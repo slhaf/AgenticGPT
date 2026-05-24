@@ -1,0 +1,183 @@
+openapi: 3.1.0
+info:
+  title: Agentic GPT Actions API
+  version: 0.1.0
+servers:
+  - url: https://agentic-gpt-worker.example.workers.dev
+security:
+  - bearerAuth: []
+paths:
+  /v1/agents:
+    get:
+      operationId: listAgents
+      responses:
+        "200":
+          description: Enabled agents with safe configuration summaries.
+  /v1/exec:
+    post:
+      operationId: exec
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExecRequest"
+      responses:
+        "200":
+          description: Immediate result or async task status.
+  /v1/batchExec:
+    post:
+      operationId: batchExec
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BatchExecRequest"
+      responses:
+        "200":
+          description: Immediate result or async task status.
+  /v1/tasks/{taskId}:
+    get:
+      operationId: getTask
+      parameters:
+        - name: taskId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: agentId
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Async exec or batchExec result.
+  /v1/sessions/start:
+    post:
+      operationId: startSession
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExecRequest"
+      responses:
+        "200":
+          description: Started session id.
+  /v1/sessions:
+    get:
+      operationId: listSessions
+      parameters:
+        - name: agentId
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Running or waiting sessions.
+  /v1/sessions/{sessionId}:
+    get:
+      operationId: inspectSession
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: agentId
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Session state and recent output.
+  /v1/sessions/{sessionId}/wait:
+    post:
+      operationId: waitSession
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: agentId
+          in: query
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [seconds]
+              properties:
+                seconds:
+                  type: integer
+                  maximum: 30
+                  minimum: 0
+      responses:
+        "200":
+          description: Session state after waiting.
+  /v1/sessions/{sessionId}/kill:
+    post:
+      operationId: killSession
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: agentId
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Killed session state.
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  schemas:
+    ExecRequest:
+      type: object
+      required: [agentId, program, args, needConfirm]
+      properties:
+        agentId:
+          type: string
+        program:
+          type: string
+        args:
+          type: array
+          items:
+            type: string
+        needConfirm:
+          type: boolean
+    BatchExecRequest:
+      type: object
+      required: [agentId, elements, needConfirm]
+      properties:
+        agentId:
+          type: string
+        elements:
+          type: array
+          items:
+            type: object
+            required: [program, args]
+            properties:
+              program:
+                type: string
+              args:
+                type: array
+                items:
+                  type: string
+        needConfirm:
+          type: boolean
