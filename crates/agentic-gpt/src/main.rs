@@ -306,9 +306,6 @@ enum AgentMessage<'a> {
         #[serde(rename = "sentAt")]
         sent_at: DateTime<Utc>,
     },
-    TaskUpdate {
-        task: &'a TaskResult,
-    },
     SessionUpdate {
         session: &'a SessionInfo,
     },
@@ -644,7 +641,6 @@ where
                 "exec finished; taskId={}; status={}; exitCode={:?}; rejectReason={:?}",
                 result.task_id, result.status, result.exit_code, result.reject_reason
             ));
-            send_task(write, &result).await?;
             send_response(write, &request_id, serde_json::to_value(&result)?).await?;
         }
         WorkerCommand::BatchExec {
@@ -711,19 +707,6 @@ where
             send_response(write, &request_id, serde_json::to_value(session)?).await?;
         }
     }
-    Ok(())
-}
-
-async fn send_task<W>(write: &mut W, result: &TaskResult) -> Result<()>
-where
-    W: SinkExt<Message> + Unpin,
-    <W as futures_util::Sink<Message>>::Error: std::error::Error + Send + Sync + 'static,
-{
-    write
-        .send(Message::Text(
-            serde_json::to_string(&AgentMessage::TaskUpdate { task: result })?.into(),
-        ))
-        .await?;
     Ok(())
 }
 

@@ -31,7 +31,6 @@ type AgentEnvelope =
 type AgentMessage =
   | { type: "hello"; configSummary?: SafeConfigSummary }
   | { type: "heartbeat"; sentAt: string }
-  | { type: "task_update"; task: TaskResult }
   | { type: "session_update"; session: SessionInfo }
   | { type: "response"; requestId: string; data: unknown };
 
@@ -210,15 +209,6 @@ async function route(request: Request, env: Env): Promise<Response> {
     return json(await getStub(env, entry).batchExec(parsed));
   }
 
-  const taskMatch = url.pathname.match(/^\/v1\/tasks\/([^/]+)$/);
-  if (request.method === "GET" && taskMatch) {
-    const agentId = url.searchParams.get("agentId") || "";
-    const entry = await requireAgent(env, agentId);
-    if (entry instanceof Response) return entry;
-    const result = await getStub(env, entry).getTask(decodeURIComponent(taskMatch[1]));
-    return result ? json(result) : error(404, "task_not_found", "Task was not found");
-  }
-
   if (request.method === "POST" && url.pathname === "/v1/sessions/start") {
     const parsed = await parseExecRequest(request);
     if (parsed instanceof Response) return parsed;
@@ -275,7 +265,6 @@ export class AgentObject extends DurableObject<Env> {
     policyRuleCounts: { allow: 0, confirm: 0, deny: 0 },
     confirmationProvider: "unknown"
   };
-  private tasks = new Map<string, TaskResult>();
   private sessions = new Map<string, SessionInfo>();
   private pending = new Map<string, (data: unknown) => void>();
 
@@ -313,10 +302,6 @@ export class AgentObject extends DurableObject<Env> {
       ws.send(JSON.stringify({ type: "heartbeat_ack", sentAt: parsed.sentAt, receivedAt: nowIso() }));
       return;
     }
-    if (parsed.type === "task_update") {
-      this.tasks.set(parsed.task.taskId, parsed.task);
-      return;
-    }
     if (parsed.type === "session_update") {
       this.sessions.set(parsed.session.sessionId, parsed.session);
       return;
@@ -352,29 +337,42 @@ export class AgentObject extends DurableObject<Env> {
 
   async exec(payload: ExecRequest): Promise<TaskResult> {
     const taskId = randomId("task");
-    const queued = this.createTask(payload.agentId, taskId);
-    this.tasks.set(taskId, queued);
 
     if (!this.currentSocket()) {
-      return queued;
+      const at = nowIso();
+      return {
+        agentId: payload.agentId,
+        taskId,
+        status: "failed",
+        exitCode: null,
+        stdoutTail: "",
+        stderrTail: "",
+        truncated: false,
+        rejectReason: "agent_offline",
+        startedAt: at,
+        updatedAt: at
+      };
     }
 
     const requestId = randomId("req");
     const data = await this.requestAgent({ type: "exec", requestId, taskId, payload }, EXEC_RESPONSE_TIMEOUT_MS);
     if (data) {
-      const result = data as TaskResult;
-      this.tasks.set(taskId, result);
-      return result;
+      return data as TaskResult;
     }
 
-    const timeoutResult: TaskResult = {
-      ...queued,
+    const at = nowIso();
+    return {
+      agentId: payload.agentId,
+      taskId,
       status: "timeout",
+      exitCode: null,
+      stdoutTail: "",
+      stderrTail: "",
+      truncated: false,
       rejectReason: "exec_timeout_use_session",
-      updatedAt: nowIso()
+      startedAt: at,
+      updatedAt: at
     };
-    this.tasks.set(taskId, timeoutResult);
-    return timeoutResult;
   }
 
   async batchExec(payload: BatchExecRequest): Promise<BatchExecResult> {
@@ -441,10 +439,6 @@ export class AgentObject extends DurableObject<Env> {
     };
   }
 
-  getTask(taskId: string): TaskResult | null {
-    return this.tasks.get(taskId) || null;
-  }
-
   async startSession(payload: StartSessionRequest): Promise<{ status: string; sessionId: string }> {
     const sessionId = randomId("sess");
     const at = nowIso();
@@ -484,23 +478,6 @@ export class AgentObject extends DurableObject<Env> {
   async killSession(sessionId: string): Promise<SessionInfo | { status: "offline"; sessionId: string }> {
     const data = await this.requestAgent({ type: "killSession", requestId: randomId("req"), sessionId }, 2_000);
     return (data as SessionInfo | undefined) || this.sessions.get(sessionId) || { status: "offline", sessionId };
-  }
-
-  private createTask(agentId: string, taskId: string): TaskResult {
-    const at = nowIso();
-    const online = this.currentSocket() !== null;
-    return {
-      agentId,
-      taskId,
-      status: online ? "queued" : "failed",
-      exitCode: null,
-      stdoutTail: "",
-      stderrTail: "",
-      truncated: false,
-      rejectReason: online ? undefined : "agent_offline",
-      startedAt: at,
-      updatedAt: at
-    };
   }
 
   private async sendCommand(command: AgentEnvelope): Promise<void> {
