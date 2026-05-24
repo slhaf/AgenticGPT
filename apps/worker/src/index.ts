@@ -337,9 +337,13 @@ export class AgentObject extends DurableObject<Env> {
     this.socket = null;
   }
 
+  private currentSocket(): WebSocket | null {
+    return this.socket ?? this.ctx.getWebSockets()[0] ?? null;
+  }
+
   getStatus(): { online: boolean; lastSeenAt: string | null; configSummary: SafeConfigSummary } {
     return {
-      online: this.socket !== null,
+      online: this.ctx.getWebSockets().length > 0,
       lastSeenAt: this.lastSeenAt,
       configSummary: this.configSummary
     };
@@ -408,27 +412,30 @@ export class AgentObject extends DurableObject<Env> {
 
   private createTask(agentId: string, taskId: string): TaskResult {
     const at = nowIso();
+    const online = this.currentSocket() !== null;
     return {
       agentId,
       taskId,
-      status: this.socket ? "queued" : "failed",
+      status: online ? "queued" : "failed",
       exitCode: null,
       stdoutTail: "",
       stderrTail: "",
       truncated: false,
-      rejectReason: this.socket ? undefined : "agent_offline",
+      rejectReason: online ? undefined : "agent_offline",
       startedAt: at,
       updatedAt: at
     };
   }
 
   private async sendCommand(command: AgentEnvelope): Promise<void> {
-    if (!this.socket) return;
-    this.socket.send(JSON.stringify(command));
+    const socket = this.currentSocket();
+    if (!socket) return;
+    socket.send(JSON.stringify(command));
   }
 
   private async requestAgent(command: AgentEnvelope, timeoutMs: number): Promise<unknown | undefined> {
-    if (!this.socket) return undefined;
+    const socket = this.currentSocket();
+    if (!socket) return undefined;
     const result = new Promise<unknown | undefined>((resolve) => {
       const timer = setTimeout(() => {
         this.pending.delete(command.requestId);
@@ -439,7 +446,7 @@ export class AgentObject extends DurableObject<Env> {
         resolve(data);
       });
     });
-    this.socket.send(JSON.stringify(command));
+    socket.send(JSON.stringify(command));
     return result;
   }
 
