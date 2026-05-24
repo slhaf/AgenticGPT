@@ -13,6 +13,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, RwLock};
+use tokio::task::JoinSet;
 use tokio::time::{sleep, timeout, Duration, Instant};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::handshake::client::Response as WsResponse;
@@ -172,7 +173,11 @@ struct PolicyCounts {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 enum WorkerCommand {
     #[serde(rename = "exec")]
     Exec {
@@ -229,7 +234,7 @@ struct BatchExecRequest {
     need_confirm: bool,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct ExecElement {
     program: String,
     args: Vec<String>,
@@ -247,6 +252,26 @@ struct TaskResult {
     truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     reject_reason: Option<String>,
+    started_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BatchElementResult {
+    index: usize,
+    program: String,
+    args: Vec<String>,
+    result: TaskResult,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BatchExecResult {
+    agent_id: String,
+    batch_id: String,
+    status: String,
+    results: Vec<BatchElementResult>,
     started_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -606,7 +631,7 @@ where
 {
     match command {
         WorkerCommand::Exec {
-            request_id: _request_id,
+            request_id,
             task_id,
             payload,
         } => {
@@ -620,22 +645,25 @@ where
                 result.task_id, result.status, result.exit_code, result.reject_reason
             ));
             send_task(write, &result).await?;
+            send_response(write, &request_id, serde_json::to_value(&result)?).await?;
         }
         WorkerCommand::BatchExec {
-            request_id: _request_id,
+            request_id,
             task_id,
             payload,
         } => {
             log_info(format!(
-                "batchExec received; taskId={task_id}; elements={}",
+                "batchExec received; batchId={task_id}; elements={}",
                 payload.elements.len()
             ));
             let result = run_batch_task(state, task_id, payload).await;
             log_info(format!(
-                "batchExec finished; taskId={}; status={}; exitCode={:?}; rejectReason={:?}",
-                result.task_id, result.status, result.exit_code, result.reject_reason
+                "batchExec finished; batchId={}; status={}; results={}",
+                result.batch_id,
+                result.status,
+                result.results.len()
             ));
-            send_task(write, &result).await?;
+            send_response(write, &request_id, serde_json::to_value(&result)?).await?;
         }
         WorkerCommand::StartSession {
             request_id,
@@ -780,8 +808,14 @@ async fn run_exec_task(state: AppState, task_id: String, request: ExecRequest) -
                 result.truncated = output.truncated;
             }
             Err(reason) => {
-                result.status = "failed".to_string();
-                result.reject_reason = Some(reason.to_string());
+                let reason = reason.to_string();
+                if reason == "timeout" {
+                    result.status = "timeout".to_string();
+                    result.reject_reason = Some("exec_timeout_use_session".to_string());
+                } else {
+                    result.status = "failed".to_string();
+                    result.reject_reason = Some(reason);
+                }
             }
         }
     }
@@ -807,43 +841,140 @@ async fn run_exec_task(state: AppState, task_id: String, request: ExecRequest) -
     result
 }
 
-async fn run_batch_task(state: AppState, task_id: String, request: BatchExecRequest) -> TaskResult {
+async fn run_batch_task(
+    state: AppState,
+    batch_id: String,
+    request: BatchExecRequest,
+) -> BatchExecResult {
     let started_at = Utc::now();
-    let mut combined_stdout = String::new();
-    let mut combined_stderr = String::new();
-    let mut exit_code = Some(0);
-    let mut status = "completed".to_string();
-    let mut reject_reason = None;
-    let mut truncated = false;
-    for element in request.elements {
-        let single = ExecRequest {
-            agent_id: request.agent_id.clone(),
-            program: element.program,
-            args: element.args,
-            need_confirm: request.need_confirm,
-        };
-        let result = run_exec_task(state.clone(), format!("{task_id}:element"), single).await;
-        combined_stdout.push_str(&result.stdout_tail);
-        combined_stderr.push_str(&result.stderr_tail);
-        truncated |= result.truncated;
-        if result.status != "completed" {
-            status = result.status;
-            exit_code = result.exit_code;
-            reject_reason = result.reject_reason;
+    let agent_id = request.agent_id.clone();
+    let need_confirm = request.need_confirm;
+    let previews = request
+        .elements
+        .iter()
+        .map(|element| (element.program.clone(), element.args.clone()))
+        .collect::<Vec<_>>();
+    let total = previews.len();
+    let max_concurrent = {
+        let config = state.config.read().await;
+        config.limits.max_concurrent_tasks.max(1).min(total.max(1))
+    };
+
+    let mut pending = request
+        .elements
+        .into_iter()
+        .enumerate()
+        .collect::<VecDeque<(usize, ExecElement)>>();
+    let mut running = JoinSet::new();
+    let mut results: Vec<Option<BatchElementResult>> = vec![None; total];
+    let deadline = Instant::now() + Duration::from_secs(EXEC_TIMEOUT_SECS);
+
+    loop {
+        while running.len() < max_concurrent {
+            let Some((index, element)) = pending.pop_front() else {
+                break;
+            };
+            let task_id = format!("{batch_id}:element:{index}");
+            let element_agent_id = agent_id.clone();
+            let element_state = state.clone();
+            running.spawn(async move {
+                let program = element.program;
+                let args = element.args;
+                let request = ExecRequest {
+                    agent_id: element_agent_id,
+                    program: program.clone(),
+                    args: args.clone(),
+                    need_confirm,
+                };
+                let result = run_exec_task(element_state, task_id, request).await;
+                BatchElementResult {
+                    index,
+                    program,
+                    args,
+                    result,
+                }
+            });
+        }
+
+        if running.is_empty() {
             break;
         }
+
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+
+        match timeout(remaining, running.join_next()).await {
+            Ok(Some(Ok(element_result))) => {
+                let index = element_result.index;
+                if index < results.len() {
+                    results[index] = Some(element_result);
+                }
+            }
+            Ok(Some(Err(error))) => {
+                log_warn(format!("batch element task join failed: {error}"));
+            }
+            Ok(None) => break,
+            Err(_) => break,
+        }
     }
-    TaskResult {
-        agent_id: request.agent_id,
-        task_id,
+
+    running.abort_all();
+
+    let updated_at = Utc::now();
+    let results = results
+        .into_iter()
+        .enumerate()
+        .map(|(index, result)| {
+            result.unwrap_or_else(|| {
+                let (program, args) = previews
+                    .get(index)
+                    .cloned()
+                    .unwrap_or_else(|| ("<unknown>".to_string(), Vec::new()));
+                BatchElementResult {
+                    index,
+                    program,
+                    args,
+                    result: TaskResult {
+                        agent_id: agent_id.clone(),
+                        task_id: format!("{batch_id}:element:{index}"),
+                        status: "timeout".to_string(),
+                        exit_code: None,
+                        stdout_tail: String::new(),
+                        stderr_tail: String::new(),
+                        truncated: false,
+                        reject_reason: Some("exec_timeout_use_session".to_string()),
+                        started_at,
+                        updated_at,
+                    },
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let status = if results
+        .iter()
+        .any(|element| element.result.status == "timeout")
+    {
+        "timeout"
+    } else if results
+        .iter()
+        .any(|element| element.result.status != "completed")
+    {
+        "partial_failed"
+    } else {
+        "completed"
+    }
+    .to_string();
+
+    BatchExecResult {
+        agent_id,
+        batch_id,
         status,
-        exit_code,
-        stdout_tail: tail_string(&combined_stdout, STDOUT_MAX).0,
-        stderr_tail: tail_string(&combined_stderr, STDERR_MAX).0,
-        truncated,
-        reject_reason,
+        results,
         started_at,
-        updated_at: Utc::now(),
+        updated_at,
     }
 }
 
@@ -1520,14 +1651,6 @@ fn command_preview(program: &str, args: &[String]) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-fn tail_string(value: &str, max: usize) -> (String, bool) {
-    if value.len() <= max {
-        (value.to_string(), false)
-    } else {
-        (value[value.len() - max..].to_string(), true)
-    }
 }
 
 fn log_info(message: String) {

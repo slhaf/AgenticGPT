@@ -36,7 +36,8 @@ export type TaskStatus =
   | "waiting_confirmation"
   | "completed"
   | "failed"
-  | "rejected";
+  | "rejected"
+  | "timeout";
 
 export type TaskResult = {
   agentId: string;
@@ -88,6 +89,22 @@ export type BatchExecRequest = {
   agentId: string;
   elements: ExecElement[];
   needConfirm: boolean;
+};
+
+export type BatchElementResult = {
+  index: number;
+  program: string;
+  args: string[];
+  result: TaskResult;
+};
+
+export type BatchExecResult = {
+  agentId: string;
+  batchId: string;
+  status: "completed" | "partial_failed" | "timeout";
+  results: BatchElementResult[];
+  startedAt: string;
+  updatedAt: string;
 };
 
 export type StartSessionRequest = ExecRequest;

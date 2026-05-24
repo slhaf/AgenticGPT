@@ -5,6 +5,7 @@ import { error, json } from "./response";
 import type {
   AgentRegistryEntry,
   BatchExecRequest,
+  BatchExecResult,
   ExecRequest,
   SafeConfigSummary,
   SessionInfo,
@@ -34,7 +35,7 @@ type AgentMessage =
   | { type: "session_update"; session: SessionInfo }
   | { type: "response"; requestId: string; data: unknown };
 
-const QUICK_RESPONSE_MS = 800;
+const EXEC_RESPONSE_TIMEOUT_MS = 35_000;
 const MAX_WAIT_SECONDS = 30;
 
 function nowIso(): string {
@@ -351,18 +352,93 @@ export class AgentObject extends DurableObject<Env> {
 
   async exec(payload: ExecRequest): Promise<TaskResult> {
     const taskId = randomId("task");
-    const task = this.createTask(payload.agentId, taskId);
-    this.tasks.set(taskId, task);
-    await this.sendCommand({ type: "exec", requestId: randomId("req"), taskId, payload });
-    return this.waitForTaskChange(taskId, QUICK_RESPONSE_MS);
+    const queued = this.createTask(payload.agentId, taskId);
+    this.tasks.set(taskId, queued);
+
+    if (!this.currentSocket()) {
+      return queued;
+    }
+
+    const requestId = randomId("req");
+    const data = await this.requestAgent({ type: "exec", requestId, taskId, payload }, EXEC_RESPONSE_TIMEOUT_MS);
+    if (data) {
+      const result = data as TaskResult;
+      this.tasks.set(taskId, result);
+      return result;
+    }
+
+    const timeoutResult: TaskResult = {
+      ...queued,
+      status: "timeout",
+      rejectReason: "exec_timeout_use_session",
+      updatedAt: nowIso()
+    };
+    this.tasks.set(taskId, timeoutResult);
+    return timeoutResult;
   }
 
-  async batchExec(payload: BatchExecRequest): Promise<TaskResult> {
-    const taskId = randomId("task");
-    const task = this.createTask(payload.agentId, taskId);
-    this.tasks.set(taskId, task);
-    await this.sendCommand({ type: "batchExec", requestId: randomId("req"), taskId, payload });
-    return this.waitForTaskChange(taskId, QUICK_RESPONSE_MS);
+  async batchExec(payload: BatchExecRequest): Promise<BatchExecResult> {
+    const batchId = randomId("batch");
+
+    if (!this.currentSocket()) {
+      const at = nowIso();
+      return {
+        agentId: payload.agentId,
+        batchId,
+        status: "partial_failed",
+        results: payload.elements.map((element, index) => ({
+          index,
+          program: element.program,
+          args: element.args,
+          result: {
+            agentId: payload.agentId,
+            taskId: `${batchId}:element:${index}`,
+            status: "failed",
+            exitCode: null,
+            stdoutTail: "",
+            stderrTail: "",
+            truncated: false,
+            rejectReason: "agent_offline",
+            startedAt: at,
+            updatedAt: at
+          }
+        })),
+        startedAt: at,
+        updatedAt: at
+      };
+    }
+
+    const requestId = randomId("req");
+    const data = await this.requestAgent({ type: "batchExec", requestId, taskId: batchId, payload }, EXEC_RESPONSE_TIMEOUT_MS);
+    if (data) {
+      return data as BatchExecResult;
+    }
+
+    const at = nowIso();
+    return {
+      agentId: payload.agentId,
+      batchId,
+      status: "timeout",
+      results: payload.elements.map((element, index) => ({
+        index,
+        program: element.program,
+        args: element.args,
+        result: {
+          agentId: payload.agentId,
+          taskId: `${batchId}:element:${index}`,
+          status: "timeout",
+          exitCode: null,
+          stdoutTail: "",
+          stderrTail: "",
+          truncated: false,
+          rejectReason: "exec_timeout_use_session",
+          startedAt: at,
+          updatedAt: at
+        }
+      })),
+      startedAt: at,
+      updatedAt: at
+    };
   }
 
   getTask(taskId: string): TaskResult | null {
@@ -450,9 +526,4 @@ export class AgentObject extends DurableObject<Env> {
     return result;
   }
 
-  private async waitForTaskChange(taskId: string, timeoutMs: number): Promise<TaskResult> {
-    const initial = this.tasks.get(taskId);
-    await new Promise((resolve) => setTimeout(resolve, timeoutMs));
-    return this.tasks.get(taskId) || initial!;
-  }
 }
