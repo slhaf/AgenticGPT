@@ -1,7 +1,7 @@
 use agentic_gpt_protocol::{
-    AgentMessage, BatchElementResult, BatchExecRequest, BatchExecResult, ExecElement, ExecRequest,
-    HubCommand, HubMessage, PolicyCounts, SafeConfigSummary, SafeSandboxSummary, SessionInfo,
-    TaskResult,
+    AgentMessage, BatchElementResult, BatchExecRequest, BatchExecResult, ConfirmationDecision,
+    ConfirmationPayload, ExecElement, ExecRequest, HubCommand, HubMessage, PolicyCounts,
+    SafeConfigSummary, SafeSandboxSummary, SessionInfo, TaskResult,
 };
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
@@ -17,7 +17,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::process::{Child, Command};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
 use tokio::task::JoinSet;
 use tokio::time::{sleep, timeout, Duration, Instant};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -179,6 +179,8 @@ struct AppState {
     config_path: PathBuf,
     config: Arc<RwLock<Config>>,
     sessions: Arc<Mutex<HashMap<String, ManagedSession>>>,
+    hub_sender: Arc<Mutex<Option<mpsc::UnboundedSender<Message>>>>,
+    pending_confirmations: Arc<Mutex<HashMap<String, oneshot::Sender<String>>>>,
 }
 
 struct ManagedSession {
@@ -257,6 +259,8 @@ async fn run(config_path: PathBuf) -> Result<()> {
         config_path: config_path.clone(),
         config: Arc::new(RwLock::new(initial)),
         sessions: Arc::new(Mutex::new(HashMap::new())),
+        hub_sender: Arc::new(Mutex::new(None)),
+        pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
     };
     tokio::spawn(watch_config(state.clone()));
     connect_loop(state).await
@@ -298,12 +302,19 @@ async fn connect_loop(state: AppState) -> Result<()> {
             Ok(Ok((stream, _))) => {
                 log_info("connected to hub".to_string());
                 let (mut write, mut read) = stream.split();
+                let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
+                *state.hub_sender.lock().await = Some(tx.clone());
+                let writer = tokio::spawn(async move {
+                    while let Some(message) = rx.recv().await {
+                        if write.send(message).await.is_err() {
+                            break;
+                        }
+                    }
+                });
                 let hello = AgentMessage::Hello {
                     config_summary: config.safe_summary(),
                 };
-                write
-                    .send(Message::Text(serde_json::to_string(&hello)?.into()))
-                    .await?;
+                tx.send(Message::Text(serde_json::to_string(&hello)?.into()))?;
                 let mut heartbeat =
                     tokio::time::interval(Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
                 heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -338,8 +349,21 @@ async fn connect_loop(state: AppState) -> Result<()> {
                                     continue;
                                 }
                             };
-                            if serde_json::from_value::<HubMessage>(value.clone()).is_ok() {
-                                last_heartbeat_ack = Instant::now();
+                            if let Ok(message) = serde_json::from_value::<HubMessage>(value.clone()) {
+                                match message {
+                                    HubMessage::HeartbeatAck { .. } => {
+                                        last_heartbeat_ack = Instant::now();
+                                    }
+                                    HubMessage::ConfirmationResponse { request_id, decision, reason } => {
+                                        let value = confirmation_decision_value(decision);
+                                        log_info(format!(
+                                            "confirmation response received; requestId={request_id}; decision={value}; reason={reason}"
+                                        ));
+                                        if let Some(sender) = state.pending_confirmations.lock().await.remove(&request_id) {
+                                            let _ = sender.send(value);
+                                        }
+                                    }
+                                }
                                 continue;
                             }
                             let command: HubCommand = match serde_json::from_value(value) {
@@ -349,22 +373,29 @@ async fn connect_loop(state: AppState) -> Result<()> {
                                     continue;
                                 }
                             };
-                            handle_hub_command(state.clone(), command, &mut write).await?;
+                            let command_state = state.clone();
+                            tokio::spawn(async move {
+                                if let Err(error) = handle_hub_command(command_state, command).await {
+                                    log_warn(format!("hub command failed: {error}"));
+                                }
+                            });
                         }
                         _ = heartbeat.tick() => {
                             if last_heartbeat_ack.elapsed() > Duration::from_secs(HEARTBEAT_ACK_TIMEOUT_SECS) {
                                 log_warn("heartbeat ack timeout; reconnecting".to_string());
-                                let _ = write.close().await;
                                 break;
                             }
                             let heartbeat = AgentMessage::Heartbeat { sent_at: Utc::now() };
-                            if let Err(error) = write.send(Message::Text(serde_json::to_string(&heartbeat)?.into())).await {
+                            if let Err(error) = tx.send(Message::Text(serde_json::to_string(&heartbeat)?.into())) {
                                 log_warn(format!("heartbeat send failed: {error}"));
                                 break;
                             }
                         }
                     }
                 }
+                *state.hub_sender.lock().await = None;
+                fail_pending_confirmations(&state, "provider_unavailable").await;
+                writer.abort();
             }
         }
         log_info(format!("reconnecting in {RECONNECT_DELAY_SECS}s"));
@@ -484,11 +515,7 @@ fn parse_http_proxy_addr(proxy: &str) -> Result<String> {
     }
 }
 
-async fn handle_hub_command<W>(state: AppState, command: HubCommand, write: &mut W) -> Result<()>
-where
-    W: SinkExt<Message> + Unpin,
-    <W as futures_util::Sink<Message>>::Error: std::error::Error + Send + Sync + 'static,
-{
+async fn handle_hub_command(state: AppState, command: HubCommand) -> Result<()> {
     match command {
         HubCommand::Exec {
             request_id,
@@ -499,12 +526,12 @@ where
                 "exec received; taskId={task_id}; command={}",
                 command_preview(&payload.program, &payload.args)
             ));
-            let result = run_exec_task(state, task_id, payload).await;
+            let result = run_exec_task(state.clone(), task_id, payload).await;
             log_info(format!(
                 "exec finished; taskId={}; status={}; exitCode={:?}; rejectReason={:?}",
                 result.task_id, result.status, result.exit_code, result.reject_reason
             ));
-            send_response(write, &request_id, serde_json::to_value(&result)?).await?;
+            send_response(&state, &request_id, serde_json::to_value(&result)?).await?;
         }
         HubCommand::BatchExec {
             request_id,
@@ -515,14 +542,14 @@ where
                 "batchExec received; batchId={task_id}; elements={}",
                 payload.elements.len()
             ));
-            let result = run_batch_task(state, task_id, payload).await;
+            let result = run_batch_task(state.clone(), task_id, payload).await;
             log_info(format!(
                 "batchExec finished; batchId={}; status={}; results={}",
                 result.batch_id,
                 result.status,
                 result.results.len()
             ));
-            send_response(write, &request_id, serde_json::to_value(&result)?).await?;
+            send_response(&state, &request_id, serde_json::to_value(&result)?).await?;
         }
         HubCommand::StartSession {
             request_id,
@@ -533,24 +560,24 @@ where
                 "startSession received; sessionId={session_id}; command={}",
                 command_preview(&payload.program, &payload.args)
             ));
-            let info = start_session(state, session_id, payload).await;
+            let info = start_session(state.clone(), session_id, payload).await;
             log_info(format!(
                 "startSession result; sessionId={}; state={}; rejectReason={:?}",
                 info.session_id, info.state, info.reject_reason
             ));
-            send_session(write, &info).await?;
-            send_response(write, &request_id, serde_json::to_value(&info)?).await?;
+            send_session(&state, &info).await?;
+            send_response(&state, &request_id, serde_json::to_value(&info)?).await?;
         }
         HubCommand::ListSessions { request_id } => {
             let sessions = current_sessions(&state).await;
-            send_response(write, &request_id, serde_json::to_value(sessions)?).await?;
+            send_response(&state, &request_id, serde_json::to_value(sessions)?).await?;
         }
         HubCommand::InspectSession {
             request_id,
             session_id,
         } => {
             let session = inspect_session(&state, &session_id).await;
-            send_response(write, &request_id, serde_json::to_value(session)?).await?;
+            send_response(&state, &request_id, serde_json::to_value(session)?).await?;
         }
         HubCommand::WaitSession {
             request_id,
@@ -559,7 +586,7 @@ where
         } => {
             sleep(Duration::from_secs(seconds.min(30))).await;
             let session = inspect_session(&state, &session_id).await;
-            send_response(write, &request_id, serde_json::to_value(session)?).await?;
+            send_response(&state, &request_id, serde_json::to_value(session)?).await?;
         }
         HubCommand::KillSession {
             request_id,
@@ -567,42 +594,43 @@ where
         } => {
             log_info(format!("killSession received; sessionId={session_id}"));
             let session = kill_session(&state, &session_id).await;
-            send_response(write, &request_id, serde_json::to_value(session)?).await?;
+            send_response(&state, &request_id, serde_json::to_value(session)?).await?;
         }
     }
     Ok(())
 }
 
-async fn send_session<W>(write: &mut W, session: &SessionInfo) -> Result<()>
-where
-    W: SinkExt<Message> + Unpin,
-    <W as futures_util::Sink<Message>>::Error: std::error::Error + Send + Sync + 'static,
-{
-    write
-        .send(Message::Text(
-            serde_json::to_string(&AgentMessage::SessionUpdate {
-                session: session.clone(),
-            })?
-            .into(),
-        ))
-        .await?;
-    Ok(())
+async fn send_session(state: &AppState, session: &SessionInfo) -> Result<()> {
+    send_agent_message(
+        state,
+        AgentMessage::SessionUpdate {
+            session: session.clone(),
+        },
+    )
+    .await
 }
 
-async fn send_response<W>(write: &mut W, request_id: &str, data: serde_json::Value) -> Result<()>
-where
-    W: SinkExt<Message> + Unpin,
-    <W as futures_util::Sink<Message>>::Error: std::error::Error + Send + Sync + 'static,
-{
-    write
-        .send(Message::Text(
-            serde_json::to_string(&AgentMessage::Response {
-                request_id: request_id.to_string(),
-                data,
-            })?
-            .into(),
-        ))
-        .await?;
+async fn send_response(state: &AppState, request_id: &str, data: serde_json::Value) -> Result<()> {
+    send_agent_message(
+        state,
+        AgentMessage::Response {
+            request_id: request_id.to_string(),
+            data,
+        },
+    )
+    .await
+}
+
+async fn send_agent_message(state: &AppState, message: AgentMessage) -> Result<()> {
+    let sender = state
+        .hub_sender
+        .lock()
+        .await
+        .clone()
+        .ok_or_else(|| anyhow!("hub_sender_unavailable"))?;
+    sender
+        .send(Message::Text(serde_json::to_string(&message)?.into()))
+        .map_err(|_| anyhow!("hub_send_failed"))?;
     Ok(())
 }
 
@@ -637,7 +665,8 @@ async fn run_exec_task(state: AppState, task_id: String, request: ExecRequest) -
         result.status = "rejected".to_string();
         result.reject_reason = Some("policy_denied".to_string());
     } else if decision == PolicyDecision::Confirm {
-        let confirmation = request_confirmation(&config, &request.program, &request.args).await;
+        let confirmation =
+            request_confirmation(&state, &config, &request.program, &request.args).await;
         confirmation_result = Some(confirmation.clone());
         if confirmation != "allow_once" {
             result.status = "rejected".to_string();
@@ -955,8 +984,43 @@ fn escapes_workspace(workspace: &Path, arg: &str) -> bool {
     }
 }
 
-async fn request_confirmation(config: &Config, program: &str, args: &[String]) -> String {
-    if config.confirmation_provider.provider != "freedesktop" {
+async fn request_confirmation(
+    state: &AppState,
+    config: &Config,
+    program: &str,
+    args: &[String],
+) -> String {
+    let provider = config.confirmation_provider.provider.as_str();
+    if provider == "freedesktop" || provider == "freedesktop-then-hub" {
+        let local = request_freedesktop_confirmation(config, program, args).await;
+        if local == "confirmation_provider_unavailable" && provider == "freedesktop-then-hub" {
+            return request_hub_confirmation(state, config, program, args).await;
+        }
+        return local;
+    }
+    if provider == "hub" {
+        return request_hub_confirmation(state, config, program, args).await;
+    }
+    "confirmation_provider_unavailable".to_string()
+}
+
+async fn request_freedesktop_confirmation(
+    config: &Config,
+    program: &str,
+    args: &[String],
+) -> String {
+    let supports_actions = tokio::task::spawn_blocking(|| {
+        notify_rust::get_capabilities()
+            .map(|capabilities| {
+                capabilities
+                    .iter()
+                    .any(|capability| capability == "actions")
+            })
+            .unwrap_or(false)
+    })
+    .await
+    .unwrap_or(false);
+    if !supports_actions {
         return "confirmation_provider_unavailable".to_string();
     }
     let warning = if !config.sandbox.enabled && risky_file_mutation(program) {
@@ -994,6 +1058,97 @@ async fn request_confirmation(config: &Config, program: &str, args: &[String]) -
         }
         Err(_) => "confirmation_provider_unavailable".to_string(),
     }
+}
+
+async fn request_hub_confirmation(
+    state: &AppState,
+    _config: &Config,
+    program: &str,
+    args: &[String],
+) -> String {
+    let request_id = format!("confirm_req_{}", Uuid::new_v4().simple());
+    let (tx, rx) = oneshot::channel();
+    state
+        .pending_confirmations
+        .lock()
+        .await
+        .insert(request_id.clone(), tx);
+    let payload = ConfirmationPayload {
+        program: program.to_string(),
+        args: args.to_vec(),
+        command_preview: truncate_chars(&command_preview(program, args), 1000),
+        risk_level: risk_level(program),
+        reason: format!("Command matched confirm policy: {program}"),
+    };
+    let config = state.config.read().await.clone();
+    let message = AgentMessage::ConfirmationRequest {
+        request_id: request_id.clone(),
+        agent_id: config.agent_id,
+        timeout_seconds: CONFIRM_TIMEOUT_SECS,
+        payload,
+    };
+    if let Err(error) = send_agent_message(state, message).await {
+        state.pending_confirmations.lock().await.remove(&request_id);
+        log_warn(format!("hub confirmation unavailable: {error}"));
+        return "provider_unavailable".to_string();
+    }
+    log_info(format!(
+        "hub confirmation requested; requestId={request_id}"
+    ));
+    match timeout(Duration::from_secs(CONFIRM_TIMEOUT_SECS + 5), rx).await {
+        Ok(Ok(decision)) => decision,
+        _ => {
+            state.pending_confirmations.lock().await.remove(&request_id);
+            "timeout".to_string()
+        }
+    }
+}
+
+async fn fail_pending_confirmations(state: &AppState, reason: &str) {
+    let pending = state
+        .pending_confirmations
+        .lock()
+        .await
+        .drain()
+        .map(|(_, sender)| sender)
+        .collect::<Vec<_>>();
+    for sender in pending {
+        let _ = sender.send(reason.to_string());
+    }
+}
+
+fn confirmation_decision_value(decision: ConfirmationDecision) -> String {
+    match decision {
+        ConfirmationDecision::AllowOnce => "allow_once",
+        ConfirmationDecision::Deny => "deny",
+        ConfirmationDecision::Timeout => "timeout",
+        ConfirmationDecision::ProviderUnavailable => "provider_unavailable",
+        ConfirmationDecision::CallbackTokenInvalid => "callback_token_invalid",
+        ConfirmationDecision::Expired => "expired",
+    }
+    .to_string()
+}
+
+fn risk_level(program: &str) -> String {
+    if risky_file_mutation(program) {
+        "HIGH"
+    } else if matches!(
+        program,
+        "curl" | "wget" | "docker" | "systemctl" | "service"
+    ) {
+        "MEDIUM"
+    } else {
+        "LOW"
+    }
+    .to_string()
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    let mut output = value.chars().take(max_chars).collect::<String>();
+    if value.chars().count() > max_chars {
+        output.push_str("...");
+    }
+    output
 }
 
 fn risky_file_mutation(program: &str) -> bool {
@@ -1137,7 +1292,8 @@ async fn start_session(state: AppState, session_id: String, request: ExecRequest
         return info;
     }
     if decision == PolicyDecision::Confirm {
-        let confirmation = request_confirmation(&config, &request.program, &request.args).await;
+        let confirmation =
+            request_confirmation(&state, &config, &request.program, &request.args).await;
         if confirmation != "allow_once" {
             info.state = "failed".to_string();
             info.reject_reason = Some(confirmation);
@@ -1359,7 +1515,7 @@ impl Config {
             workspace_root: base.join("workspace"),
             backup_limit: DEFAULT_BACKUP_LIMIT,
             confirmation_provider: ConfirmationProviderConfig {
-                provider: "freedesktop".to_string(),
+                provider: "freedesktop-then-hub".to_string(),
             },
             sandbox: SandboxConfig {
                 enabled: false,

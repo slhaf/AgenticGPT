@@ -1,11 +1,12 @@
 use agentic_gpt_protocol::{
-    AgentMessage, AgentRegistryEntry, BatchExecRequest, BatchExecResult, Capabilities, ExecRequest,
-    HubCommand, HubMessage, SafeConfigSummary, SafeSandboxSummary, SessionInfo, TaskResult,
+    AgentMessage, AgentRegistryEntry, BatchExecRequest, BatchExecResult, Capabilities,
+    ConfirmationDecision, ConfirmationPayload, ExecRequest, HubCommand, HubMessage,
+    SafeConfigSummary, SafeSandboxSummary, SessionInfo, TaskResult,
 };
 use anyhow::{Context, Result};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -22,13 +23,15 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot, Mutex};
-use tokio::time::{timeout, Duration};
+use tokio::time::{sleep, timeout, Duration};
 use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
 use uuid::Uuid;
 
 const REQUEST_TIMEOUT_SECS: u64 = 35;
 const MAX_WAIT_SECONDS: u64 = 30;
+const DEFAULT_REMOTE_CONFIRM_TIMEOUT_SECS: u64 = 45;
+const MAX_COMMAND_PREVIEW_CHARS: usize = 1000;
 
 #[derive(Parser)]
 #[command(name = "agentic-gpt-hub")]
@@ -36,6 +39,8 @@ const MAX_WAIT_SECONDS: u64 = 30;
 struct Cli {
     #[arg(long, env = "AGENTIC_GPT_HUB_DB")]
     db: Option<PathBuf>,
+    #[arg(long, env = "AGENTIC_GPT_HUB_CONFIG")]
+    config: Option<PathBuf>,
     #[command(subcommand)]
     command: HubCommandCli,
 }
@@ -84,9 +89,12 @@ enum AgentCommand {
 struct HubState {
     api_key: String,
     db: Arc<StdMutex<Connection>>,
+    config: Arc<HubConfig>,
     agents: Arc<Mutex<HashMap<String, AgentConnection>>>,
     pending: Arc<Mutex<HashMap<String, oneshot::Sender<Value>>>>,
+    pending_confirmations: Arc<Mutex<HashMap<String, PendingConfirmation>>>,
     sessions: Arc<Mutex<HashMap<String, HashMap<String, SessionInfo>>>>,
+    http: reqwest::Client,
 }
 
 #[derive(Clone)]
@@ -94,6 +102,44 @@ struct AgentConnection {
     sender: mpsc::UnboundedSender<Message>,
     last_seen_at: DateTime<Utc>,
     config_summary: Option<SafeConfigSummary>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HubConfig {
+    remote_confirmation: RemoteConfirmationConfig,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteConfirmationConfig {
+    enabled: bool,
+    provider: String,
+    timeout_seconds: u64,
+    ntfy: NtfyConfig,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NtfyConfig {
+    server_url: String,
+    topic: String,
+    callback_base_url: String,
+}
+
+#[derive(Clone, Debug)]
+struct PendingConfirmation {
+    confirmation_id: String,
+    request_id: String,
+    agent_id: String,
+    token_hash: String,
+    command_preview: String,
+    risk_level: String,
+    reason: String,
+    created_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+    resolved: bool,
+    decision: Option<ConfirmationDecision>,
 }
 
 #[derive(Deserialize)]
@@ -105,6 +151,11 @@ struct AgentIdQuery {
 #[derive(Deserialize)]
 struct WaitRequest {
     seconds: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct ConfirmationCallbackQuery {
+    token: String,
 }
 
 #[derive(Serialize)]
@@ -129,15 +180,20 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     let db_path = cli.db.unwrap_or_else(default_db_path);
+    let config_path = cli.config.unwrap_or_else(default_config_path);
+    let config = HubConfig::load_or_default(&config_path)?;
     let conn = open_db(&db_path)?;
     match cli.command {
         HubCommandCli::Init => {
             init_db(&conn)?;
+            config.write_if_missing(&config_path)?;
             println!("initialized {}", db_path.display());
+            println!("config {}", config_path.display());
         }
         HubCommandCli::Serve { bind, api_key } => {
             init_db(&conn)?;
-            serve(bind, api_key, conn).await?;
+            config.write_if_missing(&config_path)?;
+            serve(bind, api_key, conn, config).await?;
         }
         HubCommandCli::Agent { command } => {
             init_db(&conn)?;
@@ -147,17 +203,30 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn serve(bind: SocketAddr, api_key: String, conn: Connection) -> Result<()> {
+async fn serve(
+    bind: SocketAddr,
+    api_key: String,
+    conn: Connection,
+    config: HubConfig,
+) -> Result<()> {
     let state = HubState {
         api_key,
         db: Arc::new(StdMutex::new(conn)),
+        config: Arc::new(config),
         agents: Arc::new(Mutex::new(HashMap::new())),
         pending: Arc::new(Mutex::new(HashMap::new())),
+        pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
         sessions: Arc::new(Mutex::new(HashMap::new())),
+        http: reqwest::Client::new(),
     };
+    tokio::spawn(cleanup_confirmations(state.clone()));
     let app = Router::new()
         .route("/v1/agents", get(list_agents))
         .route("/v1/agents/:agent_id/connect", get(connect_agent))
+        .route(
+            "/v1/confirmations/:confirmation_id/:decision",
+            post(confirmation_callback),
+        )
         .route("/v1/exec", post(exec))
         .route("/v1/batchExec", post(batch_exec))
         .route("/v1/sessions/start", post(start_session))
@@ -165,7 +234,15 @@ async fn serve(bind: SocketAddr, api_key: String, conn: Connection) -> Result<()
         .route("/v1/sessions/:session_id", get(inspect_session))
         .route("/v1/sessions/:session_id/wait", post(wait_session))
         .route("/v1/sessions/:session_id/kill", post(kill_session))
-        .layer(TraceLayer::new_for_http())
+        .layer(
+            TraceLayer::new_for_http().make_span_with(|request: &Request<_>| {
+                tracing::info_span!(
+                    "http_request",
+                    method = %request.method(),
+                    path = %request.uri().path()
+                )
+            }),
+        )
         .with_state(state);
 
     let listener = TcpListener::bind(bind).await?;
@@ -502,11 +579,50 @@ async fn handle_socket(state: HubState, agent_id: String, socket: WebSocket) {
                     let _ = sender.send(data);
                 }
             }
+            AgentMessage::ConfirmationRequest {
+                request_id,
+                agent_id: request_agent_id,
+                timeout_seconds,
+                payload,
+            } => {
+                if request_agent_id != agent_id {
+                    warn!(
+                        %agent_id,
+                        requestAgentId = %request_agent_id,
+                        "rejected confirmation request with mismatched agentId"
+                    );
+                    send_confirmation_response(
+                        &state,
+                        &agent_id,
+                        &request_id,
+                        ConfirmationDecision::ProviderUnavailable,
+                        "agent_id_mismatch",
+                    )
+                    .await;
+                    continue;
+                }
+                let state = state.clone();
+                let agent_id = agent_id.clone();
+                tokio::spawn(async move {
+                    if let Err(error) = handle_confirmation_request(
+                        state,
+                        agent_id,
+                        request_id,
+                        timeout_seconds,
+                        payload,
+                    )
+                    .await
+                    {
+                        warn!(%error, "confirmation request failed");
+                    }
+                });
+            }
         }
     }
 
     writer.abort();
     state.agents.lock().await.remove(&agent_id);
+    discard_agent_confirmations(&state, &agent_id).await;
     info!(%agent_id, "agent disconnected");
 }
 
@@ -542,6 +658,348 @@ async fn request_agent(
             state.pending.lock().await.remove(&request_id);
             Err("exec_timeout_use_session".to_string())
         }
+    }
+}
+
+async fn handle_confirmation_request(
+    state: HubState,
+    agent_id: String,
+    request_id: String,
+    timeout_seconds: u64,
+    payload: ConfirmationPayload,
+) -> Result<()> {
+    let remote = &state.config.remote_confirmation;
+    if !remote.enabled || remote.provider != "ntfy" {
+        send_confirmation_response(
+            &state,
+            &agent_id,
+            &request_id,
+            ConfirmationDecision::ProviderUnavailable,
+            "remote_confirmation_disabled",
+        )
+        .await;
+        return Ok(());
+    }
+    if remote.ntfy.topic.trim().is_empty()
+        || remote.ntfy.server_url.trim().is_empty()
+        || remote.ntfy.callback_base_url.trim().is_empty()
+    {
+        send_confirmation_response(
+            &state,
+            &agent_id,
+            &request_id,
+            ConfirmationDecision::ProviderUnavailable,
+            "ntfy_not_configured",
+        )
+        .await;
+        return Ok(());
+    }
+
+    let confirmation_id = random_id("confirm");
+    let token = random_token();
+    let token_hash = sha256_hex(&token);
+    let created_at = Utc::now();
+    let timeout_seconds = timeout_seconds.max(1).min(remote.timeout_seconds.max(1));
+    let expires_at = created_at + chrono::Duration::seconds(timeout_seconds as i64);
+    let command_preview = truncate_chars(&payload.command_preview, MAX_COMMAND_PREVIEW_CHARS);
+    let pending = PendingConfirmation {
+        confirmation_id: confirmation_id.clone(),
+        request_id: request_id.clone(),
+        agent_id: agent_id.clone(),
+        token_hash,
+        command_preview: command_preview.clone(),
+        risk_level: payload.risk_level.clone(),
+        reason: payload.reason.clone(),
+        created_at,
+        expires_at,
+        resolved: false,
+        decision: None,
+    };
+    state
+        .pending_confirmations
+        .lock()
+        .await
+        .insert(confirmation_id.clone(), pending);
+
+    match publish_ntfy(
+        &state,
+        &confirmation_id,
+        &token,
+        &agent_id,
+        &payload,
+        &command_preview,
+    )
+    .await
+    {
+        Ok(()) => {
+            info!(
+                %agent_id,
+                %confirmation_id,
+                "remote confirmation notification sent"
+            );
+        }
+        Err(error) => {
+            warn!(%agent_id, %confirmation_id, %error, "remote confirmation notification failed");
+            state
+                .pending_confirmations
+                .lock()
+                .await
+                .remove(&confirmation_id);
+            send_confirmation_response(
+                &state,
+                &agent_id,
+                &request_id,
+                ConfirmationDecision::ProviderUnavailable,
+                "ntfy_publish_failed",
+            )
+            .await;
+        }
+    }
+    Ok(())
+}
+
+async fn publish_ntfy(
+    state: &HubState,
+    confirmation_id: &str,
+    token: &str,
+    agent_id: &str,
+    payload: &ConfirmationPayload,
+    command_preview: &str,
+) -> Result<()> {
+    let remote = &state.config.remote_confirmation;
+    let ntfy = &remote.ntfy;
+    let server_url = ntfy.server_url.trim_end_matches('/');
+    let callback_base = ntfy.callback_base_url.trim_end_matches('/');
+    let allow_url =
+        format!("{callback_base}/v1/confirmations/{confirmation_id}/allow?token={token}");
+    let deny_url = format!("{callback_base}/v1/confirmations/{confirmation_id}/deny?token={token}");
+    let message = format!(
+        "Agent {agent_id} wants to run:\n{command_preview}\n\nReason: {}\nRisk: {}",
+        payload.reason, payload.risk_level
+    );
+    let body = json!({
+        "topic": ntfy.topic,
+        "title": "AgenticGPT confirmation",
+        "message": message,
+        "priority": 5,
+        "tags": ["warning"],
+        "actions": [
+            {
+                "action": "http",
+                "label": "Allow",
+                "url": allow_url,
+                "method": "POST",
+                "clear": true
+            },
+            {
+                "action": "http",
+                "label": "Deny",
+                "url": deny_url,
+                "method": "POST",
+                "clear": true
+            }
+        ]
+    });
+    let response = state
+        .http
+        .post(format!("{server_url}/{}", ntfy.topic))
+        .json(&body)
+        .send()
+        .await?;
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!("ntfy returned {}", response.status()))
+    }
+}
+
+async fn confirmation_callback(
+    State(state): State<HubState>,
+    Path((confirmation_id, decision)): Path<(String, String)>,
+    Query(query): Query<ConfirmationCallbackQuery>,
+) -> Response {
+    let decision = match decision.as_str() {
+        "allow" => ConfirmationDecision::AllowOnce,
+        "deny" => ConfirmationDecision::Deny,
+        _ => {
+            return api_error(
+                StatusCode::NOT_FOUND,
+                "confirmation_not_found",
+                "Unknown confirmation callback action",
+            )
+        }
+    };
+    let token_hash = sha256_hex(&query.token);
+    let (agent_id, request_id, status, command_preview, risk_level, confirm_reason, created_at) = {
+        let mut confirmations = state.pending_confirmations.lock().await;
+        let Some(pending) = confirmations.get_mut(&confirmation_id) else {
+            return api_error(
+                StatusCode::NOT_FOUND,
+                "confirmation_not_found",
+                "Confirmation was not found",
+            );
+        };
+        if pending.resolved && Utc::now() >= pending.expires_at {
+            return api_error(
+                StatusCode::GONE,
+                "confirmation_expired",
+                "Confirmation has expired",
+            );
+        }
+        if pending.resolved {
+            return api_error(
+                StatusCode::CONFLICT,
+                "confirmation_resolved",
+                "Confirmation has already been resolved",
+            );
+        }
+        if Utc::now() >= pending.expires_at {
+            pending.resolved = true;
+            pending.decision = Some(ConfirmationDecision::Expired);
+            (
+                pending.agent_id.clone(),
+                pending.request_id.clone(),
+                StatusCode::GONE,
+                pending.command_preview.clone(),
+                pending.risk_level.clone(),
+                pending.reason.clone(),
+                pending.created_at,
+            )
+        } else if !constant_time_equal(&token_hash, &pending.token_hash) {
+            return api_error(
+                StatusCode::FORBIDDEN,
+                "callback_token_invalid",
+                "Invalid confirmation token",
+            );
+        } else {
+            pending.resolved = true;
+            pending.decision = Some(decision.clone());
+            (
+                pending.agent_id.clone(),
+                pending.request_id.clone(),
+                StatusCode::OK,
+                pending.command_preview.clone(),
+                pending.risk_level.clone(),
+                pending.reason.clone(),
+                pending.created_at,
+            )
+        }
+    };
+
+    if status == StatusCode::GONE {
+        send_confirmation_response(
+            &state,
+            &agent_id,
+            &request_id,
+            ConfirmationDecision::Expired,
+            "expired",
+        )
+        .await;
+        return api_error(
+            StatusCode::GONE,
+            "confirmation_expired",
+            "Confirmation has expired",
+        );
+    }
+
+    let reason = match decision {
+        ConfirmationDecision::AllowOnce => "user_allowed",
+        ConfirmationDecision::Deny => "user_denied",
+        _ => "resolved",
+    };
+    send_confirmation_response(&state, &agent_id, &request_id, decision.clone(), reason).await;
+    info!(
+        %agent_id,
+        %confirmation_id,
+        ?decision,
+        %risk_level,
+        reason = %confirm_reason,
+        %created_at,
+        commandPreview = %command_preview,
+        "confirmation resolved by callback"
+    );
+    Json(json!({
+        "status": "accepted",
+        "decision": decision_wire_value(&decision)
+    }))
+    .into_response()
+}
+
+async fn cleanup_confirmations(state: HubState) {
+    loop {
+        sleep(Duration::from_secs(2)).await;
+        let expired = {
+            let now = Utc::now();
+            let mut confirmations = state.pending_confirmations.lock().await;
+            confirmations
+                .values_mut()
+                .filter(|pending| !pending.resolved && now >= pending.expires_at)
+                .map(|pending| {
+                    pending.resolved = true;
+                    pending.decision = Some(ConfirmationDecision::Timeout);
+                    (
+                        pending.agent_id.clone(),
+                        pending.request_id.clone(),
+                        pending.confirmation_id.clone(),
+                        pending.command_preview.clone(),
+                        pending.risk_level.clone(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        for (agent_id, request_id, confirmation_id, command_preview, risk_level) in expired {
+            info!(
+                %agent_id,
+                %confirmation_id,
+                %risk_level,
+                commandPreview = %command_preview,
+                "confirmation timed out"
+            );
+            send_confirmation_response(
+                &state,
+                &agent_id,
+                &request_id,
+                ConfirmationDecision::Timeout,
+                "timeout",
+            )
+            .await;
+        }
+    }
+}
+
+async fn discard_agent_confirmations(state: &HubState, agent_id: &str) {
+    let mut confirmations = state.pending_confirmations.lock().await;
+    for pending in confirmations.values_mut() {
+        if pending.agent_id == agent_id && !pending.resolved {
+            pending.resolved = true;
+            pending.decision = Some(ConfirmationDecision::ProviderUnavailable);
+        }
+    }
+}
+
+async fn send_confirmation_response(
+    state: &HubState,
+    agent_id: &str,
+    request_id: &str,
+    decision: ConfirmationDecision,
+    reason: &str,
+) {
+    let message = HubMessage::ConfirmationResponse {
+        request_id: request_id.to_string(),
+        decision,
+        reason: reason.to_string(),
+    };
+    let Ok(text) = serde_json::to_string(&message) else {
+        return;
+    };
+    let sender = {
+        let agents = state.agents.lock().await;
+        agents
+            .get(agent_id)
+            .map(|connection| connection.sender.clone())
+    };
+    if let Some(sender) = sender {
+        let _ = sender.send(Message::Text(text));
     }
 }
 
@@ -707,6 +1165,29 @@ fn random_id(prefix: &str) -> String {
     format!("{prefix}_{}", Uuid::new_v4().simple())
 }
 
+fn random_token() -> String {
+    format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    let mut output = value.chars().take(max_chars).collect::<String>();
+    if value.chars().count() > max_chars {
+        output.push_str("...");
+    }
+    output
+}
+
+fn decision_wire_value(decision: &ConfirmationDecision) -> &'static str {
+    match decision {
+        ConfirmationDecision::AllowOnce => "allow_once",
+        ConfirmationDecision::Deny => "deny",
+        ConfirmationDecision::Timeout => "timeout",
+        ConfirmationDecision::ProviderUnavailable => "provider_unavailable",
+        ConfirmationDecision::CallbackTokenInvalid => "callback_token_invalid",
+        ConfirmationDecision::Expired => "expired",
+    }
+}
+
 fn default_config_summary() -> SafeConfigSummary {
     SafeConfigSummary {
         workspace_root: "unknown".to_string(),
@@ -729,10 +1210,53 @@ fn default_db_path() -> PathBuf {
         .join("hub.sqlite3")
 }
 
+fn default_config_path() -> PathBuf {
+    dirs_fallback_home().join(".agentic_gpt").join("hub.json")
+}
+
 fn dirs_fallback_home() -> PathBuf {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
+}
+
+impl HubConfig {
+    fn default_config() -> Self {
+        Self {
+            remote_confirmation: RemoteConfirmationConfig {
+                enabled: false,
+                provider: "ntfy".to_string(),
+                timeout_seconds: DEFAULT_REMOTE_CONFIRM_TIMEOUT_SECS,
+                ntfy: NtfyConfig {
+                    server_url: "https://ntfy.example.invalid".to_string(),
+                    topic: "change-me-high-entropy-topic".to_string(),
+                    callback_base_url: "https://agentic-gpt.example.invalid".to_string(),
+                },
+            },
+        }
+    }
+
+    fn load_or_default(path: &PathBuf) -> Result<Self> {
+        if path.exists() {
+            let text = std::fs::read_to_string(path)
+                .with_context(|| format!("read hub config {}", path.display()))?;
+            Ok(serde_json::from_str(&text)
+                .with_context(|| format!("parse hub config {}", path.display()))?)
+        } else {
+            Ok(Self::default_config())
+        }
+    }
+
+    fn write_if_missing(&self, path: &PathBuf) -> Result<()> {
+        if path.exists() {
+            return Ok(());
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, serde_json::to_string_pretty(self)?)?;
+        Ok(())
+    }
 }
 
 fn open_db(path: &PathBuf) -> Result<Connection> {

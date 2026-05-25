@@ -123,6 +123,27 @@ pub struct SessionInfo {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfirmationPayload {
+    pub program: String,
+    pub args: Vec<String>,
+    pub command_preview: String,
+    pub risk_level: String,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfirmationDecision {
+    AllowOnce,
+    Deny,
+    Timeout,
+    ProviderUnavailable,
+    CallbackTokenInvalid,
+    Expired,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(
     tag = "type",
     rename_all = "camelCase",
@@ -186,6 +207,15 @@ pub enum AgentMessage {
         request_id: String,
         data: serde_json::Value,
     },
+    ConfirmationRequest {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "agentId")]
+        agent_id: String,
+        #[serde(rename = "timeoutSeconds")]
+        timeout_seconds: u64,
+        payload: ConfirmationPayload,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -196,5 +226,11 @@ pub enum HubMessage {
         sent_at: DateTime<Utc>,
         #[serde(rename = "receivedAt")]
         received_at: DateTime<Utc>,
+    },
+    ConfirmationResponse {
+        #[serde(rename = "requestId")]
+        request_id: String,
+        decision: ConfirmationDecision,
+        reason: String,
     },
 }

@@ -36,6 +36,25 @@ AGENTIC_GPT_API_KEY='<high-entropy-api-key>' \
 
 Hub state defaults to `~/.agentic_gpt/hub.sqlite3`. Put Caddy or Nginx in front of the Hub for HTTPS and WebSocket reverse proxying.
 
+Hub config defaults to `~/.agentic_gpt/hub.json`. Remote confirmation is disabled by default; enable ntfy on the Hub, not on each Local Agent:
+
+```json
+{
+  "remoteConfirmation": {
+    "enabled": true,
+    "provider": "ntfy",
+    "timeoutSeconds": 45,
+    "ntfy": {
+      "serverUrl": "https://ntfy.example.com",
+      "topic": "<high-entropy-topic>",
+      "callbackBaseUrl": "https://agentic-gpt.example.com"
+    }
+  }
+}
+```
+
+The ntfy callback routes are intentionally not part of the GPT Actions OpenAPI. They are called only from ntfy action buttons and require the one-time confirmation token in the callback URL.
+
 ## Local Agent
 
 ```bash
@@ -43,12 +62,15 @@ cargo run -p agentic-gpt -- config init
 cargo run -p agentic-gpt -- config set hubUrl http://127.0.0.1:8787
 cargo run -p agentic-gpt -- config set agentId laptop
 cargo run -p agentic-gpt -- config set agentSecret '<agent-secret>'
+cargo run -p agentic-gpt -- config set confirmationProvider freedesktop-then-hub
 cargo run -p agentic-gpt -- run
 ```
 
 Config lives at `~/.agentic_gpt/config.json`; audit logs are JSONL at `~/.agentic_gpt/audit.log`.
 
 `workerUrl` is accepted as a legacy alias when reading or setting config, but `hubUrl` is the canonical field.
+
+`freedesktop-then-hub` first tries local desktop notification actions. It falls back to Hub-backed ntfy only when the local provider is unavailable or cannot show the notification. User denial or timeout from the local provider is final and does not fall back.
 
 ## GPT Actions
 
