@@ -1,14 +1,14 @@
 use agentic_gpt_protocol::{
     AgentMessage, BatchElementResult, BatchExecRequest, BatchExecResult, ConfirmationDecision,
     ConfirmationPayload, ExecElement, ExecRequest, HubCommand, HubMessage, PolicyCounts,
-    SafeConfigSummary, SafeSandboxSummary, SessionInfo, TaskResult,
+    SafeConfigSummary, SafePathPolicySummary, SafeSandboxSummary, SessionInfo, TaskResult,
 };
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand, ValueEnum};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -81,6 +81,10 @@ enum ConfigCommand {
         #[command(subcommand)]
         command: RuleCommand,
     },
+    Path {
+        #[command(subcommand)]
+        command: PathCommand,
+    },
 }
 
 #[derive(Subcommand)]
@@ -92,6 +96,36 @@ enum RuleCommand {
     Remove {
         rule_id: String,
     },
+}
+
+#[derive(Subcommand)]
+enum PathCommand {
+    List,
+    Write {
+        #[command(subcommand)]
+        command: PathRootCommand,
+    },
+    Readonly {
+        #[command(subcommand)]
+        command: PathRootCommand,
+    },
+    Deny {
+        #[command(subcommand)]
+        command: PathRootCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum PathRootCommand {
+    Add { path: PathBuf },
+    Remove { path: PathBuf },
+}
+
+#[derive(Clone, Copy, Debug)]
+enum PathRootKind {
+    Write,
+    Readonly,
+    Deny,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize, ValueEnum)]
@@ -114,6 +148,8 @@ struct Config {
     backup_limit: usize,
     confirmation_provider: ConfirmationProviderConfig,
     sandbox: SandboxConfig,
+    #[serde(default)]
+    path_policy: PathPolicyConfig,
     policy: PolicyConfig,
     limits: LimitsConfig,
 }
@@ -130,6 +166,17 @@ struct SandboxConfig {
     enabled: bool,
     bubblewrap_path: String,
     required_runtime_paths: Vec<PathBuf>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PathPolicyConfig {
+    #[serde(default)]
+    write_roots: Vec<PathBuf>,
+    #[serde(default)]
+    read_only_roots: Vec<PathBuf>,
+    #[serde(default)]
+    deny_roots: Vec<PathBuf>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -869,34 +916,7 @@ struct CommandOutput {
 }
 
 async fn execute_command(config: &Config, program: &str, args: &[String]) -> Result<CommandOutput> {
-    let mut command = if config.sandbox.enabled {
-        let mut command = Command::new(&config.sandbox.bubblewrap_path);
-        command
-            .arg("--die-with-parent")
-            .arg("--unshare-all")
-            .arg("--proc")
-            .arg("/proc")
-            .arg("--dev")
-            .arg("/dev")
-            .arg("--tmpfs")
-            .arg("/tmp")
-            .arg("--chdir")
-            .arg(&config.workspace_root)
-            .arg("--bind")
-            .arg(&config.workspace_root)
-            .arg(&config.workspace_root);
-        for path in &config.sandbox.required_runtime_paths {
-            if path.exists() {
-                command.arg("--ro-bind").arg(path).arg(path);
-            }
-        }
-        command.arg("--").arg(program);
-        command
-    } else {
-        let mut command = Command::new(program);
-        command.current_dir(&config.workspace_root);
-        command
-    };
+    let mut command = build_command(config, program)?;
     command.args(args);
     command
         .stdin(Stdio::null())
@@ -952,35 +972,248 @@ fn preflight(config: &Config, program: &str, args: &[String]) -> std::result::Re
     ) {
         return Err("requires_tty_not_supported".to_string());
     }
+    check_path_policy(config, program, args)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PathAccessKind {
+    Read,
+    Write,
+}
+
+fn classify_program_access(program: &str) -> PathAccessKind {
+    if matches!(
+        program,
+        "cat"
+            | "head"
+            | "tail"
+            | "stat"
+            | "file"
+            | "wc"
+            | "ls"
+            | "find"
+            | "du"
+            | "df"
+            | "upower"
+            | "free"
+            | "uptime"
+            | "fastfetch"
+            | "journalctl"
+            | "btrfs"
+            | "pacman"
+    ) {
+        PathAccessKind::Read
+    } else {
+        PathAccessKind::Write
+    }
+}
+
+fn looks_like_path(arg: &str) -> bool {
+    arg == "~"
+        || arg.starts_with("~/")
+        || arg.starts_with('/')
+        || arg.starts_with("./")
+        || arg.starts_with("../")
+}
+
+fn check_path_policy(
+    config: &Config,
+    program: &str,
+    args: &[String],
+) -> std::result::Result<(), String> {
+    let access = classify_program_access(program);
+    let policy = expanded_path_policy(config).map_err(|_| "path_policy_error".to_string())?;
     for arg in args {
-        if looks_like_path(arg) && escapes_workspace(&config.workspace_root, arg) {
-            return Err("path_outside_workspace".to_string());
+        if !looks_like_path(arg) {
+            continue;
         }
+        let path = resolve_argument_path(&config.workspace_root, arg, access)?;
+        if path_in_roots(&path, &policy.deny_roots) {
+            return Err("path_denied".to_string());
+        }
+        if program == "df" && arg == "/" {
+            continue;
+        }
+        if path_in_roots(&path, &policy.write_roots) {
+            if access == PathAccessKind::Read && !path.exists() {
+                return Err("path_not_found".to_string());
+            }
+            continue;
+        }
+        if path_in_roots(&path, &policy.read_only_roots) {
+            if access == PathAccessKind::Read {
+                if !path.exists() {
+                    return Err("path_not_found".to_string());
+                }
+                continue;
+            }
+            return Err("path_readonly".to_string());
+        }
+        return Err("path_outside_allowed_roots".to_string());
     }
     Ok(())
 }
 
-fn looks_like_path(arg: &str) -> bool {
-    arg.starts_with('/') || arg.starts_with("./") || arg.starts_with("../")
+fn resolve_argument_path(
+    workspace_root: &Path,
+    arg: &str,
+    _access: PathAccessKind,
+) -> std::result::Result<PathBuf, String> {
+    let expanded = expand_path(arg).map_err(|_| "path_policy_error".to_string())?;
+    let candidate = if expanded.is_absolute() {
+        expanded
+    } else {
+        workspace_root.join(expanded)
+    };
+    if candidate.exists() {
+        return candidate
+            .canonicalize()
+            .map_err(|_| "path_policy_error".to_string());
+    }
+    let parent = candidate
+        .parent()
+        .ok_or_else(|| "path_not_found".to_string())?;
+    let parent = parent
+        .canonicalize()
+        .map_err(|_| "path_not_found".to_string())?;
+    Ok(candidate
+        .file_name()
+        .map(|name| parent.join(name))
+        .unwrap_or(parent))
 }
 
-fn escapes_workspace(workspace: &Path, arg: &str) -> bool {
-    let path = PathBuf::from(arg);
-    let candidate = if path.is_absolute() {
-        path
+fn path_in_roots(path: &Path, roots: &[PathBuf]) -> bool {
+    roots.iter().any(|root| path.starts_with(root))
+}
+
+#[derive(Debug)]
+struct ExpandedPathPolicy {
+    write_roots: Vec<PathBuf>,
+    read_only_roots: Vec<PathBuf>,
+    deny_roots: Vec<PathBuf>,
+}
+
+fn expanded_path_policy(config: &Config) -> Result<ExpandedPathPolicy> {
+    Ok(ExpandedPathPolicy {
+        write_roots: normalize_roots(
+            config
+                .path_policy
+                .write_roots
+                .iter()
+                .chain(std::iter::once(&config.workspace_root)),
+        )?,
+        read_only_roots: normalize_roots(config.path_policy.read_only_roots.iter())?,
+        deny_roots: normalize_roots(config.path_policy.deny_roots.iter())?,
+    })
+}
+
+fn normalize_roots<'a>(roots: impl Iterator<Item = &'a PathBuf>) -> Result<Vec<PathBuf>> {
+    let mut normalized = Vec::new();
+    for root in roots {
+        let expanded = expand_pathbuf(root)?;
+        let normalized_root = canonicalize_existing_or_parent(&expanded)?;
+        if !normalized
+            .iter()
+            .any(|existing| existing == &normalized_root)
+        {
+            normalized.push(normalized_root);
+        }
+    }
+    Ok(normalized)
+}
+
+fn canonicalize_existing_or_parent(path: &Path) -> Result<PathBuf> {
+    if path.exists() {
+        return Ok(path.canonicalize()?);
+    }
+    if let Some(parent) = path.parent() {
+        if parent.exists() {
+            let parent = parent.canonicalize()?;
+            return Ok(path
+                .file_name()
+                .map(|name| parent.join(name))
+                .unwrap_or(parent));
+        }
+    }
+    Ok(path.to_path_buf())
+}
+
+fn expand_path(value: &str) -> Result<PathBuf> {
+    if value == "~" {
+        return dirs::home_dir().context("home directory not found");
+    }
+    if let Some(rest) = value.strip_prefix("~/") {
+        return Ok(dirs::home_dir()
+            .context("home directory not found")?
+            .join(rest));
+    }
+    Ok(PathBuf::from(value))
+}
+
+fn expand_pathbuf(value: &Path) -> Result<PathBuf> {
+    value
+        .to_str()
+        .map(expand_path)
+        .unwrap_or_else(|| Ok(value.to_path_buf()))
+}
+
+fn build_command(config: &Config, program: &str) -> Result<Command> {
+    if config.sandbox.enabled {
+        let policy = expanded_path_policy(config)?;
+        let mut command = Command::new(&config.sandbox.bubblewrap_path);
+        command
+            .arg("--die-with-parent")
+            .arg("--unshare-all")
+            .arg("--dev")
+            .arg("/dev")
+            .arg("--chdir")
+            .arg(&config.workspace_root);
+        let mut created_dirs = HashSet::new();
+        for path in &policy.write_roots {
+            if path.exists() {
+                add_bwrap_bind(&mut command, &mut created_dirs, "--bind", path);
+            }
+        }
+        for path in &policy.read_only_roots {
+            if path.exists() {
+                add_bwrap_bind(&mut command, &mut created_dirs, "--ro-bind", path);
+            }
+        }
+        for path in &config.sandbox.required_runtime_paths {
+            if path.exists() {
+                add_bwrap_bind(&mut command, &mut created_dirs, "--ro-bind", path);
+            }
+        }
+        command.arg("--").arg(program);
+        Ok(command)
     } else {
-        workspace.join(path)
-    };
-    match candidate
-        .parent()
-        .and_then(|parent| parent.canonicalize().ok())
-    {
-        Some(parent) => !parent.starts_with(
-            workspace
-                .canonicalize()
-                .unwrap_or_else(|_| workspace.to_path_buf()),
-        ),
-        None => true,
+        let mut command = Command::new(program);
+        command.current_dir(&config.workspace_root);
+        Ok(command)
+    }
+}
+
+fn add_bwrap_bind(
+    command: &mut Command,
+    created_dirs: &mut HashSet<PathBuf>,
+    bind_arg: &str,
+    path: &Path,
+) {
+    add_bwrap_parent_dirs(command, created_dirs, path);
+    command.arg(bind_arg).arg(path).arg(path);
+}
+
+fn add_bwrap_parent_dirs(command: &mut Command, created_dirs: &mut HashSet<PathBuf>, path: &Path) {
+    let mut parents = path.ancestors().skip(1).collect::<Vec<_>>();
+    parents.reverse();
+    for parent in parents {
+        if parent == Path::new("/") || parent.as_os_str().is_empty() {
+            continue;
+        }
+        let parent = parent.to_path_buf();
+        if created_dirs.insert(parent.clone()) {
+            command.arg("--dir").arg(parent);
+        }
     }
 }
 
@@ -1331,8 +1564,7 @@ async fn spawn_session(
     program: &str,
     args: &[String],
 ) -> Result<(Child, Arc<Mutex<TailBuffer>>, Arc<Mutex<TailBuffer>>)> {
-    let mut command = Command::new(program);
-    command.current_dir(&config.workspace_root);
+    let mut command = build_command(config, program)?;
     command
         .args(args)
         .stdin(Stdio::null())
@@ -1425,7 +1657,16 @@ async fn handle_config(config_path: PathBuf, command: ConfigCommand) -> Result<(
         ConfigCommand::Set { key, value } => {
             let mut config = Config::load_or_default(&config_path)?;
             match key.as_str() {
-                "workspaceRoot" => config.workspace_root = PathBuf::from(value),
+                "workspaceRoot" => {
+                    let old_workspace = config.workspace_root.clone();
+                    let new_workspace = PathBuf::from(value);
+                    for root in &mut config.path_policy.write_roots {
+                        if paths_match(root, &old_workspace) {
+                            *root = new_workspace.clone();
+                        }
+                    }
+                    config.workspace_root = new_workspace;
+                }
                 "confirmationProvider" => config.confirmation_provider.provider = value,
                 "sandbox.enabled" => config.sandbox.enabled = value.parse::<bool>()?,
                 "hubUrl" | "workerUrl" => config.hub_url = value,
@@ -1442,6 +1683,7 @@ async fn handle_config(config_path: PathBuf, command: ConfigCommand) -> Result<(
             mutate_rule(config_path, PolicyDecision::Confirm, command)?
         }
         ConfigCommand::Deny { command } => mutate_rule(config_path, PolicyDecision::Deny, command)?,
+        ConfigCommand::Path { command } => mutate_path_policy(config_path, command)?,
     }
     Ok(())
 }
@@ -1471,6 +1713,62 @@ fn mutate_rule(config_path: PathBuf, decision: PolicyDecision, command: RuleComm
         }
     }
     write_config_with_backup(&config_path, &config)
+}
+
+fn mutate_path_policy(config_path: PathBuf, command: PathCommand) -> Result<()> {
+    let mut config = Config::load_or_default(&config_path)?;
+    match command {
+        PathCommand::List => {
+            println!("{}", serde_json::to_string_pretty(&config.path_policy)?);
+            return Ok(());
+        }
+        PathCommand::Write { command } => {
+            mutate_path_roots(&mut config.path_policy, PathRootKind::Write, command)
+        }
+        PathCommand::Readonly { command } => {
+            mutate_path_roots(&mut config.path_policy, PathRootKind::Readonly, command)
+        }
+        PathCommand::Deny { command } => {
+            mutate_path_roots(&mut config.path_policy, PathRootKind::Deny, command)
+        }
+    }
+    write_config_with_backup(&config_path, &config)
+}
+
+fn mutate_path_roots(policy: &mut PathPolicyConfig, kind: PathRootKind, command: PathRootCommand) {
+    match command {
+        PathRootCommand::Add { path } => {
+            let roots = roots_for_kind(policy, kind);
+            if !roots.iter().any(|existing| paths_match(existing, &path)) {
+                roots.push(path);
+            }
+        }
+        PathRootCommand::Remove { path } => {
+            let roots = roots_for_kind(policy, kind);
+            roots.retain(|existing| !paths_match(existing, &path));
+        }
+    }
+}
+
+fn roots_for_kind(policy: &mut PathPolicyConfig, kind: PathRootKind) -> &mut Vec<PathBuf> {
+    match kind {
+        PathRootKind::Write => &mut policy.write_roots,
+        PathRootKind::Readonly => &mut policy.read_only_roots,
+        PathRootKind::Deny => &mut policy.deny_roots,
+    }
+}
+
+fn paths_match(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    match (
+        expand_pathbuf(left).and_then(|path| canonicalize_existing_or_parent(&path)),
+        expand_pathbuf(right).and_then(|path| canonicalize_existing_or_parent(&path)),
+    ) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
 }
 
 async fn watch_config(state: AppState) {
@@ -1528,6 +1826,7 @@ impl Config {
                     PathBuf::from("/etc/ssl"),
                 ],
             },
+            path_policy: default_path_policy(&base.join("workspace")),
             policy: PolicyConfig::default(),
             limits: LimitsConfig {
                 max_concurrent_tasks: 2,
@@ -1539,7 +1838,13 @@ impl Config {
 
     fn load(path: &Path) -> Result<Self> {
         let text = fs::read_to_string(path)?;
-        Ok(serde_json::from_str(&text)?)
+        let value: serde_json::Value = serde_json::from_str(&text)?;
+        let has_path_policy = value.get("pathPolicy").is_some();
+        let mut config: Self = serde_json::from_value(value)?;
+        if !has_path_policy {
+            config.path_policy = default_path_policy(&config.workspace_root);
+        }
+        Ok(config)
     }
 
     fn load_or_default(path: &Path) -> Result<Self> {
@@ -1577,6 +1882,11 @@ impl Config {
                 }
                 .to_string(),
             },
+            path_policy: SafePathPolicySummary {
+                write_root_count: effective_write_root_count(self),
+                read_only_root_count: self.path_policy.read_only_roots.len(),
+                deny_root_count: self.path_policy.deny_roots.len(),
+            },
             policy_rule_counts: PolicyCounts {
                 allow: self.policy.allow.len(),
                 confirm: self.policy.confirm.len(),
@@ -1584,6 +1894,60 @@ impl Config {
             },
             confirmation_provider: self.confirmation_provider.provider.clone(),
         }
+    }
+}
+
+fn effective_write_root_count(config: &Config) -> usize {
+    config.path_policy.write_roots.len()
+        + usize::from(
+            !config
+                .path_policy
+                .write_roots
+                .iter()
+                .any(|root| paths_match(root, &config.workspace_root)),
+        )
+}
+
+fn default_path_policy(workspace_root: &Path) -> PathPolicyConfig {
+    PathPolicyConfig {
+        write_roots: vec![
+            workspace_root.to_path_buf(),
+            PathBuf::from("~/Documents"),
+            PathBuf::from("~/Downloads"),
+            PathBuf::from("/tmp"),
+        ],
+        read_only_roots: vec![
+            PathBuf::from("~/.cache"),
+            PathBuf::from("~/.local/share"),
+            PathBuf::from("/etc/os-release"),
+            PathBuf::from("/proc/meminfo"),
+            PathBuf::from("/proc/cpuinfo"),
+            PathBuf::from("/proc/loadavg"),
+            PathBuf::from("/proc/uptime"),
+            PathBuf::from("/sys/class/power_supply"),
+            PathBuf::from("/sys/class/thermal"),
+        ],
+        deny_roots: vec![
+            PathBuf::from("~/.ssh"),
+            PathBuf::from("~/.gnupg"),
+            PathBuf::from("~/.local/share/keyrings"),
+            PathBuf::from("~/.password-store"),
+            PathBuf::from("~/.mozilla"),
+            PathBuf::from("~/.config/google-chrome"),
+            PathBuf::from("~/.config/chromium"),
+            PathBuf::from("~/.config/Code/User/globalStorage"),
+            PathBuf::from("~/.npmrc"),
+            PathBuf::from("~/.pypirc"),
+            PathBuf::from("~/.cargo/credentials"),
+            PathBuf::from("~/.docker/config.json"),
+            PathBuf::from("~/.kube"),
+            PathBuf::from("~/.aws"),
+            PathBuf::from("~/.config/gcloud"),
+            PathBuf::from("~/.config/gh"),
+            PathBuf::from("~/.config/hub"),
+            PathBuf::from("~/.config/clash"),
+            PathBuf::from("~/.config/clash-verge"),
+        ],
     }
 }
 
@@ -1711,5 +2075,200 @@ mod tests {
             preflight(&config, "sudo", &["true".to_string()]).unwrap_err(),
             "interactive_credential_required"
         );
+    }
+
+    #[test]
+    fn read_only_system_file_is_allowed() {
+        let config = Config::default_config().unwrap();
+        assert!(preflight(&config, "cat", &["/proc/meminfo".to_string()]).is_ok());
+        assert!(preflight(&config, "df", &["/".to_string()]).is_ok());
+    }
+
+    #[test]
+    fn path_policy_allows_write_root_and_blocks_readonly_write() {
+        let root = unique_temp_dir("path-policy");
+        let workspace = root.join("workspace");
+        let downloads = root.join("Downloads");
+        let cache = root.join(".cache");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::create_dir_all(&downloads).unwrap();
+        fs::create_dir_all(&cache).unwrap();
+
+        let mut config = Config::default_config().unwrap();
+        config.workspace_root = workspace;
+        config.path_policy = PathPolicyConfig {
+            write_roots: vec![downloads.clone()],
+            read_only_roots: vec![cache.clone()],
+            deny_roots: Vec::new(),
+        };
+
+        assert!(preflight(
+            &config,
+            "touch",
+            &[downloads.join("test-file").to_string_lossy().to_string()]
+        )
+        .is_ok());
+        assert_eq!(
+            preflight(
+                &config,
+                "touch",
+                &[cache.join("test-file").to_string_lossy().to_string()]
+            )
+            .unwrap_err(),
+            "path_readonly"
+        );
+        assert!(preflight(&config, "du", &[cache.to_string_lossy().to_string()]).is_ok());
+    }
+
+    #[test]
+    fn deny_roots_override_read_and_write() {
+        let root = unique_temp_dir("path-deny");
+        let workspace = root.join("workspace");
+        let downloads = root.join("Downloads");
+        let secret = downloads.join("secret");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::create_dir_all(&secret).unwrap();
+
+        let mut config = Config::default_config().unwrap();
+        config.workspace_root = workspace;
+        config.path_policy = PathPolicyConfig {
+            write_roots: vec![downloads.clone()],
+            read_only_roots: Vec::new(),
+            deny_roots: vec![secret.clone()],
+        };
+
+        assert_eq!(
+            preflight(
+                &config,
+                "cat",
+                &[secret.join("token").to_string_lossy().to_string()]
+            )
+            .unwrap_err(),
+            "path_denied"
+        );
+        assert_eq!(
+            preflight(
+                &config,
+                "rm",
+                &[secret.join("token").to_string_lossy().to_string()]
+            )
+            .unwrap_err(),
+            "path_denied"
+        );
+    }
+
+    #[test]
+    fn unknown_program_defaults_to_write_access() {
+        let root = unique_temp_dir("path-unknown");
+        let workspace = root.join("workspace");
+        let cache = root.join(".cache");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::create_dir_all(&cache).unwrap();
+
+        let mut config = Config::default_config().unwrap();
+        config.workspace_root = workspace;
+        config.path_policy = PathPolicyConfig {
+            write_roots: Vec::new(),
+            read_only_roots: vec![cache.clone()],
+            deny_roots: Vec::new(),
+        };
+
+        assert_eq!(
+            preflight(
+                &config,
+                "custom-tool",
+                &[cache.join("file").to_string_lossy().to_string()]
+            )
+            .unwrap_err(),
+            "path_readonly"
+        );
+    }
+
+    #[test]
+    fn symlink_to_denied_path_is_rejected() {
+        let root = unique_temp_dir("path-symlink");
+        let workspace = root.join("workspace");
+        let secret = root.join("secret");
+        let link = workspace.join("secret-link");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::create_dir_all(&secret).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&secret, &link).unwrap();
+
+        let mut config = Config::default_config().unwrap();
+        config.workspace_root = workspace;
+        config.path_policy = PathPolicyConfig {
+            write_roots: Vec::new(),
+            read_only_roots: Vec::new(),
+            deny_roots: vec![secret],
+        };
+
+        #[cfg(unix)]
+        assert_eq!(
+            preflight(&config, "cat", &[link.to_string_lossy().to_string()]).unwrap_err(),
+            "path_denied"
+        );
+    }
+
+    #[test]
+    fn load_old_config_without_path_policy_adds_defaults() {
+        let root = unique_temp_dir("old-config");
+        let config_path = root.join("config.json");
+        let config = Config::default_config().unwrap();
+        let mut value = serde_json::to_value(config).unwrap();
+        value.as_object_mut().unwrap().remove("pathPolicy");
+        fs::write(&config_path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+
+        let loaded = Config::load(&config_path).unwrap();
+        assert!(!loaded.path_policy.write_roots.is_empty());
+        assert!(!loaded.path_policy.read_only_roots.is_empty());
+        assert!(!loaded.path_policy.deny_roots.is_empty());
+    }
+
+    #[test]
+    fn load_partial_path_policy_defaults_missing_lists_to_empty() {
+        let root = unique_temp_dir("partial-config");
+        let config_path = root.join("config.json");
+        let mut value = serde_json::to_value(Config::default_config().unwrap()).unwrap();
+        value["pathPolicy"] = serde_json::json!({
+            "writeRoots": [root.join("write")]
+        });
+        fs::write(&config_path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+
+        let loaded = Config::load(&config_path).unwrap();
+        assert_eq!(loaded.path_policy.write_roots.len(), 1);
+        assert!(loaded.path_policy.read_only_roots.is_empty());
+        assert!(loaded.path_policy.deny_roots.is_empty());
+    }
+
+    #[test]
+    fn path_root_remove_matches_expanded_equivalent_path() {
+        let root = unique_temp_dir("path-cli");
+        let target = root.join("target");
+        fs::create_dir_all(&target).unwrap();
+        let mut policy = PathPolicyConfig::default();
+
+        mutate_path_roots(
+            &mut policy,
+            PathRootKind::Write,
+            PathRootCommand::Add {
+                path: target.clone(),
+            },
+        );
+        assert_eq!(policy.write_roots.len(), 1);
+        mutate_path_roots(
+            &mut policy,
+            PathRootKind::Write,
+            PathRootCommand::Remove {
+                path: target.join("..").join("target"),
+            },
+        );
+        assert!(policy.write_roots.is_empty());
+    }
+
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("{prefix}-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        dir
     }
 }

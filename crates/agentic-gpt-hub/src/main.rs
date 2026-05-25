@@ -1,7 +1,7 @@
 use agentic_gpt_protocol::{
     AgentMessage, AgentRegistryEntry, BatchExecRequest, BatchExecResult, Capabilities,
     ConfirmationDecision, ConfirmationPayload, ExecRequest, HubCommand, HubMessage,
-    SafeConfigSummary, SafeSandboxSummary, SessionInfo, TaskResult,
+    SafeConfigSummary, SafePathPolicySummary, SafeSandboxSummary, SessionInfo, TaskResult,
 };
 use anyhow::{Context, Result};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -1194,6 +1194,11 @@ fn default_config_summary() -> SafeConfigSummary {
         sandbox: SafeSandboxSummary {
             enabled: false,
             mode: "unknown".to_string(),
+        },
+        path_policy: SafePathPolicySummary {
+            write_root_count: 0,
+            read_only_root_count: 0,
+            deny_root_count: 0,
         },
         policy_rule_counts: agentic_gpt_protocol::PolicyCounts {
             allow: 0,

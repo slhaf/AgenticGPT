@@ -72,6 +72,16 @@ Config lives at `~/.agentic_gpt/config.json`; audit logs are JSONL at `~/.agenti
 
 `freedesktop-then-hub` first tries local desktop notification actions. It falls back to Hub-backed ntfy only when the local provider is unavailable or cannot show the notification. User denial or timeout from the local provider is final and does not fall back.
 
+Path access is controlled by `pathPolicy` in the local agent config. `workspaceRoot` is always a write root; defaults also allow writes under `~/Documents`, `~/Downloads`, and `/tmp`, allow read-only access to selected system/cache paths, and deny common credential/browser/auth paths. Manage roots with:
+
+```bash
+cargo run -p agentic-gpt -- config path list
+cargo run -p agentic-gpt -- config path write add ~/Projects
+cargo run -p agentic-gpt -- config path readonly add /var/log
+cargo run -p agentic-gpt -- config path deny add ~/.secrets
+cargo run -p agentic-gpt -- config path write remove ~/Projects
+```
+
 ## GPT Actions
 
 Use `openapi/hub.yaml`, replace the server URL with your VPS HTTPS domain, and configure Bearer auth with `AGENTIC_GPT_API_KEY`.

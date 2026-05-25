@@ -18,9 +18,18 @@ pub struct SafeSandboxSummary {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SafePathPolicySummary {
+    pub write_root_count: usize,
+    pub read_only_root_count: usize,
+    pub deny_root_count: usize,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SafeConfigSummary {
     pub workspace_root: String,
     pub sandbox: SafeSandboxSummary,
+    pub path_policy: SafePathPolicySummary,
     pub policy_rule_counts: PolicyCounts,
     pub confirmation_provider: String,
 }
