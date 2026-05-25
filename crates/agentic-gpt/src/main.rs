@@ -1,3 +1,8 @@
+use agentic_gpt_protocol::{
+    AgentMessage, BatchElementResult, BatchExecRequest, BatchExecResult, ExecElement, ExecRequest,
+    HubCommand, HubMessage, PolicyCounts, SafeConfigSummary, SafeSandboxSummary, SessionInfo,
+    TaskResult,
+};
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -102,7 +107,8 @@ enum PolicyDecision {
 struct Config {
     agent_id: String,
     display_name: String,
-    worker_url: String,
+    #[serde(alias = "workerUrl")]
+    hub_url: String,
     agent_secret: String,
     workspace_root: PathBuf,
     backup_limit: usize,
@@ -148,172 +154,6 @@ struct LimitsConfig {
     max_concurrent_tasks: usize,
     max_active_sessions: usize,
     session_idle_timeout_secs: u64,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SafeConfigSummary {
-    workspace_root: String,
-    sandbox: SafeSandboxSummary,
-    policy_rule_counts: PolicyCounts,
-    confirmation_provider: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-struct SafeSandboxSummary {
-    enabled: bool,
-    mode: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-struct PolicyCounts {
-    allow: usize,
-    confirm: usize,
-    deny: usize,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-enum WorkerCommand {
-    #[serde(rename = "exec")]
-    Exec {
-        request_id: String,
-        task_id: String,
-        payload: ExecRequest,
-    },
-    #[serde(rename = "batchExec")]
-    BatchExec {
-        request_id: String,
-        task_id: String,
-        payload: BatchExecRequest,
-    },
-    #[serde(rename = "startSession")]
-    StartSession {
-        request_id: String,
-        session_id: String,
-        payload: ExecRequest,
-    },
-    #[serde(rename = "listSessions")]
-    ListSessions { request_id: String },
-    #[serde(rename = "inspectSession")]
-    InspectSession {
-        request_id: String,
-        session_id: String,
-    },
-    #[serde(rename = "waitSession")]
-    WaitSession {
-        request_id: String,
-        session_id: String,
-        seconds: u64,
-    },
-    #[serde(rename = "killSession")]
-    KillSession {
-        request_id: String,
-        session_id: String,
-    },
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ExecRequest {
-    agent_id: String,
-    program: String,
-    args: Vec<String>,
-    need_confirm: bool,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct BatchExecRequest {
-    agent_id: String,
-    elements: Vec<ExecElement>,
-    need_confirm: bool,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-struct ExecElement {
-    program: String,
-    args: Vec<String>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct TaskResult {
-    agent_id: String,
-    task_id: String,
-    status: String,
-    exit_code: Option<i32>,
-    stdout_tail: String,
-    stderr_tail: String,
-    truncated: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    reject_reason: Option<String>,
-    started_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct BatchElementResult {
-    index: usize,
-    program: String,
-    args: Vec<String>,
-    result: TaskResult,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct BatchExecResult {
-    agent_id: String,
-    batch_id: String,
-    status: String,
-    results: Vec<BatchElementResult>,
-    started_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SessionInfo {
-    agent_id: String,
-    session_id: String,
-    state: String,
-    program: String,
-    args: Vec<String>,
-    command_preview: String,
-    started_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
-    exit_code: Option<i32>,
-    stdout_tail: String,
-    stderr_tail: String,
-    truncated: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    reject_reason: Option<String>,
-}
-
-#[derive(Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum AgentMessage<'a> {
-    Hello {
-        #[serde(rename = "configSummary")]
-        config_summary: SafeConfigSummary,
-    },
-    Heartbeat {
-        #[serde(rename = "sentAt")]
-        sent_at: DateTime<Utc>,
-    },
-    SessionUpdate {
-        session: &'a SessionInfo,
-    },
-    Response {
-        #[serde(rename = "requestId")]
-        request_id: &'a str,
-        data: serde_json::Value,
-    },
 }
 
 #[derive(Serialize)]
@@ -403,9 +243,9 @@ async fn run(config_path: PathBuf) -> Result<()> {
     let initial = Config::load(&config_path)?;
     initial.ensure_workspace()?;
     log_info(format!(
-        "config loaded; agentId={}; workerUrl={}; workspaceRoot={}; sandbox={}",
+        "config loaded; agentId={}; hubUrl={}; workspaceRoot={}; sandbox={}",
         initial.agent_id,
-        initial.worker_url,
+        initial.hub_url,
         initial.workspace_root.display(),
         if initial.sandbox.enabled {
             "enabled"
@@ -427,7 +267,7 @@ async fn connect_loop(state: AppState) -> Result<()> {
         let config = state.config.read().await.clone();
         let url = format!(
             "{}/v1/agents/{}/connect",
-            config.worker_url.trim_end_matches('/'),
+            config.hub_url.trim_end_matches('/'),
             config.agent_id
         )
         .replace("http://", "ws://")
@@ -437,15 +277,15 @@ async fn connect_loop(state: AppState) -> Result<()> {
             .headers_mut()
             .insert("x-agent-secret", config.agent_secret.parse()?);
 
-        let proxy = proxy_url();
+        let proxy = proxy_url(&config.hub_url);
         log_info(format!(
-            "connecting to worker; agentId={}; proxy={}",
+            "connecting to hub; agentId={}; proxy={}",
             config.agent_id,
             proxy.as_deref().unwrap_or("none")
         ));
         match timeout(
             Duration::from_secs(CONNECT_TIMEOUT_SECS),
-            connect_worker(request, proxy),
+            connect_hub(request, proxy),
         )
         .await
         {
@@ -456,7 +296,7 @@ async fn connect_loop(state: AppState) -> Result<()> {
                 log_warn(format!("connect failed: {error}"));
             }
             Ok(Ok((stream, _))) => {
-                log_info("connected to worker".to_string());
+                log_info("connected to hub".to_string());
                 let (mut write, mut read) = stream.split();
                 let hello = AgentMessage::Hello {
                     config_summary: config.safe_summary(),
@@ -472,13 +312,13 @@ async fn connect_loop(state: AppState) -> Result<()> {
                     tokio::select! {
                         maybe_message = read.next() => {
                             let Some(message) = maybe_message else {
-                                log_warn("worker connection closed".to_string());
+                                log_warn("hub connection closed".to_string());
                                 break;
                             };
                             let message = match message {
                                 Ok(Message::Text(text)) => text.to_string(),
                                 Ok(Message::Close(frame)) => {
-                                    log_warn(format!("worker closed websocket; frame={frame:?}"));
+                                    log_warn(format!("hub closed websocket; frame={frame:?}"));
                                     break;
                                 }
                                 Ok(Message::Pong(_)) => {
@@ -487,29 +327,29 @@ async fn connect_loop(state: AppState) -> Result<()> {
                                 }
                                 Ok(_) => continue,
                                 Err(error) => {
-                                    log_warn(format!("worker websocket error: {error}"));
+                                    log_warn(format!("hub websocket error: {error}"));
                                     break;
                                 }
                             };
                             let value: serde_json::Value = match serde_json::from_str(&message) {
                                 Ok(value) => value,
                                 Err(error) => {
-                                    log_warn(format!("ignored invalid worker message: {error}"));
+                                    log_warn(format!("ignored invalid hub message: {error}"));
                                     continue;
                                 }
                             };
-                            if value.get("type").and_then(|value| value.as_str()) == Some("heartbeat_ack") {
+                            if serde_json::from_value::<HubMessage>(value.clone()).is_ok() {
                                 last_heartbeat_ack = Instant::now();
                                 continue;
                             }
-                            let command: WorkerCommand = match serde_json::from_value(value) {
+                            let command: HubCommand = match serde_json::from_value(value) {
                                 Ok(command) => command,
                                 Err(error) => {
-                                    log_warn(format!("ignored unknown worker command: {error}"));
+                                    log_warn(format!("ignored unknown hub command: {error}"));
                                     continue;
                                 }
                             };
-                            handle_worker_command(state.clone(), command, &mut write).await?;
+                            handle_hub_command(state.clone(), command, &mut write).await?;
                         }
                         _ = heartbeat.tick() => {
                             if last_heartbeat_ack.elapsed() > Duration::from_secs(HEARTBEAT_ACK_TIMEOUT_SECS) {
@@ -532,7 +372,7 @@ async fn connect_loop(state: AppState) -> Result<()> {
     }
 }
 
-async fn connect_worker(
+async fn connect_hub(
     request: tokio_tungstenite::tungstenite::handshake::client::Request,
     proxy: Option<String>,
 ) -> Result<(WebSocketStream<MaybeTlsStream<TcpStream>>, WsResponse)> {
@@ -544,7 +384,7 @@ async fn connect_worker(
     let host = request
         .uri()
         .host()
-        .ok_or_else(|| anyhow!("worker URL is missing host"))?
+        .ok_or_else(|| anyhow!("hub URL is missing host"))?
         .to_string();
     let port = request.uri().port_u16().unwrap_or_else(|| {
         if request.uri().scheme_str() == Some("ws") {
@@ -593,11 +433,38 @@ async fn connect_worker(
         .map_err(|error| anyhow!("{error}"))
 }
 
-fn proxy_url() -> Option<String> {
+fn proxy_url(target_url: &str) -> Option<String> {
+    if should_bypass_proxy(target_url) {
+        return None;
+    }
     ["https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY"]
         .iter()
         .filter_map(|key| std::env::var(key).ok())
         .find(|value| !value.trim().is_empty())
+}
+
+fn should_bypass_proxy(target_url: &str) -> bool {
+    let host = target_url
+        .split("://")
+        .nth(1)
+        .unwrap_or(target_url)
+        .split('/')
+        .next()
+        .unwrap_or(target_url)
+        .split(':')
+        .next()
+        .unwrap_or(target_url);
+    if matches!(host, "localhost" | "127.0.0.1" | "::1") {
+        return true;
+    }
+    let no_proxy = std::env::var("no_proxy")
+        .or_else(|_| std::env::var("NO_PROXY"))
+        .unwrap_or_default();
+    no_proxy.split(',').any(|entry| {
+        let entry = entry.trim();
+        !entry.is_empty()
+            && (entry == "*" || host == entry || host.ends_with(entry.trim_start_matches('.')))
+    })
 }
 
 fn parse_http_proxy_addr(proxy: &str) -> Result<String> {
@@ -617,17 +484,13 @@ fn parse_http_proxy_addr(proxy: &str) -> Result<String> {
     }
 }
 
-async fn handle_worker_command<W>(
-    state: AppState,
-    command: WorkerCommand,
-    write: &mut W,
-) -> Result<()>
+async fn handle_hub_command<W>(state: AppState, command: HubCommand, write: &mut W) -> Result<()>
 where
     W: SinkExt<Message> + Unpin,
     <W as futures_util::Sink<Message>>::Error: std::error::Error + Send + Sync + 'static,
 {
     match command {
-        WorkerCommand::Exec {
+        HubCommand::Exec {
             request_id,
             task_id,
             payload,
@@ -643,7 +506,7 @@ where
             ));
             send_response(write, &request_id, serde_json::to_value(&result)?).await?;
         }
-        WorkerCommand::BatchExec {
+        HubCommand::BatchExec {
             request_id,
             task_id,
             payload,
@@ -661,7 +524,7 @@ where
             ));
             send_response(write, &request_id, serde_json::to_value(&result)?).await?;
         }
-        WorkerCommand::StartSession {
+        HubCommand::StartSession {
             request_id,
             session_id,
             payload,
@@ -678,18 +541,18 @@ where
             send_session(write, &info).await?;
             send_response(write, &request_id, serde_json::to_value(&info)?).await?;
         }
-        WorkerCommand::ListSessions { request_id } => {
+        HubCommand::ListSessions { request_id } => {
             let sessions = current_sessions(&state).await;
             send_response(write, &request_id, serde_json::to_value(sessions)?).await?;
         }
-        WorkerCommand::InspectSession {
+        HubCommand::InspectSession {
             request_id,
             session_id,
         } => {
             let session = inspect_session(&state, &session_id).await;
             send_response(write, &request_id, serde_json::to_value(session)?).await?;
         }
-        WorkerCommand::WaitSession {
+        HubCommand::WaitSession {
             request_id,
             session_id,
             seconds,
@@ -698,7 +561,7 @@ where
             let session = inspect_session(&state, &session_id).await;
             send_response(write, &request_id, serde_json::to_value(session)?).await?;
         }
-        WorkerCommand::KillSession {
+        HubCommand::KillSession {
             request_id,
             session_id,
         } => {
@@ -717,7 +580,10 @@ where
 {
     write
         .send(Message::Text(
-            serde_json::to_string(&AgentMessage::SessionUpdate { session })?.into(),
+            serde_json::to_string(&AgentMessage::SessionUpdate {
+                session: session.clone(),
+            })?
+            .into(),
         ))
         .await?;
     Ok(())
@@ -730,7 +596,11 @@ where
 {
     write
         .send(Message::Text(
-            serde_json::to_string(&AgentMessage::Response { request_id, data })?.into(),
+            serde_json::to_string(&AgentMessage::Response {
+                request_id: request_id.to_string(),
+                data,
+            })?
+            .into(),
         ))
         .await?;
     Ok(())
@@ -817,7 +687,7 @@ async fn run_exec_task(state: AppState, task_id: String, request: ExecRequest) -
             exit_code: result.exit_code,
             duration_ms: started.elapsed().as_millis(),
             truncated: result.truncated,
-            request_source: "worker".to_string(),
+            request_source: "hub".to_string(),
             reject_reason: result.reject_reason.clone(),
         },
     );
@@ -1402,7 +1272,7 @@ async fn handle_config(config_path: PathBuf, command: ConfigCommand) -> Result<(
                 "workspaceRoot" => config.workspace_root = PathBuf::from(value),
                 "confirmationProvider" => config.confirmation_provider.provider = value,
                 "sandbox.enabled" => config.sandbox.enabled = value.parse::<bool>()?,
-                "workerUrl" => config.worker_url = value,
+                "hubUrl" | "workerUrl" => config.hub_url = value,
                 "agentId" => config.agent_id = value,
                 "agentSecret" => config.agent_secret = value,
                 _ => return Err(anyhow!("unsupported config key: {key}")),
@@ -1484,7 +1354,7 @@ impl Config {
         Ok(Self {
             agent_id: "laptop".to_string(),
             display_name: hostname_fallback(),
-            worker_url: "http://localhost:8787".to_string(),
+            hub_url: "http://localhost:8787".to_string(),
             agent_secret: "change-me".to_string(),
             workspace_root: base.join("workspace"),
             backup_limit: DEFAULT_BACKUP_LIMIT,

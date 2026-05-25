@@ -1,8 +1,23 @@
 [workspace]
-members = ["crates/agentic-gpt"]
+members = [
+    "crates/agentic-gpt",
+    "crates/agentic-gpt-hub",
+    "crates/agentic-gpt-protocol",
+]
 resolver = "2"
 
 [workspace.package]
 edition = "2021"
 license = "MIT"
 repository = "https://example.invalid/agentic-gpt"
+
+[workspace.dependencies]
+agentic-gpt-protocol = { path = "crates/agentic-gpt-protocol" }
+anyhow = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.5", features = ["derive", "env"] }
+futures-util = "0.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.48", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+uuid = { version = "1.18", features = ["v4", "serde"] }

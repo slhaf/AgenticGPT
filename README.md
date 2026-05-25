@@ -1,18 +1,46 @@
 # Agentic GPT
 
-Agentic GPT is a Linux local agent plus Cloudflare Worker gateway for controlled GPT Actions execution.
+Agentic GPT is a Linux local execution agent plus a VPS Hub for controlled GPT Actions command execution.
+
+The current default architecture is:
+
+```text
+Custom GPT Actions
+  -> HTTPS API on VPS Hub
+  -> WebSocket connection to Local Agent
+  -> local process / session / confirmation / sandbox
+```
+
+The old Cloudflare Worker implementation remains under `apps/worker` as legacy code, but new work should target the Rust Hub.
 
 ## Layout
 
-- `apps/worker`: Cloudflare Worker, Durable Object, KV-backed agent registry, OpenAPI schema.
 - `crates/agentic-gpt`: Rust CLI local agent.
+- `crates/agentic-gpt-hub`: Rust VPS Hub HTTP/WebSocket service.
+- `crates/agentic-gpt-protocol`: Shared JSON protocol types.
+- `openapi/hub.yaml`: Custom GPT Actions schema for the VPS Hub.
+- `apps/worker`: Legacy Cloudflare Worker implementation.
 - `dist`: release artifact output.
+
+## Hub
+
+```bash
+cargo run -p agentic-gpt-hub -- init
+cargo run -p agentic-gpt-hub -- agent add \
+  --agent-id laptop \
+  --display-name my-laptop \
+  --secret '<agent-secret>'
+AGENTIC_GPT_API_KEY='<high-entropy-api-key>' \
+  cargo run -p agentic-gpt-hub -- serve --bind 127.0.0.1:8787
+```
+
+Hub state defaults to `~/.agentic_gpt/hub.sqlite3`. Put Caddy or Nginx in front of the Hub for HTTPS and WebSocket reverse proxying.
 
 ## Local Agent
 
 ```bash
 cargo run -p agentic-gpt -- config init
-cargo run -p agentic-gpt -- config set workerUrl http://localhost:8787
+cargo run -p agentic-gpt -- config set hubUrl http://127.0.0.1:8787
 cargo run -p agentic-gpt -- config set agentId laptop
 cargo run -p agentic-gpt -- config set agentSecret '<agent-secret>'
 cargo run -p agentic-gpt -- run
@@ -20,21 +48,31 @@ cargo run -p agentic-gpt -- run
 
 Config lives at `~/.agentic_gpt/config.json`; audit logs are JSONL at `~/.agentic_gpt/audit.log`.
 
-## Worker
+`workerUrl` is accepted as a legacy alias when reading or setting config, but `hubUrl` is the canonical field.
 
-```bash
-pnpm install
-pnpm --filter worker build
-pnpm --filter worker wrangler types
-pnpm --filter worker wrangler deploy
-```
+## GPT Actions
 
-Set the Worker secret `API_KEY` and create an `AGENT_REGISTRY` KV namespace. Agent entries are stored under `agent:<agentId>` and contain `secretHash`, where `secretHash` is SHA-256 hex of the local `agentSecret`.
+Use `openapi/hub.yaml`, replace the server URL with your VPS HTTPS domain, and configure Bearer auth with `AGENTIC_GPT_API_KEY`.
+
+The Hub API intentionally does not expose task polling. `exec` and `batchExec` wait synchronously up to the short-command limit; long-running work should use the session APIs.
 
 ## Verification
 
 ```bash
-pnpm --filter worker build
-pnpm --filter worker test
 cargo test --workspace
+pnpm --filter worker test
+cargo check --workspace
 ```
+
+## Release Artifacts
+
+```bash
+pnpm dist:linux
+```
+
+Artifacts are written to:
+
+- `dist/x86_64-unknown-linux-gnu/agentic-gpt`
+- `dist/x86_64-unknown-linux-gnu/agentic-gpt-hub`
+- `dist/aarch64-unknown-linux-gnu/agentic-gpt`
+- `dist/aarch64-unknown-linux-gnu/agentic-gpt-hub`
