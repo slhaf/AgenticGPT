@@ -819,7 +819,7 @@ async fn publish_ntfy(
     });
     let response = state
         .http
-        .post(format!("{server_url}/{}", ntfy.topic))
+        .post(server_url)
         .json(&body)
         .send()
         .await?;

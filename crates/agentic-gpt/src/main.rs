@@ -712,8 +712,14 @@ async fn run_exec_task(state: AppState, task_id: String, request: ExecRequest) -
         result.status = "rejected".to_string();
         result.reject_reason = Some("policy_denied".to_string());
     } else if decision == PolicyDecision::Confirm {
-        let confirmation =
-            request_confirmation(&state, &config, &request.program, &request.args).await;
+        let confirmation = request_confirmation(
+            &state,
+            &config,
+            request.confirm_method.as_deref(),
+            &request.program,
+            &request.args,
+        )
+        .await;
         confirmation_result = Some(confirmation.clone());
         if confirmation != "allow_once" {
             result.status = "rejected".to_string();
@@ -778,6 +784,7 @@ async fn run_batch_task(
     let started_at = Utc::now();
     let agent_id = request.agent_id.clone();
     let need_confirm = request.need_confirm;
+    let confirm_method = request.confirm_method.clone();
     let previews = request
         .elements
         .iter()
@@ -806,6 +813,7 @@ async fn run_batch_task(
             let task_id = format!("{batch_id}:element:{index}");
             let element_agent_id = agent_id.clone();
             let element_state = state.clone();
+            let element_confirm_method = confirm_method.clone();
             running.spawn(async move {
                 let program = element.program;
                 let args = element.args;
@@ -814,6 +822,7 @@ async fn run_batch_task(
                     program: program.clone(),
                     args: args.clone(),
                     need_confirm,
+                    confirm_method: element_confirm_method,
                 };
                 let result = run_exec_task(element_state, task_id, request).await;
                 BatchElementResult {
@@ -1220,10 +1229,21 @@ fn add_bwrap_parent_dirs(command: &mut Command, created_dirs: &mut HashSet<PathB
 async fn request_confirmation(
     state: &AppState,
     config: &Config,
+    confirm_method: Option<&str>,
     program: &str,
     args: &[String],
 ) -> String {
-    let provider = config.confirmation_provider.provider.as_str();
+    let configured_provider = config.confirmation_provider.provider.as_str();
+    let provider = confirm_method
+        .filter(|method| !method.trim().is_empty())
+        .unwrap_or(configured_provider);
+    let provider = if provider == "default" {
+        configured_provider
+    } else if provider == "freedesktopThenHub" {
+        "freedesktop-then-hub"
+    } else {
+        provider
+    };
     if provider == "freedesktop" || provider == "freedesktop-then-hub" {
         let local = request_freedesktop_confirmation(config, program, args).await;
         if local == "confirmation_provider_unavailable" && provider == "freedesktop-then-hub" {
@@ -1525,8 +1545,14 @@ async fn start_session(state: AppState, session_id: String, request: ExecRequest
         return info;
     }
     if decision == PolicyDecision::Confirm {
-        let confirmation =
-            request_confirmation(&state, &config, &request.program, &request.args).await;
+        let confirmation = request_confirmation(
+            &state,
+            &config,
+            request.confirm_method.as_deref(),
+            &request.program,
+            &request.args,
+        )
+        .await;
         if confirmation != "allow_once" {
             info.state = "failed".to_string();
             info.reject_reason = Some(confirmation);

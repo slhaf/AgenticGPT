@@ -354,6 +354,10 @@ components:
             type: string
         needConfirm:
           type: boolean
+        confirmMethod:
+          type: string
+          enum: [default, freedesktop, hub, freedesktop-then-hub, freedesktopThenHub]
+          description: Optional per-request confirmation provider override. Omit or use default to follow the local agent configuration.
     TaskResult:
       type: object
       required: [agentId, taskId, status, exitCode, stdoutTail, stderrTail, truncated, startedAt, updatedAt]
@@ -404,6 +408,10 @@ components:
                   type: string
         needConfirm:
           type: boolean
+        confirmMethod:
+          type: string
+          enum: [default, freedesktop, hub, freedesktop-then-hub, freedesktopThenHub]
+          description: Optional per-request confirmation provider override for all batch elements. Omit or use default to follow the local agent configuration.
     BatchExecResult:
       type: object
       required: [agentId, batchId, status, results, startedAt, updatedAt]

@@ -60,6 +60,8 @@ pub struct ExecRequest {
     pub program: String,
     pub args: Vec<String>,
     pub need_confirm: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirm_method: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -74,6 +76,8 @@ pub struct BatchExecRequest {
     pub agent_id: String,
     pub elements: Vec<ExecElement>,
     pub need_confirm: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirm_method: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
