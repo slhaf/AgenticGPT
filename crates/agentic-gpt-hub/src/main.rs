@@ -99,6 +99,7 @@ struct HubState {
 
 #[derive(Clone)]
 struct AgentConnection {
+    connection_id: String,
     sender: mpsc::UnboundedSender<Message>,
     last_seen_at: DateTime<Utc>,
     config_summary: Option<SafeConfigSummary>,
@@ -514,7 +515,8 @@ async fn connect_agent(
 }
 
 async fn handle_socket(state: HubState, agent_id: String, socket: WebSocket) {
-    info!(%agent_id, "agent connected");
+    let connection_id = random_id("conn");
+    info!(%agent_id, %connection_id, "agent connected");
     let (mut sink, mut stream) = socket.split();
     let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
     {
@@ -522,6 +524,7 @@ async fn handle_socket(state: HubState, agent_id: String, socket: WebSocket) {
         if let Some(old) = agents.insert(
             agent_id.clone(),
             AgentConnection {
+                connection_id: connection_id.clone(),
                 sender: tx.clone(),
                 last_seen_at: Utc::now(),
                 config_summary: None,
@@ -621,9 +624,23 @@ async fn handle_socket(state: HubState, agent_id: String, socket: WebSocket) {
     }
 
     writer.abort();
-    state.agents.lock().await.remove(&agent_id);
-    discard_agent_confirmations(&state, &agent_id).await;
-    info!(%agent_id, "agent disconnected");
+    let removed_current_connection = {
+        let mut agents = state.agents.lock().await;
+        let should_remove = agents
+            .get(&agent_id)
+            .map(|connection| connection.connection_id == connection_id)
+            .unwrap_or(false);
+        if should_remove {
+            agents.remove(&agent_id);
+            true
+        } else {
+            false
+        }
+    };
+    if removed_current_connection {
+        discard_agent_confirmations(&state, &agent_id).await;
+    }
+    info!(%agent_id, %connection_id, removedCurrentConnection = removed_current_connection, "agent disconnected");
 }
 
 async fn request_agent(
