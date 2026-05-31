@@ -220,6 +220,77 @@ paths:
           $ref: "#/components/responses/NotFound"
         "500":
           $ref: "#/components/responses/InternalError"
+  /v1/mcp/servers:
+    post:
+      operationId: mcpListServers
+      x-openai-isConsequential: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/McpListServersRequest"
+      responses:
+        "200":
+          description: Configured MCP servers on the selected local agent.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/McpListServersResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+  /v1/mcp/tools:
+    post:
+      operationId: mcpListTools
+      x-openai-isConsequential: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/McpListToolsRequest"
+      responses:
+        "200":
+          description: Tools exposed by a configured MCP server.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+  /v1/mcp/callTool:
+    post:
+      operationId: mcpCallTool
+      x-openai-isConsequential: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/McpCallToolRequest"
+      responses:
+        "200":
+          description: Result returned by the MCP tool.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
 components:
   securitySchemes:
     bearerAuth:
@@ -339,6 +410,60 @@ components:
               type: integer
         confirmationProvider:
           type: string
+    McpListServersRequest:
+      type: object
+      required: [agentId]
+      additionalProperties: false
+      properties:
+        agentId:
+          type: string
+    McpServerSummary:
+      type: object
+      required: [id, enabled, transport]
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+        enabled:
+          type: boolean
+        transport:
+          type: string
+        url:
+          type:
+            - string
+            - "null"
+    McpListServersResponse:
+      type: object
+      required: [servers]
+      additionalProperties: false
+      properties:
+        servers:
+          type: array
+          items:
+            $ref: "#/components/schemas/McpServerSummary"
+    McpListToolsRequest:
+      type: object
+      required: [agentId, serverId]
+      additionalProperties: false
+      properties:
+        agentId:
+          type: string
+        serverId:
+          type: string
+    McpCallToolRequest:
+      type: object
+      required: [agentId, serverId, toolName, arguments]
+      additionalProperties: false
+      properties:
+        agentId:
+          type: string
+        serverId:
+          type: string
+        toolName:
+          type: string
+        arguments:
+          type: object
+          additionalProperties: true
     ExecRequest:
       type: object
       required: [agentId, program, args, needConfirm]

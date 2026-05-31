@@ -1,7 +1,8 @@
 use agentic_gpt_protocol::{
     AgentMessage, AgentRegistryEntry, BatchExecRequest, BatchExecResult, Capabilities,
     ConfirmationDecision, ConfirmationPayload, ExecRequest, HubCommand, HubMessage,
-    SafeConfigSummary, SafePathPolicySummary, SafeSandboxSummary, SessionInfo, TaskResult,
+    McpCallToolRequest, McpListServersRequest, McpListToolsRequest, SafeConfigSummary,
+    SafePathPolicySummary, SafeSandboxSummary, SessionInfo, TaskResult,
 };
 use anyhow::{Context, Result};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -235,6 +236,9 @@ async fn serve(
         .route("/v1/sessions/:session_id", get(inspect_session))
         .route("/v1/sessions/:session_id/wait", post(wait_session))
         .route("/v1/sessions/:session_id/kill", post(kill_session))
+        .route("/v1/mcp/servers", post(mcp_list_servers))
+        .route("/v1/mcp/tools", post(mcp_list_tools))
+        .route("/v1/mcp/callTool", post(mcp_call_tool))
         .layer(
             TraceLayer::new_for_http().make_span_with(|request: &Request<_>| {
                 tracing::info_span!(
@@ -479,6 +483,76 @@ async fn kill_session(
                 "Session was not found",
             ),
         },
+    }
+}
+
+async fn mcp_list_servers(
+    State(state): State<HubState>,
+    headers: HeaderMap,
+    Json(payload): Json<McpListServersRequest>,
+) -> Response {
+    if let Err(response) = require_action_auth(&state, &headers) {
+        return response;
+    }
+    if let Err(response) = require_agent_enabled(&state, &payload.agent_id) {
+        return response;
+    }
+    let command = HubCommand::McpListServers {
+        request_id: random_id("req"),
+    };
+    match request_agent(&state, &payload.agent_id, command, REQUEST_TIMEOUT_SECS).await {
+        Ok(value) => Json(value).into_response(),
+        Err(reason) => api_error(
+            StatusCode::GATEWAY_TIMEOUT,
+            "mcp_list_servers_timeout",
+            reason,
+        ),
+    }
+}
+
+async fn mcp_list_tools(
+    State(state): State<HubState>,
+    headers: HeaderMap,
+    Json(payload): Json<McpListToolsRequest>,
+) -> Response {
+    if let Err(response) = require_action_auth(&state, &headers) {
+        return response;
+    }
+    if let Err(response) = require_agent_enabled(&state, &payload.agent_id) {
+        return response;
+    }
+    let command = HubCommand::McpListTools {
+        request_id: random_id("req"),
+        payload: payload.clone(),
+    };
+    match request_agent(&state, &payload.agent_id, command, REQUEST_TIMEOUT_SECS).await {
+        Ok(value) => Json(value).into_response(),
+        Err(reason) => api_error(
+            StatusCode::GATEWAY_TIMEOUT,
+            "mcp_list_tools_timeout",
+            reason,
+        ),
+    }
+}
+
+async fn mcp_call_tool(
+    State(state): State<HubState>,
+    headers: HeaderMap,
+    Json(payload): Json<McpCallToolRequest>,
+) -> Response {
+    if let Err(response) = require_action_auth(&state, &headers) {
+        return response;
+    }
+    if let Err(response) = require_agent_enabled(&state, &payload.agent_id) {
+        return response;
+    }
+    let command = HubCommand::McpCallTool {
+        request_id: random_id("req"),
+        payload: payload.clone(),
+    };
+    match request_agent(&state, &payload.agent_id, command, REQUEST_TIMEOUT_SECS).await {
+        Ok(value) => Json(value).into_response(),
+        Err(reason) => api_error(StatusCode::GATEWAY_TIMEOUT, "mcp_call_tool_timeout", reason),
     }
 }
 
@@ -817,12 +891,7 @@ async fn publish_ntfy(
             }
         ]
     });
-    let response = state
-        .http
-        .post(server_url)
-        .json(&body)
-        .send()
-        .await?;
+    let response = state.http.post(server_url).json(&body).send().await?;
     if response.status().is_success() {
         Ok(())
     } else {
@@ -1028,7 +1097,10 @@ fn command_request_id(command: &HubCommand) -> &str {
         | HubCommand::ListSessions { request_id }
         | HubCommand::InspectSession { request_id, .. }
         | HubCommand::WaitSession { request_id, .. }
-        | HubCommand::KillSession { request_id, .. } => request_id,
+        | HubCommand::KillSession { request_id, .. }
+        | HubCommand::McpListServers { request_id }
+        | HubCommand::McpListTools { request_id, .. }
+        | HubCommand::McpCallTool { request_id, .. } => request_id,
     }
 }
 
@@ -1040,7 +1112,10 @@ fn set_command_request_id(command: &mut HubCommand, value: String) {
         | HubCommand::ListSessions { request_id }
         | HubCommand::InspectSession { request_id, .. }
         | HubCommand::WaitSession { request_id, .. }
-        | HubCommand::KillSession { request_id, .. } => *request_id = value,
+        | HubCommand::KillSession { request_id, .. }
+        | HubCommand::McpListServers { request_id }
+        | HubCommand::McpListTools { request_id, .. }
+        | HubCommand::McpCallTool { request_id, .. } => *request_id = value,
     }
 }
 

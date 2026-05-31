@@ -1,14 +1,23 @@
 use agentic_gpt_protocol::{
     AgentMessage, BatchElementResult, BatchExecRequest, BatchExecResult, ConfirmationDecision,
-    ConfirmationPayload, ExecElement, ExecRequest, HubCommand, HubMessage, PolicyCounts,
-    SafeConfigSummary, SafePathPolicySummary, SafeSandboxSummary, SessionInfo, TaskResult,
+    ConfirmationPayload, ExecElement, ExecRequest, HubCommand, HubMessage, McpCallToolRequest,
+    McpListToolsRequest, McpServerSummary, PolicyCounts, SafeConfigSummary, SafePathPolicySummary,
+    SafeSandboxSummary, SessionInfo, TaskResult,
 };
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand, ValueEnum};
 use futures_util::{SinkExt, StreamExt};
+use rmcp::{
+    model::{CallToolRequestParams, ClientInfo, JsonObject},
+    transport::{
+        streamable_http_client::StreamableHttpClientTransportConfig, StreamableHttpClientTransport,
+    },
+    ServiceExt,
+};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet, VecDeque};
+use serde_json::{json, Value};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -85,6 +94,32 @@ enum ConfigCommand {
         #[command(subcommand)]
         command: PathCommand,
     },
+    Mcp {
+        #[command(subcommand)]
+        command: McpConfigCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum McpConfigCommand {
+    List,
+    Add {
+        server_id: String,
+        url: String,
+        #[arg(long, default_value = "streamable-http")]
+        transport: String,
+        #[arg(long, default_value_t = true)]
+        enabled: bool,
+    },
+    Remove {
+        server_id: String,
+    },
+    Enable {
+        server_id: String,
+    },
+    Disable {
+        server_id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -149,6 +184,8 @@ struct Config {
     confirmation_provider: ConfirmationProviderConfig,
     sandbox: SandboxConfig,
     #[serde(default)]
+    mcp_servers: BTreeMap<String, McpServerConfig>,
+    #[serde(default)]
     path_policy: PathPolicyConfig,
     policy: PolicyConfig,
     limits: LimitsConfig,
@@ -166,6 +203,15 @@ struct SandboxConfig {
     enabled: bool,
     bubblewrap_path: String,
     required_runtime_paths: Vec<PathBuf>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct McpServerConfig {
+    enabled: bool,
+    transport: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    url: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -643,8 +689,101 @@ async fn handle_hub_command(state: AppState, command: HubCommand) -> Result<()> 
             let session = kill_session(&state, &session_id).await;
             send_response(&state, &request_id, serde_json::to_value(session)?).await?;
         }
+        HubCommand::McpListServers { request_id } => {
+            let servers = mcp_server_summaries(&state).await;
+            send_response(
+                &state,
+                &request_id,
+                serde_json::to_value(json!({ "servers": servers }))?,
+            )
+            .await?;
+        }
+        HubCommand::McpListTools {
+            request_id,
+            payload,
+        } => {
+            let result = mcp_list_tools(&state, payload).await?;
+            send_response(&state, &request_id, result).await?;
+        }
+        HubCommand::McpCallTool {
+            request_id,
+            payload,
+        } => {
+            let result = mcp_call_tool(&state, payload).await?;
+            send_response(&state, &request_id, result).await?;
+        }
     }
     Ok(())
+}
+
+async fn mcp_server_summaries(state: &AppState) -> Vec<McpServerSummary> {
+    let config = state.config.read().await;
+    config
+        .mcp_servers
+        .iter()
+        .map(|(id, server)| McpServerSummary {
+            id: id.clone(),
+            enabled: server.enabled,
+            transport: server.transport.clone(),
+            url: server.url.clone(),
+        })
+        .collect()
+}
+
+async fn mcp_list_tools(state: &AppState, payload: McpListToolsRequest) -> Result<Value> {
+    let server = mcp_server_config(state, &payload.server_id).await?;
+    let client = mcp_client(&server).await?;
+    let tools = client.list_all_tools().await?;
+    let _ = client.cancel().await;
+    Ok(json!({ "tools": tools }))
+}
+
+async fn mcp_call_tool(state: &AppState, payload: McpCallToolRequest) -> Result<Value> {
+    let server = mcp_server_config(state, &payload.server_id).await?;
+    let client = mcp_client(&server).await?;
+    let arguments = mcp_tool_arguments(payload.arguments)?;
+    let result = client
+        .call_tool(CallToolRequestParams::new(payload.tool_name).with_arguments(arguments))
+        .await?;
+    let _ = client.cancel().await;
+    Ok(serde_json::to_value(result)?)
+}
+
+async fn mcp_server_config(state: &AppState, server_id: &str) -> Result<McpServerConfig> {
+    let config = state.config.read().await;
+    let server = config
+        .mcp_servers
+        .get(server_id)
+        .cloned()
+        .ok_or_else(|| anyhow!("mcp_server_not_found: {server_id}"))?;
+    if !server.enabled {
+        return Err(anyhow!("mcp_server_disabled: {server_id}"));
+    }
+    if server.transport != "streamable-http" {
+        return Err(anyhow!("unsupported_mcp_transport: {}", server.transport));
+    }
+    if server.url.as_deref().unwrap_or_default().trim().is_empty() {
+        return Err(anyhow!("mcp_server_url_missing: {server_id}"));
+    }
+    Ok(server)
+}
+
+async fn mcp_client(
+    server: &McpServerConfig,
+) -> Result<rmcp::service::RunningService<rmcp::RoleClient, ClientInfo>> {
+    let url = server.url.clone().context("mcp_server_url_missing")?;
+    let transport = StreamableHttpClientTransport::from_config(
+        StreamableHttpClientTransportConfig::with_uri(url),
+    );
+    Ok(ClientInfo::default().serve(transport).await?)
+}
+
+fn mcp_tool_arguments(arguments: Value) -> Result<JsonObject> {
+    match arguments {
+        Value::Null => Ok(JsonObject::new()),
+        Value::Object(map) => Ok(map),
+        other => Err(anyhow!("mcp_tool_arguments_must_be_object: {other}")),
+    }
 }
 
 async fn send_session(state: &AppState, session: &SessionInfo) -> Result<()> {
@@ -1710,8 +1849,52 @@ async fn handle_config(config_path: PathBuf, command: ConfigCommand) -> Result<(
         }
         ConfigCommand::Deny { command } => mutate_rule(config_path, PolicyDecision::Deny, command)?,
         ConfigCommand::Path { command } => mutate_path_policy(config_path, command)?,
+        ConfigCommand::Mcp { command } => mutate_mcp_servers(config_path, command)?,
     }
     Ok(())
+}
+
+fn mutate_mcp_servers(config_path: PathBuf, command: McpConfigCommand) -> Result<()> {
+    let mut config = Config::load_or_default(&config_path)?;
+    match command {
+        McpConfigCommand::List => {
+            println!("{}", serde_json::to_string_pretty(&config.mcp_servers)?);
+            return Ok(());
+        }
+        McpConfigCommand::Add {
+            server_id,
+            url,
+            transport,
+            enabled,
+        } => {
+            config.mcp_servers.insert(
+                server_id,
+                McpServerConfig {
+                    enabled,
+                    transport,
+                    url: Some(url),
+                },
+            );
+        }
+        McpConfigCommand::Remove { server_id } => {
+            config.mcp_servers.remove(&server_id);
+        }
+        McpConfigCommand::Enable { server_id } => {
+            let server = config
+                .mcp_servers
+                .get_mut(&server_id)
+                .ok_or_else(|| anyhow!("mcp server not found: {server_id}"))?;
+            server.enabled = true;
+        }
+        McpConfigCommand::Disable { server_id } => {
+            let server = config
+                .mcp_servers
+                .get_mut(&server_id)
+                .ok_or_else(|| anyhow!("mcp server not found: {server_id}"))?;
+            server.enabled = false;
+        }
+    }
+    write_config_with_backup(&config_path, &config)
 }
 
 fn mutate_rule(config_path: PathBuf, decision: PolicyDecision, command: RuleCommand) -> Result<()> {
@@ -1841,6 +2024,7 @@ impl Config {
             confirmation_provider: ConfirmationProviderConfig {
                 provider: "freedesktop-then-hub".to_string(),
             },
+            mcp_servers: BTreeMap::new(),
             sandbox: SandboxConfig {
                 enabled: false,
                 bubblewrap_path: "bwrap".to_string(),

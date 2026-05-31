@@ -82,6 +82,38 @@ pub struct BatchExecRequest {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct McpServerSummary {
+    pub id: String,
+    pub enabled: bool,
+    pub transport: String,
+    pub url: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpListServersRequest {
+    pub agent_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpListToolsRequest {
+    pub agent_id: String,
+    pub server_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpCallToolRequest {
+    pub agent_id: String,
+    pub server_id: String,
+    pub tool_name: String,
+    #[serde(default)]
+    pub arguments: serde_json::Value,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TaskResult {
     pub agent_id: String,
     pub task_id: String,
@@ -198,6 +230,18 @@ pub enum HubCommand {
     KillSession {
         request_id: String,
         session_id: String,
+    },
+    #[serde(rename = "mcpListServers")]
+    McpListServers { request_id: String },
+    #[serde(rename = "mcpListTools")]
+    McpListTools {
+        request_id: String,
+        payload: McpListToolsRequest,
+    },
+    #[serde(rename = "mcpCallTool")]
+    McpCallTool {
+        request_id: String,
+        payload: McpCallToolRequest,
     },
 }
 
