@@ -259,8 +259,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
+                $ref: "#/components/schemas/McpListToolsResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
@@ -283,8 +282,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
+                $ref: "#/components/schemas/McpCallToolResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
@@ -464,6 +462,46 @@ components:
         arguments:
           type: object
           additionalProperties: true
+          properties: {}
+    McpListToolsResponse:
+      type: object
+      required: [tools]
+      additionalProperties: false
+      properties:
+        tools:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+            properties:
+              name:
+                type: string
+              description:
+                type: string
+              inputSchema:
+                type: object
+                additionalProperties: true
+                properties: {}
+    McpCallToolResponse:
+      type: object
+      additionalProperties: true
+      properties:
+        content:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+            properties:
+              type:
+                type: string
+              text:
+                type: string
+        structuredContent:
+          type: object
+          additionalProperties: true
+          properties: {}
+        isError:
+          type: boolean
     ExecRequest:
       type: object
       required: [agentId, program, args, needConfirm]
