@@ -269,7 +269,7 @@ paths:
   /v1/mcp/callTool:
     post:
       operationId: mcpCallTool
-      x-openai-isConsequential: true
+      x-openai-isConsequential: false
       requestBody:
         required: true
         content:
