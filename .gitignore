@@ -4,3 +4,5 @@ dist/
 .wrangler/
 .dev.vars
 *.log
+
+.codegraph/

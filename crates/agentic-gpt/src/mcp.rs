@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{env, path::PathBuf};
 
 use agentic_gpt_protocol::{McpCallToolRequest, McpListToolsRequest, McpServerSummary};
 use anyhow::{anyhow, Context, Result};
@@ -6,7 +6,8 @@ use clap::Subcommand;
 use rmcp::{
     model::{CallToolRequestParams, ClientInfo, JsonObject},
     transport::{
-        streamable_http_client::StreamableHttpClientTransportConfig, StreamableHttpClientTransport,
+        ConfigureCommandExt, StreamableHttpClientTransport,
+        streamable_http_client::StreamableHttpClientTransportConfig, TokioChildProcess,
     },
     ServiceExt,
 };
@@ -133,11 +134,18 @@ async fn server_config(state: &AppState, server_id: &str) -> Result<McpServerCon
     if !server.enabled {
         return Err(anyhow!("mcp_server_disabled: {server_id}"));
     }
-    if server.transport != "streamable-http" {
-        return Err(anyhow!("unsupported_mcp_transport: {}", server.transport));
-    }
-    if server.url.as_deref().unwrap_or_default().trim().is_empty() {
-        return Err(anyhow!("mcp_server_url_missing: {server_id}"));
+    match server.transport.as_str() {
+        "streamable-http" => {
+            if server.url.as_deref().unwrap_or_default().trim().is_empty() {
+                return Err(anyhow!("mcp_server_url_missing: {server_id}"));
+            }
+        }
+        "stdio" => {
+            if server.url.as_deref().unwrap_or_default().trim().is_empty() {
+                return Err(anyhow!("mcp_server_command_missing: {server_id}"));
+            }
+        }
+        other => return Err(anyhow!("unsupported_mcp_transport: {other}")),
     }
     Ok(server)
 }
@@ -145,11 +153,27 @@ async fn server_config(state: &AppState, server_id: &str) -> Result<McpServerCon
 async fn client(
     server: &McpServerConfig,
 ) -> Result<rmcp::service::RunningService<rmcp::RoleClient, ClientInfo>> {
-    let url = server.url.clone().context("mcp_server_url_missing")?;
-    let transport = StreamableHttpClientTransport::from_config(
-        StreamableHttpClientTransportConfig::with_uri(url),
-    );
-    Ok(ClientInfo::default().serve(transport).await?)
+    match server.transport.as_str() {
+        "streamable-http" => {
+            let url = server.url.clone().context("mcp_server_url_missing")?;
+            let transport = StreamableHttpClientTransport::from_config(
+                StreamableHttpClientTransportConfig::with_uri(url),
+            );
+            Ok(ClientInfo::default().serve(transport).await?)
+        }
+        "stdio" => {
+            let command = server.url.clone().context("mcp_server_command_missing")?;
+            let transport = TokioChildProcess::new(tokio::process::Command::new("sh").configure(|cmd| {
+                cmd.arg("-lc").arg(command);
+                if let Ok(home) = env::var("HOME") {
+                    let path = env::var("PATH").unwrap_or_default();
+                    cmd.env("PATH", format!("{home}/.local/bin:{path}"));
+                }
+            }))?;
+            Ok(ClientInfo::default().serve(transport).await?)
+        }
+        other => Err(anyhow!("unsupported_mcp_transport: {other}")),
+    }
 }
 
 fn tool_arguments(arguments: Value) -> Result<JsonObject> {
