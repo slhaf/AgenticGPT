@@ -1459,22 +1459,25 @@ fn policy_decision(
             decision = decision.max(PolicyDecision::Deny);
         }
     }
+
+    let mut configured_decision = None;
     for rule in &config.policy.allow {
         if rule.matches(program, args) {
-            decision = decision.max(PolicyDecision::Allow);
+            configured_decision = Some(PolicyDecision::Allow);
         }
     }
     for rule in &config.policy.confirm {
         if rule.matches(program, args) {
-            decision = decision.max(PolicyDecision::Confirm);
+            configured_decision = Some(PolicyDecision::Confirm);
         }
     }
     for rule in &config.policy.deny {
         if rule.matches(program, args) {
-            decision = decision.max(PolicyDecision::Deny);
+            configured_decision = Some(PolicyDecision::Deny);
         }
     }
-    decision
+
+    configured_decision.unwrap_or(decision)
 }
 
 impl Rule {
@@ -2110,7 +2113,7 @@ mod tests {
     }
 
     #[test]
-    fn need_confirm_upgrades_allow() {
+    fn configured_allow_overrides_need_confirm() {
         let mut config = Config::default_config().unwrap();
         config.policy.allow.push(Rule {
             id: "r".to_string(),
@@ -2119,7 +2122,54 @@ mod tests {
         });
         assert_eq!(
             policy_decision(&config, "git", &["status".to_string()], true),
-            PolicyDecision::Confirm
+            PolicyDecision::Allow
+        );
+    }
+
+    #[test]
+    fn configured_allow_overrides_builtin_confirm() {
+        let mut config = Config::default_config().unwrap();
+        config.policy.allow.push(Rule {
+            id: "r".to_string(),
+            program: "curl".to_string(),
+            args_prefix: vec!["--version".to_string()],
+        });
+        assert_eq!(
+            policy_decision(&config, "curl", &["--version".to_string()], false),
+            PolicyDecision::Allow
+        );
+    }
+
+    #[test]
+    fn configured_allow_overrides_builtin_deny() {
+        let mut config = Config::default_config().unwrap();
+        config.policy.allow.push(Rule {
+            id: "r".to_string(),
+            program: "ssh".to_string(),
+            args_prefix: vec!["-V".to_string()],
+        });
+        assert_eq!(
+            policy_decision(&config, "ssh", &["-V".to_string()], false),
+            PolicyDecision::Allow
+        );
+    }
+
+    #[test]
+    fn configured_deny_wins_when_multiple_config_rules_match() {
+        let mut config = Config::default_config().unwrap();
+        config.policy.allow.push(Rule {
+            id: "allow".to_string(),
+            program: "git".to_string(),
+            args_prefix: vec![],
+        });
+        config.policy.deny.push(Rule {
+            id: "deny".to_string(),
+            program: "git".to_string(),
+            args_prefix: vec!["push".to_string()],
+        });
+        assert_eq!(
+            policy_decision(&config, "git", &["push".to_string()], false),
+            PolicyDecision::Deny
         );
     }
 
