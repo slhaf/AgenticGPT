@@ -1,3 +1,5 @@
+mod mcp_server;
+
 use agentic_gpt_protocol::{
     AgentMessage, AgentRegistryEntry, BatchExecRequest, BatchExecResult, Capabilities,
     ConfirmationDecision, ConfirmationPayload, ExecRequest, HubCommand, HubMessage,
@@ -222,6 +224,7 @@ async fn serve(
         http: reqwest::Client::new(),
     };
     tokio::spawn(cleanup_confirmations(state.clone()));
+    let mcp_service = mcp_server::service(state.clone());
     let app = Router::new()
         .route("/v1/agents", get(list_agents))
         .route("/v1/agents/:agent_id/connect", get(connect_agent))
@@ -239,6 +242,11 @@ async fn serve(
         .route("/v1/mcp/servers", post(mcp_list_servers))
         .route("/v1/mcp/tools", post(mcp_list_tools))
         .route("/v1/mcp/callTool", post(mcp_call_tool))
+        .nest_service("/mcp", mcp_service)
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            mcp_server::require_auth_on_mcp_path,
+        ))
         .layer(
             TraceLayer::new_for_http().make_span_with(|request: &Request<_>| {
                 tracing::info_span!(
