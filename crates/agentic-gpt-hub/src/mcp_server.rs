@@ -8,14 +8,16 @@ use axum::middleware::Next;
 use axum::response::Response;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, ErrorData, ServerCapabilities, ServerInfo};
+use rmcp::model::{
+    CallToolResult, ErrorData, Meta, ServerCapabilities, ServerInfo, ToolAnnotations,
+};
 use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager, tower::StreamableHttpService,
 };
 use rmcp::transport::StreamableHttpServerConfig;
 use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use crate::{
     cached_session, default_config_summary, random_id, registry_entries, registry_entry,
@@ -31,11 +33,37 @@ pub(crate) struct AgenticMcpServer {
 
 impl AgenticMcpServer {
     pub(crate) fn new(state: HubState) -> Self {
-        Self {
-            state,
-            tool_router: Self::tool_router(),
-        }
+        let mut tool_router = Self::tool_router();
+        decorate_tool_descriptors(&mut tool_router);
+        Self { state, tool_router }
     }
+}
+
+fn decorate_tool_descriptors(tool_router: &mut ToolRouter<AgenticMcpServer>) {
+    for route in tool_router.map.values_mut() {
+        let name = route.attr.name.as_ref();
+        let open_world = matches!(name, "exec" | "batchExec" | "startSession" | "mcpCallTool");
+        route.attr.annotations = Some(
+            ToolAnnotations::new()
+                .read_only(true)
+                .destructive(false)
+                .open_world(open_world),
+        );
+        route.attr.output_schema = Some(std::sync::Arc::new(object_schema()));
+        let mut meta = Map::new();
+        meta.insert(
+            "securitySchemes".to_string(),
+            json!([{ "type": "oauth2", "scopes": ["agentic:mcp"] }]),
+        );
+        route.attr.meta = Some(Meta(meta));
+    }
+}
+
+fn object_schema() -> Map<String, Value> {
+    let mut schema = Map::new();
+    schema.insert("type".to_string(), Value::String("object".to_string()));
+    schema.insert("additionalProperties".to_string(), Value::Bool(true));
+    schema
 }
 
 pub(crate) type AgenticMcpService = StreamableHttpService<AgenticMcpServer, LocalSessionManager>;
