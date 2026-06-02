@@ -237,6 +237,14 @@ struct AppState {
     sessions: Arc<Mutex<HashMap<String, ManagedSession>>>,
     hub_sender: Arc<Mutex<Option<mpsc::UnboundedSender<Message>>>>,
     pending_confirmations: Arc<Mutex<HashMap<String, oneshot::Sender<String>>>>,
+    temporary_mcp_allows: Arc<Mutex<Vec<TemporaryMcpAllow>>>,
+}
+
+#[derive(Clone, Debug)]
+struct TemporaryMcpAllow {
+    agent_id: String,
+    server_id: String,
+    expires_at: DateTime<Utc>,
 }
 
 struct ManagedSession {
@@ -317,6 +325,7 @@ async fn run(config_path: PathBuf) -> Result<()> {
         sessions: Arc::new(Mutex::new(HashMap::new())),
         hub_sender: Arc::new(Mutex::new(None)),
         pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
+        temporary_mcp_allows: Arc::new(Mutex::new(Vec::new())),
     };
     tokio::spawn(watch_config(state.clone()));
     connect_loop(state).await
@@ -660,14 +669,30 @@ async fn handle_hub_command(state: AppState, command: HubCommand) -> Result<()> 
             request_id,
             payload,
         } => {
-            let result = mcp::list_tools(&state, payload).await?;
+            let result = match mcp::list_tools(&state, payload).await {
+                Ok(result) => result,
+                Err(error) => serde_json::json!({
+                    "error": {
+                        "code": "mcp_list_tools_failed",
+                        "message": error.to_string()
+                    }
+                }),
+            };
             send_response(&state, &request_id, result).await?;
         }
         HubCommand::McpCallTool {
             request_id,
             payload,
         } => {
-            let result = mcp::call_tool(&state, payload).await?;
+            let result = match mcp::call_tool(&state, payload).await {
+                Ok(result) => result,
+                Err(error) => serde_json::json!({
+                    "error": {
+                        "code": "mcp_call_tool_failed",
+                        "message": error.to_string()
+                    }
+                }),
+            };
             send_response(&state, &request_id, result).await?;
         }
     }
@@ -1359,6 +1384,9 @@ async fn request_hub_confirmation(
         command_preview: truncate_chars(&command_preview(program, args), 1000),
         risk_level: risk_level(program),
         reason: format!("Command matched confirm policy: {program}"),
+        kind: None,
+        server_id: None,
+        tool_name: None,
     };
     let config = state.config.read().await.clone();
     let message = AgentMessage::ConfirmationRequest {
@@ -1397,9 +1425,193 @@ async fn fail_pending_confirmations(state: &AppState, reason: &str) {
     }
 }
 
+pub(crate) async fn authorize_mcp_tool_call(
+    state: &AppState,
+    server_id: &str,
+    tool_name: &str,
+    arguments: &serde_json::Value,
+) -> String {
+    if temporary_mcp_allowed(state, server_id).await {
+        return "temporary_mcp_allow".to_string();
+    }
+
+    let config = state.config.read().await.clone();
+    let decision =
+        request_mcp_tool_confirmation(&state, &config, server_id, tool_name, arguments).await;
+    match decision.as_str() {
+        "allow_mcp_server_15m" => add_temporary_mcp_allow(state, server_id, 15).await,
+        "allow_mcp_server_30m" => add_temporary_mcp_allow(state, server_id, 30).await,
+        _ => {}
+    }
+    decision
+}
+
+async fn temporary_mcp_allowed(state: &AppState, server_id: &str) -> bool {
+    let agent_id = state.config.read().await.agent_id.clone();
+    let now = Utc::now();
+    let mut allows = state.temporary_mcp_allows.lock().await;
+    allows.retain(|allow| allow.expires_at > now);
+    allows
+        .iter()
+        .any(|allow| allow.agent_id == agent_id && allow.server_id == server_id)
+}
+
+async fn add_temporary_mcp_allow(state: &AppState, server_id: &str, minutes: i64) {
+    let agent_id = state.config.read().await.agent_id.clone();
+    let expires_at = Utc::now() + chrono::Duration::minutes(minutes);
+    let mut allows = state.temporary_mcp_allows.lock().await;
+    allows.retain(|allow| allow.expires_at > Utc::now());
+    allows.retain(|allow| !(allow.agent_id == agent_id && allow.server_id == server_id));
+    allows.push(TemporaryMcpAllow {
+        agent_id,
+        server_id: server_id.to_string(),
+        expires_at,
+    });
+}
+
+async fn request_mcp_tool_confirmation(
+    state: &AppState,
+    config: &Config,
+    server_id: &str,
+    tool_name: &str,
+    arguments: &serde_json::Value,
+) -> String {
+    let provider = match config.confirmation_provider.provider.as_str() {
+        "default" => "freedesktop-then-hub",
+        "freedesktopThenHub" => "freedesktop-then-hub",
+        other => other,
+    };
+    if provider == "freedesktop" || provider == "freedesktop-then-hub" {
+        let local =
+            request_freedesktop_mcp_confirmation(config, server_id, tool_name, arguments).await;
+        if local == "confirmation_provider_unavailable" && provider == "freedesktop-then-hub" {
+            return request_hub_mcp_confirmation(state, config, server_id, tool_name, arguments)
+                .await;
+        }
+        return local;
+    }
+    if provider == "hub" {
+        return request_hub_mcp_confirmation(state, config, server_id, tool_name, arguments).await;
+    }
+    "confirmation_provider_unavailable".to_string()
+}
+
+async fn request_freedesktop_mcp_confirmation(
+    _config: &Config,
+    server_id: &str,
+    tool_name: &str,
+    arguments: &serde_json::Value,
+) -> String {
+    let supports_actions = tokio::task::spawn_blocking(|| {
+        notify_rust::get_capabilities()
+            .map(|capabilities| {
+                capabilities
+                    .iter()
+                    .any(|capability| capability == "actions")
+            })
+            .unwrap_or(false)
+    })
+    .await
+    .unwrap_or(false);
+    if !supports_actions {
+        return "confirmation_provider_unavailable".to_string();
+    }
+    let body = format!(
+        "{}\n\nAllow once, or temporarily allow this MCP server?",
+        mcp_tool_command_preview(server_id, tool_name, arguments)
+    );
+    let provider = notify_rust::Notification::new()
+        .summary("Agentic GPT MCP confirmation")
+        .body(&body)
+        .action("allow_once", "Allow once")
+        .action("allow_mcp_server_15m", "Allow this MCP 15m")
+        .action("allow_mcp_server_30m", "Allow this MCP 30m")
+        .action("deny", "Deny")
+        .timeout((CONFIRM_TIMEOUT_SECS * 1000) as i32)
+        .show();
+    match provider {
+        Ok(handle) => {
+            let action = tokio::task::spawn_blocking(move || {
+                let mut selected = "timeout".to_string();
+                handle.wait_for_action(|action| selected = action.to_string());
+                selected
+            })
+            .await
+            .unwrap_or_else(|_| "timeout".to_string());
+            match action.as_str() {
+                "allow_once" | "allow_mcp_server_15m" | "allow_mcp_server_30m" => action,
+                _ => "deny".to_string(),
+            }
+        }
+        Err(_) => "confirmation_provider_unavailable".to_string(),
+    }
+}
+
+async fn request_hub_mcp_confirmation(
+    state: &AppState,
+    config: &Config,
+    server_id: &str,
+    tool_name: &str,
+    arguments: &serde_json::Value,
+) -> String {
+    let request_id = format!("confirm_req_{}", Uuid::new_v4().simple());
+    let (tx, rx) = oneshot::channel();
+    state
+        .pending_confirmations
+        .lock()
+        .await
+        .insert(request_id.clone(), tx);
+    let payload = ConfirmationPayload {
+        program: "mcpCallTool".to_string(),
+        args: vec![server_id.to_string(), tool_name.to_string()],
+        command_preview: mcp_tool_command_preview(server_id, tool_name, arguments),
+        risk_level: "MEDIUM".to_string(),
+        reason: "MCP tool call requires confirmation".to_string(),
+        kind: Some("mcpTool".to_string()),
+        server_id: Some(server_id.to_string()),
+        tool_name: Some(tool_name.to_string()),
+    };
+    let message = AgentMessage::ConfirmationRequest {
+        request_id: request_id.clone(),
+        agent_id: config.agent_id.clone(),
+        timeout_seconds: CONFIRM_TIMEOUT_SECS,
+        payload,
+    };
+    if let Err(error) = send_agent_message(state, message).await {
+        state.pending_confirmations.lock().await.remove(&request_id);
+        log_warn(format!("hub MCP confirmation unavailable: {error}"));
+        return "provider_unavailable".to_string();
+    }
+    log_info(format!(
+        "hub MCP confirmation requested; requestId={request_id}; serverId={server_id}; toolName={tool_name}"
+    ));
+    match timeout(Duration::from_secs(CONFIRM_TIMEOUT_SECS + 5), rx).await {
+        Ok(Ok(decision)) => decision,
+        _ => {
+            state.pending_confirmations.lock().await.remove(&request_id);
+            "timeout".to_string()
+        }
+    }
+}
+
+fn mcp_tool_command_preview(
+    server_id: &str,
+    tool_name: &str,
+    arguments: &serde_json::Value,
+) -> String {
+    let arguments = serde_json::to_string_pretty(arguments)
+        .unwrap_or_else(|_| serde_json::to_string(arguments).unwrap_or_else(|_| "{}".to_string()));
+    format!(
+        "MCP Tool Call\nServer: {server_id}\nTool: {tool_name}\nArguments:\n{}",
+        truncate_chars(&arguments, 2000)
+    )
+}
+
 fn confirmation_decision_value(decision: ConfirmationDecision) -> String {
     match decision {
         ConfirmationDecision::AllowOnce => "allow_once",
+        ConfirmationDecision::AllowMcpServer15m => "allow_mcp_server_15m",
+        ConfirmationDecision::AllowMcpServer30m => "allow_mcp_server_30m",
         ConfirmationDecision::Deny => "deny",
         ConfirmationDecision::Timeout => "timeout",
         ConfirmationDecision::ProviderUnavailable => "provider_unavailable",

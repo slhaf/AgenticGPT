@@ -175,12 +175,22 @@ pub struct ConfirmationPayload {
     pub command_preview: String,
     pub risk_level: String,
     pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConfirmationDecision {
     AllowOnce,
+    #[serde(rename = "allow_mcp_server_15m")]
+    AllowMcpServer15m,
+    #[serde(rename = "allow_mcp_server_30m")]
+    AllowMcpServer30m,
     Deny,
     Timeout,
     ProviderUnavailable,

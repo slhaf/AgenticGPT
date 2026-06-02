@@ -863,18 +863,50 @@ async fn publish_ntfy(
     let callback_base = ntfy.callback_base_url.trim_end_matches('/');
     let allow_url =
         format!("{callback_base}/v1/confirmations/{confirmation_id}/allow?token={token}");
+    let allow_mcp_15m_url = format!(
+        "{callback_base}/v1/confirmations/{confirmation_id}/allow-mcp-server-15m?token={token}"
+    );
+    let allow_mcp_30m_url = format!(
+        "{callback_base}/v1/confirmations/{confirmation_id}/allow-mcp-server-30m?token={token}"
+    );
     let deny_url = format!("{callback_base}/v1/confirmations/{confirmation_id}/deny?token={token}");
     let message = format!(
         "Agent {agent_id} wants to run:\n{command_preview}\n\nReason: {}\nRisk: {}",
         payload.reason, payload.risk_level
     );
-    let body = json!({
-        "topic": ntfy.topic,
-        "title": "AgenticGPT confirmation",
-        "message": message,
-        "priority": 5,
-        "tags": ["warning"],
-        "actions": [
+    let actions = if payload.kind.as_deref() == Some("mcpTool") {
+        json!([
+            {
+                "action": "http",
+                "label": "Allow once",
+                "url": allow_url,
+                "method": "POST",
+                "clear": true
+            },
+            {
+                "action": "http",
+                "label": "Allow MCP 15m",
+                "url": allow_mcp_15m_url,
+                "method": "POST",
+                "clear": true
+            },
+            {
+                "action": "http",
+                "label": "Allow MCP 30m",
+                "url": allow_mcp_30m_url,
+                "method": "POST",
+                "clear": true
+            },
+            {
+                "action": "http",
+                "label": "Deny",
+                "url": deny_url,
+                "method": "POST",
+                "clear": true
+            }
+        ])
+    } else {
+        json!([
             {
                 "action": "http",
                 "label": "Allow",
@@ -889,7 +921,15 @@ async fn publish_ntfy(
                 "method": "POST",
                 "clear": true
             }
-        ]
+        ])
+    };
+    let body = json!({
+        "topic": ntfy.topic,
+        "title": "AgenticGPT confirmation",
+        "message": message,
+        "priority": 5,
+        "tags": ["warning"],
+        "actions": actions
     });
     let response = state.http.post(server_url).json(&body).send().await?;
     if response.status().is_success() {
@@ -906,6 +946,8 @@ async fn confirmation_callback(
 ) -> Response {
     let decision = match decision.as_str() {
         "allow" => ConfirmationDecision::AllowOnce,
+        "allow-mcp-server-15m" | "allow_mcp_server_15m" => ConfirmationDecision::AllowMcpServer15m,
+        "allow-mcp-server-30m" | "allow_mcp_server_30m" => ConfirmationDecision::AllowMcpServer30m,
         "deny" => ConfirmationDecision::Deny,
         _ => {
             return api_error(
@@ -990,6 +1032,8 @@ async fn confirmation_callback(
 
     let reason = match decision {
         ConfirmationDecision::AllowOnce => "user_allowed",
+        ConfirmationDecision::AllowMcpServer15m => "user_allowed_mcp_server_15m",
+        ConfirmationDecision::AllowMcpServer30m => "user_allowed_mcp_server_30m",
         ConfirmationDecision::Deny => "user_denied",
         _ => "resolved",
     };
@@ -1272,6 +1316,8 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
 fn decision_wire_value(decision: &ConfirmationDecision) -> &'static str {
     match decision {
         ConfirmationDecision::AllowOnce => "allow_once",
+        ConfirmationDecision::AllowMcpServer15m => "allow_mcp_server_15m",
+        ConfirmationDecision::AllowMcpServer30m => "allow_mcp_server_30m",
         ConfirmationDecision::Deny => "deny",
         ConfirmationDecision::Timeout => "timeout",
         ConfirmationDecision::ProviderUnavailable => "provider_unavailable",

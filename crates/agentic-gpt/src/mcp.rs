@@ -2,19 +2,23 @@ use std::{env, path::PathBuf};
 
 use agentic_gpt_protocol::{McpCallToolRequest, McpListToolsRequest, McpServerSummary};
 use anyhow::{anyhow, Context, Result};
+use chrono::Utc;
 use clap::Subcommand;
 use rmcp::{
     model::{CallToolRequestParams, ClientInfo, JsonObject},
     transport::{
-        ConfigureCommandExt, StreamableHttpClientTransport,
-        streamable_http_client::StreamableHttpClientTransportConfig, TokioChildProcess,
+        streamable_http_client::StreamableHttpClientTransportConfig, ConfigureCommandExt,
+        StreamableHttpClientTransport, TokioChildProcess,
     },
     ServiceExt,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use tokio::time::Instant;
 
-use crate::{write_config_with_backup, AppState, Config};
+use crate::{
+    authorize_mcp_tool_call, write_audit, write_config_with_backup, AppState, AuditRecord, Config,
+};
 
 #[derive(Subcommand)]
 pub(crate) enum McpConfigCommand {
@@ -114,14 +118,160 @@ pub(crate) async fn list_tools(state: &AppState, payload: McpListToolsRequest) -
 }
 
 pub(crate) async fn call_tool(state: &AppState, payload: McpCallToolRequest) -> Result<Value> {
-    let server = server_config(state, &payload.server_id).await?;
-    let client = client(&server).await?;
-    let arguments = tool_arguments(payload.arguments)?;
+    let started = Instant::now();
+    let config = state.config.read().await.clone();
+    let server = match server_config(state, &payload.server_id).await {
+        Ok(server) => server,
+        Err(error) => {
+            audit_mcp_call(
+                &config,
+                &payload,
+                "Deny",
+                None,
+                None,
+                Some(error.to_string()),
+                started.elapsed().as_millis(),
+            );
+            return Err(error);
+        }
+    };
+
+    let authorization = authorize_mcp_tool_call(
+        state,
+        &payload.server_id,
+        &payload.tool_name,
+        &payload.arguments,
+    )
+    .await;
+    if !mcp_authorization_allows(&authorization) {
+        audit_mcp_call(
+            &config,
+            &payload,
+            "Confirm",
+            Some(authorization.clone()),
+            None,
+            Some(format!("mcp_tool_call_rejected: {authorization}")),
+            started.elapsed().as_millis(),
+        );
+        return Err(anyhow!("mcp_tool_call_rejected: {authorization}"));
+    }
+
+    let arguments = match tool_arguments(payload.arguments.clone()) {
+        Ok(arguments) => arguments,
+        Err(error) => {
+            audit_mcp_call(
+                &config,
+                &payload,
+                "Deny",
+                Some(authorization),
+                None,
+                Some(error.to_string()),
+                started.elapsed().as_millis(),
+            );
+            return Err(error);
+        }
+    };
+    let client = match client(&server).await {
+        Ok(client) => client,
+        Err(error) => {
+            audit_mcp_call(
+                &config,
+                &payload,
+                "Confirm",
+                Some(authorization),
+                None,
+                Some(error.to_string()),
+                started.elapsed().as_millis(),
+            );
+            return Err(error);
+        }
+    };
     let result = client
-        .call_tool(CallToolRequestParams::new(payload.tool_name).with_arguments(arguments))
-        .await?;
+        .call_tool(CallToolRequestParams::new(payload.tool_name.clone()).with_arguments(arguments))
+        .await;
     let _ = client.cancel().await;
-    Ok(serde_json::to_value(result)?)
+    match result {
+        Ok(result) => {
+            let value = serde_json::to_value(result)?;
+            audit_mcp_call(
+                &config,
+                &payload,
+                if authorization == "temporary_mcp_allow" {
+                    "AllowTemporary"
+                } else {
+                    "Confirm"
+                },
+                Some(authorization),
+                Some(0),
+                None,
+                started.elapsed().as_millis(),
+            );
+            Ok(value)
+        }
+        Err(error) => {
+            audit_mcp_call(
+                &config,
+                &payload,
+                "Confirm",
+                Some(authorization),
+                None,
+                Some(error.to_string()),
+                started.elapsed().as_millis(),
+            );
+            Err(error.into())
+        }
+    }
+}
+
+fn mcp_authorization_allows(value: &str) -> bool {
+    matches!(
+        value,
+        "allow_once" | "allow_mcp_server_15m" | "allow_mcp_server_30m" | "temporary_mcp_allow"
+    )
+}
+
+fn audit_mcp_call(
+    config: &Config,
+    payload: &McpCallToolRequest,
+    policy_decision: &str,
+    confirmation_result: Option<String>,
+    exit_code: Option<i32>,
+    reject_reason: Option<String>,
+    duration_ms: u128,
+) {
+    let arguments = serde_json::to_string(&payload.arguments).unwrap_or_else(|_| "{}".to_string());
+    let truncated = arguments.chars().count() > 1000;
+    let arguments = truncate_chars(&arguments, 1000);
+    let _ = write_audit(
+        config,
+        AuditRecord {
+            task_id: None,
+            session_id: None,
+            time: Utc::now(),
+            program: "mcpCallTool".to_string(),
+            args: vec![
+                payload.server_id.clone(),
+                payload.tool_name.clone(),
+                arguments,
+            ],
+            need_confirm: confirmation_result.as_deref() != Some("temporary_mcp_allow"),
+            policy_decision: policy_decision.to_string(),
+            confirmation_result,
+            exit_code,
+            duration_ms,
+            truncated,
+            request_source: "hub:mcp".to_string(),
+            reject_reason,
+        },
+    );
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    let mut output = value.chars().take(max_chars).collect::<String>();
+    if value.chars().count() > max_chars {
+        output.push_str("...");
+    }
+    output
 }
 
 async fn server_config(state: &AppState, server_id: &str) -> Result<McpServerConfig> {
@@ -163,13 +313,14 @@ async fn client(
         }
         "stdio" => {
             let command = server.url.clone().context("mcp_server_command_missing")?;
-            let transport = TokioChildProcess::new(tokio::process::Command::new("sh").configure(|cmd| {
-                cmd.arg("-lc").arg(command);
-                if let Ok(home) = env::var("HOME") {
-                    let path = env::var("PATH").unwrap_or_default();
-                    cmd.env("PATH", format!("{home}/.local/bin:{path}"));
-                }
-            }))?;
+            let transport =
+                TokioChildProcess::new(tokio::process::Command::new("sh").configure(|cmd| {
+                    cmd.arg("-lc").arg(command);
+                    if let Ok(home) = env::var("HOME") {
+                        let path = env::var("PATH").unwrap_or_default();
+                        cmd.env("PATH", format!("{home}/.local/bin:{path}"));
+                    }
+                }))?;
             Ok(ClientInfo::default().serve(transport).await?)
         }
         other => Err(anyhow!("unsupported_mcp_transport: {other}")),
