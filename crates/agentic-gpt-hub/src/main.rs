@@ -239,7 +239,6 @@ async fn serve(
     };
     tokio::spawn(cleanup_confirmations(state.clone()));
     tokio::spawn(oauth::cleanup_oauth(state.clone()));
-    let mcp_service = mcp_server::service(state.clone());
     let app = Router::new()
         .route("/v1/agents", get(list_agents))
         .route("/v1/agents/:agent_id/connect", get(connect_agent))
@@ -257,6 +256,7 @@ async fn serve(
         .route("/v1/mcp/servers", post(mcp_list_servers))
         .route("/v1/mcp/tools", post(mcp_list_tools))
         .route("/v1/mcp/callTool", post(mcp_call_tool))
+        .route("/mcp", get(mcp_server::mcp_get).post(mcp_server::mcp_post))
         .route(
             "/.well-known/oauth-protected-resource",
             get(oauth::protected_resource_metadata),
@@ -274,7 +274,6 @@ async fn serve(
             get(oauth::authorize).post(oauth::authorize_submit),
         )
         .route("/oauth/token", post(oauth::token))
-        .nest_service("/mcp", mcp_service)
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             mcp_server::require_auth_on_mcp_path,
