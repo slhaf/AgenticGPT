@@ -1,4 +1,5 @@
 mod mcp_server;
+mod oauth;
 
 use agentic_gpt_protocol::{
     AgentMessage, AgentRegistryEntry, BatchExecRequest, BatchExecResult, Capabilities,
@@ -56,6 +57,8 @@ enum HubCommandCli {
         bind: SocketAddr,
         #[arg(long, env = "AGENTIC_GPT_API_KEY")]
         api_key: String,
+        #[arg(long, env = "AGENTIC_GPT_PUBLIC_BASE_URL")]
+        public_base_url: Option<String>,
     },
     Agent {
         #[command(subcommand)]
@@ -98,6 +101,9 @@ struct HubState {
     pending_confirmations: Arc<Mutex<HashMap<String, PendingConfirmation>>>,
     sessions: Arc<Mutex<HashMap<String, HashMap<String, SessionInfo>>>>,
     http: reqwest::Client,
+    public_base_url: Option<String>,
+    oauth_codes: Arc<Mutex<HashMap<String, oauth::OAuthAuthorizationCode>>>,
+    oauth_tokens: Arc<Mutex<HashMap<String, oauth::OAuthAccessToken>>>,
 }
 
 #[derive(Clone)]
@@ -194,10 +200,14 @@ async fn main() -> Result<()> {
             println!("initialized {}", db_path.display());
             println!("config {}", config_path.display());
         }
-        HubCommandCli::Serve { bind, api_key } => {
+        HubCommandCli::Serve {
+            bind,
+            api_key,
+            public_base_url,
+        } => {
             init_db(&conn)?;
             config.write_if_missing(&config_path)?;
-            serve(bind, api_key, conn, config).await?;
+            serve(bind, api_key, public_base_url, conn, config).await?;
         }
         HubCommandCli::Agent { command } => {
             init_db(&conn)?;
@@ -210,6 +220,7 @@ async fn main() -> Result<()> {
 async fn serve(
     bind: SocketAddr,
     api_key: String,
+    public_base_url: Option<String>,
     conn: Connection,
     config: HubConfig,
 ) -> Result<()> {
@@ -222,8 +233,12 @@ async fn serve(
         pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
         sessions: Arc::new(Mutex::new(HashMap::new())),
         http: reqwest::Client::new(),
+        public_base_url: public_base_url.map(|value| value.trim_end_matches('/').to_string()),
+        oauth_codes: Arc::new(Mutex::new(HashMap::new())),
+        oauth_tokens: Arc::new(Mutex::new(HashMap::new())),
     };
     tokio::spawn(cleanup_confirmations(state.clone()));
+    tokio::spawn(oauth::cleanup_oauth(state.clone()));
     let mcp_service = mcp_server::service(state.clone());
     let app = Router::new()
         .route("/v1/agents", get(list_agents))
@@ -242,6 +257,23 @@ async fn serve(
         .route("/v1/mcp/servers", post(mcp_list_servers))
         .route("/v1/mcp/tools", post(mcp_list_tools))
         .route("/v1/mcp/callTool", post(mcp_call_tool))
+        .route(
+            "/.well-known/oauth-protected-resource",
+            get(oauth::protected_resource_metadata),
+        )
+        .route(
+            "/.well-known/oauth-authorization-server",
+            get(oauth::authorization_server_metadata),
+        )
+        .route(
+            "/.well-known/openid-configuration",
+            get(oauth::authorization_server_metadata),
+        )
+        .route(
+            "/oauth/authorize",
+            get(oauth::authorize).post(oauth::authorize_submit),
+        )
+        .route("/oauth/token", post(oauth::token))
         .nest_service("/mcp", mcp_service)
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),

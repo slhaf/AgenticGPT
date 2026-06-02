@@ -28,3 +28,5 @@ uuid.workspace = true
 
 rmcp = { version = "1.7.0", default-features = false, features = ["server", "macros", "transport-streamable-http-server"] }
 schemars = "1"
+base64 = "0.22"
+url = "2"

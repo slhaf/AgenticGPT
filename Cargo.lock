@@ -29,6 +29,7 @@ dependencies = [
  "agentic-gpt-protocol",
  "anyhow",
  "axum",
+ "base64",
  "chrono",
  "clap",
  "futures-util",
@@ -43,6 +44,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "url",
  "uuid",
 ]
 

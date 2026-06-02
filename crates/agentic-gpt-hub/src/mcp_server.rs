@@ -57,10 +57,10 @@ pub(crate) async fn require_auth_on_mcp_path(
     request: Request,
     next: Next,
 ) -> Response {
-    if request.uri().path().starts_with("/mcp") {
-        if let Err(response) = crate::require_action_auth(&state, &headers) {
-            return response;
-        }
+    if request.uri().path().starts_with("/mcp")
+        && !crate::oauth::is_valid_mcp_bearer(&state, &headers).await
+    {
+        return crate::oauth::mcp_unauthorized_response(&state, &headers);
     }
     next.run(request).await
 }
