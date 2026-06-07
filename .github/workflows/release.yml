@@ -1,0 +1,48 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    name: Build Linux release artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Build Linux binaries
+        run: scripts/dist-linux.sh
+
+      - name: Package artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          for target_dir in dist/*; do
+            target="$(basename "$target_dir")"
+            tar -C "$target_dir" -czf "release/agentic-gpt-${target}.tar.gz" agentic-gpt agentic-gpt-hub
+          done
+          sha256sum release/*.tar.gz > release/SHA256SUMS
+          ls -lh release
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/*.tar.gz
+            release/SHA256SUMS

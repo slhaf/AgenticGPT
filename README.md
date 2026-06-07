@@ -115,9 +115,12 @@ cargo check --workspace
 python3 -c "import yaml; yaml.safe_load(open('openapi/hub.yaml')); print('openapi yaml ok')"
 ```
 
-## Release Artifacts
+## Build and Release
+
+Local multi-target Linux release builds use `cross`:
 
 ```bash
+cargo install cross --git https://github.com/cross-rs/cross
 ./scripts/dist-linux.sh
 ```
 
@@ -127,3 +130,16 @@ Artifacts are written to:
 - `dist/x86_64-unknown-linux-gnu/agentic-gpt-hub`
 - `dist/aarch64-unknown-linux-gnu/agentic-gpt`
 - `dist/aarch64-unknown-linux-gnu/agentic-gpt-hub`
+
+GitHub Actions runs CI on pushes and pull requests to `main`. Pushing a version tag builds Linux release archives and publishes a GitHub Release:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Release archives contain both binaries for one target:
+
+- `agentic-gpt-x86_64-unknown-linux-gnu.tar.gz`
+- `agentic-gpt-aarch64-unknown-linux-gnu.tar.gz`
+- `SHA256SUMS`
