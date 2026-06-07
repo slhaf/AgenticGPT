@@ -9,7 +9,7 @@ resolver = "2"
 [workspace.package]
 edition = "2021"
 license = "MIT"
-repository = "https://example.invalid/agentic-gpt"
+repository = "https://github.com/slhaf/AgenticGPT"
 
 [workspace.dependencies]
 agentic-gpt-protocol = { path = "crates/agentic-gpt-protocol" }
