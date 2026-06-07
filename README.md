@@ -74,6 +74,15 @@ Config lives at `~/.agentic_gpt/config.json`; audit logs are JSONL at `~/.agenti
 
 `freedesktop-then-hub` first tries local desktop notification actions. It falls back to Hub-backed ntfy only when the local provider is unavailable or cannot show the notification. User denial or timeout from the local provider is final and does not fall back.
 
+Command policy rules can be added or removed by command. `remove` matches `program` plus optional `argsPrefix`; if multiple rules match in an interactive terminal, the CLI asks which one to delete.
+
+```bash
+cargo run -p agentic-gpt -- config allow add bash
+cargo run -p agentic-gpt -- config allow remove bash
+cargo run -p agentic-gpt -- config confirm add python -c
+cargo run -p agentic-gpt -- config confirm remove python -c
+```
+
 Path access is controlled by `pathPolicy` in the local agent config. `workspaceRoot` is always a write root; defaults also allow writes under `~/Documents`, `~/Downloads`, and `/tmp`, allow read-only access to selected system/cache paths, and deny common credential/browser/auth paths. Manage roots with:
 
 ```bash

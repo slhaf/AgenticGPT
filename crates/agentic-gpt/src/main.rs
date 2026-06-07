@@ -14,7 +14,7 @@ use mcp::{McpConfigCommand, McpServerConfig};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -102,7 +102,8 @@ enum RuleCommand {
         args_prefix: Vec<String>,
     },
     Remove {
-        rule_id: String,
+        program: String,
+        args_prefix: Vec<String>,
     },
 }
 
@@ -202,7 +203,6 @@ struct PolicyConfig {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Rule {
-    id: String,
     program: String,
     args_prefix: Vec<String>,
 }
@@ -2291,19 +2291,16 @@ fn builtin_rules(decision: PolicyDecision) -> Vec<Rule> {
     let mut rules = programs
         .into_iter()
         .map(|program| Rule {
-            id: format!("builtin:{program}"),
             program: program.to_string(),
             args_prefix: vec![],
         })
         .collect::<Vec<_>>();
     if decision == PolicyDecision::Confirm {
         rules.push(Rule {
-            id: "builtin:python-c".to_string(),
             program: "python".to_string(),
             args_prefix: vec!["-c".to_string()],
         });
         rules.push(Rule {
-            id: "builtin:node-e".to_string(),
             program: "node".to_string(),
             args_prefix: vec!["-e".to_string()],
         });
@@ -2543,18 +2540,81 @@ fn mutate_rule(config_path: PathBuf, decision: PolicyDecision, command: RuleComm
             args_prefix,
         } => {
             let rule = Rule {
-                id: Uuid::new_v4().to_string(),
                 program,
                 args_prefix,
             };
-            println!("{}", rule.id);
+            println!("added {}", rule_display(&rule));
             rules.push(rule);
         }
-        RuleCommand::Remove { rule_id } => {
-            rules.retain(|rule| rule.id != rule_id);
+        RuleCommand::Remove {
+            program,
+            args_prefix,
+        } => {
+            remove_rule(rules, &program, &args_prefix)?;
         }
     }
     write_config_with_backup(&config_path, &config)
+}
+
+fn remove_rule(rules: &mut Vec<Rule>, program: &str, args_prefix: &[String]) -> Result<()> {
+    let matches = rules
+        .iter()
+        .enumerate()
+        .filter(|(_, rule)| rule.program == program && rule.args_prefix == args_prefix)
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+
+    match matches.len() {
+        0 => Err(anyhow!(
+            "rule not found: {}",
+            command_preview(program, args_prefix)
+        )),
+        1 => {
+            let removed = rules.remove(matches[0]);
+            println!("removed {}", rule_display(&removed));
+            Ok(())
+        }
+        _ if io::stdin().is_terminal() => {
+            let selected = choose_rule_interactively(rules, &matches)?;
+            let removed = rules.remove(selected);
+            println!("removed {}", rule_display(&removed));
+            Ok(())
+        }
+        _ => {
+            eprintln!(
+                "multiple rules match {}; rerun in an interactive terminal or provide a more specific args prefix:",
+                command_preview(program, args_prefix)
+            );
+            for index in matches {
+                eprintln!("  {}", rule_display(&rules[index]));
+            }
+            Err(anyhow!("multiple_matching_rules"))
+        }
+    }
+}
+
+fn choose_rule_interactively(rules: &[Rule], matches: &[usize]) -> Result<usize> {
+    println!("multiple matching rules:");
+    for (ordinal, index) in matches.iter().enumerate() {
+        println!("  {}) {}", ordinal + 1, rule_display(&rules[*index]));
+    }
+    print!("select rule to remove [1-{}]: ", matches.len());
+    io::stdout().flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    let selected = input
+        .trim()
+        .parse::<usize>()
+        .map_err(|_| anyhow!("invalid selection"))?;
+    if selected == 0 || selected > matches.len() {
+        return Err(anyhow!("selection out of range"));
+    }
+    Ok(matches[selected - 1])
+}
+
+fn rule_display(rule: &Rule) -> String {
+    command_preview(&rule.program, &rule.args_prefix)
 }
 
 fn mutate_path_policy(config_path: PathBuf, command: PathCommand) -> Result<()> {
@@ -2993,7 +3053,6 @@ mod tests {
     #[test]
     fn rule_matches_program_and_args_prefix_structurally() {
         let rule = Rule {
-            id: "r".to_string(),
             program: "python".to_string(),
             args_prefix: vec!["-c".to_string()],
         };
@@ -3022,17 +3081,14 @@ mod tests {
             deny_roots: vec![deny_root.clone()],
         };
         config.policy.allow.push(Rule {
-            id: "allow-git-status".to_string(),
             program: "git".to_string(),
             args_prefix: vec!["status".to_string()],
         });
         config.policy.confirm.push(Rule {
-            id: "confirm-bash".to_string(),
             program: "bash".to_string(),
             args_prefix: vec!["-lc".to_string()],
         });
         config.policy.deny.push(Rule {
-            id: "deny-rm".to_string(),
             program: "rm".to_string(),
             args_prefix: vec!["-rf".to_string()],
         });
@@ -3102,7 +3158,6 @@ mod tests {
     fn configured_allow_overrides_need_confirm() {
         let mut config = Config::default_config().unwrap();
         config.policy.allow.push(Rule {
-            id: "r".to_string(),
             program: "git".to_string(),
             args_prefix: vec!["status".to_string()],
         });
@@ -3116,7 +3171,6 @@ mod tests {
     fn configured_allow_overrides_builtin_confirm() {
         let mut config = Config::default_config().unwrap();
         config.policy.allow.push(Rule {
-            id: "r".to_string(),
             program: "curl".to_string(),
             args_prefix: vec!["--version".to_string()],
         });
@@ -3130,7 +3184,6 @@ mod tests {
     fn configured_allow_overrides_builtin_deny() {
         let mut config = Config::default_config().unwrap();
         config.policy.allow.push(Rule {
-            id: "r".to_string(),
             program: "ssh".to_string(),
             args_prefix: vec!["-V".to_string()],
         });
@@ -3144,12 +3197,10 @@ mod tests {
     fn configured_deny_wins_when_multiple_config_rules_match() {
         let mut config = Config::default_config().unwrap();
         config.policy.allow.push(Rule {
-            id: "allow".to_string(),
             program: "git".to_string(),
             args_prefix: vec![],
         });
         config.policy.deny.push(Rule {
-            id: "deny".to_string(),
             program: "git".to_string(),
             args_prefix: vec!["push".to_string()],
         });
@@ -3566,6 +3617,76 @@ mod tests {
         assert_eq!(loaded.path_policy.write_roots.len(), 1);
         assert!(loaded.path_policy.read_only_roots.is_empty());
         assert!(loaded.path_policy.deny_roots.is_empty());
+    }
+
+    #[test]
+    fn old_rule_ids_are_ignored_when_loading_config() {
+        let root = unique_temp_dir("old-rule-id");
+        let config_path = root.join("config.json");
+        let mut value = serde_json::to_value(Config::default_config().unwrap()).unwrap();
+        value["policy"]["allow"] = serde_json::json!([
+            {
+                "id": "legacy-id",
+                "program": "bash",
+                "argsPrefix": []
+            }
+        ]);
+        fs::write(&config_path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+
+        let loaded = Config::load(&config_path).unwrap();
+        assert_eq!(loaded.policy.allow.len(), 1);
+        assert_eq!(loaded.policy.allow[0].program, "bash");
+        assert!(serde_json::to_value(&loaded.policy.allow[0])
+            .unwrap()
+            .get("id")
+            .is_none());
+    }
+
+    #[test]
+    fn remove_rule_matches_command_without_uuid() {
+        let mut rules = vec![Rule {
+            program: "bash".to_string(),
+            args_prefix: Vec::new(),
+        }];
+
+        remove_rule(&mut rules, "bash", &[]).unwrap();
+        assert!(rules.is_empty());
+    }
+
+    #[test]
+    fn remove_rule_matches_command_and_args_prefix() {
+        let mut rules = vec![
+            Rule {
+                program: "python".to_string(),
+                args_prefix: vec!["-c".to_string()],
+            },
+            Rule {
+                program: "python".to_string(),
+                args_prefix: vec!["script.py".to_string()],
+            },
+        ];
+
+        remove_rule(&mut rules, "python", &["-c".to_string()]).unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].args_prefix, vec!["script.py".to_string()]);
+    }
+
+    #[test]
+    fn remove_rule_refuses_ambiguous_non_interactive_match() {
+        let mut rules = vec![
+            Rule {
+                program: "bash".to_string(),
+                args_prefix: Vec::new(),
+            },
+            Rule {
+                program: "bash".to_string(),
+                args_prefix: Vec::new(),
+            },
+        ];
+
+        let error = remove_rule(&mut rules, "bash", &[]).unwrap_err();
+        assert!(error.to_string().contains("multiple_matching_rules"));
+        assert_eq!(rules.len(), 2);
     }
 
     #[test]
