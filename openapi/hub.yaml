@@ -7,6 +7,21 @@ servers:
 security:
   - bearerAuth: []
 paths:
+  /v1/info:
+    get:
+      operationId: getInfo
+      x-openai-isConsequential: false
+      responses:
+        "200":
+          description: Safe Hub runtime information.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HubInfoResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /v1/agents:
     get:
       operationId: listAgents
@@ -326,6 +341,69 @@ components:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
   schemas:
+    HubInfoResponse:
+      type: object
+      required:
+        - service
+        - version
+        - publicBaseUrl
+        - requestTimeoutSeconds
+        - maxWaitSeconds
+        - remoteConfirmation
+        - agents
+        - counts
+        - generatedAt
+      additionalProperties: false
+      properties:
+        service:
+          type: string
+        version:
+          type: string
+        publicBaseUrl:
+          type:
+            - string
+            - "null"
+        requestTimeoutSeconds:
+          type: integer
+        maxWaitSeconds:
+          type: integer
+        remoteConfirmation:
+          type: object
+          required: [enabled, provider, timeoutSeconds, ntfyConfigured]
+          additionalProperties: false
+          properties:
+            enabled:
+              type: boolean
+            provider:
+              type: string
+            timeoutSeconds:
+              type: integer
+            ntfyConfigured:
+              type: boolean
+        agents:
+          type: object
+          required: [registeredCount, enabledCount, onlineCount]
+          additionalProperties: false
+          properties:
+            registeredCount:
+              type: integer
+            enabledCount:
+              type: integer
+            onlineCount:
+              type: integer
+        counts:
+          type: object
+          required: [pendingRequestCount, pendingConfirmationCount, cachedSessionCount]
+          additionalProperties: false
+          properties:
+            pendingRequestCount:
+              type: integer
+            pendingConfirmationCount:
+              type: integer
+            cachedSessionCount:
+              type: integer
+        generatedAt:
+          type: string
     ErrorResponse:
       type: object
       required: [error]
@@ -381,7 +459,7 @@ components:
           type: boolean
     SafeConfigSummary:
       type: object
-      required: [workspaceRoot, sandbox, policyRuleCounts, confirmationProvider]
+      required: [workspaceRoot, sandbox, pathPolicy, policyRuleCounts, confirmationProvider]
       additionalProperties: false
       properties:
         workspaceRoot:
@@ -395,6 +473,17 @@ components:
               type: boolean
             mode:
               type: string
+        pathPolicy:
+          type: object
+          required: [writeRootCount, readOnlyRootCount, denyRootCount]
+          additionalProperties: false
+          properties:
+            writeRootCount:
+              type: integer
+            readOnlyRootCount:
+              type: integer
+            denyRootCount:
+              type: integer
         policyRuleCounts:
           type: object
           required: [allow, confirm, deny]

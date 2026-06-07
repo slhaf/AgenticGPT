@@ -3,9 +3,10 @@ mod oauth;
 
 use agentic_gpt_protocol::{
     AgentMessage, AgentRegistryEntry, BatchExecRequest, BatchExecResult, Capabilities,
-    ConfirmationDecision, ConfirmationPayload, ExecRequest, HubCommand, HubMessage,
-    McpCallToolRequest, McpListServersRequest, McpListToolsRequest, SafeConfigSummary,
-    SafePathPolicySummary, SafeSandboxSummary, SessionInfo, TaskResult,
+    ConfirmationDecision, ConfirmationPayload, ExecRequest, HubCommand, HubInfoAgents,
+    HubInfoCounts, HubInfoRemoteConfirmation, HubInfoResponse, HubMessage, McpCallToolRequest,
+    McpListServersRequest, McpListToolsRequest, SafeConfigSummary, SafePathPolicySummary,
+    SafeSandboxSummary, SessionInfo, TaskResult,
 };
 use anyhow::{Context, Result};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -240,6 +241,7 @@ async fn serve(
     tokio::spawn(cleanup_confirmations(state.clone()));
     tokio::spawn(oauth::cleanup_oauth(state.clone()));
     let app = Router::new()
+        .route("/v1/info", get(hub_info))
         .route("/v1/agents", get(list_agents))
         .route("/v1/agents/:agent_id/connect", get(connect_agent))
         .route(
@@ -293,6 +295,62 @@ async fn serve(
     info!("agentic-gpt hub listening on {bind}");
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+async fn hub_info(State(state): State<HubState>, headers: HeaderMap) -> Response {
+    if let Err(response) = require_action_auth(&state, &headers) {
+        return response;
+    }
+
+    match build_hub_info_response(&state).await {
+        Ok(response) => Json(response).into_response(),
+        Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "db_error", error),
+    }
+}
+
+async fn build_hub_info_response(state: &HubState) -> Result<HubInfoResponse> {
+    let entries = registry_entries(state)?;
+    let registered_count = entries.len();
+    let enabled_count = entries.iter().filter(|entry| entry.enabled).count();
+    let online_count = state.agents.lock().await.len();
+    let pending_request_count = state.pending.lock().await.len();
+    let pending_confirmation_count = state
+        .pending_confirmations
+        .lock()
+        .await
+        .values()
+        .filter(|confirmation| !confirmation.resolved)
+        .count();
+    let cached_session_count = state.sessions.lock().await.values().map(HashMap::len).sum();
+
+    let remote = &state.config.remote_confirmation;
+    let ntfy = &remote.ntfy;
+    Ok(HubInfoResponse {
+        service: "agentic-gpt-hub".to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        public_base_url: state.public_base_url.clone(),
+        request_timeout_seconds: REQUEST_TIMEOUT_SECS,
+        max_wait_seconds: MAX_WAIT_SECONDS,
+        remote_confirmation: HubInfoRemoteConfirmation {
+            enabled: remote.enabled,
+            provider: remote.provider.clone(),
+            timeout_seconds: remote.timeout_seconds,
+            ntfy_configured: !ntfy.server_url.is_empty()
+                && !ntfy.topic.is_empty()
+                && !ntfy.callback_base_url.is_empty(),
+        },
+        agents: HubInfoAgents {
+            registered_count,
+            enabled_count,
+            online_count,
+        },
+        counts: HubInfoCounts {
+            pending_request_count,
+            pending_confirmation_count,
+            cached_session_count,
+        },
+        generated_at: Utc::now(),
+    })
 }
 
 async fn list_agents(State(state): State<HubState>, headers: HeaderMap) -> Response {
@@ -1597,6 +1655,73 @@ fn constant_time_equal(a: &str, b: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_hub_config() -> HubConfig {
+        HubConfig {
+            remote_confirmation: RemoteConfirmationConfig {
+                enabled: true,
+                provider: "ntfy".to_string(),
+                timeout_seconds: 45,
+                ntfy: NtfyConfig {
+                    server_url: "https://ntfy.example.invalid".to_string(),
+                    topic: "secret-topic-for-test".to_string(),
+                    callback_base_url: "https://callback.example.invalid".to_string(),
+                },
+            },
+        }
+    }
+
+    fn test_state() -> HubState {
+        let conn = Connection::open_in_memory().unwrap();
+        init_db(&conn).unwrap();
+        HubState {
+            api_key: "test-api-key".to_string(),
+            db: Arc::new(StdMutex::new(conn)),
+            config: Arc::new(test_hub_config()),
+            agents: Arc::new(Mutex::new(HashMap::new())),
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+            http: reqwest::Client::new(),
+            public_base_url: Some("https://hub.example.invalid".to_string()),
+            oauth_codes: Arc::new(Mutex::new(HashMap::new())),
+            oauth_tokens: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    #[tokio::test]
+    async fn hub_info_reports_safe_runtime_summary() {
+        let state = test_state();
+        let response = build_hub_info_response(&state).await.unwrap();
+        let value = serde_json::to_value(response).unwrap();
+        let text = serde_json::to_string(&value).unwrap();
+
+        assert_eq!(value["service"], "agentic-gpt-hub");
+        assert_eq!(value["publicBaseUrl"], "https://hub.example.invalid");
+        assert_eq!(value["remoteConfirmation"]["enabled"], true);
+        assert_eq!(value["remoteConfirmation"]["provider"], "ntfy");
+        assert_eq!(value["remoteConfirmation"]["ntfyConfigured"], true);
+        assert_eq!(value["agents"]["registeredCount"], 0);
+        assert_eq!(value["agents"]["onlineCount"], 0);
+        assert_eq!(value["counts"]["pendingRequestCount"], 0);
+        assert!(!text.contains("secret-topic-for-test"));
+        assert!(!text.contains("callback.example.invalid"));
+        assert!(!text.contains("test-api-key"));
+    }
+
+    #[test]
+    fn openapi_documents_info_and_path_policy() {
+        let openapi_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../openapi/hub.yaml");
+        let openapi = std::fs::read_to_string(openapi_path).unwrap();
+
+        assert!(openapi.contains("/v1/info:"));
+        assert!(openapi.contains("HubInfoResponse:"));
+        assert!(openapi.contains("pathPolicy:"));
+        assert!(openapi.contains("writeRootCount"));
+        assert!(openapi.contains("readOnlyRootCount"));
+        assert!(openapi.contains("denyRootCount"));
+    }
 
     #[test]
     fn parses_bearer_case_insensitively() {

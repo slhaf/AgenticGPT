@@ -44,6 +44,45 @@ pub struct Capabilities {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct HubInfoRemoteConfirmation {
+    pub enabled: bool,
+    pub provider: String,
+    pub timeout_seconds: u64,
+    pub ntfy_configured: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HubInfoAgents {
+    pub registered_count: usize,
+    pub enabled_count: usize,
+    pub online_count: usize,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HubInfoCounts {
+    pub pending_request_count: usize,
+    pub pending_confirmation_count: usize,
+    pub cached_session_count: usize,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HubInfoResponse {
+    pub service: String,
+    pub version: String,
+    pub public_base_url: Option<String>,
+    pub request_timeout_seconds: u64,
+    pub max_wait_seconds: u64,
+    pub remote_confirmation: HubInfoRemoteConfirmation,
+    pub agents: HubInfoAgents,
+    pub counts: HubInfoCounts,
+    pub generated_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AgentRegistryEntry {
     pub agent_id: String,
     pub display_name: String,

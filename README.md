@@ -1,14 +1,14 @@
 # Agentic GPT
 
-Agentic GPT is a Linux local execution agent plus a VPS Hub for controlled GPT Actions command execution.
+Agentic GPT is a Linux local execution agent plus a Rust VPS Hub for controlled ChatGPT Actions and Apps MCP access.
 
 The current default architecture is:
 
 ```text
-Custom GPT Actions
-  -> HTTPS API on VPS Hub
+ChatGPT Actions / ChatGPT Apps MCP
+  -> HTTPS API on Rust VPS Hub
   -> WebSocket connection to Local Agent
-  -> local process / session / confirmation / sandbox
+  -> local process / session / confirmation / MCP bridge / sandbox
 ```
 
 The old Cloudflare Worker implementation remains under `apps/worker` as legacy code, but new work should target the Rust Hub.
@@ -18,7 +18,9 @@ The old Cloudflare Worker implementation remains under `apps/worker` as legacy c
 - `crates/agentic-gpt`: Rust CLI local agent.
 - `crates/agentic-gpt-hub`: Rust VPS Hub HTTP/WebSocket service.
 - `crates/agentic-gpt-protocol`: Shared JSON protocol types.
-- `openapi/hub.yaml`: Custom GPT Actions schema for the VPS Hub.
+- `openapi/hub.yaml`: Custom GPT Actions schema for the Rust Hub.
+- `docs/interfaces.md`: Public interface map for Actions, Apps MCP, and Local Agent WebSocket.
+- `docs/operations.md`: Local verification, smoke tests, deployment checks, and safety invariants.
 - `apps/worker`: Legacy Cloudflare Worker implementation.
 - `dist`: release artifact output.
 
@@ -82,11 +84,18 @@ cargo run -p agentic-gpt -- config path deny add ~/.secrets
 cargo run -p agentic-gpt -- config path write remove ~/Projects
 ```
 
-## GPT Actions
+## Interfaces
 
 Use `openapi/hub.yaml`, replace the server URL with your VPS HTTPS domain, and configure Bearer auth with `AGENTIC_GPT_API_KEY`.
 
-The Hub API intentionally does not expose task polling. `exec` and `batchExec` wait synchronously up to the short-command limit; long-running work should use the session APIs.
+The Hub API exposes a safe runtime summary at `GET /v1/info`, agent discovery at `GET /v1/agents`, short command execution, session APIs, and MCP bridge operations. The Hub API intentionally does not expose task polling. `exec` and `batchExec` wait synchronously up to the short-command limit; long-running work should use the session APIs.
+
+ChatGPT Apps should use the Apps-friendly MCP endpoint at `/mcp`. OAuth discovery and token exchange are implemented by the Hub OAuth shim.
+
+See:
+
+- `docs/interfaces.md`
+- `docs/operations.md`
 
 ## Verification
 
