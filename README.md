@@ -108,13 +108,7 @@ python3 -c "import yaml; yaml.safe_load(open('openapi/hub.yaml')); print('openap
 ## Release Artifacts
 
 ```bash
-mkdir -p dist/x86_64-unknown-linux-gnu dist/aarch64-unknown-linux-gnu
-cross build --release --target x86_64-unknown-linux-gnu --workspace
-cross build --release --target aarch64-unknown-linux-gnu --workspace
-cp target/x86_64-unknown-linux-gnu/release/agentic-gpt dist/x86_64-unknown-linux-gnu/agentic-gpt
-cp target/x86_64-unknown-linux-gnu/release/agentic-gpt-hub dist/x86_64-unknown-linux-gnu/agentic-gpt-hub
-cp target/aarch64-unknown-linux-gnu/release/agentic-gpt dist/aarch64-unknown-linux-gnu/agentic-gpt
-cp target/aarch64-unknown-linux-gnu/release/agentic-gpt-hub dist/aarch64-unknown-linux-gnu/agentic-gpt-hub
+./scripts/dist-linux.sh
 ```
 
 Artifacts are written to:
