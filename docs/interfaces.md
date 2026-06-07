@@ -11,7 +11,7 @@ Core endpoints:
 - `GET /v1/info`: safe Hub runtime summary.
 - `GET /v1/agents`: enabled local agents with online status and safe config summaries.
 - `POST /v1/exec`: short synchronous command execution. Supports optional `workingDirectory`.
-- `POST /v1/batchExec`: short synchronous batch execution. Supports a batch-level `workingDirectory` and per-element overrides.
+- `POST /v1/batchExec`: short synchronous batch execution. Supports a batch-level `workingDirectory` and per-element overrides. Batch confirmation is all-or-nothing: if any element is denied, the whole batch is rejected; if any element needs confirmation, one confirmation decision applies to the entire batch.
 - `POST /v1/sessions/start`: start a long-running command session. Supports optional `workingDirectory`.
 - `GET /v1/sessions`: list sessions for one agent.
 - `GET /v1/sessions/{sessionId}`: inspect one session.

@@ -852,6 +852,169 @@ async fn run_exec_task(state: AppState, task_id: String, request: ExecRequest) -
     result
 }
 
+#[derive(Clone)]
+struct PreparedBatchElement {
+    index: usize,
+    program: String,
+    args: Vec<String>,
+    working_directory: Option<String>,
+    resolved_working_directory: PathBuf,
+    decision: PolicyDecision,
+    reject_reason: Option<String>,
+}
+
+fn prepare_batch_element(
+    config: &Config,
+    index: usize,
+    element: ExecElement,
+    batch_working_directory: Option<String>,
+    need_confirm: bool,
+) -> PreparedBatchElement {
+    let program = element.program;
+    let args = element.args;
+    let working_directory = element.working_directory.or(batch_working_directory);
+    let decision = policy_decision(config, &program, &args, need_confirm);
+    let mut reject_reason = None;
+    let resolved_working_directory =
+        match resolve_working_directory(config, working_directory.as_deref()) {
+            Ok(directory) => directory,
+            Err(reason) => {
+                reject_reason = Some(reason);
+                config.workspace_root.clone()
+            }
+        };
+    if reject_reason.is_none() {
+        if let Err(reason) = preflight(config, &resolved_working_directory, &program, &args) {
+            reject_reason = Some(reason);
+        }
+    }
+    if reject_reason.is_none() && decision == PolicyDecision::Deny {
+        reject_reason = Some("policy_denied".to_string());
+    }
+    PreparedBatchElement {
+        index,
+        program,
+        args,
+        working_directory,
+        resolved_working_directory,
+        decision,
+        reject_reason,
+    }
+}
+
+fn batch_element_result(
+    agent_id: &str,
+    batch_id: &str,
+    element: &PreparedBatchElement,
+    status: &str,
+    reject_reason: Option<String>,
+    started_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+) -> BatchElementResult {
+    BatchElementResult {
+        index: element.index,
+        program: element.program.clone(),
+        args: element.args.clone(),
+        working_directory: element.working_directory.clone(),
+        result: TaskResult {
+            agent_id: agent_id.to_string(),
+            task_id: format!("{batch_id}:element:{}", element.index),
+            status: status.to_string(),
+            exit_code: None,
+            stdout_tail: String::new(),
+            stderr_tail: String::new(),
+            truncated: false,
+            reject_reason,
+            started_at,
+            updated_at,
+        },
+    }
+}
+
+async fn run_prepared_batch_element(
+    config: Config,
+    agent_id: String,
+    batch_id: String,
+    element: PreparedBatchElement,
+    need_confirm: bool,
+    confirmation_result: Option<String>,
+) -> BatchElementResult {
+    let started_at = Utc::now();
+    let started = Instant::now();
+    let task_id = format!("{batch_id}:element:{}", element.index);
+    let mut result = TaskResult {
+        agent_id: agent_id.clone(),
+        task_id: task_id.clone(),
+        status: "running".to_string(),
+        exit_code: None,
+        stdout_tail: String::new(),
+        stderr_tail: String::new(),
+        truncated: false,
+        reject_reason: None,
+        started_at,
+        updated_at: started_at,
+    };
+
+    let execution = execute_command(
+        &config,
+        &element.resolved_working_directory,
+        &element.program,
+        &element.args,
+    )
+    .await;
+    match execution {
+        Ok(output) => {
+            result.status = if output.exit_code == Some(0) {
+                "completed"
+            } else {
+                "failed"
+            }
+            .to_string();
+            result.exit_code = output.exit_code;
+            result.stdout_tail = output.stdout;
+            result.stderr_tail = output.stderr;
+            result.truncated = output.truncated;
+        }
+        Err(reason) => {
+            let reason = reason.to_string();
+            if reason == "timeout" {
+                result.status = "timeout".to_string();
+                result.reject_reason = Some("exec_timeout_use_session".to_string());
+            } else {
+                result.status = "failed".to_string();
+                result.reject_reason = Some(reason);
+            }
+        }
+    }
+    result.updated_at = Utc::now();
+    let _ = write_audit(
+        &config,
+        AuditRecord {
+            task_id: Some(task_id),
+            session_id: None,
+            time: result.updated_at,
+            program: element.program.clone(),
+            args: element.args.clone(),
+            working_directory: element.working_directory.clone(),
+            need_confirm,
+            policy_decision: format!("{:?}", element.decision),
+            confirmation_result,
+            exit_code: result.exit_code,
+            duration_ms: started.elapsed().as_millis(),
+            truncated: result.truncated,
+            request_source: "hub:batch".to_string(),
+            reject_reason: result.reject_reason.clone(),
+        },
+    );
+    BatchElementResult {
+        index: element.index,
+        program: element.program,
+        args: element.args,
+        working_directory: element.working_directory,
+        result,
+    }
+}
+
 async fn run_batch_task(
     state: AppState,
     batch_id: String,
@@ -861,59 +1024,153 @@ async fn run_batch_task(
     let agent_id = request.agent_id.clone();
     let need_confirm = request.need_confirm;
     let confirm_method = request.confirm_method.clone();
-    let batch_working_directory = request.working_directory.clone();
-    let previews = request
-        .elements
-        .iter()
-        .map(|element| (element.program.clone(), element.args.clone()))
-        .collect::<Vec<_>>();
-    let total = previews.len();
-    let max_concurrent = {
-        let config = state.config.read().await;
-        config.limits.max_concurrent_tasks.max(1).min(total.max(1))
-    };
-
-    let mut pending = request
+    let config = state.config.read().await.clone();
+    let prepared = request
         .elements
         .into_iter()
         .enumerate()
-        .collect::<VecDeque<(usize, ExecElement)>>();
+        .map(|(index, element)| {
+            prepare_batch_element(
+                &config,
+                index,
+                element,
+                request.working_directory.clone(),
+                need_confirm,
+            )
+        })
+        .collect::<Vec<_>>();
+    let total = prepared.len();
+    let max_concurrent = config.limits.max_concurrent_tasks.max(1).min(total.max(1));
+
+    if prepared
+        .iter()
+        .any(|element| element.reject_reason.is_some())
+    {
+        let updated_at = Utc::now();
+        let results = prepared
+            .iter()
+            .map(|element| {
+                if let Some(reason) = &element.reject_reason {
+                    batch_element_result(
+                        &agent_id,
+                        &batch_id,
+                        element,
+                        "rejected",
+                        Some(reason.clone()),
+                        started_at,
+                        updated_at,
+                    )
+                } else {
+                    batch_element_result(
+                        &agent_id,
+                        &batch_id,
+                        element,
+                        "skipped",
+                        Some("batch_rejected".to_string()),
+                        started_at,
+                        updated_at,
+                    )
+                }
+            })
+            .collect::<Vec<_>>();
+        return BatchExecResult {
+            agent_id,
+            batch_id,
+            status: "rejected".to_string(),
+            results,
+            started_at,
+            updated_at,
+        };
+    }
+
+    let needs_confirmation = prepared
+        .iter()
+        .filter(|element| element.decision == PolicyDecision::Confirm)
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut batch_confirmation_result = None;
+    if !needs_confirmation.is_empty() {
+        let confirmation = request_batch_confirmation(
+            &state,
+            &config,
+            confirm_method.as_deref(),
+            &needs_confirmation,
+            &prepared,
+        )
+        .await;
+        batch_confirmation_result = Some(confirmation.clone());
+        if confirmation != "allow_once" {
+            let updated_at = Utc::now();
+            let reason = if confirmation == "timeout" {
+                "batch_confirmation_timeout".to_string()
+            } else {
+                format!("batch_confirmation_{confirmation}")
+            };
+            let results = prepared
+                .iter()
+                .map(|element| {
+                    if element.decision == PolicyDecision::Confirm {
+                        batch_element_result(
+                            &agent_id,
+                            &batch_id,
+                            element,
+                            "rejected",
+                            Some(reason.clone()),
+                            started_at,
+                            updated_at,
+                        )
+                    } else {
+                        batch_element_result(
+                            &agent_id,
+                            &batch_id,
+                            element,
+                            "skipped",
+                            Some("batch_rejected".to_string()),
+                            started_at,
+                            updated_at,
+                        )
+                    }
+                })
+                .collect::<Vec<_>>();
+            return BatchExecResult {
+                agent_id,
+                batch_id,
+                status: "rejected".to_string(),
+                results,
+                started_at,
+                updated_at,
+            };
+        }
+    }
+
+    let mut pending = prepared.into_iter().collect::<VecDeque<_>>();
     let mut running = JoinSet::new();
     let mut results: Vec<Option<BatchElementResult>> = vec![None; total];
     let deadline = Instant::now() + Duration::from_secs(EXEC_TIMEOUT_SECS);
 
     loop {
         while running.len() < max_concurrent {
-            let Some((index, element)) = pending.pop_front() else {
+            let Some(element) = pending.pop_front() else {
                 break;
             };
-            let task_id = format!("{batch_id}:element:{index}");
+            let element_config = config.clone();
             let element_agent_id = agent_id.clone();
-            let element_state = state.clone();
-            let element_confirm_method = confirm_method.clone();
-            let element_batch_working_directory = batch_working_directory.clone();
+            let element_batch_id = batch_id.clone();
+            let confirmation_result = if element.decision == PolicyDecision::Confirm {
+                batch_confirmation_result.clone()
+            } else {
+                None
+            };
             running.spawn(async move {
-                let program = element.program;
-                let args = element.args;
-                let working_directory = element
-                    .working_directory
-                    .or(element_batch_working_directory);
-                let request = ExecRequest {
-                    agent_id: element_agent_id,
-                    program: program.clone(),
-                    args: args.clone(),
+                run_prepared_batch_element(
+                    element_config,
+                    element_agent_id,
+                    element_batch_id,
+                    element,
                     need_confirm,
-                    confirm_method: element_confirm_method,
-                    working_directory,
-                };
-                let result = run_exec_task(element_state, task_id, request.clone()).await;
-                BatchElementResult {
-                    index,
-                    program,
-                    args,
-                    working_directory: request.working_directory,
-                    result,
-                }
+                    confirmation_result,
+                )
+                .await
             });
         }
 
@@ -949,28 +1206,24 @@ async fn run_batch_task(
         .enumerate()
         .map(|(index, result)| {
             result.unwrap_or_else(|| {
-                let (program, args) = previews
-                    .get(index)
-                    .cloned()
-                    .unwrap_or_else(|| ("<unknown>".to_string(), Vec::new()));
-                BatchElementResult {
+                let fallback = PreparedBatchElement {
                     index,
-                    program,
-                    args,
+                    program: "<unknown>".to_string(),
+                    args: Vec::new(),
                     working_directory: None,
-                    result: TaskResult {
-                        agent_id: agent_id.clone(),
-                        task_id: format!("{batch_id}:element:{index}"),
-                        status: "timeout".to_string(),
-                        exit_code: None,
-                        stdout_tail: String::new(),
-                        stderr_tail: String::new(),
-                        truncated: false,
-                        reject_reason: Some("exec_timeout_use_session".to_string()),
-                        started_at,
-                        updated_at,
-                    },
-                }
+                    resolved_working_directory: config.workspace_root.clone(),
+                    decision: PolicyDecision::Allow,
+                    reject_reason: None,
+                };
+                batch_element_result(
+                    &agent_id,
+                    &batch_id,
+                    &fallback,
+                    "timeout",
+                    Some("exec_timeout_use_session".to_string()),
+                    started_at,
+                    updated_at,
+                )
             })
         })
         .collect::<Vec<_>>();
@@ -1354,6 +1607,55 @@ fn add_bwrap_parent_dirs(command: &mut Command, created_dirs: &mut HashSet<PathB
             command.arg("--dir").arg(parent);
         }
     }
+}
+
+fn batch_confirmation_preview(
+    needs_confirmation: &[PreparedBatchElement],
+    all_elements: &[PreparedBatchElement],
+) -> String {
+    let mut lines = vec![format!(
+        "Batch requires confirmation for {} of {} commands:",
+        needs_confirmation.len(),
+        all_elements.len()
+    )];
+    for element in needs_confirmation.iter().take(8) {
+        let cwd = element
+            .working_directory
+            .as_ref()
+            .map(|directory| format!(" (cwd: {directory})"))
+            .unwrap_or_default();
+        lines.push(format!(
+            "[{}] {}{}",
+            element.index,
+            command_preview(&element.program, &element.args),
+            cwd
+        ));
+    }
+    if needs_confirmation.len() > 8 {
+        lines.push(format!(
+            "... and {} more commands requiring confirmation",
+            needs_confirmation.len() - 8
+        ));
+    }
+    let other_count = all_elements.len().saturating_sub(needs_confirmation.len());
+    if other_count > 0 {
+        lines.push(format!(
+            "Also included: {other_count} command(s) that do not require confirmation."
+        ));
+    }
+    lines.push("Allow the entire batch once?".to_string());
+    lines.join("\n")
+}
+
+async fn request_batch_confirmation(
+    state: &AppState,
+    config: &Config,
+    confirm_method: Option<&str>,
+    needs_confirmation: &[PreparedBatchElement],
+    all_elements: &[PreparedBatchElement],
+) -> String {
+    let args = vec![batch_confirmation_preview(needs_confirmation, all_elements)];
+    request_confirmation(state, config, confirm_method, "batchExec", &args).await
 }
 
 async fn request_confirmation(
@@ -2790,6 +3092,116 @@ mod tests {
             .unwrap_err(),
             "path_readonly"
         );
+    }
+
+    #[tokio::test]
+    async fn batch_rejects_entire_group_when_confirmation_is_unavailable() {
+        let root = unique_temp_dir("batch-confirm-unavailable");
+        let workspace = root.join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(workspace.join("marker.txt"), "untouched").unwrap();
+
+        let mut config = Config::default_config().unwrap();
+        config.workspace_root = workspace.clone();
+        config.confirmation_provider.provider = "none".to_string();
+        config.path_policy = PathPolicyConfig {
+            write_roots: Vec::new(),
+            read_only_roots: Vec::new(),
+            deny_roots: Vec::new(),
+        };
+
+        let state = AppState {
+            config_path: root.join("config.json"),
+            config: Arc::new(RwLock::new(config)),
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+            hub_sender: Arc::new(Mutex::new(None)),
+            pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
+            temporary_mcp_allows: Arc::new(Mutex::new(Vec::new())),
+        };
+
+        let result = run_batch_task(
+            state,
+            "batch_test".to_string(),
+            BatchExecRequest {
+                agent_id: "test-agent".to_string(),
+                elements: vec![
+                    ExecElement {
+                        program: "pwd".to_string(),
+                        args: Vec::new(),
+                        working_directory: None,
+                    },
+                    ExecElement {
+                        program: "bash".to_string(),
+                        args: vec!["-lc".to_string(), "echo changed > marker.txt".to_string()],
+                        working_directory: None,
+                    },
+                ],
+                need_confirm: false,
+                confirm_method: None,
+                working_directory: None,
+            },
+        )
+        .await;
+
+        assert_eq!(result.status, "rejected");
+        assert_eq!(result.results.len(), 2);
+        assert_eq!(result.results[0].result.status, "skipped");
+        assert_eq!(
+            result.results[0].result.reject_reason.as_deref(),
+            Some("batch_rejected")
+        );
+        assert_eq!(result.results[1].result.status, "rejected");
+        assert_eq!(
+            result.results[1].result.reject_reason.as_deref(),
+            Some("batch_confirmation_confirmation_provider_unavailable")
+        );
+        assert_eq!(
+            fs::read_to_string(workspace.join("marker.txt")).unwrap(),
+            "untouched"
+        );
+    }
+
+    #[test]
+    fn batch_prepare_detects_confirm_and_reject_before_execution() {
+        let root = unique_temp_dir("batch-prepare");
+        let workspace = root.join("workspace");
+        let secret = workspace.join("secret");
+        fs::create_dir_all(&secret).unwrap();
+
+        let mut config = Config::default_config().unwrap();
+        config.workspace_root = workspace;
+        config.path_policy = PathPolicyConfig {
+            write_roots: Vec::new(),
+            read_only_roots: Vec::new(),
+            deny_roots: vec![secret],
+        };
+
+        let confirm = prepare_batch_element(
+            &config,
+            0,
+            ExecElement {
+                program: "bash".to_string(),
+                args: vec!["-lc".to_string(), "echo hi".to_string()],
+                working_directory: None,
+            },
+            None,
+            false,
+        );
+        assert_eq!(confirm.decision, PolicyDecision::Confirm);
+        assert!(confirm.reject_reason.is_none());
+
+        let rejected = prepare_batch_element(
+            &config,
+            1,
+            ExecElement {
+                program: "cat".to_string(),
+                args: vec!["./secret/token".to_string()],
+                working_directory: None,
+            },
+            None,
+            false,
+        );
+        assert_eq!(rejected.reject_reason.as_deref(), Some("path_denied"));
     }
 
     #[test]
