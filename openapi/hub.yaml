@@ -675,6 +675,9 @@ components:
           type: string
           enum: [default, freedesktop, hub, freedesktop-then-hub, freedesktopThenHub]
           description: Optional per-request confirmation provider override. Omit or use default to follow the local agent configuration.
+        workingDirectory:
+          type: string
+          description: Optional command working directory. Relative values are resolved from the agent workspace root. The resolved directory must exist and be inside writable roots, not denied roots.
     TaskResult:
       type: object
       required: [agentId, taskId, status, exitCode, stdoutTail, stderrTail, truncated, startedAt, updatedAt]
@@ -723,12 +726,18 @@ components:
                 type: array
                 items:
                   type: string
+              workingDirectory:
+                type: string
+                description: Optional per-element working directory. Overrides the batch workingDirectory for this element.
         needConfirm:
           type: boolean
         confirmMethod:
           type: string
           enum: [default, freedesktop, hub, freedesktop-then-hub, freedesktopThenHub]
           description: Optional per-request confirmation provider override for all batch elements. Omit or use default to follow the local agent configuration.
+        workingDirectory:
+          type: string
+          description: Optional default working directory for all batch elements. Relative values are resolved from the agent workspace root. Per-element workingDirectory values override this.
     BatchExecResult:
       type: object
       required: [agentId, batchId, status, results, startedAt, updatedAt]
@@ -755,6 +764,8 @@ components:
                 type: array
                 items:
                   type: string
+              workingDirectory:
+                type: string
               result:
                 $ref: "#/components/schemas/TaskResult"
         startedAt:
@@ -798,6 +809,8 @@ components:
           type: array
           items:
             type: string
+        workingDirectory:
+          type: string
         commandPreview:
           type: string
         startedAt:

@@ -301,6 +301,7 @@ impl AgenticMcpServer {
             args: params.args.unwrap_or_default(),
             need_confirm: params.need_confirm.unwrap_or(false),
             confirm_method: params.confirm_method,
+            working_directory: params.working_directory,
         };
         let task_id = random_id("task");
         let command = HubCommand::Exec {
@@ -343,10 +344,12 @@ impl AgenticMcpServer {
                 .map(|element| ExecElement {
                     program: element.program,
                     args: element.args.unwrap_or_default(),
+                    working_directory: element.working_directory,
                 })
                 .collect(),
             need_confirm: params.need_confirm.unwrap_or(false),
             confirm_method: params.confirm_method,
+            working_directory: params.working_directory,
         };
         let batch_id = random_id("batch");
         let command = HubCommand::BatchExec {
@@ -385,6 +388,7 @@ impl AgenticMcpServer {
             args: params.args.unwrap_or_default(),
             need_confirm: params.need_confirm.unwrap_or(false),
             confirm_method: params.confirm_method,
+            working_directory: params.working_directory,
         };
         let session_id = random_id("sess");
         let command = HubCommand::StartSession {
@@ -647,6 +651,8 @@ struct ExecArgs {
     need_confirm: Option<bool>,
     #[serde(default)]
     confirm_method: Option<String>,
+    #[serde(default)]
+    working_directory: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
@@ -658,6 +664,8 @@ struct BatchExecArgs {
     need_confirm: Option<bool>,
     #[serde(default)]
     confirm_method: Option<String>,
+    #[serde(default)]
+    working_directory: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
@@ -666,6 +674,8 @@ struct BatchExecElementArgs {
     program: String,
     #[serde(default)]
     args: Option<Vec<String>>,
+    #[serde(default)]
+    working_directory: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]

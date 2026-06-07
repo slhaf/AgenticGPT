@@ -1368,6 +1368,10 @@ fn timeout_batch_result(
                     index,
                     program: element.program.clone(),
                     args: element.args.clone(),
+                    working_directory: element
+                        .working_directory
+                        .clone()
+                        .or_else(|| payload.working_directory.clone()),
                     result: timeout_task_result(
                         &payload.agent_id,
                         &format!("{batch_id}:element:{index}"),
@@ -1741,6 +1745,9 @@ mod tests {
         assert!(openapi.contains("SafePolicyRules:"));
         assert!(openapi.contains("SafeRule:"));
         assert!(openapi.contains("argsPrefix"));
+        assert!(openapi.contains("workingDirectory"));
+        assert!(openapi.contains("Optional command working directory"));
+        assert!(openapi.contains("Optional default working directory for all batch elements"));
     }
 
     #[test]

@@ -135,12 +135,17 @@ pub struct ExecRequest {
     pub need_confirm: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confirm_method: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_directory: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ExecElement {
     pub program: String,
     pub args: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_directory: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -151,6 +156,8 @@ pub struct BatchExecRequest {
     pub need_confirm: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confirm_method: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_directory: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -207,6 +214,8 @@ pub struct BatchElementResult {
     pub index: usize,
     pub program: String,
     pub args: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_directory: Option<String>,
     pub result: TaskResult,
 }
 
@@ -229,6 +238,8 @@ pub struct SessionInfo {
     pub state: String,
     pub program: String,
     pub args: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_directory: Option<String>,
     pub command_preview: String,
     pub started_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,

@@ -221,6 +221,7 @@ struct AuditRecord {
     time: DateTime<Utc>,
     program: String,
     args: Vec<String>,
+    working_directory: Option<String>,
     need_confirm: bool,
     policy_decision: String,
     confirmation_result: Option<String>,
@@ -757,14 +758,27 @@ async fn run_exec_task(state: AppState, task_id: String, request: ExecRequest) -
         request.need_confirm,
     );
     let mut confirmation_result = None;
+    let working_directory =
+        match resolve_working_directory(&config, request.working_directory.as_deref()) {
+            Ok(working_directory) => Some(working_directory),
+            Err(reason) => {
+                result.status = "rejected".to_string();
+                result.reject_reason = Some(reason);
+                None
+            }
+        };
 
-    if let Err(reason) = preflight(&config, &request.program, &request.args) {
-        result.status = "rejected".to_string();
-        result.reject_reason = Some(reason);
-    } else if decision == PolicyDecision::Deny {
+    if let Some(working_directory) = working_directory.as_deref() {
+        if let Err(reason) = preflight(&config, working_directory, &request.program, &request.args)
+        {
+            result.status = "rejected".to_string();
+            result.reject_reason = Some(reason);
+        }
+    }
+    if result.reject_reason.is_none() && decision == PolicyDecision::Deny {
         result.status = "rejected".to_string();
         result.reject_reason = Some("policy_denied".to_string());
-    } else if decision == PolicyDecision::Confirm {
+    } else if result.reject_reason.is_none() && decision == PolicyDecision::Confirm {
         let confirmation = request_confirmation(
             &state,
             &config,
@@ -781,7 +795,15 @@ async fn run_exec_task(state: AppState, task_id: String, request: ExecRequest) -
     }
 
     if result.reject_reason.is_none() {
-        let execution = execute_command(&config, &request.program, &request.args).await;
+        let execution = execute_command(
+            &config,
+            working_directory
+                .as_deref()
+                .unwrap_or(&config.workspace_root),
+            &request.program,
+            &request.args,
+        )
+        .await;
         match execution {
             Ok(output) => {
                 result.status = if output.exit_code == Some(0) {
@@ -816,6 +838,7 @@ async fn run_exec_task(state: AppState, task_id: String, request: ExecRequest) -
             time: result.updated_at,
             program: request.program,
             args: request.args,
+            working_directory: request.working_directory,
             need_confirm: request.need_confirm,
             policy_decision: format!("{decision:?}"),
             confirmation_result,
@@ -838,6 +861,7 @@ async fn run_batch_task(
     let agent_id = request.agent_id.clone();
     let need_confirm = request.need_confirm;
     let confirm_method = request.confirm_method.clone();
+    let batch_working_directory = request.working_directory.clone();
     let previews = request
         .elements
         .iter()
@@ -867,21 +891,27 @@ async fn run_batch_task(
             let element_agent_id = agent_id.clone();
             let element_state = state.clone();
             let element_confirm_method = confirm_method.clone();
+            let element_batch_working_directory = batch_working_directory.clone();
             running.spawn(async move {
                 let program = element.program;
                 let args = element.args;
+                let working_directory = element
+                    .working_directory
+                    .or(element_batch_working_directory);
                 let request = ExecRequest {
                     agent_id: element_agent_id,
                     program: program.clone(),
                     args: args.clone(),
                     need_confirm,
                     confirm_method: element_confirm_method,
+                    working_directory,
                 };
-                let result = run_exec_task(element_state, task_id, request).await;
+                let result = run_exec_task(element_state, task_id, request.clone()).await;
                 BatchElementResult {
                     index,
                     program,
                     args,
+                    working_directory: request.working_directory,
                     result,
                 }
             });
@@ -927,6 +957,7 @@ async fn run_batch_task(
                     index,
                     program,
                     args,
+                    working_directory: None,
                     result: TaskResult {
                         agent_id: agent_id.clone(),
                         task_id: format!("{batch_id}:element:{index}"),
@@ -977,8 +1008,13 @@ struct CommandOutput {
     truncated: bool,
 }
 
-async fn execute_command(config: &Config, program: &str, args: &[String]) -> Result<CommandOutput> {
-    let mut command = build_command(config, program)?;
+async fn execute_command(
+    config: &Config,
+    working_directory: &Path,
+    program: &str,
+    args: &[String],
+) -> Result<CommandOutput> {
+    let mut command = build_command(config, working_directory, program)?;
     command.args(args);
     command
         .stdin(Stdio::null())
@@ -1021,7 +1057,12 @@ async fn read_limited<R: AsyncRead + Unpin>(mut reader: R, max: usize) -> Result
     Ok((tail.text(), tail.truncated))
 }
 
-fn preflight(config: &Config, program: &str, args: &[String]) -> std::result::Result<(), String> {
+fn preflight(
+    config: &Config,
+    working_directory: &Path,
+    program: &str,
+    args: &[String],
+) -> std::result::Result<(), String> {
     if program == "sudo" {
         return Err("interactive_credential_required".to_string());
     }
@@ -1034,7 +1075,7 @@ fn preflight(config: &Config, program: &str, args: &[String]) -> std::result::Re
     ) {
         return Err("requires_tty_not_supported".to_string());
     }
-    check_path_policy(config, program, args)
+    check_path_policy(config, working_directory, program, args)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1080,6 +1121,7 @@ fn looks_like_path(arg: &str) -> bool {
 
 fn check_path_policy(
     config: &Config,
+    working_directory: &Path,
     program: &str,
     args: &[String],
 ) -> std::result::Result<(), String> {
@@ -1089,7 +1131,7 @@ fn check_path_policy(
         if !looks_like_path(arg) {
             continue;
         }
-        let path = resolve_argument_path(&config.workspace_root, arg, access)?;
+        let path = resolve_argument_path(working_directory, arg, access)?;
         if path_in_roots(&path, &policy.deny_roots) {
             return Err("path_denied".to_string());
         }
@@ -1219,7 +1261,42 @@ fn expand_pathbuf(value: &Path) -> Result<PathBuf> {
         .unwrap_or_else(|| Ok(value.to_path_buf()))
 }
 
-fn build_command(config: &Config, program: &str) -> Result<Command> {
+fn resolve_working_directory(
+    config: &Config,
+    working_directory: Option<&str>,
+) -> std::result::Result<PathBuf, String> {
+    let candidate = match working_directory {
+        Some(value) if value.trim().is_empty() => {
+            return Err("working_directory_empty".to_string());
+        }
+        Some(value) => {
+            let expanded =
+                expand_path(value).map_err(|_| "working_directory_invalid".to_string())?;
+            if expanded.is_absolute() {
+                expanded
+            } else {
+                config.workspace_root.join(expanded)
+            }
+        }
+        None => config.workspace_root.clone(),
+    };
+    let directory = candidate
+        .canonicalize()
+        .map_err(|_| "working_directory_not_found".to_string())?;
+    if !directory.is_dir() {
+        return Err("working_directory_not_directory".to_string());
+    }
+    let policy = expanded_path_policy(config).map_err(|_| "path_policy_error".to_string())?;
+    if path_in_roots(&directory, &policy.deny_roots) {
+        return Err("working_directory_denied".to_string());
+    }
+    if !path_in_roots(&directory, &policy.write_roots) {
+        return Err("working_directory_outside_allowed_roots".to_string());
+    }
+    Ok(directory)
+}
+
+fn build_command(config: &Config, working_directory: &Path, program: &str) -> Result<Command> {
     if config.sandbox.enabled {
         let policy = expanded_path_policy(config)?;
         let mut command = Command::new(&config.sandbox.bubblewrap_path);
@@ -1229,7 +1306,7 @@ fn build_command(config: &Config, program: &str) -> Result<Command> {
             .arg("--dev")
             .arg("/dev")
             .arg("--chdir")
-            .arg(&config.workspace_root);
+            .arg(working_directory);
         let mut created_dirs = HashSet::new();
         for path in &policy.write_roots {
             if path.exists() {
@@ -1250,7 +1327,7 @@ fn build_command(config: &Config, program: &str) -> Result<Command> {
         Ok(command)
     } else {
         let mut command = Command::new(program);
-        command.current_dir(&config.workspace_root);
+        command.current_dir(working_directory);
         Ok(command)
     }
 }
@@ -1762,6 +1839,7 @@ async fn start_session(state: AppState, session_id: String, request: ExecRequest
         state: "running".to_string(),
         program: request.program.clone(),
         args: request.args.clone(),
+        working_directory: request.working_directory.clone(),
         command_preview: command_preview(&request.program, &request.args),
         started_at,
         updated_at: started_at,
@@ -1777,7 +1855,16 @@ async fn start_session(state: AppState, session_id: String, request: ExecRequest
         &request.args,
         request.need_confirm,
     );
-    if let Err(reason) = preflight(&config, &request.program, &request.args) {
+    let working_directory =
+        match resolve_working_directory(&config, request.working_directory.as_deref()) {
+            Ok(working_directory) => working_directory,
+            Err(reason) => {
+                info.state = "failed".to_string();
+                info.reject_reason = Some(reason);
+                return info;
+            }
+        };
+    if let Err(reason) = preflight(&config, &working_directory, &request.program, &request.args) {
         info.state = "failed".to_string();
         info.reject_reason = Some(reason);
         return info;
@@ -1807,7 +1894,7 @@ async fn start_session(state: AppState, session_id: String, request: ExecRequest
         info.reject_reason = Some("max_active_sessions_reached".to_string());
         return info;
     }
-    match spawn_session(&config, &request.program, &request.args).await {
+    match spawn_session(&config, &working_directory, &request.program, &request.args).await {
         Ok((child, stdout, stderr)) => {
             state.sessions.lock().await.insert(
                 session_id,
@@ -1830,10 +1917,11 @@ async fn start_session(state: AppState, session_id: String, request: ExecRequest
 
 async fn spawn_session(
     config: &Config,
+    working_directory: &Path,
     program: &str,
     args: &[String],
 ) -> Result<(Child, Arc<Mutex<TailBuffer>>, Arc<Mutex<TailBuffer>>)> {
-    let mut command = build_command(config, program)?;
+    let mut command = build_command(config, working_directory, program)?;
     command
         .args(args)
         .stdin(Stdio::null())
@@ -2569,7 +2657,13 @@ mod tests {
     fn sudo_requires_credentials() {
         let config = Config::default_config().unwrap();
         assert_eq!(
-            preflight(&config, "sudo", &["true".to_string()]).unwrap_err(),
+            preflight(
+                &config,
+                &config.workspace_root,
+                "sudo",
+                &["true".to_string()]
+            )
+            .unwrap_err(),
             "interactive_credential_required"
         );
     }
@@ -2577,8 +2671,14 @@ mod tests {
     #[test]
     fn read_only_system_file_is_allowed() {
         let config = Config::default_config().unwrap();
-        assert!(preflight(&config, "cat", &["/proc/meminfo".to_string()]).is_ok());
-        assert!(preflight(&config, "df", &["/".to_string()]).is_ok());
+        assert!(preflight(
+            &config,
+            &config.workspace_root,
+            "cat",
+            &["/proc/meminfo".to_string()]
+        )
+        .is_ok());
+        assert!(preflight(&config, &config.workspace_root, "df", &["/".to_string()]).is_ok());
     }
 
     #[test]
@@ -2601,6 +2701,7 @@ mod tests {
 
         assert!(preflight(
             &config,
+            &config.workspace_root,
             "touch",
             &[downloads.join("test-file").to_string_lossy().to_string()]
         )
@@ -2608,13 +2709,20 @@ mod tests {
         assert_eq!(
             preflight(
                 &config,
+                &config.workspace_root,
                 "touch",
                 &[cache.join("test-file").to_string_lossy().to_string()]
             )
             .unwrap_err(),
             "path_readonly"
         );
-        assert!(preflight(&config, "du", &[cache.to_string_lossy().to_string()]).is_ok());
+        assert!(preflight(
+            &config,
+            &config.workspace_root,
+            "du",
+            &[cache.to_string_lossy().to_string()]
+        )
+        .is_ok());
     }
 
     #[test]
@@ -2637,6 +2745,7 @@ mod tests {
         assert_eq!(
             preflight(
                 &config,
+                &config.workspace_root,
                 "cat",
                 &[secret.join("token").to_string_lossy().to_string()]
             )
@@ -2646,6 +2755,7 @@ mod tests {
         assert_eq!(
             preflight(
                 &config,
+                &config.workspace_root,
                 "rm",
                 &[secret.join("token").to_string_lossy().to_string()]
             )
@@ -2673,12 +2783,89 @@ mod tests {
         assert_eq!(
             preflight(
                 &config,
+                &config.workspace_root,
                 "custom-tool",
                 &[cache.join("file").to_string_lossy().to_string()]
             )
             .unwrap_err(),
             "path_readonly"
         );
+    }
+
+    #[test]
+    fn working_directory_must_be_existing_writable_directory() {
+        let root = unique_temp_dir("working-dir-policy");
+        let workspace = root.join("workspace");
+        let subdir = workspace.join("subdir");
+        let cache = root.join("cache");
+        let secret = workspace.join("secret");
+        fs::create_dir_all(&subdir).unwrap();
+        fs::create_dir_all(&cache).unwrap();
+        fs::create_dir_all(&secret).unwrap();
+        fs::write(workspace.join("file"), "not a directory").unwrap();
+
+        let mut config = Config::default_config().unwrap();
+        config.workspace_root = workspace.clone();
+        config.path_policy = PathPolicyConfig {
+            write_roots: Vec::new(),
+            read_only_roots: vec![cache],
+            deny_roots: vec![secret.clone()],
+        };
+
+        assert_eq!(
+            resolve_working_directory(&config, None).unwrap(),
+            workspace.canonicalize().unwrap()
+        );
+        assert_eq!(
+            resolve_working_directory(&config, Some("subdir")).unwrap(),
+            subdir.canonicalize().unwrap()
+        );
+        assert_eq!(
+            resolve_working_directory(&config, Some("file")).unwrap_err(),
+            "working_directory_not_directory"
+        );
+        assert_eq!(
+            resolve_working_directory(&config, Some("missing")).unwrap_err(),
+            "working_directory_not_found"
+        );
+        assert_eq!(
+            resolve_working_directory(&config, Some("secret")).unwrap_err(),
+            "working_directory_denied"
+        );
+        assert_eq!(
+            resolve_working_directory(&config, Some(root.join("cache").to_string_lossy().as_ref()))
+                .unwrap_err(),
+            "working_directory_outside_allowed_roots"
+        );
+    }
+
+    #[test]
+    fn relative_path_arguments_are_resolved_from_working_directory() {
+        let root = unique_temp_dir("working-dir-relative");
+        let workspace = root.join("workspace");
+        let subdir = workspace.join("subdir");
+        fs::create_dir_all(&subdir).unwrap();
+        fs::write(subdir.join("target.txt"), "ok").unwrap();
+
+        let mut config = Config::default_config().unwrap();
+        config.workspace_root = workspace;
+        config.path_policy = PathPolicyConfig {
+            write_roots: Vec::new(),
+            read_only_roots: Vec::new(),
+            deny_roots: Vec::new(),
+        };
+
+        assert_eq!(
+            preflight(
+                &config,
+                &config.workspace_root,
+                "cat",
+                &["./target.txt".to_string()]
+            )
+            .unwrap_err(),
+            "path_not_found"
+        );
+        assert!(preflight(&config, &subdir, "cat", &["./target.txt".to_string()]).is_ok());
     }
 
     #[test]
@@ -2702,7 +2889,13 @@ mod tests {
 
         #[cfg(unix)]
         assert_eq!(
-            preflight(&config, "cat", &[link.to_string_lossy().to_string()]).unwrap_err(),
+            preflight(
+                &config,
+                &config.workspace_root,
+                "cat",
+                &[link.to_string_lossy().to_string()]
+            )
+            .unwrap_err(),
             "path_denied"
         );
     }

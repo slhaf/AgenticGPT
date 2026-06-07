@@ -254,6 +254,7 @@ fn audit_mcp_call(
                 payload.tool_name.clone(),
                 arguments,
             ],
+            working_directory: None,
             need_confirm: confirmation_result.as_deref() != Some("temporary_mcp_allow"),
             policy_decision: policy_decision.to_string(),
             confirmation_result,
