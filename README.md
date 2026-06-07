@@ -64,6 +64,7 @@ cargo run -p agentic-gpt -- config set hubUrl http://127.0.0.1:8787
 cargo run -p agentic-gpt -- config set agentId laptop
 cargo run -p agentic-gpt -- config set agentSecret '<agent-secret>'
 cargo run -p agentic-gpt -- config set confirmationProvider freedesktop-then-hub
+cargo run -p agentic-gpt -- config set confirmationLanguage zh-CN
 cargo run -p agentic-gpt -- run
 ```
 

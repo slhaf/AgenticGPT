@@ -155,6 +155,8 @@ struct Config {
     workspace_root: PathBuf,
     backup_limit: usize,
     confirmation_provider: ConfirmationProviderConfig,
+    #[serde(default = "default_confirmation_language")]
+    confirmation_language: String,
     sandbox: SandboxConfig,
     #[serde(default)]
     mcp_servers: BTreeMap<String, McpServerConfig>,
@@ -1610,19 +1612,35 @@ fn add_bwrap_parent_dirs(command: &mut Command, created_dirs: &mut HashSet<PathB
 }
 
 fn batch_confirmation_preview(
+    config: &Config,
     needs_confirmation: &[PreparedBatchElement],
     all_elements: &[PreparedBatchElement],
 ) -> String {
-    let mut lines = vec![format!(
-        "Batch requires confirmation for {} of {} commands:",
-        needs_confirmation.len(),
-        all_elements.len()
-    )];
+    let zh = confirmation_language_is_zh(config);
+    let mut lines = vec![if zh {
+        format!(
+            "该批次共有 {} 条命令，其中 {} 条需要确认：",
+            all_elements.len(),
+            needs_confirmation.len()
+        )
+    } else {
+        format!(
+            "Batch requires confirmation for {} of {} commands:",
+            needs_confirmation.len(),
+            all_elements.len()
+        )
+    }];
     for element in needs_confirmation.iter().take(8) {
         let cwd = element
             .working_directory
             .as_ref()
-            .map(|directory| format!(" (cwd: {directory})"))
+            .map(|directory| {
+                if zh {
+                    format!("（工作目录：{directory}）")
+                } else {
+                    format!(" (cwd: {directory})")
+                }
+            })
             .unwrap_or_default();
         lines.push(format!(
             "[{}] {}{}",
@@ -1632,18 +1650,31 @@ fn batch_confirmation_preview(
         ));
     }
     if needs_confirmation.len() > 8 {
-        lines.push(format!(
-            "... and {} more commands requiring confirmation",
-            needs_confirmation.len() - 8
-        ));
+        lines.push(if zh {
+            format!(
+                "……另外还有 {} 条需要确认的命令",
+                needs_confirmation.len() - 8
+            )
+        } else {
+            format!(
+                "... and {} more commands requiring confirmation",
+                needs_confirmation.len() - 8
+            )
+        });
     }
     let other_count = all_elements.len().saturating_sub(needs_confirmation.len());
     if other_count > 0 {
-        lines.push(format!(
-            "Also included: {other_count} command(s) that do not require confirmation."
-        ));
+        lines.push(if zh {
+            format!("另外包含 {other_count} 条不需要确认的命令。")
+        } else {
+            format!("Also included: {other_count} command(s) that do not require confirmation.")
+        });
     }
-    lines.push("Allow the entire batch once?".to_string());
+    lines.push(if zh {
+        "是否允许整个批次执行一次？".to_string()
+    } else {
+        "Allow the entire batch once?".to_string()
+    });
     lines.join("\n")
 }
 
@@ -1665,17 +1696,18 @@ async fn request_batch_confirmation(
     } else {
         provider
     };
-    let preview = batch_confirmation_preview(needs_confirmation, all_elements);
+    let preview = batch_confirmation_preview(config, needs_confirmation, all_elements);
     if provider == "freedesktop" || provider == "freedesktop-then-hub" {
         let local =
             request_freedesktop_batch_confirmation(config, &preview, needs_confirmation).await;
         if local == "confirmation_provider_unavailable" && provider == "freedesktop-then-hub" {
-            return request_hub_batch_confirmation(state, &preview, needs_confirmation).await;
+            return request_hub_batch_confirmation(state, config, &preview, needs_confirmation)
+                .await;
         }
         return local;
     }
     if provider == "hub" {
-        return request_hub_batch_confirmation(state, &preview, needs_confirmation).await;
+        return request_hub_batch_confirmation(state, config, &preview, needs_confirmation).await;
     }
     "confirmation_provider_unavailable".to_string()
 }
@@ -1702,17 +1734,33 @@ async fn request_freedesktop_batch_confirmation(
     let has_risky_file_mutation = needs_confirmation
         .iter()
         .any(|element| risky_file_mutation(&element.program));
+    let zh = confirmation_language_is_zh(config);
     let warning = if !config.sandbox.enabled && has_risky_file_mutation {
-        "\nWARNING: bubblewrap is disabled; this batch includes file mutation commands with broader host visibility."
+        if zh {
+            "\n警告：bubblewrap 未启用；该批次包含文件变更命令，对宿主机的可见范围更大。"
+        } else {
+            "\nWARNING: bubblewrap is disabled; this batch includes file mutation commands with broader host visibility."
+        }
     } else {
         ""
     };
     let body = format!("{preview}{warning}");
     let provider = notify_rust::Notification::new()
-        .summary("Agentic GPT batch confirmation")
+        .summary(if zh {
+            "Agentic GPT 批量确认"
+        } else {
+            "Agentic GPT batch confirmation"
+        })
         .body(&body)
-        .action("allow_once", "Allow batch once")
-        .action("deny", "Deny batch")
+        .action(
+            "allow_once",
+            if zh {
+                "允许本批次"
+            } else {
+                "Allow batch once"
+            },
+        )
+        .action("deny", if zh { "拒绝本批次" } else { "Deny batch" })
         .timeout((CONFIRM_TIMEOUT_SECS * 1000) as i32)
         .show();
     match provider {
@@ -1736,6 +1784,7 @@ async fn request_freedesktop_batch_confirmation(
 
 async fn request_hub_batch_confirmation(
     state: &AppState,
+    config: &Config,
     preview: &str,
     needs_confirmation: &[PreparedBatchElement],
 ) -> String {
@@ -1752,7 +1801,11 @@ async fn request_hub_batch_confirmation(
         args: Vec::new(),
         command_preview: truncate_chars(preview, 1000),
         risk_level: risk.to_string(),
-        reason: "Batch contains command(s) matching confirm policy".to_string(),
+        reason: if confirmation_language_is_zh(config) {
+            "批量命令中包含匹配确认策略的命令".to_string()
+        } else {
+            "Batch contains command(s) matching confirm policy".to_string()
+        },
         kind: Some("batchExec".to_string()),
         server_id: None,
         tool_name: None,
@@ -1810,8 +1863,13 @@ async fn request_freedesktop_confirmation(
     if !supports_actions {
         return "confirmation_provider_unavailable".to_string();
     }
+    let zh = confirmation_language_is_zh(config);
     let warning = if !config.sandbox.enabled && risky_file_mutation(program) {
-        "\nWARNING: bubblewrap is disabled; this file mutation command has broader host visibility."
+        if zh {
+            "\n警告：bubblewrap 未启用；该文件变更命令对宿主机的可见范围更大。"
+        } else {
+            "\nWARNING: bubblewrap is disabled; this file mutation command has broader host visibility."
+        }
     } else {
         ""
     };
@@ -1819,13 +1877,21 @@ async fn request_freedesktop_confirmation(
         "{}{}{}",
         command_preview(program, args),
         warning,
-        "\nAllow once?"
+        if zh {
+            "\n是否允许本次执行？"
+        } else {
+            "\nAllow once?"
+        }
     );
     let provider = notify_rust::Notification::new()
-        .summary("Agentic GPT confirmation")
+        .summary(if zh {
+            "Agentic GPT 确认"
+        } else {
+            "Agentic GPT confirmation"
+        })
         .body(&body)
-        .action("allow_once", "Allow once")
-        .action("deny", "Deny")
+        .action("allow_once", if zh { "允许本次" } else { "Allow once" })
+        .action("deny", if zh { "拒绝" } else { "Deny" })
         .timeout((CONFIRM_TIMEOUT_SECS * 1000) as i32)
         .show();
     match provider {
@@ -1858,7 +1924,11 @@ async fn request_hub_confirmation(
         args: args.to_vec(),
         command_preview: truncate_chars(&command_preview(program, args), 1000),
         risk_level: risk_level(program),
-        reason: format!("Command matched confirm policy: {program}"),
+        reason: if confirmation_language_is_zh(_config) {
+            format!("命令匹配确认策略：{program}")
+        } else {
+            format!("Command matched confirm policy: {program}")
+        },
         kind: None,
         server_id: None,
         tool_name: None,
@@ -2436,6 +2506,9 @@ async fn handle_config(config_path: PathBuf, command: ConfigCommand) -> Result<(
                     config.workspace_root = new_workspace;
                 }
                 "confirmationProvider" => config.confirmation_provider.provider = value,
+                "confirmationLanguage" => {
+                    config.confirmation_language = normalize_confirmation_language(&value)
+                }
                 "sandbox.enabled" => config.sandbox.enabled = value.parse::<bool>()?,
                 "hubUrl" | "workerUrl" => config.hub_url = value,
                 "agentId" => config.agent_id = value,
@@ -2571,6 +2644,27 @@ async fn watch_config(state: AppState) {
     }
 }
 
+fn default_confirmation_language() -> String {
+    "en".to_string()
+}
+
+fn normalize_confirmation_language(language: &str) -> String {
+    let language = language.trim();
+    if language.eq_ignore_ascii_case("zh")
+        || language.eq_ignore_ascii_case("zh-cn")
+        || language.eq_ignore_ascii_case("zh_cn")
+        || language.eq_ignore_ascii_case("cn")
+    {
+        "zh-CN".to_string()
+    } else {
+        "en".to_string()
+    }
+}
+
+fn confirmation_language_is_zh(config: &Config) -> bool {
+    normalize_confirmation_language(&config.confirmation_language) == "zh-CN"
+}
+
 impl Config {
     fn default_config() -> Result<Self> {
         let base = agentic_home()?;
@@ -2584,6 +2678,7 @@ impl Config {
             confirmation_provider: ConfirmationProviderConfig {
                 provider: "freedesktop-then-hub".to_string(),
             },
+            confirmation_language: default_confirmation_language(),
             mcp_servers: BTreeMap::new(),
             sandbox: SandboxConfig {
                 enabled: false,
@@ -3268,6 +3363,27 @@ mod tests {
             fs::read_to_string(workspace.join("marker.txt")).unwrap(),
             "untouched"
         );
+    }
+
+    #[test]
+    fn batch_confirmation_preview_supports_chinese() {
+        let mut config = Config::default_config().unwrap();
+        config.confirmation_language = "zh-CN".to_string();
+        let element = PreparedBatchElement {
+            index: 1,
+            program: "python".to_string(),
+            args: vec!["-c".to_string(), "print(1)".to_string()],
+            working_directory: Some("/tmp".to_string()),
+            resolved_working_directory: PathBuf::from("/tmp"),
+            decision: PolicyDecision::Confirm,
+            reject_reason: None,
+        };
+        let preview = batch_confirmation_preview(&config, &[element.clone()], &[element]);
+
+        assert!(preview.contains("该批次共有 1 条命令，其中 1 条需要确认"));
+        assert!(preview.contains("工作目录：/tmp"));
+        assert!(preview.contains("是否允许整个批次执行一次？"));
+        assert!(!preview.contains("\\n"));
     }
 
     #[test]
