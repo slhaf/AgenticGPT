@@ -3,7 +3,8 @@ mod mcp;
 use agentic_gpt_protocol::{
     AgentMessage, BatchElementResult, BatchExecRequest, BatchExecResult, ConfirmationDecision,
     ConfirmationPayload, ExecElement, ExecRequest, HubCommand, HubMessage, PolicyCounts,
-    SafeConfigSummary, SafePathPolicySummary, SafeSandboxSummary, SessionInfo, TaskResult,
+    SafeBuiltinPolicyRules, SafeConfigSummary, SafePathPolicySummary, SafePathRoot,
+    SafePolicyRules, SafeRule, SafeSandboxSummary, SessionInfo, TaskResult,
 };
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
@@ -2131,18 +2132,9 @@ impl Config {
     }
 
     fn safe_summary(&self) -> SafeConfigSummary {
+        let write_roots = safe_write_roots(self);
         SafeConfigSummary {
-            workspace_root: if self.workspace_root
-                == agentic_home().unwrap_or_default().join("workspace")
-            {
-                "default".to_string()
-            } else {
-                self.workspace_root
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .map(|name| format!("workspace:{name}"))
-                    .unwrap_or_else(|| "configured".to_string())
-            },
+            workspace_root: workspace_root_summary(&self.workspace_root),
             sandbox: SafeSandboxSummary {
                 enabled: self.sandbox.enabled,
                 mode: if self.sandbox.enabled {
@@ -2153,29 +2145,121 @@ impl Config {
                 .to_string(),
             },
             path_policy: SafePathPolicySummary {
-                write_root_count: effective_write_root_count(self),
+                write_root_count: write_roots.len(),
                 read_only_root_count: self.path_policy.read_only_roots.len(),
                 deny_root_count: self.path_policy.deny_roots.len(),
+                write_roots,
+                read_only_roots: safe_path_roots(
+                    &self.path_policy.read_only_roots,
+                    &self.workspace_root,
+                    "configured",
+                ),
+                deny_roots: safe_path_roots(
+                    &self.path_policy.deny_roots,
+                    &self.workspace_root,
+                    "configured",
+                ),
             },
             policy_rule_counts: PolicyCounts {
                 allow: self.policy.allow.len(),
                 confirm: self.policy.confirm.len(),
                 deny: self.policy.deny.len(),
             },
+            policy_rules: SafePolicyRules {
+                allow: safe_rules(&self.policy.allow),
+                confirm: safe_rules(&self.policy.confirm),
+                deny: safe_rules(&self.policy.deny),
+                builtins: SafeBuiltinPolicyRules {
+                    confirm: safe_rules(&builtin_rules(PolicyDecision::Confirm)),
+                    deny: safe_rules(&builtin_rules(PolicyDecision::Deny)),
+                },
+            },
             confirmation_provider: self.confirmation_provider.provider.clone(),
         }
     }
 }
 
-fn effective_write_root_count(config: &Config) -> usize {
-    config.path_policy.write_roots.len()
-        + usize::from(
-            !config
-                .path_policy
-                .write_roots
-                .iter()
-                .any(|root| paths_match(root, &config.workspace_root)),
-        )
+fn workspace_root_summary(workspace_root: &Path) -> String {
+    if *workspace_root == agentic_home().unwrap_or_default().join("workspace") {
+        "default".to_string()
+    } else {
+        workspace_root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| format!("workspace:{name}"))
+            .unwrap_or_else(|| "configured".to_string())
+    }
+}
+
+fn safe_write_roots(config: &Config) -> Vec<SafePathRoot> {
+    let mut has_workspace_root = false;
+    let mut roots = config
+        .path_policy
+        .write_roots
+        .iter()
+        .map(|root| {
+            let is_workspace_root = paths_match(root, &config.workspace_root);
+            has_workspace_root |= is_workspace_root;
+            SafePathRoot {
+                path: safe_path_display(root, &config.workspace_root),
+                source: if is_workspace_root {
+                    "workspaceRoot"
+                } else {
+                    "configured"
+                }
+                .to_string(),
+            }
+        })
+        .collect::<Vec<_>>();
+    if !has_workspace_root {
+        roots.insert(
+            0,
+            SafePathRoot {
+                path: "workspace".to_string(),
+                source: "workspaceRoot".to_string(),
+            },
+        );
+    }
+    roots
+}
+
+fn safe_path_roots(roots: &[PathBuf], workspace_root: &Path, source: &str) -> Vec<SafePathRoot> {
+    roots
+        .iter()
+        .map(|root| SafePathRoot {
+            path: safe_path_display(root, workspace_root),
+            source: source.to_string(),
+        })
+        .collect()
+}
+
+fn safe_path_display(path: &Path, workspace_root: &Path) -> String {
+    if paths_match(path, workspace_root) {
+        return "workspace".to_string();
+    }
+    let raw = path.to_string_lossy().to_string();
+    if raw == "~" || raw.starts_with("~/") {
+        return raw;
+    }
+    if let Some(home) = dirs::home_dir() {
+        if let Ok(relative) = path.strip_prefix(&home) {
+            if relative.as_os_str().is_empty() {
+                return "~".to_string();
+            }
+            return format!("~/{}", relative.to_string_lossy());
+        }
+    }
+    raw
+}
+
+fn safe_rules(rules: &[Rule]) -> Vec<SafeRule> {
+    rules
+        .iter()
+        .map(|rule| SafeRule {
+            program: rule.program.clone(),
+            args_prefix: rule.args_prefix.clone(),
+        })
+        .collect()
 }
 
 fn default_path_policy(workspace_root: &Path) -> PathPolicyConfig {
@@ -2322,6 +2406,102 @@ mod tests {
         assert!(rule.matches("python", &["-c".to_string(), "print(1)".to_string()]));
         assert!(!rule.matches("python3", &["-c".to_string()]));
         assert!(!rule.matches("python", &["script.py".to_string()]));
+    }
+
+    #[test]
+    fn safe_summary_includes_path_roots_and_policy_rules() {
+        let root = unique_temp_dir("safe-summary");
+        let workspace = root.join("workspace");
+        let write_root = root.join("write");
+        let read_only_root = root.join("readonly");
+        let deny_root = root.join("deny");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::create_dir_all(&write_root).unwrap();
+        fs::create_dir_all(&read_only_root).unwrap();
+        fs::create_dir_all(&deny_root).unwrap();
+
+        let mut config = Config::default_config().unwrap();
+        config.workspace_root = workspace;
+        config.path_policy = PathPolicyConfig {
+            write_roots: vec![write_root.clone()],
+            read_only_roots: vec![read_only_root.clone()],
+            deny_roots: vec![deny_root.clone()],
+        };
+        config.policy.allow.push(Rule {
+            id: "allow-git-status".to_string(),
+            program: "git".to_string(),
+            args_prefix: vec!["status".to_string()],
+        });
+        config.policy.confirm.push(Rule {
+            id: "confirm-bash".to_string(),
+            program: "bash".to_string(),
+            args_prefix: vec!["-lc".to_string()],
+        });
+        config.policy.deny.push(Rule {
+            id: "deny-rm".to_string(),
+            program: "rm".to_string(),
+            args_prefix: vec!["-rf".to_string()],
+        });
+
+        let summary = config.safe_summary();
+        assert_eq!(summary.path_policy.write_root_count, 2);
+        assert_eq!(summary.path_policy.read_only_root_count, 1);
+        assert_eq!(summary.path_policy.deny_root_count, 1);
+        assert!(summary
+            .path_policy
+            .write_roots
+            .iter()
+            .any(|root| root.path == "workspace" && root.source == "workspaceRoot"));
+        assert!(summary
+            .path_policy
+            .write_roots
+            .iter()
+            .any(|root| root.path.ends_with("/write") && root.source == "configured"));
+        assert!(summary
+            .path_policy
+            .read_only_roots
+            .iter()
+            .any(|root| root.path.ends_with("/readonly") && root.source == "configured"));
+        assert!(summary
+            .path_policy
+            .deny_roots
+            .iter()
+            .any(|root| root.path.ends_with("/deny") && root.source == "configured"));
+
+        assert_eq!(summary.policy_rule_counts.allow, 1);
+        assert_eq!(summary.policy_rule_counts.confirm, 1);
+        assert_eq!(summary.policy_rule_counts.deny, 1);
+        assert!(summary.policy_rules.allow.iter().any(|rule| {
+            rule.program == "git" && rule.args_prefix == vec!["status".to_string()]
+        }));
+        assert!(summary
+            .policy_rules
+            .confirm
+            .iter()
+            .any(|rule| { rule.program == "bash" && rule.args_prefix == vec!["-lc".to_string()] }));
+        assert!(summary
+            .policy_rules
+            .deny
+            .iter()
+            .any(|rule| { rule.program == "rm" && rule.args_prefix == vec!["-rf".to_string()] }));
+        assert!(summary
+            .policy_rules
+            .builtins
+            .confirm
+            .iter()
+            .any(|rule| rule.program == "bash" && rule.args_prefix.is_empty()));
+        assert!(summary
+            .policy_rules
+            .builtins
+            .confirm
+            .iter()
+            .any(|rule| rule.program == "python" && rule.args_prefix == vec!["-c".to_string()]));
+        assert!(summary
+            .policy_rules
+            .builtins
+            .deny
+            .iter()
+            .any(|rule| rule.program == "ssh" && rule.args_prefix.is_empty()));
     }
 
     #[test]

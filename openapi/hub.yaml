@@ -459,7 +459,7 @@ components:
           type: boolean
     SafeConfigSummary:
       type: object
-      required: [workspaceRoot, sandbox, pathPolicy, policyRuleCounts, confirmationProvider]
+      required: [workspaceRoot, sandbox, pathPolicy, policyRuleCounts, policyRules, confirmationProvider]
       additionalProperties: false
       properties:
         workspaceRoot:
@@ -475,7 +475,7 @@ components:
               type: string
         pathPolicy:
           type: object
-          required: [writeRootCount, readOnlyRootCount, denyRootCount]
+          required: [writeRootCount, readOnlyRootCount, denyRootCount, writeRoots, readOnlyRoots, denyRoots]
           additionalProperties: false
           properties:
             writeRootCount:
@@ -484,6 +484,18 @@ components:
               type: integer
             denyRootCount:
               type: integer
+            writeRoots:
+              type: array
+              items:
+                $ref: "#/components/schemas/SafePathRoot"
+            readOnlyRoots:
+              type: array
+              items:
+                $ref: "#/components/schemas/SafePathRoot"
+            denyRoots:
+              type: array
+              items:
+                $ref: "#/components/schemas/SafePathRoot"
         policyRuleCounts:
           type: object
           required: [allow, confirm, deny]
@@ -495,8 +507,61 @@ components:
               type: integer
             deny:
               type: integer
+        policyRules:
+          $ref: "#/components/schemas/SafePolicyRules"
         confirmationProvider:
           type: string
+    SafePathRoot:
+      type: object
+      required: [path, source]
+      additionalProperties: false
+      properties:
+        path:
+          type: string
+        source:
+          type: string
+          enum: [configured, workspaceRoot]
+    SafeRule:
+      type: object
+      required: [program, argsPrefix]
+      additionalProperties: false
+      properties:
+        program:
+          type: string
+        argsPrefix:
+          type: array
+          items:
+            type: string
+    SafePolicyRules:
+      type: object
+      required: [allow, confirm, deny, builtins]
+      additionalProperties: false
+      properties:
+        allow:
+          type: array
+          items:
+            $ref: "#/components/schemas/SafeRule"
+        confirm:
+          type: array
+          items:
+            $ref: "#/components/schemas/SafeRule"
+        deny:
+          type: array
+          items:
+            $ref: "#/components/schemas/SafeRule"
+        builtins:
+          type: object
+          required: [confirm, deny]
+          additionalProperties: false
+          properties:
+            confirm:
+              type: array
+              items:
+                $ref: "#/components/schemas/SafeRule"
+            deny:
+              type: array
+              items:
+                $ref: "#/components/schemas/SafeRule"
     McpListServersRequest:
       type: object
       required: [agentId]

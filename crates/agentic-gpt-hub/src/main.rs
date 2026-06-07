@@ -5,8 +5,8 @@ use agentic_gpt_protocol::{
     AgentMessage, AgentRegistryEntry, BatchExecRequest, BatchExecResult, Capabilities,
     ConfirmationDecision, ConfirmationPayload, ExecRequest, HubCommand, HubInfoAgents,
     HubInfoCounts, HubInfoRemoteConfirmation, HubInfoResponse, HubMessage, McpCallToolRequest,
-    McpListServersRequest, McpListToolsRequest, SafeConfigSummary, SafePathPolicySummary,
-    SafeSandboxSummary, SessionInfo, TaskResult,
+    McpListServersRequest, McpListToolsRequest, SafeBuiltinPolicyRules, SafeConfigSummary,
+    SafePathPolicySummary, SafePolicyRules, SafeSandboxSummary, SessionInfo, TaskResult,
 };
 use anyhow::{Context, Result};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -1434,11 +1434,23 @@ fn default_config_summary() -> SafeConfigSummary {
             write_root_count: 0,
             read_only_root_count: 0,
             deny_root_count: 0,
+            write_roots: Vec::new(),
+            read_only_roots: Vec::new(),
+            deny_roots: Vec::new(),
         },
         policy_rule_counts: agentic_gpt_protocol::PolicyCounts {
             allow: 0,
             confirm: 0,
             deny: 0,
+        },
+        policy_rules: SafePolicyRules {
+            allow: Vec::new(),
+            confirm: Vec::new(),
+            deny: Vec::new(),
+            builtins: SafeBuiltinPolicyRules {
+                confirm: Vec::new(),
+                deny: Vec::new(),
+            },
         },
         confirmation_provider: "unknown".to_string(),
     }
@@ -1721,6 +1733,14 @@ mod tests {
         assert!(openapi.contains("writeRootCount"));
         assert!(openapi.contains("readOnlyRootCount"));
         assert!(openapi.contains("denyRootCount"));
+        assert!(openapi.contains("writeRoots"));
+        assert!(openapi.contains("readOnlyRoots"));
+        assert!(openapi.contains("denyRoots"));
+        assert!(openapi.contains("SafePathRoot:"));
+        assert!(openapi.contains("policyRules:"));
+        assert!(openapi.contains("SafePolicyRules:"));
+        assert!(openapi.contains("SafeRule:"));
+        assert!(openapi.contains("argsPrefix"));
     }
 
     #[test]
@@ -1734,5 +1754,13 @@ mod tests {
         let summary = default_config_summary();
         assert_eq!(summary.workspace_root, "unknown");
         assert_eq!(summary.sandbox.mode, "unknown");
+        assert!(summary.path_policy.write_roots.is_empty());
+        assert!(summary.path_policy.read_only_roots.is_empty());
+        assert!(summary.path_policy.deny_roots.is_empty());
+        assert!(summary.policy_rules.allow.is_empty());
+        assert!(summary.policy_rules.confirm.is_empty());
+        assert!(summary.policy_rules.deny.is_empty());
+        assert!(summary.policy_rules.builtins.confirm.is_empty());
+        assert!(summary.policy_rules.builtins.deny.is_empty());
     }
 }

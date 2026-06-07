@@ -18,10 +18,43 @@ pub struct SafeSandboxSummary {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SafePathRoot {
+    pub path: String,
+    pub source: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SafePathPolicySummary {
     pub write_root_count: usize,
     pub read_only_root_count: usize,
     pub deny_root_count: usize,
+    pub write_roots: Vec<SafePathRoot>,
+    pub read_only_roots: Vec<SafePathRoot>,
+    pub deny_roots: Vec<SafePathRoot>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SafeRule {
+    pub program: String,
+    pub args_prefix: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SafeBuiltinPolicyRules {
+    pub confirm: Vec<SafeRule>,
+    pub deny: Vec<SafeRule>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SafePolicyRules {
+    pub allow: Vec<SafeRule>,
+    pub confirm: Vec<SafeRule>,
+    pub deny: Vec<SafeRule>,
+    pub builtins: SafeBuiltinPolicyRules,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -31,6 +64,7 @@ pub struct SafeConfigSummary {
     pub sandbox: SafeSandboxSummary,
     pub path_policy: SafePathPolicySummary,
     pub policy_rule_counts: PolicyCounts,
+    pub policy_rules: SafePolicyRules,
     pub confirmation_provider: String,
 }
 
