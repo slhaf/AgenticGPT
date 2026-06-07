@@ -1654,8 +1654,110 @@ async fn request_batch_confirmation(
     needs_confirmation: &[PreparedBatchElement],
     all_elements: &[PreparedBatchElement],
 ) -> String {
-    let args = vec![batch_confirmation_preview(needs_confirmation, all_elements)];
-    request_confirmation(state, config, confirm_method, "batchExec", &args).await
+    let configured_provider = config.confirmation_provider.provider.as_str();
+    let provider = confirm_method
+        .filter(|method| !method.trim().is_empty())
+        .unwrap_or(configured_provider);
+    let provider = if provider == "default" {
+        configured_provider
+    } else if provider == "freedesktopThenHub" {
+        "freedesktop-then-hub"
+    } else {
+        provider
+    };
+    let preview = batch_confirmation_preview(needs_confirmation, all_elements);
+    if provider == "freedesktop" || provider == "freedesktop-then-hub" {
+        let local =
+            request_freedesktop_batch_confirmation(config, &preview, needs_confirmation).await;
+        if local == "confirmation_provider_unavailable" && provider == "freedesktop-then-hub" {
+            return request_hub_batch_confirmation(state, &preview, needs_confirmation).await;
+        }
+        return local;
+    }
+    if provider == "hub" {
+        return request_hub_batch_confirmation(state, &preview, needs_confirmation).await;
+    }
+    "confirmation_provider_unavailable".to_string()
+}
+
+async fn request_freedesktop_batch_confirmation(
+    config: &Config,
+    preview: &str,
+    needs_confirmation: &[PreparedBatchElement],
+) -> String {
+    let supports_actions = tokio::task::spawn_blocking(|| {
+        notify_rust::get_capabilities()
+            .map(|capabilities| {
+                capabilities
+                    .iter()
+                    .any(|capability| capability == "actions")
+            })
+            .unwrap_or(false)
+    })
+    .await
+    .unwrap_or(false);
+    if !supports_actions {
+        return "confirmation_provider_unavailable".to_string();
+    }
+    let has_risky_file_mutation = needs_confirmation
+        .iter()
+        .any(|element| risky_file_mutation(&element.program));
+    let warning = if !config.sandbox.enabled && has_risky_file_mutation {
+        "\nWARNING: bubblewrap is disabled; this batch includes file mutation commands with broader host visibility."
+    } else {
+        ""
+    };
+    let body = format!("{preview}{warning}");
+    let provider = notify_rust::Notification::new()
+        .summary("Agentic GPT batch confirmation")
+        .body(&body)
+        .action("allow_once", "Allow batch once")
+        .action("deny", "Deny batch")
+        .timeout((CONFIRM_TIMEOUT_SECS * 1000) as i32)
+        .show();
+    match provider {
+        Ok(handle) => {
+            let action = tokio::task::spawn_blocking(move || {
+                let mut selected = "timeout".to_string();
+                handle.wait_for_action(|action| selected = action.to_string());
+                selected
+            })
+            .await
+            .unwrap_or_else(|_| "timeout".to_string());
+            if action == "allow_once" {
+                action
+            } else {
+                "deny".to_string()
+            }
+        }
+        Err(_) => "confirmation_provider_unavailable".to_string(),
+    }
+}
+
+async fn request_hub_batch_confirmation(
+    state: &AppState,
+    preview: &str,
+    needs_confirmation: &[PreparedBatchElement],
+) -> String {
+    let risk = if needs_confirmation
+        .iter()
+        .any(|element| risk_level(&element.program) == "HIGH")
+    {
+        "HIGH"
+    } else {
+        "MEDIUM"
+    };
+    let payload = ConfirmationPayload {
+        program: "batchExec".to_string(),
+        args: Vec::new(),
+        command_preview: truncate_chars(preview, 1000),
+        risk_level: risk.to_string(),
+        reason: "Batch contains command(s) matching confirm policy".to_string(),
+        kind: Some("batchExec".to_string()),
+        server_id: None,
+        tool_name: None,
+    };
+    request_hub_confirmation_payload(state, payload).await
 }
 
 async fn request_confirmation(
@@ -1751,13 +1853,6 @@ async fn request_hub_confirmation(
     program: &str,
     args: &[String],
 ) -> String {
-    let request_id = format!("confirm_req_{}", Uuid::new_v4().simple());
-    let (tx, rx) = oneshot::channel();
-    state
-        .pending_confirmations
-        .lock()
-        .await
-        .insert(request_id.clone(), tx);
     let payload = ConfirmationPayload {
         program: program.to_string(),
         args: args.to_vec(),
@@ -1768,6 +1863,20 @@ async fn request_hub_confirmation(
         server_id: None,
         tool_name: None,
     };
+    request_hub_confirmation_payload(state, payload).await
+}
+
+async fn request_hub_confirmation_payload(
+    state: &AppState,
+    payload: ConfirmationPayload,
+) -> String {
+    let request_id = format!("confirm_req_{}", Uuid::new_v4().simple());
+    let (tx, rx) = oneshot::channel();
+    state
+        .pending_confirmations
+        .lock()
+        .await
+        .insert(request_id.clone(), tx);
     let config = state.config.read().await.clone();
     let message = AgentMessage::ConfirmationRequest {
         request_id: request_id.clone(),
