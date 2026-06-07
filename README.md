@@ -11,7 +11,7 @@ ChatGPT Actions / ChatGPT Apps MCP
   -> local process / session / confirmation / MCP bridge / sandbox
 ```
 
-The old Cloudflare Worker implementation remains under `apps/worker` as legacy code, but new work should target the Rust Hub.
+The old Cloudflare Worker implementation was moved out of `main`; see branch `legacy/cf-worker-before-removal` if the historical Cloudflare-only Hub is needed. New work should target the Rust Hub.
 
 ## Layout
 
@@ -21,7 +21,6 @@ The old Cloudflare Worker implementation remains under `apps/worker` as legacy c
 - `openapi/hub.yaml`: Custom GPT Actions schema for the Rust Hub.
 - `docs/interfaces.md`: Public interface map for Actions, Apps MCP, and Local Agent WebSocket.
 - `docs/operations.md`: Local verification, smoke tests, deployment checks, and safety invariants.
-- `apps/worker`: Legacy Cloudflare Worker implementation.
 - `dist`: release artifact output.
 
 ## Hub
@@ -100,15 +99,22 @@ See:
 ## Verification
 
 ```bash
+cargo fmt
 cargo test --workspace
-pnpm --filter worker test
 cargo check --workspace
+python3 -c "import yaml; yaml.safe_load(open('openapi/hub.yaml')); print('openapi yaml ok')"
 ```
 
 ## Release Artifacts
 
 ```bash
-pnpm dist:linux
+mkdir -p dist/x86_64-unknown-linux-gnu dist/aarch64-unknown-linux-gnu
+cross build --release --target x86_64-unknown-linux-gnu --workspace
+cross build --release --target aarch64-unknown-linux-gnu --workspace
+cp target/x86_64-unknown-linux-gnu/release/agentic-gpt dist/x86_64-unknown-linux-gnu/agentic-gpt
+cp target/x86_64-unknown-linux-gnu/release/agentic-gpt-hub dist/x86_64-unknown-linux-gnu/agentic-gpt-hub
+cp target/aarch64-unknown-linux-gnu/release/agentic-gpt dist/aarch64-unknown-linux-gnu/agentic-gpt
+cp target/aarch64-unknown-linux-gnu/release/agentic-gpt-hub dist/aarch64-unknown-linux-gnu/agentic-gpt-hub
 ```
 
 Artifacts are written to:
