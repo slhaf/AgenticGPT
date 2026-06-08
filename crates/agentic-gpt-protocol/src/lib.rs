@@ -76,6 +76,13 @@ pub struct Capabilities {
     pub notification_actions: bool,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentRole {
+    Normal,
+    Room,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HubInfoRemoteConfirmation {
@@ -190,6 +197,131 @@ pub struct McpCallToolRequest {
     pub tool_name: String,
     #[serde(default)]
     pub arguments: serde_json::Value,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum PassageSignificance {
+    Normal,
+    Anchor,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct Passage {
+    pub id: String,
+    pub datetime: DateTime<Utc>,
+    pub scope: String,
+    pub significance: PassageSignificance,
+    #[serde(rename = "abstract")]
+    pub abstract_text: String,
+    pub content: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PassagePreview {
+    pub id: String,
+    pub datetime: DateTime<Utc>,
+    pub scope: String,
+    pub significance: PassageSignificance,
+    #[serde(rename = "abstract")]
+    pub abstract_text: String,
+    pub content_preview: String,
+    pub tags: Vec<String>,
+    pub display_mode: String,
+    pub truncated: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotebookCurrent {
+    pub scope: String,
+    pub updated_at: DateTime<Utc>,
+    pub source_passage_id: String,
+    #[serde(rename = "abstract")]
+    pub abstract_text: String,
+    pub content: String,
+    pub tags: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotebookAppendRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub datetime: Option<DateTime<Utc>>,
+    pub scope: String,
+    pub significance: PassageSignificance,
+    #[serde(rename = "abstract")]
+    pub abstract_text: String,
+    pub content: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotebookAppendResponse {
+    pub id: String,
+    pub path: String,
+    pub created: bool,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotebookRecentRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub days: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub significance: Option<PassageSignificance>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotebookSelectExactRequest {
+    pub year: i32,
+    pub month: u32,
+    pub day: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotebookSearchRequest {
+    pub query: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotebookCurrentRequest {
+    pub scope: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotebookPassagesResponse {
+    pub passages: Vec<PassagePreview>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotebookCurrentResponse {
+    pub current: Option<NotebookCurrent>,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -337,12 +469,38 @@ pub enum HubCommand {
         request_id: String,
         payload: McpCallToolRequest,
     },
+    #[serde(rename = "room.notebook.append")]
+    RoomNotebookAppend {
+        request_id: String,
+        payload: NotebookAppendRequest,
+    },
+    #[serde(rename = "room.notebook.recent")]
+    RoomNotebookRecent {
+        request_id: String,
+        payload: NotebookRecentRequest,
+    },
+    #[serde(rename = "room.notebook.selectExact")]
+    RoomNotebookSelectExact {
+        request_id: String,
+        payload: NotebookSelectExactRequest,
+    },
+    #[serde(rename = "room.notebook.search")]
+    RoomNotebookSearch {
+        request_id: String,
+        payload: NotebookSearchRequest,
+    },
+    #[serde(rename = "room.notebook.current")]
+    RoomNotebookCurrent {
+        request_id: String,
+        payload: NotebookCurrentRequest,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentMessage {
     Hello {
+        role: AgentRole,
         #[serde(rename = "configSummary")]
         config_summary: SafeConfigSummary,
     },

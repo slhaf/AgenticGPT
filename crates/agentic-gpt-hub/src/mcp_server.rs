@@ -1,6 +1,7 @@
 use agentic_gpt_protocol::{
     BatchExecRequest, ExecElement, ExecRequest, HubCommand, McpCallToolRequest,
-    McpListToolsRequest, SessionInfo,
+    McpListToolsRequest, NotebookAppendRequest, NotebookCurrentRequest, NotebookRecentRequest,
+    NotebookSearchRequest, NotebookSelectExactRequest, PassageSignificance, SessionInfo,
 };
 use axum::extract::{Request, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -18,8 +19,8 @@ use serde_json::{json, Map, Value};
 
 use crate::{
     cached_session, default_config_summary, random_id, registry_entries, registry_entry,
-    request_agent, timeout_batch_result, timeout_task_result, HubState, MAX_WAIT_SECONDS,
-    REQUEST_TIMEOUT_SECS,
+    request_active_room, request_agent, timeout_batch_result, timeout_task_result, HubState,
+    RoomRouteError, MAX_WAIT_SECONDS, REQUEST_TIMEOUT_SECS,
 };
 
 #[derive(Clone)]
@@ -168,6 +169,31 @@ async fn call_app_tool(server: &AgenticMcpServer, params: Value) -> Result<Value
         "mcpCallTool" => {
             server
                 .mcp_call_tool(Parameters(decode_args(arguments)?))
+                .await
+        }
+        "room.notebook.append" => {
+            server
+                .room_notebook_append(Parameters(decode_args(arguments)?))
+                .await
+        }
+        "room.notebook.recent" => {
+            server
+                .room_notebook_recent(Parameters(decode_args(arguments)?))
+                .await
+        }
+        "room.notebook.selectExact" => {
+            server
+                .room_notebook_select_exact(Parameters(decode_args(arguments)?))
+                .await
+        }
+        "room.notebook.search" => {
+            server
+                .room_notebook_search(Parameters(decode_args(arguments)?))
+                .await
+        }
+        "room.notebook.current" => {
+            server
+                .room_notebook_current(Parameters(decode_args(arguments)?))
                 .await
         }
         _ => return Err(format!("Unknown tool: {name}")),
@@ -619,6 +645,156 @@ impl AgenticMcpServer {
         );
         Ok(result_from_value(value))
     }
+
+    #[tool(
+        name = "room.notebook.append",
+        description = "Append an explicit passage to the generic room notebook."
+    )]
+    async fn room_notebook_append(
+        &self,
+        params: Parameters<RoomNotebookAppendArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let params = params.0;
+        let payload = NotebookAppendRequest {
+            datetime: params
+                .datetime
+                .map(|value| {
+                    chrono::DateTime::parse_from_rfc3339(&value)
+                        .map(|datetime| datetime.with_timezone(&chrono::Utc))
+                        .map_err(|error| mcp_invalid_params("invalid_datetime", error.to_string()))
+                })
+                .transpose()?,
+            scope: params.scope,
+            significance: parse_significance(&params.significance)?,
+            abstract_text: params.abstract_text,
+            content: params.content,
+            tags: params.tags.unwrap_or_default(),
+        };
+        let value = request_active_room(
+            &self.state,
+            HubCommand::RoomNotebookAppend {
+                request_id: random_id("req"),
+                payload: payload.clone(),
+            },
+            REQUEST_TIMEOUT_SECS,
+        )
+        .await
+        .unwrap_or_else(room_route_error_value);
+        Ok(result_from_value(value))
+    }
+
+    #[tool(
+        name = "room.notebook.recent",
+        description = "Return recent passages from the generic room notebook."
+    )]
+    async fn room_notebook_recent(
+        &self,
+        params: Parameters<RoomNotebookRecentArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let params = params.0;
+        let payload = NotebookRecentRequest {
+            scope: params.scope,
+            days: params.days,
+            significance: params
+                .significance
+                .as_deref()
+                .map(parse_significance)
+                .transpose()?,
+            limit: params.limit,
+        };
+        let value = request_active_room(
+            &self.state,
+            HubCommand::RoomNotebookRecent {
+                request_id: random_id("req"),
+                payload: payload.clone(),
+            },
+            REQUEST_TIMEOUT_SECS,
+        )
+        .await
+        .unwrap_or_else(room_route_error_value);
+        Ok(result_from_value(value))
+    }
+
+    #[tool(
+        name = "room.notebook.selectExact",
+        description = "Return passages for one exact room-timezone calendar day."
+    )]
+    async fn room_notebook_select_exact(
+        &self,
+        params: Parameters<RoomNotebookSelectExactArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let params = params.0;
+        let payload = NotebookSelectExactRequest {
+            year: params.year,
+            month: params.month,
+            day: params.day,
+            scope: params.scope,
+            limit: params.limit,
+        };
+        let value = request_active_room(
+            &self.state,
+            HubCommand::RoomNotebookSelectExact {
+                request_id: random_id("req"),
+                payload: payload.clone(),
+            },
+            REQUEST_TIMEOUT_SECS,
+        )
+        .await
+        .unwrap_or_else(room_route_error_value);
+        Ok(result_from_value(value))
+    }
+
+    #[tool(
+        name = "room.notebook.search",
+        description = "Search the generic room notebook with simple bounded JSONL scanning."
+    )]
+    async fn room_notebook_search(
+        &self,
+        params: Parameters<RoomNotebookSearchArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let params = params.0;
+        let payload = NotebookSearchRequest {
+            query: params.query,
+            scope: params.scope,
+            limit: params.limit,
+        };
+        let value = request_active_room(
+            &self.state,
+            HubCommand::RoomNotebookSearch {
+                request_id: random_id("req"),
+                payload: payload.clone(),
+            },
+            REQUEST_TIMEOUT_SECS,
+        )
+        .await
+        .unwrap_or_else(room_route_error_value);
+        Ok(result_from_value(value))
+    }
+
+    #[tool(
+        name = "room.notebook.current",
+        description = "Return the current recoverable state for one generic room notebook scope."
+    )]
+    async fn room_notebook_current(
+        &self,
+        params: Parameters<RoomNotebookCurrentArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let params = params.0;
+        let payload = NotebookCurrentRequest {
+            scope: params.scope,
+        };
+        let value = request_active_room(
+            &self.state,
+            HubCommand::RoomNotebookCurrent {
+                request_id: random_id("req"),
+                payload: payload.clone(),
+            },
+            REQUEST_TIMEOUT_SECS,
+        )
+        .await
+        .unwrap_or_else(room_route_error_value);
+        Ok(result_from_value(value))
+    }
 }
 
 impl AgenticMcpServer {
@@ -711,6 +887,61 @@ struct McpCallToolArgs {
     arguments: Option<Value>,
 }
 
+#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct RoomNotebookAppendArgs {
+    #[serde(default)]
+    datetime: Option<String>,
+    scope: String,
+    significance: String,
+    #[serde(rename = "abstract")]
+    abstract_text: String,
+    content: String,
+    #[serde(default)]
+    tags: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct RoomNotebookRecentArgs {
+    #[serde(default)]
+    scope: Option<String>,
+    #[serde(default)]
+    days: Option<u32>,
+    #[serde(default)]
+    significance: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct RoomNotebookSelectExactArgs {
+    year: i32,
+    month: u32,
+    day: u32,
+    #[serde(default)]
+    scope: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct RoomNotebookSearchArgs {
+    query: String,
+    #[serde(default)]
+    scope: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct RoomNotebookCurrentArgs {
+    scope: String,
+}
+
 fn ok_json(value: Value) -> CallToolResult {
     CallToolResult::structured(value)
 }
@@ -723,10 +954,56 @@ fn result_from_value(value: Value) -> CallToolResult {
     }
 }
 
-fn mcp_invalid_params(code: &'static str, message: &'static str) -> ErrorData {
-    ErrorData::invalid_params(message, Some(json!({ "code": code })))
+fn room_route_error_value(error: RoomRouteError) -> Value {
+    match error {
+        RoomRouteError::NotActive => json!({
+            "error": { "code": "room_not_active", "message": "no active room agent" }
+        }),
+        RoomRouteError::StateConflict => json!({
+            "error": { "code": "room_state_conflict", "message": "active room state is inconsistent" }
+        }),
+        RoomRouteError::Timeout(reason) => json!({
+            "error": { "code": "room_notebook_timeout", "message": reason }
+        }),
+    }
+}
+
+fn parse_significance(value: &str) -> Result<PassageSignificance, ErrorData> {
+    match value {
+        "NORMAL" => Ok(PassageSignificance::Normal),
+        "ANCHOR" => Ok(PassageSignificance::Anchor),
+        _ => Err(mcp_invalid_params(
+            "invalid_significance",
+            "significance must be NORMAL or ANCHOR",
+        )),
+    }
+}
+
+fn mcp_invalid_params(code: &'static str, message: impl ToString) -> ErrorData {
+    ErrorData::invalid_params(message.to_string(), Some(json!({ "code": code })))
 }
 
 fn mcp_internal_error(code: &'static str, message: String) -> ErrorData {
     ErrorData::internal_error(message, Some(json!({ "code": code })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn room_notebook_mcp_input_schemas_do_not_include_agent_id() {
+        let schemas = [
+            serde_json::to_string(&rmcp::schemars::schema_for!(RoomNotebookAppendArgs)).unwrap(),
+            serde_json::to_string(&rmcp::schemars::schema_for!(RoomNotebookRecentArgs)).unwrap(),
+            serde_json::to_string(&rmcp::schemars::schema_for!(RoomNotebookSelectExactArgs))
+                .unwrap(),
+            serde_json::to_string(&rmcp::schemars::schema_for!(RoomNotebookSearchArgs)).unwrap(),
+            serde_json::to_string(&rmcp::schemars::schema_for!(RoomNotebookCurrentArgs)).unwrap(),
+        ];
+        for schema in schemas {
+            assert!(!schema.contains("agentId"));
+            assert!(!schema.contains("agent_id"));
+        }
+    }
 }

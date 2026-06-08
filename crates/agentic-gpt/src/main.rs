@@ -1,9 +1,10 @@
 mod mcp;
+mod notebook;
 
 use agentic_gpt_protocol::{
-    AgentMessage, BatchElementResult, BatchExecRequest, BatchExecResult, ConfirmationDecision,
-    ConfirmationPayload, ExecElement, ExecRequest, HubCommand, HubMessage, PolicyCounts,
-    SafeBuiltinPolicyRules, SafeConfigSummary, SafePathPolicySummary, SafePathRoot,
+    AgentMessage, AgentRole, BatchElementResult, BatchExecRequest, BatchExecResult,
+    ConfirmationDecision, ConfirmationPayload, ExecElement, ExecRequest, HubCommand, HubMessage,
+    PolicyCounts, SafeBuiltinPolicyRules, SafeConfigSummary, SafePathPolicySummary, SafePathRoot,
     SafePolicyRules, SafeRule, SafeSandboxSummary, SessionInfo, TaskResult,
 };
 use anyhow::{anyhow, Context, Result};
@@ -54,6 +55,10 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     Run {
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+    RunAsRoom {
         #[arg(long)]
         config: Option<PathBuf>,
     },
@@ -145,6 +150,28 @@ enum PolicyDecision {
     Deny,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RunMode {
+    Normal,
+    Room,
+}
+
+impl RunMode {
+    fn role(self) -> AgentRole {
+        match self {
+            RunMode::Normal => AgentRole::Normal,
+            RunMode::Room => AgentRole::Room,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            RunMode::Normal => "normal",
+            RunMode::Room => "room",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Config {
@@ -165,6 +192,8 @@ struct Config {
     path_policy: PathPolicyConfig,
     policy: PolicyConfig,
     limits: LimitsConfig,
+    #[serde(default = "default_room_config")]
+    room: RoomConfig,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -215,6 +244,14 @@ struct LimitsConfig {
     session_idle_timeout_secs: u64,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RoomConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    notebook_root: Option<PathBuf>,
+    timezone: String,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AuditRecord {
@@ -238,10 +275,12 @@ struct AuditRecord {
 struct AppState {
     config_path: PathBuf,
     config: Arc<RwLock<Config>>,
+    run_mode: RunMode,
     sessions: Arc<Mutex<HashMap<String, ManagedSession>>>,
     hub_sender: Arc<Mutex<Option<mpsc::UnboundedSender<Message>>>>,
     pending_confirmations: Arc<Mutex<HashMap<String, oneshot::Sender<String>>>>,
     temporary_mcp_allows: Arc<Mutex<Vec<TemporaryMcpAllow>>>,
+    notebook_writes: Arc<Mutex<()>>,
 }
 
 #[derive(Clone, Debug)]
@@ -295,15 +334,17 @@ async fn main() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let cli = Cli::parse();
     match cli.command {
-        Commands::Run { config } => run(config_path(config)).await,
+        Commands::Run { config } => run(config_path(config), RunMode::Normal).await,
+        Commands::RunAsRoom { config } => run(config_path(config), RunMode::Room).await,
         Commands::Config { config, command } => handle_config(config_path(config), command).await,
     }
 }
 
-async fn run(config_path: PathBuf) -> Result<()> {
+async fn run(config_path: PathBuf, run_mode: RunMode) -> Result<()> {
     log_info(format!(
-        "agentic-gpt starting; config={}",
-        config_path.display()
+        "agentic-gpt starting; mode={}; config={}",
+        run_mode.label(),
+        config_path.display(),
     ));
     ensure_parent(&config_path)?;
     if !config_path.exists() {
@@ -326,10 +367,12 @@ async fn run(config_path: PathBuf) -> Result<()> {
     let state = AppState {
         config_path: config_path.clone(),
         config: Arc::new(RwLock::new(initial)),
+        run_mode,
         sessions: Arc::new(Mutex::new(HashMap::new())),
         hub_sender: Arc::new(Mutex::new(None)),
         pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
         temporary_mcp_allows: Arc::new(Mutex::new(Vec::new())),
+        notebook_writes: Arc::new(Mutex::new(())),
     };
     tokio::spawn(watch_config(state.clone()));
     connect_loop(state).await
@@ -381,6 +424,7 @@ async fn connect_loop(state: AppState) -> Result<()> {
                     }
                 });
                 let hello = AgentMessage::Hello {
+                    role: state.run_mode.role(),
                     config_summary: config.safe_summary(),
                 };
                 tx.send(Message::Text(serde_json::to_string(&hello)?.into()))?;
@@ -699,8 +743,97 @@ async fn handle_hub_command(state: AppState, command: HubCommand) -> Result<()> 
             };
             send_response(&state, &request_id, result).await?;
         }
+        HubCommand::RoomNotebookAppend {
+            request_id,
+            payload,
+        } => {
+            let result = if state.run_mode != RunMode::Room {
+                room_agent_required_error()
+            } else {
+                match notebook::append(&state, payload).await {
+                    Ok(result) => serde_json::to_value(result)?,
+                    Err(error) => serde_json::json!({
+                        "error": { "code": "room_notebook_append_failed", "message": error.to_string() }
+                    }),
+                }
+            };
+            send_response(&state, &request_id, result).await?;
+        }
+        HubCommand::RoomNotebookRecent {
+            request_id,
+            payload,
+        } => {
+            let result = if state.run_mode != RunMode::Room {
+                room_agent_required_error()
+            } else {
+                match notebook::recent(&state, payload).await {
+                    Ok(result) => serde_json::to_value(result)?,
+                    Err(error) => serde_json::json!({
+                        "error": { "code": "room_notebook_recent_failed", "message": error.to_string() }
+                    }),
+                }
+            };
+            send_response(&state, &request_id, result).await?;
+        }
+        HubCommand::RoomNotebookSelectExact {
+            request_id,
+            payload,
+        } => {
+            let result = if state.run_mode != RunMode::Room {
+                room_agent_required_error()
+            } else {
+                match notebook::select_exact(&state, payload).await {
+                    Ok(result) => serde_json::to_value(result)?,
+                    Err(error) => serde_json::json!({
+                        "error": { "code": "room_notebook_select_exact_failed", "message": error.to_string() }
+                    }),
+                }
+            };
+            send_response(&state, &request_id, result).await?;
+        }
+        HubCommand::RoomNotebookSearch {
+            request_id,
+            payload,
+        } => {
+            let result = if state.run_mode != RunMode::Room {
+                room_agent_required_error()
+            } else {
+                match notebook::search(&state, payload).await {
+                    Ok(result) => serde_json::to_value(result)?,
+                    Err(error) => serde_json::json!({
+                        "error": { "code": "room_notebook_search_failed", "message": error.to_string() }
+                    }),
+                }
+            };
+            send_response(&state, &request_id, result).await?;
+        }
+        HubCommand::RoomNotebookCurrent {
+            request_id,
+            payload,
+        } => {
+            let result = if state.run_mode != RunMode::Room {
+                room_agent_required_error()
+            } else {
+                match notebook::current(&state, payload).await {
+                    Ok(result) => serde_json::to_value(result)?,
+                    Err(error) => serde_json::json!({
+                        "error": { "code": "room_notebook_current_failed", "message": error.to_string() }
+                    }),
+                }
+            };
+            send_response(&state, &request_id, result).await?;
+        }
     }
     Ok(())
+}
+
+fn room_agent_required_error() -> serde_json::Value {
+    serde_json::json!({
+        "error": {
+            "code": "room_agent_required",
+            "message": "room notebook commands require run-as-room"
+        }
+    })
 }
 
 async fn send_session(state: &AppState, session: &SessionInfo) -> Result<()> {
@@ -753,8 +886,9 @@ async fn run_exec_task(state: AppState, task_id: String, request: ExecRequest) -
     };
     let config = state.config.read().await.clone();
     let started = Instant::now();
-    let decision = policy_decision(
+    let decision = policy_decision_for_mode(
         &config,
+        state.run_mode,
         &request.program,
         &request.args,
         request.need_confirm,
@@ -2215,17 +2349,27 @@ fn policy_decision(
     args: &[String],
     need_confirm: bool,
 ) -> PolicyDecision {
+    policy_decision_for_mode(config, RunMode::Normal, program, args, need_confirm)
+}
+
+fn policy_decision_for_mode(
+    config: &Config,
+    run_mode: RunMode,
+    program: &str,
+    args: &[String],
+    need_confirm: bool,
+) -> PolicyDecision {
     let mut decision = if need_confirm {
         PolicyDecision::Confirm
     } else {
         PolicyDecision::Allow
     };
-    for rule in builtin_rules(PolicyDecision::Confirm) {
+    for rule in builtin_rules(run_mode, PolicyDecision::Confirm) {
         if rule.matches(program, args) {
             decision = decision.max(PolicyDecision::Confirm);
         }
     }
-    for rule in builtin_rules(PolicyDecision::Deny) {
+    for rule in builtin_rules(run_mode, PolicyDecision::Deny) {
         if rule.matches(program, args) {
             decision = decision.max(PolicyDecision::Deny);
         }
@@ -2263,9 +2407,12 @@ impl Rule {
     }
 }
 
-fn builtin_rules(decision: PolicyDecision) -> Vec<Rule> {
+fn builtin_rules(run_mode: RunMode, decision: PolicyDecision) -> Vec<Rule> {
     let programs = match decision {
         PolicyDecision::Deny => vec!["su", "mkfs", "dd", "ssh"],
+        PolicyDecision::Confirm if run_mode == RunMode::Room => {
+            vec!["sudo", "mount", "systemctl", "service", "scp"]
+        }
         PolicyDecision::Confirm => vec![
             "sudo",
             "rm",
@@ -2295,7 +2442,7 @@ fn builtin_rules(decision: PolicyDecision) -> Vec<Rule> {
             args_prefix: vec![],
         })
         .collect::<Vec<_>>();
-    if decision == PolicyDecision::Confirm {
+    if decision == PolicyDecision::Confirm && run_mode == RunMode::Normal {
         rules.push(Rule {
             program: "python".to_string(),
             args_prefix: vec!["-c".to_string()],
@@ -2327,8 +2474,9 @@ async fn start_session(state: AppState, session_id: String, request: ExecRequest
         truncated: false,
         reject_reason: None,
     };
-    let decision = policy_decision(
+    let decision = policy_decision_for_mode(
         &config,
+        state.run_mode,
         &request.program,
         &request.args,
         request.need_confirm,
@@ -2507,6 +2655,8 @@ async fn handle_config(config_path: PathBuf, command: ConfigCommand) -> Result<(
                     config.confirmation_language = normalize_confirmation_language(&value)
                 }
                 "sandbox.enabled" => config.sandbox.enabled = value.parse::<bool>()?,
+                "room.notebookRoot" => config.room.notebook_root = Some(PathBuf::from(value)),
+                "room.timezone" => config.room.timezone = value,
                 "hubUrl" | "workerUrl" => config.hub_url = value,
                 "agentId" => config.agent_id = value,
                 "agentSecret" => config.agent_secret = value,
@@ -2758,6 +2908,7 @@ impl Config {
                 max_active_sessions: 4,
                 session_idle_timeout_secs: 3600,
             },
+            room: default_room_config(),
         })
     }
 
@@ -2824,8 +2975,8 @@ impl Config {
                 confirm: safe_rules(&self.policy.confirm),
                 deny: safe_rules(&self.policy.deny),
                 builtins: SafeBuiltinPolicyRules {
-                    confirm: safe_rules(&builtin_rules(PolicyDecision::Confirm)),
-                    deny: safe_rules(&builtin_rules(PolicyDecision::Deny)),
+                    confirm: safe_rules(&builtin_rules(RunMode::Normal, PolicyDecision::Confirm)),
+                    deny: safe_rules(&builtin_rules(RunMode::Normal, PolicyDecision::Deny)),
                 },
             },
             confirmation_provider: self.confirmation_provider.provider.clone(),
@@ -2914,6 +3065,13 @@ fn safe_rules(rules: &[Rule]) -> Vec<SafeRule> {
             args_prefix: rule.args_prefix.clone(),
         })
         .collect()
+}
+
+fn default_room_config() -> RoomConfig {
+    RoomConfig {
+        notebook_root: None,
+        timezone: "Asia/Shanghai".to_string(),
+    }
 }
 
 fn default_path_policy(workspace_root: &Path) -> PathPolicyConfig {
@@ -3049,6 +3207,76 @@ fn log_line(level: &str, message: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn run_modes_declare_expected_roles() {
+        assert_eq!(RunMode::Normal.role(), AgentRole::Normal);
+        assert_eq!(RunMode::Room.role(), AgentRole::Room);
+    }
+
+    #[test]
+    fn run_as_room_reuses_same_base_config_identity_and_workspace() {
+        let config = Config::default_config().unwrap();
+        assert_eq!(config.agent_id, "laptop");
+        assert_eq!(
+            notebook::notebook_root(&config),
+            config.workspace_root.join("notebook")
+        );
+    }
+
+    #[test]
+    fn configured_room_notebook_root_overrides_default() {
+        let mut config = Config::default_config().unwrap();
+        let root = unique_temp_dir("configured-notebook-root");
+        config.room.notebook_root = Some(root.clone());
+        assert_eq!(notebook::notebook_root(&config), root);
+    }
+
+    #[test]
+    fn room_timezone_defaults_and_can_be_overridden() {
+        let mut config = Config::default_config().unwrap();
+        assert_eq!(config.room.timezone, "Asia/Shanghai");
+        config.room.timezone = "UTC".to_string();
+        assert_eq!(config.room.timezone, "UTC");
+    }
+
+    #[test]
+    fn normal_mode_room_command_error_is_structured() {
+        let value = room_agent_required_error();
+        assert_eq!(value["error"]["code"], "room_agent_required");
+        assert_eq!(
+            value["error"]["message"],
+            "room notebook commands require run-as-room"
+        );
+    }
+
+    #[test]
+    fn room_policy_overlay_differs_from_normal_policy() {
+        let config = Config::default_config().unwrap();
+        assert_eq!(
+            policy_decision_for_mode(&config, RunMode::Normal, "rm", &[], false),
+            PolicyDecision::Confirm
+        );
+        assert_eq!(
+            policy_decision_for_mode(&config, RunMode::Room, "rm", &[], false),
+            PolicyDecision::Allow
+        );
+    }
+
+    #[test]
+    fn room_policy_keeps_high_risk_commands_restricted() {
+        let config = Config::default_config().unwrap();
+        for program in ["sudo", "scp", "mount", "systemctl", "service"] {
+            assert_eq!(
+                policy_decision_for_mode(&config, RunMode::Room, program, &[], false),
+                PolicyDecision::Confirm
+            );
+        }
+        assert_eq!(
+            policy_decision_for_mode(&config, RunMode::Room, "ssh", &[], false),
+            PolicyDecision::Deny
+        );
+    }
 
     #[test]
     fn rule_matches_program_and_args_prefix_structurally() {

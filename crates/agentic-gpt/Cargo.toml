@@ -12,6 +12,7 @@ path = "src/main.rs"
 agentic-gpt-protocol.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
+chrono-tz.workspace = true
 clap.workspace = true
 dirs = "6.0"
 futures-util.workspace = true

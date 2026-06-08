@@ -304,6 +304,122 @@ paths:
           $ref: "#/components/responses/NotFound"
         "504":
           $ref: "#/components/responses/GatewayTimeout"
+  /v1/room/notebook/append:
+    post:
+      operationId: roomNotebookAppend
+      x-openai-isConsequential: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NotebookAppendRequest"
+      responses:
+        "200":
+          description: Appended room notebook passage.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotebookAppendResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+  /v1/room/notebook/recent:
+    post:
+      operationId: roomNotebookRecent
+      x-openai-isConsequential: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NotebookRecentRequest"
+      responses:
+        "200":
+          description: Recent room notebook passages.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotebookPassagesResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+  /v1/room/notebook/selectExact:
+    post:
+      operationId: roomNotebookSelectExact
+      x-openai-isConsequential: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NotebookSelectExactRequest"
+      responses:
+        "200":
+          description: Room notebook passages for one room-timezone calendar day.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotebookPassagesResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+  /v1/room/notebook/search:
+    post:
+      operationId: roomNotebookSearch
+      x-openai-isConsequential: false
+      description: Simple bounded JSONL scan for small notebook datasets. No vector search or index is used in V1.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NotebookSearchRequest"
+      responses:
+        "200":
+          description: Matching room notebook passages.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotebookPassagesResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+  /v1/room/notebook/current:
+    post:
+      operationId: roomNotebookCurrent
+      x-openai-isConsequential: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NotebookCurrentRequest"
+      responses:
+        "200":
+          description: Current recoverable state for a room notebook scope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotebookCurrentResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
 components:
   securitySchemes:
     bearerAuth:
@@ -656,6 +772,179 @@ components:
           properties: {}
         isError:
           type: boolean
+    PassageSignificance:
+      type: string
+      enum: [NORMAL, ANCHOR]
+    NotebookAppendRequest:
+      type: object
+      required: [scope, significance, abstract, content]
+      additionalProperties: false
+      properties:
+        datetime:
+          type: string
+          description: Optional ISO-8601 datetime. Stored as UTC; file partitioning uses configured room timezone.
+        scope:
+          type: string
+          pattern: "^[A-Za-z0-9_.-]+$"
+          description: Path-safe scope. Must not contain '..'.
+        significance:
+          $ref: "#/components/schemas/PassageSignificance"
+        abstract:
+          type: string
+        content:
+          type: string
+        tags:
+          type: array
+          items:
+            type: string
+    NotebookAppendResponse:
+      type: object
+      required: [id, path, created, warnings]
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+        path:
+          type: string
+        created:
+          type: boolean
+        warnings:
+          type: array
+          items:
+            type: string
+    NotebookRecentRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        scope:
+          type: string
+          pattern: "^[A-Za-z0-9_.-]+$"
+        days:
+          type: integer
+          minimum: 1
+          maximum: 30
+          default: 5
+        significance:
+          $ref: "#/components/schemas/PassageSignificance"
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 100
+    NotebookSelectExactRequest:
+      type: object
+      required: [year, month, day]
+      additionalProperties: false
+      properties:
+        year:
+          type: integer
+        month:
+          type: integer
+          minimum: 1
+          maximum: 12
+        day:
+          type: integer
+          minimum: 1
+          maximum: 31
+        scope:
+          type: string
+          pattern: "^[A-Za-z0-9_.-]+$"
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 100
+    NotebookSearchRequest:
+      type: object
+      required: [query]
+      additionalProperties: false
+      properties:
+        query:
+          type: string
+        scope:
+          type: string
+          pattern: "^[A-Za-z0-9_.-]+$"
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 100
+    NotebookCurrentRequest:
+      type: object
+      required: [scope]
+      additionalProperties: false
+      properties:
+        scope:
+          type: string
+          pattern: "^[A-Za-z0-9_.-]+$"
+    NotebookPassagePreview:
+      type: object
+      required: [id, datetime, scope, significance, abstract, contentPreview, tags, displayMode, truncated]
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+        datetime:
+          type: string
+        scope:
+          type: string
+        significance:
+          $ref: "#/components/schemas/PassageSignificance"
+        abstract:
+          type: string
+        contentPreview:
+          type: string
+        tags:
+          type: array
+          items:
+            type: string
+        displayMode:
+          type: string
+          enum: [full, anchor, abstract, search]
+        truncated:
+          type: boolean
+    NotebookPassagesResponse:
+      type: object
+      required: [passages, warnings]
+      additionalProperties: false
+      properties:
+        passages:
+          type: array
+          items:
+            $ref: "#/components/schemas/NotebookPassagePreview"
+        warnings:
+          type: array
+          items:
+            type: string
+    NotebookCurrent:
+      type: object
+      required: [scope, updatedAt, sourcePassageId, abstract, content, tags]
+      additionalProperties: false
+      properties:
+        scope:
+          type: string
+        updatedAt:
+          type: string
+        sourcePassageId:
+          type: string
+        abstract:
+          type: string
+        content:
+          type: string
+        tags:
+          type: array
+          items:
+            type: string
+    NotebookCurrentResponse:
+      type: object
+      required: [current, warnings]
+      additionalProperties: false
+      properties:
+        current:
+          anyOf:
+            - $ref: "#/components/schemas/NotebookCurrent"
+            - type: "null"
+        warnings:
+          type: array
+          items:
+            type: string
     ExecRequest:
       type: object
       required: [agentId, program, args, needConfirm]
