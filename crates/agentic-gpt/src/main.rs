@@ -3596,10 +3596,12 @@ mod tests {
         let state = AppState {
             config_path: root.join("config.json"),
             config: Arc::new(RwLock::new(config)),
+            run_mode: RunMode::Normal,
             sessions: Arc::new(Mutex::new(HashMap::new())),
             hub_sender: Arc::new(Mutex::new(None)),
             pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
             temporary_mcp_allows: Arc::new(Mutex::new(Vec::new())),
+            notebook_writes: Arc::new(Mutex::new(())),
         };
 
         let result = run_batch_task(
