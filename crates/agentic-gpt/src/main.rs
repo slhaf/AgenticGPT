@@ -823,8 +823,56 @@ async fn handle_hub_command(state: AppState, command: HubCommand) -> Result<()> 
             };
             send_response(&state, &request_id, result).await?;
         }
+        HubCommand::RoomNotebookUpdate {
+            request_id,
+            payload,
+        } => {
+            let result = if state.run_mode != RunMode::Room {
+                room_agent_required_error()
+            } else {
+                match notebook::update(&state, payload).await {
+                    Ok(result) => serde_json::to_value(result)?,
+                    Err(error) => notebook_command_error("room_notebook_update_failed", error),
+                }
+            };
+            send_response(&state, &request_id, result).await?;
+        }
+        HubCommand::RoomNotebookRemove {
+            request_id,
+            payload,
+        } => {
+            let result = if state.run_mode != RunMode::Room {
+                room_agent_required_error()
+            } else {
+                match notebook::remove(&state, payload).await {
+                    Ok(result) => serde_json::to_value(result)?,
+                    Err(error) => notebook_command_error("room_notebook_remove_failed", error),
+                }
+            };
+            send_response(&state, &request_id, result).await?;
+        }
     }
     Ok(())
+}
+
+fn notebook_command_error(default_code: &str, error: anyhow::Error) -> serde_json::Value {
+    let message = error.to_string();
+    let code = if message == "not_found" {
+        "not_found"
+    } else if message.starts_with("validation_error")
+        || message.ends_with("_required")
+        || message.ends_with("_too_long")
+    {
+        "validation_error"
+    } else {
+        default_code
+    };
+    serde_json::json!({
+        "error": {
+            "code": code,
+            "message": if code == "not_found" { "passage not found" } else { &message }
+        }
+    })
 }
 
 fn room_agent_required_error() -> serde_json::Value {
@@ -3207,6 +3255,9 @@ fn log_line(level: &str, message: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use agentic_gpt_protocol::{
+        NotebookAppendRequest, NotebookRemoveRequest, NotebookUpdateRequest, PassageSignificance,
+    };
 
     #[test]
     fn run_modes_declare_expected_roles() {
@@ -3248,6 +3299,127 @@ mod tests {
             value["error"]["message"],
             "room notebook commands require run-as-room"
         );
+    }
+
+    fn command_test_state(
+        run_mode: RunMode,
+        workspace_root: PathBuf,
+    ) -> (AppState, mpsc::UnboundedReceiver<Message>) {
+        let mut config = Config::default_config().unwrap();
+        config.workspace_root = workspace_root;
+        let (tx, rx) = mpsc::unbounded_channel();
+        (
+            AppState {
+                config_path: PathBuf::from("test-config.json"),
+                config: Arc::new(RwLock::new(config)),
+                run_mode,
+                sessions: Arc::new(Mutex::new(HashMap::new())),
+                hub_sender: Arc::new(Mutex::new(Some(tx))),
+                pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
+                temporary_mcp_allows: Arc::new(Mutex::new(Vec::new())),
+                notebook_writes: Arc::new(Mutex::new(())),
+            },
+            rx,
+        )
+    }
+
+    async fn recv_response(rx: &mut mpsc::UnboundedReceiver<Message>) -> serde_json::Value {
+        let Message::Text(text) = rx.recv().await.unwrap() else {
+            panic!("expected text response");
+        };
+        let message = serde_json::from_str::<AgentMessage>(&text).unwrap();
+        let AgentMessage::Response { data, .. } = message else {
+            panic!("expected agent response");
+        };
+        data
+    }
+
+    #[tokio::test]
+    async fn normal_mode_rejects_update_and_remove_room_commands() {
+        let workspace = unique_temp_dir("normal-room-update-remove").join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let (state, mut rx) = command_test_state(RunMode::Normal, workspace);
+        handle_hub_command(
+            state.clone(),
+            HubCommand::RoomNotebookUpdate {
+                request_id: "req-update".to_string(),
+                payload: NotebookUpdateRequest {
+                    id: "psg_1".to_string(),
+                    significance: None,
+                    abstract_text: Some("updated".to_string()),
+                    content: None,
+                    tags: None,
+                },
+            },
+        )
+        .await
+        .unwrap();
+        let response = recv_response(&mut rx).await;
+        assert_eq!(response["error"]["code"], "room_agent_required");
+
+        handle_hub_command(
+            state,
+            HubCommand::RoomNotebookRemove {
+                request_id: "req-remove".to_string(),
+                payload: NotebookRemoveRequest {
+                    id: "psg_1".to_string(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+        let response = recv_response(&mut rx).await;
+        assert_eq!(response["error"]["code"], "room_agent_required");
+    }
+
+    #[tokio::test]
+    async fn room_mode_executes_update_and_remove_room_commands() {
+        let workspace = unique_temp_dir("room-update-remove").join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let (state, mut rx) = command_test_state(RunMode::Room, workspace);
+        let appended = notebook::append(
+            &state,
+            NotebookAppendRequest {
+                datetime: None,
+                scope: "agentic".to_string(),
+                significance: PassageSignificance::Anchor,
+                abstract_text: "original".to_string(),
+                content: "details".to_string(),
+                tags: vec![],
+            },
+        )
+        .await
+        .unwrap();
+        handle_hub_command(
+            state.clone(),
+            HubCommand::RoomNotebookUpdate {
+                request_id: "req-update".to_string(),
+                payload: NotebookUpdateRequest {
+                    id: appended.id.clone(),
+                    significance: None,
+                    abstract_text: Some("updated".to_string()),
+                    content: Some("updated details".to_string()),
+                    tags: Some(vec!["tag".to_string()]),
+                },
+            },
+        )
+        .await
+        .unwrap();
+        let response = recv_response(&mut rx).await;
+        assert_eq!(response["updated"], true);
+        assert_eq!(response["id"], appended.id);
+
+        handle_hub_command(
+            state,
+            HubCommand::RoomNotebookRemove {
+                request_id: "req-remove".to_string(),
+                payload: NotebookRemoveRequest { id: appended.id },
+            },
+        )
+        .await
+        .unwrap();
+        let response = recv_response(&mut rx).await;
+        assert_eq!(response["removed"], true);
     }
 
     #[test]

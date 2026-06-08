@@ -420,6 +420,52 @@ paths:
           $ref: "#/components/responses/NotFound"
         "504":
           $ref: "#/components/responses/GatewayTimeout"
+  /v1/room/notebook/update:
+    post:
+      operationId: roomNotebookUpdate
+      x-openai-isConsequential: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NotebookUpdateRequest"
+      responses:
+        "200":
+          description: Updated room notebook passage.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotebookUpdateResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+  /v1/room/notebook/remove:
+    post:
+      operationId: roomNotebookRemove
+      x-openai-isConsequential: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NotebookRemoveRequest"
+      responses:
+        "200":
+          description: Removed room notebook passage.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotebookRemoveResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
 components:
   securitySchemes:
     bearerAuth:
@@ -874,6 +920,57 @@ components:
         scope:
           type: string
           pattern: "^[A-Za-z0-9_.-]+$"
+    NotebookUpdateRequest:
+      type: object
+      required: [id]
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+        significance:
+          $ref: "#/components/schemas/PassageSignificance"
+        abstract:
+          type: string
+        content:
+          type: string
+        tags:
+          type: array
+          items:
+            type: string
+      description: Updates editable passage fields. Datetime and scope are immutable; at least one editable field must be supplied.
+    NotebookUpdateResponse:
+      type: object
+      required: [updated, id, warnings]
+      additionalProperties: false
+      properties:
+        updated:
+          type: boolean
+        id:
+          type: string
+        warnings:
+          type: array
+          items:
+            type: string
+    NotebookRemoveRequest:
+      type: object
+      required: [id]
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+    NotebookRemoveResponse:
+      type: object
+      required: [removed, id, warnings]
+      additionalProperties: false
+      properties:
+        removed:
+          type: boolean
+        id:
+          type: string
+        warnings:
+          type: array
+          items:
+            type: string
     NotebookPassagePreview:
       type: object
       required: [id, datetime, scope, significance, abstract, contentPreview, tags, displayMode, truncated]

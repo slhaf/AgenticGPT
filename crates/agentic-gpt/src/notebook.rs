@@ -1,8 +1,9 @@
 use agentic_gpt_protocol::{
     NotebookAppendRequest, NotebookAppendResponse, NotebookCurrent, NotebookCurrentRequest,
     NotebookCurrentResponse, NotebookPassagesResponse, NotebookRecentRequest,
-    NotebookSearchRequest, NotebookSelectExactRequest, Passage, PassagePreview,
-    PassageSignificance,
+    NotebookRemoveRequest, NotebookRemoveResponse, NotebookSearchRequest,
+    NotebookSelectExactRequest, NotebookUpdateRequest, NotebookUpdateResponse, Passage,
+    PassagePreview, PassageSignificance,
 };
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
@@ -172,6 +173,86 @@ pub(crate) async fn current(
     }
 }
 
+pub(crate) async fn update(
+    state: &AppState,
+    request: NotebookUpdateRequest,
+) -> Result<NotebookUpdateResponse> {
+    validate_id(&request.id)?;
+    validate_update_request(&request)?;
+    if let Some(abstract_text) = request.abstract_text.as_deref() {
+        validate_text("abstract", abstract_text, ABSTRACT_MAX_CHARS)?;
+    }
+    if let Some(content) = request.content.as_deref() {
+        validate_text("content", content, usize::MAX)?;
+    }
+    let config = state.config.read().await.clone();
+    let root = notebook_root(&config);
+    let _guard = state.notebook_writes.lock().await;
+    ensure_notebook_layout(&root)?;
+    let (path, original, mut warnings) =
+        find_passage_file(&root, &request.id)?.ok_or_else(|| anyhow!("not_found"))?;
+    rewrite_passage_file(
+        &path,
+        |passages| {
+            let mut found = false;
+            for passage in passages.iter_mut() {
+                if passage.id == request.id {
+                    if let Some(significance) = request.significance.clone() {
+                        passage.significance = significance;
+                    }
+                    if let Some(abstract_text) = request.abstract_text.clone() {
+                        passage.abstract_text = abstract_text;
+                    }
+                    if let Some(content) = request.content.clone() {
+                        passage.content = content;
+                    }
+                    if let Some(tags) = request.tags.clone() {
+                        passage.tags = tags;
+                    }
+                    found = true;
+                    break;
+                }
+            }
+            found
+        },
+        &mut warnings,
+    )?;
+    refresh_current_for_scope(&root, &original.scope, &mut warnings)?;
+    Ok(NotebookUpdateResponse {
+        updated: true,
+        id: request.id,
+        warnings,
+    })
+}
+
+pub(crate) async fn remove(
+    state: &AppState,
+    request: NotebookRemoveRequest,
+) -> Result<NotebookRemoveResponse> {
+    validate_id(&request.id)?;
+    let config = state.config.read().await.clone();
+    let root = notebook_root(&config);
+    let _guard = state.notebook_writes.lock().await;
+    ensure_notebook_layout(&root)?;
+    let (path, original, mut warnings) =
+        find_passage_file(&root, &request.id)?.ok_or_else(|| anyhow!("not_found"))?;
+    rewrite_passage_file(
+        &path,
+        |passages| {
+            let before = passages.len();
+            passages.retain(|passage| passage.id != request.id);
+            before != passages.len()
+        },
+        &mut warnings,
+    )?;
+    refresh_current_for_scope(&root, &original.scope, &mut warnings)?;
+    Ok(NotebookRemoveResponse {
+        removed: true,
+        id: request.id,
+        warnings,
+    })
+}
+
 pub(crate) fn notebook_root(config: &Config) -> PathBuf {
     config
         .room
@@ -228,6 +309,26 @@ fn validate_scope(scope: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_id(id: &str) -> Result<()> {
+    if id.trim().is_empty() {
+        return Err(anyhow!("id_required"));
+    }
+    Ok(())
+}
+
+fn validate_update_request(request: &NotebookUpdateRequest) -> Result<()> {
+    if request.significance.is_none()
+        && request.abstract_text.is_none()
+        && request.content.is_none()
+        && request.tags.is_none()
+    {
+        return Err(anyhow!(
+            "validation_error: update requires at least one field"
+        ));
+    }
+    Ok(())
+}
+
 fn validate_text(name: &str, value: &str, max_chars: usize) -> Result<()> {
     if value.trim().is_empty() {
         return Err(anyhow!("{name}_required"));
@@ -267,9 +368,17 @@ fn read_passages_for_dates(
 fn read_all_passages(root: &Path) -> Result<(Vec<Passage>, Vec<String>)> {
     let mut passages = Vec::new();
     let mut warnings = Vec::new();
+    for path in passage_files(root)? {
+        read_passage_file(&path, &mut passages, &mut warnings)?;
+    }
+    Ok((passages, warnings))
+}
+
+fn passage_files(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut paths = Vec::new();
     let base = root.join("passages");
     if !base.exists() {
-        return Ok((passages, warnings));
+        return Ok(paths);
     }
     for year in fs::read_dir(base)? {
         let year = year?;
@@ -284,12 +393,13 @@ fn read_all_passages(root: &Path) -> Result<(Vec<Passage>, Vec<String>)> {
             for day in fs::read_dir(month.path())? {
                 let day = day?;
                 if day.path().extension().and_then(|value| value.to_str()) == Some("jsonl") {
-                    read_passage_file(&day.path(), &mut passages, &mut warnings)?;
+                    paths.push(day.path());
                 }
             }
         }
     }
-    Ok((passages, warnings))
+    paths.sort();
+    Ok(paths)
 }
 
 fn read_passage_file(
@@ -315,6 +425,45 @@ fn read_passage_file(
             )),
         }
     }
+    Ok(())
+}
+
+fn read_passages_in_file(path: &Path, warnings: &mut Vec<String>) -> Result<Vec<Passage>> {
+    let mut passages = Vec::new();
+    read_passage_file(path, &mut passages, warnings)?;
+    Ok(passages)
+}
+
+fn find_passage_file(root: &Path, id: &str) -> Result<Option<(PathBuf, Passage, Vec<String>)>> {
+    let mut warnings = Vec::new();
+    for path in passage_files(root)? {
+        let passages = read_passages_in_file(&path, &mut warnings)?;
+        if let Some(passage) = passages.into_iter().find(|passage| passage.id == id) {
+            return Ok(Some((path, passage, warnings)));
+        }
+    }
+    Ok(None)
+}
+
+fn rewrite_passage_file(
+    path: &Path,
+    modify: impl FnOnce(&mut Vec<Passage>) -> bool,
+    warnings: &mut Vec<String>,
+) -> Result<()> {
+    let mut passages = read_passages_in_file(path, warnings)?;
+    if !modify(&mut passages) {
+        return Err(anyhow!("not_found"));
+    }
+    ensure_parent(path)?;
+    let temp = path.with_extension(format!("jsonl.tmp-{}", Uuid::new_v4().simple()));
+    {
+        let mut file = fs::File::create(&temp)?;
+        for passage in passages {
+            writeln!(file, "{}", serde_json::to_string(&passage)?)?;
+        }
+        file.sync_all()?;
+    }
+    fs::rename(temp, path)?;
     Ok(())
 }
 
@@ -448,10 +597,29 @@ fn current_from_latest_anchor(
     })
 }
 
+fn refresh_current_for_scope(root: &Path, scope: &str, warnings: &mut Vec<String>) -> Result<()> {
+    validate_scope(scope)?;
+    let (mut passages, mut read_warnings) = read_all_passages(root)?;
+    warnings.append(&mut read_warnings);
+    passages.retain(|passage| {
+        passage.scope == scope && matches!(passage.significance, PassageSignificance::Anchor)
+    });
+    passages.sort_by_key(|passage| std::cmp::Reverse(passage.datetime));
+    if let Some(passage) = passages.first() {
+        write_current(root, passage)?;
+    } else {
+        let path = current_path(root, scope);
+        if path.exists() {
+            fs::remove_file(path)?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agentic_gpt_protocol::PassageSignificance;
+    use agentic_gpt_protocol::{NotebookRemoveRequest, NotebookUpdateRequest, PassageSignificance};
     use chrono::TimeZone;
     use serde_json::json;
     use std::collections::HashMap;
@@ -551,6 +719,466 @@ mod tests {
             .unwrap();
         assert_eq!(current.source_passage_id, response.id);
         assert_eq!(current.abstract_text, "handoff");
+    }
+
+    #[tokio::test]
+    async fn update_modifies_editable_fields_without_changing_datetime_or_scope() {
+        let workspace = unique_temp_dir("update-fields").join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let state = test_state(workspace.clone());
+        let datetime = Utc.with_ymd_and_hms(2026, 6, 8, 1, 0, 0).unwrap();
+        let appended = append(
+            &state,
+            NotebookAppendRequest {
+                datetime: Some(datetime),
+                scope: "agentic".to_string(),
+                significance: PassageSignificance::Normal,
+                abstract_text: "original".to_string(),
+                content: "original content".to_string(),
+                tags: vec!["old".to_string()],
+            },
+        )
+        .await
+        .unwrap();
+        let response = update(
+            &state,
+            NotebookUpdateRequest {
+                id: appended.id.clone(),
+                significance: Some(PassageSignificance::Anchor),
+                abstract_text: Some("updated".to_string()),
+                content: Some("updated content".to_string()),
+                tags: Some(vec!["new".to_string(), "handoff".to_string()]),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(response.updated);
+        let (passages, warnings) = read_all_passages(&workspace.join("notebook")).unwrap();
+        assert!(warnings.is_empty());
+        let passage = passages
+            .iter()
+            .find(|passage| passage.id == appended.id)
+            .unwrap();
+        assert_eq!(passage.datetime, datetime);
+        assert_eq!(passage.scope, "agentic");
+        assert!(matches!(passage.significance, PassageSignificance::Anchor));
+        assert_eq!(passage.abstract_text, "updated");
+        assert_eq!(passage.content, "updated content");
+        assert_eq!(passage.tags, vec!["new", "handoff"]);
+    }
+
+    #[tokio::test]
+    async fn update_rejects_empty_patch_and_missing_id() {
+        let workspace = unique_temp_dir("update-invalid").join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let state = test_state(workspace);
+        let empty = update(
+            &state,
+            NotebookUpdateRequest {
+                id: "psg_missing".to_string(),
+                significance: None,
+                abstract_text: None,
+                content: None,
+                tags: None,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(empty.to_string().starts_with("validation_error"));
+        let missing = update(
+            &state,
+            NotebookUpdateRequest {
+                id: "psg_missing".to_string(),
+                significance: None,
+                abstract_text: Some("updated".to_string()),
+                content: None,
+                tags: None,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(missing.to_string(), "not_found");
+    }
+
+    #[tokio::test]
+    async fn update_refreshes_current_and_anchor_to_normal_clears_current() {
+        let workspace = unique_temp_dir("update-current").join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let state = test_state(workspace.clone());
+        let appended = append(
+            &state,
+            NotebookAppendRequest {
+                datetime: None,
+                scope: "agentic".to_string(),
+                significance: PassageSignificance::Anchor,
+                abstract_text: "handoff".to_string(),
+                content: "details".to_string(),
+                tags: vec!["old".to_string()],
+            },
+        )
+        .await
+        .unwrap();
+        update(
+            &state,
+            NotebookUpdateRequest {
+                id: appended.id.clone(),
+                significance: None,
+                abstract_text: Some("new handoff".to_string()),
+                content: Some("new details".to_string()),
+                tags: Some(vec!["new".to_string()]),
+            },
+        )
+        .await
+        .unwrap();
+        let current_state = current(
+            &state,
+            NotebookCurrentRequest {
+                scope: "agentic".to_string(),
+            },
+        )
+        .await
+        .unwrap()
+        .current
+        .unwrap();
+        assert_eq!(current_state.source_passage_id, appended.id);
+        assert_eq!(current_state.abstract_text, "new handoff");
+        assert_eq!(current_state.content, "new details");
+        assert_eq!(current_state.tags, vec!["new"]);
+
+        update(
+            &state,
+            NotebookUpdateRequest {
+                id: current_state.source_passage_id,
+                significance: Some(PassageSignificance::Normal),
+                abstract_text: None,
+                content: None,
+                tags: None,
+            },
+        )
+        .await
+        .unwrap();
+        let current = current(
+            &state,
+            NotebookCurrentRequest {
+                scope: "agentic".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(current.current.is_none());
+    }
+
+    #[tokio::test]
+    async fn remove_deletes_passage_from_queries() {
+        let workspace = unique_temp_dir("remove-queries").join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let state = test_state(workspace);
+        let now = Utc::now();
+        let appended = append(
+            &state,
+            NotebookAppendRequest {
+                datetime: Some(now),
+                scope: "agentic".to_string(),
+                significance: PassageSignificance::Normal,
+                abstract_text: "remove me".to_string(),
+                content: "searchable remove target".to_string(),
+                tags: vec!["remove-tag".to_string()],
+            },
+        )
+        .await
+        .unwrap();
+        remove(
+            &state,
+            NotebookRemoveRequest {
+                id: appended.id.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        let recent_response = recent(
+            &state,
+            NotebookRecentRequest {
+                scope: Some("agentic".to_string()),
+                days: Some(5),
+                significance: None,
+                limit: Some(20),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(recent_response
+            .passages
+            .iter()
+            .all(|passage| passage.id != appended.id));
+        let searched = search(
+            &state,
+            NotebookSearchRequest {
+                query: "remove target".to_string(),
+                scope: Some("agentic".to_string()),
+                limit: Some(20),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(searched.passages.is_empty());
+        let config = state.config.read().await.clone();
+        let local_day = now
+            .with_timezone(&room_timezone(&config).unwrap())
+            .date_naive();
+        let exact = select_exact(
+            &state,
+            NotebookSelectExactRequest {
+                year: local_day.year(),
+                month: local_day.month(),
+                day: local_day.day(),
+                scope: Some("agentic".to_string()),
+                limit: Some(20),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(exact.passages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn remove_missing_id_returns_not_found() {
+        let workspace = unique_temp_dir("remove-missing").join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let state = test_state(workspace);
+        let error = remove(
+            &state,
+            NotebookRemoveRequest {
+                id: "psg_missing".to_string(),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.to_string(), "not_found");
+    }
+
+    #[tokio::test]
+    async fn remove_current_source_falls_back_to_latest_anchor_or_null() {
+        let workspace = unique_temp_dir("remove-current").join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let state = test_state(workspace);
+        let older = append(
+            &state,
+            NotebookAppendRequest {
+                datetime: Some(Utc.with_ymd_and_hms(2026, 6, 8, 1, 0, 0).unwrap()),
+                scope: "agentic".to_string(),
+                significance: PassageSignificance::Anchor,
+                abstract_text: "older".to_string(),
+                content: "older details".to_string(),
+                tags: vec![],
+            },
+        )
+        .await
+        .unwrap();
+        let newer = append(
+            &state,
+            NotebookAppendRequest {
+                datetime: Some(Utc.with_ymd_and_hms(2026, 6, 8, 2, 0, 0).unwrap()),
+                scope: "agentic".to_string(),
+                significance: PassageSignificance::Anchor,
+                abstract_text: "newer".to_string(),
+                content: "newer details".to_string(),
+                tags: vec![],
+            },
+        )
+        .await
+        .unwrap();
+        remove(&state, NotebookRemoveRequest { id: newer.id })
+            .await
+            .unwrap();
+        let current_state = current(
+            &state,
+            NotebookCurrentRequest {
+                scope: "agentic".to_string(),
+            },
+        )
+        .await
+        .unwrap()
+        .current
+        .unwrap();
+        assert_eq!(current_state.source_passage_id, older.id);
+        remove(
+            &state,
+            NotebookRemoveRequest {
+                id: current_state.source_passage_id,
+            },
+        )
+        .await
+        .unwrap();
+        let current = current(
+            &state,
+            NotebookCurrentRequest {
+                scope: "agentic".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(current.current.is_none());
+    }
+
+    #[tokio::test]
+    async fn update_skips_damaged_jsonl_lines_and_returns_warning() {
+        let workspace = unique_temp_dir("update-damaged-jsonl").join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let state = test_state(workspace);
+        let appended = append(
+            &state,
+            NotebookAppendRequest {
+                datetime: None,
+                scope: "agentic".to_string(),
+                significance: PassageSignificance::Normal,
+                abstract_text: "original".to_string(),
+                content: "details".to_string(),
+                tags: vec![],
+            },
+        )
+        .await
+        .unwrap();
+        let mut file = OpenOptions::new()
+            .append(true)
+            .open(&appended.path)
+            .unwrap();
+        writeln!(file, "{{not json").unwrap();
+        let response = update(
+            &state,
+            NotebookUpdateRequest {
+                id: appended.id,
+                significance: None,
+                abstract_text: Some("updated".to_string()),
+                content: None,
+                tags: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(response
+            .warnings
+            .iter()
+            .any(|warning| warning.starts_with("invalid_jsonl")));
+    }
+
+    #[tokio::test]
+    async fn notebook_update_remove_smoke_flow() {
+        let workspace = unique_temp_dir("smoke-flow").join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let state = test_state(workspace);
+        let appended = append(
+            &state,
+            NotebookAppendRequest {
+                datetime: None,
+                scope: "agentic".to_string(),
+                significance: PassageSignificance::Anchor,
+                abstract_text: "smoke original".to_string(),
+                content: "smoke original content".to_string(),
+                tags: vec!["smoke".to_string()],
+            },
+        )
+        .await
+        .unwrap();
+        let current_state = current(
+            &state,
+            NotebookCurrentRequest {
+                scope: "agentic".to_string(),
+            },
+        )
+        .await
+        .unwrap()
+        .current
+        .unwrap();
+        assert_eq!(current_state.source_passage_id, appended.id);
+
+        update(
+            &state,
+            NotebookUpdateRequest {
+                id: appended.id.clone(),
+                significance: None,
+                abstract_text: Some("smoke updated".to_string()),
+                content: Some("smoke updated searchable content".to_string()),
+                tags: Some(vec!["smoke".to_string(), "updated".to_string()]),
+            },
+        )
+        .await
+        .unwrap();
+        let current_state = current(
+            &state,
+            NotebookCurrentRequest {
+                scope: "agentic".to_string(),
+            },
+        )
+        .await
+        .unwrap()
+        .current
+        .unwrap();
+        assert_eq!(current_state.abstract_text, "smoke updated");
+        assert_eq!(current_state.content, "smoke updated searchable content");
+        assert_eq!(current_state.tags, vec!["smoke", "updated"]);
+
+        let recent_response = recent(
+            &state,
+            NotebookRecentRequest {
+                scope: Some("agentic".to_string()),
+                days: Some(5),
+                significance: None,
+                limit: Some(20),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(recent_response
+            .passages
+            .iter()
+            .any(|passage| passage.abstract_text == "smoke updated"));
+        let searched = search(
+            &state,
+            NotebookSearchRequest {
+                query: "searchable".to_string(),
+                scope: Some("agentic".to_string()),
+                limit: Some(20),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(searched.passages.len(), 1);
+
+        remove(&state, NotebookRemoveRequest { id: appended.id })
+            .await
+            .unwrap();
+        let current_state = current(
+            &state,
+            NotebookCurrentRequest {
+                scope: "agentic".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(current_state.current.is_none());
+        let recent_response = recent(
+            &state,
+            NotebookRecentRequest {
+                scope: Some("agentic".to_string()),
+                days: Some(5),
+                significance: None,
+                limit: Some(20),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(recent_response.passages.is_empty());
+        let searched = search(
+            &state,
+            NotebookSearchRequest {
+                query: "searchable".to_string(),
+                scope: Some("agentic".to_string()),
+                limit: Some(20),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(searched.passages.is_empty());
     }
 
     #[test]

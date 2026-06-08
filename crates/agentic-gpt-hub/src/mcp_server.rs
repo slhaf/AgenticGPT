@@ -1,7 +1,8 @@
 use agentic_gpt_protocol::{
     BatchExecRequest, ExecElement, ExecRequest, HubCommand, McpCallToolRequest,
     McpListToolsRequest, NotebookAppendRequest, NotebookCurrentRequest, NotebookRecentRequest,
-    NotebookSearchRequest, NotebookSelectExactRequest, PassageSignificance, SessionInfo,
+    NotebookRemoveRequest, NotebookSearchRequest, NotebookSelectExactRequest,
+    NotebookUpdateRequest, PassageSignificance, SessionInfo,
 };
 use axum::extract::{Request, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -194,6 +195,16 @@ async fn call_app_tool(server: &AgenticMcpServer, params: Value) -> Result<Value
         "room.notebook.current" => {
             server
                 .room_notebook_current(Parameters(decode_args(arguments)?))
+                .await
+        }
+        "room.notebook.update" => {
+            server
+                .room_notebook_update(Parameters(decode_args(arguments)?))
+                .await
+        }
+        "room.notebook.remove" => {
+            server
+                .room_notebook_remove(Parameters(decode_args(arguments)?))
                 .await
         }
         _ => return Err(format!("Unknown tool: {name}")),
@@ -795,6 +806,62 @@ impl AgenticMcpServer {
         .unwrap_or_else(room_route_error_value);
         Ok(result_from_value(value))
     }
+
+    #[tool(
+        name = "room.notebook.update",
+        description = "Update editable fields on one generic room notebook passage."
+    )]
+    async fn room_notebook_update(
+        &self,
+        params: Parameters<RoomNotebookUpdateArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let params = params.0;
+        let payload = NotebookUpdateRequest {
+            id: params.id,
+            significance: params
+                .significance
+                .as_deref()
+                .map(parse_significance)
+                .transpose()?,
+            abstract_text: params.abstract_text,
+            content: params.content,
+            tags: params.tags,
+        };
+        let value = request_active_room(
+            &self.state,
+            HubCommand::RoomNotebookUpdate {
+                request_id: random_id("req"),
+                payload: payload.clone(),
+            },
+            REQUEST_TIMEOUT_SECS,
+        )
+        .await
+        .unwrap_or_else(room_route_error_value);
+        Ok(result_from_value(value))
+    }
+
+    #[tool(
+        name = "room.notebook.remove",
+        description = "Remove one passage from the generic room notebook."
+    )]
+    async fn room_notebook_remove(
+        &self,
+        params: Parameters<RoomNotebookRemoveArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let params = params.0;
+        let payload = NotebookRemoveRequest { id: params.id };
+        let value = request_active_room(
+            &self.state,
+            HubCommand::RoomNotebookRemove {
+                request_id: random_id("req"),
+                payload: payload.clone(),
+            },
+            REQUEST_TIMEOUT_SECS,
+        )
+        .await
+        .unwrap_or_else(room_route_error_value);
+        Ok(result_from_value(value))
+    }
 }
 
 impl AgenticMcpServer {
@@ -942,6 +1009,26 @@ struct RoomNotebookCurrentArgs {
     scope: String,
 }
 
+#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct RoomNotebookUpdateArgs {
+    id: String,
+    #[serde(default)]
+    significance: Option<String>,
+    #[serde(rename = "abstract", default)]
+    abstract_text: Option<String>,
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    tags: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct RoomNotebookRemoveArgs {
+    id: String,
+}
+
 fn ok_json(value: Value) -> CallToolResult {
     CallToolResult::structured(value)
 }
@@ -1000,6 +1087,8 @@ mod tests {
                 .unwrap(),
             serde_json::to_string(&rmcp::schemars::schema_for!(RoomNotebookSearchArgs)).unwrap(),
             serde_json::to_string(&rmcp::schemars::schema_for!(RoomNotebookCurrentArgs)).unwrap(),
+            serde_json::to_string(&rmcp::schemars::schema_for!(RoomNotebookUpdateArgs)).unwrap(),
+            serde_json::to_string(&rmcp::schemars::schema_for!(RoomNotebookRemoveArgs)).unwrap(),
         ];
         for schema in schemas {
             assert!(!schema.contains("agentId"));

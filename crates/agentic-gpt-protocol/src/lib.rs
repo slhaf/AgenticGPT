@@ -312,6 +312,42 @@ pub struct NotebookCurrentRequest {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct NotebookUpdateRequest {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub significance: Option<PassageSignificance>,
+    #[serde(rename = "abstract", default, skip_serializing_if = "Option::is_none")]
+    pub abstract_text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<String>>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotebookUpdateResponse {
+    pub updated: bool,
+    pub id: String,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotebookRemoveRequest {
+    pub id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotebookRemoveResponse {
+    pub removed: bool,
+    pub id: String,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct NotebookPassagesResponse {
     pub passages: Vec<PassagePreview>,
     pub warnings: Vec<String>,
@@ -493,6 +529,16 @@ pub enum HubCommand {
     RoomNotebookCurrent {
         request_id: String,
         payload: NotebookCurrentRequest,
+    },
+    #[serde(rename = "room.notebook.update")]
+    RoomNotebookUpdate {
+        request_id: String,
+        payload: NotebookUpdateRequest,
+    },
+    #[serde(rename = "room.notebook.remove")]
+    RoomNotebookRemove {
+        request_id: String,
+        payload: NotebookRemoveRequest,
     },
 }
 

@@ -6,9 +6,9 @@ use agentic_gpt_protocol::{
     ConfirmationDecision, ConfirmationPayload, ExecRequest, HubCommand, HubInfoAgents,
     HubInfoCounts, HubInfoRemoteConfirmation, HubInfoResponse, HubMessage, McpCallToolRequest,
     McpListServersRequest, McpListToolsRequest, NotebookAppendRequest, NotebookCurrentRequest,
-    NotebookRecentRequest, NotebookSearchRequest, NotebookSelectExactRequest,
-    SafeBuiltinPolicyRules, SafeConfigSummary, SafePathPolicySummary, SafePolicyRules,
-    SafeSandboxSummary, SessionInfo, TaskResult,
+    NotebookRecentRequest, NotebookRemoveRequest, NotebookSearchRequest,
+    NotebookSelectExactRequest, NotebookUpdateRequest, SafeBuiltinPolicyRules, SafeConfigSummary,
+    SafePathPolicySummary, SafePolicyRules, SafeSandboxSummary, SessionInfo, TaskResult,
 };
 use anyhow::{Context, Result};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -277,6 +277,8 @@ async fn serve(
         )
         .route("/v1/room/notebook/search", post(room_notebook_search))
         .route("/v1/room/notebook/current", post(room_notebook_current))
+        .route("/v1/room/notebook/update", post(room_notebook_update))
+        .route("/v1/room/notebook/remove", post(room_notebook_remove))
         .route("/mcp", get(mcp_server::mcp_get).post(mcp_server::mcp_post))
         .route(
             "/.well-known/oauth-protected-resource",
@@ -753,6 +755,40 @@ async fn room_notebook_current(
             payload,
         },
         "room_notebook_current_timeout",
+    )
+    .await
+}
+
+async fn room_notebook_update(
+    State(state): State<HubState>,
+    headers: HeaderMap,
+    Json(payload): Json<NotebookUpdateRequest>,
+) -> Response {
+    forward_room_command(
+        state,
+        headers,
+        HubCommand::RoomNotebookUpdate {
+            request_id: random_id("req"),
+            payload,
+        },
+        "room_notebook_update_timeout",
+    )
+    .await
+}
+
+async fn room_notebook_remove(
+    State(state): State<HubState>,
+    headers: HeaderMap,
+    Json(payload): Json<NotebookRemoveRequest>,
+) -> Response {
+    forward_room_command(
+        state,
+        headers,
+        HubCommand::RoomNotebookRemove {
+            request_id: random_id("req"),
+            payload,
+        },
+        "room_notebook_remove_timeout",
     )
     .await
 }
@@ -1502,7 +1538,9 @@ fn command_request_id(command: &HubCommand) -> &str {
         | HubCommand::RoomNotebookRecent { request_id, .. }
         | HubCommand::RoomNotebookSelectExact { request_id, .. }
         | HubCommand::RoomNotebookSearch { request_id, .. }
-        | HubCommand::RoomNotebookCurrent { request_id, .. } => request_id,
+        | HubCommand::RoomNotebookCurrent { request_id, .. }
+        | HubCommand::RoomNotebookUpdate { request_id, .. }
+        | HubCommand::RoomNotebookRemove { request_id, .. } => request_id,
     }
 }
 
@@ -1522,7 +1560,9 @@ fn set_command_request_id(command: &mut HubCommand, value: String) {
         | HubCommand::RoomNotebookRecent { request_id, .. }
         | HubCommand::RoomNotebookSelectExact { request_id, .. }
         | HubCommand::RoomNotebookSearch { request_id, .. }
-        | HubCommand::RoomNotebookCurrent { request_id, .. } => *request_id = value,
+        | HubCommand::RoomNotebookCurrent { request_id, .. }
+        | HubCommand::RoomNotebookUpdate { request_id, .. }
+        | HubCommand::RoomNotebookRemove { request_id, .. } => *request_id = value,
     }
 }
 
@@ -2077,6 +2117,8 @@ mod tests {
             "NotebookSelectExactRequest:",
             "NotebookSearchRequest:",
             "NotebookCurrentRequest:",
+            "NotebookUpdateRequest:",
+            "NotebookRemoveRequest:",
         ] {
             let mut in_section = false;
             let mut section = String::new();
@@ -2100,15 +2142,11 @@ mod tests {
                 "{schema} unexpectedly contains agentId"
             );
         }
-        for forbidden in [
-            "roomNotebookUpdate",
-            "room.notebook.update",
-            "recentWeek",
-            "recentMonth",
-            "selectPast",
-        ] {
+        for forbidden in ["recentWeek", "recentMonth", "selectPast"] {
             assert!(!openapi.contains(forbidden));
         }
+        assert!(openapi.contains("roomNotebookUpdate"));
+        assert!(openapi.contains("roomNotebookRemove"));
     }
 
     #[tokio::test]
@@ -2236,6 +2274,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn update_remove_room_api_without_active_room_returns_not_active() {
+        let state = test_state();
+        let update = request_active_room(
+            &state,
+            HubCommand::RoomNotebookUpdate {
+                request_id: "req-update".to_string(),
+                payload: NotebookUpdateRequest {
+                    id: "psg_missing".to_string(),
+                    significance: None,
+                    abstract_text: Some("updated".to_string()),
+                    content: None,
+                    tags: None,
+                },
+            },
+            1,
+        )
+        .await;
+        assert_eq!(update.unwrap_err(), RoomRouteError::NotActive);
+        let remove = request_active_room(
+            &state,
+            HubCommand::RoomNotebookRemove {
+                request_id: "req-remove".to_string(),
+                payload: NotebookRemoveRequest {
+                    id: "psg_missing".to_string(),
+                },
+            },
+            1,
+        )
+        .await;
+        assert_eq!(remove.unwrap_err(), RoomRouteError::NotActive);
+    }
+
+    #[tokio::test]
     async fn room_api_routes_to_active_room_connection() {
         let state = test_state();
         let mut rx = insert_connection(&state, "room", "conn1", AgentRole::Room).await;
@@ -2269,6 +2340,74 @@ mod tests {
             .unwrap();
         let value = task.await.unwrap();
         assert_eq!(value["current"], Value::Null);
+    }
+
+    #[tokio::test]
+    async fn update_remove_room_api_routes_to_active_room_connection() {
+        let state = test_state();
+        let mut rx = insert_connection(&state, "room", "conn1", AgentRole::Room).await;
+        register_connection_role(&state, "room", "conn1", AgentRole::Room)
+            .await
+            .unwrap();
+        let request_state = state.clone();
+        let task = tokio::spawn(async move {
+            request_active_room(
+                &request_state,
+                HubCommand::RoomNotebookUpdate {
+                    request_id: "req-update".to_string(),
+                    payload: NotebookUpdateRequest {
+                        id: "psg_1".to_string(),
+                        significance: None,
+                        abstract_text: Some("updated".to_string()),
+                        content: None,
+                        tags: None,
+                    },
+                },
+                5,
+            )
+            .await
+            .unwrap()
+        });
+        let Message::Text(text) = rx.recv().await.unwrap() else {
+            panic!("expected text command");
+        };
+        let command = serde_json::from_str::<HubCommand>(&text).unwrap();
+        let request_id = command_request_id(&command).to_string();
+        assert!(matches!(command, HubCommand::RoomNotebookUpdate { .. }));
+        let sender = state.pending.lock().await.remove(&request_id).unwrap();
+        sender
+            .send(json!({ "updated": true, "id": "psg_1", "warnings": [] }))
+            .unwrap();
+        let value = task.await.unwrap();
+        assert_eq!(value["updated"], true);
+
+        let request_state = state.clone();
+        let task = tokio::spawn(async move {
+            request_active_room(
+                &request_state,
+                HubCommand::RoomNotebookRemove {
+                    request_id: "req-remove".to_string(),
+                    payload: NotebookRemoveRequest {
+                        id: "psg_1".to_string(),
+                    },
+                },
+                5,
+            )
+            .await
+            .unwrap()
+        });
+        let Message::Text(text) = rx.recv().await.unwrap() else {
+            panic!("expected text command");
+        };
+        let command = serde_json::from_str::<HubCommand>(&text).unwrap();
+        let request_id = command_request_id(&command).to_string();
+        assert!(matches!(command, HubCommand::RoomNotebookRemove { .. }));
+        let sender = state.pending.lock().await.remove(&request_id).unwrap();
+        sender
+            .send(json!({ "removed": true, "id": "psg_1", "warnings": [] }))
+            .unwrap();
+        let value = task.await.unwrap();
+        assert_eq!(value["removed"], true);
     }
 
     #[tokio::test]
