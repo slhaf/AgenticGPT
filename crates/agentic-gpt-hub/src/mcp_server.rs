@@ -301,7 +301,7 @@ impl ServerHandler for AgenticMcpServer {
 impl AgenticMcpServer {
     #[tool(
         name = "listAgents",
-        description = "List registered Agentic local agents and online status."
+        description = "List registered local agents, their online status, capabilities, and safe config summaries. Use this before choosing an agentId."
     )]
     async fn list_agents(&self) -> Result<CallToolResult, ErrorData> {
         let entries = registry_entries(&self.state)
@@ -327,7 +327,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "exec",
-        description = "Run a short command on a local Agentic agent. Long commands should use startSession."
+        description = "Run one short command on a local Agentic agent. workingDirectory, when provided, is the process CWD; prefer it over wrapping commands with cd. Use startSession for long-running commands."
     )]
     async fn exec(&self, params: Parameters<ExecArgs>) -> Result<CallToolResult, ErrorData> {
         let params = params.0;
@@ -365,7 +365,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "batchExec",
-        description = "Run multiple short commands on a local Agentic agent."
+        description = "Run multiple short commands on a local Agentic agent. Top-level workingDirectory is the default process CWD for all elements; per-element workingDirectory overrides it."
     )]
     async fn batch_exec(
         &self,
@@ -411,7 +411,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "startSession",
-        description = "Start a long-running command session on a local Agentic agent."
+        description = "Start a long-running command session on a local Agentic agent. workingDirectory is the process CWD; read output with waitSession or inspectSession."
     )]
     async fn start_session(
         &self,
@@ -463,7 +463,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "listSessions",
-        description = "List running or recently cached sessions for a local Agentic agent."
+        description = "List running or recently cached command sessions for a local Agentic agent."
     )]
     async fn list_sessions(
         &self,
@@ -493,7 +493,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "inspectSession",
-        description = "Inspect a session by id for a local Agentic agent."
+        description = "Inspect one command session by id and return current state plus recent stdout/stderr tails."
     )]
     async fn inspect_session(
         &self,
@@ -520,7 +520,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "waitSession",
-        description = "Wait briefly for a session to update, then return current session state."
+        description = "Wait up to seconds for a session update, capped at 30 seconds. Use 0 or omit seconds to return cached state immediately."
     )]
     async fn wait_session(
         &self,
@@ -549,7 +549,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "killSession",
-        description = "Kill a running session by id for a local Agentic agent."
+        description = "Kill a running command session by id on a local Agentic agent."
     )]
     async fn kill_session(
         &self,
@@ -595,7 +595,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "mcpListTools",
-        description = "List tools exposed by one MCP server configured inside a local Agentic agent."
+        description = "List tools exposed by one MCP server configured inside a local Agentic agent. Use mcpCallTool with the returned serverId and tool name."
     )]
     async fn mcp_list_tools(
         &self,
@@ -626,7 +626,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "mcpCallTool",
-        description = "Call a tool on an MCP server configured inside a local Agentic agent. Local Agentic confirmation policy applies."
+        description = "Call a tool on an MCP server configured inside a local Agentic agent. Arguments are forwarded as JSON; local Agentic confirmation and policy still apply."
     )]
     async fn mcp_call_tool(
         &self,
@@ -659,7 +659,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "room.notebook.append",
-        description = "Append an explicit passage to the generic room notebook."
+        description = "Append an explicit notebook passage to the active Room Agent. ANCHOR passages update current state for their scope. No agentId is used."
     )]
     async fn room_notebook_append(
         &self,
@@ -696,7 +696,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "room.notebook.recent",
-        description = "Return recent passages from the generic room notebook."
+        description = "Return recent notebook passages from the active Room Agent. Supports optional scope and significance filters. No agentId is used."
     )]
     async fn room_notebook_recent(
         &self,
@@ -728,7 +728,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "room.notebook.selectExact",
-        description = "Return passages for one exact room-timezone calendar day."
+        description = "Return notebook passages for one exact room-timezone calendar day from the active Room Agent. No agentId is used."
     )]
     async fn room_notebook_select_exact(
         &self,
@@ -757,7 +757,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "room.notebook.search",
-        description = "Search the generic room notebook with simple bounded JSONL scanning."
+        description = "Search notebook passages in the active Room Agent by substring over abstract, content, scope, and tags. No vector search is used in V1."
     )]
     async fn room_notebook_search(
         &self,
@@ -784,7 +784,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "room.notebook.current",
-        description = "Return the current recoverable state for one generic room notebook scope."
+        description = "Return current recoverable notebook state for one scope, derived from current state or latest ANCHOR. No agentId is used."
     )]
     async fn room_notebook_current(
         &self,
@@ -809,7 +809,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "room.notebook.update",
-        description = "Update editable fields on one generic room notebook passage."
+        description = "Update editable fields of one notebook passage in the active Room Agent. Scope and datetime are immutable; current state is refreshed when anchors change."
     )]
     async fn room_notebook_update(
         &self,
@@ -842,7 +842,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "room.notebook.remove",
-        description = "Remove one passage from the generic room notebook."
+        description = "Physically remove one notebook passage from the active Room Agent. If it was current, current state falls back to the latest ANCHOR or becomes null."
     )]
     async fn room_notebook_remove(
         &self,
@@ -880,77 +880,127 @@ impl AgenticMcpServer {
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 struct AgentIdArgs {
+    #[schemars(
+        description = "Target local agent id. Room notebook tools do not use agentId; they route to the active Room Agent."
+    )]
     agent_id: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 struct ExecArgs {
+    #[schemars(description = "Target local agent id.")]
     agent_id: String,
+    #[schemars(
+        description = "Executable name or path. For shell syntax, use bash or sh with args such as ['-lc', '...']."
+    )]
     program: String,
     #[serde(default)]
+    #[schemars(
+        description = "Argument vector passed directly to the program; this is not a shell-split string."
+    )]
     args: Option<Vec<String>>,
     #[serde(default)]
+    #[schemars(
+        description = "Request confirmation before execution. Local policy may still allow, confirm, or deny regardless of this flag."
+    )]
     need_confirm: Option<bool>,
     #[serde(default)]
+    #[schemars(
+        description = "Optional per-request confirmation provider override. Omit or use default to follow local agent config."
+    )]
     confirm_method: Option<String>,
     #[serde(default)]
+    #[schemars(
+        description = "Process working directory. Relative values resolve from the agent workspace root; prefer this over cd in shell commands."
+    )]
     working_directory: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 struct BatchExecArgs {
+    #[schemars(description = "Target local agent id.")]
     agent_id: String,
+    #[schemars(
+        description = "Commands to run. Each element can override the top-level workingDirectory."
+    )]
     elements: Vec<BatchExecElementArgs>,
     #[serde(default)]
+    #[schemars(
+        description = "Request confirmation for the batch. Local policy may still allow, confirm, or deny regardless of this flag."
+    )]
     need_confirm: Option<bool>,
     #[serde(default)]
+    #[schemars(
+        description = "Optional per-request confirmation provider override for all batch elements."
+    )]
     confirm_method: Option<String>,
     #[serde(default)]
+    #[schemars(
+        description = "Default process working directory for all batch elements. Relative values resolve from the agent workspace root."
+    )]
     working_directory: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 struct BatchExecElementArgs {
+    #[schemars(description = "Executable name or path for this batch element.")]
     program: String,
     #[serde(default)]
+    #[schemars(description = "Argument vector passed directly to the program.")]
     args: Option<Vec<String>>,
     #[serde(default)]
+    #[schemars(
+        description = "Per-element process working directory. Overrides the batch workingDirectory."
+    )]
     working_directory: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 struct SessionIdArgs {
+    #[schemars(description = "Target local agent id.")]
     agent_id: String,
+    #[schemars(description = "Session id returned by startSession or listSessions.")]
     session_id: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 struct WaitSessionArgs {
+    #[schemars(description = "Target local agent id.")]
     agent_id: String,
+    #[schemars(description = "Session id returned by startSession or listSessions.")]
     session_id: String,
     #[serde(default)]
+    #[schemars(
+        description = "Maximum seconds to wait for new session output or state, capped at 30. Use 0 or omit for immediate cached state."
+    )]
     seconds: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 struct McpListToolsArgs {
+    #[schemars(description = "Target local agent id.")]
     agent_id: String,
+    #[schemars(description = "MCP server id returned by mcpListServers.")]
     server_id: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 struct McpCallToolArgs {
+    #[schemars(description = "Target local agent id.")]
     agent_id: String,
+    #[schemars(description = "MCP server id returned by mcpListServers.")]
     server_id: String,
+    #[schemars(description = "Tool name returned by mcpListTools.")]
     tool_name: String,
     #[serde(default)]
+    #[schemars(description = "JSON object arguments forwarded to the MCP tool.")]
     arguments: Option<Value>,
 }
 
@@ -958,13 +1008,25 @@ struct McpCallToolArgs {
 #[serde(rename_all = "camelCase")]
 struct RoomNotebookAppendArgs {
     #[serde(default)]
+    #[schemars(
+        description = "Optional ISO-8601 datetime. Stored as UTC; file partitioning uses the configured room timezone."
+    )]
     datetime: Option<String>,
+    #[schemars(
+        description = "Path-safe notebook namespace such as agentic or monopoly; used for current state and filtering."
+    )]
     scope: String,
+    #[schemars(
+        description = "NORMAL for ordinary passages; ANCHOR for passages that should update current state for the scope."
+    )]
     significance: String,
     #[serde(rename = "abstract")]
+    #[schemars(description = "Short summary used in timelines and previews.")]
     abstract_text: String,
+    #[schemars(description = "Full recoverable passage content.")]
     content: String,
     #[serde(default)]
+    #[schemars(description = "Optional labels included in simple search.")]
     tags: Option<Vec<String>>,
 }
 
@@ -972,60 +1034,87 @@ struct RoomNotebookAppendArgs {
 #[serde(rename_all = "camelCase")]
 struct RoomNotebookRecentArgs {
     #[serde(default)]
+    #[schemars(description = "Optional path-safe notebook scope filter.")]
     scope: Option<String>,
     #[serde(default)]
+    #[schemars(
+        description = "Number of recent room-timezone calendar days to scan. Defaults to 5 and is capped at 30."
+    )]
     days: Option<u32>,
     #[serde(default)]
+    #[schemars(description = "Optional significance filter: NORMAL or ANCHOR.")]
     significance: Option<String>,
     #[serde(default)]
+    #[schemars(description = "Maximum passages returned, capped by the server.")]
     limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 struct RoomNotebookSelectExactArgs {
+    #[schemars(description = "Year in the configured room timezone calendar.")]
     year: i32,
+    #[schemars(description = "Month in the configured room timezone calendar, 1-12.")]
     month: u32,
+    #[schemars(description = "Day of month in the configured room timezone calendar.")]
     day: u32,
     #[serde(default)]
+    #[schemars(description = "Optional path-safe notebook scope filter.")]
     scope: Option<String>,
     #[serde(default)]
+    #[schemars(description = "Maximum passages returned, capped by the server.")]
     limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 struct RoomNotebookSearchArgs {
+    #[schemars(
+        description = "Case-insensitive substring query over abstract, content, scope, and tags."
+    )]
     query: String,
     #[serde(default)]
+    #[schemars(description = "Optional path-safe notebook scope filter.")]
     scope: Option<String>,
     #[serde(default)]
+    #[schemars(description = "Maximum passages returned, capped by the server.")]
     limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 struct RoomNotebookCurrentArgs {
+    #[schemars(description = "Path-safe notebook scope whose current state should be returned.")]
     scope: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 struct RoomNotebookUpdateArgs {
+    #[schemars(description = "Passage id returned by append, recent, search, or selectExact.")]
     id: String,
     #[serde(default)]
+    #[schemars(
+        description = "Optional new significance: NORMAL or ANCHOR. Scope and datetime cannot be changed."
+    )]
     significance: Option<String>,
     #[serde(rename = "abstract", default)]
+    #[schemars(description = "Optional new short summary used in timelines and previews.")]
     abstract_text: Option<String>,
     #[serde(default)]
+    #[schemars(description = "Optional new full recoverable passage content.")]
     content: Option<String>,
     #[serde(default)]
+    #[schemars(description = "Optional replacement tag list included in simple search.")]
     tags: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 struct RoomNotebookRemoveArgs {
+    #[schemars(
+        description = "Passage id returned by append, recent, search, or selectExact. Removal is physical in V1."
+    )]
     id: String,
 }
 

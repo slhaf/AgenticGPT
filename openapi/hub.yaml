@@ -10,6 +10,7 @@ paths:
   /v1/info:
     get:
       operationId: getInfo
+      description: Return Hub runtime metadata, public base URL, remote confirmation status, and safe aggregate counts.
       x-openai-isConsequential: false
       responses:
         "200":
@@ -25,6 +26,7 @@ paths:
   /v1/agents:
     get:
       operationId: listAgents
+      description: List registered local agents, online status, capabilities, and safe config summaries. Use this before choosing an agentId.
       x-openai-isConsequential: false
       responses:
         "200":
@@ -40,6 +42,7 @@ paths:
   /v1/exec:
     post:
       operationId: exec
+      description: Run one short command on a local Agentic agent. workingDirectory, when provided, is used as the process working directory.
       x-openai-isConsequential: false
       requestBody:
         required: true
@@ -65,6 +68,7 @@ paths:
   /v1/batchExec:
     post:
       operationId: batchExec
+      description: Run multiple short commands on a local Agentic agent. Top-level workingDirectory is the default process working directory for all elements; per-element workingDirectory overrides it.
       x-openai-isConsequential: false
       requestBody:
         required: true
@@ -90,6 +94,7 @@ paths:
   /v1/sessions/start:
     post:
       operationId: startSession
+      description: Start a long-running command session on a local Agentic agent. Use waitSession or inspectSession to read output.
       x-openai-isConsequential: false
       requestBody:
         required: true
@@ -117,6 +122,7 @@ paths:
   /v1/sessions:
     get:
       operationId: listSessions
+      description: List running or recently cached command sessions for one local Agentic agent.
       x-openai-isConsequential: false
       parameters:
         - name: agentId
@@ -140,6 +146,7 @@ paths:
   /v1/sessions/{sessionId}:
     get:
       operationId: inspectSession
+      description: Inspect one command session by id and return current state plus recent stdout/stderr tails.
       x-openai-isConsequential: false
       parameters:
         - name: sessionId
@@ -168,6 +175,7 @@ paths:
   /v1/sessions/{sessionId}/wait:
     post:
       operationId: waitSession
+      description: Wait up to seconds for a session update, capped at 30 seconds. Use 0 for immediate cached state.
       x-openai-isConsequential: false
       parameters:
         - name: sessionId
@@ -210,6 +218,7 @@ paths:
   /v1/sessions/{sessionId}/kill:
     post:
       operationId: killSession
+      description: Stop a running command session by id on a local Agentic agent.
       x-openai-isConsequential: false
       parameters:
         - name: sessionId
@@ -238,6 +247,7 @@ paths:
   /v1/mcp/servers:
     post:
       operationId: mcpListServers
+      description: List MCP servers configured inside one local Agentic agent.
       x-openai-isConsequential: false
       requestBody:
         required: true
@@ -261,6 +271,7 @@ paths:
   /v1/mcp/tools:
     post:
       operationId: mcpListTools
+      description: List tools exposed by one MCP server configured inside a local Agentic agent.
       x-openai-isConsequential: false
       requestBody:
         required: true
@@ -284,6 +295,7 @@ paths:
   /v1/mcp/callTool:
     post:
       operationId: mcpCallTool
+      description: Call a tool on an MCP server configured inside a local Agentic agent. Arguments are forwarded as JSON; local Agentic confirmation and policy apply.
       x-openai-isConsequential: false
       requestBody:
         required: true
@@ -307,6 +319,7 @@ paths:
   /v1/room/notebook/append:
     post:
       operationId: roomNotebookAppend
+      description: Append an explicit notebook passage to the active Room Agent. ANCHOR passages update current state for their scope. No agentId is used.
       x-openai-isConsequential: false
       requestBody:
         required: true
@@ -330,6 +343,7 @@ paths:
   /v1/room/notebook/recent:
     post:
       operationId: roomNotebookRecent
+      description: Return recent notebook passages from the active Room Agent, with optional scope and significance filters. No agentId is used.
       x-openai-isConsequential: false
       requestBody:
         required: true
@@ -353,6 +367,7 @@ paths:
   /v1/room/notebook/selectExact:
     post:
       operationId: roomNotebookSelectExact
+      description: Return notebook passages for one exact room-timezone calendar day from the active Room Agent. No agentId is used.
       x-openai-isConsequential: false
       requestBody:
         required: true
@@ -376,8 +391,8 @@ paths:
   /v1/room/notebook/search:
     post:
       operationId: roomNotebookSearch
+      description: Search notebook passages in the active Room Agent by simple substring scan over abstract, content, scope, and tags. No vector search is used in V1.
       x-openai-isConsequential: false
-      description: Simple bounded JSONL scan for small notebook datasets. No vector search or index is used in V1.
       requestBody:
         required: true
         content:
@@ -400,6 +415,7 @@ paths:
   /v1/room/notebook/current:
     post:
       operationId: roomNotebookCurrent
+      description: Return current recoverable notebook state for one scope, derived from current state or the latest ANCHOR. No agentId is used.
       x-openai-isConsequential: false
       requestBody:
         required: true
@@ -423,6 +439,7 @@ paths:
   /v1/room/notebook/update:
     post:
       operationId: roomNotebookUpdate
+      description: Update editable fields of one notebook passage in the active Room Agent. Scope and datetime are immutable; current state is refreshed when anchors change.
       x-openai-isConsequential: false
       requestBody:
         required: true
@@ -446,6 +463,7 @@ paths:
   /v1/room/notebook/remove:
     post:
       operationId: roomNotebookRemove
+      description: Remove one notebook passage from the active Room Agent storage. If it was current, current state falls back to the latest ANCHOR or becomes null.
       x-openai-isConsequential: false
       requestBody:
         required: true
