@@ -179,7 +179,8 @@ pub struct McpServerSummary {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpListServersRequest {
-    pub agent_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

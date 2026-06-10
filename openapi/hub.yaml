@@ -247,7 +247,7 @@ paths:
   /v1/mcp/servers:
     post:
       operationId: mcpListServers
-      description: List MCP servers configured inside one local Agentic agent.
+      description: List MCP servers configured inside one local Agentic agent, or all currently connected agents when agentId is omitted.
       x-openai-isConsequential: false
       requestBody:
         required: true
@@ -257,7 +257,7 @@ paths:
               $ref: "#/components/schemas/McpListServersRequest"
       responses:
         "200":
-          description: Configured MCP servers on the selected local agent.
+          description: Configured MCP servers on the selected local agent, or grouped by connected agent when agentId is omitted.
           content:
             application/json:
               schema:
@@ -744,11 +744,11 @@ components:
                 $ref: "#/components/schemas/SafeRule"
     McpListServersRequest:
       type: object
-      required: [agentId]
       additionalProperties: false
       properties:
         agentId:
           type: string
+          description: Optional target local agent id. Omit to list MCP servers for all currently connected agents.
     McpServerSummary:
       type: object
       required: [id, enabled, transport]
@@ -766,13 +766,37 @@ components:
             - "null"
     McpListServersResponse:
       type: object
-      required: [servers]
       additionalProperties: false
       properties:
         servers:
           type: array
+          description: MCP servers on the selected agent when agentId is provided.
           items:
             $ref: "#/components/schemas/McpServerSummary"
+        agents:
+          type: array
+          description: MCP servers grouped by connected agent when agentId is omitted.
+          items:
+            $ref: "#/components/schemas/McpAgentServersSummary"
+    McpAgentServersSummary:
+      type: object
+      required: [agentId, displayName, online, servers]
+      additionalProperties: false
+      properties:
+        agentId:
+          type: string
+        displayName:
+          type: string
+        online:
+          type: boolean
+        servers:
+          type: array
+          items:
+            $ref: "#/components/schemas/McpServerSummary"
+        error:
+          type: object
+          additionalProperties: true
+          description: Per-agent error if the Hub could not retrieve that agent's MCP servers.
     McpListToolsRequest:
       type: object
       required: [agentId, serverId]

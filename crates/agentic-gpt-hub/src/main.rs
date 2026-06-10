@@ -612,20 +612,77 @@ async fn mcp_list_servers(
     if let Err(response) = require_action_auth(&state, &headers) {
         return response;
     }
-    if let Err(response) = require_agent_enabled(&state, &payload.agent_id) {
-        return response;
+    if let Some(agent_id) = payload.agent_id.as_deref() {
+        if let Err(response) = require_agent_enabled(&state, agent_id) {
+            return response;
+        }
+        let command = HubCommand::McpListServers {
+            request_id: random_id("req"),
+        };
+        return match request_agent(&state, agent_id, command, REQUEST_TIMEOUT_SECS).await {
+            Ok(value) => Json(value).into_response(),
+            Err(reason) => api_error(
+                StatusCode::GATEWAY_TIMEOUT,
+                "mcp_list_servers_timeout",
+                reason,
+            ),
+        };
     }
-    let command = HubCommand::McpListServers {
-        request_id: random_id("req"),
-    };
-    match request_agent(&state, &payload.agent_id, command, REQUEST_TIMEOUT_SECS).await {
+
+    match mcp_list_servers_all_agents(&state).await {
         Ok(value) => Json(value).into_response(),
-        Err(reason) => api_error(
-            StatusCode::GATEWAY_TIMEOUT,
-            "mcp_list_servers_timeout",
-            reason,
-        ),
+        Err(reason) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "db_error", reason),
     }
+}
+
+pub(crate) async fn mcp_list_servers_all_agents(
+    state: &HubState,
+) -> std::result::Result<Value, String> {
+    let entries = registry_entries(state).map_err(|error| error.to_string())?;
+    let online_agent_ids = {
+        let online = state.agents.lock().await;
+        entries
+            .into_iter()
+            .filter(|entry| entry.enabled && online.contains_key(&entry.agent_id))
+            .map(|entry| (entry.agent_id, entry.display_name))
+            .collect::<Vec<_>>()
+    };
+
+    let mut agents = Vec::new();
+    for (agent_id, display_name) in online_agent_ids {
+        let command = HubCommand::McpListServers {
+            request_id: random_id("req"),
+        };
+        let value = request_agent(state, &agent_id, command, REQUEST_TIMEOUT_SECS).await;
+        match value {
+            Ok(value) => {
+                let servers = value
+                    .get("servers")
+                    .cloned()
+                    .unwrap_or_else(|| Value::Array(Vec::new()));
+                agents.push(json!({
+                    "agentId": agent_id,
+                    "displayName": display_name,
+                    "online": true,
+                    "servers": servers,
+                }));
+            }
+            Err(reason) => {
+                agents.push(json!({
+                    "agentId": agent_id,
+                    "displayName": display_name,
+                    "online": true,
+                    "servers": [],
+                    "error": {
+                        "code": "mcp_list_servers_timeout",
+                        "message": reason,
+                    },
+                }));
+            }
+        }
+    }
+
+    Ok(json!({ "agents": agents }))
 }
 
 async fn mcp_list_tools(

@@ -19,9 +19,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use crate::{
-    cached_session, default_config_summary, random_id, registry_entries, registry_entry,
-    request_active_room, request_agent, timeout_batch_result, timeout_task_result, HubState,
-    RoomRouteError, MAX_WAIT_SECONDS, REQUEST_TIMEOUT_SECS,
+    cached_session, default_config_summary, mcp_list_servers_all_agents, random_id,
+    registry_entries, registry_entry, request_active_room, request_agent, timeout_batch_result,
+    timeout_task_result, HubState, RoomRouteError, MAX_WAIT_SECONDS, REQUEST_TIMEOUT_SECS,
 };
 
 #[derive(Clone)]
@@ -576,20 +576,26 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "mcpListServers",
-        description = "List MCP servers configured inside a local Agentic agent."
+        description = "List MCP servers configured inside local Agentic agents. If agentId is omitted, returns MCP servers for all connected agents grouped by agent. If agentId is provided, returns that agent's servers."
     )]
     async fn mcp_list_servers(
         &self,
-        params: Parameters<AgentIdArgs>,
+        params: Parameters<McpListServersArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let agent_id = params.0.agent_id;
-        self.ensure_agent_enabled(&agent_id)?;
-        let command = HubCommand::McpListServers {
-            request_id: random_id("req"),
-        };
-        let value = request_agent(&self.state, &agent_id, command, REQUEST_TIMEOUT_SECS)
+        if let Some(agent_id) = params.0.agent_id {
+            self.ensure_agent_enabled(&agent_id)?;
+            let command = HubCommand::McpListServers {
+                request_id: random_id("req"),
+            };
+            let value = request_agent(&self.state, &agent_id, command, REQUEST_TIMEOUT_SECS)
+                .await
+                .unwrap_or_else(|reason| json!({ "error": { "code": "mcp_list_servers_timeout", "message": reason } }));
+            return Ok(result_from_value(value));
+        }
+
+        let value = mcp_list_servers_all_agents(&self.state)
             .await
-            .unwrap_or_else(|reason| json!({ "error": { "code": "mcp_list_servers_timeout", "message": reason } }));
+            .unwrap_or_else(|reason| json!({ "error": { "code": "db_error", "message": reason } }));
         Ok(result_from_value(value))
     }
 
@@ -979,6 +985,16 @@ struct WaitSessionArgs {
         description = "Maximum seconds to wait for new session output or state, capped at 30. Use 0 or omit for immediate cached state."
     )]
     seconds: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct McpListServersArgs {
+    #[serde(default)]
+    #[schemars(
+        description = "Optional target local agent id. Omit to list MCP servers for all currently connected agents."
+    )]
+    agent_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]

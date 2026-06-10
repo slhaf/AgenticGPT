@@ -17,7 +17,7 @@ Core endpoints:
 - `GET /v1/sessions/{sessionId}`: inspect one session.
 - `POST /v1/sessions/{sessionId}/wait`: wait briefly for session output updates.
 - `POST /v1/sessions/{sessionId}/kill`: stop a running session.
-- `POST /v1/mcp/servers`: list MCP servers configured inside one local agent.
+- `POST /v1/mcp/servers`: list MCP servers configured inside one local agent, or omit `agentId` to group MCP servers for all currently connected agents.
 - `POST /v1/mcp/tools`: list tools exposed by one MCP server.
 - `POST /v1/mcp/callTool`: call one MCP tool through the selected local agent.
 
