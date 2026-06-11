@@ -14,9 +14,12 @@ use tokio_tungstenite::{
 };
 
 use crate::{
-    command_preview, confirmation, exec, log_info, log_warn, mcp, notebook, notify, sessions,
-    AppState, RunMode, CONNECT_TIMEOUT_SECS, HEARTBEAT_ACK_TIMEOUT_SECS, HEARTBEAT_INTERVAL_SECS,
-    RECONNECT_DELAY_SECS,
+    confirmation, exec, mcp, notebook, notify, sessions,
+    utils::{
+        command_preview, log_info, log_warn, CONNECT_TIMEOUT_SECS, HEARTBEAT_ACK_TIMEOUT_SECS,
+        HEARTBEAT_INTERVAL_SECS, RECONNECT_DELAY_SECS,
+    },
+    AppState, RunMode,
 };
 
 pub(crate) async fn connect_loop(state: AppState) -> Result<()> {

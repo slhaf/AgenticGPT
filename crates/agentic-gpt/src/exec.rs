@@ -13,8 +13,13 @@ use tokio::task::JoinSet;
 use tokio::time::{timeout, Duration, Instant};
 
 use crate::{
-    confirmation, policy_decision, policy_decision_for_mode, sessions, write_audit, AppState,
-    AuditRecord, Config, PolicyDecision, EXEC_TIMEOUT_SECS, STDERR_MAX, STDOUT_MAX,
+    audit::{write_audit, AuditRecord},
+    config::Config,
+    confirmation,
+    policy::{policy_decision, policy_decision_for_mode, PolicyDecision},
+    sessions,
+    utils::{log_warn, EXEC_TIMEOUT_SECS, STDERR_MAX, STDOUT_MAX},
+    AppState,
 };
 
 pub(crate) async fn run_exec_task(
@@ -478,7 +483,7 @@ pub(crate) async fn run_batch_task(
                 }
             }
             Ok(Some(Err(error))) => {
-                crate::log_warn(format!("batch element task join failed: {error}"));
+                log_warn(format!("batch element task join failed: {error}"));
             }
             Ok(None) => break,
             Err(_) => break,

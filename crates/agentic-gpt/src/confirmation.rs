@@ -5,9 +5,14 @@ use tokio::time::{timeout, Duration};
 use uuid::Uuid;
 
 use crate::{
-    command_preview, confirmation_language_is_zh, exec::PreparedBatchElement, hub, log_info,
-    log_warn, mcp_tool_command_preview, risk_level, risky_file_mutation, truncate_chars, AppState,
-    Config, CONFIRM_TIMEOUT_SECS,
+    config::{confirmation_language_is_zh, Config},
+    exec::PreparedBatchElement,
+    hub,
+    utils::{
+        command_preview, log_info, log_warn, mcp_tool_command_preview, risk_level,
+        risky_file_mutation, truncate_chars, CONFIRM_TIMEOUT_SECS,
+    },
+    AppState,
 };
 
 #[derive(Clone, Debug)]

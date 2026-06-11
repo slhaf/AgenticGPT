@@ -13,7 +13,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
-use crate::{ensure_parent, AppState, Config};
+use crate::{config::Config, state::AppState, utils::ensure_parent};
 
 const DEFAULT_RECENT_DAYS: u32 = 5;
 const MAX_RECENT_DAYS: u32 = 30;

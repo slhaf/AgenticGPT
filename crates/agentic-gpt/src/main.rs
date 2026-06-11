@@ -1,40 +1,33 @@
+mod audit;
+mod config;
 mod confirmation;
 mod exec;
 mod hub;
 mod mcp;
 mod notebook;
 mod notify;
+mod policy;
 mod sessions;
+mod state;
+mod utils;
 
-use agentic_gpt_protocol::{
-    AgentRole, PolicyCounts, SafeBuiltinPolicyRules, SafeConfigSummary, SafePathPolicySummary,
-    SafePathRoot, SafePolicyRules, SafeRule, SafeSandboxSummary,
+use anyhow::{anyhow, Result};
+use clap::{Parser, Subcommand};
+use config::{
+    normalize_confirmation_language, write_config_with_backup, Config, PathPolicyConfig, Rule,
 };
-use anyhow::{anyhow, Context, Result};
-use chrono::{DateTime, Utc};
-use clap::{Parser, Subcommand, ValueEnum};
-use mcp::{McpConfigCommand, McpServerConfig};
-use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
-use std::fs::{self, OpenOptions};
-use std::io::{self, IsTerminal, Write};
-use std::path::{Path, PathBuf};
+use mcp::McpConfigCommand;
+use policy::{policy_decision, PolicyDecision};
+use state::{AppState, RunMode};
+use std::collections::HashMap;
+use std::fs;
+use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
+use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio::time::{sleep, Duration};
 use tokio_tungstenite::tungstenite::Message;
+use utils::{config_path, ensure_parent, log_info, log_warn};
 use uuid::Uuid;
-
-const DEFAULT_BACKUP_LIMIT: usize = 5;
-const EXEC_TIMEOUT_SECS: u64 = 30;
-const CONFIRM_TIMEOUT_SECS: u64 = 45;
-const STDOUT_MAX: usize = 64 * 1024;
-const STDERR_MAX: usize = 64 * 1024;
-const SESSION_TAIL_MAX: usize = 32 * 1024;
-const RECONNECT_DELAY_SECS: u64 = 3;
-const CONNECT_TIMEOUT_SECS: u64 = 20;
-const HEARTBEAT_INTERVAL_SECS: u64 = 15;
-const HEARTBEAT_ACK_TIMEOUT_SECS: u64 = 45;
 
 #[derive(Parser)]
 #[command(name = "agentic-gpt")]
@@ -93,7 +86,7 @@ enum ConfigCommand {
 }
 
 #[derive(Subcommand)]
-enum RuleCommand {
+pub(crate) enum RuleCommand {
     Add {
         program: String,
         args_prefix: Vec<String>,
@@ -105,7 +98,7 @@ enum RuleCommand {
 }
 
 #[derive(Subcommand)]
-enum PathCommand {
+pub(crate) enum PathCommand {
     List,
     Write {
         #[command(subcommand)]
@@ -122,157 +115,16 @@ enum PathCommand {
 }
 
 #[derive(Subcommand)]
-enum PathRootCommand {
+pub(crate) enum PathRootCommand {
     Add { path: PathBuf },
     Remove { path: PathBuf },
 }
 
 #[derive(Clone, Copy, Debug)]
-enum PathRootKind {
+pub(crate) enum PathRootKind {
     Write,
     Readonly,
     Deny,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize, ValueEnum)]
-#[serde(rename_all = "lowercase")]
-enum PolicyDecision {
-    Allow,
-    Confirm,
-    Deny,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RunMode {
-    Normal,
-    Room,
-}
-
-impl RunMode {
-    fn role(self) -> AgentRole {
-        match self {
-            RunMode::Normal => AgentRole::Normal,
-            RunMode::Room => AgentRole::Room,
-        }
-    }
-
-    fn label(self) -> &'static str {
-        match self {
-            RunMode::Normal => "normal",
-            RunMode::Room => "room",
-        }
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct Config {
-    agent_id: String,
-    display_name: String,
-    #[serde(alias = "workerUrl")]
-    hub_url: String,
-    agent_secret: String,
-    workspace_root: PathBuf,
-    backup_limit: usize,
-    confirmation_provider: ConfirmationProviderConfig,
-    #[serde(default = "default_confirmation_language")]
-    confirmation_language: String,
-    sandbox: SandboxConfig,
-    #[serde(default)]
-    mcp_servers: BTreeMap<String, McpServerConfig>,
-    #[serde(default)]
-    path_policy: PathPolicyConfig,
-    policy: PolicyConfig,
-    limits: LimitsConfig,
-    #[serde(default = "default_room_config")]
-    room: RoomConfig,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ConfirmationProviderConfig {
-    provider: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SandboxConfig {
-    enabled: bool,
-    bubblewrap_path: String,
-    required_runtime_paths: Vec<PathBuf>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PathPolicyConfig {
-    #[serde(default)]
-    write_roots: Vec<PathBuf>,
-    #[serde(default)]
-    read_only_roots: Vec<PathBuf>,
-    #[serde(default)]
-    deny_roots: Vec<PathBuf>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PolicyConfig {
-    allow: Vec<Rule>,
-    confirm: Vec<Rule>,
-    deny: Vec<Rule>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct Rule {
-    program: String,
-    args_prefix: Vec<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct LimitsConfig {
-    max_concurrent_tasks: usize,
-    max_active_sessions: usize,
-    session_idle_timeout_secs: u64,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RoomConfig {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    notebook_root: Option<PathBuf>,
-    timezone: String,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct AuditRecord {
-    task_id: Option<String>,
-    session_id: Option<String>,
-    time: DateTime<Utc>,
-    program: String,
-    args: Vec<String>,
-    working_directory: Option<String>,
-    need_confirm: bool,
-    policy_decision: String,
-    confirmation_result: Option<String>,
-    exit_code: Option<i32>,
-    duration_ms: u128,
-    truncated: bool,
-    request_source: String,
-    reject_reason: Option<String>,
-}
-
-#[derive(Clone)]
-struct AppState {
-    config_path: PathBuf,
-    config: Arc<RwLock<Config>>,
-    run_mode: RunMode,
-    sessions: Arc<Mutex<HashMap<String, sessions::ManagedSession>>>,
-    hub_sender: Arc<Mutex<Option<mpsc::UnboundedSender<Message>>>>,
-    pending_confirmations: Arc<Mutex<HashMap<String, oneshot::Sender<String>>>>,
-    temporary_mcp_allows: Arc<Mutex<Vec<confirmation::TemporaryMcpAllow>>>,
-    notebook_writes: Arc<Mutex<()>>,
 }
 
 #[tokio::main]
@@ -324,160 +176,6 @@ async fn run(config_path: PathBuf, run_mode: RunMode) -> Result<()> {
     hub::connect_loop(state).await
 }
 
-fn mcp_tool_command_preview(
-    server_id: &str,
-    tool_name: &str,
-    arguments: &serde_json::Value,
-) -> String {
-    let arguments = serde_json::to_string_pretty(arguments)
-        .unwrap_or_else(|_| serde_json::to_string(arguments).unwrap_or_else(|_| "{}".to_string()));
-    format!(
-        "MCP Tool Call\nServer: {server_id}\nTool: {tool_name}\nArguments:\n{}",
-        truncate_chars(&arguments, 2000)
-    )
-}
-
-fn risk_level(program: &str) -> String {
-    if risky_file_mutation(program) {
-        "HIGH"
-    } else if matches!(
-        program,
-        "curl" | "wget" | "docker" | "systemctl" | "service"
-    ) {
-        "MEDIUM"
-    } else {
-        "LOW"
-    }
-    .to_string()
-}
-
-fn truncate_chars(value: &str, max_chars: usize) -> String {
-    let mut output = value.chars().take(max_chars).collect::<String>();
-    if value.chars().count() > max_chars {
-        output.push_str("...");
-    }
-    output
-}
-
-fn risky_file_mutation(program: &str) -> bool {
-    matches!(
-        program,
-        "rm" | "mv" | "chmod" | "chown" | "git" | "python" | "node"
-    )
-}
-
-fn policy_decision(
-    config: &Config,
-    program: &str,
-    args: &[String],
-    need_confirm: bool,
-) -> PolicyDecision {
-    policy_decision_for_mode(config, RunMode::Normal, program, args, need_confirm)
-}
-
-fn policy_decision_for_mode(
-    config: &Config,
-    run_mode: RunMode,
-    program: &str,
-    args: &[String],
-    need_confirm: bool,
-) -> PolicyDecision {
-    let mut decision = if need_confirm {
-        PolicyDecision::Confirm
-    } else {
-        PolicyDecision::Allow
-    };
-    for rule in builtin_rules(run_mode, PolicyDecision::Confirm) {
-        if rule.matches(program, args) {
-            decision = decision.max(PolicyDecision::Confirm);
-        }
-    }
-    for rule in builtin_rules(run_mode, PolicyDecision::Deny) {
-        if rule.matches(program, args) {
-            decision = decision.max(PolicyDecision::Deny);
-        }
-    }
-
-    let mut configured_decision = None;
-    for rule in &config.policy.allow {
-        if rule.matches(program, args) {
-            configured_decision = Some(PolicyDecision::Allow);
-        }
-    }
-    for rule in &config.policy.confirm {
-        if rule.matches(program, args) {
-            configured_decision = Some(PolicyDecision::Confirm);
-        }
-    }
-    for rule in &config.policy.deny {
-        if rule.matches(program, args) {
-            configured_decision = Some(PolicyDecision::Deny);
-        }
-    }
-
-    configured_decision.unwrap_or(decision)
-}
-
-impl Rule {
-    fn matches(&self, program: &str, args: &[String]) -> bool {
-        self.program == program
-            && args.len() >= self.args_prefix.len()
-            && self
-                .args_prefix
-                .iter()
-                .zip(args.iter())
-                .all(|(expected, actual)| expected == actual)
-    }
-}
-
-fn builtin_rules(run_mode: RunMode, decision: PolicyDecision) -> Vec<Rule> {
-    let programs = match decision {
-        PolicyDecision::Deny => vec!["su", "mkfs", "dd", "ssh"],
-        PolicyDecision::Confirm if run_mode == RunMode::Room => {
-            vec!["sudo", "mount", "systemctl", "service", "scp"]
-        }
-        PolicyDecision::Confirm => vec![
-            "sudo",
-            "rm",
-            "mv",
-            "chmod",
-            "chown",
-            "mount",
-            "systemctl",
-            "service",
-            "docker",
-            "scp",
-            "curl",
-            "wget",
-            "bash",
-            "sh",
-            "zsh",
-            "fish",
-            "perl",
-            "ruby",
-        ],
-        PolicyDecision::Allow => vec![],
-    };
-    let mut rules = programs
-        .into_iter()
-        .map(|program| Rule {
-            program: program.to_string(),
-            args_prefix: vec![],
-        })
-        .collect::<Vec<_>>();
-    if decision == PolicyDecision::Confirm && run_mode == RunMode::Normal {
-        rules.push(Rule {
-            program: "python".to_string(),
-            args_prefix: vec!["-c".to_string()],
-        });
-        rules.push(Rule {
-            program: "node".to_string(),
-            args_prefix: vec!["-e".to_string()],
-        });
-    }
-    rules
-}
-
 async fn handle_config(config_path: PathBuf, command: ConfigCommand) -> Result<()> {
     match command {
         ConfigCommand::Init => {
@@ -496,7 +194,7 @@ async fn handle_config(config_path: PathBuf, command: ConfigCommand) -> Result<(
                     let old_workspace = config.workspace_root.clone();
                     let new_workspace = PathBuf::from(value);
                     for root in &mut config.path_policy.write_roots {
-                        if paths_match(root, &old_workspace) {
+                        if policy::paths_match(root, &old_workspace) {
                             *root = new_workspace.clone();
                         }
                     }
@@ -517,171 +215,18 @@ async fn handle_config(config_path: PathBuf, command: ConfigCommand) -> Result<(
             write_config_with_backup(&config_path, &config)?;
         }
         ConfigCommand::Allow { command } => {
-            mutate_rule(config_path, PolicyDecision::Allow, command)?
+            policy::mutate_rule(config_path, PolicyDecision::Allow, command)?
         }
         ConfigCommand::Confirm { command } => {
-            mutate_rule(config_path, PolicyDecision::Confirm, command)?
+            policy::mutate_rule(config_path, PolicyDecision::Confirm, command)?
         }
-        ConfigCommand::Deny { command } => mutate_rule(config_path, PolicyDecision::Deny, command)?,
-        ConfigCommand::Path { command } => mutate_path_policy(config_path, command)?,
+        ConfigCommand::Deny { command } => {
+            policy::mutate_rule(config_path, PolicyDecision::Deny, command)?
+        }
+        ConfigCommand::Path { command } => policy::mutate_path_policy(config_path, command)?,
         ConfigCommand::Mcp { command } => mcp::mutate_servers(config_path, command)?,
     }
     Ok(())
-}
-
-fn mutate_rule(config_path: PathBuf, decision: PolicyDecision, command: RuleCommand) -> Result<()> {
-    let mut config = Config::load_or_default(&config_path)?;
-    let rules = match decision {
-        PolicyDecision::Allow => &mut config.policy.allow,
-        PolicyDecision::Confirm => &mut config.policy.confirm,
-        PolicyDecision::Deny => &mut config.policy.deny,
-    };
-    match command {
-        RuleCommand::Add {
-            program,
-            args_prefix,
-        } => {
-            let rule = Rule {
-                program,
-                args_prefix,
-            };
-            println!("added {}", rule_display(&rule));
-            rules.push(rule);
-        }
-        RuleCommand::Remove {
-            program,
-            args_prefix,
-        } => {
-            remove_rule(rules, &program, &args_prefix)?;
-        }
-    }
-    write_config_with_backup(&config_path, &config)
-}
-
-fn remove_rule(rules: &mut Vec<Rule>, program: &str, args_prefix: &[String]) -> Result<()> {
-    remove_rule_with_interactive(rules, program, args_prefix, io::stdin().is_terminal())
-}
-
-fn remove_rule_with_interactive(
-    rules: &mut Vec<Rule>,
-    program: &str,
-    args_prefix: &[String],
-    interactive: bool,
-) -> Result<()> {
-    let matches = rules
-        .iter()
-        .enumerate()
-        .filter(|(_, rule)| rule.program == program && rule.args_prefix == args_prefix)
-        .map(|(index, _)| index)
-        .collect::<Vec<_>>();
-
-    match matches.len() {
-        0 => Err(anyhow!(
-            "rule not found: {}",
-            command_preview(program, args_prefix)
-        )),
-        1 => {
-            let removed = rules.remove(matches[0]);
-            println!("removed {}", rule_display(&removed));
-            Ok(())
-        }
-        _ if interactive => {
-            let selected = choose_rule_interactively(rules, &matches)?;
-            let removed = rules.remove(selected);
-            println!("removed {}", rule_display(&removed));
-            Ok(())
-        }
-        _ => {
-            eprintln!(
-                "multiple rules match {}; rerun in an interactive terminal or provide a more specific args prefix:",
-                command_preview(program, args_prefix)
-            );
-            for index in matches {
-                eprintln!("  {}", rule_display(&rules[index]));
-            }
-            Err(anyhow!("multiple_matching_rules"))
-        }
-    }
-}
-
-fn choose_rule_interactively(rules: &[Rule], matches: &[usize]) -> Result<usize> {
-    println!("multiple matching rules:");
-    for (ordinal, index) in matches.iter().enumerate() {
-        println!("  {}) {}", ordinal + 1, rule_display(&rules[*index]));
-    }
-    print!("select rule to remove [1-{}]: ", matches.len());
-    io::stdout().flush()?;
-
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-    let selected = input
-        .trim()
-        .parse::<usize>()
-        .map_err(|_| anyhow!("invalid selection"))?;
-    if selected == 0 || selected > matches.len() {
-        return Err(anyhow!("selection out of range"));
-    }
-    Ok(matches[selected - 1])
-}
-
-fn rule_display(rule: &Rule) -> String {
-    command_preview(&rule.program, &rule.args_prefix)
-}
-
-fn mutate_path_policy(config_path: PathBuf, command: PathCommand) -> Result<()> {
-    let mut config = Config::load_or_default(&config_path)?;
-    match command {
-        PathCommand::List => {
-            println!("{}", serde_json::to_string_pretty(&config.path_policy)?);
-            return Ok(());
-        }
-        PathCommand::Write { command } => {
-            mutate_path_roots(&mut config.path_policy, PathRootKind::Write, command)
-        }
-        PathCommand::Readonly { command } => {
-            mutate_path_roots(&mut config.path_policy, PathRootKind::Readonly, command)
-        }
-        PathCommand::Deny { command } => {
-            mutate_path_roots(&mut config.path_policy, PathRootKind::Deny, command)
-        }
-    }
-    write_config_with_backup(&config_path, &config)
-}
-
-fn mutate_path_roots(policy: &mut PathPolicyConfig, kind: PathRootKind, command: PathRootCommand) {
-    match command {
-        PathRootCommand::Add { path } => {
-            let roots = roots_for_kind(policy, kind);
-            if !roots.iter().any(|existing| paths_match(existing, &path)) {
-                roots.push(path);
-            }
-        }
-        PathRootCommand::Remove { path } => {
-            let roots = roots_for_kind(policy, kind);
-            roots.retain(|existing| !paths_match(existing, &path));
-        }
-    }
-}
-
-fn roots_for_kind(policy: &mut PathPolicyConfig, kind: PathRootKind) -> &mut Vec<PathBuf> {
-    match kind {
-        PathRootKind::Write => &mut policy.write_roots,
-        PathRootKind::Readonly => &mut policy.read_only_roots,
-        PathRootKind::Deny => &mut policy.deny_roots,
-    }
-}
-
-fn paths_match(left: &Path, right: &Path) -> bool {
-    if left == right {
-        return true;
-    }
-    match (
-        exec::expand_pathbuf(left).and_then(|path| exec::canonicalize_existing_or_parent(&path)),
-        exec::expand_pathbuf(right).and_then(|path| exec::canonicalize_existing_or_parent(&path)),
-    ) {
-        (Ok(left), Ok(right)) => left == right,
-        _ => false,
-    }
 }
 
 async fn watch_config(state: AppState) {
@@ -715,356 +260,6 @@ async fn watch_config(state: AppState) {
     }
 }
 
-fn default_confirmation_language() -> String {
-    "en".to_string()
-}
-
-fn normalize_confirmation_language(language: &str) -> String {
-    let language = language.trim();
-    if language.eq_ignore_ascii_case("zh")
-        || language.eq_ignore_ascii_case("zh-cn")
-        || language.eq_ignore_ascii_case("zh_cn")
-        || language.eq_ignore_ascii_case("cn")
-    {
-        "zh-CN".to_string()
-    } else {
-        "en".to_string()
-    }
-}
-
-fn confirmation_language_is_zh(config: &Config) -> bool {
-    normalize_confirmation_language(&config.confirmation_language) == "zh-CN"
-}
-
-impl Config {
-    fn default_config() -> Result<Self> {
-        let base = agentic_home()?;
-        Ok(Self {
-            agent_id: "laptop".to_string(),
-            display_name: hostname_fallback(),
-            hub_url: "http://localhost:8787".to_string(),
-            agent_secret: "change-me".to_string(),
-            workspace_root: base.join("workspace"),
-            backup_limit: DEFAULT_BACKUP_LIMIT,
-            confirmation_provider: ConfirmationProviderConfig {
-                provider: "freedesktop-then-hub".to_string(),
-            },
-            confirmation_language: default_confirmation_language(),
-            mcp_servers: BTreeMap::new(),
-            sandbox: SandboxConfig {
-                enabled: false,
-                bubblewrap_path: "bwrap".to_string(),
-                required_runtime_paths: vec![
-                    PathBuf::from("/usr"),
-                    PathBuf::from("/bin"),
-                    PathBuf::from("/lib"),
-                    PathBuf::from("/lib64"),
-                    PathBuf::from("/etc/ssl"),
-                ],
-            },
-            path_policy: default_path_policy(&base.join("workspace")),
-            policy: PolicyConfig::default(),
-            limits: LimitsConfig {
-                max_concurrent_tasks: 2,
-                max_active_sessions: 4,
-                session_idle_timeout_secs: 3600,
-            },
-            room: default_room_config(),
-        })
-    }
-
-    fn load(path: &Path) -> Result<Self> {
-        let text = fs::read_to_string(path)?;
-        let value: serde_json::Value = serde_json::from_str(&text)?;
-        let has_path_policy = value.get("pathPolicy").is_some();
-        let mut config: Self = serde_json::from_value(value)?;
-        if !has_path_policy {
-            config.path_policy = default_path_policy(&config.workspace_root);
-        }
-        Ok(config)
-    }
-
-    fn load_or_default(path: &Path) -> Result<Self> {
-        if path.exists() {
-            Self::load(path)
-        } else {
-            Self::default_config()
-        }
-    }
-
-    fn ensure_workspace(&self) -> Result<()> {
-        fs::create_dir_all(&self.workspace_root)?;
-        Ok(())
-    }
-
-    fn safe_summary(&self) -> SafeConfigSummary {
-        let write_roots = safe_write_roots(self);
-        SafeConfigSummary {
-            workspace_root: workspace_root_summary(&self.workspace_root),
-            sandbox: SafeSandboxSummary {
-                enabled: self.sandbox.enabled,
-                mode: if self.sandbox.enabled {
-                    "bubblewrap"
-                } else {
-                    "disabled"
-                }
-                .to_string(),
-            },
-            path_policy: SafePathPolicySummary {
-                write_root_count: write_roots.len(),
-                read_only_root_count: self.path_policy.read_only_roots.len(),
-                deny_root_count: self.path_policy.deny_roots.len(),
-                write_roots,
-                read_only_roots: safe_path_roots(
-                    &self.path_policy.read_only_roots,
-                    &self.workspace_root,
-                    "configured",
-                ),
-                deny_roots: safe_path_roots(
-                    &self.path_policy.deny_roots,
-                    &self.workspace_root,
-                    "configured",
-                ),
-            },
-            policy_rule_counts: PolicyCounts {
-                allow: self.policy.allow.len(),
-                confirm: self.policy.confirm.len(),
-                deny: self.policy.deny.len(),
-            },
-            policy_rules: SafePolicyRules {
-                allow: safe_rules(&self.policy.allow),
-                confirm: safe_rules(&self.policy.confirm),
-                deny: safe_rules(&self.policy.deny),
-                builtins: SafeBuiltinPolicyRules {
-                    confirm: safe_rules(&builtin_rules(RunMode::Normal, PolicyDecision::Confirm)),
-                    deny: safe_rules(&builtin_rules(RunMode::Normal, PolicyDecision::Deny)),
-                },
-            },
-            confirmation_provider: self.confirmation_provider.provider.clone(),
-        }
-    }
-}
-
-fn workspace_root_summary(workspace_root: &Path) -> String {
-    if *workspace_root == agentic_home().unwrap_or_default().join("workspace") {
-        "default".to_string()
-    } else {
-        workspace_root
-            .file_name()
-            .and_then(|name| name.to_str())
-            .map(|name| format!("workspace:{name}"))
-            .unwrap_or_else(|| "configured".to_string())
-    }
-}
-
-fn safe_write_roots(config: &Config) -> Vec<SafePathRoot> {
-    let mut has_workspace_root = false;
-    let mut roots = config
-        .path_policy
-        .write_roots
-        .iter()
-        .map(|root| {
-            let is_workspace_root = paths_match(root, &config.workspace_root);
-            has_workspace_root |= is_workspace_root;
-            SafePathRoot {
-                path: safe_path_display(root, &config.workspace_root),
-                source: if is_workspace_root {
-                    "workspaceRoot"
-                } else {
-                    "configured"
-                }
-                .to_string(),
-            }
-        })
-        .collect::<Vec<_>>();
-    if !has_workspace_root {
-        roots.insert(
-            0,
-            SafePathRoot {
-                path: "workspace".to_string(),
-                source: "workspaceRoot".to_string(),
-            },
-        );
-    }
-    roots
-}
-
-fn safe_path_roots(roots: &[PathBuf], workspace_root: &Path, source: &str) -> Vec<SafePathRoot> {
-    roots
-        .iter()
-        .map(|root| SafePathRoot {
-            path: safe_path_display(root, workspace_root),
-            source: source.to_string(),
-        })
-        .collect()
-}
-
-fn safe_path_display(path: &Path, workspace_root: &Path) -> String {
-    if paths_match(path, workspace_root) {
-        return "workspace".to_string();
-    }
-    let raw = path.to_string_lossy().to_string();
-    if raw == "~" || raw.starts_with("~/") {
-        return raw;
-    }
-    if let Some(home) = dirs::home_dir() {
-        if let Ok(relative) = path.strip_prefix(&home) {
-            if relative.as_os_str().is_empty() {
-                return "~".to_string();
-            }
-            return format!("~/{}", relative.to_string_lossy());
-        }
-    }
-    raw
-}
-
-fn safe_rules(rules: &[Rule]) -> Vec<SafeRule> {
-    rules
-        .iter()
-        .map(|rule| SafeRule {
-            program: rule.program.clone(),
-            args_prefix: rule.args_prefix.clone(),
-        })
-        .collect()
-}
-
-fn default_room_config() -> RoomConfig {
-    RoomConfig {
-        notebook_root: None,
-        timezone: "Asia/Shanghai".to_string(),
-    }
-}
-
-fn default_path_policy(workspace_root: &Path) -> PathPolicyConfig {
-    PathPolicyConfig {
-        write_roots: vec![
-            workspace_root.to_path_buf(),
-            PathBuf::from("~/Documents"),
-            PathBuf::from("~/Downloads"),
-            PathBuf::from("/tmp"),
-        ],
-        read_only_roots: vec![
-            PathBuf::from("~/.cache"),
-            PathBuf::from("~/.local/share"),
-            PathBuf::from("/etc/os-release"),
-            PathBuf::from("/proc/meminfo"),
-            PathBuf::from("/proc/cpuinfo"),
-            PathBuf::from("/proc/loadavg"),
-            PathBuf::from("/proc/uptime"),
-            PathBuf::from("/sys/class/power_supply"),
-            PathBuf::from("/sys/class/thermal"),
-        ],
-        deny_roots: vec![
-            PathBuf::from("~/.ssh"),
-            PathBuf::from("~/.gnupg"),
-            PathBuf::from("~/.local/share/keyrings"),
-            PathBuf::from("~/.password-store"),
-            PathBuf::from("~/.mozilla"),
-            PathBuf::from("~/.config/google-chrome"),
-            PathBuf::from("~/.config/chromium"),
-            PathBuf::from("~/.config/Code/User/globalStorage"),
-            PathBuf::from("~/.npmrc"),
-            PathBuf::from("~/.pypirc"),
-            PathBuf::from("~/.cargo/credentials"),
-            PathBuf::from("~/.docker/config.json"),
-            PathBuf::from("~/.kube"),
-            PathBuf::from("~/.aws"),
-            PathBuf::from("~/.config/gcloud"),
-            PathBuf::from("~/.config/gh"),
-            PathBuf::from("~/.config/hub"),
-            PathBuf::from("~/.config/clash"),
-            PathBuf::from("~/.config/clash-verge"),
-        ],
-    }
-}
-
-fn write_config_with_backup(path: &Path, config: &Config) -> Result<()> {
-    ensure_parent(path)?;
-    if path.exists() {
-        let backup_dir = path.parent().unwrap().join("backups");
-        fs::create_dir_all(&backup_dir)?;
-        let backup = backup_dir.join(format!("config.{}.json", Utc::now().timestamp_millis()));
-        fs::copy(path, backup)?;
-        prune_backups(&backup_dir, config.backup_limit)?;
-    }
-    fs::write(path, serde_json::to_string_pretty(config)?)?;
-    Ok(())
-}
-
-fn prune_backups(dir: &Path, limit: usize) -> Result<()> {
-    let mut entries = fs::read_dir(dir)?
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| entry.file_name().to_string_lossy().starts_with("config."))
-        .collect::<Vec<_>>();
-    entries.sort_by_key(|entry| entry.metadata().and_then(|meta| meta.modified()).ok());
-    while entries.len() > limit {
-        if let Some(entry) = entries.first() {
-            fs::remove_file(entry.path())?;
-        }
-        entries.remove(0);
-    }
-    Ok(())
-}
-
-fn write_audit(config: &Config, record: AuditRecord) -> Result<()> {
-    let path = agentic_home()?.join("audit.log");
-    ensure_parent(&path)?;
-    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-    writeln!(file, "{}", serde_json::to_string(&record)?)?;
-    let _ = config;
-    Ok(())
-}
-
-fn config_path(path: Option<PathBuf>) -> PathBuf {
-    path.unwrap_or_else(|| {
-        agentic_home()
-            .unwrap_or_else(|_| PathBuf::from(".agentic_gpt"))
-            .join("config.json")
-    })
-}
-
-fn agentic_home() -> Result<PathBuf> {
-    let home = dirs::home_dir().context("home directory not found")?;
-    Ok(home.join(".agentic_gpt"))
-}
-
-fn ensure_parent(path: &Path) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    Ok(())
-}
-
-fn hostname_fallback() -> String {
-    std::env::var("HOSTNAME").unwrap_or_else(|_| "agentic-gpt-linux".to_string())
-}
-
-fn command_preview(program: &str, args: &[String]) -> String {
-    std::iter::once(program.to_string())
-        .chain(args.iter().cloned())
-        .map(|part| {
-            if part.contains(char::is_whitespace) {
-                format!("{part:?}")
-            } else {
-                part
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn log_info(message: String) {
-    log_line("INFO", message);
-}
-
-fn log_warn(message: String) {
-    log_line("WARN", message);
-}
-
-fn log_line(level: &str, message: String) {
-    eprintln!("{} {level} {message}", Utc::now().to_rfc3339());
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1076,8 +271,11 @@ mod tests {
 
     #[test]
     fn run_modes_declare_expected_roles() {
-        assert_eq!(RunMode::Normal.role(), AgentRole::Normal);
-        assert_eq!(RunMode::Room.role(), AgentRole::Room);
+        assert_eq!(
+            RunMode::Normal.role(),
+            agentic_gpt_protocol::AgentRole::Normal
+        );
+        assert_eq!(RunMode::Room.role(), agentic_gpt_protocol::AgentRole::Room);
     }
 
     #[test]
@@ -1241,11 +439,11 @@ mod tests {
     fn room_policy_overlay_differs_from_normal_policy() {
         let config = Config::default_config().unwrap();
         assert_eq!(
-            policy_decision_for_mode(&config, RunMode::Normal, "rm", &[], false),
+            policy::policy_decision_for_mode(&config, RunMode::Normal, "rm", &[], false),
             PolicyDecision::Confirm
         );
         assert_eq!(
-            policy_decision_for_mode(&config, RunMode::Room, "rm", &[], false),
+            policy::policy_decision_for_mode(&config, RunMode::Room, "rm", &[], false),
             PolicyDecision::Allow
         );
     }
@@ -1255,12 +453,12 @@ mod tests {
         let config = Config::default_config().unwrap();
         for program in ["sudo", "scp", "mount", "systemctl", "service"] {
             assert_eq!(
-                policy_decision_for_mode(&config, RunMode::Room, program, &[], false),
+                policy::policy_decision_for_mode(&config, RunMode::Room, program, &[], false),
                 PolicyDecision::Confirm
             );
         }
         assert_eq!(
-            policy_decision_for_mode(&config, RunMode::Room, "ssh", &[], false),
+            policy::policy_decision_for_mode(&config, RunMode::Room, "ssh", &[], false),
             PolicyDecision::Deny
         );
     }
@@ -1870,7 +1068,7 @@ mod tests {
             args_prefix: Vec::new(),
         }];
 
-        remove_rule(&mut rules, "bash", &[]).unwrap();
+        policy::remove_rule(&mut rules, "bash", &[]).unwrap();
         assert!(rules.is_empty());
     }
 
@@ -1887,7 +1085,7 @@ mod tests {
             },
         ];
 
-        remove_rule(&mut rules, "python", &["-c".to_string()]).unwrap();
+        policy::remove_rule(&mut rules, "python", &["-c".to_string()]).unwrap();
         assert_eq!(rules.len(), 1);
         assert_eq!(rules[0].args_prefix, vec!["script.py".to_string()]);
     }
@@ -1905,7 +1103,8 @@ mod tests {
             },
         ];
 
-        let error = remove_rule_with_interactive(&mut rules, "bash", &[], false).unwrap_err();
+        let error =
+            policy::remove_rule_with_interactive(&mut rules, "bash", &[], false).unwrap_err();
         assert!(error.to_string().contains("multiple_matching_rules"));
         assert_eq!(rules.len(), 2);
     }
@@ -1917,7 +1116,7 @@ mod tests {
         fs::create_dir_all(&target).unwrap();
         let mut policy = PathPolicyConfig::default();
 
-        mutate_path_roots(
+        policy::mutate_path_roots(
             &mut policy,
             PathRootKind::Write,
             PathRootCommand::Add {
@@ -1925,7 +1124,7 @@ mod tests {
             },
         );
         assert_eq!(policy.write_roots.len(), 1);
-        mutate_path_roots(
+        policy::mutate_path_roots(
             &mut policy,
             PathRootKind::Write,
             PathRootCommand::Remove {

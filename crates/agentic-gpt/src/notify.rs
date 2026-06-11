@@ -2,7 +2,7 @@ use agentic_gpt_protocol::{
     NotificationChannel, UserNotifyDeliveryRequest, UserNotifyDeliveryResponse,
 };
 
-use crate::Config;
+use crate::config::Config;
 
 pub(crate) fn freedesktop_notification_channel(config: &Config) -> Option<NotificationChannel> {
     let (available, _) = detect_freedesktop_notification_support();

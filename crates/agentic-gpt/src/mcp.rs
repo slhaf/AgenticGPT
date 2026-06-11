@@ -16,7 +16,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::time::Instant;
 
-use crate::{confirmation, write_audit, write_config_with_backup, AppState, AuditRecord, Config};
+use crate::{
+    audit::{write_audit, AuditRecord},
+    config::{write_config_with_backup, Config},
+    confirmation, AppState,
+};
 
 #[derive(Subcommand)]
 pub(crate) enum McpConfigCommand {

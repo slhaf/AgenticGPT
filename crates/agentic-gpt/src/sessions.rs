@@ -11,8 +11,11 @@ use tokio::sync::Mutex;
 use tokio::time::Instant;
 
 use crate::{
-    command_preview, confirmation, exec, policy_decision_for_mode, AppState, Config,
-    PolicyDecision, SESSION_TAIL_MAX,
+    config::Config,
+    confirmation, exec,
+    policy::{policy_decision_for_mode, PolicyDecision},
+    utils::{command_preview, SESSION_TAIL_MAX},
+    AppState,
 };
 
 pub(crate) struct ManagedSession {
