@@ -20,10 +20,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use crate::notify::{notification_channels, send_user_notification, NotifyRouteError};
+use crate::room::{request_active_room, RoomRouteError};
 use crate::{
     cached_session, default_config_summary, mcp_list_servers_all_agents, random_id,
-    registry_entries, registry_entry, request_active_room, request_agent, timeout_batch_result,
-    timeout_task_result, HubState, RoomRouteError, MAX_WAIT_SECONDS, REQUEST_TIMEOUT_SECS,
+    registry_entries, registry_entry, request_agent, timeout_batch_result, timeout_task_result,
+    HubState, MAX_WAIT_SECONDS, REQUEST_TIMEOUT_SECS,
 };
 
 #[derive(Clone)]

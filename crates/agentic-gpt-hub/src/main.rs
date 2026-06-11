@@ -1,14 +1,13 @@
 mod mcp_server;
 mod notify;
 mod oauth;
+mod room;
 
 use agentic_gpt_protocol::{
     AgentMessage, AgentRegistryEntry, AgentRole, BatchExecRequest, BatchExecResult, Capabilities,
     ConfirmationDecision, ConfirmationPayload, ExecRequest, HubCommand, HubInfoAgents,
     HubInfoCounts, HubInfoRemoteConfirmation, HubInfoResponse, HubMessage, McpCallToolRequest,
-    McpListServersRequest, McpListToolsRequest, NotebookAppendRequest, NotebookCurrentRequest,
-    NotebookRecentRequest, NotebookRemoveRequest, NotebookSearchRequest,
-    NotebookSelectExactRequest, NotebookUpdateRequest, NotificationChannel, SafeBuiltinPolicyRules,
+    McpListServersRequest, McpListToolsRequest, NotificationChannel, SafeBuiltinPolicyRules,
     SafeConfigSummary, SafePathPolicySummary, SafePolicyRules, SafeSandboxSummary, SessionInfo,
     TaskResult,
 };
@@ -125,7 +124,7 @@ struct HubState {
     pending: Arc<Mutex<HashMap<String, oneshot::Sender<Value>>>>,
     pending_confirmations: Arc<Mutex<HashMap<String, PendingConfirmation>>>,
     sessions: Arc<Mutex<HashMap<String, HashMap<String, SessionInfo>>>>,
-    active_room: Arc<Mutex<Option<ActiveRoomConnection>>>,
+    active_room: Arc<Mutex<Option<room::ActiveRoomConnection>>>,
     http: reqwest::Client,
     public_base_url: Option<String>,
     oauth_codes: Arc<Mutex<HashMap<String, oauth::OAuthAuthorizationCode>>>,
@@ -141,12 +140,6 @@ struct AgentConnection {
     role: AgentRole,
     config_summary: Option<SafeConfigSummary>,
     notification_channels: Vec<NotificationChannel>,
-}
-
-#[derive(Clone, Debug)]
-struct ActiveRoomConnection {
-    agent_id: String,
-    connection_id: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -300,16 +293,19 @@ async fn serve(
             "/v1/notify/android/register",
             post(notify::android_notify_register),
         )
-        .route("/v1/room/notebook/append", post(room_notebook_append))
-        .route("/v1/room/notebook/recent", post(room_notebook_recent))
+        .route("/v1/room/notebook/append", post(room::room_notebook_append))
+        .route("/v1/room/notebook/recent", post(room::room_notebook_recent))
         .route(
             "/v1/room/notebook/selectExact",
-            post(room_notebook_select_exact),
+            post(room::room_notebook_select_exact),
         )
-        .route("/v1/room/notebook/search", post(room_notebook_search))
-        .route("/v1/room/notebook/current", post(room_notebook_current))
-        .route("/v1/room/notebook/update", post(room_notebook_update))
-        .route("/v1/room/notebook/remove", post(room_notebook_remove))
+        .route("/v1/room/notebook/search", post(room::room_notebook_search))
+        .route(
+            "/v1/room/notebook/current",
+            post(room::room_notebook_current),
+        )
+        .route("/v1/room/notebook/update", post(room::room_notebook_update))
+        .route("/v1/room/notebook/remove", post(room::room_notebook_remove))
         .route("/mcp", get(mcp_server::mcp_get).post(mcp_server::mcp_post))
         .route(
             "/.well-known/oauth-protected-resource",
@@ -762,152 +758,6 @@ async fn mcp_call_tool(
     }
 }
 
-async fn room_notebook_append(
-    State(state): State<HubState>,
-    headers: HeaderMap,
-    Json(payload): Json<NotebookAppendRequest>,
-) -> Response {
-    forward_room_command(
-        state,
-        headers,
-        HubCommand::RoomNotebookAppend {
-            request_id: random_id("req"),
-            payload,
-        },
-        "room_notebook_append_timeout",
-    )
-    .await
-}
-
-async fn room_notebook_recent(
-    State(state): State<HubState>,
-    headers: HeaderMap,
-    Json(payload): Json<NotebookRecentRequest>,
-) -> Response {
-    forward_room_command(
-        state,
-        headers,
-        HubCommand::RoomNotebookRecent {
-            request_id: random_id("req"),
-            payload,
-        },
-        "room_notebook_recent_timeout",
-    )
-    .await
-}
-
-async fn room_notebook_select_exact(
-    State(state): State<HubState>,
-    headers: HeaderMap,
-    Json(payload): Json<NotebookSelectExactRequest>,
-) -> Response {
-    forward_room_command(
-        state,
-        headers,
-        HubCommand::RoomNotebookSelectExact {
-            request_id: random_id("req"),
-            payload,
-        },
-        "room_notebook_select_exact_timeout",
-    )
-    .await
-}
-
-async fn room_notebook_search(
-    State(state): State<HubState>,
-    headers: HeaderMap,
-    Json(payload): Json<NotebookSearchRequest>,
-) -> Response {
-    forward_room_command(
-        state,
-        headers,
-        HubCommand::RoomNotebookSearch {
-            request_id: random_id("req"),
-            payload,
-        },
-        "room_notebook_search_timeout",
-    )
-    .await
-}
-
-async fn room_notebook_current(
-    State(state): State<HubState>,
-    headers: HeaderMap,
-    Json(payload): Json<NotebookCurrentRequest>,
-) -> Response {
-    forward_room_command(
-        state,
-        headers,
-        HubCommand::RoomNotebookCurrent {
-            request_id: random_id("req"),
-            payload,
-        },
-        "room_notebook_current_timeout",
-    )
-    .await
-}
-
-async fn room_notebook_update(
-    State(state): State<HubState>,
-    headers: HeaderMap,
-    Json(payload): Json<NotebookUpdateRequest>,
-) -> Response {
-    forward_room_command(
-        state,
-        headers,
-        HubCommand::RoomNotebookUpdate {
-            request_id: random_id("req"),
-            payload,
-        },
-        "room_notebook_update_timeout",
-    )
-    .await
-}
-
-async fn room_notebook_remove(
-    State(state): State<HubState>,
-    headers: HeaderMap,
-    Json(payload): Json<NotebookRemoveRequest>,
-) -> Response {
-    forward_room_command(
-        state,
-        headers,
-        HubCommand::RoomNotebookRemove {
-            request_id: random_id("req"),
-            payload,
-        },
-        "room_notebook_remove_timeout",
-    )
-    .await
-}
-
-async fn forward_room_command(
-    state: HubState,
-    headers: HeaderMap,
-    command: HubCommand,
-    timeout_code: &'static str,
-) -> Response {
-    if let Err(response) = require_action_auth(&state, &headers) {
-        return response;
-    }
-    match request_active_room(&state, command, REQUEST_TIMEOUT_SECS).await {
-        Ok(value) => Json(value).into_response(),
-        Err(RoomRouteError::NotActive) => api_error(
-            StatusCode::NOT_FOUND,
-            "room_not_active",
-            "no active room agent",
-        ),
-        Err(RoomRouteError::StateConflict) => api_error(
-            StatusCode::CONFLICT,
-            "room_state_conflict",
-            "active room state is inconsistent",
-        ),
-        Err(RoomRouteError::Timeout(reason)) => {
-            api_error(StatusCode::GATEWAY_TIMEOUT, timeout_code, reason)
-        }
-    }
-}
-
 async fn connect_agent(
     State(state): State<HubState>,
     Path(agent_id): Path<String>,
@@ -972,30 +822,33 @@ async fn handle_socket(state: HubState, agent_id: String, socket: WebSocket) {
                 role,
                 config_summary,
                 notification_channels,
-            } => match register_connection_role(&state, &agent_id, &connection_id, role).await {
-                Ok(()) => {
-                    let mut agents = state.agents.lock().await;
-                    if let Some(connection) = agents.get_mut(&agent_id) {
-                        connection.role = role;
-                        connection.config_summary = Some(config_summary);
-                        connection.notification_channels = notification_channels;
+            } => {
+                match room::register_connection_role(&state, &agent_id, &connection_id, role).await
+                {
+                    Ok(()) => {
+                        let mut agents = state.agents.lock().await;
+                        if let Some(connection) = agents.get_mut(&agent_id) {
+                            connection.role = role;
+                            connection.config_summary = Some(config_summary);
+                            connection.notification_channels = notification_channels;
+                        }
+                    }
+                    Err(reason) => {
+                        warn!(%agent_id, %connection_id, %reason, "room role rejected");
+                        let _ = tx.send(Message::Text(
+                            serde_json::to_string(&json!({
+                                "error": {
+                                    "code": reason,
+                                    "message": reason
+                                }
+                            }))
+                            .unwrap(),
+                        ));
+                        let _ = tx.send(Message::Close(None));
+                        break;
                     }
                 }
-                Err(reason) => {
-                    warn!(%agent_id, %connection_id, %reason, "room role rejected");
-                    let _ = tx.send(Message::Text(
-                        serde_json::to_string(&json!({
-                            "error": {
-                                "code": reason,
-                                "message": reason
-                            }
-                        }))
-                        .unwrap(),
-                    ));
-                    let _ = tx.send(Message::Close(None));
-                    break;
-                }
-            },
+            }
             AgentMessage::Heartbeat { sent_at } => {
                 let ack = HubMessage::HeartbeatAck {
                     sent_at,
@@ -1073,7 +926,7 @@ async fn handle_socket(state: HubState, agent_id: String, socket: WebSocket) {
         }
     };
     if removed_current_connection {
-        release_active_room_if_current(&state, &agent_id, &connection_id).await;
+        room::release_active_room_if_current(&state, &agent_id, &connection_id).await;
         discard_agent_confirmations(&state, &agent_id).await;
     }
     info!(%agent_id, %connection_id, removedCurrentConnection = removed_current_connection, "agent disconnected");
@@ -1114,76 +967,6 @@ async fn request_agent(
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum RoomRouteError {
-    NotActive,
-    StateConflict,
-    Timeout(String),
-}
-
-pub(crate) async fn request_active_room(
-    state: &HubState,
-    command: HubCommand,
-    timeout_secs: u64,
-) -> std::result::Result<Value, RoomRouteError> {
-    let active = state
-        .active_room
-        .lock()
-        .await
-        .clone()
-        .ok_or(RoomRouteError::NotActive)?;
-    let valid = {
-        let agents = state.agents.lock().await;
-        agents
-            .get(&active.agent_id)
-            .map(|connection| {
-                connection.connection_id == active.connection_id
-                    && connection.role == AgentRole::Room
-            })
-            .unwrap_or(false)
-    };
-    if !valid {
-        return Err(RoomRouteError::StateConflict);
-    }
-    request_agent(state, &active.agent_id, command, timeout_secs)
-        .await
-        .map_err(RoomRouteError::Timeout)
-}
-
-async fn register_connection_role(
-    state: &HubState,
-    agent_id: &str,
-    connection_id: &str,
-    role: AgentRole,
-) -> std::result::Result<(), &'static str> {
-    match role {
-        AgentRole::Normal => {
-            release_active_room_for_agent(state, agent_id).await;
-            Ok(())
-        }
-        AgentRole::Room => {
-            let mut active = state.active_room.lock().await;
-            match active.as_ref() {
-                None => {
-                    *active = Some(ActiveRoomConnection {
-                        agent_id: agent_id.to_string(),
-                        connection_id: connection_id.to_string(),
-                    });
-                    Ok(())
-                }
-                Some(current) if current.agent_id == agent_id => {
-                    *active = Some(ActiveRoomConnection {
-                        agent_id: agent_id.to_string(),
-                        connection_id: connection_id.to_string(),
-                    });
-                    Ok(())
-                }
-                Some(_) => Err("room_already_active"),
-            }
-        }
-    }
-}
-
 async fn replace_agent_connection(
     state: &HubState,
     agent_id: &str,
@@ -1205,30 +988,8 @@ async fn replace_agent_connection(
         )
     };
     if let Some(old) = old {
-        release_active_room_if_current(state, agent_id, &old.connection_id).await;
+        room::release_active_room_if_current(state, agent_id, &old.connection_id).await;
         let _ = old.sender.send(Message::Close(None));
-    }
-}
-
-async fn release_active_room_if_current(state: &HubState, agent_id: &str, connection_id: &str) {
-    let mut active = state.active_room.lock().await;
-    let should_release = active
-        .as_ref()
-        .map(|current| current.agent_id == agent_id && current.connection_id == connection_id)
-        .unwrap_or(false);
-    if should_release {
-        *active = None;
-    }
-}
-
-async fn release_active_room_for_agent(state: &HubState, agent_id: &str) {
-    let mut active = state.active_room.lock().await;
-    if active
-        .as_ref()
-        .map(|current| current.agent_id == agent_id)
-        .unwrap_or(false)
-    {
-        *active = None;
     }
 }
 
@@ -2178,37 +1939,6 @@ mod tests {
         }
     }
 
-    async fn insert_connection(
-        state: &HubState,
-        agent_id: &str,
-        connection_id: &str,
-        role: AgentRole,
-    ) -> mpsc::UnboundedReceiver<Message> {
-        let (tx, rx) = mpsc::unbounded_channel();
-        state.agents.lock().await.insert(
-            agent_id.to_string(),
-            AgentConnection {
-                connection_id: connection_id.to_string(),
-                sender: tx,
-                last_seen_at: Utc::now(),
-                role,
-                config_summary: None,
-                notification_channels: Vec::new(),
-            },
-        );
-        rx
-    }
-
-    async fn replace_connection(
-        state: &HubState,
-        agent_id: &str,
-        connection_id: &str,
-    ) -> mpsc::UnboundedReceiver<Message> {
-        let (tx, rx) = mpsc::unbounded_channel();
-        replace_agent_connection(state, agent_id, connection_id, tx).await;
-        rx
-    }
-
     #[tokio::test]
     async fn hub_info_reports_safe_runtime_summary() {
         let state = test_state();
@@ -2314,285 +2044,6 @@ mod tests {
         }
         assert!(openapi.contains("roomNotebookUpdate"));
         assert!(openapi.contains("roomNotebookRemove"));
-    }
-
-    #[tokio::test]
-    async fn first_room_agent_becomes_active_room() {
-        let state = test_state();
-        let _rx = insert_connection(&state, "room", "conn1", AgentRole::Normal).await;
-        register_connection_role(&state, "room", "conn1", AgentRole::Room)
-            .await
-            .unwrap();
-        let active = state.active_room.lock().await.clone().unwrap();
-        assert_eq!(active.agent_id, "room");
-        assert_eq!(active.connection_id, "conn1");
-    }
-
-    #[tokio::test]
-    async fn second_different_room_agent_is_rejected() {
-        let state = test_state();
-        let _rx1 = insert_connection(&state, "room-a", "conn1", AgentRole::Room).await;
-        register_connection_role(&state, "room-a", "conn1", AgentRole::Room)
-            .await
-            .unwrap();
-        let _rx2 = insert_connection(&state, "room-b", "conn2", AgentRole::Normal).await;
-        assert_eq!(
-            register_connection_role(&state, "room-b", "conn2", AgentRole::Room).await,
-            Err("room_already_active")
-        );
-    }
-
-    #[tokio::test]
-    async fn same_room_agent_reconnect_replaces_old_room_connection() {
-        let state = test_state();
-        let _rx1 = insert_connection(&state, "room", "old", AgentRole::Room).await;
-        register_connection_role(&state, "room", "old", AgentRole::Room)
-            .await
-            .unwrap();
-        let _rx2 = replace_connection(&state, "room", "new").await;
-        assert!(state.active_room.lock().await.is_none());
-        register_connection_role(&state, "room", "new", AgentRole::Room)
-            .await
-            .unwrap();
-        let active = state.active_room.lock().await.clone().unwrap();
-        assert_eq!(active.connection_id, "new");
-    }
-
-    #[tokio::test]
-    async fn same_agent_normal_hello_releases_old_active_room() {
-        let state = test_state();
-        let _rx1 = insert_connection(&state, "room", "old", AgentRole::Room).await;
-        register_connection_role(&state, "room", "old", AgentRole::Room)
-            .await
-            .unwrap();
-        let _rx2 = replace_connection(&state, "room", "normal").await;
-        register_connection_role(&state, "room", "normal", AgentRole::Normal)
-            .await
-            .unwrap();
-        assert!(state.active_room.lock().await.is_none());
-    }
-
-    #[tokio::test]
-    async fn same_agent_replacement_without_hello_does_not_leave_stale_active_room() {
-        let state = test_state();
-        let _rx1 = insert_connection(&state, "room", "old", AgentRole::Room).await;
-        register_connection_role(&state, "room", "old", AgentRole::Room)
-            .await
-            .unwrap();
-        let _rx2 = replace_connection(&state, "room", "new-no-hello").await;
-        assert!(state.active_room.lock().await.is_none());
-        release_active_room_if_current(&state, "room", "new-no-hello").await;
-        assert!(state.active_room.lock().await.is_none());
-    }
-
-    #[tokio::test]
-    async fn room_api_after_replacement_without_hello_returns_not_active() {
-        let state = test_state();
-        let _rx1 = insert_connection(&state, "room", "old", AgentRole::Room).await;
-        register_connection_role(&state, "room", "old", AgentRole::Room)
-            .await
-            .unwrap();
-        let _rx2 = replace_connection(&state, "room", "new-no-hello").await;
-        let result = request_active_room(
-            &state,
-            HubCommand::RoomNotebookCurrent {
-                request_id: "req".to_string(),
-                payload: NotebookCurrentRequest {
-                    scope: "agentic".to_string(),
-                },
-            },
-            1,
-        )
-        .await;
-        assert_eq!(result.unwrap_err(), RoomRouteError::NotActive);
-    }
-
-    #[tokio::test]
-    async fn stale_room_disconnect_does_not_release_new_room_connection() {
-        let state = test_state();
-        let _rx1 = insert_connection(&state, "room", "old", AgentRole::Room).await;
-        register_connection_role(&state, "room", "old", AgentRole::Room)
-            .await
-            .unwrap();
-        let _rx2 = insert_connection(&state, "room", "new", AgentRole::Room).await;
-        register_connection_role(&state, "room", "new", AgentRole::Room)
-            .await
-            .unwrap();
-        release_active_room_if_current(&state, "room", "old").await;
-        let active = state.active_room.lock().await.clone().unwrap();
-        assert_eq!(active.connection_id, "new");
-    }
-
-    #[tokio::test]
-    async fn room_api_without_active_room_returns_not_active() {
-        let state = test_state();
-        let result = request_active_room(
-            &state,
-            HubCommand::RoomNotebookCurrent {
-                request_id: "req".to_string(),
-                payload: NotebookCurrentRequest {
-                    scope: "agentic".to_string(),
-                },
-            },
-            1,
-        )
-        .await;
-        assert_eq!(result.unwrap_err(), RoomRouteError::NotActive);
-    }
-
-    #[tokio::test]
-    async fn update_remove_room_api_without_active_room_returns_not_active() {
-        let state = test_state();
-        let update = request_active_room(
-            &state,
-            HubCommand::RoomNotebookUpdate {
-                request_id: "req-update".to_string(),
-                payload: NotebookUpdateRequest {
-                    id: "psg_missing".to_string(),
-                    significance: None,
-                    abstract_text: Some("updated".to_string()),
-                    content: None,
-                    tags: None,
-                },
-            },
-            1,
-        )
-        .await;
-        assert_eq!(update.unwrap_err(), RoomRouteError::NotActive);
-        let remove = request_active_room(
-            &state,
-            HubCommand::RoomNotebookRemove {
-                request_id: "req-remove".to_string(),
-                payload: NotebookRemoveRequest {
-                    id: "psg_missing".to_string(),
-                },
-            },
-            1,
-        )
-        .await;
-        assert_eq!(remove.unwrap_err(), RoomRouteError::NotActive);
-    }
-
-    #[tokio::test]
-    async fn room_api_routes_to_active_room_connection() {
-        let state = test_state();
-        let mut rx = insert_connection(&state, "room", "conn1", AgentRole::Room).await;
-        register_connection_role(&state, "room", "conn1", AgentRole::Room)
-            .await
-            .unwrap();
-        let request_state = state.clone();
-        let task = tokio::spawn(async move {
-            request_active_room(
-                &request_state,
-                HubCommand::RoomNotebookCurrent {
-                    request_id: "req".to_string(),
-                    payload: NotebookCurrentRequest {
-                        scope: "agentic".to_string(),
-                    },
-                },
-                5,
-            )
-            .await
-            .unwrap()
-        });
-        let Message::Text(text) = rx.recv().await.unwrap() else {
-            panic!("expected text command");
-        };
-        let command = serde_json::from_str::<HubCommand>(&text).unwrap();
-        let request_id = command_request_id(&command).to_string();
-        assert!(matches!(command, HubCommand::RoomNotebookCurrent { .. }));
-        let sender = state.pending.lock().await.remove(&request_id).unwrap();
-        sender
-            .send(json!({ "current": null, "warnings": [] }))
-            .unwrap();
-        let value = task.await.unwrap();
-        assert_eq!(value["current"], Value::Null);
-    }
-
-    #[tokio::test]
-    async fn update_remove_room_api_routes_to_active_room_connection() {
-        let state = test_state();
-        let mut rx = insert_connection(&state, "room", "conn1", AgentRole::Room).await;
-        register_connection_role(&state, "room", "conn1", AgentRole::Room)
-            .await
-            .unwrap();
-        let request_state = state.clone();
-        let task = tokio::spawn(async move {
-            request_active_room(
-                &request_state,
-                HubCommand::RoomNotebookUpdate {
-                    request_id: "req-update".to_string(),
-                    payload: NotebookUpdateRequest {
-                        id: "psg_1".to_string(),
-                        significance: None,
-                        abstract_text: Some("updated".to_string()),
-                        content: None,
-                        tags: None,
-                    },
-                },
-                5,
-            )
-            .await
-            .unwrap()
-        });
-        let Message::Text(text) = rx.recv().await.unwrap() else {
-            panic!("expected text command");
-        };
-        let command = serde_json::from_str::<HubCommand>(&text).unwrap();
-        let request_id = command_request_id(&command).to_string();
-        assert!(matches!(command, HubCommand::RoomNotebookUpdate { .. }));
-        let sender = state.pending.lock().await.remove(&request_id).unwrap();
-        sender
-            .send(json!({ "updated": true, "id": "psg_1", "warnings": [] }))
-            .unwrap();
-        let value = task.await.unwrap();
-        assert_eq!(value["updated"], true);
-
-        let request_state = state.clone();
-        let task = tokio::spawn(async move {
-            request_active_room(
-                &request_state,
-                HubCommand::RoomNotebookRemove {
-                    request_id: "req-remove".to_string(),
-                    payload: NotebookRemoveRequest {
-                        id: "psg_1".to_string(),
-                    },
-                },
-                5,
-            )
-            .await
-            .unwrap()
-        });
-        let Message::Text(text) = rx.recv().await.unwrap() else {
-            panic!("expected text command");
-        };
-        let command = serde_json::from_str::<HubCommand>(&text).unwrap();
-        let request_id = command_request_id(&command).to_string();
-        assert!(matches!(command, HubCommand::RoomNotebookRemove { .. }));
-        let sender = state.pending.lock().await.remove(&request_id).unwrap();
-        sender
-            .send(json!({ "removed": true, "id": "psg_1", "warnings": [] }))
-            .unwrap();
-        let value = task.await.unwrap();
-        assert_eq!(value["removed"], true);
-    }
-
-    #[tokio::test]
-    async fn normal_agent_is_not_room_api_fallback() {
-        let state = test_state();
-        let _rx = insert_connection(&state, "normal", "conn1", AgentRole::Normal).await;
-        let result = request_active_room(
-            &state,
-            HubCommand::RoomNotebookCurrent {
-                request_id: "req".to_string(),
-                payload: NotebookCurrentRequest {
-                    scope: "agentic".to_string(),
-                },
-            },
-            1,
-        )
-        .await;
-        assert_eq!(result.unwrap_err(), RoomRouteError::NotActive);
     }
 
     #[test]
