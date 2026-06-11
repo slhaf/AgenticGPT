@@ -2833,6 +2833,15 @@ fn mutate_rule(config_path: PathBuf, decision: PolicyDecision, command: RuleComm
 }
 
 fn remove_rule(rules: &mut Vec<Rule>, program: &str, args_prefix: &[String]) -> Result<()> {
+    remove_rule_with_interactive(rules, program, args_prefix, io::stdin().is_terminal())
+}
+
+fn remove_rule_with_interactive(
+    rules: &mut Vec<Rule>,
+    program: &str,
+    args_prefix: &[String],
+    interactive: bool,
+) -> Result<()> {
     let matches = rules
         .iter()
         .enumerate()
@@ -2850,7 +2859,7 @@ fn remove_rule(rules: &mut Vec<Rule>, program: &str, args_prefix: &[String]) -> 
             println!("removed {}", rule_display(&removed));
             Ok(())
         }
-        _ if io::stdin().is_terminal() => {
+        _ if interactive => {
             let selected = choose_rule_interactively(rules, &matches)?;
             let removed = rules.remove(selected);
             println!("removed {}", rule_display(&removed));
@@ -4164,7 +4173,7 @@ mod tests {
             },
         ];
 
-        let error = remove_rule(&mut rules, "bash", &[]).unwrap_err();
+        let error = remove_rule_with_interactive(&mut rules, "bash", &[], false).unwrap_err();
         assert!(error.to_string().contains("multiple_matching_rules"));
         assert_eq!(rules.len(), 2);
     }
