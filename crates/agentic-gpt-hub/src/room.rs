@@ -264,8 +264,9 @@ pub(crate) async fn release_active_room_for_agent(state: &HubState, agent_id: &s
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::init_db;
     use crate::{
-        command_request_id, init_db, replace_agent_connection, AgentConnection, HubConfig,
+        command_request_id, replace_agent_connection, AgentConnection, HubConfig,
         RemoteConfirmationConfig,
     };
     use agentic_gpt_protocol::HubCommand;

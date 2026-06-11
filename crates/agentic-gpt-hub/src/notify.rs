@@ -14,11 +14,11 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use tokio::time::{timeout, Duration};
 
-// Phase 1 keeps these crate-root helper calls as a temporary dependency. Later
-// phases will move them into registry/agents/routes/utils modules.
+// Temporary dependencies until agents/routes/utils modules take ownership.
+use crate::registry::registry_entries;
 use crate::{
-    api_error, random_id, random_token, registry_entries, request_agent, require_action_auth,
-    sha256_hex, HubState, NtfyConfig, REQUEST_TIMEOUT_SECS,
+    api_error, random_id, random_token, request_agent, require_action_auth, sha256_hex, HubState,
+    NtfyConfig, REQUEST_TIMEOUT_SECS,
 };
 
 #[derive(Clone, Debug)]
@@ -509,9 +509,8 @@ mod tests {
     use std::sync::{Arc, Mutex as StdMutex};
     use tokio::sync::{mpsc, Mutex};
 
-    use crate::{
-        command_request_id, init_db, AgentConnection, HubConfig, RemoteConfirmationConfig,
-    };
+    use crate::db::init_db;
+    use crate::{command_request_id, AgentConnection, HubConfig, RemoteConfirmationConfig};
 
     fn test_hub_config() -> HubConfig {
         HubConfig {

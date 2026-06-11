@@ -1,12 +1,14 @@
+mod db;
 mod mcp_server;
 mod notify;
 mod oauth;
+mod registry;
 mod room;
 
 use agentic_gpt_protocol::{
-    AgentMessage, AgentRegistryEntry, AgentRole, BatchExecRequest, BatchExecResult, Capabilities,
-    ConfirmationDecision, ConfirmationPayload, ExecRequest, HubCommand, HubInfoAgents,
-    HubInfoCounts, HubInfoRemoteConfirmation, HubInfoResponse, HubMessage, McpCallToolRequest,
+    AgentMessage, AgentRole, BatchExecRequest, BatchExecResult, ConfirmationDecision,
+    ConfirmationPayload, ExecRequest, HubCommand, HubInfoAgents, HubInfoCounts,
+    HubInfoRemoteConfirmation, HubInfoResponse, HubMessage, McpCallToolRequest,
     McpListServersRequest, McpListToolsRequest, NotificationChannel, SafeBuiltinPolicyRules,
     SafeConfigSummary, SafePathPolicySummary, SafePolicyRules, SafeSandboxSummary, SessionInfo,
     TaskResult,
@@ -21,7 +23,7 @@ use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 use futures_util::{SinkExt, StreamExt};
-use rusqlite::{params, Connection};
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -35,6 +37,9 @@ use tokio::time::{sleep, timeout, Duration};
 use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
 use uuid::Uuid;
+
+use crate::db::{init_db, open_db};
+use crate::registry::{handle_agent_command, registry_entries, registry_entry, update_last_seen};
 
 const REQUEST_TIMEOUT_SECS: u64 = 35;
 const MAX_WAIT_SECONDS: u64 = 30;
@@ -66,52 +71,7 @@ enum HubCommandCli {
     },
     Agent {
         #[command(subcommand)]
-        command: AgentCommand,
-    },
-}
-
-#[derive(Subcommand)]
-enum AgentCommand {
-    Add {
-        #[arg(long)]
-        agent_id: String,
-        #[arg(long)]
-        alias: Option<String>,
-        #[arg(long)]
-        display_name: String,
-        #[arg(long)]
-        secret: String,
-    },
-    Alias {
-        #[command(subcommand)]
-        command: AgentAliasCommand,
-    },
-    Remove {
-        #[arg(long)]
-        agent_id: String,
-    },
-    Disable {
-        #[arg(long)]
-        agent_id: String,
-    },
-    Enable {
-        #[arg(long)]
-        agent_id: String,
-    },
-    List,
-}
-
-#[derive(Subcommand)]
-enum AgentAliasCommand {
-    Set {
-        #[arg(long)]
-        agent_id: String,
-        #[arg(long)]
-        alias: String,
-    },
-    Clear {
-        #[arg(long)]
-        agent_id: String,
+        command: registry::AgentCommand,
     },
 }
 
@@ -1675,212 +1635,6 @@ impl HubConfig {
     }
 }
 
-fn open_db(path: &PathBuf) -> Result<Connection> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    Connection::open(path).with_context(|| format!("open sqlite db {}", path.display()))
-}
-
-fn init_db(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
-        "
-        create table if not exists agents (
-            agent_id text primary key,
-            display_name text not null,
-            enabled integer not null,
-            secret_hash text not null,
-            last_seen_at text,
-            capabilities_json text not null
-        );
-        create table if not exists notification_endpoints (
-            endpoint_id text primary key,
-            kind text not null,
-            display_name text,
-            capabilities_json text not null,
-            token_hash text not null,
-            enabled integer not null,
-            last_seen_at text,
-            created_at text not null
-        );
-        ",
-    )?;
-    ensure_column(conn, "agents", "alias", "alias text")?;
-    conn.execute_batch(
-        "create unique index if not exists agents_alias_unique on agents(alias) where alias is not null;",
-    )?;
-    Ok(())
-}
-
-fn handle_agent_command(conn: &Connection, command: AgentCommand) -> Result<()> {
-    match command {
-        AgentCommand::Add {
-            agent_id,
-            alias,
-            display_name,
-            secret,
-        } => {
-            let alias = normalize_alias(alias.as_deref())?;
-            let capabilities = Capabilities {
-                sessions: true,
-                confirmation: true,
-                notification_actions: true,
-            };
-            conn.execute(
-                "insert into agents(agent_id, alias, display_name, enabled, secret_hash, last_seen_at, capabilities_json)
-                 values (?1, ?2, ?3, 1, ?4, null, ?5)
-                 on conflict(agent_id) do update set display_name = excluded.display_name,
-                     alias = coalesce(excluded.alias, agents.alias),
-                     enabled = 1, secret_hash = excluded.secret_hash, capabilities_json = excluded.capabilities_json",
-                params![
-                    agent_id,
-                    alias,
-                    display_name,
-                    sha256_hex(&secret),
-                    serde_json::to_string(&capabilities)?
-                ],
-            )?;
-            println!("agent saved");
-        }
-        AgentCommand::Alias { command } => match command {
-            AgentAliasCommand::Set { agent_id, alias } => {
-                let alias = normalize_alias(Some(&alias))?;
-                conn.execute(
-                    "update agents set alias = ?2 where agent_id = ?1",
-                    params![agent_id, alias],
-                )?;
-                println!("agent alias saved");
-            }
-            AgentAliasCommand::Clear { agent_id } => {
-                conn.execute(
-                    "update agents set alias = null where agent_id = ?1",
-                    params![agent_id],
-                )?;
-                println!("agent alias cleared");
-            }
-        },
-        AgentCommand::Remove { agent_id } => {
-            conn.execute("delete from agents where agent_id = ?1", params![agent_id])?;
-            println!("agent removed");
-        }
-        AgentCommand::Disable { agent_id } => {
-            conn.execute(
-                "update agents set enabled = 0 where agent_id = ?1",
-                params![agent_id],
-            )?;
-            println!("agent disabled");
-        }
-        AgentCommand::Enable { agent_id } => {
-            conn.execute(
-                "update agents set enabled = 1 where agent_id = ?1",
-                params![agent_id],
-            )?;
-            println!("agent enabled");
-        }
-        AgentCommand::List => {
-            for entry in registry_entries_from_conn(conn)? {
-                println!(
-                    "{}\talias={}\t{}\tenabled={}\tlastSeenAt={}",
-                    entry.agent_id,
-                    entry.alias.as_deref().unwrap_or("-"),
-                    entry.display_name,
-                    entry.enabled,
-                    entry
-                        .last_seen_at
-                        .map(|value| value.to_rfc3339())
-                        .unwrap_or_else(|| "-".to_string())
-                );
-            }
-        }
-    }
-    Ok(())
-}
-
-fn registry_entries(state: &HubState) -> Result<Vec<AgentRegistryEntry>> {
-    let conn = state.db.lock().unwrap();
-    registry_entries_from_conn(&conn)
-}
-
-fn registry_entries_from_conn(conn: &Connection) -> Result<Vec<AgentRegistryEntry>> {
-    let mut stmt = conn.prepare(
-        "select agent_id, alias, display_name, enabled, secret_hash, last_seen_at, capabilities_json from agents order by agent_id",
-    )?;
-    let rows = stmt.query_map([], row_to_entry)?;
-    rows.collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(Into::into)
-}
-
-fn registry_entry(state: &HubState, agent_id: &str) -> Result<Option<AgentRegistryEntry>> {
-    let conn = state.db.lock().unwrap();
-    let mut stmt = conn.prepare(
-        "select agent_id, alias, display_name, enabled, secret_hash, last_seen_at, capabilities_json from agents where agent_id = ?1",
-    )?;
-    let mut rows = stmt.query_map(params![agent_id], row_to_entry)?;
-    rows.next().transpose().map_err(Into::into)
-}
-
-fn update_last_seen(state: &HubState, agent_id: &str) -> Result<()> {
-    let conn = state.db.lock().unwrap();
-    conn.execute(
-        "update agents set last_seen_at = ?2 where agent_id = ?1",
-        params![agent_id, Utc::now().to_rfc3339()],
-    )?;
-    Ok(())
-}
-
-fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentRegistryEntry> {
-    let last_seen: Option<String> = row.get(5)?;
-    let capabilities_json: String = row.get(6)?;
-    Ok(AgentRegistryEntry {
-        agent_id: row.get(0)?,
-        alias: row.get(1)?,
-        display_name: row.get(2)?,
-        enabled: row.get::<_, i64>(3)? != 0,
-        secret_hash: row.get(4)?,
-        last_seen_at: last_seen.and_then(|value| {
-            DateTime::parse_from_rfc3339(&value)
-                .ok()
-                .map(|value| value.with_timezone(&Utc))
-        }),
-        capabilities: serde_json::from_str(&capabilities_json).unwrap_or(Capabilities {
-            sessions: true,
-            confirmation: true,
-            notification_actions: false,
-        }),
-    })
-}
-
-fn ensure_column(conn: &Connection, table: &str, column: &str, definition: &str) -> Result<()> {
-    let mut stmt = conn.prepare(&format!("pragma table_info({table})"))?;
-    let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
-    for existing in columns {
-        if existing? == column {
-            return Ok(());
-        }
-    }
-    conn.execute(&format!("alter table {table} add column {definition}"), [])?;
-    Ok(())
-}
-
-fn normalize_alias(value: Option<&str>) -> Result<Option<String>> {
-    let Some(value) = value else {
-        return Ok(None);
-    };
-    let alias = value.trim();
-    if alias.is_empty() {
-        return Ok(None);
-    }
-    let valid = alias
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'));
-    if !valid {
-        return Err(anyhow::anyhow!(
-            "alias may only contain ASCII letters, digits, underscore, or hyphen"
-        ));
-    }
-    Ok(Some(alias.to_string()))
-}
-
 fn sha256_hex(value: &str) -> String {
     let digest = Sha256::digest(value.as_bytes());
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
@@ -2044,39 +1798,5 @@ mod tests {
         }
         assert!(openapi.contains("roomNotebookUpdate"));
         assert!(openapi.contains("roomNotebookRemove"));
-    }
-
-    #[test]
-    fn agent_alias_is_nullable_and_unique_when_present() {
-        let conn = Connection::open_in_memory().unwrap();
-        init_db(&conn).unwrap();
-        let capabilities = serde_json::to_string(&Capabilities {
-            sessions: true,
-            confirmation: true,
-            notification_actions: false,
-        })
-        .unwrap();
-        conn.execute(
-            "insert into agents(agent_id, alias, display_name, enabled, secret_hash, last_seen_at, capabilities_json)
-             values ('a', null, 'A', 1, 'hash-a', null, ?1)",
-            params![capabilities],
-        )
-        .unwrap();
-        conn.execute(
-            "insert into agents(agent_id, alias, display_name, enabled, secret_hash, last_seen_at, capabilities_json)
-             values ('b', null, 'B', 1, 'hash-b', null, ?1)",
-            params![capabilities],
-        )
-        .unwrap();
-        conn.execute(
-            "update agents set alias = 'laptop' where agent_id = 'a'",
-            [],
-        )
-        .unwrap();
-        let duplicate = conn.execute(
-            "update agents set alias = 'laptop' where agent_id = 'b'",
-            [],
-        );
-        assert!(duplicate.is_err());
     }
 }
