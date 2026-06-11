@@ -16,9 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::time::Instant;
 
-use crate::{
-    authorize_mcp_tool_call, write_audit, write_config_with_backup, AppState, AuditRecord, Config,
-};
+use crate::{confirmation, write_audit, write_config_with_backup, AppState, AuditRecord, Config};
 
 #[derive(Subcommand)]
 pub(crate) enum McpConfigCommand {
@@ -136,7 +134,7 @@ pub(crate) async fn call_tool(state: &AppState, payload: McpCallToolRequest) -> 
         }
     };
 
-    let authorization = authorize_mcp_tool_call(
+    let authorization = confirmation::authorize_mcp_tool_call(
         state,
         &payload.server_id,
         &payload.tool_name,

@@ -1,12 +1,13 @@
+mod confirmation;
 mod mcp;
 mod notebook;
+mod notify;
 
 use agentic_gpt_protocol::{
-    AgentMessage, AgentRole, BatchElementResult, BatchExecRequest, BatchExecResult,
-    ConfirmationDecision, ConfirmationPayload, ExecElement, ExecRequest, HubCommand, HubMessage,
-    NotificationChannel, PolicyCounts, SafeBuiltinPolicyRules, SafeConfigSummary,
+    AgentMessage, AgentRole, BatchElementResult, BatchExecRequest, BatchExecResult, ExecElement,
+    ExecRequest, HubCommand, HubMessage, PolicyCounts, SafeBuiltinPolicyRules, SafeConfigSummary,
     SafePathPolicySummary, SafePathRoot, SafePolicyRules, SafeRule, SafeSandboxSummary,
-    SessionInfo, TaskResult, UserNotifyDeliveryRequest, UserNotifyDeliveryResponse,
+    SessionInfo, TaskResult,
 };
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
@@ -280,15 +281,8 @@ struct AppState {
     sessions: Arc<Mutex<HashMap<String, ManagedSession>>>,
     hub_sender: Arc<Mutex<Option<mpsc::UnboundedSender<Message>>>>,
     pending_confirmations: Arc<Mutex<HashMap<String, oneshot::Sender<String>>>>,
-    temporary_mcp_allows: Arc<Mutex<Vec<TemporaryMcpAllow>>>,
+    temporary_mcp_allows: Arc<Mutex<Vec<confirmation::TemporaryMcpAllow>>>,
     notebook_writes: Arc<Mutex<()>>,
-}
-
-#[derive(Clone, Debug)]
-struct TemporaryMcpAllow {
-    agent_id: String,
-    server_id: String,
-    expires_at: DateTime<Utc>,
 }
 
 struct ManagedSession {
@@ -427,7 +421,7 @@ async fn connect_loop(state: AppState) -> Result<()> {
                 let hello = AgentMessage::Hello {
                     role: state.run_mode.role(),
                     config_summary: config.safe_summary(),
-                    notification_channels: freedesktop_notification_channel(&config)
+                    notification_channels: notify::freedesktop_notification_channel(&config)
                         .into_iter()
                         .collect(),
                 };
@@ -472,7 +466,7 @@ async fn connect_loop(state: AppState) -> Result<()> {
                                         last_heartbeat_ack = Instant::now();
                                     }
                                     HubMessage::ConfirmationResponse { request_id, decision, reason } => {
-                                        let value = confirmation_decision_value(decision);
+                                        let value = confirmation::confirmation_decision_value(decision);
                                         log_info(format!(
                                             "confirmation response received; requestId={request_id}; decision={value}; reason={reason}"
                                         ));
@@ -511,7 +505,7 @@ async fn connect_loop(state: AppState) -> Result<()> {
                     }
                 }
                 *state.hub_sender.lock().await = None;
-                fail_pending_confirmations(&state, "provider_unavailable").await;
+                confirmation::fail_pending_confirmations(&state, "provider_unavailable").await;
                 writer.abort();
             }
         }
@@ -751,7 +745,7 @@ async fn handle_hub_command(state: AppState, command: HubCommand) -> Result<()> 
             request_id,
             payload,
         } => {
-            let result = deliver_freedesktop_notification(payload).await;
+            let result = notify::deliver_freedesktop_notification(payload).await;
             send_response(&state, &request_id, serde_json::to_value(result)?).await?;
         }
         HubCommand::RoomNotebookAppend {
@@ -895,73 +889,6 @@ fn room_agent_required_error() -> serde_json::Value {
     })
 }
 
-fn freedesktop_notification_channel(config: &Config) -> Option<NotificationChannel> {
-    let (available, _) = detect_freedesktop_notification_support();
-    if !available {
-        return None;
-    }
-    Some(NotificationChannel {
-        key: format!("agent::{}::freedesktop", config.agent_id),
-        display_name: format!("{} desktop notification", config.display_name),
-        available: true,
-        kind: "freedesktop".to_string(),
-        supports_actions: false,
-        reason: None,
-        agent_id: Some(config.agent_id.clone()),
-    })
-}
-
-fn detect_freedesktop_notification_support() -> (bool, bool) {
-    notify_rust::get_capabilities()
-        .map(|capabilities| {
-            let supports_actions = capabilities
-                .iter()
-                .any(|capability| capability == "actions");
-            (true, supports_actions)
-        })
-        .unwrap_or((false, false))
-}
-
-async fn deliver_freedesktop_notification(
-    payload: UserNotifyDeliveryRequest,
-) -> UserNotifyDeliveryResponse {
-    if !matches!(
-        payload.channel_key.split("::").collect::<Vec<_>>().as_slice(),
-        ["agent", alias, "freedesktop"] if !alias.is_empty()
-    ) {
-        return UserNotifyDeliveryResponse {
-            channel_key: payload.channel_key,
-            delivered: false,
-            reason: Some("unsupported_channel".to_string()),
-        };
-    }
-    let channel_key = payload.channel_key.clone();
-    let delivered = tokio::task::spawn_blocking(move || {
-        notify_rust::Notification::new()
-            .summary(&payload.title)
-            .body(&payload.body)
-            .show()
-    })
-    .await;
-    match delivered {
-        Ok(Ok(_)) => UserNotifyDeliveryResponse {
-            channel_key,
-            delivered: true,
-            reason: None,
-        },
-        Ok(Err(error)) => UserNotifyDeliveryResponse {
-            channel_key,
-            delivered: false,
-            reason: Some(format!("notification_show_failed:{error}")),
-        },
-        Err(error) => UserNotifyDeliveryResponse {
-            channel_key,
-            delivered: false,
-            reason: Some(format!("notification_provider_unavailable:{error}")),
-        },
-    }
-}
-
 async fn send_session(state: &AppState, session: &SessionInfo) -> Result<()> {
     send_agent_message(
         state,
@@ -1041,7 +968,7 @@ async fn run_exec_task(state: AppState, task_id: String, request: ExecRequest) -
         result.status = "rejected".to_string();
         result.reject_reason = Some("policy_denied".to_string());
     } else if result.reject_reason.is_none() && decision == PolicyDecision::Confirm {
-        let confirmation = request_confirmation(
+        let confirmation = confirmation::request_confirmation(
             &state,
             &config,
             request.confirm_method.as_deref(),
@@ -1352,7 +1279,7 @@ async fn run_batch_task(
         .collect::<Vec<_>>();
     let mut batch_confirmation_result = None;
     if !needs_confirmation.is_empty() {
-        let confirmation = request_batch_confirmation(
+        let confirmation = confirmation::request_batch_confirmation(
             &state,
             &config,
             confirm_method.as_deref(),
@@ -1871,548 +1798,6 @@ fn add_bwrap_parent_dirs(command: &mut Command, created_dirs: &mut HashSet<PathB
     }
 }
 
-fn batch_confirmation_preview(
-    config: &Config,
-    needs_confirmation: &[PreparedBatchElement],
-    all_elements: &[PreparedBatchElement],
-) -> String {
-    let zh = confirmation_language_is_zh(config);
-    let mut lines = vec![if zh {
-        format!(
-            "该批次共有 {} 条命令，其中 {} 条需要确认：",
-            all_elements.len(),
-            needs_confirmation.len()
-        )
-    } else {
-        format!(
-            "Batch requires confirmation for {} of {} commands:",
-            needs_confirmation.len(),
-            all_elements.len()
-        )
-    }];
-    for element in needs_confirmation.iter().take(8) {
-        let cwd = element
-            .working_directory
-            .as_ref()
-            .map(|directory| {
-                if zh {
-                    format!("（工作目录：{directory}）")
-                } else {
-                    format!(" (cwd: {directory})")
-                }
-            })
-            .unwrap_or_default();
-        lines.push(format!(
-            "[{}] {}{}",
-            element.index,
-            command_preview(&element.program, &element.args),
-            cwd
-        ));
-    }
-    if needs_confirmation.len() > 8 {
-        lines.push(if zh {
-            format!(
-                "……另外还有 {} 条需要确认的命令",
-                needs_confirmation.len() - 8
-            )
-        } else {
-            format!(
-                "... and {} more commands requiring confirmation",
-                needs_confirmation.len() - 8
-            )
-        });
-    }
-    let other_count = all_elements.len().saturating_sub(needs_confirmation.len());
-    if other_count > 0 {
-        lines.push(if zh {
-            format!("另外包含 {other_count} 条不需要确认的命令。")
-        } else {
-            format!("Also included: {other_count} command(s) that do not require confirmation.")
-        });
-    }
-    lines.push(if zh {
-        "是否允许整个批次执行一次？".to_string()
-    } else {
-        "Allow the entire batch once?".to_string()
-    });
-    lines.join("\n")
-}
-
-async fn request_batch_confirmation(
-    state: &AppState,
-    config: &Config,
-    confirm_method: Option<&str>,
-    needs_confirmation: &[PreparedBatchElement],
-    all_elements: &[PreparedBatchElement],
-) -> String {
-    let configured_provider = config.confirmation_provider.provider.as_str();
-    let provider = confirm_method
-        .filter(|method| !method.trim().is_empty())
-        .unwrap_or(configured_provider);
-    let provider = if provider == "default" {
-        configured_provider
-    } else if provider == "freedesktopThenHub" {
-        "freedesktop-then-hub"
-    } else {
-        provider
-    };
-    let preview = batch_confirmation_preview(config, needs_confirmation, all_elements);
-    if provider == "freedesktop" || provider == "freedesktop-then-hub" {
-        let local =
-            request_freedesktop_batch_confirmation(config, &preview, needs_confirmation).await;
-        if local == "confirmation_provider_unavailable" && provider == "freedesktop-then-hub" {
-            return request_hub_batch_confirmation(state, config, &preview, needs_confirmation)
-                .await;
-        }
-        return local;
-    }
-    if provider == "hub" {
-        return request_hub_batch_confirmation(state, config, &preview, needs_confirmation).await;
-    }
-    "confirmation_provider_unavailable".to_string()
-}
-
-async fn request_freedesktop_batch_confirmation(
-    config: &Config,
-    preview: &str,
-    needs_confirmation: &[PreparedBatchElement],
-) -> String {
-    let supports_actions = tokio::task::spawn_blocking(|| {
-        notify_rust::get_capabilities()
-            .map(|capabilities| {
-                capabilities
-                    .iter()
-                    .any(|capability| capability == "actions")
-            })
-            .unwrap_or(false)
-    })
-    .await
-    .unwrap_or(false);
-    if !supports_actions {
-        return "confirmation_provider_unavailable".to_string();
-    }
-    let has_risky_file_mutation = needs_confirmation
-        .iter()
-        .any(|element| risky_file_mutation(&element.program));
-    let zh = confirmation_language_is_zh(config);
-    let warning = if !config.sandbox.enabled && has_risky_file_mutation {
-        if zh {
-            "\n警告：bubblewrap 未启用；该批次包含文件变更命令，对宿主机的可见范围更大。"
-        } else {
-            "\nWARNING: bubblewrap is disabled; this batch includes file mutation commands with broader host visibility."
-        }
-    } else {
-        ""
-    };
-    let body = format!("{preview}{warning}");
-    let provider = notify_rust::Notification::new()
-        .summary(if zh {
-            "Agentic GPT 批量确认"
-        } else {
-            "Agentic GPT batch confirmation"
-        })
-        .body(&body)
-        .action(
-            "allow_once",
-            if zh {
-                "允许本批次"
-            } else {
-                "Allow batch once"
-            },
-        )
-        .action("deny", if zh { "拒绝本批次" } else { "Deny batch" })
-        .timeout((CONFIRM_TIMEOUT_SECS * 1000) as i32)
-        .show();
-    match provider {
-        Ok(handle) => {
-            let action = tokio::task::spawn_blocking(move || {
-                let mut selected = "timeout".to_string();
-                handle.wait_for_action(|action| selected = action.to_string());
-                selected
-            })
-            .await
-            .unwrap_or_else(|_| "timeout".to_string());
-            if action == "allow_once" {
-                action
-            } else {
-                "deny".to_string()
-            }
-        }
-        Err(_) => "confirmation_provider_unavailable".to_string(),
-    }
-}
-
-async fn request_hub_batch_confirmation(
-    state: &AppState,
-    config: &Config,
-    preview: &str,
-    needs_confirmation: &[PreparedBatchElement],
-) -> String {
-    let risk = if needs_confirmation
-        .iter()
-        .any(|element| risk_level(&element.program) == "HIGH")
-    {
-        "HIGH"
-    } else {
-        "MEDIUM"
-    };
-    let payload = ConfirmationPayload {
-        program: "batchExec".to_string(),
-        args: Vec::new(),
-        command_preview: truncate_chars(preview, 1000),
-        risk_level: risk.to_string(),
-        reason: if confirmation_language_is_zh(config) {
-            "批量命令中包含匹配确认策略的命令".to_string()
-        } else {
-            "Batch contains command(s) matching confirm policy".to_string()
-        },
-        kind: Some("batchExec".to_string()),
-        server_id: None,
-        tool_name: None,
-    };
-    request_hub_confirmation_payload(state, payload).await
-}
-
-async fn request_confirmation(
-    state: &AppState,
-    config: &Config,
-    confirm_method: Option<&str>,
-    program: &str,
-    args: &[String],
-) -> String {
-    let configured_provider = config.confirmation_provider.provider.as_str();
-    let provider = confirm_method
-        .filter(|method| !method.trim().is_empty())
-        .unwrap_or(configured_provider);
-    let provider = if provider == "default" {
-        configured_provider
-    } else if provider == "freedesktopThenHub" {
-        "freedesktop-then-hub"
-    } else {
-        provider
-    };
-    if provider == "freedesktop" || provider == "freedesktop-then-hub" {
-        let local = request_freedesktop_confirmation(config, program, args).await;
-        if local == "confirmation_provider_unavailable" && provider == "freedesktop-then-hub" {
-            return request_hub_confirmation(state, config, program, args).await;
-        }
-        return local;
-    }
-    if provider == "hub" {
-        return request_hub_confirmation(state, config, program, args).await;
-    }
-    "confirmation_provider_unavailable".to_string()
-}
-
-async fn request_freedesktop_confirmation(
-    config: &Config,
-    program: &str,
-    args: &[String],
-) -> String {
-    let supports_actions = tokio::task::spawn_blocking(|| {
-        notify_rust::get_capabilities()
-            .map(|capabilities| {
-                capabilities
-                    .iter()
-                    .any(|capability| capability == "actions")
-            })
-            .unwrap_or(false)
-    })
-    .await
-    .unwrap_or(false);
-    if !supports_actions {
-        return "confirmation_provider_unavailable".to_string();
-    }
-    let zh = confirmation_language_is_zh(config);
-    let warning = if !config.sandbox.enabled && risky_file_mutation(program) {
-        if zh {
-            "\n警告：bubblewrap 未启用；该文件变更命令对宿主机的可见范围更大。"
-        } else {
-            "\nWARNING: bubblewrap is disabled; this file mutation command has broader host visibility."
-        }
-    } else {
-        ""
-    };
-    let body = format!(
-        "{}{}{}",
-        command_preview(program, args),
-        warning,
-        if zh {
-            "\n是否允许本次执行？"
-        } else {
-            "\nAllow once?"
-        }
-    );
-    let provider = notify_rust::Notification::new()
-        .summary(if zh {
-            "Agentic GPT 确认"
-        } else {
-            "Agentic GPT confirmation"
-        })
-        .body(&body)
-        .action("allow_once", if zh { "允许本次" } else { "Allow once" })
-        .action("deny", if zh { "拒绝" } else { "Deny" })
-        .timeout((CONFIRM_TIMEOUT_SECS * 1000) as i32)
-        .show();
-    match provider {
-        Ok(handle) => {
-            let action = tokio::task::spawn_blocking(move || {
-                let mut selected = "timeout".to_string();
-                handle.wait_for_action(|action| selected = action.to_string());
-                selected
-            })
-            .await
-            .unwrap_or_else(|_| "timeout".to_string());
-            if action == "allow_once" {
-                action
-            } else {
-                "deny".to_string()
-            }
-        }
-        Err(_) => "confirmation_provider_unavailable".to_string(),
-    }
-}
-
-async fn request_hub_confirmation(
-    state: &AppState,
-    _config: &Config,
-    program: &str,
-    args: &[String],
-) -> String {
-    let payload = ConfirmationPayload {
-        program: program.to_string(),
-        args: args.to_vec(),
-        command_preview: truncate_chars(&command_preview(program, args), 1000),
-        risk_level: risk_level(program),
-        reason: if confirmation_language_is_zh(_config) {
-            format!("命令匹配确认策略：{program}")
-        } else {
-            format!("Command matched confirm policy: {program}")
-        },
-        kind: None,
-        server_id: None,
-        tool_name: None,
-    };
-    request_hub_confirmation_payload(state, payload).await
-}
-
-async fn request_hub_confirmation_payload(
-    state: &AppState,
-    payload: ConfirmationPayload,
-) -> String {
-    let request_id = format!("confirm_req_{}", Uuid::new_v4().simple());
-    let (tx, rx) = oneshot::channel();
-    state
-        .pending_confirmations
-        .lock()
-        .await
-        .insert(request_id.clone(), tx);
-    let config = state.config.read().await.clone();
-    let message = AgentMessage::ConfirmationRequest {
-        request_id: request_id.clone(),
-        agent_id: config.agent_id,
-        timeout_seconds: CONFIRM_TIMEOUT_SECS,
-        payload,
-    };
-    if let Err(error) = send_agent_message(state, message).await {
-        state.pending_confirmations.lock().await.remove(&request_id);
-        log_warn(format!("hub confirmation unavailable: {error}"));
-        return "provider_unavailable".to_string();
-    }
-    log_info(format!(
-        "hub confirmation requested; requestId={request_id}"
-    ));
-    match timeout(Duration::from_secs(CONFIRM_TIMEOUT_SECS + 5), rx).await {
-        Ok(Ok(decision)) => decision,
-        _ => {
-            state.pending_confirmations.lock().await.remove(&request_id);
-            "timeout".to_string()
-        }
-    }
-}
-
-async fn fail_pending_confirmations(state: &AppState, reason: &str) {
-    let pending = state
-        .pending_confirmations
-        .lock()
-        .await
-        .drain()
-        .map(|(_, sender)| sender)
-        .collect::<Vec<_>>();
-    for sender in pending {
-        let _ = sender.send(reason.to_string());
-    }
-}
-
-pub(crate) async fn authorize_mcp_tool_call(
-    state: &AppState,
-    server_id: &str,
-    tool_name: &str,
-    arguments: &serde_json::Value,
-) -> String {
-    if temporary_mcp_allowed(state, server_id).await {
-        return "temporary_mcp_allow".to_string();
-    }
-
-    let config = state.config.read().await.clone();
-    let decision =
-        request_mcp_tool_confirmation(&state, &config, server_id, tool_name, arguments).await;
-    match decision.as_str() {
-        "allow_mcp_server_15m" => add_temporary_mcp_allow(state, server_id, 15).await,
-        "allow_mcp_server_30m" => add_temporary_mcp_allow(state, server_id, 30).await,
-        _ => {}
-    }
-    decision
-}
-
-async fn temporary_mcp_allowed(state: &AppState, server_id: &str) -> bool {
-    let agent_id = state.config.read().await.agent_id.clone();
-    let now = Utc::now();
-    let mut allows = state.temporary_mcp_allows.lock().await;
-    allows.retain(|allow| allow.expires_at > now);
-    allows
-        .iter()
-        .any(|allow| allow.agent_id == agent_id && allow.server_id == server_id)
-}
-
-async fn add_temporary_mcp_allow(state: &AppState, server_id: &str, minutes: i64) {
-    let agent_id = state.config.read().await.agent_id.clone();
-    let expires_at = Utc::now() + chrono::Duration::minutes(minutes);
-    let mut allows = state.temporary_mcp_allows.lock().await;
-    allows.retain(|allow| allow.expires_at > Utc::now());
-    allows.retain(|allow| !(allow.agent_id == agent_id && allow.server_id == server_id));
-    allows.push(TemporaryMcpAllow {
-        agent_id,
-        server_id: server_id.to_string(),
-        expires_at,
-    });
-}
-
-async fn request_mcp_tool_confirmation(
-    state: &AppState,
-    config: &Config,
-    server_id: &str,
-    tool_name: &str,
-    arguments: &serde_json::Value,
-) -> String {
-    let provider = match config.confirmation_provider.provider.as_str() {
-        "default" => "freedesktop-then-hub",
-        "freedesktopThenHub" => "freedesktop-then-hub",
-        other => other,
-    };
-    if provider == "freedesktop" || provider == "freedesktop-then-hub" {
-        let local =
-            request_freedesktop_mcp_confirmation(config, server_id, tool_name, arguments).await;
-        if local == "confirmation_provider_unavailable" && provider == "freedesktop-then-hub" {
-            return request_hub_mcp_confirmation(state, config, server_id, tool_name, arguments)
-                .await;
-        }
-        return local;
-    }
-    if provider == "hub" {
-        return request_hub_mcp_confirmation(state, config, server_id, tool_name, arguments).await;
-    }
-    "confirmation_provider_unavailable".to_string()
-}
-
-async fn request_freedesktop_mcp_confirmation(
-    _config: &Config,
-    server_id: &str,
-    tool_name: &str,
-    arguments: &serde_json::Value,
-) -> String {
-    let supports_actions = tokio::task::spawn_blocking(|| {
-        notify_rust::get_capabilities()
-            .map(|capabilities| {
-                capabilities
-                    .iter()
-                    .any(|capability| capability == "actions")
-            })
-            .unwrap_or(false)
-    })
-    .await
-    .unwrap_or(false);
-    if !supports_actions {
-        return "confirmation_provider_unavailable".to_string();
-    }
-    let body = format!(
-        "{}\n\nAllow once, or temporarily allow this MCP server?",
-        mcp_tool_command_preview(server_id, tool_name, arguments)
-    );
-    let provider = notify_rust::Notification::new()
-        .summary("Agentic GPT MCP confirmation")
-        .body(&body)
-        .action("allow_once", "Allow once")
-        .action("allow_mcp_server_15m", "Allow this MCP 15m")
-        .action("allow_mcp_server_30m", "Allow this MCP 30m")
-        .action("deny", "Deny")
-        .timeout((CONFIRM_TIMEOUT_SECS * 1000) as i32)
-        .show();
-    match provider {
-        Ok(handle) => {
-            let action = tokio::task::spawn_blocking(move || {
-                let mut selected = "timeout".to_string();
-                handle.wait_for_action(|action| selected = action.to_string());
-                selected
-            })
-            .await
-            .unwrap_or_else(|_| "timeout".to_string());
-            match action.as_str() {
-                "allow_once" | "allow_mcp_server_15m" | "allow_mcp_server_30m" => action,
-                _ => "deny".to_string(),
-            }
-        }
-        Err(_) => "confirmation_provider_unavailable".to_string(),
-    }
-}
-
-async fn request_hub_mcp_confirmation(
-    state: &AppState,
-    config: &Config,
-    server_id: &str,
-    tool_name: &str,
-    arguments: &serde_json::Value,
-) -> String {
-    let request_id = format!("confirm_req_{}", Uuid::new_v4().simple());
-    let (tx, rx) = oneshot::channel();
-    state
-        .pending_confirmations
-        .lock()
-        .await
-        .insert(request_id.clone(), tx);
-    let payload = ConfirmationPayload {
-        program: "mcpCallTool".to_string(),
-        args: vec![server_id.to_string(), tool_name.to_string()],
-        command_preview: mcp_tool_command_preview(server_id, tool_name, arguments),
-        risk_level: "MEDIUM".to_string(),
-        reason: "MCP tool call requires confirmation".to_string(),
-        kind: Some("mcpTool".to_string()),
-        server_id: Some(server_id.to_string()),
-        tool_name: Some(tool_name.to_string()),
-    };
-    let message = AgentMessage::ConfirmationRequest {
-        request_id: request_id.clone(),
-        agent_id: config.agent_id.clone(),
-        timeout_seconds: CONFIRM_TIMEOUT_SECS,
-        payload,
-    };
-    if let Err(error) = send_agent_message(state, message).await {
-        state.pending_confirmations.lock().await.remove(&request_id);
-        log_warn(format!("hub MCP confirmation unavailable: {error}"));
-        return "provider_unavailable".to_string();
-    }
-    log_info(format!(
-        "hub MCP confirmation requested; requestId={request_id}; serverId={server_id}; toolName={tool_name}"
-    ));
-    match timeout(Duration::from_secs(CONFIRM_TIMEOUT_SECS + 5), rx).await {
-        Ok(Ok(decision)) => decision,
-        _ => {
-            state.pending_confirmations.lock().await.remove(&request_id);
-            "timeout".to_string()
-        }
-    }
-}
-
 fn mcp_tool_command_preview(
     server_id: &str,
     tool_name: &str,
@@ -2424,20 +1809,6 @@ fn mcp_tool_command_preview(
         "MCP Tool Call\nServer: {server_id}\nTool: {tool_name}\nArguments:\n{}",
         truncate_chars(&arguments, 2000)
     )
-}
-
-fn confirmation_decision_value(decision: ConfirmationDecision) -> String {
-    match decision {
-        ConfirmationDecision::AllowOnce => "allow_once",
-        ConfirmationDecision::AllowMcpServer15m => "allow_mcp_server_15m",
-        ConfirmationDecision::AllowMcpServer30m => "allow_mcp_server_30m",
-        ConfirmationDecision::Deny => "deny",
-        ConfirmationDecision::Timeout => "timeout",
-        ConfirmationDecision::ProviderUnavailable => "provider_unavailable",
-        ConfirmationDecision::CallbackTokenInvalid => "callback_token_invalid",
-        ConfirmationDecision::Expired => "expired",
-    }
-    .to_string()
 }
 
 fn risk_level(program: &str) -> String {
@@ -2627,7 +1998,7 @@ async fn start_session(state: AppState, session_id: String, request: ExecRequest
         return info;
     }
     if decision == PolicyDecision::Confirm {
-        let confirmation = request_confirmation(
+        let confirmation = confirmation::request_confirmation(
             &state,
             &config,
             request.confirm_method.as_deref(),
@@ -3918,7 +3289,8 @@ mod tests {
             decision: PolicyDecision::Confirm,
             reject_reason: None,
         };
-        let preview = batch_confirmation_preview(&config, &[element.clone()], &[element]);
+        let preview =
+            confirmation::batch_confirmation_preview(&config, &[element.clone()], &[element]);
 
         assert!(preview.contains("该批次共有 1 条命令，其中 1 条需要确认"));
         assert!(preview.contains("工作目录：/tmp"));
@@ -4205,13 +3577,15 @@ mod tests {
 
     #[tokio::test]
     async fn notification_delivery_rejects_unsupported_channel() {
-        let response = deliver_freedesktop_notification(UserNotifyDeliveryRequest {
-            channel_key: "hub::ntfy".to_string(),
-            title: "Hello".to_string(),
-            body: "World".to_string(),
-            actions: Vec::new(),
-            priority: None,
-        })
+        let response = notify::deliver_freedesktop_notification(
+            agentic_gpt_protocol::UserNotifyDeliveryRequest {
+                channel_key: "hub::ntfy".to_string(),
+                title: "Hello".to_string(),
+                body: "World".to_string(),
+                actions: Vec::new(),
+                priority: None,
+            },
+        )
         .await;
         assert!(!response.delivered);
         assert_eq!(response.reason.as_deref(), Some("unsupported_channel"));
