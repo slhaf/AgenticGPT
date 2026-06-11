@@ -5,9 +5,9 @@ use tokio::time::{timeout, Duration};
 use uuid::Uuid;
 
 use crate::{
-    command_preview, confirmation_language_is_zh, log_info, log_warn, mcp_tool_command_preview,
-    risk_level, risky_file_mutation, send_agent_message, truncate_chars, AppState, Config,
-    PreparedBatchElement, CONFIRM_TIMEOUT_SECS,
+    command_preview, confirmation_language_is_zh, exec::PreparedBatchElement, hub, log_info,
+    log_warn, mcp_tool_command_preview, risk_level, risky_file_mutation, truncate_chars, AppState,
+    Config, CONFIRM_TIMEOUT_SECS,
 };
 
 #[derive(Clone, Debug)]
@@ -360,7 +360,7 @@ async fn request_hub_confirmation_payload(
         timeout_seconds: CONFIRM_TIMEOUT_SECS,
         payload,
     };
-    if let Err(error) = send_agent_message(state, message).await {
+    if let Err(error) = hub::send_agent_message(state, message).await {
         state.pending_confirmations.lock().await.remove(&request_id);
         log_warn(format!("hub confirmation unavailable: {error}"));
         return "provider_unavailable".to_string();
@@ -542,7 +542,7 @@ async fn request_hub_mcp_confirmation(
         timeout_seconds: CONFIRM_TIMEOUT_SECS,
         payload,
     };
-    if let Err(error) = send_agent_message(state, message).await {
+    if let Err(error) = hub::send_agent_message(state, message).await {
         state.pending_confirmations.lock().await.remove(&request_id);
         log_warn(format!("hub MCP confirmation unavailable: {error}"));
         return "provider_unavailable".to_string();

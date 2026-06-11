@@ -1,38 +1,28 @@
 mod confirmation;
+mod exec;
+mod hub;
 mod mcp;
 mod notebook;
 mod notify;
+mod sessions;
 
 use agentic_gpt_protocol::{
-    AgentMessage, AgentRole, BatchElementResult, BatchExecRequest, BatchExecResult, ExecElement,
-    ExecRequest, HubCommand, HubMessage, PolicyCounts, SafeBuiltinPolicyRules, SafeConfigSummary,
-    SafePathPolicySummary, SafePathRoot, SafePolicyRules, SafeRule, SafeSandboxSummary,
-    SessionInfo, TaskResult,
+    AgentRole, PolicyCounts, SafeBuiltinPolicyRules, SafeConfigSummary, SafePathPolicySummary,
+    SafePathRoot, SafePolicyRules, SafeRule, SafeSandboxSummary,
 };
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand, ValueEnum};
-use futures_util::{SinkExt, StreamExt};
 use mcp::{McpConfigCommand, McpServerConfig};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, OpenOptions};
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::Arc;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
-use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
-use tokio::task::JoinSet;
-use tokio::time::{sleep, timeout, Duration, Instant};
-use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::tungstenite::handshake::client::Response as WsResponse;
+use tokio::time::{sleep, Duration};
 use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::{
-    client_async_tls_with_config, connect_async, MaybeTlsStream, WebSocketStream,
-};
 use uuid::Uuid;
 
 const DEFAULT_BACKUP_LIMIT: usize = 5;
@@ -278,50 +268,11 @@ struct AppState {
     config_path: PathBuf,
     config: Arc<RwLock<Config>>,
     run_mode: RunMode,
-    sessions: Arc<Mutex<HashMap<String, ManagedSession>>>,
+    sessions: Arc<Mutex<HashMap<String, sessions::ManagedSession>>>,
     hub_sender: Arc<Mutex<Option<mpsc::UnboundedSender<Message>>>>,
     pending_confirmations: Arc<Mutex<HashMap<String, oneshot::Sender<String>>>>,
     temporary_mcp_allows: Arc<Mutex<Vec<confirmation::TemporaryMcpAllow>>>,
     notebook_writes: Arc<Mutex<()>>,
-}
-
-struct ManagedSession {
-    info: SessionInfo,
-    child: Child,
-    stdout: Arc<Mutex<TailBuffer>>,
-    stderr: Arc<Mutex<TailBuffer>>,
-    last_activity: Instant,
-}
-
-#[derive(Debug, Default)]
-struct TailBuffer {
-    data: VecDeque<u8>,
-    max: usize,
-    truncated: bool,
-}
-
-impl TailBuffer {
-    fn new(max: usize) -> Self {
-        Self {
-            data: VecDeque::with_capacity(max),
-            max,
-            truncated: false,
-        }
-    }
-
-    fn push(&mut self, bytes: &[u8]) {
-        for byte in bytes {
-            if self.data.len() == self.max {
-                self.data.pop_front();
-                self.truncated = true;
-            }
-            self.data.push_back(*byte);
-        }
-    }
-
-    fn text(&self) -> String {
-        String::from_utf8_lossy(&self.data.iter().copied().collect::<Vec<_>>()).to_string()
-    }
 }
 
 #[tokio::main]
@@ -370,1432 +321,7 @@ async fn run(config_path: PathBuf, run_mode: RunMode) -> Result<()> {
         notebook_writes: Arc::new(Mutex::new(())),
     };
     tokio::spawn(watch_config(state.clone()));
-    connect_loop(state).await
-}
-
-async fn connect_loop(state: AppState) -> Result<()> {
-    loop {
-        let config = state.config.read().await.clone();
-        let url = format!(
-            "{}/v1/agents/{}/connect",
-            config.hub_url.trim_end_matches('/'),
-            config.agent_id
-        )
-        .replace("http://", "ws://")
-        .replace("https://", "wss://");
-        let mut request = url.into_client_request()?;
-        request
-            .headers_mut()
-            .insert("x-agent-secret", config.agent_secret.parse()?);
-
-        let proxy = proxy_url(&config.hub_url);
-        log_info(format!(
-            "connecting to hub; agentId={}; proxy={}",
-            config.agent_id,
-            proxy.as_deref().unwrap_or("none")
-        ));
-        match timeout(
-            Duration::from_secs(CONNECT_TIMEOUT_SECS),
-            connect_hub(request, proxy),
-        )
-        .await
-        {
-            Err(_) => {
-                log_warn(format!("connect timed out after {CONNECT_TIMEOUT_SECS}s"));
-            }
-            Ok(Err(error)) => {
-                log_warn(format!("connect failed: {error}"));
-            }
-            Ok(Ok((stream, _))) => {
-                log_info("connected to hub".to_string());
-                let (mut write, mut read) = stream.split();
-                let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
-                *state.hub_sender.lock().await = Some(tx.clone());
-                let writer = tokio::spawn(async move {
-                    while let Some(message) = rx.recv().await {
-                        if write.send(message).await.is_err() {
-                            break;
-                        }
-                    }
-                });
-                let hello = AgentMessage::Hello {
-                    role: state.run_mode.role(),
-                    config_summary: config.safe_summary(),
-                    notification_channels: notify::freedesktop_notification_channel(&config)
-                        .into_iter()
-                        .collect(),
-                };
-                tx.send(Message::Text(serde_json::to_string(&hello)?.into()))?;
-                let mut heartbeat =
-                    tokio::time::interval(Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
-                heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-                let mut last_heartbeat_ack = Instant::now();
-                loop {
-                    tokio::select! {
-                        maybe_message = read.next() => {
-                            let Some(message) = maybe_message else {
-                                log_warn("hub connection closed".to_string());
-                                break;
-                            };
-                            let message = match message {
-                                Ok(Message::Text(text)) => text.to_string(),
-                                Ok(Message::Close(frame)) => {
-                                    log_warn(format!("hub closed websocket; frame={frame:?}"));
-                                    break;
-                                }
-                                Ok(Message::Pong(_)) => {
-                                    last_heartbeat_ack = Instant::now();
-                                    continue;
-                                }
-                                Ok(_) => continue,
-                                Err(error) => {
-                                    log_warn(format!("hub websocket error: {error}"));
-                                    break;
-                                }
-                            };
-                            let value: serde_json::Value = match serde_json::from_str(&message) {
-                                Ok(value) => value,
-                                Err(error) => {
-                                    log_warn(format!("ignored invalid hub message: {error}"));
-                                    continue;
-                                }
-                            };
-                            if let Ok(message) = serde_json::from_value::<HubMessage>(value.clone()) {
-                                match message {
-                                    HubMessage::HeartbeatAck { .. } => {
-                                        last_heartbeat_ack = Instant::now();
-                                    }
-                                    HubMessage::ConfirmationResponse { request_id, decision, reason } => {
-                                        let value = confirmation::confirmation_decision_value(decision);
-                                        log_info(format!(
-                                            "confirmation response received; requestId={request_id}; decision={value}; reason={reason}"
-                                        ));
-                                        if let Some(sender) = state.pending_confirmations.lock().await.remove(&request_id) {
-                                            let _ = sender.send(value);
-                                        }
-                                    }
-                                }
-                                continue;
-                            }
-                            let command: HubCommand = match serde_json::from_value(value) {
-                                Ok(command) => command,
-                                Err(error) => {
-                                    log_warn(format!("ignored unknown hub command: {error}"));
-                                    continue;
-                                }
-                            };
-                            let command_state = state.clone();
-                            tokio::spawn(async move {
-                                if let Err(error) = handle_hub_command(command_state, command).await {
-                                    log_warn(format!("hub command failed: {error}"));
-                                }
-                            });
-                        }
-                        _ = heartbeat.tick() => {
-                            if last_heartbeat_ack.elapsed() > Duration::from_secs(HEARTBEAT_ACK_TIMEOUT_SECS) {
-                                log_warn("heartbeat ack timeout; reconnecting".to_string());
-                                break;
-                            }
-                            let heartbeat = AgentMessage::Heartbeat { sent_at: Utc::now() };
-                            if let Err(error) = tx.send(Message::Text(serde_json::to_string(&heartbeat)?.into())) {
-                                log_warn(format!("heartbeat send failed: {error}"));
-                                break;
-                            }
-                        }
-                    }
-                }
-                *state.hub_sender.lock().await = None;
-                confirmation::fail_pending_confirmations(&state, "provider_unavailable").await;
-                writer.abort();
-            }
-        }
-        log_info(format!("reconnecting in {RECONNECT_DELAY_SECS}s"));
-        sleep(Duration::from_secs(RECONNECT_DELAY_SECS)).await;
-    }
-}
-
-async fn connect_hub(
-    request: tokio_tungstenite::tungstenite::handshake::client::Request,
-    proxy: Option<String>,
-) -> Result<(WebSocketStream<MaybeTlsStream<TcpStream>>, WsResponse)> {
-    let Some(proxy) = proxy else {
-        return connect_async(request)
-            .await
-            .map_err(|error| anyhow!("{error}"));
-    };
-    let host = request
-        .uri()
-        .host()
-        .ok_or_else(|| anyhow!("hub URL is missing host"))?
-        .to_string();
-    let port = request.uri().port_u16().unwrap_or_else(|| {
-        if request.uri().scheme_str() == Some("ws") {
-            80
-        } else {
-            443
-        }
-    });
-    let proxy_addr = parse_http_proxy_addr(&proxy)?;
-    let mut stream = TcpStream::connect(proxy_addr).await?;
-    let connect_request = format!(
-        "CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\nProxy-Connection: Keep-Alive\r\n\r\n"
-    );
-    stream.write_all(connect_request.as_bytes()).await?;
-
-    let mut response = Vec::with_capacity(1024);
-    let mut buffer = [0_u8; 512];
-    loop {
-        let read = stream.read(&mut buffer).await?;
-        if read == 0 {
-            return Err(anyhow!("proxy closed before CONNECT response completed"));
-        }
-        response.extend_from_slice(&buffer[..read]);
-        if response.windows(4).any(|window| window == b"\r\n\r\n") {
-            break;
-        }
-        if response.len() > 8192 {
-            return Err(anyhow!("proxy CONNECT response too large"));
-        }
-    }
-    let response_text = String::from_utf8_lossy(&response);
-    let status_ok = response_text
-        .lines()
-        .next()
-        .map(|line| line.contains(" 200 "))
-        .unwrap_or(false);
-    if !status_ok {
-        return Err(anyhow!(
-            "proxy CONNECT failed: {}",
-            response_text.lines().next().unwrap_or("<empty response>")
-        ));
-    }
-
-    client_async_tls_with_config(request, stream, None, None)
-        .await
-        .map_err(|error| anyhow!("{error}"))
-}
-
-fn proxy_url(target_url: &str) -> Option<String> {
-    if should_bypass_proxy(target_url) {
-        return None;
-    }
-    ["https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY"]
-        .iter()
-        .filter_map(|key| std::env::var(key).ok())
-        .find(|value| !value.trim().is_empty())
-}
-
-fn should_bypass_proxy(target_url: &str) -> bool {
-    let host = target_url
-        .split("://")
-        .nth(1)
-        .unwrap_or(target_url)
-        .split('/')
-        .next()
-        .unwrap_or(target_url)
-        .split(':')
-        .next()
-        .unwrap_or(target_url);
-    if matches!(host, "localhost" | "127.0.0.1" | "::1") {
-        return true;
-    }
-    let no_proxy = std::env::var("no_proxy")
-        .or_else(|_| std::env::var("NO_PROXY"))
-        .unwrap_or_default();
-    no_proxy.split(',').any(|entry| {
-        let entry = entry.trim();
-        !entry.is_empty()
-            && (entry == "*" || host == entry || host.ends_with(entry.trim_start_matches('.')))
-    })
-}
-
-fn parse_http_proxy_addr(proxy: &str) -> Result<String> {
-    let trimmed = proxy.trim();
-    let without_scheme = trimmed
-        .strip_prefix("http://")
-        .or_else(|| trimmed.strip_prefix("https://"))
-        .unwrap_or(trimmed);
-    if without_scheme.contains('@') {
-        return Err(anyhow!("proxy authentication is not supported"));
-    }
-    let authority = without_scheme.split('/').next().unwrap_or(without_scheme);
-    if authority.contains(':') {
-        Ok(authority.to_string())
-    } else {
-        Ok(format!("{authority}:8080"))
-    }
-}
-
-async fn handle_hub_command(state: AppState, command: HubCommand) -> Result<()> {
-    match command {
-        HubCommand::Exec {
-            request_id,
-            task_id,
-            payload,
-        } => {
-            log_info(format!(
-                "exec received; taskId={task_id}; command={}",
-                command_preview(&payload.program, &payload.args)
-            ));
-            let result = run_exec_task(state.clone(), task_id, payload).await;
-            log_info(format!(
-                "exec finished; taskId={}; status={}; exitCode={:?}; rejectReason={:?}",
-                result.task_id, result.status, result.exit_code, result.reject_reason
-            ));
-            send_response(&state, &request_id, serde_json::to_value(&result)?).await?;
-        }
-        HubCommand::BatchExec {
-            request_id,
-            task_id,
-            payload,
-        } => {
-            log_info(format!(
-                "batchExec received; batchId={task_id}; elements={}",
-                payload.elements.len()
-            ));
-            let result = run_batch_task(state.clone(), task_id, payload).await;
-            log_info(format!(
-                "batchExec finished; batchId={}; status={}; results={}",
-                result.batch_id,
-                result.status,
-                result.results.len()
-            ));
-            send_response(&state, &request_id, serde_json::to_value(&result)?).await?;
-        }
-        HubCommand::StartSession {
-            request_id,
-            session_id,
-            payload,
-        } => {
-            log_info(format!(
-                "startSession received; sessionId={session_id}; command={}",
-                command_preview(&payload.program, &payload.args)
-            ));
-            let info = start_session(state.clone(), session_id, payload).await;
-            log_info(format!(
-                "startSession result; sessionId={}; state={}; rejectReason={:?}",
-                info.session_id, info.state, info.reject_reason
-            ));
-            send_session(&state, &info).await?;
-            send_response(&state, &request_id, serde_json::to_value(&info)?).await?;
-        }
-        HubCommand::ListSessions { request_id } => {
-            let sessions = current_sessions(&state).await;
-            send_response(&state, &request_id, serde_json::to_value(sessions)?).await?;
-        }
-        HubCommand::InspectSession {
-            request_id,
-            session_id,
-        } => {
-            let session = inspect_session(&state, &session_id).await;
-            send_response(&state, &request_id, serde_json::to_value(session)?).await?;
-        }
-        HubCommand::WaitSession {
-            request_id,
-            session_id,
-            seconds,
-        } => {
-            sleep(Duration::from_secs(seconds.min(30))).await;
-            let session = inspect_session(&state, &session_id).await;
-            send_response(&state, &request_id, serde_json::to_value(session)?).await?;
-        }
-        HubCommand::KillSession {
-            request_id,
-            session_id,
-        } => {
-            log_info(format!("killSession received; sessionId={session_id}"));
-            let session = kill_session(&state, &session_id).await;
-            send_response(&state, &request_id, serde_json::to_value(session)?).await?;
-        }
-        HubCommand::McpListServers { request_id } => {
-            let result = mcp::list_servers(&state).await;
-            send_response(&state, &request_id, result).await?;
-        }
-        HubCommand::McpListTools {
-            request_id,
-            payload,
-        } => {
-            let result = match mcp::list_tools(&state, payload).await {
-                Ok(result) => result,
-                Err(error) => serde_json::json!({
-                    "error": {
-                        "code": "mcp_list_tools_failed",
-                        "message": error.to_string()
-                    }
-                }),
-            };
-            send_response(&state, &request_id, result).await?;
-        }
-        HubCommand::McpCallTool {
-            request_id,
-            payload,
-        } => {
-            let result = match mcp::call_tool(&state, payload).await {
-                Ok(result) => result,
-                Err(error) => serde_json::json!({
-                    "error": {
-                        "code": "mcp_call_tool_failed",
-                        "message": error.to_string()
-                    }
-                }),
-            };
-            send_response(&state, &request_id, result).await?;
-        }
-        HubCommand::UserNotifyDeliver {
-            request_id,
-            payload,
-        } => {
-            let result = notify::deliver_freedesktop_notification(payload).await;
-            send_response(&state, &request_id, serde_json::to_value(result)?).await?;
-        }
-        HubCommand::RoomNotebookAppend {
-            request_id,
-            payload,
-        } => {
-            let result = if state.run_mode != RunMode::Room {
-                room_agent_required_error()
-            } else {
-                match notebook::append(&state, payload).await {
-                    Ok(result) => serde_json::to_value(result)?,
-                    Err(error) => serde_json::json!({
-                        "error": { "code": "room_notebook_append_failed", "message": error.to_string() }
-                    }),
-                }
-            };
-            send_response(&state, &request_id, result).await?;
-        }
-        HubCommand::RoomNotebookRecent {
-            request_id,
-            payload,
-        } => {
-            let result = if state.run_mode != RunMode::Room {
-                room_agent_required_error()
-            } else {
-                match notebook::recent(&state, payload).await {
-                    Ok(result) => serde_json::to_value(result)?,
-                    Err(error) => serde_json::json!({
-                        "error": { "code": "room_notebook_recent_failed", "message": error.to_string() }
-                    }),
-                }
-            };
-            send_response(&state, &request_id, result).await?;
-        }
-        HubCommand::RoomNotebookSelectExact {
-            request_id,
-            payload,
-        } => {
-            let result = if state.run_mode != RunMode::Room {
-                room_agent_required_error()
-            } else {
-                match notebook::select_exact(&state, payload).await {
-                    Ok(result) => serde_json::to_value(result)?,
-                    Err(error) => serde_json::json!({
-                        "error": { "code": "room_notebook_select_exact_failed", "message": error.to_string() }
-                    }),
-                }
-            };
-            send_response(&state, &request_id, result).await?;
-        }
-        HubCommand::RoomNotebookSearch {
-            request_id,
-            payload,
-        } => {
-            let result = if state.run_mode != RunMode::Room {
-                room_agent_required_error()
-            } else {
-                match notebook::search(&state, payload).await {
-                    Ok(result) => serde_json::to_value(result)?,
-                    Err(error) => serde_json::json!({
-                        "error": { "code": "room_notebook_search_failed", "message": error.to_string() }
-                    }),
-                }
-            };
-            send_response(&state, &request_id, result).await?;
-        }
-        HubCommand::RoomNotebookCurrent {
-            request_id,
-            payload,
-        } => {
-            let result = if state.run_mode != RunMode::Room {
-                room_agent_required_error()
-            } else {
-                match notebook::current(&state, payload).await {
-                    Ok(result) => serde_json::to_value(result)?,
-                    Err(error) => serde_json::json!({
-                        "error": { "code": "room_notebook_current_failed", "message": error.to_string() }
-                    }),
-                }
-            };
-            send_response(&state, &request_id, result).await?;
-        }
-        HubCommand::RoomNotebookUpdate {
-            request_id,
-            payload,
-        } => {
-            let result = if state.run_mode != RunMode::Room {
-                room_agent_required_error()
-            } else {
-                match notebook::update(&state, payload).await {
-                    Ok(result) => serde_json::to_value(result)?,
-                    Err(error) => notebook_command_error("room_notebook_update_failed", error),
-                }
-            };
-            send_response(&state, &request_id, result).await?;
-        }
-        HubCommand::RoomNotebookRemove {
-            request_id,
-            payload,
-        } => {
-            let result = if state.run_mode != RunMode::Room {
-                room_agent_required_error()
-            } else {
-                match notebook::remove(&state, payload).await {
-                    Ok(result) => serde_json::to_value(result)?,
-                    Err(error) => notebook_command_error("room_notebook_remove_failed", error),
-                }
-            };
-            send_response(&state, &request_id, result).await?;
-        }
-    }
-    Ok(())
-}
-
-fn notebook_command_error(default_code: &str, error: anyhow::Error) -> serde_json::Value {
-    let message = error.to_string();
-    let code = if message == "not_found" {
-        "not_found"
-    } else if message.starts_with("validation_error")
-        || message.ends_with("_required")
-        || message.ends_with("_too_long")
-    {
-        "validation_error"
-    } else {
-        default_code
-    };
-    serde_json::json!({
-        "error": {
-            "code": code,
-            "message": if code == "not_found" { "passage not found" } else { &message }
-        }
-    })
-}
-
-fn room_agent_required_error() -> serde_json::Value {
-    serde_json::json!({
-        "error": {
-            "code": "room_agent_required",
-            "message": "room notebook commands require run-as-room"
-        }
-    })
-}
-
-async fn send_session(state: &AppState, session: &SessionInfo) -> Result<()> {
-    send_agent_message(
-        state,
-        AgentMessage::SessionUpdate {
-            session: session.clone(),
-        },
-    )
-    .await
-}
-
-async fn send_response(state: &AppState, request_id: &str, data: serde_json::Value) -> Result<()> {
-    send_agent_message(
-        state,
-        AgentMessage::Response {
-            request_id: request_id.to_string(),
-            data,
-        },
-    )
-    .await
-}
-
-async fn send_agent_message(state: &AppState, message: AgentMessage) -> Result<()> {
-    let sender = state
-        .hub_sender
-        .lock()
-        .await
-        .clone()
-        .ok_or_else(|| anyhow!("hub_sender_unavailable"))?;
-    sender
-        .send(Message::Text(serde_json::to_string(&message)?.into()))
-        .map_err(|_| anyhow!("hub_send_failed"))?;
-    Ok(())
-}
-
-async fn run_exec_task(state: AppState, task_id: String, request: ExecRequest) -> TaskResult {
-    let started_at = Utc::now();
-    let mut result = TaskResult {
-        agent_id: request.agent_id.clone(),
-        task_id: task_id.clone(),
-        status: "running".to_string(),
-        exit_code: None,
-        stdout_tail: String::new(),
-        stderr_tail: String::new(),
-        truncated: false,
-        reject_reason: None,
-        started_at,
-        updated_at: started_at,
-    };
-    let config = state.config.read().await.clone();
-    let started = Instant::now();
-    let decision = policy_decision_for_mode(
-        &config,
-        state.run_mode,
-        &request.program,
-        &request.args,
-        request.need_confirm,
-    );
-    let mut confirmation_result = None;
-    let working_directory =
-        match resolve_working_directory(&config, request.working_directory.as_deref()) {
-            Ok(working_directory) => Some(working_directory),
-            Err(reason) => {
-                result.status = "rejected".to_string();
-                result.reject_reason = Some(reason);
-                None
-            }
-        };
-
-    if let Some(working_directory) = working_directory.as_deref() {
-        if let Err(reason) = preflight(&config, working_directory, &request.program, &request.args)
-        {
-            result.status = "rejected".to_string();
-            result.reject_reason = Some(reason);
-        }
-    }
-    if result.reject_reason.is_none() && decision == PolicyDecision::Deny {
-        result.status = "rejected".to_string();
-        result.reject_reason = Some("policy_denied".to_string());
-    } else if result.reject_reason.is_none() && decision == PolicyDecision::Confirm {
-        let confirmation = confirmation::request_confirmation(
-            &state,
-            &config,
-            request.confirm_method.as_deref(),
-            &request.program,
-            &request.args,
-        )
-        .await;
-        confirmation_result = Some(confirmation.clone());
-        if confirmation != "allow_once" {
-            result.status = "rejected".to_string();
-            result.reject_reason = Some(confirmation);
-        }
-    }
-
-    if result.reject_reason.is_none() {
-        let execution = execute_command(
-            &config,
-            working_directory
-                .as_deref()
-                .unwrap_or(&config.workspace_root),
-            &request.program,
-            &request.args,
-        )
-        .await;
-        match execution {
-            Ok(output) => {
-                result.status = if output.exit_code == Some(0) {
-                    "completed"
-                } else {
-                    "failed"
-                }
-                .to_string();
-                result.exit_code = output.exit_code;
-                result.stdout_tail = output.stdout;
-                result.stderr_tail = output.stderr;
-                result.truncated = output.truncated;
-            }
-            Err(reason) => {
-                let reason = reason.to_string();
-                if reason == "timeout" {
-                    result.status = "timeout".to_string();
-                    result.reject_reason = Some("exec_timeout_use_session".to_string());
-                } else {
-                    result.status = "failed".to_string();
-                    result.reject_reason = Some(reason);
-                }
-            }
-        }
-    }
-    result.updated_at = Utc::now();
-    let _ = write_audit(
-        &config,
-        AuditRecord {
-            task_id: Some(task_id),
-            session_id: None,
-            time: result.updated_at,
-            program: request.program,
-            args: request.args,
-            working_directory: request.working_directory,
-            need_confirm: request.need_confirm,
-            policy_decision: format!("{decision:?}"),
-            confirmation_result,
-            exit_code: result.exit_code,
-            duration_ms: started.elapsed().as_millis(),
-            truncated: result.truncated,
-            request_source: "hub".to_string(),
-            reject_reason: result.reject_reason.clone(),
-        },
-    );
-    result
-}
-
-#[derive(Clone)]
-struct PreparedBatchElement {
-    index: usize,
-    program: String,
-    args: Vec<String>,
-    working_directory: Option<String>,
-    resolved_working_directory: PathBuf,
-    decision: PolicyDecision,
-    reject_reason: Option<String>,
-}
-
-fn prepare_batch_element(
-    config: &Config,
-    index: usize,
-    element: ExecElement,
-    batch_working_directory: Option<String>,
-    need_confirm: bool,
-) -> PreparedBatchElement {
-    let program = element.program;
-    let args = element.args;
-    let working_directory = element.working_directory.or(batch_working_directory);
-    let decision = policy_decision(config, &program, &args, need_confirm);
-    let mut reject_reason = None;
-    let resolved_working_directory =
-        match resolve_working_directory(config, working_directory.as_deref()) {
-            Ok(directory) => directory,
-            Err(reason) => {
-                reject_reason = Some(reason);
-                config.workspace_root.clone()
-            }
-        };
-    if reject_reason.is_none() {
-        if let Err(reason) = preflight(config, &resolved_working_directory, &program, &args) {
-            reject_reason = Some(reason);
-        }
-    }
-    if reject_reason.is_none() && decision == PolicyDecision::Deny {
-        reject_reason = Some("policy_denied".to_string());
-    }
-    PreparedBatchElement {
-        index,
-        program,
-        args,
-        working_directory,
-        resolved_working_directory,
-        decision,
-        reject_reason,
-    }
-}
-
-fn batch_element_result(
-    agent_id: &str,
-    batch_id: &str,
-    element: &PreparedBatchElement,
-    status: &str,
-    reject_reason: Option<String>,
-    started_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
-) -> BatchElementResult {
-    BatchElementResult {
-        index: element.index,
-        program: element.program.clone(),
-        args: element.args.clone(),
-        working_directory: element.working_directory.clone(),
-        result: TaskResult {
-            agent_id: agent_id.to_string(),
-            task_id: format!("{batch_id}:element:{}", element.index),
-            status: status.to_string(),
-            exit_code: None,
-            stdout_tail: String::new(),
-            stderr_tail: String::new(),
-            truncated: false,
-            reject_reason,
-            started_at,
-            updated_at,
-        },
-    }
-}
-
-async fn run_prepared_batch_element(
-    config: Config,
-    agent_id: String,
-    batch_id: String,
-    element: PreparedBatchElement,
-    need_confirm: bool,
-    confirmation_result: Option<String>,
-) -> BatchElementResult {
-    let started_at = Utc::now();
-    let started = Instant::now();
-    let task_id = format!("{batch_id}:element:{}", element.index);
-    let mut result = TaskResult {
-        agent_id: agent_id.clone(),
-        task_id: task_id.clone(),
-        status: "running".to_string(),
-        exit_code: None,
-        stdout_tail: String::new(),
-        stderr_tail: String::new(),
-        truncated: false,
-        reject_reason: None,
-        started_at,
-        updated_at: started_at,
-    };
-
-    let execution = execute_command(
-        &config,
-        &element.resolved_working_directory,
-        &element.program,
-        &element.args,
-    )
-    .await;
-    match execution {
-        Ok(output) => {
-            result.status = if output.exit_code == Some(0) {
-                "completed"
-            } else {
-                "failed"
-            }
-            .to_string();
-            result.exit_code = output.exit_code;
-            result.stdout_tail = output.stdout;
-            result.stderr_tail = output.stderr;
-            result.truncated = output.truncated;
-        }
-        Err(reason) => {
-            let reason = reason.to_string();
-            if reason == "timeout" {
-                result.status = "timeout".to_string();
-                result.reject_reason = Some("exec_timeout_use_session".to_string());
-            } else {
-                result.status = "failed".to_string();
-                result.reject_reason = Some(reason);
-            }
-        }
-    }
-    result.updated_at = Utc::now();
-    let _ = write_audit(
-        &config,
-        AuditRecord {
-            task_id: Some(task_id),
-            session_id: None,
-            time: result.updated_at,
-            program: element.program.clone(),
-            args: element.args.clone(),
-            working_directory: element.working_directory.clone(),
-            need_confirm,
-            policy_decision: format!("{:?}", element.decision),
-            confirmation_result,
-            exit_code: result.exit_code,
-            duration_ms: started.elapsed().as_millis(),
-            truncated: result.truncated,
-            request_source: "hub:batch".to_string(),
-            reject_reason: result.reject_reason.clone(),
-        },
-    );
-    BatchElementResult {
-        index: element.index,
-        program: element.program,
-        args: element.args,
-        working_directory: element.working_directory,
-        result,
-    }
-}
-
-async fn run_batch_task(
-    state: AppState,
-    batch_id: String,
-    request: BatchExecRequest,
-) -> BatchExecResult {
-    let started_at = Utc::now();
-    let agent_id = request.agent_id.clone();
-    let need_confirm = request.need_confirm;
-    let confirm_method = request.confirm_method.clone();
-    let config = state.config.read().await.clone();
-    let prepared = request
-        .elements
-        .into_iter()
-        .enumerate()
-        .map(|(index, element)| {
-            prepare_batch_element(
-                &config,
-                index,
-                element,
-                request.working_directory.clone(),
-                need_confirm,
-            )
-        })
-        .collect::<Vec<_>>();
-    let total = prepared.len();
-    let max_concurrent = config.limits.max_concurrent_tasks.max(1).min(total.max(1));
-
-    if prepared
-        .iter()
-        .any(|element| element.reject_reason.is_some())
-    {
-        let updated_at = Utc::now();
-        let results = prepared
-            .iter()
-            .map(|element| {
-                if let Some(reason) = &element.reject_reason {
-                    batch_element_result(
-                        &agent_id,
-                        &batch_id,
-                        element,
-                        "rejected",
-                        Some(reason.clone()),
-                        started_at,
-                        updated_at,
-                    )
-                } else {
-                    batch_element_result(
-                        &agent_id,
-                        &batch_id,
-                        element,
-                        "skipped",
-                        Some("batch_rejected".to_string()),
-                        started_at,
-                        updated_at,
-                    )
-                }
-            })
-            .collect::<Vec<_>>();
-        return BatchExecResult {
-            agent_id,
-            batch_id,
-            status: "rejected".to_string(),
-            results,
-            started_at,
-            updated_at,
-        };
-    }
-
-    let needs_confirmation = prepared
-        .iter()
-        .filter(|element| element.decision == PolicyDecision::Confirm)
-        .cloned()
-        .collect::<Vec<_>>();
-    let mut batch_confirmation_result = None;
-    if !needs_confirmation.is_empty() {
-        let confirmation = confirmation::request_batch_confirmation(
-            &state,
-            &config,
-            confirm_method.as_deref(),
-            &needs_confirmation,
-            &prepared,
-        )
-        .await;
-        batch_confirmation_result = Some(confirmation.clone());
-        if confirmation != "allow_once" {
-            let updated_at = Utc::now();
-            let reason = if confirmation == "timeout" {
-                "batch_confirmation_timeout".to_string()
-            } else {
-                format!("batch_confirmation_{confirmation}")
-            };
-            let results = prepared
-                .iter()
-                .map(|element| {
-                    if element.decision == PolicyDecision::Confirm {
-                        batch_element_result(
-                            &agent_id,
-                            &batch_id,
-                            element,
-                            "rejected",
-                            Some(reason.clone()),
-                            started_at,
-                            updated_at,
-                        )
-                    } else {
-                        batch_element_result(
-                            &agent_id,
-                            &batch_id,
-                            element,
-                            "skipped",
-                            Some("batch_rejected".to_string()),
-                            started_at,
-                            updated_at,
-                        )
-                    }
-                })
-                .collect::<Vec<_>>();
-            return BatchExecResult {
-                agent_id,
-                batch_id,
-                status: "rejected".to_string(),
-                results,
-                started_at,
-                updated_at,
-            };
-        }
-    }
-
-    let mut pending = prepared.into_iter().collect::<VecDeque<_>>();
-    let mut running = JoinSet::new();
-    let mut results: Vec<Option<BatchElementResult>> = vec![None; total];
-    let deadline = Instant::now() + Duration::from_secs(EXEC_TIMEOUT_SECS);
-
-    loop {
-        while running.len() < max_concurrent {
-            let Some(element) = pending.pop_front() else {
-                break;
-            };
-            let element_config = config.clone();
-            let element_agent_id = agent_id.clone();
-            let element_batch_id = batch_id.clone();
-            let confirmation_result = if element.decision == PolicyDecision::Confirm {
-                batch_confirmation_result.clone()
-            } else {
-                None
-            };
-            running.spawn(async move {
-                run_prepared_batch_element(
-                    element_config,
-                    element_agent_id,
-                    element_batch_id,
-                    element,
-                    need_confirm,
-                    confirmation_result,
-                )
-                .await
-            });
-        }
-
-        if running.is_empty() {
-            break;
-        }
-
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            break;
-        }
-
-        match timeout(remaining, running.join_next()).await {
-            Ok(Some(Ok(element_result))) => {
-                let index = element_result.index;
-                if index < results.len() {
-                    results[index] = Some(element_result);
-                }
-            }
-            Ok(Some(Err(error))) => {
-                log_warn(format!("batch element task join failed: {error}"));
-            }
-            Ok(None) => break,
-            Err(_) => break,
-        }
-    }
-
-    running.abort_all();
-
-    let updated_at = Utc::now();
-    let results = results
-        .into_iter()
-        .enumerate()
-        .map(|(index, result)| {
-            result.unwrap_or_else(|| {
-                let fallback = PreparedBatchElement {
-                    index,
-                    program: "<unknown>".to_string(),
-                    args: Vec::new(),
-                    working_directory: None,
-                    resolved_working_directory: config.workspace_root.clone(),
-                    decision: PolicyDecision::Allow,
-                    reject_reason: None,
-                };
-                batch_element_result(
-                    &agent_id,
-                    &batch_id,
-                    &fallback,
-                    "timeout",
-                    Some("exec_timeout_use_session".to_string()),
-                    started_at,
-                    updated_at,
-                )
-            })
-        })
-        .collect::<Vec<_>>();
-
-    let status = if results
-        .iter()
-        .any(|element| element.result.status == "timeout")
-    {
-        "timeout"
-    } else if results
-        .iter()
-        .any(|element| element.result.status != "completed")
-    {
-        "partial_failed"
-    } else {
-        "completed"
-    }
-    .to_string();
-
-    BatchExecResult {
-        agent_id,
-        batch_id,
-        status,
-        results,
-        started_at,
-        updated_at,
-    }
-}
-
-#[derive(Debug)]
-struct CommandOutput {
-    exit_code: Option<i32>,
-    stdout: String,
-    stderr: String,
-    truncated: bool,
-}
-
-async fn execute_command(
-    config: &Config,
-    working_directory: &Path,
-    program: &str,
-    args: &[String],
-) -> Result<CommandOutput> {
-    let mut command = build_command(config, working_directory, program)?;
-    command.args(args);
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = command
-        .spawn()
-        .map_err(|error| anyhow!("spawn_failed: {error}"))?;
-    let stdout = child.stdout.take().context("stdout pipe missing")?;
-    let stderr = child.stderr.take().context("stderr pipe missing")?;
-    let stdout_task = tokio::spawn(read_limited(stdout, STDOUT_MAX));
-    let stderr_task = tokio::spawn(read_limited(stderr, STDERR_MAX));
-    let status = match timeout(Duration::from_secs(EXEC_TIMEOUT_SECS), child.wait()).await {
-        Ok(status) => status.map_err(|error| anyhow!("wait_failed: {error}"))?,
-        Err(_) => {
-            let _ = child.kill().await;
-            return Err(anyhow!("timeout"));
-        }
-    };
-    let stdout = stdout_task.await??;
-    let stderr = stderr_task.await??;
-    Ok(CommandOutput {
-        exit_code: status.code(),
-        truncated: stdout.1 || stderr.1,
-        stdout: stdout.0,
-        stderr: stderr.0,
-    })
-}
-
-async fn read_limited<R: AsyncRead + Unpin>(mut reader: R, max: usize) -> Result<(String, bool)> {
-    let mut tail = TailBuffer::new(max);
-    let mut buffer = [0_u8; 4096];
-    loop {
-        let read = reader.read(&mut buffer).await?;
-        if read == 0 {
-            break;
-        }
-        tail.push(&buffer[..read]);
-    }
-    Ok((tail.text(), tail.truncated))
-}
-
-fn preflight(
-    config: &Config,
-    working_directory: &Path,
-    program: &str,
-    args: &[String],
-) -> std::result::Result<(), String> {
-    if program == "sudo" {
-        return Err("interactive_credential_required".to_string());
-    }
-    if matches!(program, "passwd" | "su" | "login") {
-        return Err("interactive_credential_required".to_string());
-    }
-    if matches!(
-        program,
-        "vim" | "vi" | "nano" | "less" | "more" | "top" | "htop"
-    ) {
-        return Err("requires_tty_not_supported".to_string());
-    }
-    check_path_policy(config, working_directory, program, args)
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum PathAccessKind {
-    Read,
-    Write,
-}
-
-fn classify_program_access(program: &str) -> PathAccessKind {
-    if matches!(
-        program,
-        "cat"
-            | "head"
-            | "tail"
-            | "stat"
-            | "file"
-            | "wc"
-            | "ls"
-            | "find"
-            | "du"
-            | "df"
-            | "upower"
-            | "free"
-            | "uptime"
-            | "fastfetch"
-            | "journalctl"
-            | "btrfs"
-            | "pacman"
-    ) {
-        PathAccessKind::Read
-    } else {
-        PathAccessKind::Write
-    }
-}
-
-fn looks_like_path(arg: &str) -> bool {
-    arg == "~"
-        || arg.starts_with("~/")
-        || arg.starts_with('/')
-        || arg.starts_with("./")
-        || arg.starts_with("../")
-}
-
-fn check_path_policy(
-    config: &Config,
-    working_directory: &Path,
-    program: &str,
-    args: &[String],
-) -> std::result::Result<(), String> {
-    let access = classify_program_access(program);
-    let policy = expanded_path_policy(config).map_err(|_| "path_policy_error".to_string())?;
-    for arg in args {
-        if !looks_like_path(arg) {
-            continue;
-        }
-        let path = resolve_argument_path(working_directory, arg, access)?;
-        if path_in_roots(&path, &policy.deny_roots) {
-            return Err("path_denied".to_string());
-        }
-        if program == "df" && arg == "/" {
-            continue;
-        }
-        if path_in_roots(&path, &policy.write_roots) {
-            if access == PathAccessKind::Read && !path.exists() {
-                return Err("path_not_found".to_string());
-            }
-            continue;
-        }
-        if path_in_roots(&path, &policy.read_only_roots) {
-            if access == PathAccessKind::Read {
-                if !path.exists() {
-                    return Err("path_not_found".to_string());
-                }
-                continue;
-            }
-            return Err("path_readonly".to_string());
-        }
-        return Err("path_outside_allowed_roots".to_string());
-    }
-    Ok(())
-}
-
-fn resolve_argument_path(
-    workspace_root: &Path,
-    arg: &str,
-    _access: PathAccessKind,
-) -> std::result::Result<PathBuf, String> {
-    let expanded = expand_path(arg).map_err(|_| "path_policy_error".to_string())?;
-    let candidate = if expanded.is_absolute() {
-        expanded
-    } else {
-        workspace_root.join(expanded)
-    };
-    if candidate.exists() {
-        return candidate
-            .canonicalize()
-            .map_err(|_| "path_policy_error".to_string());
-    }
-    let parent = candidate
-        .parent()
-        .ok_or_else(|| "path_not_found".to_string())?;
-    let parent = parent
-        .canonicalize()
-        .map_err(|_| "path_not_found".to_string())?;
-    Ok(candidate
-        .file_name()
-        .map(|name| parent.join(name))
-        .unwrap_or(parent))
-}
-
-fn path_in_roots(path: &Path, roots: &[PathBuf]) -> bool {
-    roots.iter().any(|root| path.starts_with(root))
-}
-
-#[derive(Debug)]
-struct ExpandedPathPolicy {
-    write_roots: Vec<PathBuf>,
-    read_only_roots: Vec<PathBuf>,
-    deny_roots: Vec<PathBuf>,
-}
-
-fn expanded_path_policy(config: &Config) -> Result<ExpandedPathPolicy> {
-    Ok(ExpandedPathPolicy {
-        write_roots: normalize_roots(
-            config
-                .path_policy
-                .write_roots
-                .iter()
-                .chain(std::iter::once(&config.workspace_root)),
-        )?,
-        read_only_roots: normalize_roots(config.path_policy.read_only_roots.iter())?,
-        deny_roots: normalize_roots(config.path_policy.deny_roots.iter())?,
-    })
-}
-
-fn normalize_roots<'a>(roots: impl Iterator<Item = &'a PathBuf>) -> Result<Vec<PathBuf>> {
-    let mut normalized = Vec::new();
-    for root in roots {
-        let expanded = expand_pathbuf(root)?;
-        let normalized_root = canonicalize_existing_or_parent(&expanded)?;
-        if !normalized
-            .iter()
-            .any(|existing| existing == &normalized_root)
-        {
-            normalized.push(normalized_root);
-        }
-    }
-    Ok(normalized)
-}
-
-fn canonicalize_existing_or_parent(path: &Path) -> Result<PathBuf> {
-    if path.exists() {
-        return Ok(path.canonicalize()?);
-    }
-    if let Some(parent) = path.parent() {
-        if parent.exists() {
-            let parent = parent.canonicalize()?;
-            return Ok(path
-                .file_name()
-                .map(|name| parent.join(name))
-                .unwrap_or(parent));
-        }
-    }
-    Ok(path.to_path_buf())
-}
-
-fn expand_path(value: &str) -> Result<PathBuf> {
-    if value == "~" {
-        return dirs::home_dir().context("home directory not found");
-    }
-    if let Some(rest) = value.strip_prefix("~/") {
-        return Ok(dirs::home_dir()
-            .context("home directory not found")?
-            .join(rest));
-    }
-    Ok(PathBuf::from(value))
-}
-
-fn expand_pathbuf(value: &Path) -> Result<PathBuf> {
-    value
-        .to_str()
-        .map(expand_path)
-        .unwrap_or_else(|| Ok(value.to_path_buf()))
-}
-
-fn resolve_working_directory(
-    config: &Config,
-    working_directory: Option<&str>,
-) -> std::result::Result<PathBuf, String> {
-    let candidate = match working_directory {
-        Some(value) if value.trim().is_empty() => {
-            return Err("working_directory_empty".to_string());
-        }
-        Some(value) => {
-            let expanded =
-                expand_path(value).map_err(|_| "working_directory_invalid".to_string())?;
-            if expanded.is_absolute() {
-                expanded
-            } else {
-                config.workspace_root.join(expanded)
-            }
-        }
-        None => config.workspace_root.clone(),
-    };
-    let directory = candidate
-        .canonicalize()
-        .map_err(|_| "working_directory_not_found".to_string())?;
-    if !directory.is_dir() {
-        return Err("working_directory_not_directory".to_string());
-    }
-    let policy = expanded_path_policy(config).map_err(|_| "path_policy_error".to_string())?;
-    if path_in_roots(&directory, &policy.deny_roots) {
-        return Err("working_directory_denied".to_string());
-    }
-    if !path_in_roots(&directory, &policy.write_roots) {
-        return Err("working_directory_outside_allowed_roots".to_string());
-    }
-    Ok(directory)
-}
-
-fn build_command(config: &Config, working_directory: &Path, program: &str) -> Result<Command> {
-    if config.sandbox.enabled {
-        let policy = expanded_path_policy(config)?;
-        let mut command = Command::new(&config.sandbox.bubblewrap_path);
-        command
-            .arg("--die-with-parent")
-            .arg("--unshare-all")
-            .arg("--dev")
-            .arg("/dev")
-            .arg("--chdir")
-            .arg(working_directory);
-        let mut created_dirs = HashSet::new();
-        for path in &policy.write_roots {
-            if path.exists() {
-                add_bwrap_bind(&mut command, &mut created_dirs, "--bind", path);
-            }
-        }
-        for path in &policy.read_only_roots {
-            if path.exists() {
-                add_bwrap_bind(&mut command, &mut created_dirs, "--ro-bind", path);
-            }
-        }
-        for path in &config.sandbox.required_runtime_paths {
-            if path.exists() {
-                add_bwrap_bind(&mut command, &mut created_dirs, "--ro-bind", path);
-            }
-        }
-        command.arg("--").arg(program);
-        Ok(command)
-    } else {
-        let mut command = Command::new(program);
-        command.current_dir(working_directory);
-        Ok(command)
-    }
-}
-
-fn add_bwrap_bind(
-    command: &mut Command,
-    created_dirs: &mut HashSet<PathBuf>,
-    bind_arg: &str,
-    path: &Path,
-) {
-    add_bwrap_parent_dirs(command, created_dirs, path);
-    command.arg(bind_arg).arg(path).arg(path);
-}
-
-fn add_bwrap_parent_dirs(command: &mut Command, created_dirs: &mut HashSet<PathBuf>, path: &Path) {
-    let mut parents = path.ancestors().skip(1).collect::<Vec<_>>();
-    parents.reverse();
-    for parent in parents {
-        if parent == Path::new("/") || parent.as_os_str().is_empty() {
-            continue;
-        }
-        let parent = parent.to_path_buf();
-        if created_dirs.insert(parent.clone()) {
-            command.arg("--dir").arg(parent);
-        }
-    }
+    hub::connect_loop(state).await
 }
 
 fn mcp_tool_command_preview(
@@ -1950,177 +476,6 @@ fn builtin_rules(run_mode: RunMode, decision: PolicyDecision) -> Vec<Rule> {
         });
     }
     rules
-}
-
-async fn start_session(state: AppState, session_id: String, request: ExecRequest) -> SessionInfo {
-    let config = state.config.read().await.clone();
-    let started_at = Utc::now();
-    let mut info = SessionInfo {
-        agent_id: request.agent_id.clone(),
-        session_id: session_id.clone(),
-        state: "running".to_string(),
-        program: request.program.clone(),
-        args: request.args.clone(),
-        working_directory: request.working_directory.clone(),
-        command_preview: command_preview(&request.program, &request.args),
-        started_at,
-        updated_at: started_at,
-        exit_code: None,
-        stdout_tail: String::new(),
-        stderr_tail: String::new(),
-        truncated: false,
-        reject_reason: None,
-    };
-    let decision = policy_decision_for_mode(
-        &config,
-        state.run_mode,
-        &request.program,
-        &request.args,
-        request.need_confirm,
-    );
-    let working_directory =
-        match resolve_working_directory(&config, request.working_directory.as_deref()) {
-            Ok(working_directory) => working_directory,
-            Err(reason) => {
-                info.state = "failed".to_string();
-                info.reject_reason = Some(reason);
-                return info;
-            }
-        };
-    if let Err(reason) = preflight(&config, &working_directory, &request.program, &request.args) {
-        info.state = "failed".to_string();
-        info.reject_reason = Some(reason);
-        return info;
-    }
-    if decision == PolicyDecision::Deny {
-        info.state = "failed".to_string();
-        info.reject_reason = Some("policy_denied".to_string());
-        return info;
-    }
-    if decision == PolicyDecision::Confirm {
-        let confirmation = confirmation::request_confirmation(
-            &state,
-            &config,
-            request.confirm_method.as_deref(),
-            &request.program,
-            &request.args,
-        )
-        .await;
-        if confirmation != "allow_once" {
-            info.state = "failed".to_string();
-            info.reject_reason = Some(confirmation);
-            return info;
-        }
-    }
-    if state.sessions.lock().await.len() >= config.limits.max_active_sessions {
-        info.state = "failed".to_string();
-        info.reject_reason = Some("max_active_sessions_reached".to_string());
-        return info;
-    }
-    match spawn_session(&config, &working_directory, &request.program, &request.args).await {
-        Ok((child, stdout, stderr)) => {
-            state.sessions.lock().await.insert(
-                session_id,
-                ManagedSession {
-                    info: info.clone(),
-                    child,
-                    stdout,
-                    stderr,
-                    last_activity: Instant::now(),
-                },
-            );
-        }
-        Err(error) => {
-            info.state = "failed".to_string();
-            info.reject_reason = Some(format!("spawn_failed: {error}"));
-        }
-    }
-    info
-}
-
-async fn spawn_session(
-    config: &Config,
-    working_directory: &Path,
-    program: &str,
-    args: &[String],
-) -> Result<(Child, Arc<Mutex<TailBuffer>>, Arc<Mutex<TailBuffer>>)> {
-    let mut command = build_command(config, working_directory, program)?;
-    command
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = command.spawn()?;
-    let stdout = Arc::new(Mutex::new(TailBuffer::new(SESSION_TAIL_MAX)));
-    let stderr = Arc::new(Mutex::new(TailBuffer::new(SESSION_TAIL_MAX)));
-    if let Some(out) = child.stdout.take() {
-        tokio::spawn(read_tail(out, stdout.clone()));
-    }
-    if let Some(err) = child.stderr.take() {
-        tokio::spawn(read_tail(err, stderr.clone()));
-    }
-    Ok((child, stdout, stderr))
-}
-
-async fn read_tail<R: AsyncRead + Unpin>(
-    mut reader: R,
-    tail: Arc<Mutex<TailBuffer>>,
-) -> Result<()> {
-    let mut buffer = [0_u8; 4096];
-    loop {
-        let read = reader.read(&mut buffer).await?;
-        if read == 0 {
-            break;
-        }
-        tail.lock().await.push(&buffer[..read]);
-    }
-    Ok(())
-}
-
-async fn current_sessions(state: &AppState) -> Vec<SessionInfo> {
-    let mut sessions = state.sessions.lock().await;
-    let mut result = Vec::new();
-    for session in sessions.values_mut() {
-        refresh_session(session).await;
-        if matches!(
-            session.info.state.as_str(),
-            "running" | "waiting_confirmation"
-        ) {
-            result.push(session.info.clone());
-        }
-    }
-    result
-}
-
-async fn inspect_session(state: &AppState, session_id: &str) -> Option<SessionInfo> {
-    let mut sessions = state.sessions.lock().await;
-    let session = sessions.get_mut(session_id)?;
-    refresh_session(session).await;
-    Some(session.info.clone())
-}
-
-async fn kill_session(state: &AppState, session_id: &str) -> Option<SessionInfo> {
-    let mut sessions = state.sessions.lock().await;
-    let session = sessions.get_mut(session_id)?;
-    let _ = session.child.kill().await;
-    refresh_session(session).await;
-    session.info.state = "killed".to_string();
-    session.info.updated_at = Utc::now();
-    Some(session.info.clone())
-}
-
-async fn refresh_session(session: &mut ManagedSession) {
-    if let Ok(Some(status)) = session.child.try_wait() {
-        session.info.exit_code = status.code();
-        session.info.state = if status.success() { "exited" } else { "failed" }.to_string();
-    }
-    let stdout = session.stdout.lock().await;
-    let stderr = session.stderr.lock().await;
-    session.info.stdout_tail = stdout.text();
-    session.info.stderr_tail = stderr.text();
-    session.info.truncated = stdout.truncated || stderr.truncated;
-    session.info.updated_at = Utc::now();
-    session.last_activity = Instant::now();
 }
 
 async fn handle_config(config_path: PathBuf, command: ConfigCommand) -> Result<()> {
@@ -2321,8 +676,8 @@ fn paths_match(left: &Path, right: &Path) -> bool {
         return true;
     }
     match (
-        expand_pathbuf(left).and_then(|path| canonicalize_existing_or_parent(&path)),
-        expand_pathbuf(right).and_then(|path| canonicalize_existing_or_parent(&path)),
+        exec::expand_pathbuf(left).and_then(|path| exec::canonicalize_existing_or_parent(&path)),
+        exec::expand_pathbuf(right).and_then(|path| exec::canonicalize_existing_or_parent(&path)),
     ) {
         (Ok(left), Ok(right)) => left == right,
         _ => false,
@@ -2713,8 +1068,10 @@ fn log_line(level: &str, message: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::exec::PreparedBatchElement;
     use agentic_gpt_protocol::{
-        NotebookAppendRequest, NotebookRemoveRequest, NotebookUpdateRequest, PassageSignificance,
+        AgentMessage, BatchExecRequest, ExecElement, HubCommand, NotebookAppendRequest,
+        NotebookRemoveRequest, NotebookUpdateRequest, PassageSignificance,
     };
 
     #[test]
@@ -2751,7 +1108,7 @@ mod tests {
 
     #[test]
     fn normal_mode_room_command_error_is_structured() {
-        let value = room_agent_required_error();
+        let value = hub::room_agent_required_error();
         assert_eq!(value["error"]["code"], "room_agent_required");
         assert_eq!(
             value["error"]["message"],
@@ -2797,7 +1154,7 @@ mod tests {
         let workspace = unique_temp_dir("normal-room-update-remove").join("workspace");
         fs::create_dir_all(&workspace).unwrap();
         let (state, mut rx) = command_test_state(RunMode::Normal, workspace);
-        handle_hub_command(
+        hub::handle_hub_command(
             state.clone(),
             HubCommand::RoomNotebookUpdate {
                 request_id: "req-update".to_string(),
@@ -2815,7 +1172,7 @@ mod tests {
         let response = recv_response(&mut rx).await;
         assert_eq!(response["error"]["code"], "room_agent_required");
 
-        handle_hub_command(
+        hub::handle_hub_command(
             state,
             HubCommand::RoomNotebookRemove {
                 request_id: "req-remove".to_string(),
@@ -2848,7 +1205,7 @@ mod tests {
         )
         .await
         .unwrap();
-        handle_hub_command(
+        hub::handle_hub_command(
             state.clone(),
             HubCommand::RoomNotebookUpdate {
                 request_id: "req-update".to_string(),
@@ -2867,7 +1224,7 @@ mod tests {
         assert_eq!(response["updated"], true);
         assert_eq!(response["id"], appended.id);
 
-        handle_hub_command(
+        hub::handle_hub_command(
             state,
             HubCommand::RoomNotebookRemove {
                 request_id: "req-remove".to_string(),
@@ -3072,7 +1429,7 @@ mod tests {
     fn sudo_requires_credentials() {
         let config = Config::default_config().unwrap();
         assert_eq!(
-            preflight(
+            exec::preflight(
                 &config,
                 &config.workspace_root,
                 "sudo",
@@ -3086,14 +1443,14 @@ mod tests {
     #[test]
     fn read_only_system_file_is_allowed() {
         let config = Config::default_config().unwrap();
-        assert!(preflight(
+        assert!(exec::preflight(
             &config,
             &config.workspace_root,
             "cat",
             &["/proc/meminfo".to_string()]
         )
         .is_ok());
-        assert!(preflight(&config, &config.workspace_root, "df", &["/".to_string()]).is_ok());
+        assert!(exec::preflight(&config, &config.workspace_root, "df", &["/".to_string()]).is_ok());
     }
 
     #[test]
@@ -3114,7 +1471,7 @@ mod tests {
             deny_roots: Vec::new(),
         };
 
-        assert!(preflight(
+        assert!(exec::preflight(
             &config,
             &config.workspace_root,
             "touch",
@@ -3122,7 +1479,7 @@ mod tests {
         )
         .is_ok());
         assert_eq!(
-            preflight(
+            exec::preflight(
                 &config,
                 &config.workspace_root,
                 "touch",
@@ -3131,7 +1488,7 @@ mod tests {
             .unwrap_err(),
             "path_readonly"
         );
-        assert!(preflight(
+        assert!(exec::preflight(
             &config,
             &config.workspace_root,
             "du",
@@ -3158,7 +1515,7 @@ mod tests {
         };
 
         assert_eq!(
-            preflight(
+            exec::preflight(
                 &config,
                 &config.workspace_root,
                 "cat",
@@ -3168,7 +1525,7 @@ mod tests {
             "path_denied"
         );
         assert_eq!(
-            preflight(
+            exec::preflight(
                 &config,
                 &config.workspace_root,
                 "rm",
@@ -3196,7 +1553,7 @@ mod tests {
         };
 
         assert_eq!(
-            preflight(
+            exec::preflight(
                 &config,
                 &config.workspace_root,
                 "custom-tool",
@@ -3234,7 +1591,7 @@ mod tests {
             notebook_writes: Arc::new(Mutex::new(())),
         };
 
-        let result = run_batch_task(
+        let result = exec::run_batch_task(
             state,
             "batch_test".to_string(),
             BatchExecRequest {
@@ -3313,7 +1670,7 @@ mod tests {
             deny_roots: vec![secret],
         };
 
-        let confirm = prepare_batch_element(
+        let confirm = exec::prepare_batch_element(
             &config,
             0,
             ExecElement {
@@ -3327,7 +1684,7 @@ mod tests {
         assert_eq!(confirm.decision, PolicyDecision::Confirm);
         assert!(confirm.reject_reason.is_none());
 
-        let rejected = prepare_batch_element(
+        let rejected = exec::prepare_batch_element(
             &config,
             1,
             ExecElement {
@@ -3362,28 +1719,31 @@ mod tests {
         };
 
         assert_eq!(
-            resolve_working_directory(&config, None).unwrap(),
+            exec::resolve_working_directory(&config, None).unwrap(),
             workspace.canonicalize().unwrap()
         );
         assert_eq!(
-            resolve_working_directory(&config, Some("subdir")).unwrap(),
+            exec::resolve_working_directory(&config, Some("subdir")).unwrap(),
             subdir.canonicalize().unwrap()
         );
         assert_eq!(
-            resolve_working_directory(&config, Some("file")).unwrap_err(),
+            exec::resolve_working_directory(&config, Some("file")).unwrap_err(),
             "working_directory_not_directory"
         );
         assert_eq!(
-            resolve_working_directory(&config, Some("missing")).unwrap_err(),
+            exec::resolve_working_directory(&config, Some("missing")).unwrap_err(),
             "working_directory_not_found"
         );
         assert_eq!(
-            resolve_working_directory(&config, Some("secret")).unwrap_err(),
+            exec::resolve_working_directory(&config, Some("secret")).unwrap_err(),
             "working_directory_denied"
         );
         assert_eq!(
-            resolve_working_directory(&config, Some(root.join("cache").to_string_lossy().as_ref()))
-                .unwrap_err(),
+            exec::resolve_working_directory(
+                &config,
+                Some(root.join("cache").to_string_lossy().as_ref())
+            )
+            .unwrap_err(),
             "working_directory_outside_allowed_roots"
         );
     }
@@ -3405,7 +1765,7 @@ mod tests {
         };
 
         assert_eq!(
-            preflight(
+            exec::preflight(
                 &config,
                 &config.workspace_root,
                 "cat",
@@ -3414,7 +1774,7 @@ mod tests {
             .unwrap_err(),
             "path_not_found"
         );
-        assert!(preflight(&config, &subdir, "cat", &["./target.txt".to_string()]).is_ok());
+        assert!(exec::preflight(&config, &subdir, "cat", &["./target.txt".to_string()]).is_ok());
     }
 
     #[test]
@@ -3438,7 +1798,7 @@ mod tests {
 
         #[cfg(unix)]
         assert_eq!(
-            preflight(
+            exec::preflight(
                 &config,
                 &config.workspace_root,
                 "cat",
