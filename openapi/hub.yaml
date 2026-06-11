@@ -316,6 +316,48 @@ paths:
           $ref: "#/components/responses/NotFound"
         "504":
           $ref: "#/components/responses/GatewayTimeout"
+  /v1/notify/channels:
+    get:
+      operationId: userNotifyChannels
+      description: List Hub-native user notification channels. This does not use the active Room Agent.
+      x-openai-isConsequential: false
+      responses:
+        "200":
+          description: Available and unavailable notification channels.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserNotifyChannelsResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/notify/send:
+    post:
+      operationId: userNotifySend
+      description: Send a Hub-native notification to the user through a selected channel. This does not use the active Room Agent.
+      x-openai-isConsequential: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserNotifySendRequest"
+      responses:
+        "200":
+          description: Notification send result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserNotifySendResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "502":
+          $ref: "#/components/responses/BadGateway"
   /v1/room/notebook/append:
     post:
       operationId: roomNotebookAppend
@@ -514,6 +556,12 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
+    BadGateway:
+      description: Hub could not deliver the proxied request.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
     InternalError:
       description: Hub internal error.
       content:
@@ -614,6 +662,10 @@ components:
       properties:
         agentId:
           type: string
+        alias:
+          type:
+            - string
+            - "null"
         displayName:
           type: string
         online:
@@ -860,6 +912,87 @@ components:
           properties: {}
         isError:
           type: boolean
+    UserNotifyChannelsResponse:
+      type: object
+      required: [channels]
+      additionalProperties: false
+      properties:
+        channels:
+          type: array
+          items:
+            $ref: "#/components/schemas/NotificationChannel"
+    NotificationChannel:
+      type: object
+      required: [key, displayName, available, kind, supportsActions]
+      additionalProperties: false
+      properties:
+        key:
+          type: string
+          examples: ["agent::laptop::freedesktop", "hub::ntfy", "hub::android::notice"]
+        displayName:
+          type: string
+        available:
+          type: boolean
+        kind:
+          type: string
+          enum: [freedesktop, ntfy, android_notice, android_alarm]
+        supportsActions:
+          type: boolean
+        reason:
+          type:
+            - string
+            - "null"
+          examples: [android_endpoint_not_connected, android_delivery_not_implemented]
+        agentId:
+          type:
+            - string
+            - "null"
+    NotificationAction:
+      type: object
+      required: [id, label]
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          description: Stable action id. Android ack will report this as actionId.
+        label:
+          type: string
+    UserNotifySendRequest:
+      type: object
+      required: [channel, title, body]
+      additionalProperties: false
+      properties:
+        channel:
+          type: string
+          description: Notification channel key returned by userNotifyChannels.
+        title:
+          type: string
+        body:
+          type: string
+        actions:
+          type: array
+          items:
+            $ref: "#/components/schemas/NotificationAction"
+        priority:
+          type: string
+          enum: [min, low, normal, high, urgent, alarm]
+    UserNotifySendResponse:
+      type: object
+      required: [channelKey, accepted]
+      additionalProperties: false
+      properties:
+        channelKey:
+          type: string
+        accepted:
+          type: boolean
+        deliveryId:
+          type:
+            - string
+            - "null"
+        reason:
+          type:
+            - string
+            - "null"
     PassageSignificance:
       type: string
       enum: [NORMAL, ANCHOR]

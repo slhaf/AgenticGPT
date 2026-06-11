@@ -4,8 +4,9 @@ mod notebook;
 use agentic_gpt_protocol::{
     AgentMessage, AgentRole, BatchElementResult, BatchExecRequest, BatchExecResult,
     ConfirmationDecision, ConfirmationPayload, ExecElement, ExecRequest, HubCommand, HubMessage,
-    PolicyCounts, SafeBuiltinPolicyRules, SafeConfigSummary, SafePathPolicySummary, SafePathRoot,
-    SafePolicyRules, SafeRule, SafeSandboxSummary, SessionInfo, TaskResult,
+    NotificationChannel, PolicyCounts, SafeBuiltinPolicyRules, SafeConfigSummary,
+    SafePathPolicySummary, SafePathRoot, SafePolicyRules, SafeRule, SafeSandboxSummary,
+    SessionInfo, TaskResult, UserNotifyDeliveryRequest, UserNotifyDeliveryResponse,
 };
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
@@ -426,6 +427,9 @@ async fn connect_loop(state: AppState) -> Result<()> {
                 let hello = AgentMessage::Hello {
                     role: state.run_mode.role(),
                     config_summary: config.safe_summary(),
+                    notification_channels: freedesktop_notification_channel(&config)
+                        .into_iter()
+                        .collect(),
                 };
                 tx.send(Message::Text(serde_json::to_string(&hello)?.into()))?;
                 let mut heartbeat =
@@ -743,6 +747,13 @@ async fn handle_hub_command(state: AppState, command: HubCommand) -> Result<()> 
             };
             send_response(&state, &request_id, result).await?;
         }
+        HubCommand::UserNotifyDeliver {
+            request_id,
+            payload,
+        } => {
+            let result = deliver_freedesktop_notification(payload).await;
+            send_response(&state, &request_id, serde_json::to_value(result)?).await?;
+        }
         HubCommand::RoomNotebookAppend {
             request_id,
             payload,
@@ -882,6 +893,73 @@ fn room_agent_required_error() -> serde_json::Value {
             "message": "room notebook commands require run-as-room"
         }
     })
+}
+
+fn freedesktop_notification_channel(config: &Config) -> Option<NotificationChannel> {
+    let (available, _) = detect_freedesktop_notification_support();
+    if !available {
+        return None;
+    }
+    Some(NotificationChannel {
+        key: format!("agent::{}::freedesktop", config.agent_id),
+        display_name: format!("{} desktop notification", config.display_name),
+        available: true,
+        kind: "freedesktop".to_string(),
+        supports_actions: false,
+        reason: None,
+        agent_id: Some(config.agent_id.clone()),
+    })
+}
+
+fn detect_freedesktop_notification_support() -> (bool, bool) {
+    notify_rust::get_capabilities()
+        .map(|capabilities| {
+            let supports_actions = capabilities
+                .iter()
+                .any(|capability| capability == "actions");
+            (true, supports_actions)
+        })
+        .unwrap_or((false, false))
+}
+
+async fn deliver_freedesktop_notification(
+    payload: UserNotifyDeliveryRequest,
+) -> UserNotifyDeliveryResponse {
+    if !matches!(
+        payload.channel_key.split("::").collect::<Vec<_>>().as_slice(),
+        ["agent", alias, "freedesktop"] if !alias.is_empty()
+    ) {
+        return UserNotifyDeliveryResponse {
+            channel_key: payload.channel_key,
+            delivered: false,
+            reason: Some("unsupported_channel".to_string()),
+        };
+    }
+    let channel_key = payload.channel_key.clone();
+    let delivered = tokio::task::spawn_blocking(move || {
+        notify_rust::Notification::new()
+            .summary(&payload.title)
+            .body(&payload.body)
+            .show()
+    })
+    .await;
+    match delivered {
+        Ok(Ok(_)) => UserNotifyDeliveryResponse {
+            channel_key,
+            delivered: true,
+            reason: None,
+        },
+        Ok(Err(error)) => UserNotifyDeliveryResponse {
+            channel_key,
+            delivered: false,
+            reason: Some(format!("notification_show_failed:{error}")),
+        },
+        Err(error) => UserNotifyDeliveryResponse {
+            channel_key,
+            delivered: false,
+            reason: Some(format!("notification_provider_unavailable:{error}")),
+        },
+    }
 }
 
 async fn send_session(state: &AppState, session: &SessionInfo) -> Result<()> {
@@ -4114,6 +4192,20 @@ mod tests {
             },
         );
         assert!(policy.write_roots.is_empty());
+    }
+
+    #[tokio::test]
+    async fn notification_delivery_rejects_unsupported_channel() {
+        let response = deliver_freedesktop_notification(UserNotifyDeliveryRequest {
+            channel_key: "hub::ntfy".to_string(),
+            title: "Hello".to_string(),
+            body: "World".to_string(),
+            actions: Vec::new(),
+            priority: None,
+        })
+        .await;
+        assert!(!response.delivered);
+        assert_eq!(response.reason.as_deref(), Some("unsupported_channel"));
     }
 
     fn unique_temp_dir(prefix: &str) -> PathBuf {

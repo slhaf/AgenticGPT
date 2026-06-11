@@ -7,8 +7,9 @@ use agentic_gpt_protocol::{
     HubInfoCounts, HubInfoRemoteConfirmation, HubInfoResponse, HubMessage, McpCallToolRequest,
     McpListServersRequest, McpListToolsRequest, NotebookAppendRequest, NotebookCurrentRequest,
     NotebookRecentRequest, NotebookRemoveRequest, NotebookSearchRequest,
-    NotebookSelectExactRequest, NotebookUpdateRequest, SafeBuiltinPolicyRules, SafeConfigSummary,
-    SafePathPolicySummary, SafePolicyRules, SafeSandboxSummary, SessionInfo, TaskResult,
+    NotebookSelectExactRequest, NotebookUpdateRequest, NotificationChannel, SafeBuiltinPolicyRules,
+    SafeConfigSummary, SafePathPolicySummary, SafePolicyRules, SafeSandboxSummary, SessionInfo,
+    TaskResult, UserNotifyDeliveryRequest, UserNotifySendRequest, UserNotifySendResponse,
 };
 use anyhow::{Context, Result};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -75,9 +76,15 @@ enum AgentCommand {
         #[arg(long)]
         agent_id: String,
         #[arg(long)]
+        alias: Option<String>,
+        #[arg(long)]
         display_name: String,
         #[arg(long)]
         secret: String,
+    },
+    Alias {
+        #[command(subcommand)]
+        command: AgentAliasCommand,
     },
     Remove {
         #[arg(long)]
@@ -94,6 +101,20 @@ enum AgentCommand {
     List,
 }
 
+#[derive(Subcommand)]
+enum AgentAliasCommand {
+    Set {
+        #[arg(long)]
+        agent_id: String,
+        #[arg(long)]
+        alias: String,
+    },
+    Clear {
+        #[arg(long)]
+        agent_id: String,
+    },
+}
+
 #[derive(Clone)]
 struct HubState {
     api_key: String,
@@ -108,6 +129,7 @@ struct HubState {
     public_base_url: Option<String>,
     oauth_codes: Arc<Mutex<HashMap<String, oauth::OAuthAuthorizationCode>>>,
     oauth_tokens: Arc<Mutex<HashMap<String, oauth::OAuthAccessToken>>>,
+    ntfy_health: Arc<Mutex<Option<NtfyHealthCache>>>,
 }
 
 #[derive(Clone)]
@@ -117,6 +139,7 @@ struct AgentConnection {
     last_seen_at: DateTime<Utc>,
     role: AgentRole,
     config_summary: Option<SafeConfigSummary>,
+    notification_channels: Vec<NotificationChannel>,
 }
 
 #[derive(Clone, Debug)]
@@ -149,6 +172,20 @@ struct NtfyConfig {
 }
 
 #[derive(Clone, Debug)]
+struct NtfyHealthCache {
+    server_url: String,
+    checked_at: DateTime<Utc>,
+    result: NtfyHealthStatus,
+}
+
+#[derive(Clone, Debug)]
+enum NtfyHealthStatus {
+    Healthy,
+    Unhealthy,
+    Failed,
+}
+
+#[derive(Clone, Debug)]
 struct PendingConfirmation {
     confirmation_id: String,
     request_id: String,
@@ -172,6 +209,27 @@ struct AgentIdQuery {
 #[derive(Deserialize)]
 struct WaitRequest {
     seconds: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UserNotifySendBody {
+    channel: String,
+    title: String,
+    body: String,
+    #[serde(default)]
+    actions: Vec<agentic_gpt_protocol::NotificationAction>,
+    #[serde(default)]
+    priority: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AndroidRegisterRequest {
+    #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
+    capabilities: Value,
 }
 
 #[derive(Deserialize)]
@@ -248,6 +306,7 @@ async fn serve(
         public_base_url: public_base_url.map(|value| value.trim_end_matches('/').to_string()),
         oauth_codes: Arc::new(Mutex::new(HashMap::new())),
         oauth_tokens: Arc::new(Mutex::new(HashMap::new())),
+        ntfy_health: Arc::new(Mutex::new(None)),
     };
     tokio::spawn(cleanup_confirmations(state.clone()));
     tokio::spawn(oauth::cleanup_oauth(state.clone()));
@@ -269,6 +328,9 @@ async fn serve(
         .route("/v1/mcp/servers", post(mcp_list_servers))
         .route("/v1/mcp/tools", post(mcp_list_tools))
         .route("/v1/mcp/callTool", post(mcp_call_tool))
+        .route("/v1/notify/channels", get(notify_channels))
+        .route("/v1/notify/send", post(notify_send))
+        .route("/v1/notify/android/register", post(android_notify_register))
         .route("/v1/room/notebook/append", post(room_notebook_append))
         .route("/v1/room/notebook/recent", post(room_notebook_recent))
         .route(
@@ -356,9 +418,8 @@ async fn build_hub_info_response(state: &HubState) -> Result<HubInfoResponse> {
             enabled: remote.enabled,
             provider: remote.provider.clone(),
             timeout_seconds: remote.timeout_seconds,
-            ntfy_configured: !ntfy.server_url.is_empty()
-                && !ntfy.topic.is_empty()
-                && !ntfy.callback_base_url.is_empty(),
+            ntfy_configured: !ntfy_not_configured(ntfy)
+                && !ntfy.callback_base_url.trim().is_empty(),
         },
         agents: HubInfoAgents {
             registered_count,
@@ -390,6 +451,7 @@ async fn list_agents(State(state): State<HubState>, headers: HeaderMap) -> Respo
             let status = online.get(&entry.agent_id);
             json!({
                 "agentId": entry.agent_id,
+                "alias": entry.alias,
                 "displayName": entry.display_name,
                 "online": status.is_some(),
                 "lastSeenAt": status.map(|s| s.last_seen_at).or(entry.last_seen_at),
@@ -731,6 +793,51 @@ async fn mcp_call_tool(
     }
 }
 
+async fn notify_channels(State(state): State<HubState>, headers: HeaderMap) -> Response {
+    if let Err(response) = require_action_auth(&state, &headers) {
+        return response;
+    }
+    match notification_channels(&state).await {
+        Ok(channels) => Json(json!({ "channels": channels })).into_response(),
+        Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "db_error", error),
+    }
+}
+
+async fn notify_send(
+    State(state): State<HubState>,
+    headers: HeaderMap,
+    Json(payload): Json<UserNotifySendBody>,
+) -> Response {
+    if let Err(response) = require_action_auth(&state, &headers) {
+        return response;
+    }
+    let request = UserNotifySendRequest {
+        channel_key: payload.channel,
+        title: payload.title,
+        body: payload.body,
+        actions: payload.actions,
+        priority: payload.priority,
+    };
+    match send_user_notification(&state, request).await {
+        Ok(response) => Json(response).into_response(),
+        Err(error) => notify_route_error_response(error),
+    }
+}
+
+async fn android_notify_register(
+    State(state): State<HubState>,
+    headers: HeaderMap,
+    Json(payload): Json<AndroidRegisterRequest>,
+) -> Response {
+    if let Err(response) = require_action_auth(&state, &headers) {
+        return response;
+    }
+    match register_android_endpoint(&state, payload) {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "db_error", error),
+    }
+}
+
 async fn room_notebook_append(
     State(state): State<HubState>,
     headers: HeaderMap,
@@ -850,6 +957,405 @@ async fn room_notebook_remove(
     .await
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum NotifyChannelKey {
+    AgentFreedesktop { alias: String },
+    HubNtfy,
+    AndroidNotice,
+    AndroidAlarm,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum AndroidEndpointState {
+    NotConnected,
+    DeliveryNotImplemented,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum NotifyRouteError {
+    InvalidChannel(String),
+    AgentNotFound(String),
+    ChannelUnavailable {
+        channel_key: String,
+        reason: &'static str,
+    },
+    DeliveryFailed {
+        channel_key: String,
+        reason: String,
+    },
+    Db(String),
+}
+
+pub(crate) async fn notification_channels(state: &HubState) -> Result<Vec<NotificationChannel>> {
+    let entries = registry_entries(state)?;
+    let by_id = entries
+        .into_iter()
+        .map(|entry| (entry.agent_id.clone(), entry))
+        .collect::<HashMap<_, _>>();
+    let online = state.agents.lock().await;
+    let mut channels = Vec::new();
+    for (agent_id, connection) in online.iter() {
+        let Some(entry) = by_id.get(agent_id) else {
+            continue;
+        };
+        if !entry.enabled {
+            continue;
+        }
+        let alias = entry.alias.as_deref().unwrap_or(&entry.agent_id);
+        for channel in &connection.notification_channels {
+            if channel.kind == "freedesktop" {
+                channels.push(NotificationChannel {
+                    key: format!("agent::{alias}::freedesktop"),
+                    display_name: format!("{} desktop notification", entry.display_name),
+                    available: true,
+                    kind: "freedesktop".to_string(),
+                    supports_actions: channel.supports_actions,
+                    reason: None,
+                    agent_id: Some(entry.agent_id.clone()),
+                });
+            }
+        }
+    }
+
+    let ntfy_state = ntfy_channel_state(state).await;
+    channels.push(NotificationChannel {
+        key: "hub::ntfy".to_string(),
+        display_name: "ntfy notification".to_string(),
+        available: ntfy_state.reason.is_none(),
+        kind: "ntfy".to_string(),
+        supports_actions: false,
+        reason: ntfy_state.reason.map(str::to_string),
+        agent_id: None,
+    });
+
+    let android_reason = match android_endpoint_state(state) {
+        AndroidEndpointState::NotConnected => "android_endpoint_not_connected",
+        AndroidEndpointState::DeliveryNotImplemented => "android_delivery_not_implemented",
+    };
+    channels.push(NotificationChannel {
+        key: "hub::android::notice".to_string(),
+        display_name: "Android normal notification".to_string(),
+        available: false,
+        kind: "android_notice".to_string(),
+        supports_actions: true,
+        reason: Some(android_reason.to_string()),
+        agent_id: None,
+    });
+    channels.push(NotificationChannel {
+        key: "hub::android::alarm".to_string(),
+        display_name: "Android alarm notification".to_string(),
+        available: false,
+        kind: "android_alarm".to_string(),
+        supports_actions: true,
+        reason: Some(android_reason.to_string()),
+        agent_id: None,
+    });
+    Ok(channels)
+}
+
+pub(crate) async fn send_user_notification(
+    state: &HubState,
+    request: UserNotifySendRequest,
+) -> std::result::Result<UserNotifySendResponse, NotifyRouteError> {
+    match parse_notify_channel_key(&request.channel_key)? {
+        NotifyChannelKey::AgentFreedesktop { alias } => {
+            let agent_id = resolve_agent_alias(state, &alias)?;
+            let delivery = UserNotifyDeliveryRequest {
+                channel_key: request.channel_key.clone(),
+                title: request.title.clone(),
+                body: request.body.clone(),
+                actions: request.actions.clone(),
+                priority: request.priority.clone(),
+            };
+            let command = HubCommand::UserNotifyDeliver {
+                request_id: random_id("req"),
+                payload: delivery,
+            };
+            match request_agent(state, &agent_id, command, REQUEST_TIMEOUT_SECS).await {
+                Ok(value) => {
+                    if value.get("error").is_some() {
+                        return Err(NotifyRouteError::DeliveryFailed {
+                            channel_key: request.channel_key,
+                            reason: value.to_string(),
+                        });
+                    }
+                    Ok(UserNotifySendResponse {
+                        channel_key: request.channel_key,
+                        accepted: value
+                            .get("delivered")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(true),
+                        delivery_id: None,
+                        reason: value
+                            .get("reason")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                    })
+                }
+                Err(reason) => Err(NotifyRouteError::DeliveryFailed {
+                    channel_key: request.channel_key,
+                    reason,
+                }),
+            }
+        }
+        NotifyChannelKey::HubNtfy => {
+            if ntfy_not_configured(&state.config.remote_confirmation.ntfy) {
+                return Err(NotifyRouteError::ChannelUnavailable {
+                    channel_key: request.channel_key,
+                    reason: "ntfy_not_configured",
+                });
+            }
+            publish_ntfy_notification(state, &request)
+                .await
+                .map_err(|error| NotifyRouteError::DeliveryFailed {
+                    channel_key: request.channel_key.clone(),
+                    reason: error.to_string(),
+                })?;
+            Ok(UserNotifySendResponse {
+                channel_key: request.channel_key,
+                accepted: true,
+                delivery_id: None,
+                reason: None,
+            })
+        }
+        NotifyChannelKey::AndroidNotice | NotifyChannelKey::AndroidAlarm => {
+            let reason = match android_endpoint_state(state) {
+                AndroidEndpointState::NotConnected => "android_endpoint_not_connected",
+                AndroidEndpointState::DeliveryNotImplemented => "android_delivery_not_implemented",
+            };
+            Err(NotifyRouteError::ChannelUnavailable {
+                channel_key: request.channel_key,
+                reason,
+            })
+        }
+    }
+}
+
+pub(crate) fn parse_notify_channel_key(
+    key: &str,
+) -> std::result::Result<NotifyChannelKey, NotifyRouteError> {
+    let parts = key.split("::").collect::<Vec<_>>();
+    match parts.as_slice() {
+        ["agent", alias, "freedesktop"] if !alias.trim().is_empty() => {
+            Ok(NotifyChannelKey::AgentFreedesktop {
+                alias: alias.to_string(),
+            })
+        }
+        ["hub", "ntfy"] => Ok(NotifyChannelKey::HubNtfy),
+        ["hub", "android", "notice"] => Ok(NotifyChannelKey::AndroidNotice),
+        ["hub", "android", "alarm"] => Ok(NotifyChannelKey::AndroidAlarm),
+        _ => Err(NotifyRouteError::InvalidChannel(key.to_string())),
+    }
+}
+
+pub(crate) fn resolve_agent_alias(
+    state: &HubState,
+    alias: &str,
+) -> std::result::Result<String, NotifyRouteError> {
+    let entries =
+        registry_entries(state).map_err(|error| NotifyRouteError::Db(error.to_string()))?;
+    entries
+        .into_iter()
+        .find(|entry| {
+            entry.enabled
+                && (entry.alias.as_deref() == Some(alias)
+                    || (entry.alias.is_none() && entry.agent_id == alias))
+        })
+        .map(|entry| entry.agent_id)
+        .ok_or_else(|| NotifyRouteError::AgentNotFound(alias.to_string()))
+}
+
+pub(crate) async fn publish_ntfy_notification(
+    state: &HubState,
+    request: &UserNotifySendRequest,
+) -> Result<()> {
+    let ntfy = &state.config.remote_confirmation.ntfy;
+    let server_url = ntfy.server_url.trim_end_matches('/');
+    let body = json!({
+        "topic": ntfy.topic,
+        "title": request.title,
+        "message": request.body,
+        "priority": ntfy_priority(request.priority.as_deref()),
+    });
+    let response = state.http.post(server_url).json(&body).send().await?;
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!("ntfy returned {}", response.status()))
+    }
+}
+
+pub(crate) fn android_endpoint_state(state: &HubState) -> AndroidEndpointState {
+    if android_endpoint_exists(state).unwrap_or(false) {
+        AndroidEndpointState::DeliveryNotImplemented
+    } else {
+        AndroidEndpointState::NotConnected
+    }
+}
+
+struct NtfyChannelState {
+    reason: Option<&'static str>,
+}
+
+async fn ntfy_channel_state(state: &HubState) -> NtfyChannelState {
+    let ntfy = &state.config.remote_confirmation.ntfy;
+    if ntfy_not_configured(ntfy) {
+        return NtfyChannelState {
+            reason: Some("ntfy_not_configured"),
+        };
+    }
+    match cached_ntfy_health(state).await {
+        NtfyHealthStatus::Healthy => NtfyChannelState { reason: None },
+        NtfyHealthStatus::Unhealthy => NtfyChannelState {
+            reason: Some("ntfy_unhealthy"),
+        },
+        NtfyHealthStatus::Failed => NtfyChannelState {
+            reason: Some("ntfy_health_check_failed"),
+        },
+    }
+}
+
+async fn cached_ntfy_health(state: &HubState) -> NtfyHealthStatus {
+    const NTFY_HEALTH_CACHE_TTL_SECS: i64 = 45;
+
+    let server_url = state
+        .config
+        .remote_confirmation
+        .ntfy
+        .server_url
+        .trim_end_matches('/')
+        .to_string();
+    let now = Utc::now();
+    if let Some(cached) = state.ntfy_health.lock().await.clone() {
+        if cached.server_url == server_url
+            && now.signed_duration_since(cached.checked_at).num_seconds()
+                < NTFY_HEALTH_CACHE_TTL_SECS
+        {
+            return cached.result;
+        }
+    }
+
+    let result = check_ntfy_health(state, &server_url).await;
+    *state.ntfy_health.lock().await = Some(NtfyHealthCache {
+        server_url,
+        checked_at: now,
+        result: result.clone(),
+    });
+    result
+}
+
+async fn check_ntfy_health(state: &HubState, server_url: &str) -> NtfyHealthStatus {
+    let url = format!("{server_url}/v1/health");
+    let response = match timeout(Duration::from_secs(3), state.http.get(url).send()).await {
+        Ok(Ok(response)) => response,
+        Ok(Err(_)) => return NtfyHealthStatus::Failed,
+        Err(_) => return NtfyHealthStatus::Failed,
+    };
+    if !response.status().is_success() {
+        return NtfyHealthStatus::Failed;
+    }
+    match response.json::<Value>().await {
+        Ok(value) if value.get("healthy").and_then(Value::as_bool) == Some(true) => {
+            NtfyHealthStatus::Healthy
+        }
+        Ok(_) => NtfyHealthStatus::Unhealthy,
+        Err(_) => NtfyHealthStatus::Failed,
+    }
+}
+
+fn ntfy_not_configured(ntfy: &NtfyConfig) -> bool {
+    let server_url = ntfy.server_url.trim().trim_end_matches('/');
+    let topic = ntfy.topic.trim();
+    server_url.is_empty()
+        || topic.is_empty()
+        || (server_url == "https://ntfy.example.invalid" && topic == "change-me-high-entropy-topic")
+}
+
+fn ntfy_priority(priority: Option<&str>) -> i32 {
+    match priority {
+        Some("min") | Some("low") => 2,
+        Some("high") => 4,
+        Some("urgent") | Some("alarm") => 5,
+        _ => 3,
+    }
+}
+
+fn android_endpoint_exists(state: &HubState) -> Result<bool> {
+    let conn = state.db.lock().unwrap();
+    let mut stmt = conn.prepare(
+        "select exists(select 1 from notification_endpoints where kind = 'android' and enabled = 1)",
+    )?;
+    let exists: i64 = stmt.query_row([], |row| row.get(0))?;
+    Ok(exists != 0)
+}
+
+fn register_android_endpoint(state: &HubState, payload: AndroidRegisterRequest) -> Result<Value> {
+    let endpoint_id = random_id("android");
+    let token = random_token();
+    let token_hash = sha256_hex(&token);
+    let now = Utc::now().to_rfc3339();
+    let display_name = payload
+        .display_name
+        .unwrap_or_else(|| "Android endpoint".to_string());
+    let capabilities = if payload.capabilities.is_null() {
+        json!({})
+    } else {
+        payload.capabilities
+    };
+    let conn = state.db.lock().unwrap();
+    conn.execute(
+        "insert into notification_endpoints(endpoint_id, kind, display_name, capabilities_json, token_hash, enabled, last_seen_at, created_at)
+         values (?1, 'android', ?2, ?3, ?4, 1, ?5, ?5)",
+        params![
+            endpoint_id,
+            display_name,
+            serde_json::to_string(&capabilities)?,
+            token_hash,
+            now
+        ],
+    )?;
+    Ok(json!({
+        "endpointId": endpoint_id,
+        "token": token,
+        "status": "registered",
+        "deliveryImplemented": false
+    }))
+}
+
+fn notify_route_error_response(error: NotifyRouteError) -> Response {
+    match error {
+        NotifyRouteError::InvalidChannel(channel) => api_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_notify_channel",
+            format!("Invalid notification channel: {channel}"),
+        ),
+        NotifyRouteError::AgentNotFound(alias) => api_error(
+            StatusCode::NOT_FOUND,
+            "agent_alias_not_found",
+            format!("No enabled agent found for alias: {alias}"),
+        ),
+        NotifyRouteError::ChannelUnavailable {
+            channel_key,
+            reason,
+        } => api_error(
+            StatusCode::BAD_REQUEST,
+            reason,
+            format!("Notification channel {channel_key} is unavailable: {reason}"),
+        ),
+        NotifyRouteError::DeliveryFailed {
+            channel_key,
+            reason,
+        } => api_error(
+            StatusCode::BAD_GATEWAY,
+            "notify_delivery_failed",
+            format!("Notification delivery failed for {channel_key}: {reason}"),
+        ),
+        NotifyRouteError::Db(reason) => {
+            api_error(StatusCode::INTERNAL_SERVER_ERROR, "db_error", reason)
+        }
+    }
+}
+
 async fn forward_room_command(
     state: HubState,
     headers: HeaderMap,
@@ -940,12 +1446,14 @@ async fn handle_socket(state: HubState, agent_id: String, socket: WebSocket) {
             AgentMessage::Hello {
                 role,
                 config_summary,
+                notification_channels,
             } => match register_connection_role(&state, &agent_id, &connection_id, role).await {
                 Ok(()) => {
                     let mut agents = state.agents.lock().await;
                     if let Some(connection) = agents.get_mut(&agent_id) {
                         connection.role = role;
                         connection.config_summary = Some(config_summary);
+                        connection.notification_channels = notification_channels;
                     }
                 }
                 Err(reason) => {
@@ -1167,6 +1675,7 @@ async fn replace_agent_connection(
                 last_seen_at: Utc::now(),
                 role: AgentRole::Normal,
                 config_summary: None,
+                notification_channels: Vec::new(),
             },
         )
     };
@@ -1591,6 +2100,7 @@ fn command_request_id(command: &HubCommand) -> &str {
         | HubCommand::McpListServers { request_id }
         | HubCommand::McpListTools { request_id, .. }
         | HubCommand::McpCallTool { request_id, .. }
+        | HubCommand::UserNotifyDeliver { request_id, .. }
         | HubCommand::RoomNotebookAppend { request_id, .. }
         | HubCommand::RoomNotebookRecent { request_id, .. }
         | HubCommand::RoomNotebookSelectExact { request_id, .. }
@@ -1613,6 +2123,7 @@ fn set_command_request_id(command: &mut HubCommand, value: String) {
         | HubCommand::McpListServers { request_id }
         | HubCommand::McpListTools { request_id, .. }
         | HubCommand::McpCallTool { request_id, .. }
+        | HubCommand::UserNotifyDeliver { request_id, .. }
         | HubCommand::RoomNotebookAppend { request_id, .. }
         | HubCommand::RoomNotebookRecent { request_id, .. }
         | HubCommand::RoomNotebookSelectExact { request_id, .. }
@@ -1896,7 +2407,21 @@ fn init_db(conn: &Connection) -> Result<()> {
             last_seen_at text,
             capabilities_json text not null
         );
+        create table if not exists notification_endpoints (
+            endpoint_id text primary key,
+            kind text not null,
+            display_name text,
+            capabilities_json text not null,
+            token_hash text not null,
+            enabled integer not null,
+            last_seen_at text,
+            created_at text not null
+        );
         ",
+    )?;
+    ensure_column(conn, "agents", "alias", "alias text")?;
+    conn.execute_batch(
+        "create unique index if not exists agents_alias_unique on agents(alias) where alias is not null;",
     )?;
     Ok(())
 }
@@ -1905,21 +2430,25 @@ fn handle_agent_command(conn: &Connection, command: AgentCommand) -> Result<()> 
     match command {
         AgentCommand::Add {
             agent_id,
+            alias,
             display_name,
             secret,
         } => {
+            let alias = normalize_alias(alias.as_deref())?;
             let capabilities = Capabilities {
                 sessions: true,
                 confirmation: true,
                 notification_actions: true,
             };
             conn.execute(
-                "insert into agents(agent_id, display_name, enabled, secret_hash, last_seen_at, capabilities_json)
-                 values (?1, ?2, 1, ?3, null, ?4)
+                "insert into agents(agent_id, alias, display_name, enabled, secret_hash, last_seen_at, capabilities_json)
+                 values (?1, ?2, ?3, 1, ?4, null, ?5)
                  on conflict(agent_id) do update set display_name = excluded.display_name,
+                     alias = coalesce(excluded.alias, agents.alias),
                      enabled = 1, secret_hash = excluded.secret_hash, capabilities_json = excluded.capabilities_json",
                 params![
                     agent_id,
+                    alias,
                     display_name,
                     sha256_hex(&secret),
                     serde_json::to_string(&capabilities)?
@@ -1927,6 +2456,23 @@ fn handle_agent_command(conn: &Connection, command: AgentCommand) -> Result<()> 
             )?;
             println!("agent saved");
         }
+        AgentCommand::Alias { command } => match command {
+            AgentAliasCommand::Set { agent_id, alias } => {
+                let alias = normalize_alias(Some(&alias))?;
+                conn.execute(
+                    "update agents set alias = ?2 where agent_id = ?1",
+                    params![agent_id, alias],
+                )?;
+                println!("agent alias saved");
+            }
+            AgentAliasCommand::Clear { agent_id } => {
+                conn.execute(
+                    "update agents set alias = null where agent_id = ?1",
+                    params![agent_id],
+                )?;
+                println!("agent alias cleared");
+            }
+        },
         AgentCommand::Remove { agent_id } => {
             conn.execute("delete from agents where agent_id = ?1", params![agent_id])?;
             println!("agent removed");
@@ -1948,8 +2494,9 @@ fn handle_agent_command(conn: &Connection, command: AgentCommand) -> Result<()> 
         AgentCommand::List => {
             for entry in registry_entries_from_conn(conn)? {
                 println!(
-                    "{}\t{}\tenabled={}\tlastSeenAt={}",
+                    "{}\talias={}\t{}\tenabled={}\tlastSeenAt={}",
                     entry.agent_id,
+                    entry.alias.as_deref().unwrap_or("-"),
                     entry.display_name,
                     entry.enabled,
                     entry
@@ -1970,7 +2517,7 @@ fn registry_entries(state: &HubState) -> Result<Vec<AgentRegistryEntry>> {
 
 fn registry_entries_from_conn(conn: &Connection) -> Result<Vec<AgentRegistryEntry>> {
     let mut stmt = conn.prepare(
-        "select agent_id, display_name, enabled, secret_hash, last_seen_at, capabilities_json from agents order by agent_id",
+        "select agent_id, alias, display_name, enabled, secret_hash, last_seen_at, capabilities_json from agents order by agent_id",
     )?;
     let rows = stmt.query_map([], row_to_entry)?;
     rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -1980,7 +2527,7 @@ fn registry_entries_from_conn(conn: &Connection) -> Result<Vec<AgentRegistryEntr
 fn registry_entry(state: &HubState, agent_id: &str) -> Result<Option<AgentRegistryEntry>> {
     let conn = state.db.lock().unwrap();
     let mut stmt = conn.prepare(
-        "select agent_id, display_name, enabled, secret_hash, last_seen_at, capabilities_json from agents where agent_id = ?1",
+        "select agent_id, alias, display_name, enabled, secret_hash, last_seen_at, capabilities_json from agents where agent_id = ?1",
     )?;
     let mut rows = stmt.query_map(params![agent_id], row_to_entry)?;
     rows.next().transpose().map_err(Into::into)
@@ -1996,13 +2543,14 @@ fn update_last_seen(state: &HubState, agent_id: &str) -> Result<()> {
 }
 
 fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentRegistryEntry> {
-    let last_seen: Option<String> = row.get(4)?;
-    let capabilities_json: String = row.get(5)?;
+    let last_seen: Option<String> = row.get(5)?;
+    let capabilities_json: String = row.get(6)?;
     Ok(AgentRegistryEntry {
         agent_id: row.get(0)?,
-        display_name: row.get(1)?,
-        enabled: row.get::<_, i64>(2)? != 0,
-        secret_hash: row.get(3)?,
+        alias: row.get(1)?,
+        display_name: row.get(2)?,
+        enabled: row.get::<_, i64>(3)? != 0,
+        secret_hash: row.get(4)?,
         last_seen_at: last_seen.and_then(|value| {
             DateTime::parse_from_rfc3339(&value)
                 .ok()
@@ -2014,6 +2562,37 @@ fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentRegistryEntry>
             notification_actions: false,
         }),
     })
+}
+
+fn ensure_column(conn: &Connection, table: &str, column: &str, definition: &str) -> Result<()> {
+    let mut stmt = conn.prepare(&format!("pragma table_info({table})"))?;
+    let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for existing in columns {
+        if existing? == column {
+            return Ok(());
+        }
+    }
+    conn.execute(&format!("alter table {table} add column {definition}"), [])?;
+    Ok(())
+}
+
+fn normalize_alias(value: Option<&str>) -> Result<Option<String>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let alias = value.trim();
+    if alias.is_empty() {
+        return Ok(None);
+    }
+    let valid = alias
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'));
+    if !valid {
+        return Err(anyhow::anyhow!(
+            "alias may only contain ASCII letters, digits, underscore, or hyphen"
+        ));
+    }
+    Ok(Some(alias.to_string()))
 }
 
 fn sha256_hex(value: &str) -> String {
@@ -2066,6 +2645,11 @@ mod tests {
             public_base_url: Some("https://hub.example.invalid".to_string()),
             oauth_codes: Arc::new(Mutex::new(HashMap::new())),
             oauth_tokens: Arc::new(Mutex::new(HashMap::new())),
+            ntfy_health: Arc::new(Mutex::new(Some(NtfyHealthCache {
+                server_url: "https://ntfy.example.invalid".to_string(),
+                checked_at: Utc::now(),
+                result: NtfyHealthStatus::Healthy,
+            }))),
         }
     }
 
@@ -2084,6 +2668,7 @@ mod tests {
                 last_seen_at: Utc::now(),
                 role,
                 config_summary: None,
+                notification_channels: Vec::new(),
             },
         );
         rx
@@ -2483,5 +3068,260 @@ mod tests {
         )
         .await;
         assert_eq!(result.unwrap_err(), RoomRouteError::NotActive);
+    }
+
+    #[test]
+    fn parses_notify_channel_keys() {
+        assert_eq!(
+            parse_notify_channel_key("agent::laptop::freedesktop").unwrap(),
+            NotifyChannelKey::AgentFreedesktop {
+                alias: "laptop".to_string()
+            }
+        );
+        assert_eq!(
+            parse_notify_channel_key("hub::ntfy").unwrap(),
+            NotifyChannelKey::HubNtfy
+        );
+        assert_eq!(
+            parse_notify_channel_key("hub::android::notice").unwrap(),
+            NotifyChannelKey::AndroidNotice
+        );
+        assert!(parse_notify_channel_key("agent::::freedesktop").is_err());
+        assert!(parse_notify_channel_key("room::notify").is_err());
+    }
+
+    #[test]
+    fn agent_alias_is_nullable_and_unique_when_present() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_db(&conn).unwrap();
+        let capabilities = serde_json::to_string(&Capabilities {
+            sessions: true,
+            confirmation: true,
+            notification_actions: false,
+        })
+        .unwrap();
+        conn.execute(
+            "insert into agents(agent_id, alias, display_name, enabled, secret_hash, last_seen_at, capabilities_json)
+             values ('a', null, 'A', 1, 'hash-a', null, ?1)",
+            params![capabilities],
+        )
+        .unwrap();
+        conn.execute(
+            "insert into agents(agent_id, alias, display_name, enabled, secret_hash, last_seen_at, capabilities_json)
+             values ('b', null, 'B', 1, 'hash-b', null, ?1)",
+            params![capabilities],
+        )
+        .unwrap();
+        conn.execute(
+            "update agents set alias = 'laptop' where agent_id = 'a'",
+            [],
+        )
+        .unwrap();
+        let duplicate = conn.execute(
+            "update agents set alias = 'laptop' where agent_id = 'b'",
+            [],
+        );
+        assert!(duplicate.is_err());
+    }
+
+    #[tokio::test]
+    async fn notification_channels_include_agent_ntfy_and_android_placeholders() {
+        let state = test_state();
+        {
+            let conn = state.db.lock().unwrap();
+            let capabilities = serde_json::to_string(&Capabilities {
+                sessions: true,
+                confirmation: true,
+                notification_actions: false,
+            })
+            .unwrap();
+            conn.execute(
+                "insert into agents(agent_id, alias, display_name, enabled, secret_hash, last_seen_at, capabilities_json)
+                 values ('agentic-gpt-slhaf-laptop', 'laptop', 'Laptop', 1, 'hash', null, ?1)",
+                params![capabilities],
+            )
+            .unwrap();
+        }
+        let _rx = insert_connection(
+            &state,
+            "agentic-gpt-slhaf-laptop",
+            "conn1",
+            AgentRole::Normal,
+        )
+        .await;
+        state
+            .agents
+            .lock()
+            .await
+            .get_mut("agentic-gpt-slhaf-laptop")
+            .unwrap()
+            .notification_channels
+            .push(NotificationChannel {
+                key: "agent::agentic-gpt-slhaf-laptop::freedesktop".to_string(),
+                display_name: "Desktop".to_string(),
+                available: true,
+                kind: "freedesktop".to_string(),
+                supports_actions: false,
+                reason: None,
+                agent_id: Some("agentic-gpt-slhaf-laptop".to_string()),
+            });
+
+        let channels = notification_channels(&state).await.unwrap();
+        assert!(channels
+            .iter()
+            .any(|channel| channel.key == "agent::laptop::freedesktop"));
+        assert!(channels.iter().any(|channel| channel.key == "hub::ntfy"));
+        let android = channels
+            .iter()
+            .find(|channel| channel.key == "hub::android::notice")
+            .unwrap();
+        assert!(!android.available);
+        assert_eq!(
+            android.reason.as_deref(),
+            Some("android_endpoint_not_connected")
+        );
+    }
+
+    #[tokio::test]
+    async fn ntfy_default_placeholder_is_not_configured() {
+        let mut state = test_state();
+        state.config = Arc::new(HubConfig::default_config());
+        let channels = notification_channels(&state).await.unwrap();
+        let ntfy = channels
+            .iter()
+            .find(|channel| channel.key == "hub::ntfy")
+            .unwrap();
+        assert!(!ntfy.available);
+        assert_eq!(ntfy.reason.as_deref(), Some("ntfy_not_configured"));
+    }
+
+    #[tokio::test]
+    async fn ntfy_health_cache_controls_listing_reason() {
+        let state = test_state();
+        *state.ntfy_health.lock().await = Some(NtfyHealthCache {
+            server_url: "https://ntfy.example.invalid".to_string(),
+            checked_at: Utc::now(),
+            result: NtfyHealthStatus::Unhealthy,
+        });
+        let channels = notification_channels(&state).await.unwrap();
+        let ntfy = channels
+            .iter()
+            .find(|channel| channel.key == "hub::ntfy")
+            .unwrap();
+        assert!(!ntfy.available);
+        assert_eq!(ntfy.reason.as_deref(), Some("ntfy_unhealthy"));
+
+        *state.ntfy_health.lock().await = Some(NtfyHealthCache {
+            server_url: "https://ntfy.example.invalid".to_string(),
+            checked_at: Utc::now(),
+            result: NtfyHealthStatus::Failed,
+        });
+        let channels = notification_channels(&state).await.unwrap();
+        let ntfy = channels
+            .iter()
+            .find(|channel| channel.key == "hub::ntfy")
+            .unwrap();
+        assert!(!ntfy.available);
+        assert_eq!(ntfy.reason.as_deref(), Some("ntfy_health_check_failed"));
+    }
+
+    #[tokio::test]
+    async fn android_registered_endpoint_still_reports_delivery_not_implemented() {
+        let state = test_state();
+        register_android_endpoint(
+            &state,
+            AndroidRegisterRequest {
+                display_name: Some("Phone".to_string()),
+                capabilities: json!({ "channels": ["notice", "alarm"] }),
+            },
+        )
+        .unwrap();
+        let channels = notification_channels(&state).await.unwrap();
+        let android = channels
+            .iter()
+            .find(|channel| channel.key == "hub::android::alarm")
+            .unwrap();
+        assert!(!android.available);
+        assert_eq!(
+            android.reason.as_deref(),
+            Some("android_delivery_not_implemented")
+        );
+        let error = send_user_notification(
+            &state,
+            UserNotifySendRequest {
+                channel_key: "hub::android::alarm".to_string(),
+                title: "Wake".to_string(),
+                body: "Up".to_string(),
+                actions: Vec::new(),
+                priority: None,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error,
+            NotifyRouteError::ChannelUnavailable {
+                channel_key: "hub::android::alarm".to_string(),
+                reason: "android_delivery_not_implemented"
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn user_notify_send_routes_agent_channel_by_alias() {
+        let state = test_state();
+        {
+            let conn = state.db.lock().unwrap();
+            let capabilities = serde_json::to_string(&Capabilities {
+                sessions: true,
+                confirmation: true,
+                notification_actions: false,
+            })
+            .unwrap();
+            conn.execute(
+                "insert into agents(agent_id, alias, display_name, enabled, secret_hash, last_seen_at, capabilities_json)
+                 values ('agentic-gpt-slhaf-laptop', 'laptop', 'Laptop', 1, 'hash', null, ?1)",
+                params![capabilities],
+            )
+            .unwrap();
+        }
+        let mut rx = insert_connection(
+            &state,
+            "agentic-gpt-slhaf-laptop",
+            "conn1",
+            AgentRole::Normal,
+        )
+        .await;
+        let request_state = state.clone();
+        let task = tokio::spawn(async move {
+            send_user_notification(
+                &request_state,
+                UserNotifySendRequest {
+                    channel_key: "agent::laptop::freedesktop".to_string(),
+                    title: "Hello".to_string(),
+                    body: "World".to_string(),
+                    actions: Vec::new(),
+                    priority: None,
+                },
+            )
+            .await
+            .unwrap()
+        });
+        let Message::Text(text) = rx.recv().await.unwrap() else {
+            panic!("expected command");
+        };
+        let command = serde_json::from_str::<HubCommand>(&text).unwrap();
+        let request_id = command_request_id(&command).to_string();
+        assert!(matches!(command, HubCommand::UserNotifyDeliver { .. }));
+        let sender = state.pending.lock().await.remove(&request_id).unwrap();
+        sender
+            .send(json!({
+                "channelKey": "agent::laptop::freedesktop",
+                "delivered": true
+            }))
+            .unwrap();
+        let response = task.await.unwrap();
+        assert!(response.accepted);
+        assert_eq!(response.channel_key, "agent::laptop::freedesktop");
     }
 }

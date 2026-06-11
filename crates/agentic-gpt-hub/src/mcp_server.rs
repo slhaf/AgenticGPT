@@ -2,7 +2,8 @@ use agentic_gpt_protocol::{
     BatchExecRequest, ExecElement, ExecRequest, HubCommand, McpCallToolRequest,
     McpListToolsRequest, NotebookAppendRequest, NotebookCurrentRequest, NotebookRecentRequest,
     NotebookRemoveRequest, NotebookSearchRequest, NotebookSelectExactRequest,
-    NotebookUpdateRequest, PassageSignificance, SessionInfo,
+    NotebookUpdateRequest, NotificationAction, PassageSignificance, SessionInfo,
+    UserNotifySendRequest,
 };
 use axum::extract::{Request, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -19,9 +20,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use crate::{
-    cached_session, default_config_summary, mcp_list_servers_all_agents, random_id,
-    registry_entries, registry_entry, request_active_room, request_agent, timeout_batch_result,
-    timeout_task_result, HubState, RoomRouteError, MAX_WAIT_SECONDS, REQUEST_TIMEOUT_SECS,
+    cached_session, default_config_summary, mcp_list_servers_all_agents, notification_channels,
+    random_id, registry_entries, registry_entry, request_active_room, request_agent,
+    send_user_notification, timeout_batch_result, timeout_task_result, HubState, NotifyRouteError,
+    RoomRouteError, MAX_WAIT_SECONDS, REQUEST_TIMEOUT_SECS,
 };
 
 #[derive(Clone)]
@@ -172,6 +174,12 @@ async fn call_app_tool(server: &AgenticMcpServer, params: Value) -> Result<Value
                 .mcp_call_tool(Parameters(decode_args(arguments)?))
                 .await
         }
+        "user.notify.channels" => server.user_notify_channels().await,
+        "user.notify.send" => {
+            server
+                .user_notify_send(Parameters(decode_args(arguments)?))
+                .await
+        }
         "room.notebook.append" => {
             server
                 .room_notebook_append(Parameters(decode_args(arguments)?))
@@ -314,6 +322,7 @@ impl AgenticMcpServer {
                 let status = online.get(&entry.agent_id);
                 json!({
                     "agentId": entry.agent_id,
+                    "alias": entry.alias,
                     "displayName": entry.display_name,
                     "online": status.is_some(),
                     "lastSeenAt": status.map(|s| s.last_seen_at).or(entry.last_seen_at),
@@ -660,6 +669,53 @@ impl AgenticMcpServer {
         .unwrap_or_else(
             |reason| json!({ "error": { "code": "mcp_call_tool_timeout", "message": reason } }),
         );
+        Ok(result_from_value(value))
+    }
+
+    #[tool(
+        name = "user.notify.channels",
+        description = "List Hub-native user notification channels. This does not use the active Room Agent."
+    )]
+    async fn user_notify_channels(&self) -> Result<CallToolResult, ErrorData> {
+        let channels = notification_channels(&self.state)
+            .await
+            .map_err(|error| mcp_internal_error("db_error", error.to_string()))?;
+        Ok(ok_json(json!({ "channels": channels })))
+    }
+
+    #[tool(
+        name = "user.notify.send",
+        description = "Send a Hub-native notification to the user through a selected channel. This does not use the active Room Agent."
+    )]
+    async fn user_notify_send(
+        &self,
+        params: Parameters<UserNotifySendArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let params = params.0;
+        let request = UserNotifySendRequest {
+            channel_key: params.channel,
+            title: params.title,
+            body: params.body,
+            actions: params
+                .actions
+                .unwrap_or_default()
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+            priority: params.priority,
+        };
+        let value = send_user_notification(&self.state, request)
+            .await
+            .map(serde_json::to_value)
+            .unwrap_or_else(|error| {
+                Ok(json!({
+                    "error": {
+                        "code": notify_route_error_code(&error),
+                        "message": notify_route_error_message(&error)
+                    }
+                }))
+            })
+            .unwrap_or_else(|error| json!({ "error": { "code": "serialization_error", "message": error.to_string() } }));
         Ok(result_from_value(value))
     }
 
@@ -1022,6 +1078,41 @@ struct McpCallToolArgs {
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
+struct UserNotifySendArgs {
+    #[schemars(description = "Notification channel key returned by user.notify.channels.")]
+    channel: String,
+    #[schemars(description = "Notification title.")]
+    title: String,
+    #[schemars(description = "Notification body.")]
+    body: String,
+    #[serde(default)]
+    #[schemars(description = "Optional notification actions. Phase A does not deliver actions.")]
+    actions: Option<Vec<UserNotifyActionArgs>>,
+    #[serde(default)]
+    #[schemars(description = "Optional priority such as low, normal, high, urgent, or alarm.")]
+    priority: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct UserNotifyActionArgs {
+    #[schemars(description = "Stable action id. Android ack will report this as actionId.")]
+    id: String,
+    #[schemars(description = "Human-readable action label.")]
+    label: String,
+}
+
+impl From<UserNotifyActionArgs> for NotificationAction {
+    fn from(value: UserNotifyActionArgs) -> Self {
+        Self {
+            id: value.id,
+            label: value.label,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
 struct RoomNotebookAppendArgs {
     #[serde(default)]
     #[schemars(
@@ -1177,6 +1268,36 @@ fn mcp_invalid_params(code: &'static str, message: impl ToString) -> ErrorData {
 
 fn mcp_internal_error(code: &'static str, message: String) -> ErrorData {
     ErrorData::internal_error(message, Some(json!({ "code": code })))
+}
+
+fn notify_route_error_code(error: &NotifyRouteError) -> &'static str {
+    match error {
+        NotifyRouteError::InvalidChannel(_) => "invalid_notify_channel",
+        NotifyRouteError::AgentNotFound(_) => "agent_alias_not_found",
+        NotifyRouteError::ChannelUnavailable { reason, .. } => reason,
+        NotifyRouteError::DeliveryFailed { .. } => "notify_delivery_failed",
+        NotifyRouteError::Db(_) => "db_error",
+    }
+}
+
+fn notify_route_error_message(error: &NotifyRouteError) -> String {
+    match error {
+        NotifyRouteError::InvalidChannel(channel) => {
+            format!("Invalid notification channel: {channel}")
+        }
+        NotifyRouteError::AgentNotFound(alias) => {
+            format!("No enabled agent found for alias: {alias}")
+        }
+        NotifyRouteError::ChannelUnavailable {
+            channel_key,
+            reason,
+        } => format!("Notification channel {channel_key} is unavailable: {reason}"),
+        NotifyRouteError::DeliveryFailed {
+            channel_key,
+            reason,
+        } => format!("Notification delivery failed for {channel_key}: {reason}"),
+        NotifyRouteError::Db(reason) => reason.clone(),
+    }
 }
 
 #[cfg(test)]

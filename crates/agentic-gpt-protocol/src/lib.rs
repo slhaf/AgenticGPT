@@ -126,6 +126,8 @@ pub struct HubInfoResponse {
 #[serde(rename_all = "camelCase")]
 pub struct AgentRegistryEntry {
     pub agent_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
     pub display_name: String,
     pub enabled: bool,
     pub secret_hash: String,
@@ -198,6 +200,71 @@ pub struct McpCallToolRequest {
     pub tool_name: String,
     #[serde(default)]
     pub arguments: serde_json::Value,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotificationChannel {
+    pub key: String,
+    pub display_name: String,
+    pub available: bool,
+    pub kind: String,
+    pub supports_actions: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotificationAction {
+    pub id: String,
+    pub label: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserNotifySendRequest {
+    pub channel_key: String,
+    pub title: String,
+    pub body: String,
+    #[serde(default)]
+    pub actions: Vec<NotificationAction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserNotifySendResponse {
+    pub channel_key: String,
+    pub accepted: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserNotifyDeliveryRequest {
+    pub channel_key: String,
+    pub title: String,
+    pub body: String,
+    #[serde(default)]
+    pub actions: Vec<NotificationAction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserNotifyDeliveryResponse {
+    pub channel_key: String,
+    pub delivered: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -506,6 +573,11 @@ pub enum HubCommand {
         request_id: String,
         payload: McpCallToolRequest,
     },
+    #[serde(rename = "user.notify.deliver")]
+    UserNotifyDeliver {
+        request_id: String,
+        payload: UserNotifyDeliveryRequest,
+    },
     #[serde(rename = "room.notebook.append")]
     RoomNotebookAppend {
         request_id: String,
@@ -550,6 +622,8 @@ pub enum AgentMessage {
         role: AgentRole,
         #[serde(rename = "configSummary")]
         config_summary: SafeConfigSummary,
+        #[serde(default, rename = "notificationChannels")]
+        notification_channels: Vec<NotificationChannel>,
     },
     Heartbeat {
         #[serde(rename = "sentAt")]
