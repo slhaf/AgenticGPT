@@ -1,45 +1,45 @@
+mod agents;
 mod db;
 mod mcp_server;
 mod notify;
 mod oauth;
 mod registry;
 mod room;
+mod routes;
+mod state;
+mod utils;
 
 use agentic_gpt_protocol::{
-    AgentMessage, AgentRole, BatchExecRequest, BatchExecResult, ConfirmationDecision,
-    ConfirmationPayload, ExecRequest, HubCommand, HubInfoAgents, HubInfoCounts,
-    HubInfoRemoteConfirmation, HubInfoResponse, HubMessage, McpCallToolRequest,
-    McpListServersRequest, McpListToolsRequest, NotificationChannel, SafeBuiltinPolicyRules,
-    SafeConfigSummary, SafePathPolicySummary, SafePolicyRules, SafeSandboxSummary, SessionInfo,
-    TaskResult,
+    ConfirmationDecision, ConfirmationPayload, HubMessage, SafeBuiltinPolicyRules,
+    SafeConfigSummary, SafePathPolicySummary, SafePolicyRules, SafeSandboxSummary,
 };
 use anyhow::{Context, Result};
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::ws::Message;
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, Request, StatusCode};
+use axum::http::{Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use clap::{Parser, Subcommand};
-use futures_util::{SinkExt, StreamExt};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
+use serde_json::json;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::net::TcpListener;
-use tokio::sync::{mpsc, oneshot, Mutex};
-use tokio::time::{sleep, timeout, Duration};
+use tokio::sync::Mutex;
+use tokio::time::{sleep, Duration};
 use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
-use uuid::Uuid;
 
 use crate::db::{init_db, open_db};
-use crate::registry::{handle_agent_command, registry_entries, registry_entry, update_last_seen};
+use crate::registry::handle_agent_command;
+use crate::routes::{api_error, parse_bearer_token};
+use crate::state::{HubState, PendingConfirmation};
+use crate::utils::{constant_time_equal, random_id, random_token, sha256_hex};
 
 const REQUEST_TIMEOUT_SECS: u64 = 35;
 const MAX_WAIT_SECONDS: u64 = 30;
@@ -75,33 +75,6 @@ enum HubCommandCli {
     },
 }
 
-#[derive(Clone)]
-struct HubState {
-    api_key: String,
-    db: Arc<StdMutex<Connection>>,
-    config: Arc<HubConfig>,
-    agents: Arc<Mutex<HashMap<String, AgentConnection>>>,
-    pending: Arc<Mutex<HashMap<String, oneshot::Sender<Value>>>>,
-    pending_confirmations: Arc<Mutex<HashMap<String, PendingConfirmation>>>,
-    sessions: Arc<Mutex<HashMap<String, HashMap<String, SessionInfo>>>>,
-    active_room: Arc<Mutex<Option<room::ActiveRoomConnection>>>,
-    http: reqwest::Client,
-    public_base_url: Option<String>,
-    oauth_codes: Arc<Mutex<HashMap<String, oauth::OAuthAuthorizationCode>>>,
-    oauth_tokens: Arc<Mutex<HashMap<String, oauth::OAuthAccessToken>>>,
-    ntfy_health: Arc<Mutex<Option<notify::NtfyHealthCache>>>,
-}
-
-#[derive(Clone)]
-struct AgentConnection {
-    connection_id: String,
-    sender: mpsc::UnboundedSender<Message>,
-    last_seen_at: DateTime<Utc>,
-    role: AgentRole,
-    config_summary: Option<SafeConfigSummary>,
-    notification_channels: Vec<NotificationChannel>,
-}
-
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct HubConfig {
@@ -125,46 +98,9 @@ struct NtfyConfig {
     callback_base_url: String,
 }
 
-#[derive(Clone, Debug)]
-struct PendingConfirmation {
-    confirmation_id: String,
-    request_id: String,
-    agent_id: String,
-    token_hash: String,
-    command_preview: String,
-    risk_level: String,
-    reason: String,
-    created_at: DateTime<Utc>,
-    expires_at: DateTime<Utc>,
-    resolved: bool,
-    decision: Option<ConfirmationDecision>,
-}
-
-#[derive(Deserialize)]
-struct AgentIdQuery {
-    #[serde(rename = "agentId")]
-    agent_id: String,
-}
-
-#[derive(Deserialize)]
-struct WaitRequest {
-    seconds: Option<u64>,
-}
-
 #[derive(Deserialize)]
 struct ConfirmationCallbackQuery {
     token: String,
-}
-
-#[derive(Serialize)]
-struct ErrorBody {
-    error: ErrorDetail,
-}
-
-#[derive(Serialize)]
-struct ErrorDetail {
-    code: &'static str,
-    message: String,
 }
 
 #[tokio::main]
@@ -230,23 +166,23 @@ async fn serve(
     tokio::spawn(cleanup_confirmations(state.clone()));
     tokio::spawn(oauth::cleanup_oauth(state.clone()));
     let app = Router::new()
-        .route("/v1/info", get(hub_info))
-        .route("/v1/agents", get(list_agents))
-        .route("/v1/agents/:agent_id/connect", get(connect_agent))
+        .route("/v1/info", get(routes::hub_info))
+        .route("/v1/agents", get(routes::list_agents))
+        .route("/v1/agents/:agent_id/connect", get(agents::connect_agent))
         .route(
             "/v1/confirmations/:confirmation_id/:decision",
             post(confirmation_callback),
         )
-        .route("/v1/exec", post(exec))
-        .route("/v1/batchExec", post(batch_exec))
-        .route("/v1/sessions/start", post(start_session))
-        .route("/v1/sessions", get(list_sessions))
-        .route("/v1/sessions/:session_id", get(inspect_session))
-        .route("/v1/sessions/:session_id/wait", post(wait_session))
-        .route("/v1/sessions/:session_id/kill", post(kill_session))
-        .route("/v1/mcp/servers", post(mcp_list_servers))
-        .route("/v1/mcp/tools", post(mcp_list_tools))
-        .route("/v1/mcp/callTool", post(mcp_call_tool))
+        .route("/v1/exec", post(routes::exec))
+        .route("/v1/batchExec", post(routes::batch_exec))
+        .route("/v1/sessions/start", post(routes::start_session))
+        .route("/v1/sessions", get(routes::list_sessions))
+        .route("/v1/sessions/:session_id", get(routes::inspect_session))
+        .route("/v1/sessions/:session_id/wait", post(routes::wait_session))
+        .route("/v1/sessions/:session_id/kill", post(routes::kill_session))
+        .route("/v1/mcp/servers", post(routes::mcp_list_servers))
+        .route("/v1/mcp/tools", post(routes::mcp_list_tools))
+        .route("/v1/mcp/callTool", post(routes::mcp_call_tool))
         .route("/v1/notify/channels", get(notify::notify_channels))
         .route("/v1/notify/send", post(notify::notify_send))
         .route(
@@ -303,654 +239,6 @@ async fn serve(
     info!("agentic-gpt hub listening on {bind}");
     axum::serve(listener, app).await?;
     Ok(())
-}
-
-async fn hub_info(State(state): State<HubState>, headers: HeaderMap) -> Response {
-    if let Err(response) = require_action_auth(&state, &headers) {
-        return response;
-    }
-
-    match build_hub_info_response(&state).await {
-        Ok(response) => Json(response).into_response(),
-        Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "db_error", error),
-    }
-}
-
-async fn build_hub_info_response(state: &HubState) -> Result<HubInfoResponse> {
-    let entries = registry_entries(state)?;
-    let registered_count = entries.len();
-    let enabled_count = entries.iter().filter(|entry| entry.enabled).count();
-    let online_count = state.agents.lock().await.len();
-    let pending_request_count = state.pending.lock().await.len();
-    let pending_confirmation_count = state
-        .pending_confirmations
-        .lock()
-        .await
-        .values()
-        .filter(|confirmation| !confirmation.resolved)
-        .count();
-    let cached_session_count = state.sessions.lock().await.values().map(HashMap::len).sum();
-
-    let remote = &state.config.remote_confirmation;
-    let ntfy = &remote.ntfy;
-    Ok(HubInfoResponse {
-        service: "agentic-gpt-hub".to_string(),
-        version: env!("CARGO_PKG_VERSION").to_string(),
-        public_base_url: state.public_base_url.clone(),
-        request_timeout_seconds: REQUEST_TIMEOUT_SECS,
-        max_wait_seconds: MAX_WAIT_SECONDS,
-        remote_confirmation: HubInfoRemoteConfirmation {
-            enabled: remote.enabled,
-            provider: remote.provider.clone(),
-            timeout_seconds: remote.timeout_seconds,
-            ntfy_configured: !notify::ntfy_not_configured(ntfy)
-                && !ntfy.callback_base_url.trim().is_empty(),
-        },
-        agents: HubInfoAgents {
-            registered_count,
-            enabled_count,
-            online_count,
-        },
-        counts: HubInfoCounts {
-            pending_request_count,
-            pending_confirmation_count,
-            cached_session_count,
-        },
-        generated_at: Utc::now(),
-    })
-}
-
-async fn list_agents(State(state): State<HubState>, headers: HeaderMap) -> Response {
-    if let Err(response) = require_action_auth(&state, &headers) {
-        return response;
-    }
-    let entries = match registry_entries(&state) {
-        Ok(entries) => entries,
-        Err(error) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db_error", error),
-    };
-    let online = state.agents.lock().await;
-    let agents = entries
-        .into_iter()
-        .filter(|entry| entry.enabled)
-        .map(|entry| {
-            let status = online.get(&entry.agent_id);
-            json!({
-                "agentId": entry.agent_id,
-                "alias": entry.alias,
-                "displayName": entry.display_name,
-                "online": status.is_some(),
-                "lastSeenAt": status.map(|s| s.last_seen_at).or(entry.last_seen_at),
-                "capabilities": entry.capabilities,
-                "configSummary": status.and_then(|s| s.config_summary.clone()).unwrap_or_else(default_config_summary)
-            })
-        })
-        .collect::<Vec<_>>();
-    Json(json!({ "agents": agents })).into_response()
-}
-
-async fn exec(
-    State(state): State<HubState>,
-    headers: HeaderMap,
-    Json(payload): Json<ExecRequest>,
-) -> Response {
-    if let Err(response) = require_action_auth(&state, &headers) {
-        return response;
-    }
-    if let Err(response) = require_agent_enabled(&state, &payload.agent_id) {
-        return response;
-    }
-    let task_id = random_id("task");
-    let command = HubCommand::Exec {
-        request_id: random_id("req"),
-        task_id: task_id.clone(),
-        payload: payload.clone(),
-    };
-    match request_agent(&state, &payload.agent_id, command, REQUEST_TIMEOUT_SECS).await {
-        Ok(value) => Json(value).into_response(),
-        Err(reason) => {
-            Json(timeout_task_result(&payload.agent_id, &task_id, reason)).into_response()
-        }
-    }
-}
-
-async fn batch_exec(
-    State(state): State<HubState>,
-    headers: HeaderMap,
-    Json(payload): Json<BatchExecRequest>,
-) -> Response {
-    if let Err(response) = require_action_auth(&state, &headers) {
-        return response;
-    }
-    if let Err(response) = require_agent_enabled(&state, &payload.agent_id) {
-        return response;
-    }
-    let batch_id = random_id("batch");
-    let command = HubCommand::BatchExec {
-        request_id: random_id("req"),
-        task_id: batch_id.clone(),
-        payload: payload.clone(),
-    };
-    match request_agent(&state, &payload.agent_id, command, REQUEST_TIMEOUT_SECS).await {
-        Ok(value) => Json(value).into_response(),
-        Err(reason) => Json(timeout_batch_result(&payload, &batch_id, reason)).into_response(),
-    }
-}
-
-async fn start_session(
-    State(state): State<HubState>,
-    headers: HeaderMap,
-    Json(payload): Json<ExecRequest>,
-) -> Response {
-    if let Err(response) = require_action_auth(&state, &headers) {
-        return response;
-    }
-    if let Err(response) = require_agent_enabled(&state, &payload.agent_id) {
-        return response;
-    }
-    let session_id = random_id("sess");
-    let command = HubCommand::StartSession {
-        request_id: random_id("req"),
-        session_id: session_id.clone(),
-        payload: payload.clone(),
-    };
-    match request_agent(&state, &payload.agent_id, command, REQUEST_TIMEOUT_SECS).await {
-        Ok(value) => {
-            let status = serde_json::from_value::<SessionInfo>(value.clone())
-                .ok()
-                .map(|session| {
-                    if session.state == "running" || session.state == "waiting_confirmation" {
-                        "started"
-                    } else {
-                        "failed"
-                    }
-                })
-                .unwrap_or("started");
-            Json(json!({ "status": status, "sessionId": session_id, "session": value }))
-                .into_response()
-        }
-        Err(reason) => api_error(StatusCode::GATEWAY_TIMEOUT, "session_start_timeout", reason),
-    }
-}
-
-async fn list_sessions(
-    State(state): State<HubState>,
-    headers: HeaderMap,
-    Query(query): Query<AgentIdQuery>,
-) -> Response {
-    if let Err(response) = require_action_auth(&state, &headers) {
-        return response;
-    }
-    if let Err(response) = require_agent_enabled(&state, &query.agent_id) {
-        return response;
-    }
-    let command = HubCommand::ListSessions {
-        request_id: random_id("req"),
-    };
-    match request_agent(&state, &query.agent_id, command, 2).await {
-        Ok(value) => Json(json!({ "sessions": value })).into_response(),
-        Err(_) => {
-            let sessions = state
-                .sessions
-                .lock()
-                .await
-                .get(&query.agent_id)
-                .map(|sessions| sessions.values().cloned().collect::<Vec<_>>())
-                .unwrap_or_default();
-            Json(json!({ "sessions": sessions })).into_response()
-        }
-    }
-}
-
-async fn inspect_session(
-    State(state): State<HubState>,
-    headers: HeaderMap,
-    Path(session_id): Path<String>,
-    Query(query): Query<AgentIdQuery>,
-) -> Response {
-    if let Err(response) = require_action_auth(&state, &headers) {
-        return response;
-    }
-    if let Err(response) = require_agent_enabled(&state, &query.agent_id) {
-        return response;
-    }
-    let command = HubCommand::InspectSession {
-        request_id: random_id("req"),
-        session_id: session_id.clone(),
-    };
-    match request_agent(&state, &query.agent_id, command, 2).await {
-        Ok(value) if !value.is_null() => Json(value).into_response(),
-        _ => match cached_session(&state, &query.agent_id, &session_id).await {
-            Some(session) => Json(session).into_response(),
-            None => api_error(
-                StatusCode::NOT_FOUND,
-                "session_not_found",
-                "Session was not found",
-            ),
-        },
-    }
-}
-
-async fn wait_session(
-    State(state): State<HubState>,
-    headers: HeaderMap,
-    Path(session_id): Path<String>,
-    Query(query): Query<AgentIdQuery>,
-    Json(body): Json<WaitRequest>,
-) -> Response {
-    if let Err(response) = require_action_auth(&state, &headers) {
-        return response;
-    }
-    if let Err(response) = require_agent_enabled(&state, &query.agent_id) {
-        return response;
-    }
-    let seconds = body.seconds.unwrap_or(0).min(MAX_WAIT_SECONDS);
-    let command = HubCommand::WaitSession {
-        request_id: random_id("req"),
-        session_id: session_id.clone(),
-        seconds,
-    };
-    match request_agent(&state, &query.agent_id, command, seconds + 2).await {
-        Ok(value) if !value.is_null() => Json(value).into_response(),
-        _ => match cached_session(&state, &query.agent_id, &session_id).await {
-            Some(session) => Json(session).into_response(),
-            None => api_error(
-                StatusCode::NOT_FOUND,
-                "session_not_found",
-                "Session was not found",
-            ),
-        },
-    }
-}
-
-async fn kill_session(
-    State(state): State<HubState>,
-    headers: HeaderMap,
-    Path(session_id): Path<String>,
-    Query(query): Query<AgentIdQuery>,
-) -> Response {
-    if let Err(response) = require_action_auth(&state, &headers) {
-        return response;
-    }
-    if let Err(response) = require_agent_enabled(&state, &query.agent_id) {
-        return response;
-    }
-    let command = HubCommand::KillSession {
-        request_id: random_id("req"),
-        session_id: session_id.clone(),
-    };
-    match request_agent(&state, &query.agent_id, command, 5).await {
-        Ok(value) if !value.is_null() => Json(value).into_response(),
-        _ => match cached_session(&state, &query.agent_id, &session_id).await {
-            Some(session) => Json(session).into_response(),
-            None => api_error(
-                StatusCode::NOT_FOUND,
-                "session_not_found",
-                "Session was not found",
-            ),
-        },
-    }
-}
-
-async fn mcp_list_servers(
-    State(state): State<HubState>,
-    headers: HeaderMap,
-    Json(payload): Json<McpListServersRequest>,
-) -> Response {
-    if let Err(response) = require_action_auth(&state, &headers) {
-        return response;
-    }
-    if let Some(agent_id) = payload.agent_id.as_deref() {
-        if let Err(response) = require_agent_enabled(&state, agent_id) {
-            return response;
-        }
-        let command = HubCommand::McpListServers {
-            request_id: random_id("req"),
-        };
-        return match request_agent(&state, agent_id, command, REQUEST_TIMEOUT_SECS).await {
-            Ok(value) => Json(value).into_response(),
-            Err(reason) => api_error(
-                StatusCode::GATEWAY_TIMEOUT,
-                "mcp_list_servers_timeout",
-                reason,
-            ),
-        };
-    }
-
-    match mcp_list_servers_all_agents(&state).await {
-        Ok(value) => Json(value).into_response(),
-        Err(reason) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "db_error", reason),
-    }
-}
-
-pub(crate) async fn mcp_list_servers_all_agents(
-    state: &HubState,
-) -> std::result::Result<Value, String> {
-    let entries = registry_entries(state).map_err(|error| error.to_string())?;
-    let online_agent_ids = {
-        let online = state.agents.lock().await;
-        entries
-            .into_iter()
-            .filter(|entry| entry.enabled && online.contains_key(&entry.agent_id))
-            .map(|entry| (entry.agent_id, entry.display_name))
-            .collect::<Vec<_>>()
-    };
-
-    let mut agents = Vec::new();
-    for (agent_id, display_name) in online_agent_ids {
-        let command = HubCommand::McpListServers {
-            request_id: random_id("req"),
-        };
-        let value = request_agent(state, &agent_id, command, REQUEST_TIMEOUT_SECS).await;
-        match value {
-            Ok(value) => {
-                let servers = value
-                    .get("servers")
-                    .cloned()
-                    .unwrap_or_else(|| Value::Array(Vec::new()));
-                agents.push(json!({
-                    "agentId": agent_id,
-                    "displayName": display_name,
-                    "online": true,
-                    "servers": servers,
-                }));
-            }
-            Err(reason) => {
-                agents.push(json!({
-                    "agentId": agent_id,
-                    "displayName": display_name,
-                    "online": true,
-                    "servers": [],
-                    "error": {
-                        "code": "mcp_list_servers_timeout",
-                        "message": reason,
-                    },
-                }));
-            }
-        }
-    }
-
-    Ok(json!({ "agents": agents }))
-}
-
-async fn mcp_list_tools(
-    State(state): State<HubState>,
-    headers: HeaderMap,
-    Json(payload): Json<McpListToolsRequest>,
-) -> Response {
-    if let Err(response) = require_action_auth(&state, &headers) {
-        return response;
-    }
-    if let Err(response) = require_agent_enabled(&state, &payload.agent_id) {
-        return response;
-    }
-    let command = HubCommand::McpListTools {
-        request_id: random_id("req"),
-        payload: payload.clone(),
-    };
-    match request_agent(&state, &payload.agent_id, command, REQUEST_TIMEOUT_SECS).await {
-        Ok(value) => Json(value).into_response(),
-        Err(reason) => api_error(
-            StatusCode::GATEWAY_TIMEOUT,
-            "mcp_list_tools_timeout",
-            reason,
-        ),
-    }
-}
-
-async fn mcp_call_tool(
-    State(state): State<HubState>,
-    headers: HeaderMap,
-    Json(payload): Json<McpCallToolRequest>,
-) -> Response {
-    if let Err(response) = require_action_auth(&state, &headers) {
-        return response;
-    }
-    if let Err(response) = require_agent_enabled(&state, &payload.agent_id) {
-        return response;
-    }
-    let command = HubCommand::McpCallTool {
-        request_id: random_id("req"),
-        payload: payload.clone(),
-    };
-    match request_agent(&state, &payload.agent_id, command, REQUEST_TIMEOUT_SECS).await {
-        Ok(value) => Json(value).into_response(),
-        Err(reason) => api_error(StatusCode::GATEWAY_TIMEOUT, "mcp_call_tool_timeout", reason),
-    }
-}
-
-async fn connect_agent(
-    State(state): State<HubState>,
-    Path(agent_id): Path<String>,
-    headers: HeaderMap,
-    ws: WebSocketUpgrade,
-) -> Response {
-    let secret = headers
-        .get("x-agent-secret")
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("");
-    match registry_entry(&state, &agent_id) {
-        Ok(Some(entry))
-            if entry.enabled && constant_time_equal(&sha256_hex(secret), &entry.secret_hash) =>
-        {
-            update_last_seen(&state, &agent_id).ok();
-            ws.on_upgrade(move |socket| handle_socket(state, agent_id, socket))
-                .into_response()
-        }
-        Ok(Some(_)) => api_error(
-            StatusCode::UNAUTHORIZED,
-            "unauthorized_agent",
-            "Invalid agent secret",
-        ),
-        Ok(None) => api_error(
-            StatusCode::NOT_FOUND,
-            "agent_not_found",
-            "Agent is not registered or enabled",
-        ),
-        Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "db_error", error),
-    }
-}
-
-async fn handle_socket(state: HubState, agent_id: String, socket: WebSocket) {
-    let connection_id = random_id("conn");
-    info!(%agent_id, %connection_id, "agent connected");
-    let (mut sink, mut stream) = socket.split();
-    let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
-    replace_agent_connection(&state, &agent_id, &connection_id, tx.clone()).await;
-
-    let writer = tokio::spawn(async move {
-        while let Some(message) = rx.recv().await {
-            if sink.send(message).await.is_err() {
-                break;
-            }
-        }
-    });
-
-    while let Some(message) = stream.next().await {
-        let Ok(Message::Text(text)) = message else {
-            continue;
-        };
-        let parsed = match serde_json::from_str::<AgentMessage>(&text) {
-            Ok(parsed) => parsed,
-            Err(error) => {
-                warn!(%agent_id, %error, "ignored invalid agent message");
-                continue;
-            }
-        };
-        touch_agent(&state, &agent_id).await;
-        match parsed {
-            AgentMessage::Hello {
-                role,
-                config_summary,
-                notification_channels,
-            } => {
-                match room::register_connection_role(&state, &agent_id, &connection_id, role).await
-                {
-                    Ok(()) => {
-                        let mut agents = state.agents.lock().await;
-                        if let Some(connection) = agents.get_mut(&agent_id) {
-                            connection.role = role;
-                            connection.config_summary = Some(config_summary);
-                            connection.notification_channels = notification_channels;
-                        }
-                    }
-                    Err(reason) => {
-                        warn!(%agent_id, %connection_id, %reason, "room role rejected");
-                        let _ = tx.send(Message::Text(
-                            serde_json::to_string(&json!({
-                                "error": {
-                                    "code": reason,
-                                    "message": reason
-                                }
-                            }))
-                            .unwrap(),
-                        ));
-                        let _ = tx.send(Message::Close(None));
-                        break;
-                    }
-                }
-            }
-            AgentMessage::Heartbeat { sent_at } => {
-                let ack = HubMessage::HeartbeatAck {
-                    sent_at,
-                    received_at: Utc::now(),
-                };
-                let _ = tx.send(Message::Text(serde_json::to_string(&ack).unwrap()));
-            }
-            AgentMessage::SessionUpdate { session } => {
-                state
-                    .sessions
-                    .lock()
-                    .await
-                    .entry(agent_id.clone())
-                    .or_default()
-                    .insert(session.session_id.clone(), session);
-            }
-            AgentMessage::Response { request_id, data } => {
-                if let Some(sender) = state.pending.lock().await.remove(&request_id) {
-                    let _ = sender.send(data);
-                }
-            }
-            AgentMessage::ConfirmationRequest {
-                request_id,
-                agent_id: request_agent_id,
-                timeout_seconds,
-                payload,
-            } => {
-                if request_agent_id != agent_id {
-                    warn!(
-                        %agent_id,
-                        requestAgentId = %request_agent_id,
-                        "rejected confirmation request with mismatched agentId"
-                    );
-                    send_confirmation_response(
-                        &state,
-                        &agent_id,
-                        &request_id,
-                        ConfirmationDecision::ProviderUnavailable,
-                        "agent_id_mismatch",
-                    )
-                    .await;
-                    continue;
-                }
-                let state = state.clone();
-                let agent_id = agent_id.clone();
-                tokio::spawn(async move {
-                    if let Err(error) = handle_confirmation_request(
-                        state,
-                        agent_id,
-                        request_id,
-                        timeout_seconds,
-                        payload,
-                    )
-                    .await
-                    {
-                        warn!(%error, "confirmation request failed");
-                    }
-                });
-            }
-        }
-    }
-
-    writer.abort();
-    let removed_current_connection = {
-        let mut agents = state.agents.lock().await;
-        let should_remove = agents
-            .get(&agent_id)
-            .map(|connection| connection.connection_id == connection_id)
-            .unwrap_or(false);
-        if should_remove {
-            agents.remove(&agent_id);
-            true
-        } else {
-            false
-        }
-    };
-    if removed_current_connection {
-        room::release_active_room_if_current(&state, &agent_id, &connection_id).await;
-        discard_agent_confirmations(&state, &agent_id).await;
-    }
-    info!(%agent_id, %connection_id, removedCurrentConnection = removed_current_connection, "agent disconnected");
-}
-
-async fn request_agent(
-    state: &HubState,
-    agent_id: &str,
-    mut command: HubCommand,
-    timeout_secs: u64,
-) -> std::result::Result<Value, String> {
-    let request_id = command_request_id(&command).to_string();
-    let sender = {
-        let agents = state.agents.lock().await;
-        agents
-            .get(agent_id)
-            .map(|connection| connection.sender.clone())
-            .ok_or_else(|| "agent_offline".to_string())?
-    };
-    let (tx, rx) = oneshot::channel();
-    state.pending.lock().await.insert(request_id.clone(), tx);
-    set_command_request_id(&mut command, request_id.clone());
-    if sender
-        .send(Message::Text(
-            serde_json::to_string(&command).map_err(|error| error.to_string())?,
-        ))
-        .is_err()
-    {
-        state.pending.lock().await.remove(&request_id);
-        return Err("agent_offline".to_string());
-    }
-    match timeout(Duration::from_secs(timeout_secs), rx).await {
-        Ok(Ok(value)) => Ok(value),
-        _ => {
-            state.pending.lock().await.remove(&request_id);
-            Err("exec_timeout_use_session".to_string())
-        }
-    }
-}
-
-async fn replace_agent_connection(
-    state: &HubState,
-    agent_id: &str,
-    connection_id: &str,
-    sender: mpsc::UnboundedSender<Message>,
-) {
-    let old = {
-        let mut agents = state.agents.lock().await;
-        agents.insert(
-            agent_id.to_string(),
-            AgentConnection {
-                connection_id: connection_id.to_string(),
-                sender,
-                last_seen_at: Utc::now(),
-                role: AgentRole::Normal,
-                config_summary: None,
-                notification_channels: Vec::new(),
-            },
-        )
-    };
-    if let Some(old) = old {
-        room::release_active_room_if_current(state, agent_id, &old.connection_id).await;
-        let _ = old.sender.send(Message::Close(None));
-    }
 }
 
 async fn handle_confirmation_request(
@@ -1334,198 +622,6 @@ async fn send_confirmation_response(
     }
 }
 
-fn command_request_id(command: &HubCommand) -> &str {
-    match command {
-        HubCommand::Exec { request_id, .. }
-        | HubCommand::BatchExec { request_id, .. }
-        | HubCommand::StartSession { request_id, .. }
-        | HubCommand::ListSessions { request_id }
-        | HubCommand::InspectSession { request_id, .. }
-        | HubCommand::WaitSession { request_id, .. }
-        | HubCommand::KillSession { request_id, .. }
-        | HubCommand::McpListServers { request_id }
-        | HubCommand::McpListTools { request_id, .. }
-        | HubCommand::McpCallTool { request_id, .. }
-        | HubCommand::UserNotifyDeliver { request_id, .. }
-        | HubCommand::RoomNotebookAppend { request_id, .. }
-        | HubCommand::RoomNotebookRecent { request_id, .. }
-        | HubCommand::RoomNotebookSelectExact { request_id, .. }
-        | HubCommand::RoomNotebookSearch { request_id, .. }
-        | HubCommand::RoomNotebookCurrent { request_id, .. }
-        | HubCommand::RoomNotebookUpdate { request_id, .. }
-        | HubCommand::RoomNotebookRemove { request_id, .. } => request_id,
-    }
-}
-
-fn set_command_request_id(command: &mut HubCommand, value: String) {
-    match command {
-        HubCommand::Exec { request_id, .. }
-        | HubCommand::BatchExec { request_id, .. }
-        | HubCommand::StartSession { request_id, .. }
-        | HubCommand::ListSessions { request_id }
-        | HubCommand::InspectSession { request_id, .. }
-        | HubCommand::WaitSession { request_id, .. }
-        | HubCommand::KillSession { request_id, .. }
-        | HubCommand::McpListServers { request_id }
-        | HubCommand::McpListTools { request_id, .. }
-        | HubCommand::McpCallTool { request_id, .. }
-        | HubCommand::UserNotifyDeliver { request_id, .. }
-        | HubCommand::RoomNotebookAppend { request_id, .. }
-        | HubCommand::RoomNotebookRecent { request_id, .. }
-        | HubCommand::RoomNotebookSelectExact { request_id, .. }
-        | HubCommand::RoomNotebookSearch { request_id, .. }
-        | HubCommand::RoomNotebookCurrent { request_id, .. }
-        | HubCommand::RoomNotebookUpdate { request_id, .. }
-        | HubCommand::RoomNotebookRemove { request_id, .. } => *request_id = value,
-    }
-}
-
-fn require_action_auth(state: &HubState, headers: &HeaderMap) -> std::result::Result<(), Response> {
-    let auth = headers
-        .get("authorization")
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("");
-    let token = parse_bearer_token(auth);
-    if token
-        .as_deref()
-        .map(|token| constant_time_equal(token, state.api_key.trim()))
-        .unwrap_or(false)
-    {
-        Ok(())
-    } else {
-        Err(api_error(
-            StatusCode::UNAUTHORIZED,
-            "unauthorized",
-            "Invalid GPT Actions API key",
-        ))
-    }
-}
-
-fn parse_bearer_token(value: &str) -> Option<String> {
-    let mut parts = value.splitn(2, char::is_whitespace);
-    let scheme = parts.next()?;
-    let token = parts.next()?.trim();
-    if scheme.eq_ignore_ascii_case("bearer") && !token.is_empty() {
-        Some(token.to_string())
-    } else {
-        None
-    }
-}
-
-fn require_agent_enabled(state: &HubState, agent_id: &str) -> std::result::Result<(), Response> {
-    match registry_entry(state, agent_id) {
-        Ok(Some(entry)) if entry.enabled => Ok(()),
-        Ok(_) => Err(api_error(
-            StatusCode::NOT_FOUND,
-            "agent_not_found",
-            "Agent is not registered or enabled",
-        )),
-        Err(error) => Err(api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "db_error",
-            error,
-        )),
-    }
-}
-
-async fn cached_session(state: &HubState, agent_id: &str, session_id: &str) -> Option<SessionInfo> {
-    state
-        .sessions
-        .lock()
-        .await
-        .get(agent_id)
-        .and_then(|sessions| sessions.get(session_id).cloned())
-}
-
-async fn touch_agent(state: &HubState, agent_id: &str) {
-    if let Some(connection) = state.agents.lock().await.get_mut(agent_id) {
-        connection.last_seen_at = Utc::now();
-    }
-}
-
-fn timeout_task_result(agent_id: &str, task_id: &str, reason: String) -> TaskResult {
-    let at = Utc::now();
-    TaskResult {
-        agent_id: agent_id.to_string(),
-        task_id: task_id.to_string(),
-        status: if reason == "agent_offline" {
-            "failed"
-        } else {
-            "timeout"
-        }
-        .to_string(),
-        exit_code: None,
-        stdout_tail: String::new(),
-        stderr_tail: String::new(),
-        truncated: false,
-        reject_reason: Some(reason),
-        started_at: at,
-        updated_at: at,
-    }
-}
-
-fn timeout_batch_result(
-    payload: &BatchExecRequest,
-    batch_id: &str,
-    reason: String,
-) -> BatchExecResult {
-    let at = Utc::now();
-    let status = if reason == "agent_offline" {
-        "partial_failed"
-    } else {
-        "timeout"
-    };
-    BatchExecResult {
-        agent_id: payload.agent_id.clone(),
-        batch_id: batch_id.to_string(),
-        status: status.to_string(),
-        results: payload
-            .elements
-            .iter()
-            .enumerate()
-            .map(
-                |(index, element)| agentic_gpt_protocol::BatchElementResult {
-                    index,
-                    program: element.program.clone(),
-                    args: element.args.clone(),
-                    working_directory: element
-                        .working_directory
-                        .clone()
-                        .or_else(|| payload.working_directory.clone()),
-                    result: timeout_task_result(
-                        &payload.agent_id,
-                        &format!("{batch_id}:element:{index}"),
-                        reason.clone(),
-                    ),
-                },
-            )
-            .collect(),
-        started_at: at,
-        updated_at: at,
-    }
-}
-
-fn api_error(status: StatusCode, code: &'static str, message: impl ToString) -> Response {
-    (
-        status,
-        Json(ErrorBody {
-            error: ErrorDetail {
-                code,
-                message: message.to_string(),
-            },
-        }),
-    )
-        .into_response()
-}
-
-fn random_id(prefix: &str) -> String {
-    format!("{prefix}_{}", Uuid::new_v4().simple())
-}
-
-fn random_token() -> String {
-    format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
-}
-
 fn truncate_chars(value: &str, max_chars: usize) -> String {
     let mut output = value.chars().take(max_chars).collect::<String>();
     if value.chars().count() > max_chars {
@@ -1635,21 +731,6 @@ impl HubConfig {
     }
 }
 
-fn sha256_hex(value: &str) -> String {
-    let digest = Sha256::digest(value.as_bytes());
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
-fn constant_time_equal(a: &str, b: &str) -> bool {
-    let max = a.len().max(b.len());
-    let mut diff = a.len() ^ b.len();
-    for index in 0..max {
-        diff |= a.as_bytes().get(index).copied().unwrap_or(0) as usize
-            ^ b.as_bytes().get(index).copied().unwrap_or(0) as usize;
-    }
-    diff == 0
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1696,7 +777,7 @@ mod tests {
     #[tokio::test]
     async fn hub_info_reports_safe_runtime_summary() {
         let state = test_state();
-        let response = build_hub_info_response(&state).await.unwrap();
+        let response = routes::build_hub_info_response(&state).await.unwrap();
         let value = serde_json::to_value(response).unwrap();
         let text = serde_json::to_string(&value).unwrap();
 

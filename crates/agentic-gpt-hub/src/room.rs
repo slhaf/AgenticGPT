@@ -9,9 +9,11 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::Value;
 
-use crate::{
-    api_error, random_id, request_agent, require_action_auth, HubState, REQUEST_TIMEOUT_SECS,
-};
+use crate::agents::request_agent;
+use crate::routes::{api_error, require_action_auth};
+use crate::state::HubState;
+use crate::utils::random_id;
+use crate::REQUEST_TIMEOUT_SECS;
 
 #[derive(Clone, Debug)]
 pub(crate) struct ActiveRoomConnection {
@@ -264,11 +266,10 @@ pub(crate) async fn release_active_room_for_agent(state: &HubState, agent_id: &s
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agents::{command_request_id, replace_agent_connection};
     use crate::db::init_db;
-    use crate::{
-        command_request_id, replace_agent_connection, AgentConnection, HubConfig,
-        RemoteConfirmationConfig,
-    };
+    use crate::state::AgentConnection;
+    use crate::{HubConfig, RemoteConfirmationConfig};
     use agentic_gpt_protocol::HubCommand;
     use axum::extract::ws::Message;
     use chrono::Utc;

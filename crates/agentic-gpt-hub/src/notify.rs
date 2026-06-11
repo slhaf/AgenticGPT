@@ -15,11 +15,12 @@ use std::collections::HashMap;
 use tokio::time::{timeout, Duration};
 
 // Temporary dependencies until agents/routes/utils modules take ownership.
+use crate::agents::request_agent;
 use crate::registry::registry_entries;
-use crate::{
-    api_error, random_id, random_token, request_agent, require_action_auth, sha256_hex, HubState,
-    NtfyConfig, REQUEST_TIMEOUT_SECS,
-};
+use crate::routes::{api_error, require_action_auth};
+use crate::state::HubState;
+use crate::utils::{random_id, random_token, sha256_hex};
+use crate::{NtfyConfig, REQUEST_TIMEOUT_SECS};
 
 #[derive(Clone, Debug)]
 pub(crate) struct NtfyHealthCache {
@@ -509,8 +510,10 @@ mod tests {
     use std::sync::{Arc, Mutex as StdMutex};
     use tokio::sync::{mpsc, Mutex};
 
+    use crate::agents::command_request_id;
     use crate::db::init_db;
-    use crate::{command_request_id, AgentConnection, HubConfig, RemoteConfirmationConfig};
+    use crate::state::AgentConnection;
+    use crate::{HubConfig, RemoteConfirmationConfig};
 
     fn test_hub_config() -> HubConfig {
         HubConfig {

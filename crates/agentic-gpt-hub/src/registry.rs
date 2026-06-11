@@ -4,7 +4,8 @@ use chrono::{DateTime, Utc};
 use clap::Subcommand;
 use rusqlite::{params, Connection};
 
-use crate::{sha256_hex, HubState};
+use crate::state::HubState;
+use crate::utils::sha256_hex;
 
 #[derive(Subcommand)]
 pub(crate) enum AgentCommand {
