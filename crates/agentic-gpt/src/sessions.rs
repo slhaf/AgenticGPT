@@ -123,7 +123,15 @@ pub(crate) async fn start_session(
             return info;
         }
     }
-    if state.sessions.lock().await.len() >= config.limits.max_active_sessions {
+    let active_session_count = {
+        let mut sessions = state.sessions.lock().await;
+        refresh_sessions(&mut sessions).await;
+        sessions
+            .values()
+            .filter(|session| is_active_session_state(&session.info.state))
+            .count()
+    };
+    if active_session_count >= config.limits.max_active_sessions {
         info.state = "failed".to_string();
         info.reject_reason = Some("max_active_sessions_reached".to_string());
         return info;
@@ -190,17 +198,22 @@ async fn read_tail<R: AsyncRead + Unpin>(
 
 pub(crate) async fn current_sessions(state: &AppState) -> Vec<SessionInfo> {
     let mut sessions = state.sessions.lock().await;
-    let mut result = Vec::new();
+    refresh_sessions(&mut sessions).await;
+    sessions
+        .values()
+        .filter(|session| is_active_session_state(&session.info.state))
+        .map(|session| session.info.clone())
+        .collect()
+}
+
+async fn refresh_sessions(sessions: &mut std::collections::HashMap<String, ManagedSession>) {
     for session in sessions.values_mut() {
         refresh_session(session).await;
-        if matches!(
-            session.info.state.as_str(),
-            "running" | "waiting_confirmation"
-        ) {
-            result.push(session.info.clone());
-        }
     }
-    result
+}
+
+fn is_active_session_state(state: &str) -> bool {
+    matches!(state, "running" | "waiting_confirmation")
 }
 
 pub(crate) async fn inspect_session(state: &AppState, session_id: &str) -> Option<SessionInfo> {
@@ -232,4 +245,100 @@ async fn refresh_session(session: &mut ManagedSession) {
     session.info.truncated = stdout.truncated || stderr.truncated;
     session.info.updated_at = Utc::now();
     session.last_activity = Instant::now();
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::HashMap, fs, path::PathBuf, sync::Arc, time::Duration};
+
+    use tokio::sync::{Mutex, RwLock};
+    use uuid::Uuid;
+
+    use super::*;
+    use crate::state::RunMode;
+
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("{prefix}-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn exec_request(program: &str, working_directory: &std::path::Path) -> ExecRequest {
+        ExecRequest {
+            agent_id: "test-agent".to_string(),
+            program: program.to_string(),
+            args: Vec::new(),
+            need_confirm: false,
+            confirm_method: None,
+            working_directory: Some(working_directory.to_string_lossy().to_string()),
+        }
+    }
+
+    async fn test_state(max_active_sessions: usize) -> (AppState, PathBuf) {
+        let root = unique_temp_dir("sessions-max-active");
+        let workspace = root.join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+
+        let mut config = Config::default_config().unwrap();
+        config.workspace_root = workspace.clone();
+        config.limits.max_active_sessions = max_active_sessions;
+        config.confirmation_provider.provider = "none".to_string();
+
+        let state = AppState {
+            config_path: root.join("config.json"),
+            config: Arc::new(RwLock::new(config)),
+            run_mode: RunMode::Normal,
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+            hub_sender: Arc::new(Mutex::new(None)),
+            pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
+            temporary_mcp_allows: Arc::new(Mutex::new(Vec::new())),
+            notebook_writes: Arc::new(Mutex::new(())),
+        };
+        (state, workspace)
+    }
+
+    async fn wait_until_terminal(state: &AppState, session_id: &str) -> SessionInfo {
+        for _ in 0..50 {
+            let session = inspect_session(state, session_id)
+                .await
+                .expect("session should be inspectable");
+            if !is_active_session_state(&session.state) {
+                return session;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        inspect_session(state, session_id)
+            .await
+            .expect("session should be inspectable")
+    }
+
+    #[tokio::test]
+    async fn completed_sessions_do_not_consume_max_active_session_slots() {
+        let (state, workspace) = test_state(1).await;
+
+        let first = start_session(
+            state.clone(),
+            "sess-first".to_string(),
+            exec_request("true", &workspace),
+        )
+        .await;
+        assert_eq!(first.state, "running");
+
+        let first = wait_until_terminal(&state, "sess-first").await;
+        assert_eq!(first.state, "exited");
+
+        assert!(current_sessions(&state).await.is_empty());
+
+        let second = start_session(
+            state.clone(),
+            "sess-second".to_string(),
+            exec_request("true", &workspace),
+        )
+        .await;
+        assert_ne!(
+            second.reject_reason.as_deref(),
+            Some("max_active_sessions_reached")
+        );
+        assert_eq!(second.state, "running");
+    }
 }
