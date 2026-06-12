@@ -259,11 +259,16 @@ async fn watch_config(state: AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{PathPolicyConfig, Rule};
     use crate::exec::PreparedBatchElement;
+    use crate::policy::policy_decision;
     use agentic_gpt_protocol::{
         AgentMessage, BatchExecRequest, ExecElement, HubCommand, NotebookAppendRequest,
         NotebookRemoveRequest, NotebookUpdateRequest, PassageSignificance,
     };
+    use tokio::sync::mpsc;
+    use tokio_tungstenite::tungstenite::Message;
+    use uuid::Uuid;
 
     #[test]
     fn run_modes_declare_expected_roles() {

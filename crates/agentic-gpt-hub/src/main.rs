@@ -734,6 +734,7 @@ impl HubConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::routes::parse_bearer_token;
 
     fn test_hub_config() -> HubConfig {
         HubConfig {
