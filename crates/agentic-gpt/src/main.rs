@@ -13,21 +13,17 @@ mod utils;
 
 use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
-use config::{
-    normalize_confirmation_language, write_config_with_backup, Config, PathPolicyConfig, Rule,
-};
+use config::{normalize_confirmation_language, write_config_with_backup, Config};
 use mcp::McpConfigCommand;
-use policy::{policy_decision, PolicyDecision};
+use policy::PolicyDecision;
 use state::{AppState, RunMode};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock};
 use tokio::time::{sleep, Duration};
-use tokio_tungstenite::tungstenite::Message;
 use utils::{config_path, ensure_parent, log_info, log_warn};
-use uuid::Uuid;
 
 #[derive(Parser)]
 #[command(name = "agentic-gpt")]

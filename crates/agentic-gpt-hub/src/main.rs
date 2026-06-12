@@ -37,7 +37,7 @@ use tracing::{info, warn};
 
 use crate::db::{init_db, open_db};
 use crate::registry::handle_agent_command;
-use crate::routes::{api_error, parse_bearer_token};
+use crate::routes::api_error;
 use crate::state::{HubState, PendingConfirmation};
 use crate::utils::{constant_time_equal, random_id, random_token, sha256_hex};
 
