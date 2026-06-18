@@ -44,6 +44,17 @@ class ReminderNotificationService(
                 description = "High-priority local alarms for Agentic Console"
             },
         )
+        notificationManager.createNotificationChannel(
+            NotificationChannel(
+                CRITICAL_ALARM_CHANNEL_ID,
+                "Agentic critical alarms",
+                NotificationManager.IMPORTANCE_HIGH,
+            ).apply {
+                description = "Critical local alarms for Agentic Console"
+                enableVibration(true)
+                vibrationPattern = CRITICAL_ALARM_VIBRATION_PATTERN
+            },
+        )
     }
 
     fun canPostNotifications(): Boolean =
@@ -112,6 +123,17 @@ class ReminderNotificationService(
             Intent(appContext, MainActivity::class.java),
             pendingIntentFlags(),
         )
+        val fullScreenIntent = if (profile.fullScreen && canUseFullScreenIntent()) {
+            fullScreenPendingIntent(
+                notificationId = notificationId,
+                itemId = itemId,
+                title = title,
+                message = message,
+                type = type,
+            )
+        } else {
+            null
+        }
 
         val notificationBuilder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             Notification.Builder(appContext, profile.channelId)
@@ -128,6 +150,11 @@ class ReminderNotificationService(
             .setAutoCancel(profile.autoCancel)
             .setCategory(profile.category)
             .setPriority(profile.priority)
+            .apply {
+                if (fullScreenIntent != null) {
+                    setFullScreenIntent(fullScreenIntent, true)
+                }
+            }
             .addAction(
                 Notification.Action.Builder(
                     R.drawable.ic_stat_agentic_notification,
@@ -164,6 +191,10 @@ class ReminderNotificationService(
         notificationManager.notify(notificationId, notification)
     }
 
+    private fun canUseFullScreenIntent(): Boolean =
+        Build.VERSION.SDK_INT < 34 ||
+            appContext.getSystemService(NotificationManager::class.java).canUseFullScreenIntent()
+
     private fun actionPendingIntent(
         action: String,
         requestCode: Int,
@@ -186,9 +217,35 @@ class ReminderNotificationService(
         return PendingIntent.getBroadcast(appContext, requestCode, intent, pendingIntentFlags())
     }
 
+    private fun fullScreenPendingIntent(
+        notificationId: Int,
+        itemId: String,
+        title: String,
+        message: String,
+        type: String?,
+    ): PendingIntent {
+        val intent = Intent(appContext, AlarmActivity::class.java)
+            .putNotificationExtras(
+                notificationId = notificationId,
+                itemId = itemId,
+                title = title,
+                message = message,
+                type = type,
+            )
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+
+        return PendingIntent.getActivity(
+            appContext,
+            requestCode(itemId, ACTION_FULL_SCREEN),
+            intent,
+            pendingIntentFlags(),
+        )
+    }
+
     companion object {
         const val REMINDER_CHANNEL_ID = "agentic_reminders"
         const val ALARM_CHANNEL_ID = "agentic_alarms"
+        const val CRITICAL_ALARM_CHANNEL_ID = "agentic_critical_alarms"
         const val TEST_NOTIFICATION_ID = 1_001
         const val TEST_ITEM_ID = "debug-test-notification"
         const val TEST_TITLE = "Agentic reminder"
@@ -201,6 +258,8 @@ class ReminderNotificationService(
         const val EXTRA_TYPE = "work.slhaf.agentic.console.extra.TYPE"
 
         private const val REQUEST_OPEN_APP = 2_000
+        private const val ACTION_FULL_SCREEN = "FULL_SCREEN"
+        private val CRITICAL_ALARM_VIBRATION_PATTERN = longArrayOf(0, 500, 250, 500, 250, 800)
 
         fun pendingIntentFlags(): Int = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
 
@@ -215,18 +274,20 @@ class ReminderNotificationService(
         val primaryAction: String,
         val primaryActionLabel: String,
         val snoozeActionLabel: String,
+        val fullScreen: Boolean,
     ) {
         companion object {
             fun from(type: String?): NotificationProfile =
                 if (type == AttentionType.Alarm.name) {
                     NotificationProfile(
-                        channelId = ALARM_CHANNEL_ID,
+                        channelId = CRITICAL_ALARM_CHANNEL_ID,
                         category = Notification.CATEGORY_ALARM,
                         priority = Notification.PRIORITY_HIGH,
                         autoCancel = false,
                         primaryAction = ReminderNotificationActionReceiver.ACTION_ACKNOWLEDGE,
                         primaryActionLabel = "Acknowledge",
                         snoozeActionLabel = "Snooze 5 minutes",
+                        fullScreen = true,
                     )
                 } else {
                     NotificationProfile(
@@ -237,6 +298,7 @@ class ReminderNotificationService(
                         primaryAction = ReminderNotificationActionReceiver.ACTION_DONE,
                         primaryActionLabel = "Done",
                         snoozeActionLabel = "Snooze 10 minutes",
+                        fullScreen = false,
                     )
                 }
         }
