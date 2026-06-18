@@ -11,6 +11,8 @@ import work.slhaf.agentic.console.settings.AndroidSettingsScreen
 fun buildAndroidDestinations(
     stateHolder: AttentionListStateHolder,
     permissionState: AndroidPermissionState,
+    onRequestNotificationPermission: () -> Unit,
+    onSendTestNotification: () -> Unit,
 ): List<AppDestination> = listOf(
     AppDestination(
         id = "attention",
@@ -26,6 +28,11 @@ fun buildAndroidDestinations(
         icon = AppIcon.Settings,
         kind = DestinationKind.Utility,
     ) {
-        AndroidSettingsScreen(permissionState = permissionState, stateHolder = stateHolder)
+        AndroidSettingsScreen(
+            permissionState = permissionState,
+            stateHolder = stateHolder,
+            onRequestNotificationPermission = onRequestNotificationPermission,
+            onSendTestNotification = onSendTestNotification,
+        )
     },
 )

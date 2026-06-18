@@ -29,6 +29,8 @@ import work.slhaf.agentic.console.ui.common.SettingsSection
 fun AndroidSettingsScreen(
     permissionState: AndroidPermissionState,
     stateHolder: AttentionListStateHolder,
+    onRequestNotificationPermission: () -> Unit,
+    onSendTestNotification: () -> Unit,
 ) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -41,7 +43,13 @@ fun AndroidSettingsScreen(
         item { HubConnectionSection() }
         item { AndroidPermissionSection(permissionState) }
         item { ReminderBehaviorSection() }
-        item { DebugSection(stateHolder) }
+        item {
+            DebugSection(
+                stateHolder = stateHolder,
+                onRequestNotificationPermission = onRequestNotificationPermission,
+                onSendTestNotification = onSendTestNotification,
+            )
+        }
     }
 }
 
@@ -84,9 +92,21 @@ private fun ReminderBehaviorSection() {
 }
 
 @Composable
-private fun DebugSection(stateHolder: AttentionListStateHolder) {
+private fun DebugSection(
+    stateHolder: AttentionListStateHolder,
+    onRequestNotificationPermission: () -> Unit,
+    onSendTestNotification: () -> Unit,
+) {
     SettingsSection("调试") {
-        Text("以下按钮只修改内存 mock 数据，不会弹出系统通知，也不会调用 AlarmManager。", style = MaterialTheme.typography.bodySmall)
+        Text("通知按钮只验证 Android 本地通知和通知动作；mock Reminder / Alarm 仍只修改内存数据，不会调度系统 alarm。", style = MaterialTheme.typography.bodySmall)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+            OutlinedButton(onClick = onRequestNotificationPermission, modifier = Modifier.weight(1f)) {
+                Text("请求通知权限")
+            }
+            Button(onClick = onSendTestNotification, modifier = Modifier.weight(1f)) {
+                Text("发送测试通知")
+            }
+        }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
             Button(onClick = stateHolder::createMockReminder, modifier = Modifier.weight(1f)) {
                 Text("创建 mock Reminder")
