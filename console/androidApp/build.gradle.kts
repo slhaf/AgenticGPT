@@ -4,6 +4,7 @@ plugins {
     alias(libs.plugins.androidApplication)
     alias(libs.plugins.composeMultiplatform)
     alias(libs.plugins.composeCompiler)
+    alias(libs.plugins.ksp)
 }
 
 kotlin {
@@ -21,9 +22,12 @@ dependencies {
     implementation(libs.compose.material3)
     implementation(libs.compose.ui)
     implementation(libs.kotlinx.coroutines.core)
+    implementation(libs.androidx.room.runtime)
+    implementation(libs.androidx.room.ktx)
 
     implementation(libs.compose.uiToolingPreview)
     debugImplementation(libs.compose.uiTooling)
+    ksp(libs.androidx.room.compiler)
 }
 
 android {

@@ -3,14 +3,13 @@ package work.slhaf.agentic.console.platform.attention
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
-import work.slhaf.agentic.console.domain.attention.AttentionDemoData
 import work.slhaf.agentic.console.domain.attention.AttentionItem
 import work.slhaf.agentic.console.domain.attention.AttentionRepository
 import work.slhaf.agentic.console.domain.attention.AttentionStatus
 import kotlin.time.Duration
 
 class InMemoryAttentionRepository(
-    initialItems: List<AttentionItem> = AttentionDemoData.initialItems(),
+    initialItems: List<AttentionItem> = emptyList(),
 ) : AttentionRepository {
     private val items = MutableStateFlow(initialItems)
 

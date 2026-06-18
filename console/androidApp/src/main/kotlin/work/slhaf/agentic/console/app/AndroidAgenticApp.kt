@@ -23,17 +23,19 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import work.slhaf.agentic.console.navigation.AgenticNavigationScaffold
 import work.slhaf.agentic.console.platform.attention.AndroidAttentionScheduler
-import work.slhaf.agentic.console.platform.attention.InMemoryAttentionRepository
 import work.slhaf.agentic.console.platform.attention.PermissionStateReader
 import work.slhaf.agentic.console.platform.attention.ReminderNotificationService
 import work.slhaf.agentic.console.attention.AttentionListStateHolder
+import work.slhaf.agentic.console.platform.attention.persistence.AndroidRoomAttentionRepository
+import work.slhaf.agentic.console.platform.attention.persistence.AttentionDatabase
 
 @Composable
 fun AndroidAgenticApp() {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
-    val repository = remember { InMemoryAttentionRepository() }
+    val database = remember(context) { AttentionDatabase.create(context) }
+    val repository = remember(database, scope) { AndroidRoomAttentionRepository(database.attentionDao(), scope) }
     val scheduler = remember(context) { AndroidAttentionScheduler(context) }
     val stateHolder = remember { AttentionListStateHolder(repository, scheduler, scope) }
     val permissionStateReader = remember(context) { PermissionStateReader(context) }

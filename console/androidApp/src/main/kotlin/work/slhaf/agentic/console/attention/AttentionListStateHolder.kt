@@ -11,6 +11,7 @@ import work.slhaf.agentic.console.domain.attention.AttentionDemoData
 import work.slhaf.agentic.console.domain.attention.AttentionItem
 import work.slhaf.agentic.console.domain.attention.AttentionRepository
 import work.slhaf.agentic.console.domain.attention.AttentionScheduler
+import work.slhaf.agentic.console.domain.attention.AttentionSourceKind
 import work.slhaf.agentic.console.domain.attention.AttentionStatus
 import work.slhaf.agentic.console.domain.attention.AttentionType
 import kotlin.time.Clock
@@ -66,7 +67,9 @@ class AttentionListStateHolder(
     }
 
     fun clearMockData() {
-        state.value.items.forEach { scheduler.cancel(it.id) }
+        state.value.items
+            .filter { it.source.kind == AttentionSourceKind.LocalMock }
+            .forEach { scheduler.cancel(it.id) }
         scope.launch { repository.clearMockData() }
     }
 
