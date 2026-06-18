@@ -23,6 +23,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import work.slhaf.agentic.console.navigation.AgenticNavigationScaffold
 import work.slhaf.agentic.console.platform.attention.AndroidAttentionScheduler
+import work.slhaf.agentic.console.platform.attention.AttentionRuntimeCoordinator
 import work.slhaf.agentic.console.platform.attention.PermissionStateReader
 import work.slhaf.agentic.console.platform.attention.ReminderNotificationService
 import work.slhaf.agentic.console.attention.AttentionListStateHolder
@@ -40,6 +41,7 @@ fun AndroidAgenticApp() {
     val stateHolder = remember { AttentionListStateHolder(repository, scheduler, scope) }
     val permissionStateReader = remember(context) { PermissionStateReader(context) }
     val notificationService = remember(context) { ReminderNotificationService(context) }
+    val runtimeCoordinator = remember(context) { AttentionRuntimeCoordinator(context) }
     var permissionState by remember(permissionStateReader) { mutableStateOf(permissionStateReader.read()) }
     val refreshPermissionState = { permissionState = permissionStateReader.read() }
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
@@ -77,8 +79,9 @@ fun AndroidAgenticApp() {
         }
     }
 
-    LaunchedEffect(notificationService) {
+    LaunchedEffect(notificationService, runtimeCoordinator) {
         notificationService.ensureChannel()
+        runtimeCoordinator.restoreFutureItems()
         refreshPermissionState()
     }
 

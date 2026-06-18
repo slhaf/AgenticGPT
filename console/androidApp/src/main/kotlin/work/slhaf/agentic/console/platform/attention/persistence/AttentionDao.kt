@@ -12,6 +12,21 @@ interface AttentionDao {
     @Query("SELECT * FROM attention_items ORDER BY dueAtEpochMillis ASC")
     fun observeItems(): Flow<List<AttentionEntity>>
 
+    @Query("SELECT * FROM attention_items WHERE id = :id LIMIT 1")
+    suspend fun findById(id: String): AttentionEntity?
+
+    @Query(
+        """
+        SELECT * FROM attention_items
+        WHERE status IN (:statuses) AND dueAtEpochMillis > :nowEpochMillis
+        ORDER BY dueAtEpochMillis ASC
+        """,
+    )
+    suspend fun queryPendingForRestore(
+        statuses: List<String>,
+        nowEpochMillis: Long,
+    ): List<AttentionEntity>
+
     @Query("SELECT COUNT(*) FROM attention_items")
     suspend fun count(): Int
 
@@ -29,6 +44,19 @@ interface AttentionDao {
         """,
     )
     suspend fun updateTerminalState(
+        id: String,
+        status: String,
+        updatedAtEpochMillis: Long,
+    )
+
+    @Query(
+        """
+        UPDATE attention_items
+        SET status = :status, updatedAtEpochMillis = :updatedAtEpochMillis
+        WHERE id = :id
+        """,
+    )
+    suspend fun markTriggered(
         id: String,
         status: String,
         updatedAtEpochMillis: Long,

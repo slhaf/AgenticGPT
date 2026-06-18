@@ -16,11 +16,16 @@ abstract class AttentionDatabase : RoomDatabase() {
     companion object {
         private const val DATABASE_NAME = "agentic_attention.db"
 
+        @Volatile
+        private var instance: AttentionDatabase? = null
+
         fun create(context: Context): AttentionDatabase =
-            Room.databaseBuilder(
-                context.applicationContext,
-                AttentionDatabase::class.java,
-                DATABASE_NAME,
-            ).build()
+            instance ?: synchronized(this) {
+                instance ?: Room.databaseBuilder(
+                    context.applicationContext,
+                    AttentionDatabase::class.java,
+                    DATABASE_NAME,
+                ).build().also { instance = it }
+            }
     }
 }
