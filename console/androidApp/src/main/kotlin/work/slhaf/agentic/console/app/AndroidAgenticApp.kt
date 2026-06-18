@@ -1,9 +1,14 @@
 package work.slhaf.agentic.console.app
 
 import android.Manifest
+import android.content.ActivityNotFoundException
+import android.content.Intent
+import android.net.Uri
 import android.os.Build
+import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
@@ -13,6 +18,9 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import work.slhaf.agentic.console.navigation.AgenticNavigationScaffold
 import work.slhaf.agentic.console.platform.attention.AndroidAttentionScheduler
 import work.slhaf.agentic.console.platform.attention.InMemoryAttentionRepository
@@ -23,6 +31,7 @@ import work.slhaf.agentic.console.attention.AttentionListStateHolder
 @Composable
 fun AndroidAgenticApp() {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
     val repository = remember { InMemoryAttentionRepository() }
     val scheduler = remember(context) { AndroidAttentionScheduler(context) }
@@ -51,10 +60,36 @@ fun AndroidAgenticApp() {
             requestNotificationPermission()
         }
     }
+    val openExactAlarmSettings: () -> Unit = {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val packageUri = Uri.parse("package:${context.packageName}")
+            val exactAlarmIntent = Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM, packageUri)
+            try {
+                context.startActivity(exactAlarmIntent)
+            } catch (_: ActivityNotFoundException) {
+                val appSettingsIntent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, packageUri)
+                context.startActivity(appSettingsIntent)
+            }
+        } else {
+            refreshPermissionState()
+        }
+    }
 
     LaunchedEffect(notificationService) {
         notificationService.ensureChannel()
         refreshPermissionState()
+    }
+
+    DisposableEffect(lifecycleOwner, permissionStateReader) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                refreshPermissionState()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
     }
 
     val destinations = remember(stateHolder, permissionState) {
@@ -63,6 +98,7 @@ fun AndroidAgenticApp() {
             permissionState = permissionState,
             onRequestNotificationPermission = requestNotificationPermission,
             onSendTestNotification = sendTestNotification,
+            onOpenExactAlarmSettings = openExactAlarmSettings,
         )
     }
     var selectedId by remember { mutableStateOf(destinations.first().id) }

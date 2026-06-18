@@ -31,6 +31,7 @@ fun AndroidSettingsScreen(
     stateHolder: AttentionListStateHolder,
     onRequestNotificationPermission: () -> Unit,
     onSendTestNotification: () -> Unit,
+    onOpenExactAlarmSettings: () -> Unit,
 ) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -41,7 +42,12 @@ fun AndroidSettingsScreen(
             Text("设置", style = MaterialTheme.typography.headlineSmall)
         }
         item { HubConnectionSection() }
-        item { AndroidPermissionSection(permissionState) }
+        item {
+            AndroidPermissionSection(
+                permissionState = permissionState,
+                onOpenExactAlarmSettings = onOpenExactAlarmSettings,
+            )
+        }
         item { ReminderBehaviorSection() }
         item {
             DebugSection(
@@ -72,10 +78,17 @@ private fun HubConnectionSection() {
 }
 
 @Composable
-private fun AndroidPermissionSection(permissionState: AndroidPermissionState) {
+private fun AndroidPermissionSection(
+    permissionState: AndroidPermissionState,
+    onOpenExactAlarmSettings: () -> Unit,
+) {
     SettingsSection("Android 权限") {
         CapabilityRow("通知权限", permissionState.notifications)
         CapabilityRow("精确闹钟", permissionState.exactAlarm)
+        OutlinedButton(onClick = onOpenExactAlarmSettings) {
+            Text("打开精确闹钟权限设置")
+        }
+        Text("开启后 ExactPreferred / ExactRequired 更可能准时触发；不开启时会继续自动降级，可能延迟。", style = MaterialTheme.typography.bodySmall)
         CapabilityRow("电池优化", permissionState.batteryOptimization)
         CapabilityRow("锁屏 / 强提醒", permissionState.lockScreenInterrupt)
     }

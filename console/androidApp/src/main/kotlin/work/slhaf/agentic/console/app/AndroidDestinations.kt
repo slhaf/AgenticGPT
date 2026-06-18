@@ -13,6 +13,7 @@ fun buildAndroidDestinations(
     permissionState: AndroidPermissionState,
     onRequestNotificationPermission: () -> Unit,
     onSendTestNotification: () -> Unit,
+    onOpenExactAlarmSettings: () -> Unit,
 ): List<AppDestination> = listOf(
     AppDestination(
         id = "attention",
@@ -33,6 +34,7 @@ fun buildAndroidDestinations(
             stateHolder = stateHolder,
             onRequestNotificationPermission = onRequestNotificationPermission,
             onSendTestNotification = onSendTestNotification,
+            onOpenExactAlarmSettings = onOpenExactAlarmSettings,
         )
     },
 )
