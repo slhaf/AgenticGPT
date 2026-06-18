@@ -22,8 +22,9 @@ class ReminderNotificationActionReceiver : BroadcastReceiver() {
         val type = intent.getStringExtra(ReminderNotificationService.EXTRA_TYPE)
 
         when (intent.action) {
-            ACTION_DONE -> cancelNotification(context, notificationId)
-            ACTION_SNOOZE_10_MINUTES -> {
+            ACTION_DONE,
+            ACTION_ACKNOWLEDGE -> cancelNotification(context, notificationId)
+            ACTION_SNOOZE -> {
                 cancelNotification(context, notificationId)
                 scheduleSnoozedNotification(context, notificationId, itemId, title, message, type)
             }
@@ -72,17 +73,22 @@ class ReminderNotificationActionReceiver : BroadcastReceiver() {
         val alarmManager = appContext.getSystemService(AlarmManager::class.java)
         alarmManager.setAndAllowWhileIdle(
             AlarmManager.RTC_WAKEUP,
-            System.currentTimeMillis() + SNOOZE_DELAY_MILLIS,
+            System.currentTimeMillis() + snoozeDelayMillis(type),
             pendingIntent,
         )
     }
 
+    private fun snoozeDelayMillis(type: String?): Long =
+        if (type == "Alarm") ALARM_SNOOZE_DELAY_MILLIS else REMINDER_SNOOZE_DELAY_MILLIS
+
     companion object {
         const val ACTION_DONE = "work.slhaf.agentic.console.action.DONE"
-        const val ACTION_SNOOZE_10_MINUTES = "work.slhaf.agentic.console.action.SNOOZE_10_MINUTES"
+        const val ACTION_ACKNOWLEDGE = "work.slhaf.agentic.console.action.ACKNOWLEDGE"
+        const val ACTION_SNOOZE = "work.slhaf.agentic.console.action.SNOOZE"
         const val ACTION_SHOW_SNOOZED_NOTIFICATION = "work.slhaf.agentic.console.action.SHOW_SNOOZED_NOTIFICATION"
         const val ACTION_FIRE_ATTENTION_ITEM = "work.slhaf.agentic.console.action.FIRE_ATTENTION_ITEM"
 
-        private const val SNOOZE_DELAY_MILLIS = 10 * 60 * 1_000L
+        private const val REMINDER_SNOOZE_DELAY_MILLIS = 10 * 60 * 1_000L
+        private const val ALARM_SNOOZE_DELAY_MILLIS = 5 * 60 * 1_000L
     }
 }

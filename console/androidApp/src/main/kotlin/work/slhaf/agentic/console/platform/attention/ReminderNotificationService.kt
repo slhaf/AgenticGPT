@@ -1,3 +1,5 @@
+@file:Suppress("DEPRECATION")
+
 package work.slhaf.agentic.console.platform.attention
 
 import android.Manifest
@@ -23,15 +25,25 @@ class ReminderNotificationService(
     fun ensureChannel() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
 
-        val channel = NotificationChannel(
-            CHANNEL_ID,
-            "Agentic reminders",
-            NotificationManager.IMPORTANCE_DEFAULT,
-        ).apply {
-            description = "Local reminder notifications for Agentic Console"
-        }
         val notificationManager = appContext.getSystemService(NotificationManager::class.java)
-        notificationManager.createNotificationChannel(channel)
+        notificationManager.createNotificationChannel(
+            NotificationChannel(
+                REMINDER_CHANNEL_ID,
+                "Agentic reminders",
+                NotificationManager.IMPORTANCE_DEFAULT,
+            ).apply {
+                description = "Soft local reminders for Agentic Console"
+            },
+        )
+        notificationManager.createNotificationChannel(
+            NotificationChannel(
+                ALARM_CHANNEL_ID,
+                "Agentic alarms",
+                NotificationManager.IMPORTANCE_HIGH,
+            ).apply {
+                description = "High-priority local alarms for Agentic Console"
+            },
+        )
     }
 
     fun canPostNotifications(): Boolean =
@@ -86,7 +98,6 @@ class ReminderNotificationService(
     }
 
     @SuppressLint("MissingPermission")
-    @Suppress("DEPRECATION")
     private fun showNotification(
         notificationId: Int,
         itemId: String,
@@ -94,6 +105,7 @@ class ReminderNotificationService(
         message: String,
         type: String? = null,
     ) {
+        val profile = NotificationProfile.from(type)
         val contentIntent = PendingIntent.getActivity(
             appContext,
             REQUEST_OPEN_APP,
@@ -102,7 +114,7 @@ class ReminderNotificationService(
         )
 
         val notificationBuilder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            Notification.Builder(appContext, CHANNEL_ID)
+            Notification.Builder(appContext, profile.channelId)
         } else {
             Notification.Builder(appContext)
         }
@@ -113,15 +125,16 @@ class ReminderNotificationService(
             .setContentText(message)
             .setStyle(Notification.BigTextStyle().bigText(message))
             .setContentIntent(contentIntent)
-            .setAutoCancel(true)
-            .setPriority(Notification.PRIORITY_DEFAULT)
+            .setAutoCancel(profile.autoCancel)
+            .setCategory(profile.category)
+            .setPriority(profile.priority)
             .addAction(
                 Notification.Action.Builder(
                     R.drawable.ic_stat_agentic_notification,
-                    "Done",
+                    profile.primaryActionLabel,
                     actionPendingIntent(
-                        action = ReminderNotificationActionReceiver.ACTION_DONE,
-                        requestCode = requestCode(itemId, ReminderNotificationActionReceiver.ACTION_DONE),
+                        action = profile.primaryAction,
+                        requestCode = requestCode(itemId, profile.primaryAction),
                         notificationId = notificationId,
                         itemId = itemId,
                         title = title,
@@ -133,10 +146,10 @@ class ReminderNotificationService(
             .addAction(
                 Notification.Action.Builder(
                     R.drawable.ic_stat_agentic_notification,
-                    "Snooze 10 minutes",
+                    profile.snoozeActionLabel,
                     actionPendingIntent(
-                        action = ReminderNotificationActionReceiver.ACTION_SNOOZE_10_MINUTES,
-                        requestCode = requestCode(itemId, ReminderNotificationActionReceiver.ACTION_SNOOZE_10_MINUTES),
+                        action = ReminderNotificationActionReceiver.ACTION_SNOOZE,
+                        requestCode = requestCode(itemId, ReminderNotificationActionReceiver.ACTION_SNOOZE),
                         notificationId = notificationId,
                         itemId = itemId,
                         title = title,
@@ -174,7 +187,8 @@ class ReminderNotificationService(
     }
 
     companion object {
-        const val CHANNEL_ID = "agentic_reminders"
+        const val REMINDER_CHANNEL_ID = "agentic_reminders"
+        const val ALARM_CHANNEL_ID = "agentic_alarms"
         const val TEST_NOTIFICATION_ID = 1_001
         const val TEST_ITEM_ID = "debug-test-notification"
         const val TEST_TITLE = "Agentic reminder"
@@ -191,6 +205,41 @@ class ReminderNotificationService(
         fun pendingIntentFlags(): Int = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
 
         fun requestCode(itemId: String, action: String): Int = 31 * itemId.hashCode() + action.hashCode()
+    }
+
+    private data class NotificationProfile(
+        val channelId: String,
+        val category: String,
+        val priority: Int,
+        val autoCancel: Boolean,
+        val primaryAction: String,
+        val primaryActionLabel: String,
+        val snoozeActionLabel: String,
+    ) {
+        companion object {
+            fun from(type: String?): NotificationProfile =
+                if (type == AttentionType.Alarm.name) {
+                    NotificationProfile(
+                        channelId = ALARM_CHANNEL_ID,
+                        category = Notification.CATEGORY_ALARM,
+                        priority = Notification.PRIORITY_HIGH,
+                        autoCancel = false,
+                        primaryAction = ReminderNotificationActionReceiver.ACTION_ACKNOWLEDGE,
+                        primaryActionLabel = "Acknowledge",
+                        snoozeActionLabel = "Snooze 5 minutes",
+                    )
+                } else {
+                    NotificationProfile(
+                        channelId = REMINDER_CHANNEL_ID,
+                        category = Notification.CATEGORY_REMINDER,
+                        priority = Notification.PRIORITY_DEFAULT,
+                        autoCancel = true,
+                        primaryAction = ReminderNotificationActionReceiver.ACTION_DONE,
+                        primaryActionLabel = "Done",
+                        snoozeActionLabel = "Snooze 10 minutes",
+                    )
+                }
+        }
     }
 }
 

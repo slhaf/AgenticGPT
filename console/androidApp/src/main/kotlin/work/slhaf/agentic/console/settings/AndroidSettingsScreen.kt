@@ -100,7 +100,7 @@ private fun ReminderBehaviorSection() {
         SettingLine("默认 Snooze", "5 分钟")
         SettingLine("Alarm 重复策略", "MVP 不重复")
         SettingLine("默认时区", "按设备本地时区显示；模型保存 epochMillis")
-        SettingLine("通知级别", "Reminder 普通，Alarm 强提醒能力仅展示占位")
+        SettingLine("通知级别", "Reminder 普通通知；Alarm 高优先级，需要确认或稍后提醒")
     }
 }
 
