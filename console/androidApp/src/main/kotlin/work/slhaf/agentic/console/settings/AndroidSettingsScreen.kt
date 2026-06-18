@@ -98,7 +98,7 @@ private fun DebugSection(
     onSendTestNotification: () -> Unit,
 ) {
     SettingsSection("调试") {
-        Text("通知按钮只验证 Android 本地通知和通知动作；mock Reminder / Alarm 仍只修改内存数据，不会调度系统 alarm。", style = MaterialTheme.typography.bodySmall)
+        Text("通知按钮验证 Android 本地通知和通知动作；mock Reminder / Alarm 会创建内存数据并调度系统 alarm。", style = MaterialTheme.typography.bodySmall)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
             OutlinedButton(onClick = onRequestNotificationPermission, modifier = Modifier.weight(1f)) {
                 Text("请求通知权限")

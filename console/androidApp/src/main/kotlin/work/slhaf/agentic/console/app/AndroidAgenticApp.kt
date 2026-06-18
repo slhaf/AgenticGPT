@@ -14,8 +14,8 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import work.slhaf.agentic.console.navigation.AgenticNavigationScaffold
+import work.slhaf.agentic.console.platform.attention.AndroidAttentionScheduler
 import work.slhaf.agentic.console.platform.attention.InMemoryAttentionRepository
-import work.slhaf.agentic.console.platform.attention.MockAttentionScheduler
 import work.slhaf.agentic.console.platform.attention.PermissionStateReader
 import work.slhaf.agentic.console.platform.attention.ReminderNotificationService
 import work.slhaf.agentic.console.attention.AttentionListStateHolder
@@ -25,7 +25,7 @@ fun AndroidAgenticApp() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val repository = remember { InMemoryAttentionRepository() }
-    val scheduler = remember { MockAttentionScheduler() }
+    val scheduler = remember(context) { AndroidAttentionScheduler(context) }
     val stateHolder = remember { AttentionListStateHolder(repository, scheduler, scope) }
     val permissionStateReader = remember(context) { PermissionStateReader(context) }
     val notificationService = remember(context) { ReminderNotificationService(context) }

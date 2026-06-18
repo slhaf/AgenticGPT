@@ -13,6 +13,8 @@ import work.slhaf.agentic.console.domain.attention.AttentionRepository
 import work.slhaf.agentic.console.domain.attention.AttentionScheduler
 import work.slhaf.agentic.console.domain.attention.AttentionStatus
 import work.slhaf.agentic.console.domain.attention.AttentionType
+import kotlin.time.Clock
+import kotlin.time.Duration
 import kotlin.time.Duration.Companion.minutes
 
 class AttentionListStateHolder(
@@ -25,16 +27,25 @@ class AttentionListStateHolder(
         .stateIn(scope, SharingStarted.WhileSubscribed(5_000), AttentionListUiState())
 
     fun markDone(id: String) {
+        scheduler.cancel(id)
         scope.launch { repository.markDone(id) }
     }
 
     fun acknowledge(id: String) {
+        scheduler.cancel(id)
         scope.launch { repository.acknowledge(id) }
     }
 
     fun snooze(id: String) {
-        scheduler.snooze(id, 5.minutes)
-        scope.launch { repository.snooze(id, 5.minutes) }
+        val duration = 5.minutes
+        val item = state.value.items.firstOrNull { it.id == id }
+        if (item != null) {
+            scheduler.cancel(id)
+            scheduler.schedule(item.snoozedCopy(duration))
+        } else {
+            scheduler.snooze(id, duration)
+        }
+        scope.launch { repository.snooze(id, duration) }
     }
 
     fun cancel(id: String) {
@@ -55,7 +66,17 @@ class AttentionListStateHolder(
     }
 
     fun clearMockData() {
+        state.value.items.forEach { scheduler.cancel(it.id) }
         scope.launch { repository.clearMockData() }
+    }
+
+    private fun AttentionItem.snoozedCopy(duration: Duration): AttentionItem {
+        val now = Clock.System.now().toEpochMilliseconds()
+        return copy(
+            status = AttentionStatus.Snoozed,
+            dueAtEpochMillis = now + duration.inWholeMilliseconds,
+            updatedAtEpochMillis = now,
+        )
     }
 }
 
