@@ -31,6 +31,8 @@ use crate::state::HubState;
 use crate::utils::random_id;
 use crate::{default_config_summary, MAX_WAIT_SECONDS, REQUEST_TIMEOUT_SECS};
 
+const MCP_INSTRUCTIONS: &str = "Agentic GPT Hub provides three execution layers. Use exec for short, one-shot inspection, detection, and deterministic tasks where an exit code is required. Use startSession for long-running or background managed processes whose lifecycle and output should be observed through session tools. Use tmux as the persistent shared workspace for stateful development, iterative debugging, TUIs, and user-agent handoff. For tmux work, discover the workspace with tmux.listSessions and tmux.listPanes, inspect it with tmux.capturePane, then use tmux.exec for shell panes or tmux.pasteText for non-shell panes. tmux.exec confirms submission to the interactive shell, not command completion; use capturePane to observe progress and exec when a deterministic result is required. Commands remain subject to Agentic local policy, path policy, confirmation, and audit.";
+
 #[derive(Clone)]
 pub(crate) struct AgenticMcpServer {
     state: HubState,
@@ -122,7 +124,7 @@ pub(crate) async fn mcp_post(State(state): State<HubState>, Json(rpc): Json<Valu
                     "title": "Agentic GPT Hub",
                     "version": env!("CARGO_PKG_VERSION")
                 },
-                "instructions": "Agentic GPT Hub tools. Commands are routed to registered local agents and remain subject to Agentic local policy, path policy, confirmation, and audit."
+                "instructions": MCP_INSTRUCTIONS
             }),
         ),
         "notifications/initialized" => StatusCode::ACCEPTED.into_response(),
@@ -350,9 +352,7 @@ impl ServerHandler for AgenticMcpServer {
                 "agentic-gpt-hub",
                 env!("CARGO_PKG_VERSION"),
             ))
-            .with_instructions(
-                "Agentic GPT Hub tools. Commands are routed to registered local agents and remain subject to Agentic local policy, path policy, confirmation, and audit.",
-            )
+            .with_instructions(MCP_INSTRUCTIONS)
     }
 }
 
@@ -387,7 +387,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "exec",
-        description = "Run one short command on a local Agentic agent. workingDirectory, when provided, is the process CWD; prefer it over wrapping commands with cd. Use startSession for long-running commands."
+        description = "Run one short, one-shot inspection, detection, or deterministic command on a local Agentic agent and return its exit status. workingDirectory is the process CWD. Use startSession for long-running managed processes and tmux for persistent collaborative work."
     )]
     async fn exec(&self, params: Parameters<ExecArgs>) -> Result<CallToolResult, ErrorData> {
         let params = params.0;
@@ -471,7 +471,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "startSession",
-        description = "Start a long-running command session on a local Agentic agent. workingDirectory is the process CWD; read output with waitSession or inspectSession."
+        description = "Start a long-running or background managed process on a local Agentic agent. workingDirectory is the process CWD; observe lifecycle and output with waitSession or inspectSession. Use tmux instead when the work needs a persistent interactive workspace or user-agent handoff."
     )]
     async fn start_session(
         &self,
@@ -636,7 +636,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "tmux.listSessions",
-        description = "List tmux sessions on a local Agentic agent. This is a shared-terminal observation tool, separate from Agentic command sessions."
+        description = "List persistent tmux shared workspaces on a local Agentic agent. Start tmux workflows here, then use tmux.listPanes to locate the relevant pane."
     )]
     async fn tmux_list_sessions(
         &self,
@@ -655,7 +655,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "tmux.listPanes",
-        description = "List tmux panes on a local Agentic agent, optionally scoped to one tmux session. Returns pane ids, cwd, foreground command, and size."
+        description = "List tmux panes, optionally scoped to one session. Returns target ids, cwd, foreground command, size, process/mode state, and isLikelyShell. Inspect this before choosing tmux.exec for a shell pane or tmux.pasteText for a non-shell pane."
     )]
     async fn tmux_list_panes(
         &self,
@@ -677,7 +677,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "tmux.capturePane",
-        description = "Capture recent visible tmux pane history from a local Agentic agent. Use this to inspect shared terminal/TUI state such as Codex inside tmux."
+        description = "Capture recent tmux pane history to inspect a shared shell or TUI before acting and to observe progress afterward. This is the primary observation mechanism for tmux.exec, which does not report command completion."
     )]
     async fn tmux_capture_pane(
         &self,
@@ -700,7 +700,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "tmux.pasteText",
-        description = "Paste text into a tmux pane on a local Agentic agent, optionally appending Enter. Defaults to confirmation because this writes into an interactive terminal."
+        description = "Paste text into a non-shell tmux pane or TUI, optionally appending Enter. Shell panes are rejected; use tmux.exec there. Defaults to confirmation because this writes into an interactive workspace."
     )]
     async fn tmux_paste_text(
         &self,
@@ -725,7 +725,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "tmux.exec",
-        description = "Execute one structured program and argument vector in an existing tmux shell pane. The local agent applies command and path policy before atomically pasting and submitting it."
+        description = "Submit one structured program and argument vector atomically to an existing tmux shell pane for persistent collaborative work. The pane cwd, command policy, path policy, confirmation, and audit apply. Submission is not proof of completion; observe the pane with tmux.capturePane, or use exec when an exit status is required."
     )]
     async fn tmux_exec(
         &self,
@@ -750,7 +750,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "tmux.createSession",
-        description = "Create an idempotent tmux session on a local Agentic agent. cwd is checked by the agent path policy."
+        description = "Create an idempotent persistent tmux workspace when no suitable session exists. Prefer reusing the default agentic session; cwd is checked by the local path policy."
     )]
     async fn tmux_create_session(
         &self,
@@ -773,7 +773,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "tmux.closeSession",
-        description = "Close a tmux session on a local Agentic agent. Defaults to local confirmation."
+        description = "Close a persistent tmux workspace only when it is explicitly no longer needed. Defaults to local confirmation."
     )]
     async fn tmux_close_session(
         &self,
