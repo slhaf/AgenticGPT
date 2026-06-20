@@ -314,6 +314,13 @@ pub(crate) fn command_request_id(command: &HubCommand) -> &str {
         | HubCommand::InspectSession { request_id, .. }
         | HubCommand::WaitSession { request_id, .. }
         | HubCommand::KillSession { request_id, .. }
+        | HubCommand::TmuxListSessions { request_id }
+        | HubCommand::TmuxListPanes { request_id, .. }
+        | HubCommand::TmuxCapturePane { request_id, .. }
+        | HubCommand::TmuxPasteText { request_id, .. }
+        | HubCommand::TmuxExec { request_id, .. }
+        | HubCommand::TmuxCreateSession { request_id, .. }
+        | HubCommand::TmuxCloseSession { request_id, .. }
         | HubCommand::McpListServers { request_id }
         | HubCommand::McpListTools { request_id, .. }
         | HubCommand::McpCallTool { request_id, .. }
@@ -337,6 +344,13 @@ fn set_command_request_id(command: &mut HubCommand, value: String) {
         | HubCommand::InspectSession { request_id, .. }
         | HubCommand::WaitSession { request_id, .. }
         | HubCommand::KillSession { request_id, .. }
+        | HubCommand::TmuxListSessions { request_id }
+        | HubCommand::TmuxListPanes { request_id, .. }
+        | HubCommand::TmuxCapturePane { request_id, .. }
+        | HubCommand::TmuxPasteText { request_id, .. }
+        | HubCommand::TmuxExec { request_id, .. }
+        | HubCommand::TmuxCreateSession { request_id, .. }
+        | HubCommand::TmuxCloseSession { request_id, .. }
         | HubCommand::McpListServers { request_id }
         | HubCommand::McpListTools { request_id, .. }
         | HubCommand::McpCallTool { request_id, .. }

@@ -9,6 +9,7 @@ mod notify;
 mod policy;
 mod sessions;
 mod state;
+mod tmux;
 mod utils;
 
 use anyhow::{anyhow, Result};
@@ -48,6 +49,28 @@ enum Commands {
         config: Option<PathBuf>,
         #[command(subcommand)]
         command: ConfigCommand,
+    },
+    Tmux {
+        #[arg(long)]
+        config: Option<PathBuf>,
+        #[command(subcommand)]
+        command: TmuxCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum TmuxCommand {
+    List,
+    Attach {
+        session: String,
+    },
+    Create {
+        name: String,
+        #[arg(long)]
+        cwd: String,
+    },
+    Close {
+        name: String,
     },
 }
 
@@ -131,6 +154,7 @@ async fn main() -> Result<()> {
         Commands::Run { config } => run(config_path(config), RunMode::Normal).await,
         Commands::RunAsRoom { config } => run(config_path(config), RunMode::Room).await,
         Commands::Config { config, command } => handle_config(config_path(config), command).await,
+        Commands::Tmux { config, command } => handle_tmux(config_path(config), command).await,
     }
 }
 
@@ -147,6 +171,9 @@ async fn run(config_path: PathBuf, run_mode: RunMode) -> Result<()> {
     }
     let initial = Config::load(&config_path)?;
     initial.ensure_workspace()?;
+    if let Err(error) = tmux::ensure_default_session(&initial.workspace_root).await {
+        log_warn(format!("default tmux session unavailable: {error}"));
+    }
     log_info(format!(
         "config loaded; agentId={}; hubUrl={}; workspaceRoot={}; sandbox={}",
         initial.agent_id,
@@ -170,6 +197,32 @@ async fn run(config_path: PathBuf, run_mode: RunMode) -> Result<()> {
     };
     tokio::spawn(watch_config(state.clone()));
     hub::connect_loop(state).await
+}
+
+async fn handle_tmux(config_path: PathBuf, command: TmuxCommand) -> Result<()> {
+    match command {
+        TmuxCommand::List => println!(
+            "{}",
+            serde_json::to_string_pretty(&tmux::list_sessions().await)?
+        ),
+        TmuxCommand::Attach { session } => tmux::attach(&session)
+            .await
+            .map_err(|error| anyhow!(error))?,
+        TmuxCommand::Create { name, cwd } => {
+            let config = Config::load_or_default(&config_path)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(
+                    &tmux::create_session_for_config(&config, &name, &cwd).await
+                )?
+            );
+        }
+        TmuxCommand::Close { name } => println!(
+            "{}",
+            serde_json::to_string_pretty(&tmux::close_session_local(&name).await)?
+        ),
+    }
+    Ok(())
 }
 
 async fn handle_config(config_path: PathBuf, command: ConfigCommand) -> Result<()> {

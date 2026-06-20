@@ -14,7 +14,7 @@ use tokio_tungstenite::{
 };
 
 use crate::{
-    confirmation, exec, mcp, notebook, notify, sessions,
+    confirmation, exec, mcp, notebook, notify, sessions, tmux,
     utils::{
         command_preview, log_info, log_warn, CONNECT_TIMEOUT_SECS, HEARTBEAT_ACK_TIMEOUT_SECS,
         HEARTBEAT_INTERVAL_SECS, RECONNECT_DELAY_SECS,
@@ -355,6 +355,55 @@ pub(crate) async fn handle_hub_command(state: AppState, command: HubCommand) -> 
             log_info(format!("killSession received; sessionId={session_id}"));
             let session = sessions::kill_session(&state, &session_id).await;
             send_response(&state, &request_id, serde_json::to_value(session)?).await?;
+        }
+        HubCommand::TmuxListSessions { request_id } => {
+            send_response(&state, &request_id, tmux::list_sessions().await).await?;
+        }
+        HubCommand::TmuxListPanes {
+            request_id,
+            payload,
+        } => {
+            send_response(&state, &request_id, tmux::list_panes(payload).await).await?;
+        }
+        HubCommand::TmuxCapturePane {
+            request_id,
+            payload,
+        } => {
+            send_response(&state, &request_id, tmux::capture_pane(payload).await).await?;
+        }
+        HubCommand::TmuxPasteText {
+            request_id,
+            payload,
+        } => {
+            send_response(&state, &request_id, tmux::paste_text(&state, payload).await).await?;
+        }
+        HubCommand::TmuxExec {
+            request_id,
+            payload,
+        } => {
+            send_response(&state, &request_id, tmux::exec(&state, payload).await).await?;
+        }
+        HubCommand::TmuxCreateSession {
+            request_id,
+            payload,
+        } => {
+            send_response(
+                &state,
+                &request_id,
+                tmux::create_session(&state, payload).await,
+            )
+            .await?;
+        }
+        HubCommand::TmuxCloseSession {
+            request_id,
+            payload,
+        } => {
+            send_response(
+                &state,
+                &request_id,
+                tmux::close_session(&state, payload).await,
+            )
+            .await?;
         }
         HubCommand::McpListServers { request_id } => {
             let result = mcp::list_servers(&state).await;

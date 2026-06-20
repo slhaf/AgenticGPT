@@ -3,7 +3,8 @@ use agentic_gpt_protocol::{
     McpListToolsRequest, NotebookAppendRequest, NotebookCurrentRequest, NotebookRecentRequest,
     NotebookRemoveRequest, NotebookSearchRequest, NotebookSelectExactRequest,
     NotebookUpdateRequest, NotificationAction, PassageSignificance, SessionInfo,
-    UserNotifySendRequest,
+    TmuxCapturePaneRequest, TmuxCloseSessionRequest, TmuxCreateSessionRequest, TmuxExecRequest,
+    TmuxListPanesRequest, TmuxPasteTextRequest, UserNotifySendRequest,
 };
 use axum::extract::{Request, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -47,11 +48,26 @@ impl AgenticMcpServer {
 fn decorate_tool_descriptors(tool_router: &mut ToolRouter<AgenticMcpServer>) {
     for route in tool_router.map.values_mut() {
         let name = route.attr.name.as_ref();
-        let open_world = matches!(name, "exec" | "batchExec" | "startSession" | "mcpCallTool");
+        let open_world = matches!(
+            name,
+            "exec"
+                | "batchExec"
+                | "startSession"
+                | "mcpCallTool"
+                | "tmux.pasteText"
+                | "tmux.exec"
+                | "tmux.createSession"
+                | "tmux.closeSession"
+        );
+        let read_only = !matches!(
+            name,
+            "tmux.pasteText" | "tmux.exec" | "tmux.createSession" | "tmux.closeSession"
+        );
+        let destructive = matches!(name, "tmux.closeSession");
         route.attr.annotations = Some(
             ToolAnnotations::new()
-                .read_only(true)
-                .destructive(false)
+                .read_only(read_only)
+                .destructive(destructive)
                 .open_world(open_world),
         );
         route.attr.output_schema = Some(std::sync::Arc::new(object_schema()));
@@ -161,6 +177,37 @@ async fn call_app_tool(server: &AgenticMcpServer, params: Value) -> Result<Value
         "killSession" => {
             server
                 .kill_session(Parameters(decode_args(arguments)?))
+                .await
+        }
+        "tmux.listSessions" => {
+            server
+                .tmux_list_sessions(Parameters(decode_args(arguments)?))
+                .await
+        }
+        "tmux.listPanes" => {
+            server
+                .tmux_list_panes(Parameters(decode_args(arguments)?))
+                .await
+        }
+        "tmux.capturePane" => {
+            server
+                .tmux_capture_pane(Parameters(decode_args(arguments)?))
+                .await
+        }
+        "tmux.pasteText" => {
+            server
+                .tmux_paste_text(Parameters(decode_args(arguments)?))
+                .await
+        }
+        "tmux.exec" => server.tmux_exec(Parameters(decode_args(arguments)?)).await,
+        "tmux.createSession" => {
+            server
+                .tmux_create_session(Parameters(decode_args(arguments)?))
+                .await
+        }
+        "tmux.closeSession" => {
+            server
+                .tmux_close_session(Parameters(decode_args(arguments)?))
                 .await
         }
         "mcpListServers" => {
@@ -584,6 +631,166 @@ impl AgenticMcpServer {
                 }
             },
         };
+        Ok(result_from_value(value))
+    }
+
+    #[tool(
+        name = "tmux.listSessions",
+        description = "List tmux sessions on a local Agentic agent. This is a shared-terminal observation tool, separate from Agentic command sessions."
+    )]
+    async fn tmux_list_sessions(
+        &self,
+        params: Parameters<TmuxListSessionsArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let params = params.0;
+        self.ensure_agent_enabled(&params.agent_id)?;
+        let command = HubCommand::TmuxListSessions {
+            request_id: random_id("req"),
+        };
+        let value = request_agent(&self.state, &params.agent_id, command, 5)
+            .await
+            .map_err(|reason| mcp_internal_error("tmux_request_timeout", reason))?;
+        Ok(result_from_value(value))
+    }
+
+    #[tool(
+        name = "tmux.listPanes",
+        description = "List tmux panes on a local Agentic agent, optionally scoped to one tmux session. Returns pane ids, cwd, foreground command, and size."
+    )]
+    async fn tmux_list_panes(
+        &self,
+        params: Parameters<TmuxListPanesArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let params = params.0;
+        self.ensure_agent_enabled(&params.agent_id)?;
+        let command = HubCommand::TmuxListPanes {
+            request_id: random_id("req"),
+            payload: TmuxListPanesRequest {
+                session: params.session,
+            },
+        };
+        let value = request_agent(&self.state, &params.agent_id, command, 5)
+            .await
+            .map_err(|reason| mcp_internal_error("tmux_request_timeout", reason))?;
+        Ok(result_from_value(value))
+    }
+
+    #[tool(
+        name = "tmux.capturePane",
+        description = "Capture recent visible tmux pane history from a local Agentic agent. Use this to inspect shared terminal/TUI state such as Codex inside tmux."
+    )]
+    async fn tmux_capture_pane(
+        &self,
+        params: Parameters<TmuxCapturePaneArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let params = params.0;
+        self.ensure_agent_enabled(&params.agent_id)?;
+        let command = HubCommand::TmuxCapturePane {
+            request_id: random_id("req"),
+            payload: TmuxCapturePaneRequest {
+                target: params.target,
+                lines: params.lines.unwrap_or(160),
+            },
+        };
+        let value = request_agent(&self.state, &params.agent_id, command, 5)
+            .await
+            .map_err(|reason| mcp_internal_error("tmux_request_timeout", reason))?;
+        Ok(result_from_value(value))
+    }
+
+    #[tool(
+        name = "tmux.pasteText",
+        description = "Paste text into a tmux pane on a local Agentic agent, optionally appending Enter. Defaults to confirmation because this writes into an interactive terminal."
+    )]
+    async fn tmux_paste_text(
+        &self,
+        params: Parameters<TmuxPasteTextArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let params = params.0;
+        self.ensure_agent_enabled(&params.agent_id)?;
+        let command = HubCommand::TmuxPasteText {
+            request_id: random_id("req"),
+            payload: TmuxPasteTextRequest {
+                target: params.target,
+                text: params.text,
+                submit: params.submit.unwrap_or(false),
+                need_confirm: params.need_confirm.unwrap_or(true),
+            },
+        };
+        let value = request_agent(&self.state, &params.agent_id, command, 65)
+            .await
+            .map_err(|reason| mcp_internal_error("tmux_request_timeout", reason))?;
+        Ok(result_from_value(value))
+    }
+
+    #[tool(
+        name = "tmux.exec",
+        description = "Execute one structured program and argument vector in an existing tmux shell pane. The local agent applies command and path policy before atomically pasting and submitting it."
+    )]
+    async fn tmux_exec(
+        &self,
+        params: Parameters<TmuxExecArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let params = params.0;
+        self.ensure_agent_enabled(&params.agent_id)?;
+        let command = HubCommand::TmuxExec {
+            request_id: random_id("req"),
+            payload: TmuxExecRequest {
+                target: params.target,
+                program: params.program,
+                args: params.args,
+                need_confirm: params.need_confirm.unwrap_or(false),
+            },
+        };
+        let value = request_agent(&self.state, &params.agent_id, command, 65)
+            .await
+            .map_err(|reason| mcp_internal_error("tmux_request_timeout", reason))?;
+        Ok(result_from_value(value))
+    }
+
+    #[tool(
+        name = "tmux.createSession",
+        description = "Create an idempotent tmux session on a local Agentic agent. cwd is checked by the agent path policy."
+    )]
+    async fn tmux_create_session(
+        &self,
+        params: Parameters<TmuxCreateSessionArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let params = params.0;
+        self.ensure_agent_enabled(&params.agent_id)?;
+        let command = HubCommand::TmuxCreateSession {
+            request_id: random_id("req"),
+            payload: TmuxCreateSessionRequest {
+                name: params.name,
+                cwd: params.cwd,
+            },
+        };
+        let value = request_agent(&self.state, &params.agent_id, command, 5)
+            .await
+            .map_err(|reason| mcp_internal_error("tmux_request_timeout", reason))?;
+        Ok(result_from_value(value))
+    }
+
+    #[tool(
+        name = "tmux.closeSession",
+        description = "Close a tmux session on a local Agentic agent. Defaults to local confirmation."
+    )]
+    async fn tmux_close_session(
+        &self,
+        params: Parameters<TmuxCloseSessionArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let params = params.0;
+        self.ensure_agent_enabled(&params.agent_id)?;
+        let command = HubCommand::TmuxCloseSession {
+            request_id: random_id("req"),
+            payload: TmuxCloseSessionRequest {
+                name: params.name,
+                need_confirm: params.need_confirm.unwrap_or(true),
+            },
+        };
+        let value = request_agent(&self.state, &params.agent_id, command, 65)
+            .await
+            .map_err(|reason| mcp_internal_error("tmux_request_timeout", reason))?;
         Ok(result_from_value(value))
     }
 
@@ -1049,6 +1256,94 @@ struct WaitSessionArgs {
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
+struct TmuxListSessionsArgs {
+    #[schemars(description = "Target local agent id.")]
+    agent_id: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct TmuxListPanesArgs {
+    #[schemars(description = "Target local agent id.")]
+    agent_id: String,
+    #[serde(default)]
+    #[schemars(description = "Optional tmux session name to scope pane listing.")]
+    session: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct TmuxCapturePaneArgs {
+    #[schemars(description = "Target local agent id.")]
+    agent_id: String,
+    #[schemars(description = "tmux target such as session:window.pane or a pane id like %0.")]
+    target: String,
+    #[serde(default)]
+    #[schemars(
+        description = "Number of recent tmux history lines to capture. Defaults to 160 and caps at 5000."
+    )]
+    lines: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct TmuxPasteTextArgs {
+    #[schemars(description = "Target local agent id.")]
+    agent_id: String,
+    #[schemars(description = "tmux target such as session:window.pane or a pane id like %0.")]
+    target: String,
+    #[schemars(description = "Text to paste into the tmux pane.")]
+    text: String,
+    #[serde(default)]
+    #[schemars(description = "Append Enter after pasting the text. Defaults to false.")]
+    submit: Option<bool>,
+    #[serde(default)]
+    #[schemars(description = "Request local confirmation before pasting. Defaults to true.")]
+    need_confirm: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct TmuxExecArgs {
+    #[schemars(description = "Target local agent id.")]
+    agent_id: String,
+    #[schemars(description = "Shell pane target such as session:window.pane or %0.")]
+    target: String,
+    #[schemars(description = "Program or shell builtin to execute as one command.")]
+    program: String,
+    #[serde(default)]
+    #[schemars(description = "Structured argument vector; shell operators are not interpreted.")]
+    args: Vec<String>,
+    #[serde(default)]
+    #[schemars(description = "Force local confirmation in addition to configured policy.")]
+    need_confirm: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct TmuxCreateSessionArgs {
+    #[schemars(description = "Target local agent id.")]
+    agent_id: String,
+    #[schemars(description = "tmux session name.")]
+    name: String,
+    #[schemars(description = "Session cwd, subject to the local agent path policy.")]
+    cwd: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct TmuxCloseSessionArgs {
+    #[schemars(description = "Target local agent id.")]
+    agent_id: String,
+    #[schemars(description = "tmux session name.")]
+    name: String,
+    #[serde(default)]
+    #[schemars(description = "Request local confirmation before closing. Defaults to true.")]
+    need_confirm: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
 struct McpListServersArgs {
     #[serde(default)]
     #[schemars(
@@ -1307,6 +1602,14 @@ fn notify_route_error_message(error: &NotifyRouteError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tmux_paste_schema_exposes_confirmation_default_field() {
+        let schema =
+            serde_json::to_string(&rmcp::schemars::schema_for!(TmuxPasteTextArgs)).unwrap();
+        assert!(schema.contains("needConfirm"));
+        assert!(schema.contains("submit"));
+    }
 
     #[test]
     fn room_notebook_mcp_input_schemas_do_not_include_agent_id() {

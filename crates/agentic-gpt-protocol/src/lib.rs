@@ -503,6 +503,66 @@ pub struct ConfirmationPayload {
     pub tool_name: Option<String>,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TmuxListPanesRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TmuxCapturePaneRequest {
+    pub target: String,
+    #[serde(default = "default_tmux_capture_lines")]
+    pub lines: u32,
+}
+
+fn default_tmux_capture_lines() -> u32 {
+    160
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TmuxPasteTextRequest {
+    pub target: String,
+    pub text: String,
+    #[serde(default)]
+    pub submit: bool,
+    #[serde(default = "default_true")]
+    pub need_confirm: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TmuxExecRequest {
+    pub target: String,
+    pub program: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub need_confirm: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TmuxCreateSessionRequest {
+    pub name: String,
+    pub cwd: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TmuxCloseSessionRequest {
+    pub name: String,
+    #[serde(default = "default_true")]
+    pub need_confirm: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConfirmationDecision {
@@ -560,6 +620,38 @@ pub enum HubCommand {
     KillSession {
         request_id: String,
         session_id: String,
+    },
+    #[serde(rename = "tmux.listSessions")]
+    TmuxListSessions { request_id: String },
+    #[serde(rename = "tmux.listPanes")]
+    TmuxListPanes {
+        request_id: String,
+        payload: TmuxListPanesRequest,
+    },
+    #[serde(rename = "tmux.capturePane")]
+    TmuxCapturePane {
+        request_id: String,
+        payload: TmuxCapturePaneRequest,
+    },
+    #[serde(rename = "tmux.pasteText")]
+    TmuxPasteText {
+        request_id: String,
+        payload: TmuxPasteTextRequest,
+    },
+    #[serde(rename = "tmux.exec")]
+    TmuxExec {
+        request_id: String,
+        payload: TmuxExecRequest,
+    },
+    #[serde(rename = "tmux.createSession")]
+    TmuxCreateSession {
+        request_id: String,
+        payload: TmuxCreateSessionRequest,
+    },
+    #[serde(rename = "tmux.closeSession")]
+    TmuxCloseSession {
+        request_id: String,
+        payload: TmuxCloseSessionRequest,
     },
     #[serde(rename = "mcpListServers")]
     McpListServers { request_id: String },
@@ -646,6 +738,38 @@ pub enum AgentMessage {
         timeout_seconds: u64,
         payload: ConfirmationPayload,
     },
+}
+
+#[cfg(test)]
+mod tmux_tests {
+    use super::*;
+
+    #[test]
+    fn paste_and_close_default_to_confirmation() {
+        let paste: TmuxPasteTextRequest = serde_json::from_value(serde_json::json!({
+            "target": "%0",
+            "text": "status"
+        }))
+        .unwrap();
+        let close: TmuxCloseSessionRequest =
+            serde_json::from_value(serde_json::json!({ "name": "agentic" })).unwrap();
+        assert!(paste.need_confirm);
+        assert!(close.need_confirm);
+        assert!(!paste.submit);
+    }
+
+    #[test]
+    fn tmux_exec_defaults_to_structured_non_forced_confirmation_request() {
+        let request: TmuxExecRequest = serde_json::from_value(serde_json::json!({
+            "target": "%0",
+            "program": "git",
+            "args": ["status"]
+        }))
+        .unwrap();
+        assert_eq!(request.program, "git");
+        assert_eq!(request.args, ["status"]);
+        assert!(!request.need_confirm);
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
