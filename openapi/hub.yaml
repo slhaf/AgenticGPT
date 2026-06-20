@@ -115,10 +115,10 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
-        "504":
-          $ref: "#/components/responses/GatewayTimeout"
         "500":
           $ref: "#/components/responses/InternalError"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
   /v1/sessions:
     get:
       operationId: listSessions
@@ -194,7 +194,8 @@ paths:
           application/json:
             schema:
               type: object
-              required: [seconds]
+              required:
+                - seconds
               properties:
                 seconds:
                   type: integer
@@ -250,7 +251,12 @@ paths:
       description: List persistent tmux shared workspaces. Start tmux workflows here, then use tmuxListPanes to locate the relevant pane.
       x-openai-isConsequential: false
       parameters:
-        - $ref: "#/components/parameters/AgentId"
+        - name: agentId
+          in: query
+          required: true
+          description: Target enabled local Agentic agent id.
+          schema:
+            type: string
       responses:
         "200":
           description: tmux sessions or a structured agent-side error.
@@ -270,10 +276,16 @@ paths:
       description: List tmux panes and their cwd, foreground command, process/mode state, and isLikelyShell. Use tmuxExec for shell panes and tmuxPasteText for non-shell panes.
       x-openai-isConsequential: false
       parameters:
-        - $ref: "#/components/parameters/AgentId"
+        - name: agentId
+          in: query
+          required: true
+          description: Target enabled local Agentic agent id.
+          schema:
+            type: string
         - name: session
           in: query
           required: false
+          description: Optional tmux session name to scope pane listing.
           schema:
             type: string
       responses:
@@ -744,30 +756,57 @@ components:
   schemas:
     TmuxSession:
       type: object
-      required: [session, windows, attached, createdEpoch, activityEpoch]
+      required:
+        - session
+        - windows
+        - attached
+        - createdEpoch
+        - activityEpoch
       additionalProperties: false
       properties:
         session:
           type: string
         windows:
-          type: [integer, "null"]
+          type:
+            - integer
+            - "null"
         attached:
           type: boolean
         createdEpoch:
-          type: [integer, "null"]
+          type:
+            - integer
+            - "null"
         activityEpoch:
-          type: [integer, "null"]
+          type:
+            - integer
+            - "null"
     TmuxPane:
       type: object
-      required: [session, windowIndex, paneIndex, paneId, currentPath, currentCommand, width, height, panePid, paneInMode, paneDead, isLikelyShell]
+      required:
+        - session
+        - windowIndex
+        - paneIndex
+        - paneId
+        - currentPath
+        - currentCommand
+        - width
+        - height
+        - panePid
+        - paneInMode
+        - paneDead
+        - isLikelyShell
       additionalProperties: false
       properties:
         session:
           type: string
         windowIndex:
-          type: [integer, "null"]
+          type:
+            - integer
+            - "null"
         paneIndex:
-          type: [integer, "null"]
+          type:
+            - integer
+            - "null"
         paneId:
           type: string
         currentPath:
@@ -775,11 +814,17 @@ components:
         currentCommand:
           type: string
         width:
-          type: [integer, "null"]
+          type:
+            - integer
+            - "null"
         height:
-          type: [integer, "null"]
+          type:
+            - integer
+            - "null"
         panePid:
-          type: [integer, "null"]
+          type:
+            - integer
+            - "null"
         paneInMode:
           type: boolean
         paneDead:
@@ -788,7 +833,8 @@ components:
           type: boolean
     TmuxListSessionsResponse:
       type: object
-      required: [sessions]
+      required:
+        - sessions
       additionalProperties: true
       properties:
         sessions:
@@ -799,11 +845,14 @@ components:
           $ref: "#/components/schemas/ErrorDetail"
     TmuxListPanesResponse:
       type: object
-      required: [panes]
+      required:
+        - panes
       additionalProperties: true
       properties:
         session:
-          type: [string, "null"]
+          type:
+            - string
+            - "null"
         panes:
           type: array
           items:
@@ -812,7 +861,9 @@ components:
           $ref: "#/components/schemas/ErrorDetail"
     TmuxCaptureRequest:
       type: object
-      required: [agentId, target]
+      required:
+        - agentId
+        - target
       additionalProperties: false
       properties:
         agentId:
@@ -838,7 +889,10 @@ components:
           $ref: "#/components/schemas/ErrorDetail"
     TmuxExecRequest:
       type: object
-      required: [agentId, target, program]
+      required:
+        - agentId
+        - target
+        - program
       additionalProperties: false
       properties:
         agentId:
@@ -858,7 +912,10 @@ components:
           description: Force confirmation in addition to configured command policy.
     TmuxPasteRequest:
       type: object
-      required: [agentId, target, text]
+      required:
+        - agentId
+        - target
+        - text
       additionalProperties: false
       properties:
         agentId:
@@ -875,7 +932,10 @@ components:
           default: true
     TmuxCreateSessionRequest:
       type: object
-      required: [agentId, name, cwd]
+      required:
+        - agentId
+        - name
+        - cwd
       additionalProperties: false
       properties:
         agentId:
@@ -887,7 +947,9 @@ components:
           description: Existing session cwd. It must be inside writable roots and outside denied roots.
     TmuxCloseSessionRequest:
       type: object
-      required: [agentId, name]
+      required:
+        - agentId
+        - name
       additionalProperties: false
       properties:
         agentId:
@@ -907,7 +969,9 @@ components:
           $ref: "#/components/schemas/ErrorDetail"
     ErrorDetail:
       type: object
-      required: [code, message]
+      required:
+        - code
+        - message
       additionalProperties: false
       properties:
         code:
@@ -942,7 +1006,11 @@ components:
           type: integer
         remoteConfirmation:
           type: object
-          required: [enabled, provider, timeoutSeconds, ntfyConfigured]
+          required:
+            - enabled
+            - provider
+            - timeoutSeconds
+            - ntfyConfigured
           additionalProperties: false
           properties:
             enabled:
@@ -955,7 +1023,10 @@ components:
               type: boolean
         agents:
           type: object
-          required: [registeredCount, enabledCount, onlineCount]
+          required:
+            - registeredCount
+            - enabledCount
+            - onlineCount
           additionalProperties: false
           properties:
             registeredCount:
@@ -966,7 +1037,10 @@ components:
               type: integer
         counts:
           type: object
-          required: [pendingRequestCount, pendingConfirmationCount, cachedSessionCount]
+          required:
+            - pendingRequestCount
+            - pendingConfirmationCount
+            - cachedSessionCount
           additionalProperties: false
           properties:
             pendingRequestCount:
@@ -979,12 +1053,15 @@ components:
           type: string
     ErrorResponse:
       type: object
-      required: [error]
+      required:
+        - error
       additionalProperties: false
       properties:
         error:
           type: object
-          required: [code, message]
+          required:
+            - code
+            - message
           additionalProperties: false
           properties:
             code:
@@ -993,7 +1070,8 @@ components:
               type: string
     ListAgentsResponse:
       type: object
-      required: [agents]
+      required:
+        - agents
       additionalProperties: false
       properties:
         agents:
@@ -1002,7 +1080,13 @@ components:
             $ref: "#/components/schemas/AgentSummary"
     AgentSummary:
       type: object
-      required: [agentId, displayName, online, lastSeenAt, capabilities, configSummary]
+      required:
+        - agentId
+        - displayName
+        - online
+        - lastSeenAt
+        - capabilities
+        - configSummary
       additionalProperties: false
       properties:
         agentId:
@@ -1025,7 +1109,10 @@ components:
           $ref: "#/components/schemas/SafeConfigSummary"
     Capabilities:
       type: object
-      required: [sessions, confirmation, notificationActions]
+      required:
+        - sessions
+        - confirmation
+        - notificationActions
       additionalProperties: false
       properties:
         sessions:
@@ -1036,14 +1123,22 @@ components:
           type: boolean
     SafeConfigSummary:
       type: object
-      required: [workspaceRoot, sandbox, pathPolicy, policyRuleCounts, policyRules, confirmationProvider]
+      required:
+        - workspaceRoot
+        - sandbox
+        - pathPolicy
+        - policyRuleCounts
+        - policyRules
+        - confirmationProvider
       additionalProperties: false
       properties:
         workspaceRoot:
           type: string
         sandbox:
           type: object
-          required: [enabled, mode]
+          required:
+            - enabled
+            - mode
           additionalProperties: false
           properties:
             enabled:
@@ -1052,7 +1147,13 @@ components:
               type: string
         pathPolicy:
           type: object
-          required: [writeRootCount, readOnlyRootCount, denyRootCount, writeRoots, readOnlyRoots, denyRoots]
+          required:
+            - writeRootCount
+            - readOnlyRootCount
+            - denyRootCount
+            - writeRoots
+            - readOnlyRoots
+            - denyRoots
           additionalProperties: false
           properties:
             writeRootCount:
@@ -1075,7 +1176,10 @@ components:
                 $ref: "#/components/schemas/SafePathRoot"
         policyRuleCounts:
           type: object
-          required: [allow, confirm, deny]
+          required:
+            - allow
+            - confirm
+            - deny
           additionalProperties: false
           properties:
             allow:
@@ -1090,17 +1194,23 @@ components:
           type: string
     SafePathRoot:
       type: object
-      required: [path, source]
+      required:
+        - path
+        - source
       additionalProperties: false
       properties:
         path:
           type: string
         source:
           type: string
-          enum: [configured, workspaceRoot]
+          enum:
+            - configured
+            - workspaceRoot
     SafeRule:
       type: object
-      required: [program, argsPrefix]
+      required:
+        - program
+        - argsPrefix
       additionalProperties: false
       properties:
         program:
@@ -1111,7 +1221,11 @@ components:
             type: string
     SafePolicyRules:
       type: object
-      required: [allow, confirm, deny, builtins]
+      required:
+        - allow
+        - confirm
+        - deny
+        - builtins
       additionalProperties: false
       properties:
         allow:
@@ -1128,7 +1242,9 @@ components:
             $ref: "#/components/schemas/SafeRule"
         builtins:
           type: object
-          required: [confirm, deny]
+          required:
+            - confirm
+            - deny
           additionalProperties: false
           properties:
             confirm:
@@ -1148,7 +1264,10 @@ components:
           description: Optional target local agent id. Omit to list MCP servers for all currently connected agents.
     McpServerSummary:
       type: object
-      required: [id, enabled, transport]
+      required:
+        - id
+        - enabled
+        - transport
       additionalProperties: false
       properties:
         id:
@@ -1177,7 +1296,11 @@ components:
             $ref: "#/components/schemas/McpAgentServersSummary"
     McpAgentServersSummary:
       type: object
-      required: [agentId, displayName, online, servers]
+      required:
+        - agentId
+        - displayName
+        - online
+        - servers
       additionalProperties: false
       properties:
         agentId:
@@ -1196,7 +1319,9 @@ components:
           description: Per-agent error if the Hub could not retrieve that agent's MCP servers.
     McpListToolsRequest:
       type: object
-      required: [agentId, serverId]
+      required:
+        - agentId
+        - serverId
       additionalProperties: false
       properties:
         agentId:
@@ -1205,7 +1330,11 @@ components:
           type: string
     McpCallToolRequest:
       type: object
-      required: [agentId, serverId, toolName, arguments]
+      required:
+        - agentId
+        - serverId
+        - toolName
+        - arguments
       additionalProperties: false
       properties:
         agentId:
@@ -1220,7 +1349,8 @@ components:
           properties: {}
     McpListToolsResponse:
       type: object
-      required: [tools]
+      required:
+        - tools
       additionalProperties: false
       properties:
         tools:
@@ -1259,7 +1389,8 @@ components:
           type: boolean
     UserNotifyChannelsResponse:
       type: object
-      required: [channels]
+      required:
+        - channels
       additionalProperties: false
       properties:
         channels:
@@ -1268,33 +1399,49 @@ components:
             $ref: "#/components/schemas/NotificationChannel"
     NotificationChannel:
       type: object
-      required: [key, displayName, available, kind, supportsActions]
+      required:
+        - key
+        - displayName
+        - available
+        - kind
+        - supportsActions
       additionalProperties: false
       properties:
         key:
           type: string
-          examples: ["agent::laptop::freedesktop", "hub::ntfy", "hub::android::notice"]
+          examples:
+            - agent::laptop::freedesktop
+            - hub::ntfy
+            - hub::android::notice
         displayName:
           type: string
         available:
           type: boolean
         kind:
           type: string
-          enum: [freedesktop, ntfy, android_notice, android_alarm]
+          enum:
+            - freedesktop
+            - ntfy
+            - android_notice
+            - android_alarm
         supportsActions:
           type: boolean
         reason:
           type:
             - string
             - "null"
-          examples: [android_endpoint_not_connected, android_delivery_not_implemented]
+          examples:
+            - android_endpoint_not_connected
+            - android_delivery_not_implemented
         agentId:
           type:
             - string
             - "null"
     NotificationAction:
       type: object
-      required: [id, label]
+      required:
+        - id
+        - label
       additionalProperties: false
       properties:
         id:
@@ -1304,7 +1451,10 @@ components:
           type: string
     UserNotifySendRequest:
       type: object
-      required: [channel, title, body]
+      required:
+        - channel
+        - title
+        - body
       additionalProperties: false
       properties:
         channel:
@@ -1320,10 +1470,18 @@ components:
             $ref: "#/components/schemas/NotificationAction"
         priority:
           type: string
-          enum: [min, low, normal, high, urgent, alarm]
+          enum:
+            - min
+            - low
+            - normal
+            - high
+            - urgent
+            - alarm
     UserNotifySendResponse:
       type: object
-      required: [channelKey, accepted]
+      required:
+        - channelKey
+        - accepted
       additionalProperties: false
       properties:
         channelKey:
@@ -1340,10 +1498,16 @@ components:
             - "null"
     PassageSignificance:
       type: string
-      enum: [NORMAL, ANCHOR]
+      enum:
+        - NORMAL
+        - ANCHOR
     NotebookAppendRequest:
       type: object
-      required: [scope, significance, abstract, content]
+      required:
+        - scope
+        - significance
+        - abstract
+        - content
       additionalProperties: false
       properties:
         datetime:
@@ -1351,7 +1515,7 @@ components:
           description: Optional ISO-8601 datetime. Stored as UTC; file partitioning uses configured room timezone.
         scope:
           type: string
-          pattern: "^[A-Za-z0-9_.-]+$"
+          pattern: ^[A-Za-z0-9_.-]+$
           description: Path-safe scope. Must not contain '..'.
         significance:
           $ref: "#/components/schemas/PassageSignificance"
@@ -1365,7 +1529,11 @@ components:
             type: string
     NotebookAppendResponse:
       type: object
-      required: [id, path, created, warnings]
+      required:
+        - id
+        - path
+        - created
+        - warnings
       additionalProperties: false
       properties:
         id:
@@ -1384,7 +1552,7 @@ components:
       properties:
         scope:
           type: string
-          pattern: "^[A-Za-z0-9_.-]+$"
+          pattern: ^[A-Za-z0-9_.-]+$
         days:
           type: integer
           minimum: 1
@@ -1398,7 +1566,10 @@ components:
           maximum: 100
     NotebookSelectExactRequest:
       type: object
-      required: [year, month, day]
+      required:
+        - year
+        - month
+        - day
       additionalProperties: false
       properties:
         year:
@@ -1413,36 +1584,39 @@ components:
           maximum: 31
         scope:
           type: string
-          pattern: "^[A-Za-z0-9_.-]+$"
+          pattern: ^[A-Za-z0-9_.-]+$
         limit:
           type: integer
           minimum: 1
           maximum: 100
     NotebookSearchRequest:
       type: object
-      required: [query]
+      required:
+        - query
       additionalProperties: false
       properties:
         query:
           type: string
         scope:
           type: string
-          pattern: "^[A-Za-z0-9_.-]+$"
+          pattern: ^[A-Za-z0-9_.-]+$
         limit:
           type: integer
           minimum: 1
           maximum: 100
     NotebookCurrentRequest:
       type: object
-      required: [scope]
+      required:
+        - scope
       additionalProperties: false
       properties:
         scope:
           type: string
-          pattern: "^[A-Za-z0-9_.-]+$"
+          pattern: ^[A-Za-z0-9_.-]+$
     NotebookUpdateRequest:
       type: object
-      required: [id]
+      required:
+        - id
       additionalProperties: false
       properties:
         id:
@@ -1460,7 +1634,10 @@ components:
       description: Updates editable passage fields. Datetime and scope are immutable; at least one editable field must be supplied.
     NotebookUpdateResponse:
       type: object
-      required: [updated, id, warnings]
+      required:
+        - updated
+        - id
+        - warnings
       additionalProperties: false
       properties:
         updated:
@@ -1473,14 +1650,18 @@ components:
             type: string
     NotebookRemoveRequest:
       type: object
-      required: [id]
+      required:
+        - id
       additionalProperties: false
       properties:
         id:
           type: string
     NotebookRemoveResponse:
       type: object
-      required: [removed, id, warnings]
+      required:
+        - removed
+        - id
+        - warnings
       additionalProperties: false
       properties:
         removed:
@@ -1493,7 +1674,16 @@ components:
             type: string
     NotebookPassagePreview:
       type: object
-      required: [id, datetime, scope, significance, abstract, contentPreview, tags, displayMode, truncated]
+      required:
+        - id
+        - datetime
+        - scope
+        - significance
+        - abstract
+        - contentPreview
+        - tags
+        - displayMode
+        - truncated
       additionalProperties: false
       properties:
         id:
@@ -1514,12 +1704,18 @@ components:
             type: string
         displayMode:
           type: string
-          enum: [full, anchor, abstract, search]
+          enum:
+            - full
+            - anchor
+            - abstract
+            - search
         truncated:
           type: boolean
     NotebookPassagesResponse:
       type: object
-      required: [passages, warnings]
+      required:
+        - passages
+        - warnings
       additionalProperties: false
       properties:
         passages:
@@ -1532,7 +1728,13 @@ components:
             type: string
     NotebookCurrent:
       type: object
-      required: [scope, updatedAt, sourcePassageId, abstract, content, tags]
+      required:
+        - scope
+        - updatedAt
+        - sourcePassageId
+        - abstract
+        - content
+        - tags
       additionalProperties: false
       properties:
         scope:
@@ -1551,7 +1753,9 @@ components:
             type: string
     NotebookCurrentResponse:
       type: object
-      required: [current, warnings]
+      required:
+        - current
+        - warnings
       additionalProperties: false
       properties:
         current:
@@ -1564,7 +1768,11 @@ components:
             type: string
     ExecRequest:
       type: object
-      required: [agentId, program, args, needConfirm]
+      required:
+        - agentId
+        - program
+        - args
+        - needConfirm
       additionalProperties: false
       properties:
         agentId:
@@ -1579,14 +1787,28 @@ components:
           type: boolean
         confirmMethod:
           type: string
-          enum: [default, freedesktop, hub, freedesktop-then-hub, freedesktopThenHub]
+          enum:
+            - default
+            - freedesktop
+            - hub
+            - freedesktop-then-hub
+            - freedesktopThenHub
           description: Optional per-request confirmation provider override. Omit or use default to follow the local agent configuration.
         workingDirectory:
           type: string
           description: Optional command working directory. Relative values are resolved from the agent workspace root. The resolved directory must exist and be inside writable roots, not denied roots.
     TaskResult:
       type: object
-      required: [agentId, taskId, status, exitCode, stdoutTail, stderrTail, truncated, startedAt, updatedAt]
+      required:
+        - agentId
+        - taskId
+        - status
+        - exitCode
+        - stdoutTail
+        - stderrTail
+        - truncated
+        - startedAt
+        - updatedAt
       additionalProperties: true
       properties:
         agentId:
@@ -1613,7 +1835,10 @@ components:
           type: string
     BatchExecRequest:
       type: object
-      required: [agentId, elements, needConfirm]
+      required:
+        - agentId
+        - elements
+        - needConfirm
       additionalProperties: false
       properties:
         agentId:
@@ -1623,7 +1848,9 @@ components:
           minItems: 1
           items:
             type: object
-            required: [program, args]
+            required:
+              - program
+              - args
             additionalProperties: false
             properties:
               program:
@@ -1639,14 +1866,25 @@ components:
           type: boolean
         confirmMethod:
           type: string
-          enum: [default, freedesktop, hub, freedesktop-then-hub, freedesktopThenHub]
+          enum:
+            - default
+            - freedesktop
+            - hub
+            - freedesktop-then-hub
+            - freedesktopThenHub
           description: Optional per-request confirmation provider override for all batch elements. Omit or use default to follow the local agent configuration.
         workingDirectory:
           type: string
           description: Optional default working directory for all batch elements. Relative values are resolved from the agent workspace root. Per-element workingDirectory values override this.
     BatchExecResult:
       type: object
-      required: [agentId, batchId, status, results, startedAt, updatedAt]
+      required:
+        - agentId
+        - batchId
+        - status
+        - results
+        - startedAt
+        - updatedAt
       additionalProperties: true
       properties:
         agentId:
@@ -1659,7 +1897,11 @@ components:
           type: array
           items:
             type: object
-            required: [index, program, args, result]
+            required:
+              - index
+              - program
+              - args
+              - result
             additionalProperties: false
             properties:
               index:
@@ -1680,7 +1922,10 @@ components:
           type: string
     StartSessionResponse:
       type: object
-      required: [status, sessionId, session]
+      required:
+        - status
+        - sessionId
+        - session
       additionalProperties: false
       properties:
         status:
@@ -1691,7 +1936,8 @@ components:
           $ref: "#/components/schemas/SessionInfo"
     ListSessionsResponse:
       type: object
-      required: [sessions]
+      required:
+        - sessions
       additionalProperties: false
       properties:
         sessions:
@@ -1700,7 +1946,19 @@ components:
             $ref: "#/components/schemas/SessionInfo"
     SessionInfo:
       type: object
-      required: [agentId, sessionId, state, program, args, commandPreview, startedAt, updatedAt, exitCode, stdoutTail, stderrTail, truncated]
+      required:
+        - agentId
+        - sessionId
+        - state
+        - program
+        - args
+        - commandPreview
+        - startedAt
+        - updatedAt
+        - exitCode
+        - stdoutTail
+        - stderrTail
+        - truncated
       additionalProperties: true
       properties:
         agentId:
