@@ -1,7 +1,8 @@
 use agentic_gpt_protocol::{
     BatchExecRequest, ExecRequest, HubCommand, HubInfoAgents, HubInfoCounts,
     HubInfoRemoteConfirmation, HubInfoResponse, McpCallToolRequest, McpListServersRequest,
-    McpListToolsRequest, SessionInfo,
+    McpListToolsRequest, SessionInfo, TmuxCapturePaneRequest, TmuxCloseSessionRequest,
+    TmuxCreateSessionRequest, TmuxExecRequest, TmuxListPanesRequest, TmuxPasteTextRequest,
 };
 use anyhow::Result;
 use axum::extract::{Path, Query, State};
@@ -31,6 +32,71 @@ pub(crate) struct AgentIdQuery {
 #[derive(Deserialize)]
 pub(crate) struct WaitRequest {
     seconds: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TmuxListPanesQuery {
+    agent_id: String,
+    session: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TmuxCaptureRequest {
+    agent_id: String,
+    target: String,
+    #[serde(default = "default_tmux_capture_lines")]
+    lines: u32,
+}
+
+fn default_tmux_capture_lines() -> u32 {
+    160
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TmuxExecActionRequest {
+    agent_id: String,
+    target: String,
+    program: String,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    need_confirm: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TmuxPasteActionRequest {
+    agent_id: String,
+    target: String,
+    text: String,
+    #[serde(default)]
+    submit: bool,
+    #[serde(default = "default_true")]
+    need_confirm: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TmuxCreateActionRequest {
+    agent_id: String,
+    name: String,
+    cwd: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TmuxCloseActionRequest {
+    agent_id: String,
+    name: String,
+    #[serde(default = "default_true")]
+    need_confirm: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Serialize)]
@@ -327,6 +393,199 @@ pub(crate) async fn kill_session(
                 "Session was not found",
             ),
         },
+    }
+}
+
+pub(crate) async fn tmux_list_sessions(
+    State(state): State<HubState>,
+    headers: HeaderMap,
+    Query(query): Query<AgentIdQuery>,
+) -> Response {
+    if let Err(response) = require_action_auth(&state, &headers) {
+        return response;
+    }
+    if let Err(response) = require_agent_enabled(&state, &query.agent_id) {
+        return response;
+    }
+    tmux_request(
+        &state,
+        &query.agent_id,
+        HubCommand::TmuxListSessions {
+            request_id: random_id("req"),
+        },
+        5,
+    )
+    .await
+}
+
+pub(crate) async fn tmux_list_panes(
+    State(state): State<HubState>,
+    headers: HeaderMap,
+    Query(query): Query<TmuxListPanesQuery>,
+) -> Response {
+    if let Err(response) = require_action_auth(&state, &headers) {
+        return response;
+    }
+    if let Err(response) = require_agent_enabled(&state, &query.agent_id) {
+        return response;
+    }
+    tmux_request(
+        &state,
+        &query.agent_id,
+        HubCommand::TmuxListPanes {
+            request_id: random_id("req"),
+            payload: TmuxListPanesRequest {
+                session: query.session,
+            },
+        },
+        5,
+    )
+    .await
+}
+
+pub(crate) async fn tmux_capture_pane(
+    State(state): State<HubState>,
+    headers: HeaderMap,
+    Json(payload): Json<TmuxCaptureRequest>,
+) -> Response {
+    if let Err(response) = require_action_auth(&state, &headers) {
+        return response;
+    }
+    if let Err(response) = require_agent_enabled(&state, &payload.agent_id) {
+        return response;
+    }
+    tmux_request(
+        &state,
+        &payload.agent_id,
+        HubCommand::TmuxCapturePane {
+            request_id: random_id("req"),
+            payload: TmuxCapturePaneRequest {
+                target: payload.target,
+                lines: payload.lines,
+            },
+        },
+        5,
+    )
+    .await
+}
+
+pub(crate) async fn tmux_exec(
+    State(state): State<HubState>,
+    headers: HeaderMap,
+    Json(payload): Json<TmuxExecActionRequest>,
+) -> Response {
+    if let Err(response) = require_action_auth(&state, &headers) {
+        return response;
+    }
+    if let Err(response) = require_agent_enabled(&state, &payload.agent_id) {
+        return response;
+    }
+    tmux_request(
+        &state,
+        &payload.agent_id,
+        HubCommand::TmuxExec {
+            request_id: random_id("req"),
+            payload: TmuxExecRequest {
+                target: payload.target,
+                program: payload.program,
+                args: payload.args,
+                need_confirm: payload.need_confirm,
+            },
+        },
+        65,
+    )
+    .await
+}
+
+pub(crate) async fn tmux_paste_text(
+    State(state): State<HubState>,
+    headers: HeaderMap,
+    Json(payload): Json<TmuxPasteActionRequest>,
+) -> Response {
+    if let Err(response) = require_action_auth(&state, &headers) {
+        return response;
+    }
+    if let Err(response) = require_agent_enabled(&state, &payload.agent_id) {
+        return response;
+    }
+    tmux_request(
+        &state,
+        &payload.agent_id,
+        HubCommand::TmuxPasteText {
+            request_id: random_id("req"),
+            payload: TmuxPasteTextRequest {
+                target: payload.target,
+                text: payload.text,
+                submit: payload.submit,
+                need_confirm: payload.need_confirm,
+            },
+        },
+        65,
+    )
+    .await
+}
+
+pub(crate) async fn tmux_create_session(
+    State(state): State<HubState>,
+    headers: HeaderMap,
+    Json(payload): Json<TmuxCreateActionRequest>,
+) -> Response {
+    if let Err(response) = require_action_auth(&state, &headers) {
+        return response;
+    }
+    if let Err(response) = require_agent_enabled(&state, &payload.agent_id) {
+        return response;
+    }
+    tmux_request(
+        &state,
+        &payload.agent_id,
+        HubCommand::TmuxCreateSession {
+            request_id: random_id("req"),
+            payload: TmuxCreateSessionRequest {
+                name: payload.name,
+                cwd: payload.cwd,
+            },
+        },
+        5,
+    )
+    .await
+}
+
+pub(crate) async fn tmux_close_session(
+    State(state): State<HubState>,
+    headers: HeaderMap,
+    Json(payload): Json<TmuxCloseActionRequest>,
+) -> Response {
+    if let Err(response) = require_action_auth(&state, &headers) {
+        return response;
+    }
+    if let Err(response) = require_agent_enabled(&state, &payload.agent_id) {
+        return response;
+    }
+    tmux_request(
+        &state,
+        &payload.agent_id,
+        HubCommand::TmuxCloseSession {
+            request_id: random_id("req"),
+            payload: TmuxCloseSessionRequest {
+                name: payload.name,
+                need_confirm: payload.need_confirm,
+            },
+        },
+        65,
+    )
+    .await
+}
+
+async fn tmux_request(
+    state: &HubState,
+    agent_id: &str,
+    command: HubCommand,
+    timeout_seconds: u64,
+) -> Response {
+    match request_agent(state, agent_id, command, timeout_seconds).await {
+        Ok(value) => Json(value).into_response(),
+        Err(reason) => api_error(StatusCode::GATEWAY_TIMEOUT, "tmux_request_timeout", reason),
     }
 }
 

@@ -42,7 +42,7 @@ paths:
   /v1/exec:
     post:
       operationId: exec
-      description: Run one short command on a local Agentic agent. workingDirectory, when provided, is used as the process working directory.
+      description: Run one short, one-shot inspection, detection, or deterministic command and return its exit status. Use startSession for long-running managed processes and tmux for persistent collaborative work.
       x-openai-isConsequential: false
       requestBody:
         required: true
@@ -94,7 +94,7 @@ paths:
   /v1/sessions/start:
     post:
       operationId: startSession
-      description: Start a long-running command session on a local Agentic agent. Use waitSession or inspectSession to read output.
+      description: Start a long-running or background managed process. Observe it with waitSession or inspectSession. Use tmux when work needs a persistent interactive workspace or user-agent handoff.
       x-openai-isConsequential: false
       requestBody:
         required: true
@@ -244,6 +244,171 @@ paths:
           $ref: "#/components/responses/NotFound"
         "500":
           $ref: "#/components/responses/InternalError"
+  /v1/tmux/sessions:
+    get:
+      operationId: tmuxListSessions
+      description: List persistent tmux shared workspaces. Start tmux workflows here, then use tmuxListPanes to locate the relevant pane.
+      x-openai-isConsequential: false
+      parameters:
+        - $ref: "#/components/parameters/AgentId"
+      responses:
+        "200":
+          description: tmux sessions or a structured agent-side error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TmuxListSessionsResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+  /v1/tmux/panes:
+    get:
+      operationId: tmuxListPanes
+      description: List tmux panes and their cwd, foreground command, process/mode state, and isLikelyShell. Use tmuxExec for shell panes and tmuxPasteText for non-shell panes.
+      x-openai-isConsequential: false
+      parameters:
+        - $ref: "#/components/parameters/AgentId"
+        - name: session
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Matching tmux panes or a structured agent-side error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TmuxListPanesResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+  /v1/tmux/capture:
+    post:
+      operationId: tmuxCapturePane
+      description: Capture recent pane history before acting or to observe progress after tmuxExec. This is read-only.
+      x-openai-isConsequential: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TmuxCaptureRequest"
+      responses:
+        "200":
+          description: Pane capture or a structured agent-side error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TmuxCaptureResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+  /v1/tmux/exec:
+    post:
+      operationId: tmuxExec
+      description: Submit one structured program and argument vector atomically to a tmux shell pane. Pane cwd, command policy, path policy, confirmation, and audit apply. Submission does not prove completion; use tmuxCapturePane afterward or exec when an exit status is required.
+      x-openai-isConsequential: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TmuxExecRequest"
+      responses:
+        "200":
+          description: Submission result or a structured policy/agent-side error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TmuxOperationResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+  /v1/tmux/paste:
+    post:
+      operationId: tmuxPasteText
+      description: Paste text into a non-shell tmux pane or TUI. Shell panes are rejected and must use tmuxExec. Confirmation defaults to true.
+      x-openai-isConsequential: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TmuxPasteRequest"
+      responses:
+        "200":
+          description: Paste result or a structured agent-side error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TmuxOperationResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+  /v1/tmux/sessions/create:
+    post:
+      operationId: tmuxCreateSession
+      description: Create an idempotent persistent tmux workspace when no suitable session exists. Prefer reusing the default agentic session. cwd is checked by local path policy.
+      x-openai-isConsequential: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TmuxCreateSessionRequest"
+      responses:
+        "200":
+          description: Session creation result or a structured agent-side error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TmuxOperationResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+  /v1/tmux/sessions/close:
+    post:
+      operationId: tmuxCloseSession
+      description: Close a persistent tmux workspace only when explicitly no longer needed. Confirmation defaults to true.
+      x-openai-isConsequential: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TmuxCloseSessionRequest"
+      responses:
+        "200":
+          description: Session close result or a structured agent-side error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TmuxOperationResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
   /v1/mcp/servers:
     post:
       operationId: mcpListServers
@@ -336,7 +501,7 @@ paths:
     post:
       operationId: userNotifySend
       description: Send a Hub-native notification to the user through a selected channel. This does not use the active Room Agent.
-      x-openai-isConsequential: true
+      x-openai-isConsequential: false
       requestBody:
         required: true
         content:
@@ -531,6 +696,14 @@ components:
     bearerAuth:
       type: http
       scheme: bearer
+  parameters:
+    AgentId:
+      name: agentId
+      in: query
+      required: true
+      description: Target enabled local Agentic agent id.
+      schema:
+        type: string
   responses:
     BadRequest:
       description: Invalid request body or parameters.
@@ -569,6 +742,178 @@ components:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
   schemas:
+    TmuxSession:
+      type: object
+      required: [session, windows, attached, createdEpoch, activityEpoch]
+      additionalProperties: false
+      properties:
+        session:
+          type: string
+        windows:
+          type: [integer, "null"]
+        attached:
+          type: boolean
+        createdEpoch:
+          type: [integer, "null"]
+        activityEpoch:
+          type: [integer, "null"]
+    TmuxPane:
+      type: object
+      required: [session, windowIndex, paneIndex, paneId, currentPath, currentCommand, width, height, panePid, paneInMode, paneDead, isLikelyShell]
+      additionalProperties: false
+      properties:
+        session:
+          type: string
+        windowIndex:
+          type: [integer, "null"]
+        paneIndex:
+          type: [integer, "null"]
+        paneId:
+          type: string
+        currentPath:
+          type: string
+        currentCommand:
+          type: string
+        width:
+          type: [integer, "null"]
+        height:
+          type: [integer, "null"]
+        panePid:
+          type: [integer, "null"]
+        paneInMode:
+          type: boolean
+        paneDead:
+          type: boolean
+        isLikelyShell:
+          type: boolean
+    TmuxListSessionsResponse:
+      type: object
+      required: [sessions]
+      additionalProperties: true
+      properties:
+        sessions:
+          type: array
+          items:
+            $ref: "#/components/schemas/TmuxSession"
+        error:
+          $ref: "#/components/schemas/ErrorDetail"
+    TmuxListPanesResponse:
+      type: object
+      required: [panes]
+      additionalProperties: true
+      properties:
+        session:
+          type: [string, "null"]
+        panes:
+          type: array
+          items:
+            $ref: "#/components/schemas/TmuxPane"
+        error:
+          $ref: "#/components/schemas/ErrorDetail"
+    TmuxCaptureRequest:
+      type: object
+      required: [agentId, target]
+      additionalProperties: false
+      properties:
+        agentId:
+          type: string
+        target:
+          type: string
+        lines:
+          type: integer
+          minimum: 1
+          maximum: 5000
+          default: 160
+    TmuxCaptureResponse:
+      type: object
+      additionalProperties: true
+      properties:
+        target:
+          type: string
+        lines:
+          type: integer
+        capture:
+          type: string
+        error:
+          $ref: "#/components/schemas/ErrorDetail"
+    TmuxExecRequest:
+      type: object
+      required: [agentId, target, program]
+      additionalProperties: false
+      properties:
+        agentId:
+          type: string
+        target:
+          type: string
+        program:
+          type: string
+        args:
+          type: array
+          default: []
+          items:
+            type: string
+        needConfirm:
+          type: boolean
+          default: false
+          description: Force confirmation in addition to configured command policy.
+    TmuxPasteRequest:
+      type: object
+      required: [agentId, target, text]
+      additionalProperties: false
+      properties:
+        agentId:
+          type: string
+        target:
+          type: string
+        text:
+          type: string
+        submit:
+          type: boolean
+          default: false
+        needConfirm:
+          type: boolean
+          default: true
+    TmuxCreateSessionRequest:
+      type: object
+      required: [agentId, name, cwd]
+      additionalProperties: false
+      properties:
+        agentId:
+          type: string
+        name:
+          type: string
+        cwd:
+          type: string
+          description: Existing session cwd. It must be inside writable roots and outside denied roots.
+    TmuxCloseSessionRequest:
+      type: object
+      required: [agentId, name]
+      additionalProperties: false
+      properties:
+        agentId:
+          type: string
+        name:
+          type: string
+        needConfirm:
+          type: boolean
+          default: true
+    TmuxOperationResponse:
+      type: object
+      additionalProperties: true
+      properties:
+        accepted:
+          type: boolean
+        error:
+          $ref: "#/components/schemas/ErrorDetail"
+    ErrorDetail:
+      type: object
+      required: [code, message]
+      additionalProperties: false
+      properties:
+        code:
+          type: string
+        message:
+          type: string
     HubInfoResponse:
       type: object
       required:

@@ -180,6 +180,16 @@ async fn serve(
         .route("/v1/sessions/:session_id", get(routes::inspect_session))
         .route("/v1/sessions/:session_id/wait", post(routes::wait_session))
         .route("/v1/sessions/:session_id/kill", post(routes::kill_session))
+        .route("/v1/tmux/sessions", get(routes::tmux_list_sessions))
+        .route("/v1/tmux/panes", get(routes::tmux_list_panes))
+        .route("/v1/tmux/capture", post(routes::tmux_capture_pane))
+        .route("/v1/tmux/exec", post(routes::tmux_exec))
+        .route("/v1/tmux/paste", post(routes::tmux_paste_text))
+        .route(
+            "/v1/tmux/sessions/create",
+            post(routes::tmux_create_session),
+        )
+        .route("/v1/tmux/sessions/close", post(routes::tmux_close_session))
         .route("/v1/mcp/servers", post(routes::mcp_list_servers))
         .route("/v1/mcp/tools", post(routes::mcp_list_tools))
         .route("/v1/mcp/callTool", post(routes::mcp_call_tool))
@@ -818,6 +828,20 @@ mod tests {
         assert!(openapi.contains("workingDirectory"));
         assert!(openapi.contains("Optional command working directory"));
         assert!(openapi.contains("Optional default working directory for all batch elements"));
+        for tmux_path in [
+            "/v1/tmux/sessions:",
+            "/v1/tmux/panes:",
+            "/v1/tmux/capture:",
+            "/v1/tmux/exec:",
+            "/v1/tmux/paste:",
+            "/v1/tmux/sessions/create:",
+            "/v1/tmux/sessions/close:",
+        ] {
+            assert!(openapi.contains(tmux_path));
+        }
+        assert!(openapi.contains("TmuxExecRequest:"));
+        assert!(openapi.contains("isLikelyShell:"));
+        assert!(!openapi.contains("x-openai-isConsequential: true"));
     }
 
     #[test]

@@ -61,11 +61,11 @@ fn decorate_tool_descriptors(tool_router: &mut ToolRouter<AgenticMcpServer>) {
                 | "tmux.createSession"
                 | "tmux.closeSession"
         );
-        let read_only = !matches!(
+        let read_only = tool_is_read_only(name);
+        let destructive = matches!(
             name,
-            "tmux.pasteText" | "tmux.exec" | "tmux.createSession" | "tmux.closeSession"
+            "killSession" | "tmux.closeSession" | "room.notebook.remove"
         );
-        let destructive = matches!(name, "tmux.closeSession");
         route.attr.annotations = Some(
             ToolAnnotations::new()
                 .read_only(read_only)
@@ -80,6 +80,25 @@ fn decorate_tool_descriptors(tool_router: &mut ToolRouter<AgenticMcpServer>) {
         );
         route.attr.meta = Some(Meta(meta));
     }
+}
+
+fn tool_is_read_only(name: &str) -> bool {
+    !matches!(
+        name,
+        "exec"
+            | "batchExec"
+            | "startSession"
+            | "killSession"
+            | "tmux.pasteText"
+            | "tmux.exec"
+            | "tmux.createSession"
+            | "tmux.closeSession"
+            | "mcpCallTool"
+            | "user.notify.send"
+            | "room.notebook.append"
+            | "room.notebook.update"
+            | "room.notebook.remove"
+    )
 }
 
 fn object_schema() -> Map<String, Value> {
@@ -1602,6 +1621,36 @@ fn notify_route_error_message(error: &NotifyRouteError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tool_read_only_hints_match_side_effect_semantics() {
+        for name in [
+            "listAgents",
+            "listSessions",
+            "tmux.listSessions",
+            "tmux.listPanes",
+            "tmux.capturePane",
+            "room.notebook.search",
+        ] {
+            assert!(tool_is_read_only(name), "{name} should be read-only");
+        }
+        for name in [
+            "exec",
+            "startSession",
+            "killSession",
+            "tmux.exec",
+            "tmux.pasteText",
+            "tmux.createSession",
+            "tmux.closeSession",
+            "mcpCallTool",
+            "user.notify.send",
+            "room.notebook.append",
+            "room.notebook.update",
+            "room.notebook.remove",
+        ] {
+            assert!(!tool_is_read_only(name), "{name} should not be read-only");
+        }
+    }
 
     #[test]
     fn tmux_paste_schema_exposes_confirmation_default_field() {
