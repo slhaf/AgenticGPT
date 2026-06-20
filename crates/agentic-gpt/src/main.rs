@@ -3,6 +3,7 @@ mod config;
 mod confirmation;
 mod exec;
 mod hub;
+mod instance_lock;
 mod mcp;
 mod notebook;
 mod notify;
@@ -165,6 +166,7 @@ async fn run(config_path: PathBuf, run_mode: RunMode) -> Result<()> {
         config_path.display(),
     ));
     ensure_parent(&config_path)?;
+    let _instance_lock = instance_lock::InstanceLock::acquire(&config_path, ".run.lock", "agent")?;
     if !config_path.exists() {
         write_config_with_backup(&config_path, &Config::default_config()?)?;
         log_info("default config created".to_string());

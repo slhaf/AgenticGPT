@@ -1,5 +1,6 @@
 mod agents;
 mod db;
+mod instance_lock;
 mod mcp_server;
 mod notify;
 mod oauth;
@@ -116,9 +117,9 @@ async fn main() -> Result<()> {
     let db_path = cli.db.unwrap_or_else(default_db_path);
     let config_path = cli.config.unwrap_or_else(default_config_path);
     let config = HubConfig::load_or_default(&config_path)?;
-    let conn = open_db(&db_path)?;
     match cli.command {
         HubCommandCli::Init => {
+            let conn = open_db(&db_path)?;
             init_db(&conn)?;
             config.write_if_missing(&config_path)?;
             println!("initialized {}", db_path.display());
@@ -129,11 +130,15 @@ async fn main() -> Result<()> {
             api_key,
             public_base_url,
         } => {
-            init_db(&conn)?;
+            let _instance_lock =
+                instance_lock::InstanceLock::acquire(&db_path, ".serve.lock", "hub")?;
             config.write_if_missing(&config_path)?;
+            let conn = open_db(&db_path)?;
+            init_db(&conn)?;
             serve(bind, api_key, public_base_url, conn, config).await?;
         }
         HubCommandCli::Agent { command } => {
+            let conn = open_db(&db_path)?;
             init_db(&conn)?;
             handle_agent_command(&conn, command)?;
         }
