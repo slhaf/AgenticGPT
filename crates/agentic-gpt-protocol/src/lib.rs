@@ -542,6 +542,18 @@ pub struct TmuxExecRequest {
     pub args: Vec<String>,
     #[serde(default)]
     pub need_confirm: bool,
+    #[serde(default = "default_tmux_exec_wait_ms")]
+    pub wait_ms: u64,
+    #[serde(default = "default_tmux_exec_capture_lines")]
+    pub capture_lines: u32,
+}
+
+fn default_tmux_exec_wait_ms() -> u64 {
+    300
+}
+
+fn default_tmux_exec_capture_lines() -> u32 {
+    120
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -769,6 +781,8 @@ mod tmux_tests {
         assert_eq!(request.program, "git");
         assert_eq!(request.args, ["status"]);
         assert!(!request.need_confirm);
+        assert_eq!(request.wait_ms, 300);
+        assert_eq!(request.capture_lines, 120);
     }
 }
 

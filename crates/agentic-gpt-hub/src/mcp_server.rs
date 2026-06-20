@@ -31,7 +31,7 @@ use crate::state::HubState;
 use crate::utils::random_id;
 use crate::{default_config_summary, MAX_WAIT_SECONDS, REQUEST_TIMEOUT_SECS};
 
-const MCP_INSTRUCTIONS: &str = "Agentic GPT Hub provides three execution layers. Use exec for short, one-shot inspection, detection, and deterministic tasks where an exit code is required. Use startSession for long-running or background managed processes whose lifecycle and output should be observed through session tools. Use tmux as the persistent shared workspace for stateful development, iterative debugging, TUIs, and user-agent handoff. For tmux work, discover the workspace with tmux.listSessions and tmux.listPanes, inspect it with tmux.capturePane, then use tmux.exec for shell panes or tmux.pasteText for non-shell panes. tmux.exec confirms submission to the interactive shell, not command completion; use capturePane to observe progress and exec when a deterministic result is required. Commands remain subject to Agentic local policy, path policy, confirmation, and audit.";
+const MCP_INSTRUCTIONS: &str = "Agentic GPT Hub provides three execution layers. Use exec for short, one-shot inspection, detection, and deterministic tasks where an exit code is required. Use startSession for long-running or background managed processes whose lifecycle and output should be observed through session tools. Use tmux as the persistent shared workspace for stateful development, iterative debugging, TUIs, and user-agent handoff. For tmux work, discover the workspace with tmux.listSessions and tmux.listPanes, inspect it with tmux.capturePane, then use tmux.exec for shell panes or tmux.pasteText for non-shell panes. tmux.exec confirms submission to the interactive shell and returns a bounded post-submit pane snapshot; it is still not proof of command completion, so use exec when a deterministic exit status is required. Commands remain subject to Agentic local policy, path policy, confirmation, and audit.";
 
 #[derive(Clone)]
 pub(crate) struct AgenticMcpServer {
@@ -744,7 +744,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "tmux.exec",
-        description = "Submit one structured program and argument vector atomically to an existing tmux shell pane for persistent collaborative work. The pane cwd, command policy, path policy, confirmation, and audit apply. Submission is not proof of completion; observe the pane with tmux.capturePane, or use exec when an exit status is required."
+        description = "Submit one structured program and argument vector atomically to an existing tmux shell pane for persistent collaborative work. The pane cwd, command policy, path policy, confirmation, and audit apply. Returns a bounded post-submit pane snapshot after waitMs; this is not proof of completion, so use exec when an exit status is required."
     )]
     async fn tmux_exec(
         &self,
@@ -759,6 +759,8 @@ impl AgenticMcpServer {
                 program: params.program,
                 args: params.args,
                 need_confirm: params.need_confirm.unwrap_or(false),
+                wait_ms: params.wait_ms.unwrap_or(300),
+                capture_lines: params.capture_lines.unwrap_or(120),
             },
         };
         let value = request_agent(&self.state, &params.agent_id, command, 65)
@@ -1336,6 +1338,16 @@ struct TmuxExecArgs {
     #[serde(default)]
     #[schemars(description = "Force local confirmation in addition to configured policy.")]
     need_confirm: Option<bool>,
+    #[serde(default)]
+    #[schemars(
+        description = "Milliseconds to wait before returning the post-submit pane snapshot. Defaults to 300 and caps at 5000."
+    )]
+    wait_ms: Option<u64>,
+    #[serde(default)]
+    #[schemars(
+        description = "Number of tmux history lines to include in the post-submit snapshot. Defaults to 120, caps at 5000, and 0 disables the snapshot."
+    )]
+    capture_lines: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
@@ -1658,6 +1670,13 @@ mod tests {
             serde_json::to_string(&rmcp::schemars::schema_for!(TmuxPasteTextArgs)).unwrap();
         assert!(schema.contains("needConfirm"));
         assert!(schema.contains("submit"));
+    }
+
+    #[test]
+    fn tmux_exec_schema_exposes_snapshot_fields() {
+        let schema = serde_json::to_string(&rmcp::schemars::schema_for!(TmuxExecArgs)).unwrap();
+        assert!(schema.contains("waitMs"));
+        assert!(schema.contains("captureLines"));
     }
 
     #[test]

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Agentic GPT Hub API
-  version: 0.2.0
+  version: 0.3.1
 servers:
   - url: https://agentic-gpt.example.com
 security:
@@ -328,7 +328,7 @@ paths:
   /v1/tmux/exec:
     post:
       operationId: tmuxExec
-      description: Submit one structured program and argument vector atomically to a tmux shell pane. Pane cwd, command policy, path policy, confirmation, and audit apply. Submission does not prove completion; use tmuxCapturePane afterward or exec when an exit status is required.
+      description: Submit one structured program and argument vector atomically to a tmux shell pane. Pane cwd, command policy, path policy, confirmation, and audit apply. Returns a bounded post-submit pane snapshot after waitMs. Submission does not prove completion; use exec when an exit status is required.
       x-openai-isConsequential: false
       requestBody:
         required: true
@@ -910,6 +910,18 @@ components:
           type: boolean
           default: false
           description: Force confirmation in addition to configured command policy.
+        waitMs:
+          type: integer
+          minimum: 0
+          maximum: 5000
+          default: 300
+          description: Milliseconds to wait before returning the post-submit pane snapshot.
+        captureLines:
+          type: integer
+          minimum: 0
+          maximum: 5000
+          default: 120
+          description: Number of tmux history lines included in the post-submit snapshot. Set to 0 to disable the snapshot.
     TmuxPasteRequest:
       type: object
       required:
@@ -965,6 +977,24 @@ components:
       properties:
         accepted:
           type: boolean
+        waitMs:
+          type: integer
+        captureLines:
+          type: integer
+        snapshot:
+          type: object
+          additionalProperties: true
+          properties:
+            target:
+              type: string
+            waitMs:
+              type: integer
+            lines:
+              type: integer
+            capture:
+              type: string
+            error:
+              $ref: "#/components/schemas/ErrorDetail"
         error:
           $ref: "#/components/schemas/ErrorDetail"
     ErrorDetail:

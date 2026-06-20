@@ -64,6 +64,18 @@ pub(crate) struct TmuxExecActionRequest {
     args: Vec<String>,
     #[serde(default)]
     need_confirm: bool,
+    #[serde(default = "default_tmux_exec_wait_ms")]
+    wait_ms: u64,
+    #[serde(default = "default_tmux_exec_capture_lines")]
+    capture_lines: u32,
+}
+
+fn default_tmux_exec_wait_ms() -> u64 {
+    300
+}
+
+fn default_tmux_exec_capture_lines() -> u32 {
+    120
 }
 
 #[derive(Deserialize)]
@@ -490,6 +502,8 @@ pub(crate) async fn tmux_exec(
                 program: payload.program,
                 args: payload.args,
                 need_confirm: payload.need_confirm,
+                wait_ms: payload.wait_ms,
+                capture_lines: payload.capture_lines,
             },
         },
         65,

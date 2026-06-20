@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use agentic_gpt_protocol::{
     TmuxCapturePaneRequest, TmuxCloseSessionRequest, TmuxCreateSessionRequest, TmuxExecRequest,
@@ -11,6 +11,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
+use tokio::time::sleep;
 use uuid::Uuid;
 
 use crate::config::Config;
@@ -19,6 +20,8 @@ use crate::{confirmation, exec, AppState};
 
 const SESSION_FORMAT: &str = "#{session_name}\t#{session_windows}\t#{session_attached}\t#{session_created}\t#{session_activity}";
 const PANE_FORMAT: &str = "#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_id}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_width}\t#{pane_height}\t#{pane_pid}\t#{pane_in_mode}\t#{pane_dead}";
+const MAX_TMUX_EXEC_WAIT_MS: u64 = 5_000;
+const MAX_TMUX_CAPTURE_LINES: u32 = 5_000;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -254,15 +257,50 @@ async fn exec_inner(state: &AppState, request: TmuxExecRequest) -> Value {
     let mut bytes = command.as_bytes().to_vec();
     bytes.push(b'\r');
     match paste_bytes(&request.target, bytes).await {
-        Ok(()) => json!({
-            "target": request.target,
-            "program": request.program,
-            "args": request.args,
-            "currentPath": pane.current_path,
-            "policyDecision": format!("{decision:?}").to_lowercase(),
-            "accepted": true
-        }),
+        Ok(()) => {
+            let wait_ms = request.wait_ms.min(MAX_TMUX_EXEC_WAIT_MS);
+            let capture_lines = request.capture_lines.min(MAX_TMUX_CAPTURE_LINES);
+            let mut result = json!({
+                "target": request.target,
+                "program": request.program,
+                "args": request.args,
+                "currentPath": pane.current_path,
+                "policyDecision": format!("{decision:?}").to_lowercase(),
+                "accepted": true,
+                "waitMs": wait_ms,
+                "captureLines": capture_lines
+            });
+            if capture_lines > 0 {
+                result["snapshot"] =
+                    post_submit_snapshot(&result["target"], wait_ms, capture_lines).await;
+            }
+            result
+        }
         Err(error) => error.value_with_current_path(&pane.current_path),
+    }
+}
+
+async fn post_submit_snapshot(target: &Value, wait_ms: u64, lines: u32) -> Value {
+    let target = target.as_str().unwrap_or_default();
+    if wait_ms > 0 {
+        sleep(Duration::from_millis(wait_ms)).await;
+    }
+    match tmux_output([
+        "capture-pane".to_string(),
+        "-t".to_string(),
+        target.to_string(),
+        "-p".to_string(),
+        "-S".to_string(),
+        format!("-{lines}"),
+    ])
+    .await
+    {
+        Ok(capture) => {
+            json!({ "target": target, "waitMs": wait_ms, "lines": lines, "capture": capture })
+        }
+        Err(error) => {
+            json!({ "target": target, "waitMs": wait_ms, "lines": lines, "error": error.error_detail() })
+        }
     }
 }
 
@@ -673,13 +711,17 @@ impl TmuxError {
         }
     }
 
+    fn error_detail(&self) -> Value {
+        json!({ "code": self.code, "message": self.message })
+    }
+
     pub(crate) fn value(&self) -> Value {
-        json!({ "error": { "code": self.code, "message": self.message } })
+        json!({ "error": self.error_detail() })
     }
 
     fn value_with_current_path(&self, current_path: &str) -> Value {
         json!({
-            "error": { "code": self.code, "message": self.message },
+            "error": self.error_detail(),
             "currentPath": current_path
         })
     }
