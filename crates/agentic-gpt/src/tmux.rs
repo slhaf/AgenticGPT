@@ -56,14 +56,12 @@ pub(crate) async fn list_sessions() -> Value {
 }
 
 pub(crate) async fn list_panes(request: TmuxListPanesRequest) -> Value {
-    let mut args = vec!["list-panes".to_string(), "-a".to_string()];
     if let Some(session) = request.session.as_deref() {
         if let Err(error) = validate_identifier("session", session) {
             return error.value();
         }
-        args.extend(["-t".to_string(), session.to_string()]);
     }
-    args.extend(["-F".to_string(), PANE_FORMAT.to_string()]);
+    let args = list_panes_arguments(request.session.as_deref());
     match tmux_output(args).await {
         Ok(stdout) => json!({ "session": request.session, "panes": parse_panes(&stdout) }),
         Err(error) if error.code == "tmux_server_not_running" && request.session.is_none() => {
@@ -71,6 +69,17 @@ pub(crate) async fn list_panes(request: TmuxListPanesRequest) -> Value {
         }
         Err(error) => error.value(),
     }
+}
+
+fn list_panes_arguments(session: Option<&str>) -> Vec<String> {
+    let mut args = vec!["list-panes".to_string()];
+    if let Some(session) = session {
+        args.extend(["-t".to_string(), session.to_string()]);
+    } else {
+        args.push("-a".to_string());
+    }
+    args.extend(["-F".to_string(), PANE_FORMAT.to_string()]);
+    args
 }
 
 pub(crate) async fn capture_pane(request: TmuxCapturePaneRequest) -> Value {
@@ -198,20 +207,24 @@ async fn exec_inner(state: &AppState, request: TmuxExecRequest) -> Value {
             "tmux_shell_not_ready",
             "tmux.exec requires a live shell pane outside tmux copy mode",
         )
-        .value();
+        .value_with_current_path(&pane.current_path);
     }
 
     let config = state.config.read().await.clone();
     let cwd = match exec::resolve_working_directory(&config, Some(&pane.current_path)) {
         Ok(cwd) => cwd,
-        Err(reason) => return TmuxError::new(&reason, reason.clone()).value(),
+        Err(reason) => {
+            return TmuxError::new(&reason, reason.clone())
+                .value_with_current_path(&pane.current_path);
+        }
     };
     if request.program == "cd" {
         if let Err(reason) = validate_cd_target(&config, &cwd, &request.args) {
-            return TmuxError::new(&reason, reason.clone()).value();
+            return TmuxError::new(&reason, reason.clone())
+                .value_with_current_path(&pane.current_path);
         }
     } else if let Err(reason) = exec::preflight(&config, &cwd, &request.program, &request.args) {
-        return TmuxError::new(&reason, reason.clone()).value();
+        return TmuxError::new(&reason, reason.clone()).value_with_current_path(&pane.current_path);
     }
     let decision = policy_decision_for_mode(
         &config,
@@ -221,14 +234,16 @@ async fn exec_inner(state: &AppState, request: TmuxExecRequest) -> Value {
         request.need_confirm,
     );
     if decision == PolicyDecision::Deny {
-        return TmuxError::new("policy_denied", "command was denied by local policy").value();
+        return TmuxError::new("policy_denied", "command was denied by local policy")
+            .value_with_current_path(&pane.current_path);
     }
     if decision == PolicyDecision::Confirm
         && confirmation::request_confirmation(state, &config, None, &request.program, &request.args)
             .await
             != "allow_once"
     {
-        return TmuxError::new("confirmation_denied", "tmux command was not approved").value();
+        return TmuxError::new("confirmation_denied", "tmux command was not approved")
+            .value_with_current_path(&pane.current_path);
     }
 
     let mut command = shell_quote(&request.program);
@@ -247,7 +262,7 @@ async fn exec_inner(state: &AppState, request: TmuxExecRequest) -> Value {
             "policyDecision": format!("{decision:?}").to_lowercase(),
             "accepted": true
         }),
-        Err(error) => error.value(),
+        Err(error) => error.value_with_current_path(&pane.current_path),
     }
 }
 
@@ -661,6 +676,13 @@ impl TmuxError {
     pub(crate) fn value(&self) -> Value {
         json!({ "error": { "code": self.code, "message": self.message } })
     }
+
+    fn value_with_current_path(&self, current_path: &str) -> Value {
+        json!({
+            "error": { "code": self.code, "message": self.message },
+            "currentPath": current_path
+        })
+    }
 }
 
 impl std::fmt::Display for TmuxError {
@@ -704,6 +726,14 @@ mod tests {
             Err("tmux_cd_requires_explicit_path".to_string())
         );
         assert_eq!(cd_target_arg(&["/tmp".to_string()]), Ok("/tmp"));
+    }
+
+    #[test]
+    fn session_scoped_pane_listing_does_not_request_all_panes() {
+        let scoped = list_panes_arguments(Some("agentic"));
+        assert_eq!(scoped, ["list-panes", "-t", "agentic", "-F", PANE_FORMAT]);
+        let all = list_panes_arguments(None);
+        assert!(all.iter().any(|argument| argument == "-a"));
     }
 }
 use crate::audit::{write_audit, AuditRecord};
