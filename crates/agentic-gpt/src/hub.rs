@@ -14,7 +14,7 @@ use tokio_tungstenite::{
 };
 
 use crate::{
-    confirmation, exec, mcp, notebook, notify, sessions, tmux,
+    confirmation, diary, exec, mcp, notebook, notify, sessions, tmux,
     utils::{
         command_preview, log_info, log_warn, CONNECT_TIMEOUT_SECS, HEARTBEAT_ACK_TIMEOUT_SECS,
         HEARTBEAT_INTERVAL_SECS, RECONNECT_DELAY_SECS,
@@ -550,6 +550,54 @@ pub(crate) async fn handle_hub_command(state: AppState, command: HubCommand) -> 
                 match notebook::remove(&state, payload).await {
                     Ok(result) => serde_json::to_value(result)?,
                     Err(error) => notebook_command_error("room_notebook_remove_failed", error),
+                }
+            };
+            send_response(&state, &request_id, result).await?;
+        }
+        HubCommand::RoomDiaryAppend {
+            request_id,
+            payload,
+        } => {
+            let result = if state.run_mode != RunMode::Room {
+                room_agent_required_error()
+            } else {
+                match diary::append(&state, payload).await {
+                    Ok(result) => serde_json::to_value(result)?,
+                    Err(error) => serde_json::json!({
+                        "error": { "code": "room_diary_append_failed", "message": error.to_string() }
+                    }),
+                }
+            };
+            send_response(&state, &request_id, result).await?;
+        }
+        HubCommand::RoomDiaryRecent {
+            request_id,
+            payload,
+        } => {
+            let result = if state.run_mode != RunMode::Room {
+                room_agent_required_error()
+            } else {
+                match diary::recent(&state, payload).await {
+                    Ok(result) => serde_json::to_value(result)?,
+                    Err(error) => serde_json::json!({
+                        "error": { "code": "room_diary_recent_failed", "message": error.to_string() }
+                    }),
+                }
+            };
+            send_response(&state, &request_id, result).await?;
+        }
+        HubCommand::RoomDiarySelectExact {
+            request_id,
+            payload,
+        } => {
+            let result = if state.run_mode != RunMode::Room {
+                room_agent_required_error()
+            } else {
+                match diary::select_exact(&state, payload).await {
+                    Ok(result) => serde_json::to_value(result)?,
+                    Err(error) => serde_json::json!({
+                        "error": { "code": "room_diary_select_exact_failed", "message": error.to_string() }
+                    }),
                 }
             };
             send_response(&state, &request_id, result).await?;

@@ -430,6 +430,65 @@ pub struct NotebookCurrentResponse {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct DiaryEntry {
+    pub id: String,
+    pub created_at: DateTime<Utc>,
+    pub date: String,
+    pub time_hint: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    pub entry: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiaryAppendRequest {
+    #[serde(default)]
+    pub time_hint: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    pub entry: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiaryAppendResponse {
+    pub id: String,
+    pub path: String,
+    pub created_at: DateTime<Utc>,
+    pub date: String,
+    pub created: bool,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiaryRecentRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub days: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiarySelectExactRequest {
+    pub year: i32,
+    pub month: u32,
+    pub day: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiaryEntriesResponse {
+    pub entries: Vec<DiaryEntry>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TaskResult {
     pub agent_id: String,
     pub task_id: String,
@@ -716,6 +775,21 @@ pub enum HubCommand {
     RoomNotebookRemove {
         request_id: String,
         payload: NotebookRemoveRequest,
+    },
+    #[serde(rename = "room.diary.append")]
+    RoomDiaryAppend {
+        request_id: String,
+        payload: DiaryAppendRequest,
+    },
+    #[serde(rename = "room.diary.recent")]
+    RoomDiaryRecent {
+        request_id: String,
+        payload: DiaryRecentRequest,
+    },
+    #[serde(rename = "room.diary.selectExact")]
+    RoomDiarySelectExact {
+        request_id: String,
+        payload: DiarySelectExactRequest,
     },
 }
 

@@ -1,6 +1,7 @@
 mod audit;
 mod config;
 mod confirmation;
+mod diary;
 mod exec;
 mod hub;
 mod instance_lock;

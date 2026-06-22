@@ -331,7 +331,10 @@ pub(crate) fn command_request_id(command: &HubCommand) -> &str {
         | HubCommand::RoomNotebookSearch { request_id, .. }
         | HubCommand::RoomNotebookCurrent { request_id, .. }
         | HubCommand::RoomNotebookUpdate { request_id, .. }
-        | HubCommand::RoomNotebookRemove { request_id, .. } => request_id,
+        | HubCommand::RoomNotebookRemove { request_id, .. }
+        | HubCommand::RoomDiaryAppend { request_id, .. }
+        | HubCommand::RoomDiaryRecent { request_id, .. }
+        | HubCommand::RoomDiarySelectExact { request_id, .. } => request_id,
     }
 }
 
@@ -361,7 +364,10 @@ fn set_command_request_id(command: &mut HubCommand, value: String) {
         | HubCommand::RoomNotebookSearch { request_id, .. }
         | HubCommand::RoomNotebookCurrent { request_id, .. }
         | HubCommand::RoomNotebookUpdate { request_id, .. }
-        | HubCommand::RoomNotebookRemove { request_id, .. } => *request_id = value,
+        | HubCommand::RoomNotebookRemove { request_id, .. }
+        | HubCommand::RoomDiaryAppend { request_id, .. }
+        | HubCommand::RoomDiaryRecent { request_id, .. }
+        | HubCommand::RoomDiarySelectExact { request_id, .. } => *request_id = value,
     }
 }
 

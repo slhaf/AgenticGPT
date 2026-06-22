@@ -1,10 +1,10 @@
 use agentic_gpt_protocol::{
-    BatchExecRequest, ExecElement, ExecRequest, HubCommand, McpCallToolRequest,
-    McpListToolsRequest, NotebookAppendRequest, NotebookCurrentRequest, NotebookRecentRequest,
-    NotebookRemoveRequest, NotebookSearchRequest, NotebookSelectExactRequest,
-    NotebookUpdateRequest, NotificationAction, PassageSignificance, SessionInfo,
-    TmuxCapturePaneRequest, TmuxCloseSessionRequest, TmuxCreateSessionRequest, TmuxExecRequest,
-    TmuxListPanesRequest, TmuxPasteTextRequest, UserNotifySendRequest,
+    BatchExecRequest, DiaryAppendRequest, DiaryRecentRequest, DiarySelectExactRequest, ExecElement,
+    ExecRequest, HubCommand, McpCallToolRequest, McpListToolsRequest, NotebookAppendRequest,
+    NotebookCurrentRequest, NotebookRecentRequest, NotebookRemoveRequest, NotebookSearchRequest,
+    NotebookSelectExactRequest, NotebookUpdateRequest, NotificationAction, PassageSignificance,
+    SessionInfo, TmuxCapturePaneRequest, TmuxCloseSessionRequest, TmuxCreateSessionRequest,
+    TmuxExecRequest, TmuxListPanesRequest, TmuxPasteTextRequest, UserNotifySendRequest,
 };
 use axum::extract::{Request, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -98,6 +98,7 @@ fn tool_is_read_only(name: &str) -> bool {
             | "room.notebook.append"
             | "room.notebook.update"
             | "room.notebook.remove"
+            | "room.diary.append"
     )
 }
 
@@ -285,6 +286,21 @@ async fn call_app_tool(server: &AgenticMcpServer, params: Value) -> Result<Value
         "room.notebook.remove" => {
             server
                 .room_notebook_remove(Parameters(decode_args(arguments)?))
+                .await
+        }
+        "room.diary.append" => {
+            server
+                .room_diary_append(Parameters(decode_args(arguments)?))
+                .await
+        }
+        "room.diary.recent" => {
+            server
+                .room_diary_recent(Parameters(decode_args(arguments)?))
+                .await
+        }
+        "room.diary.selectExact" => {
+            server
+                .room_diary_select_exact(Parameters(decode_args(arguments)?))
                 .await
         }
         _ => return Err(format!("Unknown tool: {name}")),
@@ -1156,6 +1172,87 @@ impl AgenticMcpServer {
         .unwrap_or_else(room_route_error_value);
         Ok(result_from_value(value))
     }
+
+    #[tool(
+        name = "room.diary.append",
+        description = "Append one diary entry to the active Room Agent. The entry is stored under the current room-timezone day in workspace diary storage. No agentId is used."
+    )]
+    async fn room_diary_append(
+        &self,
+        params: Parameters<RoomDiaryAppendArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let params = params.0;
+        let payload = DiaryAppendRequest {
+            time_hint: params.time_hint,
+            tags: params.tags.unwrap_or_default(),
+            entry: params.entry,
+        };
+        let value = request_active_room(
+            &self.state,
+            HubCommand::RoomDiaryAppend {
+                request_id: random_id("req"),
+                payload: payload.clone(),
+            },
+            REQUEST_TIMEOUT_SECS,
+        )
+        .await
+        .unwrap_or_else(room_route_error_value);
+        Ok(result_from_value(value))
+    }
+
+    #[tool(
+        name = "room.diary.recent",
+        description = "Return recent diary entries from the active Room Agent. Scans recent room-timezone calendar days in workspace diary storage. No agentId is used."
+    )]
+    async fn room_diary_recent(
+        &self,
+        params: Parameters<RoomDiaryRecentArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let params = params.0;
+        let payload = DiaryRecentRequest {
+            days: params.days,
+            limit: params.limit,
+        };
+        let value = request_active_room(
+            &self.state,
+            HubCommand::RoomDiaryRecent {
+                request_id: random_id("req"),
+                payload: payload.clone(),
+            },
+            REQUEST_TIMEOUT_SECS,
+        )
+        .await
+        .unwrap_or_else(room_route_error_value);
+        Ok(result_from_value(value))
+    }
+
+    #[tool(
+        name = "room.diary.selectExact",
+        description = "Return diary entries for one exact room-timezone calendar day from the active Room Agent workspace diary storage. No agentId is used."
+    )]
+    async fn room_diary_select_exact(
+        &self,
+        params: Parameters<RoomDiarySelectExactArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let params = params.0;
+        let payload = DiarySelectExactRequest {
+            year: params.year,
+            month: params.month,
+            day: params.day,
+            limit: params.limit,
+        };
+        let value = request_active_room(
+            &self.state,
+            HubCommand::RoomDiarySelectExact {
+                request_id: random_id("req"),
+                payload: payload.clone(),
+            },
+            REQUEST_TIMEOUT_SECS,
+        )
+        .await
+        .unwrap_or_else(room_route_error_value);
+        Ok(result_from_value(value))
+    }
 }
 
 impl AgenticMcpServer {
@@ -1555,6 +1652,48 @@ struct RoomNotebookRemoveArgs {
     id: String,
 }
 
+#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct RoomDiaryAppendArgs {
+    #[serde(default)]
+    #[schemars(
+        description = "Optional daypart label such as morning, noon, afternoon, evening, bedtime, or unknown. Stored as metadata only; the date is derived from the current room timezone."
+    )]
+    time_hint: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "Optional labels included with the diary entry.")]
+    tags: Option<Vec<String>>,
+    #[schemars(description = "Diary entry text to append.")]
+    entry: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct RoomDiaryRecentArgs {
+    #[serde(default)]
+    #[schemars(
+        description = "Number of recent room-timezone calendar days to scan. Defaults to 3 and is capped at 30."
+    )]
+    days: Option<u32>,
+    #[serde(default)]
+    #[schemars(description = "Maximum diary entries returned, capped by the server.")]
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct RoomDiarySelectExactArgs {
+    #[schemars(description = "Year in the configured room timezone calendar.")]
+    year: i32,
+    #[schemars(description = "Month in the configured room timezone calendar, 1-12.")]
+    month: u32,
+    #[schemars(description = "Day of month in the configured room timezone calendar.")]
+    day: u32,
+    #[serde(default)]
+    #[schemars(description = "Maximum diary entries returned, capped by the server.")]
+    limit: Option<usize>,
+}
+
 fn ok_json(value: Value) -> CallToolResult {
     CallToolResult::structured(value)
 }
@@ -1643,6 +1782,8 @@ mod tests {
             "tmux.listPanes",
             "tmux.capturePane",
             "room.notebook.search",
+            "room.diary.recent",
+            "room.diary.selectExact",
         ] {
             assert!(tool_is_read_only(name), "{name} should be read-only");
         }
@@ -1659,6 +1800,7 @@ mod tests {
             "room.notebook.append",
             "room.notebook.update",
             "room.notebook.remove",
+            "room.diary.append",
         ] {
             assert!(!tool_is_read_only(name), "{name} should not be read-only");
         }
@@ -1690,6 +1832,9 @@ mod tests {
             serde_json::to_string(&rmcp::schemars::schema_for!(RoomNotebookCurrentArgs)).unwrap(),
             serde_json::to_string(&rmcp::schemars::schema_for!(RoomNotebookUpdateArgs)).unwrap(),
             serde_json::to_string(&rmcp::schemars::schema_for!(RoomNotebookRemoveArgs)).unwrap(),
+            serde_json::to_string(&rmcp::schemars::schema_for!(RoomDiaryAppendArgs)).unwrap(),
+            serde_json::to_string(&rmcp::schemars::schema_for!(RoomDiaryRecentArgs)).unwrap(),
+            serde_json::to_string(&rmcp::schemars::schema_for!(RoomDiarySelectExactArgs)).unwrap(),
         ];
         for schema in schemas {
             assert!(!schema.contains("agentId"));
