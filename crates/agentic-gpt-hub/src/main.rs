@@ -217,12 +217,6 @@ async fn serve(
         )
         .route("/v1/room/notebook/update", post(room::room_notebook_update))
         .route("/v1/room/notebook/remove", post(room::room_notebook_remove))
-        .route("/v1/room/diary/append", post(room::room_diary_append))
-        .route("/v1/room/diary/recent", post(room::room_diary_recent))
-        .route(
-            "/v1/room/diary/selectExact",
-            post(room::room_diary_select_exact),
-        )
         .route("/mcp", get(mcp_server::mcp_get).post(mcp_server::mcp_post))
         .route(
             "/.well-known/oauth-protected-resource",
@@ -887,9 +881,6 @@ mod tests {
             "NotebookCurrentRequest:",
             "NotebookUpdateRequest:",
             "NotebookRemoveRequest:",
-            "DiaryAppendRequest:",
-            "DiaryRecentRequest:",
-            "DiarySelectExactRequest:",
         ] {
             let mut in_section = false;
             let mut section = String::new();
@@ -913,20 +904,10 @@ mod tests {
                 "{schema} unexpectedly contains agentId"
             );
         }
-        for forbidden in [
-            "recentWeek",
-            "recentMonth",
-            "selectPast",
-            "roomDiarySearch",
-            "roomDiaryUpdate",
-            "roomDiaryRemove",
-        ] {
+        for forbidden in ["recentWeek", "recentMonth", "selectPast"] {
             assert!(!openapi.contains(forbidden));
         }
         assert!(openapi.contains("roomNotebookUpdate"));
         assert!(openapi.contains("roomNotebookRemove"));
-        assert!(openapi.contains("roomDiaryAppend"));
-        assert!(openapi.contains("roomDiaryRecent"));
-        assert!(openapi.contains("roomDiarySelectExact"));
     }
 }

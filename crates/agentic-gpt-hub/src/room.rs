@@ -1,7 +1,7 @@
 use agentic_gpt_protocol::{
-    AgentRole, DiaryAppendRequest, DiaryRecentRequest, DiarySelectExactRequest, HubCommand,
-    NotebookAppendRequest, NotebookCurrentRequest, NotebookRecentRequest, NotebookRemoveRequest,
-    NotebookSearchRequest, NotebookSelectExactRequest, NotebookUpdateRequest,
+    AgentRole, HubCommand, NotebookAppendRequest, NotebookCurrentRequest, NotebookRecentRequest,
+    NotebookRemoveRequest, NotebookSearchRequest, NotebookSelectExactRequest,
+    NotebookUpdateRequest,
 };
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
@@ -143,57 +143,6 @@ pub(crate) async fn room_notebook_remove(
             payload,
         },
         "room_notebook_remove_timeout",
-    )
-    .await
-}
-
-pub(crate) async fn room_diary_append(
-    State(state): State<HubState>,
-    headers: HeaderMap,
-    Json(payload): Json<DiaryAppendRequest>,
-) -> Response {
-    forward_room_command(
-        state,
-        headers,
-        HubCommand::RoomDiaryAppend {
-            request_id: random_id("req"),
-            payload,
-        },
-        "room_diary_append_timeout",
-    )
-    .await
-}
-
-pub(crate) async fn room_diary_recent(
-    State(state): State<HubState>,
-    headers: HeaderMap,
-    Json(payload): Json<DiaryRecentRequest>,
-) -> Response {
-    forward_room_command(
-        state,
-        headers,
-        HubCommand::RoomDiaryRecent {
-            request_id: random_id("req"),
-            payload,
-        },
-        "room_diary_recent_timeout",
-    )
-    .await
-}
-
-pub(crate) async fn room_diary_select_exact(
-    State(state): State<HubState>,
-    headers: HeaderMap,
-    Json(payload): Json<DiarySelectExactRequest>,
-) -> Response {
-    forward_room_command(
-        state,
-        headers,
-        HubCommand::RoomDiarySelectExact {
-            request_id: random_id("req"),
-            payload,
-        },
-        "room_diary_select_exact_timeout",
     )
     .await
 }
