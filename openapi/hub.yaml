@@ -703,6 +703,78 @@ paths:
           $ref: "#/components/responses/NotFound"
         "504":
           $ref: "#/components/responses/GatewayTimeout"
+  /v1/room/diary/append:
+    post:
+      operationId: roomDiaryAppend
+      description: Append one diary entry to the active Room Agent. The entry is stored under the current room-timezone day in workspace diary storage. No agentId is used.
+      x-openai-isConsequential: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DiaryAppendRequest"
+      responses:
+        "200":
+          description: Appended room diary entry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DiaryAppendResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+  /v1/room/diary/recent:
+    post:
+      operationId: roomDiaryRecent
+      description: Return recent diary entries from the active Room Agent. Scans recent room-timezone calendar days in workspace diary storage. No agentId is used.
+      x-openai-isConsequential: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DiaryRecentRequest"
+      responses:
+        "200":
+          description: Recent room diary entries.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DiaryEntriesResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+  /v1/room/diary/selectExact:
+    post:
+      operationId: roomDiarySelectExact
+      description: Return diary entries for one exact room-timezone calendar day from the active Room Agent workspace diary storage. No agentId is used.
+      x-openai-isConsequential: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DiarySelectExactRequest"
+      responses:
+        "200":
+          description: Room diary entries for one room-timezone calendar day.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DiaryEntriesResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
 components:
   securitySchemes:
     bearerAuth:
@@ -1792,6 +1864,122 @@ components:
           anyOf:
             - $ref: "#/components/schemas/NotebookCurrent"
             - type: "null"
+        warnings:
+          type: array
+          items:
+            type: string
+    DiaryAppendRequest:
+      type: object
+      required:
+        - entry
+      additionalProperties: false
+      properties:
+        timeHint:
+          type: string
+          pattern: ^[A-Za-z0-9_-]+$
+        tags:
+          type: array
+          items:
+            type: string
+        entry:
+          type: string
+          description: Diary entry text to append.
+    DiaryAppendResponse:
+      type: object
+      required:
+        - id
+        - path
+        - createdAt
+        - date
+        - created
+        - warnings
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+        path:
+          type: string
+        createdAt:
+          type: string
+        date:
+          type: string
+        created:
+          type: boolean
+        warnings:
+          type: array
+          items:
+            type: string
+    DiaryRecentRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        days:
+          type: integer
+          minimum: 1
+          maximum: 30
+          default: 3
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 100
+    DiarySelectExactRequest:
+      type: object
+      required:
+        - year
+        - month
+        - day
+      additionalProperties: false
+      properties:
+        year:
+          type: integer
+        month:
+          type: integer
+          minimum: 1
+          maximum: 12
+        day:
+          type: integer
+          minimum: 1
+          maximum: 31
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 100
+    DiaryEntry:
+      type: object
+      required:
+        - id
+        - createdAt
+        - date
+        - timeHint
+        - tags
+        - entry
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+        createdAt:
+          type: string
+        date:
+          type: string
+        timeHint:
+          type: string
+        tags:
+          type: array
+          items:
+            type: string
+        entry:
+          type: string
+    DiaryEntriesResponse:
+      type: object
+      required:
+        - entries
+        - warnings
+      additionalProperties: false
+      properties:
+        entries:
+          type: array
+          items:
+            $ref: "#/components/schemas/DiaryEntry"
         warnings:
           type: array
           items:
