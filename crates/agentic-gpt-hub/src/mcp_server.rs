@@ -1175,7 +1175,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "room.diary.append",
-        description = "Append one diary entry to the active Room Agent. The entry is stored under the current room-timezone day in workspace diary storage. No agentId is used."
+        description = "Append one diary entry to the active Room Agent. The entry is stored under the current logical diary day in workspace diary storage. No agentId is used."
     )]
     async fn room_diary_append(
         &self,
@@ -1202,7 +1202,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "room.diary.recent",
-        description = "Return recent diary entries from the active Room Agent. Scans recent room-timezone calendar days in workspace diary storage. No agentId is used."
+        description = "Return recent diary entries from the active Room Agent. Scans recent logical diary days in workspace diary storage. No agentId is used."
     )]
     async fn room_diary_recent(
         &self,
@@ -1228,7 +1228,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "room.diary.selectExact",
-        description = "Return diary entries for one exact room-timezone calendar day from the active Room Agent workspace diary storage. No agentId is used."
+        description = "Return diary entries for one exact logical diary date from the active Room Agent workspace diary storage. No agentId is used."
     )]
     async fn room_diary_select_exact(
         &self,
@@ -1657,7 +1657,7 @@ struct RoomNotebookRemoveArgs {
 struct RoomDiaryAppendArgs {
     #[serde(default)]
     #[schemars(
-        description = "Optional daypart label such as morning, noon, afternoon, evening, bedtime, or unknown. Stored as metadata only; the date is derived from the current room timezone."
+        description = "Optional daypart label such as morning, noon, afternoon, evening, bedtime, or unknown. Stored as metadata only; the date is derived from the current logical diary day."
     )]
     time_hint: Option<String>,
     #[serde(default)]
@@ -1672,7 +1672,7 @@ struct RoomDiaryAppendArgs {
 struct RoomDiaryRecentArgs {
     #[serde(default)]
     #[schemars(
-        description = "Number of recent room-timezone calendar days to scan. Defaults to 3 and is capped at 30."
+        description = "Number of recent logical diary days to scan. Defaults to 3 and is capped at 30."
     )]
     days: Option<u32>,
     #[serde(default)]
@@ -1683,11 +1683,11 @@ struct RoomDiaryRecentArgs {
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 struct RoomDiarySelectExactArgs {
-    #[schemars(description = "Year in the configured room timezone calendar.")]
+    #[schemars(description = "Year in the logical diary date.")]
     year: i32,
-    #[schemars(description = "Month in the configured room timezone calendar, 1-12.")]
+    #[schemars(description = "Month in the logical diary date, 1-12.")]
     month: u32,
-    #[schemars(description = "Day of month in the configured room timezone calendar.")]
+    #[schemars(description = "Day of month in the logical diary date.")]
     day: u32,
     #[serde(default)]
     #[schemars(description = "Maximum diary entries returned, capped by the server.")]

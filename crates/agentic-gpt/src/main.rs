@@ -259,6 +259,15 @@ async fn handle_config(config_path: PathBuf, command: ConfigCommand) -> Result<(
                 "sandbox.enabled" => config.sandbox.enabled = value.parse::<bool>()?,
                 "room.notebookRoot" => config.room.notebook_root = Some(PathBuf::from(value)),
                 "room.timezone" => config.room.timezone = value,
+                "room.diaryDayBoundaryHour" => {
+                    let hour = value.parse::<u32>()?;
+                    if hour > 23 {
+                        return Err(anyhow!(
+                            "room.diaryDayBoundaryHour must be an integer from 0 to 23"
+                        ));
+                    }
+                    config.room.diary_day_boundary_hour = hour;
+                }
                 "hubUrl" | "workerUrl" => config.hub_url = value,
                 "agentId" => config.agent_id = value,
                 "agentSecret" => config.agent_secret = value,
@@ -357,8 +366,11 @@ mod tests {
     fn room_timezone_defaults_and_can_be_overridden() {
         let mut config = Config::default_config().unwrap();
         assert_eq!(config.room.timezone, "Asia/Shanghai");
+        assert_eq!(config.room.diary_day_boundary_hour, 5);
         config.room.timezone = "UTC".to_string();
+        config.room.diary_day_boundary_hour = 3;
         assert_eq!(config.room.timezone, "UTC");
+        assert_eq!(config.room.diary_day_boundary_hour, 3);
     }
 
     #[test]

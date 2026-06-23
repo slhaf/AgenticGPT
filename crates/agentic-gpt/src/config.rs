@@ -93,6 +93,8 @@ pub(crate) struct RoomConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) notebook_root: Option<PathBuf>,
     pub(crate) timezone: String,
+    #[serde(default = "default_diary_day_boundary_hour")]
+    pub(crate) diary_day_boundary_hour: u32,
 }
 impl Config {
     pub(crate) fn default_config() -> Result<Self> {
@@ -289,7 +291,12 @@ pub(crate) fn default_room_config() -> RoomConfig {
     RoomConfig {
         notebook_root: None,
         timezone: "Asia/Shanghai".to_string(),
+        diary_day_boundary_hour: default_diary_day_boundary_hour(),
     }
+}
+
+pub(crate) fn default_diary_day_boundary_hour() -> u32 {
+    5
 }
 
 pub(crate) fn default_confirmation_language() -> String {

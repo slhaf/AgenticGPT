@@ -3,7 +3,7 @@ use agentic_gpt_protocol::{
     DiarySelectExactRequest,
 };
 use anyhow::{anyhow, Result};
-use chrono::{Datelike, Duration, NaiveDate, Utc};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, Timelike, Utc};
 use chrono_tz::Tz;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
@@ -29,7 +29,8 @@ pub(crate) async fn append(
     let root = diary_root(&config);
     let now = Utc::now();
     let local = now.with_timezone(&timezone);
-    let date = local.date_naive().to_string();
+    let diary_date = diary_date_for_local(local, config.room.diary_day_boundary_hour)?;
+    let date = diary_date.to_string();
     let entry = DiaryEntry {
         id: format!("dia_{}", Uuid::new_v4().simple()),
         created_at: now,
@@ -41,7 +42,7 @@ pub(crate) async fn append(
         tags: request.tags,
         entry: request.entry,
     };
-    let path = diary_path(&root, local.date_naive());
+    let path = diary_path(&root, diary_date);
     let _guard = state.notebook_writes.lock().await;
     ensure_diary_layout(&root)?;
     ensure_parent(&path)?;
@@ -69,7 +70,8 @@ pub(crate) async fn recent(
         .unwrap_or(DEFAULT_RECENT_DAYS)
         .clamp(1, MAX_RECENT_DAYS);
     let limit = normalized_limit(request.limit);
-    let today = Utc::now().with_timezone(&timezone).date_naive();
+    let local_now = Utc::now().with_timezone(&timezone);
+    let today = diary_date_for_local(local_now, config.room.diary_day_boundary_hour)?;
     let start = today - Duration::days(days.saturating_sub(1) as i64);
     let dates = date_range(start, today);
     let (mut entries, warnings) = read_entries_for_dates(&root, &dates)?;
@@ -107,6 +109,20 @@ fn room_timezone(config: &Config) -> Result<Tz> {
         .map_err(|_| anyhow!("invalid_room_timezone: {}", config.room.timezone))
 }
 
+fn diary_date_for_local(local: DateTime<Tz>, boundary_hour: u32) -> Result<NaiveDate> {
+    if boundary_hour > 23 {
+        return Err(anyhow!(
+            "invalid_diary_day_boundary_hour: {boundary_hour}; expected 0..=23"
+        ));
+    }
+    let date = if local.hour() < boundary_hour {
+        local.date_naive() - Duration::days(1)
+    } else {
+        local.date_naive()
+    };
+    Ok(date)
+}
+
 fn diary_path(root: &Path, date: NaiveDate) -> PathBuf {
     root.join(format!("{:04}", date.year()))
         .join(format!("{:02}", date.month()))
@@ -119,7 +135,7 @@ fn ensure_diary_layout(root: &Path) -> Result<()> {
     if !readme.exists() {
         fs::write(
             readme,
-            "# Room Diary\n\nFile-backed room diary storage.\n\nEntries are stored as JSONL under `YYYY/MM/DD.jsonl`, partitioned by the configured room timezone. Entry timestamps are stored as UTC ISO-8601 values. Diary entries are concrete event narratives for cross-day continuity, not task handoff passages or automatic chat logs.\n",
+            "# Room Diary\n\nFile-backed room diary storage.\n\nEntries are stored as JSONL under `YYYY/MM/DD.jsonl`, partitioned by the logical diary day in the configured room timezone. Local times before `room.diaryDayBoundaryHour` are assigned to the previous diary date. Entry timestamps are stored as UTC ISO-8601 values. Diary entries are concrete event narratives for cross-day continuity, not task handoff passages or automatic chat logs.\n",
         )?;
     }
     Ok(())
@@ -206,6 +222,7 @@ mod tests {
     use crate::state::RunMode;
     use crate::utils::ensure_parent;
     use crate::AppState;
+    use chrono::TimeZone;
     use std::collections::HashMap;
     use std::sync::Arc;
     use tokio::sync::{Mutex, RwLock};
@@ -231,6 +248,30 @@ mod tests {
             temporary_mcp_allows: Arc::new(Mutex::new(Vec::new())),
             notebook_writes: Arc::new(Mutex::new(())),
         }
+    }
+
+    #[test]
+    fn diary_date_uses_sleep_day_boundary() {
+        let timezone: Tz = "Asia/Shanghai".parse().unwrap();
+        let before_boundary = timezone.with_ymd_and_hms(2026, 6, 23, 4, 59, 0).unwrap();
+        let at_boundary = timezone.with_ymd_and_hms(2026, 6, 23, 5, 0, 0).unwrap();
+
+        assert_eq!(
+            diary_date_for_local(before_boundary, 5).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 6, 22).unwrap()
+        );
+        assert_eq!(
+            diary_date_for_local(at_boundary, 5).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 6, 23).unwrap()
+        );
+    }
+
+    #[test]
+    fn diary_date_rejects_invalid_boundary_hour() {
+        let timezone: Tz = "Asia/Shanghai".parse().unwrap();
+        let local = timezone.with_ymd_and_hms(2026, 6, 23, 1, 0, 0).unwrap();
+        let error = diary_date_for_local(local, 24).unwrap_err().to_string();
+        assert!(error.contains("invalid_diary_day_boundary_hour"));
     }
 
     #[test]
