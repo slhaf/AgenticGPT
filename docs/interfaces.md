@@ -29,6 +29,17 @@ Core endpoints:
 
 `/mcp` is the Apps-friendly MCP endpoint. It is protected by the Hub OAuth shim and forwards MCP requests to the configured local agent and local MCP server.
 
+All `/mcp` `tools/call` responses use the Hub `AgenticResult` envelope, which is directly compatible with the ChatGPT Apps / MCP tool result shape:
+
+- `content`: model/client-visible MCP content blocks, including non-text blocks such as `image`, `audio`, `resource`, and `resource_link` when returned by downstream MCP servers.
+- `structuredContent`: concise JSON visible to the model and Apps component.
+- `_meta`: widget-only MCP result metadata.
+- `isError`: tool-result error flag.
+
+Hub-native `/mcp` tools wrap their JSON payloads as `AgenticResult` with both `structuredContent` and a JSON text content block. The `mcpCallTool` tool recognizes downstream MCP tool result envelopes and passes through their top-level `content`, `structuredContent`, `_meta`, and `isError` instead of nesting them inside a Hub JSON payload.
+
+This contract applies to the Apps MCP `/mcp` surface. The GPT Actions endpoints under `/v1/*` keep their OpenAPI-described JSON response shapes.
+
 OAuth discovery routes:
 
 - `/.well-known/oauth-protected-resource`

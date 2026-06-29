@@ -1,3 +1,4 @@
+mod agentic_result;
 mod agents;
 mod db;
 mod instance_lock;

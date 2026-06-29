@@ -106,6 +106,8 @@ ChatGPT Apps / MCP 使用 Apps 友好的 MCP endpoint：
 https://<your-hub-domain>/mcp
 ```
 
+`/mcp` 的 `tools/call` 响应使用 Hub 的 `AgenticResult` 外壳，兼容 ChatGPT Apps / MCP tool result。Hub 原生工具返回 `content`、`structuredContent` 和 `isError`；`mcpCallTool` 会透传下游 MCP result envelope，包括非文本 content block 和 `_meta`。
+
 OAuth discovery 和 token exchange 由 Hub 的 OAuth shim 提供。
 
 ## 确认机制

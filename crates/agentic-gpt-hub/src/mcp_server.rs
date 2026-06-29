@@ -20,6 +20,7 @@ use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
+use crate::agentic_result::AgenticResult;
 use crate::agents::{
     cached_session, mcp_list_servers_all_agents, request_agent, timeout_batch_result,
     timeout_task_result,
@@ -917,7 +918,7 @@ impl AgenticMcpServer {
         .unwrap_or_else(
             |reason| json!({ "error": { "code": "mcp_call_tool_timeout", "message": reason } }),
         );
-        Ok(result_from_value(value))
+        Ok(result_from_mcp_tool_value(value))
     }
 
     #[tool(
@@ -1695,15 +1696,15 @@ struct RoomDiarySelectExactArgs {
 }
 
 fn ok_json(value: Value) -> CallToolResult {
-    CallToolResult::structured(value)
+    AgenticResult::from_native_value(value).into_call_tool_result()
 }
 
 fn result_from_value(value: Value) -> CallToolResult {
-    if value.get("error").is_some() {
-        CallToolResult::structured_error(value)
-    } else {
-        CallToolResult::structured(value)
-    }
+    AgenticResult::from_native_value(value).into_call_tool_result()
+}
+
+fn result_from_mcp_tool_value(value: Value) -> CallToolResult {
+    AgenticResult::from_mcp_or_native_value(value).into_call_tool_result()
 }
 
 fn room_route_error_value(error: RoomRouteError) -> Value {
@@ -1772,6 +1773,53 @@ fn notify_route_error_message(error: &NotifyRouteError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::init_db;
+    use crate::{HubConfig, RemoteConfirmationConfig};
+    use axum::body::to_bytes;
+    use axum::extract::State;
+    use rusqlite::Connection;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex as StdMutex};
+    use tokio::sync::Mutex;
+
+    fn test_hub_config() -> HubConfig {
+        HubConfig {
+            remote_confirmation: RemoteConfirmationConfig {
+                enabled: true,
+                provider: "ntfy".to_string(),
+                timeout_seconds: 45,
+                ntfy: crate::NtfyConfig {
+                    server_url: "https://ntfy.example.invalid".to_string(),
+                    topic: "secret-topic-for-test".to_string(),
+                    callback_base_url: "https://callback.example.invalid".to_string(),
+                },
+            },
+        }
+    }
+
+    fn test_state() -> HubState {
+        let conn = Connection::open_in_memory().unwrap();
+        init_db(&conn).unwrap();
+        HubState {
+            api_key: "test-api-key".to_string(),
+            db: Arc::new(StdMutex::new(conn)),
+            config: Arc::new(test_hub_config()),
+            agents: Arc::new(Mutex::new(HashMap::new())),
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+            active_room: Arc::new(Mutex::new(None)),
+            http: reqwest::Client::new(),
+            public_base_url: Some("https://hub.example.invalid".to_string()),
+            oauth_codes: Arc::new(Mutex::new(HashMap::new())),
+            oauth_tokens: Arc::new(Mutex::new(HashMap::new())),
+            ntfy_health: Arc::new(Mutex::new(Some(crate::notify::NtfyHealthCache {
+                server_url: "https://ntfy.example.invalid".to_string(),
+                checked_at: chrono::Utc::now(),
+                result: crate::notify::NtfyHealthStatus::Healthy,
+            }))),
+        }
+    }
 
     #[test]
     fn tool_read_only_hints_match_side_effect_semantics() {
@@ -1840,5 +1888,60 @@ mod tests {
             assert!(!schema.contains("agentId"));
             assert!(!schema.contains("agent_id"));
         }
+    }
+
+    #[test]
+    fn native_tool_values_use_agentic_result_shape() {
+        let value = json!({ "sessions": [] });
+
+        let result = result_from_value(value.clone());
+        let serialized = serde_json::to_value(result).unwrap();
+
+        assert_eq!(serialized["structuredContent"], value);
+        assert_eq!(serialized["isError"], false);
+        assert_eq!(serialized["content"][0]["type"], "text");
+    }
+
+    #[test]
+    fn mcp_tool_values_pass_through_mcp_result_envelope() {
+        let value = json!({
+            "content": [{ "type": "image", "data": "aW1hZ2U=", "mimeType": "image/png" }],
+            "_meta": { "hidden": "widget-only" },
+            "isError": false
+        });
+
+        let result = result_from_mcp_tool_value(value);
+        let serialized = serde_json::to_value(result).unwrap();
+
+        assert_eq!(serialized["content"][0]["type"], "image");
+        assert_eq!(serialized["content"][0]["mimeType"], "image/png");
+        assert_eq!(serialized["_meta"]["hidden"], "widget-only");
+        assert!(serialized.get("structuredContent").is_none());
+    }
+
+    #[tokio::test]
+    async fn mcp_tools_call_wire_response_uses_agentic_result_shape() {
+        let response = mcp_post(
+            State(test_state()),
+            Json(json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "listAgents",
+                    "arguments": {}
+                }
+            })),
+        )
+        .await;
+
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(value["jsonrpc"], "2.0");
+        assert_eq!(value["id"], 1);
+        assert_eq!(value["result"]["content"][0]["type"], "text");
+        assert_eq!(value["result"]["structuredContent"]["agents"], json!([]));
+        assert_eq!(value["result"]["isError"], false);
     }
 }
