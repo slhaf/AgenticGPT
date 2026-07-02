@@ -30,6 +30,23 @@ pub(crate) fn init_db(conn: &Connection) -> Result<()> {
             last_seen_at text,
             created_at text not null
         );
+        create table if not exists agent_runs (
+            run_id text primary key,
+            request_id text not null,
+            agent_id text not null,
+            command_type text not null,
+            command_json text not null,
+            command_hash text not null,
+            status text not null,
+            acked_at text,
+            result_json text,
+            result_hash text,
+            conflict_json text,
+            reason text,
+            created_at text not null,
+            updated_at text not null,
+            expires_at text
+        );
         ",
     )?;
     ensure_column(conn, "agents", "alias", "alias text")?;

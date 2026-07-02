@@ -794,6 +794,16 @@ pub enum HubCommand {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HubCommandEnvelope {
+    pub event_id: String,
+    pub run_id: String,
+    pub request_id: String,
+    pub command_hash: String,
+    pub command: HubCommand,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentMessage {
     Hello {
@@ -811,9 +821,30 @@ pub enum AgentMessage {
         session: SessionInfo,
     },
     Response {
+        #[serde(default, skip_serializing_if = "Option::is_none", rename = "runId")]
+        run_id: Option<String>,
         #[serde(rename = "requestId")]
         request_id: String,
         data: serde_json::Value,
+    },
+    TransportAck {
+        #[serde(rename = "eventId")]
+        event_id: String,
+        #[serde(rename = "runId")]
+        run_id: String,
+        #[serde(rename = "requestId")]
+        request_id: String,
+        #[serde(rename = "commandHash")]
+        command_hash: String,
+    },
+    TransportRunStatus {
+        #[serde(rename = "runId")]
+        run_id: String,
+        #[serde(rename = "requestId")]
+        request_id: String,
+        status: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
     },
     ConfirmationRequest {
         #[serde(rename = "requestId")]

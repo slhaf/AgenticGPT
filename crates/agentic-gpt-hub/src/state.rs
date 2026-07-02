@@ -1,7 +1,6 @@
 use agentic_gpt_protocol::{
     AgentRole, ConfirmationDecision, NotificationChannel, SafeConfigSummary, SessionInfo,
 };
-use axum::extract::ws::Message;
 use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 use serde_json::Value;
@@ -31,11 +30,24 @@ pub(crate) struct HubState {
 #[derive(Clone)]
 pub(crate) struct AgentConnection {
     pub(crate) connection_id: String,
-    pub(crate) sender: mpsc::UnboundedSender<Message>,
+    pub(crate) sender: mpsc::UnboundedSender<OutboundAgentMessage>,
     pub(crate) last_seen_at: DateTime<Utc>,
     pub(crate) role: AgentRole,
+    pub(crate) transport: AgentTransport,
     pub(crate) config_summary: Option<SafeConfigSummary>,
     pub(crate) notification_channels: Vec<NotificationChannel>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AgentTransport {
+    WebSocket,
+    Sse,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum OutboundAgentMessage {
+    Text(String),
+    Close,
 }
 
 #[derive(Clone, Debug)]

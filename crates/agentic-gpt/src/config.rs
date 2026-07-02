@@ -22,6 +22,8 @@ pub(crate) struct Config {
     pub(crate) display_name: String,
     #[serde(alias = "workerUrl")]
     pub(crate) hub_url: String,
+    #[serde(default = "default_hub_transport")]
+    pub(crate) hub_transport: String,
     pub(crate) agent_secret: String,
     pub(crate) workspace_root: PathBuf,
     pub(crate) backup_limit: usize,
@@ -103,6 +105,7 @@ impl Config {
             agent_id: "laptop".to_string(),
             display_name: hostname_fallback(),
             hub_url: "http://localhost:8787".to_string(),
+            hub_transport: default_hub_transport(),
             agent_secret: "change-me".to_string(),
             workspace_root: base.join("workspace"),
             backup_limit: DEFAULT_BACKUP_LIMIT,
@@ -301,6 +304,10 @@ pub(crate) fn default_diary_day_boundary_hour() -> u32 {
 
 pub(crate) fn default_confirmation_language() -> String {
     "zh-CN".to_string()
+}
+
+pub(crate) fn default_hub_transport() -> String {
+    "websocket".to_string()
 }
 
 pub(crate) fn normalize_confirmation_language(language: &str) -> String {

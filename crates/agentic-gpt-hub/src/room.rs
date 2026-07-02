@@ -268,10 +268,9 @@ mod tests {
     use super::*;
     use crate::agents::{command_request_id, replace_agent_connection};
     use crate::db::init_db;
-    use crate::state::AgentConnection;
+    use crate::state::{AgentConnection, AgentTransport, OutboundAgentMessage};
     use crate::{HubConfig, RemoteConfirmationConfig};
     use agentic_gpt_protocol::HubCommand;
-    use axum::extract::ws::Message;
     use chrono::Utc;
     use rusqlite::Connection;
     use serde_json::json;
@@ -323,7 +322,7 @@ mod tests {
         agent_id: &str,
         connection_id: &str,
         role: AgentRole,
-    ) -> mpsc::UnboundedReceiver<Message> {
+    ) -> mpsc::UnboundedReceiver<OutboundAgentMessage> {
         let (tx, rx) = mpsc::unbounded_channel();
         state.agents.lock().await.insert(
             agent_id.to_string(),
@@ -332,6 +331,7 @@ mod tests {
                 sender: tx,
                 last_seen_at: Utc::now(),
                 role,
+                transport: AgentTransport::WebSocket,
                 config_summary: None,
                 notification_channels: Vec::new(),
             },
@@ -343,9 +343,16 @@ mod tests {
         state: &HubState,
         agent_id: &str,
         connection_id: &str,
-    ) -> mpsc::UnboundedReceiver<Message> {
+    ) -> mpsc::UnboundedReceiver<OutboundAgentMessage> {
         let (tx, rx) = mpsc::unbounded_channel();
-        replace_agent_connection(state, agent_id, connection_id, tx).await;
+        replace_agent_connection(
+            state,
+            agent_id,
+            connection_id,
+            AgentTransport::WebSocket,
+            tx,
+        )
+        .await;
         rx
     }
 
@@ -528,7 +535,7 @@ mod tests {
             .await
             .unwrap()
         });
-        let Message::Text(text) = rx.recv().await.unwrap() else {
+        let OutboundAgentMessage::Text(text) = rx.recv().await.unwrap() else {
             panic!("expected text command");
         };
         let command = serde_json::from_str::<HubCommand>(&text).unwrap();
@@ -568,7 +575,7 @@ mod tests {
             .await
             .unwrap()
         });
-        let Message::Text(text) = rx.recv().await.unwrap() else {
+        let OutboundAgentMessage::Text(text) = rx.recv().await.unwrap() else {
             panic!("expected text command");
         };
         let command = serde_json::from_str::<HubCommand>(&text).unwrap();
@@ -596,7 +603,7 @@ mod tests {
             .await
             .unwrap()
         });
-        let Message::Text(text) = rx.recv().await.unwrap() else {
+        let OutboundAgentMessage::Text(text) = rx.recv().await.unwrap() else {
             panic!("expected text command");
         };
         let command = serde_json::from_str::<HubCommand>(&text).unwrap();

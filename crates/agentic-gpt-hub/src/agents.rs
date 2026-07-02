@@ -1,19 +1,23 @@
 use agentic_gpt_protocol::{
-    AgentMessage, AgentRole, BatchExecRequest, BatchExecResult, HubCommand, HubMessage,
-    SessionInfo, TaskResult,
+    AgentMessage, AgentRole, BatchExecRequest, BatchExecResult, HubCommand, HubCommandEnvelope,
+    HubMessage, SessionInfo, TaskResult,
 };
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::extract::{Path, Query, State};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{SinkExt, Stream, StreamExt};
+use serde::Deserialize;
 use serde_json::{json, Value};
+use std::convert::Infallible;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{timeout, Duration};
 use tracing::{info, warn};
 
 use crate::registry::{registry_entries, registry_entry, update_last_seen};
-use crate::state::{AgentConnection, HubState};
+use crate::runs;
+use crate::state::{AgentConnection, AgentTransport, HubState, OutboundAgentMessage};
 use crate::utils::{constant_time_equal, random_id, sha256_hex};
 use crate::{
     api_error, discard_agent_confirmations, handle_confirmation_request, room,
@@ -52,17 +56,157 @@ pub(crate) async fn connect_agent(
     }
 }
 
+#[derive(Deserialize)]
+pub(crate) struct SseConnectQuery {
+    #[serde(rename = "connectionId")]
+    connection_id: Option<String>,
+}
+
+pub(crate) async fn connect_agent_sse(
+    State(state): State<HubState>,
+    Path(agent_id): Path<String>,
+    Query(query): Query<SseConnectQuery>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(response) = require_agent_secret(&state, &agent_id, &headers) {
+        return response;
+    }
+    let connection_id = query.connection_id.unwrap_or_else(|| random_id("conn"));
+    info!(%agent_id, %connection_id, "agent sse connected");
+    let (tx, rx) = mpsc::unbounded_channel::<OutboundAgentMessage>();
+    replace_agent_connection(
+        &state,
+        &agent_id,
+        &connection_id,
+        AgentTransport::Sse,
+        tx.clone(),
+    )
+    .await;
+    match runs::pending_unacked(&state, &agent_id) {
+        Ok(pending) => {
+            for run in pending {
+                let envelope = HubCommandEnvelope {
+                    event_id: random_id("evt"),
+                    run_id: run.run_id,
+                    request_id: run.request_id,
+                    command_hash: run.command_hash,
+                    command: run.command,
+                };
+                if let Ok(text) = serde_json::to_string(&envelope) {
+                    let _ = tx.send(OutboundAgentMessage::Text(text));
+                }
+            }
+        }
+        Err(error) => warn!(%agent_id, %error, "failed to load pending sse replay"),
+    }
+    let stream = sse_stream(rx);
+    let mut response = Sse::new(stream)
+        .keep_alive(
+            KeepAlive::new()
+                .interval(Duration::from_secs(15))
+                .text("keepalive"),
+        )
+        .into_response();
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-cache, no-transform"),
+    );
+    response
+        .headers_mut()
+        .insert("x-accel-buffering", HeaderValue::from_static("no"));
+    response
+}
+
+pub(crate) async fn post_agent_message(
+    State(state): State<HubState>,
+    Path(agent_id): Path<String>,
+    Query(query): Query<SseConnectQuery>,
+    headers: HeaderMap,
+    axum::Json(message): axum::Json<AgentMessage>,
+) -> Response {
+    if let Err(response) = require_agent_secret(&state, &agent_id, &headers) {
+        return response;
+    }
+    let connection_id = query.connection_id.unwrap_or_default();
+    match handle_agent_message(&state, &agent_id, &connection_id, message).await {
+        Ok(()) => axum::Json(json!({ "ok": true })).into_response(),
+        Err(reason) => api_error(StatusCode::BAD_REQUEST, "agent_message_rejected", reason),
+    }
+}
+
+fn sse_stream(
+    rx: mpsc::UnboundedReceiver<OutboundAgentMessage>,
+) -> impl Stream<Item = Result<Event, Infallible>> {
+    futures_util::stream::unfold(rx, |mut rx| async move {
+        match rx.recv().await {
+            Some(OutboundAgentMessage::Text(text)) => {
+                Some((Ok(Event::default().event("message").data(text)), rx))
+            }
+            Some(OutboundAgentMessage::Close) | None => None,
+        }
+    })
+}
+
+fn require_agent_secret(
+    state: &HubState,
+    agent_id: &str,
+    headers: &HeaderMap,
+) -> std::result::Result<(), Response> {
+    let secret = headers
+        .get("x-agent-secret")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    match registry_entry(state, agent_id) {
+        Ok(Some(entry))
+            if entry.enabled && constant_time_equal(&sha256_hex(secret), &entry.secret_hash) =>
+        {
+            update_last_seen(state, agent_id).ok();
+            Ok(())
+        }
+        Ok(Some(_)) => Err(api_error(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized_agent",
+            "Invalid agent secret",
+        )),
+        Ok(None) => Err(api_error(
+            StatusCode::NOT_FOUND,
+            "agent_not_found",
+            "Agent is not registered or enabled",
+        )),
+        Err(error) => Err(api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "db_error",
+            error,
+        )),
+    }
+}
+
 async fn handle_socket(state: HubState, agent_id: String, socket: WebSocket) {
     let connection_id = random_id("conn");
     info!(%agent_id, %connection_id, "agent connected");
     let (mut sink, mut stream) = socket.split();
-    let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
-    replace_agent_connection(&state, &agent_id, &connection_id, tx.clone()).await;
+    let (tx, mut rx) = mpsc::unbounded_channel::<OutboundAgentMessage>();
+    replace_agent_connection(
+        &state,
+        &agent_id,
+        &connection_id,
+        AgentTransport::WebSocket,
+        tx.clone(),
+    )
+    .await;
 
     let writer = tokio::spawn(async move {
         while let Some(message) = rx.recv().await {
-            if sink.send(message).await.is_err() {
-                break;
+            match message {
+                OutboundAgentMessage::Text(text) => {
+                    if sink.send(Message::Text(text.into())).await.is_err() {
+                        break;
+                    }
+                }
+                OutboundAgentMessage::Close => {
+                    let _ = sink.send(Message::Close(None)).await;
+                    break;
+                }
             }
         }
     });
@@ -78,118 +222,204 @@ async fn handle_socket(state: HubState, agent_id: String, socket: WebSocket) {
                 continue;
             }
         };
-        touch_agent(&state, &agent_id).await;
-        match parsed {
-            AgentMessage::Hello {
-                role,
-                config_summary,
-                notification_channels,
-            } => {
-                match room::register_connection_role(&state, &agent_id, &connection_id, role).await
-                {
-                    Ok(()) => {
-                        let mut agents = state.agents.lock().await;
-                        if let Some(connection) = agents.get_mut(&agent_id) {
-                            connection.role = role;
-                            connection.config_summary = Some(config_summary);
-                            connection.notification_channels = notification_channels;
-                        }
-                    }
-                    Err(reason) => {
-                        warn!(%agent_id, %connection_id, %reason, "room role rejected");
-                        let _ = tx.send(Message::Text(
-                            serde_json::to_string(&json!({
-                                "error": {
-                                    "code": reason,
-                                    "message": reason
-                                }
-                            }))
-                            .unwrap(),
-                        ));
-                        let _ = tx.send(Message::Close(None));
-                        break;
-                    }
-                }
-            }
-            AgentMessage::Heartbeat { sent_at } => {
-                let ack = HubMessage::HeartbeatAck {
-                    sent_at,
-                    received_at: chrono::Utc::now(),
-                };
-                let _ = tx.send(Message::Text(serde_json::to_string(&ack).unwrap()));
-            }
-            AgentMessage::SessionUpdate { session } => {
-                state
-                    .sessions
-                    .lock()
-                    .await
-                    .entry(agent_id.clone())
-                    .or_default()
-                    .insert(session.session_id.clone(), session);
-            }
-            AgentMessage::Response { request_id, data } => {
-                if let Some(sender) = state.pending.lock().await.remove(&request_id) {
-                    let _ = sender.send(data);
-                }
-            }
-            AgentMessage::ConfirmationRequest {
-                request_id,
-                agent_id: request_agent_id,
-                timeout_seconds,
-                payload,
-            } => {
-                if request_agent_id != agent_id {
-                    warn!(
-                        %agent_id,
-                        requestAgentId = %request_agent_id,
-                        "rejected confirmation request with mismatched agentId"
-                    );
-                    send_confirmation_response(
-                        &state,
-                        &agent_id,
-                        &request_id,
-                        agentic_gpt_protocol::ConfirmationDecision::ProviderUnavailable,
-                        "agent_id_mismatch",
-                    )
-                    .await;
-                    continue;
-                }
-                let state = state.clone();
-                let agent_id = agent_id.clone();
-                tokio::spawn(async move {
-                    if let Err(error) = handle_confirmation_request(
-                        state,
-                        agent_id,
-                        request_id,
-                        timeout_seconds,
-                        payload,
-                    )
-                    .await
-                    {
-                        warn!(%error, "confirmation request failed");
-                    }
-                });
-            }
+        if let Err(reason) = handle_agent_message(&state, &agent_id, &connection_id, parsed).await {
+            warn!(%agent_id, %connection_id, %reason, "agent message rejected");
         }
     }
 
     writer.abort();
+    disconnect_agent(&state, &agent_id, &connection_id).await;
+}
+
+async fn handle_agent_message(
+    state: &HubState,
+    agent_id: &str,
+    connection_id: &str,
+    parsed: AgentMessage,
+) -> std::result::Result<(), String> {
+    touch_agent(state, agent_id).await;
+    match parsed {
+        AgentMessage::Hello {
+            role,
+            config_summary,
+            notification_channels,
+        } => match room::register_connection_role(state, agent_id, connection_id, role).await {
+            Ok(()) => {
+                let mut agents = state.agents.lock().await;
+                if let Some(connection) = agents.get_mut(agent_id) {
+                    connection.role = role;
+                    connection.config_summary = Some(config_summary);
+                    connection.notification_channels = notification_channels;
+                }
+            }
+            Err(reason) => {
+                warn!(%agent_id, %connection_id, %reason, "room role rejected");
+                send_to_connection(
+                    state,
+                    agent_id,
+                    connection_id,
+                    serde_json::to_string(&json!({
+                        "error": { "code": reason, "message": reason }
+                    }))
+                    .map_err(|error| error.to_string())?,
+                )
+                .await;
+                close_connection(state, agent_id, connection_id).await;
+                return Err(reason.to_string());
+            }
+        },
+        AgentMessage::Heartbeat { sent_at } => {
+            let ack = HubMessage::HeartbeatAck {
+                sent_at,
+                received_at: chrono::Utc::now(),
+            };
+            send_to_connection(
+                state,
+                agent_id,
+                connection_id,
+                serde_json::to_string(&ack).map_err(|error| error.to_string())?,
+            )
+            .await;
+        }
+        AgentMessage::SessionUpdate { session } => {
+            state
+                .sessions
+                .lock()
+                .await
+                .entry(agent_id.to_string())
+                .or_default()
+                .insert(session.session_id.clone(), session);
+        }
+        AgentMessage::Response {
+            run_id,
+            request_id,
+            data,
+        } => {
+            if let Err(error) =
+                runs::store_result(state, agent_id, run_id.as_deref(), &request_id, &data)
+            {
+                warn!(%agent_id, %request_id, %error, "failed to store agent result");
+            }
+            if let Some(sender) = state.pending.lock().await.remove(&request_id) {
+                let _ = sender.send(data);
+            }
+        }
+        AgentMessage::TransportAck {
+            event_id: _,
+            run_id,
+            request_id,
+            command_hash,
+        } => {
+            let matched = runs::mark_acked(state, agent_id, &run_id, &request_id, &command_hash)
+                .map_err(|error| error.to_string())?;
+            if !matched {
+                return Err("transport_ack_run_mismatch".to_string());
+            }
+        }
+        AgentMessage::TransportRunStatus {
+            run_id,
+            request_id,
+            status,
+            reason,
+        } => {
+            let matched = runs::mark_status(
+                state,
+                agent_id,
+                &run_id,
+                &request_id,
+                &status,
+                reason.as_deref(),
+            )
+            .map_err(|error| error.to_string())?;
+            if !matched {
+                return Err("transport_status_run_mismatch".to_string());
+            }
+        }
+        AgentMessage::ConfirmationRequest {
+            request_id,
+            agent_id: request_agent_id,
+            timeout_seconds,
+            payload,
+        } => {
+            if request_agent_id != agent_id {
+                warn!(
+                    %agent_id,
+                    requestAgentId = %request_agent_id,
+                    "rejected confirmation request with mismatched agentId"
+                );
+                send_confirmation_response(
+                    state,
+                    agent_id,
+                    &request_id,
+                    agentic_gpt_protocol::ConfirmationDecision::ProviderUnavailable,
+                    "agent_id_mismatch",
+                )
+                .await;
+                return Err("agent_id_mismatch".to_string());
+            }
+            let state = state.clone();
+            let agent_id = agent_id.to_string();
+            tokio::spawn(async move {
+                if let Err(error) = handle_confirmation_request(
+                    state,
+                    agent_id,
+                    request_id,
+                    timeout_seconds,
+                    payload,
+                )
+                .await
+                {
+                    warn!(%error, "confirmation request failed");
+                }
+            });
+        }
+    }
+    Ok(())
+}
+
+async fn send_to_connection(state: &HubState, agent_id: &str, connection_id: &str, text: String) {
+    let sender = {
+        let agents = state.agents.lock().await;
+        agents
+            .get(agent_id)
+            .filter(|connection| connection.connection_id == connection_id)
+            .map(|connection| connection.sender.clone())
+    };
+    if let Some(sender) = sender {
+        let _ = sender.send(OutboundAgentMessage::Text(text));
+    }
+}
+
+async fn close_connection(state: &HubState, agent_id: &str, connection_id: &str) {
+    let sender = {
+        let agents = state.agents.lock().await;
+        agents
+            .get(agent_id)
+            .filter(|connection| connection.connection_id == connection_id)
+            .map(|connection| connection.sender.clone())
+    };
+    if let Some(sender) = sender {
+        let _ = sender.send(OutboundAgentMessage::Close);
+    }
+}
+
+async fn disconnect_agent(state: &HubState, agent_id: &str, connection_id: &str) {
     let removed_current_connection = {
         let mut agents = state.agents.lock().await;
         let should_remove = agents
-            .get(&agent_id)
+            .get(agent_id)
             .map(|connection| connection.connection_id == connection_id)
             .unwrap_or(false);
         if should_remove {
-            agents.remove(&agent_id);
+            agents.remove(agent_id);
             true
         } else {
             false
         }
     };
     if removed_current_connection {
-        room::release_active_room_if_current(&state, &agent_id, &connection_id).await;
-        discard_agent_confirmations(&state, &agent_id).await;
+        room::release_active_room_if_current(state, agent_id, connection_id).await;
+        discard_agent_confirmations(state, agent_id).await;
     }
     info!(%agent_id, %connection_id, removedCurrentConnection = removed_current_connection, "agent disconnected");
 }
@@ -201,30 +431,48 @@ pub(crate) async fn request_agent(
     timeout_secs: u64,
 ) -> std::result::Result<Value, String> {
     let request_id = command_request_id(&command).to_string();
-    let sender = {
+    set_command_request_id(&mut command, request_id.clone());
+    let (sender, transport) = {
         let agents = state.agents.lock().await;
         agents
             .get(agent_id)
-            .map(|connection| connection.sender.clone())
+            .map(|connection| (connection.sender.clone(), connection.transport))
             .ok_or_else(|| "agent_offline".to_string())?
     };
+    let run = runs::prepare_run(state, agent_id, &request_id, &command)
+        .map_err(|error| error.to_string())?;
     let (tx, rx) = oneshot::channel();
     state.pending.lock().await.insert(request_id.clone(), tx);
-    set_command_request_id(&mut command, request_id.clone());
-    if sender
-        .send(Message::Text(
-            serde_json::to_string(&command).map_err(|error| error.to_string())?,
-        ))
-        .is_err()
-    {
+    let text = match transport {
+        AgentTransport::WebSocket => {
+            serde_json::to_string(&command).map_err(|error| error.to_string())?
+        }
+        AgentTransport::Sse => {
+            let envelope = HubCommandEnvelope {
+                event_id: random_id("evt"),
+                run_id: run.run_id.clone(),
+                request_id: run.request_id.clone(),
+                command_hash: run.command_hash.clone(),
+                command: command.clone(),
+            };
+            serde_json::to_string(&envelope).map_err(|error| error.to_string())?
+        }
+    };
+    if sender.send(OutboundAgentMessage::Text(text)).is_err() {
         state.pending.lock().await.remove(&request_id);
         return Err("agent_offline".to_string());
+    }
+    if let Err(error) = runs::mark_dispatched(state, &run.run_id) {
+        warn!(runId = %run.run_id, %error, "failed to mark run dispatched");
     }
     match timeout(Duration::from_secs(timeout_secs), rx).await {
         Ok(Ok(value)) => Ok(value),
         _ => {
             state.pending.lock().await.remove(&request_id);
-            Err("exec_timeout_use_session".to_string())
+            if let Err(error) = runs::mark_timeout(state, &run.run_id, "exec_timeout_use_session") {
+                warn!(runId = %run.run_id, %error, "failed to mark run timeout");
+            }
+            Err(format!("exec_timeout_use_session; runId={}", run.run_id))
         }
     }
 }
@@ -233,7 +481,8 @@ pub(crate) async fn replace_agent_connection(
     state: &HubState,
     agent_id: &str,
     connection_id: &str,
-    sender: mpsc::UnboundedSender<Message>,
+    transport: AgentTransport,
+    sender: mpsc::UnboundedSender<OutboundAgentMessage>,
 ) {
     let old = {
         let mut agents = state.agents.lock().await;
@@ -244,6 +493,7 @@ pub(crate) async fn replace_agent_connection(
                 sender,
                 last_seen_at: chrono::Utc::now(),
                 role: AgentRole::Normal,
+                transport,
                 config_summary: None,
                 notification_channels: Vec::new(),
             },
@@ -251,7 +501,7 @@ pub(crate) async fn replace_agent_connection(
     };
     if let Some(old) = old {
         room::release_active_room_if_current(state, agent_id, &old.connection_id).await;
-        let _ = old.sender.send(Message::Close(None));
+        let _ = old.sender.send(OutboundAgentMessage::Close);
     }
 }
 

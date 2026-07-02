@@ -1,4 +1,4 @@
-use agentic_gpt_protocol::{AgentMessage, HubCommand, HubMessage, SessionInfo};
+use agentic_gpt_protocol::{AgentMessage, HubCommand, HubCommandEnvelope, HubMessage, SessionInfo};
 use anyhow::{anyhow, Result};
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
@@ -12,9 +12,11 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{
     client_async_tls_with_config, connect_async, MaybeTlsStream, WebSocketStream,
 };
+use uuid::Uuid;
 
 use crate::{
-    confirmation, diary, exec, mcp, notebook, notify, sessions, tmux,
+    config::Config,
+    confirmation, diary, exec, mcp, notebook, notify, sessions, tmux, transport_ledger,
     utils::{
         command_preview, log_info, log_warn, CONNECT_TIMEOUT_SECS, HEARTBEAT_ACK_TIMEOUT_SECS,
         HEARTBEAT_INTERVAL_SECS, RECONNECT_DELAY_SECS,
@@ -25,6 +27,17 @@ use crate::{
 pub(crate) async fn connect_loop(state: AppState) -> Result<()> {
     loop {
         let config = state.config.read().await.clone();
+        if config.hub_transport == "sse" {
+            match connect_sse(state.clone(), config).await {
+                Err(error) => log_warn(format!("sse connection failed: {error}")),
+                Ok(()) => log_warn("sse connection closed".to_string()),
+            }
+            *state.hub_sender.lock().await = None;
+            confirmation::fail_pending_confirmations(&state, "provider_unavailable").await;
+            log_info(format!("reconnecting in {RECONNECT_DELAY_SECS}s"));
+            sleep(Duration::from_secs(RECONNECT_DELAY_SECS)).await;
+            continue;
+        }
         let url = format!(
             "{}/v1/agents/{}/connect",
             config.hub_url.trim_end_matches('/'),
@@ -58,11 +71,14 @@ pub(crate) async fn connect_loop(state: AppState) -> Result<()> {
             Ok(Ok((stream, _))) => {
                 log_info("connected to hub".to_string());
                 let (mut write, mut read) = stream.split();
-                let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
+                let (tx, mut rx) = mpsc::unbounded_channel::<AgentMessage>();
                 *state.hub_sender.lock().await = Some(tx.clone());
                 let writer = tokio::spawn(async move {
                     while let Some(message) = rx.recv().await {
-                        if write.send(message).await.is_err() {
+                        let Ok(text) = serde_json::to_string(&message) else {
+                            break;
+                        };
+                        if write.send(Message::Text(text.into())).await.is_err() {
                             break;
                         }
                     }
@@ -74,7 +90,7 @@ pub(crate) async fn connect_loop(state: AppState) -> Result<()> {
                         .into_iter()
                         .collect(),
                 };
-                tx.send(Message::Text(serde_json::to_string(&hello)?.into()))?;
+                tx.send(hello)?;
                 let mut heartbeat =
                     tokio::time::interval(Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
                 heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -135,7 +151,7 @@ pub(crate) async fn connect_loop(state: AppState) -> Result<()> {
                             };
                             let command_state = state.clone();
                             tokio::spawn(async move {
-                                if let Err(error) = handle_hub_command(command_state, command).await {
+                                if let Err(error) = handle_hub_command(command_state, command, None).await {
                                     log_warn(format!("hub command failed: {error}"));
                                 }
                             });
@@ -146,7 +162,7 @@ pub(crate) async fn connect_loop(state: AppState) -> Result<()> {
                                 break;
                             }
                             let heartbeat = AgentMessage::Heartbeat { sent_at: Utc::now() };
-                            if let Err(error) = tx.send(Message::Text(serde_json::to_string(&heartbeat)?.into())) {
+                            if let Err(error) = tx.send(heartbeat) {
                                 log_warn(format!("heartbeat send failed: {error}"));
                                 break;
                             }
@@ -160,6 +176,237 @@ pub(crate) async fn connect_loop(state: AppState) -> Result<()> {
         }
         log_info(format!("reconnecting in {RECONNECT_DELAY_SECS}s"));
         sleep(Duration::from_secs(RECONNECT_DELAY_SECS)).await;
+    }
+}
+
+async fn connect_sse(state: AppState, config: Config) -> Result<()> {
+    let connection_id = format!("conn_{}", Uuid::new_v4().simple());
+    let base = config.hub_url.trim_end_matches('/');
+    let events_url = format!(
+        "{}/v1/agents/{}/events?connectionId={}",
+        base, config.agent_id, connection_id
+    );
+    let messages_url = format!(
+        "{}/v1/agents/{}/messages?connectionId={}",
+        base, config.agent_id, connection_id
+    );
+    log_info(format!(
+        "connecting to hub via sse; agentId={}; connectionId={}",
+        config.agent_id, connection_id
+    ));
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
+        .build()
+        .map_err(|error| anyhow!("{error}"))?;
+    let (tx, mut rx) = mpsc::unbounded_channel::<AgentMessage>();
+    *state.hub_sender.lock().await = Some(tx.clone());
+    let post_client = client.clone();
+    let agent_secret = config.agent_secret.clone();
+    let writer = tokio::spawn(async move {
+        while let Some(message) = rx.recv().await {
+            let mut delay = Duration::from_millis(250);
+            loop {
+                let response = post_client
+                    .post(&messages_url)
+                    .header("x-agent-secret", &agent_secret)
+                    .json(&message)
+                    .send()
+                    .await;
+                match response {
+                    Ok(response) if response.status().is_success() => break,
+                    Ok(response) => {
+                        log_warn(format!("sse post failed; status={}", response.status()));
+                    }
+                    Err(error) => log_warn(format!("sse post failed: {error}")),
+                }
+                sleep(delay).await;
+                delay = (delay * 2).min(Duration::from_secs(10));
+            }
+        }
+    });
+
+    tx.send(AgentMessage::Hello {
+        role: state.run_mode.role(),
+        config_summary: config.safe_summary(),
+        notification_channels: notify::freedesktop_notification_channel(&config)
+            .into_iter()
+            .collect(),
+    })?;
+    reconcile_sse_runs(&state, &tx).await;
+    let heartbeat_tx = tx.clone();
+    let heartbeat = tokio::spawn(async move {
+        let mut heartbeat = tokio::time::interval(Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            heartbeat.tick().await;
+            if heartbeat_tx
+                .send(AgentMessage::Heartbeat {
+                    sent_at: Utc::now(),
+                })
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+
+    let response = client
+        .get(events_url)
+        .header("x-agent-secret", &config.agent_secret)
+        .send()
+        .await
+        .map_err(|error| anyhow!("{error}"))?;
+    if !response.status().is_success() {
+        writer.abort();
+        heartbeat.abort();
+        return Err(anyhow!("sse connect failed: {}", response.status()));
+    }
+    log_info("connected to hub via sse".to_string());
+    let mut stream = response.bytes_stream();
+    let mut buffer = String::new();
+    let mut data = String::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| anyhow!("{error}"))?;
+        buffer.push_str(&String::from_utf8_lossy(&chunk));
+        while let Some(index) = buffer.find('\n') {
+            let mut line = buffer[..index].to_string();
+            buffer = buffer[index + 1..].to_string();
+            if line.ends_with('\r') {
+                line.pop();
+            }
+            if line.is_empty() {
+                if !data.is_empty() {
+                    handle_sse_data(&state, &tx, std::mem::take(&mut data)).await;
+                }
+                continue;
+            }
+            if let Some(value) = line.strip_prefix("data:") {
+                if !data.is_empty() {
+                    data.push('\n');
+                }
+                data.push_str(value.trim_start());
+            }
+        }
+    }
+    writer.abort();
+    heartbeat.abort();
+    Ok(())
+}
+
+async fn handle_sse_data(state: &AppState, tx: &mpsc::UnboundedSender<AgentMessage>, data: String) {
+    if let Ok(message) = serde_json::from_str::<HubMessage>(&data) {
+        match message {
+            HubMessage::HeartbeatAck { .. } => {}
+            HubMessage::ConfirmationResponse {
+                request_id,
+                decision,
+                reason,
+            } => {
+                let value = confirmation::confirmation_decision_value(decision);
+                log_info(format!(
+                    "confirmation response received; requestId={request_id}; decision={value}; reason={reason}"
+                ));
+                if let Some(sender) = state.pending_confirmations.lock().await.remove(&request_id) {
+                    let _ = sender.send(value);
+                }
+            }
+        }
+        return;
+    }
+    let envelope = match serde_json::from_str::<HubCommandEnvelope>(&data) {
+        Ok(envelope) => envelope,
+        Err(error) => {
+            log_warn(format!("ignored invalid sse envelope: {error}"));
+            return;
+        }
+    };
+    let outcome = match transport_ledger::accept(&envelope) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            log_warn(format!("transport ledger accept failed: {error}"));
+            return;
+        }
+    };
+    let _ = tx.send(transport_ledger::ack_message(&envelope));
+    match outcome {
+        transport_ledger::AcceptOutcome::HashMismatch => {
+            let _ = tx.send(AgentMessage::TransportRunStatus {
+                run_id: envelope.run_id,
+                request_id: envelope.request_id,
+                status: "failed".to_string(),
+                reason: Some("command_hash_mismatch".to_string()),
+            });
+            return;
+        }
+        transport_ledger::AcceptOutcome::Completed(result) => {
+            let _ = tx.send(AgentMessage::Response {
+                run_id: Some(envelope.run_id),
+                request_id: envelope.request_id,
+                data: result,
+            });
+            return;
+        }
+        transport_ledger::AcceptOutcome::DuplicateStarted => return,
+        transport_ledger::AcceptOutcome::FirstAccepted
+        | transport_ledger::AcceptOutcome::DuplicateAccepted => {}
+    }
+    if let Err(error) = transport_ledger::mark_started(&envelope.run_id) {
+        log_warn(format!("transport ledger mark started failed: {error}"));
+        return;
+    }
+    let command_state = state.clone();
+    tokio::spawn(async move {
+        if let Err(error) =
+            handle_hub_command(command_state, envelope.command, Some(envelope.run_id)).await
+        {
+            log_warn(format!("hub command failed: {error}"));
+        }
+    });
+}
+
+async fn reconcile_sse_runs(state: &AppState, tx: &mpsc::UnboundedSender<AgentMessage>) {
+    let records = match transport_ledger::latest_records() {
+        Ok(records) => records,
+        Err(error) => {
+            log_warn(format!("transport ledger scan failed: {error}"));
+            return;
+        }
+    };
+    for record in records.into_values() {
+        match record.status.as_str() {
+            "completed" => {
+                if let Some(message) = transport_ledger::completed_response(&record) {
+                    let _ = tx.send(message);
+                }
+            }
+            "accepted" => {
+                let Some(command) = record.command.clone() else {
+                    continue;
+                };
+                if let Err(error) = transport_ledger::mark_started(&record.run_id) {
+                    log_warn(format!("transport ledger mark started failed: {error}"));
+                    continue;
+                }
+                let run_id = record.run_id.clone();
+                let command_state = state.clone();
+                tokio::spawn(async move {
+                    if let Err(error) =
+                        handle_hub_command(command_state, command, Some(run_id)).await
+                    {
+                        log_warn(format!("hub command failed during reconciliation: {error}"));
+                    }
+                });
+            }
+            "started" | "running" => {
+                let _ = tx.send(AgentMessage::TransportRunStatus {
+                    run_id: record.run_id,
+                    request_id: record.request_id,
+                    status: "unknown".to_string(),
+                    reason: Some("agent_restarted_before_completion".to_string()),
+                });
+            }
+            _ => {}
+        }
     }
 }
 
@@ -275,7 +522,11 @@ fn parse_http_proxy_addr(proxy: &str) -> Result<String> {
     }
 }
 
-pub(crate) async fn handle_hub_command(state: AppState, command: HubCommand) -> Result<()> {
+pub(crate) async fn handle_hub_command(
+    state: AppState,
+    command: HubCommand,
+    run_id: Option<String>,
+) -> Result<()> {
     match command {
         HubCommand::Exec {
             request_id,
@@ -291,7 +542,13 @@ pub(crate) async fn handle_hub_command(state: AppState, command: HubCommand) -> 
                 "exec finished; taskId={}; status={}; exitCode={:?}; rejectReason={:?}",
                 result.task_id, result.status, result.exit_code, result.reject_reason
             ));
-            send_response(&state, &request_id, serde_json::to_value(&result)?).await?;
+            send_response(
+                &state,
+                run_id.as_deref(),
+                &request_id,
+                serde_json::to_value(&result)?,
+            )
+            .await?;
         }
         HubCommand::BatchExec {
             request_id,
@@ -309,7 +566,13 @@ pub(crate) async fn handle_hub_command(state: AppState, command: HubCommand) -> 
                 result.status,
                 result.results.len()
             ));
-            send_response(&state, &request_id, serde_json::to_value(&result)?).await?;
+            send_response(
+                &state,
+                run_id.as_deref(),
+                &request_id,
+                serde_json::to_value(&result)?,
+            )
+            .await?;
         }
         HubCommand::StartSession {
             request_id,
@@ -326,18 +589,36 @@ pub(crate) async fn handle_hub_command(state: AppState, command: HubCommand) -> 
                 info.session_id, info.state, info.reject_reason
             ));
             send_session(&state, &info).await?;
-            send_response(&state, &request_id, serde_json::to_value(&info)?).await?;
+            send_response(
+                &state,
+                run_id.as_deref(),
+                &request_id,
+                serde_json::to_value(&info)?,
+            )
+            .await?;
         }
         HubCommand::ListSessions { request_id } => {
             let sessions = sessions::current_sessions(&state).await;
-            send_response(&state, &request_id, serde_json::to_value(sessions)?).await?;
+            send_response(
+                &state,
+                run_id.as_deref(),
+                &request_id,
+                serde_json::to_value(sessions)?,
+            )
+            .await?;
         }
         HubCommand::InspectSession {
             request_id,
             session_id,
         } => {
             let session = sessions::inspect_session(&state, &session_id).await;
-            send_response(&state, &request_id, serde_json::to_value(session)?).await?;
+            send_response(
+                &state,
+                run_id.as_deref(),
+                &request_id,
+                serde_json::to_value(session)?,
+            )
+            .await?;
         }
         HubCommand::WaitSession {
             request_id,
@@ -346,7 +627,13 @@ pub(crate) async fn handle_hub_command(state: AppState, command: HubCommand) -> 
         } => {
             sleep(Duration::from_secs(seconds.min(30))).await;
             let session = sessions::inspect_session(&state, &session_id).await;
-            send_response(&state, &request_id, serde_json::to_value(session)?).await?;
+            send_response(
+                &state,
+                run_id.as_deref(),
+                &request_id,
+                serde_json::to_value(session)?,
+            )
+            .await?;
         }
         HubCommand::KillSession {
             request_id,
@@ -354,34 +641,70 @@ pub(crate) async fn handle_hub_command(state: AppState, command: HubCommand) -> 
         } => {
             log_info(format!("killSession received; sessionId={session_id}"));
             let session = sessions::kill_session(&state, &session_id).await;
-            send_response(&state, &request_id, serde_json::to_value(session)?).await?;
+            send_response(
+                &state,
+                run_id.as_deref(),
+                &request_id,
+                serde_json::to_value(session)?,
+            )
+            .await?;
         }
         HubCommand::TmuxListSessions { request_id } => {
-            send_response(&state, &request_id, tmux::list_sessions().await).await?;
+            send_response(
+                &state,
+                run_id.as_deref(),
+                &request_id,
+                tmux::list_sessions().await,
+            )
+            .await?;
         }
         HubCommand::TmuxListPanes {
             request_id,
             payload,
         } => {
-            send_response(&state, &request_id, tmux::list_panes(payload).await).await?;
+            send_response(
+                &state,
+                run_id.as_deref(),
+                &request_id,
+                tmux::list_panes(payload).await,
+            )
+            .await?;
         }
         HubCommand::TmuxCapturePane {
             request_id,
             payload,
         } => {
-            send_response(&state, &request_id, tmux::capture_pane(payload).await).await?;
+            send_response(
+                &state,
+                run_id.as_deref(),
+                &request_id,
+                tmux::capture_pane(payload).await,
+            )
+            .await?;
         }
         HubCommand::TmuxPasteText {
             request_id,
             payload,
         } => {
-            send_response(&state, &request_id, tmux::paste_text(&state, payload).await).await?;
+            send_response(
+                &state,
+                run_id.as_deref(),
+                &request_id,
+                tmux::paste_text(&state, payload).await,
+            )
+            .await?;
         }
         HubCommand::TmuxExec {
             request_id,
             payload,
         } => {
-            send_response(&state, &request_id, tmux::exec(&state, payload).await).await?;
+            send_response(
+                &state,
+                run_id.as_deref(),
+                &request_id,
+                tmux::exec(&state, payload).await,
+            )
+            .await?;
         }
         HubCommand::TmuxCreateSession {
             request_id,
@@ -389,6 +712,7 @@ pub(crate) async fn handle_hub_command(state: AppState, command: HubCommand) -> 
         } => {
             send_response(
                 &state,
+                run_id.as_deref(),
                 &request_id,
                 tmux::create_session(&state, payload).await,
             )
@@ -400,6 +724,7 @@ pub(crate) async fn handle_hub_command(state: AppState, command: HubCommand) -> 
         } => {
             send_response(
                 &state,
+                run_id.as_deref(),
                 &request_id,
                 tmux::close_session(&state, payload).await,
             )
@@ -407,7 +732,7 @@ pub(crate) async fn handle_hub_command(state: AppState, command: HubCommand) -> 
         }
         HubCommand::McpListServers { request_id } => {
             let result = mcp::list_servers(&state).await;
-            send_response(&state, &request_id, result).await?;
+            send_response(&state, run_id.as_deref(), &request_id, result).await?;
         }
         HubCommand::McpListTools {
             request_id,
@@ -422,7 +747,7 @@ pub(crate) async fn handle_hub_command(state: AppState, command: HubCommand) -> 
                     }
                 }),
             };
-            send_response(&state, &request_id, result).await?;
+            send_response(&state, run_id.as_deref(), &request_id, result).await?;
         }
         HubCommand::McpCallTool {
             request_id,
@@ -437,14 +762,20 @@ pub(crate) async fn handle_hub_command(state: AppState, command: HubCommand) -> 
                     }
                 }),
             };
-            send_response(&state, &request_id, result).await?;
+            send_response(&state, run_id.as_deref(), &request_id, result).await?;
         }
         HubCommand::UserNotifyDeliver {
             request_id,
             payload,
         } => {
             let result = notify::deliver_freedesktop_notification(payload).await;
-            send_response(&state, &request_id, serde_json::to_value(result)?).await?;
+            send_response(
+                &state,
+                run_id.as_deref(),
+                &request_id,
+                serde_json::to_value(result)?,
+            )
+            .await?;
         }
         HubCommand::RoomNotebookAppend {
             request_id,
@@ -460,7 +791,7 @@ pub(crate) async fn handle_hub_command(state: AppState, command: HubCommand) -> 
                     }),
                 }
             };
-            send_response(&state, &request_id, result).await?;
+            send_response(&state, run_id.as_deref(), &request_id, result).await?;
         }
         HubCommand::RoomNotebookRecent {
             request_id,
@@ -476,7 +807,7 @@ pub(crate) async fn handle_hub_command(state: AppState, command: HubCommand) -> 
                     }),
                 }
             };
-            send_response(&state, &request_id, result).await?;
+            send_response(&state, run_id.as_deref(), &request_id, result).await?;
         }
         HubCommand::RoomNotebookSelectExact {
             request_id,
@@ -492,7 +823,7 @@ pub(crate) async fn handle_hub_command(state: AppState, command: HubCommand) -> 
                     }),
                 }
             };
-            send_response(&state, &request_id, result).await?;
+            send_response(&state, run_id.as_deref(), &request_id, result).await?;
         }
         HubCommand::RoomNotebookSearch {
             request_id,
@@ -508,7 +839,7 @@ pub(crate) async fn handle_hub_command(state: AppState, command: HubCommand) -> 
                     }),
                 }
             };
-            send_response(&state, &request_id, result).await?;
+            send_response(&state, run_id.as_deref(), &request_id, result).await?;
         }
         HubCommand::RoomNotebookCurrent {
             request_id,
@@ -524,7 +855,7 @@ pub(crate) async fn handle_hub_command(state: AppState, command: HubCommand) -> 
                     }),
                 }
             };
-            send_response(&state, &request_id, result).await?;
+            send_response(&state, run_id.as_deref(), &request_id, result).await?;
         }
         HubCommand::RoomNotebookUpdate {
             request_id,
@@ -538,7 +869,7 @@ pub(crate) async fn handle_hub_command(state: AppState, command: HubCommand) -> 
                     Err(error) => notebook_command_error("room_notebook_update_failed", error),
                 }
             };
-            send_response(&state, &request_id, result).await?;
+            send_response(&state, run_id.as_deref(), &request_id, result).await?;
         }
         HubCommand::RoomNotebookRemove {
             request_id,
@@ -552,7 +883,7 @@ pub(crate) async fn handle_hub_command(state: AppState, command: HubCommand) -> 
                     Err(error) => notebook_command_error("room_notebook_remove_failed", error),
                 }
             };
-            send_response(&state, &request_id, result).await?;
+            send_response(&state, run_id.as_deref(), &request_id, result).await?;
         }
         HubCommand::RoomDiaryAppend {
             request_id,
@@ -568,7 +899,7 @@ pub(crate) async fn handle_hub_command(state: AppState, command: HubCommand) -> 
                     }),
                 }
             };
-            send_response(&state, &request_id, result).await?;
+            send_response(&state, run_id.as_deref(), &request_id, result).await?;
         }
         HubCommand::RoomDiaryRecent {
             request_id,
@@ -584,7 +915,7 @@ pub(crate) async fn handle_hub_command(state: AppState, command: HubCommand) -> 
                     }),
                 }
             };
-            send_response(&state, &request_id, result).await?;
+            send_response(&state, run_id.as_deref(), &request_id, result).await?;
         }
         HubCommand::RoomDiarySelectExact {
             request_id,
@@ -600,7 +931,7 @@ pub(crate) async fn handle_hub_command(state: AppState, command: HubCommand) -> 
                     }),
                 }
             };
-            send_response(&state, &request_id, result).await?;
+            send_response(&state, run_id.as_deref(), &request_id, result).await?;
         }
     }
     Ok(())
@@ -645,10 +976,19 @@ async fn send_session(state: &AppState, session: &SessionInfo) -> Result<()> {
     .await
 }
 
-async fn send_response(state: &AppState, request_id: &str, data: serde_json::Value) -> Result<()> {
+async fn send_response(
+    state: &AppState,
+    run_id: Option<&str>,
+    request_id: &str,
+    data: serde_json::Value,
+) -> Result<()> {
+    if let Some(run_id) = run_id {
+        transport_ledger::mark_completed(run_id, request_id, &data)?;
+    }
     send_agent_message(
         state,
         AgentMessage::Response {
+            run_id: run_id.map(|value| value.to_string()),
             request_id: request_id.to_string(),
             data,
         },
@@ -664,7 +1004,7 @@ pub(crate) async fn send_agent_message(state: &AppState, message: AgentMessage) 
         .clone()
         .ok_or_else(|| anyhow!("hub_sender_unavailable"))?;
     sender
-        .send(Message::Text(serde_json::to_string(&message)?.into()))
+        .send(message)
         .map_err(|_| anyhow!("hub_send_failed"))?;
     Ok(())
 }

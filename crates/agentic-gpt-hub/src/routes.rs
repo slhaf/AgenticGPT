@@ -19,6 +19,7 @@ use crate::agents::{
     timeout_task_result,
 };
 use crate::registry::{registry_entries, registry_entry};
+use crate::runs;
 use crate::state::HubState;
 use crate::utils::{constant_time_equal, random_id};
 use crate::{default_config_summary, notify, MAX_WAIT_SECONDS, REQUEST_TIMEOUT_SECS};
@@ -203,6 +204,21 @@ pub(crate) async fn list_agents(State(state): State<HubState>, headers: HeaderMa
         })
         .collect::<Vec<_>>();
     Json(json!({ "agents": agents })).into_response()
+}
+
+pub(crate) async fn get_run(
+    State(state): State<HubState>,
+    headers: HeaderMap,
+    Path(run_id): Path<String>,
+) -> Response {
+    if let Err(response) = require_action_auth(&state, &headers) {
+        return response;
+    }
+    match runs::get_run(&state, &run_id) {
+        Ok(Some(run)) => Json(run).into_response(),
+        Ok(None) => api_error(StatusCode::NOT_FOUND, "run_not_found", "Run was not found"),
+        Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "db_error", error),
+    }
 }
 
 pub(crate) async fn exec(

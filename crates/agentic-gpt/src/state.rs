@@ -2,9 +2,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use agentic_gpt_protocol::AgentRole;
+use agentic_gpt_protocol::{AgentMessage, AgentRole};
 use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
-use tokio_tungstenite::tungstenite::Message;
 
 use crate::{config::Config, confirmation, sessions};
 
@@ -36,7 +35,7 @@ pub(crate) struct AppState {
     pub(crate) config: Arc<RwLock<Config>>,
     pub(crate) run_mode: RunMode,
     pub(crate) sessions: Arc<Mutex<HashMap<String, sessions::ManagedSession>>>,
-    pub(crate) hub_sender: Arc<Mutex<Option<mpsc::UnboundedSender<Message>>>>,
+    pub(crate) hub_sender: Arc<Mutex<Option<mpsc::UnboundedSender<AgentMessage>>>>,
     pub(crate) pending_confirmations: Arc<Mutex<HashMap<String, oneshot::Sender<String>>>>,
     pub(crate) temporary_mcp_allows: Arc<Mutex<Vec<confirmation::TemporaryMcpAllow>>>,
     pub(crate) notebook_writes: Arc<Mutex<()>>,

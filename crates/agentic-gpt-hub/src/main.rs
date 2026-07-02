@@ -8,6 +8,7 @@ mod oauth;
 mod registry;
 mod room;
 mod routes;
+mod runs;
 mod state;
 mod utils;
 
@@ -16,7 +17,6 @@ use agentic_gpt_protocol::{
     SafeConfigSummary, SafePathPolicySummary, SafePolicyRules, SafeSandboxSummary,
 };
 use anyhow::{Context, Result};
-use axum::extract::ws::Message;
 use axum::extract::{Path, Query, State};
 use axum::http::{Request, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -40,7 +40,7 @@ use tracing::{info, warn};
 use crate::db::{init_db, open_db};
 use crate::registry::handle_agent_command;
 use crate::routes::api_error;
-use crate::state::{HubState, PendingConfirmation};
+use crate::state::{HubState, OutboundAgentMessage, PendingConfirmation};
 use crate::utils::{constant_time_equal, random_id, random_token, sha256_hex};
 
 const REQUEST_TIMEOUT_SECS: u64 = 35;
@@ -170,11 +170,21 @@ async fn serve(
         ntfy_health: Arc::new(Mutex::new(None)),
     };
     tokio::spawn(cleanup_confirmations(state.clone()));
+    tokio::spawn(cleanup_runs(state.clone()));
     tokio::spawn(oauth::cleanup_oauth(state.clone()));
     let app = Router::new()
         .route("/v1/info", get(routes::hub_info))
         .route("/v1/agents", get(routes::list_agents))
         .route("/v1/agents/:agent_id/connect", get(agents::connect_agent))
+        .route(
+            "/v1/agents/:agent_id/events",
+            get(agents::connect_agent_sse),
+        )
+        .route(
+            "/v1/agents/:agent_id/messages",
+            post(agents::post_agent_message),
+        )
+        .route("/v1/runs/:run_id", get(routes::get_run))
         .route(
             "/v1/confirmations/:confirmation_id/:decision",
             post(confirmation_callback),
@@ -352,6 +362,20 @@ async fn handle_confirmation_request(
         }
     }
     Ok(())
+}
+
+async fn cleanup_runs(state: HubState) {
+    loop {
+        sleep(Duration::from_secs(30)).await;
+        let older_than = Utc::now() - chrono::Duration::seconds((REQUEST_TIMEOUT_SECS * 2) as i64);
+        match runs::mark_stale_acked_unknown(&state, older_than) {
+            Ok(changed) if changed > 0 => {
+                info!(changed, "marked stale acked runs unknown");
+            }
+            Ok(_) => {}
+            Err(error) => warn!(%error, "run cleanup failed"),
+        }
+    }
 }
 
 async fn publish_ntfy(
@@ -634,7 +658,7 @@ async fn send_confirmation_response(
             .map(|connection| connection.sender.clone())
     };
     if let Some(sender) = sender {
-        let _ = sender.send(Message::Text(text));
+        let _ = sender.send(OutboundAgentMessage::Text(text));
     }
 }
 

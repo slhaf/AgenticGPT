@@ -703,6 +703,30 @@ paths:
           $ref: "#/components/responses/NotFound"
         "504":
           $ref: "#/components/responses/GatewayTimeout"
+  /v1/runs/{runId}:
+    get:
+      operationId: getRun
+      description: Return persisted status and result for one Hub-to-Agent command run. Use this when a synchronous request timed out but returned a runId.
+      x-openai-isConsequential: false
+      parameters:
+        - name: runId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Persisted run status and optional result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentRun"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
 components:
   securitySchemes:
     bearerAuth:
@@ -1098,6 +1122,51 @@ components:
               type: string
             message:
               type: string
+    AgentRun:
+      type: object
+      required:
+        - runId
+        - requestId
+        - agentId
+        - commandType
+        - commandHash
+        - status
+        - createdAt
+        - updatedAt
+      additionalProperties: false
+      properties:
+        runId:
+          type: string
+        requestId:
+          type: string
+        agentId:
+          type: string
+        commandType:
+          type: string
+        commandHash:
+          type: string
+        status:
+          type: string
+          enum:
+            - created
+            - dispatched
+            - acked
+            - started
+            - running
+            - completed
+            - timeout_waiting_result
+            - unknown
+            - failed
+        result:
+          description: Completed command result, when available.
+        reason:
+          type:
+            - string
+            - "null"
+        createdAt:
+          type: string
+        updatedAt:
+          type: string
     ListAgentsResponse:
       type: object
       required:

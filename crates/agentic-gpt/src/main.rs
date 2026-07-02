@@ -12,6 +12,7 @@ mod policy;
 mod sessions;
 mod state;
 mod tmux;
+mod transport_ledger;
 mod utils;
 
 use anyhow::{anyhow, Result};
@@ -269,6 +270,13 @@ async fn handle_config(config_path: PathBuf, command: ConfigCommand) -> Result<(
                     config.room.diary_day_boundary_hour = hour;
                 }
                 "hubUrl" | "workerUrl" => config.hub_url = value,
+                "hubTransport" => {
+                    let normalized = value.to_lowercase();
+                    if normalized != "websocket" && normalized != "sse" {
+                        return Err(anyhow!("hubTransport must be websocket or sse"));
+                    }
+                    config.hub_transport = normalized;
+                }
                 "agentId" => config.agent_id = value,
                 "agentSecret" => config.agent_secret = value,
                 _ => return Err(anyhow!("unsupported config key: {key}")),
@@ -332,7 +340,6 @@ mod tests {
         NotebookRemoveRequest, NotebookUpdateRequest, PassageSignificance,
     };
     use tokio::sync::mpsc;
-    use tokio_tungstenite::tungstenite::Message;
     use uuid::Uuid;
 
     #[test]
@@ -386,7 +393,7 @@ mod tests {
     fn command_test_state(
         run_mode: RunMode,
         workspace_root: PathBuf,
-    ) -> (AppState, mpsc::UnboundedReceiver<Message>) {
+    ) -> (AppState, mpsc::UnboundedReceiver<AgentMessage>) {
         let mut config = Config::default_config().unwrap();
         config.workspace_root = workspace_root;
         let (tx, rx) = mpsc::unbounded_channel();
@@ -405,11 +412,8 @@ mod tests {
         )
     }
 
-    async fn recv_response(rx: &mut mpsc::UnboundedReceiver<Message>) -> serde_json::Value {
-        let Message::Text(text) = rx.recv().await.unwrap() else {
-            panic!("expected text response");
-        };
-        let message = serde_json::from_str::<AgentMessage>(&text).unwrap();
+    async fn recv_response(rx: &mut mpsc::UnboundedReceiver<AgentMessage>) -> serde_json::Value {
+        let message = rx.recv().await.unwrap();
         let AgentMessage::Response { data, .. } = message else {
             panic!("expected agent response");
         };
@@ -433,6 +437,7 @@ mod tests {
                     tags: None,
                 },
             },
+            None,
         )
         .await
         .unwrap();
@@ -447,6 +452,7 @@ mod tests {
                     id: "psg_1".to_string(),
                 },
             },
+            None,
         )
         .await
         .unwrap();
@@ -484,6 +490,7 @@ mod tests {
                     tags: Some(vec!["tag".to_string()]),
                 },
             },
+            None,
         )
         .await
         .unwrap();
@@ -497,6 +504,7 @@ mod tests {
                 request_id: "req-remove".to_string(),
                 payload: NotebookRemoveRequest { id: appended.id },
             },
+            None,
         )
         .await
         .unwrap();

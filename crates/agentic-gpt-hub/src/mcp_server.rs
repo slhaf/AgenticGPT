@@ -28,6 +28,7 @@ use crate::agents::{
 use crate::notify::{notification_channels, send_user_notification, NotifyRouteError};
 use crate::registry::{registry_entries, registry_entry};
 use crate::room::{request_active_room, RoomRouteError};
+use crate::runs;
 use crate::state::HubState;
 use crate::utils::random_id;
 use crate::{default_config_summary, MAX_WAIT_SECONDS, REQUEST_TIMEOUT_SECS};
@@ -249,6 +250,11 @@ async fn call_app_tool(server: &AgenticMcpServer, params: Value) -> Result<Value
                 .await
         }
         "user.notify.channels" => server.user_notify_channels().await,
+        "hub.run.get" => {
+            server
+                .hub_run_get(Parameters(decode_args(arguments)?))
+                .await
+        }
         "user.notify.send" => {
             server
                 .user_notify_send(Parameters(decode_args(arguments)?))
@@ -419,6 +425,25 @@ impl AgenticMcpServer {
             })
             .collect::<Vec<_>>();
         Ok(ok_json(json!({ "agents": agents })))
+    }
+
+    #[tool(
+        name = "hub.run.get",
+        description = "Return persisted status and optional late result for one Hub-to-Agent command run by runId."
+    )]
+    async fn hub_run_get(
+        &self,
+        params: Parameters<HubRunGetArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let params = params.0;
+        match runs::get_run(&self.state, &params.run_id)
+            .map_err(|error| mcp_internal_error("db_error", error.to_string()))?
+        {
+            Some(run) => Ok(ok_json(serde_json::to_value(run).map_err(|error| {
+                mcp_internal_error("serialization_error", error.to_string())
+            })?)),
+            None => Err(mcp_invalid_params("run_not_found", "Run was not found")),
+        }
     }
 
     #[tool(
@@ -1280,6 +1305,13 @@ struct AgentIdArgs {
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
+struct HubRunGetArgs {
+    #[schemars(description = "Run id returned by a timed-out Hub request.")]
+    run_id: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
 struct ExecArgs {
     #[schemars(description = "Target local agent id.")]
     agent_id: String,
@@ -1829,6 +1861,7 @@ mod tests {
             "tmux.listSessions",
             "tmux.listPanes",
             "tmux.capturePane",
+            "hub.run.get",
             "room.notebook.search",
             "room.diary.recent",
             "room.diary.selectExact",
