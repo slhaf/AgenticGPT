@@ -270,7 +270,7 @@ mod tests {
     use crate::db::init_db;
     use crate::state::{AgentConnection, AgentTransport, OutboundAgentMessage};
     use crate::{HubConfig, RemoteConfirmationConfig};
-    use agentic_gpt_protocol::HubCommand;
+    use agentic_gpt_protocol::{HubCommand, HubCommandEnvelope};
     use chrono::Utc;
     use rusqlite::Connection;
     use serde_json::json;
@@ -337,6 +337,12 @@ mod tests {
             },
         );
         rx
+    }
+
+    fn command_from_envelope(text: &str) -> HubCommand {
+        serde_json::from_str::<HubCommandEnvelope>(text)
+            .unwrap()
+            .command
     }
 
     async fn replace_connection(
@@ -538,7 +544,7 @@ mod tests {
         let OutboundAgentMessage::Text(text) = rx.recv().await.unwrap() else {
             panic!("expected text command");
         };
-        let command = serde_json::from_str::<HubCommand>(&text).unwrap();
+        let command = command_from_envelope(&text);
         let request_id = command_request_id(&command).to_string();
         assert!(matches!(command, HubCommand::RoomNotebookCurrent { .. }));
         let sender = state.pending.lock().await.remove(&request_id).unwrap();
@@ -578,7 +584,7 @@ mod tests {
         let OutboundAgentMessage::Text(text) = rx.recv().await.unwrap() else {
             panic!("expected text command");
         };
-        let command = serde_json::from_str::<HubCommand>(&text).unwrap();
+        let command = command_from_envelope(&text);
         let request_id = command_request_id(&command).to_string();
         assert!(matches!(command, HubCommand::RoomNotebookUpdate { .. }));
         let sender = state.pending.lock().await.remove(&request_id).unwrap();
@@ -606,7 +612,7 @@ mod tests {
         let OutboundAgentMessage::Text(text) = rx.recv().await.unwrap() else {
             panic!("expected text command");
         };
-        let command = serde_json::from_str::<HubCommand>(&text).unwrap();
+        let command = command_from_envelope(&text);
         let request_id = command_request_id(&command).to_string();
         assert!(matches!(command, HubCommand::RoomNotebookRemove { .. }));
         let sender = state.pending.lock().await.remove(&request_id).unwrap();

@@ -82,23 +82,7 @@ pub(crate) async fn connect_agent_sse(
         tx.clone(),
     )
     .await;
-    match runs::pending_unacked(&state, &agent_id) {
-        Ok(pending) => {
-            for run in pending {
-                let envelope = HubCommandEnvelope {
-                    event_id: random_id("evt"),
-                    run_id: run.run_id,
-                    request_id: run.request_id,
-                    command_hash: run.command_hash,
-                    command: run.command,
-                };
-                if let Ok(text) = serde_json::to_string(&envelope) {
-                    let _ = tx.send(OutboundAgentMessage::Text(text));
-                }
-            }
-        }
-        Err(error) => warn!(%agent_id, %error, "failed to load pending sse replay"),
-    }
+    send_pending_replays(&state, &agent_id, &tx).await;
     let stream = sse_stream(rx);
     let mut response = Sse::new(stream)
         .keep_alive(
@@ -194,6 +178,7 @@ async fn handle_socket(state: HubState, agent_id: String, socket: WebSocket) {
         tx.clone(),
     )
     .await;
+    send_pending_replays(&state, &agent_id, &tx).await;
 
     let writer = tokio::spawn(async move {
         while let Some(message) = rx.recv().await {
@@ -432,32 +417,24 @@ pub(crate) async fn request_agent(
 ) -> std::result::Result<Value, String> {
     let request_id = command_request_id(&command).to_string();
     set_command_request_id(&mut command, request_id.clone());
-    let (sender, transport) = {
+    let sender = {
         let agents = state.agents.lock().await;
         agents
             .get(agent_id)
-            .map(|connection| (connection.sender.clone(), connection.transport))
+            .map(|connection| connection.sender.clone())
             .ok_or_else(|| "agent_offline".to_string())?
     };
     let run = runs::prepare_run(state, agent_id, &request_id, &command)
         .map_err(|error| error.to_string())?;
     let (tx, rx) = oneshot::channel();
     state.pending.lock().await.insert(request_id.clone(), tx);
-    let text = match transport {
-        AgentTransport::WebSocket => {
-            serde_json::to_string(&command).map_err(|error| error.to_string())?
-        }
-        AgentTransport::Sse => {
-            let envelope = HubCommandEnvelope {
-                event_id: random_id("evt"),
-                run_id: run.run_id.clone(),
-                request_id: run.request_id.clone(),
-                command_hash: run.command_hash.clone(),
-                command: command.clone(),
-            };
-            serde_json::to_string(&envelope).map_err(|error| error.to_string())?
-        }
-    };
+    let text = envelope_text(
+        &run.run_id,
+        &run.request_id,
+        &run.command_hash,
+        command.clone(),
+    )
+    .map_err(|error| error.to_string())?;
     if sender.send(OutboundAgentMessage::Text(text)).is_err() {
         state.pending.lock().await.remove(&request_id);
         return Err("agent_offline".to_string());
@@ -475,6 +452,41 @@ pub(crate) async fn request_agent(
             Err(format!("exec_timeout_use_session; runId={}", run.run_id))
         }
     }
+}
+
+async fn send_pending_replays(
+    state: &HubState,
+    agent_id: &str,
+    tx: &mpsc::UnboundedSender<OutboundAgentMessage>,
+) {
+    match runs::pending_unacked(state, agent_id) {
+        Ok(pending) => {
+            for run in pending {
+                match envelope_text(&run.run_id, &run.request_id, &run.command_hash, run.command) {
+                    Ok(text) => {
+                        let _ = tx.send(OutboundAgentMessage::Text(text));
+                    }
+                    Err(error) => warn!(%agent_id, %error, "failed to encode pending replay"),
+                }
+            }
+        }
+        Err(error) => warn!(%agent_id, %error, "failed to load pending replay"),
+    }
+}
+
+fn envelope_text(
+    run_id: &str,
+    request_id: &str,
+    command_hash: &str,
+    command: HubCommand,
+) -> serde_json::Result<String> {
+    serde_json::to_string(&HubCommandEnvelope {
+        event_id: random_id("evt"),
+        run_id: run_id.to_string(),
+        request_id: request_id.to_string(),
+        command_hash: command_hash.to_string(),
+        command,
+    })
 }
 
 pub(crate) async fn replace_agent_connection(
@@ -699,5 +711,80 @@ pub(crate) fn timeout_batch_result(
             .collect(),
         started_at: at,
         updated_at: at,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::init_db;
+    use crate::{HubConfig, NtfyConfig, RemoteConfirmationConfig};
+    use agentic_gpt_protocol::ExecRequest;
+    use rusqlite::Connection;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex as StdMutex};
+    use tokio::sync::Mutex;
+
+    fn test_state() -> HubState {
+        let conn = Connection::open_in_memory().unwrap();
+        init_db(&conn).unwrap();
+        HubState {
+            api_key: "test-api-key".to_string(),
+            db: Arc::new(StdMutex::new(conn)),
+            config: Arc::new(HubConfig {
+                remote_confirmation: RemoteConfirmationConfig {
+                    enabled: false,
+                    provider: "none".to_string(),
+                    timeout_seconds: 45,
+                    ntfy: NtfyConfig {
+                        server_url: String::new(),
+                        topic: String::new(),
+                        callback_base_url: String::new(),
+                    },
+                },
+            }),
+            agents: Arc::new(Mutex::new(HashMap::new())),
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+            active_room: Arc::new(Mutex::new(None)),
+            http: reqwest::Client::new(),
+            public_base_url: None,
+            oauth_codes: Arc::new(Mutex::new(HashMap::new())),
+            oauth_tokens: Arc::new(Mutex::new(HashMap::new())),
+            ntfy_health: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_replay_sends_reliable_envelope() {
+        let state = test_state();
+        let command = HubCommand::Exec {
+            request_id: "req_replay".to_string(),
+            task_id: "task_replay".to_string(),
+            payload: ExecRequest {
+                agent_id: "agent".to_string(),
+                program: "printf".to_string(),
+                args: vec!["ok".to_string()],
+                need_confirm: false,
+                confirm_method: None,
+                working_directory: None,
+            },
+        };
+        let run = runs::prepare_run(&state, "agent", "req_replay", &command).unwrap();
+        runs::mark_dispatched(&state, &run.run_id).unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        send_pending_replays(&state, "agent", &tx).await;
+
+        let OutboundAgentMessage::Text(text) = rx.recv().await.unwrap() else {
+            panic!("expected replay envelope");
+        };
+        let envelope = serde_json::from_str::<HubCommandEnvelope>(&text).unwrap();
+        assert_eq!(envelope.run_id, run.run_id);
+        assert_eq!(envelope.request_id, "req_replay");
+        assert_eq!(envelope.command_hash, run.command_hash);
+        assert!(matches!(envelope.command, HubCommand::Exec { .. }));
+        assert!(rx.try_recv().is_err());
     }
 }

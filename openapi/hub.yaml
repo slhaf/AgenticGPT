@@ -1183,6 +1183,7 @@ components:
         - agentId
         - displayName
         - online
+        - transport
         - lastSeenAt
         - capabilities
         - configSummary
@@ -1198,6 +1199,14 @@ components:
           type: string
         online:
           type: boolean
+        transport:
+          type:
+            - string
+            - "null"
+          enum:
+            - websocket
+            - sse
+            - null
         lastSeenAt:
           type:
             - string

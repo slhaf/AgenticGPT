@@ -504,7 +504,7 @@ fn notify_route_error_response(error: NotifyRouteError) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agentic_gpt_protocol::{AgentRole, Capabilities};
+    use agentic_gpt_protocol::{AgentRole, Capabilities, HubCommandEnvelope};
     use rusqlite::Connection;
     use std::sync::{Arc, Mutex as StdMutex};
     use tokio::sync::{mpsc, Mutex};
@@ -573,6 +573,12 @@ mod tests {
             },
         );
         rx
+    }
+
+    fn command_from_envelope(text: &str) -> HubCommand {
+        serde_json::from_str::<HubCommandEnvelope>(text)
+            .unwrap()
+            .command
     }
 
     #[test]
@@ -781,7 +787,7 @@ mod tests {
         let OutboundAgentMessage::Text(text) = rx.recv().await.unwrap() else {
             panic!("expected command");
         };
-        let command = serde_json::from_str::<HubCommand>(&text).unwrap();
+        let command = command_from_envelope(&text);
         let request_id = command_request_id(&command).to_string();
         assert!(matches!(command, HubCommand::UserNotifyDeliver { .. }));
         let sender = state.pending.lock().await.remove(&request_id).unwrap();

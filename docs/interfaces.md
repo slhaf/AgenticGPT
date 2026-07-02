@@ -51,7 +51,7 @@ OAuth discovery routes:
 
 The ntfy confirmation callback routes are intentionally not part of `openapi/hub.yaml`. They are only used by confirmation action buttons.
 
-## Local Agent WebSocket
+## Local Agent transports
 
 Local agents connect to:
 
@@ -59,11 +59,7 @@ Local agents connect to:
 GET /v1/agents/{agentId}/connect
 ```
 
-The Hub sends command messages over this WebSocket. The local agent sends hello, heartbeat, session updates, command responses, and confirmation requests back to the Hub.
-
-## Local Agent HTTP/SSE transport
-
-Local agents may opt into the HTTP/SSE transport with `hubTransport: "sse"`. WebSocket remains the default transport.
+WebSocket is the default local-agent transport. Local agents may opt into the HTTP/SSE transport with `hubTransport: "sse"` for environments where outbound HTTP/SSE is more stable than WebSocket.
 
 SSE endpoints are agent-private and use the same `x-agent-secret` authentication as WebSocket:
 
@@ -72,7 +68,7 @@ GET  /v1/agents/{agentId}/events?connectionId=...
 POST /v1/agents/{agentId}/messages?connectionId=...
 ```
 
-The SSE transport gives reliable ack/replay semantics to request/response-style `HubCommand` messages. The Hub sends a command envelope containing `eventId`, `runId`, `requestId`, `commandHash`, and the original `HubCommand`. The agent writes the accepted command to its local transport ledger before sending `TransportAck`; command results include `runId` and are accepted as late results when `agentId`, `runId`, and `requestId` match, even if the original SSE connection is stale.
+WebSocket and HTTP/SSE share reliable ack/replay semantics for request/response-style `HubCommand` messages. The Hub sends a command envelope containing `eventId`, `runId`, `requestId`, `commandHash`, and the original `HubCommand`. The agent writes the accepted command to its local transport ledger before sending `TransportAck`; command results include `runId` and are accepted as late results when `agentId`, `runId`, and `requestId` match, even if the original connection is stale.
 
 `Hello`, `Heartbeat`, `HeartbeatAck`, confirmation messages, and `SessionUpdate` remain best-effort/legacy messages in V1. `StartSession` itself is a reliable request/response command; later session state updates continue to use the existing session cache plus `inspectSession`/`waitSession` queries.
 

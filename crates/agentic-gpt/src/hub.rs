@@ -91,6 +91,7 @@ pub(crate) async fn connect_loop(state: AppState) -> Result<()> {
                         .collect(),
                 };
                 tx.send(hello)?;
+                reconcile_transport_runs(&state, &tx).await;
                 let mut heartbeat =
                     tokio::time::interval(Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
                 heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -142,19 +143,14 @@ pub(crate) async fn connect_loop(state: AppState) -> Result<()> {
                                 }
                                 continue;
                             }
-                            let command: HubCommand = match serde_json::from_value(value) {
-                                Ok(command) => command,
+                            let envelope: HubCommandEnvelope = match serde_json::from_value(value) {
+                                Ok(envelope) => envelope,
                                 Err(error) => {
-                                    log_warn(format!("ignored unknown hub command: {error}"));
+                                    log_warn(format!("ignored unknown reliable hub envelope: {error}"));
                                     continue;
                                 }
                             };
-                            let command_state = state.clone();
-                            tokio::spawn(async move {
-                                if let Err(error) = handle_hub_command(command_state, command, None).await {
-                                    log_warn(format!("hub command failed: {error}"));
-                                }
-                            });
+                            handle_reliable_envelope(&state, &tx, envelope).await;
                         }
                         _ = heartbeat.tick() => {
                             if last_heartbeat_ack.elapsed() > Duration::from_secs(HEARTBEAT_ACK_TIMEOUT_SECS) {
@@ -232,7 +228,7 @@ async fn connect_sse(state: AppState, config: Config) -> Result<()> {
             .into_iter()
             .collect(),
     })?;
-    reconcile_sse_runs(&state, &tx).await;
+    reconcile_transport_runs(&state, &tx).await;
     let heartbeat_tx = tx.clone();
     let heartbeat = tokio::spawn(async move {
         let mut heartbeat = tokio::time::interval(Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
@@ -320,6 +316,14 @@ async fn handle_sse_data(state: &AppState, tx: &mpsc::UnboundedSender<AgentMessa
             return;
         }
     };
+    handle_reliable_envelope(state, tx, envelope).await;
+}
+
+async fn handle_reliable_envelope(
+    state: &AppState,
+    tx: &mpsc::UnboundedSender<AgentMessage>,
+    envelope: HubCommandEnvelope,
+) {
     let outcome = match transport_ledger::accept(&envelope) {
         Ok(outcome) => outcome,
         Err(error) => {
@@ -364,7 +368,7 @@ async fn handle_sse_data(state: &AppState, tx: &mpsc::UnboundedSender<AgentMessa
     });
 }
 
-async fn reconcile_sse_runs(state: &AppState, tx: &mpsc::UnboundedSender<AgentMessage>) {
+async fn reconcile_transport_runs(state: &AppState, tx: &mpsc::UnboundedSender<AgentMessage>) {
     let records = match transport_ledger::latest_records() {
         Ok(records) => records,
         Err(error) => {

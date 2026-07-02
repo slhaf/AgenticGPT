@@ -197,6 +197,10 @@ pub(crate) async fn list_agents(State(state): State<HubState>, headers: HeaderMa
                 "alias": entry.alias,
                 "displayName": entry.display_name,
                 "online": status.is_some(),
+                "transport": status.map(|s| match s.transport {
+                    crate::state::AgentTransport::WebSocket => "websocket",
+                    crate::state::AgentTransport::Sse => "sse",
+                }),
                 "lastSeenAt": status.map(|s| s.last_seen_at).or(entry.last_seen_at),
                 "capabilities": entry.capabilities,
                 "configSummary": status.and_then(|s| s.config_summary.clone()).unwrap_or_else(default_config_summary)
