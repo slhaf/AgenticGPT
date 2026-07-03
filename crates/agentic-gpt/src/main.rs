@@ -352,6 +352,22 @@ mod tests {
     }
 
     #[test]
+    fn sse_post_status_classification_stops_on_stale_connection() {
+        assert_eq!(
+            hub::classify_sse_post_status(reqwest::StatusCode::OK),
+            hub::SsePostStatus::Delivered
+        );
+        assert_eq!(
+            hub::classify_sse_post_status(reqwest::StatusCode::CONFLICT),
+            hub::SsePostStatus::Stale
+        );
+        assert_eq!(
+            hub::classify_sse_post_status(reqwest::StatusCode::BAD_GATEWAY),
+            hub::SsePostStatus::Retry
+        );
+    }
+
+    #[test]
     fn run_as_room_reuses_same_base_config_identity_and_workspace() {
         let config = Config::default_config().unwrap();
         assert_eq!(config.agent_id, "laptop");

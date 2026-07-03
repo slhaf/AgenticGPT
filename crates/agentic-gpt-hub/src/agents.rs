@@ -12,7 +12,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::convert::Infallible;
 use tokio::sync::{mpsc, oneshot};
-use tokio::time::{timeout, Duration};
+use tokio::time::{sleep, timeout, Duration};
 use tracing::{info, warn};
 
 use crate::registry::{registry_entries, registry_entry, update_last_seen};
@@ -23,6 +23,9 @@ use crate::{
     api_error, discard_agent_confirmations, handle_confirmation_request, room,
     send_confirmation_response, REQUEST_TIMEOUT_SECS,
 };
+
+const AGENT_CONNECTION_SWEEP_SECS: u64 = 15;
+const AGENT_CONNECTION_TTL_SECS: i64 = 60;
 
 pub(crate) async fn connect_agent(
     State(state): State<HubState>,
@@ -71,6 +74,7 @@ pub(crate) async fn connect_agent_sse(
     if let Err(response) = require_agent_secret(&state, &agent_id, &headers) {
         return response;
     }
+    update_last_seen(&state, &agent_id).ok();
     let connection_id = query.connection_id.unwrap_or_else(|| random_id("conn"));
     info!(%agent_id, %connection_id, "agent sse connected");
     let (tx, rx) = mpsc::unbounded_channel::<OutboundAgentMessage>();
@@ -112,7 +116,14 @@ pub(crate) async fn post_agent_message(
         return response;
     }
     let connection_id = query.connection_id.unwrap_or_default();
-    match handle_agent_message(&state, &agent_id, &connection_id, message).await {
+    let is_current = is_current_connection(&state, &agent_id, &connection_id).await;
+    if !is_current && !is_reliable_agent_message(&message) {
+        return api_error(StatusCode::CONFLICT, "stale_connection", "stale_connection");
+    }
+    if is_current {
+        update_last_seen(&state, &agent_id).ok();
+    }
+    match handle_agent_message(&state, &agent_id, &connection_id, message, is_current).await {
         Ok(()) => axum::Json(json!({ "ok": true })).into_response(),
         Err(reason) => api_error(StatusCode::BAD_REQUEST, "agent_message_rejected", reason),
     }
@@ -144,7 +155,6 @@ fn require_agent_secret(
         Ok(Some(entry))
             if entry.enabled && constant_time_equal(&sha256_hex(secret), &entry.secret_hash) =>
         {
-            update_last_seen(state, agent_id).ok();
             Ok(())
         }
         Ok(Some(_)) => Err(api_error(
@@ -207,7 +217,9 @@ async fn handle_socket(state: HubState, agent_id: String, socket: WebSocket) {
                 continue;
             }
         };
-        if let Err(reason) = handle_agent_message(&state, &agent_id, &connection_id, parsed).await {
+        if let Err(reason) =
+            handle_agent_message(&state, &agent_id, &connection_id, parsed, true).await
+        {
             warn!(%agent_id, %connection_id, %reason, "agent message rejected");
         }
     }
@@ -221,8 +233,11 @@ async fn handle_agent_message(
     agent_id: &str,
     connection_id: &str,
     parsed: AgentMessage,
+    touch_current: bool,
 ) -> std::result::Result<(), String> {
-    touch_agent(state, agent_id).await;
+    if touch_current {
+        touch_agent(state, agent_id).await;
+    }
     match parsed {
         AgentMessage::Hello {
             role,
@@ -362,6 +377,25 @@ async fn handle_agent_message(
     Ok(())
 }
 
+async fn is_current_connection(state: &HubState, agent_id: &str, connection_id: &str) -> bool {
+    state
+        .agents
+        .lock()
+        .await
+        .get(agent_id)
+        .map(|connection| connection.connection_id == connection_id)
+        .unwrap_or(false)
+}
+
+fn is_reliable_agent_message(message: &AgentMessage) -> bool {
+    matches!(
+        message,
+        AgentMessage::Response { .. }
+            | AgentMessage::TransportAck { .. }
+            | AgentMessage::TransportRunStatus { .. }
+    )
+}
+
 async fn send_to_connection(state: &HubState, agent_id: &str, connection_id: &str, text: String) {
     let sender = {
         let agents = state.agents.lock().await;
@@ -421,7 +455,7 @@ pub(crate) async fn request_agent(
         let agents = state.agents.lock().await;
         agents
             .get(agent_id)
-            .map(|connection| connection.sender.clone())
+            .map(|connection| (connection.connection_id.clone(), connection.sender.clone()))
             .ok_or_else(|| "agent_offline".to_string())?
     };
     let run = runs::prepare_run(state, agent_id, &request_id, &command)
@@ -435,8 +469,9 @@ pub(crate) async fn request_agent(
         command.clone(),
     )
     .map_err(|error| error.to_string())?;
-    if sender.send(OutboundAgentMessage::Text(text)).is_err() {
+    if sender.1.send(OutboundAgentMessage::Text(text)).is_err() {
         state.pending.lock().await.remove(&request_id);
+        disconnect_agent(state, agent_id, &sender.0).await;
         return Err("agent_offline".to_string());
     }
     if let Err(error) = runs::mark_dispatched(state, &run.run_id) {
@@ -514,6 +549,41 @@ pub(crate) async fn replace_agent_connection(
     if let Some(old) = old {
         room::release_active_room_if_current(state, agent_id, &old.connection_id).await;
         let _ = old.sender.send(OutboundAgentMessage::Close);
+    }
+}
+
+pub(crate) async fn cleanup_agent_connections(state: HubState) {
+    loop {
+        sleep(Duration::from_secs(AGENT_CONNECTION_SWEEP_SECS)).await;
+        cleanup_expired_agent_connections_once(&state, chrono::Utc::now()).await;
+    }
+}
+
+pub(crate) async fn cleanup_expired_agent_connections_once(
+    state: &HubState,
+    now: chrono::DateTime<chrono::Utc>,
+) {
+    let expired = {
+        let agents = state.agents.lock().await;
+        agents
+            .iter()
+            .filter(|(_, connection)| {
+                now.signed_duration_since(connection.last_seen_at)
+                    .num_seconds()
+                    > AGENT_CONNECTION_TTL_SECS
+            })
+            .map(|(agent_id, connection)| {
+                (
+                    agent_id.clone(),
+                    connection.connection_id.clone(),
+                    connection.last_seen_at,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    for (agent_id, connection_id, last_seen_at) in expired {
+        warn!(%agent_id, %connection_id, %last_seen_at, "agent connection expired");
+        disconnect_agent(state, &agent_id, &connection_id).await;
     }
 }
 
@@ -719,8 +789,9 @@ mod tests {
     use super::*;
     use crate::db::init_db;
     use crate::{HubConfig, NtfyConfig, RemoteConfirmationConfig};
-    use agentic_gpt_protocol::ExecRequest;
-    use rusqlite::Connection;
+    use agentic_gpt_protocol::{Capabilities, ExecRequest};
+    use axum::http::HeaderValue;
+    use rusqlite::{params, Connection};
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex as StdMutex};
     use tokio::sync::Mutex;
@@ -756,6 +827,53 @@ mod tests {
         }
     }
 
+    fn register_agent(state: &HubState, agent_id: &str, secret: &str) {
+        let conn = state.db.lock().unwrap();
+        let capabilities = Capabilities {
+            sessions: true,
+            confirmation: true,
+            notification_actions: true,
+        };
+        conn.execute(
+            "insert into agents(agent_id, alias, display_name, enabled, secret_hash, last_seen_at, capabilities_json)
+             values (?1, null, ?1, 1, ?2, null, ?3)",
+            params![
+                agent_id,
+                sha256_hex(secret),
+                serde_json::to_string(&capabilities).unwrap()
+            ],
+        )
+        .unwrap();
+    }
+
+    fn agent_headers(secret: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-agent-secret", HeaderValue::from_str(secret).unwrap());
+        headers
+    }
+
+    async fn insert_connection(
+        state: &HubState,
+        agent_id: &str,
+        connection_id: &str,
+        last_seen_at: chrono::DateTime<chrono::Utc>,
+    ) -> mpsc::UnboundedReceiver<OutboundAgentMessage> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        state.agents.lock().await.insert(
+            agent_id.to_string(),
+            AgentConnection {
+                connection_id: connection_id.to_string(),
+                sender: tx,
+                last_seen_at,
+                role: AgentRole::Normal,
+                transport: AgentTransport::Sse,
+                config_summary: None,
+                notification_channels: Vec::new(),
+            },
+        );
+        rx
+    }
+
     #[tokio::test]
     async fn pending_replay_sends_reliable_envelope() {
         let state = test_state();
@@ -786,5 +904,149 @@ mod tests {
         assert_eq!(envelope.command_hash, run.command_hash);
         assert!(matches!(envelope.command, HubCommand::Exec { .. }));
         assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn stale_heartbeat_is_rejected_without_touching_current_connection() {
+        let state = test_state();
+        register_agent(&state, "agent", "secret");
+        let previous_seen = chrono::Utc::now() - chrono::Duration::seconds(10);
+        let _rx = insert_connection(&state, "agent", "current", previous_seen).await;
+
+        let response = post_agent_message(
+            State(state.clone()),
+            Path("agent".to_string()),
+            Query(SseConnectQuery {
+                connection_id: Some("old".to_string()),
+            }),
+            agent_headers("secret"),
+            axum::Json(AgentMessage::Heartbeat {
+                sent_at: chrono::Utc::now(),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let agents = state.agents.lock().await;
+        let connection = agents.get("agent").unwrap();
+        assert_eq!(connection.connection_id, "current");
+        assert_eq!(connection.last_seen_at, previous_seen);
+    }
+
+    #[tokio::test]
+    async fn stale_session_update_is_rejected_without_writing_session_cache() {
+        let state = test_state();
+        register_agent(&state, "agent", "secret");
+        let _rx = insert_connection(&state, "agent", "current", chrono::Utc::now()).await;
+
+        let response = post_agent_message(
+            State(state.clone()),
+            Path("agent".to_string()),
+            Query(SseConnectQuery {
+                connection_id: Some("old".to_string()),
+            }),
+            agent_headers("secret"),
+            axum::Json(AgentMessage::SessionUpdate {
+                session: SessionInfo {
+                    agent_id: "agent".to_string(),
+                    session_id: "session-old".to_string(),
+                    program: "sleep".to_string(),
+                    args: vec!["10".to_string()],
+                    working_directory: None,
+                    command_preview: "sleep 10".to_string(),
+                    state: "running".to_string(),
+                    started_at: chrono::Utc::now(),
+                    updated_at: chrono::Utc::now(),
+                    exit_code: None,
+                    stdout_tail: String::new(),
+                    stderr_tail: String::new(),
+                    truncated: false,
+                    reject_reason: None,
+                },
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert!(state.sessions.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn stale_response_with_matching_run_is_accepted() {
+        let state = test_state();
+        register_agent(&state, "agent", "secret");
+        let _rx = insert_connection(&state, "agent", "current", chrono::Utc::now()).await;
+        let command = HubCommand::Exec {
+            request_id: "req_late".to_string(),
+            task_id: "task_late".to_string(),
+            payload: ExecRequest {
+                agent_id: "agent".to_string(),
+                program: "printf".to_string(),
+                args: vec!["ok".to_string()],
+                need_confirm: false,
+                confirm_method: None,
+                working_directory: None,
+            },
+        };
+        let run = runs::prepare_run(&state, "agent", "req_late", &command).unwrap();
+
+        let response = post_agent_message(
+            State(state.clone()),
+            Path("agent".to_string()),
+            Query(SseConnectQuery {
+                connection_id: Some("old".to_string()),
+            }),
+            agent_headers("secret"),
+            axum::Json(AgentMessage::Response {
+                run_id: Some(run.run_id.clone()),
+                request_id: "req_late".to_string(),
+                data: json!({ "ok": true }),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let stored = runs::get_run(&state, &run.run_id).unwrap().unwrap();
+        assert_eq!(stored.status, "completed");
+        assert_eq!(stored.result, Some(json!({ "ok": true })));
+    }
+
+    #[tokio::test]
+    async fn failed_request_send_removes_current_connection() {
+        let state = test_state();
+        let rx = insert_connection(&state, "agent", "current", chrono::Utc::now()).await;
+        drop(rx);
+        let command = HubCommand::Exec {
+            request_id: "req_send_failed".to_string(),
+            task_id: "task_send_failed".to_string(),
+            payload: ExecRequest {
+                agent_id: "agent".to_string(),
+                program: "printf".to_string(),
+                args: vec!["ok".to_string()],
+                need_confirm: false,
+                confirm_method: None,
+                working_directory: None,
+            },
+        };
+
+        let result = request_agent(&state, "agent", command, 1).await;
+
+        assert_eq!(result.unwrap_err(), "agent_offline");
+        assert!(!state.agents.lock().await.contains_key("agent"));
+    }
+
+    #[tokio::test]
+    async fn expired_connection_cleanup_removes_only_stale_current_entries() {
+        let state = test_state();
+        let old_seen = chrono::Utc::now() - chrono::Duration::seconds(120);
+        let fresh_seen = chrono::Utc::now();
+        let _old_rx = insert_connection(&state, "old-agent", "old", old_seen).await;
+        let _fresh_rx = insert_connection(&state, "fresh-agent", "fresh", fresh_seen).await;
+
+        cleanup_expired_agent_connections_once(&state, chrono::Utc::now()).await;
+
+        let agents = state.agents.lock().await;
+        assert!(!agents.contains_key("old-agent"));
+        assert!(agents.contains_key("fresh-agent"));
     }
 }

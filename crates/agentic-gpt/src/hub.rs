@@ -32,7 +32,6 @@ pub(crate) async fn connect_loop(state: AppState) -> Result<()> {
                 Err(error) => log_warn(format!("sse connection failed: {error}")),
                 Ok(()) => log_warn("sse connection closed".to_string()),
             }
-            *state.hub_sender.lock().await = None;
             confirmation::fail_pending_confirmations(&state, "provider_unavailable").await;
             log_info(format!("reconnecting in {RECONNECT_DELAY_SECS}s"));
             sleep(Duration::from_secs(RECONNECT_DELAY_SECS)).await;
@@ -194,6 +193,17 @@ async fn connect_sse(state: AppState, config: Config) -> Result<()> {
         .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
         .build()
         .map_err(|error| anyhow!("{error}"))?;
+    let response = client
+        .get(events_url)
+        .header("x-agent-secret", &config.agent_secret)
+        .send()
+        .await
+        .map_err(|error| anyhow!("{error}"))?;
+    if !response.status().is_success() {
+        return Err(anyhow!("sse connect failed: {}", response.status()));
+    }
+    log_info("connected to hub via sse".to_string());
+
     let (tx, mut rx) = mpsc::unbounded_channel::<AgentMessage>();
     *state.hub_sender.lock().await = Some(tx.clone());
     let post_client = client.clone();
@@ -211,6 +221,13 @@ async fn connect_sse(state: AppState, config: Config) -> Result<()> {
                 match response {
                     Ok(response) if response.status().is_success() => break,
                     Ok(response) => {
+                        if classify_sse_post_status(response.status()) == SsePostStatus::Stale {
+                            log_warn(
+                                "sse post rejected as stale connection; stopping writer"
+                                    .to_string(),
+                            );
+                            return;
+                        }
                         log_warn(format!("sse post failed; status={}", response.status()));
                     }
                     Err(error) => log_warn(format!("sse post failed: {error}")),
@@ -221,14 +238,6 @@ async fn connect_sse(state: AppState, config: Config) -> Result<()> {
         }
     });
 
-    tx.send(AgentMessage::Hello {
-        role: state.run_mode.role(),
-        config_summary: config.safe_summary(),
-        notification_channels: notify::freedesktop_notification_channel(&config)
-            .into_iter()
-            .collect(),
-    })?;
-    reconcile_transport_runs(&state, &tx).await;
     let heartbeat_tx = tx.clone();
     let heartbeat = tokio::spawn(async move {
         let mut heartbeat = tokio::time::interval(Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
@@ -246,47 +255,77 @@ async fn connect_sse(state: AppState, config: Config) -> Result<()> {
         }
     });
 
-    let response = client
-        .get(events_url)
-        .header("x-agent-secret", &config.agent_secret)
-        .send()
-        .await
-        .map_err(|error| anyhow!("{error}"))?;
-    if !response.status().is_success() {
-        writer.abort();
-        heartbeat.abort();
-        return Err(anyhow!("sse connect failed: {}", response.status()));
-    }
-    log_info("connected to hub via sse".to_string());
-    let mut stream = response.bytes_stream();
-    let mut buffer = String::new();
-    let mut data = String::new();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|error| anyhow!("{error}"))?;
-        buffer.push_str(&String::from_utf8_lossy(&chunk));
-        while let Some(index) = buffer.find('\n') {
-            let mut line = buffer[..index].to_string();
-            buffer = buffer[index + 1..].to_string();
-            if line.ends_with('\r') {
-                line.pop();
-            }
-            if line.is_empty() {
-                if !data.is_empty() {
-                    handle_sse_data(&state, &tx, std::mem::take(&mut data)).await;
+    let result = async {
+        tx.send(AgentMessage::Hello {
+            role: state.run_mode.role(),
+            config_summary: config.safe_summary(),
+            notification_channels: notify::freedesktop_notification_channel(&config)
+                .into_iter()
+                .collect(),
+        })?;
+        reconcile_transport_runs(&state, &tx).await;
+
+        let mut stream = response.bytes_stream();
+        let mut buffer = String::new();
+        let mut data = String::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|error| anyhow!("{error}"))?;
+            buffer.push_str(&String::from_utf8_lossy(&chunk));
+            while let Some(index) = buffer.find('\n') {
+                let mut line = buffer[..index].to_string();
+                buffer = buffer[index + 1..].to_string();
+                if line.ends_with('\r') {
+                    line.pop();
                 }
-                continue;
-            }
-            if let Some(value) = line.strip_prefix("data:") {
-                if !data.is_empty() {
-                    data.push('\n');
+                if line.is_empty() {
+                    if !data.is_empty() {
+                        handle_sse_data(&state, &tx, std::mem::take(&mut data)).await;
+                    }
+                    continue;
                 }
-                data.push_str(value.trim_start());
+                if let Some(value) = line.strip_prefix("data:") {
+                    if !data.is_empty() {
+                        data.push('\n');
+                    }
+                    data.push_str(value.trim_start());
+                }
             }
         }
+        Ok(())
     }
+    .await;
     writer.abort();
     heartbeat.abort();
-    Ok(())
+    clear_hub_sender_if_current(&state, &tx).await;
+    result
+}
+
+async fn clear_hub_sender_if_current(state: &AppState, tx: &mpsc::UnboundedSender<AgentMessage>) {
+    let mut current = state.hub_sender.lock().await;
+    if current
+        .as_ref()
+        .map(|sender| sender.same_channel(tx))
+        .unwrap_or(false)
+    {
+        *current = None;
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SsePostStatus {
+    Delivered,
+    Stale,
+    Retry,
+}
+
+pub(crate) fn classify_sse_post_status(status: reqwest::StatusCode) -> SsePostStatus {
+    if status.is_success() {
+        SsePostStatus::Delivered
+    } else if status == reqwest::StatusCode::CONFLICT {
+        SsePostStatus::Stale
+    } else {
+        SsePostStatus::Retry
+    }
 }
 
 async fn handle_sse_data(state: &AppState, tx: &mpsc::UnboundedSender<AgentMessage>, data: String) {

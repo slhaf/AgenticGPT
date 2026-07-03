@@ -171,6 +171,7 @@ async fn serve(
     };
     tokio::spawn(cleanup_confirmations(state.clone()));
     tokio::spawn(cleanup_runs(state.clone()));
+    tokio::spawn(agents::cleanup_agent_connections(state.clone()));
     tokio::spawn(oauth::cleanup_oauth(state.clone()));
     let app = Router::new()
         .route("/v1/info", get(routes::hub_info))
