@@ -72,6 +72,12 @@ pub(crate) fn command_type(command: &HubCommand) -> &'static str {
         HubCommand::RoomDiaryAppend { .. } => "room.diary.append",
         HubCommand::RoomDiaryRecent { .. } => "room.diary.recent",
         HubCommand::RoomDiarySelectExact { .. } => "room.diary.selectExact",
+        HubCommand::SkillsList { .. } => "skills.list",
+        HubCommand::SkillsRead { .. } => "skills.read",
+        HubCommand::SkillsSearch { .. } => "skills.search",
+        HubCommand::SkillsActive { .. } => "skills.active",
+        HubCommand::SkillsActivate { .. } => "skills.activate",
+        HubCommand::SkillsDeactivate { .. } => "skills.deactivate",
     }
 }
 

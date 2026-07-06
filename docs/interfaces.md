@@ -21,6 +21,7 @@ Core endpoints:
 - `POST /v1/mcp/tools`: list tools exposed by one MCP server.
 - `POST /v1/mcp/callTool`: call one MCP tool through the selected local agent.
 - `GET /v1/runs/{runId}`: inspect persisted status and optional late result for one Hub-to-Agent command run.
+- `POST /v1/room/skills/list`, `/read`, `/search`, `/active`, `/activate`, `/deactivate`: discover workspace skills through the active Room Agent and maintain local active skill state. These endpoints do not take `agentId`.
 
 `/v1/info` intentionally returns only safe metadata: Hub version, public base URL, timeout settings, remote confirmation status, agent counts, and pending request/session counts. It must not expose secrets, confirmation callback URLs, or private config values.
 
@@ -50,6 +51,8 @@ OAuth discovery routes:
 - `/oauth/token`
 
 The ntfy confirmation callback routes are intentionally not part of `openapi/hub.yaml`. They are only used by confirmation action buttons.
+
+Room skills API stores active state in the Room Agent workspace under `state/active-skills.json`. Activating a skill does not execute it or grant permissions; stale active entries remain visible as `missing` until explicitly deactivated.
 
 ## Local Agent transports
 

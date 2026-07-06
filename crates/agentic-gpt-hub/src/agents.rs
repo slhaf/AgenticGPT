@@ -666,11 +666,17 @@ pub(crate) fn command_request_id(command: &HubCommand) -> &str {
         | HubCommand::RoomNotebookRemove { request_id, .. }
         | HubCommand::RoomDiaryAppend { request_id, .. }
         | HubCommand::RoomDiaryRecent { request_id, .. }
-        | HubCommand::RoomDiarySelectExact { request_id, .. } => request_id,
+        | HubCommand::RoomDiarySelectExact { request_id, .. }
+        | HubCommand::SkillsList { request_id }
+        | HubCommand::SkillsRead { request_id, .. }
+        | HubCommand::SkillsSearch { request_id, .. }
+        | HubCommand::SkillsActive { request_id }
+        | HubCommand::SkillsActivate { request_id, .. }
+        | HubCommand::SkillsDeactivate { request_id, .. } => request_id,
     }
 }
 
-fn set_command_request_id(command: &mut HubCommand, value: String) {
+pub(crate) fn set_command_request_id(command: &mut HubCommand, value: String) {
     match command {
         HubCommand::Exec { request_id, .. }
         | HubCommand::BatchExec { request_id, .. }
@@ -699,7 +705,13 @@ fn set_command_request_id(command: &mut HubCommand, value: String) {
         | HubCommand::RoomNotebookRemove { request_id, .. }
         | HubCommand::RoomDiaryAppend { request_id, .. }
         | HubCommand::RoomDiaryRecent { request_id, .. }
-        | HubCommand::RoomDiarySelectExact { request_id, .. } => *request_id = value,
+        | HubCommand::RoomDiarySelectExact { request_id, .. }
+        | HubCommand::SkillsList { request_id }
+        | HubCommand::SkillsRead { request_id, .. }
+        | HubCommand::SkillsSearch { request_id, .. }
+        | HubCommand::SkillsActive { request_id }
+        | HubCommand::SkillsActivate { request_id, .. }
+        | HubCommand::SkillsDeactivate { request_id, .. } => *request_id = value,
     }
 }
 

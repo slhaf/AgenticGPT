@@ -645,6 +645,7 @@ mod tests {
             pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
             temporary_mcp_allows: Arc::new(Mutex::new(Vec::new())),
             notebook_writes: Arc::new(Mutex::new(())),
+            skills_writes: Arc::new(Mutex::new(())),
         }
     }
 

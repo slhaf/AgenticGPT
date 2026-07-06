@@ -229,6 +229,12 @@ async fn serve(
         )
         .route("/v1/room/notebook/update", post(room::room_notebook_update))
         .route("/v1/room/notebook/remove", post(room::room_notebook_remove))
+        .route("/v1/room/skills/list", post(room::skills_list))
+        .route("/v1/room/skills/read", post(room::skills_read))
+        .route("/v1/room/skills/search", post(room::skills_search))
+        .route("/v1/room/skills/active", post(room::skills_active))
+        .route("/v1/room/skills/activate", post(room::skills_activate))
+        .route("/v1/room/skills/deactivate", post(room::skills_deactivate))
         .route("/mcp", get(mcp_server::mcp_get).post(mcp_server::mcp_post))
         .route(
             "/.well-known/oauth-protected-resource",
@@ -776,6 +782,7 @@ impl HubConfig {
 mod tests {
     use super::*;
     use crate::routes::parse_bearer_token;
+    use agentic_gpt_protocol::HubCommand;
 
     fn test_hub_config() -> HubConfig {
         HubConfig {
@@ -935,5 +942,114 @@ mod tests {
         }
         assert!(openapi.contains("roomNotebookUpdate"));
         assert!(openapi.contains("roomNotebookRemove"));
+    }
+
+    #[test]
+    fn skills_commands_have_request_ids_and_run_types() {
+        let mut commands = [
+            HubCommand::SkillsList {
+                request_id: "req-list".to_string(),
+            },
+            HubCommand::SkillsRead {
+                request_id: "req-read".to_string(),
+                payload: agentic_gpt_protocol::SkillReadRequest {
+                    id: "demo".to_string(),
+                },
+            },
+            HubCommand::SkillsSearch {
+                request_id: "req-search".to_string(),
+                payload: agentic_gpt_protocol::SkillSearchRequest {
+                    query: "demo".to_string(),
+                    limit: None,
+                },
+            },
+            HubCommand::SkillsActive {
+                request_id: "req-active".to_string(),
+            },
+            HubCommand::SkillsActivate {
+                request_id: "req-activate".to_string(),
+                payload: agentic_gpt_protocol::SkillActivationRequest {
+                    id: "demo".to_string(),
+                },
+            },
+            HubCommand::SkillsDeactivate {
+                request_id: "req-deactivate".to_string(),
+                payload: agentic_gpt_protocol::SkillActivationRequest {
+                    id: "demo".to_string(),
+                },
+            },
+        ];
+        let expected = [
+            "skills.list",
+            "skills.read",
+            "skills.search",
+            "skills.active",
+            "skills.activate",
+            "skills.deactivate",
+        ];
+
+        for index in 0..commands.len() {
+            let command = &mut commands[index];
+            let expected_type = expected[index];
+            assert_eq!(crate::runs::command_type(command), expected_type);
+            crate::agents::set_command_request_id(command, "req-new".to_string());
+            assert_eq!(crate::agents::command_request_id(command), "req-new");
+        }
+    }
+
+    #[test]
+    fn openapi_room_skills_paths_and_schemas_do_not_include_agent_id() {
+        let openapi = include_str!("../../../openapi/hub.yaml");
+        for path in [
+            "/v1/room/skills/list:",
+            "/v1/room/skills/read:",
+            "/v1/room/skills/search:",
+            "/v1/room/skills/active:",
+            "/v1/room/skills/activate:",
+            "/v1/room/skills/deactivate:",
+        ] {
+            assert!(openapi.contains(path), "missing {path}");
+        }
+        for operation_id in [
+            "roomSkillsList",
+            "roomSkillsRead",
+            "roomSkillsSearch",
+            "roomSkillsActive",
+            "roomSkillsActivate",
+            "roomSkillsDeactivate",
+        ] {
+            assert!(openapi.contains(operation_id), "missing {operation_id}");
+        }
+        for schema in [
+            "SkillReadRequest:",
+            "SkillSearchRequest:",
+            "SkillActivationRequest:",
+            "SkillSummary:",
+            "SkillDetail:",
+            "ActiveSkill:",
+        ] {
+            let mut in_section = false;
+            let mut section = String::new();
+            for line in openapi.lines() {
+                if line.trim() == schema {
+                    in_section = true;
+                    section.push_str(line);
+                    section.push('\n');
+                    continue;
+                }
+                if in_section && line.starts_with("    ") && !line.starts_with("      ") {
+                    break;
+                }
+                if in_section {
+                    section.push_str(line);
+                    section.push('\n');
+                }
+            }
+            assert!(!section.is_empty(), "missing schema {schema}");
+            assert!(
+                !section.contains("agentId"),
+                "{schema} unexpectedly contains agentId"
+            );
+        }
     }
 }

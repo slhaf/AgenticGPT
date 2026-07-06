@@ -39,4 +39,5 @@ pub(crate) struct AppState {
     pub(crate) pending_confirmations: Arc<Mutex<HashMap<String, oneshot::Sender<String>>>>,
     pub(crate) temporary_mcp_allows: Arc<Mutex<Vec<confirmation::TemporaryMcpAllow>>>,
     pub(crate) notebook_writes: Arc<Mutex<()>>,
+    pub(crate) skills_writes: Arc<Mutex<()>>,
 }

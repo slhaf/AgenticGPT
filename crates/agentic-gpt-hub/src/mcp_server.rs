@@ -3,8 +3,9 @@ use agentic_gpt_protocol::{
     ExecRequest, HubCommand, McpCallToolRequest, McpListToolsRequest, NotebookAppendRequest,
     NotebookCurrentRequest, NotebookRecentRequest, NotebookRemoveRequest, NotebookSearchRequest,
     NotebookSelectExactRequest, NotebookUpdateRequest, NotificationAction, PassageSignificance,
-    SessionInfo, TmuxCapturePaneRequest, TmuxCloseSessionRequest, TmuxCreateSessionRequest,
-    TmuxExecRequest, TmuxListPanesRequest, TmuxPasteTextRequest, UserNotifySendRequest,
+    SessionInfo, SkillActivationRequest, SkillReadRequest, SkillSearchRequest,
+    TmuxCapturePaneRequest, TmuxCloseSessionRequest, TmuxCreateSessionRequest, TmuxExecRequest,
+    TmuxListPanesRequest, TmuxPasteTextRequest, UserNotifySendRequest,
 };
 use axum::extract::{Request, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -101,6 +102,8 @@ fn tool_is_read_only(name: &str) -> bool {
             | "room.notebook.update"
             | "room.notebook.remove"
             | "room.diary.append"
+            | "skills.activate"
+            | "skills.deactivate"
     )
 }
 
@@ -308,6 +311,28 @@ async fn call_app_tool(server: &AgenticMcpServer, params: Value) -> Result<Value
         "room.diary.selectExact" => {
             server
                 .room_diary_select_exact(Parameters(decode_args(arguments)?))
+                .await
+        }
+        "skills.list" => server.skills_list().await,
+        "skills.read" => {
+            server
+                .skills_read(Parameters(decode_args(arguments)?))
+                .await
+        }
+        "skills.search" => {
+            server
+                .skills_search(Parameters(decode_args(arguments)?))
+                .await
+        }
+        "skills.active" => server.skills_active().await,
+        "skills.activate" => {
+            server
+                .skills_activate(Parameters(decode_args(arguments)?))
+                .await
+        }
+        "skills.deactivate" => {
+            server
+                .skills_deactivate(Parameters(decode_args(arguments)?))
                 .await
         }
         _ => return Err(format!("Unknown tool: {name}")),
@@ -1279,6 +1304,132 @@ impl AgenticMcpServer {
         .unwrap_or_else(room_route_error_value);
         Ok(result_from_value(value))
     }
+
+    #[tool(
+        name = "skills.list",
+        description = "List valid skills in the active Room Agent workspace. Scans workspace skills/*/SKILL.md and marks active skills. No agentId is used."
+    )]
+    async fn skills_list(&self) -> Result<CallToolResult, ErrorData> {
+        let value = request_active_room(
+            &self.state,
+            HubCommand::SkillsList {
+                request_id: random_id("req"),
+            },
+            REQUEST_TIMEOUT_SECS,
+        )
+        .await
+        .unwrap_or_else(room_route_error_value);
+        Ok(result_from_value(value))
+    }
+
+    #[tool(
+        name = "skills.read",
+        description = "Read one skill package from the active Room Agent workspace by id, including SKILL.md, parsed frontmatter, package summary, warnings, and active status. No agentId is used."
+    )]
+    async fn skills_read(
+        &self,
+        params: Parameters<SkillReadArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let payload = SkillReadRequest { id: params.0.id };
+        let value = request_active_room(
+            &self.state,
+            HubCommand::SkillsRead {
+                request_id: random_id("req"),
+                payload,
+            },
+            REQUEST_TIMEOUT_SECS,
+        )
+        .await
+        .unwrap_or_else(room_route_error_value);
+        Ok(result_from_value(value))
+    }
+
+    #[tool(
+        name = "skills.search",
+        description = "Search skills in the active Room Agent workspace by case-insensitive substring over id, frontmatter, tags, and SKILL.md content. No agentId is used."
+    )]
+    async fn skills_search(
+        &self,
+        params: Parameters<SkillSearchArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let params = params.0;
+        let payload = SkillSearchRequest {
+            query: params.query,
+            limit: params.limit,
+        };
+        let value = request_active_room(
+            &self.state,
+            HubCommand::SkillsSearch {
+                request_id: random_id("req"),
+                payload,
+            },
+            REQUEST_TIMEOUT_SECS,
+        )
+        .await
+        .unwrap_or_else(room_route_error_value);
+        Ok(result_from_value(value))
+    }
+
+    #[tool(
+        name = "skills.active",
+        description = "Return active skills for the active Room Agent workspace. Deleted skills remain listed as stale/missing until deactivated. No agentId is used."
+    )]
+    async fn skills_active(&self) -> Result<CallToolResult, ErrorData> {
+        let value = request_active_room(
+            &self.state,
+            HubCommand::SkillsActive {
+                request_id: random_id("req"),
+            },
+            REQUEST_TIMEOUT_SECS,
+        )
+        .await
+        .unwrap_or_else(room_route_error_value);
+        Ok(result_from_value(value))
+    }
+
+    #[tool(
+        name = "skills.activate",
+        description = "Mark an existing valid skill as active in the active Room Agent workspace. This grants no permissions and executes nothing. No agentId is used."
+    )]
+    async fn skills_activate(
+        &self,
+        params: Parameters<SkillActivationArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let payload = SkillActivationRequest { id: params.0.id };
+        let value = request_active_room(
+            &self.state,
+            HubCommand::SkillsActivate {
+                request_id: random_id("req"),
+                payload,
+            },
+            REQUEST_TIMEOUT_SECS,
+        )
+        .await
+        .unwrap_or_else(room_route_error_value);
+        Ok(result_from_value(value))
+    }
+
+    #[tool(
+        name = "skills.deactivate",
+        description = "Remove active state for a skill id in the active Room Agent workspace. This succeeds even for stale/missing skills. No agentId is used."
+    )]
+    async fn skills_deactivate(
+        &self,
+        params: Parameters<SkillActivationArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let payload = SkillActivationRequest { id: params.0.id };
+        let value = request_active_room(
+            &self.state,
+            HubCommand::SkillsDeactivate {
+                request_id: random_id("req"),
+                payload,
+            },
+            REQUEST_TIMEOUT_SECS,
+        )
+        .await
+        .unwrap_or_else(room_route_error_value);
+        Ok(result_from_value(value))
+    }
 }
 
 impl AgenticMcpServer {
@@ -1727,6 +1878,32 @@ struct RoomDiarySelectExactArgs {
     limit: Option<usize>,
 }
 
+#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct SkillReadArgs {
+    #[schemars(description = "Skill id, matching one workspace skills/ directory name.")]
+    id: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct SkillSearchArgs {
+    #[schemars(
+        description = "Case-insensitive substring query over id, frontmatter, tags, and SKILL.md content."
+    )]
+    query: String,
+    #[serde(default)]
+    #[schemars(description = "Maximum skills returned. Defaults to 20 and caps at 100.")]
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct SkillActivationArgs {
+    #[schemars(description = "Skill id, matching one workspace skills/ directory name.")]
+    id: String,
+}
+
 fn ok_json(value: Value) -> CallToolResult {
     AgenticResult::from_native_value(value).into_call_tool_result()
 }
@@ -1865,6 +2042,10 @@ mod tests {
             "room.notebook.search",
             "room.diary.recent",
             "room.diary.selectExact",
+            "skills.list",
+            "skills.read",
+            "skills.search",
+            "skills.active",
         ] {
             assert!(tool_is_read_only(name), "{name} should be read-only");
         }
@@ -1882,6 +2063,8 @@ mod tests {
             "room.notebook.update",
             "room.notebook.remove",
             "room.diary.append",
+            "skills.activate",
+            "skills.deactivate",
         ] {
             assert!(!tool_is_read_only(name), "{name} should not be read-only");
         }
@@ -1916,6 +2099,9 @@ mod tests {
             serde_json::to_string(&rmcp::schemars::schema_for!(RoomDiaryAppendArgs)).unwrap(),
             serde_json::to_string(&rmcp::schemars::schema_for!(RoomDiaryRecentArgs)).unwrap(),
             serde_json::to_string(&rmcp::schemars::schema_for!(RoomDiarySelectExactArgs)).unwrap(),
+            serde_json::to_string(&rmcp::schemars::schema_for!(SkillReadArgs)).unwrap(),
+            serde_json::to_string(&rmcp::schemars::schema_for!(SkillSearchArgs)).unwrap(),
+            serde_json::to_string(&rmcp::schemars::schema_for!(SkillActivationArgs)).unwrap(),
         ];
         for schema in schemas {
             assert!(!schema.contains("agentId"));

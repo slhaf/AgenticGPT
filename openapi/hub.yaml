@@ -703,6 +703,138 @@ paths:
           $ref: "#/components/responses/NotFound"
         "504":
           $ref: "#/components/responses/GatewayTimeout"
+  /v1/room/skills/list:
+    post:
+      operationId: roomSkillsList
+      description: List valid skills in the active Room Agent workspace. Scans workspace skills/*/SKILL.md and marks active skills. No agentId is used.
+      x-openai-isConsequential: false
+      responses:
+        "200":
+          description: Valid workspace skills.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SkillsListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+  /v1/room/skills/read:
+    post:
+      operationId: roomSkillsRead
+      description: Read one skill package from the active Room Agent workspace by id, including SKILL.md, parsed frontmatter, package summary, warnings, and active status. No agentId is used.
+      x-openai-isConsequential: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SkillReadRequest"
+      responses:
+        "200":
+          description: Skill detail.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SkillReadResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+  /v1/room/skills/search:
+    post:
+      operationId: roomSkillsSearch
+      description: Search skills in the active Room Agent workspace by case-insensitive substring over id, frontmatter, tags, and SKILL.md content. No agentId is used.
+      x-openai-isConsequential: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SkillSearchRequest"
+      responses:
+        "200":
+          description: Matching workspace skills.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SkillsSearchResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+  /v1/room/skills/active:
+    post:
+      operationId: roomSkillsActive
+      description: Return active skills for the active Room Agent workspace. Deleted skills remain listed as stale/missing until deactivated. No agentId is used.
+      x-openai-isConsequential: false
+      responses:
+        "200":
+          description: Active workspace skills.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SkillsActiveResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+  /v1/room/skills/activate:
+    post:
+      operationId: roomSkillsActivate
+      description: Mark an existing valid skill as active in the active Room Agent workspace. This grants no permissions and executes nothing. No agentId is used.
+      x-openai-isConsequential: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SkillActivationRequest"
+      responses:
+        "200":
+          description: Skill activation result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SkillActivationResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+  /v1/room/skills/deactivate:
+    post:
+      operationId: roomSkillsDeactivate
+      description: Remove active state for a skill id in the active Room Agent workspace. This succeeds even for stale/missing skills. No agentId is used.
+      x-openai-isConsequential: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SkillActivationRequest"
+      responses:
+        "200":
+          description: Skill deactivation result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SkillActivationResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
   /v1/runs/{runId}:
     get:
       operationId: getRun
@@ -1874,6 +2006,208 @@ components:
           type: array
           items:
             type: string
+    SkillReadRequest:
+      type: object
+      required:
+        - id
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          pattern: ^[A-Za-z0-9_.-]+$
+    SkillSearchRequest:
+      type: object
+      required:
+        - query
+      additionalProperties: false
+      properties:
+        query:
+          type: string
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 100
+    SkillActivationRequest:
+      type: object
+      required:
+        - id
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          pattern: ^[A-Za-z0-9_.-]+$
+    SkillPackageSummary:
+      type: object
+      required:
+        - hasAssets
+        - hasScripts
+        - hasReferences
+      additionalProperties: false
+      properties:
+        hasAssets:
+          type: boolean
+        hasScripts:
+          type: boolean
+        hasReferences:
+          type: boolean
+    SkillSummary:
+      type: object
+      required:
+        - id
+        - tags
+        - active
+        - packageSummary
+        - warnings
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        version:
+          type: string
+        tags:
+          type: array
+          items:
+            type: string
+        active:
+          type: boolean
+        packageSummary:
+          $ref: "#/components/schemas/SkillPackageSummary"
+        warnings:
+          type: array
+          items:
+            type: string
+    SkillDetail:
+      type: object
+      required:
+        - id
+        - skillMd
+        - frontmatter
+        - tags
+        - active
+        - packageSummary
+        - warnings
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+        skillMd:
+          type: string
+        frontmatter:
+          type: object
+          additionalProperties: true
+        name:
+          type: string
+        description:
+          type: string
+        version:
+          type: string
+        tags:
+          type: array
+          items:
+            type: string
+        active:
+          type: boolean
+        packageSummary:
+          $ref: "#/components/schemas/SkillPackageSummary"
+        warnings:
+          type: array
+          items:
+            type: string
+    ActiveSkill:
+      type: object
+      required:
+        - id
+        - activatedAt
+        - status
+        - stale
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+        activatedAt:
+          type: string
+        status:
+          type: string
+          enum:
+            - active
+            - missing
+        stale:
+          type: boolean
+        summary:
+          $ref: "#/components/schemas/SkillSummary"
+    SkillsListResponse:
+      type: object
+      required:
+        - skills
+        - warnings
+      additionalProperties: false
+      properties:
+        skills:
+          type: array
+          items:
+            $ref: "#/components/schemas/SkillSummary"
+        warnings:
+          type: array
+          items:
+            type: string
+    SkillReadResponse:
+      type: object
+      required:
+        - skill
+      additionalProperties: false
+      properties:
+        skill:
+          $ref: "#/components/schemas/SkillDetail"
+    SkillsSearchResponse:
+      type: object
+      required:
+        - skills
+        - warnings
+      additionalProperties: false
+      properties:
+        skills:
+          type: array
+          items:
+            $ref: "#/components/schemas/SkillSummary"
+        warnings:
+          type: array
+          items:
+            type: string
+    SkillsActiveResponse:
+      type: object
+      required:
+        - activeSkills
+        - warnings
+      additionalProperties: false
+      properties:
+        activeSkills:
+          type: array
+          items:
+            $ref: "#/components/schemas/ActiveSkill"
+        warnings:
+          type: array
+          items:
+            type: string
+    SkillActivationResponse:
+      type: object
+      required:
+        - id
+        - active
+        - changed
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+        active:
+          type: boolean
+        changed:
+          type: boolean
+        activatedAt:
+          type: string
     ExecRequest:
       type: object
       required:

@@ -10,6 +10,7 @@ mod notebook;
 mod notify;
 mod policy;
 mod sessions;
+mod skills;
 mod state;
 mod tmux;
 mod transport_ledger;
@@ -198,6 +199,7 @@ async fn run(config_path: PathBuf, run_mode: RunMode) -> Result<()> {
         pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
         temporary_mcp_allows: Arc::new(Mutex::new(Vec::new())),
         notebook_writes: Arc::new(Mutex::new(())),
+        skills_writes: Arc::new(Mutex::new(())),
     };
     tokio::spawn(watch_config(state.clone()));
     hub::connect_loop(state).await
@@ -402,7 +404,7 @@ mod tests {
         assert_eq!(value["error"]["code"], "room_agent_required");
         assert_eq!(
             value["error"]["message"],
-            "room notebook commands require run-as-room"
+            "room commands require run-as-room"
         );
     }
 
@@ -423,6 +425,7 @@ mod tests {
                 pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
                 temporary_mcp_allows: Arc::new(Mutex::new(Vec::new())),
                 notebook_writes: Arc::new(Mutex::new(())),
+                skills_writes: Arc::new(Mutex::new(())),
             },
             rx,
         )
@@ -880,6 +883,7 @@ mod tests {
             pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
             temporary_mcp_allows: Arc::new(Mutex::new(Vec::new())),
             notebook_writes: Arc::new(Mutex::new(())),
+            skills_writes: Arc::new(Mutex::new(())),
         };
 
         let result = exec::run_batch_task(

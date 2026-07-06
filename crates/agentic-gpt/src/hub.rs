@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 use crate::{
     config::Config,
-    confirmation, diary, exec, mcp, notebook, notify, sessions, tmux, transport_ledger,
+    confirmation, diary, exec, mcp, notebook, notify, sessions, skills, tmux, transport_ledger,
     utils::{
         command_preview, log_info, log_warn, CONNECT_TIMEOUT_SECS, HEARTBEAT_ACK_TIMEOUT_SECS,
         HEARTBEAT_INTERVAL_SECS, RECONNECT_DELAY_SECS,
@@ -976,8 +976,101 @@ pub(crate) async fn handle_hub_command(
             };
             send_response(&state, run_id.as_deref(), &request_id, result).await?;
         }
+        HubCommand::SkillsList { request_id } => {
+            let result = if state.run_mode != RunMode::Room {
+                room_agent_required_error()
+            } else {
+                match skills::list(&state).await {
+                    Ok(result) => serde_json::to_value(result)?,
+                    Err(error) => skills_command_error("skills_list_failed", error),
+                }
+            };
+            send_response(&state, run_id.as_deref(), &request_id, result).await?;
+        }
+        HubCommand::SkillsRead {
+            request_id,
+            payload,
+        } => {
+            let result = if state.run_mode != RunMode::Room {
+                room_agent_required_error()
+            } else {
+                match skills::read(&state, payload).await {
+                    Ok(result) => serde_json::to_value(result)?,
+                    Err(error) => skills_command_error("skills_read_failed", error),
+                }
+            };
+            send_response(&state, run_id.as_deref(), &request_id, result).await?;
+        }
+        HubCommand::SkillsSearch {
+            request_id,
+            payload,
+        } => {
+            let result = if state.run_mode != RunMode::Room {
+                room_agent_required_error()
+            } else {
+                match skills::search(&state, payload).await {
+                    Ok(result) => serde_json::to_value(result)?,
+                    Err(error) => skills_command_error("skills_search_failed", error),
+                }
+            };
+            send_response(&state, run_id.as_deref(), &request_id, result).await?;
+        }
+        HubCommand::SkillsActive { request_id } => {
+            let result = if state.run_mode != RunMode::Room {
+                room_agent_required_error()
+            } else {
+                match skills::active(&state).await {
+                    Ok(result) => serde_json::to_value(result)?,
+                    Err(error) => skills_command_error("skills_active_failed", error),
+                }
+            };
+            send_response(&state, run_id.as_deref(), &request_id, result).await?;
+        }
+        HubCommand::SkillsActivate {
+            request_id,
+            payload,
+        } => {
+            let result = if state.run_mode != RunMode::Room {
+                room_agent_required_error()
+            } else {
+                match skills::activate(&state, payload).await {
+                    Ok(result) => serde_json::to_value(result)?,
+                    Err(error) => skills_command_error("skills_activate_failed", error),
+                }
+            };
+            send_response(&state, run_id.as_deref(), &request_id, result).await?;
+        }
+        HubCommand::SkillsDeactivate {
+            request_id,
+            payload,
+        } => {
+            let result = if state.run_mode != RunMode::Room {
+                room_agent_required_error()
+            } else {
+                match skills::deactivate(&state, payload).await {
+                    Ok(result) => serde_json::to_value(result)?,
+                    Err(error) => skills_command_error("skills_deactivate_failed", error),
+                }
+            };
+            send_response(&state, run_id.as_deref(), &request_id, result).await?;
+        }
     }
     Ok(())
+}
+
+fn skills_command_error(default_code: &str, error: anyhow::Error) -> serde_json::Value {
+    let message = error.to_string();
+    let code = match message.as_str() {
+        "invalid_id" | "query_required" => "validation_error",
+        "not_found" => "not_found",
+        _ => default_code,
+    };
+    serde_json::json!({
+        "error": {
+            "code": code,
+            "message": if code == "not_found" { "skill not found" } else { &message }
+        }
+    })
 }
 
 fn notebook_command_error(default_code: &str, error: anyhow::Error) -> serde_json::Value {
@@ -1004,7 +1097,7 @@ pub(crate) fn room_agent_required_error() -> serde_json::Value {
     serde_json::json!({
         "error": {
             "code": "room_agent_required",
-            "message": "room notebook commands require run-as-room"
+            "message": "room commands require run-as-room"
         }
     })
 }

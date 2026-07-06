@@ -1,7 +1,7 @@
 use agentic_gpt_protocol::{
     AgentRole, HubCommand, NotebookAppendRequest, NotebookCurrentRequest, NotebookRecentRequest,
     NotebookRemoveRequest, NotebookSearchRequest, NotebookSelectExactRequest,
-    NotebookUpdateRequest,
+    NotebookUpdateRequest, SkillActivationRequest, SkillReadRequest, SkillSearchRequest,
 };
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
@@ -143,6 +143,98 @@ pub(crate) async fn room_notebook_remove(
             payload,
         },
         "room_notebook_remove_timeout",
+    )
+    .await
+}
+
+pub(crate) async fn skills_list(State(state): State<HubState>, headers: HeaderMap) -> Response {
+    forward_room_command(
+        state,
+        headers,
+        HubCommand::SkillsList {
+            request_id: random_id("req"),
+        },
+        "skills_list_timeout",
+    )
+    .await
+}
+
+pub(crate) async fn skills_read(
+    State(state): State<HubState>,
+    headers: HeaderMap,
+    Json(payload): Json<SkillReadRequest>,
+) -> Response {
+    forward_room_command(
+        state,
+        headers,
+        HubCommand::SkillsRead {
+            request_id: random_id("req"),
+            payload,
+        },
+        "skills_read_timeout",
+    )
+    .await
+}
+
+pub(crate) async fn skills_search(
+    State(state): State<HubState>,
+    headers: HeaderMap,
+    Json(payload): Json<SkillSearchRequest>,
+) -> Response {
+    forward_room_command(
+        state,
+        headers,
+        HubCommand::SkillsSearch {
+            request_id: random_id("req"),
+            payload,
+        },
+        "skills_search_timeout",
+    )
+    .await
+}
+
+pub(crate) async fn skills_active(State(state): State<HubState>, headers: HeaderMap) -> Response {
+    forward_room_command(
+        state,
+        headers,
+        HubCommand::SkillsActive {
+            request_id: random_id("req"),
+        },
+        "skills_active_timeout",
+    )
+    .await
+}
+
+pub(crate) async fn skills_activate(
+    State(state): State<HubState>,
+    headers: HeaderMap,
+    Json(payload): Json<SkillActivationRequest>,
+) -> Response {
+    forward_room_command(
+        state,
+        headers,
+        HubCommand::SkillsActivate {
+            request_id: random_id("req"),
+            payload,
+        },
+        "skills_activate_timeout",
+    )
+    .await
+}
+
+pub(crate) async fn skills_deactivate(
+    State(state): State<HubState>,
+    headers: HeaderMap,
+    Json(payload): Json<SkillActivationRequest>,
+) -> Response {
+    forward_room_command(
+        state,
+        headers,
+        HubCommand::SkillsDeactivate {
+            request_id: random_id("req"),
+            payload,
+        },
+        "skills_deactivate_timeout",
     )
     .await
 }

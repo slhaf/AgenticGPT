@@ -489,6 +489,118 @@ pub struct DiaryEntriesResponse {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SkillReadRequest {
+    pub id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillSearchRequest {
+    pub query: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillActivationRequest {
+    pub id: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillPackageSummary {
+    pub has_assets: bool,
+    pub has_scripts: bool,
+    pub has_references: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillSummary {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    pub active: bool,
+    pub package_summary: SkillPackageSummary,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillDetail {
+    pub id: String,
+    pub skill_md: String,
+    pub frontmatter: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    pub active: bool,
+    pub package_summary: SkillPackageSummary,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActiveSkill {
+    pub id: String,
+    pub activated_at: DateTime<Utc>,
+    pub status: String,
+    pub stale: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<SkillSummary>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillsListResponse {
+    pub skills: Vec<SkillSummary>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillReadResponse {
+    pub skill: SkillDetail,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillsSearchResponse {
+    pub skills: Vec<SkillSummary>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillsActiveResponse {
+    pub active_skills: Vec<ActiveSkill>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillActivationResponse {
+    pub id: String,
+    pub active: bool,
+    pub changed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activated_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TaskResult {
     pub agent_id: String,
     pub task_id: String,
@@ -791,6 +903,30 @@ pub enum HubCommand {
         request_id: String,
         payload: DiarySelectExactRequest,
     },
+    #[serde(rename = "skills.list")]
+    SkillsList { request_id: String },
+    #[serde(rename = "skills.read")]
+    SkillsRead {
+        request_id: String,
+        payload: SkillReadRequest,
+    },
+    #[serde(rename = "skills.search")]
+    SkillsSearch {
+        request_id: String,
+        payload: SkillSearchRequest,
+    },
+    #[serde(rename = "skills.active")]
+    SkillsActive { request_id: String },
+    #[serde(rename = "skills.activate")]
+    SkillsActivate {
+        request_id: String,
+        payload: SkillActivationRequest,
+    },
+    #[serde(rename = "skills.deactivate")]
+    SkillsDeactivate {
+        request_id: String,
+        payload: SkillActivationRequest,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -888,6 +1024,30 @@ mod tmux_tests {
         assert!(!request.need_confirm);
         assert_eq!(request.wait_ms, 300);
         assert_eq!(request.capture_lines, 120);
+    }
+
+    #[test]
+    fn skills_command_serde_names_are_public_interface_names() {
+        let command = HubCommand::SkillsRead {
+            request_id: "req".to_string(),
+            payload: SkillReadRequest {
+                id: "demo".to_string(),
+            },
+        };
+        let value = serde_json::to_value(command).unwrap();
+        assert_eq!(value["type"], "skills.read");
+        assert_eq!(value["requestId"], "req");
+        assert_eq!(value["payload"]["id"], "demo");
+
+        let active = ActiveSkill {
+            id: "missing".to_string(),
+            activated_at: Utc::now(),
+            status: "missing".to_string(),
+            stale: true,
+            summary: None,
+        };
+        let serialized = serde_json::to_string(&active).unwrap();
+        assert!(!serialized.contains("summary"));
     }
 }
 
