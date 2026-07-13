@@ -768,38 +768,38 @@ pub enum ConfirmationDecision {
     rename_all_fields = "camelCase"
 )]
 pub enum HubCommand {
-    #[serde(rename = "exec")]
+    #[serde(rename = "process.exec")]
     Exec {
         request_id: String,
         task_id: String,
         payload: ExecRequest,
     },
-    #[serde(rename = "batchExec")]
+    #[serde(rename = "process.batchExec")]
     BatchExec {
         request_id: String,
         task_id: String,
         payload: BatchExecRequest,
     },
-    #[serde(rename = "startSession")]
+    #[serde(rename = "session.start")]
     StartSession {
         request_id: String,
         session_id: String,
         payload: ExecRequest,
     },
-    #[serde(rename = "listSessions")]
+    #[serde(rename = "session.list")]
     ListSessions { request_id: String },
-    #[serde(rename = "inspectSession")]
+    #[serde(rename = "session.inspect")]
     InspectSession {
         request_id: String,
         session_id: String,
     },
-    #[serde(rename = "waitSession")]
+    #[serde(rename = "session.wait")]
     WaitSession {
         request_id: String,
         session_id: String,
         seconds: u64,
     },
-    #[serde(rename = "killSession")]
+    #[serde(rename = "session.kill")]
     KillSession {
         request_id: String,
         session_id: String,
@@ -836,14 +836,14 @@ pub enum HubCommand {
         request_id: String,
         payload: TmuxCloseSessionRequest,
     },
-    #[serde(rename = "mcpListServers")]
+    #[serde(rename = "mcp.listServers")]
     McpListServers { request_id: String },
-    #[serde(rename = "mcpListTools")]
+    #[serde(rename = "mcp.listTools")]
     McpListTools {
         request_id: String,
         payload: McpListToolsRequest,
     },
-    #[serde(rename = "mcpCallTool")]
+    #[serde(rename = "mcp.callTool")]
     McpCallTool {
         request_id: String,
         payload: McpCallToolRequest,

@@ -34,7 +34,7 @@ use crate::state::HubState;
 use crate::utils::random_id;
 use crate::{default_config_summary, MAX_WAIT_SECONDS, REQUEST_TIMEOUT_SECS};
 
-const MCP_INSTRUCTIONS: &str = "Agentic GPT Hub provides three execution layers. Use exec for short, one-shot inspection, detection, and deterministic tasks where an exit code is required. Use startSession for long-running or background managed processes whose lifecycle and output should be observed through session tools. Use tmux as the persistent shared workspace for stateful development, iterative debugging, TUIs, and user-agent handoff. For tmux work, discover the workspace with tmux.listSessions and tmux.listPanes, inspect it with tmux.capturePane, then use tmux.exec for shell panes or tmux.pasteText for non-shell panes. tmux.exec confirms submission to the interactive shell and returns a bounded post-submit pane snapshot; it is still not proof of command completion, so use exec when a deterministic exit status is required. Commands remain subject to Agentic local policy, path policy, confirmation, and audit.";
+const MCP_INSTRUCTIONS: &str = "Agentic GPT Hub provides three execution layers. Use process.exec for short, one-shot inspection, detection, and deterministic tasks where an exit code is required. Use session.start for long-running or background managed processes whose lifecycle and output should be observed through session tools. Use tmux as the persistent shared workspace for stateful development, iterative debugging, TUIs, and user-agent handoff. For tmux work, discover the workspace with tmux.listSessions and tmux.listPanes, inspect it with tmux.capturePane, then use tmux.exec for shell panes or tmux.pasteText for non-shell panes. tmux.exec confirms submission to the interactive shell and returns a bounded post-submit pane snapshot; it is still not proof of command completion, so use process.exec when a deterministic exit status is required. Commands remain subject to Agentic local policy, path policy, confirmation, and audit.";
 
 #[derive(Clone)]
 pub(crate) struct AgenticMcpServer {
@@ -55,10 +55,10 @@ fn decorate_tool_descriptors(tool_router: &mut ToolRouter<AgenticMcpServer>) {
         let name = route.attr.name.as_ref();
         let open_world = matches!(
             name,
-            "exec"
-                | "batchExec"
-                | "startSession"
-                | "mcpCallTool"
+            "process.exec"
+                | "process.batchExec"
+                | "session.start"
+                | "mcp.callTool"
                 | "tmux.pasteText"
                 | "tmux.exec"
                 | "tmux.createSession"
@@ -67,7 +67,7 @@ fn decorate_tool_descriptors(tool_router: &mut ToolRouter<AgenticMcpServer>) {
         let read_only = tool_is_read_only(name);
         let destructive = matches!(
             name,
-            "killSession" | "tmux.closeSession" | "room.notebook.remove"
+            "session.kill" | "tmux.closeSession" | "room.notebook.remove"
         );
         route.attr.annotations = Some(
             ToolAnnotations::new()
@@ -88,15 +88,15 @@ fn decorate_tool_descriptors(tool_router: &mut ToolRouter<AgenticMcpServer>) {
 fn tool_is_read_only(name: &str) -> bool {
     !matches!(
         name,
-        "exec"
-            | "batchExec"
-            | "startSession"
-            | "killSession"
+        "process.exec"
+            | "process.batchExec"
+            | "session.start"
+            | "session.kill"
             | "tmux.pasteText"
             | "tmux.exec"
             | "tmux.createSession"
             | "tmux.closeSession"
-            | "mcpCallTool"
+            | "mcp.callTool"
             | "user.notify.send"
             | "room.notebook.append"
             | "room.notebook.update"
@@ -178,30 +178,30 @@ async fn call_app_tool(server: &AgenticMcpServer, params: Value) -> Result<Value
         .cloned()
         .unwrap_or_else(|| json!({}));
     let result = match name {
-        "listAgents" => server.list_agents().await,
-        "exec" => server.exec(Parameters(decode_args(arguments)?)).await,
-        "batchExec" => server.batch_exec(Parameters(decode_args(arguments)?)).await,
-        "startSession" => {
+        "agent.list" => server.list_agents().await,
+        "process.exec" => server.exec(Parameters(decode_args(arguments)?)).await,
+        "process.batchExec" => server.batch_exec(Parameters(decode_args(arguments)?)).await,
+        "session.start" => {
             server
                 .start_session(Parameters(decode_args(arguments)?))
                 .await
         }
-        "listSessions" => {
+        "session.list" => {
             server
                 .list_sessions(Parameters(decode_args(arguments)?))
                 .await
         }
-        "inspectSession" => {
+        "session.inspect" => {
             server
                 .inspect_session(Parameters(decode_args(arguments)?))
                 .await
         }
-        "waitSession" => {
+        "session.wait" => {
             server
                 .wait_session(Parameters(decode_args(arguments)?))
                 .await
         }
-        "killSession" => {
+        "session.kill" => {
             server
                 .kill_session(Parameters(decode_args(arguments)?))
                 .await
@@ -237,17 +237,17 @@ async fn call_app_tool(server: &AgenticMcpServer, params: Value) -> Result<Value
                 .tmux_close_session(Parameters(decode_args(arguments)?))
                 .await
         }
-        "mcpListServers" => {
+        "mcp.listServers" => {
             server
                 .mcp_list_servers(Parameters(decode_args(arguments)?))
                 .await
         }
-        "mcpListTools" => {
+        "mcp.listTools" => {
             server
                 .mcp_list_tools(Parameters(decode_args(arguments)?))
                 .await
         }
-        "mcpCallTool" => {
+        "mcp.callTool" => {
             server
                 .mcp_call_tool(Parameters(decode_args(arguments)?))
                 .await
@@ -426,7 +426,7 @@ impl ServerHandler for AgenticMcpServer {
 #[tool_router(router = tool_router)]
 impl AgenticMcpServer {
     #[tool(
-        name = "listAgents",
+        name = "agent.list",
         description = "List registered local agents, their online status, capabilities, and safe config summaries. Use this before choosing an agentId."
     )]
     async fn list_agents(&self) -> Result<CallToolResult, ErrorData> {
@@ -472,8 +472,8 @@ impl AgenticMcpServer {
     }
 
     #[tool(
-        name = "exec",
-        description = "Run one short, one-shot inspection, detection, or deterministic command on a local Agentic agent and return its exit status. workingDirectory is the process CWD. Use startSession for long-running managed processes and tmux for persistent collaborative work."
+        name = "process.exec",
+        description = "Run one short, one-shot inspection, detection, or deterministic command on a local Agentic agent and return its exit status. workingDirectory is the process CWD. Use session.start for long-running managed processes and tmux for persistent collaborative work."
     )]
     async fn exec(&self, params: Parameters<ExecArgs>) -> Result<CallToolResult, ErrorData> {
         let params = params.0;
@@ -510,7 +510,7 @@ impl AgenticMcpServer {
     }
 
     #[tool(
-        name = "batchExec",
+        name = "process.batchExec",
         description = "Run multiple short commands on a local Agentic agent. Top-level workingDirectory is the default process CWD for all elements; per-element workingDirectory overrides it."
     )]
     async fn batch_exec(
@@ -556,8 +556,8 @@ impl AgenticMcpServer {
     }
 
     #[tool(
-        name = "startSession",
-        description = "Start a long-running or background managed process on a local Agentic agent. workingDirectory is the process CWD; observe lifecycle and output with waitSession or inspectSession. Use tmux instead when the work needs a persistent interactive workspace or user-agent handoff."
+        name = "session.start",
+        description = "Start a long-running or background managed process on a local Agentic agent. workingDirectory is the process CWD; observe lifecycle and output with session.wait or session.inspect. Use tmux instead when the work needs a persistent interactive workspace or user-agent handoff."
     )]
     async fn start_session(
         &self,
@@ -608,7 +608,7 @@ impl AgenticMcpServer {
     }
 
     #[tool(
-        name = "listSessions",
+        name = "session.list",
         description = "List running or recently cached command sessions for a local Agentic agent."
     )]
     async fn list_sessions(
@@ -638,7 +638,7 @@ impl AgenticMcpServer {
     }
 
     #[tool(
-        name = "inspectSession",
+        name = "session.inspect",
         description = "Inspect one command session by id and return current state plus recent stdout/stderr tails."
     )]
     async fn inspect_session(
@@ -665,7 +665,7 @@ impl AgenticMcpServer {
     }
 
     #[tool(
-        name = "waitSession",
+        name = "session.wait",
         description = "Wait up to seconds for a session update, capped at 30 seconds. Use 0 or omit seconds to return cached state immediately."
     )]
     async fn wait_session(
@@ -694,7 +694,7 @@ impl AgenticMcpServer {
     }
 
     #[tool(
-        name = "killSession",
+        name = "session.kill",
         description = "Kill a running command session by id on a local Agentic agent."
     )]
     async fn kill_session(
@@ -883,7 +883,7 @@ impl AgenticMcpServer {
     }
 
     #[tool(
-        name = "mcpListServers",
+        name = "mcp.listServers",
         description = "List MCP servers configured inside local Agentic agents. If agentId is omitted, returns MCP servers for all connected agents grouped by agent. If agentId is provided, returns that agent's servers."
     )]
     async fn mcp_list_servers(
@@ -908,8 +908,8 @@ impl AgenticMcpServer {
     }
 
     #[tool(
-        name = "mcpListTools",
-        description = "List tools exposed by one MCP server configured inside a local Agentic agent. Use mcpCallTool with the returned serverId and tool name."
+        name = "mcp.listTools",
+        description = "List tools exposed by one MCP server configured inside a local Agentic agent. Use mcp.callTool with the returned serverId and tool name."
     )]
     async fn mcp_list_tools(
         &self,
@@ -939,7 +939,7 @@ impl AgenticMcpServer {
     }
 
     #[tool(
-        name = "mcpCallTool",
+        name = "mcp.callTool",
         description = "Call a tool on an MCP server configured inside a local Agentic agent. Arguments are forwarded as JSON; local Agentic confirmation and policy still apply."
     )]
     async fn mcp_call_tool(
@@ -1538,7 +1538,7 @@ struct BatchExecElementArgs {
 struct SessionIdArgs {
     #[schemars(description = "Target local agent id.")]
     agent_id: String,
-    #[schemars(description = "Session id returned by startSession or listSessions.")]
+    #[schemars(description = "Session id returned by session.start or session.list.")]
     session_id: String,
 }
 
@@ -1547,7 +1547,7 @@ struct SessionIdArgs {
 struct WaitSessionArgs {
     #[schemars(description = "Target local agent id.")]
     agent_id: String,
-    #[schemars(description = "Session id returned by startSession or listSessions.")]
+    #[schemars(description = "Session id returned by session.start or session.list.")]
     session_id: String,
     #[serde(default)]
     #[schemars(
@@ -1669,7 +1669,7 @@ struct McpListServersArgs {
 struct McpListToolsArgs {
     #[schemars(description = "Target local agent id.")]
     agent_id: String,
-    #[schemars(description = "MCP server id returned by mcpListServers.")]
+    #[schemars(description = "MCP server id returned by mcp.listServers.")]
     server_id: String,
 }
 
@@ -1678,9 +1678,9 @@ struct McpListToolsArgs {
 struct McpCallToolArgs {
     #[schemars(description = "Target local agent id.")]
     agent_id: String,
-    #[schemars(description = "MCP server id returned by mcpListServers.")]
+    #[schemars(description = "MCP server id returned by mcp.listServers.")]
     server_id: String,
-    #[schemars(description = "Tool name returned by mcpListTools.")]
+    #[schemars(description = "Tool name returned by mcp.listTools.")]
     tool_name: String,
     #[serde(default)]
     #[schemars(description = "JSON object arguments forwarded to the MCP tool.")]
@@ -2033,8 +2033,8 @@ mod tests {
     #[test]
     fn tool_read_only_hints_match_side_effect_semantics() {
         for name in [
-            "listAgents",
-            "listSessions",
+            "agent.list",
+            "session.list",
             "tmux.listSessions",
             "tmux.listPanes",
             "tmux.capturePane",
@@ -2050,14 +2050,14 @@ mod tests {
             assert!(tool_is_read_only(name), "{name} should be read-only");
         }
         for name in [
-            "exec",
-            "startSession",
-            "killSession",
+            "process.exec",
+            "session.start",
+            "session.kill",
             "tmux.exec",
             "tmux.pasteText",
             "tmux.createSession",
             "tmux.closeSession",
-            "mcpCallTool",
+            "mcp.callTool",
             "user.notify.send",
             "room.notebook.append",
             "room.notebook.update",
@@ -2147,7 +2147,7 @@ mod tests {
                 "id": 1,
                 "method": "tools/call",
                 "params": {
-                    "name": "listAgents",
+                    "name": "agent.list",
                     "arguments": {}
                 }
             })),

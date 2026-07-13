@@ -208,7 +208,7 @@ async fn request_hub_batch_confirmation(
         "MEDIUM"
     };
     let payload = ConfirmationPayload {
-        program: "batchExec".to_string(),
+        program: "process.batchExec".to_string(),
         args: Vec::new(),
         command_preview: truncate_chars(preview, 1000),
         risk_level: risk.to_string(),
@@ -217,7 +217,7 @@ async fn request_hub_batch_confirmation(
         } else {
             "Batch contains command(s) matching confirm policy".to_string()
         },
-        kind: Some("batchExec".to_string()),
+        kind: Some("process.batchExec".to_string()),
         server_id: None,
         tool_name: None,
     };
@@ -532,7 +532,7 @@ async fn request_hub_mcp_confirmation(
         .await
         .insert(request_id.clone(), tx);
     let payload = ConfirmationPayload {
-        program: "mcpCallTool".to_string(),
+        program: "mcp.callTool".to_string(),
         args: vec![server_id.to_string(), tool_name.to_string()],
         command_preview: mcp_tool_command_preview(server_id, tool_name, arguments),
         risk_level: "MEDIUM".to_string(),

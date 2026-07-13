@@ -38,7 +38,7 @@ All `/mcp` `tools/call` responses use the Hub `AgenticResult` envelope, which is
 - `_meta`: widget-only MCP result metadata.
 - `isError`: tool-result error flag.
 
-Hub-native `/mcp` tools wrap their JSON payloads as `AgenticResult` with both `structuredContent` and a JSON text content block. The `mcpCallTool` tool recognizes downstream MCP tool result envelopes and passes through their top-level `content`, `structuredContent`, `_meta`, and `isError` instead of nesting them inside a Hub JSON payload.
+Hub-native `/mcp` tools wrap their JSON payloads as `AgenticResult` with both `structuredContent` and a JSON text content block. The `mcp.callTool` tool recognizes downstream MCP tool result envelopes and passes through their top-level `content`, `structuredContent`, `_meta`, and `isError` instead of nesting them inside a Hub JSON payload.
 
 This contract applies to the Apps MCP `/mcp` surface. The GPT Actions endpoints under `/v1/*` keep their OpenAPI-described JSON response shapes.
 
@@ -75,6 +75,6 @@ WebSocket and HTTP/SSE share reliable ack/replay semantics for request/response-
 
 For HTTP/SSE, the Hub treats only the latest `connectionId` for an agent as the current connection. Stale `Hello`, `Heartbeat`, `SessionUpdate`, and `ConfirmationRequest` messages sent to `/messages` are rejected with `409 stale_connection`; the local agent should stop the writer for that `connectionId`. Stale reliable messages (`TransportAck`, `TransportRunStatus`, and `Response`) may still be accepted when their run metadata matches an existing Hub run, preserving late-result delivery after reconnects.
 
-`Hello`, `Heartbeat`, `HeartbeatAck`, confirmation messages, and `SessionUpdate` remain best-effort/legacy messages in V1. `StartSession` itself is a reliable request/response command; later session state updates continue to use the existing session cache plus `inspectSession`/`waitSession` queries.
+`Hello`, `Heartbeat`, `HeartbeatAck`, confirmation messages, and `SessionUpdate` remain best-effort/legacy messages in V1. `session.start` itself is a reliable request/response command; later session state updates continue to use the existing session cache plus `session.inspect`/`session.wait` queries.
 
 On agent restart, the local ledger is reconciled as follows: completed runs resend their result, accepted-but-not-started runs continue execution from the stored command, and started/running runs without a completed result report `unknown` instead of replaying side effects. The Hub also marks acked runs without a status/result as `unknown` after a timeout so callers can query a terminal state via `/v1/runs/{runId}`.

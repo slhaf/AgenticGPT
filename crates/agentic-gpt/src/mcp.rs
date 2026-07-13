@@ -250,7 +250,7 @@ fn audit_mcp_call(
             task_id: None,
             session_id: None,
             time: Utc::now(),
-            program: "mcpCallTool".to_string(),
+            program: "mcp.callTool".to_string(),
             args: vec![
                 payload.server_id.clone(),
                 payload.tool_name.clone(),

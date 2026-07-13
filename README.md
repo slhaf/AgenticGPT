@@ -105,7 +105,7 @@ For ChatGPT Apps / MCP, use the Apps-friendly MCP endpoint:
 https://<your-hub-domain>/mcp
 ```
 
-The `/mcp` `tools/call` response uses the Hub `AgenticResult` envelope, which is compatible with ChatGPT Apps / MCP tool results. Hub-native tools return `content`, `structuredContent`, and `isError`; `mcpCallTool` passes through downstream MCP result envelopes, including non-text content blocks and `_meta`.
+The `/mcp` `tools/call` response uses the Hub `AgenticResult` envelope, which is compatible with ChatGPT Apps / MCP tool results. Hub-native tools return `content`, `structuredContent`, and `isError`; `mcp.callTool` passes through downstream MCP result envelopes, including non-text content blocks and `_meta`.
 
 OAuth discovery and token exchange are implemented by the Hub OAuth shim.
 
@@ -180,7 +180,7 @@ agentic-gpt config path deny add ~/.secrets
 agentic-gpt config path write remove ~/Projects
 ```
 
-`exec`, `batchExec`, and `startSession` also support `workingDirectory`. The resolved directory must exist, must be inside writable roots, and must not be inside denied roots.
+`process.exec`, `process.batchExec`, and `session.start` also support `workingDirectory`. The resolved directory must exist, must be inside writable roots, and must not be inside denied roots.
 
 ## Interfaces
 

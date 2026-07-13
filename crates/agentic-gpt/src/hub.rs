@@ -599,12 +599,12 @@ pub(crate) async fn handle_hub_command(
             payload,
         } => {
             log_info(format!(
-                "batchExec received; batchId={task_id}; elements={}",
+                "process.batchExec received; batchId={task_id}; elements={}",
                 payload.elements.len()
             ));
             let result = exec::run_batch_task(state.clone(), task_id, payload).await;
             log_info(format!(
-                "batchExec finished; batchId={}; status={}; results={}",
+                "process.batchExec finished; batchId={}; status={}; results={}",
                 result.batch_id,
                 result.status,
                 result.results.len()
@@ -623,12 +623,12 @@ pub(crate) async fn handle_hub_command(
             payload,
         } => {
             log_info(format!(
-                "startSession received; sessionId={session_id}; command={}",
+                "session.start received; sessionId={session_id}; command={}",
                 command_preview(&payload.program, &payload.args)
             ));
             let info = sessions::start_session(state.clone(), session_id, payload).await;
             log_info(format!(
-                "startSession result; sessionId={}; state={}; rejectReason={:?}",
+                "session.start result; sessionId={}; state={}; rejectReason={:?}",
                 info.session_id, info.state, info.reject_reason
             ));
             send_session(&state, &info).await?;
@@ -682,7 +682,7 @@ pub(crate) async fn handle_hub_command(
             request_id,
             session_id,
         } => {
-            log_info(format!("killSession received; sessionId={session_id}"));
+            log_info(format!("session.kill received; sessionId={session_id}"));
             let session = sessions::kill_session(&state, &session_id).await;
             send_response(
                 &state,
