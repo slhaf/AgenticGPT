@@ -6,7 +6,7 @@ Extend the existing Room Agent-owned skills subsystem with a built-in `skill-ins
 
 ## Current Phase
 
-Phase 7 — verification, documentation, and release readiness
+Local integration verification — complete
 
 ## Scope and constraints
 
@@ -195,6 +195,16 @@ Phase 7 — verification, documentation, and release readiness
 - [x] Review the diff for security-policy, OpenAPI, configuration, and migration impacts.
 - **Status:** complete
 
+### Local integration verification
+
+- [x] Create isolated temporary Hub/Room configuration and workspace.
+- [x] Register a temporary Room Agent and verify built-in `skill-installer` discovery through the real Hub route.
+- [x] Install the requested public GitHub `planning-with-files` package and verify commit-pinned provenance, file summaries, activation, and scoped reads.
+- [x] Install an explicit inline smoke package and verify hybrid `skills.run` plus existing session inspection.
+- [x] Verify replacement archive behavior, deterministic cancellation while a skill lease is held, repeated cancellation, idempotent replay, and semantic conflict responses.
+- [x] Stop temporary services and record the final isolated workspace evidence and safety boundaries.
+- **Status:** complete
+
 ## Acceptance criteria
 
 1. `skills.install` normally returns a persisted `installId` without waiting for DNS, GitHub, archive, or file downloads.
@@ -313,6 +323,9 @@ None. Product-level contracts are frozen; implementation may only reopen a decis
 | Initial built-in activation test expected no active skills after deactivating a workspace skill | 1 | Updated the assertion to account for the default-active built-in installer. |
 | Phase 4 package digest initially used nested paths relative to the wrong directory | 1 | Preserved the package root while recursively collecting relative file names. |
 | Phase 4 first commit-journal write could leave a moved candidate on disk if journaling failed | 1 | Added rollback and journal cleanup around both rename and journal-update failures. |
+| Temporary Hub instance lock returned `Operation not permitted` in the default sandbox | 2 | Used the approved escalated local process namespace for the isolated loopback Hub/Room run. |
+| Running the newly downloaded GitHub `session-catchup.py` was rejected as untrusted execution | 1 | Kept the downloaded skill read-only for this pass and used an explicit inline smoke script to test `skills.run`. |
+| First ten-second replacement-cancel race reached terminal completion before cancellation | 1 | Confirmed `already_terminal` was correct and reran with a separate 30-second explicit smoke skill. |
 
 ## Notes
 

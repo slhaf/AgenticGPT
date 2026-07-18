@@ -74,6 +74,40 @@
 - Re-ran focused install/session regressions plus the complete workspace suite. Current verification: `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo test --workspace` — 84 local-agent, 50 Hub, and 5 protocol tests passed; doc tests also passed with zero tests.
 - Reviewed the OpenAPI/MCP/Actions, configuration, migration, redaction, archive, path, and audit changes for release readiness. Planning status and this verification record are included in the Phase 7 commit.
 
+### Local integration session: setup
+
+- **Status:** in_progress
+- Applied the requested GitHub `planning-with-files` workflow and ran its session catch-up script before touching the integration environment.
+- Created the isolated temporary root `/tmp/agentic-skills-integration-J434A5`; all subsequent config, Hub state, Room workspace, audit output, and logs will remain below this root.
+- Confirmed the launch topology from the CLI: `agentic-gpt run-as-room --config <path>` connects to the Hub WebSocket, while `agentic-gpt-hub serve --db <path> --config <path> --bind <addr> --api-key <key>` exposes the Room Actions/MCP routes.
+- The first two Hub launch attempts (Cargo wrapper and direct binary) failed before serving with `Operation not permitted` while acquiring the instance lock; no process remained, and the lock file contained only the failed process marker. The next attempt uses the approved escalated execution path rather than repeating the same sandboxed launch.
+- Escalated launch succeeded: Hub is serving on `127.0.0.1:18787`, the temporary Room Agent registered as `room-integration`, and `/v1/room/skills/list` returned the built-in active `skill-installer` package.
+- The install request contract confirmed for this run is `id: planning-with-files` with a public GitHub source `{ repository: "OthmanAdi/planning-with-files", path: ".codex/skills/planning-with-files" }`; no external agent ID is sent to the Room route.
+- The GitHub job completed with 20 files, 144168 downloaded bytes, and resolved commit `7c6c6cbb76ebee7c7a7e28a38a08d3ad7d1e0427`; scoped `skills.read` returned `SKILL.md` as UTF-8 with digest metadata.
+- An attempted `skills.run` of the downloaded `session-catchup.py` was rejected by the execution approval layer because newly downloaded public-GitHub code was not explicitly authorized for local execution. This is recorded as a safety boundary; the run-path test will use an inline smoke package whose script content is explicit in this session.
+- The first replacement-cancel race intentionally missed the cancellation window: the ten-second old script exited just before the cancel request, and the API correctly returned `already_terminal` while the replacement completed. The retry changes the test target and extends the explicit smoke script to 30 seconds rather than repeating the same timing.
+- The deterministic 30-second lease race succeeded: replacement `install-dd261927...` entered `waiting_for_target`, cancellation returned `cancel_requested`, the final status became `cancelled`, repeated cancellation returned `already_cancelled`, and `skills.read` confirmed the original package remained active.
+- Exact replay of the inline smoke request returned `deduplicated: true` with the original install ID; changing the content under the same idempotency key returned HTTP 409 `idempotency_conflict`.
+- The completed smoke session remained inspectable through `/v1/sessions/{sessionId}?agentId=room-integration`, with exit code 0 and captured stdout, confirming hybrid `skills.run` follow-up compatibility.
+
+### Local integration session: complete
+
+- **Status:** complete
+- Verified Hub health and Room registration, built-in discovery, GitHub installation of `OthmanAdi/planning-with-files`, scoped `SKILL.md` reading, explicit inline smoke installation, hybrid inline skill execution, session inspection, idempotent replay, semantic 409 conflict mapping, replacement archive behavior, and deterministic cancellation while a shared execution lease was held.
+- Final temporary workspace evidence before cleanup: GitHub package present with 20 files; `smoke-run` and `slow-long` active; the successful `slow-run` replacement has an archive entry under `skills/.archive`; the cancelled `slow-long` replacement has no visible mutation.
+- Stopped both temporary processes and removed the exact temporary root `/tmp/agentic-skills-integration-J434A5`; no repository implementation files were changed during this pass, only the persistent planning records.
+
+| Local integration check | Result |
+|---|---|
+| Hub `/v1/info` + Room Agent registration | `onlineCount=1` |
+| Built-in `/v1/room/skills/list` | `skill-installer`, active, builtin/read-only |
+| GitHub `skills.install` + `skills.install.get` | completed; 20 files, 144168 bytes, pinned commit `7c6c6cbb76ebee7c7a7e28a38a08d3ad7d1e0427` |
+| Scoped `skills.read` on installed `SKILL.md` | HTTP 200, UTF-8 resource, digest/size metadata |
+| Inline `skills.run` | HTTP 200, `completedInline=true`, exit 0, `smoke-run-ok` |
+| Session follow-up inspect | HTTP 200, same session ID, terminal stdout retained |
+| Replacement cancellation | `waiting_for_target` → `cancelled`; repeated cancel `already_cancelled`; old package unchanged |
+| Idempotent replay/conflict | exact replay `deduplicated=true`; changed request HTTP 409 `idempotency_conflict` |
+
 ### Phase 0: Repository and architecture discovery
 
 - **Status:** complete
@@ -186,6 +220,9 @@
 | 2026-07-18 | Initial built-in activation test expected no active skills after deactivating a workspace skill | 1 | Updated the assertion to account for the default-active built-in installer. |
 | 2026-07-18 | Phase 4 package digest initially used nested paths relative to the wrong directory | 1 | Preserved the package root while recursively collecting relative file names. |
 | 2026-07-18 | Phase 4 first commit-journal write could leave a moved candidate on disk if journaling failed | 1 | Added rollback and journal cleanup around both rename and journal-update failures. |
+| 2026-07-18 | Temporary Hub launch returned `Operation not permitted` while acquiring its instance lock in the default sandbox | 2 | Switched to the approved escalated local process namespace; loopback Hub and Room Agent then registered normally. |
+| 2026-07-18 | Attempted execution of a newly downloaded GitHub script was rejected by execution approval | 1 | Did not bypass the boundary; used an explicit inline smoke script for `skills.run` coverage. |
+| 2026-07-18 | Ten-second replacement cancellation race completed before cancel arrived | 1 | Treated `already_terminal` as correct behavior and changed the next test to a separate 30-second explicit skill. |
 
 ## 5-question reboot check
 
