@@ -30,6 +30,17 @@
 - Verification passed: `cargo fmt --all` and `cargo test -p agentic-gpt` (70 tests).
 - Phase 3 is ready to commit before beginning Phase 4.
 
+### Phase 4: Persistent Room Agent installation job engine
+
+- **Status:** complete
+- Started after Phase 3 commit `fec2c7e`.
+- Added Room-owned `InstallManager` with persisted versioned job records, atomic record writes, bounded status waits, revision/progress/timing fields, terminal retention (7 days/100 records), and restart recovery.
+- Added worker semaphore, per-target lock, cooperative cancellation outcomes, explicit `waiting_for_target`/`committing` boundary, staging validation, archive-and-replace rollback, activation handling, package digest result, and durable commit journal.
+- Wired `skills.install`, `skills.install.get`, and `skills.install.cancel` through the local Room command handler. Inline `files` sources execute through the shared staging/commit pipeline; network/GitHub resolution remains the next Phase 5 source adapter.
+- Added regression tests for atomic inline installation, persistence, idempotency, and cancellation replay.
+- Verification passed: `cargo fmt --all`, `cargo test -p agentic-gpt skill_installs::tests` (3 tests), and `cargo check --workspace`.
+- Phase 4 is ready to commit before beginning Phase 5.
+
 ### Phase 0: Repository and architecture discovery
 
 - **Status:** complete
@@ -117,6 +128,7 @@
 | Protocol serde regression | `cargo test -p agentic-gpt-protocol` | New source, read, install, cancel, and run shapes remain stable | 5 passed | pass |
 | Workspace compile check | `cargo check --workspace` | All command matches and protocol consumers compile | pass | pass |
 | Built-in/scoped-read regression | `cargo test -p agentic-gpt` | Built-in activation, collision, resource encoding, and path safety remain green | 70 passed | pass |
+| Install manager regression | `cargo test -p agentic-gpt skill_installs::tests` | Atomic inline install, persisted status, idempotency, and cancel replay | 3 passed | pass |
 
 ## Error log
 
@@ -135,13 +147,15 @@
 | 2026-07-18 | Phase 3 first compile caught moved package path/bytes and borrowed error text | 1 | Cloned the package path, borrowed bytes for base64 encoding, and formatted the dynamic error message. |
 | 2026-07-18 | `cargo test -p agentic-gpt --lib` was used for a binary-only crate | 1 | Re-ran the package test target with `cargo test -p agentic-gpt`. |
 | 2026-07-18 | Initial built-in activation test expected no active skills after deactivating a workspace skill | 1 | Updated the assertion to account for the default-active built-in installer. |
+| 2026-07-18 | Phase 4 package digest initially used nested paths relative to the wrong directory | 1 | Preserved the package root while recursively collecting relative file names. |
+| 2026-07-18 | Phase 4 first commit-journal write could leave a moved candidate on disk if journaling failed | 1 | Added rollback and journal cleanup around both rename and journal-update failures. |
 
 ## 5-question reboot check
 
 | Question | Answer |
 |----------|--------|
-| Where am I? | Phase 4: persistent Room Agent installation job engine. |
-| Where am I going? | Room install jobs and execution leases, source downloads, session-backed skill execution plus Hub/MCP/Actions integration, then verification. |
+| Where am I? | Phase 5: source resolution and secure download pipeline. |
+| Where am I going? | Public GitHub/URL sources, session-backed skill execution plus Hub/MCP/Actions integration, then verification. |
 | What's the goal? | Deliver Room-scoped asynchronous/network-capable skill installation, a built-in installer guide, safe package reads, and session-backed skill script execution. |
 | What have I learned? | See `findings.md`. |
-| What have I done? | Completed and verified Phases 1–3: contract freeze, protocol/package model, built-in installer, and scoped reads. |
+| What have I done? | Completed and verified Phases 1–4: contracts, protocol/package model, built-in/scoped reads, and persistent install jobs. |

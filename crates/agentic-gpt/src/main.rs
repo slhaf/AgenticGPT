@@ -10,6 +10,7 @@ mod notebook;
 mod notify;
 mod policy;
 mod sessions;
+mod skill_installs;
 mod skills;
 mod state;
 mod tmux;
@@ -200,7 +201,9 @@ async fn run(config_path: PathBuf, run_mode: RunMode) -> Result<()> {
         temporary_mcp_allows: Arc::new(Mutex::new(Vec::new())),
         notebook_writes: Arc::new(Mutex::new(())),
         skills_writes: Arc::new(Mutex::new(())),
+        skill_installs: Arc::new(skill_installs::InstallManager::new()),
     };
+    state.skill_installs.recover(state.clone()).await?;
     tokio::spawn(watch_config(state.clone()));
     hub::connect_loop(state).await
 }
@@ -426,6 +429,7 @@ mod tests {
                 temporary_mcp_allows: Arc::new(Mutex::new(Vec::new())),
                 notebook_writes: Arc::new(Mutex::new(())),
                 skills_writes: Arc::new(Mutex::new(())),
+                skill_installs: Arc::new(skill_installs::InstallManager::new()),
             },
             rx,
         )
@@ -884,6 +888,7 @@ mod tests {
             temporary_mcp_allows: Arc::new(Mutex::new(Vec::new())),
             notebook_writes: Arc::new(Mutex::new(())),
             skills_writes: Arc::new(Mutex::new(())),
+            skill_installs: Arc::new(skill_installs::InstallManager::new()),
         };
 
         let result = exec::run_batch_task(

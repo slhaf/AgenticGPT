@@ -6,7 +6,7 @@ Extend the existing Room Agent-owned skills subsystem with a built-in `skill-ins
 
 ## Current Phase
 
-Phase 4 — persistent Room Agent installation job engine
+Phase 5 — source resolution and secure download pipeline
 
 ## Scope and constraints
 
@@ -124,25 +124,23 @@ Phase 4 — persistent Room Agent installation job engine
 
 ### Phase 4: Persistent Room Agent installation job engine
 
-- [ ] Create per-install persisted request/status storage under Room workspace state.
-- [ ] Make job creation idempotent across reliable command replay.
-- [ ] Return `installId`, `queued`, and `pollAfterMs` before any network operation.
-- [ ] Implement worker queue/semaphore and per-target skill locking.
-- [ ] Track stable job status plus detailed phases including `waiting_for_target`, progress, timestamps, elapsed time, result, and error.
-- [ ] Return stable start/status/cancel structs with monotonic revision, attempt counters, progress, redacted source, timestamps, elapsed time, result/error, cancellation time, and polling guidance.
-- [ ] Implement bounded status waiting that returns early on terminal state or a newer job revision, returns the latest snapshot on timeout, and treats `waitSeconds: 0` as an immediate read.
-- [ ] Persist `cancelRequestedAt`, make cancel replay idempotent, and signal queued/running workers cooperatively.
-- [ ] Cancel queued jobs immediately; abort cancellable network/extraction work and clean staging for running jobs.
-- [ ] Define the transition into `committing` as the cancellation boundary: check and persist cancellation before entering it, reject later cancellation as too late, and let a successful commit finish as `completed`.
-- [ ] Reconcile queued/running/partially committed jobs after Room Agent restart.
-- [ ] Retry only transient network/status failures for at most three total attempts using exponential backoff and capped `Retry-After`; expose `attempt` and `maxAttempts`.
-- [ ] Keep downloads outside the final `skills_writes` critical section.
-- [ ] Commit only through staging validation and atomic rename.
-- [ ] Include default/explicit activation in the durable commit journal; if activation fails, remove the candidate and restore the archived previous package so the job has no partial-success result.
-- [ ] On replacement, move the old package to `skills/.archive/<id>/<archive-entry>` before committing the new package and roll back if the second rename fails.
-- [ ] Implement writer-fair per-skill execution leases: run acquisition fails with `skill_update_pending` once commit is pending; commit waits cancellably before the non-cancellable boundary and fails retryably with `target_busy` at the install deadline.
-- [ ] Prune terminal job records after seven days or beyond the newest 100 records, never prune active jobs, and remove staging data at terminal completion.
-- **Status:** pending
+- [x] Create per-install persisted request/status storage under Room workspace state.
+- [x] Make job creation idempotent across reliable command replay.
+- [x] Return `installId`, `queued`, and `pollAfterMs` before any network operation.
+- [x] Implement worker queue/semaphore and per-target skill locking.
+- [x] Track stable job status plus detailed phases including `waiting_for_target`, progress, timestamps, elapsed time, result, and error.
+- [x] Return stable start/status/cancel structs with monotonic revision, attempt counters, progress, redacted source, timestamps, elapsed time, result/error, cancellation time, and polling guidance.
+- [x] Implement bounded status waiting that returns early on terminal state or a newer job revision, returns the latest snapshot on timeout, and treats `waitSeconds: 0` as an immediate read.
+- [x] Persist `cancelRequestedAt`, make cancel replay idempotent, and signal queued/running workers cooperatively.
+- [x] Cancel queued jobs immediately; abort cancellable network/extraction work and clean staging for running jobs.
+- [x] Define the transition into `committing` as the cancellation boundary: check and persist cancellation before entering it, reject later cancellation as too late, and let a successful commit finish as `completed`.
+- [x] Reconcile queued/running/partially committed jobs after Room Agent restart with a durable commit journal and safe recovery failure for ambiguous commit states.
+- [x] Keep downloads/materialization outside the final `skills_writes` critical section.
+- [x] Commit only through staging validation and atomic rename.
+- [x] Include default/explicit activation in the durable commit journal; if activation fails, remove the candidate and restore the archived previous package so the job has no partial-success result.
+- [x] On replacement, move the old package to `skills/.archive/<id>/<archive-entry>` before committing the new package and roll back if the second rename fails.
+- [x] Prune terminal job records after seven days or beyond the newest 100 records, never prune active jobs, and remove staging data at terminal completion.
+- **Status:** complete
 
 ### Phase 5: Source resolution and secure download pipeline
 
@@ -158,12 +156,14 @@ Phase 4 — persistent Room Agent installation job engine
 - [ ] Reject absolute paths, traversal, symlinks/hardlinks, duplicates, case conflicts, and package-limit violations.
 - [ ] Validate required `SKILL.md`, compute content digests, and save provenance.
 - [ ] Ensure installation never executes bundled scripts.
+- [ ] Retry transient download/status failures up to three total attempts with bounded backoff and expose `attempt`/`maxAttempts` in the source worker.
 - **Status:** pending
 
 ### Phase 6: Hub, MCP, Actions, and Apps workflow integration
 
 - [ ] Route install start/status/cancel through `request_active_room` without `agentId`.
 - [ ] Implement Room-side `skills.run` validation: active workspace skill, `scripts/` containment, no symlink traversal, regular executable file, and existing-policy-validated cwd before session creation.
+- [ ] Implement writer-fair per-skill execution leases: runs fail with `skill_update_pending` once replacement commit is pending, while commit waits cancellably and returns retryable `target_busy` on deadline.
 - [ ] Refactor the shared managed-session engine to support `starting`/`waiting_confirmation`, asynchronous cancellable confirmation, an optional child, event-driven state notification, and a skill execution-lease guard released on every terminal path.
 - [ ] Implement the hybrid run path: create the session first, wait event-driven for up to `waitSeconds`, return immediately on terminal state, and otherwise return the current session identity/state without creating a second job system.
 - [ ] Retain terminal sessions in memory for 24 hours and at most 100 entries, never prune active/pending sessions, and clear stale Room session cache on disconnect/restart so later inspection returns `session_not_found` rather than stale `running`.
@@ -311,6 +311,8 @@ None. Product-level contracts are frozen; implementation may only reopen a decis
 | Phase 3 first compile caught moved package path/bytes and borrowed error text | 1 | Cloned the package path, borrowed bytes for base64 encoding, and formatted the dynamic error message. |
 | `cargo test -p agentic-gpt --lib` was used for a binary-only crate | 1 | Re-ran the package test target with `cargo test -p agentic-gpt`. |
 | Initial built-in activation test expected no active skills after deactivating a workspace skill | 1 | Updated the assertion to account for the default-active built-in installer. |
+| Phase 4 package digest initially used nested paths relative to the wrong directory | 1 | Preserved the package root while recursively collecting relative file names. |
+| Phase 4 first commit-journal write could leave a moved candidate on disk if journaling failed | 1 | Added rollback and journal cleanup around both rename and journal-update failures. |
 
 ## Notes
 

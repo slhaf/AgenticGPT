@@ -1054,10 +1054,49 @@ pub(crate) async fn handle_hub_command(
             };
             send_response(&state, run_id.as_deref(), &request_id, result).await?;
         }
-        HubCommand::SkillsInstall { request_id, .. }
-        | HubCommand::SkillsInstallGet { request_id, .. }
-        | HubCommand::SkillsInstallCancel { request_id, .. }
-        | HubCommand::SkillsRun { request_id, .. } => {
+        HubCommand::SkillsInstall {
+            request_id,
+            payload,
+        } => {
+            let result = if state.run_mode != RunMode::Room {
+                room_agent_required_error()
+            } else {
+                match state.skill_installs.start(state.clone(), payload).await {
+                    Ok(result) => serde_json::to_value(result)?,
+                    Err(error) => install_command_error(error),
+                }
+            };
+            send_response(&state, run_id.as_deref(), &request_id, result).await?;
+        }
+        HubCommand::SkillsInstallGet {
+            request_id,
+            payload,
+        } => {
+            let result = if state.run_mode != RunMode::Room {
+                room_agent_required_error()
+            } else {
+                match state.skill_installs.get(&state, payload).await {
+                    Ok(result) => serde_json::to_value(result)?,
+                    Err(error) => install_command_error(error),
+                }
+            };
+            send_response(&state, run_id.as_deref(), &request_id, result).await?;
+        }
+        HubCommand::SkillsInstallCancel {
+            request_id,
+            payload,
+        } => {
+            let result = if state.run_mode != RunMode::Room {
+                room_agent_required_error()
+            } else {
+                match state.skill_installs.cancel(&state, payload).await {
+                    Ok(result) => serde_json::to_value(result)?,
+                    Err(error) => install_command_error(error),
+                }
+            };
+            send_response(&state, run_id.as_deref(), &request_id, result).await?;
+        }
+        HubCommand::SkillsRun { request_id, .. } => {
             let result = serde_json::json!({
                 "error": {
                     "code": "skills_not_implemented",
@@ -1083,6 +1122,25 @@ fn skills_command_error(default_code: &str, error: anyhow::Error) -> serde_json:
             "message": if code == "not_found" { "skill not found" } else { &message }
         }
     })
+}
+
+fn install_command_error(error: anyhow::Error) -> serde_json::Value {
+    let message = error.to_string();
+    let code = match message.as_str() {
+        "install_not_found" => "install_not_found",
+        "target_exists" => "target_exists",
+        "idempotency_conflict" => "idempotency_conflict",
+        "reserved_id" => "reserved_id",
+        "invalid_id"
+        | "invalid_files"
+        | "invalid_file_source"
+        | "invalid_path"
+        | "duplicate_path"
+        | "invalid_base64"
+        | "invalid_idempotency_key" => "validation_error",
+        _ => "skills_install_failed",
+    };
+    serde_json::json!({ "error": { "code": code, "message": message } })
 }
 
 fn notebook_command_error(default_code: &str, error: anyhow::Error) -> serde_json::Value {

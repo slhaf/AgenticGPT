@@ -646,6 +646,7 @@ mod tests {
             temporary_mcp_allows: Arc::new(Mutex::new(Vec::new())),
             notebook_writes: Arc::new(Mutex::new(())),
             skills_writes: Arc::new(Mutex::new(())),
+            skill_installs: Arc::new(crate::skill_installs::InstallManager::new()),
         }
     }
 

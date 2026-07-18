@@ -568,7 +568,7 @@ fn write_active_file(config: &Config, active: &ActiveSkillsFile) -> Result<()> {
     Ok(())
 }
 
-fn validate_skill_id(id: &str) -> Result<()> {
+pub(crate) fn validate_skill_id(id: &str) -> Result<()> {
     if id.is_empty() || id == "." || id == ".." {
         return Err(anyhow!("invalid_id"));
     }
@@ -582,7 +582,7 @@ fn validate_skill_id(id: &str) -> Result<()> {
     }
 }
 
-fn skills_root(config: &Config) -> PathBuf {
+pub(crate) fn skills_root(config: &Config) -> PathBuf {
     config.workspace_root.join("skills")
 }
 
@@ -591,6 +591,12 @@ fn active_file_path(config: &Config) -> PathBuf {
         .workspace_root
         .join("state")
         .join("active-skills.json")
+}
+
+pub(crate) async fn is_active(state: &AppState, id: &str) -> Result<bool> {
+    let config = state.config.read().await.clone();
+    let active = read_active_file(&config)?;
+    Ok(active_contains(&active, id))
 }
 
 #[cfg(test)]
@@ -619,6 +625,7 @@ mod tests {
             temporary_mcp_allows: Arc::new(Mutex::new(Vec::new())),
             notebook_writes: Arc::new(Mutex::new(())),
             skills_writes: Arc::new(Mutex::new(())),
+            skill_installs: Arc::new(crate::skill_installs::InstallManager::new()),
         }
     }
 
