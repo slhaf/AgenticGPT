@@ -4,24 +4,31 @@ use agentic_gpt_protocol::{
     SkillsActiveResponse, SkillsListResponse, SkillsSearchResponse,
 };
 use anyhow::{anyhow, Result};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use uuid::Uuid;
 
 use crate::{config::Config, state::AppState};
 
 const DEFAULT_LIMIT: usize = 20;
 const MAX_LIMIT: usize = 100;
+const BUILTIN_INSTALLER_ID: &str = "skill-installer";
+const MAX_RESOURCE_BYTES: u64 = 1024 * 1024;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ActiveSkillsFile {
     #[serde(default)]
     active_skills: Vec<ActiveSkillRecord>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    disabled_defaults: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -36,6 +43,7 @@ struct SkillPackage {
     id: String,
     origin: SkillOrigin,
     read_only: bool,
+    package_root: Option<PathBuf>,
     skill_md: String,
     frontmatter: Value,
     name: Option<String>,
@@ -63,9 +71,14 @@ pub(crate) async fn read(state: &AppState, request: SkillReadRequest) -> Result<
     let config = state.config.read().await.clone();
     let active = read_active_file(&config)?;
     let package = load_skill(&config, &request.id, active_contains(&active, &request.id))?;
+    let resource = request
+        .path
+        .as_deref()
+        .map(|path| read_resource(&package, path))
+        .transpose()?;
     Ok(SkillReadResponse {
         skill: package.detail(active_contains(&active, &request.id)),
-        resource: None,
+        resource,
     })
 }
 
@@ -132,11 +145,16 @@ pub(crate) async fn activate(
     load_skill(&config, &request.id, false)?;
     let _guard = state.skills_writes.lock().await;
     let mut active = read_active_file(&config)?;
+    let removed_disabled_default = active.disabled_defaults.iter().any(|id| id == &request.id);
+    active.disabled_defaults.retain(|id| id != &request.id);
     if let Some(record) = active
         .active_skills
         .iter()
         .find(|record| record.id == request.id)
     {
+        if removed_disabled_default {
+            write_active_file(&config, &active)?;
+        }
         return Ok(SkillActivationResponse {
             id: request.id,
             active: true,
@@ -174,7 +192,14 @@ pub(crate) async fn deactivate(
         .active_skills
         .retain(|record| record.id != request.id);
     let changed = active.active_skills.len() != before;
-    if changed {
+    let default_disabled = is_default_active_builtin(&request.id);
+    let tombstone_added =
+        default_disabled && !active.disabled_defaults.iter().any(|id| id == &request.id);
+    if tombstone_added {
+        active.disabled_defaults.push(request.id.clone());
+        active.disabled_defaults.sort();
+    }
+    if changed || tombstone_added {
         write_active_file(&config, &active)?;
     }
     Ok(SkillActivationResponse {
@@ -236,6 +261,7 @@ fn scan_skills(
 ) -> Result<BTreeMap<String, SkillPackage>> {
     let root = skills_root(config);
     let mut skills = BTreeMap::new();
+    skills.insert(BUILTIN_INSTALLER_ID.to_string(), builtin_skill_package()?);
     if !root.exists() {
         return Ok(skills);
     }
@@ -255,8 +281,15 @@ fn scan_skills(
             warnings.push(format!("skill_dir_name_invalid: {}", path.display()));
             continue;
         };
+        if id.starts_with('.') {
+            continue;
+        }
         if validate_skill_id(id).is_err() {
             warnings.push(format!("skill_id_invalid: {id}"));
+            continue;
+        }
+        if id == BUILTIN_INSTALLER_ID {
+            warnings.push("skill_id_reserved: skill-installer".to_string());
             continue;
         }
         match load_skill(config, id, active_contains(active, id)) {
@@ -272,9 +305,14 @@ fn scan_skills(
 
 fn load_skill(config: &Config, id: &str, _active: bool) -> Result<SkillPackage> {
     validate_skill_id(id)?;
+    if id == BUILTIN_INSTALLER_ID {
+        return builtin_skill_package();
+    }
     let root = skills_root(config);
     let skill_dir = root.join(id);
+    reject_symlink(&skill_dir, "skill_symlink")?;
     let skill_md_path = skill_dir.join("SKILL.md");
+    reject_symlink(&skill_md_path, "skill_symlink")?;
     if !skill_md_path.is_file() {
         return Err(anyhow!("not_found"));
     }
@@ -300,6 +338,7 @@ fn load_skill(config: &Config, id: &str, _active: bool) -> Result<SkillPackage> 
         id: id.to_string(),
         origin: SkillOrigin::Workspace,
         read_only: false,
+        package_root: Some(skill_dir.clone()),
         skill_md,
         frontmatter,
         name,
@@ -313,6 +352,127 @@ fn load_skill(config: &Config, id: &str, _active: bool) -> Result<SkillPackage> 
         },
         warnings,
     })
+}
+
+fn builtin_skill_package() -> Result<SkillPackage> {
+    let skill_md = include_str!("../skills/skill-installer/SKILL.md").to_string();
+    let (frontmatter, warnings) = parse_frontmatter(&skill_md);
+    Ok(SkillPackage {
+        id: BUILTIN_INSTALLER_ID.to_string(),
+        origin: SkillOrigin::Builtin,
+        read_only: true,
+        package_root: None,
+        name: string_field(&frontmatter, "name"),
+        description: string_field(&frontmatter, "description"),
+        version: string_field(&frontmatter, "version"),
+        tags: frontmatter
+            .get("tags")
+            .and_then(Value::as_array)
+            .map(|tags| {
+                tags.iter()
+                    .filter_map(Value::as_str)
+                    .map(ToString::to_string)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        skill_md,
+        frontmatter,
+        package_summary: SkillPackageSummary::default(),
+        warnings,
+    })
+}
+
+fn read_resource(
+    package: &SkillPackage,
+    path: &str,
+) -> Result<agentic_gpt_protocol::SkillResource> {
+    let relative = normalize_resource_path(path)?;
+    let bytes = if relative == Path::new("SKILL.md") {
+        package.skill_md.as_bytes().to_vec()
+    } else {
+        let root = package
+            .package_root
+            .as_ref()
+            .ok_or_else(|| anyhow!("resource_unavailable"))?;
+        reject_symlink(root, "resource_symlink")?;
+        let mut cursor = root.clone();
+        for component in relative.components() {
+            let Component::Normal(part) = component else {
+                return Err(anyhow!("invalid_resource_path"));
+            };
+            cursor.push(part);
+            reject_symlink(&cursor, "resource_symlink")?;
+        }
+        let metadata = fs::metadata(&cursor).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                anyhow!("resource_not_found")
+            } else {
+                anyhow!("resource_read_failed")
+            }
+        })?;
+        if !metadata.is_file() {
+            return Err(anyhow!("not_a_file"));
+        }
+        if metadata.len() > MAX_RESOURCE_BYTES {
+            return Err(anyhow!("resource_too_large"));
+        }
+        fs::read(cursor).map_err(|_| anyhow!("resource_read_failed"))?
+    };
+    if bytes.len() as u64 > MAX_RESOURCE_BYTES {
+        return Err(anyhow!("resource_too_large"));
+    }
+    let sha256 = hex_sha256(&bytes);
+    let (encoding, content) = match String::from_utf8(bytes.clone()) {
+        Ok(text) => (agentic_gpt_protocol::SkillResourceEncoding::Utf8, text),
+        Err(_) => (
+            agentic_gpt_protocol::SkillResourceEncoding::Base64,
+            BASE64.encode(&bytes),
+        ),
+    };
+    Ok(agentic_gpt_protocol::SkillResource {
+        path: relative.to_string_lossy().replace('\\', "/"),
+        encoding,
+        content,
+        media_type: None,
+        size_bytes: bytes.len() as u64,
+        sha256,
+    })
+}
+
+fn normalize_resource_path(path: &str) -> Result<PathBuf> {
+    if path.is_empty() || path.contains('\0') || path.contains('\\') {
+        return Err(anyhow!("invalid_resource_path"));
+    }
+    let mut relative = PathBuf::new();
+    for component in Path::new(path).components() {
+        match component {
+            Component::Normal(part) => relative.push(part),
+            Component::CurDir
+            | Component::ParentDir
+            | Component::RootDir
+            | Component::Prefix(_) => {
+                return Err(anyhow!("invalid_resource_path"));
+            }
+        }
+    }
+    if relative.as_os_str().is_empty() {
+        return Err(anyhow!("invalid_resource_path"));
+    }
+    Ok(relative)
+}
+
+fn reject_symlink(path: &Path, error: &str) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(anyhow!("{error}")),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(anyhow!("{error}")),
+    }
+}
+
+fn hex_sha256(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn parse_frontmatter(skill_md: &str) -> (Value, Vec<String>) {
@@ -359,12 +519,41 @@ fn active_contains(active: &ActiveSkillsFile, id: &str) -> bool {
 fn read_active_file(config: &Config) -> Result<ActiveSkillsFile> {
     let path = active_file_path(config);
     if !path.exists() {
-        return Ok(ActiveSkillsFile {
+        let active = ActiveSkillsFile {
             active_skills: Vec::new(),
-        });
+            disabled_defaults: Vec::new(),
+        };
+        return reconcile_default_activation(config, active);
     }
     let text = fs::read_to_string(path)?;
-    Ok(serde_json::from_str(&text)?)
+    reconcile_default_activation(config, serde_json::from_str(&text)?)
+}
+
+fn reconcile_default_activation(
+    config: &Config,
+    mut active: ActiveSkillsFile,
+) -> Result<ActiveSkillsFile> {
+    if is_default_active_builtin(BUILTIN_INSTALLER_ID)
+        && !active
+            .disabled_defaults
+            .iter()
+            .any(|id| id == BUILTIN_INSTALLER_ID)
+        && !active_contains(&active, BUILTIN_INSTALLER_ID)
+    {
+        active.active_skills.push(ActiveSkillRecord {
+            id: BUILTIN_INSTALLER_ID.to_string(),
+            activated_at: Utc::now(),
+        });
+        active
+            .active_skills
+            .sort_by(|left, right| left.id.cmp(&right.id));
+        write_active_file(config, &active)?;
+    }
+    Ok(active)
+}
+
+fn is_default_active_builtin(id: &str) -> bool {
+    id == BUILTIN_INSTALLER_ID
 }
 
 fn write_active_file(config: &Config, active: &ActiveSkillsFile) -> Result<()> {
@@ -471,12 +660,15 @@ mod tests {
                 .iter()
                 .map(|skill| skill.id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["alpha", "beta"]
+            vec!["alpha", "beta", BUILTIN_INSTALLER_ID]
         );
         assert!(!response.skills[0].active);
         assert!(response.skills[1].active);
         assert_eq!(response.skills[1].name.as_deref(), Some("Beta"));
         assert_eq!(response.skills[1].tags, vec!["rust", "tools"]);
+        assert!(response.skills[2].active);
+        assert_eq!(response.skills[2].origin, SkillOrigin::Builtin);
+        assert!(response.skills[2].read_only);
     }
 
     #[tokio::test]
@@ -570,7 +762,9 @@ mod tests {
         .await
         .unwrap();
         assert!(response.changed);
-        assert!(active(&state).await.unwrap().active_skills.is_empty());
+        let active = active(&state).await.unwrap();
+        assert_eq!(active.active_skills.len(), 1);
+        assert_eq!(active.active_skills[0].id, BUILTIN_INSTALLER_ID);
     }
 
     #[tokio::test]
@@ -603,6 +797,168 @@ mod tests {
         assert!(text.contains("activeSkills"));
         assert!(text.contains("activatedAt"));
         assert!(!text.contains("summary"));
+    }
+
+    #[tokio::test]
+    async fn builtin_installer_is_default_active_and_deactivation_survives_restart() {
+        let state = test_state();
+        let root = workspace_root(&state).await;
+
+        let first = list(&state).await.unwrap();
+        let installer = first
+            .skills
+            .iter()
+            .find(|skill| skill.id == BUILTIN_INSTALLER_ID)
+            .unwrap();
+        assert!(installer.active);
+        assert_eq!(installer.origin, SkillOrigin::Builtin);
+        assert!(installer.read_only);
+        let detail = read(
+            &state,
+            SkillReadRequest {
+                id: BUILTIN_INSTALLER_ID.to_string(),
+                path: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(detail.skill.origin, SkillOrigin::Builtin);
+        assert!(detail.skill.skill_md.contains("skills.install"));
+        assert_eq!(
+            search(
+                &state,
+                SkillSearchRequest {
+                    query: "installer".to_string(),
+                    limit: None,
+                },
+            )
+            .await
+            .unwrap()
+            .skills
+            .iter()
+            .filter(|skill| skill.id == BUILTIN_INSTALLER_ID)
+            .count(),
+            1
+        );
+
+        write_skill(&root, BUILTIN_INSTALLER_ID, "# shadow");
+        let shadowed = read(
+            &state,
+            SkillReadRequest {
+                id: BUILTIN_INSTALLER_ID.to_string(),
+                path: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(shadowed.skill.skill_md.contains("skills.install"));
+
+        deactivate(
+            &state,
+            SkillActivationRequest {
+                id: BUILTIN_INSTALLER_ID.to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let text = fs::read_to_string(root.join("state/active-skills.json")).unwrap();
+        assert!(text.contains("disabledDefaults"));
+        assert!(text.contains(BUILTIN_INSTALLER_ID));
+        assert!(
+            !list(&state)
+                .await
+                .unwrap()
+                .skills
+                .iter()
+                .find(|skill| skill.id == BUILTIN_INSTALLER_ID)
+                .unwrap()
+                .active
+        );
+
+        activate(
+            &state,
+            SkillActivationRequest {
+                id: BUILTIN_INSTALLER_ID.to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let text = fs::read_to_string(root.join("state/active-skills.json")).unwrap();
+        assert!(!text.contains("disabledDefaults"));
+    }
+
+    #[tokio::test]
+    async fn read_supports_bounded_utf8_and_base64_package_resources() {
+        let state = test_state();
+        let root = workspace_root(&state).await;
+        write_skill(&root, "demo", "# Demo");
+        let package_root = root.join("skills/demo");
+        fs::write(package_root.join("notes.txt"), "hello").unwrap();
+        fs::write(package_root.join("data.bin"), [0_u8, 255_u8, 1_u8]).unwrap();
+
+        let text = read(
+            &state,
+            SkillReadRequest {
+                id: "demo".to_string(),
+                path: Some("notes.txt".to_string()),
+            },
+        )
+        .await
+        .unwrap();
+        let resource = text.resource.unwrap();
+        assert_eq!(
+            resource.encoding,
+            agentic_gpt_protocol::SkillResourceEncoding::Utf8
+        );
+        assert_eq!(resource.content, "hello");
+        assert_eq!(resource.size_bytes, 5);
+
+        let binary = read(
+            &state,
+            SkillReadRequest {
+                id: "demo".to_string(),
+                path: Some("data.bin".to_string()),
+            },
+        )
+        .await
+        .unwrap();
+        let resource = binary.resource.unwrap();
+        assert_eq!(
+            resource.encoding,
+            agentic_gpt_protocol::SkillResourceEncoding::Base64
+        );
+        assert_eq!(resource.content, "AP8B");
+        assert_eq!(resource.size_bytes, 3);
+    }
+
+    #[tokio::test]
+    async fn read_rejects_resource_escape_directories_and_symlinks() {
+        let state = test_state();
+        let root = workspace_root(&state).await;
+        write_skill(&root, "demo", "# Demo");
+        let package_root = root.join("skills/demo");
+        fs::create_dir(package_root.join("docs")).unwrap();
+        fs::write(package_root.join("docs/info.txt"), "info").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(root.join("state"), package_root.join("link")).unwrap();
+
+        for path in ["../state/secret", "docs", "link/secret"] {
+            let error = read(
+                &state,
+                SkillReadRequest {
+                    id: "demo".to_string(),
+                    path: Some(path.to_string()),
+                },
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+            assert!(
+                ["invalid_resource_path", "not_a_file", "resource_symlink"]
+                    .contains(&error.as_str()),
+                "unexpected error for {path}: {error}"
+            );
+        }
     }
 
     #[tokio::test]

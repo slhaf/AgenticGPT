@@ -6,7 +6,7 @@ Extend the existing Room Agent-owned skills subsystem with a built-in `skill-ins
 
 ## Current Phase
 
-Phase 3 — built-in skill and scoped read behavior
+Phase 4 — persistent Room Agent installation job engine
 
 ## Scope and constraints
 
@@ -109,18 +109,18 @@ Phase 3 — built-in skill and scoped read behavior
 
 ### Phase 3: Built-in skill and scoped read behavior
 
-- [ ] Add the source-controlled `skill-installer/SKILL.md` package under the local-agent crate.
-- [ ] Embed built-in skills into the Room Agent binary and merge them with workspace discovery.
-- [ ] Reserve built-in IDs and define deterministic same-ID collision behavior.
-- [ ] Reconcile `skill-installer` into active state on Room initialization and persist a disabled-default tombstone when a user explicitly deactivates it.
-- [ ] Migrate existing `active-skills.json` files compatibly so upgrade activates the new default once, while later user deactivation survives restarts and upgrades.
-- [ ] Explicitly exclude `skills/.archive` and other internal dot-directories from workspace skill discovery.
-- [ ] Extend `skills.read` to normalize and validate package-relative paths.
-- [ ] Preserve the exact legacy response when `path` is omitted; when present, append `resource { path, encoding, content, mediaType?, sizeBytes, sha256 }` while retaining `skill`.
-- [ ] Support file-only UTF-8/base64 auto-encoding up to 1 MiB without truncation, range reads, path escape, directory reads, or symlink traversal.
-- [ ] Add tests for built-in list/read/search/activation behavior and scoped reads.
-- [ ] Return `skill_not_runnable` for embedded built-ins in V1; do not materialize embedded scripts onto disk.
-- **Status:** pending
+- [x] Add the source-controlled `skill-installer/SKILL.md` package under the local-agent crate.
+- [x] Embed built-in skills into the Room Agent binary and merge them with workspace discovery.
+- [x] Reserve built-in IDs and define deterministic same-ID collision behavior.
+- [x] Reconcile `skill-installer` into active state on Room initialization and persist a disabled-default tombstone when a user explicitly deactivates it.
+- [x] Migrate existing `active-skills.json` files compatibly so upgrade activates the new default once, while later user deactivation survives restarts and upgrades.
+- [x] Explicitly exclude `skills/.archive` and other internal dot-directories from workspace skill discovery.
+- [x] Extend `skills.read` to normalize and validate package-relative paths.
+- [x] Preserve the exact legacy response when `path` is omitted; when present, append `resource { path, encoding, content, mediaType?, sizeBytes, sha256 }` while retaining `skill`.
+- [x] Support file-only UTF-8/base64 auto-encoding up to 1 MiB without truncation, range reads, path escape, directory reads, or symlink traversal.
+- [x] Add tests for built-in list/read/search/activation behavior and scoped reads.
+- [x] Represent embedded built-ins as read-only, non-materialized packages so the later run preflight returns `skill_not_runnable` in V1.
+- **Status:** complete
 
 ### Phase 4: Persistent Room Agent installation job engine
 
@@ -308,6 +308,9 @@ None. Product-level contracts are frozen; implementation may only reopen a decis
 | First execution-lease decision patch used a stale acceptance-criteria anchor | 1 | No partial change was applied; inspected the exact plan sections and reapplied against current text. |
 | First all-A finalization patch used a truncated Phase 4 context | 1 | No partial change was applied; split the update into exact section-level patches and revalidated the plan. |
 | Git index lock was read-only in the default sandbox | 1 | Retried the scoped Phase 1 add/commit with approved escalation; commit `68e4908` succeeded. |
+| Phase 3 first compile caught moved package path/bytes and borrowed error text | 1 | Cloned the package path, borrowed bytes for base64 encoding, and formatted the dynamic error message. |
+| `cargo test -p agentic-gpt --lib` was used for a binary-only crate | 1 | Re-ran the package test target with `cargo test -p agentic-gpt`. |
+| Initial built-in activation test expected no active skills after deactivating a workspace skill | 1 | Updated the assertion to account for the default-active built-in installer. |
 
 ## Notes
 
