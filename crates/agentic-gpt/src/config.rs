@@ -97,6 +97,41 @@ pub(crate) struct RoomConfig {
     pub(crate) timezone: String,
     #[serde(default = "default_diary_day_boundary_hour")]
     pub(crate) diary_day_boundary_hour: u32,
+    #[serde(default)]
+    pub(crate) skills: RoomSkillsConfig,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RoomSkillsConfig {
+    #[serde(default = "default_skill_max_files")]
+    pub(crate) max_files: usize,
+    #[serde(default = "default_skill_max_file_bytes")]
+    pub(crate) max_file_bytes: u64,
+    #[serde(default = "default_skill_max_package_bytes")]
+    pub(crate) max_package_bytes: u64,
+    #[serde(default = "default_skill_max_skill_md_bytes")]
+    pub(crate) max_skill_md_bytes: u64,
+    #[serde(default = "default_skill_max_inline_bytes")]
+    pub(crate) max_inline_bytes: u64,
+    #[serde(default = "default_skill_connect_timeout_secs")]
+    pub(crate) connect_timeout_secs: u64,
+    #[serde(default = "default_skill_request_timeout_secs")]
+    pub(crate) request_timeout_secs: u64,
+    #[serde(default = "default_skill_idle_timeout_secs")]
+    pub(crate) idle_timeout_secs: u64,
+    #[serde(default = "default_skill_max_redirects")]
+    pub(crate) max_redirects: usize,
+    #[serde(default = "default_skill_max_concurrent_installs")]
+    pub(crate) max_concurrent_installs: usize,
+    #[serde(default = "default_skill_max_parallel_downloads")]
+    pub(crate) max_parallel_downloads: usize,
+    #[serde(default = "default_skill_max_attempts")]
+    pub(crate) max_attempts: u32,
+    #[serde(default = "default_skill_total_deadline_secs")]
+    pub(crate) total_deadline_secs: u64,
+    #[serde(default)]
+    pub(crate) allowed_hosts: Vec<String>,
 }
 impl Config {
     pub(crate) fn default_config() -> Result<Self> {
@@ -295,7 +330,69 @@ pub(crate) fn default_room_config() -> RoomConfig {
         notebook_root: None,
         timezone: "Asia/Shanghai".to_string(),
         diary_day_boundary_hour: default_diary_day_boundary_hour(),
+        skills: RoomSkillsConfig::default(),
     }
+}
+
+impl Default for RoomSkillsConfig {
+    fn default() -> Self {
+        Self {
+            max_files: default_skill_max_files(),
+            max_file_bytes: default_skill_max_file_bytes(),
+            max_package_bytes: default_skill_max_package_bytes(),
+            max_skill_md_bytes: default_skill_max_skill_md_bytes(),
+            max_inline_bytes: default_skill_max_inline_bytes(),
+            connect_timeout_secs: default_skill_connect_timeout_secs(),
+            request_timeout_secs: default_skill_request_timeout_secs(),
+            idle_timeout_secs: default_skill_idle_timeout_secs(),
+            max_redirects: default_skill_max_redirects(),
+            max_concurrent_installs: default_skill_max_concurrent_installs(),
+            max_parallel_downloads: default_skill_max_parallel_downloads(),
+            max_attempts: default_skill_max_attempts(),
+            total_deadline_secs: default_skill_total_deadline_secs(),
+            allowed_hosts: Vec::new(),
+        }
+    }
+}
+
+fn default_skill_max_files() -> usize {
+    256
+}
+fn default_skill_max_file_bytes() -> u64 {
+    10 * 1024 * 1024
+}
+fn default_skill_max_package_bytes() -> u64 {
+    50 * 1024 * 1024
+}
+fn default_skill_max_skill_md_bytes() -> u64 {
+    256 * 1024
+}
+fn default_skill_max_inline_bytes() -> u64 {
+    2 * 1024 * 1024
+}
+fn default_skill_connect_timeout_secs() -> u64 {
+    10
+}
+fn default_skill_request_timeout_secs() -> u64 {
+    120
+}
+fn default_skill_idle_timeout_secs() -> u64 {
+    30
+}
+fn default_skill_max_redirects() -> usize {
+    5
+}
+fn default_skill_max_concurrent_installs() -> usize {
+    2
+}
+fn default_skill_max_parallel_downloads() -> usize {
+    4
+}
+fn default_skill_max_attempts() -> u32 {
+    3
+}
+fn default_skill_total_deadline_secs() -> u64 {
+    600
 }
 
 pub(crate) fn default_diary_day_boundary_hour() -> u32 {

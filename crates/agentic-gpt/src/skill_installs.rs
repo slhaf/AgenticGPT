@@ -9,9 +9,12 @@ use agentic_gpt_protocol::{
 use anyhow::{anyhow, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use reqwest::{Client, StatusCode, Url};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
+use std::net::IpAddr;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -24,12 +27,6 @@ use uuid::Uuid;
 use crate::{skills, AppState};
 
 const DEFAULT_POLL_AFTER_MS: u64 = 1_000;
-const MAX_ATTEMPTS: u32 = 3;
-const INSTALL_DEADLINE_SECS: u64 = 600;
-const MAX_FILES: usize = 256;
-const MAX_FILE_BYTES: u64 = 10 * 1024 * 1024;
-const MAX_PACKAGE_BYTES: u64 = 50 * 1024 * 1024;
-const MAX_SKILL_MD_BYTES: u64 = 256 * 1024;
 const MAX_PATH_BYTES: usize = 240;
 const MAX_PATH_DEPTH: usize = 16;
 const TERMINAL_RETENTION_DAYS: i64 = 7;
@@ -55,13 +52,18 @@ pub(crate) struct InstallManager {
 }
 
 impl InstallManager {
+    #[cfg(test)]
     pub(crate) fn new() -> Self {
+        Self::with_concurrency(2)
+    }
+
+    pub(crate) fn with_concurrency(max_concurrent_installs: usize) -> Self {
         Self {
             records: Arc::new(Mutex::new(HashMap::new())),
             cancellations: Arc::new(Mutex::new(HashMap::new())),
             target_locks: Arc::new(Mutex::new(HashMap::new())),
             changed: Arc::new(Notify::new()),
-            worker_slots: Arc::new(Semaphore::new(2)),
+            worker_slots: Arc::new(Semaphore::new(max_concurrent_installs.max(1))),
         }
     }
 
@@ -156,7 +158,7 @@ impl InstallManager {
             status: SkillInstallStatus::Queued,
             phase: None,
             attempt: 0,
-            max_attempts: MAX_ATTEMPTS,
+            max_attempts: config.room.skills.max_attempts.max(1),
             progress: initial_progress(&request.source),
             source: source_summary(&request.source),
             created_at: now,
@@ -312,39 +314,101 @@ impl InstallManager {
         }
         fs::create_dir_all(&staging)?;
         let started = record.status.started_at.unwrap_or_else(Utc::now);
-        let deadline = started + ChronoDuration::seconds(INSTALL_DEADLINE_SECS as i64);
-        let summaries =
-            match materialize_source(&record.request, &staging, &self.cancellations, install_id)
-                .await
-            {
-                Ok(summaries) => summaries,
-                Err(error) => {
+        let deadline =
+            started + ChronoDuration::seconds(config.room.skills.total_deadline_secs as i64);
+        let max_attempts = config.room.skills.max_attempts.max(1);
+        let mut materialized = None;
+        for attempt in 1..=max_attempts {
+            record = self.load_record(&config, install_id).await?;
+            record.status.attempt = attempt;
+            record.status.phase = Some(if attempt == 1 {
+                SkillInstallPhase::Resolving
+            } else {
+                SkillInstallPhase::Downloading
+            });
+            touch_status(&mut record.status);
+            self.save_cache(&config, &record).await?;
+            let remaining = remaining_deadline(deadline);
+            if remaining.is_zero() {
+                let _ = fs::remove_dir_all(&staging);
+                return self
+                    .fail(
+                        state,
+                        install_id,
+                        "install_deadline_exceeded",
+                        Some(SkillInstallPhase::Downloading),
+                        true,
+                    )
+                    .await;
+            }
+            let result = timeout(
+                remaining,
+                materialize_source(
+                    &config,
+                    &record.request,
+                    &staging,
+                    &self.cancellations,
+                    install_id,
+                ),
+            )
+            .await;
+            match result {
+                Ok(Ok(value)) => {
+                    materialized = Some(value);
+                    break;
+                }
+                Ok(Err(error)) => {
+                    let message = error.to_string();
+                    if !is_retryable_materialization_error(&message) || attempt == max_attempts {
+                        let _ = fs::remove_dir_all(&staging);
+                        return self
+                            .fail(
+                                state,
+                                install_id,
+                                &message,
+                                Some(SkillInstallPhase::Downloading),
+                                is_retryable_materialization_error(&message),
+                            )
+                            .await;
+                    }
+                    let _ = fs::remove_dir_all(&staging);
+                    let backoff = Duration::from_secs(1_u64 << (attempt - 1).min(5));
+                    tokio::time::sleep(backoff.min(remaining)).await;
+                    fs::create_dir_all(&staging)?;
+                }
+                Err(_) => {
                     let _ = fs::remove_dir_all(&staging);
                     return self
                         .fail(
                             state,
                             install_id,
-                            &error.to_string(),
+                            "install_deadline_exceeded",
                             Some(SkillInstallPhase::Downloading),
-                            false,
+                            true,
                         )
                         .await;
                 }
-            };
+            }
+        }
+        let materialized = materialized.ok_or_else(|| anyhow!("materialization_failed"))?;
         if self.is_cancelled(install_id).await {
             let _ = fs::remove_dir_all(&staging);
             return self.cancelled(state, install_id).await;
         }
         record = self.load_record(&config, install_id).await?;
         record.status.phase = Some(SkillInstallPhase::Validating);
-        record.status.progress.files_completed = summaries.len() as u64;
-        record.status.progress.bytes_downloaded =
-            summaries.iter().map(|summary| summary.size_bytes).sum();
+        record.status.progress.files_completed = materialized.summaries.len() as u64;
+        record.status.progress.bytes_downloaded = materialized
+            .summaries
+            .iter()
+            .map(|summary| summary.size_bytes)
+            .sum();
         record.status.progress.bytes_total = Some(record.status.progress.bytes_downloaded);
-        record.status.source.files = summaries;
+        record.status.source = materialized.source;
         touch_status(&mut record.status);
         self.save_cache(&config, &record).await?;
-        validate_staging(&staging, &record.request.id)?;
+        normalize_directory_modes(&staging)?;
+        validate_staging(&staging, &record.request.id, &config.room.skills)?;
 
         if self.is_cancelled(install_id).await {
             let _ = fs::remove_dir_all(&staging);
@@ -465,11 +529,7 @@ impl InstallManager {
         record.status.status = SkillInstallStatus::Failed;
         record.status.phase = None;
         record.status.error = Some(SkillInstallError {
-            code: if message == "target_busy" {
-                "target_busy".to_string()
-            } else {
-                "internal_error".to_string()
-            },
+            code: install_error_code(message),
             message: safe_error_message(message),
             phase,
             retryable,
@@ -660,7 +720,7 @@ fn validate_install_request(
         }
     }
     if let SkillInstallSource::Files { files } = &request.source {
-        if files.is_empty() || files.len() > MAX_FILES {
+        if files.is_empty() || files.len() > config.room.skills.max_files {
             return Err(anyhow!("invalid_files"));
         }
         let mut paths = std::collections::HashSet::new();
@@ -675,24 +735,62 @@ fn validate_install_request(
             if values != 1 {
                 return Err(anyhow!("invalid_file_source"));
             }
+            if let Some(url) = file.url.as_deref() {
+                let parsed = Url::parse(url).map_err(|_| anyhow!("download_blocked"))?;
+                if parsed.scheme() != "https"
+                    || parsed.username() != ""
+                    || parsed.password().is_some()
+                    || parsed.host_str().is_none()
+                {
+                    return Err(anyhow!("download_blocked"));
+                }
+            }
         }
     }
-    let _ = config;
+    if let SkillInstallSource::Github {
+        repository, url, ..
+    } = &request.source
+    {
+        let _ = parse_github_source(repository.as_deref(), url.as_deref())?;
+    }
+    if let SkillInstallSource::Files { files } = &request.source {
+        if files
+            .iter()
+            .filter_map(|file| file.content.as_deref())
+            .map(str::len)
+            .sum::<usize>() as u64
+            > config.room.skills.max_inline_bytes
+        {
+            return Err(anyhow!("package_limit_exceeded"));
+        }
+    }
     Ok(())
 }
 
+struct MaterializedSource {
+    summaries: Vec<SkillInstallFileSummary>,
+    source: SkillInstallSourceSummary,
+}
+
 async fn materialize_source(
+    config: &crate::config::Config,
     request: &SkillInstallRequest,
     staging: &Path,
     cancellations: &Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
     install_id: &str,
-) -> Result<Vec<SkillInstallFileSummary>> {
+) -> Result<MaterializedSource> {
+    if let SkillInstallSource::Github { .. } = &request.source {
+        return materialize_github(config, request, staging, cancellations, install_id).await;
+    }
     let SkillInstallSource::Files { files } = &request.source else {
         return Err(anyhow!("source_not_supported"));
     };
     let cancel = cancellations.lock().await.get(install_id).cloned();
     let mut summaries = Vec::with_capacity(files.len());
+    let mut planned_paths = std::collections::HashSet::new();
+    let mut planned_casefolded_paths = std::collections::HashSet::new();
     let mut total_bytes = 0_u64;
+    let mut source = source_summary(&request.source);
     for file in files {
         if cancel
             .as_ref()
@@ -701,9 +799,16 @@ async fn materialize_source(
             return Err(anyhow!("cancelled"));
         }
         let relative = normalize_package_path(&file.path)?;
-        let (bytes, source_type) = inline_file_bytes(file)?;
+        register_package_path(&mut planned_paths, &mut planned_casefolded_paths, &relative)?;
+        let (bytes, source_type) = if let Some(url) = file.url.as_deref() {
+            (download_url(config, url).await?, "url")
+        } else {
+            inline_file_bytes(config, file)?
+        };
         let size = bytes.len() as u64;
-        if size > MAX_FILE_BYTES || total_bytes.saturating_add(size) > MAX_PACKAGE_BYTES {
+        if size > config.room.skills.max_file_bytes
+            || total_bytes.saturating_add(size) > config.room.skills.max_package_bytes
+        {
             return Err(anyhow!("package_limit_exceeded"));
         }
         if let Some(expected) = file.sha256.as_deref() {
@@ -725,37 +830,462 @@ async fn materialize_source(
             source_type: source_type.to_string(),
         });
     }
-    Ok(summaries)
+    source.files = summaries.clone();
+    Ok(MaterializedSource { summaries, source })
 }
 
-fn inline_file_bytes(file: &SkillInstallFile) -> Result<(Vec<u8>, &'static str)> {
+fn inline_file_bytes(
+    config: &crate::config::Config,
+    file: &SkillInstallFile,
+) -> Result<(Vec<u8>, &'static str)> {
     if let Some(content) = file.content.as_deref() {
+        if content.len() as u64 > config.room.skills.max_inline_bytes {
+            return Err(anyhow!("package_limit_exceeded"));
+        }
         return Ok((content.as_bytes().to_vec(), "inline_utf8"));
     }
     if let Some(content) = file.content_base64.as_deref() {
-        return BASE64
+        let bytes = BASE64
             .decode(content)
-            .map(|bytes| (bytes, "inline_base64"))
-            .map_err(|_| anyhow!("invalid_base64"));
+            .map_err(|_| anyhow!("invalid_base64"))?;
+        if bytes.len() as u64 > config.room.skills.max_inline_bytes {
+            return Err(anyhow!("package_limit_exceeded"));
+        }
+        return Ok((bytes, "inline_base64"));
     }
     Err(anyhow!("source_not_supported"))
 }
 
-fn validate_staging(staging: &Path, id: &str) -> Result<()> {
+fn is_retryable_materialization_error(message: &str) -> bool {
+    message == "download_failed"
+        || message == "download_timeout"
+        || message
+            .strip_prefix("download_http:")
+            .and_then(|status| status.parse::<u16>().ok())
+            .is_some_and(|status| matches!(status, 408 | 425 | 429 | 500 | 502 | 503 | 504))
+}
+
+fn register_package_path(
+    paths: &mut std::collections::HashSet<PathBuf>,
+    casefolded_paths: &mut std::collections::HashSet<String>,
+    path: &Path,
+) -> Result<()> {
+    let key = path.to_string_lossy().replace('\\', "/").to_lowercase();
+    if casefolded_paths.iter().any(|existing| {
+        existing == &key
+            || existing.starts_with(&format!("{key}/"))
+            || key.starts_with(&format!("{existing}/"))
+    }) {
+        return Err(anyhow!("duplicate_path"));
+    }
+    paths.insert(path.to_path_buf());
+    casefolded_paths.insert(key);
+    Ok(())
+}
+
+async fn materialize_github(
+    config: &crate::config::Config,
+    request: &SkillInstallRequest,
+    staging: &Path,
+    cancellations: &Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
+    install_id: &str,
+) -> Result<MaterializedSource> {
+    let SkillInstallSource::Github {
+        repository,
+        url,
+        ref_name,
+        path,
+    } = &request.source
+    else {
+        return Err(anyhow!("source_not_supported"));
+    };
+    let (repo, parsed_ref, parsed_path) =
+        parse_github_source(repository.as_deref(), url.as_deref())?;
+    let requested_ref = ref_name.clone().or(parsed_ref);
+    let subtree = path.clone().or(parsed_path);
+    let client = github_client(config)?;
+    let repo_info =
+        github_get_json(&client, &format!("https://api.github.com/repos/{repo}")).await?;
+    let resolved_ref = requested_ref
+        .clone()
+        .or_else(|| {
+            repo_info
+                .get("default_branch")
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+        })
+        .ok_or_else(|| anyhow!("ref_not_found"))?;
+    let commit_info = github_get_json(
+        &client,
+        &format!(
+            "https://api.github.com/repos/{repo}/commits/{}",
+            urlencoding::encode(&resolved_ref)
+        ),
+    )
+    .await?;
+    let commit = commit_info
+        .get("sha")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("ref_not_found"))?
+        .to_string();
+    let tree = github_get_json(
+        &client,
+        &format!("https://api.github.com/repos/{repo}/git/trees/{commit}?recursive=1"),
+    )
+    .await?;
+    let prefix = subtree
+        .as_deref()
+        .map(|value| {
+            normalize_package_path(value).map(|path| path.to_string_lossy().replace('\\', "/"))
+        })
+        .transpose()?;
+    let entries = tree
+        .get("tree")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("archive_invalid"))?;
+    let cancel = cancellations.lock().await.get(install_id).cloned();
+    let mut summaries = Vec::new();
+    let mut planned_paths = std::collections::HashSet::new();
+    let mut planned_casefolded_paths = std::collections::HashSet::new();
+    let mut total = 0_u64;
+    for entry in entries {
+        if cancel
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Acquire))
+        {
+            return Err(anyhow!("cancelled"));
+        }
+        if entry.get("type").and_then(Value::as_str) != Some("blob") {
+            continue;
+        }
+        let mode = entry
+            .get("mode")
+            .and_then(Value::as_str)
+            .unwrap_or("100644");
+        if !matches!(mode, "100644" | "100755") {
+            return Err(anyhow!("archive_invalid"));
+        }
+        let repo_path = entry
+            .get("path")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let relative = match prefix.as_deref() {
+            Some(prefix) if repo_path == prefix => PathBuf::from(
+                Path::new(repo_path)
+                    .file_name()
+                    .ok_or_else(|| anyhow!("invalid_path"))?,
+            ),
+            Some(prefix) => {
+                let Some(rest) = repo_path.strip_prefix(&format!("{prefix}/")) else {
+                    continue;
+                };
+                normalize_package_path(rest)?
+            }
+            None => normalize_package_path(repo_path)?,
+        };
+        if relative.as_os_str().is_empty() {
+            continue;
+        }
+        register_package_path(&mut planned_paths, &mut planned_casefolded_paths, &relative)?;
+        let raw_url = format!(
+            "https://raw.githubusercontent.com/{repo}/{commit}/{}",
+            repo_path
+                .split('/')
+                .map(urlencoding::encode)
+                .collect::<Vec<_>>()
+                .join("/")
+        );
+        let bytes = download_url_with_client(config, &client, &raw_url).await?;
+        let size = bytes.len() as u64;
+        if size > config.room.skills.max_file_bytes
+            || total.saturating_add(size) > config.room.skills.max_package_bytes
+        {
+            return Err(anyhow!("package_limit_exceeded"));
+        }
+        total += size;
+        let destination = staging.join(&relative);
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&destination, &bytes)?;
+        let executable = mode == "100755";
+        set_mode(&destination, executable)?;
+        summaries.push(SkillInstallFileSummary {
+            path: relative.to_string_lossy().replace('\\', "/"),
+            size_bytes: size,
+            sha256: hex_sha256(&bytes),
+            source_type: "github".to_string(),
+        });
+        if summaries.len() > config.room.skills.max_files {
+            return Err(anyhow!("package_limit_exceeded"));
+        }
+    }
+    if summaries.is_empty() {
+        return Err(anyhow!("source_not_found"));
+    }
+    Ok(MaterializedSource {
+        summaries: summaries.clone(),
+        source: SkillInstallSourceSummary {
+            source_type: "github".to_string(),
+            repository: Some(repo),
+            requested_ref: Some(resolved_ref),
+            resolved_commit: Some(commit),
+            path: subtree,
+            files: summaries,
+        },
+    })
+}
+
+fn parse_github_source(
+    repository: Option<&str>,
+    url: Option<&str>,
+) -> Result<(String, Option<String>, Option<String>)> {
+    if repository.is_some() == url.is_some() {
+        return Err(anyhow!("invalid_github_source"));
+    }
+    if let Some(repository) = repository {
+        let parts = repository.trim().split('/').collect::<Vec<_>>();
+        if parts.len() != 2
+            || parts.iter().any(|part| {
+                part.is_empty()
+                    || *part == "."
+                    || *part == ".."
+                    || !part.chars().all(|character| {
+                        character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+                    })
+            })
+        {
+            return Err(anyhow!("invalid_github_repository"));
+        }
+        return Ok((repository.trim().to_string(), None, None));
+    }
+    let url = Url::parse(url.unwrap()).map_err(|_| anyhow!("invalid_github_url"))?;
+    if url.scheme() != "https"
+        || url.host_str() != Some("github.com")
+        || url.username() != ""
+        || url.password().is_some()
+    {
+        return Err(anyhow!("unsupported_github_host"));
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err(anyhow!("ambiguous_github_url"));
+    }
+    let parts = url
+        .path_segments()
+        .ok_or_else(|| anyhow!("invalid_github_url"))?
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    if parts.len() < 2 || parts[0].contains('.') || parts[1].contains('.') {
+        return Err(anyhow!("invalid_github_url"));
+    }
+    if parts[..2].iter().any(|part| {
+        part.is_empty()
+            || !part.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+            })
+    }) {
+        return Err(anyhow!("invalid_github_url"));
+    }
+    let repo = format!("{}/{}", parts[0], parts[1]);
+    if parts.len() == 2 {
+        return Ok((repo, None, None));
+    }
+    if parts.len() < 4 || !matches!(parts[2], "tree" | "blob") {
+        return Err(anyhow!("ambiguous_github_url"));
+    }
+    let ref_name = parts[3].to_string();
+    let path = if parts.len() > 4 {
+        Some(parts[4..].join("/"))
+    } else {
+        None
+    };
+    Ok((repo, Some(ref_name), path))
+}
+
+fn github_client(config: &crate::config::Config) -> Result<Client> {
+    Client::builder()
+        .connect_timeout(Duration::from_secs(config.room.skills.connect_timeout_secs))
+        .timeout(Duration::from_secs(config.room.skills.request_timeout_secs))
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent("agentic-gpt-skill-installer")
+        .build()
+        .map_err(|error| anyhow!("download_client_failed: {error}"))
+}
+
+async fn github_get_json(client: &Client, url: &str) -> Result<Value> {
+    let response = client
+        .get(url)
+        .header("accept", "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(|_| anyhow!("download_failed"))?;
+    if response.status() == StatusCode::NOT_FOUND {
+        return Err(anyhow!("source_not_found"));
+    }
+    if !response.status().is_success() {
+        return Err(anyhow!("download_http:{}", response.status().as_u16()));
+    }
+    response
+        .json()
+        .await
+        .map_err(|_| anyhow!("archive_invalid"))
+}
+
+async fn download_url(config: &crate::config::Config, url: &str) -> Result<Vec<u8>> {
+    let client = github_client(config)?;
+    download_url_with_client(config, &client, url).await
+}
+
+async fn download_url_with_client(
+    config: &crate::config::Config,
+    client: &Client,
+    url: &str,
+) -> Result<Vec<u8>> {
+    let mut current = Url::parse(url).map_err(|_| anyhow!("download_blocked"))?;
+    for redirect in 0..=config.room.skills.max_redirects {
+        validate_public_url(config, &current).await?;
+        let response = client
+            .get(current.clone())
+            .send()
+            .await
+            .map_err(|_| anyhow!("download_failed"))?;
+        if response.status().is_redirection() {
+            if redirect == config.room.skills.max_redirects {
+                return Err(anyhow!("download_failed"));
+            }
+            let location = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .ok_or_else(|| anyhow!("download_failed"))?;
+            current = current
+                .join(location)
+                .map_err(|_| anyhow!("download_blocked"))?;
+            continue;
+        }
+        if !response.status().is_success() {
+            if response.status() == StatusCode::NOT_FOUND {
+                return Err(anyhow!("source_not_found"));
+            }
+            return Err(anyhow!("download_http:{}", response.status().as_u16()));
+        }
+        if response
+            .content_length()
+            .is_some_and(|size| size > config.room.skills.max_file_bytes)
+        {
+            return Err(anyhow!("package_limit_exceeded"));
+        }
+        let mut bytes = Vec::new();
+        let mut response = response;
+        while let Some(chunk) = tokio::time::timeout(
+            Duration::from_secs(config.room.skills.idle_timeout_secs),
+            response.chunk(),
+        )
+        .await
+        .map_err(|_| anyhow!("download_timeout"))?
+        .map_err(|_| anyhow!("download_failed"))?
+        {
+            bytes.extend_from_slice(&chunk);
+            if bytes.len() as u64 > config.room.skills.max_file_bytes {
+                return Err(anyhow!("package_limit_exceeded"));
+            }
+        }
+        return Ok(bytes);
+    }
+    Err(anyhow!("download_failed"))
+}
+
+async fn validate_public_url(config: &crate::config::Config, url: &Url) -> Result<()> {
+    if url.scheme() != "https" || url.username() != "" || url.password().is_some() {
+        return Err(anyhow!("download_blocked"));
+    }
+    let host = url.host_str().ok_or_else(|| anyhow!("download_blocked"))?;
+    if !config.room.skills.allowed_hosts.is_empty()
+        && !config
+            .room
+            .skills
+            .allowed_hosts
+            .iter()
+            .any(|allowed| allowed == host)
+    {
+        return Err(anyhow!("download_blocked"));
+    }
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| anyhow!("download_blocked"))?;
+    let addresses = tokio::net::lookup_host((host, port))
+        .await
+        .map_err(|_| anyhow!("download_blocked"))?
+        .collect::<Vec<_>>();
+    if addresses.is_empty() || addresses.iter().any(|address| !is_public_ip(address.ip())) {
+        return Err(anyhow!("download_blocked"));
+    }
+    Ok(())
+}
+
+fn is_public_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => {
+            let octets = ip.octets();
+            !ip.is_loopback()
+                && !ip.is_private()
+                && !ip.is_link_local()
+                && !ip.is_unspecified()
+                && !ip.is_multicast()
+                && octets[0] != 0
+                && !(octets[0] == 100 && (64..=127).contains(&octets[1]))
+                && !(octets[0] == 192 && octets[1] == 0)
+                && !(octets[0] == 198 && (18..=19).contains(&octets[1]))
+                && !(octets[0] == 198 && octets[1] == 51 && octets[2] == 100)
+                && !(octets[0] == 203 && octets[1] == 0 && octets[2] == 113)
+        }
+        IpAddr::V6(ip) => {
+            let segments = ip.segments();
+            !ip.is_loopback()
+                && !ip.is_unspecified()
+                && !ip.is_multicast()
+                && (segments[0] & 0xfe00) != 0xfc00
+                && (segments[0] & 0xffc0) != 0xfe80
+        }
+    }
+}
+
+fn validate_staging(
+    staging: &Path,
+    id: &str,
+    limits: &crate::config::RoomSkillsConfig,
+) -> Result<()> {
     let skill_md = staging.join("SKILL.md");
     if !skill_md.is_file() {
         return Err(anyhow!("skill_md_missing"));
     }
-    if fs::metadata(&skill_md)?.len() > MAX_SKILL_MD_BYTES {
+    if fs::metadata(&skill_md)?.len() > limits.max_skill_md_bytes {
         return Err(anyhow!("skill_md_too_large"));
     }
     let mut count = 0_usize;
     let mut total = 0_u64;
     validate_tree(staging, staging, &mut count, &mut total)?;
-    if count > MAX_FILES || total > MAX_PACKAGE_BYTES {
+    if count > limits.max_files || total > limits.max_package_bytes {
         return Err(anyhow!("package_limit_exceeded"));
     }
     let _ = id;
+    Ok(())
+}
+
+fn normalize_directory_modes(root: &Path) -> Result<()> {
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        normalize_directory_modes(&path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
+        }
+    }
     Ok(())
 }
 
@@ -951,14 +1481,20 @@ fn source_summary(source: &SkillInstallSource) -> SkillInstallSourceSummary {
             url,
             ref_name,
             path,
-        } => SkillInstallSourceSummary {
-            source_type: "github".to_string(),
-            repository: repository.clone().or_else(|| url.clone()),
-            requested_ref: ref_name.clone(),
-            resolved_commit: None,
-            path: path.clone(),
-            files: Vec::new(),
-        },
+        } => {
+            let parsed_repository = url
+                .as_deref()
+                .and_then(|value| parse_github_source(None, Some(value)).ok())
+                .map(|(repository, _, _)| repository);
+            SkillInstallSourceSummary {
+                source_type: "github".to_string(),
+                repository: repository.clone().or(parsed_repository),
+                requested_ref: ref_name.clone(),
+                resolved_commit: None,
+                path: path.clone(),
+                files: Vec::new(),
+            }
+        }
         SkillInstallSource::Files { .. } => SkillInstallSourceSummary {
             source_type: "files".to_string(),
             ..Default::default()
@@ -1031,6 +1567,29 @@ fn safe_error_message(message: &str) -> String {
         "installation cancelled".to_string()
     } else {
         message.chars().take(256).collect()
+    }
+}
+
+fn install_error_code(message: &str) -> String {
+    let code = message.split(':').next().unwrap_or(message);
+    match code {
+        "source_not_found"
+        | "ref_not_found"
+        | "download_blocked"
+        | "download_failed"
+        | "download_timeout"
+        | "digest_mismatch"
+        | "archive_invalid"
+        | "package_limit_exceeded"
+        | "skill_md_missing"
+        | "skill_invalid"
+        | "target_changed"
+        | "target_busy"
+        | "install_deadline_exceeded"
+        | "activation_failed"
+        | "recovery_failed" => code.to_string(),
+        "download_http" => "download_failed".to_string(),
+        _ => "internal_error".to_string(),
     }
 }
 
@@ -1208,5 +1767,60 @@ mod tests {
                 | SkillInstallCancelOutcome::AlreadyTerminal
                 | SkillInstallCancelOutcome::TooLate
         ));
+    }
+
+    #[test]
+    fn github_sources_resolve_structured_and_convenience_forms() {
+        assert_eq!(
+            parse_github_source(Some("octo/demo"), None).unwrap(),
+            ("octo/demo".to_string(), None, None)
+        );
+        assert_eq!(
+            parse_github_source(None, Some("https://github.com/octo/demo/tree/main/scripts"))
+                .unwrap(),
+            (
+                "octo/demo".to_string(),
+                Some("main".to_string()),
+                Some("scripts".to_string())
+            )
+        );
+        assert!(
+            parse_github_source(None, Some("https://github.com/octo/demo?token=secret")).is_err()
+        );
+        assert!(parse_github_source(None, Some("https://github.com:443/octo/demo")).is_ok());
+        assert!(parse_github_source(None, Some("https://user:pass@github.com/octo/demo")).is_err());
+    }
+
+    #[test]
+    fn package_paths_reject_case_conflicts_and_file_directory_collisions() {
+        let mut exact = std::collections::HashSet::new();
+        let mut folded = std::collections::HashSet::new();
+        register_package_path(&mut exact, &mut folded, Path::new("scripts/run"))
+            .expect("first path is valid");
+        assert!(register_package_path(&mut exact, &mut folded, Path::new("SCRIPTS/RUN")).is_err());
+        assert!(register_package_path(&mut exact, &mut folded, Path::new("scripts")).is_err());
+        assert!(
+            register_package_path(&mut exact, &mut folded, Path::new("scripts/run/out")).is_err()
+        );
+    }
+
+    #[test]
+    fn remote_policy_rejects_private_and_reserved_addresses() {
+        assert!(!is_public_ip("127.0.0.1".parse().unwrap()));
+        assert!(!is_public_ip("10.0.0.1".parse().unwrap()));
+        assert!(!is_public_ip("169.254.1.1".parse().unwrap()));
+        assert!(!is_public_ip("::1".parse().unwrap()));
+        assert!(!is_public_ip("fd00::1".parse().unwrap()));
+        assert!(is_public_ip("8.8.8.8".parse().unwrap()));
+    }
+
+    #[test]
+    fn transient_download_errors_are_the_only_retryable_materialization_failures() {
+        assert!(is_retryable_materialization_error("download_failed"));
+        assert!(is_retryable_materialization_error("download_timeout"));
+        assert!(is_retryable_materialization_error("download_http:503"));
+        assert!(!is_retryable_materialization_error("download_http:403"));
+        assert!(!is_retryable_materialization_error("source_not_found"));
+        assert_eq!(install_error_code("download_http:503"), "download_failed");
     }
 }

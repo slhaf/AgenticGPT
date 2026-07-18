@@ -6,7 +6,7 @@ Extend the existing Room Agent-owned skills subsystem with a built-in `skill-ins
 
 ## Current Phase
 
-Phase 5 — source resolution and secure download pipeline
+Phase 6 — Hub, MCP, Actions, and Apps workflow integration
 
 ## Scope and constraints
 
@@ -144,20 +144,20 @@ Phase 5 — source resolution and secure download pipeline
 
 ### Phase 5: Source resolution and secure download pipeline
 
-- [ ] Normalize GitHub repository/ref/path or canonical GitHub URL into a resolved commit and package subtree.
-- [ ] Reject ambiguous GitHub tree URLs, credential-bearing URLs, unsupported hosts, and conflicting structured/URL fields; direct callers to structured `ref`/`path` when URL parsing is ambiguous.
-- [ ] Select and implement the GitHub download strategy, favoring a single commit-pinned archive when safe.
-- [ ] Normalize `files` entries into one internal resolved file plan.
-- [ ] Normalize `executable` into `0644`/`0755`, preserve only the GitHub executable bit, use `0755` directories, and reject arbitrary/special modes.
-- [ ] Download URL-backed entries directly into the staging package.
-- [ ] Materialize inline UTF-8/base64 entries through the same plan.
-- [ ] Accept public HTTPS URL entries by default, revalidate DNS and every redirect against private/reserved ranges, support an optional narrowing host allowlist, and enforce bounded resource use.
-- [ ] Add defaulted `room.skills` configuration for the accepted package/read/inline ceilings, network timeouts, redirects, concurrency, retries, and total deadline.
-- [ ] Reject absolute paths, traversal, symlinks/hardlinks, duplicates, case conflicts, and package-limit violations.
-- [ ] Validate required `SKILL.md`, compute content digests, and save provenance.
-- [ ] Ensure installation never executes bundled scripts.
-- [ ] Retry transient download/status failures up to three total attempts with bounded backoff and expose `attempt`/`maxAttempts` in the source worker.
-- **Status:** pending
+- [x] Normalize GitHub repository/ref/path or canonical GitHub URL into a resolved commit and package subtree.
+- [x] Reject ambiguous GitHub tree URLs, credential-bearing URLs, unsupported hosts, and conflicting structured/URL fields; direct callers to structured `ref`/`path` when URL parsing is ambiguous.
+- [x] Select and implement a commit-pinned GitHub tree/blob strategy with explicit symlink/mode handling.
+- [x] Normalize `files` entries into one internal resolved file plan.
+- [x] Normalize `executable` into `0644`/`0755`, preserve only the GitHub executable bit, use `0755` directories, and reject arbitrary/special modes.
+- [x] Download URL-backed entries directly into the staging package.
+- [x] Materialize inline UTF-8/base64 entries through the same plan.
+- [x] Accept public HTTPS URL entries by default, revalidate DNS and every redirect against private/reserved ranges, support an optional narrowing host allowlist, and enforce bounded resource use.
+- [x] Add defaulted `room.skills` configuration for the accepted package/read/inline ceilings, network timeouts, redirects, concurrency, retries, and total deadline.
+- [x] Reject absolute paths, traversal, symlinks/hardlinks, duplicates, case conflicts, and package-limit violations.
+- [x] Validate required `SKILL.md`, compute content digests, and save provenance.
+- [x] Ensure installation never executes bundled scripts.
+- [x] Retry transient download/status failures up to three total attempts with bounded backoff and expose `attempt`/`maxAttempts` in the source worker.
+- **Status:** complete
 
 ### Phase 6: Hub, MCP, Actions, and Apps workflow integration
 

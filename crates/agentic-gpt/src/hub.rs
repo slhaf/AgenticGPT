@@ -1137,6 +1137,13 @@ fn install_command_error(error: anyhow::Error) -> serde_json::Value {
         | "invalid_path"
         | "duplicate_path"
         | "invalid_base64"
+        | "package_limit_exceeded"
+        | "download_blocked"
+        | "invalid_github_source"
+        | "invalid_github_repository"
+        | "invalid_github_url"
+        | "unsupported_github_host"
+        | "ambiguous_github_url"
         | "invalid_idempotency_key" => "validation_error",
         _ => "skills_install_failed",
     };

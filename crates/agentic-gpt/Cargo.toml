@@ -27,4 +27,5 @@ serde_yaml.workspace = true
 sha2 = "0.10"
 tokio.workspace = true
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
+urlencoding = "2.1"
 uuid.workspace = true

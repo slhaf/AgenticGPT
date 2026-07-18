@@ -41,6 +41,18 @@
 - Verification passed: `cargo fmt --all`, `cargo test -p agentic-gpt skill_installs::tests` (3 tests), and `cargo check --workspace`.
 - Phase 4 is ready to commit before beginning Phase 5.
 
+### Phase 5: Source resolution and secure download pipeline
+
+- **Status:** complete
+- Started after Phase 4 commit `b76dd30`.
+- Added backward-compatible `room.skills` limits and network policy, including worker concurrency, public-host allowlisting, bounded redirects, retries, and total deadline.
+- Added structured and convenience GitHub resolution with public-host validation, default-branch lookup, commit pinning, recursive tree selection, raw blob downloads, redacted source provenance, and special-mode/symlink rejection.
+- Unified inline UTF-8/base64 and URL-backed files with GitHub blobs through one staging, digest, package-limit, path, permission, and atomic commit pipeline.
+- Added SSRF protections for arbitrary HTTPS files: credentials/private/reserved targets are blocked and every redirect is revalidated through DNS. Added case-folded duplicate/prefix collision checks, required `SKILL.md` validation, directory/file mode normalization, and transient-failure retry/backoff.
+- Added regression coverage for GitHub URL parsing, path collisions, public-IP policy, retry classification, and the existing atomic install flow.
+- Verification passed: `cargo fmt --all`, `cargo test --workspace` (77 local, 49 Hub, 5 protocol tests), and `cargo check --workspace`.
+- Phase 5 is ready to commit before beginning Phase 6.
+
 ### Phase 0: Repository and architecture discovery
 
 - **Status:** complete
@@ -129,6 +141,8 @@
 | Workspace compile check | `cargo check --workspace` | All command matches and protocol consumers compile | pass | pass |
 | Built-in/scoped-read regression | `cargo test -p agentic-gpt` | Built-in activation, collision, resource encoding, and path safety remain green | 70 passed | pass |
 | Install manager regression | `cargo test -p agentic-gpt skill_installs::tests` | Atomic inline install, persisted status, idempotency, and cancel replay | 3 passed | pass |
+| Phase 5 source/security regression | `cargo test --workspace` | GitHub parsing, SSRF policy, collision checks, retries, atomic install, Hub/protocol contracts | 77 local, 49 Hub, 5 protocol passed | pass |
+| Phase 5 compile check | `cargo check --workspace` | Configured remote-source pipeline compiles without warnings | pass | pass |
 
 ## Error log
 
@@ -154,8 +168,8 @@
 
 | Question | Answer |
 |----------|--------|
-| Where am I? | Phase 5: source resolution and secure download pipeline. |
-| Where am I going? | Public GitHub/URL sources, session-backed skill execution plus Hub/MCP/Actions integration, then verification. |
+| Where am I? | Phase 6: Hub, MCP, Actions, and Apps workflow integration. |
+| Where am I going? | Route the installed-job APIs, implement managed-session-backed `skills.run`, then update MCP/Actions/OpenAPI and verify. |
 | What's the goal? | Deliver Room-scoped asynchronous/network-capable skill installation, a built-in installer guide, safe package reads, and session-backed skill script execution. |
 | What have I learned? | See `findings.md`. |
-| What have I done? | Completed and verified Phases 1–4: contracts, protocol/package model, built-in/scoped reads, and persistent install jobs. |
+| What have I done? | Completed and verified Phases 1–5: contracts, protocol/package model, built-in/scoped reads, persistent jobs, and secure GitHub/HTTPS source materialization. |
