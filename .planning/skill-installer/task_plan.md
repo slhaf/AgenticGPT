@@ -6,7 +6,7 @@ Extend the existing Room Agent-owned skills subsystem with a built-in `skill-ins
 
 ## Current Phase
 
-Phase 2 — protocol and package model; all product-level contracts are frozen
+Phase 3 — built-in skill and scoped read behavior
 
 ## Scope and constraints
 
@@ -92,20 +92,20 @@ Phase 2 — protocol and package model; all product-level contracts are frozen
 
 ### Phase 2: Protocol and package model
 
-- [ ] Add protocol types for package-relative reads and binary/text results.
-- [ ] Add the frozen `SkillInstallRequest`: required `id` and discriminated `source`; default-false `replaceExisting`; optional `activateAfterInstall`; optional `idempotencyKey`.
-- [ ] Add `github` source with exactly one of canonical `repository` or convenience `url`, plus compatible optional `ref`/`path`; add `files` source with a non-empty bounded file list.
-- [ ] Add file entries with required relative `path`, exactly one of `url`/`content`/`contentBase64`, optional SHA-256, and optional `executable`.
-- [ ] Add protocol types for install start, status/progress/source/result/error, bounded get, and cancellation outcomes.
-- [ ] Include cancellable install phase `waiting_for_target` before non-cancellable `committing`, plus retryable `target_busy` for lease deadline expiry.
-- [ ] Add `SkillRunRequest { id, path, args?, workingDirectory?, waitSeconds? }` with camelCase serialization, default 5-second wait, and a 0–30 range enforced at the public boundary.
-- [ ] Add `SkillRunResponse { agentId, sessionId, completedInline, pollAfterMs, session }` and stable session states `starting | waiting_confirmation | running | exited | failed | killed`.
-- [ ] Model `id`, `replaceExisting`, context-sensitive post-install activation, and optional `idempotencyKey` explicitly in the install request schema.
-- [ ] Add `HubCommand` variants for install start, status lookup, cancellation, and Room-scoped skill run with a Hub-generated session ID.
-- [ ] Add command serde-name and request-ID regression tests.
-- [ ] Add origin/read-only metadata needed to distinguish built-in and workspace skills.
-- [ ] Define a versioned persisted installation-job schema independent of Hub `agent_runs`.
-- **Status:** pending
+- [x] Add protocol types for package-relative reads and binary/text results.
+- [x] Add the frozen `SkillInstallRequest`: required `id` and discriminated `source`; default-false `replaceExisting`; optional `activateAfterInstall`; optional `idempotencyKey`.
+- [x] Add `github` source with exactly one of canonical `repository` or convenience `url`, plus compatible optional `ref`/`path`; add `files` source with a non-empty bounded file list.
+- [x] Add file entries with required relative `path`, exactly one of `url`/`content`/`contentBase64`, optional SHA-256, and optional `executable`.
+- [x] Add protocol types for install start, status/progress/source/result/error, bounded get, and cancellation outcomes.
+- [x] Include cancellable install phase `waiting_for_target` before non-cancellable `committing`, plus retryable `target_busy` for lease deadline expiry.
+- [x] Add `SkillRunRequest { id, path, args?, workingDirectory?, waitSeconds? }` with camelCase serialization, default 5-second wait, and a 0–30 range enforced at the public boundary.
+- [x] Add `SkillRunResponse { agentId, sessionId, completedInline, pollAfterMs, session }` and stable session states `starting | waiting_confirmation | running | exited | failed | killed`.
+- [x] Model `id`, `replaceExisting`, context-sensitive post-install activation, and optional `idempotencyKey` explicitly in the install request schema.
+- [x] Add `HubCommand` variants for install start, status lookup, cancellation, and Room-scoped skill run with a Hub-generated session ID.
+- [x] Add command serde-name and request-ID regression tests.
+- [x] Add origin/read-only metadata needed to distinguish built-in and workspace skills.
+- [x] Define a versioned persisted installation-job schema independent of Hub `agent_runs`.
+- **Status:** complete
 
 ### Phase 3: Built-in skill and scoped read behavior
 
@@ -307,6 +307,7 @@ None. Product-level contracts are frozen; implementation may only reopen a decis
 | First script-execution findings patch used stale Phase 1 checklist wording | 1 | No partial change was applied; inspected the exact sections and revised the proposal after confirming the existing session lifecycle. |
 | First execution-lease decision patch used a stale acceptance-criteria anchor | 1 | No partial change was applied; inspected the exact plan sections and reapplied against current text. |
 | First all-A finalization patch used a truncated Phase 4 context | 1 | No partial change was applied; split the update into exact section-level patches and revalidated the plan. |
+| Git index lock was read-only in the default sandbox | 1 | Retried the scoped Phase 1 add/commit with approved escalation; commit `68e4908` succeeded. |
 
 ## Notes
 

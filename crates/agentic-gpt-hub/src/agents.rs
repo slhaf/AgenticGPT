@@ -672,7 +672,11 @@ pub(crate) fn command_request_id(command: &HubCommand) -> &str {
         | HubCommand::SkillsSearch { request_id, .. }
         | HubCommand::SkillsActive { request_id }
         | HubCommand::SkillsActivate { request_id, .. }
-        | HubCommand::SkillsDeactivate { request_id, .. } => request_id,
+        | HubCommand::SkillsDeactivate { request_id, .. }
+        | HubCommand::SkillsInstall { request_id, .. }
+        | HubCommand::SkillsInstallGet { request_id, .. }
+        | HubCommand::SkillsInstallCancel { request_id, .. }
+        | HubCommand::SkillsRun { request_id, .. } => request_id,
     }
 }
 
@@ -711,7 +715,11 @@ pub(crate) fn set_command_request_id(command: &mut HubCommand, value: String) {
         | HubCommand::SkillsSearch { request_id, .. }
         | HubCommand::SkillsActive { request_id }
         | HubCommand::SkillsActivate { request_id, .. }
-        | HubCommand::SkillsDeactivate { request_id, .. } => *request_id = value,
+        | HubCommand::SkillsDeactivate { request_id, .. }
+        | HubCommand::SkillsInstall { request_id, .. }
+        | HubCommand::SkillsInstallGet { request_id, .. }
+        | HubCommand::SkillsInstallCancel { request_id, .. }
+        | HubCommand::SkillsRun { request_id, .. } => *request_id = value,
     }
 }
 

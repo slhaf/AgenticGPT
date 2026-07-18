@@ -491,6 +491,8 @@ pub struct DiaryEntriesResponse {
 #[serde(rename_all = "camelCase")]
 pub struct SkillReadRequest {
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -528,8 +530,20 @@ pub struct SkillSummary {
     #[serde(default)]
     pub tags: Vec<String>,
     pub active: bool,
+    #[serde(default)]
+    pub origin: SkillOrigin,
+    #[serde(default)]
+    pub read_only: bool,
     pub package_summary: SkillPackageSummary,
     pub warnings: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SkillOrigin {
+    #[default]
+    Workspace,
+    Builtin,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -547,6 +561,10 @@ pub struct SkillDetail {
     #[serde(default)]
     pub tags: Vec<String>,
     pub active: bool,
+    #[serde(default)]
+    pub origin: SkillOrigin,
+    #[serde(default)]
+    pub read_only: bool,
     pub package_summary: SkillPackageSummary,
     pub warnings: Vec<String>,
 }
@@ -573,6 +591,296 @@ pub struct SkillsListResponse {
 #[serde(rename_all = "camelCase")]
 pub struct SkillReadResponse {
     pub skill: SkillDetail,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource: Option<SkillResource>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillResource {
+    pub path: String,
+    pub encoding: SkillResourceEncoding,
+    pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_type: Option<String>,
+    pub size_bytes: u64,
+    pub sha256: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SkillResourceEncoding {
+    Utf8,
+    Base64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillInstallRequest {
+    pub id: String,
+    pub source: SkillInstallSource,
+    #[serde(default)]
+    pub replace_existing: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activate_after_install: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(
+    tag = "type",
+    rename_all = "lowercase",
+    rename_all_fields = "camelCase"
+)]
+pub enum SkillInstallSource {
+    Github {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        repository: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        url: Option<String>,
+        #[serde(rename = "ref", default, skip_serializing_if = "Option::is_none")]
+        ref_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+    },
+    Files {
+        files: Vec<SkillInstallFile>,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillInstallFile {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_base64: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executable: Option<bool>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SkillInstallStatus {
+    Queued,
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillInstallPhase {
+    Resolving,
+    Downloading,
+    Extracting,
+    Validating,
+    WaitingForTarget,
+    Committing,
+    Activating,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillInstallProgress {
+    pub files_completed: u64,
+    pub files_total: u64,
+    pub bytes_downloaded: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes_total: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillInstallFileSummary {
+    pub path: String,
+    pub size_bytes: u64,
+    pub sha256: String,
+    pub source_type: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillInstallSourceSummary {
+    pub source_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_commit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub files: Vec<SkillInstallFileSummary>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillInstallResult {
+    pub skill: SkillSummary,
+    pub source: SkillInstallSourceSummary,
+    pub package_sha256: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillInstallError {
+    pub code: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<SkillInstallPhase>,
+    pub retryable: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillInstallStartResponse {
+    pub install_id: String,
+    pub id: String,
+    pub status: SkillInstallStatus,
+    pub queued: bool,
+    pub deduplicated: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub poll_after_ms: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillInstallGetRequest {
+    pub install_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_seconds: Option<u64>,
+}
+
+impl SkillInstallGetRequest {
+    pub const DEFAULT_WAIT_SECONDS: u64 = 5;
+    pub const MAX_WAIT_SECONDS: u64 = 30;
+
+    pub fn effective_wait_seconds(&self) -> u64 {
+        self.wait_seconds.unwrap_or(Self::DEFAULT_WAIT_SECONDS)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillInstallStatusResponse {
+    pub install_id: String,
+    pub id: String,
+    pub revision: u64,
+    pub status: SkillInstallStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<SkillInstallPhase>,
+    pub attempt: u32,
+    pub max_attempts: u32,
+    pub progress: SkillInstallProgress,
+    pub source: SkillInstallSourceSummary,
+    pub created_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<DateTime<Utc>>,
+    pub updated_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<DateTime<Utc>>,
+    pub elapsed_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancel_requested_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<SkillInstallResult>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<SkillInstallError>,
+    pub poll_after_ms: u64,
+}
+
+pub const SKILL_INSTALL_JOB_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillInstallJobRecord {
+    pub schema_version: u32,
+    pub install_id: String,
+    pub request: SkillInstallRequest,
+    pub canonical_request_sha256: String,
+    pub status: SkillInstallStatusResponse,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillInstallCancelRequest {
+    pub install_id: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillInstallCancelOutcome {
+    CancelRequested,
+    Cancelled,
+    AlreadyCancelled,
+    TooLate,
+    AlreadyTerminal,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillInstallCancelResponse {
+    pub install_id: String,
+    pub outcome: SkillInstallCancelOutcome,
+    pub changed: bool,
+    pub status: SkillInstallStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<SkillInstallPhase>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancel_requested_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillRunRequest {
+    pub id: String,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_directory: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_seconds: Option<u64>,
+}
+
+impl SkillRunRequest {
+    pub const DEFAULT_WAIT_SECONDS: u64 = 5;
+    pub const MAX_WAIT_SECONDS: u64 = 30;
+
+    pub fn effective_wait_seconds(&self) -> u64 {
+        self.wait_seconds.unwrap_or(Self::DEFAULT_WAIT_SECONDS)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillRunSessionState {
+    Starting,
+    WaitingConfirmation,
+    Running,
+    Exited,
+    Failed,
+    Killed,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillRunResponse {
+    pub agent_id: String,
+    pub session_id: String,
+    pub completed_inline: bool,
+    pub poll_after_ms: u64,
+    pub session: SessionInfo,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -927,6 +1235,27 @@ pub enum HubCommand {
         request_id: String,
         payload: SkillActivationRequest,
     },
+    #[serde(rename = "skills.install")]
+    SkillsInstall {
+        request_id: String,
+        payload: SkillInstallRequest,
+    },
+    #[serde(rename = "skills.install.get")]
+    SkillsInstallGet {
+        request_id: String,
+        payload: SkillInstallGetRequest,
+    },
+    #[serde(rename = "skills.install.cancel")]
+    SkillsInstallCancel {
+        request_id: String,
+        payload: SkillInstallCancelRequest,
+    },
+    #[serde(rename = "skills.run")]
+    SkillsRun {
+        request_id: String,
+        session_id: String,
+        payload: SkillRunRequest,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1032,6 +1361,7 @@ mod tmux_tests {
             request_id: "req".to_string(),
             payload: SkillReadRequest {
                 id: "demo".to_string(),
+                path: None,
             },
         };
         let value = serde_json::to_value(command).unwrap();
@@ -1048,6 +1378,91 @@ mod tmux_tests {
         };
         let serialized = serde_json::to_string(&active).unwrap();
         assert!(!serialized.contains("summary"));
+    }
+
+    #[test]
+    fn skill_read_path_is_additive_and_install_source_is_discriminated() {
+        let request: SkillReadRequest = serde_json::from_value(serde_json::json!({
+            "id": "demo"
+        }))
+        .unwrap();
+        assert_eq!(request.path, None);
+
+        let source = SkillInstallSource::Github {
+            repository: Some("owner/repo".to_string()),
+            url: None,
+            ref_name: Some("release/v1".to_string()),
+            path: Some("skills/demo".to_string()),
+        };
+        let serialized = serde_json::to_value(source).unwrap();
+        assert_eq!(serialized["type"], "github");
+        assert_eq!(serialized["repository"], "owner/repo");
+        assert_eq!(serialized["ref"], "release/v1");
+        assert_eq!(serialized["path"], "skills/demo");
+
+        let legacy_response = serde_json::json!({
+            "skill": {
+                "id": "demo",
+                "skillMd": "# Demo",
+                "frontmatter": {},
+                "tags": [],
+                "active": true,
+                "packageSummary": {
+                    "hasAssets": false,
+                    "hasScripts": false,
+                    "hasReferences": false
+                },
+                "warnings": []
+            }
+        });
+        let response: SkillReadResponse = serde_json::from_value(legacy_response).unwrap();
+        assert!(response.resource.is_none());
+        assert!(!serde_json::to_string(&response)
+            .unwrap()
+            .contains("resource"));
+    }
+
+    #[test]
+    fn install_and_run_protocol_defaults_and_command_names_are_stable() {
+        let get: SkillInstallGetRequest = serde_json::from_value(serde_json::json!({
+            "installId": "install-1"
+        }))
+        .unwrap();
+        assert_eq!(get.effective_wait_seconds(), 5);
+
+        let run: SkillRunRequest = serde_json::from_value(serde_json::json!({
+            "id": "demo",
+            "path": "scripts/check.sh"
+        }))
+        .unwrap();
+        assert_eq!(run.effective_wait_seconds(), 5);
+        assert_eq!(run.args, None);
+
+        let command = HubCommand::SkillsRun {
+            request_id: "req".to_string(),
+            session_id: "session-1".to_string(),
+            payload: run,
+        };
+        let value = serde_json::to_value(command).unwrap();
+        assert_eq!(value["type"], "skills.run");
+        assert_eq!(value["requestId"], "req");
+        assert_eq!(value["sessionId"], "session-1");
+        assert_eq!(value["payload"]["waitSeconds"], serde_json::Value::Null);
+
+        let install = HubCommand::SkillsInstall {
+            request_id: "req-install".to_string(),
+            payload: SkillInstallRequest {
+                id: "demo".to_string(),
+                source: SkillInstallSource::Files { files: vec![] },
+                replace_existing: false,
+                activate_after_install: None,
+                idempotency_key: None,
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(install).unwrap()["type"],
+            "skills.install"
+        );
     }
 }
 

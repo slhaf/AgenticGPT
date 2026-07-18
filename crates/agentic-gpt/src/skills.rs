@@ -1,7 +1,7 @@
 use agentic_gpt_protocol::{
-    ActiveSkill, SkillActivationRequest, SkillActivationResponse, SkillDetail, SkillPackageSummary,
-    SkillReadRequest, SkillReadResponse, SkillSearchRequest, SkillSummary, SkillsActiveResponse,
-    SkillsListResponse, SkillsSearchResponse,
+    ActiveSkill, SkillActivationRequest, SkillActivationResponse, SkillDetail, SkillOrigin,
+    SkillPackageSummary, SkillReadRequest, SkillReadResponse, SkillSearchRequest, SkillSummary,
+    SkillsActiveResponse, SkillsListResponse, SkillsSearchResponse,
 };
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
@@ -34,6 +34,8 @@ struct ActiveSkillRecord {
 #[derive(Clone)]
 struct SkillPackage {
     id: String,
+    origin: SkillOrigin,
+    read_only: bool,
     skill_md: String,
     frontmatter: Value,
     name: Option<String>,
@@ -63,6 +65,7 @@ pub(crate) async fn read(state: &AppState, request: SkillReadRequest) -> Result<
     let package = load_skill(&config, &request.id, active_contains(&active, &request.id))?;
     Ok(SkillReadResponse {
         skill: package.detail(active_contains(&active, &request.id)),
+        resource: None,
     })
 }
 
@@ -191,6 +194,8 @@ impl SkillPackage {
             version: self.version.clone(),
             tags: self.tags.clone(),
             active,
+            origin: self.origin,
+            read_only: self.read_only,
             package_summary: self.package_summary.clone(),
             warnings: self.warnings.clone(),
         }
@@ -206,6 +211,8 @@ impl SkillPackage {
             version: self.version,
             tags: self.tags,
             active,
+            origin: self.origin,
+            read_only: self.read_only,
             package_summary: self.package_summary,
             warnings: self.warnings,
         }
@@ -291,6 +298,8 @@ fn load_skill(config: &Config, id: &str, _active: bool) -> Result<SkillPackage> 
     }
     Ok(SkillPackage {
         id: id.to_string(),
+        origin: SkillOrigin::Workspace,
+        read_only: false,
         skill_md,
         frontmatter,
         name,
@@ -481,6 +490,7 @@ mod tests {
             &state,
             SkillReadRequest {
                 id: "demo".to_string(),
+                path: None,
             },
         )
         .await
@@ -602,7 +612,8 @@ mod tests {
             read(
                 &state,
                 SkillReadRequest {
-                    id: "../x".to_string()
+                    id: "../x".to_string(),
+                    path: None,
                 },
             )
             .await

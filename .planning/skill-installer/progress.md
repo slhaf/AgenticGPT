@@ -8,6 +8,16 @@
 - Confirmed before implementation: each completed phase must be verified and committed as one focused git commit before the next phase begins.
 - Planning-file status and progress updates for a completed phase are included in that phase's commit.
 
+### Phase 2: Protocol and package model
+
+- **Status:** complete
+- Started after Phase 1 commit `68e4908`.
+- Implemented shared request/source/status/run structs, resource-read response metadata, origin/read-only skill metadata, versioned installation-job records, Hub command variants, and serde/request-ID regression tests.
+- Preserved legacy `skills.read` callers by making `path` and `resource` additive and optional.
+- Added temporary Room-side structured `skills_not_implemented` responses for the new command variants; these are replaced by the install/run handlers in later phases.
+- Verification passed: `cargo fmt --all`, `cargo test -p agentic-gpt-protocol` (5 tests), `cargo test -p agentic-gpt --lib` (67 tests), and `cargo check --workspace`.
+- Phase 2 is ready to commit before beginning Phase 3.
+
 ### Phase 0: Repository and architecture discovery
 
 - **Status:** complete
@@ -92,6 +102,8 @@
 | Existing skills unit tests | `cargo test -p agentic-gpt skills` | Current behavior remains green | 6 passed | pass |
 | MCP tool annotation regression | targeted Hub test | Current annotations remain green | 1 passed | pass |
 | Room skills OpenAPI agentId regression | targeted Hub test | Skills schemas omit `agentId` | 1 passed | pass |
+| Protocol serde regression | `cargo test -p agentic-gpt-protocol` | New source, read, install, cancel, and run shapes remain stable | 5 passed | pass |
+| Workspace compile check | `cargo check --workspace` | All command matches and protocol consumers compile | pass | pass |
 
 ## Error log
 
@@ -106,13 +118,14 @@
 | 2026-07-18 | The first script-execution findings patch used stale Phase 1 checklist wording | 1 | No partial change was applied; inspected the exact sections and revised the recommendation after confirming the session APIs. |
 | 2026-07-18 | The first execution-lease decision patch used a stale acceptance-criteria anchor | 1 | No partial change was applied; inspected the exact sections and reapplied against current text. |
 | 2026-07-18 | The first all-A finalization patch used a truncated Phase 4 context | 1 | No partial change was applied; split the update into exact section-level patches and revalidated the plan. |
+| 2026-07-18 | Initial Phase 1 commit attempt could not create `.git/index.lock` in the sandbox | 1 | Retried the same scoped add/commit with approved Git escalation; commit `68e4908` succeeded. |
 
 ## 5-question reboot check
 
 | Question | Answer |
 |----------|--------|
-| Where am I? | Phase 2 handoff: protocol and package model are the next implementation step. |
-| Where am I going? | Protocol, built-in/read support, Room install jobs and execution leases, source downloads, session-backed skill execution plus Hub/MCP/Actions integration, then verification. |
+| Where am I? | Phase 3: built-in skill and scoped read behavior. |
+| Where am I going? | Built-in/read support, Room install jobs and execution leases, source downloads, session-backed skill execution plus Hub/MCP/Actions integration, then verification. |
 | What's the goal? | Deliver Room-scoped asynchronous/network-capable skill installation, a built-in installer guide, safe package reads, and session-backed skill script execution. |
 | What have I learned? | See `findings.md`. |
-| What have I done? | Completed discovery and all contract decisions; prepared a Phase 2 implementation handoff with acceptance criteria and verification coverage. |
+| What have I done? | Completed discovery and contract freeze; implemented and verified the Phase 2 shared protocol/package model. |

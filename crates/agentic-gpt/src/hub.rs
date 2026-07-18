@@ -1054,6 +1054,18 @@ pub(crate) async fn handle_hub_command(
             };
             send_response(&state, run_id.as_deref(), &request_id, result).await?;
         }
+        HubCommand::SkillsInstall { request_id, .. }
+        | HubCommand::SkillsInstallGet { request_id, .. }
+        | HubCommand::SkillsInstallCancel { request_id, .. }
+        | HubCommand::SkillsRun { request_id, .. } => {
+            let result = serde_json::json!({
+                "error": {
+                    "code": "skills_not_implemented",
+                    "message": "skill installation and execution are not available yet"
+                }
+            });
+            send_response(&state, run_id.as_deref(), &request_id, result).await?;
+        }
     }
     Ok(())
 }

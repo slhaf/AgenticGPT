@@ -78,6 +78,10 @@ pub(crate) fn command_type(command: &HubCommand) -> &'static str {
         HubCommand::SkillsActive { .. } => "skills.active",
         HubCommand::SkillsActivate { .. } => "skills.activate",
         HubCommand::SkillsDeactivate { .. } => "skills.deactivate",
+        HubCommand::SkillsInstall { .. } => "skills.install",
+        HubCommand::SkillsInstallGet { .. } => "skills.install.get",
+        HubCommand::SkillsInstallCancel { .. } => "skills.install.cancel",
+        HubCommand::SkillsRun { .. } => "skills.run",
     }
 }
 

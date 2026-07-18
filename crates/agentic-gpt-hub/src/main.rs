@@ -954,6 +954,7 @@ mod tests {
                 request_id: "req-read".to_string(),
                 payload: agentic_gpt_protocol::SkillReadRequest {
                     id: "demo".to_string(),
+                    path: None,
                 },
             },
             HubCommand::SkillsSearch {

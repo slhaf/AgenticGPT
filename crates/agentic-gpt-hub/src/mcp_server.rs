@@ -1330,7 +1330,10 @@ impl AgenticMcpServer {
         &self,
         params: Parameters<SkillReadArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let payload = SkillReadRequest { id: params.0.id };
+        let payload = SkillReadRequest {
+            id: params.0.id,
+            path: None,
+        };
         let value = request_active_room(
             &self.state,
             HubCommand::SkillsRead {
