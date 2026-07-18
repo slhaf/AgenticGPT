@@ -326,13 +326,14 @@ None. Product-level contracts are frozen; implementation may only reopen a decis
 | Temporary Hub instance lock returned `Operation not permitted` in the default sandbox | 2 | Used the approved escalated local process namespace for the isolated loopback Hub/Room run. |
 | Running the newly downloaded GitHub `session-catchup.py` was rejected as untrusted execution | 1 | Kept the downloaded skill read-only for this pass and used an explicit inline smoke script to test `skills.run`. |
 | First ten-second replacement-cancel race reached terminal completion before cancellation | 1 | Confirmed `already_terminal` was correct and reran with a separate 30-second explicit smoke skill. |
+| Planning closure patch used a stale Notes-section anchor | 1 | Read the exact tail and reapplied only the current handoff/closure lines. |
 
 ## Notes
 
 - This plan is stored as the scoped plan `.planning/skill-installer`; `.planning/.active_plan` selects it as the current plan.
-- Handoff entry point is Phase 2. Do not reopen frozen decisions unless repository evidence proves a hard conflict; record any such conflict before changing the contract.
+- Handoff entry point was Phase 2. The implementation and local integration phases are now complete; do not reopen frozen decisions unless a future requirement or repository evidence proves a hard conflict. Start future independent work in a new scoped plan.
 - Re-read this plan before each major contract or implementation decision.
 - Update `findings.md` after every two repository/doc inspection actions.
 - Update phase status and `progress.md` after each completed phase.
 - Implementation convention: complete and verify one phase at a time, then create one focused git commit for that phase before starting the next phase. Planning-file updates required to record the phase result belong in the same phase commit.
-- The implementation handoff is accepted; implementation begins at Phase 2.
+- The implementation handoff was accepted and executed; implementation began at Phase 2 and this plan is now closed.

@@ -4,9 +4,10 @@
 
 ### Implementation convention
 
-- **Status:** active
+- **Status:** complete for this task
 - Confirmed before implementation: each completed phase must be verified and committed as one focused git commit before the next phase begins.
 - Planning-file status and progress updates for a completed phase are included in that phase's commit.
+- Future independent requirements should create or select a new scoped plan rather than reopening this completed record.
 
 ### Phase 2: Protocol and package model
 
@@ -228,8 +229,8 @@
 
 | Question | Answer |
 |----------|--------|
-| Where am I? | Phase 7: verification, documentation, and release readiness. |
-| Where am I going? | Add final redaction/replay/security regression coverage, review the complete diff, and commit the release-ready result. |
+| Where am I? | Local integration verification: complete. |
+| Where am I going? | Nowhere for this task; implementation, integration, cleanup, and planning closure are complete. |
 | What's the goal? | Deliver Room-scoped asynchronous/network-capable skill installation, a built-in installer guide, safe package reads, and session-backed skill script execution. |
-| What have I learned? | See `findings.md`. |
-| What have I done? | Completed and verified Phases 1–6: contracts, protocol/package model, built-in/scoped reads, persistent jobs, secure source materialization, Room routing, MCP/Actions, managed sessions, leases, and audit. |
+| What have I learned? | See `findings.md`, including the real Hub ↔ Room GitHub install, scoped read, session, cancellation, archive, and safety-boundary findings. |
+| What have I done? | Completed and committed Phases 1–7 plus the local integration verification; the temporary environment was stopped and removed, and the repository is clean. |
