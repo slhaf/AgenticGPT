@@ -53,6 +53,17 @@
 - Verification passed: `cargo fmt --all`, `cargo test --workspace` (77 local, 49 Hub, 5 protocol tests), and `cargo check --workspace`.
 - Phase 5 is ready to commit before beginning Phase 6.
 
+### Phase 6: Hub, MCP, Actions, and Apps workflow integration
+
+- **Status:** complete
+- Started after Phase 5 commit `7bda5cf`.
+- Routed install start/status/cancel and skill execution through the active Room Agent, added semantic Actions 400/404/409 error responses, and preserved `hub.run.get` as transport-only recovery.
+- Exposed all four new MCP tools with Room-scoped schemas/annotations and added matching POST Actions/OpenAPI contracts. Updated MCP instructions and interface/README usage guidance for asynchronous Apps polling and hybrid session follow-up.
+- Added active-workspace `scripts/` executable resolution, existing policy/cwd validation, asynchronous managed sessions with `starting`/`waiting_confirmation`, cancellable pending confirmation, bounded hybrid waits, terminal pruning, disconnect cache clearing, provenance audit fields, and writer-fair per-skill shared/exclusive leases.
+- Added regression tests for script preflight, async sessions, lease fairness, skill audit provenance, MCP annotations, command routing, OpenAPI paths/schemas, and the full workspace baseline.
+- Verification passed: `cargo fmt --all`, `cargo check --workspace`, and `cargo test --workspace` (79 local, 49 Hub, 5 protocol tests).
+- Phase 6 is ready to commit before beginning Phase 7.
+
 ### Phase 0: Repository and architecture discovery
 
 - **Status:** complete
@@ -168,8 +179,8 @@
 
 | Question | Answer |
 |----------|--------|
-| Where am I? | Phase 6: Hub, MCP, Actions, and Apps workflow integration. |
-| Where am I going? | Route the installed-job APIs, implement managed-session-backed `skills.run`, then update MCP/Actions/OpenAPI and verify. |
+| Where am I? | Phase 7: verification, documentation, and release readiness. |
+| Where am I going? | Add final redaction/replay/security regression coverage, review the complete diff, and commit the release-ready result. |
 | What's the goal? | Deliver Room-scoped asynchronous/network-capable skill installation, a built-in installer guide, safe package reads, and session-backed skill script execution. |
 | What have I learned? | See `findings.md`. |
-| What have I done? | Completed and verified Phases 1–5: contracts, protocol/package model, built-in/scoped reads, persistent jobs, and secure GitHub/HTTPS source materialization. |
+| What have I done? | Completed and verified Phases 1–6: contracts, protocol/package model, built-in/scoped reads, persistent jobs, secure source materialization, Room routing, MCP/Actions, managed sessions, leases, and audit. |

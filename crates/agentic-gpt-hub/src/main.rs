@@ -235,6 +235,16 @@ async fn serve(
         .route("/v1/room/skills/active", post(room::skills_active))
         .route("/v1/room/skills/activate", post(room::skills_activate))
         .route("/v1/room/skills/deactivate", post(room::skills_deactivate))
+        .route("/v1/room/skills/install", post(room::skills_install))
+        .route(
+            "/v1/room/skills/install/get",
+            post(room::skills_install_get),
+        )
+        .route(
+            "/v1/room/skills/install/cancel",
+            post(room::skills_install_cancel),
+        )
+        .route("/v1/room/skills/run", post(room::skills_run))
         .route("/mcp", get(mcp_server::mcp_get).post(mcp_server::mcp_post))
         .route(
             "/.well-known/oauth-protected-resource",
@@ -879,7 +889,7 @@ mod tests {
         }
         assert!(openapi.contains("TmuxExecRequest:"));
         assert!(openapi.contains("isLikelyShell:"));
-        assert!(!openapi.contains("x-openai-isConsequential: true"));
+        assert!(openapi.contains("x-openai-isConsequential: true"));
     }
 
     #[test]
@@ -979,6 +989,40 @@ mod tests {
                     id: "demo".to_string(),
                 },
             },
+            HubCommand::SkillsInstall {
+                request_id: "req-install".to_string(),
+                payload: agentic_gpt_protocol::SkillInstallRequest {
+                    id: "demo".to_string(),
+                    source: agentic_gpt_protocol::SkillInstallSource::Files { files: vec![] },
+                    replace_existing: false,
+                    activate_after_install: None,
+                    idempotency_key: None,
+                },
+            },
+            HubCommand::SkillsInstallGet {
+                request_id: "req-install-get".to_string(),
+                payload: agentic_gpt_protocol::SkillInstallGetRequest {
+                    install_id: "install-1".to_string(),
+                    wait_seconds: Some(0),
+                },
+            },
+            HubCommand::SkillsInstallCancel {
+                request_id: "req-install-cancel".to_string(),
+                payload: agentic_gpt_protocol::SkillInstallCancelRequest {
+                    install_id: "install-1".to_string(),
+                },
+            },
+            HubCommand::SkillsRun {
+                request_id: "req-run".to_string(),
+                session_id: "sess-1".to_string(),
+                payload: agentic_gpt_protocol::SkillRunRequest {
+                    id: "demo".to_string(),
+                    path: "scripts/check.sh".to_string(),
+                    args: None,
+                    working_directory: None,
+                    wait_seconds: Some(0),
+                },
+            },
         ];
         let expected = [
             "skills.list",
@@ -987,6 +1031,10 @@ mod tests {
             "skills.active",
             "skills.activate",
             "skills.deactivate",
+            "skills.install",
+            "skills.install.get",
+            "skills.install.cancel",
+            "skills.run",
         ];
 
         for index in 0..commands.len() {
@@ -1008,6 +1056,10 @@ mod tests {
             "/v1/room/skills/active:",
             "/v1/room/skills/activate:",
             "/v1/room/skills/deactivate:",
+            "/v1/room/skills/install:",
+            "/v1/room/skills/install/get:",
+            "/v1/room/skills/install/cancel:",
+            "/v1/room/skills/run:",
         ] {
             assert!(openapi.contains(path), "missing {path}");
         }
@@ -1018,6 +1070,10 @@ mod tests {
             "roomSkillsActive",
             "roomSkillsActivate",
             "roomSkillsDeactivate",
+            "roomSkillsInstall",
+            "roomSkillsInstallGet",
+            "roomSkillsInstallCancel",
+            "roomSkillsRun",
         ] {
             assert!(openapi.contains(operation_id), "missing {operation_id}");
         }
@@ -1028,6 +1084,9 @@ mod tests {
             "SkillSummary:",
             "SkillDetail:",
             "ActiveSkill:",
+            "SkillInstallRequest:",
+            "SkillInstallStatusResponse:",
+            "SkillRunRequest:",
         ] {
             let mut in_section = false;
             let mut section = String::new();

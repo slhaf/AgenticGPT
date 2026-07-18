@@ -24,6 +24,12 @@ pub(crate) struct AuditRecord {
     pub(crate) truncated: bool,
     pub(crate) request_source: String,
     pub(crate) reject_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) skill_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) skill_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) installed_digest: Option<String>,
 }
 
 pub(crate) fn write_audit(config: &Config, record: AuditRecord) -> Result<()> {

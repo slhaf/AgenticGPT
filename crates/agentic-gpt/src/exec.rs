@@ -139,6 +139,9 @@ pub(crate) async fn run_exec_task(
             truncated: result.truncated,
             request_source: "hub".to_string(),
             reject_reason: result.reject_reason.clone(),
+            skill_id: None,
+            skill_path: None,
+            installed_digest: None,
         },
     );
     result
@@ -296,6 +299,9 @@ async fn run_prepared_batch_element(
             truncated: result.truncated,
             request_source: "hub:batch".to_string(),
             reject_reason: result.reject_reason.clone(),
+            skill_id: None,
+            skill_path: None,
+            installed_digest: None,
         },
     );
     BatchElementResult {

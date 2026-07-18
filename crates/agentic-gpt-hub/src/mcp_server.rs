@@ -3,9 +3,11 @@ use agentic_gpt_protocol::{
     ExecRequest, HubCommand, McpCallToolRequest, McpListToolsRequest, NotebookAppendRequest,
     NotebookCurrentRequest, NotebookRecentRequest, NotebookRemoveRequest, NotebookSearchRequest,
     NotebookSelectExactRequest, NotebookUpdateRequest, NotificationAction, PassageSignificance,
-    SessionInfo, SkillActivationRequest, SkillReadRequest, SkillSearchRequest,
-    TmuxCapturePaneRequest, TmuxCloseSessionRequest, TmuxCreateSessionRequest, TmuxExecRequest,
-    TmuxListPanesRequest, TmuxPasteTextRequest, UserNotifySendRequest,
+    SessionInfo, SkillActivationRequest, SkillInstallCancelRequest, SkillInstallFile,
+    SkillInstallGetRequest, SkillInstallRequest, SkillInstallSource, SkillReadRequest,
+    SkillRunRequest, SkillSearchRequest, TmuxCapturePaneRequest, TmuxCloseSessionRequest,
+    TmuxCreateSessionRequest, TmuxExecRequest, TmuxListPanesRequest, TmuxPasteTextRequest,
+    UserNotifySendRequest,
 };
 use axum::extract::{Request, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -34,7 +36,7 @@ use crate::state::HubState;
 use crate::utils::random_id;
 use crate::{default_config_summary, MAX_WAIT_SECONDS, REQUEST_TIMEOUT_SECS};
 
-const MCP_INSTRUCTIONS: &str = "Agentic GPT Hub provides three execution layers. Use process.exec for short, one-shot inspection, detection, and deterministic tasks where an exit code is required. Use session.start for long-running or background managed processes whose lifecycle and output should be observed through session tools. Use tmux as the persistent shared workspace for stateful development, iterative debugging, TUIs, and user-agent handoff. For tmux work, discover the workspace with tmux.listSessions and tmux.listPanes, inspect it with tmux.capturePane, then use tmux.exec for shell panes or tmux.pasteText for non-shell panes. tmux.exec confirms submission to the interactive shell and returns a bounded post-submit pane snapshot; it is still not proof of command completion, so use process.exec when a deterministic exit status is required. Commands remain subject to Agentic local policy, path policy, confirmation, and audit.";
+const MCP_INSTRUCTIONS: &str = "Agentic GPT Hub provides three execution layers. Use process.exec for short, one-shot inspection, detection, and deterministic tasks where an exit code is required. Use session.start for long-running or background managed processes whose lifecycle and output should be observed through session tools. Use tmux as the persistent shared workspace for stateful development, iterative debugging, TUIs, and user-agent handoff. For tmux work, discover the workspace with tmux.listSessions and tmux.listPanes, inspect it with tmux.capturePane, then use tmux.exec for shell panes or tmux.pasteText for non-shell panes. tmux.exec confirms submission to the interactive shell and returns a bounded post-submit pane snapshot; it is still not proof of command completion, so use process.exec when a deterministic exit status is required. Room skills are managed only by the active Room Agent: use skills.install for asynchronous GitHub/HTTPS/inline installation, then skills.install.get with waitSeconds (default 5) and pollAfterMs, and skills.install.cancel when needed. Use skills.read with an optional package-relative path for bounded resources. Use skills.run for active installed scripts; it returns terminal output inline when it completes within waitSeconds (default 5), otherwise follow the returned sessionId with session.inspect/session.wait/session.kill. Commands remain subject to Agentic local policy, path policy, confirmation, and audit.";
 
 #[derive(Clone)]
 pub(crate) struct AgenticMcpServer {
@@ -63,11 +65,18 @@ fn decorate_tool_descriptors(tool_router: &mut ToolRouter<AgenticMcpServer>) {
                 | "tmux.exec"
                 | "tmux.createSession"
                 | "tmux.closeSession"
+                | "skills.install"
+                | "skills.run"
         );
         let read_only = tool_is_read_only(name);
         let destructive = matches!(
             name,
-            "session.kill" | "tmux.closeSession" | "room.notebook.remove"
+            "session.kill"
+                | "tmux.closeSession"
+                | "room.notebook.remove"
+                | "skills.install"
+                | "skills.install.cancel"
+                | "skills.run"
         );
         route.attr.annotations = Some(
             ToolAnnotations::new()
@@ -104,6 +113,9 @@ fn tool_is_read_only(name: &str) -> bool {
             | "room.diary.append"
             | "skills.activate"
             | "skills.deactivate"
+            | "skills.install"
+            | "skills.install.cancel"
+            | "skills.run"
     )
 }
 
@@ -335,6 +347,22 @@ async fn call_app_tool(server: &AgenticMcpServer, params: Value) -> Result<Value
                 .skills_deactivate(Parameters(decode_args(arguments)?))
                 .await
         }
+        "skills.install" => {
+            server
+                .skills_install(Parameters(decode_args(arguments)?))
+                .await
+        }
+        "skills.install.get" => {
+            server
+                .skills_install_get(Parameters(decode_args(arguments)?))
+                .await
+        }
+        "skills.install.cancel" => {
+            server
+                .skills_install_cancel(Parameters(decode_args(arguments)?))
+                .await
+        }
+        "skills.run" => server.skills_run(Parameters(decode_args(arguments)?)).await,
         _ => return Err(format!("Unknown tool: {name}")),
     }
     .map_err(|error| error.to_string())?;
@@ -1332,7 +1360,7 @@ impl AgenticMcpServer {
     ) -> Result<CallToolResult, ErrorData> {
         let payload = SkillReadRequest {
             id: params.0.id,
-            path: None,
+            path: params.0.path,
         };
         let value = request_active_room(
             &self.state,
@@ -1426,6 +1454,113 @@ impl AgenticMcpServer {
             HubCommand::SkillsDeactivate {
                 request_id: random_id("req"),
                 payload,
+            },
+            REQUEST_TIMEOUT_SECS,
+        )
+        .await
+        .unwrap_or_else(room_route_error_value);
+        Ok(result_from_value(value))
+    }
+
+    #[tool(
+        name = "skills.install",
+        description = "Start an asynchronous installation of one Room skill from public GitHub, HTTPS file entries, or inline content. Returns an installId immediately; poll with skills.install.get. No agentId is used."
+    )]
+    async fn skills_install(
+        &self,
+        params: Parameters<SkillInstallArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let params = params.0;
+        let payload = SkillInstallRequest {
+            id: params.id,
+            source: params.source.into_protocol(),
+            replace_existing: params.replace_existing,
+            activate_after_install: params.activate_after_install,
+            idempotency_key: params.idempotency_key,
+        };
+        let value = request_active_room(
+            &self.state,
+            HubCommand::SkillsInstall {
+                request_id: random_id("req"),
+                payload,
+            },
+            REQUEST_TIMEOUT_SECS,
+        )
+        .await
+        .unwrap_or_else(room_route_error_value);
+        Ok(result_from_value(value))
+    }
+
+    #[tool(
+        name = "skills.install.get",
+        description = "Return the latest asynchronous Room skill installation status. Waits up to waitSeconds (default 5, maximum 30) and returns pollAfterMs guidance. No agentId is used."
+    )]
+    async fn skills_install_get(
+        &self,
+        params: Parameters<SkillInstallGetArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let params = params.0;
+        let value = request_active_room(
+            &self.state,
+            HubCommand::SkillsInstallGet {
+                request_id: random_id("req"),
+                payload: SkillInstallGetRequest {
+                    install_id: params.install_id,
+                    wait_seconds: params.wait_seconds,
+                },
+            },
+            REQUEST_TIMEOUT_SECS,
+        )
+        .await
+        .unwrap_or_else(room_route_error_value);
+        Ok(result_from_value(value))
+    }
+
+    #[tool(
+        name = "skills.install.cancel",
+        description = "Request cooperative cancellation of a Room skill installation. Cancellation is idempotent and reports tooLate once atomic commit has begun. No agentId is used."
+    )]
+    async fn skills_install_cancel(
+        &self,
+        params: Parameters<SkillInstallCancelArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let value = request_active_room(
+            &self.state,
+            HubCommand::SkillsInstallCancel {
+                request_id: random_id("req"),
+                payload: SkillInstallCancelRequest {
+                    install_id: params.0.install_id,
+                },
+            },
+            REQUEST_TIMEOUT_SECS,
+        )
+        .await
+        .unwrap_or_else(room_route_error_value);
+        Ok(result_from_value(value))
+    }
+
+    #[tool(
+        name = "skills.run",
+        description = "Run an executable scripts/ file from an active workspace skill through the Room Agent managed-session engine. Returns terminal output inline when it finishes within waitSeconds (default 5), otherwise returns the session id for session.inspect/session.wait/session.kill. No agentId is used."
+    )]
+    async fn skills_run(
+        &self,
+        params: Parameters<SkillRunArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let params = params.0;
+        let session_id = random_id("sess");
+        let value = request_active_room(
+            &self.state,
+            HubCommand::SkillsRun {
+                request_id: random_id("req"),
+                session_id,
+                payload: SkillRunRequest {
+                    id: params.id,
+                    path: params.path,
+                    args: params.args,
+                    working_directory: params.working_directory,
+                    wait_seconds: params.wait_seconds,
+                },
             },
             REQUEST_TIMEOUT_SECS,
         )
@@ -1886,6 +2021,11 @@ struct RoomDiarySelectExactArgs {
 struct SkillReadArgs {
     #[schemars(description = "Skill id, matching one workspace skills/ directory name.")]
     id: String,
+    #[serde(default)]
+    #[schemars(
+        description = "Optional package-relative file path. Omit to read the legacy SKILL.md response."
+    )]
+    path: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
@@ -1905,6 +2045,135 @@ struct SkillSearchArgs {
 struct SkillActivationArgs {
     #[schemars(description = "Skill id, matching one workspace skills/ directory name.")]
     id: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct SkillInstallArgs {
+    #[schemars(description = "Target skill id. One installation job targets exactly one id.")]
+    id: String,
+    #[schemars(description = "GitHub, HTTPS-file, or inline-content source descriptor.")]
+    source: SkillInstallSourceArgs,
+    #[serde(default)]
+    #[schemars(
+        description = "Archive an existing workspace skill before replacement. Defaults to false."
+    )]
+    replace_existing: bool,
+    #[serde(default)]
+    #[schemars(
+        description = "Optional explicit activation choice; new skills default active and replacement preserves its prior state."
+    )]
+    activate_after_install: Option<bool>,
+    #[serde(default)]
+    #[schemars(
+        description = "Optional idempotency key for safe retries of the same install request."
+    )]
+    idempotency_key: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(
+    tag = "type",
+    rename_all = "lowercase",
+    rename_all_fields = "camelCase"
+)]
+enum SkillInstallSourceArgs {
+    Github {
+        #[serde(default)]
+        repository: Option<String>,
+        #[serde(default)]
+        url: Option<String>,
+        #[serde(rename = "ref", default)]
+        ref_name: Option<String>,
+        #[serde(default)]
+        path: Option<String>,
+    },
+    Files {
+        files: Vec<SkillInstallFileArgs>,
+    },
+}
+
+impl SkillInstallSourceArgs {
+    fn into_protocol(self) -> SkillInstallSource {
+        match self {
+            Self::Github {
+                repository,
+                url,
+                ref_name,
+                path,
+            } => SkillInstallSource::Github {
+                repository,
+                url,
+                ref_name,
+                path,
+            },
+            Self::Files { files } => SkillInstallSource::Files {
+                files: files
+                    .into_iter()
+                    .map(SkillInstallFileArgs::into_protocol)
+                    .collect(),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct SkillInstallFileArgs {
+    path: String,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    content_base64: Option<String>,
+    #[serde(default)]
+    sha256: Option<String>,
+    #[serde(default)]
+    executable: Option<bool>,
+}
+
+impl SkillInstallFileArgs {
+    fn into_protocol(self) -> SkillInstallFile {
+        SkillInstallFile {
+            path: self.path,
+            url: self.url,
+            content: self.content,
+            content_base64: self.content_base64,
+            sha256: self.sha256,
+            executable: self.executable,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct SkillInstallGetArgs {
+    install_id: String,
+    #[serde(default)]
+    #[schemars(description = "Seconds to wait for a newer status revision, 0-30. Defaults to 5.")]
+    wait_seconds: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct SkillInstallCancelArgs {
+    install_id: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct SkillRunArgs {
+    id: String,
+    #[schemars(description = "Package-relative executable path under scripts/.")]
+    path: String,
+    #[serde(default)]
+    args: Option<Vec<String>>,
+    #[serde(default)]
+    working_directory: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "Bounded inline wait in seconds, 0-30. Defaults to 5.")]
+    wait_seconds: Option<u64>,
 }
 
 fn ok_json(value: Value) -> CallToolResult {
@@ -2049,6 +2318,7 @@ mod tests {
             "skills.read",
             "skills.search",
             "skills.active",
+            "skills.install.get",
         ] {
             assert!(tool_is_read_only(name), "{name} should be read-only");
         }
@@ -2068,9 +2338,42 @@ mod tests {
             "room.diary.append",
             "skills.activate",
             "skills.deactivate",
+            "skills.install",
+            "skills.install.cancel",
+            "skills.run",
         ] {
             assert!(!tool_is_read_only(name), "{name} should not be read-only");
         }
+    }
+
+    #[test]
+    fn skill_install_and_run_tools_are_exposed_with_stable_annotations() {
+        let server = AgenticMcpServer::new(test_state());
+        let tools = app_tool_descriptors(&server);
+        let mut names = tools
+            .iter()
+            .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        names.sort_unstable();
+        for name in [
+            "skills.install",
+            "skills.install.get",
+            "skills.install.cancel",
+            "skills.run",
+        ] {
+            assert!(names.contains(&name), "missing MCP tool {name}");
+        }
+        let install = tools
+            .iter()
+            .find(|tool| tool.get("name").and_then(Value::as_str) == Some("skills.install"))
+            .unwrap();
+        assert_eq!(install["annotations"]["readOnlyHint"], false);
+        assert_eq!(install["annotations"]["destructiveHint"], true);
+        let get = tools
+            .iter()
+            .find(|tool| tool.get("name").and_then(Value::as_str) == Some("skills.install.get"))
+            .unwrap();
+        assert_eq!(get["annotations"]["readOnlyHint"], true);
     }
 
     #[test]
@@ -2105,6 +2408,10 @@ mod tests {
             serde_json::to_string(&rmcp::schemars::schema_for!(SkillReadArgs)).unwrap(),
             serde_json::to_string(&rmcp::schemars::schema_for!(SkillSearchArgs)).unwrap(),
             serde_json::to_string(&rmcp::schemars::schema_for!(SkillActivationArgs)).unwrap(),
+            serde_json::to_string(&rmcp::schemars::schema_for!(SkillInstallArgs)).unwrap(),
+            serde_json::to_string(&rmcp::schemars::schema_for!(SkillInstallGetArgs)).unwrap(),
+            serde_json::to_string(&rmcp::schemars::schema_for!(SkillInstallCancelArgs)).unwrap(),
+            serde_json::to_string(&rmcp::schemars::schema_for!(SkillRunArgs)).unwrap(),
         ];
         for schema in schemas {
             assert!(!schema.contains("agentId"));

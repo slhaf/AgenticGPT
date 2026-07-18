@@ -439,6 +439,7 @@ async fn disconnect_agent(state: &HubState, agent_id: &str, connection_id: &str)
     if removed_current_connection {
         room::release_active_room_if_current(state, agent_id, connection_id).await;
         discard_agent_confirmations(state, agent_id).await;
+        state.sessions.lock().await.remove(agent_id);
     }
     info!(%agent_id, %connection_id, removedCurrentConnection = removed_current_connection, "agent disconnected");
 }
@@ -549,6 +550,7 @@ pub(crate) async fn replace_agent_connection(
     if let Some(old) = old {
         room::release_active_room_if_current(state, agent_id, &old.connection_id).await;
         let _ = old.sender.send(OutboundAgentMessage::Close);
+        state.sessions.lock().await.remove(agent_id);
     }
 }
 

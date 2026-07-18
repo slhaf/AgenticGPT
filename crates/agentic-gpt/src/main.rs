@@ -202,6 +202,7 @@ async fn run(config_path: PathBuf, run_mode: RunMode) -> Result<()> {
         temporary_mcp_allows: Arc::new(Mutex::new(Vec::new())),
         notebook_writes: Arc::new(Mutex::new(())),
         skills_writes: Arc::new(Mutex::new(())),
+        skill_leases: Arc::new(sessions::SkillLeaseManager::new()),
         skill_installs: Arc::new(skill_installs::InstallManager::with_concurrency(
             max_concurrent_skill_installs,
         )),
@@ -432,6 +433,7 @@ mod tests {
                 temporary_mcp_allows: Arc::new(Mutex::new(Vec::new())),
                 notebook_writes: Arc::new(Mutex::new(())),
                 skills_writes: Arc::new(Mutex::new(())),
+                skill_leases: Arc::new(sessions::SkillLeaseManager::new()),
                 skill_installs: Arc::new(skill_installs::InstallManager::new()),
             },
             rx,
@@ -891,6 +893,7 @@ mod tests {
             temporary_mcp_allows: Arc::new(Mutex::new(Vec::new())),
             notebook_writes: Arc::new(Mutex::new(())),
             skills_writes: Arc::new(Mutex::new(())),
+            skill_leases: Arc::new(sessions::SkillLeaseManager::new()),
             skill_installs: Arc::new(skill_installs::InstallManager::new()),
         };
 

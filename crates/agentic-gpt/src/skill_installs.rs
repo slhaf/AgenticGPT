@@ -398,6 +398,7 @@ impl InstallManager {
         record = self.load_record(&config, install_id).await?;
         record.status.phase = Some(SkillInstallPhase::Validating);
         record.status.progress.files_completed = materialized.summaries.len() as u64;
+        record.status.progress.files_total = materialized.summaries.len() as u64;
         record.status.progress.bytes_downloaded = materialized
             .summaries
             .iter()
@@ -420,9 +421,17 @@ impl InstallManager {
         self.save_cache(&config, &record).await?;
         let target_lock = self.target_lock(&record.request.id).await;
         let remaining = remaining_deadline(deadline);
-        let guard = match timeout(remaining, target_lock.lock()).await {
-            Ok(guard) => guard,
-            Err(_) => {
+        let target_result = tokio::select! {
+            result = timeout(remaining, target_lock.lock()) => Some(result),
+            _ = self.wait_until_cancelled(install_id) => None,
+        };
+        let guard = match target_result {
+            Some(Ok(guard)) => guard,
+            None if self.is_cancelled(install_id).await => {
+                let _ = fs::remove_dir_all(&staging);
+                return self.cancelled(state, install_id).await;
+            }
+            Some(Err(_)) | None => {
                 let _ = fs::remove_dir_all(&staging);
                 return self
                     .fail(
@@ -436,6 +445,40 @@ impl InstallManager {
             }
         };
         if self.is_cancelled(install_id).await {
+            drop(guard);
+            let _ = fs::remove_dir_all(&staging);
+            return self.cancelled(state, install_id).await;
+        }
+        let lease_result = tokio::select! {
+            result = state.skill_leases.acquire_exclusive(
+                &record.request.id,
+                remaining_deadline(deadline),
+            ) => Some(result),
+            _ = self.wait_until_cancelled(install_id) => None,
+        };
+        let lease = match lease_result {
+            Some(Ok(lease)) => lease,
+            None if self.is_cancelled(install_id).await => {
+                drop(guard);
+                let _ = fs::remove_dir_all(&staging);
+                return self.cancelled(state, install_id).await;
+            }
+            Some(Err(_)) | None => {
+                drop(guard);
+                let _ = fs::remove_dir_all(&staging);
+                return self
+                    .fail(
+                        state,
+                        install_id,
+                        "target_busy",
+                        Some(SkillInstallPhase::WaitingForTarget),
+                        true,
+                    )
+                    .await;
+            }
+        };
+        if self.is_cancelled(install_id).await {
+            drop(lease);
             drop(guard);
             let _ = fs::remove_dir_all(&staging);
             return self.cancelled(state, install_id).await;
@@ -658,6 +701,12 @@ impl InstallManager {
 
     async fn is_cancelled(&self, install_id: &str) -> bool {
         self.cancellation(install_id).await.load(Ordering::Acquire)
+    }
+
+    async fn wait_until_cancelled(&self, install_id: &str) {
+        while !self.is_cancelled(install_id).await {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 
     async fn target_lock(&self, id: &str) -> Arc<Mutex<()>> {
@@ -1391,7 +1440,7 @@ fn remove_commit_journal(config: &crate::config::Config, install_id: &str) {
     let _ = fs::remove_file(commit_journal_path(config, install_id));
 }
 
-fn package_sha256(config: &crate::config::Config, id: &str) -> Result<String> {
+pub(crate) fn package_sha256(config: &crate::config::Config, id: &str) -> Result<String> {
     let root = skills::skills_root(config).join(id);
     let mut files = Vec::new();
     collect_files(&root, &root, &mut files)?;
@@ -1649,6 +1698,7 @@ mod tests {
             temporary_mcp_allows: Arc::new(Mutex::new(Vec::new())),
             notebook_writes: Arc::new(Mutex::new(())),
             skills_writes: Arc::new(Mutex::new(())),
+            skill_leases: Arc::new(crate::sessions::SkillLeaseManager::new()),
             skill_installs: Arc::new(InstallManager::new()),
         }
     }

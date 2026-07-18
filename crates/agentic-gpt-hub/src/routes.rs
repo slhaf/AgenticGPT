@@ -295,7 +295,10 @@ pub(crate) async fn start_session(
             let status = serde_json::from_value::<SessionInfo>(value.clone())
                 .ok()
                 .map(|session| {
-                    if session.state == "running" || session.state == "waiting_confirmation" {
+                    if session.state == "starting"
+                        || session.state == "running"
+                        || session.state == "waiting_confirmation"
+                    {
                         "started"
                     } else {
                         "failed"

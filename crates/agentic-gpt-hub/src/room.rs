@@ -1,7 +1,9 @@
 use agentic_gpt_protocol::{
     AgentRole, HubCommand, NotebookAppendRequest, NotebookCurrentRequest, NotebookRecentRequest,
     NotebookRemoveRequest, NotebookSearchRequest, NotebookSelectExactRequest,
-    NotebookUpdateRequest, SkillActivationRequest, SkillReadRequest, SkillSearchRequest,
+    NotebookUpdateRequest, SkillActivationRequest, SkillInstallCancelRequest,
+    SkillInstallGetRequest, SkillInstallRequest, SkillReadRequest, SkillRunRequest,
+    SkillSearchRequest,
 };
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
@@ -239,6 +241,76 @@ pub(crate) async fn skills_deactivate(
     .await
 }
 
+pub(crate) async fn skills_install(
+    State(state): State<HubState>,
+    headers: HeaderMap,
+    Json(payload): Json<SkillInstallRequest>,
+) -> Response {
+    forward_room_command(
+        state,
+        headers,
+        HubCommand::SkillsInstall {
+            request_id: random_id("req"),
+            payload,
+        },
+        "skills_install_timeout",
+    )
+    .await
+}
+
+pub(crate) async fn skills_install_get(
+    State(state): State<HubState>,
+    headers: HeaderMap,
+    Json(payload): Json<SkillInstallGetRequest>,
+) -> Response {
+    forward_room_command(
+        state,
+        headers,
+        HubCommand::SkillsInstallGet {
+            request_id: random_id("req"),
+            payload,
+        },
+        "skills_install_get_timeout",
+    )
+    .await
+}
+
+pub(crate) async fn skills_install_cancel(
+    State(state): State<HubState>,
+    headers: HeaderMap,
+    Json(payload): Json<SkillInstallCancelRequest>,
+) -> Response {
+    forward_room_command(
+        state,
+        headers,
+        HubCommand::SkillsInstallCancel {
+            request_id: random_id("req"),
+            payload,
+        },
+        "skills_install_cancel_timeout",
+    )
+    .await
+}
+
+pub(crate) async fn skills_run(
+    State(state): State<HubState>,
+    headers: HeaderMap,
+    Json(payload): Json<SkillRunRequest>,
+) -> Response {
+    let session_id = random_id("sess");
+    forward_room_command(
+        state,
+        headers,
+        HubCommand::SkillsRun {
+            request_id: random_id("req"),
+            session_id,
+            payload,
+        },
+        "skills_run_timeout",
+    )
+    .await
+}
+
 async fn forward_room_command(
     state: HubState,
     headers: HeaderMap,
@@ -249,7 +321,7 @@ async fn forward_room_command(
         return response;
     }
     match request_active_room(&state, command, REQUEST_TIMEOUT_SECS).await {
-        Ok(value) => Json(value).into_response(),
+        Ok(value) => room_value_response(value),
         Err(RoomRouteError::NotActive) => api_error(
             StatusCode::NOT_FOUND,
             "room_not_active",
@@ -264,6 +336,25 @@ async fn forward_room_command(
             api_error(StatusCode::GATEWAY_TIMEOUT, timeout_code, reason)
         }
     }
+}
+
+fn room_value_response(value: Value) -> Response {
+    let Some(code) = value
+        .get("error")
+        .and_then(Value::as_object)
+        .and_then(|error| error.get("code"))
+        .and_then(Value::as_str)
+    else {
+        return Json(value).into_response();
+    };
+    let status = match code {
+        "target_exists" | "idempotency_conflict" | "room_state_conflict" => StatusCode::CONFLICT,
+        "not_found" | "skill_not_found" | "install_not_found" | "room_not_active" => {
+            StatusCode::NOT_FOUND
+        }
+        _ => StatusCode::BAD_REQUEST,
+    };
+    (status, Json(value)).into_response()
 }
 
 pub(crate) async fn request_active_room(

@@ -25,6 +25,7 @@ The current mainline uses the Rust Hub. The older Cloudflare Worker implementati
 - Path policy with writable, read-only, and denied roots.
 - Optional bubblewrap sandbox integration.
 - MCP bridge from ChatGPT to MCP servers configured on the local agent.
+- Room-scoped asynchronous skill installation from public GitHub/HTTPS/inline sources, plus managed execution of active skill scripts.
 - ChatGPT Actions OpenAPI schema and ChatGPT Apps-friendly MCP endpoint.
 
 ## Repository layout
@@ -108,6 +109,8 @@ https://<your-hub-domain>/mcp
 The `/mcp` `tools/call` response uses the Hub `AgenticResult` envelope, which is compatible with ChatGPT Apps / MCP tool results. Hub-native tools return `content`, `structuredContent`, and `isError`; `mcp.callTool` passes through downstream MCP result envelopes, including non-text content blocks and `_meta`.
 
 OAuth discovery and token exchange are implemented by the Hub OAuth shim.
+
+Room skills are exposed without an input `agentId`: use `skills.install` and poll `skills.install.get` (or the matching `/v1/room/skills/*` Actions routes), then use `skills.run` for executable files beneath an active skill's `scripts/` directory. Installation starts asynchronously for Apps-compatible bounded requests; terminal status includes redacted source provenance and `pollAfterMs` guidance.
 
 ## Confirmation
 

@@ -6,7 +6,7 @@ Extend the existing Room Agent-owned skills subsystem with a built-in `skill-ins
 
 ## Current Phase
 
-Phase 6 — Hub, MCP, Actions, and Apps workflow integration
+Phase 7 — verification, documentation, and release readiness
 
 ## Scope and constraints
 
@@ -161,21 +161,21 @@ Phase 6 — Hub, MCP, Actions, and Apps workflow integration
 
 ### Phase 6: Hub, MCP, Actions, and Apps workflow integration
 
-- [ ] Route install start/status/cancel through `request_active_room` without `agentId`.
-- [ ] Implement Room-side `skills.run` validation: active workspace skill, `scripts/` containment, no symlink traversal, regular executable file, and existing-policy-validated cwd before session creation.
-- [ ] Implement writer-fair per-skill execution leases: runs fail with `skill_update_pending` once replacement commit is pending, while commit waits cancellably and returns retryable `target_busy` on deadline.
-- [ ] Refactor the shared managed-session engine to support `starting`/`waiting_confirmation`, asynchronous cancellable confirmation, an optional child, event-driven state notification, and a skill execution-lease guard released on every terminal path.
-- [ ] Implement the hybrid run path: create the session first, wait event-driven for up to `waitSeconds`, return immediately on terminal state, and otherwise return the current session identity/state without creating a second job system.
-- [ ] Retain terminal sessions in memory for 24 hours and at most 100 entries, never prune active/pending sessions, and clear stale Room session cache on disconnect/restart so later inspection returns `session_not_found` rather than stale `running`.
-- [ ] Keep `hub.run.get` limited to Hub-to-Agent command delivery and late-result recovery.
-- [ ] Expose `skills.install`, `skills.install.get`, `skills.install.cancel`, and `skills.run` as MCP tools with predictable output schemas.
-- [ ] Add POST Actions routes `/v1/room/skills/install`, `/v1/room/skills/install/get`, `/v1/room/skills/install/cancel`, and `/v1/room/skills/run` plus strict OpenAPI schemas in the same change as MCP support.
-- [ ] Set frozen annotations: install non-read-only/destructive/open-world and consequential; get read-only/non-destructive/closed-world and non-consequential; cancel non-read-only/destructive/closed-world and consequential; run non-read-only/destructive/open-world and consequential; read remains read-only/non-destructive/closed-world.
-- [ ] Extend MCP server instructions with install start/poll/cancel and skill-run bounded-inline/session-follow-up workflows, including `waitSeconds` and `pollAfterMs` guidance.
-- [ ] Extend audit records for skill ID, package-relative script path, installed digest, session ID, args, resolved cwd, policy/confirmation outcome, exit state, and duration.
-- [ ] Ensure structured content exposes reusable IDs and only necessary status data.
-- [ ] Redact URL query/fragment data and omit inline content from public status/logs while returning GitHub commit provenance plus file path/size/digest summaries.
-- **Status:** pending
+- [x] Route install start/status/cancel through `request_active_room` without `agentId`.
+- [x] Implement Room-side `skills.run` validation: active workspace skill, `scripts/` containment, no symlink traversal, regular executable file, and existing-policy-validated cwd before session creation.
+- [x] Implement writer-fair per-skill execution leases: runs fail with `skill_update_pending` once replacement commit is pending, while commit waits cancellably and returns retryable `target_busy` on deadline.
+- [x] Refactor the shared managed-session engine to support `starting`/`waiting_confirmation`, asynchronous cancellable confirmation, an optional child, event-driven state notification, and a skill execution-lease guard released on every terminal path.
+- [x] Implement the hybrid run path: create the session first, wait event-driven for up to `waitSeconds`, return immediately on terminal state, and otherwise return the current session identity/state without creating a second job system.
+- [x] Retain terminal sessions in memory for 24 hours and at most 100 entries, never prune active/pending sessions, and clear stale Room session cache on disconnect/restart so later inspection returns `session_not_found` rather than stale `running`.
+- [x] Keep `hub.run.get` limited to Hub-to-Agent command delivery and late-result recovery.
+- [x] Expose `skills.install`, `skills.install.get`, `skills.install.cancel`, and `skills.run` as MCP tools with predictable output schemas.
+- [x] Add POST Actions routes `/v1/room/skills/install`, `/v1/room/skills/install/get`, `/v1/room/skills/install/cancel`, and `/v1/room/skills/run` plus strict OpenAPI schemas in the same change as MCP support.
+- [x] Set frozen annotations: install non-read-only/destructive/open-world and consequential; get read-only/non-destructive/closed-world and non-consequential; cancel non-read-only/destructive/closed-world and consequential; run non-read-only/destructive/open-world and consequential; read remains read-only/non-destructive/closed-world.
+- [x] Extend MCP server instructions with install start/poll/cancel and skill-run bounded-inline/session-follow-up workflows, including `waitSeconds` and `pollAfterMs` guidance.
+- [x] Extend audit records for skill ID, package-relative script path, installed digest, session ID, args, resolved cwd, policy/confirmation outcome, exit state, and duration.
+- [x] Ensure structured content exposes reusable IDs and only necessary status data.
+- [x] Redact URL query/fragment data and omit inline content from public status/logs while returning GitHub commit provenance plus file path/size/digest summaries.
+- **Status:** complete
 
 ### Phase 7: Verification, documentation, and release readiness
 

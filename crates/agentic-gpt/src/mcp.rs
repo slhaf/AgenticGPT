@@ -265,6 +265,9 @@ fn audit_mcp_call(
             truncated,
             request_source: "hub:mcp".to_string(),
             reject_reason,
+            skill_id: None,
+            skill_path: None,
+            installed_digest: None,
         },
     );
 }

@@ -22,6 +22,10 @@ Core endpoints:
 - `POST /v1/mcp/callTool`: call one MCP tool through the selected local agent.
 - `GET /v1/runs/{runId}`: inspect persisted status and optional late result for one Hub-to-Agent command run.
 - `POST /v1/room/skills/list`, `/read`, `/search`, `/active`, `/activate`, `/deactivate`: discover workspace skills through the active Room Agent and maintain local active skill state. These endpoints do not take `agentId`.
+- `POST /v1/room/skills/install`: asynchronously install one skill from public GitHub, HTTPS file entries, or inline UTF-8/base64 files. The response returns an `installId` before network work begins.
+- `POST /v1/room/skills/install/get`: query an installation with bounded long polling (`waitSeconds`, default 5, maximum 30); terminal responses set `pollAfterMs` to `0`.
+- `POST /v1/room/skills/install/cancel`: request idempotent cooperative cancellation before atomic commit.
+- `POST /v1/room/skills/run`: run an executable active workspace skill script under `scripts/`. It returns terminal session output inline when possible, otherwise the same `sessionId` used by the existing inspect/wait/kill session APIs. These endpoints do not take `agentId`.
 
 `/v1/info` intentionally returns only safe metadata: Hub version, public base URL, timeout settings, remote confirmation status, agent counts, and pending request/session counts. It must not expose secrets, confirmation callback URLs, or private config values.
 
@@ -52,7 +56,9 @@ OAuth discovery routes:
 
 The ntfy confirmation callback routes are intentionally not part of `openapi/hub.yaml`. They are only used by confirmation action buttons.
 
-Room skills API stores active state in the Room Agent workspace under `state/active-skills.json`. Activating a skill does not execute it or grant permissions; stale active entries remain visible as `missing` until explicitly deactivated.
+Room skills API stores active state in the Room Agent workspace under `state/active-skills.json`. Activating a skill does not execute it or grant permissions; stale active entries remain visible as `missing` until explicitly deactivated. The built-in `skill-installer` guide is active by default and can be explicitly deactivated.
+
+Installation jobs are persisted under `state/skill-installs/`, retain terminal records for seven days (capped at 100), and never expose inline payloads or URL query/fragment values in public status. Existing skills are archived under `skills/.archive/<id>/` before an explicit replacement. Remote file URLs require public HTTPS and are revalidated after DNS resolution and redirects; deployments can narrow hosts with `room.skills.allowedHosts`.
 
 ## Local Agent transports
 

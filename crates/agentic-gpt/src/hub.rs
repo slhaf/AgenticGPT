@@ -1,4 +1,7 @@
-use agentic_gpt_protocol::{AgentMessage, HubCommand, HubCommandEnvelope, HubMessage, SessionInfo};
+use agentic_gpt_protocol::{
+    AgentMessage, ExecRequest, HubCommand, HubCommandEnvelope, HubMessage, SessionInfo,
+    SkillRunRequest, SkillRunResponse,
+};
 use anyhow::{anyhow, Result};
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
@@ -626,7 +629,7 @@ pub(crate) async fn handle_hub_command(
                 "session.start received; sessionId={session_id}; command={}",
                 command_preview(&payload.program, &payload.args)
             ));
-            let info = sessions::start_session(state.clone(), session_id, payload).await;
+            let info = sessions::start_session_async(state.clone(), session_id, payload).await;
             log_info(format!(
                 "session.start result; sessionId={}; state={}; rejectReason={:?}",
                 info.session_id, info.state, info.reject_reason
@@ -668,8 +671,19 @@ pub(crate) async fn handle_hub_command(
             session_id,
             seconds,
         } => {
-            sleep(Duration::from_secs(seconds.min(30))).await;
-            let session = sessions::inspect_session(&state, &session_id).await;
+            let deadline = Instant::now() + Duration::from_secs(seconds.min(30));
+            let mut session = sessions::inspect_session(&state, &session_id).await;
+            while let Some(info) = session.as_ref() {
+                if !matches!(
+                    info.state.as_str(),
+                    "starting" | "running" | "waiting_confirmation"
+                ) || Instant::now() >= deadline
+                {
+                    break;
+                }
+                sleep(Duration::from_millis(20)).await;
+                session = sessions::inspect_session(&state, &session_id).await;
+            }
             send_response(
                 &state,
                 run_id.as_deref(),
@@ -1096,13 +1110,16 @@ pub(crate) async fn handle_hub_command(
             };
             send_response(&state, run_id.as_deref(), &request_id, result).await?;
         }
-        HubCommand::SkillsRun { request_id, .. } => {
-            let result = serde_json::json!({
-                "error": {
-                    "code": "skills_not_implemented",
-                    "message": "skill installation and execution are not available yet"
-                }
-            });
+        HubCommand::SkillsRun {
+            request_id,
+            session_id,
+            payload,
+        } => {
+            let result = if state.run_mode != RunMode::Room {
+                room_agent_required_error()
+            } else {
+                run_skill(&state, session_id, payload).await
+            };
             send_response(&state, run_id.as_deref(), &request_id, result).await?;
         }
     }
@@ -1146,6 +1163,99 @@ fn install_command_error(error: anyhow::Error) -> serde_json::Value {
         | "ambiguous_github_url"
         | "invalid_idempotency_key" => "validation_error",
         _ => "skills_install_failed",
+    };
+    serde_json::json!({ "error": { "code": code, "message": message } })
+}
+
+async fn run_skill(
+    state: &AppState,
+    session_id: String,
+    request: SkillRunRequest,
+) -> serde_json::Value {
+    let program = match skills::resolve_run_program(state, &request).await {
+        Ok(program) => program,
+        Err(error) => return skill_run_command_error(error),
+    };
+    let config = state.config.read().await.clone();
+    let wait_seconds = request.effective_wait_seconds();
+    if let Some(working_directory) = request.working_directory.as_deref() {
+        if let Err(reason) = exec::resolve_working_directory(&config, Some(working_directory)) {
+            return serde_json::json!({
+                "error": { "code": "invalid_working_directory", "message": reason }
+            });
+        }
+    }
+    let info = sessions::start_skill_session_async(
+        state.clone(),
+        session_id.clone(),
+        ExecRequest {
+            agent_id: config.agent_id.clone(),
+            program: program.to_string_lossy().to_string(),
+            args: request.args.unwrap_or_default(),
+            need_confirm: false,
+            confirm_method: None,
+            working_directory: request.working_directory,
+        },
+        &request.id,
+        &request.path,
+    )
+    .await;
+    let info = wait_for_skill_session(state, info, wait_seconds).await;
+    let completed_inline = !matches!(
+        info.state.as_str(),
+        "starting" | "running" | "waiting_confirmation"
+    );
+    let response = SkillRunResponse {
+        agent_id: config.agent_id,
+        session_id,
+        completed_inline,
+        poll_after_ms: if completed_inline { 0 } else { 1_000 },
+        session: info,
+    };
+    serde_json::to_value(response).unwrap_or_else(|_| {
+        serde_json::json!({
+            "error": { "code": "skills_run_failed", "message": "failed to encode skill run response" }
+        })
+    })
+}
+
+async fn wait_for_skill_session(
+    state: &AppState,
+    mut info: SessionInfo,
+    wait_seconds: u64,
+) -> SessionInfo {
+    if wait_seconds == 0 {
+        return info;
+    }
+    let deadline = Instant::now() + Duration::from_secs(wait_seconds.min(30));
+    while matches!(
+        info.state.as_str(),
+        "starting" | "running" | "waiting_confirmation"
+    ) && Instant::now() < deadline
+    {
+        sleep(Duration::from_millis(20)).await;
+        if let Some(latest) = sessions::inspect_session(state, &info.session_id).await {
+            info = latest;
+        } else {
+            break;
+        }
+    }
+    info
+}
+
+fn skill_run_command_error(error: anyhow::Error) -> serde_json::Value {
+    let message = error.to_string();
+    let code = match message.as_str() {
+        "invalid_id"
+        | "skill_inactive"
+        | "skill_not_runnable"
+        | "invalid_script_path"
+        | "script_path_forbidden"
+        | "script_not_found"
+        | "script_not_executable"
+        | "script_symlink"
+        | "invalid_working_directory" => message.as_str(),
+        _ => "skills_run_failed",
     };
     serde_json::json!({ "error": { "code": code, "message": message } })
 }

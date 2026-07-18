@@ -1,7 +1,7 @@
 use agentic_gpt_protocol::{
     ActiveSkill, SkillActivationRequest, SkillActivationResponse, SkillDetail, SkillOrigin,
-    SkillPackageSummary, SkillReadRequest, SkillReadResponse, SkillSearchRequest, SkillSummary,
-    SkillsActiveResponse, SkillsListResponse, SkillsSearchResponse,
+    SkillPackageSummary, SkillReadRequest, SkillReadResponse, SkillRunRequest, SkillSearchRequest,
+    SkillSummary, SkillsActiveResponse, SkillsListResponse, SkillsSearchResponse,
 };
 use anyhow::{anyhow, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
@@ -80,6 +80,65 @@ pub(crate) async fn read(state: &AppState, request: SkillReadRequest) -> Result<
         skill: package.detail(active_contains(&active, &request.id)),
         resource,
     })
+}
+
+pub(crate) async fn resolve_run_program(
+    state: &AppState,
+    request: &SkillRunRequest,
+) -> Result<PathBuf> {
+    validate_skill_id(&request.id)?;
+    let config = state.config.read().await.clone();
+    let active = read_active_file(&config)?;
+    if !active_contains(&active, &request.id) {
+        return Err(anyhow!("skill_inactive"));
+    }
+    let package = load_skill(&config, &request.id, true)?;
+    if package.origin != SkillOrigin::Workspace || package.read_only {
+        return Err(anyhow!("skill_not_runnable"));
+    }
+    let root = package
+        .package_root
+        .as_ref()
+        .ok_or_else(|| anyhow!("skill_not_runnable"))?;
+    let relative =
+        normalize_resource_path(&request.path).map_err(|_| anyhow!("invalid_script_path"))?;
+    let mut components = relative.components();
+    if components.next() != Some(Component::Normal(std::ffi::OsStr::new("scripts"))) {
+        return Err(anyhow!("script_path_forbidden"));
+    }
+    reject_symlink(root, "script_symlink")?;
+    let mut candidate = root.clone();
+    for component in relative.components() {
+        let Component::Normal(part) = component else {
+            return Err(anyhow!("invalid_script_path"));
+        };
+        candidate.push(part);
+        reject_symlink(&candidate, "script_symlink")?;
+    }
+    let metadata = fs::metadata(&candidate).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            anyhow!("script_not_found")
+        } else {
+            anyhow!("script_read_failed")
+        }
+    })?;
+    if !metadata.is_file() {
+        return Err(anyhow!("script_not_runnable"));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o111 == 0 {
+            return Err(anyhow!("script_not_executable"));
+        }
+    }
+    let canonical_root = fs::canonicalize(root).map_err(|_| anyhow!("skill_not_runnable"))?;
+    let canonical_candidate =
+        fs::canonicalize(&candidate).map_err(|_| anyhow!("script_not_runnable"))?;
+    if !canonical_candidate.starts_with(&canonical_root) {
+        return Err(anyhow!("script_path_forbidden"));
+    }
+    Ok(canonical_candidate)
 }
 
 pub(crate) async fn search(
@@ -625,6 +684,7 @@ mod tests {
             temporary_mcp_allows: Arc::new(Mutex::new(Vec::new())),
             notebook_writes: Arc::new(Mutex::new(())),
             skills_writes: Arc::new(Mutex::new(())),
+            skill_leases: Arc::new(crate::sessions::SkillLeaseManager::new()),
             skill_installs: Arc::new(crate::skill_installs::InstallManager::new()),
         }
     }
@@ -966,6 +1026,61 @@ mod tests {
                 "unexpected error for {path}: {error}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn run_resolution_requires_active_workspace_executable_under_scripts() {
+        let state = test_state();
+        let root = workspace_root(&state).await;
+        write_skill(&root, "demo", "# Demo");
+        let scripts = root.join("skills/demo/scripts");
+        fs::create_dir_all(&scripts).unwrap();
+        let script = scripts.join("check.sh");
+        fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let request = SkillRunRequest {
+            id: "demo".to_string(),
+            path: "scripts/check.sh".to_string(),
+            args: None,
+            working_directory: None,
+            wait_seconds: None,
+        };
+        assert_eq!(
+            resolve_run_program(&state, &request)
+                .await
+                .unwrap_err()
+                .to_string(),
+            "skill_inactive"
+        );
+        activate(
+            &state,
+            SkillActivationRequest {
+                id: "demo".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let resolved = resolve_run_program(&state, &request).await.unwrap();
+        assert_eq!(
+            resolved.file_name().and_then(|name| name.to_str()),
+            Some("check.sh")
+        );
+        assert!(resolve_run_program(
+            &state,
+            &SkillRunRequest {
+                id: "demo".to_string(),
+                path: "SKILL.md".to_string(),
+                args: None,
+                working_directory: None,
+                wait_seconds: None,
+            },
+        )
+        .await
+        .is_err());
     }
 
     #[tokio::test]

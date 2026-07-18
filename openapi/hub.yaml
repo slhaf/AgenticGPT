@@ -835,6 +835,108 @@ paths:
           $ref: "#/components/responses/NotFound"
         "504":
           $ref: "#/components/responses/GatewayTimeout"
+  /v1/room/skills/install:
+    post:
+      operationId: roomSkillsInstall
+      description: Start an asynchronous installation of one Room skill from public GitHub, HTTPS files, or inline content. Returns an installId for bounded polling. No agentId is used.
+      x-openai-isConsequential: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SkillInstallRequest"
+      responses:
+        "200":
+          description: Installation accepted and queued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SkillInstallStartResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+  /v1/room/skills/install/get:
+    post:
+      operationId: roomSkillsInstallGet
+      description: Return a Room skill installation status, optionally waiting up to 30 seconds for a newer revision. No agentId is used.
+      x-openai-isConsequential: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SkillInstallGetRequest"
+      responses:
+        "200":
+          description: Installation status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SkillInstallStatusResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+  /v1/room/skills/install/cancel:
+    post:
+      operationId: roomSkillsInstallCancel
+      description: Request idempotent cooperative cancellation of a Room skill installation. No agentId is used.
+      x-openai-isConsequential: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SkillInstallCancelRequest"
+      responses:
+        "200":
+          description: Cancellation outcome.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SkillInstallCancelResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+  /v1/room/skills/run:
+    post:
+      operationId: roomSkillsRun
+      description: Run an executable scripts/ file from an active workspace skill through the Room Agent managed-session engine. Fast terminal results are returned inline; otherwise use the returned sessionId with the existing session tools. No agentId is used.
+      x-openai-isConsequential: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SkillRunRequest"
+      responses:
+        "200":
+          description: Skill run started or completed inline.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SkillRunResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
   /v1/runs/{runId}:
     get:
       operationId: getRun
@@ -875,6 +977,12 @@ components:
   responses:
     BadRequest:
       description: Invalid request body or parameters.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Conflict:
+      description: Request conflicts with an existing Room skill or idempotency key.
       content:
         application/json:
           schema:
@@ -2015,6 +2123,9 @@ components:
         id:
           type: string
           pattern: ^[A-Za-z0-9_.-]+$
+        path:
+          type: string
+          description: Optional package-relative file path; omit for the legacy SKILL.md-only response.
     SkillSearchRequest:
       type: object
       required:
@@ -2056,6 +2167,8 @@ components:
         - id
         - tags
         - active
+        - origin
+        - readOnly
         - packageSummary
         - warnings
       additionalProperties: false
@@ -2074,6 +2187,13 @@ components:
             type: string
         active:
           type: boolean
+        origin:
+          type: string
+          enum:
+            - workspace
+            - builtin
+        readOnly:
+          type: boolean
         packageSummary:
           $ref: "#/components/schemas/SkillPackageSummary"
         warnings:
@@ -2088,6 +2208,8 @@ components:
         - frontmatter
         - tags
         - active
+        - origin
+        - readOnly
         - packageSummary
         - warnings
       additionalProperties: false
@@ -2110,6 +2232,13 @@ components:
           items:
             type: string
         active:
+          type: boolean
+        origin:
+          type: string
+          enum:
+            - workspace
+            - builtin
+        readOnly:
           type: boolean
         packageSummary:
           $ref: "#/components/schemas/SkillPackageSummary"
@@ -2162,6 +2291,345 @@ components:
       properties:
         skill:
           $ref: "#/components/schemas/SkillDetail"
+        resource:
+          $ref: "#/components/schemas/SkillResource"
+    SkillResource:
+      type: object
+      required:
+        - path
+        - encoding
+        - content
+        - sizeBytes
+        - sha256
+      additionalProperties: false
+      properties:
+        path:
+          type: string
+        encoding:
+          type: string
+          enum:
+            - utf8
+            - base64
+        content:
+          type: string
+        mediaType:
+          type: string
+        sizeBytes:
+          type: integer
+        sha256:
+          type: string
+    SkillInstallRequest:
+      type: object
+      required:
+        - id
+        - source
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          pattern: ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$
+        source:
+          oneOf:
+            - $ref: "#/components/schemas/SkillGithubSource"
+            - $ref: "#/components/schemas/SkillFilesSource"
+          discriminator:
+            propertyName: type
+        replaceExisting:
+          type: boolean
+          default: false
+        activateAfterInstall:
+          type: boolean
+        idempotencyKey:
+          type: string
+          minLength: 1
+          maxLength: 128
+    SkillGithubSource:
+      type: object
+      required:
+        - type
+      additionalProperties: false
+      properties:
+        type:
+          type: string
+          enum:
+            - github
+        repository:
+          type: string
+          description: Canonical public owner/repository form.
+        url:
+          type: string
+          format: uri
+          description: Convenience github.com URL; structured ref/path is preferred for ambiguous branches.
+        ref:
+          type: string
+        path:
+          type: string
+    SkillFilesSource:
+      type: object
+      required:
+        - type
+        - files
+      additionalProperties: false
+      properties:
+        type:
+          type: string
+          enum:
+            - files
+        files:
+          type: array
+          minItems: 1
+          maxItems: 256
+          items:
+            $ref: "#/components/schemas/SkillInstallFile"
+    SkillInstallFile:
+      type: object
+      required:
+        - path
+      additionalProperties: false
+      properties:
+        path:
+          type: string
+        url:
+          type: string
+          format: uri
+        content:
+          type: string
+        contentBase64:
+          type: string
+        sha256:
+          type: string
+        executable:
+          type: boolean
+      description: Exactly one of url, content, or contentBase64 must be supplied.
+    SkillInstallStartResponse:
+      type: object
+      required:
+        - installId
+        - id
+        - status
+        - queued
+        - deduplicated
+        - createdAt
+        - updatedAt
+        - pollAfterMs
+      additionalProperties: false
+      properties:
+        installId:
+          type: string
+        id:
+          type: string
+        status:
+          type: string
+          enum: [queued, running, completed, failed, cancelled]
+        queued:
+          type: boolean
+        deduplicated:
+          type: boolean
+        createdAt:
+          type: string
+        updatedAt:
+          type: string
+        pollAfterMs:
+          type: integer
+    SkillInstallGetRequest:
+      type: object
+      required:
+        - installId
+      additionalProperties: false
+      properties:
+        installId:
+          type: string
+        waitSeconds:
+          type: integer
+          minimum: 0
+          maximum: 30
+          default: 5
+    SkillInstallStatusResponse:
+      type: object
+      required:
+        - installId
+        - id
+        - revision
+        - status
+        - attempt
+        - maxAttempts
+        - progress
+        - source
+        - createdAt
+        - updatedAt
+        - elapsedMs
+        - pollAfterMs
+      additionalProperties: false
+      properties:
+        installId:
+          type: string
+        id:
+          type: string
+        revision:
+          type: integer
+        status:
+          type: string
+          enum: [queued, running, completed, failed, cancelled]
+        phase:
+          type: string
+          enum: [resolving, downloading, extracting, validating, waiting_for_target, committing, activating]
+        attempt:
+          type: integer
+        maxAttempts:
+          type: integer
+        progress:
+          $ref: "#/components/schemas/SkillInstallProgress"
+        source:
+          $ref: "#/components/schemas/SkillInstallSourceSummary"
+        createdAt:
+          type: string
+        startedAt:
+          type: string
+        updatedAt:
+          type: string
+        finishedAt:
+          type: string
+        elapsedMs:
+          type: integer
+        cancelRequestedAt:
+          type: string
+        result:
+          $ref: "#/components/schemas/SkillInstallResult"
+        error:
+          $ref: "#/components/schemas/SkillInstallError"
+        pollAfterMs:
+          type: integer
+    SkillInstallProgress:
+      type: object
+      required: [filesCompleted, filesTotal, bytesDownloaded]
+      additionalProperties: false
+      properties:
+        filesCompleted:
+          type: integer
+        filesTotal:
+          type: integer
+        bytesDownloaded:
+          type: integer
+        bytesTotal:
+          type: integer
+    SkillInstallSourceSummary:
+      type: object
+      required: [sourceType, files]
+      additionalProperties: false
+      properties:
+        sourceType:
+          type: string
+        repository:
+          type: string
+        requestedRef:
+          type: string
+        resolvedCommit:
+          type: string
+        path:
+          type: string
+        files:
+          type: array
+          items:
+            $ref: "#/components/schemas/SkillInstallFileSummary"
+    SkillInstallFileSummary:
+      type: object
+      required: [path, sizeBytes, sha256, sourceType]
+      additionalProperties: false
+      properties:
+        path:
+          type: string
+        sizeBytes:
+          type: integer
+        sha256:
+          type: string
+        sourceType:
+          type: string
+    SkillInstallResult:
+      type: object
+      required: [skill, source, packageSha256]
+      additionalProperties: false
+      properties:
+        skill:
+          $ref: "#/components/schemas/SkillSummary"
+        source:
+          $ref: "#/components/schemas/SkillInstallSourceSummary"
+        packageSha256:
+          type: string
+    SkillInstallError:
+      type: object
+      required: [code, message, retryable]
+      additionalProperties: false
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+        phase:
+          type: string
+        retryable:
+          type: boolean
+    SkillInstallCancelRequest:
+      type: object
+      required: [installId]
+      additionalProperties: false
+      properties:
+        installId:
+          type: string
+    SkillInstallCancelResponse:
+      type: object
+      required: [installId, outcome, changed, status]
+      additionalProperties: false
+      properties:
+        installId:
+          type: string
+        outcome:
+          type: string
+          enum: [cancel_requested, cancelled, already_cancelled, too_late, already_terminal]
+        changed:
+          type: boolean
+        status:
+          type: string
+          enum: [queued, running, completed, failed, cancelled]
+        phase:
+          type: string
+        cancelRequestedAt:
+          type: string
+    SkillRunRequest:
+      type: object
+      required: [id, path]
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+        path:
+          type: string
+          description: Package-relative executable path under scripts/.
+        args:
+          type: array
+          items:
+            type: string
+        workingDirectory:
+          type: string
+        waitSeconds:
+          type: integer
+          minimum: 0
+          maximum: 30
+          default: 5
+    SkillRunResponse:
+      type: object
+      required: [agentId, sessionId, completedInline, pollAfterMs, session]
+      additionalProperties: false
+      properties:
+        agentId:
+          type: string
+        sessionId:
+          type: string
+        completedInline:
+          type: boolean
+        pollAfterMs:
+          type: integer
+        session:
+          $ref: "#/components/schemas/SessionInfo"
     SkillsSearchResponse:
       type: object
       required:

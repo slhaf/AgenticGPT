@@ -523,6 +523,9 @@ async fn audit_tmux(
             truncated: false,
             request_source: request_source.to_string(),
             reject_reason,
+            skill_id: None,
+            skill_path: None,
+            installed_digest: None,
         },
     );
 }
