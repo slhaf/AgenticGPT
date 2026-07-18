@@ -64,6 +64,16 @@
 - Verification passed: `cargo fmt --all`, `cargo check --workspace`, and `cargo test --workspace` (79 local, 49 Hub, 5 protocol tests).
 - Phase 6 is ready to commit before beginning Phase 7.
 
+### Phase 7: Verification, documentation, and release readiness
+
+- **Status:** complete
+- Started after Phase 6 commit `eb37d58`.
+- Added idempotency-conflict coverage and hardened persisted install-ID validation so recovery, record reads/writes, and journal paths cannot escape the install-state directory.
+- Reworked commit-journal recovery to distinguish the pre-candidate and post-candidate crash windows: precommit journals preserve an unexpected target, archived packages are restored only when safe, and candidate commits roll back without accepting paths outside the skills root.
+- Made asynchronous materialization cancellation drop in-flight network futures promptly, clean staging, and publish a terminal cancelled state. Added cancellation-aware Hub confirmation cleanup so killing a pending `skills.run` session removes its callback sender.
+- Re-ran focused install/session regressions plus the complete workspace suite. Current verification: `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo test --workspace` — 84 local-agent, 50 Hub, and 5 protocol tests passed; doc tests also passed with zero tests.
+- Reviewed the OpenAPI/MCP/Actions, configuration, migration, redaction, archive, path, and audit changes for release readiness. Planning status and this verification record are included in the Phase 7 commit.
+
 ### Phase 0: Repository and architecture discovery
 
 - **Status:** complete
@@ -154,6 +164,8 @@
 | Install manager regression | `cargo test -p agentic-gpt skill_installs::tests` | Atomic inline install, persisted status, idempotency, and cancel replay | 3 passed | pass |
 | Phase 5 source/security regression | `cargo test --workspace` | GitHub parsing, SSRF policy, collision checks, retries, atomic install, Hub/protocol contracts | 77 local, 49 Hub, 5 protocol passed | pass |
 | Phase 5 compile check | `cargo check --workspace` | Configured remote-source pipeline compiles without warnings | pass | pass |
+| Phase 7 focused install/session regression | `cargo test -p agentic-gpt skill_installs` and `cargo test -p agentic-gpt sessions` | Journal recovery, idempotency conflict, cancellation, leases, async sessions, and audit remain green | 10 install, 4 session tests passed | pass |
+| Phase 7 workspace verification | `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo test --workspace` | Release-ready formatting, compilation, and cross-crate behavior | 84 local, 50 Hub, 5 protocol passed; doc tests passed | pass |
 
 ## Error log
 

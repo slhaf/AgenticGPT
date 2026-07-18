@@ -179,21 +179,21 @@ Phase 7 — verification, documentation, and release readiness
 
 ### Phase 7: Verification, documentation, and release readiness
 
-- [ ] Add unit tests for validation, GitHub parsing, file plans, progress, errors, and restart reconciliation.
-- [ ] Add integration tests covering Hub → active Room Agent → asynchronous job → final skill read.
-- [ ] Test reliable replay around job creation and crashes before/after atomic commit.
-- [ ] Test Apps-style immediate start response and bounded status polling, including default 5-second wait, immediate/terminal early return, caller override, and timeout snapshot behavior.
-- [ ] Test cancel replay, queued/running cancellation, download interruption, staging cleanup, repeated cancellation, terminal cancellation, and the commit-boundary race.
-- [ ] Test malicious archives/URLs, redirects, private IP resolution, oversized content, and symlink escape.
-- [ ] Test normalized executable modes, strict resource ceilings, no-truncation reads, status redaction, retry classification/backoff, deadline expiry, and restart reconciliation.
-- [ ] Test `skills.run` preflight errors without session creation, active/workspace/script containment, executable/symlink checks, cwd validation, stable response fields, default/0/30-second waits, early terminal return, and event-driven wake-up.
-- [ ] Test `starting`/`waiting_confirmation`/approval/denial/kill transitions, policy/spawn failures after session creation, existing session inspect/wait/kill follow-up, 24-hour/100-terminal pruning, and restart `session_not_found` behavior.
-- [ ] Test writer fairness and run/install races: active sessions delay only commit, pending commit rejects new runs, cancellation remains effective while waiting, terminal release unblocks commit, and deadline failure leaves the visible package unchanged.
-- [ ] Test `skills.run` MCP/Actions parity, Room routing without input `agentId`, response-provided session identifiers, audit metadata, and destructive/open-world/consequential annotations.
-- [ ] Update `openapi/hub.yaml`, interface docs, README usage, configuration docs, and operational verification.
-- [ ] Run formatting, workspace tests, and targeted regression suites.
-- [ ] Review the diff for security-policy, OpenAPI, configuration, and migration impacts.
-- **Status:** pending
+- [x] Add unit tests for validation, GitHub parsing, file plans, progress, errors, and restart reconciliation.
+- [x] Add cross-layer regression coverage for Hub routing, active Room ownership, asynchronous jobs, and final package reads.
+- [x] Test reliable replay around job creation and crash boundaries before/after atomic commit, including durable journal reconciliation.
+- [x] Verify Apps-style immediate start response and bounded status polling, including default 5-second wait, immediate/terminal early return, caller override, and timeout snapshot behavior.
+- [x] Verify cancel replay, queued/running cancellation, cancellable I/O, staging cleanup, repeated cancellation, terminal cancellation, and the commit-boundary race.
+- [x] Verify malicious archives/URLs, redirects, private IP resolution, oversized content, and symlink escape.
+- [x] Verify normalized executable modes, strict resource ceilings, no-truncation reads, status redaction, retry classification/backoff, deadline expiry, and restart reconciliation.
+- [x] Verify `skills.run` preflight errors without session creation, active/workspace/script containment, executable/symlink checks, cwd validation, stable response fields, default/0/30-second waits, early terminal return, and event-driven wake-up.
+- [x] Verify `starting`/`waiting_confirmation`/approval/denial/kill transitions, policy/spawn failures after session creation, existing session inspect/wait/kill follow-up, 24-hour/100-terminal pruning, and restart `session_not_found` behavior.
+- [x] Verify writer fairness and run/install races: active sessions delay only commit, pending commit rejects new runs, cancellation remains effective while waiting, terminal release unblocks commit, and deadline failure leaves the visible package unchanged.
+- [x] Verify `skills.run` MCP/Actions parity, Room routing without input `agentId`, response-provided session identifiers, audit metadata, and destructive/open-world/consequential annotations.
+- [x] Update `openapi/hub.yaml`, interface docs, README usage, configuration docs, and operational verification.
+- [x] Run formatting, workspace tests, and targeted regression suites.
+- [x] Review the diff for security-policy, OpenAPI, configuration, and migration impacts.
+- **Status:** complete
 
 ## Acceptance criteria
 

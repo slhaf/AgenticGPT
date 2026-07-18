@@ -388,16 +388,15 @@ async fn run_async_session(
 ) {
     if decision == PolicyDecision::Confirm {
         let config = state.config.read().await.clone();
-        let confirmation = tokio::select! {
-            result = confirmation::request_confirmation(
-                &state,
-                &config,
-                request.confirm_method.as_deref(),
-                &request.program,
-                &request.args,
-            ) => result,
-            _ = wait_for_cancel(cancel_requested.clone()) => "cancelled".to_string(),
-        };
+        let confirmation = confirmation::request_confirmation_cancellable(
+            &state,
+            &config,
+            request.confirm_method.as_deref(),
+            &request.program,
+            &request.args,
+            cancel_requested.clone(),
+        )
+        .await;
         if confirmation != "allow_once" {
             finish_pending_session(&state, &session_id, &confirmation).await;
             return;
@@ -468,12 +467,6 @@ async fn spawn_session_with_buffers(
         tokio::spawn(read_tail(err, stderr));
     }
     Ok(child)
-}
-
-async fn wait_for_cancel(cancel_requested: Arc<std::sync::atomic::AtomicBool>) {
-    while !cancel_requested.load(std::sync::atomic::Ordering::Acquire) {
-        sleep(std::time::Duration::from_millis(50)).await;
-    }
 }
 
 async fn monitor_session(state: AppState, session_id: String) {

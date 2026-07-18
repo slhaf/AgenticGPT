@@ -84,11 +84,34 @@ impl InstallManager {
             let Ok(mut record) = serde_json::from_str::<SkillInstallJobRecord>(&text) else {
                 continue;
             };
+            if validate_install_id(&record.install_id).is_err() {
+                continue;
+            }
             if is_terminal(record.status.status) {
+                // A terminal record should have no live commit journal. If a
+                // process stopped after persisting the terminal state but
+                // before journal cleanup, the commit has already reached its
+                // terminal outcome, so only discard the stale marker here.
+                remove_commit_journal(&config, &record.install_id);
                 self.records
                     .lock()
                     .await
                     .insert(record.install_id.clone(), record);
+                continue;
+            }
+            if let Err(error) = reconcile_commit_journal(&config, &record.install_id) {
+                record.status.status = SkillInstallStatus::Failed;
+                record.status.phase = None;
+                record.status.error = Some(SkillInstallError {
+                    code: "recovery_failed".to_string(),
+                    message: format!("commit journal reconciliation failed: {error}"),
+                    phase: Some(SkillInstallPhase::Committing),
+                    retryable: true,
+                });
+                record.status.finished_at = Some(Utc::now());
+                record.status.poll_after_ms = 0;
+                touch_status(&mut record.status);
+                self.save_cache(&config, &record).await?;
                 continue;
             }
             if matches!(
@@ -341,24 +364,34 @@ impl InstallManager {
                     )
                     .await;
             }
-            let result = timeout(
-                remaining,
-                materialize_source(
-                    &config,
-                    &record.request,
-                    &staging,
-                    &self.cancellations,
-                    install_id,
-                ),
-            )
-            .await;
+            let result = tokio::select! {
+                result = timeout(
+                    remaining,
+                    materialize_source(
+                        &config,
+                        &record.request,
+                        &staging,
+                        &self.cancellations,
+                        install_id,
+                    ),
+                ) => Some(result),
+                _ = self.wait_until_cancelled(install_id) => None,
+            };
             match result {
-                Ok(Ok(value)) => {
+                None => {
+                    let _ = fs::remove_dir_all(&staging);
+                    return self.cancelled(state, install_id).await;
+                }
+                Some(Ok(Ok(value))) => {
                     materialized = Some(value);
                     break;
                 }
-                Ok(Err(error)) => {
+                Some(Ok(Err(error))) => {
                     let message = error.to_string();
+                    if message == "cancelled" || self.is_cancelled(install_id).await {
+                        let _ = fs::remove_dir_all(&staging);
+                        return self.cancelled(state, install_id).await;
+                    }
                     if !is_retryable_materialization_error(&message) || attempt == max_attempts {
                         let _ = fs::remove_dir_all(&staging);
                         return self
@@ -376,7 +409,7 @@ impl InstallManager {
                     tokio::time::sleep(backoff.min(remaining)).await;
                     fs::create_dir_all(&staging)?;
                 }
-                Err(_) => {
+                Some(Err(_)) => {
                     let _ = fs::remove_dir_all(&staging);
                     return self
                         .fail(
@@ -630,6 +663,7 @@ impl InstallManager {
         config: &crate::config::Config,
         record: &SkillInstallJobRecord,
     ) -> Result<()> {
+        validate_install_id(&record.install_id)?;
         let root = install_records_root(config);
         fs::create_dir_all(&root)?;
         let path = root.join(format!("{}.json", record.install_id));
@@ -645,6 +679,7 @@ impl InstallManager {
         config: &crate::config::Config,
         install_id: &str,
     ) -> Result<SkillInstallJobRecord> {
+        validate_install_id(install_id)?;
         if let Some(record) = self.records.lock().await.get(install_id).cloned() {
             return Ok(record);
         }
@@ -657,6 +692,10 @@ impl InstallManager {
             }
         })?;
         let record: SkillInstallJobRecord = serde_json::from_str(&text)?;
+        validate_install_id(&record.install_id)?;
+        if record.install_id != install_id {
+            return Err(anyhow!("install_record_mismatch"));
+        }
         self.records
             .lock()
             .await
@@ -683,6 +722,9 @@ impl InstallManager {
                 let Ok(record) = serde_json::from_str::<SkillInstallJobRecord>(&text) else {
                     continue;
                 };
+                if validate_install_id(&record.install_id).is_err() {
+                    continue;
+                }
                 if record.request.idempotency_key.as_deref() == Some(key) {
                     return Ok(Some(record));
                 }
@@ -803,13 +845,21 @@ fn validate_install_request(
         let _ = parse_github_source(repository.as_deref(), url.as_deref())?;
     }
     if let SkillInstallSource::Files { files } = &request.source {
-        if files
-            .iter()
-            .filter_map(|file| file.content.as_deref())
-            .map(str::len)
-            .sum::<usize>() as u64
-            > config.room.skills.max_inline_bytes
-        {
+        let mut inline_total = 0_u64;
+        for file in files {
+            inline_total = inline_total.saturating_add(
+                file.content
+                    .as_deref()
+                    .map_or(0, |content| content.len() as u64),
+            );
+            if let Some(content) = file.content_base64.as_deref() {
+                let decoded = BASE64
+                    .decode(content)
+                    .map_err(|_| anyhow!("invalid_base64"))?;
+                inline_total = inline_total.saturating_add(decoded.len() as u64);
+            }
+        }
+        if inline_total > config.room.skills.max_inline_bytes {
             return Err(anyhow!("package_limit_exceeded"));
         }
     }
@@ -1437,7 +1487,97 @@ fn commit_journal_path(config: &crate::config::Config, install_id: &str) -> Path
 }
 
 fn remove_commit_journal(config: &crate::config::Config, install_id: &str) {
+    if validate_install_id(install_id).is_err() {
+        return;
+    }
     let _ = fs::remove_file(commit_journal_path(config, install_id));
+}
+
+fn reconcile_commit_journal(config: &crate::config::Config, install_id: &str) -> Result<()> {
+    validate_install_id(install_id)?;
+    let journal_path = commit_journal_path(config, install_id);
+    if !journal_path.exists() {
+        return Ok(());
+    }
+    let journal: CommitJournal = serde_json::from_slice(&fs::read(&journal_path)?)?;
+    if journal.install_id != install_id {
+        return Err(anyhow!("commit_journal_mismatch"));
+    }
+    skills::validate_skill_id(&journal.id)?;
+    let skills_root = skills::skills_root(config);
+    let target = PathBuf::from(&journal.target);
+    let expected_target = skills_root.join(&journal.id);
+    if target != expected_target {
+        return Err(anyhow!("commit_journal_target_invalid"));
+    }
+    let archive = journal.archive.as_ref().map(PathBuf::from);
+    if let Some(archive) = archive.as_ref() {
+        let expected_archive = skills_root
+            .join(".archive")
+            .join(&journal.id)
+            .join(install_id);
+        if archive != &expected_archive {
+            return Err(anyhow!("commit_journal_archive_invalid"));
+        }
+    }
+
+    let target_present = fs::symlink_metadata(&target).is_ok();
+    let archive_present = archive
+        .as_ref()
+        .is_some_and(|path| fs::symlink_metadata(path).is_ok());
+    if journal.candidate_committed {
+        // The candidate rename completed. Roll it back, restoring the
+        // archived package when one exists. A malformed or externally changed
+        // archive is left in place and reported instead of being overwritten.
+        if target_present {
+            remove_path(&target)?;
+        }
+        if let Some(archive) = archive.as_ref() {
+            if archive_present {
+                if let Some(parent) = target.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::rename(archive, &target)?;
+            }
+        }
+    } else if archive_present {
+        // The old target was moved but the candidate rename did not complete.
+        // Preserve any unexpected target rather than deleting user data.
+        if target_present {
+            return Err(anyhow!("commit_journal_target_changed"));
+        }
+        if let Some(archive) = archive.as_ref() {
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::rename(archive, &target)?;
+        }
+    }
+    fs::remove_file(journal_path)?;
+    Ok(())
+}
+
+fn remove_path(path: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_dir() {
+        fs::remove_dir_all(path)?;
+    } else {
+        fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
+fn validate_install_id(install_id: &str) -> Result<()> {
+    if install_id.is_empty()
+        || install_id.len() > 128
+        || install_id.starts_with('.')
+        || !install_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+    {
+        return Err(anyhow!("invalid_install_id"));
+    }
+    Ok(())
 }
 
 pub(crate) fn package_sha256(config: &crate::config::Config, id: &str) -> Result<String> {
@@ -1782,6 +1922,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn idempotency_conflict_is_rejected_before_creating_a_second_job() {
+        let state = test_state();
+        let manager = state.skill_installs.clone();
+        let mut first_request = inline_request("demo");
+        first_request.idempotency_key = Some("same-key".to_string());
+        manager.start(state.clone(), first_request).await.unwrap();
+        let mut conflicting = inline_request("demo");
+        conflicting.idempotency_key = Some("same-key".to_string());
+        if let SkillInstallSource::Files { files } = &mut conflicting.source {
+            files[0].content = Some("# Different\n".to_string());
+        }
+        assert_eq!(
+            manager
+                .start(state, conflicting)
+                .await
+                .unwrap_err()
+                .to_string(),
+            "idempotency_conflict"
+        );
+    }
+
+    #[tokio::test]
     async fn queued_cancel_is_idempotent_and_status_is_terminal() {
         let state = test_state();
         let manager = state.skill_installs.clone();
@@ -1872,5 +2034,86 @@ mod tests {
         assert!(!is_retryable_materialization_error("download_http:403"));
         assert!(!is_retryable_materialization_error("source_not_found"));
         assert_eq!(install_error_code("download_http:503"), "download_failed");
+    }
+
+    #[test]
+    fn commit_journal_recovery_restores_archive_without_destroying_precommit_target() {
+        let mut config = Config::default_config().unwrap();
+        config.workspace_root = std::env::temp_dir().join(format!(
+            "agentic-install-journal-{}",
+            Uuid::new_v4().simple()
+        ));
+        let root = skills::skills_root(&config);
+        let target = root.join("demo");
+        let archive = root.join(".archive/demo/install-test");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("SKILL.md"), "new").unwrap();
+        fs::create_dir_all(&archive).unwrap();
+        fs::write(archive.join("SKILL.md"), "old").unwrap();
+        let journal = CommitJournal {
+            install_id: "install-test".to_string(),
+            id: "demo".to_string(),
+            target: target.to_string_lossy().to_string(),
+            archive: Some(archive.to_string_lossy().to_string()),
+            candidate_committed: true,
+        };
+        fs::create_dir_all(install_records_root(&config)).unwrap();
+        fs::write(
+            commit_journal_path(&config, "install-test"),
+            serde_json::to_vec(&journal).unwrap(),
+        )
+        .unwrap();
+
+        reconcile_commit_journal(&config, "install-test").unwrap();
+        assert_eq!(fs::read_to_string(target.join("SKILL.md")).unwrap(), "old");
+        assert!(!archive.exists());
+        assert!(!commit_journal_path(&config, "install-test").exists());
+
+        // A journal written before the old target is moved must not delete it.
+        fs::write(target.join("SKILL.md"), "still-old").unwrap();
+        let precommit = CommitJournal {
+            install_id: "install-test-2".to_string(),
+            id: "demo".to_string(),
+            target: target.to_string_lossy().to_string(),
+            archive: None,
+            candidate_committed: false,
+        };
+        fs::write(
+            commit_journal_path(&config, "install-test-2"),
+            serde_json::to_vec(&precommit).unwrap(),
+        )
+        .unwrap();
+        reconcile_commit_journal(&config, "install-test-2").unwrap();
+        assert_eq!(
+            fs::read_to_string(target.join("SKILL.md")).unwrap(),
+            "still-old"
+        );
+    }
+
+    #[test]
+    fn commit_journal_recovery_rejects_paths_outside_skills_root() {
+        let mut config = Config::default_config().unwrap();
+        config.workspace_root = std::env::temp_dir().join(format!(
+            "agentic-install-journal-invalid-{}",
+            Uuid::new_v4().simple()
+        ));
+        let outside = config.workspace_root.join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        let journal = CommitJournal {
+            install_id: "install-test".to_string(),
+            id: "demo".to_string(),
+            target: outside.to_string_lossy().to_string(),
+            archive: None,
+            candidate_committed: true,
+        };
+        fs::create_dir_all(install_records_root(&config)).unwrap();
+        fs::write(
+            commit_journal_path(&config, "install-test"),
+            serde_json::to_vec(&journal).unwrap(),
+        )
+        .unwrap();
+
+        assert!(reconcile_commit_journal(&config, "install-test").is_err());
+        assert!(outside.exists());
     }
 }

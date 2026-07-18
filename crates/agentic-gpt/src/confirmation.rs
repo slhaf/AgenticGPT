@@ -1,7 +1,11 @@
 use agentic_gpt_protocol::{AgentMessage, ConfirmationDecision, ConfirmationPayload};
 use chrono::{DateTime, Utc};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use tokio::sync::oneshot;
-use tokio::time::{timeout, Duration};
+use tokio::time::{sleep, timeout, Duration};
 use uuid::Uuid;
 
 use crate::{
@@ -255,6 +259,58 @@ pub(crate) async fn request_confirmation(
     "confirmation_provider_unavailable".to_string()
 }
 
+/// Confirmation used by an asynchronously registered session. Hub-backed
+/// requests remove their pending sender when the session is cancelled, so a
+/// killed `waiting_confirmation` session cannot leak a durable callback entry.
+pub(crate) async fn request_confirmation_cancellable(
+    state: &AppState,
+    config: &Config,
+    confirm_method: Option<&str>,
+    program: &str,
+    args: &[String],
+    cancel_requested: Arc<AtomicBool>,
+) -> String {
+    let configured_provider = config.confirmation_provider.provider.as_str();
+    let provider = confirm_method
+        .filter(|method| !method.trim().is_empty())
+        .unwrap_or(configured_provider);
+    let provider = if provider == "default" {
+        configured_provider
+    } else if provider == "freedesktopThenHub" {
+        "freedesktop-then-hub"
+    } else {
+        provider
+    };
+    if provider == "freedesktop" || provider == "freedesktop-then-hub" {
+        let local = tokio::select! {
+            result = request_freedesktop_confirmation(config, program, args) => result,
+            _ = wait_for_cancellation(cancel_requested.clone()) => "cancelled".to_string(),
+        };
+        if local == "confirmation_provider_unavailable" && provider == "freedesktop-then-hub" {
+            return request_hub_confirmation_cancellable(
+                state,
+                config,
+                program,
+                args,
+                cancel_requested,
+            )
+            .await;
+        }
+        return local;
+    }
+    if provider == "hub" {
+        return request_hub_confirmation_cancellable(
+            state,
+            config,
+            program,
+            args,
+            cancel_requested,
+        )
+        .await;
+    }
+    "confirmation_provider_unavailable".to_string()
+}
+
 async fn request_freedesktop_confirmation(
     config: &Config,
     program: &str,
@@ -347,10 +403,48 @@ async fn request_hub_confirmation(
     request_hub_confirmation_payload(state, payload).await
 }
 
+async fn request_hub_confirmation_cancellable(
+    state: &AppState,
+    config: &Config,
+    program: &str,
+    args: &[String],
+    cancel_requested: Arc<AtomicBool>,
+) -> String {
+    let payload = ConfirmationPayload {
+        program: program.to_string(),
+        args: args.to_vec(),
+        command_preview: truncate_chars(&command_preview(program, args), 1000),
+        risk_level: risk_level(program),
+        reason: if confirmation_language_is_zh(config) {
+            format!("命令匹配确认策略：{program}")
+        } else {
+            format!("Command matched confirmation policy: {program}")
+        },
+        kind: None,
+        server_id: None,
+        tool_name: None,
+    };
+    request_hub_confirmation_payload_cancellable(state, payload, Some(cancel_requested)).await
+}
+
 async fn request_hub_confirmation_payload(
     state: &AppState,
     payload: ConfirmationPayload,
 ) -> String {
+    request_hub_confirmation_payload_cancellable(state, payload, None).await
+}
+
+async fn request_hub_confirmation_payload_cancellable(
+    state: &AppState,
+    payload: ConfirmationPayload,
+    cancel_requested: Option<Arc<AtomicBool>>,
+) -> String {
+    if cancel_requested
+        .as_ref()
+        .is_some_and(|flag| flag.load(Ordering::Acquire))
+    {
+        return "cancelled".to_string();
+    }
     let request_id = format!("confirm_req_{}", Uuid::new_v4().simple());
     let (tx, rx) = oneshot::channel();
     state
@@ -373,12 +467,29 @@ async fn request_hub_confirmation_payload(
     log_info(format!(
         "hub confirmation requested; requestId={request_id}"
     ));
-    match timeout(Duration::from_secs(CONFIRM_TIMEOUT_SECS + 5), rx).await {
-        Ok(Ok(decision)) => decision,
-        _ => {
-            state.pending_confirmations.lock().await.remove(&request_id);
-            "timeout".to_string()
+    let result = if let Some(cancel_requested) = cancel_requested {
+        tokio::select! {
+            result = timeout(Duration::from_secs(CONFIRM_TIMEOUT_SECS + 5), rx) => {
+                match result {
+                    Ok(Ok(decision)) => decision,
+                    _ => "timeout".to_string(),
+                }
+            }
+            _ = wait_for_cancellation(cancel_requested) => "cancelled".to_string(),
         }
+    } else {
+        match timeout(Duration::from_secs(CONFIRM_TIMEOUT_SECS + 5), rx).await {
+            Ok(Ok(decision)) => decision,
+            _ => "timeout".to_string(),
+        }
+    };
+    state.pending_confirmations.lock().await.remove(&request_id);
+    result
+}
+
+async fn wait_for_cancellation(cancel_requested: Arc<AtomicBool>) {
+    while !cancel_requested.load(Ordering::Acquire) {
+        sleep(Duration::from_millis(50)).await;
     }
 }
 
