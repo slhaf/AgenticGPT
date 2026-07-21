@@ -6,17 +6,17 @@ Implement a Room Agent-scoped V1 bootstrap package that exposes a concise sessio
 
 ## Current Phase
 
-Phase 4 - Local Room bootstrap loader
+Phase 5 - Hub routing, MCP, and GPT Actions/OpenAPI
 
 ## Workflow State
 
 - **Stage:** implementation_active
 - **Current role:** implementer
 - **Implementation authorized:** yes
-- **Entry phase:** Phase 4
+- **Entry phase:** Phase 5
 - **Open blocking decisions:** 0
 - **Design checkpoint:** not set
-- **Next action:** implement Phase 4 under `$planning-with-files` without `$refine-implementation-plan`
+- **Next action:** implement Phase 5 under `$planning-with-files` without `$refine-implementation-plan`
 
 ## Scope and constraints
 
@@ -384,7 +384,7 @@ cargo check -p agentic-gpt
 
 **Completion boundary:** local unit tests cover every public success/degradation/failure branch and command dispatch returns protocol-shaped values.
 
-- **Status:** in_progress
+- **Status:** complete
 
 ### Phase 5: Hub routing, MCP, and GPT Actions/OpenAPI
 
@@ -424,7 +424,7 @@ cargo check -p agentic-gpt-hub
 
 **Completion boundary:** MCP and Actions expose matching Room-only behavior and all exhaustive command helpers compile/test.
 
-- **Status:** pending
+- **Status:** in_progress
 
 ### Phase 6: Documentation, authoring examples, and integration verification
 
@@ -548,7 +548,7 @@ The Implementer may not change frontmatter fields/defaults, directory rules, pub
 - **Plan maturity:** implementation_ready
 - **Design phase:** complete
 - **Implementation authorized:** yes
-- **Entry phase:** Phase 4
+- **Entry phase:** Phase 5
 - **Frozen decisions:** D-01 through D-13
 - **Open blocking decisions:** none
 - **Implementation discretion:** see `Implementation Discretion`
@@ -565,3 +565,5 @@ The Implementer may not change frontmatter fields/defaults, directory rules, pub
 | Planning maturity fields temporarily disagreed after Q-06 write-through (`task_plan.md`/`progress.md` still showed `exploring`) | 1 | Re-read all three files under the handoff gate and reconciled them in this implementation-ready compilation |
 | `cargo test -p agentic-gpt-protocol` could not create `/home/slhaf/Projects/AgenticGPT/target/debug/.cargo-build-lock` on the read-only repository filesystem | 1 | Retried with a task-local writable `CARGO_TARGET_DIR` under `/tmp` |
 | `cargo fmt --all` could not rewrite the protocol file on the read-only repository filesystem | 1 | Applied the single rustfmt line-wrap manually, then re-ran format checking |
+| First bootstrap test run exposed entrypoint validation details escaping as public error codes and a symlink fixture that rewrote rather than replaced its link | 1 | Map all entrypoint metadata failures to `bootstrap_invalid`; remove the link before creating the valid fixture |
+| A follow-up bootstrap test failed because the fixture reset cleanup was inserted before the entrypoint existed | 1 | Removed that premature cleanup; retain removal only after the symlink is created |

@@ -18,6 +18,7 @@ use tokio_tungstenite::{
 use uuid::Uuid;
 
 use crate::{
+    bootstrap,
     config::Config,
     confirmation, diary, exec, mcp, notebook, notify, sessions, skills, tmux, transport_ledger,
     utils::{
@@ -990,6 +991,31 @@ pub(crate) async fn handle_hub_command(
             };
             send_response(&state, run_id.as_deref(), &request_id, result).await?;
         }
+        HubCommand::RoomBootstrap { request_id } => {
+            let result = if state.run_mode != RunMode::Room {
+                room_agent_required_error()
+            } else {
+                match bootstrap::load(&state).await {
+                    Ok(result) => serde_json::to_value(result)?,
+                    Err(error) => bootstrap_command_error("bootstrap_read_failed", error),
+                }
+            };
+            send_response(&state, run_id.as_deref(), &request_id, result).await?;
+        }
+        HubCommand::RoomBootstrapRead {
+            request_id,
+            payload,
+        } => {
+            let result = if state.run_mode != RunMode::Room {
+                room_agent_required_error()
+            } else {
+                match bootstrap::read(&state, payload).await {
+                    Ok(result) => serde_json::to_value(result)?,
+                    Err(error) => bootstrap_command_error("bootstrap_read_failed", error),
+                }
+            };
+            send_response(&state, run_id.as_deref(), &request_id, result).await?;
+        }
         HubCommand::SkillsList { request_id } => {
             let result = if state.run_mode != RunMode::Room {
                 room_agent_required_error()
@@ -1139,6 +1165,18 @@ fn skills_command_error(default_code: &str, error: anyhow::Error) -> serde_json:
             "message": if code == "not_found" { "skill not found" } else { &message }
         }
     })
+}
+
+fn bootstrap_command_error(default_code: &str, error: anyhow::Error) -> serde_json::Value {
+    let message = error.to_string();
+    let code = match message.as_str() {
+        "bootstrap_not_found"
+        | "guide_not_found"
+        | "bootstrap_invalid"
+        | "bootstrap_read_failed" => message.as_str(),
+        _ => default_code,
+    };
+    serde_json::json!({ "error": { "code": code, "message": message } })
 }
 
 fn install_command_error(error: anyhow::Error) -> serde_json::Value {

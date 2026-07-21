@@ -44,6 +44,13 @@ Plan scope: `.planning/2026-07-21-room-bootstrap`.
 - Protocol tests are inline in `crates/agentic-gpt-protocol/src/lib.rs`; existing tests assert serialized `type`, `requestId`, payload fields, and omission of optional fields. Bootstrap compatibility tests should follow this pattern.
 - The protocol crate has only `chrono`, `serde`, and `serde_json` dependencies; the new model should remain dependency-free beyond those existing types.
 
+### Phase 4 loader checkpoint
+
+- The local Room dispatch pattern checks `state.run_mode == RunMode::Room` before invoking Room-only modules and serializes module results into the existing `AgentMessage::Response` path.
+- `Config.workspace_root` is already available to Room modules and `serde_yaml`/`sha2` are existing local-agent dependencies, so bootstrap needs no configuration or dependency changes.
+- Bootstrap entrypoint metadata errors must be collapsed to the frozen public `bootstrap_invalid` code at the loader boundary; internal validation details remain diagnostics only for optional guide warnings.
+- The loader keeps valid guide bytes in a per-call in-memory index so the manifest and ID-based read share the same observed package revision; no workspace state is created or mutated.
+
 - `SkillResource` is a stable protocol object with `path`, `encoding`, `content`, optional `mediaType`, `sizeBytes`, and `sha256`; encoding is `utf8` or `base64`.
 - `skills.read` normalizes a package-relative path, rejects empty/absolute/parent/backslash paths, rejects symlinks at every component, requires a regular file, and caps a returned resource at 1 MiB.
 - Frontmatter parsing currently normalizes CRLF, recognizes a leading YAML block, converts an object to JSON, and reports malformed/non-object YAML through warnings rather than rejecting the skill package.

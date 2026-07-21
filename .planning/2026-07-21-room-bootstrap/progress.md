@@ -3,13 +3,13 @@
 ## Session: 2026-07-21
 
 ### Current Status
-- **Phase:** 4 - Local Room bootstrap loader
+- **Phase:** 5 - Hub routing, MCP, and GPT Actions/OpenAPI
 - **Phase status:** in_progress
 - **Started:** 2026-07-21
 - **Workflow stage:** implementation_active
 - **Current role:** implementer
 - **Implementation authorized:** yes
-- **Entry phase:** Phase 4
+- **Entry phase:** Phase 5
 - **Open blocking decisions:** none
 
 ### Actions Taken
@@ -147,3 +147,20 @@
 - Verification passed: `CARGO_TARGET_DIR=/tmp/agentic-gpt-room-bootstrap-target cargo test -p agentic-gpt-protocol` (8 tests plus doctests) and `cargo check -p agentic-gpt-protocol`.
 - `cargo fmt --all -- --check` initially found one line-wrap discrepancy in the new test; the wrap was corrected manually and the final format check passed.
 - A direct `cargo fmt --all` rewrite was blocked by the same read-only product filesystem; the one reported wrap was applied manually instead.
+
+### Phase 4 test feedback
+
+- The first focused loader run found two fixture/contract issues: invalid entrypoint metadata returned the internal `kind` detail instead of `bootstrap_invalid`, and the symlink test attempted to write through the link when resetting the fixture.
+- Both were corrected: entrypoint validation is now fail-closed to the public code, and the test removes the symlink before recreating `bootstrap.md`.
+
+### Phase 4 loader implementation
+
+- Added `crates/agentic-gpt/src/bootstrap.rs` with fixed-root discovery, strict entrypoint/guide frontmatter validation, UTF-8 checks, symlink/non-regular filtering, deterministic duplicate exclusion/order, full-file hashes, canonical revision, guide manifest capping, and ID-based reads.
+- Added line-aware bounded resources for entrypoint (64 KiB) and guide (256 KiB) responses with complete-line preference, UTF-8-safe fallback, byte/line metadata, and truncation warnings.
+- Added local Room dispatch arms and public error-code mapping for `room.bootstrap` and `room.bootstrap.read`; registered the new module in `main.rs`.
+- Focused bootstrap test run now passes all 10 bootstrap tests, including normal-mode rejection and Room-mode protocol-shaped dispatch.
+
+### Phase 4 completion
+
+- Verification passed: `CARGO_TARGET_DIR=/tmp/agentic-gpt-room-bootstrap-target cargo test -p agentic-gpt bootstrap` (10 passed), `CARGO_TARGET_DIR=/tmp/agentic-gpt-room-bootstrap-target cargo test -p agentic-gpt` (94 passed), `CARGO_TARGET_DIR=/tmp/agentic-gpt-room-bootstrap-target cargo check -p agentic-gpt`, and `cargo fmt --all -- --check`.
+- Phase 4 leaves no workspace state/config artifacts; all test fixtures use temporary directories.

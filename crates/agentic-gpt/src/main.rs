@@ -1,4 +1,5 @@
 mod audit;
+mod bootstrap;
 mod config;
 mod confirmation;
 mod diary;
@@ -345,8 +346,8 @@ mod tests {
     use crate::exec::PreparedBatchElement;
     use crate::policy::policy_decision;
     use agentic_gpt_protocol::{
-        AgentMessage, BatchExecRequest, ExecElement, HubCommand, NotebookAppendRequest,
-        NotebookRemoveRequest, NotebookUpdateRequest, PassageSignificance,
+        AgentMessage, BatchExecRequest, BootstrapReadRequest, ExecElement, HubCommand,
+        NotebookAppendRequest, NotebookRemoveRequest, NotebookUpdateRequest, PassageSignificance,
     };
     use tokio::sync::mpsc;
     use uuid::Uuid;
@@ -486,6 +487,94 @@ mod tests {
         .unwrap();
         let response = recv_response(&mut rx).await;
         assert_eq!(response["error"]["code"], "room_agent_required");
+    }
+
+    #[tokio::test]
+    async fn normal_mode_rejects_bootstrap_commands() {
+        let workspace = unique_temp_dir("normal-room-bootstrap").join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let (state, mut rx) = command_test_state(RunMode::Normal, workspace);
+        hub::handle_hub_command(
+            state.clone(),
+            HubCommand::RoomBootstrap {
+                request_id: "req-bootstrap".to_string(),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            recv_response(&mut rx).await["error"]["code"],
+            "room_agent_required"
+        );
+
+        hub::handle_hub_command(
+            state,
+            HubCommand::RoomBootstrapRead {
+                request_id: "req-bootstrap-read".to_string(),
+                payload: BootstrapReadRequest {
+                    id: "guide".to_string(),
+                },
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            recv_response(&mut rx).await["error"]["code"],
+            "room_agent_required"
+        );
+    }
+
+    #[tokio::test]
+    async fn room_mode_dispatches_bootstrap_manifest_and_read() {
+        let workspace = unique_temp_dir("room-bootstrap-dispatch").join("workspace");
+        let guides = workspace.join("bootstrap").join("guides");
+        fs::create_dir_all(&guides).unwrap();
+        fs::write(
+            workspace.join("bootstrap").join("bootstrap.md"),
+            "---\nid: room\nkind: entrypoint\nname: Room\ndescription: Route guides\nschemaVersion: 1\n---\nstart\n",
+        )
+        .unwrap();
+        fs::write(
+            guides.join("guide.md"),
+            "---\nid: guide\nkind: guide\ntitle: Guide\nsummary: Use guide\n---\nbody\n",
+        )
+        .unwrap();
+        let (state, mut rx) = command_test_state(RunMode::Room, workspace);
+
+        hub::handle_hub_command(
+            state.clone(),
+            HubCommand::RoomBootstrap {
+                request_id: "req-bootstrap".to_string(),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        let response = recv_response(&mut rx).await;
+        assert_eq!(response["schemaVersion"], 1);
+        assert_eq!(response["entrypoint"]["id"], "room");
+        assert_eq!(response["guides"][0]["id"], "guide");
+
+        hub::handle_hub_command(
+            state,
+            HubCommand::RoomBootstrapRead {
+                request_id: "req-bootstrap-read".to_string(),
+                payload: BootstrapReadRequest {
+                    id: "guide".to_string(),
+                },
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        let response = recv_response(&mut rx).await;
+        assert_eq!(response["guide"]["id"], "guide");
+        assert_eq!(
+            response["resource"]["content"],
+            "---\nid: guide\nkind: guide\ntitle: Guide\nsummary: Use guide\n---\nbody\n"
+        );
     }
 
     #[tokio::test]
