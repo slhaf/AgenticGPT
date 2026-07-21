@@ -3,12 +3,13 @@
 ## Session: 2026-07-21
 
 ### Current Status
-- **Phase:** 3 - Protocol and public data model
+- **Phase:** 4 - Local Room bootstrap loader
+- **Phase status:** in_progress
 - **Started:** 2026-07-21
-- **Workflow stage:** implementation_ready
+- **Workflow stage:** implementation_active
 - **Current role:** implementer
 - **Implementation authorized:** yes
-- **Entry phase:** Phase 3
+- **Entry phase:** Phase 4
 - **Open blocking decisions:** none
 
 ### Actions Taken
@@ -121,3 +122,28 @@
 - **Open blocking decisions:** none.
 - **Product code changed during refinement:** no.
 - **Next invocation:** `$planning-with-files` without `$refine-implementation-plan`.
+
+### Implementation session: Phase 3 started
+
+- Recovered the active plan and confirmed the implementation-ready handoff.
+- Marked Phase 3 in progress; no product files have been modified yet.
+- User explicitly authorized a separate commit after each verified phase; this overrides the handoff's earlier no-automatic-commit note.
+
+### Phase 3 protocol checkpoint
+
+- Confirmed the protocol uses explicit serde command renames and camelCase field serialization.
+- Confirmed `SkillResource` cannot represent the frozen bootstrap encoding/truncation/line-accounting contract without changing an existing public type, so Phase 3 will add dedicated bootstrap wire types.
+
+### Phase 3 verification attempt
+
+- `cargo check -p agentic-gpt-protocol` passed using the repository target state.
+- Parallel `cargo test -p agentic-gpt-protocol` failed before compilation because the repository `target/` filesystem is read-only; the test command was changed to use a writable task-local target under `/tmp`.
+
+### Phase 3 completion
+
+- Added dedicated bootstrap protocol enums and camelCase response/request models, including line-aware truncation metadata and raw frontmatter retention.
+- Added serialized `room.bootstrap` and `room.bootstrap.read` `HubCommand` variants.
+- Added protocol tests for command names, enum spellings, optional truncation fields, camelCase fields, and response/request round trips.
+- Verification passed: `CARGO_TARGET_DIR=/tmp/agentic-gpt-room-bootstrap-target cargo test -p agentic-gpt-protocol` (8 tests plus doctests) and `cargo check -p agentic-gpt-protocol`.
+- `cargo fmt --all -- --check` initially found one line-wrap discrepancy in the new test; the wrap was corrected manually and the final format check passed.
+- A direct `cargo fmt --all` rewrite was blocked by the same read-only product filesystem; the one reported wrap was applied manually instead.

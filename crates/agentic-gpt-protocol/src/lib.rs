@@ -487,6 +487,101 @@ pub struct DiaryEntriesResponse {
     pub warnings: Vec<String>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BootstrapDocumentKind {
+    Entrypoint,
+    Guide,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BootstrapLoadPolicy {
+    Startup,
+    Contextual,
+    OnDemand,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BootstrapEncoding {
+    Utf8,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BootstrapTextResource {
+    pub path: String,
+    pub encoding: BootstrapEncoding,
+    pub content: String,
+    pub media_type: String,
+    pub size_bytes: u64,
+    pub returned_size_bytes: u64,
+    pub total_lines: u64,
+    pub returned_through_line: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub omitted_from_line: Option<u64>,
+    pub truncated: bool,
+    pub last_line_complete: bool,
+    pub sha256: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BootstrapEntrypoint {
+    pub id: String,
+    pub kind: BootstrapDocumentKind,
+    pub name: String,
+    pub description: String,
+    pub frontmatter: serde_json::Value,
+    pub resource: BootstrapTextResource,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BootstrapGuideSummary {
+    pub id: String,
+    pub kind: BootstrapDocumentKind,
+    pub title: String,
+    pub summary: String,
+    pub load_policy: BootstrapLoadPolicy,
+    pub priority: i32,
+    pub load_when: Vec<String>,
+    pub tool_bindings: Vec<String>,
+    pub tags: Vec<String>,
+    pub path: String,
+    pub size_bytes: u64,
+    pub total_lines: u64,
+    pub sha256: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BootstrapResponse {
+    pub schema_version: u32,
+    pub revision: String,
+    pub entrypoint: BootstrapEntrypoint,
+    pub guides: Vec<BootstrapGuideSummary>,
+    pub total_guides: usize,
+    pub returned_guides: usize,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BootstrapReadRequest {
+    pub id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BootstrapReadResponse {
+    pub guide: BootstrapGuideSummary,
+    pub frontmatter: serde_json::Value,
+    pub resource: BootstrapTextResource,
+    pub warnings: Vec<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SkillReadRequest {
@@ -1211,6 +1306,13 @@ pub enum HubCommand {
         request_id: String,
         payload: DiarySelectExactRequest,
     },
+    #[serde(rename = "room.bootstrap")]
+    RoomBootstrap { request_id: String },
+    #[serde(rename = "room.bootstrap.read")]
+    RoomBootstrapRead {
+        request_id: String,
+        payload: BootstrapReadRequest,
+    },
     #[serde(rename = "skills.list")]
     SkillsList { request_id: String },
     #[serde(rename = "skills.read")]
@@ -1463,6 +1565,155 @@ mod tmux_tests {
             serde_json::to_value(install).unwrap()["type"],
             "skills.install"
         );
+    }
+
+    #[test]
+    fn bootstrap_commands_and_enums_use_public_spellings() {
+        let bootstrap = HubCommand::RoomBootstrap {
+            request_id: "req-bootstrap".to_string(),
+        };
+        let bootstrap_value = serde_json::to_value(bootstrap).unwrap();
+        assert_eq!(bootstrap_value["type"], "room.bootstrap");
+        assert_eq!(bootstrap_value["requestId"], "req-bootstrap");
+
+        let read = HubCommand::RoomBootstrapRead {
+            request_id: "req-read".to_string(),
+            payload: BootstrapReadRequest {
+                id: "diary".to_string(),
+            },
+        };
+        let read_value = serde_json::to_value(read).unwrap();
+        assert_eq!(read_value["type"], "room.bootstrap.read");
+        assert_eq!(read_value["requestId"], "req-read");
+        assert_eq!(read_value["payload"]["id"], "diary");
+
+        assert_eq!(
+            serde_json::to_value(BootstrapDocumentKind::Entrypoint).unwrap(),
+            "entrypoint"
+        );
+        assert_eq!(
+            serde_json::to_value(BootstrapDocumentKind::Guide).unwrap(),
+            "guide"
+        );
+        assert_eq!(
+            serde_json::to_value(BootstrapLoadPolicy::OnDemand).unwrap(),
+            "on_demand"
+        );
+        assert_eq!(
+            serde_json::to_value(BootstrapEncoding::Utf8).unwrap(),
+            "utf8"
+        );
+    }
+
+    #[test]
+    fn bootstrap_resource_omits_only_absent_truncation_line() {
+        let resource = BootstrapTextResource {
+            path: "bootstrap.md".to_string(),
+            encoding: BootstrapEncoding::Utf8,
+            content: "---\nid: room\n---\n".to_string(),
+            media_type: "text/markdown".to_string(),
+            size_bytes: 18,
+            returned_size_bytes: 18,
+            total_lines: 3,
+            returned_through_line: 3,
+            omitted_from_line: None,
+            truncated: false,
+            last_line_complete: true,
+            sha256: "a".repeat(64),
+        };
+        let value = serde_json::to_value(resource).unwrap();
+        assert_eq!(value["mediaType"], "text/markdown");
+        assert_eq!(value["sizeBytes"], 18);
+        assert_eq!(value["returnedSizeBytes"], 18);
+        assert_eq!(value["totalLines"], 3);
+        assert_eq!(value["returnedThroughLine"], 3);
+        assert_eq!(value["truncated"], false);
+        assert_eq!(value["lastLineComplete"], true);
+        assert!(value.get("omittedFromLine").is_none());
+
+        let truncated: BootstrapTextResource = serde_json::from_value(serde_json::json!({
+            "path": "guides/diary.md",
+            "encoding": "utf8",
+            "content": "line 1\n",
+            "mediaType": "text/markdown",
+            "sizeBytes": 100,
+            "returnedSizeBytes": 7,
+            "totalLines": 20,
+            "returnedThroughLine": 1,
+            "omittedFromLine": 2,
+            "truncated": true,
+            "lastLineComplete": true,
+            "sha256": "b".repeat(64)
+        }))
+        .unwrap();
+        assert_eq!(truncated.omitted_from_line, Some(2));
+    }
+
+    #[test]
+    fn bootstrap_response_and_read_request_round_trip_with_camel_case_fields() {
+        let response = BootstrapResponse {
+            schema_version: 1,
+            revision: "r".repeat(64),
+            entrypoint: BootstrapEntrypoint {
+                id: "room".to_string(),
+                kind: BootstrapDocumentKind::Entrypoint,
+                name: "Room Bootstrap".to_string(),
+                description: "Route startup guides".to_string(),
+                frontmatter: serde_json::json!({"schemaVersion": 1, "future": true}),
+                resource: BootstrapTextResource {
+                    path: "bootstrap.md".to_string(),
+                    encoding: BootstrapEncoding::Utf8,
+                    content: "content\n".to_string(),
+                    media_type: "text/markdown".to_string(),
+                    size_bytes: 8,
+                    returned_size_bytes: 8,
+                    total_lines: 1,
+                    returned_through_line: 1,
+                    omitted_from_line: None,
+                    truncated: false,
+                    last_line_complete: true,
+                    sha256: "a".repeat(64),
+                },
+            },
+            guides: vec![BootstrapGuideSummary {
+                id: "diary".to_string(),
+                kind: BootstrapDocumentKind::Guide,
+                title: "Diary conventions".to_string(),
+                summary: "Keep continuity".to_string(),
+                load_policy: BootstrapLoadPolicy::Contextual,
+                priority: 80,
+                load_when: vec!["continued context".to_string()],
+                tool_bindings: vec!["room.diary.recent".to_string()],
+                tags: vec!["continuity".to_string()],
+                path: "guides/diary.md".to_string(),
+                size_bytes: 10,
+                total_lines: 2,
+                sha256: "d".repeat(64),
+            }],
+            total_guides: 1,
+            returned_guides: 1,
+            warnings: vec![],
+        };
+        let value = serde_json::to_value(&response).unwrap();
+        assert_eq!(value["schemaVersion"], 1);
+        assert_eq!(
+            value["entrypoint"]["resource"]["mediaType"],
+            "text/markdown"
+        );
+        assert_eq!(value["guides"][0]["loadPolicy"], "contextual");
+        assert_eq!(value["guides"][0]["toolBindings"][0], "room.diary.recent");
+        assert_eq!(value["totalGuides"], 1);
+        assert_eq!(value["returnedGuides"], 1);
+
+        let round_trip: BootstrapResponse = serde_json::from_value(value).unwrap();
+        assert_eq!(round_trip, response);
+
+        let request: BootstrapReadRequest = serde_json::from_value(serde_json::json!({
+            "id": "diary"
+        }))
+        .unwrap();
+        assert_eq!(request.id, "diary");
+        assert_eq!(serde_json::to_value(request).unwrap()["id"], "diary");
     }
 }
 

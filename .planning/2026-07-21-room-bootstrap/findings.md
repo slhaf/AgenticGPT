@@ -37,6 +37,13 @@ Plan scope: `.planning/2026-07-21-room-bootstrap`.
 
 ## Repository evidence: resource and routing conventions
 
+### Phase 3 protocol checkpoint
+
+- `HubCommand` is a serde-tagged enum with explicit public `#[serde(rename = ...)]` command names and camelCase fields; Room commands are grouped beside notebook/diary commands.
+- Existing `SkillResource` has a different encoding contract (`utf8 | base64`) and lacks truncation/line fields, so the frozen bootstrap contract requires a dedicated `BootstrapTextResource` and `BootstrapEncoding::Utf8` rather than reusing it directly.
+- Protocol tests are inline in `crates/agentic-gpt-protocol/src/lib.rs`; existing tests assert serialized `type`, `requestId`, payload fields, and omission of optional fields. Bootstrap compatibility tests should follow this pattern.
+- The protocol crate has only `chrono`, `serde`, and `serde_json` dependencies; the new model should remain dependency-free beyond those existing types.
+
 - `SkillResource` is a stable protocol object with `path`, `encoding`, `content`, optional `mediaType`, `sizeBytes`, and `sha256`; encoding is `utf8` or `base64`.
 - `skills.read` normalizes a package-relative path, rejects empty/absolute/parent/backslash paths, rejects symlinks at every component, requires a regular file, and caps a returned resource at 1 MiB.
 - Frontmatter parsing currently normalizes CRLF, recognizes a leading YAML block, converts an object to JSON, and reports malformed/non-object YAML through warnings rather than rejecting the skill package.
