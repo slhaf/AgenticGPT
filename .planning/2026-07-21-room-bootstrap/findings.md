@@ -331,3 +331,34 @@ Repository evidence rules out a Bootstrap regression:
 - Bootstrap changes to `main.rs` add only module registration and Bootstrap dispatch tests; they do not alter Diary configuration or shared test state.
 
 The appropriate future repair is test-only: parse `response.date` and pass that logical date to `select_exact`. The user explicitly deferred this unrelated cleanup, so it does not reopen the completed Bootstrap plan.
+
+
+## Post-delivery independent review: Phase 8 repair findings
+
+The completed implementation passed its declared focused suites, but an independent cross-surface review found three observable defects and two hardening gaps. These findings reopen implementation only; D-01 through D-13 remain unchanged.
+
+### R-01 — Apps tools are listed but not callable (blocking)
+
+`app_tool_descriptors()` returns all 43 registered MCP tools, including `room.bootstrap` and `room.bootstrap.read`, while the separately maintained `call_app_tool()` match accepts only 41 names. The two missing names are exactly the Bootstrap tools. ChatGPT Apps `/mcp` therefore advertises both tools through `tools/list` but returns `Unknown tool` when either is invoked through `tools/call`.
+
+The existing Hub tests checked descriptor presence, schemas, and annotations, plus one unrelated `agent.list` wire call. They did not execute either new tool through the actual Apps dispatcher. Phase 8 must add both dispatch arms and a structural list/call parity regression.
+
+### R-02 — Bootstrap MCP timeout codes collapse to Notebook (contract defect)
+
+Both Bootstrap MCP handlers call the generic `room_route_error_value()`. Its timeout branch is hard-coded to `room_notebook_timeout`, so MCP timeout responses violate the frozen operation-specific codes `room_bootstrap_timeout` and `room_bootstrap_read_timeout`. HTTP forwarding already supplies the correct operation-specific timeout codes; Phase 8 must restore MCP/Actions parity and test `isError: true`.
+
+### R-03 — Mixed-validity duplicate IDs can leave one guide active (contract defect)
+
+The loader currently performs full guide metadata validation before counting duplicate IDs. A candidate with a valid ID but invalid title/summary/optional metadata is discarded before duplicate grouping, allowing an otherwise-valid same-ID guide to survive. D-10 states that every colliding candidate is excluded because identity is ambiguous; validity of non-ID fields must not resolve that ambiguity. Phase 8 must separate candidate-ID extraction from full metadata acceptance and add a mixed-validity fixture.
+
+### R-04 — Individual directory-entry errors are silently discarded (hardening gap)
+
+`read_dir(...).filter_map(|entry| entry.ok())` silently drops an individual iterator error. The public warning taxonomy already includes `guide_dir_entry_unreadable`; the scanner should retain readable entries and emit that warning for failures rather than erasing evidence. Because operating systems make this error difficult to manufacture reliably, a helper-level deterministic regression is acceptable.
+
+### R-05 — Per-file buffering is not bounded (contract hardening gap)
+
+Phase 7 stopped retaining every guide body simultaneously, but the loader still uses `fs::read` for the entrypoint and each guide. One arbitrarily large authored file can therefore produce an equally large allocation before the 64/256 KiB response limit is applied. The frozen handoff required streaming or otherwise bounded scanning/hashing memory while preserving full-file SHA-256, line accounting, validation, and truncation behavior. Phase 8 must implement bounded per-file processing without introducing a package-size rejection or changing public outputs.
+
+### Independent verification baseline
+
+Before repair, the reviewer reran formatting, protocol 8/8, bootstrap focused 10/10, Hub 53/53, and workspace check successfully. The workspace was clean. This confirms that R-01 through R-05 are test-matrix and implementation-contract gaps rather than general compilation instability.

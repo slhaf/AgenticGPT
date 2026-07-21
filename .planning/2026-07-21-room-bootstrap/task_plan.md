@@ -6,17 +6,17 @@ Implement a Room Agent-scoped V1 bootstrap package that exposes a concise sessio
 
 ## Current Phase
 
-Phase 7 - Delivery
+Phase 8 - Repair and regression hardening
 
 ## Workflow State
 
-- **Stage:** delivery_complete
+- **Stage:** implementation_active
 - **Current role:** implementer
 - **Implementation authorized:** yes
-- **Entry phase:** Phase 7
+- **Entry phase:** Phase 8
 - **Open blocking decisions:** 0
-- **Design checkpoint:** D-01 through D-13 audited against implementation and public surfaces
-- **Next action:** deliver final implementation summary
+- **Design checkpoint:** D-01 through D-13 remain frozen; independent review findings R-01 through R-05 require implementation repair
+- **Next action:** implement and verify Phase 8, then repeat delivery review
 
 ## Scope and constraints
 
@@ -469,6 +469,55 @@ cargo test --workspace
 - [x] Deliver changed-file summary, public behavior, warnings/errors, and verification status.
 - **Status:** complete
 
+### Phase 8: Repair and regression hardening
+
+**Objective:** correct post-delivery integration and contract defects found by independent review, then add regressions that prevent the same classes of omission.
+
+**Prerequisites:** Phases 3-7 complete. D-01 through D-13 remain frozen; this phase repairs implementation drift and introduces no new public behavior.
+
+**Files/surfaces:**
+
+- `crates/agentic-gpt-hub/src/mcp_server.rs`
+- `crates/agentic-gpt/src/bootstrap.rs`
+- Focused tests in those modules.
+- Planning files for exact findings and verification evidence.
+- Protocol/OpenAPI/docs only if repair reveals an actual contract mismatch; do not broaden the feature.
+
+**Ordered work:**
+
+1. Add `room.bootstrap` and `room.bootstrap.read` to the hand-written ChatGPT Apps `/mcp` `tools/call` dispatcher so every Bootstrap tool returned by `tools/list` is callable through that JSON-RPC endpoint.
+2. Preserve operation-specific MCP timeout codes: `room_bootstrap_timeout` for `room.bootstrap` and `room_bootstrap_read_timeout` for `room.bootstrap.read`; neither operation may fall back to `room_notebook_timeout`.
+3. Enforce D-10 duplicate semantics across every colliding candidate with an extractable valid guide ID, even when another candidate with that ID later fails non-ID metadata validation. No otherwise-valid guide may survive an ambiguous duplicate ID.
+4. Replace silent dropping of individual `read_dir` entry errors with deterministic `guide_dir_entry_unreadable` warnings while continuing to process readable entries.
+5. Bound per-file scanning/hashing memory. Do not load an arbitrarily large entrypoint or guide wholly into memory merely to hash, count lines, validate frontmatter, or return a bounded prefix. Preserve full-file SHA-256/revision, current UTF-8/frontmatter semantics, and one observed byte stream per file per call.
+
+**Required regression tests:**
+
+- Exercise the real Apps `/mcp` `tools/call` path for both `room.bootstrap` and `room.bootstrap.read`; descriptor/list assertions alone are insufficient.
+- Prove that every registered MCP tool name is accepted by the hand-written Apps dispatcher, or remove the separately maintained dispatch-name set so list/call drift is structurally impossible.
+- Exercise Bootstrap MCP timeout conversion and assert the operation-specific code plus `isError: true` for each tool.
+- Add a mixed-validity duplicate fixture: one otherwise-valid guide and one same-ID candidate with invalid non-ID metadata must exclude both deterministically.
+- Cover directory-entry error warning production through a deterministic helper-level test when the platform cannot reliably manufacture a failing `ReadDir` entry.
+- Add practical oversized-file fixtures proving bounded returned content and correct full-file hash/line metadata. Do not use flaky process-RSS assertions.
+- Keep existing protocol, loader, Hub, HTTP/OpenAPI, annotation, and error-status regressions green.
+
+**Verification:**
+
+```bash
+cargo fmt --all -- --check
+CARGO_TARGET_DIR=/tmp/agentic-gpt-room-bootstrap-target cargo test -p agentic-gpt bootstrap
+CARGO_TARGET_DIR=/tmp/agentic-gpt-room-bootstrap-target cargo test -p agentic-gpt-hub
+CARGO_TARGET_DIR=/tmp/agentic-gpt-room-bootstrap-target cargo test -p agentic-gpt-protocol
+CARGO_TARGET_DIR=/tmp/agentic-gpt-room-bootstrap-target cargo check --workspace
+CARGO_TARGET_DIR=/tmp/agentic-gpt-room-bootstrap-target cargo test --workspace
+```
+
+The known deferred Diary boundary-sensitive test may still fail only during its documented pre-05:00 window. Do not modify Diary code or tests in this phase.
+
+**Completion boundary:** both Bootstrap tools are callable through the actual Apps JSON-RPC path; MCP timeout parity is restored; D-10 duplicate behavior is enforced; guide scanning neither silently loses directory-entry failures nor performs unbounded full-file buffering; focused suites pass; and the full workspace outcome is recorded honestly.
+
+- **Status:** pending
+
 ## Key Questions
 
 | ID | Question | Blocking | Status | Resolution |
@@ -503,17 +552,19 @@ Detailed evidence and rationale remain canonical in `findings.md`.
 
 ## Acceptance criteria
 
-- [x] `room.bootstrap` and `room.bootstrap.read` work only through the active Room Agent and expose no `agentId` field.
+- [ ] `room.bootstrap` and `room.bootstrap.read` work through both native MCP and the Apps `/mcp` JSON-RPC path, only through the active Room Agent, and expose no `agentId` field.
 - [x] The protocol and OpenAPI fields exactly match the frozen shapes and enum spellings.
 - [x] A valid entrypoint with no guide directory succeeds with an empty manifest.
 - [x] Generic frontmatter drives identity, display, load guidance, priority, tags, and tool bindings; no capability family is hard-coded.
-- [x] Missing/invalid entrypoint errors, invalid-guide warnings, duplicate exclusion, UTF-8, symlink, flat-path, and containment behavior are deterministic.
+- [ ] Missing/invalid entrypoint errors, invalid-guide warnings, mixed-validity duplicate exclusion, UTF-8, symlink, flat-path, containment, and directory-entry failure behavior are deterministic.
 - [x] Entry/guide content truncation reports complete/full sizes, line position, completeness, and full-file hash without presenting prefixes as complete.
 - [x] Manifest ordering and 64-item truncation are deterministic; omitted valid guides remain readable and affect revision.
 - [x] Revision matches the canonical full-file algorithm and excludes invalid guides.
 - [x] Both MCP tools are read-only/non-destructive/non-open-world and the Actions operations are non-consequential.
-- [x] HTTP status mapping and MCP native error behavior match the frozen taxonomy.
+- [ ] HTTP status mapping and MCP native error behavior, including operation-specific Bootstrap timeouts, match the frozen taxonomy.
 - [x] Reads create no state, require no restart/reload, and are retry-safe.
+- [ ] Per-file scanning/hashing memory is bounded independently of authored file size while preserving full-file hash and line metadata.
+- [ ] Registered MCP tool names and Apps `tools/call` dispatch cannot drift silently.
 - [x] Protocol, local loader, Hub/MCP/OpenAPI, documentation, formatting, workspace check, and focused crate tests pass; the known unrelated Diary timing failure in the full workspace test is documented.
 - [x] Documentation includes authoring examples and explains tool schema versus usage-guide responsibility.
 
@@ -546,17 +597,17 @@ The Implementer may not change frontmatter fields/defaults, directory rules, pub
 
 ## Implementation Handoff
 
-- **Plan maturity:** delivery_complete
+- **Plan maturity:** implementation_active
 - **Design phase:** complete
 - **Implementation authorized:** yes
-- **Entry phase:** Phase 7
+- **Entry phase:** Phase 8
 - **Frozen decisions:** D-01 through D-13
 - **Open blocking decisions:** none
 - **Implementation discretion:** see `Implementation Discretion`
 - **Verification convention:** focused crate tests after each phase, then CI-equivalent workspace format/check/test in Phase 6
-- **Commit convention:** user explicitly requested one focused commit after each verified phase; Phases 3 through 6 are committed and Phase 7 will close with its delivery commit
-- **Design checkpoint:** D-01 through D-13 audited
-- **Next invocation:** none; deliver the completed implementation
+- **Commit convention:** Phases 3 through 7 are committed; after Phase 8 verification, create one focused repair commit and leave the workspace clean
+- **Design checkpoint:** D-01 through D-13 frozen; R-01 through R-05 accepted for repair
+- **Next invocation:** implement Phase 8 under `$planning-with-files`, update all planning files, verify, and create one focused repair commit
 
 ## Deferred repository follow-up
 

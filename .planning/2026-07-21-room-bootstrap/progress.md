@@ -214,3 +214,15 @@
 - Classified the failure as a pre-existing, boundary-sensitive test defect rather than a Bootstrap regression.
 - Recorded the future fix: select by parsed `response.date`, then rerun the workspace suite.
 - **User decision:** defer the Diary test cleanup; do not modify product/test code or reopen the completed Room Bootstrap delivery now.
+
+
+### Post-delivery independent implementation review
+
+- Re-ran the declared clean baseline: formatting passed; protocol 8/8 passed; focused Bootstrap 10/10 passed; Hub 53/53 passed; workspace check passed; worktree remained clean.
+- Compared all 43 registered MCP tool names with the hand-written Apps `call_app_tool()` dispatcher and found exactly two missing names: `room.bootstrap` and `room.bootstrap.read`. This makes both tools visible but uncallable through Apps `/mcp`.
+- Confirmed both Bootstrap MCP handlers map `RoomRouteError::Timeout` through a helper hard-coded to `room_notebook_timeout`, violating the frozen operation-specific timeout codes.
+- Confirmed duplicate grouping occurs only after full metadata validation, so an invalid same-ID candidate can be removed early and allow another colliding guide to survive.
+- Confirmed individual `ReadDir` entry errors are dropped by `filter_map` without `guide_dir_entry_unreadable` evidence.
+- Confirmed the loader avoids aggregate guide-body retention but still allocates each complete file through `fs::read`, which does not satisfy bounded per-file scanning for arbitrarily large content.
+- **User decision:** reopen implementation as Phase 8 and repair all five findings, with real Apps calls, timeout, mixed-duplicate, directory-entry, oversized-file, and dispatch-parity regressions.
+- No product code was changed during this review/planning update.
