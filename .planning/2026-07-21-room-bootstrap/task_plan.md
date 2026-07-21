@@ -6,17 +6,17 @@ Implement a Room Agent-scoped V1 bootstrap package that exposes a concise sessio
 
 ## Current Phase
 
-Phase 5 - Hub routing, MCP, and GPT Actions/OpenAPI
+Phase 6 - Documentation, authoring examples, and integration verification
 
 ## Workflow State
 
 - **Stage:** implementation_active
 - **Current role:** implementer
 - **Implementation authorized:** yes
-- **Entry phase:** Phase 5
+- **Entry phase:** Phase 6
 - **Open blocking decisions:** 0
 - **Design checkpoint:** not set
-- **Next action:** implement Phase 5 under `$planning-with-files` without `$refine-implementation-plan`
+- **Next action:** implement Phase 6 under `$planning-with-files` without `$refine-implementation-plan`
 
 ## Scope and constraints
 
@@ -424,7 +424,7 @@ cargo check -p agentic-gpt-hub
 
 **Completion boundary:** MCP and Actions expose matching Room-only behavior and all exhaustive command helpers compile/test.
 
-- **Status:** in_progress
+- **Status:** complete
 
 ### Phase 6: Documentation, authoring examples, and integration verification
 
@@ -456,7 +456,7 @@ cargo test --workspace
 
 **Completion boundary:** docs match the wire contract and CI-equivalent commands pass.
 
-- **Status:** pending
+- **Status:** in_progress
 
 ### Phase 7: Delivery
 
@@ -548,7 +548,7 @@ The Implementer may not change frontmatter fields/defaults, directory rules, pub
 - **Plan maturity:** implementation_ready
 - **Design phase:** complete
 - **Implementation authorized:** yes
-- **Entry phase:** Phase 5
+- **Entry phase:** Phase 6
 - **Frozen decisions:** D-01 through D-13
 - **Open blocking decisions:** none
 - **Implementation discretion:** see `Implementation Discretion`
@@ -567,3 +567,4 @@ The Implementer may not change frontmatter fields/defaults, directory rules, pub
 | `cargo fmt --all` could not rewrite the protocol file on the read-only repository filesystem | 1 | Applied the single rustfmt line-wrap manually, then re-ran format checking |
 | First bootstrap test run exposed entrypoint validation details escaping as public error codes and a symlink fixture that rewrote rather than replaced its link | 1 | Map all entrypoint metadata failures to `bootstrap_invalid`; remove the link before creating the valid fixture |
 | A follow-up bootstrap test failed because the fixture reset cleanup was inserted before the entrypoint existed | 1 | Removed that premature cleanup; retain removal only after the symlink is created |
+| First Hub compile found duplicate derive/serde attributes on `BootstrapReadArgs` | 1 | Removed the duplicated attribute pair; keep one `JsonSchema` derive and camelCase serde attribute |

@@ -3,13 +3,13 @@
 ## Session: 2026-07-21
 
 ### Current Status
-- **Phase:** 5 - Hub routing, MCP, and GPT Actions/OpenAPI
+- **Phase:** 6 - Documentation, authoring examples, and integration verification
 - **Phase status:** in_progress
 - **Started:** 2026-07-21
 - **Workflow stage:** implementation_active
 - **Current role:** implementer
 - **Implementation authorized:** yes
-- **Entry phase:** Phase 5
+- **Entry phase:** Phase 6
 - **Open blocking decisions:** none
 
 ### Actions Taken
@@ -164,3 +164,16 @@
 
 - Verification passed: `CARGO_TARGET_DIR=/tmp/agentic-gpt-room-bootstrap-target cargo test -p agentic-gpt bootstrap` (10 passed), `CARGO_TARGET_DIR=/tmp/agentic-gpt-room-bootstrap-target cargo test -p agentic-gpt` (94 passed), `CARGO_TARGET_DIR=/tmp/agentic-gpt-room-bootstrap-target cargo check -p agentic-gpt`, and `cargo fmt --all -- --check`.
 - Phase 4 leaves no workspace state/config artifacts; all test fixtures use temporary directories.
+
+### Phase 5 surface inspection
+
+- Confirmed exhaustive Hub command helpers, shared Room forwarding/error mapping, generated MCP tool descriptor annotations, and manual OpenAPI Room Skills conventions.
+- Phase 5 changes must keep bootstrap read operations outside mutation/destructive/open-world lists and must add explicit HTTP 404/500 mappings for the frozen bootstrap error taxonomy.
+- The first Hub compile caught a duplicated derive pair on the new MCP read args; it was removed before continuing.
+
+### Phase 5 completion
+
+- Added Room HTTP routes `POST /v1/room/bootstrap` and `POST /v1/room/bootstrap/read`, active-Room forwarding, operation-specific timeout codes, and frozen bootstrap HTTP error statuses.
+- Added MCP tools `room.bootstrap` and `room.bootstrap.read`, with no `agentId`, read-only/non-destructive/non-open-world annotations, and a concise startup instruction.
+- Added OpenAPI paths, operation IDs, non-consequential annotations, request/response schemas, enum spellings, truncation fields, and hash patterns.
+- Verification passed: `CARGO_TARGET_DIR=/tmp/agentic-gpt-room-bootstrap-target cargo test -p agentic-gpt-hub bootstrap` (3 passed), `CARGO_TARGET_DIR=/tmp/agentic-gpt-room-bootstrap-target cargo test -p agentic-gpt-hub` (53 passed), `CARGO_TARGET_DIR=/tmp/agentic-gpt-room-bootstrap-target cargo check -p agentic-gpt-hub`, and `cargo fmt --all -- --check`.

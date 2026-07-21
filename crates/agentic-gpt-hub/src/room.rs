@@ -1,9 +1,9 @@
 use agentic_gpt_protocol::{
-    AgentRole, HubCommand, NotebookAppendRequest, NotebookCurrentRequest, NotebookRecentRequest,
-    NotebookRemoveRequest, NotebookSearchRequest, NotebookSelectExactRequest,
-    NotebookUpdateRequest, SkillActivationRequest, SkillInstallCancelRequest,
-    SkillInstallGetRequest, SkillInstallRequest, SkillReadRequest, SkillRunRequest,
-    SkillSearchRequest,
+    AgentRole, BootstrapReadRequest, HubCommand, NotebookAppendRequest, NotebookCurrentRequest,
+    NotebookRecentRequest, NotebookRemoveRequest, NotebookSearchRequest,
+    NotebookSelectExactRequest, NotebookUpdateRequest, SkillActivationRequest,
+    SkillInstallCancelRequest, SkillInstallGetRequest, SkillInstallRequest, SkillReadRequest,
+    SkillRunRequest, SkillSearchRequest,
 };
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
@@ -157,6 +157,35 @@ pub(crate) async fn skills_list(State(state): State<HubState>, headers: HeaderMa
             request_id: random_id("req"),
         },
         "skills_list_timeout",
+    )
+    .await
+}
+
+pub(crate) async fn room_bootstrap(State(state): State<HubState>, headers: HeaderMap) -> Response {
+    forward_room_command(
+        state,
+        headers,
+        HubCommand::RoomBootstrap {
+            request_id: random_id("req"),
+        },
+        "room_bootstrap_timeout",
+    )
+    .await
+}
+
+pub(crate) async fn room_bootstrap_read(
+    State(state): State<HubState>,
+    headers: HeaderMap,
+    Json(payload): Json<BootstrapReadRequest>,
+) -> Response {
+    forward_room_command(
+        state,
+        headers,
+        HubCommand::RoomBootstrapRead {
+            request_id: random_id("req"),
+            payload,
+        },
+        "room_bootstrap_read_timeout",
     )
     .await
 }
@@ -349,9 +378,13 @@ fn room_value_response(value: Value) -> Response {
     };
     let status = match code {
         "target_exists" | "idempotency_conflict" | "room_state_conflict" => StatusCode::CONFLICT,
-        "not_found" | "skill_not_found" | "install_not_found" | "room_not_active" => {
-            StatusCode::NOT_FOUND
-        }
+        "not_found"
+        | "skill_not_found"
+        | "install_not_found"
+        | "bootstrap_not_found"
+        | "guide_not_found"
+        | "room_not_active" => StatusCode::NOT_FOUND,
+        "bootstrap_read_failed" => StatusCode::INTERNAL_SERVER_ERROR,
         _ => StatusCode::BAD_REQUEST,
     };
     (status, Json(value)).into_response()
@@ -453,7 +486,7 @@ mod tests {
     use crate::db::init_db;
     use crate::state::{AgentConnection, AgentTransport, OutboundAgentMessage};
     use crate::{HubConfig, RemoteConfirmationConfig};
-    use agentic_gpt_protocol::{HubCommand, HubCommandEnvelope};
+    use agentic_gpt_protocol::{BootstrapReadRequest, HubCommand, HubCommandEnvelope};
     use chrono::Utc;
     use rusqlite::Connection;
     use serde_json::json;
@@ -526,6 +559,38 @@ mod tests {
         serde_json::from_str::<HubCommandEnvelope>(text)
             .unwrap()
             .command
+    }
+
+    #[test]
+    fn bootstrap_error_codes_map_to_frozen_http_statuses() {
+        assert_eq!(
+            room_value_response(json!({
+                "error": { "code": "bootstrap_not_found", "message": "missing" }
+            }))
+            .status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            room_value_response(json!({
+                "error": { "code": "guide_not_found", "message": "missing" }
+            }))
+            .status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            room_value_response(json!({
+                "error": { "code": "bootstrap_invalid", "message": "invalid" }
+            }))
+            .status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            room_value_response(json!({
+                "error": { "code": "bootstrap_read_failed", "message": "failed" }
+            }))
+            .status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 
     async fn replace_connection(
@@ -736,6 +801,65 @@ mod tests {
             .unwrap();
         let value = task.await.unwrap();
         assert_eq!(value["current"], Value::Null);
+    }
+
+    #[tokio::test]
+    async fn bootstrap_room_api_routes_to_active_room_connection() {
+        let state = test_state();
+        let mut rx = insert_connection(&state, "room", "conn1", AgentRole::Room).await;
+        register_connection_role(&state, "room", "conn1", AgentRole::Room)
+            .await
+            .unwrap();
+        let request_state = state.clone();
+        let task = tokio::spawn(async move {
+            request_active_room(
+                &request_state,
+                HubCommand::RoomBootstrap {
+                    request_id: "req-bootstrap".to_string(),
+                },
+                5,
+            )
+            .await
+            .unwrap()
+        });
+        let OutboundAgentMessage::Text(text) = rx.recv().await.unwrap() else {
+            panic!("expected text command");
+        };
+        let command = command_from_envelope(&text);
+        let request_id = command_request_id(&command).to_string();
+        assert!(matches!(command, HubCommand::RoomBootstrap { .. }));
+        let sender = state.pending.lock().await.remove(&request_id).unwrap();
+        sender
+            .send(json!({ "schemaVersion": 1, "guides": [], "warnings": [] }))
+            .unwrap();
+        assert_eq!(task.await.unwrap()["schemaVersion"], 1);
+
+        let request_state = state.clone();
+        let task = tokio::spawn(async move {
+            request_active_room(
+                &request_state,
+                HubCommand::RoomBootstrapRead {
+                    request_id: "req-bootstrap-read".to_string(),
+                    payload: BootstrapReadRequest {
+                        id: "diary".to_string(),
+                    },
+                },
+                5,
+            )
+            .await
+            .unwrap()
+        });
+        let OutboundAgentMessage::Text(text) = rx.recv().await.unwrap() else {
+            panic!("expected text command");
+        };
+        let command = command_from_envelope(&text);
+        let request_id = command_request_id(&command).to_string();
+        assert!(matches!(command, HubCommand::RoomBootstrapRead { .. }));
+        let sender = state.pending.lock().await.remove(&request_id).unwrap();
+        sender
+            .send(json!({ "guide": { "id": "diary" }, "warnings": [] }))
+            .unwrap();
+        assert_eq!(task.await.unwrap()["guide"]["id"], "diary");
     }
 
     #[tokio::test]

@@ -51,6 +51,14 @@ Plan scope: `.planning/2026-07-21-room-bootstrap`.
 - Bootstrap entrypoint metadata errors must be collapsed to the frozen public `bootstrap_invalid` code at the loader boundary; internal validation details remain diagnostics only for optional guide warnings.
 - The loader keeps valid guide bytes in a per-call in-memory index so the manifest and ID-based read share the same observed package revision; no workspace state is created or mutated.
 
+### Phase 5 Hub surface checkpoint
+
+- Hub `agents::command_request_id` and `set_command_request_id`, plus `runs::command_type`, are exhaustive matches over `HubCommand`; both must add the two bootstrap variants for replay/idempotency and dispatch compilation.
+- Room HTTP APIs use `request_active_room` and a shared `forward_room_command`; adding no-body `room_bootstrap` and JSON-body `room_bootstrap_read` preserves active-Room routing and timeout behavior.
+- `room_value_response` currently maps a small set of not-found/conflict codes and defaults other agent errors to 400. Bootstrap must add `bootstrap_not_found`/`guide_not_found` as 404 and `bootstrap_read_failed` as 500.
+- MCP tool annotations are centrally derived from tool names. New bootstrap tools are read-only by default if they are absent from mutation, destructive, and open-world match sets; their schemas should contain no `agentId`.
+- GPT Actions/OpenAPI is manually maintained and has regression tests that assert Room routes, operation IDs, schemas, and no `agentId`; bootstrap needs explicit paths and component schemas rather than generated output.
+
 - `SkillResource` is a stable protocol object with `path`, `encoding`, `content`, optional `mediaType`, `sizeBytes`, and `sha256`; encoding is `utf8` or `base64`.
 - `skills.read` normalizes a package-relative path, rejects empty/absolute/parent/backslash paths, rejects symlinks at every component, requires a regular file, and caps a returned resource at 1 MiB.
 - Frontmatter parsing currently normalizes CRLF, recognizes a leading YAML block, converts an object to JSON, and reports malformed/non-object YAML through warnings rather than rejecting the skill package.

@@ -1,13 +1,13 @@
 use agentic_gpt_protocol::{
-    BatchExecRequest, DiaryAppendRequest, DiaryRecentRequest, DiarySelectExactRequest, ExecElement,
-    ExecRequest, HubCommand, McpCallToolRequest, McpListToolsRequest, NotebookAppendRequest,
-    NotebookCurrentRequest, NotebookRecentRequest, NotebookRemoveRequest, NotebookSearchRequest,
-    NotebookSelectExactRequest, NotebookUpdateRequest, NotificationAction, PassageSignificance,
-    SessionInfo, SkillActivationRequest, SkillInstallCancelRequest, SkillInstallFile,
-    SkillInstallGetRequest, SkillInstallRequest, SkillInstallSource, SkillReadRequest,
-    SkillRunRequest, SkillSearchRequest, TmuxCapturePaneRequest, TmuxCloseSessionRequest,
-    TmuxCreateSessionRequest, TmuxExecRequest, TmuxListPanesRequest, TmuxPasteTextRequest,
-    UserNotifySendRequest,
+    BatchExecRequest, BootstrapReadRequest, DiaryAppendRequest, DiaryRecentRequest,
+    DiarySelectExactRequest, ExecElement, ExecRequest, HubCommand, McpCallToolRequest,
+    McpListToolsRequest, NotebookAppendRequest, NotebookCurrentRequest, NotebookRecentRequest,
+    NotebookRemoveRequest, NotebookSearchRequest, NotebookSelectExactRequest,
+    NotebookUpdateRequest, NotificationAction, PassageSignificance, SessionInfo,
+    SkillActivationRequest, SkillInstallCancelRequest, SkillInstallFile, SkillInstallGetRequest,
+    SkillInstallRequest, SkillInstallSource, SkillReadRequest, SkillRunRequest, SkillSearchRequest,
+    TmuxCapturePaneRequest, TmuxCloseSessionRequest, TmuxCreateSessionRequest, TmuxExecRequest,
+    TmuxListPanesRequest, TmuxPasteTextRequest, UserNotifySendRequest,
 };
 use axum::extract::{Request, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -36,7 +36,7 @@ use crate::state::HubState;
 use crate::utils::random_id;
 use crate::{default_config_summary, MAX_WAIT_SECONDS, REQUEST_TIMEOUT_SECS};
 
-const MCP_INSTRUCTIONS: &str = "Agentic GPT Hub provides three execution layers. Use process.exec for short, one-shot inspection, detection, and deterministic tasks where an exit code is required. Use session.start for long-running or background managed processes whose lifecycle and output should be observed through session tools. Use tmux as the persistent shared workspace for stateful development, iterative debugging, TUIs, and user-agent handoff. For tmux work, discover the workspace with tmux.listSessions and tmux.listPanes, inspect it with tmux.capturePane, then use tmux.exec for shell panes or tmux.pasteText for non-shell panes. tmux.exec confirms submission to the interactive shell and returns a bounded post-submit pane snapshot; it is still not proof of command completion, so use process.exec when a deterministic exit status is required. Room skills are managed only by the active Room Agent: use skills.install for asynchronous GitHub/HTTPS/inline installation, then skills.install.get with waitSeconds (default 5) and pollAfterMs, and skills.install.cancel when needed. Use skills.read with an optional package-relative path for bounded resources. Use skills.run for active installed scripts; it returns terminal output inline when it completes within waitSeconds (default 5), otherwise follow the returned sessionId with session.inspect/session.wait/session.kill. Commands remain subject to Agentic local policy, path policy, confirmation, and audit.";
+const MCP_INSTRUCTIONS: &str = "Agentic GPT Hub provides three execution layers. Use process.exec for short, one-shot inspection, detection, and deterministic tasks where an exit code is required. Use session.start for long-running or background managed processes whose lifecycle and output should be observed through session tools. Use tmux as the persistent shared workspace for stateful development, iterative debugging, TUIs, and user-agent handoff. For tmux work, discover the workspace with tmux.listSessions and tmux.listPanes, inspect it with tmux.capturePane, then use tmux.exec for shell panes or tmux.pasteText for non-shell panes. tmux.exec confirms submission to the interactive shell and returns a bounded post-submit pane snapshot; it is still not proof of command completion, so use process.exec when a deterministic exit status is required. At Room session start, call room.bootstrap, then call room.bootstrap.read for relevant guide ids listed in its manifest. Room skills are managed only by the active Room Agent: use skills.install for asynchronous GitHub/HTTPS/inline installation, then skills.install.get with waitSeconds (default 5) and pollAfterMs, and skills.install.cancel when needed. Use skills.read with an optional package-relative path for bounded resources. Use skills.run for active installed scripts; it returns terminal output inline when it completes within waitSeconds (default 5), otherwise follow the returned sessionId with session.inspect/session.wait/session.kill. Commands remain subject to Agentic local policy, path policy, confirmation, and audit.";
 
 #[derive(Clone)]
 pub(crate) struct AgenticMcpServer {
@@ -1334,6 +1334,44 @@ impl AgenticMcpServer {
     }
 
     #[tool(
+        name = "room.bootstrap",
+        description = "Load the active Room Agent session bootstrap entrypoint and deterministic guide manifest. Call this at Room session start; it takes no agentId."
+    )]
+    async fn room_bootstrap(&self) -> Result<CallToolResult, ErrorData> {
+        let value = request_active_room(
+            &self.state,
+            HubCommand::RoomBootstrap {
+                request_id: random_id("req"),
+            },
+            REQUEST_TIMEOUT_SECS,
+        )
+        .await
+        .unwrap_or_else(room_route_error_value);
+        Ok(result_from_value(value))
+    }
+
+    #[tool(
+        name = "room.bootstrap.read",
+        description = "Read one valid bootstrap guide by id from the active Room Agent workspace, including typed metadata, raw frontmatter, and bounded Markdown content. No agentId is used."
+    )]
+    async fn room_bootstrap_read(
+        &self,
+        params: Parameters<BootstrapReadArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let value = request_active_room(
+            &self.state,
+            HubCommand::RoomBootstrapRead {
+                request_id: random_id("req"),
+                payload: BootstrapReadRequest { id: params.0.id },
+            },
+            REQUEST_TIMEOUT_SECS,
+        )
+        .await
+        .unwrap_or_else(room_route_error_value);
+        Ok(result_from_value(value))
+    }
+
+    #[tool(
         name = "skills.list",
         description = "List valid skills in the active Room Agent workspace. Scans workspace skills/*/SKILL.md and marks active skills. No agentId is used."
     )]
@@ -2018,6 +2056,13 @@ struct RoomDiarySelectExactArgs {
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
+struct BootstrapReadArgs {
+    #[schemars(description = "Guide id returned by room.bootstrap.")]
+    id: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
 struct SkillReadArgs {
     #[schemars(description = "Skill id, matching one workspace skills/ directory name.")]
     id: String,
@@ -2314,6 +2359,8 @@ mod tests {
             "room.notebook.search",
             "room.diary.recent",
             "room.diary.selectExact",
+            "room.bootstrap",
+            "room.bootstrap.read",
             "skills.list",
             "skills.read",
             "skills.search",
@@ -2356,6 +2403,8 @@ mod tests {
             .collect::<Vec<_>>();
         names.sort_unstable();
         for name in [
+            "room.bootstrap",
+            "room.bootstrap.read",
             "skills.install",
             "skills.install.get",
             "skills.install.cancel",
@@ -2374,6 +2423,16 @@ mod tests {
             .find(|tool| tool.get("name").and_then(Value::as_str) == Some("skills.install.get"))
             .unwrap();
         assert_eq!(get["annotations"]["readOnlyHint"], true);
+
+        for name in ["room.bootstrap", "room.bootstrap.read"] {
+            let tool = tools
+                .iter()
+                .find(|tool| tool.get("name").and_then(Value::as_str) == Some(name))
+                .unwrap_or_else(|| panic!("missing MCP tool {name}"));
+            assert_eq!(tool["annotations"]["readOnlyHint"], true);
+            assert_eq!(tool["annotations"]["destructiveHint"], false);
+            assert_eq!(tool["annotations"]["openWorldHint"], false);
+        }
     }
 
     #[test]
@@ -2405,6 +2464,7 @@ mod tests {
             serde_json::to_string(&rmcp::schemars::schema_for!(RoomDiaryAppendArgs)).unwrap(),
             serde_json::to_string(&rmcp::schemars::schema_for!(RoomDiaryRecentArgs)).unwrap(),
             serde_json::to_string(&rmcp::schemars::schema_for!(RoomDiarySelectExactArgs)).unwrap(),
+            serde_json::to_string(&rmcp::schemars::schema_for!(BootstrapReadArgs)).unwrap(),
             serde_json::to_string(&rmcp::schemars::schema_for!(SkillReadArgs)).unwrap(),
             serde_json::to_string(&rmcp::schemars::schema_for!(SkillSearchArgs)).unwrap(),
             serde_json::to_string(&rmcp::schemars::schema_for!(SkillActivationArgs)).unwrap(),

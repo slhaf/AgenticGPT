@@ -669,6 +669,8 @@ pub(crate) fn command_request_id(command: &HubCommand) -> &str {
         | HubCommand::RoomDiaryAppend { request_id, .. }
         | HubCommand::RoomDiaryRecent { request_id, .. }
         | HubCommand::RoomDiarySelectExact { request_id, .. }
+        | HubCommand::RoomBootstrap { request_id }
+        | HubCommand::RoomBootstrapRead { request_id, .. }
         | HubCommand::SkillsList { request_id }
         | HubCommand::SkillsRead { request_id, .. }
         | HubCommand::SkillsSearch { request_id, .. }
@@ -712,6 +714,8 @@ pub(crate) fn set_command_request_id(command: &mut HubCommand, value: String) {
         | HubCommand::RoomDiaryAppend { request_id, .. }
         | HubCommand::RoomDiaryRecent { request_id, .. }
         | HubCommand::RoomDiarySelectExact { request_id, .. }
+        | HubCommand::RoomBootstrap { request_id }
+        | HubCommand::RoomBootstrapRead { request_id, .. }
         | HubCommand::SkillsList { request_id }
         | HubCommand::SkillsRead { request_id, .. }
         | HubCommand::SkillsSearch { request_id, .. }

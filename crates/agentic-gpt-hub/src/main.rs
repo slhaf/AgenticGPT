@@ -229,6 +229,8 @@ async fn serve(
         )
         .route("/v1/room/notebook/update", post(room::room_notebook_update))
         .route("/v1/room/notebook/remove", post(room::room_notebook_remove))
+        .route("/v1/room/bootstrap", post(room::room_bootstrap))
+        .route("/v1/room/bootstrap/read", post(room::room_bootstrap_read))
         .route("/v1/room/skills/list", post(room::skills_list))
         .route("/v1/room/skills/read", post(room::skills_read))
         .route("/v1/room/skills/search", post(room::skills_search))
@@ -1047,9 +1049,33 @@ mod tests {
     }
 
     #[test]
+    fn bootstrap_commands_have_request_ids_and_run_types() {
+        let mut commands = [
+            HubCommand::RoomBootstrap {
+                request_id: "req-bootstrap".to_string(),
+            },
+            HubCommand::RoomBootstrapRead {
+                request_id: "req-bootstrap-read".to_string(),
+                payload: agentic_gpt_protocol::BootstrapReadRequest {
+                    id: "diary".to_string(),
+                },
+            },
+        ];
+        let expected = ["room.bootstrap", "room.bootstrap.read"];
+        for index in 0..commands.len() {
+            let command = &mut commands[index];
+            assert_eq!(crate::runs::command_type(command), expected[index]);
+            crate::agents::set_command_request_id(command, "req-new".to_string());
+            assert_eq!(crate::agents::command_request_id(command), "req-new");
+        }
+    }
+
+    #[test]
     fn openapi_room_skills_paths_and_schemas_do_not_include_agent_id() {
         let openapi = include_str!("../../../openapi/hub.yaml");
         for path in [
+            "/v1/room/bootstrap:",
+            "/v1/room/bootstrap/read:",
             "/v1/room/skills/list:",
             "/v1/room/skills/read:",
             "/v1/room/skills/search:",
@@ -1064,6 +1090,8 @@ mod tests {
             assert!(openapi.contains(path), "missing {path}");
         }
         for operation_id in [
+            "roomBootstrap",
+            "roomBootstrapRead",
             "roomSkillsList",
             "roomSkillsRead",
             "roomSkillsSearch",
@@ -1078,6 +1106,12 @@ mod tests {
             assert!(openapi.contains(operation_id), "missing {operation_id}");
         }
         for schema in [
+            "BootstrapReadRequest:",
+            "BootstrapTextResource:",
+            "BootstrapEntrypoint:",
+            "BootstrapGuideSummary:",
+            "BootstrapResponse:",
+            "BootstrapReadResponse:",
             "SkillReadRequest:",
             "SkillSearchRequest:",
             "SkillActivationRequest:",

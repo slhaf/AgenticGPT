@@ -703,6 +703,56 @@ paths:
           $ref: "#/components/responses/NotFound"
         "504":
           $ref: "#/components/responses/GatewayTimeout"
+  /v1/room/bootstrap:
+    post:
+      operationId: roomBootstrap
+      description: Load the repeated session bootstrap entrypoint and deterministic guide manifest from the active Room Agent workspace. No agentId or request body is used.
+      x-openai-isConsequential: false
+      responses:
+        "200":
+          description: Room bootstrap entrypoint and guide manifest.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BootstrapResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+  /v1/room/bootstrap/read:
+    post:
+      operationId: roomBootstrapRead
+      description: Read one valid bootstrap guide by id from the active Room Agent workspace, including typed metadata, raw frontmatter, and bounded Markdown content. No agentId is used.
+      x-openai-isConsequential: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BootstrapReadRequest"
+      responses:
+        "200":
+          description: One Room bootstrap guide and bounded resource.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BootstrapReadResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
   /v1/room/skills/list:
     post:
       operationId: roomSkillsList
@@ -2110,6 +2160,213 @@ components:
           anyOf:
             - $ref: "#/components/schemas/NotebookCurrent"
             - type: "null"
+        warnings:
+          type: array
+          items:
+            type: string
+    BootstrapDocumentKind:
+      type: string
+      enum:
+        - entrypoint
+        - guide
+    BootstrapLoadPolicy:
+      type: string
+      enum:
+        - startup
+        - contextual
+        - on_demand
+    BootstrapEncoding:
+      type: string
+      enum:
+        - utf8
+    BootstrapTextResource:
+      type: object
+      required:
+        - path
+        - encoding
+        - content
+        - mediaType
+        - sizeBytes
+        - returnedSizeBytes
+        - totalLines
+        - returnedThroughLine
+        - truncated
+        - lastLineComplete
+        - sha256
+      additionalProperties: false
+      properties:
+        path:
+          type: string
+        encoding:
+          $ref: "#/components/schemas/BootstrapEncoding"
+        content:
+          type: string
+        mediaType:
+          type: string
+          enum:
+            - text/markdown
+        sizeBytes:
+          type: integer
+          minimum: 0
+        returnedSizeBytes:
+          type: integer
+          minimum: 0
+        totalLines:
+          type: integer
+          minimum: 0
+        returnedThroughLine:
+          type: integer
+          minimum: 0
+        omittedFromLine:
+          type: integer
+          minimum: 1
+        truncated:
+          type: boolean
+        lastLineComplete:
+          type: boolean
+        sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+    BootstrapEntrypoint:
+      type: object
+      required:
+        - id
+        - kind
+        - name
+        - description
+        - frontmatter
+        - resource
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          pattern: ^[A-Za-z0-9_.-]+$
+        kind:
+          const: entrypoint
+        name:
+          type: string
+        description:
+          type: string
+        frontmatter:
+          type: object
+          additionalProperties: true
+        resource:
+          $ref: "#/components/schemas/BootstrapTextResource"
+    BootstrapGuideSummary:
+      type: object
+      required:
+        - id
+        - kind
+        - title
+        - summary
+        - loadPolicy
+        - priority
+        - loadWhen
+        - toolBindings
+        - tags
+        - path
+        - sizeBytes
+        - totalLines
+        - sha256
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          pattern: ^[A-Za-z0-9_.-]+$
+        kind:
+          const: guide
+        title:
+          type: string
+        summary:
+          type: string
+        loadPolicy:
+          $ref: "#/components/schemas/BootstrapLoadPolicy"
+        priority:
+          type: integer
+          format: int32
+        loadWhen:
+          type: array
+          items:
+            type: string
+        toolBindings:
+          type: array
+          items:
+            type: string
+        tags:
+          type: array
+          items:
+            type: string
+        path:
+          type: string
+        sizeBytes:
+          type: integer
+          minimum: 0
+        totalLines:
+          type: integer
+          minimum: 0
+        sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+    BootstrapResponse:
+      type: object
+      required:
+        - schemaVersion
+        - revision
+        - entrypoint
+        - guides
+        - totalGuides
+        - returnedGuides
+        - warnings
+      additionalProperties: false
+      properties:
+        schemaVersion:
+          const: 1
+        revision:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+        entrypoint:
+          $ref: "#/components/schemas/BootstrapEntrypoint"
+        guides:
+          type: array
+          maxItems: 64
+          items:
+            $ref: "#/components/schemas/BootstrapGuideSummary"
+        totalGuides:
+          type: integer
+          minimum: 0
+        returnedGuides:
+          type: integer
+          minimum: 0
+          maximum: 64
+        warnings:
+          type: array
+          items:
+            type: string
+    BootstrapReadRequest:
+      type: object
+      required:
+        - id
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          pattern: ^[A-Za-z0-9_.-]+$
+    BootstrapReadResponse:
+      type: object
+      required:
+        - guide
+        - frontmatter
+        - resource
+        - warnings
+      additionalProperties: false
+      properties:
+        guide:
+          $ref: "#/components/schemas/BootstrapGuideSummary"
+        frontmatter:
+          type: object
+          additionalProperties: true
+        resource:
+          $ref: "#/components/schemas/BootstrapTextResource"
         warnings:
           type: array
           items:
