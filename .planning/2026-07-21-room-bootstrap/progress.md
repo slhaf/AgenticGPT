@@ -3,8 +3,8 @@
 ## Session: 2026-07-21
 
 ### Current Status
-- **Phase:** 7 - Delivery
-- **Phase status:** in_progress
+- **Phase:** 8 - Repair and regression hardening
+- **Phase status:** complete
 - **Started:** 2026-07-21
 - **Workflow stage:** implementation_active
 - **Current role:** implementer
@@ -226,3 +226,22 @@
 - Confirmed the loader avoids aggregate guide-body retention but still allocates each complete file through `fs::read`, which does not satisfy bounded per-file scanning for arbitrarily large content.
 - **User decision:** reopen implementation as Phase 8 and repair all five findings, with real Apps calls, timeout, mixed-duplicate, directory-entry, oversized-file, and dispatch-parity regressions.
 - No product code was changed during this review/planning update.
+
+### Phase 8 implementation start
+
+- Recovered the active Phase 8 plan and re-read `task_plan.md`, `findings.md`, and `progress.md` before editing.
+- Confirmed the repair scope is exactly R-01 through R-05: Apps dispatcher parity, operation-specific MCP timeout codes, mixed-validity duplicate exclusion, retained directory-entry warnings, and bounded per-file scanning/hashing.
+- Confirmed the deferred `diary::tests::append_and_select_exact_round_trip` test remains out of scope; no Diary code or tests will be modified.
+- Baseline remains the independent-review result: protocol 8/8, bootstrap 10/10, Hub 53/53, format/check pass, and clean worktree before Phase 8 changes.
+
+### Phase 8 repair completion
+
+- R-01: added both Bootstrap tools to `call_app_tool`; actual Apps `/mcp` calls now reach the existing Room handlers. Added list/call parity coverage for all advertised tools and direct JSON-RPC calls for both Bootstrap names.
+- R-02: parameterized MCP Room timeout conversion and kept Notebook's legacy fallback untouched. Added `isError: true` assertions for `room_bootstrap_timeout` and `room_bootstrap_read_timeout`.
+- R-03: duplicate grouping now records every candidate with a safe frontmatter ID before full metadata validation. Mixed-validity duplicates exclude the valid guide and emit duplicate evidence for both paths.
+- R-04: replaced `filter_map(|entry| entry.ok())` with an error-preserving path collector; readable directory entries continue and iterator failures emit `guide_dir_entry_unreadable`.
+- R-05: replaced production `fs::read` in Bootstrap scanning with an 8 KiB chunked scanner. It computes full-file SHA-256/line metadata/UTF-8 validity while retaining only the bounded response prefix; only a requested guide retains its scan and raw frontmatter for read responses.
+- New focused regressions pass: bootstrap 13/13, Hub 56/56, protocol 8/8 plus doctests. `cargo fmt --all -- --check` and workspace check pass without warnings.
+- Full `cargo test --workspace` reached 96 passed and one failure: the explicitly deferred `diary::tests::append_and_select_exact_round_trip` at `2026-07-22 00:40 +0800`, caused by the known 05:00 logical-day boundary. No Diary files were changed.
+- R-01 through R-05 and the Phase 8 completion boundary are satisfied without changes to D-01 through D-13 or any deferred Diary test. The final repair commit is still pending after the final clean-worktree check.
+- Final pre-commit recheck passed again: bootstrap 13/13, Hub 56/56, protocol 8/8 plus doctests, workspace check, and format check. The full workspace result above remains the authoritative workspace-test outcome; no code changed after that run except the test-only dead-code annotation.

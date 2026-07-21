@@ -10,13 +10,13 @@ Phase 8 - Repair and regression hardening
 
 ## Workflow State
 
-- **Stage:** implementation_active
+- **Stage:** delivery_complete
 - **Current role:** implementer
 - **Implementation authorized:** yes
 - **Entry phase:** Phase 8
 - **Open blocking decisions:** 0
-- **Design checkpoint:** D-01 through D-13 remain frozen; independent review findings R-01 through R-05 require implementation repair
-- **Next action:** implement and verify Phase 8, then repeat delivery review
+- **Design checkpoint:** D-01 through D-13 remain frozen; R-01 through R-05 repaired and regression-tested
+- **Next action:** deliver the Phase 8 repair summary
 
 ## Scope and constraints
 
@@ -485,21 +485,21 @@ cargo test --workspace
 
 **Ordered work:**
 
-1. Add `room.bootstrap` and `room.bootstrap.read` to the hand-written ChatGPT Apps `/mcp` `tools/call` dispatcher so every Bootstrap tool returned by `tools/list` is callable through that JSON-RPC endpoint.
-2. Preserve operation-specific MCP timeout codes: `room_bootstrap_timeout` for `room.bootstrap` and `room_bootstrap_read_timeout` for `room.bootstrap.read`; neither operation may fall back to `room_notebook_timeout`.
-3. Enforce D-10 duplicate semantics across every colliding candidate with an extractable valid guide ID, even when another candidate with that ID later fails non-ID metadata validation. No otherwise-valid guide may survive an ambiguous duplicate ID.
-4. Replace silent dropping of individual `read_dir` entry errors with deterministic `guide_dir_entry_unreadable` warnings while continuing to process readable entries.
-5. Bound per-file scanning/hashing memory. Do not load an arbitrarily large entrypoint or guide wholly into memory merely to hash, count lines, validate frontmatter, or return a bounded prefix. Preserve full-file SHA-256/revision, current UTF-8/frontmatter semantics, and one observed byte stream per file per call.
+1. [x] Add `room.bootstrap` and `room.bootstrap.read` to the hand-written ChatGPT Apps `/mcp` `tools/call` dispatcher so every Bootstrap tool returned by `tools/list` is callable through that JSON-RPC endpoint.
+2. [x] Preserve operation-specific MCP timeout codes: `room_bootstrap_timeout` for `room.bootstrap` and `room_bootstrap_read_timeout` for `room.bootstrap.read`; neither operation may fall back to `room_notebook_timeout`.
+3. [x] Enforce D-10 duplicate semantics across every colliding candidate with an extractable valid guide ID, even when another candidate with that ID later fails non-ID metadata validation. No otherwise-valid guide may survive an ambiguous duplicate ID.
+4. [x] Replace silent dropping of individual `read_dir` entry errors with deterministic `guide_dir_entry_unreadable` warnings while continuing to process readable entries.
+5. [x] Bound per-file scanning/hashing memory. Do not load an arbitrarily large entrypoint or guide wholly into memory merely to hash, count lines, validate frontmatter, or return a bounded prefix. Preserve full-file SHA-256/revision, current UTF-8/frontmatter semantics, and one observed byte stream per file per call.
 
 **Required regression tests:**
 
-- Exercise the real Apps `/mcp` `tools/call` path for both `room.bootstrap` and `room.bootstrap.read`; descriptor/list assertions alone are insufficient.
-- Prove that every registered MCP tool name is accepted by the hand-written Apps dispatcher, or remove the separately maintained dispatch-name set so list/call drift is structurally impossible.
-- Exercise Bootstrap MCP timeout conversion and assert the operation-specific code plus `isError: true` for each tool.
-- Add a mixed-validity duplicate fixture: one otherwise-valid guide and one same-ID candidate with invalid non-ID metadata must exclude both deterministically.
-- Cover directory-entry error warning production through a deterministic helper-level test when the platform cannot reliably manufacture a failing `ReadDir` entry.
-- Add practical oversized-file fixtures proving bounded returned content and correct full-file hash/line metadata. Do not use flaky process-RSS assertions.
-- Keep existing protocol, loader, Hub, HTTP/OpenAPI, annotation, and error-status regressions green.
+- [x] Exercise the real Apps `/mcp` `tools/call` path for both `room.bootstrap` and `room.bootstrap.read`; descriptor/list assertions alone are insufficient.
+- [x] Prove that every registered MCP tool name is accepted by the hand-written Apps dispatcher, or remove the separately maintained dispatch-name set so list/call drift is structurally impossible.
+- [x] Exercise Bootstrap MCP timeout conversion and assert the operation-specific code plus `isError: true` for each tool.
+- [x] Add a mixed-validity duplicate fixture: one otherwise-valid guide and one same-ID candidate with invalid non-ID metadata must exclude both deterministically.
+- [x] Cover directory-entry error warning production through a deterministic helper-level test when the platform cannot reliably manufacture a failing `ReadDir` entry.
+- [x] Add practical oversized-file fixtures proving bounded returned content and correct full-file hash/line metadata. Do not use flaky process-RSS assertions.
+- [x] Keep existing protocol, loader, Hub, HTTP/OpenAPI, annotation, and error-status regressions green.
 
 **Verification:**
 
@@ -512,11 +512,12 @@ CARGO_TARGET_DIR=/tmp/agentic-gpt-room-bootstrap-target cargo check --workspace
 CARGO_TARGET_DIR=/tmp/agentic-gpt-room-bootstrap-target cargo test --workspace
 ```
 
-The known deferred Diary boundary-sensitive test may still fail only during its documented pre-05:00 window. Do not modify Diary code or tests in this phase.
+The known deferred Diary boundary-sensitive test still fails during its documented pre-05:00 window. Do not modify Diary code or tests in this phase.
 
 **Completion boundary:** both Bootstrap tools are callable through the actual Apps JSON-RPC path; MCP timeout parity is restored; D-10 duplicate behavior is enforced; guide scanning neither silently loses directory-entry failures nor performs unbounded full-file buffering; focused suites pass; and the full workspace outcome is recorded honestly.
 
-- **Status:** pending
+- **Verification note:** formatting, protocol 8/8, bootstrap 13/13, Hub 56/56, and workspace check passed. Full workspace testing reached 96 passed and the one explicitly deferred `diary::tests::append_and_select_exact_round_trip` failure at `00:40 +0800`; no Diary code or tests were changed.
+- **Status:** complete
 
 ## Key Questions
 
@@ -552,19 +553,19 @@ Detailed evidence and rationale remain canonical in `findings.md`.
 
 ## Acceptance criteria
 
-- [ ] `room.bootstrap` and `room.bootstrap.read` work through both native MCP and the Apps `/mcp` JSON-RPC path, only through the active Room Agent, and expose no `agentId` field.
+- [x] `room.bootstrap` and `room.bootstrap.read` work through both native MCP and the Apps `/mcp` JSON-RPC path, only through the active Room Agent, and expose no `agentId` field.
 - [x] The protocol and OpenAPI fields exactly match the frozen shapes and enum spellings.
 - [x] A valid entrypoint with no guide directory succeeds with an empty manifest.
 - [x] Generic frontmatter drives identity, display, load guidance, priority, tags, and tool bindings; no capability family is hard-coded.
-- [ ] Missing/invalid entrypoint errors, invalid-guide warnings, mixed-validity duplicate exclusion, UTF-8, symlink, flat-path, containment, and directory-entry failure behavior are deterministic.
+- [x] Missing/invalid entrypoint errors, invalid-guide warnings, mixed-validity duplicate exclusion, UTF-8, symlink, flat-path, containment, and directory-entry failure behavior are deterministic.
 - [x] Entry/guide content truncation reports complete/full sizes, line position, completeness, and full-file hash without presenting prefixes as complete.
 - [x] Manifest ordering and 64-item truncation are deterministic; omitted valid guides remain readable and affect revision.
 - [x] Revision matches the canonical full-file algorithm and excludes invalid guides.
 - [x] Both MCP tools are read-only/non-destructive/non-open-world and the Actions operations are non-consequential.
-- [ ] HTTP status mapping and MCP native error behavior, including operation-specific Bootstrap timeouts, match the frozen taxonomy.
+- [x] HTTP status mapping and MCP native error behavior, including operation-specific Bootstrap timeouts, match the frozen taxonomy.
 - [x] Reads create no state, require no restart/reload, and are retry-safe.
-- [ ] Per-file scanning/hashing memory is bounded independently of authored file size while preserving full-file hash and line metadata.
-- [ ] Registered MCP tool names and Apps `tools/call` dispatch cannot drift silently.
+- [x] Per-file scanning/hashing memory is bounded independently of authored file size while preserving full-file hash and line metadata.
+- [x] Registered MCP tool names and Apps `tools/call` dispatch cannot drift silently.
 - [x] Protocol, local loader, Hub/MCP/OpenAPI, documentation, formatting, workspace check, and focused crate tests pass; the known unrelated Diary timing failure in the full workspace test is documented.
 - [x] Documentation includes authoring examples and explains tool schema versus usage-guide responsibility.
 
@@ -597,17 +598,17 @@ The Implementer may not change frontmatter fields/defaults, directory rules, pub
 
 ## Implementation Handoff
 
-- **Plan maturity:** implementation_active
+- **Plan maturity:** delivery_complete
 - **Design phase:** complete
 - **Implementation authorized:** yes
 - **Entry phase:** Phase 8
 - **Frozen decisions:** D-01 through D-13
 - **Open blocking decisions:** none
 - **Implementation discretion:** see `Implementation Discretion`
-- **Verification convention:** focused crate tests after each phase, then CI-equivalent workspace format/check/test in Phase 6
+- **Verification convention:** focused crate tests after each phase, then Phase 8 format/check/focused suites and workspace test outcome recorded with the deferred Diary caveat
 - **Commit convention:** Phases 3 through 7 are committed; after Phase 8 verification, create one focused repair commit and leave the workspace clean
 - **Design checkpoint:** D-01 through D-13 frozen; R-01 through R-05 accepted for repair
-- **Next invocation:** implement Phase 8 under `$planning-with-files`, update all planning files, verify, and create one focused repair commit
+- **Next invocation:** none; deliver the completed Phase 8 repair
 
 ## Deferred repository follow-up
 
@@ -636,3 +637,7 @@ The Implementer may not change frontmatter fields/defaults, directory rules, pub
 | Isolated Diary diagnostic initially placed `--exact` before Cargo's test-argument separator | 1 | Corrected the command to pass `--exact` after `--` |
 | Correctly isolated Diary test still fails at local `00:03 +0800` because the default 05:00 logical-day boundary writes yesterday's file while the test selects the `created_at` calendar date | 1 | Confirmed deterministic pre-existing timing failure; left unrelated Diary code/tests unchanged and documented the verification caveat |
 | Manual Room bootstrap smoke call was unavailable because no `agentic-gpt`/Hub process was running and `127.0.0.1:8080/health` refused the connection | 1 | Recorded smoke checks as unavailable; relied on deterministic local-agent and Hub routing tests |
+| A broad replacement initially applied Bootstrap timeout handling to two Notebook handlers | 1 | Inspected the diff, restored Notebook's existing fallback, and applied operation-specific handling only to the two Bootstrap handlers |
+| The toolchain has no `Option::then_some` method | 1 | Replaced the candidate-ID extraction expression with an explicit `is_ok` branch; boolean `then_some` usage remains unchanged |
+| Workspace check reported the test-only `build_resource` helper as dead code in production builds | 1 | Gated the compatibility helper with `#[cfg(test)]`; production workspace check is now warning-free |
+| Workspace test still failed in the deferred Diary round-trip at `00:40 +0800` (`96 passed, 1 failed`) | 1 | Confirmed the same pre-existing 05:00 logical-day boundary defect; did not modify Diary code or tests |

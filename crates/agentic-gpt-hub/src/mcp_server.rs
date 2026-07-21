@@ -325,6 +325,12 @@ async fn call_app_tool(server: &AgenticMcpServer, params: Value) -> Result<Value
                 .room_diary_select_exact(Parameters(decode_args(arguments)?))
                 .await
         }
+        "room.bootstrap" => server.room_bootstrap().await,
+        "room.bootstrap.read" => {
+            server
+                .room_bootstrap_read(Parameters(decode_args(arguments)?))
+                .await
+        }
         "skills.list" => server.skills_list().await,
         "skills.read" => {
             server
@@ -1346,7 +1352,9 @@ impl AgenticMcpServer {
             REQUEST_TIMEOUT_SECS,
         )
         .await
-        .unwrap_or_else(room_route_error_value);
+        .unwrap_or_else(|error| {
+            room_route_error_value_with_timeout(error, "room_bootstrap_timeout")
+        });
         Ok(result_from_value(value))
     }
 
@@ -1367,7 +1375,9 @@ impl AgenticMcpServer {
             REQUEST_TIMEOUT_SECS,
         )
         .await
-        .unwrap_or_else(room_route_error_value);
+        .unwrap_or_else(|error| {
+            room_route_error_value_with_timeout(error, "room_bootstrap_read_timeout")
+        });
         Ok(result_from_value(value))
     }
 
@@ -2234,6 +2244,10 @@ fn result_from_mcp_tool_value(value: Value) -> CallToolResult {
 }
 
 fn room_route_error_value(error: RoomRouteError) -> Value {
+    room_route_error_value_with_timeout(error, "room_notebook_timeout")
+}
+
+fn room_route_error_value_with_timeout(error: RoomRouteError, timeout_code: &'static str) -> Value {
     match error {
         RoomRouteError::NotActive => json!({
             "error": { "code": "room_not_active", "message": "no active room agent" }
@@ -2242,7 +2256,7 @@ fn room_route_error_value(error: RoomRouteError) -> Value {
             "error": { "code": "room_state_conflict", "message": "active room state is inconsistent" }
         }),
         RoomRouteError::Timeout(reason) => json!({
-            "error": { "code": "room_notebook_timeout", "message": reason }
+            "error": { "code": timeout_code, "message": reason }
         }),
     }
 }
@@ -2432,6 +2446,67 @@ mod tests {
             assert_eq!(tool["annotations"]["readOnlyHint"], true);
             assert_eq!(tool["annotations"]["destructiveHint"], false);
             assert_eq!(tool["annotations"]["openWorldHint"], false);
+        }
+    }
+
+    #[tokio::test]
+    async fn every_advertised_tool_is_accepted_by_apps_dispatcher() {
+        let server = AgenticMcpServer::new(test_state());
+        for tool in app_tool_descriptors(&server) {
+            let name = tool["name"].as_str().unwrap();
+            let result = call_app_tool(&server, json!({ "name": name, "arguments": {} })).await;
+            if let Err(error) = result {
+                assert!(
+                    !error.starts_with("Unknown tool:"),
+                    "advertised tool {name} is not accepted by tools/call: {error}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn apps_bootstrap_tools_are_callable_through_tools_call() {
+        for (name, arguments) in [
+            ("room.bootstrap", json!({})),
+            ("room.bootstrap.read", json!({ "id": "missing" })),
+        ] {
+            let response = mcp_post(
+                State(test_state()),
+                Json(json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": { "name": name, "arguments": arguments }
+                })),
+            )
+            .await;
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let value: Value = serde_json::from_slice(&body).unwrap();
+            assert!(
+                value.get("error").is_none(),
+                "{name} was not dispatched: {value}"
+            );
+            assert_eq!(value["result"]["isError"], true);
+            assert_eq!(
+                value["result"]["structuredContent"]["error"]["code"],
+                "room_not_active"
+            );
+        }
+    }
+
+    #[test]
+    fn bootstrap_timeout_values_preserve_operation_specific_codes() {
+        for (code, expected) in [
+            ("room_bootstrap_timeout", "room_bootstrap_timeout"),
+            ("room_bootstrap_read_timeout", "room_bootstrap_read_timeout"),
+        ] {
+            let value = room_route_error_value_with_timeout(
+                RoomRouteError::Timeout("timed out".to_string()),
+                code,
+            );
+            let result = serde_json::to_value(result_from_value(value)).unwrap();
+            assert_eq!(result["isError"], true);
+            assert_eq!(result["structuredContent"]["error"]["code"], expected);
         }
     }
 

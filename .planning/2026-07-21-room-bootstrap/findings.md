@@ -362,3 +362,13 @@ Phase 7 stopped retaining every guide body simultaneously, but the loader still 
 ### Independent verification baseline
 
 Before repair, the reviewer reran formatting, protocol 8/8, bootstrap focused 10/10, Hub 53/53, and workspace check successfully. The workspace was clean. This confirms that R-01 through R-05 are test-matrix and implementation-contract gaps rather than general compilation instability.
+
+## Phase 8 repair checkpoint
+
+- R-01 is repaired in the hand-written Apps dispatcher: `room.bootstrap` and `room.bootstrap.read` now have `tools/call` arms, and an async regression calls both through the actual `/mcp` JSON-RPC handler. A second regression invokes every advertised tool with empty arguments and asserts none is rejected as `Unknown tool`.
+- R-02 is repaired without changing the public taxonomy: Bootstrap handlers use a timeout-code parameter, producing `room_bootstrap_timeout` and `room_bootstrap_read_timeout`; the native MCP result remains `isError: true`. Existing Notebook and other Room handlers retain their old fallback behavior.
+- R-03 is repaired by extracting a safe candidate ID immediately after frontmatter parsing, before full guide metadata validation. Duplicate grouping includes invalid non-ID metadata candidates, emits deterministic duplicate warnings for all colliding paths, and removes every valid guide sharing the ID.
+- R-04 is repaired with a helper over `io::Result<PathBuf>` entries. Real `ReadDir` errors are converted to `guide_dir_entry_unreadable` warnings while successful paths continue through discovery; a deterministic helper test covers the otherwise difficult iterator-error branch.
+- R-05 is repaired with chunked file scanning. Each file is read through an 8 KiB buffer while hashing, counting lines, validating UTF-8, capturing only a bounded response prefix, and collecting only bounded frontmatter. Manifest loads retain no guide body or raw guide frontmatter; ID reads retain only the requested guide's bounded scan and raw frontmatter. Oversized entrypoint/guide fixtures verify bounded returned sizes and complete-file hashes.
+- Frozen D-01 through D-13 remain unchanged. No protocol, OpenAPI, documentation, Diary, or public route/tool contract was broadened.
+- Phase 8 focused verification passed: format check, bootstrap 13/13, Hub 56/56, protocol 8/8 plus doctests, and workspace check. Workspace testing reached 96 passed with only the explicitly deferred Diary test failing at `2026-07-22 00:40 +0800`; no Diary code or tests were modified.

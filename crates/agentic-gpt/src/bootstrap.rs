@@ -7,7 +7,8 @@ use anyhow::{anyhow, Result};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::fs;
+use std::fs::{self, File};
+use std::io::{self, Read};
 use std::path::Path;
 
 use crate::{config::Config, state::AppState};
@@ -19,14 +20,24 @@ const ENTRYPOINT_MAX_BYTES: usize = 65_536;
 const GUIDE_MAX_BYTES: usize = 262_144;
 const MAX_RETURNED_GUIDES: usize = 64;
 const SCHEMA_VERSION: u32 = 1;
+const FILE_SCAN_CHUNK_BYTES: usize = 8 * 1024;
+const MAX_FRONTMATTER_BYTES: usize = 1024 * 1024;
 
-#[derive(Clone)]
 struct GuideDocument {
     id: String,
     path: String,
-    retained_bytes: Option<Vec<u8>>,
-    frontmatter: Value,
+    retained_scan: Option<FileScan>,
+    frontmatter: Option<Value>,
     summary: BootstrapGuideSummary,
+}
+
+struct FileScan {
+    prefix: Vec<u8>,
+    size_bytes: u64,
+    total_lines: u64,
+    sha256: String,
+    utf8_valid: bool,
+    frontmatter: Option<String>,
 }
 
 struct LoadedPackage {
@@ -82,15 +93,18 @@ fn read_config(config: &Config, request: &BootstrapReadRequest) -> Result<Bootst
         .iter()
         .find(|guide| guide.id == request.id)
         .ok_or_else(|| anyhow!("guide_not_found"))?;
-    let bytes = guide
-        .retained_bytes
-        .as_deref()
+    let scan = guide
+        .retained_scan
+        .as_ref()
         .ok_or_else(|| anyhow!("bootstrap_read_failed"))?;
     let (resource, warning) =
-        build_resource(bytes, &guide.path, GUIDE_MAX_BYTES, "guide_truncated")?;
+        build_scanned_resource(scan, &guide.path, GUIDE_MAX_BYTES, "guide_truncated")?;
     Ok(BootstrapReadResponse {
         guide: guide.summary.clone(),
-        frontmatter: guide.frontmatter.clone(),
+        frontmatter: guide
+            .frontmatter
+            .clone()
+            .ok_or_else(|| anyhow!("bootstrap_read_failed"))?,
         resource,
         warnings: warning.into_iter().collect(),
     })
@@ -101,15 +115,22 @@ fn load_package(config: &Config, retain_guide_id: Option<&str>) -> Result<Loaded
     ensure_directory(&bootstrap_root, "bootstrap_not_found", "bootstrap_invalid")?;
 
     let entrypoint_path = bootstrap_root.join(ENTRYPOINT_NAME);
-    let entrypoint_bytes = read_required_file(&entrypoint_path)?;
-    let entrypoint_text =
-        String::from_utf8(entrypoint_bytes.clone()).map_err(|_| anyhow!("bootstrap_invalid"))?;
-    let entrypoint_frontmatter =
-        parse_required_frontmatter(&entrypoint_text).map_err(|_| anyhow!("bootstrap_invalid"))?;
+    ensure_required_file(&entrypoint_path)?;
+    let entrypoint_scan = scan_file(&entrypoint_path, ENTRYPOINT_MAX_BYTES)?;
+    if !entrypoint_scan.utf8_valid {
+        return Err(anyhow!("bootstrap_invalid"));
+    }
+    let entrypoint_frontmatter = parse_required_frontmatter(
+        entrypoint_scan
+            .frontmatter
+            .as_deref()
+            .ok_or_else(|| anyhow!("bootstrap_invalid"))?,
+    )
+    .map_err(|_| anyhow!("bootstrap_invalid"))?;
     let (entrypoint_id, name, description) =
         validate_entrypoint(&entrypoint_frontmatter).map_err(|_| anyhow!("bootstrap_invalid"))?;
-    let (entrypoint_resource, entrypoint_warning) = build_resource(
-        &entrypoint_bytes,
+    let (entrypoint_resource, entrypoint_warning) = build_scanned_resource(
+        &entrypoint_scan,
         ENTRYPOINT_NAME,
         ENTRYPOINT_MAX_BYTES,
         "entrypoint_truncated",
@@ -127,7 +148,7 @@ fn load_package(config: &Config, retain_guide_id: Option<&str>) -> Result<Loaded
     if let Some(warning) = entrypoint_warning {
         warnings.insert(0, warning);
     }
-    let revision = package_revision(&entrypoint_bytes, &guides);
+    let revision = package_revision(&entrypoint_scan.sha256, &guides);
     Ok(LoadedPackage {
         entrypoint,
         guides,
@@ -150,7 +171,7 @@ fn ensure_directory(path: &Path, missing_code: &str, invalid_code: &str) -> Resu
     Ok(())
 }
 
-fn read_required_file(path: &Path) -> Result<Vec<u8>> {
+fn ensure_required_file(path: &Path) -> Result<()> {
     let metadata = fs::symlink_metadata(path).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             anyhow!("bootstrap_not_found")
@@ -161,7 +182,7 @@ fn read_required_file(path: &Path) -> Result<Vec<u8>> {
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err(anyhow!("bootstrap_invalid"));
     }
-    fs::read(path).map_err(|_| anyhow!("bootstrap_read_failed"))
+    Ok(())
 }
 
 fn scan_guides(
@@ -203,11 +224,11 @@ fn scan_guides(
         ));
     }
 
-    let mut entries = match fs::read_dir(&guides_root) {
-        Ok(entries) => entries
-            .filter_map(|entry| entry.ok())
-            .map(|entry| entry.path())
-            .collect::<Vec<_>>(),
+    let (mut entries, mut warnings) = match fs::read_dir(&guides_root) {
+        Ok(entries) => collect_guide_paths(
+            entries.map(|entry| entry.map(|entry| entry.path())),
+            &guides_root,
+        ),
         Err(_) => {
             return Ok((
                 Vec::new(),
@@ -221,7 +242,7 @@ fn scan_guides(
     entries.sort_by(|left, right| display_path(left).cmp(&display_path(right)));
 
     let mut guides = Vec::new();
-    let mut warnings = Vec::new();
+    let mut candidate_paths = BTreeMap::<String, Vec<String>>::new();
     for path in entries {
         let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
             continue;
@@ -248,21 +269,19 @@ fn scan_guides(
             ));
             continue;
         }
-        let bytes = match fs::read(&path) {
-            Ok(bytes) => bytes,
+        let scan = match scan_file(&path, GUIDE_MAX_BYTES) {
+            Ok(scan) => scan,
             Err(_) => {
                 warnings.push(format!("guide_unreadable: path={relative_path}"));
                 continue;
             }
         };
-        let text = match std::str::from_utf8(&bytes) {
-            Ok(text) => text,
-            Err(_) => {
-                warnings.push(format!("guide_non_utf8: path={relative_path}"));
-                continue;
-            }
-        };
-        let frontmatter = match parse_required_frontmatter(&text) {
+        if !scan.utf8_valid {
+            warnings.push(format!("guide_non_utf8: path={relative_path}"));
+            continue;
+        }
+        let text = scan.frontmatter.as_deref().unwrap_or_default();
+        let frontmatter = match parse_required_frontmatter(text) {
             Ok(frontmatter) => frontmatter,
             Err(error) => {
                 warnings.push(format!(
@@ -271,6 +290,12 @@ fn scan_guides(
                 continue;
             }
         };
+        if let Some(id) = extract_valid_guide_id(&frontmatter) {
+            candidate_paths
+                .entry(id)
+                .or_default()
+                .push(relative_path.clone());
+        }
         let metadata = match validate_guide(&frontmatter, &relative_path) {
             Ok(metadata) => metadata,
             Err(error) => {
@@ -280,14 +305,16 @@ fn scan_guides(
                 continue;
             }
         };
-        let size_bytes = bytes.len() as u64;
-        let total_lines = logical_line_count(&bytes);
-        let sha256 = hex_sha256(&bytes);
+        let retain = retain_guide_id == Some(metadata.id.as_str());
+        let size_bytes = scan.size_bytes;
+        let total_lines = scan.total_lines;
+        let sha256 = scan.sha256.clone();
+        let retained_scan = retain.then_some(scan);
         guides.push(GuideDocument {
             id: metadata.id.clone(),
             path: relative_path,
-            retained_bytes: (retain_guide_id == Some(metadata.id.as_str())).then_some(bytes),
-            frontmatter,
+            retained_scan,
+            frontmatter: retain.then_some(frontmatter),
             summary: BootstrapGuideSummary {
                 id: metadata.id,
                 kind: BootstrapDocumentKind::Guide,
@@ -306,20 +333,18 @@ fn scan_guides(
         });
     }
 
-    let mut ids = BTreeMap::<String, usize>::new();
-    for guide in &guides {
-        *ids.entry(guide.id.clone()).or_default() += 1;
+    for (id, paths) in &candidate_paths {
+        if paths.len() > 1 {
+            for path in paths {
+                warnings.push(format!("guide_duplicate_id: id={id}; path={path}"));
+            }
+        }
     }
     guides.retain(|guide| {
-        if ids.get(&guide.id).copied().unwrap_or_default() > 1 {
-            warnings.push(format!(
-                "guide_duplicate_id: id={}; path={}",
-                guide.id, guide.path
-            ));
-            false
-        } else {
-            true
-        }
+        candidate_paths
+            .get(&guide.id)
+            .map(|paths| paths.len() == 1)
+            .unwrap_or(true)
     });
     warnings.sort();
     guides.sort_by(|left, right| {
@@ -330,6 +355,164 @@ fn scan_guides(
             .then_with(|| left.id.cmp(&right.id))
     });
     Ok((guides, warnings))
+}
+
+fn collect_guide_paths<I>(entries: I, guides_root: &Path) -> (Vec<std::path::PathBuf>, Vec<String>)
+where
+    I: IntoIterator<Item = io::Result<std::path::PathBuf>>,
+{
+    let mut paths = Vec::new();
+    let mut warnings = Vec::new();
+    for entry in entries {
+        match entry {
+            Ok(path) => paths.push(path),
+            Err(error) => warnings.push(format!(
+                "guide_dir_entry_unreadable: path={}; detail={}",
+                display_path(guides_root),
+                error.kind()
+            )),
+        }
+    }
+    (paths, warnings)
+}
+
+fn scan_file(path: &Path, max_prefix_bytes: usize) -> Result<FileScan> {
+    let mut file = File::open(path).map_err(|_| anyhow!("bootstrap_read_failed"))?;
+    let mut reader = [0_u8; FILE_SCAN_CHUNK_BYTES];
+    let mut prefix = Vec::with_capacity(max_prefix_bytes.min(FILE_SCAN_CHUNK_BYTES));
+    let mut frontmatter_bytes = Vec::new();
+    let mut frontmatter_closed = false;
+    let mut frontmatter_overflow = false;
+    let mut utf8 = Utf8Validator::default();
+    let mut hasher = Sha256::new();
+    let mut size_bytes = 0_u64;
+    let mut total_newlines = 0_u64;
+    let mut last_byte = None;
+
+    loop {
+        let read = file
+            .read(&mut reader)
+            .map_err(|_| anyhow!("bootstrap_read_failed"))?;
+        if read == 0 {
+            break;
+        }
+        let chunk = &reader[..read];
+        hasher.update(chunk);
+        utf8.push(chunk);
+        size_bytes += read as u64;
+        total_newlines += chunk.iter().filter(|byte| **byte == b'\n').count() as u64;
+        last_byte = chunk.last().copied();
+
+        let prefix_remaining = max_prefix_bytes.saturating_sub(prefix.len());
+        prefix.extend_from_slice(&chunk[..prefix_remaining.min(chunk.len())]);
+
+        if !frontmatter_closed && !frontmatter_overflow {
+            let remaining = MAX_FRONTMATTER_BYTES.saturating_sub(frontmatter_bytes.len());
+            frontmatter_bytes.extend_from_slice(&chunk[..remaining.min(chunk.len())]);
+            if let Some(end) = frontmatter_end(&frontmatter_bytes, false) {
+                frontmatter_bytes.truncate(end);
+                frontmatter_closed = true;
+            } else if frontmatter_bytes.len() == MAX_FRONTMATTER_BYTES {
+                frontmatter_overflow = true;
+                frontmatter_bytes.clear();
+            }
+        }
+    }
+
+    if !frontmatter_closed && !frontmatter_overflow {
+        if let Some(end) = frontmatter_end(&frontmatter_bytes, true) {
+            frontmatter_bytes.truncate(end);
+            frontmatter_closed = true;
+        }
+    }
+
+    let utf8_valid = utf8.finish();
+    let total_lines = if size_bytes == 0 {
+        0
+    } else if last_byte == Some(b'\n') {
+        total_newlines
+    } else {
+        total_newlines + 1
+    };
+    let frontmatter = if utf8_valid && frontmatter_closed {
+        Some(
+            std::str::from_utf8(&frontmatter_bytes)
+                .map_err(|_| anyhow!("bootstrap_invalid"))?
+                .to_string(),
+        )
+    } else {
+        None
+    };
+    Ok(FileScan {
+        prefix,
+        size_bytes,
+        total_lines,
+        sha256: hex_digest(hasher.finalize().as_ref()),
+        utf8_valid,
+        frontmatter,
+    })
+}
+
+struct Utf8Validator {
+    carry: Vec<u8>,
+    valid: bool,
+}
+
+impl Default for Utf8Validator {
+    fn default() -> Self {
+        Self {
+            carry: Vec::new(),
+            valid: true,
+        }
+    }
+}
+
+impl Utf8Validator {
+    fn push(&mut self, bytes: &[u8]) {
+        if !self.valid && !self.carry.is_empty() {
+            return;
+        }
+        let mut combined = Vec::with_capacity(self.carry.len() + bytes.len());
+        combined.extend_from_slice(&self.carry);
+        combined.extend_from_slice(bytes);
+        self.carry.clear();
+        match std::str::from_utf8(&combined) {
+            Ok(_) => {}
+            Err(error) if error.error_len().is_none() => {
+                self.carry
+                    .extend_from_slice(&combined[error.valid_up_to()..]);
+            }
+            Err(_) => {
+                self.valid = false;
+                self.carry.clear();
+            }
+        }
+    }
+
+    fn finish(self) -> bool {
+        self.valid && self.carry.is_empty()
+    }
+}
+
+fn frontmatter_end(bytes: &[u8], eof: bool) -> Option<usize> {
+    let marker = b"\n---";
+    let mut offset = 0;
+    while let Some(relative) = bytes[offset..]
+        .windows(marker.len())
+        .position(|window| window == marker)
+    {
+        let marker_start = offset + relative;
+        let marker_end = marker_start + marker.len();
+        match bytes.get(marker_end..) {
+            Some(rest) if rest.starts_with(b"\n") => return Some(marker_end + 1),
+            Some(rest) if rest.starts_with(b"\r\n") => return Some(marker_end + 2),
+            None if eof => return Some(marker_end),
+            _ => {
+                offset = marker_start + 1;
+            }
+        }
+    }
+    None
 }
 
 struct GuideMetadata {
@@ -403,6 +586,15 @@ fn validate_guide(frontmatter: &Value, path: &str) -> Result<GuideMetadata> {
     })
 }
 
+fn extract_valid_guide_id(frontmatter: &Value) -> Option<String> {
+    let id = frontmatter.get("id").and_then(Value::as_str)?.to_string();
+    if validate_id(&id).is_ok() {
+        Some(id)
+    } else {
+        None
+    }
+}
+
 fn required_string(frontmatter: &Value, key: &str) -> Result<String> {
     let value = frontmatter
         .get(key)
@@ -467,29 +659,65 @@ fn parse_required_frontmatter(text: &str) -> Result<Value> {
     Ok(value)
 }
 
+#[cfg(test)]
 fn build_resource(
     bytes: &[u8],
     path: &str,
     max_bytes: usize,
     warning_code: &str,
 ) -> Result<(BootstrapTextResource, Option<String>)> {
-    let size_bytes = bytes.len() as u64;
-    let sha256 = hex_sha256(bytes);
-    let total_lines = logical_line_count(bytes);
-    let (returned_bytes, truncated, last_line_complete) = if bytes.len() <= max_bytes {
-        (bytes, false, true)
+    build_resource_parts(
+        bytes,
+        bytes.len() as u64,
+        logical_line_count(bytes),
+        &hex_sha256(bytes),
+        path,
+        max_bytes,
+        warning_code,
+    )
+}
+
+fn build_scanned_resource(
+    scan: &FileScan,
+    path: &str,
+    max_bytes: usize,
+    warning_code: &str,
+) -> Result<(BootstrapTextResource, Option<String>)> {
+    build_resource_parts(
+        &scan.prefix,
+        scan.size_bytes,
+        scan.total_lines,
+        &scan.sha256,
+        path,
+        max_bytes,
+        warning_code,
+    )
+}
+
+fn build_resource_parts(
+    prefix: &[u8],
+    size_bytes: u64,
+    total_lines: u64,
+    sha256: &str,
+    path: &str,
+    max_bytes: usize,
+    warning_code: &str,
+) -> Result<(BootstrapTextResource, Option<String>)> {
+    let bounded_prefix = &prefix[..prefix.len().min(max_bytes)];
+    let (returned_bytes, truncated, last_line_complete) = if size_bytes <= max_bytes as u64 {
+        (bounded_prefix, false, true)
     } else {
-        let mut boundary = max_bytes;
-        while boundary > 0 && std::str::from_utf8(&bytes[..boundary]).is_err() {
+        let mut boundary = bounded_prefix.len();
+        while boundary > 0 && std::str::from_utf8(&bounded_prefix[..boundary]).is_err() {
             boundary -= 1;
         }
-        let bounded = &bytes[..boundary];
+        let bounded = &bounded_prefix[..boundary];
         let complete_line_boundary = bounded
             .iter()
             .rposition(|byte| *byte == b'\n')
             .map(|index| index + 1);
         match complete_line_boundary {
-            Some(end) => (&bytes[..end], true, true),
+            Some(end) => (&bounded[..end], true, true),
             None => (bounded, true, false),
         }
     };
@@ -526,20 +754,20 @@ fn build_resource(
             omitted_from_line,
             truncated,
             last_line_complete,
-            sha256,
+            sha256: sha256.to_string(),
         },
         warning,
     ))
 }
 
-fn package_revision(entrypoint_bytes: &[u8], guides: &[GuideDocument]) -> String {
+fn package_revision(entrypoint_sha256: &str, guides: &[GuideDocument]) -> String {
     let mut canonical = Vec::new();
     canonical.extend_from_slice(b"agentic-room-bootstrap-v1\0");
     canonical.extend_from_slice(b"schemaVersion\0");
     canonical.extend_from_slice(SCHEMA_VERSION.to_string().as_bytes());
     canonical.push(0);
     canonical.extend_from_slice(b"entrypoint\0bootstrap.md\0");
-    canonical.extend_from_slice(hex_sha256(entrypoint_bytes).as_bytes());
+    canonical.extend_from_slice(entrypoint_sha256.as_bytes());
     canonical.push(0);
     for guide in guides {
         canonical.extend_from_slice(b"guide\0");
@@ -567,7 +795,11 @@ fn logical_line_count(bytes: &[u8]) -> u64 {
 
 fn hex_sha256(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+    hex_digest(digest.as_ref())
+}
+
+fn hex_digest(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn display_path(path: &Path) -> String {
@@ -724,6 +956,55 @@ mod tests {
     }
 
     #[test]
+    fn mixed_validity_duplicate_ids_exclude_every_candidate() {
+        let (config, root) = test_config("mixed-duplicate");
+        write_entrypoint(&root, "");
+        write_guide(
+            &root,
+            "valid.md",
+            "id: duplicate\nkind: guide\ntitle: Valid\nsummary: Valid",
+            "valid",
+        );
+        write_guide(
+            &root,
+            "invalid.md",
+            "id: duplicate\nkind: guide\ntitle: \"\"\nsummary: Invalid",
+            "invalid",
+        );
+
+        let response = load_config(&config).unwrap();
+        assert_eq!(response.total_guides, 0);
+        assert_eq!(
+            response
+                .warnings
+                .iter()
+                .filter(|warning| warning.starts_with("guide_duplicate_id:"))
+                .count(),
+            2
+        );
+        assert!(response
+            .warnings
+            .iter()
+            .any(|warning| warning.starts_with("guide_metadata_invalid:")));
+    }
+
+    #[test]
+    fn guide_directory_entry_errors_are_reported_without_dropping_readable_entries() {
+        let root = PathBuf::from("/tmp/bootstrap-guides");
+        let readable = root.join("readable.md");
+        let (paths, warnings) = collect_guide_paths(
+            vec![
+                Ok(readable.clone()),
+                Err(io::Error::new(io::ErrorKind::PermissionDenied, "denied")),
+            ],
+            &root,
+        );
+        assert_eq!(paths, vec![readable]);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].starts_with("guide_dir_entry_unreadable:"));
+    }
+
+    #[test]
     fn guides_sort_by_priority_then_id_and_manifest_caps_at_64_but_read_keeps_all() {
         let (config, root) = test_config("ordering");
         write_entrypoint(&root, "");
@@ -807,6 +1088,49 @@ mod tests {
         assert_eq!(resource.returned_through_line, 1);
         assert_eq!(resource.omitted_from_line, Some(1));
         assert_eq!(resource.returned_size_bytes, resource.content.len() as u64);
+    }
+
+    #[test]
+    fn oversized_files_keep_full_metadata_with_bounded_prefixes() {
+        let (config, root) = test_config("oversized");
+        let entrypoint_body = "entrypoint-line\n".repeat(ENTRYPOINT_MAX_BYTES);
+        write_entrypoint(&root, &entrypoint_body);
+        let entrypoint_path = root.join(BOOTSTRAP_DIR).join(ENTRYPOINT_NAME);
+        let entrypoint_bytes = fs::read(&entrypoint_path).unwrap();
+
+        let guide_body = "guide-line\n".repeat(GUIDE_MAX_BYTES);
+        write_guide(
+            &root,
+            "large.md",
+            "id: large\nkind: guide\ntitle: Large\nsummary: Large guide",
+            &guide_body,
+        );
+        let guide_path = root.join(BOOTSTRAP_DIR).join(GUIDES_DIR).join("large.md");
+        let guide_bytes = fs::read(&guide_path).unwrap();
+
+        let response = load_config(&config).unwrap();
+        assert!(response.entrypoint.resource.truncated);
+        assert_eq!(
+            response.entrypoint.resource.size_bytes,
+            entrypoint_bytes.len() as u64
+        );
+        assert!(response.entrypoint.resource.returned_size_bytes <= ENTRYPOINT_MAX_BYTES as u64);
+        assert_eq!(
+            response.entrypoint.resource.sha256,
+            hex_sha256(&entrypoint_bytes)
+        );
+
+        let read = read_config(
+            &config,
+            &BootstrapReadRequest {
+                id: "large".to_string(),
+            },
+        )
+        .unwrap();
+        assert!(read.resource.truncated);
+        assert_eq!(read.resource.size_bytes, guide_bytes.len() as u64);
+        assert!(read.resource.returned_size_bytes <= GUIDE_MAX_BYTES as u64);
+        assert_eq!(read.resource.sha256, hex_sha256(&guide_bytes));
     }
 
     #[test]
