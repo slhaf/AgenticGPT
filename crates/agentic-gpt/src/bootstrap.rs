@@ -408,11 +408,12 @@ fn scan_file(path: &Path, max_prefix_bytes: usize) -> Result<FileScan> {
 
         if !frontmatter_closed && !frontmatter_overflow {
             let remaining = MAX_FRONTMATTER_BYTES.saturating_sub(frontmatter_bytes.len());
-            frontmatter_bytes.extend_from_slice(&chunk[..remaining.min(chunk.len())]);
+            let retained = remaining.min(chunk.len());
+            frontmatter_bytes.extend_from_slice(&chunk[..retained]);
             if let Some(end) = frontmatter_end(&frontmatter_bytes, false) {
                 frontmatter_bytes.truncate(end);
                 frontmatter_closed = true;
-            } else if frontmatter_bytes.len() == MAX_FRONTMATTER_BYTES {
+            } else if retained < chunk.len() {
                 frontmatter_overflow = true;
                 frontmatter_bytes.clear();
             }
@@ -506,7 +507,7 @@ fn frontmatter_end(bytes: &[u8], eof: bool) -> Option<usize> {
         match bytes.get(marker_end..) {
             Some(rest) if rest.starts_with(b"\n") => return Some(marker_end + 1),
             Some(rest) if rest.starts_with(b"\r\n") => return Some(marker_end + 2),
-            None if eof => return Some(marker_end),
+            Some(rest) if rest.is_empty() && eof => return Some(marker_end),
             _ => {
                 offset = marker_start + 1;
             }
@@ -845,6 +846,17 @@ mod tests {
         .unwrap();
     }
 
+    fn padded_frontmatter_document(metadata: &str, block_bytes: usize) -> Vec<u8> {
+        let prefix = format!("---\n{metadata}\n#");
+        let closing = b"\n---";
+        assert!(block_bytes >= prefix.len() + closing.len());
+        let mut bytes = prefix.into_bytes();
+        bytes.extend(vec![b'a'; block_bytes - bytes.len() - closing.len()]);
+        bytes.extend_from_slice(closing);
+        assert_eq!(bytes.len(), block_bytes);
+        bytes
+    }
+
     #[test]
     fn missing_package_and_invalid_entrypoint_are_fail_closed() {
         let (config, root) = test_config("missing");
@@ -1131,6 +1143,72 @@ mod tests {
         assert_eq!(read.resource.size_bytes, guide_bytes.len() as u64);
         assert!(read.resource.returned_size_bytes <= GUIDE_MAX_BYTES as u64);
         assert_eq!(read.resource.sha256, hex_sha256(&guide_bytes));
+    }
+
+    #[test]
+    fn frontmatter_scan_limit_accepts_exact_boundary_and_rejects_overflow() {
+        let (config, root) = test_config("frontmatter-limit");
+        let bootstrap = root.join(BOOTSTRAP_DIR);
+        fs::create_dir_all(&bootstrap).unwrap();
+        let entrypoint_metadata = "id: room\nkind: entrypoint\nname: Room Bootstrap\ndescription: Route guides\nschemaVersion: 1";
+
+        fs::write(
+            bootstrap.join(ENTRYPOINT_NAME),
+            padded_frontmatter_document(entrypoint_metadata, MAX_FRONTMATTER_BYTES),
+        )
+        .unwrap();
+        let exact = load_config(&config);
+        assert!(exact.is_ok(), "exact-boundary error: {:?}", exact.err());
+
+        fs::write(
+            bootstrap.join(ENTRYPOINT_NAME),
+            padded_frontmatter_document(entrypoint_metadata, MAX_FRONTMATTER_BYTES + 1),
+        )
+        .unwrap();
+        assert_eq!(
+            load_config(&config).unwrap_err().to_string(),
+            "bootstrap_invalid"
+        );
+
+        write_entrypoint(&root, "");
+        let guides = bootstrap.join(GUIDES_DIR);
+        fs::create_dir_all(&guides).unwrap();
+        let guide_metadata =
+            "id: oversized\nkind: guide\ntitle: Oversized\nsummary: Oversized frontmatter";
+        fs::write(
+            guides.join("oversized.md"),
+            padded_frontmatter_document(guide_metadata, MAX_FRONTMATTER_BYTES + 1),
+        )
+        .unwrap();
+        let response = load_config(&config).unwrap();
+        assert_eq!(response.total_guides, 0);
+        assert!(response
+            .warnings
+            .iter()
+            .any(|warning| warning.starts_with("guide_frontmatter_invalid:")));
+    }
+
+    #[test]
+    fn utf8_validation_accepts_multibyte_codepoint_split_across_scan_chunks() {
+        let (_config, root) = test_config("chunked-utf8");
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("split.md");
+        let mut bytes = b"---\nid: room\nkind: entrypoint\nname: Room Bootstrap\ndescription: Route guides\nschemaVersion: 1\n---\n".to_vec();
+        let padding = (FILE_SCAN_CHUNK_BYTES - 1 + FILE_SCAN_CHUNK_BYTES
+            - (bytes.len() % FILE_SCAN_CHUNK_BYTES))
+            % FILE_SCAN_CHUNK_BYTES;
+        bytes.extend(vec![b'a'; padding]);
+        assert_eq!(
+            bytes.len() % FILE_SCAN_CHUNK_BYTES,
+            FILE_SCAN_CHUNK_BYTES - 1
+        );
+        bytes.extend_from_slice("β\n".as_bytes());
+        fs::write(&path, &bytes).unwrap();
+
+        let scan = scan_file(&path, ENTRYPOINT_MAX_BYTES).unwrap();
+        assert!(scan.utf8_valid);
+        assert_eq!(scan.sha256, hex_sha256(&bytes));
+        assert_eq!(scan.total_lines, logical_line_count(&bytes));
     }
 
     #[test]

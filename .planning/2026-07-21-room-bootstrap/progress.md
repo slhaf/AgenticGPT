@@ -245,3 +245,14 @@
 - Full `cargo test --workspace` reached 96 passed and one failure: the explicitly deferred `diary::tests::append_and_select_exact_round_trip` at `2026-07-22 00:40 +0800`, caused by the known 05:00 logical-day boundary. No Diary files were changed.
 - R-01 through R-05 and the Phase 8 completion boundary are satisfied without changes to D-01 through D-13 or any deferred Diary test. The final repair commit is still pending after the final clean-worktree check.
 - Final pre-commit recheck passed again: bootstrap 13/13, Hub 56/56, protocol 8/8 plus doctests, workspace check, and format check. The full workspace result above remains the authoritative workspace-test outcome; no code changed after that run except the test-only dead-code annotation.
+
+
+### Post-Phase 8 frontmatter contract clarification
+
+- Independent review identified the scanner's existing 1 MiB retained-frontmatter limit as an undocumented public-behavior boundary.
+- **User decision:** formalize the limit as D-14 rather than remove bounded metadata parsing.
+- Documented that the complete frontmatter block must close within the first 1 MiB; exact-boundary closure is accepted, entrypoint overflow maps to `bootstrap_invalid`, and optional-guide overflow maps to `guide_frontmatter_invalid` plus exclusion.
+- Adjusted the scanner to defer overflow until bytes actually extend beyond the bound. The new exact-boundary test also exposed and fixed an EOF-closing bug where `bytes.get(len..)` returns an empty slice rather than `None`.
+- Added exact-boundary/one-byte-overflow regressions for entrypoint and guide plus a UTF-8 codepoint split across an 8 KiB chunk boundary.
+- Verification passed: Bootstrap 15/15, `cargo fmt --all -- --check`, and workspace check.
+- No Diary files or public protocol/OpenAPI shapes were changed.

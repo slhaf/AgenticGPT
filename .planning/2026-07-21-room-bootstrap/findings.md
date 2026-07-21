@@ -372,3 +372,12 @@ Before repair, the reviewer reran formatting, protocol 8/8, bootstrap focused 10
 - R-05 is repaired with chunked file scanning. Each file is read through an 8 KiB buffer while hashing, counting lines, validating UTF-8, capturing only a bounded response prefix, and collecting only bounded frontmatter. Manifest loads retain no guide body or raw guide frontmatter; ID reads retain only the requested guide's bounded scan and raw frontmatter. Oversized entrypoint/guide fixtures verify bounded returned sizes and complete-file hashes.
 - Frozen D-01 through D-13 remain unchanged. No protocol, OpenAPI, documentation, Diary, or public route/tool contract was broadened.
 - Phase 8 focused verification passed: format check, bootstrap 13/13, Hub 56/56, protocol 8/8 plus doctests, and workspace check. Workspace testing reached 96 passed with only the explicitly deferred Diary test failing at `2026-07-22 00:40 +0800`; no Diary code or tests were modified.
+
+
+## D-14 — Explicit frontmatter scan bound
+
+Post-repair review found that chunked scanning already retained at most 1 MiB of leading frontmatter, but the bound was not part of the frozen public contract. The user accepted formalizing that engineering bound rather than allowing raw frontmatter to grow without limit.
+
+The complete leading YAML block, including both delimiters, must end within the first 1 MiB. A delimiter exactly at the byte bound remains valid, including the EOF-closing form. Regression work corrected the scanner to recognize an empty slice at EOF rather than waiting for an impossible `None` slice. Entrypoint overflow is `bootstrap_invalid`; optional-guide overflow is `guide_frontmatter_invalid` and exclusion. This does not cap total document size: the scanner continues through the complete file for UTF-8 validity, line count, SHA-256, and revision while retaining only bounded response content.
+
+Regression coverage now includes exact-boundary acceptance, one-byte overflow for entrypoint and guide, and a multibyte UTF-8 codepoint split across the 8 KiB scanner boundary.

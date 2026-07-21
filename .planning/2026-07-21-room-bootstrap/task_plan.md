@@ -15,7 +15,7 @@ Phase 8 - Repair and regression hardening
 - **Implementation authorized:** yes
 - **Entry phase:** Phase 8
 - **Open blocking decisions:** 0
-- **Design checkpoint:** D-01 through D-13 remain frozen; R-01 through R-05 repaired and regression-tested
+- **Design checkpoint:** D-01 through D-14 frozen; R-01 through R-05 repaired and regression-tested
 - **Next action:** deliver the Phase 8 repair summary
 
 ## Scope and constraints
@@ -75,6 +75,12 @@ Rules:
 - `schemaVersion`: required integer and must equal `1`; other versions are `bootstrap_invalid` in V1.
 - The parsed raw YAML object is retained in the entrypoint detail for forward-compatible inspection.
 - Missing/unclosed/non-object/invalid YAML or invalid required fields make the package `bootstrap_invalid`.
+
+### Frontmatter scan bound
+
+- The complete leading YAML frontmatter block, including both `---` delimiters, must end within the first 1,048,576 bytes (1 MiB) of the file. A closing delimiter exactly at the bound is valid.
+- This is a metadata parsing bound, separate from the 64 KiB/256 KiB returned-content limits. The complete file is still streamed for UTF-8 validation, line counting, SHA-256, and package revision.
+- An entrypoint whose frontmatter exceeds the bound is `bootstrap_invalid`. An optional guide whose frontmatter exceeds the bound is excluded with `guide_frontmatter_invalid`.
 
 ### Guide frontmatter
 
@@ -530,6 +536,7 @@ The known deferred Diary boundary-sensitive test still fails during its document
 | Q-05 | MCP and Actions parity | yes | resolved | Both surfaces required, read-only and no `agentId` (D-11) |
 | Q-06 | Limits/truncation/order/revision/security | yes | resolved | Graceful line-aware truncation, 64-guide manifest, full hashes/revision, structural failures not truncated (D-13) |
 | Q-07 | Nested directories/category grouping | yes | resolved | Flat direct guide directory; no `group` in V1 (D-12) |
+| Q-08 | Frontmatter memory bound | yes | resolved | Complete frontmatter must close within the first 1 MiB; exact boundary accepted (D-14) |
 
 ## Decisions Made
 
@@ -548,6 +555,7 @@ The known deferred Diary boundary-sensitive test still fails during its document
 | D-11 | Public surfaces | confirmed | MCP and GPT Actions/OpenAPI parity |
 | D-12 | Organization | confirmed | Flat direct `guides/*.md`, no recursion/group |
 | D-13 | Resources | confirmed | Line-aware bounded responses, deterministic order/revision, full-file hashes, structural/security rejection |
+| D-14 | Frontmatter bound | confirmed | Complete frontmatter block must close within the first 1 MiB; entrypoint fails and optional guides warn/exclude on overflow |
 
 Detailed evidence and rationale remain canonical in `findings.md`.
 
@@ -565,6 +573,7 @@ Detailed evidence and rationale remain canonical in `findings.md`.
 - [x] HTTP status mapping and MCP native error behavior, including operation-specific Bootstrap timeouts, match the frozen taxonomy.
 - [x] Reads create no state, require no restart/reload, and are retry-safe.
 - [x] Per-file scanning/hashing memory is bounded independently of authored file size while preserving full-file hash and line metadata.
+- [x] The 1 MiB frontmatter scan bound is documented; exact-boundary, overflow, and cross-chunk UTF-8 behavior are regression-tested.
 - [x] Registered MCP tool names and Apps `tools/call` dispatch cannot drift silently.
 - [x] Protocol, local loader, Hub/MCP/OpenAPI, documentation, formatting, workspace check, and focused crate tests pass; the known unrelated Diary timing failure in the full workspace test is documented.
 - [x] Documentation includes authoring examples and explains tool schema versus usage-guide responsibility.
@@ -602,12 +611,12 @@ The Implementer may not change frontmatter fields/defaults, directory rules, pub
 - **Design phase:** complete
 - **Implementation authorized:** yes
 - **Entry phase:** Phase 8
-- **Frozen decisions:** D-01 through D-13
+- **Frozen decisions:** D-01 through D-14
 - **Open blocking decisions:** none
 - **Implementation discretion:** see `Implementation Discretion`
 - **Verification convention:** focused crate tests after each phase, then Phase 8 format/check/focused suites and workspace test outcome recorded with the deferred Diary caveat
-- **Commit convention:** Phases 3 through 7 are committed; after Phase 8 verification, create one focused repair commit and leave the workspace clean
-- **Design checkpoint:** D-01 through D-13 frozen; R-01 through R-05 accepted for repair
+- **Commit convention:** Phases 3 through 8 are committed; record the D-14 contract clarification in one focused follow-up commit and leave the workspace clean
+- **Design checkpoint:** D-01 through D-14 frozen; R-01 through R-05 repaired
 - **Next invocation:** none; deliver the completed Phase 8 repair
 
 ## Deferred repository follow-up
