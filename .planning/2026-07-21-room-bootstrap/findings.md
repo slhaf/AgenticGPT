@@ -64,6 +64,13 @@ Plan scope: `.planning/2026-07-21-room-bootstrap`.
 - `docs/interfaces.md` is the repository's canonical public interface map, so the bootstrap authoring model and both public surfaces are documented there; README top-level feature lists only need concise pointers.
 - Documentation examples can name Diary, Notebook, execution/session, and skills conventions while keeping the implementation generic because capability names are authored `toolBindings`/body content, not runtime guide branches.
 
+### Phase 7 delivery checkpoint
+
+- The final D-01 through D-13 audit found no contract drift across the dedicated protocol types, local loader, Hub command helpers, Room HTTP routes, MCP tools, OpenAPI schemas, and interface documentation. The public identity remains the active Room Agent; both operations have no `agentId`, are read-only/non-destructive/non-open-world, and Actions operations are non-consequential.
+- The loader now avoids accumulating guide bodies during manifest calls. It reads and hashes each candidate for validation/revision, retains no body for `room.bootstrap`, and retains only the requested valid guide for `room.bootstrap.read`; complete-file size, line count, and SHA-256 semantics are unchanged.
+- Documentation explicitly lists all implemented stable warning prefixes, including entrypoint/guide truncation and unreadable guide-directory entries. The implementation continues to use fixed `<workspaceRoot>/bootstrap`, direct lowercase `.md` guide discovery, generic typed metadata with raw detail retention, deterministic priority/ID order, and full-file revision membership for valid guides beyond the 64-item manifest.
+- Focused protocol, loader, and Hub tests plus formatting and workspace check passed. The full workspace test caveat is environmental/pre-existing and reproducible only in the Diary test at the local pre-05:00 logical-day boundary; bootstrap-specific behavior is unaffected.
+
 - `SkillResource` is a stable protocol object with `path`, `encoding`, `content`, optional `mediaType`, `sizeBytes`, and `sha256`; encoding is `utf8` or `base64`.
 - `skills.read` normalizes a package-relative path, rejects empty/absolute/parent/backslash paths, rejects symlinks at every component, requires a regular file, and caps a returned resource at 1 MiB.
 - Frontmatter parsing currently normalizes CRLF, recognizes a leading YAML block, converts an object to JSON, and reports malformed/non-object YAML through warnings rather than rejecting the skill package.

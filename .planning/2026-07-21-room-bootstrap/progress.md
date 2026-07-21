@@ -194,3 +194,13 @@
 - `CARGO_TARGET_DIR=/tmp/agentic-gpt-room-bootstrap-target cargo check --workspace` passed.
 - `CARGO_TARGET_DIR=/tmp/agentic-gpt-room-bootstrap-target cargo test --workspace` reached 93/94 local-agent tests before the known unrelated Diary timing failure; protocol and Hub focused/full suites passed separately (8/8 and 53/53).
 - Documentation matches the frozen D-01 through D-13 contract, including the fixed layout, generic authoring examples, both API surfaces, warnings/errors, ordering/revision, and truncation metadata.
+
+### Phase 7 delivery review
+
+- Re-read the frozen contract and audited D-01 through D-13 across protocol types, local loader tests, active-Room dispatch, Hub routing, MCP descriptors/instructions, OpenAPI, and documentation. No `agentId` was introduced; the implementation remains generic and does not branch on Diary, Notebook, execution, tmux, or skills guide names.
+- Tightened the local loader's per-call memory behavior: manifest loads retain no guide bodies, while `room.bootstrap.read` retains only the requested valid guide. Guide hashing, line counting, and validation still use the complete original bytes observed for each file.
+- Added the missing `entrypoint_truncated` and `guide_dir_entry_unreadable` warning prefixes to the canonical interface documentation.
+- Final verification passed: `cargo fmt --all -- --check`; `CARGO_TARGET_DIR=/tmp/agentic-gpt-room-bootstrap-target cargo test -p agentic-gpt bootstrap` (10 passed); `CARGO_TARGET_DIR=/tmp/agentic-gpt-room-bootstrap-target cargo test -p agentic-gpt-protocol` (8 passed plus doctests); `CARGO_TARGET_DIR=/tmp/agentic-gpt-room-bootstrap-target cargo test -p agentic-gpt-hub` (53 passed); and `CARGO_TARGET_DIR=/tmp/agentic-gpt-room-bootstrap-target cargo check --workspace`.
+- The previously run full workspace test remains 93/94 local-agent tests: only the unrelated `diary::tests::append_and_select_exact_round_trip` fails at the current local time because the default 05:00 logical-day boundary disagrees with the test's calendar-date selection. No Diary files were changed.
+- Implementation discretion used: dedicated bootstrap wire types instead of widening `SkillResource`; fixed-path constants instead of config; direct sorted scanning with per-call hashes; only the requested guide body retained for ID reads; and raw frontmatter retained only in guide detail responses. Deferred non-goals remain V1's no nested/grouped guides, write/install/reload APIs, aggregate package-byte cap, and atomic multi-file snapshot guarantee.
+- Phase 7 is complete. Phase commits: `25a7510`, `8e9a56a`, `aec922e`, and `e38c065`; the final delivery commit follows after this planning update.

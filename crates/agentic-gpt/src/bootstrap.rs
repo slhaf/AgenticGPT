@@ -24,7 +24,7 @@ const SCHEMA_VERSION: u32 = 1;
 struct GuideDocument {
     id: String,
     path: String,
-    bytes: Vec<u8>,
+    retained_bytes: Option<Vec<u8>>,
     frontmatter: Value,
     summary: BootstrapGuideSummary,
 }
@@ -50,7 +50,7 @@ pub(crate) async fn read(
 }
 
 fn load_config(config: &Config) -> Result<BootstrapResponse> {
-    let package = load_package(config)?;
+    let package = load_package(config, None)?;
     let total_guides = package.guides.len();
     let returned_guides = total_guides.min(MAX_RETURNED_GUIDES);
     let mut warnings = package.warnings;
@@ -76,18 +76,18 @@ fn load_config(config: &Config) -> Result<BootstrapResponse> {
 }
 
 fn read_config(config: &Config, request: &BootstrapReadRequest) -> Result<BootstrapReadResponse> {
-    let package = load_package(config)?;
+    let package = load_package(config, Some(&request.id))?;
     let guide = package
         .guides
         .iter()
         .find(|guide| guide.id == request.id)
         .ok_or_else(|| anyhow!("guide_not_found"))?;
-    let (resource, warning) = build_resource(
-        &guide.bytes,
-        &guide.path,
-        GUIDE_MAX_BYTES,
-        "guide_truncated",
-    )?;
+    let bytes = guide
+        .retained_bytes
+        .as_deref()
+        .ok_or_else(|| anyhow!("bootstrap_read_failed"))?;
+    let (resource, warning) =
+        build_resource(bytes, &guide.path, GUIDE_MAX_BYTES, "guide_truncated")?;
     Ok(BootstrapReadResponse {
         guide: guide.summary.clone(),
         frontmatter: guide.frontmatter.clone(),
@@ -96,7 +96,7 @@ fn read_config(config: &Config, request: &BootstrapReadRequest) -> Result<Bootst
     })
 }
 
-fn load_package(config: &Config) -> Result<LoadedPackage> {
+fn load_package(config: &Config, retain_guide_id: Option<&str>) -> Result<LoadedPackage> {
     let bootstrap_root = config.workspace_root.join(BOOTSTRAP_DIR);
     ensure_directory(&bootstrap_root, "bootstrap_not_found", "bootstrap_invalid")?;
 
@@ -123,7 +123,7 @@ fn load_package(config: &Config) -> Result<LoadedPackage> {
         resource: entrypoint_resource,
     };
 
-    let (guides, mut warnings) = scan_guides(&bootstrap_root)?;
+    let (guides, mut warnings) = scan_guides(&bootstrap_root, retain_guide_id)?;
     if let Some(warning) = entrypoint_warning {
         warnings.insert(0, warning);
     }
@@ -164,7 +164,10 @@ fn read_required_file(path: &Path) -> Result<Vec<u8>> {
     fs::read(path).map_err(|_| anyhow!("bootstrap_read_failed"))
 }
 
-fn scan_guides(bootstrap_root: &Path) -> Result<(Vec<GuideDocument>, Vec<String>)> {
+fn scan_guides(
+    bootstrap_root: &Path,
+    retain_guide_id: Option<&str>,
+) -> Result<(Vec<GuideDocument>, Vec<String>)> {
     let guides_root = bootstrap_root.join(GUIDES_DIR);
     let metadata = match fs::symlink_metadata(&guides_root) {
         Ok(metadata) => metadata,
@@ -252,7 +255,7 @@ fn scan_guides(bootstrap_root: &Path) -> Result<(Vec<GuideDocument>, Vec<String>
                 continue;
             }
         };
-        let text = match String::from_utf8(bytes.clone()) {
+        let text = match std::str::from_utf8(&bytes) {
             Ok(text) => text,
             Err(_) => {
                 warnings.push(format!("guide_non_utf8: path={relative_path}"));
@@ -277,10 +280,13 @@ fn scan_guides(bootstrap_root: &Path) -> Result<(Vec<GuideDocument>, Vec<String>
                 continue;
             }
         };
+        let size_bytes = bytes.len() as u64;
+        let total_lines = logical_line_count(&bytes);
+        let sha256 = hex_sha256(&bytes);
         guides.push(GuideDocument {
             id: metadata.id.clone(),
             path: relative_path,
-            bytes: bytes.clone(),
+            retained_bytes: (retain_guide_id == Some(metadata.id.as_str())).then_some(bytes),
             frontmatter,
             summary: BootstrapGuideSummary {
                 id: metadata.id,
@@ -293,9 +299,9 @@ fn scan_guides(bootstrap_root: &Path) -> Result<(Vec<GuideDocument>, Vec<String>
                 tool_bindings: metadata.tool_bindings,
                 tags: metadata.tags,
                 path: metadata.path,
-                size_bytes: bytes.len() as u64,
-                total_lines: logical_line_count(&bytes),
-                sha256: hex_sha256(&bytes),
+                size_bytes,
+                total_lines,
+                sha256,
             },
         });
     }
