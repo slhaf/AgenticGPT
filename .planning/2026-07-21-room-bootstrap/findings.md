@@ -315,3 +315,19 @@ Guide summaries deliberately omit raw frontmatter to bound the startup manifest 
 - Ensure HTTP 500 mapping for `bootstrap_read_failed` is added explicitly; current generic Room mapping otherwise defaults many errors to 400.
 - Ensure revision input uses unambiguous NUL-delimited records and all valid guides, not only returned guides.
 - Ensure line accounting tests cover trailing newline, CRLF, multibyte characters, and one overlong line.
+
+
+## Deferred repository issue: Diary boundary-sensitive round-trip test
+
+Independent post-delivery review confirmed that `diary::tests::append_and_select_exact_round_trip` is time-dependent and unrelated to Room Bootstrap. At local `2026-07-22 00:12 +0800`, the isolated test reproduced `left: 0, right: 1`.
+
+The production behavior is internally consistent: `append()` applies the configured 05:00 logical-day boundary and writes the new entry under the previous logical date before 05:00. The test then derives a natural calendar date from `response.created_at` and calls `select_exact` for that date, rather than selecting the logical date already returned as `response.date`. The test therefore fails predictably during the five-hour pre-boundary window.
+
+Repository evidence rules out a Bootstrap regression:
+
+- `crates/agentic-gpt/src/diary.rs` has the same blob `13e73d372453d227f0ec3637bb5c4bb3982f8c55` at planning checkpoint `6f24b67` and final delivery `d174916`.
+- `crates/agentic-gpt/src/config.rs` likewise remains unchanged across the implementation range.
+- The faulty test shape already existed in `87c9cb9 Add diary day boundary`.
+- Bootstrap changes to `main.rs` add only module registration and Bootstrap dispatch tests; they do not alter Diary configuration or shared test state.
+
+The appropriate future repair is test-only: parse `response.date` and pass that logical date to `select_exact`. The user explicitly deferred this unrelated cleanup, so it does not reopen the completed Bootstrap plan.

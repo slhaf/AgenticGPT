@@ -204,3 +204,13 @@
 - The previously run full workspace test remains 93/94 local-agent tests: only the unrelated `diary::tests::append_and_select_exact_round_trip` fails at the current local time because the default 05:00 logical-day boundary disagrees with the test's calendar-date selection. No Diary files were changed.
 - Implementation discretion used: dedicated bootstrap wire types instead of widening `SkillResource`; fixed-path constants instead of config; direct sorted scanning with per-call hashes; only the requested guide body retained for ID reads; and raw frontmatter retained only in guide detail responses. Deferred non-goals remain V1's no nested/grouped guides, write/install/reload APIs, aggregate package-byte cap, and atomic multi-file snapshot guarantee.
 - Phase 7 is complete. Phase commits: `25a7510`, `8e9a56a`, `aec922e`, and `e38c065`; the final delivery commit follows after this planning update.
+
+
+### Post-delivery review: Diary test issue deferred
+
+- Reproduced `diary::tests::append_and_select_exact_round_trip` in isolation at local `00:12 +0800`; it failed with `left: 0`, `right: 1`.
+- Confirmed the test selects the `created_at` calendar date while `append()` stores and returns the configured logical Diary date, which is the previous day before the 05:00 boundary.
+- Verified `diary.rs` and `config.rs` are byte-identical before and after the Bootstrap implementation range and that the problematic test predates this feature.
+- Classified the failure as a pre-existing, boundary-sensitive test defect rather than a Bootstrap regression.
+- Recorded the future fix: select by parsed `response.date`, then rerun the workspace suite.
+- **User decision:** defer the Diary test cleanup; do not modify product/test code or reopen the completed Room Bootstrap delivery now.

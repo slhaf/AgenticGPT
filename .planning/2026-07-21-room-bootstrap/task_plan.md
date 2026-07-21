@@ -515,7 +515,7 @@ Detailed evidence and rationale remain canonical in `findings.md`.
 - [x] HTTP status mapping and MCP native error behavior match the frozen taxonomy.
 - [x] Reads create no state, require no restart/reload, and are retry-safe.
 - [x] Protocol, local loader, Hub/MCP/OpenAPI, documentation, formatting, workspace check, and focused crate tests pass; the known unrelated Diary timing failure in the full workspace test is documented.
-- [ ] Documentation includes authoring examples and explains tool schema versus usage-guide responsibility.
+- [x] Documentation includes authoring examples and explains tool schema versus usage-guide responsibility.
 
 ## Implementation Discretion
 
@@ -558,6 +558,18 @@ The Implementer may not change frontmatter fields/defaults, directory rules, pub
 - **Design checkpoint:** D-01 through D-13 audited
 - **Next invocation:** none; deliver the completed implementation
 
+## Deferred repository follow-up
+
+### Diary logical-date round-trip test
+
+- **Status:** confirmed pre-existing test defect; deferred by user.
+- **Affected test:** `diary::tests::append_and_select_exact_round_trip`.
+- **Failure window:** deterministic from `00:00` through `04:59` in the configured `Asia/Shanghai` timezone when the default `room.diaryDayBoundaryHour` is `5`.
+- **Root cause:** `append()` writes to the logical Diary date and returns it as `response.date`, but the test selects by the natural calendar date derived from `response.created_at`. Before the 05:00 boundary those dates differ by one day.
+- **Bootstrap regression status:** none. `crates/agentic-gpt/src/diary.rs` and `crates/agentic-gpt/src/config.rs` have identical Git blobs before and after the Room Bootstrap implementation range, and no Bootstrap commit modified Diary behavior or defaults.
+- **Recommended future fix:** parse and select `response.date` in the round-trip test rather than deriving the date from `created_at`; then rerun `cargo test --workspace`.
+- **Scope decision:** do not reopen or amend the completed Room Bootstrap delivery for this unrelated test issue.
+
 ## Errors Encountered
 
 | Error | Attempt | Resolution |
@@ -569,7 +581,7 @@ The Implementer may not change frontmatter fields/defaults, directory rules, pub
 | First bootstrap test run exposed entrypoint validation details escaping as public error codes and a symlink fixture that rewrote rather than replaced its link | 1 | Map all entrypoint metadata failures to `bootstrap_invalid`; remove the link before creating the valid fixture |
 | A follow-up bootstrap test failed because the fixture reset cleanup was inserted before the entrypoint existed | 1 | Removed that premature cleanup; retain removal only after the symlink is created |
 | First Hub compile found duplicate derive/serde attributes on `BootstrapReadArgs` | 1 | Removed the duplicated attribute pair; keep one `JsonSchema` derive and camelCase serde attribute |
-| Full workspace test had one failure in pre-existing `diary::tests::append_and_select_exact_round_trip` (`left: 0`, `right: 1`) while the other 93 local-agent tests passed | 1 | Investigate the diary test's date/time fixture and rerun that isolated test; do not alter unrelated Diary code |
+| Full workspace test had one failure in pre-existing `diary::tests::append_and_select_exact_round_trip` (`left: 0`, `right: 1`) while the other 93 local-agent tests passed | 1 | Isolated and reproduced the test; confirmed a pre-existing logical-date versus calendar-date mismatch and deferred the unrelated fix |
 | Isolated Diary diagnostic initially placed `--exact` before Cargo's test-argument separator | 1 | Corrected the command to pass `--exact` after `--` |
 | Correctly isolated Diary test still fails at local `00:03 +0800` because the default 05:00 logical-day boundary writes yesterday's file while the test selects the `created_at` calendar date | 1 | Confirmed deterministic pre-existing timing failure; left unrelated Diary code/tests unchanged and documented the verification caveat |
 | Manual Room bootstrap smoke call was unavailable because no `agentic-gpt`/Hub process was running and `127.0.0.1:8080/health` refused the connection | 1 | Recorded smoke checks as unavailable; relied on deterministic local-agent and Hub routing tests |
