@@ -26,6 +26,7 @@ ChatGPT Actions / ChatGPT Apps MCP
 - 可选 bubblewrap 沙箱。
 - 支持把 ChatGPT 请求桥接到 local agent 内配置的 MCP server。
 - 提供 ChatGPT Actions OpenAPI schema 和 ChatGPT Apps 友好的 MCP endpoint。
+- 提供 Room 作用域的重复会话 bootstrap：简短入口文件加上由 frontmatter 驱动的通用能力指南。
 
 ## 仓库结构
 

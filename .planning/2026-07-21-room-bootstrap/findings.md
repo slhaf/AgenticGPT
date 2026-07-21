@@ -59,6 +59,11 @@ Plan scope: `.planning/2026-07-21-room-bootstrap`.
 - MCP tool annotations are centrally derived from tool names. New bootstrap tools are read-only by default if they are absent from mutation, destructive, and open-world match sets; their schemas should contain no `agentId`.
 - GPT Actions/OpenAPI is manually maintained and has regression tests that assert Room routes, operation IDs, schemas, and no `agentId`; bootstrap needs explicit paths and component schemas rather than generated output.
 
+### Phase 6 documentation checkpoint
+
+- `docs/interfaces.md` is the repository's canonical public interface map, so the bootstrap authoring model and both public surfaces are documented there; README top-level feature lists only need concise pointers.
+- Documentation examples can name Diary, Notebook, execution/session, and skills conventions while keeping the implementation generic because capability names are authored `toolBindings`/body content, not runtime guide branches.
+
 - `SkillResource` is a stable protocol object with `path`, `encoding`, `content`, optional `mediaType`, `sizeBytes`, and `sha256`; encoding is `utf8` or `base64`.
 - `skills.read` normalizes a package-relative path, rejects empty/absolute/parent/backslash paths, rejects symlinks at every component, requires a regular file, and caps a returned resource at 1 MiB.
 - Frontmatter parsing currently normalizes CRLF, recognizes a leading YAML block, converts an object to JSON, and reports malformed/non-object YAML through warnings rather than rejecting the skill package.

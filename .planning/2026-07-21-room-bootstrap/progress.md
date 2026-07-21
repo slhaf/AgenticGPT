@@ -3,13 +3,13 @@
 ## Session: 2026-07-21
 
 ### Current Status
-- **Phase:** 6 - Documentation, authoring examples, and integration verification
+- **Phase:** 7 - Delivery
 - **Phase status:** in_progress
 - **Started:** 2026-07-21
 - **Workflow stage:** implementation_active
 - **Current role:** implementer
 - **Implementation authorized:** yes
-- **Entry phase:** Phase 6
+- **Entry phase:** Phase 7
 - **Open blocking decisions:** none
 
 ### Actions Taken
@@ -177,3 +177,20 @@
 - Added MCP tools `room.bootstrap` and `room.bootstrap.read`, with no `agentId`, read-only/non-destructive/non-open-world annotations, and a concise startup instruction.
 - Added OpenAPI paths, operation IDs, non-consequential annotations, request/response schemas, enum spellings, truncation fields, and hash patterns.
 - Verification passed: `CARGO_TARGET_DIR=/tmp/agentic-gpt-room-bootstrap-target cargo test -p agentic-gpt-hub bootstrap` (3 passed), `CARGO_TARGET_DIR=/tmp/agentic-gpt-room-bootstrap-target cargo test -p agentic-gpt-hub` (53 passed), `CARGO_TARGET_DIR=/tmp/agentic-gpt-room-bootstrap-target cargo check -p agentic-gpt-hub`, and `cargo fmt --all -- --check`.
+
+### Phase 6 documentation
+
+- Added the Room bootstrap package section to `docs/interfaces.md`, covering fixed layout, strict frontmatter, defaults, flat discovery, generic tool bindings, API parity, warnings/errors, revision/ordering, and line-aware truncation.
+- Added concise authoring examples for `bootstrap.md` plus Diary, Notebook, execution/session, and skills guides; clarified that MCP schemas define availability/arguments while guides define workflow and recovery.
+- Added concise Room bootstrap feature bullets to `README.md` and `README.zh-CN.md`.
+- First full workspace test run: 93 of 94 local-agent tests passed; the unrelated `diary::tests::append_and_select_exact_round_trip` failed with no matching selected entry (`left: 0`, `right: 1`). Bootstrap tests passed.
+- The first isolated diagnostic invocation used invalid Cargo argument placement; this was corrected before rerunning the test.
+- Correct isolated rerun still fails at local `00:03 +0800`; the 05:00 Room Diary boundary explains the mismatch. No Diary implementation/test files were changed.
+- Manual smoke check was unavailable: no local `agentic-gpt`/Hub process was running and `curl http://127.0.0.1:8080/health` could not connect. No runtime workspace content was created.
+
+### Phase 6 completion
+
+- `cargo fmt --all -- --check` passed.
+- `CARGO_TARGET_DIR=/tmp/agentic-gpt-room-bootstrap-target cargo check --workspace` passed.
+- `CARGO_TARGET_DIR=/tmp/agentic-gpt-room-bootstrap-target cargo test --workspace` reached 93/94 local-agent tests before the known unrelated Diary timing failure; protocol and Hub focused/full suites passed separately (8/8 and 53/53).
+- Documentation matches the frozen D-01 through D-13 contract, including the fixed layout, generic authoring examples, both API surfaces, warnings/errors, ordering/revision, and truncation metadata.

@@ -6,17 +6,17 @@ Implement a Room Agent-scoped V1 bootstrap package that exposes a concise sessio
 
 ## Current Phase
 
-Phase 6 - Documentation, authoring examples, and integration verification
+Phase 7 - Delivery
 
 ## Workflow State
 
 - **Stage:** implementation_active
 - **Current role:** implementer
 - **Implementation authorized:** yes
-- **Entry phase:** Phase 6
+- **Entry phase:** Phase 7
 - **Open blocking decisions:** 0
 - **Design checkpoint:** not set
-- **Next action:** implement Phase 6 under `$planning-with-files` without `$refine-implementation-plan`
+- **Next action:** complete Phase 7 delivery review under `$planning-with-files`
 
 ## Scope and constraints
 
@@ -456,7 +456,7 @@ cargo test --workspace
 
 **Completion boundary:** docs match the wire contract and CI-equivalent commands pass.
 
-- **Status:** in_progress
+- **Status:** complete
 
 ### Phase 7: Delivery
 
@@ -466,7 +466,7 @@ cargo test --workspace
 - [ ] Record exact commands and outcomes in `progress.md`.
 - [ ] Record any implementation discretion used and any deferred non-goal.
 - [ ] Deliver changed-file summary, public behavior, warnings/errors, and verification status.
-- **Status:** pending
+- **Status:** in_progress
 
 ## Key Questions
 
@@ -568,3 +568,7 @@ The Implementer may not change frontmatter fields/defaults, directory rules, pub
 | First bootstrap test run exposed entrypoint validation details escaping as public error codes and a symlink fixture that rewrote rather than replaced its link | 1 | Map all entrypoint metadata failures to `bootstrap_invalid`; remove the link before creating the valid fixture |
 | A follow-up bootstrap test failed because the fixture reset cleanup was inserted before the entrypoint existed | 1 | Removed that premature cleanup; retain removal only after the symlink is created |
 | First Hub compile found duplicate derive/serde attributes on `BootstrapReadArgs` | 1 | Removed the duplicated attribute pair; keep one `JsonSchema` derive and camelCase serde attribute |
+| Full workspace test had one failure in pre-existing `diary::tests::append_and_select_exact_round_trip` (`left: 0`, `right: 1`) while the other 93 local-agent tests passed | 1 | Investigate the diary test's date/time fixture and rerun that isolated test; do not alter unrelated Diary code |
+| Isolated Diary diagnostic initially placed `--exact` before Cargo's test-argument separator | 1 | Corrected the command to pass `--exact` after `--` |
+| Correctly isolated Diary test still fails at local `00:03 +0800` because the default 05:00 logical-day boundary writes yesterday's file while the test selects the `created_at` calendar date | 1 | Confirmed deterministic pre-existing timing failure; left unrelated Diary code/tests unchanged and documented the verification caveat |
+| Manual Room bootstrap smoke call was unavailable because no `agentic-gpt`/Hub process was running and `127.0.0.1:8080/health` refused the connection | 1 | Recorded smoke checks as unavailable; relied on deterministic local-agent and Hub routing tests |

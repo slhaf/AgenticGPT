@@ -26,6 +26,7 @@ The current mainline uses the Rust Hub. The older Cloudflare Worker implementati
 - Optional bubblewrap sandbox integration.
 - MCP bridge from ChatGPT to MCP servers configured on the local agent.
 - Room-scoped asynchronous skill installation from public GitHub/HTTPS/inline sources, plus managed execution of active skill scripts.
+- Room-scoped repeated session bootstrap with a concise entrypoint and generic frontmatter-driven capability guides.
 - ChatGPT Actions OpenAPI schema and ChatGPT Apps-friendly MCP endpoint.
 
 ## Repository layout
