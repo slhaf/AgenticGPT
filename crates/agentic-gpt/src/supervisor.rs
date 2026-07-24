@@ -104,19 +104,18 @@ fn resolve_secret(reference: &str) -> Result<String> {
     let value = if let Some(name) = reference.strip_prefix("env:") {
         std::env::var(name).map_err(|_| anyhow!("tunnel_api_key_unavailable"))?
     } else if let Some(path) = reference.strip_prefix("file:") {
-        let mut value =
-            fs::read_to_string(path).map_err(|_| anyhow!("tunnel_api_key_unavailable"))?;
-        if value.ends_with("\r\n") {
-            value.truncate(value.len() - 2);
-        } else if value.ends_with('\n') {
-            value.pop();
-        }
-        value
+        fs::read_to_string(path)
+            .map_err(|_| anyhow!("tunnel_api_key_unavailable"))?
+            .trim_end_matches(['\r', '\n'])
+            .to_owned()
     } else {
         return Err(anyhow!("tunnel_api_key_reference_plaintext_rejected"));
     };
     if value.trim().is_empty() {
         return Err(anyhow!("tunnel_api_key_unavailable"));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(anyhow!("tunnel_api_key_invalid"));
     }
     Ok(value)
 }
@@ -889,15 +888,38 @@ mod tests {
     }
 
     #[test]
-    fn secret_reference_is_resolved_without_logging_material() {
-        let path = std::env::temp_dir().join(format!("agentic-secret-test-{}", Uuid::new_v4()));
-        fs::write(&path, "secret-value\r\n").unwrap();
-        let value = resolve_secret(&format!("file:{}", path.display())).unwrap();
+    fn secret_reference_normalizes_trailing_line_endings_and_rejects_controls() {
+        let root = std::env::temp_dir().join(format!("agentic-secret-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+
+        let valid = root.join("valid");
+        fs::write(&valid, "secret-value\r\n\n").unwrap();
+        let value = resolve_secret(&format!("file:{}", valid.display())).unwrap();
         assert_eq!(value, "secret-value");
+
+        let embedded_newline = root.join("embedded-newline");
+        fs::write(&embedded_newline, "secret\nvalue\n").unwrap();
+        assert_eq!(
+            resolve_secret(&format!("file:{}", embedded_newline.display()))
+                .unwrap_err()
+                .to_string(),
+            "tunnel_api_key_invalid"
+        );
+
+        let empty = root.join("empty");
+        fs::write(&empty, "\r\n\n").unwrap();
+        assert_eq!(
+            resolve_secret(&format!("file:{}", empty.display()))
+                .unwrap_err()
+                .to_string(),
+            "tunnel_api_key_unavailable"
+        );
+
         assert_eq!(
             resolve_secret("literal-secret").unwrap_err().to_string(),
             "tunnel_api_key_reference_plaintext_rejected"
         );
+        let _ = fs::remove_dir_all(root);
     }
 
     #[tokio::test]

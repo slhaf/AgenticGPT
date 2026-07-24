@@ -336,3 +336,24 @@
 - Full `cargo test --workspace` passed: Agent 132 unit tests + 1 integration, Hub 61, Protocol 9, doc tests 0.
 - `cargo fmt --all -- --check`, `git diff --check`, and `cargo check -p agentic-gpt` passed; only the two pre-existing `RunMode` dead-code warnings remain.
 - A temporary config copied the real tunnel settings but used an isolated config/runtime identity. The newly built Agentic binary passed the official pinned `tunnel-client` doctor and logged `standalone tunnel ready`; the temporary process and files were then removed.
+
+### Phase 11 repair started
+
+- Inspected running-process and official tunnel-client logs after the ChatGPT connector reported a connection error.
+- Confirmed the worker command starts successfully; failure occurs before any MCP request because every control-plane metadata/poll request rejects the Authorization header locally.
+- Inspected only key-file metadata and byte classes, not secret content. Found two trailing LF bytes while the current parser removes only one.
+- Repair scope: normalize repeated trailing CR/LF for file references, reject embedded controls, add regression tests, and verify actual control-plane traffic rather than local readiness alone.
+
+### Phase 11 verification correction
+
+- The first combined final verification stopped at `git diff --check` because `findings.md` and `progress.md` had extra blank lines at EOF. No compile or test step ran in that command. Trimmed planning files to one final newline and reran the full verification chain.
+
+### Phase 11 repair complete
+
+- Updated `resolve_secret` so file references remove all trailing CR/LF bytes and all references reject remaining control characters before entering `CONTROL_PLANE_API_KEY`.
+- Replaced the single-CRLF test with coverage for repeated mixed trailing line endings, embedded newline rejection, line-only empty-file rejection, and plaintext-reference rejection.
+- Focused supervisor tests passed 11/11.
+- Real official-client validation with the original unmodified key file logged `tunnel metadata fetched` and no Authorization-header failure.
+- Real ChatGPT Secure MCP Tunnel validation discovered 29 Normal tools and successfully completed `process.exec`; `bootstrap` and `skills.list` additionally proved structured error and data responses.
+- The temporary isolated supervisor, config, runtime directory, audit file, and state directory were removed after validation.
+- Final `cargo fmt --all -- --check`, `git diff --check`, `cargo check -p agentic-gpt`, and `cargo test --workspace` passed: Agent 132 unit + 1 integration, Hub 61, Protocol 9, doc tests 0. Only the two pre-existing `RunMode` dead-code warnings remain.

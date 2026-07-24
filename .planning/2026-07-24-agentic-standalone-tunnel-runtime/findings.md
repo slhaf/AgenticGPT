@@ -445,3 +445,15 @@ It must not expose process, tmux, downstream MCP, skills, bootstrap, diary, note
 - `mcp.command` now preserves the worker command's internal token quoting and no longer wraps the full command line. The official pinned client accepted the generated binding and reached readiness under an isolated temporary config using the real account-scoped tunnel settings.
 - Doctor failures now include exit code plus bounded stdout/stderr. Both the Runtime API key and the random per-run worker authorization token are redacted before error construction; forwarded tunnel stdout/stderr uses the same two-value redaction boundary.
 - The fake-tunnel integration now fails with exit 23 when the worker command begins with a whole-command quote. It no longer strips delimiters or adapts invalid output before launching the real hidden worker.
+
+## Post-delivery Authorization Header Finding
+
+- The configured key reference points to a mode-0600 file with 166 bytes, two LF bytes, no CR/NUL/space/tab, and two logical lines (`[164, 0]`). The secret payload itself was not inspected or printed.
+- `resolve_secret` removes exactly one CRLF or one LF. With two trailing LF bytes, one remains in `CONTROL_PLANE_API_KEY`; the official Go client then rejects its own Authorization header before sending metadata or poll requests.
+- Local `/readyz` can become healthy while control-plane metadata/poll continuously fails, so real verification must inspect control-plane success/failure rather than treating local readiness alone as end-to-end evidence.
+
+### Phase 11 repair result
+
+- File-backed secrets use `trim_end_matches(['\r', '\n'])`, preserving all non-line-ending bytes while tolerating common editor-created trailing blank lines. Any control character remaining after normalization is rejected before child-process environment injection.
+- With the original unmodified mode-0600 key file containing two trailing LF bytes, the rebuilt Agentic supervisor and pinned official client successfully fetched tunnel metadata and started polling; no invalid Authorization-header event remained.
+- ChatGPT then discovered the exact 29-tool Normal surface. A real `process.exec` returned `agentic-tunnel-e2e-ok` with exit code 0; `bootstrap` returned the expected structured `bootstrap_not_found` business error; `skills.list` returned local skill data. This proves discovery, success responses, and structured error responses across the full production topology.

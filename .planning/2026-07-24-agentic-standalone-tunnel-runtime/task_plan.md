@@ -8,7 +8,7 @@ Add a Tunnel-backed local command path to Agentic without removing the existing 
 - **Current role:** implementer
 - **Implementation authorized:** yes
 - **Active plan:** `2026-07-24-agentic-standalone-tunnel-runtime`
-- **Current phase:** Phase 10 - Real tunnel-client command/diagnostic repair (complete)
+- **Current phase:** Phase 11 - Runtime API key line-ending repair (complete)
 - **Entry phase after handoff:** Phase 3
 - **Open blocking decisions:** none
 
@@ -489,6 +489,23 @@ agentic-gpt run-as-standalone [--profile normal|room]
 **Implementation result:** Removed whole-command quoting from the tunnel binding while preserving token-level quoting, added 16 KiB bounded/redacted doctor diagnostics, redacted both Runtime API key and worker authorization token from forwarded child logs, and made the local fake-tunnel integration reject the invalid production shape.
 
 **Verification evidence:** supervisor focused tests 11/11; standalone supervisor integration 1/1; full workspace Agent 132 + 1 integration, Hub 61, Protocol 9; formatting/diff/check pass; a temporary isolated config using the real pinned official tunnel-client reached `standalone tunnel ready`.
+
+### Phase 11: Runtime API Key Line-Ending Repair
+**Objective:** Prevent file-backed Runtime API keys from producing invalid HTTP Authorization headers when editors leave multiple trailing line endings, while rejecting embedded control characters.
+
+**Trigger evidence:** The official tunnel-client started its stdio worker but every metadata and poll request failed with `net/http: invalid header field value for "Authorization"`. The configured mode-0600 key file contained two trailing LF bytes; `resolve_secret` removed only one.
+
+**Work:**
+- [x] Remove all trailing CR/LF bytes from file-backed secrets, not only one line ending.
+- [x] Reject any remaining embedded control characters and preserve strict plaintext-reference rejection.
+- [x] Add regression coverage for repeated trailing line endings, embedded newlines, and empty line-only files.
+- [x] Run focused/full tests and a real official-client/ChatGPT Tunnel call that proves control-plane metadata/poll and MCP responses succeed.
+
+**Status:** complete
+
+**Implementation result:** File-backed secrets now remove all trailing CR/LF bytes; any remaining control character is rejected as `tunnel_api_key_invalid`. Plaintext references and empty/line-only files retain their strict existing errors.
+
+**Verification evidence:** focused supervisor tests 11/11; full workspace Agent 132 + 1 integration, Hub 61, Protocol 9; format/diff/check pass; the official client logged `tunnel metadata fetched`; ChatGPT discovered the exact 29-tool Normal surface and successfully called `process.exec`, `bootstrap` (structured `bootstrap_not_found`), and `skills.list`.
 
 ## Cross-Phase Acceptance Criteria
 
