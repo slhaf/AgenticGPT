@@ -220,3 +220,33 @@
 ### Next step
 
 - Phase 6: wire the resolver into the standalone supervisor and own the tunnel-client/stdio-worker lifecycle; this phase will eliminate the current distribution-module dead-code warnings.
+
+### Phase 6 started
+
+- Re-read the frozen supervisor contract and official tunnel-client v0.0.10 flags/source before implementation.
+- Recorded the 45-second readiness bound, child-only secret environment, per-run worker token, Unix process-group cleanup, and private runtime-path assumptions in `findings.md`.
+- Added the public `run-as-standalone` CLI shape, hidden worker authorization hook, and initial supervisor lifecycle implementation; fake-client lifecycle tests remain before completion.
+
+### Phase 6 complete
+
+- Added the supervisor-owned runtime lock and lifecycle around the trusted resolver: secret resolution, doctor preflight, exact tunnel-client argv/env, hidden worker token authorization, private runtime files, readiness polling, restart budget/reset, restart-required config diagnostics, signal forwarding, process-group cleanup, and stale-file cleanup.
+- Added fake tunnel-client coverage for doctor/run separation, API-key argv exclusion, worker invocation, health URL discovery, readiness, and graceful process-tree shutdown; added policy tests for bounded backoff, permanent exit classification, exhaustion, and stale runtime files.
+
+| Check | Result |
+|---|---|
+| `cargo fmt --all -- --check` | pass |
+| `git diff --check` | pass |
+| `cargo check -p agentic-gpt` | pass; only pre-existing `RunMode` warnings remain |
+| `cargo test --workspace` | Agent 126 + Hub 56 + Protocol 8 passed |
+
+### Phase 6 implementation errors and resolutions
+
+| Error | Resolution |
+|---|---|
+| The sandbox denied loopback bind for the fake supervisor readiness server. | Ran the focused and workspace suites with narrow escalated loopback permission; production code remains loopback-only for health. |
+| A focused cargo test command supplied two filters, which Cargo rejects. | Re-ran the intended tests with one filter/full crate selection and recorded the command correction here. |
+| The first fake-client secret assertion inspected argv and the deliberately appended environment marker together. | Split the fixture log at the marker so argv exclusion and environment injection are asserted independently. |
+
+### Next step
+
+- Phase 7: add reporting-only Hub protocol and persistence without coupling reporting failures to direct Tunnel tool execution.

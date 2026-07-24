@@ -1,0 +1,911 @@
+//! Standalone Tunnel supervisor.
+//!
+//! The supervisor is the only process that owns the Agentic runtime lock. It
+//! launches the trusted tunnel-client, which in turn launches the hidden
+//! stdio worker. The API key is injected into the tunnel-client environment;
+//! it is never included in either command line.
+
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::time::{Duration, Instant};
+
+use anyhow::{anyhow, Result};
+use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
+use tokio::process::{Child, Command};
+use tokio::signal::unix::{signal, Signal, SignalKind};
+use tokio::task::JoinHandle;
+use tokio::time::{sleep, timeout};
+use uuid::Uuid;
+
+use crate::config::{validate_secret_reference, Config};
+use crate::instance_lock::InstanceLock;
+use crate::state::CapabilityProfile;
+use crate::tunnel_distribution::ResolvedTunnelClient;
+use crate::utils::{agentic_home, ensure_parent, log_info, log_warn};
+
+pub(crate) const WORKER_AUTH_ENV: &str = "AGENTIC_GPT_SUPERVISOR_TOKEN";
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(45);
+const HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_RESTART_ATTEMPTS: usize = 5;
+const READY_RESET_AFTER: Duration = Duration::from_secs(60);
+const BACKOFFS: [Duration; MAX_RESTART_ATTEMPTS] = [
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(4),
+    Duration::from_secs(8),
+    Duration::from_secs(16),
+];
+
+pub(crate) async fn run(config_path: PathBuf, profile: CapabilityProfile) -> Result<()> {
+    log_info(format!(
+        "standalone supervisor starting; profile={}; config={}",
+        profile.label(),
+        config_path.display()
+    ));
+    ensure_parent(&config_path)?;
+    let _instance_lock = InstanceLock::acquire(&config_path, ".run.lock", "agent")?;
+    if !config_path.exists() {
+        crate::config::write_config_with_backup(&config_path, &Config::default_config()?)?;
+    }
+    let config = Config::load(&config_path)?;
+    config.validate_standalone()?;
+    config.ensure_workspace()?;
+    if let Err(error) = crate::tmux::ensure_default_session(&config.workspace_root).await {
+        log_warn(format!("default tmux session unavailable: {error}"));
+    }
+
+    let runtime_paths = RuntimePaths::prepare(&config.agent_id)?;
+    let startup_identity = StartupIdentity::from_config(&config, profile)?;
+    let result = async {
+        let tunnel = config
+            .tunnel
+            .as_ref()
+            .ok_or_else(|| anyhow!("tunnel_config_required"))?;
+        let secret = resolve_secret(&tunnel.api_key)?;
+        let resolved = crate::tunnel_distribution::resolve(&config).await?;
+        let invocation = Invocation::new(
+            config_path.clone(),
+            profile,
+            tunnel.tunnel_id.clone(),
+            secret,
+            resolved,
+            runtime_paths.clone(),
+        )?;
+        run_doctor(&invocation).await?;
+        let watcher = tokio::spawn(watch_startup_identity(
+            config_path.clone(),
+            startup_identity,
+        ));
+        let result = run_loop(&invocation, &runtime_paths).await;
+        watcher.abort();
+        result
+    }
+    .await;
+    runtime_paths.cleanup();
+    result
+}
+
+pub(crate) fn authorize_worker(token: Option<&str>) -> Result<()> {
+    let token = token
+        .filter(|token| !token.is_empty())
+        .ok_or_else(|| anyhow!("stdio_worker_unauthorized"))?;
+    if std::env::var(WORKER_AUTH_ENV).ok().as_deref() != Some(token) {
+        return Err(anyhow!("stdio_worker_unauthorized"));
+    }
+    Ok(())
+}
+
+fn resolve_secret(reference: &str) -> Result<String> {
+    validate_secret_reference(reference)?;
+    let value = if let Some(name) = reference.strip_prefix("env:") {
+        std::env::var(name).map_err(|_| anyhow!("tunnel_api_key_unavailable"))?
+    } else if let Some(path) = reference.strip_prefix("file:") {
+        let mut value =
+            fs::read_to_string(path).map_err(|_| anyhow!("tunnel_api_key_unavailable"))?;
+        if value.ends_with("\r\n") {
+            value.truncate(value.len() - 2);
+        } else if value.ends_with('\n') {
+            value.pop();
+        }
+        value
+    } else {
+        return Err(anyhow!("tunnel_api_key_reference_plaintext_rejected"));
+    };
+    if value.trim().is_empty() {
+        return Err(anyhow!("tunnel_api_key_unavailable"));
+    }
+    Ok(value)
+}
+
+#[derive(Clone, Debug)]
+struct RuntimePaths {
+    health_url: PathBuf,
+    log: PathBuf,
+    pid: PathBuf,
+}
+
+impl RuntimePaths {
+    fn prepare(agent_id: &str) -> Result<Self> {
+        if agent_id.is_empty()
+            || !agent_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+        {
+            return Err(anyhow!("runtime_identity_invalid"));
+        }
+        let root = agentic_home()?
+            .join("runtime")
+            .join("tunnel")
+            .join(agent_id);
+        fs::create_dir_all(&root).map_err(|_| anyhow!("runtime_directory_unavailable"))?;
+        set_private_dir(&root)?;
+        let paths = Self {
+            health_url: root.join("health.url"),
+            log: root.join("tunnel-client.log"),
+            pid: root.join("tunnel-client.pid"),
+        };
+        fs::write(&paths.log, []).map_err(|_| anyhow!("runtime_directory_unavailable"))?;
+        set_private_file(&paths.log)?;
+        paths.remove_stale_files();
+        Ok(paths)
+    }
+
+    fn remove_stale_files(&self) {
+        for path in [&self.health_url, &self.pid] {
+            let _ = fs::remove_file(path);
+        }
+    }
+
+    fn cleanup(&self) {
+        let _ = fs::remove_file(&self.health_url);
+        let _ = fs::remove_file(&self.pid);
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct StartupIdentity {
+    tunnel_id: String,
+    api_key_reference: String,
+    version: Option<String>,
+    cache_dir: PathBuf,
+    auto_download: bool,
+    executable: Option<PathBuf>,
+    download_url: Option<String>,
+    sha256: Option<String>,
+    profile: CapabilityProfile,
+}
+
+impl StartupIdentity {
+    fn from_config(config: &Config, profile: CapabilityProfile) -> Result<Self> {
+        let tunnel = config
+            .tunnel
+            .as_ref()
+            .ok_or_else(|| anyhow!("tunnel_config_required"))?;
+        Ok(Self {
+            tunnel_id: tunnel.tunnel_id.clone(),
+            api_key_reference: tunnel.api_key.clone(),
+            version: tunnel.client.version.clone(),
+            cache_dir: tunnel.client.cache_dir.clone(),
+            auto_download: tunnel.client.auto_download,
+            executable: tunnel.client.executable.clone(),
+            download_url: tunnel.client.download_url.clone(),
+            sha256: tunnel.client.sha256.clone(),
+            profile,
+        })
+    }
+}
+
+async fn watch_startup_identity(config_path: PathBuf, mut previous: StartupIdentity) {
+    loop {
+        sleep(Duration::from_secs(2)).await;
+        let Ok(config) = Config::load(&config_path) else {
+            log_warn("standalone config reload failed; keeping current runtime".to_owned());
+            continue;
+        };
+        let Ok(current) = StartupIdentity::from_config(&config, previous.profile) else {
+            log_warn(
+                "standalone config reload removed tunnel settings; restart_required".to_owned(),
+            );
+            continue;
+        };
+        if current != previous {
+            log_warn("restart_required: standalone tunnel startup identity changed".to_owned());
+            previous = current;
+        }
+    }
+}
+
+#[derive(Clone)]
+struct Invocation {
+    tunnel_id: String,
+    secret: String,
+    executable: PathBuf,
+    worker_command: String,
+    worker_token: String,
+    paths: RuntimePaths,
+}
+
+impl Invocation {
+    fn new(
+        config_path: PathBuf,
+        profile: CapabilityProfile,
+        tunnel_id: String,
+        secret: String,
+        resolved: ResolvedTunnelClient,
+        paths: RuntimePaths,
+    ) -> Result<Self> {
+        let worker =
+            std::env::current_exe().map_err(|_| anyhow!("worker_executable_unavailable"))?;
+        let worker_token = Uuid::new_v4().to_string();
+        let worker_command = format!(
+            "{} stdio-worker --config {} --profile {} --supervisor-token {}",
+            quote_arg(worker.to_string_lossy()),
+            quote_arg(config_path.to_string_lossy()),
+            match profile {
+                CapabilityProfile::Normal => "normal",
+                CapabilityProfile::Room => "room",
+            },
+            quote_arg(&worker_token),
+        );
+        Ok(Self {
+            tunnel_id,
+            secret,
+            executable: resolved.path,
+            worker_command,
+            worker_token,
+            paths,
+        })
+    }
+
+    fn mcp_command(&self) -> String {
+        format!("channel=main,command={}", quote_arg(&self.worker_command))
+    }
+
+    fn common_args(&self, command: &str) -> Vec<String> {
+        vec![
+            command.to_owned(),
+            "--control-plane.tunnel-id".to_owned(),
+            self.tunnel_id.clone(),
+            "--control-plane.api-key".to_owned(),
+            "env:CONTROL_PLANE_API_KEY".to_owned(),
+            "--health.listen-addr".to_owned(),
+            "127.0.0.1:0".to_owned(),
+            "--health.url-file".to_owned(),
+            self.paths.health_url.to_string_lossy().into_owned(),
+            "--mcp.command".to_owned(),
+            self.mcp_command(),
+        ]
+    }
+
+    fn doctor_args(&self) -> Vec<String> {
+        let mut args = vec!["doctor".to_owned(), "--json".to_owned()];
+        args.extend(self.common_args_without_command());
+        args
+    }
+
+    fn run_args(&self) -> Vec<String> {
+        let mut args = self.common_args("run");
+        args.extend([
+            "--log.format".to_owned(),
+            "json".to_owned(),
+            "--log.file".to_owned(),
+            self.paths.log.to_string_lossy().into_owned(),
+            "--pid.file".to_owned(),
+            self.paths.pid.to_string_lossy().into_owned(),
+        ]);
+        args
+    }
+
+    fn common_args_without_command(&self) -> Vec<String> {
+        let args = self.common_args("unused");
+        args.into_iter().skip(1).collect()
+    }
+
+    fn command_env(&self, command: &mut Command) {
+        command
+            .env("CONTROL_PLANE_API_KEY", &self.secret)
+            .env(WORKER_AUTH_ENV, &self.worker_token)
+            .env_remove("OPENAI_API_KEY")
+            .env_remove("AGENTIC_TUNNEL_API_KEY");
+    }
+}
+
+struct SupervisorPolicy {
+    startup_timeout: Duration,
+    graceful_shutdown_timeout: Duration,
+    ready_reset_after: Duration,
+    backoffs: Vec<Duration>,
+}
+
+impl Default for SupervisorPolicy {
+    fn default() -> Self {
+        Self {
+            startup_timeout: STARTUP_TIMEOUT,
+            graceful_shutdown_timeout: GRACEFUL_SHUTDOWN_TIMEOUT,
+            ready_reset_after: READY_RESET_AFTER,
+            backoffs: BACKOFFS.to_vec(),
+        }
+    }
+}
+
+async fn run_loop(invocation: &Invocation, paths: &RuntimePaths) -> Result<()> {
+    let policy = SupervisorPolicy::default();
+    let mut signals = ShutdownSignals::new()?;
+    let mut failures = 0usize;
+    loop {
+        let mut process = spawn_tunnel(invocation)?;
+        let readiness = wait_until_ready(&mut process.child, paths, &policy, &mut signals).await?;
+        match readiness {
+            Readiness::Shutdown => {
+                terminate(&mut process.child, policy.graceful_shutdown_timeout).await;
+                process.stop_log_tasks();
+                return Ok(());
+            }
+            Readiness::Ready => {}
+            failure @ (Readiness::Exited(_) | Readiness::Timeout) => {
+                kill_after_failure(&mut process.child).await;
+                process.stop_log_tasks();
+                failures += 1;
+                let code = match failure {
+                    Readiness::Exited(code) => code,
+                    Readiness::Timeout => None,
+                    _ => unreachable!(),
+                };
+                match restart_decision(failures, code, &policy.backoffs) {
+                    RestartDecision::Permanent => {
+                        return Err(anyhow!("standalone_permanent_child_failure"));
+                    }
+                    RestartDecision::Exhausted => {
+                        return Err(anyhow!("standalone_restart_budget_exhausted"));
+                    }
+                    RestartDecision::Retry(delay) => {
+                        if sleep_or_shutdown(delay, &mut signals).await {
+                            return Ok(());
+                        }
+                    }
+                }
+                continue;
+            }
+        }
+
+        match wait_running(&mut process.child, &policy, &mut signals, &mut failures).await? {
+            RunResult::Shutdown => {
+                terminate(&mut process.child, policy.graceful_shutdown_timeout).await;
+                process.stop_log_tasks();
+                return Ok(());
+            }
+            RunResult::Exited(code) => {
+                process.stop_log_tasks();
+                failures += 1;
+                match restart_decision(failures, code, &policy.backoffs) {
+                    RestartDecision::Permanent => {
+                        return Err(anyhow!("standalone_permanent_child_failure"));
+                    }
+                    RestartDecision::Exhausted => {
+                        return Err(anyhow!("standalone_restart_budget_exhausted"));
+                    }
+                    RestartDecision::Retry(delay) => {
+                        if sleep_or_shutdown(delay, &mut signals).await {
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+struct RunningProcess {
+    child: Child,
+    log_tasks: Vec<JoinHandle<()>>,
+}
+
+impl RunningProcess {
+    fn stop_log_tasks(&mut self) {
+        for task in self.log_tasks.drain(..) {
+            task.abort();
+        }
+    }
+}
+
+fn spawn_tunnel(invocation: &Invocation) -> Result<RunningProcess> {
+    let mut command = Command::new(&invocation.executable);
+    command
+        .args(invocation.run_args())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    invocation.command_env(&mut command);
+    configure_process_group(&mut command);
+    let mut child = command
+        .spawn()
+        .map_err(|_| anyhow!("tunnel_client_spawn_failed"))?;
+    let mut log_tasks = Vec::new();
+    if let Some(stdout) = child.stdout.take() {
+        log_tasks.push(tokio::spawn(forward_log(
+            stdout,
+            "tunnel.stdout",
+            invocation.secret.clone(),
+        )));
+    }
+    if let Some(stderr) = child.stderr.take() {
+        log_tasks.push(tokio::spawn(forward_log(
+            stderr,
+            "tunnel.stderr",
+            invocation.secret.clone(),
+        )));
+    }
+    Ok(RunningProcess { child, log_tasks })
+}
+
+async fn run_doctor(invocation: &Invocation) -> Result<()> {
+    let mut command = Command::new(&invocation.executable);
+    command
+        .args(invocation.doctor_args())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    invocation.command_env(&mut command);
+    let output = command
+        .output()
+        .await
+        .map_err(|_| anyhow!("tunnel_doctor_spawn_failed"))?;
+    if !output.status.success() {
+        return Err(anyhow!("tunnel_doctor_failed"));
+    }
+    Ok(())
+}
+
+async fn forward_log<R>(reader: R, component: &'static str, secret: String)
+where
+    R: AsyncRead + Unpin,
+{
+    let mut lines = BufReader::new(reader).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        let line = if secret.is_empty() {
+            line
+        } else {
+            line.replace(&secret, "[REDACTED]")
+        };
+        log_warn(format!("{component}: {line}"));
+    }
+}
+
+enum Readiness {
+    Ready,
+    Exited(Option<i32>),
+    Timeout,
+    Shutdown,
+}
+
+async fn wait_until_ready(
+    child: &mut Child,
+    paths: &RuntimePaths,
+    policy: &SupervisorPolicy,
+    signals: &mut ShutdownSignals,
+) -> Result<Readiness> {
+    let deadline = Instant::now() + policy.startup_timeout;
+    loop {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|_| anyhow!("tunnel_client_wait_failed"))?
+        {
+            return Ok(Readiness::Exited(status.code()));
+        }
+        if let Some(base_url) = read_health_url(&paths.health_url) {
+            if health_ready(&base_url).await {
+                log_info("standalone tunnel ready".to_owned());
+                return Ok(Readiness::Ready);
+            }
+        }
+        if Instant::now() >= deadline {
+            return Ok(Readiness::Timeout);
+        }
+        tokio::select! {
+            _ = sleep(HEALTH_POLL_INTERVAL) => {}
+            _ = signals.next() => return Ok(Readiness::Shutdown),
+        }
+    }
+}
+
+enum RunResult {
+    Exited(Option<i32>),
+    Shutdown,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum RestartDecision {
+    Retry(Duration),
+    Permanent,
+    Exhausted,
+}
+
+fn restart_decision(
+    failure_count: usize,
+    exit_code: Option<i32>,
+    backoffs: &[Duration],
+) -> RestartDecision {
+    if exit_code == Some(2) {
+        return RestartDecision::Permanent;
+    }
+    backoffs
+        .get(failure_count.saturating_sub(1))
+        .copied()
+        .map(RestartDecision::Retry)
+        .unwrap_or(RestartDecision::Exhausted)
+}
+
+async fn wait_running(
+    child: &mut Child,
+    policy: &SupervisorPolicy,
+    signals: &mut ShutdownSignals,
+    failures: &mut usize,
+) -> Result<RunResult> {
+    let reset_sleep = sleep(policy.ready_reset_after);
+    tokio::pin!(reset_sleep);
+    let mut reset = false;
+    loop {
+        if reset {
+            tokio::select! {
+                _ = signals.next() => return Ok(RunResult::Shutdown),
+                status = child.wait() => {
+                    let status = status.map_err(|_| anyhow!("tunnel_client_wait_failed"))?;
+                    return Ok(RunResult::Exited(status.code()));
+                }
+            }
+        } else {
+            tokio::select! {
+                _ = signals.next() => return Ok(RunResult::Shutdown),
+                status = child.wait() => {
+                    let status = status.map_err(|_| anyhow!("tunnel_client_wait_failed"))?;
+                    return Ok(RunResult::Exited(status.code()));
+                }
+                _ = &mut reset_sleep => {
+                    *failures = 0;
+                    reset = true;
+                    log_info("standalone tunnel readiness reset restart budget".to_owned());
+                }
+            }
+        }
+    }
+}
+
+async fn sleep_or_shutdown(delay: Duration, signals: &mut ShutdownSignals) -> bool {
+    tokio::select! {
+        _ = sleep(delay) => false,
+        _ = signals.next() => true,
+    }
+}
+
+struct ShutdownSignals {
+    interrupt: Signal,
+    terminate: Signal,
+}
+
+impl ShutdownSignals {
+    fn new() -> Result<Self> {
+        Ok(Self {
+            interrupt: signal(SignalKind::interrupt())?,
+            terminate: signal(SignalKind::terminate())?,
+        })
+    }
+
+    async fn next(&mut self) {
+        tokio::select! {
+            _ = self.interrupt.recv() => {}
+            _ = self.terminate.recv() => {}
+        }
+    }
+}
+
+fn read_health_url(path: &Path) -> Option<String> {
+    let value = fs::read_to_string(path).ok()?;
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let parsed = reqwest::Url::parse(value).ok()?;
+    if parsed.scheme() != "http"
+        || !parsed
+            .host_str()
+            .is_some_and(|host| host == "127.0.0.1" || host == "localhost")
+        || parsed.username() != ""
+        || parsed.password().is_some()
+        || parsed.fragment().is_some()
+    {
+        return None;
+    }
+    Some(value.to_owned())
+}
+
+async fn health_ready(base_url: &str) -> bool {
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+    {
+        Ok(client) => client,
+        Err(_) => return false,
+    };
+    let base_url = base_url.trim_end_matches('/');
+    let health = format!("{base_url}/healthz");
+    let ready = format!("{base_url}/readyz");
+    matches!(client.get(health).send().await, Ok(response) if response.status().is_success())
+        && matches!(client.get(ready).send().await, Ok(response) if response.status().is_success())
+}
+
+async fn terminate(child: &mut Child, grace: Duration) {
+    send_process_signal(child.id(), signal_term());
+    if timeout(grace, child.wait()).await.is_err() {
+        send_process_signal(child.id(), signal_kill());
+        let _ = child.kill().await;
+        let _ = timeout(Duration::from_secs(1), child.wait()).await;
+    }
+}
+
+async fn kill_after_failure(child: &mut Child) {
+    send_process_signal(child.id(), signal_kill());
+    let _ = child.kill().await;
+    let _ = timeout(Duration::from_secs(1), child.wait()).await;
+}
+
+fn quote_arg(value: impl AsRef<str>) -> String {
+    let value = value.as_ref();
+    if !value
+        .bytes()
+        .any(|byte| matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | b'"' | b'\\'))
+    {
+        return value.to_owned();
+    }
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+#[cfg(test)]
+fn backoff_delay(attempt: usize) -> Duration {
+    BACKOFFS
+        .get(attempt.saturating_sub(1))
+        .copied()
+        .unwrap_or(*BACKOFFS.last().unwrap())
+}
+
+fn set_private_dir(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+            .map_err(|_| anyhow!("runtime_directory_unavailable"))?;
+    }
+    Ok(())
+}
+
+fn set_private_file(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+            .map_err(|_| anyhow!("runtime_directory_unavailable"))?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn configure_process_group(command: &mut Command) {
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setpgid(0, 0) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(unix))]
+fn configure_process_group(_command: &mut Command) {}
+
+#[cfg(unix)]
+fn send_process_signal(pid: Option<u32>, signal: i32) {
+    if let Some(pid) = pid {
+        unsafe {
+            let _ = libc::kill(-(pid as libc::pid_t), signal);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn send_process_signal(_pid: Option<u32>, _signal: i32) {}
+
+#[cfg(unix)]
+fn signal_term() -> i32 {
+    libc::SIGTERM
+}
+
+#[cfg(not(unix))]
+fn signal_term() -> i32 {
+    15
+}
+
+#[cfg(unix)]
+fn signal_kill() -> i32 {
+    libc::SIGKILL
+}
+
+#[cfg(not(unix))]
+fn signal_kill() -> i32 {
+    9
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    #[test]
+    fn worker_command_quotes_paths_and_never_contains_api_key() {
+        let token = "worker-token";
+        let command = format!(
+            "{} stdio-worker --config {} --profile normal --supervisor-token {}",
+            quote_arg("/tmp/agentic worker"),
+            quote_arg("/tmp/config with spaces.json"),
+            token
+        );
+        assert!(command.contains("\"/tmp/agentic worker\""));
+        assert!(!command.contains("runtime-api-key"));
+    }
+
+    #[test]
+    fn retry_schedule_is_bounded_and_exponential() {
+        assert_eq!(backoff_delay(1), Duration::from_secs(1));
+        assert_eq!(backoff_delay(2), Duration::from_secs(2));
+        assert_eq!(backoff_delay(5), Duration::from_secs(16));
+        assert_eq!(backoff_delay(6), Duration::from_secs(16));
+    }
+
+    #[test]
+    fn restart_decision_covers_retry_permanent_and_exhausted() {
+        assert_eq!(
+            restart_decision(1, None, &BACKOFFS),
+            RestartDecision::Retry(Duration::from_secs(1))
+        );
+        assert_eq!(
+            restart_decision(6, None, &BACKOFFS),
+            RestartDecision::Exhausted
+        );
+        assert_eq!(
+            restart_decision(1, Some(2), &BACKOFFS),
+            RestartDecision::Permanent
+        );
+    }
+
+    #[test]
+    fn health_url_accepts_only_local_http_endpoints() {
+        let root = std::env::temp_dir().join(format!("agentic-health-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("health.url");
+        fs::write(&path, "http://127.0.0.1:1234\n").unwrap();
+        assert_eq!(
+            read_health_url(&path).as_deref(),
+            Some("http://127.0.0.1:1234")
+        );
+        fs::write(&path, "https://127.0.0.1:1234\n").unwrap();
+        assert!(read_health_url(&path).is_none());
+        fs::write(&path, "http://example.com:1234\n").unwrap();
+        assert!(read_health_url(&path).is_none());
+    }
+
+    #[test]
+    fn runtime_paths_reject_path_injection() {
+        assert_eq!(
+            RuntimePaths::prepare("../escape").unwrap_err().to_string(),
+            "runtime_identity_invalid"
+        );
+    }
+
+    #[test]
+    fn stale_health_and_pid_files_are_removed_before_start() {
+        let root = std::env::temp_dir().join(format!("agentic-stale-runtime-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let paths = RuntimePaths {
+            health_url: root.join("health.url"),
+            log: root.join("tunnel.log"),
+            pid: root.join("tunnel.pid"),
+        };
+        fs::write(&paths.health_url, "stale").unwrap();
+        fs::write(&paths.pid, "stale").unwrap();
+        paths.remove_stale_files();
+        assert!(!paths.health_url.exists());
+        assert!(!paths.pid.exists());
+    }
+
+    #[test]
+    fn secret_reference_is_resolved_without_logging_material() {
+        let path = std::env::temp_dir().join(format!("agentic-secret-test-{}", Uuid::new_v4()));
+        fs::write(&path, "secret-value\r\n").unwrap();
+        let value = resolve_secret(&format!("file:{}", path.display())).unwrap();
+        assert_eq!(value, "secret-value");
+        assert_eq!(
+            resolve_secret("literal-secret").unwrap_err().to_string(),
+            "tunnel_api_key_reference_plaintext_rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn fake_tunnel_verifies_args_environment_health_and_shutdown() {
+        let root = std::env::temp_dir().join(format!("agentic-supervisor-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let args_log = root.join("args.log");
+        let script = root.join("fake-tunnel.sh");
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let health_task = tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut request = [0u8; 1024];
+                let _ = stream.read(&mut request).await;
+                let response =
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
+                let _ = stream.write_all(response).await;
+            }
+        });
+        let script_text = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"doctor\" ]; then\n  printf '%s\\n' \"$@\" > '{}'\n  printf 'SECRET=%s\\n' \"$CONTROL_PLANE_API_KEY\" >> '{}'\n  exit 0\nfi\nprintf '%s\\n' \"$@\" >> '{}'\nurl_file=\"\"\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = \"--health.url-file\" ]; then shift; url_file=\"$1\"; fi\n  shift\ndone\nprintf 'http://127.0.0.1:{}\\n' > \"$url_file\"\nsleep 60\n",
+            args_log.display(),
+            args_log.display(),
+            args_log.display(),
+            port,
+        );
+        fs::write(&script, script_text).unwrap();
+        set_executable(&script);
+        let paths = RuntimePaths {
+            health_url: root.join("health.url"),
+            log: root.join("tunnel.log"),
+            pid: root.join("tunnel.pid"),
+        };
+        let invocation = Invocation {
+            tunnel_id: "tunnel_test".to_owned(),
+            secret: "runtime-secret".to_owned(),
+            executable: script,
+            worker_command: "agentic-gpt stdio-worker --config config.json".to_owned(),
+            worker_token: "worker-token".to_owned(),
+            paths: paths.clone(),
+        };
+
+        run_doctor(&invocation).await.unwrap();
+        let mut process = spawn_tunnel(&invocation).unwrap();
+        let mut signals = ShutdownSignals::new().unwrap();
+        let policy = SupervisorPolicy {
+            startup_timeout: Duration::from_secs(2),
+            graceful_shutdown_timeout: Duration::from_secs(1),
+            ready_reset_after: Duration::from_secs(10),
+            backoffs: vec![Duration::from_millis(1)],
+        };
+        assert!(matches!(
+            wait_until_ready(&mut process.child, &paths, &policy, &mut signals)
+                .await
+                .unwrap(),
+            Readiness::Ready
+        ));
+        let args = fs::read_to_string(&args_log).unwrap();
+        let argv = args.split("SECRET=").next().unwrap_or_default();
+        assert!(args.contains("--mcp.command"));
+        assert!(args.contains("stdio-worker"));
+        assert!(!argv.contains("runtime-secret"));
+        assert!(args.contains("SECRET=runtime-secret"));
+        terminate(&mut process.child, policy.graceful_shutdown_timeout).await;
+        process.stop_log_tasks();
+        health_task.abort();
+    }
+
+    fn set_executable(path: &Path) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+}

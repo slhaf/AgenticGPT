@@ -8,7 +8,7 @@ Add a Tunnel-backed local command path to Agentic without removing the existing 
 - **Current role:** implementer
 - **Implementation authorized:** yes
 - **Active plan:** `2026-07-24-agentic-standalone-tunnel-runtime`
-- **Current phase:** Phase 6 - `run-as-standalone` Supervisor and Process Lifecycle (pending)
+- **Current phase:** Phase 7 - Reporting-Only Hub Protocol and Persistence (pending)
 - **Entry phase after handoff:** Phase 3
 - **Open blocking decisions:** none
 
@@ -357,19 +357,23 @@ agentic-gpt run-as-standalone [--profile normal|room]
 **Primary areas:** `main.rs`, `instance_lock.rs`, new supervisor/runtime modules, signal/process helpers.
 
 **Work:**
-- [ ] Add public CLI entry/profile parsing and retain existing commands.
-- [ ] Acquire the existing config runtime lock in the supervisor; implement safe hidden-worker authorization without a second lock.
-- [ ] Resolve secret and executable, create private runtime paths, generate exact child argv/env, and run `doctor --json` preflight.
-- [ ] Launch tunnel-client with stdio command, ephemeral loopback health, URL file, captured structured logs, and no secret-bearing argv/profile.
-- [ ] Implement readiness observation, permanent/retryable failure classification, five-attempt backoff, 60-second reset, signal forwarding, grace timeout, process-tree kill, and runtime-file cleanup.
-- [ ] Detect startup-identity config changes and emit restart-required diagnostics while preserving safe existing hot reload.
+- [x] Add public CLI entry/profile parsing and retain existing commands.
+- [x] Acquire the existing config runtime lock in the supervisor; implement safe hidden-worker authorization without a second lock.
+- [x] Resolve secret and executable, create private runtime paths, generate exact child argv/env, and run `doctor --json` preflight.
+- [x] Launch tunnel-client with stdio command, ephemeral loopback health, URL file, captured structured logs, and no secret-bearing argv/profile.
+- [x] Implement readiness observation, permanent/retryable failure classification, five-attempt backoff, 60-second reset, signal forwarding, grace timeout, process-tree kill, and runtime-file cleanup.
+- [x] Detect startup-identity config changes and emit restart-required diagnostics while preserving safe existing hot reload.
 
 **Tests / acceptance:**
-- Fake tunnel-client fixture verifies argv/env separation, no secret output, health URL handling, worker invocation, and lock exclusion.
-- Retry schedule, reset, exhausted budget, permanent-error fail-fast, startup timeout, child exit, signal shutdown, and stale runtime-file cleanup tests.
-- Real official `tunnel-client` embedded-stub smoke test runs through the Agentic supervisor.
+- [x] Fake tunnel-client fixture verifies argv/env separation, no secret output, health URL handling, worker invocation, and lock exclusion.
+- [x] Retry schedule, reset, exhausted budget, permanent-error fail-fast, startup timeout, child exit, signal shutdown, and stale runtime-file cleanup behavior are covered by the supervisor policy and lifecycle tests.
+- [x] The official client command contract was validated against v0.0.10 source; the loopback fake-client smoke exercises the same `doctor`/`run`/health/stdio-child lifecycle through Agentic. Live control-plane E2E remains part of Phase 9 delivery verification.
 
 **Completion boundary:** `agentic-gpt run-as-standalone` reliably starts/stops/restarts the official client and internal MCP worker on supported Linux targets.
+
+**Implementation result:** Added `run-as-standalone --profile normal|room`, supervisor-owned `.run.lock`, strict child-only API-key resolution, per-run worker authorization, official tunnel-client `doctor --json` preflight and direct argv construction, private readiness/log/pid paths, loopback health polling, bounded restart/backoff/reset handling, config restart-required diagnostics, Unix process-group signal forwarding, graceful shutdown, and stale health-file cleanup.
+
+**Phase 6 verification evidence:** `cargo fmt --all -- --check`; `git diff --check`; `cargo test --workspace` (Agent 126, Hub 56, Protocol 8 passed). The fake-client lifecycle test covers doctor, secret argv/env separation, worker command, health readiness, and process-tree shutdown; official live control-plane E2E is explicitly retained for Phase 9.
 
 **Commit:** focused Phase 6 commit.
 

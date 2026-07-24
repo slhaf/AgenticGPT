@@ -16,6 +16,7 @@ mod skill_installs;
 mod skills;
 mod state;
 mod stdio_server;
+mod supervisor;
 mod tmux;
 mod transport_ledger;
 mod tunnel_distribution;
@@ -53,12 +54,20 @@ enum Commands {
         #[arg(long)]
         config: Option<PathBuf>,
     },
+    RunAsStandalone {
+        #[arg(long)]
+        config: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = WorkerProfile::Normal)]
+        profile: WorkerProfile,
+    },
     #[command(name = "stdio-worker", hide = true)]
     StdioWorker {
         #[arg(long)]
         config: PathBuf,
         #[arg(long, value_enum, default_value_t = WorkerProfile::Normal)]
         profile: WorkerProfile,
+        #[arg(long, hide = true)]
+        supervisor_token: Option<String>,
     },
     Config {
         #[arg(long)]
@@ -196,9 +205,14 @@ async fn main() -> Result<()> {
             )
             .await
         }
-        Commands::StdioWorker { config, profile } => {
-            run_stdio_worker(config, profile.capability_profile()).await
+        Commands::RunAsStandalone { config, profile } => {
+            supervisor::run(config_path(config), profile.capability_profile()).await
         }
+        Commands::StdioWorker {
+            config,
+            profile,
+            supervisor_token,
+        } => run_stdio_worker(config, profile.capability_profile(), supervisor_token).await,
         Commands::Config { config, command } => handle_config(config_path(config), command).await,
         Commands::Tmux { config, command } => handle_tmux(config_path(config), command).await,
     }
@@ -254,7 +268,12 @@ async fn run(config_path: PathBuf, runtime: RuntimeModel) -> Result<()> {
     hub::connect_loop(state).await
 }
 
-async fn run_stdio_worker(config_path: PathBuf, profile: CapabilityProfile) -> Result<()> {
+async fn run_stdio_worker(
+    config_path: PathBuf,
+    profile: CapabilityProfile,
+    supervisor_token: Option<String>,
+) -> Result<()> {
+    supervisor::authorize_worker(supervisor_token.as_deref())?;
     let config = Config::load(&config_path)?;
     config.ensure_workspace()?;
     let max_concurrent_skill_installs = config.skills.max_concurrent_installs;
@@ -526,6 +545,27 @@ mod tests {
             notebook::notebook_root(&config),
             config.workspace_root.join("notebook")
         );
+    }
+
+    #[test]
+    fn standalone_cli_defaults_to_normal_profile_and_accepts_room() {
+        let cli = Cli::try_parse_from(["agentic-gpt", "run-as-standalone"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::RunAsStandalone {
+                profile: WorkerProfile::Normal,
+                ..
+            }
+        ));
+        let cli =
+            Cli::try_parse_from(["agentic-gpt", "run-as-standalone", "--profile", "room"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::RunAsStandalone {
+                profile: WorkerProfile::Room,
+                ..
+            }
+        ));
     }
 
     #[test]

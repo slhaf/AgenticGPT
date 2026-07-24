@@ -367,3 +367,17 @@ It must not expose process, tmux, downstream MCP, skills, bootstrap, diary, note
 - Local executable overrides reject symlinks and non-executable files before optional SHA-256 verification. The resolved override is canonicalized only after the configured path itself passes those checks.
 - The downloader follows redirects manually, keeps the HTTPS requirement across every hop, writes to a unique temporary file, and removes that file on download or verification failure. Installation stages both archive and executable and swaps the staged directory only after all checks pass.
 - Artifact locks are async-waiting, atomically created files keyed by version/platform/archive digest. A stale lock is recoverable after five minutes; active locks are never deleted.
+
+## Phase 6 Implementation Assumptions
+
+- The supervisor uses the frozen 45-second startup readiness bound (within the allowed 30–60 second range), polls the private URL-file's loopback `/healthz` and `/readyz`, and treats HTTP readiness as the process-tree startup boundary.
+- The API key is resolved once by Agentic and injected only as `CONTROL_PLANE_API_KEY` into the tunnel-client child environment. The worker inherits the child environment as required by tunnel-client's stdio topology, but neither public supervisor argv nor the generated MCP command contains the key.
+- The hidden worker receives a per-run random authorization token in its command and matching child-only environment variable. This prevents an ordinary direct `stdio-worker` invocation from being accepted while avoiding any persistent authorization file.
+- The tunnel-client child is placed in its own Unix process group with `setpgid`; graceful stop sends SIGTERM to that group and the bounded fallback sends SIGKILL, allowing worker descendants to be cleaned with the tunnel-client.
+- Runtime state uses `~/.agentic_gpt/runtime/tunnel/<agentId>/`, a mode-0700 directory, fixed health/pid paths for stale-file cleanup, and a retained structured tunnel log for post-failure diagnostics.
+
+### Phase 6 implementation findings
+
+- `doctor --json` and `run` receive the same tunnel id, secret reference, loopback ephemeral health settings, and quoted `channel=main` stdio worker command. The run-only flags add JSON log and pid-file paths without creating a persistent tunnel-client profile.
+- Child exit code 2 is treated as a permanent runtime failure; other unexpected exits and readiness timeouts consume the five-attempt restart budget. A healthy 60-second interval resets that budget before a later failure.
+- Startup identity watching compares only restart-sensitive references/settings and the selected CLI profile. It emits one redacted `restart_required` diagnostic per observed identity transition while leaving the current child tree untouched.
