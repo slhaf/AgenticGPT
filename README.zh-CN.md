@@ -35,6 +35,7 @@ ChatGPT Actions / ChatGPT Apps MCP
 - `crates/agentic-gpt-protocol`：共享 JSON 协议类型。
 - `openapi/hub.yaml`：Rust Hub 的 Custom GPT Actions schema。
 - `docs/interfaces.md`：Actions、Apps MCP、Local Agent WebSocket 的接口地图。
+- `docs/standalone-runtime.md`：独立 Tunnel 的拓扑、配置、信任校验、reporting、Hub profile 和故障恢复。
 - `docs/operations.md`：本地验证、smoke test、部署检查和安全不变量。
 - `scripts/dist-linux.sh`：多目标 Linux release 构建脚本。
 
@@ -111,6 +112,12 @@ https://<your-hub-domain>/mcp
 
 OAuth discovery 和 token exchange 由 Hub 的 OAuth shim 提供。
 
+如果使用独立 Secure MCP Tunnel，请配置 `tunnel.tunnelId` 和
+`file:PATH` 或 `env:NAME` 形式的 secret reference，然后运行
+`agentic-gpt run-as-standalone`；Room surface 使用 `--profile room`。
+完整的拓扑、tool matrix、固定版本 tunnel-client、reporting 隐私模式和
+故障恢复流程见 [`docs/standalone-runtime.md`](docs/standalone-runtime.md)。
+
 ## 确认机制
 
 Local agent 可以在命令匹配 confirm 策略时请求用户确认。
@@ -186,6 +193,7 @@ agentic-gpt config path write remove ~/Projects
 ## 更多文档
 
 - [`docs/interfaces.md`](docs/interfaces.md)：API、Actions、Apps MCP 和 Local Agent WebSocket 的接口地图。
+- [`docs/standalone-runtime.md`](docs/standalone-runtime.md)：独立 Tunnel 的配置、profile、信任校验、reporting 和恢复流程。
 - [`docs/operations.md`](docs/operations.md)：部署检查、smoke test 和安全不变量。
 - [`docs/development.zh-CN.md`](docs/development.zh-CN.md)：源码开发、验证、CI 和 release 发布。
 

@@ -39,6 +39,7 @@ use crate::{default_config_summary, MAX_WAIT_SECONDS, REQUEST_TIMEOUT_SECS};
 const MCP_INSTRUCTIONS: &str = "Agentic GPT Hub provides three execution layers. Use process.exec for short, one-shot inspection, detection, and deterministic tasks where an exit code is required. Use session.start for long-running or background managed processes whose lifecycle and output should be observed through session tools. Use tmux as the persistent shared workspace for stateful development, iterative debugging, TUIs, and user-agent handoff. For tmux work, discover the workspace with tmux.listSessions and tmux.listPanes, inspect it with tmux.capturePane, then use tmux.exec for shell panes or tmux.pasteText for non-shell panes. tmux.exec confirms submission to the interactive shell and returns a bounded post-submit pane snapshot; it is still not proof of command completion, so use process.exec when a deterministic exit status is required. At Room session start, call room.bootstrap, then call room.bootstrap.read for relevant guide ids listed in its manifest. Room skills are managed only by the active Room Agent: use skills.install for asynchronous GitHub/HTTPS/inline installation, then skills.install.get with waitSeconds (default 5) and pollAfterMs, and skills.install.cancel when needed. Use skills.read with an optional package-relative path for bounded resources. Use skills.run for active installed scripts; it returns terminal output inline when it completes within waitSeconds (default 5), otherwise follow the returned sessionId with session.inspect/session.wait/session.kill. Commands remain subject to Agentic local policy, path policy, confirmation, and audit.";
 const COORDINATOR_INSTRUCTIONS: &str = "Agentic GPT Hub coordinator profile. This connector exposes only Hub-native agent status, retained run history, current session snapshots, and notification tools. It never dispatches execution, session-control, tmux, downstream MCP, skills, bootstrap, diary, or notebook commands to an Agent.";
 const COORDINATOR_TOOLS: &[&str] = &[
+    "hub.info",
     "agent.list",
     "hub.run.list",
     "hub.run.get",
@@ -296,6 +297,7 @@ async fn call_app_tool(server: &AgenticMcpServer, params: Value) -> Result<Value
                 .mcp_call_tool(Parameters(decode_args(arguments)?))
                 .await
         }
+        "hub.info" => server.hub_info().await,
         "user.notify.channels" => server.user_notify_channels().await,
         "hub.run.get" => {
             server
@@ -534,6 +536,19 @@ impl ServerHandler for AgenticMcpServer {
 
 #[tool_router(router = tool_router)]
 impl AgenticMcpServer {
+    #[tool(
+        name = "hub.info",
+        description = "Return the safe Hub runtime summary, including version, public URL, agent counts, confirmation status, and bounded pending/session counts."
+    )]
+    async fn hub_info(&self) -> Result<CallToolResult, ErrorData> {
+        let info = crate::routes::build_hub_info_response(&self.state)
+            .await
+            .map_err(|error| mcp_internal_error("db_error", error.to_string()))?;
+        Ok(ok_json(serde_json::to_value(info).map_err(|error| {
+            mcp_internal_error("serialization_error", error.to_string())
+        })?))
+    }
+
     #[tool(
         name = "agent.list",
         description = "List registered local agents, their online status, capabilities, and safe config summaries. Use this before choosing an agentId."
@@ -2563,6 +2578,7 @@ mod tests {
             names,
             vec![
                 "agent.list",
+                "hub.info",
                 "hub.run.get",
                 "hub.run.list",
                 "hub.session.get",

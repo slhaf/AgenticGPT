@@ -27,6 +27,7 @@ The current mainline uses the Rust Hub. The older Cloudflare Worker implementati
 - MCP bridge from ChatGPT to MCP servers configured on the local agent.
 - Room-scoped asynchronous skill installation from public GitHub/HTTPS/inline sources, plus managed execution of active skill scripts.
 - Room-scoped repeated session bootstrap with a concise entrypoint and generic frontmatter-driven capability guides.
+- Optional standalone Secure MCP Tunnel runtime with Normal/Room profiles and opt-in reporting-only Hub telemetry.
 - ChatGPT Actions OpenAPI schema and ChatGPT Apps-friendly MCP endpoint.
 
 ## Repository layout
@@ -36,6 +37,7 @@ The current mainline uses the Rust Hub. The older Cloudflare Worker implementati
 - `crates/agentic-gpt-protocol`: Shared JSON protocol types.
 - `openapi/hub.yaml`: Custom GPT Actions schema for the Rust Hub.
 - `docs/interfaces.md`: Interface map for Actions, Apps MCP, and Local Agent WebSocket.
+- `docs/standalone-runtime.md`: Standalone Tunnel topology, configuration, trust, recovery, reporting, and Hub profiles.
 - `docs/operations.md`: Local verification, smoke tests, deployment checks, and safety invariants.
 - `scripts/dist-linux.sh`: Multi-target Linux release build script.
 
@@ -110,6 +112,12 @@ https://<your-hub-domain>/mcp
 The `/mcp` `tools/call` response uses the Hub `AgenticResult` envelope, which is compatible with ChatGPT Apps / MCP tool results. Hub-native tools return `content`, `structuredContent`, and `isError`; `mcp.callTool` passes through downstream MCP result envelopes, including non-text content blocks and `_meta`.
 
 OAuth discovery and token exchange are implemented by the Hub OAuth shim.
+
+For a direct Secure MCP Tunnel deployment, configure `tunnel.tunnelId` and a
+secret reference (`file:PATH` or `env:NAME`), then run
+`agentic-gpt run-as-standalone`. Use `--profile room` for the Room surface.
+The complete topology, tool matrix, pinned client assets, reporting privacy
+modes, and recovery procedure are in [`docs/standalone-runtime.md`](docs/standalone-runtime.md).
 
 Room skills are exposed without an input `agentId`: use `skills.install` and poll `skills.install.get` (or the matching `/v1/room/skills/*` Actions routes), then use `skills.run` for executable files beneath an active skill's `scripts/` directory. Installation starts asynchronously for Apps-compatible bounded requests; terminal status includes redacted source provenance and `pollAfterMs` guidance.
 

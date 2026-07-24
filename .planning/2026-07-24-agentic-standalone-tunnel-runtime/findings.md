@@ -402,3 +402,34 @@ It must not expose process, tmux, downstream MCP, skills, bootstrap, diary, note
 - `doctor --json` and `run` receive the same tunnel id, secret reference, loopback ephemeral health settings, and quoted `channel=main` stdio worker command. The run-only flags add JSON log and pid-file paths without creating a persistent tunnel-client profile.
 - Child exit code 2 is treated as a permanent runtime failure; other unexpected exits and readiness timeouts consume the five-attempt restart budget. A healthy 60-second interval resets that budget before a later failure.
 - Startup identity watching compares only restart-sensitive references/settings and the selected CLI profile. It emits one redacted `restart_required` diagnostic per observed identity transition while leaving the current child tree untouched.
+
+## Phase 9 Implementation Assumptions and Constraints
+
+- The delivery documentation will be additive: the root README files will link to a focused standalone-runtime guide, while the existing interface and operations documents remain authoritative for their current surfaces.
+- Setup examples must use `file:` or `env:` secret references without assigning the Runtime API key on a command line. Examples will use placeholders and explain secure shell/file provisioning separately; no secret-bearing fixture will be committed.
+- The current repository can prove the official stub/fake-client supervisor lifecycle and local Rust behavior, but a real Secure MCP Tunnel connector call requires an external control-plane/ChatGPT connector not exposed by the local test commands. If that external path is unavailable, the evidence will explicitly distinguish health/stub success from the unmet real-call acceptance criterion.
+- Release validation will use the existing `scripts/dist-linux.sh` contract where `cross` and target toolchains are available. If the environment lacks those prerequisites, local release builds and manifest/asset tests will be recorded as the available substitute rather than claiming both packaged architectures were built.
+- Phase 9 is the final implementation phase; its commit may include the focused operational guide, README/interface links, planning evidence, and any narrowly scoped verification fixture changes, but it must not add unrelated product features.
+
+### Phase 9 contract correction
+
+- The frozen coordinator surface lists `hub.info` alongside the seven already-implemented Hub-native tools, while the Phase 8 implementation exposed `hub.info` only as the Actions route `GET /v1/info`. This is a real surface gap, not a documentation choice. Phase 9 will add an MCP `hub.info` wrapper around the existing safe Hub summary and extend the exact coordinator-list regression from seven to eight tools; no Agent dispatch is involved.
+
+### Phase 9 verification evidence and external boundary
+
+- The first in-sandbox `scripts/dist-linux.sh` attempt failed while `cross` tried to install its target toolchain because the sandbox denied a write pipe. The authorized rerun succeeded and produced all four release binaries under the existing ignored `dist/` directories.
+- The first in-sandbox `cargo test --workspace` run reached the tests and passed 127 tests, but the two loopback fixtures were denied `Operation not permitted`. The authorized rerun passed Agent 129, Hub 61, Protocol 9, and zero doc tests.
+- Release inspection confirmed x86_64 ELF output for amd64 and AArch64 ELF output for arm64. Both Agent binaries embed the pinned v0.0.10 amd64/arm64 URLs and archive digests; the target-specific platform mapping is covered by `tunnel_distribution` tests.
+- The available API/tool surface for this turn has no Secure MCP Tunnel connector capable of establishing the external control-plane session, and no external tunnel credentials were provided. The local fake-client supervisor test is passing, but it is not evidence of a real connector tool call. This acceptance item remains explicitly pending rather than being inferred from health or `doctor` success.
+
+### Phase 9 user delivery decision
+
+- The user explicitly confirmed that the repository-local implementation is sufficient for this delivery and that a live production connector call is not required. A production call would require account-scoped, mutually consistent `tunnelId` and runtime API key credentials that are not appropriate to invent or commit.
+- The official source's `dev proxy`/mock control-plane remains useful for future local client development, but it is not treated as production connector evidence and no further external E2E work is required in this plan.
+- This is a user-approved delivery-boundary change, not a silent test downgrade: local supervisor/worker MCP evidence, full automated tests, release packaging, and documentation remain required and have passed.
+
+### Phase 9 continuation constraint and local evidence improvement
+
+- A fresh inventory found no configured MCP resources/resource templates or connector-specific tool in the current execution environment; this confirms that the external E2E boundary is still unavailable rather than merely undiscovered in the repository.
+- The existing supervisor test verifies tunnel arguments, secret separation, health readiness, and shutdown, but its fake client does not launch the worker or issue an MCP request. A new integration smoke test may emulate only the tunnel client's local stdio handoff and drive the actual built `agentic-gpt stdio-worker` through `process.exec`. This strengthens local topology evidence while remaining explicitly non-equivalent to a real Secure MCP Tunnel control-plane call.
+- The new integration smoke test passed after emulating the tunnel client's double-quoted `mcp.command` binding correctly. It exercised the actual supervisor CLI, actual hidden worker binary, MCP initialize/notification/tools-call traffic, and local `/usr/bin/printf` execution; the fake tunnel supplied only loopback readiness and did not claim external control-plane connectivity.

@@ -56,6 +56,15 @@ OAuth discovery routes:
 - `/oauth/authorize`
 - `/oauth/token`
 
+The Hub MCP profile is selected at Hub startup with `--mcp-profile full|coordinator`
+or `AGENTIC_GPT_HUB_MCP_PROFILE`. `full` is the default and preserves the
+execution surface plus the transport-neutral `bootstrap` aliases. `coordinator`
+advertises only the Hub-native tools `hub.info`, `agent.list`, `hub.run.list`,
+`hub.run.get`, `hub.session.list`, `hub.session.get`, `user.notify.channels`,
+and `user.notify.send`; it never dispatches an Agent command. See
+[`standalone-runtime.md`](standalone-runtime.md) for the complete profile and
+standalone Tunnel documentation.
+
 The ntfy confirmation callback routes are intentionally not part of `openapi/hub.yaml`. They are only used by confirmation action buttons.
 
 Room skills API stores active state in the Room Agent workspace under `state/active-skills.json`. Activating a skill does not execute it or grant permissions; stale active entries remain visible as `missing` until explicitly deactivated. The built-in `skill-installer` guide is active by default and can be explicitly deactivated.

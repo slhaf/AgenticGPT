@@ -4,11 +4,11 @@
 Add a Tunnel-backed local command path to Agentic without removing the existing Hub-centric path. `agentic-gpt run-as-standalone` supervises the official OpenAI `tunnel-client`, which launches an internal Agentic stdio MCP worker. Normal and Room capability profiles are both supported. The Hub remains available as an optional best-effort reporting/aggregation plane and gains a bounded coordinator MCP profile for KMP-oriented status, history, and notification use.
 
 ## Workflow State
-- **Stage:** implementation_ready
+- **Stage:** implementation_complete
 - **Current role:** implementer
 - **Implementation authorized:** yes
 - **Active plan:** `2026-07-24-agentic-standalone-tunnel-runtime`
-- **Current phase:** Phase 7 - Reporting-Only Hub Protocol and Persistence (pending)
+- **Current phase:** Phase 9 - Documentation, End-to-End Verification, and Delivery (complete)
 - **Entry phase after handoff:** Phase 3
 - **Open blocking decisions:** none
 
@@ -435,7 +435,7 @@ agentic-gpt run-as-standalone [--profile normal|room]
 
 **Status:** complete
 
-**Implementation result:** Added startup-fixed `full`/`coordinator` MCP profile selection via CLI/environment, profile labels in initialize and OAuth metadata, descriptor and direct-call filtering, the exact seven-tool coordinator allowlist, native `hub.session.list/get` snapshot tools, full-profile bootstrap aliases, and regression coverage proving hidden execution tools produce no Hub run.
+**Implementation result:** Added startup-fixed `full`/`coordinator` MCP profile selection via CLI/environment, profile labels in initialize and OAuth metadata, descriptor and direct-call filtering, the exact eight-tool coordinator allowlist (including `hub.info`), native `hub.session.list/get` snapshot tools, full-profile bootstrap aliases, and regression coverage proving hidden execution tools produce no Hub run.
 
 **Phase 8 verification evidence:** `cargo fmt --all -- --check`; `git diff --check`; `cargo test -p agentic-gpt-hub` (61 passed), including exact coordinator tool-set, hidden direct-call/no-dispatch, full alias, and Apps-dispatcher compatibility tests.
 
@@ -449,22 +449,29 @@ agentic-gpt run-as-standalone [--profile normal|room]
 **Primary areas:** README files, `docs/interfaces.md`, config examples, release scripts/workflows, integration tests.
 
 **Work:**
-- [ ] Document architecture, four runtime mappings, exact tool surfaces, config/migration, secret references, cache/source overrides, reporting privacy modes, Hub profiles, health/log diagnostics, restart behavior, and recovery.
-- [ ] Add setup examples that never place the Runtime API key in shell history or argv.
-- [ ] Validate packaged Linux amd64/arm64 binaries can resolve the pinned tunnel-client assets.
-- [ ] Run official stub through the supervisor and a real local Agentic tool through the existing Secure MCP Tunnel connector.
-- [ ] Validate Tunnel Normal and Room, reporting disabled/enabled, Hub unavailable, metadata/full reports, coordinator profile, and existing centralized Hub mode.
+- [x] Document architecture, four runtime mappings, exact tool surfaces, config/migration, secret references, cache/source overrides, reporting privacy modes, Hub profiles, health/log diagnostics, restart behavior, and recovery.
+- [x] Add setup examples that never place the Runtime API key in shell history or argv.
+- [x] Validate packaged Linux amd64/arm64 binaries can resolve the pinned tunnel-client assets.
+- [x] Run the actual Agentic supervisor/stdio-worker/local-tool topology with a local fake tunnel handoff.
+- [x] Resolve the production connector E2E boundary: waived for this delivery by explicit user decision because consistent account-scoped `tunnelId` and runtime API key credentials are unavailable; local topology evidence remains required and passing.
+- [x] Validate Tunnel Normal and Room, reporting disabled/enabled, Hub unavailable, metadata/full reports, coordinator profile, and existing centralized Hub mode.
 
 **Verification:**
 - `cargo fmt --all -- --check`
 - focused crate tests during phases
 - `cargo test --workspace`
 - release/package build checks for both Linux targets where the environment supports them
-- real end-to-end connector call; health-only success is insufficient
+- real end-to-end connector call when account-scoped credentials and connector access are part of the delivery scope; explicitly waived for this delivery by the user
 
-**Completion boundary:** All automated suites pass, real Tunnel call succeeds, docs match behavior, and existing Hub mode remains compatible.
+**Completion boundary:** All repository-local automated/release suites pass, local supervisor-to-worker tool execution succeeds, docs match behavior, existing Hub mode remains compatible, and any external connector requirement is explicitly satisfied or waived by the user. The external production connector call is waived for this delivery.
 
-**Commit:** focused Phase 9 delivery/docs commit after verification.
+**Status:** complete; repository-local work and verification passed, and the user explicitly waived production connector E2E for this delivery.
+
+**Implementation result:** Added the standalone runtime operational guide and README/interface links, corrected the coordinator MCP surface to include the frozen Hub-native `hub.info` tool, and recorded release/test evidence plus the external E2E boundary in planning.
+
+**Phase 9 verification evidence:** `cargo fmt --all -- --check`; `git diff --check`; authorized `./scripts/dist-linux.sh` for x86_64/aarch64 release artifacts; release ELF/CLI/embedded-manifest inspection; local supervisor-to-worker MCP smoke test; and authorized `cargo test --workspace` (Agent 129 unit tests plus 1 integration test, Hub 61, Protocol 9, doc tests 0) passed. Production connector E2E is explicitly waived by the user for this delivery.
+
+**Commit:** focused Phase 9 delivery/docs commit.
 
 ## Cross-Phase Acceptance Criteria
 
@@ -477,7 +484,7 @@ agentic-gpt run-as-standalone [--profile normal|room]
 7. Metadata reporting excludes sensitive execution content; full reporting is explicit and bounded.
 8. Coordinator MCP exposes only the exact Hub-native allowlist and cannot dispatch local commands.
 9. Existing `run`, `run-as-room`, full Hub MCP, Actions routes, policies, and stored Hub-run behavior remain backward compatible except for additive aliases/fields.
-10. A real ChatGPT/OpenAI Secure MCP Tunnel call reaches an Agentic local tool and returns its result through the supervised topology.
+10. **Waived for this delivery by explicit user decision:** a real ChatGPT/OpenAI Secure MCP Tunnel call reaches an Agentic local tool and returns its result through the supervised topology. Future production E2E may be added when account-scoped connector credentials and access are available.
 
 ## Implementation Discretion
 
@@ -525,17 +532,17 @@ Implementation discretion must not alter public CLI names/defaults, tool sets, p
 
 ## Implementation Handoff
 
-- **Plan maturity:** implementation_ready
+- **Plan maturity:** implementation_complete
 - **Design phase:** complete
 - **Implementation authorized:** yes
 - **Entry phase:** Phase 3 - Runtime model, configuration, and shared local tool service
 - **Frozen decisions:** D-01 through D-13
 - **Open blocking decisions:** none
 - **Implementation discretion:** see `Implementation Discretion`
-- **Verification convention:** focused per-phase tests, full workspace format/tests, packaged Linux checks, and one real Tunnel tool call
-- **Commit convention:** focused per-phase commits; design checkpoint not yet authorized
+- **Verification convention:** focused per-phase tests, full workspace format/tests, packaged Linux checks, and one real Tunnel tool call when that external scope is available; production connector E2E is explicitly waived for this delivery
+- **Commit convention:** focused per-phase commits
 - **Design checkpoint:** not set
-- **Next invocation:** `$planning-with-files` without `$refine-implementation-plan`, beginning Phase 6
+- **Next invocation:** none for this delivery; external connector E2E may be revisited only if a future scope supplies account-scoped credentials and connector access.
 
 ## Errors Encountered During Planning
 

@@ -3,9 +3,9 @@
 ## Session: 2026-07-24
 
 ### Current Status
-- **Phase:** 2 - Contract Refinement and Handoff Freeze (complete)
-- **Workflow stage:** implementation_ready
-- **Role:** designer
+- **Phase:** 9 - Documentation, End-to-End Verification, and Delivery (complete)
+- **Workflow stage:** implementation_complete
+- **Role:** implementer
 - **Implementation authorized:** yes
 
 ### Phase 7 kickoff
@@ -28,8 +28,8 @@
 
 ### Phase 8 complete
 
-- Added `serve --mcp-profile full|coordinator` with `AGENTIC_GPT_HUB_MCP_PROFILE`, profile-aware initialize/instructions/metadata, strict descriptor and direct-call filtering, the exact seven-tool coordinator surface, native session aliases, and full-profile bootstrap aliases.
-- Verification: formatting/diff checks and all 61 Hub tests passed, including no-dispatch assertions for hidden coordinator tools. Phase 8 is ready to commit; Phase 9 remains for documentation, packaging, and end-to-end delivery verification.
+- Added `serve --mcp-profile full|coordinator` with `AGENTIC_GPT_HUB_MCP_PROFILE`, profile-aware initialize/instructions/metadata, strict descriptor and direct-call filtering, the exact eight-tool coordinator surface including `hub.info`, native session aliases, and full-profile bootstrap aliases.
+- Verification: formatting/diff checks and all 61 Hub tests passed, including no-dispatch assertions for hidden coordinator tools. Phase 8 is committed; Phase 9 follows for documentation, packaging, and end-to-end delivery verification.
 
 ### Actions Taken
 - Verified the official Secure MCP Tunnel path using tunnel-client's embedded MCP stub and a real ChatGPT tool call.
@@ -60,7 +60,7 @@
 | A parallel official-source inspection read before the sibling clone completed. | Re-ran the inspection serially after clone completion. |
 
 ### Next Step
-- Begin Phase 3 in a later invocation using `planning-with-files` without `refine-implementation-plan`.
+- Phase 9 is complete under the user-approved delivery boundary; no remaining repository work is required.
 
 ### Implementation session: Phase 3 started
 
@@ -273,3 +273,45 @@
 ### Next step
 
 - Phase 7: add reporting-only Hub protocol and persistence without coupling reporting failures to direct Tunnel tool execution.
+
+### Phase 9 started
+
+- Phase 8 was committed as `a2e8728` (`feat(hub): add coordinator MCP profile`); the worktree was clean at the phase boundary.
+- Re-read the delivery checklist and audited the existing README, interface/operations docs, Linux packaging script, CLI/config surface, pinned tunnel manifest, and supervisor diagnostics before editing documentation.
+- Recorded the Phase 9 documentation, secret-handling, release-environment, and external-connector evidence constraints in `findings.md` before making product/doc changes.
+- During the surface audit, found and recorded the frozen-plan/implementation mismatch for coordinator `hub.info`; this will be corrected before the Phase 9 delivery commit.
+
+### Phase 9 verification checkpoint
+
+- Added `hub.info` to the coordinator MCP surface and direct Apps dispatcher; Hub tests now cover the exact eight-tool list and all advertised tools remain callable.
+- Added `docs/standalone-runtime.md` and linked it from both READMEs and `docs/interfaces.md`. The guide documents the four mappings, Normal/Room tool sets, config migration, secret references, pinned client sources, reporting detail, coordinator/full profiles, runtime files, recovery, and the distinction between fake-client and real connector verification.
+- `cargo fmt --all -- --check` and `git diff --check` pass.
+- `./scripts/dist-linux.sh` passes with authorized external execution and writes amd64/arm64 release artifacts for both binaries. `file`, CLI help, embedded manifest URL/digest inspection, and target mapping tests pass.
+- `cargo test --workspace` passes after the authorized loopback rerun: Agent 129, Hub 61, Protocol 9, doc tests 0.
+- The real external Secure MCP Tunnel connector call is not executable from the current API/tool surface; Phase 9 remains open at that acceptance boundary and must not be described as fully complete.
+
+### Phase 9 continuation smoke-test attempt
+
+- Added `crates/agentic-gpt/tests/standalone_supervisor.rs`, which provisions a temporary config and fake tunnel binding, launches the actual built `agentic-gpt` supervisor, invokes the actual hidden stdio worker with MCP initialize/`process.exec` traffic, and checks the returned local-tool marker. This is local topology evidence only and is not the external connector call.
+- The first unsandboxed run failed before the test logic could execute because its loopback health listener received `Operation not permitted`; the next run requires the same narrow loopback escalation used by the workspace suite.
+- The authorized rerun reached the supervisor but timed out waiting for the worker marker after 15 seconds. The test currently cleans temporary files before returning this error, so the next diagnostic edit will preserve worker response/stderr and supervisor stderr before changing the MCP harness.
+- Diagnostic output showed the fake harness passed the entire double-quoted `mcp.command` value as one executable (`sh: ... stdio-worker ...: no such file or directory`). This is a harness parser defect: production `quote_arg` intentionally uses double quotes for the worker command; the harness will strip those delimiters before its shell-only emulation.
+
+### Phase 9 continuation smoke-test complete
+
+- The corrected integration test passed: the actual supervisor CLI reached readiness, the fake tunnel launched the actual hidden stdio worker, MCP initialize/initialized/tools-call traffic completed, and the worker executed `/usr/bin/printf` through the local dispatcher with the expected marker.
+- This is stronger local supervisor/worker/tool evidence, but the frozen real Secure MCP Tunnel connector acceptance remains pending because the current environment exposes no connector capability or external credentials.
+
+### Phase 9 full verification rerun
+
+- `cargo fmt --all -- --check` and `git diff --check` pass after the integration test and documentation updates.
+- Authorized `cargo test --workspace` passes: Agent 129 unit tests plus 1 integration test, Hub 61, Protocol 9, and 0 doc tests. The unprivileged run still reports only the two known loopback sandbox denials; the authorized result is authoritative for the suite.
+
+### Phase 9 complete
+
+- The user explicitly waived the live production Secure MCP Tunnel connector call for this delivery because it requires consistent account-scoped `tunnelId` and runtime API key credentials. This waiver is recorded in `findings.md` and `task_plan.md`; it does not claim that the local mock or health check is a production connector call.
+- All repository-local Phase 9 work is complete and remains represented by the single amended Phase 9 delivery commit.
+
+### Phase 9 checkpoint committed
+
+- Committed the repository-local Phase 9 delivery as one focused commit after all available automated and release checks passed. The external connector acceptance boundary is explicitly waived for this delivery by the user.
