@@ -87,6 +87,7 @@ pub(crate) async fn protected_resource_metadata(
     let base_url = public_base_url(&state, &headers);
     Json(json!({
         "resource": mcp_resource_url(&state, &headers),
+        "mcp_profile": state.mcp_profile.label(),
         "authorization_servers": [base_url],
         "scopes_supported": [OAUTH_SCOPE],
         "resource_documentation": format!("{}/mcp", public_base_url(&state, &headers))
@@ -101,6 +102,7 @@ pub(crate) async fn authorization_server_metadata(
     let base_url = public_base_url(&state, &headers);
     Json(json!({
         "issuer": base_url,
+        "mcp_profile": state.mcp_profile.label(),
         "authorization_endpoint": format!("{base_url}/oauth/authorize"),
         "token_endpoint": format!("{base_url}/oauth/token"),
         "response_types_supported": ["code"],

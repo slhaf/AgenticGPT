@@ -40,7 +40,7 @@ use tracing::{info, warn};
 use crate::db::{init_db, open_db};
 use crate::registry::handle_agent_command;
 use crate::routes::api_error;
-use crate::state::{HubState, OutboundAgentMessage, PendingConfirmation};
+use crate::state::{HubState, McpProfile, OutboundAgentMessage, PendingConfirmation};
 use crate::utils::{constant_time_equal, random_id, random_token, sha256_hex};
 
 const REQUEST_TIMEOUT_SECS: u64 = 35;
@@ -70,6 +70,13 @@ enum HubCommandCli {
         api_key: String,
         #[arg(long, env = "AGENTIC_GPT_PUBLIC_BASE_URL")]
         public_base_url: Option<String>,
+        #[arg(
+            long,
+            env = "AGENTIC_GPT_HUB_MCP_PROFILE",
+            value_enum,
+            default_value_t = McpProfile::Full
+        )]
+        mcp_profile: McpProfile,
     },
     Agent {
         #[command(subcommand)]
@@ -130,13 +137,14 @@ async fn main() -> Result<()> {
             bind,
             api_key,
             public_base_url,
+            mcp_profile,
         } => {
             let _instance_lock =
                 instance_lock::InstanceLock::acquire(&db_path, ".serve.lock", "hub")?;
             config.write_if_missing(&config_path)?;
             let conn = open_db(&db_path)?;
             init_db(&conn)?;
-            serve(bind, api_key, public_base_url, conn, config).await?;
+            serve(bind, api_key, public_base_url, mcp_profile, conn, config).await?;
         }
         HubCommandCli::Agent { command } => {
             let conn = open_db(&db_path)?;
@@ -151,6 +159,7 @@ async fn serve(
     bind: SocketAddr,
     api_key: String,
     public_base_url: Option<String>,
+    mcp_profile: McpProfile,
     conn: Connection,
     config: HubConfig,
 ) -> Result<()> {
@@ -158,6 +167,7 @@ async fn serve(
         api_key,
         db: Arc::new(StdMutex::new(conn)),
         config: Arc::new(config),
+        mcp_profile,
         agents: Arc::new(Mutex::new(HashMap::new())),
         pending: Arc::new(Mutex::new(HashMap::new())),
         pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
@@ -822,6 +832,7 @@ mod tests {
             api_key: "test-api-key".to_string(),
             db: Arc::new(StdMutex::new(conn)),
             config: Arc::new(test_hub_config()),
+            mcp_profile: McpProfile::Full,
             agents: Arc::new(Mutex::new(HashMap::new())),
             pending: Arc::new(Mutex::new(HashMap::new())),
             pending_confirmations: Arc::new(Mutex::new(HashMap::new())),

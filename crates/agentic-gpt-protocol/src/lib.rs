@@ -106,6 +106,15 @@ pub enum AgentConnectionMode {
     ReportingOnly,
 }
 
+impl AgentConnectionMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::CommandCapable => "command_capable",
+            Self::ReportingOnly => "reporting_only",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BoundedJsonValue {

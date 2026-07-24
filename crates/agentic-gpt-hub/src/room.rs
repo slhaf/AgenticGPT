@@ -486,7 +486,7 @@ mod tests {
     use crate::agents::{command_request_id, replace_agent_connection};
     use crate::db::init_db;
     use crate::state::{AgentConnection, AgentTransport, OutboundAgentMessage};
-    use crate::{HubConfig, RemoteConfirmationConfig};
+    use crate::{HubConfig, McpProfile, RemoteConfirmationConfig};
     use agentic_gpt_protocol::{BootstrapReadRequest, HubCommand, HubCommandEnvelope};
     use chrono::Utc;
     use rusqlite::Connection;
@@ -517,6 +517,7 @@ mod tests {
             api_key: "test-api-key".to_string(),
             db: Arc::new(StdMutex::new(conn)),
             config: Arc::new(test_hub_config()),
+            mcp_profile: McpProfile::Full,
             agents: Arc::new(Mutex::new(HashMap::new())),
             pending: Arc::new(Mutex::new(HashMap::new())),
             pending_confirmations: Arc::new(Mutex::new(HashMap::new())),

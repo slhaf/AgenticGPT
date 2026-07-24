@@ -16,6 +16,7 @@ pub(crate) struct HubState {
     pub(crate) api_key: String,
     pub(crate) db: Arc<StdMutex<Connection>>,
     pub(crate) config: Arc<HubConfig>,
+    pub(crate) mcp_profile: McpProfile,
     pub(crate) agents: Arc<Mutex<HashMap<String, AgentConnection>>>,
     pub(crate) pending: Arc<Mutex<HashMap<String, oneshot::Sender<Value>>>>,
     pub(crate) pending_confirmations: Arc<Mutex<HashMap<String, PendingConfirmation>>>,
@@ -26,6 +27,23 @@ pub(crate) struct HubState {
     pub(crate) oauth_codes: Arc<Mutex<HashMap<String, oauth::OAuthAuthorizationCode>>>,
     pub(crate) oauth_tokens: Arc<Mutex<HashMap<String, oauth::OAuthAccessToken>>>,
     pub(crate) ntfy_health: Arc<Mutex<Option<crate::notify::NtfyHealthCache>>>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, clap::ValueEnum)]
+#[value(rename_all = "lower")]
+pub(crate) enum McpProfile {
+    #[default]
+    Full,
+    Coordinator,
+}
+
+impl McpProfile {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Coordinator => "coordinator",
+        }
+    }
 }
 
 #[derive(Clone)]

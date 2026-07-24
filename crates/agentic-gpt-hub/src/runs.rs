@@ -527,7 +527,7 @@ pub(crate) fn prune_expired(state: &HubState) -> Result<usize> {
 mod tests {
     use super::*;
     use crate::db::init_db;
-    use crate::{HubConfig, NtfyConfig, RemoteConfirmationConfig};
+    use crate::{HubConfig, McpProfile, NtfyConfig, RemoteConfirmationConfig};
     use agentic_gpt_protocol::{AgentRunReport, BoundedJsonValue};
     use rusqlite::Connection;
     use std::collections::HashMap;
@@ -552,6 +552,7 @@ mod tests {
                     },
                 },
             }),
+            mcp_profile: McpProfile::Full,
             agents: Arc::new(Mutex::new(HashMap::new())),
             pending: Arc::new(Mutex::new(HashMap::new())),
             pending_confirmations: Arc::new(Mutex::new(HashMap::new())),

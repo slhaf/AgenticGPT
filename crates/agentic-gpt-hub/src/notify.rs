@@ -512,7 +512,7 @@ mod tests {
     use crate::agents::command_request_id;
     use crate::db::init_db;
     use crate::state::{AgentConnection, AgentTransport, OutboundAgentMessage};
-    use crate::{HubConfig, RemoteConfirmationConfig};
+    use crate::{HubConfig, McpProfile, RemoteConfirmationConfig};
 
     fn test_hub_config() -> HubConfig {
         HubConfig {
@@ -536,6 +536,7 @@ mod tests {
             api_key: "test-api-key".to_string(),
             db: Arc::new(StdMutex::new(conn)),
             config: Arc::new(test_hub_config()),
+            mcp_profile: McpProfile::Full,
             agents: Arc::new(Mutex::new(HashMap::new())),
             pending: Arc::new(Mutex::new(HashMap::new())),
             pending_confirmations: Arc::new(Mutex::new(HashMap::new())),

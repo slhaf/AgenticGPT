@@ -32,15 +32,26 @@ use crate::notify::{notification_channels, send_user_notification, NotifyRouteEr
 use crate::registry::{registry_entries, registry_entry};
 use crate::room::{request_active_room, RoomRouteError};
 use crate::runs;
-use crate::state::HubState;
+use crate::state::{HubState, McpProfile};
 use crate::utils::random_id;
 use crate::{default_config_summary, MAX_WAIT_SECONDS, REQUEST_TIMEOUT_SECS};
 
 const MCP_INSTRUCTIONS: &str = "Agentic GPT Hub provides three execution layers. Use process.exec for short, one-shot inspection, detection, and deterministic tasks where an exit code is required. Use session.start for long-running or background managed processes whose lifecycle and output should be observed through session tools. Use tmux as the persistent shared workspace for stateful development, iterative debugging, TUIs, and user-agent handoff. For tmux work, discover the workspace with tmux.listSessions and tmux.listPanes, inspect it with tmux.capturePane, then use tmux.exec for shell panes or tmux.pasteText for non-shell panes. tmux.exec confirms submission to the interactive shell and returns a bounded post-submit pane snapshot; it is still not proof of command completion, so use process.exec when a deterministic exit status is required. At Room session start, call room.bootstrap, then call room.bootstrap.read for relevant guide ids listed in its manifest. Room skills are managed only by the active Room Agent: use skills.install for asynchronous GitHub/HTTPS/inline installation, then skills.install.get with waitSeconds (default 5) and pollAfterMs, and skills.install.cancel when needed. Use skills.read with an optional package-relative path for bounded resources. Use skills.run for active installed scripts; it returns terminal output inline when it completes within waitSeconds (default 5), otherwise follow the returned sessionId with session.inspect/session.wait/session.kill. Commands remain subject to Agentic local policy, path policy, confirmation, and audit.";
+const COORDINATOR_INSTRUCTIONS: &str = "Agentic GPT Hub coordinator profile. This connector exposes only Hub-native agent status, retained run history, current session snapshots, and notification tools. It never dispatches execution, session-control, tmux, downstream MCP, skills, bootstrap, diary, or notebook commands to an Agent.";
+const COORDINATOR_TOOLS: &[&str] = &[
+    "agent.list",
+    "hub.run.list",
+    "hub.run.get",
+    "hub.session.list",
+    "hub.session.get",
+    "user.notify.channels",
+    "user.notify.send",
+];
 
 #[derive(Clone)]
 pub(crate) struct AgenticMcpServer {
     state: HubState,
+    profile: McpProfile,
     tool_router: ToolRouter<Self>,
 }
 
@@ -48,7 +59,23 @@ impl AgenticMcpServer {
     pub(crate) fn new(state: HubState) -> Self {
         let mut tool_router = Self::tool_router();
         decorate_tool_descriptors(&mut tool_router);
-        Self { state, tool_router }
+        let profile = state.mcp_profile;
+        Self {
+            state,
+            profile,
+            tool_router,
+        }
+    }
+
+    fn allows_tool(&self, name: &str) -> bool {
+        self.profile == McpProfile::Full || COORDINATOR_TOOLS.contains(&name)
+    }
+
+    fn instructions(&self) -> &'static str {
+        match self.profile {
+            McpProfile::Full => MCP_INSTRUCTIONS,
+            McpProfile::Coordinator => COORDINATOR_INSTRUCTIONS,
+        }
     }
 }
 
@@ -138,6 +165,7 @@ pub(crate) async fn mcp_get(State(state): State<HubState>) -> Response {
     let server = AgenticMcpServer::new(state);
     Json(json!({
         "name": "agentic-gpt-hub",
+        "profile": server.profile.label(),
         "tools": app_tool_descriptors(&server)
     }))
     .into_response()
@@ -161,7 +189,8 @@ pub(crate) async fn mcp_post(State(state): State<HubState>, Json(rpc): Json<Valu
                     "title": "Agentic GPT Hub",
                     "version": env!("CARGO_PKG_VERSION")
                 },
-                "instructions": MCP_INSTRUCTIONS
+                "instructions": server.instructions(),
+                "profile": server.profile.label()
             }),
         ),
         "notifications/initialized" => StatusCode::ACCEPTED.into_response(),
@@ -185,6 +214,9 @@ async fn call_app_tool(server: &AgenticMcpServer, params: Value) -> Result<Value
         .get("name")
         .and_then(Value::as_str)
         .ok_or_else(|| "tools/call params.name is required".to_string())?;
+    if !server.allows_tool(name) {
+        return Err(format!("tool_unavailable_for_profile: {name}"));
+    }
     let arguments = object
         .get("arguments")
         .cloned()
@@ -275,6 +307,16 @@ async fn call_app_tool(server: &AgenticMcpServer, params: Value) -> Result<Value
                 .hub_run_list(Parameters(decode_args(arguments)?))
                 .await
         }
+        "hub.session.list" => {
+            server
+                .hub_session_list(Parameters(decode_args(arguments)?))
+                .await
+        }
+        "hub.session.get" => {
+            server
+                .hub_session_get(Parameters(decode_args(arguments)?))
+                .await
+        }
         "user.notify.send" => {
             server
                 .user_notify_send(Parameters(decode_args(arguments)?))
@@ -336,6 +378,12 @@ async fn call_app_tool(server: &AgenticMcpServer, params: Value) -> Result<Value
                 .room_bootstrap_read(Parameters(decode_args(arguments)?))
                 .await
         }
+        "bootstrap" => server.bootstrap().await,
+        "bootstrap.read" => {
+            server
+                .bootstrap_read(Parameters(decode_args(arguments)?))
+                .await
+        }
         "skills.list" => server.skills_list().await,
         "skills.read" => {
             server
@@ -384,11 +432,33 @@ fn decode_args<T: for<'de> Deserialize<'de>>(value: Value) -> Result<T, String> 
     serde_json::from_value(value).map_err(|error| format!("Invalid tool arguments: {error}"))
 }
 
+async fn snapshot_session_list(state: &HubState, agent_id: &str) -> Value {
+    let sessions = state
+        .sessions
+        .lock()
+        .await
+        .get(agent_id)
+        .map(|sessions| sessions.values().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    json!({ "sessions": sessions })
+}
+
+async fn snapshot_session_get(state: &HubState, agent_id: &str, session_id: &str) -> Value {
+    match cached_session(state, agent_id, session_id).await {
+        Some(session) => serde_json::to_value(session)
+            .unwrap_or_else(|error| json!({ "error": error.to_string() })),
+        None => {
+            json!({ "error": { "code": "session_not_found", "message": "Session was not found" } })
+        }
+    }
+}
+
 fn app_tool_descriptors(server: &AgenticMcpServer) -> Vec<Value> {
     server
         .tool_router
         .list_all()
         .into_iter()
+        .filter(|tool| server.allows_tool(tool.name.as_ref()))
         .map(|tool| {
             let mut value = serde_json::to_value(tool).unwrap_or_else(|_| json!({}));
             if let Some(object) = value.as_object_mut() {
@@ -458,7 +528,7 @@ impl ServerHandler for AgenticMcpServer {
                 "agentic-gpt-hub",
                 env!("CARGO_PKG_VERSION"),
             ))
-            .with_instructions(MCP_INSTRUCTIONS)
+            .with_instructions(self.instructions())
     }
 }
 
@@ -482,6 +552,7 @@ impl AgenticMcpServer {
                     "alias": entry.alias,
                     "displayName": entry.display_name,
                     "online": status.is_some(),
+                    "connectionMode": status.map(|s| s.connection_mode.label()),
                     "lastSeenAt": status.map(|s| s.last_seen_at).or(entry.last_seen_at),
                     "capabilities": entry.capabilities,
                     "configSummary": status.and_then(|s| s.config_summary.clone()).unwrap_or_else(default_config_summary)
@@ -533,6 +604,34 @@ impl AgenticMcpServer {
         )
         .map_err(|error| mcp_internal_error("db_error", error.to_string()))?;
         Ok(ok_json(json!({ "runs": runs, "limit": limit })))
+    }
+
+    #[tool(
+        name = "hub.session.list",
+        description = "List current or recently cached session snapshots without dispatching a command to an Agent."
+    )]
+    async fn hub_session_list(
+        &self,
+        params: Parameters<AgentIdArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let agent_id = params.0.agent_id;
+        self.ensure_agent_enabled(&agent_id)?;
+        Ok(ok_json(snapshot_session_list(&self.state, &agent_id).await))
+    }
+
+    #[tool(
+        name = "hub.session.get",
+        description = "Get one current or recently cached session snapshot without dispatching a command to an Agent."
+    )]
+    async fn hub_session_get(
+        &self,
+        params: Parameters<SessionIdArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let params = params.0;
+        self.ensure_agent_enabled(&params.agent_id)?;
+        Ok(result_from_value(
+            snapshot_session_get(&self.state, &params.agent_id, &params.session_id).await,
+        ))
     }
 
     #[tool(
@@ -681,15 +780,7 @@ impl AgenticMcpServer {
     ) -> Result<CallToolResult, ErrorData> {
         let agent_id = params.0.agent_id;
         self.ensure_agent_enabled(&agent_id)?;
-        let sessions = self
-            .state
-            .sessions
-            .lock()
-            .await
-            .get(&agent_id)
-            .map(|sessions| sessions.values().cloned().collect::<Vec<_>>())
-            .unwrap_or_default();
-        let value = json!({ "sessions": sessions });
+        let value = snapshot_session_list(&self.state, &agent_id).await;
         Ok(ok_json(value))
     }
 
@@ -703,13 +794,7 @@ impl AgenticMcpServer {
     ) -> Result<CallToolResult, ErrorData> {
         let params = params.0;
         self.ensure_agent_enabled(&params.agent_id)?;
-        let value = match cached_session(&self.state, &params.agent_id, &params.session_id).await {
-            Some(session) => serde_json::to_value(session)
-                .unwrap_or_else(|error| json!({ "error": error.to_string() })),
-            None => {
-                json!({ "error": { "code": "session_not_found", "message": "Session was not found" } })
-            }
-        };
+        let value = snapshot_session_get(&self.state, &params.agent_id, &params.session_id).await;
         Ok(result_from_value(value))
     }
 
@@ -1394,6 +1479,25 @@ impl AgenticMcpServer {
             room_route_error_value_with_timeout(error, "room_bootstrap_read_timeout")
         });
         Ok(result_from_value(value))
+    }
+
+    #[tool(
+        name = "bootstrap",
+        description = "Load the active Room Agent bootstrap entrypoint and guide manifest. This additive alias does not take agentId."
+    )]
+    async fn bootstrap(&self) -> Result<CallToolResult, ErrorData> {
+        self.room_bootstrap().await
+    }
+
+    #[tool(
+        name = "bootstrap.read",
+        description = "Read one active Room Agent bootstrap guide by id. This additive alias does not take agentId."
+    )]
+    async fn bootstrap_read(
+        &self,
+        params: Parameters<BootstrapReadArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        self.room_bootstrap_read(params).await
     }
 
     #[tool(
@@ -2351,7 +2455,7 @@ fn notify_route_error_message(error: &NotifyRouteError) -> String {
 mod tests {
     use super::*;
     use crate::db::init_db;
-    use crate::{HubConfig, RemoteConfirmationConfig};
+    use crate::{HubConfig, McpProfile, RemoteConfirmationConfig};
     use axum::body::to_bytes;
     use axum::extract::State;
     use rusqlite::Connection;
@@ -2381,6 +2485,7 @@ mod tests {
             api_key: "test-api-key".to_string(),
             db: Arc::new(StdMutex::new(conn)),
             config: Arc::new(test_hub_config()),
+            mcp_profile: McpProfile::Full,
             agents: Arc::new(Mutex::new(HashMap::new())),
             pending: Arc::new(Mutex::new(HashMap::new())),
             pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
@@ -2442,6 +2547,65 @@ mod tests {
         ] {
             assert!(!tool_is_read_only(name), "{name} should not be read-only");
         }
+    }
+
+    #[test]
+    fn coordinator_profile_exposes_only_native_tools() {
+        let mut state = test_state();
+        state.mcp_profile = McpProfile::Coordinator;
+        let server = AgenticMcpServer::new(state);
+        let mut names = app_tool_descriptors(&server)
+            .into_iter()
+            .filter_map(|tool| tool.get("name").and_then(Value::as_str).map(str::to_string))
+            .collect::<Vec<_>>();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            vec![
+                "agent.list",
+                "hub.run.get",
+                "hub.run.list",
+                "hub.session.get",
+                "hub.session.list",
+                "user.notify.channels",
+                "user.notify.send",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn coordinator_rejects_hidden_execution_tools_before_dispatch() {
+        let mut state = test_state();
+        state.mcp_profile = McpProfile::Coordinator;
+        let server = AgenticMcpServer::new(state);
+        let error = call_app_tool(
+            &server,
+            json!({ "name": "process.exec", "arguments": { "agentId": "agent" } }),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("tool_unavailable_for_profile"));
+        let run_count: i64 = server
+            .state
+            .db
+            .lock()
+            .unwrap()
+            .query_row("select count(*) from agent_runs", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(run_count, 0);
+    }
+
+    #[test]
+    fn full_profile_keeps_bootstrap_aliases_and_execution_surface() {
+        let server = AgenticMcpServer::new(test_state());
+        let names = app_tool_descriptors(&server)
+            .into_iter()
+            .filter_map(|tool| tool.get("name").and_then(Value::as_str).map(str::to_string))
+            .collect::<Vec<_>>();
+        assert!(names.iter().any(|name| name == "bootstrap"));
+        assert!(names.iter().any(|name| name == "bootstrap.read"));
+        assert!(names.iter().any(|name| name == "process.exec"));
+        assert!(names.iter().any(|name| name == "hub.session.list"));
     }
 
     #[test]

@@ -418,11 +418,11 @@ agentic-gpt run-as-standalone [--profile normal|room]
 **Primary areas:** Hub CLI/config, `mcp_server.rs`, `routes.rs`, OAuth metadata/instructions/tests.
 
 **Work:**
-- [ ] Add `--mcp-profile full|coordinator`, default `full`, with config/env integration as appropriate.
-- [ ] Make server instructions, descriptor construction, annotations, and Apps-compatible manual dispatch profile-aware.
-- [ ] Implement the exact coordinator allowlist and Hub-native queries.
-- [ ] Add `bootstrap` aliases to full profile while retaining `room.bootstrap*`.
-- [ ] Ensure OAuth/resource metadata remains valid for either profile and does not imply unavailable tools.
+- [x] Add `--mcp-profile full|coordinator`, default `full`, with config/env integration as appropriate.
+- [x] Make server instructions, descriptor construction, annotations, and Apps-compatible manual dispatch profile-aware.
+- [x] Implement the exact coordinator allowlist and Hub-native queries.
+- [x] Add `bootstrap` aliases to full profile while retaining `room.bootstrap*`.
+- [x] Ensure OAuth/resource metadata remains valid for either profile and does not imply unavailable tools.
 
 **Tests / acceptance:**
 - Full profile regression tool set plus new aliases/aggregation tools.
@@ -432,6 +432,12 @@ agentic-gpt run-as-standalone [--profile normal|room]
 - `hub.run.list/get`, `hub.session.list/get`, agent status, and notifications work from stored/native state.
 
 **Completion boundary:** Users can choose unchanged full Hub MCP or bounded coordinator MCP from the same Hub binary.
+
+**Status:** complete
+
+**Implementation result:** Added startup-fixed `full`/`coordinator` MCP profile selection via CLI/environment, profile labels in initialize and OAuth metadata, descriptor and direct-call filtering, the exact seven-tool coordinator allowlist, native `hub.session.list/get` snapshot tools, full-profile bootstrap aliases, and regression coverage proving hidden execution tools produce no Hub run.
+
+**Phase 8 verification evidence:** `cargo fmt --all -- --check`; `git diff --check`; `cargo test -p agentic-gpt-hub` (61 passed), including exact coordinator tool-set, hidden direct-call/no-dispatch, full alias, and Apps-dispatcher compatibility tests.
 
 **Commit:** focused Phase 8 commit.
 

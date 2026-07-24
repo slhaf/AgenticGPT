@@ -21,6 +21,16 @@
 - Verification: focused Hub/Protocol/Agent tests passed; authorized `cargo test --workspace` passed with Agent 129, Hub 58, Protocol 9, and no doc-test failures; formatting and diff checks passed.
 - Phase 7 commit is now the next handoff boundary. Continue with Phase 8 coordinator/full MCP profile work after committing this phase.
 
+### Phase 8 kickoff
+
+- Investigation confirmed the Hub's custom `/mcp` JSON-RPC path owns Apps-compatible dispatch and currently exposes the full ToolRouter. Phase 8 will add startup-fixed profile state, filter both descriptors and direct calls at that boundary, and preserve full-profile compatibility.
+- New profile assumptions were recorded in `findings.md` before edits: full default via CLI/env, the frozen coordinator allowlist, Hub-native session aliases, additive bootstrap aliases, and profile labels in shared OAuth metadata.
+
+### Phase 8 complete
+
+- Added `serve --mcp-profile full|coordinator` with `AGENTIC_GPT_HUB_MCP_PROFILE`, profile-aware initialize/instructions/metadata, strict descriptor and direct-call filtering, the exact seven-tool coordinator surface, native session aliases, and full-profile bootstrap aliases.
+- Verification: formatting/diff checks and all 61 Hub tests passed, including no-dispatch assertions for hidden coordinator tools. Phase 8 is ready to commit; Phase 9 remains for documentation, packaging, and end-to-end delivery verification.
+
 ### Actions Taken
 - Verified the official Secure MCP Tunnel path using tunnel-client's embedded MCP stub and a real ChatGPT tool call.
 - Discussed coexistence of direct Tunnel command routing, existing centralized Hub routing, optional Hub aggregation/reporting, and future KMP needs.

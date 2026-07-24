@@ -13,6 +13,14 @@
 - Hub `session.list` and `session.inspect` are snapshot queries in Phase 7; they no longer issue a remote execution command first. The snapshot cache is cleared on current-connection replacement/disconnect, while terminal history remains available through run records.
 - The new `hub.run.list` query filters non-expired rows in descending creation order, defaults to 20 results, caps at 100, and exposes the same common `AgentRun` shape as `hub.run.get`.
 
+## Phase 8 Implementation Assumptions
+
+- The MCP profile is selected once at Hub startup through `serve --mcp-profile` (with `AGENTIC_GPT_HUB_MCP_PROFILE` and a `full` default) and stored in `HubState`; it is not negotiated per request.
+- The custom `/mcp` JSON-RPC dispatcher remains the authoritative Apps-compatible path. It will filter descriptors and reject hidden tool names before the operation match, while the underlying rmcp router remains the full implementation registry.
+- The coordinator allowlist is the frozen seven-tool set: `agent.list`, `hub.run.list`, `hub.run.get`, `hub.session.list`, `hub.session.get`, `user.notify.channels`, and `user.notify.send`. The two Hub session aliases are native snapshot queries and never call `request_agent`.
+- Full profile keeps its existing execution surface and adds the Hub-native coordinator tools plus additive `bootstrap`/`bootstrap.read` aliases; existing `room.bootstrap*` names remain.
+- OAuth/resource metadata remains shared across profiles and gains only an additive profile label, so clients can discover the selected surface without being told that hidden tools are available.
+
 ## Requirements
 - The user-facing startup remains `agentic-gpt run-as-standalone`.
 - Agentic internally manages the official OpenAI tunnel-client lifecycle.

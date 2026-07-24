@@ -863,7 +863,7 @@ pub(crate) fn timeout_batch_result(
 mod tests {
     use super::*;
     use crate::db::init_db;
-    use crate::{HubConfig, NtfyConfig, RemoteConfirmationConfig};
+    use crate::{HubConfig, McpProfile, NtfyConfig, RemoteConfirmationConfig};
     use agentic_gpt_protocol::{Capabilities, ExecRequest};
     use axum::http::HeaderValue;
     use rusqlite::{params, Connection};
@@ -889,6 +889,7 @@ mod tests {
                     },
                 },
             }),
+            mcp_profile: McpProfile::Full,
             agents: Arc::new(Mutex::new(HashMap::new())),
             pending: Arc::new(Mutex::new(HashMap::new())),
             pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
