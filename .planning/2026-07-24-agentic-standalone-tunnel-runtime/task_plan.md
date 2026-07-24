@@ -8,7 +8,7 @@ Add a Tunnel-backed local command path to Agentic without removing the existing 
 - **Current role:** implementer
 - **Implementation authorized:** yes
 - **Active plan:** `2026-07-24-agentic-standalone-tunnel-runtime`
-- **Current phase:** Phase 9 - Documentation, End-to-End Verification, and Delivery (complete)
+- **Current phase:** Phase 10 - Real tunnel-client command/diagnostic repair (complete)
 - **Entry phase after handoff:** Phase 3
 - **Open blocking decisions:** none
 
@@ -472,6 +472,23 @@ agentic-gpt run-as-standalone [--profile normal|room]
 **Phase 9 verification evidence:** `cargo fmt --all -- --check`; `git diff --check`; authorized `./scripts/dist-linux.sh` for x86_64/aarch64 release artifacts; release ELF/CLI/embedded-manifest inspection; local supervisor-to-worker MCP smoke test; and authorized `cargo test --workspace` (Agent 129 unit tests plus 1 integration test, Hub 61, Protocol 9, doc tests 0) passed. Production connector E2E is explicitly waived by the user for this delivery.
 
 **Commit:** focused Phase 9 delivery/docs commit.
+
+### Phase 10: Real tunnel-client Command and Diagnostic Repair
+**Objective:** Correct the production `--mcp.command` binding exposed by a real `tunnel-client doctor`, surface redacted doctor diagnostics, and make the regression harness enforce real parsing semantics.
+
+**Trigger evidence:** A real startup reached `doctor --json` and failed `mcp_command_executable` because Agentic wrapped the entire worker command in quotes. The fake tunnel integration stripped those quotes and therefore masked the production defect.
+
+**Work:**
+- [x] Pass `channel=main,command=<worker command>` without re-quoting the complete command; retain quoting only for individual executable/argument tokens inside the worker command.
+- [x] On doctor failure, return bounded redacted exit-code/stdout/stderr diagnostics without exposing the Runtime API key or per-run worker authorization token.
+- [x] Update focused/unit/integration tests so the fake tunnel rejects a whole-command quoted binding instead of adapting it.
+- [x] Run focused tests, full workspace tests, formatting, diff checks, and one real local startup against the configured official tunnel-client.
+
+**Status:** complete
+
+**Implementation result:** Removed whole-command quoting from the tunnel binding while preserving token-level quoting, added 16 KiB bounded/redacted doctor diagnostics, redacted both Runtime API key and worker authorization token from forwarded child logs, and made the local fake-tunnel integration reject the invalid production shape.
+
+**Verification evidence:** supervisor focused tests 11/11; standalone supervisor integration 1/1; full workspace Agent 132 + 1 integration, Hub 61, Protocol 9; formatting/diff/check pass; a temporary isolated config using the real pinned official tunnel-client reached `standalone tunnel ready`.
 
 ## Cross-Phase Acceptance Criteria
 

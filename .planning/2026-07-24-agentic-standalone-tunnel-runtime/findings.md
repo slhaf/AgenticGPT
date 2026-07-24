@@ -433,3 +433,15 @@ It must not expose process, tmux, downstream MCP, skills, bootstrap, diary, note
 - A fresh inventory found no configured MCP resources/resource templates or connector-specific tool in the current execution environment; this confirms that the external E2E boundary is still unavailable rather than merely undiscovered in the repository.
 - The existing supervisor test verifies tunnel arguments, secret separation, health readiness, and shutdown, but its fake client does not launch the worker or issue an MCP request. A new integration smoke test may emulate only the tunnel client's local stdio handoff and drive the actual built `agentic-gpt stdio-worker` through `process.exec`. This strengthens local topology evidence while remaining explicitly non-equivalent to a real Secure MCP Tunnel control-plane call.
 - The new integration smoke test passed after emulating the tunnel client's double-quoted `mcp.command` binding correctly. It exercised the actual supervisor CLI, actual hidden worker binary, MCP initialize/notification/tools-call traffic, and local `/usr/bin/printf` execution; the fake tunnel supplied only loopback readiness and did not claim external control-plane connectivity.
+## Post-delivery Real Startup Finding
+
+- A real `run-as-standalone` startup reached the pinned official `tunnel-client v0.0.10` and failed only the `mcp_command_executable` doctor check. Manual doctor execution showed the entire `command=<executable> <args>` value had been wrapped as one quoted token, so the client treated the full command line as the executable path.
+- `Invocation::new` already quotes the executable path, config path, and supervisor token individually. `Invocation::mcp_command` must therefore concatenate the completed worker command directly and must not call `quote_arg` around the whole string.
+- The Phase 9 fake tunnel integration removed whole-command quotes before `sh -c`; that was recorded as a harness parser correction but actually adapted the test to invalid production output. The repaired harness must reject this shape and consume only the valid unwrapped command binding.
+- `run_doctor` currently discards piped stdout/stderr and returns only `tunnel_doctor_failed`. Failure diagnostics should include bounded UTF-8-lossy exit code/stdout/stderr after replacing the resolved secret with `[REDACTED]`.
+
+### Phase 10 repair result
+
+- `mcp.command` now preserves the worker command's internal token quoting and no longer wraps the full command line. The official pinned client accepted the generated binding and reached readiness under an isolated temporary config using the real account-scoped tunnel settings.
+- Doctor failures now include exit code plus bounded stdout/stderr. Both the Runtime API key and the random per-run worker authorization token are redacted before error construction; forwarded tunnel stdout/stderr uses the same two-value redaction boundary.
+- The fake-tunnel integration now fails with exit 23 when the worker command begins with a whole-command quote. It no longer strips delimiters or adapts invalid output before launching the real hidden worker.

@@ -173,7 +173,7 @@ fn fake_tunnel_script(
         }
     });
     format!(
-        "#!/bin/sh\nset -eu\nif [ \"$1\" = \"doctor\" ]; then exit 0; fi\nhealth_url_file=\"\"\nmcp_binding=\"\"\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = \"--health.url-file\" ]; then shift; health_url_file=\"$1\"; fi\n  if [ \"$1\" = \"--mcp.command\" ]; then shift; mcp_binding=\"$1\"; fi\n  shift\ndone\nprintf 'http://127.0.0.1:{health_port}\\n' > \"$health_url_file\"\nworker=\"${{mcp_binding#*command=}}\"\nworker=\"$(printf '%s' \"$worker\" | sed \"s/^'//;s/'$//\")\"\nrequest_initialize={initialize}\nrequest_initialized={initialized}\nrequest_call={call}\nprintf '%s\\n%s\\n%s\\n' \"$request_initialize\" \"$request_initialized\" \"$request_call\" | sh -c \"$worker\" > {response} 2> {worker_stderr} || true\nif grep -q 'standalone-e2e-ok' {response}; then touch {marker}; fi\nsleep 60\n",
+        "#!/bin/sh\nset -eu\nmode=\"$1\"\nhealth_url_file=\"\"\nmcp_binding=\"\"\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = \"--health.url-file\" ]; then shift; health_url_file=\"$1\"; fi\n  if [ \"$1\" = \"--mcp.command\" ]; then shift; mcp_binding=\"$1\"; fi\n  shift\ndone\nworker=\"${{mcp_binding#*command=}}\"\nfirst=\"$(printf '%.1s' \"$worker\")\"\nif [ \"$first\" = '\"' ] || [ \"$first\" = \"'\" ]; then printf 'invalid whole-command quoting\\n' >&2; exit 23; fi\nif [ \"$mode\" = \"doctor\" ]; then exit 0; fi\nprintf 'http://127.0.0.1:{health_port}\\n' > \"$health_url_file\"\nrequest_initialize={initialize}\nrequest_initialized={initialized}\nrequest_call={call}\nprintf '%s\\n%s\\n%s\\n' \"$request_initialize\" \"$request_initialized\" \"$request_call\" | sh -c \"$worker\" > {response} 2> {worker_stderr} || true\nif grep -q 'standalone-e2e-ok' {response}; then touch {marker}; fi\nsleep 60\n",
         health_port = health_port,
         initialize = sh_quote(&initialize.to_string()),
         initialized = sh_quote(&initialized.to_string()),
@@ -181,10 +181,6 @@ fn fake_tunnel_script(
         response = sh_quote(&response_path.to_string_lossy()),
         worker_stderr = sh_quote(&worker_stderr_path.to_string_lossy()),
         marker = sh_quote(&marker_path.to_string_lossy()),
-    )
-    .replace(
-        "sed \"s/^'//;s/'$//\"",
-        "sed 's/^\"//;s/\"$//'",
     )
 }
 

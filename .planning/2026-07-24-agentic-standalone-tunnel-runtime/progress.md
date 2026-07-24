@@ -315,3 +315,24 @@
 ### Phase 9 checkpoint committed
 
 - Committed the repository-local Phase 9 delivery as one focused commit after all available automated and release checks passed. The external connector acceptance boundary is explicitly waived for this delivery by the user.
+### Phase 10 repair started
+
+- Reproduced the production mismatch from the earlier real official-client doctor output and mapped it to `Invocation::mcp_command`.
+- Confirmed the worktree was clean before repair.
+- Confirmed the Phase 9 integration fake tunnel strips outer double quotes from `mcp.command`, masking the actual client behavior.
+- Repair scope is limited to command binding, redacted/bounded doctor diagnostics, and focused regression coverage; no public contract change is required.
+
+
+### Phase 10 command correction
+
+- The first focused Cargo command supplied two separate test filters; Cargo accepts only one positional filter. No tests ran. Re-ran the supervisor test module as one focused filter instead of repeating the invalid command.
+
+### Phase 10 repair complete
+
+- Changed `Invocation::mcp_command` to concatenate the already token-quoted worker command directly.
+- Added bounded doctor failure diagnostics with redaction for both the Runtime API key and per-run worker token; extended child-log forwarding to redact both values.
+- Added exact binding, diagnostic redaction/truncation, and failing-doctor tests. Updated the standalone fake tunnel to reject whole-command quoting and removed its quote-stripping workaround.
+- Focused supervisor tests passed: 11/11. Standalone supervisor integration passed: 1/1.
+- Full `cargo test --workspace` passed: Agent 132 unit tests + 1 integration, Hub 61, Protocol 9, doc tests 0.
+- `cargo fmt --all -- --check`, `git diff --check`, and `cargo check -p agentic-gpt` passed; only the two pre-existing `RunMode` dead-code warnings remain.
+- A temporary config copied the real tunnel settings but used an isolated config/runtime identity. The newly built Agentic binary passed the official pinned `tunnel-client` doctor and logged `standalone tunnel ready`; the temporary process and files were then removed.

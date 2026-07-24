@@ -31,6 +31,7 @@ const HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_RESTART_ATTEMPTS: usize = 5;
 const READY_RESET_AFTER: Duration = Duration::from_secs(60);
+const DOCTOR_DIAGNOSTIC_LIMIT: usize = 16 * 1024;
 const BACKOFFS: [Duration; MAX_RESTART_ATTEMPTS] = [
     Duration::from_secs(1),
     Duration::from_secs(2),
@@ -261,7 +262,7 @@ impl Invocation {
     }
 
     fn mcp_command(&self) -> String {
-        format!("channel=main,command={}", quote_arg(&self.worker_command))
+        format!("channel=main,command={}", self.worker_command)
     }
 
     fn common_args(&self, command: &str) -> Vec<String> {
@@ -429,6 +430,7 @@ fn spawn_tunnel(invocation: &Invocation) -> Result<RunningProcess> {
             stdout,
             "tunnel.stdout",
             invocation.secret.clone(),
+            invocation.worker_token.clone(),
         )));
     }
     if let Some(stderr) = child.stderr.take() {
@@ -436,6 +438,7 @@ fn spawn_tunnel(invocation: &Invocation) -> Result<RunningProcess> {
             stderr,
             "tunnel.stderr",
             invocation.secret.clone(),
+            invocation.worker_token.clone(),
         )));
     }
     Ok(RunningProcess { child, log_tasks })
@@ -454,22 +457,52 @@ async fn run_doctor(invocation: &Invocation) -> Result<()> {
         .await
         .map_err(|_| anyhow!("tunnel_doctor_spawn_failed"))?;
     if !output.status.success() {
-        return Err(anyhow!("tunnel_doctor_failed"));
+        let exit_code = output
+            .status
+            .code()
+            .map(|code| code.to_string())
+            .unwrap_or_else(|| "signal".to_owned());
+        let redactions = [invocation.secret.as_str(), invocation.worker_token.as_str()];
+        let stdout = bounded_redacted_output(&output.stdout, &redactions);
+        let stderr = bounded_redacted_output(&output.stderr, &redactions);
+        return Err(anyhow!(
+            "tunnel_doctor_failed: exit_code={exit_code}; stdout={stdout:?}; stderr={stderr:?}"
+        ));
     }
     Ok(())
 }
 
-async fn forward_log<R>(reader: R, component: &'static str, secret: String)
+fn bounded_redacted_output(output: &[u8], secrets: &[&str]) -> String {
+    let value = String::from_utf8_lossy(output).into_owned();
+    let mut value = redact_sensitive(value, secrets);
+    if value.len() > DOCTOR_DIAGNOSTIC_LIMIT {
+        let mut end = DOCTOR_DIAGNOSTIC_LIMIT;
+        while !value.is_char_boundary(end) {
+            end -= 1;
+        }
+        value.truncate(end);
+        value.push_str("...[truncated]");
+    }
+    value.trim().to_owned()
+}
+
+fn redact_sensitive(mut value: String, secrets: &[&str]) -> String {
+    for secret in secrets {
+        if !secret.is_empty() {
+            value = value.replace(secret, "[REDACTED]");
+        }
+    }
+    value
+}
+
+async fn forward_log<R>(reader: R, component: &'static str, secret: String, worker_token: String)
 where
     R: AsyncRead + Unpin,
 {
     let mut lines = BufReader::new(reader).lines();
     while let Ok(Some(line)) = lines.next_line().await {
-        let line = if secret.is_empty() {
-            line
-        } else {
-            line.replace(&secret, "[REDACTED]")
-        };
+        let redactions = [secret.as_str(), worker_token.as_str()];
+        let line = redact_sensitive(line, &redactions);
         log_warn(format!("{component}: {line}"));
     }
 }
@@ -757,6 +790,41 @@ mod tests {
     }
 
     #[test]
+    fn mcp_binding_preserves_worker_tokenization() {
+        let invocation = Invocation {
+            tunnel_id: "tunnel_test".to_owned(),
+            secret: "runtime-secret".to_owned(),
+            executable: PathBuf::from("/tmp/tunnel-client"),
+            worker_command:
+                "\"/tmp/agentic worker\" stdio-worker --config \"/tmp/config with spaces.json\""
+                    .to_owned(),
+            worker_token: "worker-token".to_owned(),
+            paths: RuntimePaths {
+                health_url: PathBuf::from("/tmp/health.url"),
+                log: PathBuf::from("/tmp/tunnel.log"),
+                pid: PathBuf::from("/tmp/tunnel.pid"),
+            },
+        };
+
+        assert_eq!(
+            invocation.mcp_command(),
+            "channel=main,command=\"/tmp/agentic worker\" stdio-worker --config \"/tmp/config with spaces.json\""
+        );
+    }
+
+    #[test]
+    fn doctor_diagnostic_output_is_bounded_and_redacted() {
+        let output = format!(
+            "prefix-secret-value-{}",
+            "x".repeat(DOCTOR_DIAGNOSTIC_LIMIT)
+        );
+        let diagnostic = bounded_redacted_output(output.as_bytes(), &["secret-value"]);
+        assert!(diagnostic.contains("[REDACTED]"));
+        assert!(!diagnostic.contains("secret-value"));
+        assert!(diagnostic.ends_with("...[truncated]"));
+    }
+
+    #[test]
     fn retry_schedule_is_bounded_and_exponential() {
         assert_eq!(backoff_delay(1), Duration::from_secs(1));
         assert_eq!(backoff_delay(2), Duration::from_secs(2));
@@ -830,6 +898,39 @@ mod tests {
             resolve_secret("literal-secret").unwrap_err().to_string(),
             "tunnel_api_key_reference_plaintext_rejected"
         );
+    }
+
+    #[tokio::test]
+    async fn doctor_failure_surfaces_redacted_stdout_stderr_and_exit_code() {
+        let root = std::env::temp_dir().join(format!("agentic-doctor-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let script = root.join("fake-doctor.sh");
+        fs::write(
+            &script,
+            "#!/bin/sh\nprintf 'public stdout %s\\n' \"$CONTROL_PLANE_API_KEY\"\nprintf 'public stderr %s token=%s\\n' \"$CONTROL_PLANE_API_KEY\" \"$AGENTIC_GPT_SUPERVISOR_TOKEN\" >&2\nexit 7\n",
+        )
+        .unwrap();
+        set_executable(&script);
+        let invocation = Invocation {
+            tunnel_id: "tunnel_test".to_owned(),
+            secret: "runtime-secret".to_owned(),
+            executable: script,
+            worker_command: "agentic-gpt stdio-worker --config config.json".to_owned(),
+            worker_token: "worker-token".to_owned(),
+            paths: RuntimePaths {
+                health_url: root.join("health.url"),
+                log: root.join("tunnel.log"),
+                pid: root.join("tunnel.pid"),
+            },
+        };
+
+        let error = run_doctor(&invocation).await.unwrap_err().to_string();
+        assert!(error.contains("tunnel_doctor_failed"));
+        assert!(error.contains("exit_code=7"));
+        assert!(error.contains("public stdout [REDACTED]"));
+        assert!(error.contains("public stderr [REDACTED] token=[REDACTED]"));
+        assert!(!error.contains("runtime-secret"));
+        let _ = fs::remove_dir_all(root);
     }
 
     #[tokio::test]
