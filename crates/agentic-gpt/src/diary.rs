@@ -301,16 +301,13 @@ mod tests {
         )
         .await
         .unwrap();
-        let config = state.config.read().await.clone();
-        let created = response
-            .created_at
-            .with_timezone(&room_timezone(&config).unwrap());
+        let diary_date = NaiveDate::parse_from_str(&response.date, "%Y-%m-%d").unwrap();
         let exact = select_exact(
             &state,
             DiarySelectExactRequest {
-                year: created.year(),
-                month: created.month(),
-                day: created.day(),
+                year: diary_date.year(),
+                month: diary_date.month(),
+                day: diary_date.day(),
                 limit: None,
             },
         )

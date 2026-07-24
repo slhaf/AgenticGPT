@@ -256,3 +256,12 @@
 - Added exact-boundary/one-byte-overflow regressions for entrypoint and guide plus a UTF-8 codepoint split across an 8 KiB chunk boundary.
 - Verification passed: Bootstrap 15/15, `cargo fmt --all -- --check`, and workspace check.
 - No Diary files or public protocol/OpenAPI shapes were changed.
+
+
+### Deferred Diary round-trip test cleanup
+
+- Fixed only `diary::tests::append_and_select_exact_round_trip`; Diary runtime behavior and the 05:00 logical-day boundary remain unchanged.
+- The test now parses the logical date returned in `response.date` and passes that date to `select_exact`, rather than deriving the natural calendar date from `response.created_at`.
+- Focused verification passed: `CARGO_TARGET_DIR=/tmp/agentic-gpt-diary-fix-target cargo test -p agentic-gpt diary::tests::append_and_select_exact_round_trip -- --exact` (1/1).
+- Full verification passed: `cargo fmt --all -- --check`; `CARGO_TARGET_DIR=/tmp/agentic-gpt-diary-fix-target cargo test --workspace` with local agent 99/99, Hub 56/56, protocol 8/8, and doctests 0/0.
+- This removes the previously documented time-dependent workspace-test failure without changing Room Bootstrap or Diary product semantics.

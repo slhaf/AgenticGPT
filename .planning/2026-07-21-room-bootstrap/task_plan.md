@@ -16,7 +16,7 @@ Phase 8 - Repair and regression hardening
 - **Entry phase:** Phase 8
 - **Open blocking decisions:** 0
 - **Design checkpoint:** D-01 through D-14 frozen; R-01 through R-05 repaired and regression-tested
-- **Next action:** deliver the Phase 8 repair summary
+- **Next action:** none; delivery and deferred Diary test cleanup are complete
 
 ## Scope and constraints
 
@@ -615,21 +615,22 @@ The Implementer may not change frontmatter fields/defaults, directory rules, pub
 - **Open blocking decisions:** none
 - **Implementation discretion:** see `Implementation Discretion`
 - **Verification convention:** focused crate tests after each phase, then Phase 8 format/check/focused suites and workspace test outcome recorded with the deferred Diary caveat
-- **Commit convention:** Phases 3 through 8 are committed; record the D-14 contract clarification in one focused follow-up commit and leave the workspace clean
+- **Commit convention:** Phases 3 through 8, D-14 clarification, and the deferred Diary test cleanup each use focused commits; leave the workspace clean
 - **Design checkpoint:** D-01 through D-14 frozen; R-01 through R-05 repaired
 - **Next invocation:** none; deliver the completed Phase 8 repair
 
-## Deferred repository follow-up
+## Resolved repository follow-up
 
 ### Diary logical-date round-trip test
 
-- **Status:** confirmed pre-existing test defect; deferred by user.
+- **Status:** fixed and fully regression-tested on 2026-07-24.
 - **Affected test:** `diary::tests::append_and_select_exact_round_trip`.
 - **Failure window:** deterministic from `00:00` through `04:59` in the configured `Asia/Shanghai` timezone when the default `room.diaryDayBoundaryHour` is `5`.
 - **Root cause:** `append()` writes to the logical Diary date and returns it as `response.date`, but the test selects by the natural calendar date derived from `response.created_at`. Before the 05:00 boundary those dates differ by one day.
 - **Bootstrap regression status:** none. `crates/agentic-gpt/src/diary.rs` and `crates/agentic-gpt/src/config.rs` have identical Git blobs before and after the Room Bootstrap implementation range, and no Bootstrap commit modified Diary behavior or defaults.
-- **Recommended future fix:** parse and select `response.date` in the round-trip test rather than deriving the date from `created_at`; then rerun `cargo test --workspace`.
-- **Scope decision:** do not reopen or amend the completed Room Bootstrap delivery for this unrelated test issue.
+- **Resolution:** the test now parses `response.date` and selects by that logical Diary date instead of deriving a natural calendar date from `created_at`. Diary implementation, protocol, configuration, and the default 05:00 boundary remain unchanged.
+- **Verification:** the focused round-trip test passes; `cargo fmt --all -- --check` passes; `cargo test --workspace` passes completely with local agent 99/99, Hub 56/56, protocol 8/8, and doctests 0/0.
+- **Scope:** test-only product change plus planning record; the completed Room Bootstrap behavior was not reopened.
 
 ## Errors Encountered
 
