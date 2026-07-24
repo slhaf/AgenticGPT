@@ -387,6 +387,9 @@ async fn cleanup_runs(state: HubState) {
     loop {
         sleep(Duration::from_secs(30)).await;
         let older_than = Utc::now() - chrono::Duration::seconds((REQUEST_TIMEOUT_SECS * 2) as i64);
+        if let Err(error) = runs::prune_expired(&state) {
+            warn!(%error, "expired run cleanup failed");
+        }
         match runs::mark_stale_acked_unknown(&state, older_than) {
             Ok(changed) if changed > 0 => {
                 info!(changed, "marked stale acked runs unknown");

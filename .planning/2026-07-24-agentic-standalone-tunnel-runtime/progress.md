@@ -8,6 +8,19 @@
 - **Role:** designer
 - **Implementation authorized:** yes
 
+### Phase 7 kickoff
+
+- Investigation confirmed that the current Hub registry has one live connection per `agentId`, Room activation is performed during Hello, and `request_agent` creates/persists a run before sending a command. Phase 7 will preserve those rules for command-capable connections and add an explicit reporting-only boundary.
+- New implementation assumptions were recorded in `findings.md` before code changes: Hello mode defaulting, a separate Agent run-report event, worker-owned nonblocking reporting, nullable run metadata migration, and current-connection session synchronization.
+- Phase 7 implementation added a Hello-ready gate so a newly replaced connection cannot receive a command before its mode is known; snapshot session tools now read only the active connection cache, and bounded `hub.run.list` was added beside `hub.run.get`.
+- One test command initially supplied multiple Cargo filters to a single `cargo test` invocation; it was corrected to separate focused test runs. The two remaining Agent loopback failures are sandbox permission errors and require the same escalation used by Phase 6.
+
+### Phase 7 complete
+
+- Added the Hello connection-mode extension with legacy command-capable default and a Hello-ready gate, reporting-only Hub transport behavior for WebSocket/SSE, nonblocking bounded Agent reporting, metadata/full privacy handling, session sync/cleanup, Agent-originated run persistence, TTL cleanup, idempotency/conflict handling, and bounded `hub.run.list/get` plus snapshot `session.list/inspect` behavior.
+- Verification: focused Hub/Protocol/Agent tests passed; authorized `cargo test --workspace` passed with Agent 129, Hub 58, Protocol 9, and no doc-test failures; formatting and diff checks passed.
+- Phase 7 commit is now the next handoff boundary. Continue with Phase 8 coordinator/full MCP profile work after committing this phase.
+
 ### Actions Taken
 - Verified the official Secure MCP Tunnel path using tunnel-client's embedded MCP stub and a real ChatGPT tool call.
 - Discussed coexistence of direct Tunnel command routing, existing centralized Hub routing, optional Hub aggregation/reporting, and future KMP needs.

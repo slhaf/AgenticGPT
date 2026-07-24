@@ -385,13 +385,13 @@ agentic-gpt run-as-standalone [--profile normal|room]
 **Primary areas:** protocol messages, local Hub connection split, stdio tool-call wrapper, session transitions, Hub `agents.rs`, `runs.rs`, `db.rs`, `state.rs`, routes/tests.
 
 **Work:**
-- [ ] Add backward-compatible connection mode in Hello/registry; old clients default command-capable.
-- [ ] Split Hub transport into command-capable and reporting-only behavior; permit heartbeat and confirmation responses but prohibit command envelopes.
-- [ ] Add nonblocking direct-run events and bounded reporting-detail transformation/redaction/truncation.
-- [ ] Add explicit session transition reporting and active-session sync on reconnect.
-- [ ] Add Agent-originated run upsert, schema migration/source/profile/detail fields, 24-hour cleanup, idempotency, and bounded list/get queries.
-- [ ] Define current-connection session snapshot queries and clear them on disconnect.
-- [ ] Ensure active Room routing and `request_agent` cannot select reporting-only connections.
+- [x] Add backward-compatible connection mode in Hello/registry; old clients default command-capable.
+- [x] Split Hub transport into command-capable and reporting-only behavior; permit heartbeat and confirmation responses but prohibit command envelopes.
+- [x] Add nonblocking direct-run events and bounded reporting-detail transformation/redaction/truncation.
+- [x] Add explicit session transition reporting and active-session sync on reconnect.
+- [x] Add Agent-originated run upsert, schema migration/source/profile/detail fields, 24-hour cleanup, idempotency, and bounded list/get queries.
+- [x] Define current-connection session snapshot queries and clear them on disconnect.
+- [x] Ensure active Room routing and `request_agent` cannot select reporting-only connections.
 
 **Tests / acceptance:**
 - Old Hello payloads remain command-capable.
@@ -401,6 +401,12 @@ agentic-gpt run-as-standalone [--profile normal|room]
 - Direct-run started/completed/failed idempotency, TTL cleanup, filters/limits, session sync, disconnect cleanup, and remote confirmation behavior are covered.
 
 **Completion boundary:** Optional reporting produces useful Hub state/history with the frozen best-effort and privacy semantics.
+
+**Status:** complete
+
+**Implementation result:** Added the wire-compatible `connectionMode` Hello extension, Hello-ready gating, reporting-only WebSocket/SSE connections with separate control and bounded event queues, Agent run lifecycle reports, bounded full-detail payloads, redacted metadata session snapshots, reconnect synchronization, Agent-originated 24-hour run upserts, conflict-safe idempotency, bounded run listing, and snapshot-only session list/inspect queries. Reporting remains opt-in and never gates local stdio tool results.
+
+**Phase 7 verification evidence:** `cargo fmt --all -- --check`; `git diff --check`; focused Hub/Protocol tests; and escalated `cargo test --workspace` (Agent 129, Hub 58, Protocol 9, doc tests 0) passed. A non-escalated workspace run was also attempted; its two loopback failures were sandbox `Operation not permitted` errors and were resolved by the authorized rerun.
 
 **Commit:** focused Phase 7 commit.
 

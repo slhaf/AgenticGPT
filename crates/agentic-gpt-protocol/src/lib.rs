@@ -98,6 +98,51 @@ pub enum AgentRole {
     Room,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentConnectionMode {
+    #[default]
+    CommandCapable,
+    ReportingOnly,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BoundedJsonValue {
+    pub value: serde_json::Value,
+    pub byte_count: usize,
+    pub sha256: String,
+    pub truncated: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentRunReport {
+    pub run_id: String,
+    pub request_id: String,
+    pub tool_name: String,
+    pub source: String,
+    pub profile: String,
+    pub detail: String,
+    pub status: String,
+    pub started_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<BoundedJsonValue>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<BoundedJsonValue>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<SessionInfo>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HubInfoRemoteConfirmation {
@@ -1446,6 +1491,8 @@ pub struct HubCommandEnvelope {
 pub enum AgentMessage {
     Hello {
         role: AgentRole,
+        #[serde(default, rename = "connectionMode")]
+        connection_mode: AgentConnectionMode,
         #[serde(rename = "configSummary")]
         config_summary: SafeConfigSummary,
         #[serde(default, rename = "notificationChannels")]
@@ -1457,6 +1504,9 @@ pub enum AgentMessage {
     },
     SessionUpdate {
         session: SessionInfo,
+    },
+    RunReport {
+        report: AgentRunReport,
     },
     Response {
         #[serde(default, skip_serializing_if = "Option::is_none", rename = "runId")]
@@ -1803,6 +1853,40 @@ mod tmux_tests {
         .unwrap();
         assert_eq!(request.id, "diary");
         assert_eq!(serde_json::to_value(request).unwrap()["id"], "diary");
+    }
+
+    #[test]
+    fn old_agent_hello_defaults_to_command_capable() {
+        let message: AgentMessage = serde_json::from_value(serde_json::json!({
+            "type": "hello",
+            "role": "normal",
+            "configSummary": {
+                "workspaceRoot": "/workspace",
+                "sandbox": {"enabled": false, "mode": "disabled"},
+                "pathPolicy": {
+                    "writeRootCount": 0,
+                    "readOnlyRootCount": 0,
+                    "denyRootCount": 0,
+                    "writeRoots": [],
+                    "readOnlyRoots": [],
+                    "denyRoots": []
+                },
+                "policyRuleCounts": {"allow": 0, "confirm": 0, "deny": 0},
+                "policyRules": {
+                    "allow": [], "confirm": [], "deny": [],
+                    "builtins": {"confirm": [], "deny": []}
+                },
+                "confirmationProvider": "none"
+            }
+        }))
+        .unwrap();
+        assert!(matches!(
+            message,
+            AgentMessage::Hello {
+                connection_mode: AgentConnectionMode::CommandCapable,
+                ..
+            }
+        ));
     }
 }
 

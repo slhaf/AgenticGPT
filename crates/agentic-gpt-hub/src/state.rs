@@ -1,5 +1,6 @@
 use agentic_gpt_protocol::{
-    AgentRole, ConfirmationDecision, NotificationChannel, SafeConfigSummary, SessionInfo,
+    AgentConnectionMode, AgentRole, ConfirmationDecision, NotificationChannel, SafeConfigSummary,
+    SessionInfo,
 };
 use chrono::{DateTime, Utc};
 use rusqlite::Connection;
@@ -33,6 +34,8 @@ pub(crate) struct AgentConnection {
     pub(crate) sender: mpsc::UnboundedSender<OutboundAgentMessage>,
     pub(crate) last_seen_at: DateTime<Utc>,
     pub(crate) role: AgentRole,
+    pub(crate) connection_mode: AgentConnectionMode,
+    pub(crate) hello_received: bool,
     pub(crate) transport: AgentTransport,
     pub(crate) config_summary: Option<SafeConfigSummary>,
     pub(crate) notification_channels: Vec<NotificationChannel>,

@@ -270,6 +270,11 @@ async fn call_app_tool(server: &AgenticMcpServer, params: Value) -> Result<Value
                 .hub_run_get(Parameters(decode_args(arguments)?))
                 .await
         }
+        "hub.run.list" => {
+            server
+                .hub_run_list(Parameters(decode_args(arguments)?))
+                .await
+        }
         "user.notify.send" => {
             server
                 .user_notify_send(Parameters(decode_args(arguments)?))
@@ -506,6 +511,31 @@ impl AgenticMcpServer {
     }
 
     #[tool(
+        name = "hub.run.list",
+        description = "List bounded, filterable Hub and Agent-originated run records retained for 24 hours."
+    )]
+    async fn hub_run_list(
+        &self,
+        params: Parameters<HubRunListArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let params = params.0;
+        let limit = params.limit.unwrap_or(20).clamp(1, 100);
+        let since = params
+            .since_seconds
+            .map(|seconds| chrono::Utc::now() - chrono::Duration::seconds(seconds as i64));
+        let runs = runs::list_runs(
+            &self.state,
+            params.agent_id.as_deref(),
+            params.source.as_deref(),
+            params.status.as_deref(),
+            since,
+            limit,
+        )
+        .map_err(|error| mcp_internal_error("db_error", error.to_string()))?;
+        Ok(ok_json(json!({ "runs": runs, "limit": limit })))
+    }
+
+    #[tool(
         name = "process.exec",
         description = "Run one short, one-shot inspection, detection, or deterministic command on a local Agentic agent and return its exit status. workingDirectory is the process CWD. Use session.start for long-running managed processes and tmux for persistent collaborative work."
     )]
@@ -651,23 +681,15 @@ impl AgenticMcpServer {
     ) -> Result<CallToolResult, ErrorData> {
         let agent_id = params.0.agent_id;
         self.ensure_agent_enabled(&agent_id)?;
-        let command = HubCommand::ListSessions {
-            request_id: random_id("req"),
-        };
-        let value = match request_agent(&self.state, &agent_id, command, 2).await {
-            Ok(value) => json!({ "sessions": value }),
-            Err(_) => {
-                let sessions = self
-                    .state
-                    .sessions
-                    .lock()
-                    .await
-                    .get(&agent_id)
-                    .map(|sessions| sessions.values().cloned().collect::<Vec<_>>())
-                    .unwrap_or_default();
-                json!({ "sessions": sessions })
-            }
-        };
+        let sessions = self
+            .state
+            .sessions
+            .lock()
+            .await
+            .get(&agent_id)
+            .map(|sessions| sessions.values().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        let value = json!({ "sessions": sessions });
         Ok(ok_json(value))
     }
 
@@ -681,19 +703,12 @@ impl AgenticMcpServer {
     ) -> Result<CallToolResult, ErrorData> {
         let params = params.0;
         self.ensure_agent_enabled(&params.agent_id)?;
-        let command = HubCommand::InspectSession {
-            request_id: random_id("req"),
-            session_id: params.session_id.clone(),
-        };
-        let value = match request_agent(&self.state, &params.agent_id, command, 2).await {
-            Ok(value) if !value.is_null() => value,
-            _ => match cached_session(&self.state, &params.agent_id, &params.session_id).await {
-                Some(session) => serde_json::to_value(session)
-                    .unwrap_or_else(|error| json!({ "error": error.to_string() })),
-                None => {
-                    json!({ "error": { "code": "session_not_found", "message": "Session was not found" } })
-                }
-            },
+        let value = match cached_session(&self.state, &params.agent_id, &params.session_id).await {
+            Some(session) => serde_json::to_value(session)
+                .unwrap_or_else(|error| json!({ "error": error.to_string() })),
+            None => {
+                json!({ "error": { "code": "session_not_found", "message": "Session was not found" } })
+            }
         };
         Ok(result_from_value(value))
     }
@@ -1645,6 +1660,28 @@ struct AgentIdArgs {
 struct HubRunGetArgs {
     #[schemars(description = "Run id returned by a timed-out Hub request.")]
     run_id: String,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct HubRunListArgs {
+    #[serde(default)]
+    #[schemars(description = "Optional agent id filter.")]
+    agent_id: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "Optional source filter such as hub or tunnel.")]
+    source: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "Optional status filter such as started, completed, failed, or timeout_waiting_result."
+    )]
+    status: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "Only include records created within this many seconds.")]
+    since_seconds: Option<u64>,
+    #[serde(default)]
+    #[schemars(description = "Result count, default 20 and capped at 100.")]
+    limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]

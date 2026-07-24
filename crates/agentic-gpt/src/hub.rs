@@ -1,10 +1,11 @@
 use agentic_gpt_protocol::{
-    AgentMessage, ExecRequest, HubCommand, HubCommandEnvelope, HubMessage, SessionInfo,
-    SkillRunRequest, SkillRunResponse,
+    AgentConnectionMode, AgentMessage, AgentRunReport, BoundedJsonValue, ExecRequest, HubCommand,
+    HubCommandEnvelope, HubMessage, SessionInfo, SkillRunRequest, SkillRunResponse,
 };
 use anyhow::{anyhow, Result};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use futures_util::{SinkExt, StreamExt};
+use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
@@ -29,6 +30,9 @@ use crate::{
 };
 
 pub(crate) async fn connect_loop(state: AppState) -> Result<()> {
+    if state.runtime.hub_mode == crate::state::HubMode::ReportingOnly {
+        return connect_reporting_loop(state).await;
+    }
     loop {
         let config = state.config.read().await.clone();
         if config.hub_transport == "sse" {
@@ -88,6 +92,7 @@ pub(crate) async fn connect_loop(state: AppState) -> Result<()> {
                 });
                 let hello = AgentMessage::Hello {
                     role: state.runtime.profile.role(),
+                    connection_mode: AgentConnectionMode::CommandCapable,
                     config_summary: config.safe_summary(),
                     notification_channels: notify::freedesktop_notification_channel(&config)
                         .into_iter()
@@ -178,6 +183,450 @@ pub(crate) async fn connect_loop(state: AppState) -> Result<()> {
     }
 }
 
+async fn connect_reporting_loop(state: AppState) -> Result<()> {
+    loop {
+        let config = state.config.read().await.clone();
+        let enabled = config
+            .tunnel
+            .as_ref()
+            .map(|tunnel| tunnel.hub_reporting.enabled)
+            .unwrap_or(false);
+        if !enabled {
+            return Ok(());
+        }
+        let result = if config.hub_transport == "sse" {
+            connect_reporting_sse(state.clone(), config).await
+        } else {
+            connect_reporting_websocket(state.clone(), config).await
+        };
+        if let Err(error) = result {
+            log_warn(format!("hub reporting connection failed: {error}"));
+        }
+        confirmation::fail_pending_confirmations(&state, "provider_unavailable").await;
+        log_info(format!(
+            "reconnecting reporting connection in {RECONNECT_DELAY_SECS}s"
+        ));
+        sleep(Duration::from_secs(RECONNECT_DELAY_SECS)).await;
+    }
+}
+
+async fn connect_reporting_websocket(state: AppState, config: Config) -> Result<()> {
+    let url = format!(
+        "{}/v1/agents/{}/connect",
+        config.hub_url.trim_end_matches('/'),
+        config.agent_id
+    )
+    .replace("http://", "ws://")
+    .replace("https://", "wss://");
+    let mut request = url.into_client_request()?;
+    request
+        .headers_mut()
+        .insert("x-agent-secret", config.agent_secret.parse()?);
+    let proxy = proxy_url(&config.hub_url);
+    let (stream, _) = timeout(
+        Duration::from_secs(CONNECT_TIMEOUT_SECS),
+        connect_hub(request, proxy),
+    )
+    .await
+    .map_err(|_| anyhow!("hub reporting connect timeout"))??;
+    let (mut write, mut read) = stream.split();
+    let (control_tx, mut control_rx) = mpsc::unbounded_channel::<AgentMessage>();
+    let (event_tx, mut event_rx) = mpsc::channel::<AgentMessage>(64);
+    *state.hub_sender.lock().await = Some(control_tx.clone());
+    *state.reporting_sender.lock().await = Some(event_tx.clone());
+    let writer = tokio::spawn(async move {
+        loop {
+            let message = tokio::select! {
+                biased;
+                Some(message) = control_rx.recv() => message,
+                Some(message) = event_rx.recv() => message,
+                else => break,
+            };
+            let Ok(text) = serde_json::to_string(&message) else {
+                continue;
+            };
+            if write.send(Message::Text(text.into())).await.is_err() {
+                break;
+            }
+        }
+    });
+    control_tx.send(AgentMessage::Hello {
+        role: state.runtime.profile.role(),
+        connection_mode: AgentConnectionMode::ReportingOnly,
+        config_summary: config.safe_summary(),
+        notification_channels: notify::freedesktop_notification_channel(&config)
+            .into_iter()
+            .collect(),
+    })?;
+    send_current_session_snapshots(&state, &event_tx).await;
+    let mut heartbeat = tokio::time::interval(Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut last_heartbeat_ack = Instant::now();
+    loop {
+        tokio::select! {
+            maybe_message = read.next() => {
+                let Some(message) = maybe_message else { break; };
+                let text = match message {
+                    Ok(Message::Text(text)) => text.to_string(),
+                    Ok(Message::Close(_)) => break,
+                    Ok(Message::Pong(_)) => { last_heartbeat_ack = Instant::now(); continue; }
+                    Ok(_) => continue,
+                    Err(error) => return Err(anyhow!("hub reporting websocket error: {error}")),
+                };
+                handle_reporting_inbound(&state, &text).await;
+            }
+            _ = heartbeat.tick() => {
+                if last_heartbeat_ack.elapsed() > Duration::from_secs(HEARTBEAT_ACK_TIMEOUT_SECS) {
+                    return Err(anyhow!("hub reporting heartbeat timeout"));
+                }
+                if control_tx.send(AgentMessage::Heartbeat { sent_at: Utc::now() }).is_err() {
+                    break;
+                }
+            }
+        }
+    }
+    writer.abort();
+    clear_reporting_senders(&state, &control_tx, &event_tx).await;
+    Ok(())
+}
+
+async fn connect_reporting_sse(state: AppState, config: Config) -> Result<()> {
+    let connection_id = format!("conn_{}", Uuid::new_v4().simple());
+    let base = config.hub_url.trim_end_matches('/');
+    let events_url = format!(
+        "{}/v1/agents/{}/events?connectionId={}",
+        base, config.agent_id, connection_id
+    );
+    let messages_url = format!(
+        "{}/v1/agents/{}/messages?connectionId={}",
+        base, config.agent_id, connection_id
+    );
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
+        .build()
+        .map_err(|error| anyhow!("{error}"))?;
+    let response = client
+        .get(events_url)
+        .header("x-agent-secret", &config.agent_secret)
+        .send()
+        .await
+        .map_err(|error| anyhow!("{error}"))?;
+    if !response.status().is_success() {
+        return Err(anyhow!(
+            "sse reporting connect failed: {}",
+            response.status()
+        ));
+    }
+    let (control_tx, mut control_rx) = mpsc::unbounded_channel::<AgentMessage>();
+    let (event_tx, mut event_rx) = mpsc::channel::<AgentMessage>(64);
+    *state.hub_sender.lock().await = Some(control_tx.clone());
+    *state.reporting_sender.lock().await = Some(event_tx.clone());
+    let post_client = client.clone();
+    let post_url = messages_url.clone();
+    let post_secret = config.agent_secret.clone();
+    let writer = tokio::spawn(async move {
+        loop {
+            let message = tokio::select! {
+                biased;
+                Some(message) = control_rx.recv() => message,
+                Some(message) = event_rx.recv() => message,
+                else => break,
+            };
+            let result = post_client
+                .post(&post_url)
+                .header("x-agent-secret", &post_secret)
+                .json(&message)
+                .send()
+                .await;
+            if let Err(error) = result {
+                log_warn(format!("sse reporting event dropped: {error}"));
+            }
+        }
+    });
+    control_tx.send(AgentMessage::Hello {
+        role: state.runtime.profile.role(),
+        connection_mode: AgentConnectionMode::ReportingOnly,
+        config_summary: config.safe_summary(),
+        notification_channels: notify::freedesktop_notification_channel(&config)
+            .into_iter()
+            .collect(),
+    })?;
+    send_current_session_snapshots(&state, &event_tx).await;
+    let heartbeat_tx = control_tx.clone();
+    let heartbeat = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+            if heartbeat_tx
+                .send(AgentMessage::Heartbeat {
+                    sent_at: Utc::now(),
+                })
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+    let mut stream = response.bytes_stream();
+    let mut buffer = String::new();
+    let mut data = String::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| anyhow!("{error}"))?;
+        buffer.push_str(&String::from_utf8_lossy(&chunk));
+        while let Some(index) = buffer.find('\n') {
+            let mut line = buffer[..index].to_string();
+            buffer = buffer[index + 1..].to_string();
+            if line.ends_with('\r') {
+                line.pop();
+            }
+            if line.is_empty() {
+                if !data.is_empty() {
+                    handle_reporting_inbound(&state, &data).await;
+                    data.clear();
+                }
+            } else if let Some(value) = line.strip_prefix("data:") {
+                if !data.is_empty() {
+                    data.push('\n');
+                }
+                data.push_str(value.trim_start());
+            }
+        }
+    }
+    writer.abort();
+    heartbeat.abort();
+    clear_reporting_senders(&state, &control_tx, &event_tx).await;
+    Ok(())
+}
+
+async fn handle_reporting_inbound(state: &AppState, text: &str) {
+    if let Ok(message) = serde_json::from_str::<HubMessage>(text) {
+        match message {
+            HubMessage::HeartbeatAck { .. } => {}
+            HubMessage::ConfirmationResponse {
+                request_id,
+                decision,
+                reason,
+            } => {
+                let value = confirmation::confirmation_decision_value(decision);
+                log_info(format!(
+                    "reporting confirmation response received; requestId={request_id}; decision={value}; reason={reason}"
+                ));
+                if let Some(sender) = state.pending_confirmations.lock().await.remove(&request_id) {
+                    let _ = sender.send(value);
+                }
+            }
+        }
+    } else if serde_json::from_str::<HubCommandEnvelope>(text).is_ok() {
+        log_warn("ignored execution command on reporting-only connection".to_string());
+    }
+}
+
+async fn clear_reporting_senders(
+    state: &AppState,
+    control_tx: &mpsc::UnboundedSender<AgentMessage>,
+    event_tx: &mpsc::Sender<AgentMessage>,
+) {
+    let mut control = state.hub_sender.lock().await;
+    if control
+        .as_ref()
+        .map(|sender| sender.same_channel(control_tx))
+        .unwrap_or(false)
+    {
+        *control = None;
+    }
+    let mut reporting = state.reporting_sender.lock().await;
+    if reporting
+        .as_ref()
+        .map(|sender| sender.same_channel(event_tx))
+        .unwrap_or(false)
+    {
+        *reporting = None;
+    }
+}
+
+async fn send_current_session_snapshots(state: &AppState, sender: &mpsc::Sender<AgentMessage>) {
+    for session in sessions::current_sessions(state).await {
+        let _ = sender.try_send(AgentMessage::SessionUpdate {
+            session: session_for_reporting(state, session),
+        });
+    }
+}
+
+const REPORT_MAX_JSON_BYTES: usize = 16 * 1024;
+
+pub(crate) fn report_run_event(
+    state: &AppState,
+    run_id: &str,
+    request_id: &str,
+    tool_name: &str,
+    status: &str,
+    started_at: DateTime<Utc>,
+    result: Option<serde_json::Value>,
+    reason: Option<String>,
+    session: Option<SessionInfo>,
+) {
+    let detail = reporting_detail(state);
+    let updated_at = Utc::now();
+    let full = detail == "full";
+    let arguments = None;
+    let result = if full {
+        result.map(bounded_json_value)
+    } else {
+        None
+    };
+    let session_id = session.as_ref().map(|value| value.session_id.clone());
+    try_send_reporting(
+        state,
+        AgentMessage::RunReport {
+            report: AgentRunReport {
+                run_id: run_id.to_string(),
+                request_id: request_id.to_string(),
+                tool_name: tool_name.to_string(),
+                source: "tunnel".to_string(),
+                profile: state.runtime.profile.label().to_string(),
+                detail,
+                status: status.to_string(),
+                started_at,
+                updated_at,
+                duration_ms: if status == "started" {
+                    None
+                } else {
+                    Some((updated_at - started_at).num_milliseconds().max(0) as u64)
+                },
+                session_id,
+                exit_code: session.as_ref().and_then(|value| value.exit_code),
+                reason: reason.map(|value| bounded_reason(&value)),
+                arguments,
+                result,
+                session: if full { session } else { None },
+            },
+        },
+    );
+}
+
+pub(crate) fn report_tool_arguments(
+    state: &AppState,
+    run_id: &str,
+    request_id: &str,
+    tool_name: &str,
+    arguments: serde_json::Value,
+    started_at: DateTime<Utc>,
+) {
+    let detail = reporting_detail(state);
+    let arguments = if detail == "full" {
+        Some(bounded_json_value(arguments))
+    } else {
+        None
+    };
+    try_send_reporting(
+        state,
+        AgentMessage::RunReport {
+            report: AgentRunReport {
+                run_id: run_id.to_string(),
+                request_id: request_id.to_string(),
+                tool_name: tool_name.to_string(),
+                source: "tunnel".to_string(),
+                profile: state.runtime.profile.label().to_string(),
+                detail,
+                status: "started".to_string(),
+                started_at,
+                updated_at: started_at,
+                duration_ms: None,
+                session_id: None,
+                exit_code: None,
+                reason: None,
+                arguments,
+                result: None,
+                session: None,
+            },
+        },
+    );
+}
+
+pub(crate) fn report_session(state: &AppState, session: SessionInfo) {
+    try_send_reporting(
+        state,
+        AgentMessage::SessionUpdate {
+            session: session_for_reporting(state, session),
+        },
+    );
+}
+
+fn reporting_detail(state: &AppState) -> String {
+    state
+        .config
+        .try_read()
+        .ok()
+        .and_then(|config| {
+            config
+                .tunnel
+                .as_ref()
+                .map(|tunnel| tunnel.hub_reporting.detail.to_string())
+        })
+        .unwrap_or_else(|| "metadata".to_string())
+}
+
+fn session_for_reporting(state: &AppState, mut session: SessionInfo) -> SessionInfo {
+    if reporting_detail(state) == "metadata" {
+        session.program = "<redacted>".to_string();
+        session.args.clear();
+        session.working_directory = None;
+        session.command_preview = "<redacted>".to_string();
+        session.stdout_tail.clear();
+        session.stderr_tail.clear();
+        session.truncated = false;
+    }
+    session
+}
+
+fn try_send_reporting(state: &AppState, message: AgentMessage) {
+    let Ok(sender) = state.reporting_sender.try_lock() else {
+        log_warn("hub reporting event dropped: queue lock unavailable".to_string());
+        return;
+    };
+    let Some(sender) = sender.as_ref() else {
+        return;
+    };
+    if sender.try_send(message).is_err() {
+        log_warn("hub reporting event dropped: queue full or disconnected".to_string());
+    }
+}
+
+fn bounded_json_value(value: serde_json::Value) -> BoundedJsonValue {
+    let json = serde_json::to_vec(&value).unwrap_or_default();
+    let byte_count = json.len();
+    let digest = Sha256::digest(&json);
+    let sha256 = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+    if byte_count <= REPORT_MAX_JSON_BYTES {
+        return BoundedJsonValue {
+            value,
+            byte_count,
+            sha256,
+            truncated: false,
+        };
+    }
+    BoundedJsonValue {
+        value: serde_json::json!({
+            "truncated": true,
+            "byteCount": byte_count,
+            "sha256": sha256,
+        }),
+        byte_count,
+        sha256,
+        truncated: true,
+    }
+}
+
+fn bounded_reason(value: &str) -> String {
+    const MAX_REASON_CHARS: usize = 2048;
+    let mut output = value.chars().take(MAX_REASON_CHARS).collect::<String>();
+    if value.chars().count() > MAX_REASON_CHARS {
+        output.push_str("…");
+    }
+    output
+}
+
 async fn connect_sse(state: AppState, config: Config) -> Result<()> {
     let connection_id = format!("conn_{}", Uuid::new_v4().simple());
     let base = config.hub_url.trim_end_matches('/');
@@ -262,6 +711,7 @@ async fn connect_sse(state: AppState, config: Config) -> Result<()> {
     let result = async {
         tx.send(AgentMessage::Hello {
             role: state.runtime.profile.role(),
+            connection_mode: AgentConnectionMode::CommandCapable,
             config_summary: config.safe_summary(),
             notification_channels: notify::freedesktop_notification_channel(&config)
                 .into_iter()
@@ -1419,4 +1869,21 @@ pub(crate) async fn send_agent_message(state: &AppState, message: AgentMessage) 
         .send(message)
         .map_err(|_| anyhow!("hub_send_failed"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod reporting_tests {
+    use super::*;
+
+    #[test]
+    fn oversized_report_json_becomes_a_hash_record() {
+        let bounded = bounded_json_value(serde_json::json!({
+            "payload": "x".repeat(REPORT_MAX_JSON_BYTES)
+        }));
+        assert!(bounded.truncated);
+        assert!(bounded.byte_count > REPORT_MAX_JSON_BYTES);
+        assert_eq!(bounded.value["truncated"], true);
+        assert_eq!(bounded.value["byteCount"], bounded.byte_count);
+        assert_eq!(bounded.value["sha256"], bounded.sha256);
+    }
 }

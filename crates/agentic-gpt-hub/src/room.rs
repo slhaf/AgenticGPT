@@ -1,6 +1,6 @@
 use agentic_gpt_protocol::{
-    AgentRole, BootstrapReadRequest, HubCommand, NotebookAppendRequest, NotebookCurrentRequest,
-    NotebookRecentRequest, NotebookRemoveRequest, NotebookSearchRequest,
+    AgentConnectionMode, AgentRole, BootstrapReadRequest, HubCommand, NotebookAppendRequest,
+    NotebookCurrentRequest, NotebookRecentRequest, NotebookRemoveRequest, NotebookSearchRequest,
     NotebookSelectExactRequest, NotebookUpdateRequest, SkillActivationRequest,
     SkillInstallCancelRequest, SkillInstallGetRequest, SkillInstallRequest, SkillReadRequest,
     SkillRunRequest, SkillSearchRequest,
@@ -407,6 +407,7 @@ pub(crate) async fn request_active_room(
             .get(&active.agent_id)
             .map(|connection| {
                 connection.connection_id == active.connection_id
+                    && connection.connection_mode == AgentConnectionMode::CommandCapable
                     && connection.role == AgentRole::Room
             })
             .unwrap_or(false)
@@ -547,6 +548,8 @@ mod tests {
                 sender: tx,
                 last_seen_at: Utc::now(),
                 role,
+                connection_mode: AgentConnectionMode::CommandCapable,
+                hello_received: true,
                 transport: AgentTransport::WebSocket,
                 config_summary: None,
                 notification_channels: Vec::new(),

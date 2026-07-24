@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use agentic_gpt_protocol::{BatchExecRequest, ExecRequest, HubCommand};
 use anyhow::Result;
+use chrono::Utc;
 use rmcp::{
     model::{
         CallToolRequestParams, CallToolResult, ErrorData, ListToolsResult, Meta,
@@ -105,10 +106,58 @@ impl StdioMcpServer {
             ));
         }
         let arguments = Value::Object(request.arguments.unwrap_or_default());
-        let value = self
-            .dispatch(&name, arguments)
-            .await
-            .map_err(|error| ErrorData::invalid_params(error.to_string(), None))?;
+        let run_id = task_id("run");
+        let report_request_id = task_id("req");
+        let started_at = Utc::now();
+        crate::hub::report_tool_arguments(
+            &self.state,
+            &run_id,
+            &report_request_id,
+            &name,
+            arguments.clone(),
+            started_at,
+        );
+        let value = match self.dispatch(&name, arguments).await {
+            Ok(value) => value,
+            Err(error) => {
+                crate::hub::report_run_event(
+                    &self.state,
+                    &run_id,
+                    &report_request_id,
+                    &name,
+                    "failed",
+                    started_at,
+                    None,
+                    Some(error.to_string()),
+                    None,
+                );
+                return Err(ErrorData::invalid_params(error.to_string(), None));
+            }
+        };
+        let session: Option<agentic_gpt_protocol::SessionInfo> = value
+            .get("session")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok());
+        if let Some(session) = session.as_ref() {
+            crate::hub::report_session(&self.state, session.clone());
+        }
+        let is_error = value.get("error").is_some();
+        let reason = value
+            .get("error")
+            .and_then(|error| error.get("message"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        crate::hub::report_run_event(
+            &self.state,
+            &run_id,
+            &report_request_id,
+            &name,
+            if is_error { "failed" } else { "completed" },
+            started_at,
+            Some(value.clone()),
+            reason,
+            session,
+        );
         Ok(value)
     }
 
@@ -1195,6 +1244,7 @@ mod tests {
             runtime: RuntimeModel::tunnel(profile, false),
             sessions: Arc::new(Mutex::new(HashMap::new())),
             hub_sender: Arc::new(Mutex::new(None)),
+            reporting_sender: Arc::new(Mutex::new(None)),
             pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
             temporary_mcp_allows: Arc::new(Mutex::new(Vec::new())),
             notebook_writes: Arc::new(Mutex::new(())),

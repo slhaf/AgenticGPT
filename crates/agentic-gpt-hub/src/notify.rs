@@ -567,6 +567,8 @@ mod tests {
                 sender: tx,
                 last_seen_at: Utc::now(),
                 role,
+                connection_mode: agentic_gpt_protocol::AgentConnectionMode::CommandCapable,
+                hello_received: true,
                 transport: AgentTransport::WebSocket,
                 config_summary: None,
                 notification_channels: Vec::new(),

@@ -156,6 +156,7 @@ pub(crate) struct AppState {
     pub(crate) runtime: RuntimeModel,
     pub(crate) sessions: Arc<Mutex<HashMap<String, sessions::ManagedSession>>>,
     pub(crate) hub_sender: Arc<Mutex<Option<mpsc::UnboundedSender<AgentMessage>>>>,
+    pub(crate) reporting_sender: Arc<Mutex<Option<mpsc::Sender<AgentMessage>>>>,
     pub(crate) pending_confirmations: Arc<Mutex<HashMap<String, oneshot::Sender<String>>>>,
     pub(crate) temporary_mcp_allows: Arc<Mutex<Vec<confirmation::TemporaryMcpAllow>>>,
     pub(crate) notebook_writes: Arc<Mutex<()>>,

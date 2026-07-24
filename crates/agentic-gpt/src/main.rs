@@ -254,6 +254,7 @@ async fn run(config_path: PathBuf, runtime: RuntimeModel) -> Result<()> {
         runtime,
         sessions: Arc::new(Mutex::new(HashMap::new())),
         hub_sender: Arc::new(Mutex::new(None)),
+        reporting_sender: Arc::new(Mutex::new(None)),
         pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
         temporary_mcp_allows: Arc::new(Mutex::new(Vec::new())),
         notebook_writes: Arc::new(Mutex::new(())),
@@ -288,6 +289,7 @@ async fn run_stdio_worker(
         runtime: RuntimeModel::tunnel(profile, reporting_enabled),
         sessions: Arc::new(Mutex::new(HashMap::new())),
         hub_sender: Arc::new(Mutex::new(None)),
+        reporting_sender: Arc::new(Mutex::new(None)),
         pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
         temporary_mcp_allows: Arc::new(Mutex::new(Vec::new())),
         notebook_writes: Arc::new(Mutex::new(())),
@@ -298,6 +300,9 @@ async fn run_stdio_worker(
         )),
     };
     state.skill_installs.recover(state.clone()).await?;
+    if reporting_enabled {
+        tokio::spawn(hub::connect_loop(state.clone()));
+    }
     stdio_server::serve(state).await
 }
 
@@ -611,6 +616,7 @@ mod tests {
                 runtime: RuntimeModel::hub(run_mode.profile()),
                 sessions: Arc::new(Mutex::new(HashMap::new())),
                 hub_sender: Arc::new(Mutex::new(Some(tx))),
+                reporting_sender: Arc::new(Mutex::new(None)),
                 pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
                 temporary_mcp_allows: Arc::new(Mutex::new(Vec::new())),
                 notebook_writes: Arc::new(Mutex::new(())),
@@ -1177,6 +1183,7 @@ mod tests {
             runtime: RuntimeModel::hub(CapabilityProfile::Normal),
             sessions: Arc::new(Mutex::new(HashMap::new())),
             hub_sender: Arc::new(Mutex::new(None)),
+            reporting_sender: Arc::new(Mutex::new(None)),
             pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
             temporary_mcp_allows: Arc::new(Mutex::new(Vec::new())),
             notebook_writes: Arc::new(Mutex::new(())),

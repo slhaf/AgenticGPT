@@ -1,6 +1,6 @@
 use agentic_gpt_protocol::{
-    AgentMessage, AgentRole, BatchExecRequest, BatchExecResult, HubCommand, HubCommandEnvelope,
-    HubMessage, SessionInfo, TaskResult,
+    AgentConnectionMode, AgentMessage, AgentRole, BatchExecRequest, BatchExecResult, HubCommand,
+    HubCommandEnvelope, HubMessage, SessionInfo, TaskResult,
 };
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
@@ -86,7 +86,6 @@ pub(crate) async fn connect_agent_sse(
         tx.clone(),
     )
     .await;
-    send_pending_replays(&state, &agent_id, &tx).await;
     let stream = sse_stream(rx);
     let mut response = Sse::new(stream)
         .keep_alive(
@@ -188,7 +187,6 @@ async fn handle_socket(state: HubState, agent_id: String, socket: WebSocket) {
         tx.clone(),
     )
     .await;
-    send_pending_replays(&state, &agent_id, &tx).await;
 
     let writer = tokio::spawn(async move {
         while let Some(message) = rx.recv().await {
@@ -241,15 +239,32 @@ async fn handle_agent_message(
     match parsed {
         AgentMessage::Hello {
             role,
+            connection_mode,
             config_summary,
             notification_channels,
-        } => match room::register_connection_role(state, agent_id, connection_id, role).await {
+        } => match register_connection_mode(state, agent_id, connection_id, role, connection_mode)
+            .await
+        {
             Ok(()) => {
                 let mut agents = state.agents.lock().await;
                 if let Some(connection) = agents.get_mut(agent_id) {
                     connection.role = role;
+                    connection.connection_mode = connection_mode;
+                    connection.hello_received = true;
                     connection.config_summary = Some(config_summary);
                     connection.notification_channels = notification_channels;
+                }
+                if connection_mode == AgentConnectionMode::CommandCapable {
+                    let sender = state
+                        .agents
+                        .lock()
+                        .await
+                        .get(agent_id)
+                        .filter(|connection| connection.connection_id == connection_id)
+                        .map(|connection| connection.sender.clone());
+                    if let Some(sender) = sender {
+                        send_pending_replays(state, agent_id, &sender).await;
+                    }
                 }
             }
             Err(reason) => {
@@ -289,6 +304,11 @@ async fn handle_agent_message(
                 .entry(agent_id.to_string())
                 .or_default()
                 .insert(session.session_id.clone(), session);
+        }
+        AgentMessage::RunReport { report } => {
+            if let Err(error) = runs::upsert_agent_report(state, agent_id, report) {
+                warn!(%agent_id, %error, "failed to store agent run report");
+            }
         }
         AgentMessage::Response {
             run_id,
@@ -396,6 +416,20 @@ fn is_reliable_agent_message(message: &AgentMessage) -> bool {
     )
 }
 
+async fn register_connection_mode(
+    state: &HubState,
+    agent_id: &str,
+    connection_id: &str,
+    role: AgentRole,
+    connection_mode: AgentConnectionMode,
+) -> std::result::Result<(), &'static str> {
+    if connection_mode == AgentConnectionMode::ReportingOnly {
+        room::release_active_room_for_agent(state, agent_id).await;
+        return Ok(());
+    }
+    room::register_connection_role(state, agent_id, connection_id, role).await
+}
+
 async fn send_to_connection(state: &HubState, agent_id: &str, connection_id: &str, text: String) {
     let sender = {
         let agents = state.agents.lock().await;
@@ -454,11 +488,20 @@ pub(crate) async fn request_agent(
     set_command_request_id(&mut command, request_id.clone());
     let sender = {
         let agents = state.agents.lock().await;
-        agents
-            .get(agent_id)
-            .map(|connection| (connection.connection_id.clone(), connection.sender.clone()))
-            .ok_or_else(|| "agent_offline".to_string())?
-    };
+        match agents.get(agent_id) {
+            Some(connection)
+                if connection.connection_mode == AgentConnectionMode::CommandCapable =>
+            {
+                if connection.hello_received {
+                    Ok((connection.connection_id.clone(), connection.sender.clone()))
+                } else {
+                    Err("agent_not_ready".to_string())
+                }
+            }
+            Some(_) => Err("agent_reporting_only".to_string()),
+            None => Err("agent_offline".to_string()),
+        }
+    }?;
     let run = runs::prepare_run(state, agent_id, &request_id, &command)
         .map_err(|error| error.to_string())?;
     let (tx, rx) = oneshot::channel();
@@ -541,6 +584,8 @@ pub(crate) async fn replace_agent_connection(
                 sender,
                 last_seen_at: chrono::Utc::now(),
                 role: AgentRole::Normal,
+                connection_mode: AgentConnectionMode::CommandCapable,
+                hello_received: false,
                 transport,
                 config_summary: None,
                 notification_channels: Vec::new(),
@@ -896,6 +941,8 @@ mod tests {
                 sender: tx,
                 last_seen_at,
                 role: AgentRole::Normal,
+                connection_mode: AgentConnectionMode::CommandCapable,
+                hello_received: true,
                 transport: AgentTransport::Sse,
                 config_summary: None,
                 notification_channels: Vec::new(),
@@ -1063,6 +1110,42 @@ mod tests {
 
         assert_eq!(result.unwrap_err(), "agent_offline");
         assert!(!state.agents.lock().await.contains_key("agent"));
+    }
+
+    #[tokio::test]
+    async fn reporting_only_connection_is_not_a_command_target() {
+        let state = test_state();
+        let _rx = insert_connection(&state, "agent", "reporting", chrono::Utc::now()).await;
+        state
+            .agents
+            .lock()
+            .await
+            .get_mut("agent")
+            .unwrap()
+            .connection_mode = AgentConnectionMode::ReportingOnly;
+        let command = HubCommand::Exec {
+            request_id: "req_reporting_only".to_string(),
+            task_id: "task_reporting_only".to_string(),
+            payload: ExecRequest {
+                agent_id: "agent".to_string(),
+                program: "printf".to_string(),
+                args: vec!["blocked".to_string()],
+                need_confirm: false,
+                confirm_method: None,
+                working_directory: None,
+            },
+        };
+
+        let result = request_agent(&state, "agent", command, 1).await;
+
+        assert_eq!(result.unwrap_err(), "agent_reporting_only");
+        let run_count: i64 = state
+            .db
+            .lock()
+            .unwrap()
+            .query_row("select count(*) from agent_runs", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(run_count, 0);
     }
 
     #[tokio::test]

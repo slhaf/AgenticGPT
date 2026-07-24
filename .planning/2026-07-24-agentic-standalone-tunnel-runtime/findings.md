@@ -1,5 +1,18 @@
 # Findings & Decisions: Agentic Standalone Tunnel Runtime
 
+## Phase 7 Implementation Assumptions
+
+- The wire-compatible extension will add a `connectionMode` field to `AgentMessage::Hello`, defaulting to `command_capable`; this lets existing clients keep execution semantics while Tunnel reporting explicitly opts into `reporting_only`.
+- Reporting-only Agent messages will use a separate `RunReport` event envelope rather than reusing `Response` or `TransportRunStatus`; Hub can therefore reject execution-oriented messages and keep Agent-originated records distinct from Hub-originated command runs.
+- The stdio worker will own the best-effort reporting connection and bounded queue. Local MCP dispatch remains authoritative; report enqueue is a nonblocking side effect and the worker will not await Hub delivery before returning a tool result.
+- The first reporting implementation will use the existing WebSocket/SSE Hub transports and the existing `hubUrl`, `hubTransport`, `agentId`, and `agentSecret` fields. It will advertise the worker profile and detail mode in the Hello/config summary, without adding a second authentication or persistence channel.
+- Session synchronization will be scoped to the current connection: the Hub clears snapshots on replacement/disconnect, and a reporting reconnect sends only the worker's current in-memory session snapshot.
+- Existing `agent_runs` rows remain backward-compatible. New Agent-originated rows will use nullable source/profile/detail columns and a stable `run_id` supplied by the Agent; old Hub-originated rows continue through their current prepare/ack/result path.
+- Report payloads will be sanitized at the Agent boundary: metadata excludes tool arguments/results and process fields; full detail uses bounded JSON values and existing bounded `SessionInfo` tails. Oversized JSON is represented by byte count plus SHA-256.
+- A newly accepted connection is not command-ready until its Hello has been processed. This closes the replacement/Hello race without changing the default mode for legacy Hello payloads.
+- Hub `session.list` and `session.inspect` are snapshot queries in Phase 7; they no longer issue a remote execution command first. The snapshot cache is cleared on current-connection replacement/disconnect, while terminal history remains available through run records.
+- The new `hub.run.list` query filters non-expired rows in descending creation order, defaults to 20 results, caps at 100, and exposes the same common `AgentRun` shape as `hub.run.get`.
+
 ## Requirements
 - The user-facing startup remains `agentic-gpt run-as-standalone`.
 - Agentic internally manages the official OpenAI tunnel-client lifecycle.
