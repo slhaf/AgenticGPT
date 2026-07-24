@@ -346,3 +346,24 @@ It must not expose process, tmux, downstream MCP, skills, bootstrap, diary, note
 - The stdio Tunnel worker reuses the existing Hub MCP argument shapes for overlapping process, session, tmux, and downstream-MCP tools, including `agentId`; the worker validates that value against its loaded local `Config.agent_id` before dispatch. This preserves the frozen shared schemas while keeping the worker local.
 - Phase 4 adds a hidden `stdio-worker` CLI entry that loads the supplied config path without acquiring the runtime lock. The public supervisor's lock exclusion and child authorization remain Phase 6 responsibilities.
 - The worker uses rmcp's native stdio framing and returns the existing local dispatcher JSON as both structured content and bounded text content; operational logs continue to use stderr-only helpers.
+
+## Phase 5 Implementation Assumptions
+
+- Archive handling will use a Rust ZIP reader in the agent binary rather than invoking a host `unzip` command. This keeps traversal, symlink, duplicate-candidate, size, and file-type checks under Agentic's policy and makes behavior portable across the supported Linux targets.
+- Per-artifact installation coordination will use a lock file created atomically inside the selected cache and a temporary sibling directory/file followed by atomic rename. A failed candidate never replaces an already verified cache artifact; stale lock recovery is bounded and deterministic rather than deleting an active install.
+
+### Phase 5 official manifest evidence
+
+- GitHub release `openai/tunnel-client` tag `v0.0.10` asset metadata reports `tunnel-client-v0.0.10-linux-amd64.zip` SHA-256 `b9e0388a343f2d7adeff3992f411a0bd3d916a64bc56534aac5fd15ac1b20cd5` and `tunnel-client-v0.0.10-linux-arm64.zip` SHA-256 `b842a9b2352eebd80514cf01a1fbb1c0d400a7d24a4015e85a7ea5f1aeaa5b30`.
+- The downloaded official amd64 archive was independently hashed and listed; it contains exactly one entry named `tunnel-client`, so the strict single-candidate extraction rule matches the real artifact layout.
+
+### Phase 5 distribution safety bounds
+
+- The resolver will cap a downloaded archive at 64 MiB, cap total extracted regular-file bytes at 128 MiB, and inspect at most 32 ZIP entries. These are local resource-safety limits, not trust substitutes for the pinned SHA-256 checks.
+
+### Phase 5 implementation findings
+
+- The cache retains the verified archive beside the executable. Every cache lookup re-hashes the archive, extracts the sole trusted candidate in memory, and repairs/replaces a changed executable before returning its path; the archive digest therefore remains the cache trust identity rather than an unrelated executable digest.
+- Local executable overrides reject symlinks and non-executable files before optional SHA-256 verification. The resolved override is canonicalized only after the configured path itself passes those checks.
+- The downloader follows redirects manually, keeps the HTTPS requirement across every hop, writes to a unique temporary file, and removes that file on download or verification failure. Installation stages both archive and executable and swaps the staged directory only after all checks pass.
+- Artifact locks are async-waiting, atomically created files keyed by version/platform/archive digest. A stale lock is recoverable after five minutes; active locks are never deleted.

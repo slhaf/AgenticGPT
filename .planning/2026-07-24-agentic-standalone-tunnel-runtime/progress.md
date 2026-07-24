@@ -184,3 +184,39 @@
 ### Next step
 
 - Phase 5: implement trusted Tunnel-client distribution and verification; no download or supervisor lifecycle is part of the Phase 4 commit.
+
+### Phase 5 started
+
+- Re-read the frozen Phase 5 contract and confirmed the repository has no existing distribution module or ZIP dependency.
+- Recorded the Rust ZIP-reader and atomic cache-install assumptions in `findings.md` before implementation.
+- Official v0.0.10 release checksum lookup remains a required research input before finalizing the embedded manifest.
+
+### Phase 5 research checkpoint
+
+- Confirmed the official v0.0.10 Linux asset digests from GitHub release metadata and independently checked the amd64 ZIP. The archive has one regular root entry, `tunnel-client`; no wrapper directory is needed for the built-in extraction path.
+
+### Phase 5 implementation constraint checkpoint
+
+- Recorded bounded archive, extraction, and entry limits before implementing the downloader and ZIP extractor.
+
+### Phase 5 complete
+
+- Added `tunnel_distribution.rs` and the ZIP dependency with the pinned Linux manifest, trusted override/cache resolution, HTTPS-only bounded downloads, async artifact locks, safe extraction, staged atomic cache replacement, executable permissions, cleanup, and deterministic redacted errors.
+- Added ten focused tests covering manifest/platform/checksum fixtures, HTTPS policy, executable overrides, archive traversal/symlink/duplicate/layout rejection, archive hash mismatch, cache repair/replacement, offline and `autoDownload=false` behavior, concurrent locks, redirects, response truncation, and size bounds.
+
+| Check | Result |
+|---|---|
+| `cargo fmt --all -- --check` | pass |
+| `cargo check -p agentic-gpt` | pass; existing unused-code warnings remain until Phase 6 wires the resolver into the supervisor |
+| `cargo test -p agentic-gpt tunnel_distribution::tests` | 10 passed |
+
+### Phase 5 implementation errors and resolutions
+
+| Error | Resolution |
+|---|---|
+| The sandbox denied loopback bind for the local HTTP test server. | Requested the narrow test command with escalated local-network permission; production code still rejects HTTP. |
+| The ZIP writer test helper masks high POSIX file-type bits and could not emit a symlink entry through `unix_permissions`. | Patched the test fixture's central-directory metadata to represent a Unix symlink, then verified the extractor rejects it. |
+
+### Next step
+
+- Phase 6: wire the resolver into the standalone supervisor and own the tunnel-client/stdio-worker lifecycle; this phase will eliminate the current distribution-module dead-code warnings.

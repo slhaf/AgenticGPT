@@ -8,7 +8,7 @@ Add a Tunnel-backed local command path to Agentic without removing the existing 
 - **Current role:** implementer
 - **Implementation authorized:** yes
 - **Active plan:** `2026-07-24-agentic-standalone-tunnel-runtime`
-- **Current phase:** Phase 5 - Trusted Tunnel-client distribution manager (pending)
+- **Current phase:** Phase 6 - `run-as-standalone` Supervisor and Process Lifecycle (pending)
 - **Entry phase after handoff:** Phase 3
 - **Open blocking decisions:** none
 
@@ -330,18 +330,22 @@ agentic-gpt run-as-standalone [--profile normal|room]
 **Primary areas:** new tunnel distribution/manifest modules, `Cargo.toml`, release/build tests.
 
 **Work:**
-- [ ] Add pinned manifest entries for Linux amd64/arm64 official assets and checksums.
-- [ ] Implement platform selection, path expansion, executable override, optional local hash, cache identity, and auto-download semantics.
-- [ ] Implement HTTPS download/redirect/size bounds, temporary files, per-artifact lock, SHA-256, safe ZIP extraction, permissions, atomic installation, cleanup, and cache revalidation.
-- [ ] Preserve valid cached artifacts on failure and produce redacted deterministic error codes.
+- [x] Add pinned manifest entries for Linux amd64/arm64 official assets and checksums.
+- [x] Implement platform selection, path expansion, executable override, optional local hash, cache identity, and auto-download semantics.
+- [x] Implement HTTPS download/redirect/size bounds, temporary files, per-artifact lock, SHA-256, safe ZIP extraction, permissions, atomic installation, cleanup, and cache revalidation.
+- [x] Preserve valid cached artifacts on failure and produce redacted deterministic error codes.
 
 **Tests / acceptance:**
-- Manifest/platform mapping and checksum fixtures.
-- Local HTTP test server may be used only in tests; production validation remains HTTPS-only.
-- Tests for redirects, size limit, hash mismatch, traversal, symlink/duplicate candidate, interrupted download, concurrent installers, atomic replacement, offline verified-cache use, autoDownload=false, and executable override.
-- Unsupported platform and trust failures occur before execution.
+- [x] Manifest/platform mapping and checksum fixtures.
+- [x] Local HTTP test server is used only in tests; production validation remains HTTPS-only.
+- [x] Tests cover redirects, size limit, hash mismatch, traversal, symlink/duplicate candidate, interrupted download, concurrent installers, atomic replacement, offline verified-cache use, autoDownload=false, and executable override.
+- [x] Unsupported platform and trust failures occur before execution.
 
 **Completion boundary:** Given valid config, the resolver returns one verified executable path or a deterministic redacted error.
+
+**Implementation result:** Added a pinned v0.0.10 Linux manifest, HTTPS-only bounded downloader with manual safe redirects, archive SHA-256 verification, a private identity-keyed cache, async per-artifact locking, symlink/path/device-safe ZIP extraction, executable permissions, atomic staged replacement, and cache revalidation that derives executable bytes from the verified archive. Local overrides are checked before use and may opt into a SHA-256 check.
+
+**Phase 5 verification evidence:** `cargo fmt --all -- --check`; `cargo check -p agentic-gpt`; `cargo test -p agentic-gpt tunnel_distribution::tests` (10 passed). The tests use loopback HTTP only for redirect, size, and interrupted-download cases; production URL validation rejects non-HTTPS schemes.
 
 **Commit:** focused Phase 5 commit.
 
@@ -515,7 +519,7 @@ Implementation discretion must not alter public CLI names/defaults, tool sets, p
 - **Verification convention:** focused per-phase tests, full workspace format/tests, packaged Linux checks, and one real Tunnel tool call
 - **Commit convention:** focused per-phase commits; design checkpoint not yet authorized
 - **Design checkpoint:** not set
-- **Next invocation:** `$planning-with-files` without `$refine-implementation-plan`, beginning Phase 5
+- **Next invocation:** `$planning-with-files` without `$refine-implementation-plan`, beginning Phase 6
 
 ## Errors Encountered During Planning
 

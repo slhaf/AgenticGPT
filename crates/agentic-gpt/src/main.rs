@@ -18,6 +18,7 @@ mod state;
 mod stdio_server;
 mod tmux;
 mod transport_ledger;
+mod tunnel_distribution;
 mod utils;
 
 use anyhow::{anyhow, Result};
