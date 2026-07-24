@@ -8,7 +8,7 @@ Add a Tunnel-backed local command path to Agentic without removing the existing 
 - **Current role:** implementer
 - **Implementation authorized:** yes
 - **Active plan:** `2026-07-24-agentic-standalone-tunnel-runtime`
-- **Current phase:** Phase 4 - Capability-aware stdio MCP worker (in progress)
+- **Current phase:** Phase 5 - Trusted Tunnel-client distribution manager (pending)
 - **Entry phase after handoff:** Phase 3
 - **Open blocking decisions:** none
 
@@ -299,12 +299,12 @@ agentic-gpt run-as-standalone [--profile normal|room]
 **Primary areas:** new local MCP server module(s), `main.rs`, `Cargo.toml`, shared schemas/result conversion, existing Hub `mcp_server.rs` as parity reference.
 
 **Work:**
-- [ ] Enable rmcp server/macros/`transport-io` alongside current client features.
-- [ ] Add hidden internal worker invocation carrying config path and profile through the supervised contract.
-- [ ] Build capability-specific tool routers over the shared local service.
-- [ ] Preserve current tool names, input schemas, output/result envelopes, annotations, bounded waits, and error codes where surfaces overlap.
-- [ ] Add only `bootstrap` names on Tunnel; Room-only diary/notebook registration depends on Room profile.
-- [ ] Keep stdout exclusively MCP and logs on stderr; handle initialize, ping, tools/list, tools/call, cancellation, EOF, and graceful shutdown.
+- [x] Enable rmcp server/macros/`transport-io` alongside current client features.
+- [x] Add hidden internal worker invocation carrying config path and profile through the supervised contract.
+- [x] Build capability-specific tool routers over the shared local service.
+- [x] Preserve current tool names, input schemas, output/result envelopes, annotations, bounded waits, and error codes where surfaces overlap.
+- [x] Add only `bootstrap` names on Tunnel; Room-only diary/notebook registration depends on Room profile.
+- [x] Keep stdout exclusively MCP and logs on stderr; handle initialize, ping, tools/list, tools/call, cancellation, EOF, and graceful shutdown.
 
 **Tests / acceptance:**
 - In-process stdio initialize/list/call tests for Normal and Room.
@@ -315,7 +315,12 @@ agentic-gpt run-as-standalone [--profile normal|room]
 
 **Completion boundary:** A directly launched internal worker is a valid local stdio MCP server for both profiles.
 
-**Commit:** focused Phase 4 commit.
+**Status:** complete
+**Commit:** `feat(agent): add capability-aware stdio worker`
+
+**Implementation result:** Added the hidden `stdio-worker` invocation, rmcp stdio server, exact Normal/Room tool allowlists, shared-dispatch command mapping, MCP result envelopes, annotation/schema descriptors, stderr-only startup path, and in-process protocol tests. Worker lock exclusion and parent authorization remain in the frozen Phase 6 supervisor boundary.
+
+**Phase 4 verification evidence:** `cargo fmt --all -- --check`; `cargo test -p agentic-gpt --bin agentic-gpt` (109 passed); `cargo test --workspace` (Agent 109 + Hub 56 + Protocol 8 passed). The in-process rmcp transport tests cover initialize/list/call for both profiles and the descriptor tests cover exact 29/39 sets plus absent Room-only calls.
 
 ### Phase 5: Trusted Tunnel-Client Distribution Manager
 **Objective:** Resolve a trusted executable from local override or managed Linux cache without ever executing unverified downloaded bytes.
@@ -510,7 +515,7 @@ Implementation discretion must not alter public CLI names/defaults, tool sets, p
 - **Verification convention:** focused per-phase tests, full workspace format/tests, packaged Linux checks, and one real Tunnel tool call
 - **Commit convention:** focused per-phase commits; design checkpoint not yet authorized
 - **Design checkpoint:** not set
-- **Next invocation:** `$planning-with-files` without `$refine-implementation-plan`
+- **Next invocation:** `$planning-with-files` without `$refine-implementation-plan`, beginning Phase 5
 
 ## Errors Encountered During Planning
 

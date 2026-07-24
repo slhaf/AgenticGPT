@@ -155,3 +155,32 @@
 ### Next step
 
 - Phase 4: add the hidden capability-aware rmcp stdio worker over the shared local dispatcher; no Tunnel child/supervisor is started until later phases.
+
+### Phase 4 started
+
+- Confirmed rmcp 1.7 supports a server over `transport::stdio()` with `ServerHandler`; the worker can use a dynamic descriptor table while dispatching through the shared `local_service`.
+- Recorded the schema/identity and hidden-worker assumptions in `findings.md` before product edits.
+- Phase 4 implementation is now in progress; no Phase 4 product commit has been made yet.
+
+### Phase 4 complete
+
+- Enabled rmcp server/macros/`transport-io` features and added the hidden `stdio-worker --config ... --profile normal|room` entry. The worker loads one config, does not acquire the runtime lock, recovers skill-install records, and serves native rmcp stdio with logs remaining on stderr.
+- Added a capability-filtered descriptor/dispatch adapter over `local_service`: Tunnel Normal exposes the frozen 29 tools; Tunnel Room adds the 10 diary/notebook tools. `user.notify.deliver` and all other Hub-only tools stay absent. Existing overlapping Hub argument shapes, annotations, bounded limits, session envelopes, and structured error values are preserved.
+- Added protocol-level tests for exact tool sets, absent Room-only direct calls, in-process initialize/list/call over duplex stdio, skills/bootstrap, and Room diary/notebook dispatch.
+
+| Check | Result |
+|---|---|
+| `cargo fmt --all -- --check` | pass |
+| `cargo test -p agentic-gpt --bin agentic-gpt` | 109 passed |
+| `cargo test --workspace` | Agent 109 + Hub 56 + Protocol 8 passed |
+
+### Phase 4 implementation errors and resolutions
+
+| Error | Resolution |
+|---|---|
+| rmcp `CallToolResult` is non-exhaustive and cannot be constructed with a struct literal. | Used rmcp's `structured`/`structured_error` constructors so structured content and `isError` remain protocol-native. |
+| The first stdio session-list test observed the raw dispatcher vector instead of the existing MCP `{sessions: [...]}` envelope. | Kept the dispatcher transport-neutral and restored the established envelope in the stdio adapter, alongside `session.start` and not-found normalization. |
+
+### Next step
+
+- Phase 5: implement trusted Tunnel-client distribution and verification; no download or supervisor lifecycle is part of the Phase 4 commit.

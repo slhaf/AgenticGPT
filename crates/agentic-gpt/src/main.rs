@@ -15,6 +15,7 @@ mod sessions;
 mod skill_installs;
 mod skills;
 mod state;
+mod stdio_server;
 mod tmux;
 mod transport_ledger;
 mod utils;
@@ -51,6 +52,13 @@ enum Commands {
         #[arg(long)]
         config: Option<PathBuf>,
     },
+    #[command(name = "stdio-worker", hide = true)]
+    StdioWorker {
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long, value_enum, default_value_t = WorkerProfile::Normal)]
+        profile: WorkerProfile,
+    },
     Config {
         #[arg(long)]
         config: Option<PathBuf>,
@@ -63,6 +71,21 @@ enum Commands {
         #[command(subcommand)]
         command: TmuxCommand,
     },
+}
+
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+enum WorkerProfile {
+    Normal,
+    Room,
+}
+
+impl WorkerProfile {
+    fn capability_profile(self) -> CapabilityProfile {
+        match self {
+            Self::Normal => CapabilityProfile::Normal,
+            Self::Room => CapabilityProfile::Room,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -172,6 +195,9 @@ async fn main() -> Result<()> {
             )
             .await
         }
+        Commands::StdioWorker { config, profile } => {
+            run_stdio_worker(config, profile.capability_profile()).await
+        }
         Commands::Config { config, command } => handle_config(config_path(config), command).await,
         Commands::Tmux { config, command } => handle_tmux(config_path(config), command).await,
     }
@@ -225,6 +251,34 @@ async fn run(config_path: PathBuf, runtime: RuntimeModel) -> Result<()> {
     state.skill_installs.recover(state.clone()).await?;
     tokio::spawn(watch_config(state.clone()));
     hub::connect_loop(state).await
+}
+
+async fn run_stdio_worker(config_path: PathBuf, profile: CapabilityProfile) -> Result<()> {
+    let config = Config::load(&config_path)?;
+    config.ensure_workspace()?;
+    let max_concurrent_skill_installs = config.skills.max_concurrent_installs;
+    let reporting_enabled = config
+        .tunnel
+        .as_ref()
+        .map(|tunnel| tunnel.hub_reporting.enabled)
+        .unwrap_or(false);
+    let state = AppState {
+        config_path,
+        config: Arc::new(RwLock::new(config)),
+        runtime: RuntimeModel::tunnel(profile, reporting_enabled),
+        sessions: Arc::new(Mutex::new(HashMap::new())),
+        hub_sender: Arc::new(Mutex::new(None)),
+        pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
+        temporary_mcp_allows: Arc::new(Mutex::new(Vec::new())),
+        notebook_writes: Arc::new(Mutex::new(())),
+        skills_writes: Arc::new(Mutex::new(())),
+        skill_leases: Arc::new(sessions::SkillLeaseManager::new()),
+        skill_installs: Arc::new(skill_installs::InstallManager::with_concurrency(
+            max_concurrent_skill_installs,
+        )),
+    };
+    state.skill_installs.recover(state.clone()).await?;
+    stdio_server::serve(state).await
 }
 
 async fn handle_tmux(config_path: PathBuf, command: TmuxCommand) -> Result<()> {

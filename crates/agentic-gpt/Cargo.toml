@@ -18,7 +18,7 @@ clap.workspace = true
 dirs = "6.0"
 futures-util.workspace = true
 notify-rust = "4.11"
-rmcp = { version = "1.7.0", default-features = false, features = ["client", "transport-streamable-http-client", "transport-streamable-http-client-reqwest", "transport-child-process"] }
+rmcp = { version = "1.7.0", default-features = false, features = ["client", "server", "macros", "transport-io", "transport-streamable-http-client", "transport-streamable-http-client-reqwest", "transport-child-process"] }
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "stream"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 serde.workspace = true

@@ -340,3 +340,9 @@ It must not expose process, tmux, downstream MCP, skills, bootstrap, diary, note
 - An additive `#[serde(flatten)]` map on `Config` preserves unmodeled top-level JSON fields during the existing load/write cycle, satisfying migration preservation without changing the public typed contract.
 - The active Hub handler now gets its request id from a protocol-level `HubCommand::request_id()` helper. This keeps request-id extraction consistent with Hub command replay/mutation helpers and avoids another transport-specific mapping in the local service.
 - Session-start `SessionUpdate` remains a Hub adapter side effect; the shared local dispatcher returns only the `SessionInfo` value, so future stdio calls do not require a Hub sender.
+
+## Phase 4 Implementation Assumptions
+
+- The stdio Tunnel worker reuses the existing Hub MCP argument shapes for overlapping process, session, tmux, and downstream-MCP tools, including `agentId`; the worker validates that value against its loaded local `Config.agent_id` before dispatch. This preserves the frozen shared schemas while keeping the worker local.
+- Phase 4 adds a hidden `stdio-worker` CLI entry that loads the supplied config path without acquiring the runtime lock. The public supervisor's lock exclusion and child authorization remain Phase 6 responsibilities.
+- The worker uses rmcp's native stdio framing and returns the existing local dispatcher JSON as both structured content and bounded text content; operational logs continue to use stderr-only helpers.
