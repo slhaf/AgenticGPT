@@ -59,6 +59,19 @@ pub struct SafePolicyRules {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SafeTunnelSummary {
+    pub configured: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tunnel_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key_source: Option<String>,
+    pub client_source: String,
+    pub hub_reporting_enabled: bool,
+    pub reporting_detail: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SafeConfigSummary {
     pub workspace_root: String,
     pub sandbox: SafeSandboxSummary,
@@ -66,6 +79,8 @@ pub struct SafeConfigSummary {
     pub policy_rule_counts: PolicyCounts,
     pub policy_rules: SafePolicyRules,
     pub confirmation_provider: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tunnel: Option<SafeTunnelSummary>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1313,6 +1328,13 @@ pub enum HubCommand {
         request_id: String,
         payload: BootstrapReadRequest,
     },
+    #[serde(rename = "bootstrap")]
+    Bootstrap { request_id: String },
+    #[serde(rename = "bootstrap.read")]
+    BootstrapRead {
+        request_id: String,
+        payload: BootstrapReadRequest,
+    },
     #[serde(rename = "skills.list")]
     SkillsList { request_id: String },
     #[serde(rename = "skills.read")]
@@ -1358,6 +1380,55 @@ pub enum HubCommand {
         session_id: String,
         payload: SkillRunRequest,
     },
+}
+
+impl HubCommand {
+    pub fn request_id(&self) -> &str {
+        match self {
+            Self::Exec { request_id, .. }
+            | Self::BatchExec { request_id, .. }
+            | Self::StartSession { request_id, .. }
+            | Self::ListSessions { request_id }
+            | Self::InspectSession { request_id, .. }
+            | Self::WaitSession { request_id, .. }
+            | Self::KillSession { request_id, .. }
+            | Self::TmuxListSessions { request_id }
+            | Self::TmuxListPanes { request_id, .. }
+            | Self::TmuxCapturePane { request_id, .. }
+            | Self::TmuxPasteText { request_id, .. }
+            | Self::TmuxExec { request_id, .. }
+            | Self::TmuxCreateSession { request_id, .. }
+            | Self::TmuxCloseSession { request_id, .. }
+            | Self::McpListServers { request_id }
+            | Self::McpListTools { request_id, .. }
+            | Self::McpCallTool { request_id, .. }
+            | Self::UserNotifyDeliver { request_id, .. }
+            | Self::RoomNotebookAppend { request_id, .. }
+            | Self::RoomNotebookRecent { request_id, .. }
+            | Self::RoomNotebookSelectExact { request_id, .. }
+            | Self::RoomNotebookSearch { request_id, .. }
+            | Self::RoomNotebookCurrent { request_id, .. }
+            | Self::RoomNotebookUpdate { request_id, .. }
+            | Self::RoomNotebookRemove { request_id, .. }
+            | Self::RoomDiaryAppend { request_id, .. }
+            | Self::RoomDiaryRecent { request_id, .. }
+            | Self::RoomDiarySelectExact { request_id, .. }
+            | Self::RoomBootstrap { request_id }
+            | Self::RoomBootstrapRead { request_id, .. }
+            | Self::Bootstrap { request_id }
+            | Self::BootstrapRead { request_id, .. }
+            | Self::SkillsList { request_id }
+            | Self::SkillsRead { request_id, .. }
+            | Self::SkillsSearch { request_id, .. }
+            | Self::SkillsActive { request_id }
+            | Self::SkillsActivate { request_id, .. }
+            | Self::SkillsDeactivate { request_id, .. }
+            | Self::SkillsInstall { request_id, .. }
+            | Self::SkillsInstallGet { request_id, .. }
+            | Self::SkillsInstallCancel { request_id, .. }
+            | Self::SkillsRun { request_id, .. } => request_id,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1602,6 +1673,24 @@ mod tmux_tests {
         assert_eq!(
             serde_json::to_value(BootstrapEncoding::Utf8).unwrap(),
             "utf8"
+        );
+
+        let neutral = HubCommand::Bootstrap {
+            request_id: "req-neutral".to_string(),
+        };
+        assert_eq!(neutral.request_id(), "req-neutral");
+        assert_eq!(serde_json::to_value(neutral).unwrap()["type"], "bootstrap");
+
+        let neutral_read = HubCommand::BootstrapRead {
+            request_id: "req-neutral-read".to_string(),
+            payload: BootstrapReadRequest {
+                id: "guide".to_string(),
+            },
+        };
+        assert_eq!(neutral_read.request_id(), "req-neutral-read");
+        assert_eq!(
+            serde_json::to_value(neutral_read).unwrap()["type"],
+            "bootstrap.read"
         );
     }
 

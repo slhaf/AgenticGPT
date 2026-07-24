@@ -732,6 +732,7 @@ fn default_config_summary() -> SafeConfigSummary {
             },
         },
         confirmation_provider: "unknown".to_string(),
+        tunnel: None,
     }
 }
 

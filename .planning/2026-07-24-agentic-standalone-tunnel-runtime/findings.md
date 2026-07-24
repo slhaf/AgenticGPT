@@ -266,6 +266,17 @@ It must not expose process, tmux, downstream MCP, skills, bootstrap, diary, note
 
 ## Final Repository Gap Findings
 
+## Phase 3 Implementation Assumptions
+
+- The existing `HubCommand` enum is the stable shared request envelope. Phase 3 will introduce transport-neutral bootstrap variants additively and use a local value-returning dispatcher around the same payload shapes, so the Hub adapter and future stdio adapter cannot diverge in result conversion.
+- Existing modules already apply policy and path/session limits at the operation boundary. The runtime model will select profile/capabilities and pass the selected profile into those existing checks; it will not create a second policy implementation.
+- The legacy `RoomConfig.skills` field is retained only for deserialization compatibility and an in-memory mirror during this phase. Config serialization will emit canonical top-level `skills`, so a later config write performs the planned migration without deleting unrelated JSON fields represented by the typed config.
+- Tunnel binary resolution, secret materialization, supervisor lifecycle, and reporting transport remain deferred to their frozen phases; Phase 3 validates only configuration shape/reference syntax and safe summaries.
+
+## Phase 3 Workspace Validation Finding
+
+- Adding protocol-level `bootstrap` and `bootstrap.read` variants requires matching updates in the Hub crate's request-id mutation, command-name mapping, and safe-summary construction. The variants are additive and the compatibility aliases remain intact.
+
 ### Direct-run reporting storage
 - Existing `agent_runs` persists full serialized Hub commands and full results for 24 hours.
 - Direct Tunnel calls have no Hub-created run row, so reporting needs an Agent-originated run upsert message and Hub insertion path.
@@ -320,6 +331,12 @@ It must not expose process, tmux, downstream MCP, skills, bootstrap, diary, note
 ## Handoff Readiness Findings
 - All Q-01 through Q-13 are resolved and represented by D-01 through D-13.
 - Current implementation evidence covers CLI/runtime, policy, config/migration, stdio server feasibility, command dispatch, sessions, Hub protocol/registry, run DB, MCP profiles, release packaging, official client trust/lifecycle, and end-to-end stub validation.
-- The only repository modifications during design are `.planning/.active_plan` and the new active planning directory.
-- Exact implementation entry is Phase 3; Phases 1–2 are complete and product implementation has not begun.
+- During the design-only period, the only repository modifications were `.planning/.active_plan` and the new active planning directory; subsequent Phase 3 implementation changes are recorded below.
+- The implementation entry was Phase 3; Phases 1–2 are complete and Phase 3 is now complete.
 - A focused planning checkpoint is appropriate but requires separate user authorization.
+
+## Phase 3 Implementation Findings
+
+- An additive `#[serde(flatten)]` map on `Config` preserves unmodeled top-level JSON fields during the existing load/write cycle, satisfying migration preservation without changing the public typed contract.
+- The active Hub handler now gets its request id from a protocol-level `HubCommand::request_id()` helper. This keeps request-id extraction consistent with Hub command replay/mutation helpers and avoids another transport-specific mapping in the local service.
+- Session-start `SessionUpdate` remains a Hub adapter side effect; the shared local dispatcher returns only the `SessionInfo` value, so future stdio calls do not require a Hub sender.

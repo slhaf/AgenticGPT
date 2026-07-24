@@ -15,7 +15,7 @@ use tokio::time::sleep;
 use uuid::Uuid;
 
 use crate::config::Config;
-use crate::policy::{policy_decision_for_mode, PolicyDecision};
+use crate::policy::{policy_decision_for_profile, PolicyDecision};
 use crate::{confirmation, exec, AppState};
 
 const SESSION_FORMAT: &str = "#{session_name}\t#{session_windows}\t#{session_attached}\t#{session_created}\t#{session_activity}";
@@ -172,7 +172,13 @@ pub(crate) async fn exec(state: &AppState, request: TmuxExecRequest) -> Value {
     let target = request.target.clone();
     let need_confirm = request.need_confirm;
     let config = state.config.read().await.clone();
-    let decision = policy_decision_for_mode(&config, state.run_mode, &program, &args, need_confirm);
+    let decision = policy_decision_for_profile(
+        &config,
+        state.runtime.profile,
+        &program,
+        &args,
+        need_confirm,
+    );
     let result = exec_inner(state, request).await;
     let cwd = result
         .get("currentPath")
@@ -229,9 +235,9 @@ async fn exec_inner(state: &AppState, request: TmuxExecRequest) -> Value {
     } else if let Err(reason) = exec::preflight(&config, &cwd, &request.program, &request.args) {
         return TmuxError::new(&reason, reason.clone()).value_with_current_path(&pane.current_path);
     }
-    let decision = policy_decision_for_mode(
+    let decision = policy_decision_for_profile(
         &config,
-        state.run_mode,
+        state.runtime.profile,
         &request.program,
         &request.args,
         request.need_confirm,

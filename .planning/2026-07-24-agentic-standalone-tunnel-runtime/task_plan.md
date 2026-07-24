@@ -5,10 +5,10 @@ Add a Tunnel-backed local command path to Agentic without removing the existing 
 
 ## Workflow State
 - **Stage:** implementation_ready
-- **Current role:** designer
+- **Current role:** implementer
 - **Implementation authorized:** yes
 - **Active plan:** `2026-07-24-agentic-standalone-tunnel-runtime`
-- **Current phase:** Phase 3 - Runtime model, configuration, and shared local tool service
+- **Current phase:** Phase 4 - Capability-aware stdio MCP worker (in progress)
 - **Entry phase after handoff:** Phase 3
 - **Open blocking decisions:** none
 
@@ -265,12 +265,12 @@ agentic-gpt run-as-standalone [--profile normal|room]
 - `crates/agentic-gpt-protocol/src/lib.rs`
 
 **Work:**
-- [ ] Replace overloaded `RunMode` decisions with internal transport/profile/Hub-mode concepts while preserving old public entries and serialized role compatibility.
-- [ ] Add canonical top-level `skills` and optional `tunnel` config types, defaults, validation, safe summaries, `config set` support where appropriate, and legacy `room.skills` migration behavior.
-- [ ] Define capability resolution from transport + profile; Normal Hub remains unchanged, Tunnel Normal gains skills/bootstrap, Room retains diary/notebook.
-- [ ] Extract local tool operations from `handle_hub_command` into reusable value-returning services/dispatcher; Hub adapter remains responsible only for envelope/response transport.
-- [ ] Generalize bootstrap internals to transport-neutral naming and preserve Hub aliases.
-- [ ] Preserve policy, path policy, confirmations, audit, session limits, and error envelopes.
+- [x] Replace overloaded `RunMode` decisions with internal transport/profile/Hub-mode concepts while preserving old public entries and serialized role compatibility.
+- [x] Add canonical top-level `skills` and optional `tunnel` config types, defaults, validation, safe summaries, `config set` support where appropriate, and legacy `room.skills` migration behavior.
+- [x] Define capability resolution from transport + profile; Normal Hub remains unchanged, Tunnel Normal gains skills/bootstrap, Room retains diary/notebook.
+- [x] Extract local tool operations from `handle_hub_command` into reusable value-returning services/dispatcher; Hub adapter remains responsible only for envelope/response transport.
+- [x] Generalize bootstrap internals to transport-neutral naming and preserve Hub aliases.
+- [x] Preserve policy, path policy, confirmations, audit, session limits, and error envelopes.
 
 **Tests / acceptance:**
 - Existing `run` and `run-as-room` tests remain green and public behavior is unchanged.
@@ -281,7 +281,15 @@ agentic-gpt run-as-standalone [--profile normal|room]
 
 **Completion boundary:** Shared local operations and frozen runtime/config model exist; no stdio server or tunnel child is started yet.
 
-**Commit:** focused Phase 3 commit.
+**Status:** complete
+**Commit:** `feat(agent): add runtime profiles and shared local dispatcher`
+
+**Implementation notes:**
+- `RunMode` remains as a compatibility conversion type for the existing `run`/`run-as-room` entry points and tests; `AppState` will not use it as its runtime state.
+- Legacy `room.skills` remains deserializable but is omitted from serialization; `Config::load` mirrors it into canonical top-level `skills`, with top-level values winning when both are present.
+- Phase 3 adds transport-neutral bootstrap command variants to the shared protocol, while existing `room.bootstrap*` variants remain wire-compatible aliases for the Hub adapter.
+
+**Phase 3 implementation result:** Runtime/profile/config foundation and shared local dispatcher are complete. Existing Hub behavior remains covered by regression tests; stdio worker and Tunnel child lifecycle are deferred to Phases 4–6.
 
 ### Phase 4: Capability-Aware Stdio MCP Worker
 **Objective:** Serve the frozen Tunnel Normal/Room tool surfaces over protocol-clean stdio.
@@ -510,3 +518,9 @@ Implementation discretion must not alter public CLI names/defaults, tool sets, p
 |---|---|
 | Room `skills.run` rejected the laptop repository as `invalid_working_directory`. | Read the skills through Agentic and invoked the same installed planning script through the laptop process tool. |
 | A parallel official-source inspection read before the sibling clone completed. | Re-ran source inspection serially; no repository or planning state was affected. |
+
+## Errors Encountered During Phase 3
+
+| Error | Attempt | Resolution |
+|---|---:|---|
+| Workspace Hub crate failed to compile after additive protocol bootstrap variants: one `SafeConfigSummary` initializer and three Hub command matches were non-exhaustive. | 1 | Updated the Hub-side additive compatibility matches and reran workspace tests; no protocol variant was removed. |

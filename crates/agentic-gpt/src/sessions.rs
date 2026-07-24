@@ -14,7 +14,7 @@ use crate::{
     audit::{write_audit, AuditRecord},
     config::Config,
     confirmation, exec,
-    policy::{policy_decision_for_mode, PolicyDecision},
+    policy::{policy_decision_for_profile, PolicyDecision},
     utils::{command_preview, SESSION_TAIL_MAX},
     AppState,
 };
@@ -134,9 +134,9 @@ pub(crate) async fn start_session(
         truncated: false,
         reject_reason: None,
     };
-    let decision = policy_decision_for_mode(
+    let decision = policy_decision_for_profile(
         &config,
-        state.run_mode,
+        state.runtime.profile,
         &request.program,
         &request.args,
         request.need_confirm,
@@ -247,9 +247,9 @@ async fn start_session_async_inner(
         truncated: false,
         reject_reason: None,
     };
-    let decision = policy_decision_for_mode(
+    let decision = policy_decision_for_profile(
         &config,
-        state.run_mode,
+        state.runtime.profile,
         &request.program,
         &request.args,
         request.need_confirm,
@@ -681,7 +681,6 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
-    use crate::state::RunMode;
 
     fn unique_temp_dir(prefix: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("{prefix}-{}", Uuid::new_v4()));
@@ -713,7 +712,7 @@ mod tests {
         let state = AppState {
             config_path: root.join("config.json"),
             config: Arc::new(RwLock::new(config)),
-            run_mode: RunMode::Normal,
+            runtime: crate::state::RuntimeModel::hub(crate::state::CapabilityProfile::Normal),
             sessions: Arc::new(Mutex::new(HashMap::new())),
             hub_sender: Arc::new(Mutex::new(None)),
             pending_confirmations: Arc::new(Mutex::new(HashMap::new())),

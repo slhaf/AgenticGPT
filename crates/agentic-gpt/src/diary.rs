@@ -219,7 +219,6 @@ fn read_entry_file(
 mod tests {
     use super::*;
     use crate::config::Config;
-    use crate::state::RunMode;
     use crate::utils::ensure_parent;
     use crate::AppState;
     use chrono::TimeZone;
@@ -241,7 +240,7 @@ mod tests {
         AppState {
             config_path: PathBuf::from("/tmp/test-config.json"),
             config: Arc::new(RwLock::new(config)),
-            run_mode: RunMode::Room,
+            runtime: crate::state::RuntimeModel::hub(crate::state::CapabilityProfile::Room),
             sessions: Arc::new(Mutex::new(HashMap::new())),
             hub_sender: Arc::new(Mutex::new(None)),
             pending_confirmations: Arc::new(Mutex::new(HashMap::new())),

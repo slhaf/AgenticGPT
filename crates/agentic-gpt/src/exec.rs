@@ -16,7 +16,7 @@ use crate::{
     audit::{write_audit, AuditRecord},
     config::Config,
     confirmation,
-    policy::{policy_decision, policy_decision_for_mode, PolicyDecision},
+    policy::{policy_decision, policy_decision_for_profile, PolicyDecision},
     sessions,
     utils::{log_warn, EXEC_TIMEOUT_SECS, STDERR_MAX, STDOUT_MAX},
     AppState,
@@ -42,9 +42,9 @@ pub(crate) async fn run_exec_task(
     };
     let config = state.config.read().await.clone();
     let started = Instant::now();
-    let decision = policy_decision_for_mode(
+    let decision = policy_decision_for_profile(
         &config,
-        state.run_mode,
+        state.runtime.profile,
         &request.program,
         &request.args,
         request.need_confirm,

@@ -661,10 +661,7 @@ pub(crate) async fn is_active(state: &AppState, id: &str) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        config::Config,
-        state::{AppState, RunMode},
-    };
+    use crate::{config::Config, state::AppState};
     use std::collections::HashMap;
     use std::path::Path;
     use std::sync::Arc;
@@ -677,7 +674,7 @@ mod tests {
         AppState {
             config_path: PathBuf::from("test-config.json"),
             config: Arc::new(RwLock::new(config)),
-            run_mode: RunMode::Room,
+            runtime: crate::state::RuntimeModel::hub(crate::state::CapabilityProfile::Room),
             sessions: Arc::new(Mutex::new(HashMap::new())),
             hub_sender: Arc::new(Mutex::new(None)),
             pending_confirmations: Arc::new(Mutex::new(HashMap::new())),

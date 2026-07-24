@@ -74,6 +74,8 @@ pub(crate) fn command_type(command: &HubCommand) -> &'static str {
         HubCommand::RoomDiarySelectExact { .. } => "room.diary.selectExact",
         HubCommand::RoomBootstrap { .. } => "room.bootstrap",
         HubCommand::RoomBootstrapRead { .. } => "room.bootstrap.read",
+        HubCommand::Bootstrap { .. } => "bootstrap",
+        HubCommand::BootstrapRead { .. } => "bootstrap.read",
         HubCommand::SkillsList { .. } => "skills.list",
         HubCommand::SkillsRead { .. } => "skills.read",
         HubCommand::SkillsSearch { .. } => "skills.search",

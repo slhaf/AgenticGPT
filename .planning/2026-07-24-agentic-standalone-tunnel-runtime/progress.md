@@ -39,6 +39,18 @@
 ### Next Step
 - Begin Phase 3 in a later invocation using `planning-with-files` without `refine-implementation-plan`.
 
+### Implementation session: Phase 3 started
+
+- Re-read the active plan, findings, and progress after the design-freeze commit; worktree is clean and Phase 1–2 remain complete.
+- Confirmed the implementation boundary: `RunMode` is currently overloaded across role, policy, and Room capability gates; `room.skills` is the only current skill configuration location; Hub dispatch owns nearly all local operation result conversion.
+- Recorded the implementation assumptions in `task_plan.md` and `findings.md`: keep `RunMode` as a compatibility adapter, make top-level `skills` canonical with legacy deserialization, add bootstrap aliases additively, and defer binary/supervisor/reporting behavior to later phases.
+- Next action: implement the runtime model and config contract before extracting the shared dispatcher.
+
+### Phase 3 validation finding
+
+- Focused Agent and protocol suites passed (`104` and `8` tests), and formatting passed before workspace validation.
+- Workspace validation found four expected additive protocol integration points in `agentic-gpt-hub`: one `SafeConfigSummary` constructor and three exhaustive `HubCommand` matches. These are recorded as a Phase 3 error and will be fixed before the phase commit.
+
 
 ### Refinement round 1: runtime foundations
 
@@ -122,3 +134,24 @@
 - Open blockers: none.
 - Product changes during refinement: none.
 - Design checkpoint commit: recommended, not created because authorization has not been given.
+
+### Phase 3 complete
+
+- Added `RuntimeModel` with independent `Transport`, `CapabilityProfile`, and `HubMode`; preserved `RunMode` only as a public-entry/test compatibility converter and preserved serialized `AgentRole` values.
+- Added canonical top-level `skills`, legacy `room.skills` fallback with top-level precedence warning, flattened unknown-field preservation, optional Tunnel configuration, safe tunnel summaries, strict API-key reference validation, reporting detail defaults, and `config set` keys.
+- Added transport-neutral `bootstrap`/`bootstrap.read` protocol variants while retaining Hub `room.bootstrap*` aliases.
+- Added `local_service::dispatch` as the value-returning operation layer and changed the active Hub handler to envelope/session-update/transport-response adaptation; direct-vs-Hub capability parity is tested.
+- Updated Hub-side protocol matches and safe-summary construction after workspace validation found the additive integration points.
+
+### Phase 3 verification evidence
+
+| Check | Result |
+|---|---|
+| `cargo fmt --all -- --check` | pass |
+| `cargo test -p agentic-gpt` | 104 passed |
+| `cargo test -p agentic-gpt-protocol` | 8 passed |
+| `cargo test --workspace` | Agent 104 + Hub 56 + Protocol 8 passed |
+
+### Next step
+
+- Phase 4: add the hidden capability-aware rmcp stdio worker over the shared local dispatcher; no Tunnel child/supervisor is started until later phases.

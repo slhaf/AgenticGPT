@@ -181,7 +181,7 @@ impl InstallManager {
             status: SkillInstallStatus::Queued,
             phase: None,
             attempt: 0,
-            max_attempts: config.room.skills.max_attempts.max(1),
+            max_attempts: config.skills.max_attempts.max(1),
             progress: initial_progress(&request.source),
             source: source_summary(&request.source),
             created_at: now,
@@ -337,9 +337,8 @@ impl InstallManager {
         }
         fs::create_dir_all(&staging)?;
         let started = record.status.started_at.unwrap_or_else(Utc::now);
-        let deadline =
-            started + ChronoDuration::seconds(config.room.skills.total_deadline_secs as i64);
-        let max_attempts = config.room.skills.max_attempts.max(1);
+        let deadline = started + ChronoDuration::seconds(config.skills.total_deadline_secs as i64);
+        let max_attempts = config.skills.max_attempts.max(1);
         let mut materialized = None;
         for attempt in 1..=max_attempts {
             record = self.load_record(&config, install_id).await?;
@@ -442,7 +441,7 @@ impl InstallManager {
         touch_status(&mut record.status);
         self.save_cache(&config, &record).await?;
         normalize_directory_modes(&staging)?;
-        validate_staging(&staging, &record.request.id, &config.room.skills)?;
+        validate_staging(&staging, &record.request.id, &config.skills)?;
 
         if self.is_cancelled(install_id).await {
             let _ = fs::remove_dir_all(&staging);
@@ -811,7 +810,7 @@ fn validate_install_request(
         }
     }
     if let SkillInstallSource::Files { files } = &request.source {
-        if files.is_empty() || files.len() > config.room.skills.max_files {
+        if files.is_empty() || files.len() > config.skills.max_files {
             return Err(anyhow!("invalid_files"));
         }
         let mut paths = std::collections::HashSet::new();
@@ -859,7 +858,7 @@ fn validate_install_request(
                 inline_total = inline_total.saturating_add(decoded.len() as u64);
             }
         }
-        if inline_total > config.room.skills.max_inline_bytes {
+        if inline_total > config.skills.max_inline_bytes {
             return Err(anyhow!("package_limit_exceeded"));
         }
     }
@@ -905,8 +904,8 @@ async fn materialize_source(
             inline_file_bytes(config, file)?
         };
         let size = bytes.len() as u64;
-        if size > config.room.skills.max_file_bytes
-            || total_bytes.saturating_add(size) > config.room.skills.max_package_bytes
+        if size > config.skills.max_file_bytes
+            || total_bytes.saturating_add(size) > config.skills.max_package_bytes
         {
             return Err(anyhow!("package_limit_exceeded"));
         }
@@ -938,7 +937,7 @@ fn inline_file_bytes(
     file: &SkillInstallFile,
 ) -> Result<(Vec<u8>, &'static str)> {
     if let Some(content) = file.content.as_deref() {
-        if content.len() as u64 > config.room.skills.max_inline_bytes {
+        if content.len() as u64 > config.skills.max_inline_bytes {
             return Err(anyhow!("package_limit_exceeded"));
         }
         return Ok((content.as_bytes().to_vec(), "inline_utf8"));
@@ -947,7 +946,7 @@ fn inline_file_bytes(
         let bytes = BASE64
             .decode(content)
             .map_err(|_| anyhow!("invalid_base64"))?;
-        if bytes.len() as u64 > config.room.skills.max_inline_bytes {
+        if bytes.len() as u64 > config.skills.max_inline_bytes {
             return Err(anyhow!("package_limit_exceeded"));
         }
         return Ok((bytes, "inline_base64"));
@@ -1096,8 +1095,8 @@ async fn materialize_github(
         );
         let bytes = download_url_with_client(config, &client, &raw_url).await?;
         let size = bytes.len() as u64;
-        if size > config.room.skills.max_file_bytes
-            || total.saturating_add(size) > config.room.skills.max_package_bytes
+        if size > config.skills.max_file_bytes
+            || total.saturating_add(size) > config.skills.max_package_bytes
         {
             return Err(anyhow!("package_limit_exceeded"));
         }
@@ -1115,7 +1114,7 @@ async fn materialize_github(
             sha256: hex_sha256(&bytes),
             source_type: "github".to_string(),
         });
-        if summaries.len() > config.room.skills.max_files {
+        if summaries.len() > config.skills.max_files {
             return Err(anyhow!("package_limit_exceeded"));
         }
     }
@@ -1203,8 +1202,8 @@ fn parse_github_source(
 
 fn github_client(config: &crate::config::Config) -> Result<Client> {
     Client::builder()
-        .connect_timeout(Duration::from_secs(config.room.skills.connect_timeout_secs))
-        .timeout(Duration::from_secs(config.room.skills.request_timeout_secs))
+        .connect_timeout(Duration::from_secs(config.skills.connect_timeout_secs))
+        .timeout(Duration::from_secs(config.skills.request_timeout_secs))
         .redirect(reqwest::redirect::Policy::none())
         .user_agent("agentic-gpt-skill-installer")
         .build()
@@ -1241,7 +1240,7 @@ async fn download_url_with_client(
     url: &str,
 ) -> Result<Vec<u8>> {
     let mut current = Url::parse(url).map_err(|_| anyhow!("download_blocked"))?;
-    for redirect in 0..=config.room.skills.max_redirects {
+    for redirect in 0..=config.skills.max_redirects {
         validate_public_url(config, &current).await?;
         let response = client
             .get(current.clone())
@@ -1249,7 +1248,7 @@ async fn download_url_with_client(
             .await
             .map_err(|_| anyhow!("download_failed"))?;
         if response.status().is_redirection() {
-            if redirect == config.room.skills.max_redirects {
+            if redirect == config.skills.max_redirects {
                 return Err(anyhow!("download_failed"));
             }
             let location = response
@@ -1270,14 +1269,14 @@ async fn download_url_with_client(
         }
         if response
             .content_length()
-            .is_some_and(|size| size > config.room.skills.max_file_bytes)
+            .is_some_and(|size| size > config.skills.max_file_bytes)
         {
             return Err(anyhow!("package_limit_exceeded"));
         }
         let mut bytes = Vec::new();
         let mut response = response;
         while let Some(chunk) = tokio::time::timeout(
-            Duration::from_secs(config.room.skills.idle_timeout_secs),
+            Duration::from_secs(config.skills.idle_timeout_secs),
             response.chunk(),
         )
         .await
@@ -1285,7 +1284,7 @@ async fn download_url_with_client(
         .map_err(|_| anyhow!("download_failed"))?
         {
             bytes.extend_from_slice(&chunk);
-            if bytes.len() as u64 > config.room.skills.max_file_bytes {
+            if bytes.len() as u64 > config.skills.max_file_bytes {
                 return Err(anyhow!("package_limit_exceeded"));
             }
         }
@@ -1299,7 +1298,7 @@ async fn validate_public_url(config: &crate::config::Config, url: &Url) -> Resul
         return Err(anyhow!("download_blocked"));
     }
     let host = url.host_str().ok_or_else(|| anyhow!("download_blocked"))?;
-    if !config.room.skills.allowed_hosts.is_empty()
+    if !config.skills.allowed_hosts.is_empty()
         && !config
             .room
             .skills
@@ -1816,7 +1815,7 @@ fn format_digest<D: AsRef<[u8]>>(digest: D) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{config::Config, state::RunMode};
+    use crate::config::Config;
     use agentic_gpt_protocol::{SkillInstallFile, SkillInstallGetRequest};
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -1831,7 +1830,7 @@ mod tests {
         AppState {
             config_path: PathBuf::from("test-config.json"),
             config: Arc::new(RwLock::new(config)),
-            run_mode: RunMode::Room,
+            runtime: crate::state::RuntimeModel::hub(crate::state::CapabilityProfile::Room),
             sessions: Arc::new(Mutex::new(HashMap::new())),
             hub_sender: Arc::new(Mutex::new(None)),
             pending_confirmations: Arc::new(Mutex::new(HashMap::new())),

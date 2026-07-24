@@ -639,7 +639,7 @@ mod tests {
         AppState {
             config_path: PathBuf::from("test-config.json"),
             config: Arc::new(RwLock::new(config)),
-            run_mode: crate::RunMode::Room,
+            runtime: crate::state::RuntimeModel::hub(crate::state::CapabilityProfile::Room),
             sessions: Arc::new(Mutex::new(HashMap::new())),
             hub_sender: Arc::new(Mutex::new(None)),
             pending_confirmations: Arc::new(Mutex::new(HashMap::new())),

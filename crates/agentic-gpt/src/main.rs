@@ -6,6 +6,7 @@ mod diary;
 mod exec;
 mod hub;
 mod instance_lock;
+mod local_service;
 mod mcp;
 mod notebook;
 mod notify;
@@ -20,10 +21,10 @@ mod utils;
 
 use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
-use config::{normalize_confirmation_language, write_config_with_backup, Config};
+use config::{normalize_confirmation_language, write_config_with_backup, Config, ReportingDetail};
 use mcp::McpConfigCommand;
 use policy::PolicyDecision;
-use state::{AppState, RunMode};
+use state::{AppState, CapabilityProfile, RuntimeModel};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
@@ -157,17 +158,30 @@ async fn main() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let cli = Cli::parse();
     match cli.command {
-        Commands::Run { config } => run(config_path(config), RunMode::Normal).await,
-        Commands::RunAsRoom { config } => run(config_path(config), RunMode::Room).await,
+        Commands::Run { config } => {
+            run(
+                config_path(config),
+                RuntimeModel::hub(CapabilityProfile::Normal),
+            )
+            .await
+        }
+        Commands::RunAsRoom { config } => {
+            run(
+                config_path(config),
+                RuntimeModel::hub(CapabilityProfile::Room),
+            )
+            .await
+        }
         Commands::Config { config, command } => handle_config(config_path(config), command).await,
         Commands::Tmux { config, command } => handle_tmux(config_path(config), command).await,
     }
 }
 
-async fn run(config_path: PathBuf, run_mode: RunMode) -> Result<()> {
+async fn run(config_path: PathBuf, runtime: RuntimeModel) -> Result<()> {
     log_info(format!(
-        "agentic-gpt starting; mode={}; config={}",
-        run_mode.label(),
+        "agentic-gpt starting; runtime={}; hubMode={}; config={}",
+        runtime.label(),
+        runtime.hub_mode.label(),
         config_path.display(),
     ));
     ensure_parent(&config_path)?;
@@ -192,11 +206,11 @@ async fn run(config_path: PathBuf, run_mode: RunMode) -> Result<()> {
             "disabled"
         }
     ));
-    let max_concurrent_skill_installs = initial.room.skills.max_concurrent_installs;
+    let max_concurrent_skill_installs = initial.skills.max_concurrent_installs;
     let state = AppState {
         config_path: config_path.clone(),
         config: Arc::new(RwLock::new(initial)),
-        run_mode,
+        runtime,
         sessions: Arc::new(Mutex::new(HashMap::new())),
         hub_sender: Arc::new(Mutex::new(None)),
         pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
@@ -279,6 +293,71 @@ async fn handle_config(config_path: PathBuf, command: ConfigCommand) -> Result<(
                     }
                     config.room.diary_day_boundary_hour = hour;
                 }
+                "skills.maxFiles" => config.skills.max_files = value.parse()?,
+                "skills.maxFileBytes" => config.skills.max_file_bytes = value.parse()?,
+                "skills.maxPackageBytes" => config.skills.max_package_bytes = value.parse()?,
+                "skills.maxSkillMdBytes" => config.skills.max_skill_md_bytes = value.parse()?,
+                "skills.maxInlineBytes" => config.skills.max_inline_bytes = value.parse()?,
+                "skills.connectTimeoutSecs" => {
+                    config.skills.connect_timeout_secs = value.parse()?
+                }
+                "skills.requestTimeoutSecs" => {
+                    config.skills.request_timeout_secs = value.parse()?
+                }
+                "skills.idleTimeoutSecs" => config.skills.idle_timeout_secs = value.parse()?,
+                "skills.maxRedirects" => config.skills.max_redirects = value.parse()?,
+                "skills.maxConcurrentInstalls" => {
+                    config.skills.max_concurrent_installs = value.parse()?
+                }
+                "skills.maxParallelDownloads" => {
+                    config.skills.max_parallel_downloads = value.parse()?
+                }
+                "skills.maxAttempts" => config.skills.max_attempts = value.parse()?,
+                "skills.totalDeadlineSecs" => config.skills.total_deadline_secs = value.parse()?,
+                "skills.allowedHosts" => {
+                    config.skills.allowed_hosts = serde_json::from_str(&value)?
+                }
+                "tunnel.tunnelId" => tunnel_config(&mut config).tunnel_id = value,
+                "tunnel.apiKey" => tunnel_config(&mut config).api_key = value,
+                "tunnel.client.version" => {
+                    tunnel_config(&mut config).client.version =
+                        if value == "null" { None } else { Some(value) }
+                }
+                "tunnel.client.cacheDir" => {
+                    tunnel_config(&mut config).client.cache_dir = PathBuf::from(value)
+                }
+                "tunnel.client.autoDownload" => {
+                    tunnel_config(&mut config).client.auto_download = value.parse()?
+                }
+                "tunnel.client.executable" => {
+                    tunnel_config(&mut config).client.executable = if value == "null" {
+                        None
+                    } else {
+                        Some(PathBuf::from(value))
+                    }
+                }
+                "tunnel.client.downloadUrl" => {
+                    tunnel_config(&mut config).client.download_url =
+                        if value == "null" { None } else { Some(value) }
+                }
+                "tunnel.client.sha256" => {
+                    tunnel_config(&mut config).client.sha256 =
+                        if value == "null" { None } else { Some(value) }
+                }
+                "tunnel.hubReporting.enabled" => {
+                    tunnel_config(&mut config).hub_reporting.enabled = value.parse()?
+                }
+                "tunnel.hubReporting.detail" => {
+                    tunnel_config(&mut config).hub_reporting.detail = match value.as_str() {
+                        "metadata" => ReportingDetail::Metadata,
+                        "full" => ReportingDetail::Full,
+                        _ => {
+                            return Err(anyhow!(
+                                "tunnel hub reporting detail must be metadata or full"
+                            ))
+                        }
+                    }
+                }
                 "hubUrl" | "workerUrl" => config.hub_url = value,
                 "hubTransport" => {
                     let normalized = value.to_lowercase();
@@ -306,6 +385,12 @@ async fn handle_config(config_path: PathBuf, command: ConfigCommand) -> Result<(
         ConfigCommand::Mcp { command } => mcp::mutate_servers(config_path, command)?,
     }
     Ok(())
+}
+
+fn tunnel_config(config: &mut Config) -> &mut config::TunnelConfig {
+    config
+        .tunnel
+        .get_or_insert_with(config::TunnelConfig::default)
 }
 
 async fn watch_config(state: AppState) {
@@ -345,6 +430,7 @@ mod tests {
     use crate::config::{PathPolicyConfig, Rule};
     use crate::exec::PreparedBatchElement;
     use crate::policy::policy_decision;
+    use crate::state::RunMode;
     use agentic_gpt_protocol::{
         AgentMessage, BatchExecRequest, BootstrapReadRequest, ExecElement, HubCommand,
         NotebookAppendRequest, NotebookRemoveRequest, NotebookUpdateRequest, PassageSignificance,
@@ -427,7 +513,7 @@ mod tests {
             AppState {
                 config_path: PathBuf::from("test-config.json"),
                 config: Arc::new(RwLock::new(config)),
-                run_mode,
+                runtime: RuntimeModel::hub(run_mode.profile()),
                 sessions: Arc::new(Mutex::new(HashMap::new())),
                 hub_sender: Arc::new(Mutex::new(Some(tx))),
                 pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
@@ -487,6 +573,24 @@ mod tests {
         .unwrap();
         let response = recv_response(&mut rx).await;
         assert_eq!(response["error"]["code"], "room_agent_required");
+    }
+
+    #[tokio::test]
+    async fn hub_adapter_and_local_dispatcher_share_capability_errors() {
+        let workspace = unique_temp_dir("dispatcher-parity").join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let (state, mut rx) = command_test_state(RunMode::Normal, workspace);
+        let command = HubCommand::RoomBootstrap {
+            request_id: "req-parity".to_string(),
+        };
+
+        let direct = local_service::dispatch(state.clone(), command.clone())
+            .await
+            .unwrap();
+        hub::handle_hub_command(state, command, None).await.unwrap();
+        let adapted = recv_response(&mut rx).await;
+        assert_eq!(direct, adapted);
+        assert_eq!(direct["error"]["code"], "room_agent_required");
     }
 
     #[tokio::test]
@@ -975,7 +1079,7 @@ mod tests {
         let state = AppState {
             config_path: root.join("config.json"),
             config: Arc::new(RwLock::new(config)),
-            run_mode: RunMode::Normal,
+            runtime: RuntimeModel::hub(CapabilityProfile::Normal),
             sessions: Arc::new(Mutex::new(HashMap::new())),
             hub_sender: Arc::new(Mutex::new(None)),
             pending_confirmations: Arc::new(Mutex::new(HashMap::new())),

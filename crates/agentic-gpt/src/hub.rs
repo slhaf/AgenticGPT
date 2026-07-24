@@ -25,7 +25,7 @@ use crate::{
         command_preview, log_info, log_warn, CONNECT_TIMEOUT_SECS, HEARTBEAT_ACK_TIMEOUT_SECS,
         HEARTBEAT_INTERVAL_SECS, RECONNECT_DELAY_SECS,
     },
-    AppState, RunMode,
+    AppState,
 };
 
 pub(crate) async fn connect_loop(state: AppState) -> Result<()> {
@@ -87,7 +87,7 @@ pub(crate) async fn connect_loop(state: AppState) -> Result<()> {
                     }
                 });
                 let hello = AgentMessage::Hello {
-                    role: state.run_mode.role(),
+                    role: state.runtime.profile.role(),
                     config_summary: config.safe_summary(),
                     notification_channels: notify::freedesktop_notification_channel(&config)
                         .into_iter()
@@ -261,7 +261,7 @@ async fn connect_sse(state: AppState, config: Config) -> Result<()> {
 
     let result = async {
         tx.send(AgentMessage::Hello {
-            role: state.run_mode.role(),
+            role: state.runtime.profile.role(),
             config_summary: config.safe_summary(),
             notification_channels: notify::freedesktop_notification_channel(&config)
                 .into_iter()
@@ -574,6 +574,32 @@ pub(crate) async fn handle_hub_command(
     command: HubCommand,
     run_id: Option<String>,
 ) -> Result<()> {
+    let request_id = command.request_id().to_string();
+    let is_session_start = matches!(command, HubCommand::StartSession { .. });
+    let data = match crate::local_service::dispatch(state.clone(), command).await {
+        Ok(data) => data,
+        Err(error) if error.to_string() == "room_agent_required" => room_agent_required_error(),
+        Err(error) => serde_json::json!({
+            "error": {
+                "code": "local_dispatch_failed",
+                "message": error.to_string()
+            }
+        }),
+    };
+    if is_session_start {
+        if let Ok(session) = serde_json::from_value::<SessionInfo>(data.clone()) {
+            send_session(&state, &session).await?;
+        }
+    }
+    send_response(&state, run_id.as_deref(), &request_id, data).await
+}
+
+#[allow(dead_code)]
+async fn handle_hub_command_legacy(
+    state: AppState,
+    command: HubCommand,
+    run_id: Option<String>,
+) -> Result<()> {
     match command {
         HubCommand::Exec {
             request_id,
@@ -839,7 +865,7 @@ pub(crate) async fn handle_hub_command(
             request_id,
             payload,
         } => {
-            let result = if state.run_mode != RunMode::Room {
+            let result = if !state.runtime.capabilities().notebook {
                 room_agent_required_error()
             } else {
                 match notebook::append(&state, payload).await {
@@ -855,7 +881,7 @@ pub(crate) async fn handle_hub_command(
             request_id,
             payload,
         } => {
-            let result = if state.run_mode != RunMode::Room {
+            let result = if !state.runtime.capabilities().notebook {
                 room_agent_required_error()
             } else {
                 match notebook::recent(&state, payload).await {
@@ -871,7 +897,7 @@ pub(crate) async fn handle_hub_command(
             request_id,
             payload,
         } => {
-            let result = if state.run_mode != RunMode::Room {
+            let result = if !state.runtime.capabilities().notebook {
                 room_agent_required_error()
             } else {
                 match notebook::select_exact(&state, payload).await {
@@ -887,7 +913,7 @@ pub(crate) async fn handle_hub_command(
             request_id,
             payload,
         } => {
-            let result = if state.run_mode != RunMode::Room {
+            let result = if !state.runtime.capabilities().notebook {
                 room_agent_required_error()
             } else {
                 match notebook::search(&state, payload).await {
@@ -903,7 +929,7 @@ pub(crate) async fn handle_hub_command(
             request_id,
             payload,
         } => {
-            let result = if state.run_mode != RunMode::Room {
+            let result = if !state.runtime.capabilities().notebook {
                 room_agent_required_error()
             } else {
                 match notebook::current(&state, payload).await {
@@ -919,7 +945,7 @@ pub(crate) async fn handle_hub_command(
             request_id,
             payload,
         } => {
-            let result = if state.run_mode != RunMode::Room {
+            let result = if !state.runtime.capabilities().notebook {
                 room_agent_required_error()
             } else {
                 match notebook::update(&state, payload).await {
@@ -933,7 +959,7 @@ pub(crate) async fn handle_hub_command(
             request_id,
             payload,
         } => {
-            let result = if state.run_mode != RunMode::Room {
+            let result = if !state.runtime.capabilities().diary {
                 room_agent_required_error()
             } else {
                 match notebook::remove(&state, payload).await {
@@ -947,7 +973,7 @@ pub(crate) async fn handle_hub_command(
             request_id,
             payload,
         } => {
-            let result = if state.run_mode != RunMode::Room {
+            let result = if !state.runtime.capabilities().diary {
                 room_agent_required_error()
             } else {
                 match diary::append(&state, payload).await {
@@ -963,7 +989,7 @@ pub(crate) async fn handle_hub_command(
             request_id,
             payload,
         } => {
-            let result = if state.run_mode != RunMode::Room {
+            let result = if !state.runtime.capabilities().diary {
                 room_agent_required_error()
             } else {
                 match diary::recent(&state, payload).await {
@@ -979,7 +1005,7 @@ pub(crate) async fn handle_hub_command(
             request_id,
             payload,
         } => {
-            let result = if state.run_mode != RunMode::Room {
+            let result = if !state.runtime.capabilities().bootstrap {
                 room_agent_required_error()
             } else {
                 match diary::select_exact(&state, payload).await {
@@ -992,7 +1018,7 @@ pub(crate) async fn handle_hub_command(
             send_response(&state, run_id.as_deref(), &request_id, result).await?;
         }
         HubCommand::RoomBootstrap { request_id } => {
-            let result = if state.run_mode != RunMode::Room {
+            let result = if !state.runtime.capabilities().bootstrap {
                 room_agent_required_error()
             } else {
                 match bootstrap::load(&state).await {
@@ -1006,7 +1032,32 @@ pub(crate) async fn handle_hub_command(
             request_id,
             payload,
         } => {
-            let result = if state.run_mode != RunMode::Room {
+            let result = if !state.runtime.capabilities().skills {
+                room_agent_required_error()
+            } else {
+                match bootstrap::read(&state, payload).await {
+                    Ok(result) => serde_json::to_value(result)?,
+                    Err(error) => bootstrap_command_error("bootstrap_read_failed", error),
+                }
+            };
+            send_response(&state, run_id.as_deref(), &request_id, result).await?;
+        }
+        HubCommand::Bootstrap { request_id } => {
+            let result = if !state.runtime.capabilities().bootstrap {
+                room_agent_required_error()
+            } else {
+                match bootstrap::load(&state).await {
+                    Ok(result) => serde_json::to_value(result)?,
+                    Err(error) => bootstrap_command_error("bootstrap_read_failed", error),
+                }
+            };
+            send_response(&state, run_id.as_deref(), &request_id, result).await?;
+        }
+        HubCommand::BootstrapRead {
+            request_id,
+            payload,
+        } => {
+            let result = if !state.runtime.capabilities().bootstrap {
                 room_agent_required_error()
             } else {
                 match bootstrap::read(&state, payload).await {
@@ -1017,7 +1068,7 @@ pub(crate) async fn handle_hub_command(
             send_response(&state, run_id.as_deref(), &request_id, result).await?;
         }
         HubCommand::SkillsList { request_id } => {
-            let result = if state.run_mode != RunMode::Room {
+            let result = if !state.runtime.capabilities().skills {
                 room_agent_required_error()
             } else {
                 match skills::list(&state).await {
@@ -1031,7 +1082,7 @@ pub(crate) async fn handle_hub_command(
             request_id,
             payload,
         } => {
-            let result = if state.run_mode != RunMode::Room {
+            let result = if !state.runtime.capabilities().skills {
                 room_agent_required_error()
             } else {
                 match skills::read(&state, payload).await {
@@ -1045,7 +1096,7 @@ pub(crate) async fn handle_hub_command(
             request_id,
             payload,
         } => {
-            let result = if state.run_mode != RunMode::Room {
+            let result = if !state.runtime.capabilities().skills {
                 room_agent_required_error()
             } else {
                 match skills::search(&state, payload).await {
@@ -1056,7 +1107,7 @@ pub(crate) async fn handle_hub_command(
             send_response(&state, run_id.as_deref(), &request_id, result).await?;
         }
         HubCommand::SkillsActive { request_id } => {
-            let result = if state.run_mode != RunMode::Room {
+            let result = if !state.runtime.capabilities().skills {
                 room_agent_required_error()
             } else {
                 match skills::active(&state).await {
@@ -1070,7 +1121,7 @@ pub(crate) async fn handle_hub_command(
             request_id,
             payload,
         } => {
-            let result = if state.run_mode != RunMode::Room {
+            let result = if !state.runtime.capabilities().skills {
                 room_agent_required_error()
             } else {
                 match skills::activate(&state, payload).await {
@@ -1084,7 +1135,7 @@ pub(crate) async fn handle_hub_command(
             request_id,
             payload,
         } => {
-            let result = if state.run_mode != RunMode::Room {
+            let result = if !state.runtime.capabilities().skills {
                 room_agent_required_error()
             } else {
                 match skills::deactivate(&state, payload).await {
@@ -1098,7 +1149,7 @@ pub(crate) async fn handle_hub_command(
             request_id,
             payload,
         } => {
-            let result = if state.run_mode != RunMode::Room {
+            let result = if !state.runtime.capabilities().skills {
                 room_agent_required_error()
             } else {
                 match state.skill_installs.start(state.clone(), payload).await {
@@ -1112,7 +1163,7 @@ pub(crate) async fn handle_hub_command(
             request_id,
             payload,
         } => {
-            let result = if state.run_mode != RunMode::Room {
+            let result = if !state.runtime.capabilities().skills {
                 room_agent_required_error()
             } else {
                 match state.skill_installs.get(&state, payload).await {
@@ -1126,7 +1177,7 @@ pub(crate) async fn handle_hub_command(
             request_id,
             payload,
         } => {
-            let result = if state.run_mode != RunMode::Room {
+            let result = if !state.runtime.capabilities().skills {
                 room_agent_required_error()
             } else {
                 match state.skill_installs.cancel(&state, payload).await {
@@ -1141,7 +1192,7 @@ pub(crate) async fn handle_hub_command(
             session_id,
             payload,
         } => {
-            let result = if state.run_mode != RunMode::Room {
+            let result = if !state.runtime.capabilities().skills {
                 room_agent_required_error()
             } else {
                 run_skill(&state, session_id, payload).await
@@ -1205,7 +1256,7 @@ fn install_command_error(error: anyhow::Error) -> serde_json::Value {
     serde_json::json!({ "error": { "code": code, "message": message } })
 }
 
-async fn run_skill(
+pub(crate) async fn run_skill(
     state: &AppState,
     session_id: String,
     request: SkillRunRequest,

@@ -4,16 +4,18 @@ use std::path::{Path, PathBuf};
 
 use agentic_gpt_protocol::{
     PolicyCounts, SafeBuiltinPolicyRules, SafeConfigSummary, SafePathPolicySummary, SafePathRoot,
-    SafePolicyRules, SafeRule, SafeSandboxSummary,
+    SafePolicyRules, SafeRule, SafeSandboxSummary, SafeTunnelSummary,
 };
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::mcp::McpServerConfig;
 use crate::policy::{builtin_rules, paths_match, PolicyDecision};
-use crate::state::RunMode;
-use crate::utils::{agentic_home, ensure_parent, hostname_fallback, DEFAULT_BACKUP_LIMIT};
+use crate::state::CapabilityProfile;
+use crate::utils::{
+    agentic_home, ensure_parent, hostname_fallback, log_warn, DEFAULT_BACKUP_LIMIT,
+};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -37,8 +39,14 @@ pub(crate) struct Config {
     pub(crate) path_policy: PathPolicyConfig,
     pub(crate) policy: PolicyConfig,
     pub(crate) limits: LimitsConfig,
+    #[serde(default)]
+    pub(crate) skills: RoomSkillsConfig,
     #[serde(default = "default_room_config")]
     pub(crate) room: RoomConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) tunnel: Option<TunnelConfig>,
+    #[serde(flatten)]
+    pub(crate) extra: BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -97,8 +105,95 @@ pub(crate) struct RoomConfig {
     pub(crate) timezone: String,
     #[serde(default = "default_diary_day_boundary_hour")]
     pub(crate) diary_day_boundary_hour: u32,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub(crate) skills: RoomSkillsConfig,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TunnelConfig {
+    pub(crate) tunnel_id: String,
+    pub(crate) api_key: String,
+    #[serde(default)]
+    pub(crate) client: TunnelClientConfig,
+    #[serde(default)]
+    pub(crate) hub_reporting: HubReportingConfig,
+}
+
+impl Default for TunnelConfig {
+    fn default() -> Self {
+        Self {
+            tunnel_id: String::new(),
+            api_key: String::new(),
+            client: TunnelClientConfig::default(),
+            hub_reporting: HubReportingConfig::default(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TunnelClientConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) version: Option<String>,
+    #[serde(default = "default_tunnel_cache_dir")]
+    pub(crate) cache_dir: PathBuf,
+    #[serde(default = "default_true")]
+    pub(crate) auto_download: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) executable: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) download_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) sha256: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct HubReportingConfig {
+    #[serde(default)]
+    pub(crate) enabled: bool,
+    #[serde(default)]
+    pub(crate) detail: ReportingDetail,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum ReportingDetail {
+    #[default]
+    Metadata,
+    Full,
+}
+
+impl std::fmt::Display for ReportingDetail {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Metadata => "metadata",
+            Self::Full => "full",
+        })
+    }
+}
+
+impl Default for TunnelClientConfig {
+    fn default() -> Self {
+        Self {
+            version: None,
+            cache_dir: default_tunnel_cache_dir(),
+            auto_download: true,
+            executable: None,
+            download_url: None,
+            sha256: None,
+        }
+    }
+}
+
+impl Default for HubReportingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            detail: ReportingDetail::Metadata,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -167,7 +262,10 @@ impl Config {
                 max_active_sessions: 4,
                 session_idle_timeout_secs: 3600,
             },
+            skills: RoomSkillsConfig::default(),
             room: default_room_config(),
+            tunnel: None,
+            extra: BTreeMap::new(),
         })
     }
 
@@ -175,10 +273,26 @@ impl Config {
         let text = fs::read_to_string(path)?;
         let value: serde_json::Value = serde_json::from_str(&text)?;
         let has_path_policy = value.get("pathPolicy").is_some();
+        let has_top_level_skills = value.get("skills").is_some();
+        let legacy_skills = value
+            .get("room")
+            .and_then(|room| room.get("skills"))
+            .cloned();
         let mut config: Self = serde_json::from_value(value)?;
         if !has_path_policy {
             config.path_policy = default_path_policy(&config.workspace_root);
         }
+        if has_top_level_skills {
+            if legacy_skills.is_some() {
+                log_warn(
+                    "both skills and legacy room.skills are configured; top-level skills wins"
+                        .to_string(),
+                );
+            }
+        } else if let Some(legacy_skills) = legacy_skills {
+            config.skills = serde_json::from_value(legacy_skills)?;
+        }
+        config.room.skills = config.skills.clone();
         Ok(config)
     }
 
@@ -234,12 +348,60 @@ impl Config {
                 confirm: safe_rules(&self.policy.confirm),
                 deny: safe_rules(&self.policy.deny),
                 builtins: SafeBuiltinPolicyRules {
-                    confirm: safe_rules(&builtin_rules(RunMode::Normal, PolicyDecision::Confirm)),
-                    deny: safe_rules(&builtin_rules(RunMode::Normal, PolicyDecision::Deny)),
+                    confirm: safe_rules(&builtin_rules(
+                        CapabilityProfile::Normal,
+                        PolicyDecision::Confirm,
+                    )),
+                    deny: safe_rules(&builtin_rules(
+                        CapabilityProfile::Normal,
+                        PolicyDecision::Deny,
+                    )),
                 },
             },
             confirmation_provider: self.confirmation_provider.provider.clone(),
+            tunnel: self.tunnel.as_ref().map(|tunnel| SafeTunnelSummary {
+                configured: true,
+                tunnel_id: (!tunnel.tunnel_id.trim().is_empty()).then(|| tunnel.tunnel_id.clone()),
+                api_key_source: secret_reference_kind(&tunnel.api_key),
+                client_source: if tunnel.client.executable.is_some() {
+                    "executable".to_string()
+                } else if tunnel.client.download_url.is_some() {
+                    "custom-url".to_string()
+                } else {
+                    "managed".to_string()
+                },
+                hub_reporting_enabled: tunnel.hub_reporting.enabled,
+                reporting_detail: tunnel.hub_reporting.detail.to_string(),
+            }),
         }
+    }
+
+    pub(crate) fn validate_standalone(&self) -> Result<()> {
+        let tunnel = self
+            .tunnel
+            .as_ref()
+            .ok_or_else(|| anyhow!("tunnel_config_required"))?;
+        if tunnel.tunnel_id.trim().is_empty() {
+            return Err(anyhow!("tunnel_id_required"));
+        }
+        validate_secret_reference(&tunnel.api_key)?;
+        if let Some(url) = tunnel.client.download_url.as_deref() {
+            if !url.starts_with("https://") {
+                return Err(anyhow!("tunnel_download_url_must_use_https"));
+            }
+            if tunnel.client.sha256.is_none() {
+                return Err(anyhow!("tunnel_download_sha256_required"));
+            }
+        }
+        if let Some(sha256) = tunnel.client.sha256.as_deref() {
+            if sha256.len() != 64 || !sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                return Err(anyhow!("tunnel_sha256_invalid"));
+            }
+        }
+        match tunnel.hub_reporting.detail {
+            ReportingDetail::Metadata | ReportingDetail::Full => {}
+        }
+        Ok(())
     }
 }
 
@@ -395,6 +557,49 @@ fn default_skill_total_deadline_secs() -> u64 {
     600
 }
 
+fn default_true() -> bool {
+    true
+}
+
+fn default_tunnel_cache_dir() -> PathBuf {
+    agentic_home()
+        .map(|home| home.join("cache").join("tunnel-client"))
+        .unwrap_or_else(|_| PathBuf::from("~/.agentic_gpt/cache/tunnel-client"))
+}
+
+pub(crate) fn validate_secret_reference(reference: &str) -> Result<()> {
+    if let Some(name) = reference.strip_prefix("env:") {
+        if name.is_empty()
+            || !name.bytes().enumerate().all(|(index, byte)| {
+                byte == b'_'
+                    || byte.is_ascii_alphanumeric() && (index > 0 || byte.is_ascii_alphabetic())
+            })
+        {
+            return Err(anyhow!("tunnel_api_key_reference_invalid"));
+        }
+        return Ok(());
+    }
+    if let Some(path) = reference.strip_prefix("file:") {
+        if path.trim().is_empty() {
+            return Err(anyhow!("tunnel_api_key_reference_invalid"));
+        }
+        return Ok(());
+    }
+    Err(anyhow!("tunnel_api_key_reference_plaintext_rejected"))
+}
+
+fn secret_reference_kind(reference: &str) -> Option<String> {
+    if reference.starts_with("env:") {
+        Some("env".to_string())
+    } else if reference.starts_with("file:") {
+        Some("file".to_string())
+    } else if reference.is_empty() {
+        None
+    } else {
+        Some("invalid".to_string())
+    }
+}
+
 pub(crate) fn default_diary_day_boundary_hour() -> u32 {
     5
 }
@@ -465,6 +670,71 @@ pub(crate) fn default_path_policy(workspace_root: &Path) -> PathPolicyConfig {
             PathBuf::from("~/.config/clash"),
             PathBuf::from("~/.config/clash-verge"),
         ],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use uuid::Uuid;
+
+    fn temp_config_path() -> PathBuf {
+        std::env::temp_dir().join(format!("agentic-config-{}.json", Uuid::new_v4().simple()))
+    }
+
+    #[test]
+    fn legacy_skills_are_loaded_and_written_at_top_level() {
+        let path = temp_config_path();
+        let mut value = serde_json::to_value(Config::default_config().unwrap()).unwrap();
+        value["futureField"] = json!({ "preserve": true });
+        value["room"]["skills"] = json!({ "maxFiles": 7, "allowedHosts": ["example.test"] });
+        value.as_object_mut().unwrap().remove("skills");
+        fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+
+        let config = Config::load(&path).unwrap();
+        assert_eq!(config.skills.max_files, 7);
+        assert_eq!(config.skills.allowed_hosts, vec!["example.test"]);
+        let written = serde_json::to_value(config).unwrap();
+        assert_eq!(written["skills"]["maxFiles"], 7);
+        assert!(written["room"].get("skills").is_none());
+        assert_eq!(written["futureField"]["preserve"], true);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn top_level_skills_win_over_legacy_values() {
+        let path = temp_config_path();
+        let mut value = serde_json::to_value(Config::default_config().unwrap()).unwrap();
+        value["skills"]["maxFiles"] = json!(11);
+        value["room"]["skills"] = json!({ "maxFiles": 3 });
+        fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+
+        let config = Config::load(&path).unwrap();
+        assert_eq!(config.skills.max_files, 11);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn tunnel_secret_references_are_strict_and_safe_summary_is_redacted() {
+        assert!(validate_secret_reference("env:AGENTIC_TUNNEL_API_KEY").is_ok());
+        assert!(validate_secret_reference("file:/run/secrets/tunnel").is_ok());
+        assert!(validate_secret_reference("env:1BAD").is_err());
+        assert!(validate_secret_reference("plaintext-secret").is_err());
+
+        let mut config = Config::default_config().unwrap();
+        config.tunnel = Some(TunnelConfig {
+            tunnel_id: "tunnel_demo".to_string(),
+            api_key: "env:AGENTIC_TUNNEL_API_KEY".to_string(),
+            ..TunnelConfig::default()
+        });
+        let summary = serde_json::to_string(&config.safe_summary()).unwrap();
+        assert!(summary.contains("tunnel_demo"));
+        assert!(summary.contains("\"apiKeySource\":\"env\""));
+        assert!(!summary.contains("AGENTIC_TUNNEL_API_KEY"));
+        assert!(config.validate_standalone().is_ok());
+        config.tunnel.as_mut().unwrap().api_key = "secret".to_string();
+        assert!(config.validate_standalone().is_err());
     }
 }
 pub(crate) fn write_config_with_backup(path: &Path, config: &Config) -> Result<()> {

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{write_config_with_backup, Config, PathPolicyConfig, Rule};
 use crate::exec;
-use crate::state::RunMode;
+use crate::state::{CapabilityProfile, RunMode};
 use crate::utils::command_preview;
 use crate::{PathCommand, PathRootCommand, PathRootKind, RuleCommand};
 
@@ -34,17 +34,27 @@ pub(crate) fn policy_decision_for_mode(
     args: &[String],
     need_confirm: bool,
 ) -> PolicyDecision {
+    policy_decision_for_profile(config, run_mode.profile(), program, args, need_confirm)
+}
+
+pub(crate) fn policy_decision_for_profile(
+    config: &Config,
+    profile: CapabilityProfile,
+    program: &str,
+    args: &[String],
+    need_confirm: bool,
+) -> PolicyDecision {
     let mut decision = if need_confirm {
         PolicyDecision::Confirm
     } else {
         PolicyDecision::Allow
     };
-    for rule in builtin_rules(run_mode, PolicyDecision::Confirm) {
+    for rule in builtin_rules(profile, PolicyDecision::Confirm) {
         if rule.matches(program, args) {
             decision = decision.max(PolicyDecision::Confirm);
         }
     }
-    for rule in builtin_rules(run_mode, PolicyDecision::Deny) {
+    for rule in builtin_rules(profile, PolicyDecision::Deny) {
         if rule.matches(program, args) {
             decision = decision.max(PolicyDecision::Deny);
         }
@@ -82,10 +92,10 @@ impl Rule {
     }
 }
 
-pub(crate) fn builtin_rules(run_mode: RunMode, decision: PolicyDecision) -> Vec<Rule> {
+pub(crate) fn builtin_rules(profile: CapabilityProfile, decision: PolicyDecision) -> Vec<Rule> {
     let programs = match decision {
         PolicyDecision::Deny => vec!["su", "mkfs", "dd", "ssh"],
-        PolicyDecision::Confirm if run_mode == RunMode::Room => {
+        PolicyDecision::Confirm if profile == CapabilityProfile::Room => {
             vec!["sudo", "mount", "systemctl", "service", "scp"]
         }
         PolicyDecision::Confirm => vec![
@@ -117,7 +127,7 @@ pub(crate) fn builtin_rules(run_mode: RunMode, decision: PolicyDecision) -> Vec<
             args_prefix: vec![],
         })
         .collect::<Vec<_>>();
-    if decision == PolicyDecision::Confirm && run_mode == RunMode::Normal {
+    if decision == PolicyDecision::Confirm && profile == CapabilityProfile::Normal {
         rules.push(Rule {
             program: "python".to_string(),
             args_prefix: vec!["-c".to_string()],
