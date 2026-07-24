@@ -1,0 +1,325 @@
+# Findings & Decisions: Agentic Standalone Tunnel Runtime
+
+## Requirements
+- The user-facing startup remains `agentic-gpt run-as-standalone`.
+- Agentic internally manages the official OpenAI tunnel-client lifecycle.
+- The official binary is downloaded from a configurable source into a configurable cache, or an existing executable can be selected.
+- Tunnel id and runtime API-key reference are configured through Agentic.
+- tunnel-client invokes an internal Agentic stdio MCP worker.
+- Standalone exposes local execution tools, downstream MCP bridge, skills, and bootstrap.
+- Diary and notebook remain Room-only.
+- Existing Hub-centric command routing is retained.
+- Hub should be able to remain the aggregation surface for a future KMP dashboard, run records, status, and notifications.
+
+## External Validation Already Completed
+- The official tunnel-client embedded MCP stub was connected successfully through Secure MCP Tunnel.
+- ChatGPT discovered and called `server_info`; the returned stub advertised `server_info`, `echo`, and `uppercase`.
+- This proves the tested account, tunnel, runtime key, connector association, long-poll path, local stub binding, and response path work end-to-end.
+
+## Repository Findings
+
+### Current local-agent modes
+- `crates/agentic-gpt/src/state.rs` defines only `RunMode::Normal` and `RunMode::Room`.
+- `RunMode` currently determines both local policy behavior and the protocol `AgentRole` sent to Hub.
+- `crates/agentic-gpt/src/main.rs` exposes `run` and `run-as-room`.
+- Both public modes enter one `run(config_path, run_mode)` function.
+- That function always ends in `hub::connect_loop(state).await`; there is no non-Hub command transport.
+
+### Current tool implementation and routing
+- Local execution implementations already live in the agent crate: exec, sessions, tmux, downstream MCP client, skills, skill installs, bootstrap, notebook, and diary.
+- Hub's `mcp_server.rs` defines the public MCP schemas and converts calls into `HubCommand` values.
+- The local agent handles those commands after Hub WebSocket/SSE delivery.
+- Standalone should reuse local implementations rather than duplicate behavior inside a second MCP stack.
+
+### Room-only behavior
+- Notebook, diary, and bootstrap commands are currently rejected in Normal mode by local command dispatch.
+- Hub routes Room tools to the active Room Agent without an `agentId`.
+- Skills are currently also routed through the active Room Agent and described publicly as Room-scoped, even though their storage and core implementation are local workspace operations.
+- Bootstrap internals and public API contain Room-specific names, including `room.bootstrap`, `room.bootstrap.read`, `Room Bootstrap`, and a canonical revision prefix containing `agentic-room-bootstrap-v1`.
+
+### MCP dependencies
+- The agent crate already uses `rmcp 1.7.0` with client transports for downstream MCP.
+- It does not currently enable rmcp server or stdio server transport features.
+- The Hub crate already uses rmcp server macros and Streamable HTTP server transport, providing patterns for tool schemas and result envelopes.
+
+### Hub value beyond command routing
+- Hub stores agent registry/online state, managed run records, cached session state, notification channels, and Room routing state.
+- These are relevant to a future KMP dashboard even if direct tool execution bypasses Hub.
+- Current Agent hello/role handling assumes connected agents can participate in command routing; reporting-only behavior is not represented separately.
+
+### Runtime topology constraint
+- In stdio binding mode, tunnel-client launches the downstream command and owns its stdin/stdout.
+- Therefore the public Agentic process should supervise tunnel-client, while tunnel-client launches a hidden/internal Agentic MCP worker process.
+- The supervisor and worker need distinct lock semantics.
+- The worker's stdout must be exclusively MCP protocol output; logs belong on stderr.
+
+## Initial Technical Direction
+- Split internal runtime concepts into at least:
+  1. command transport (`Hub` versus local MCP stdio),
+  2. capability profile (`Normal`, `Standalone`, `Room`),
+  3. Hub relationship (`command-capable`, `reporting-only`, `disabled`).
+- Keep public CLI commands simple and map each command onto those axes.
+- Introduce a shared local tool service/dispatcher reused by the Hub command adapter and standalone MCP adapter.
+- Implement tunnel-client as an externally versioned official executable managed by Agentic, not linked through Go FFI.
+- Prefer runtime secret injection through environment/file references rather than argv.
+- Bind custom download URL to explicit version and checksum validation.
+
+## Security and Operational Concerns to Refine
+- Remote executable download must not become unconstrained arbitrary-code execution through config.
+- Define allowed URL schemes, checksum requirements, redirects, archive extraction safety, symlink handling, file permissions, and atomic replacement.
+- Decide whether Agentic owns an embedded trusted release manifest or requires user-supplied checksums for every source.
+- Prevent API keys from appearing in command lines, logs, generated diagnostics, or persistent generated tunnel profiles.
+- Define safe behavior when config reload changes tunnel identity or binary distribution while running.
+- Define child-process cleanup if supervisor, tunnel-client, or MCP worker exits unexpectedly.
+- Reporting failure must not change tool-call success or block the direct command path.
+
+## Skill Workflow Findings
+- `planning-with-files` v3.7.0 is active and provides scoped `.planning/<id>` initialization, persistent task/findings/progress files, session catch-up, and phase/error discipline.
+- `refine-implementation-plan` is active and requires an existing active plan, complete repository inspection, decision-focused discussion, contract freezing, and readiness checks before implementation.
+- Refinement must not modify product code.
+
+## Decisions
+
+| ID | Decision | Rationale | Status |
+|---|---|---|---|
+| U-01 | Preserve a separate standalone public mode. | Direct Tunnel and Hub-centric command routing serve different deployments. | confirmed |
+| U-02 | Use official tunnel-client binary. | Reuses the supported implementation and avoids maintaining the control-plane protocol. | confirmed |
+| U-03 | Agentic supervises tunnel-client. | Removes manual profile/env/startup steps from normal usage. | confirmed |
+| U-04 | Use stdio for the first internal MCP binding. | No local network listener is required and tunnel-client owns worker lifecycle. | confirmed direction |
+| U-05 | Standalone receives skills/bootstrap but not diary/notebook. | Skills/bootstrap are workspace execution context; diary/notebook carry Room identity and continuity semantics. | confirmed |
+| U-06 | Cache directory and download URL are configurable. | Supports custom filesystems, mirrors, offline/preprovisioned systems, and deployment constraints. | confirmed |
+| A-01 | Treat transport/profile/Hub role as separate internal axes. | Prevents `RunMode` from accumulating unrelated semantics and supports future local HTTP/Unix transports. | adopted by D-04 |
+| A-02 | Use a supervisor → tunnel-client → internal Agentic worker topology. | Required by tunnel-client stdio child-command ownership while preserving one public entry. | adopted in frozen supervisor contract |
+
+## Issues Encountered
+
+| Issue | Resolution |
+|---|---|
+| Room `skills.run` cannot execute the planning initializer in the laptop project path. | Read the skill package through `agentic.skills`, then invoked the same installed script with the laptop process tool. |
+
+## Repository Locations
+- `crates/agentic-gpt/src/main.rs`: CLI, runtime creation, unconditional Hub connection, command tests.
+- `crates/agentic-gpt/src/state.rs`: current `RunMode` and `AppState`.
+- `crates/agentic-gpt/src/hub.rs`: local Agent-to-Hub lifecycle and command reception.
+- `crates/agentic-gpt/src/exec.rs`, `sessions.rs`, `tmux.rs`, `mcp.rs`: local execution services.
+- `crates/agentic-gpt/src/skills.rs`, `skill_installs.rs`, `bootstrap.rs`: capabilities to generalize.
+- `crates/agentic-gpt/src/notebook.rs`, `diary.rs`: Room-only capabilities.
+- `crates/agentic-gpt-hub/src/mcp_server.rs`: current complete public MCP surface and schema patterns.
+- `crates/agentic-gpt-hub/src/agents.rs`, `runs.rs`, `notify.rs`, `room.rs`: command routing, records, notification aggregation, and active Room semantics.
+- `crates/agentic-gpt-protocol/src/lib.rs`: roles, capabilities, commands, messages, and public serialization contracts.
+
+
+## Existing Implementation Details Added During Refinement
+
+### Configuration and compatibility
+- `Config` is one camelCase JSON object with serde defaults for additive fields; `Config::load` already performs a small compatibility repair when `pathPolicy` is absent.
+- Hub identity and credential fields (`hubUrl`, `hubTransport`, `agentSecret`) are top-level and currently mandatory in the Rust struct, even though standalone command execution should not require a working Hub.
+- Skill installation limits are currently nested under `room.skills`, which conflicts with making skills a shared Standalone/Room capability without either migration or a compatibility alias.
+- `safe_summary()` always reports built-in Normal policy rules; a future capability/runtime refactor must avoid silently changing existing summary semantics.
+
+### Logging and stdio safety
+- All current local startup logging helpers call `eprintln!`, so the default logging path is already stderr-safe for a future stdio MCP worker.
+- Some command-oriented CLI paths print JSON to stdout intentionally; the internal MCP worker must bypass those paths and ensure no incidental `println!` reaches protocol stdout.
+
+### Locking and process topology
+- The existing agent lock is advisory and derived from the canonical config path plus `.run.lock`.
+- Both `run` and `run-as-room` currently acquire that same lock before building state.
+- A standalone supervisor and its worker cannot both acquire the existing lock. The plan needs one authority owner and a separate supervisor lock or a worker-token mechanism.
+
+### Hub connection coupling
+- `hub::connect_loop` currently owns reconnection, command reception, confirmation responses, heartbeat, sender registration, reliable-run reconciliation, and command dispatch.
+- Both WebSocket and SSE transports send `AgentMessage::Hello` with one `AgentRole`; neither protocol nor Hub registry has a reporting-only connection contract.
+- The local `hub_sender` is also used by confirmation delivery, so disabling Hub command reception while retaining Hub-based confirmation/notification requires an explicit directional contract rather than merely ignoring received commands.
+
+### Persistence and reporting foundations
+- Execution audit already appends local JSONL under `<workspaceRoot>/.agentic-gpt-audit.jsonl` and includes source, policy, result, skill provenance, and timing.
+- `transport_ledger` is specifically shaped around Hub command envelopes and reliable response replay, not generic standalone execution events.
+- Hub already stores `agent_runs` and cached sessions, but those records are created from Hub-originated commands; direct Tunnel calls currently have no Hub run identity or upload path.
+
+### Release packaging
+- Agentic's own release workflow currently builds Linux `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu` archives and publishes SHA256SUMS.
+- This provides a strong repository convention for initially limiting the managed tunnel-client matrix to the same two Linux targets unless the user expands scope.
+
+
+## Official Tunnel-Client v0.0.10 Evidence
+- GitHub latest release resolves to `v0.0.10` and publishes six platform ZIPs: Linux/macOS/Windows on amd64 and arm64, plus combined archives, `SHA256SUMS.txt`, and `PUBLIC_URLS.txt`.
+- Linux archive names are `tunnel-client-v0.0.10-linux-amd64.zip` and `tunnel-client-v0.0.10-linux-arm64.zip`; their published SHA-256 values were retrieved from the release manifest during refinement.
+- The official configuration contract requires a runtime API key, tunnel id, and `main` MCP binding.
+- `--mcp.command` spawns one command and communicates over its stdin/stdout; stdio bindings do not support MCP transport sessions.
+- Default tunnel-client logs go to stdout unless `log.file` is configured. A supervised integration must capture/redirect them deliberately.
+- Health defaults to loopback `127.0.0.1:8080`; an ephemeral port plus a private per-run `health.url_file` is officially recommended when another supervisor needs the resolved URL.
+- Secret-bearing fields support `env:` and `file:` references; literal values remain accepted by tunnel-client for compatibility but are not recommended.
+- Official E2E testing supports both hosted-control-plane tests and a local `dev proxy` path; the release itself includes in-repo mocks and end-to-end coverage.
+
+## rmcp Server Feasibility
+- `rmcp 1.7.0` exposes a `server` feature and `transport-io`; its documented server transport can serve `(tokio::io::stdin(), tokio::io::stdout())` directly.
+- The existing agent crate can add server/macros/transport-io features alongside its current client transports, while Hub remains on its existing Streamable HTTP server features.
+
+## Dispatch Refactor Evidence
+- `hub::handle_hub_command` is a large transport-aware match that both executes local operations and sends Hub responses.
+- Room gating is repeated per command using `state.run_mode != RunMode::Room` across notebook, diary, bootstrap, and skills.
+- Extracting value-returning local operations and capability checks before introducing the stdio adapter will avoid a second divergent dispatch implementation.
+- Policy behavior is also coupled to `RunMode`: Room intentionally has fewer built-in confirmation requirements than Normal. Standalone policy semantics therefore require an explicit decision rather than inheriting a mode name accidentally.
+
+
+## Official Stdio Lifecycle Details
+- `mcp.command` is parsed into argv with explicit quote and escape handling, then launched directly with `exec.Command(args[0], args[1:]...)`; it is not implicitly wrapped in a shell.
+- Agentic can therefore generate one correctly quoted command string containing its own executable path, internal subcommand, and config path without a temporary shell script.
+- tunnel-client attaches the worker's stderr to its own stderr, reserves the worker stdin/stdout for MCP, and forwards SIGINT/SIGTERM to the worker.
+- If worker stdout closes, stdin writes fail, or the worker exits unexpectedly, tunnel-client requests its own shutdown. The outer Agentic supervisor should treat tunnel-client + worker as one restart unit.
+- On normal stop, tunnel-client closes worker stdin, sends SIGTERM, and waits for exit within its lifecycle shutdown context.
+
+## Refine Process Error Record
+- A parallel source inspection attempted to read `/tmp/openai-tunnel-client-v0.0.10` before the sibling clone command completed and returned `No such file or directory`.
+- Resolution: reran the source inspection serially after clone completion; no repository or planning state was affected.
+
+
+## Decision Rationale: Round 1
+
+### D-01 — Live best-effort Hub reporting
+- Implement online/heartbeat, direct execution lifecycle, and session updates in this delivery.
+- Reporting is explicitly non-authoritative for MCP success: Hub failure cannot fail or delay the Tunnel response path.
+- No durable event spool, restart replay, or delivery guarantee is included in V1; local audit remains available for diagnostics.
+
+### D-02 — Bootstrap naming compatibility
+- New transport-neutral names are `bootstrap` and `bootstrap.read`.
+- Existing Hub names `room.bootstrap` and `room.bootstrap.read` remain compatibility aliases.
+- All aliases call one local workspace-bootstrap implementation; Room identity is no longer embedded in the core service name.
+
+### D-03 — Reference-only Tunnel secret
+- Agentic accepts both `env:NAME` and `file:/path` forms.
+- Plaintext literals are rejected during config validation rather than merely redacted later.
+- The resolved secret is injected into the tunnel-client child environment and never placed in argv or generated persistent profile content.
+
+### D-04 — Transport/profile independence
+- Normal and Room are capability and policy profiles; Hub and Tunnel are command transports.
+- Normal-over-Tunnel uses the current stricter Normal built-in policy.
+- Room-over-Tunnel uses current Room policy and may expose Room-only diary/notebook capabilities.
+- This changes the earlier shorthand in which “Standalone” looked like a third capability identity; standalone is now treated as a Tunnel-backed runtime topology.
+
+### D-05 — Pinned release trust
+- Each Agentic release owns a tested tunnel-client version and asset/checksum manifest.
+- Default startup never follows GitHub `latest` dynamically.
+- A custom URL is permitted only with an explicitly configured SHA-256; a user-selected local executable is a separate trusted override path.
+
+
+## Q-02 Workload Estimate: Coordinator MCP Profile
+
+### Existing surface
+- Hub MCP currently exposes 43 tools from one generated `ToolRouter` plus a separate manual `tools/call` match used by the Apps-compatible endpoint.
+- The current constructor always exposes the full router and one execution-oriented instruction string.
+- A profile implementation must therefore filter both descriptors and dispatch, provide profile-specific instructions, and test that hidden tools cannot be called by name.
+
+### Missing aggregation tools
+- Current useful Hub-native MCP tools are limited to `agent.list`, `hub.run.get`, `user.notify.channels`, and `user.notify.send`.
+- There is no MCP `hub.info`, no run-list query, and no clean cached-only session aggregation surface.
+- Existing `session.list` / `session.inspect` may forward commands to an online Agent, so they are not safe coordinator tools without semantic changes.
+
+### Bounded coordinator proposal
+A useful V1 coordinator profile can remain small and Hub-native:
+- `hub.info`
+- `agent.list`
+- `hub.run.list`
+- `hub.run.get`
+- `hub.session.list`
+- `hub.session.get`
+- `user.notify.channels`
+- `user.notify.send`
+
+It must not expose process, tmux, downstream MCP, skills, bootstrap, diary, notebook, or command-capable session tools.
+
+### Cost assessment
+- Profile plumbing and strict allowlist: small.
+- New Hub-native query tools and tests: moderate.
+- Database/reporting schema required by D-01 overlaps heavily with `hub.run.list/get`; cached session data already exists in memory and needs a query wrapper rather than a new execution path.
+- Estimated incremental scope is roughly one focused implementation phase and about 10–15% additional effort relative to the full standalone/tunnel refactor, not a second major subsystem.
+- Because the reporting data is otherwise difficult to inspect from ChatGPT and is directly relevant to future KMP, the revised recommendation is to include Q-02B with the bounded tool set above.
+
+
+## Decision Rationale: Round 2
+
+### D-06 — Coordinator Hub MCP profile
+- Include the bounded coordinator profile in this delivery because reporting schema/query work overlaps directly with D-01 and future KMP needs.
+- The profile is an MCP-surface restriction, not a separate Hub data plane or binary.
+- Both descriptor discovery and direct tool dispatch must enforce the allowlist.
+
+### D-07 — Tunnel profile selection
+- `run-as-standalone` means Tunnel-backed command transport and defaults to Normal capability/policy.
+- `run-as-standalone --profile room` selects Room capabilities and policy without creating a second long public subcommand.
+- Existing `run` and `run-as-room` remain Hub-command entries for compatibility.
+
+### D-08 — Restart unit and failure classes
+- tunnel-client and the internal MCP worker form one restart unit because official tunnel-client exits when its stdio child exits or its pipes fail.
+- Runtime failures use bounded exponential backoff and reset after a stable-ready interval.
+- Deterministic failures such as invalid config, unsupported platform, missing secret reference, checksum mismatch, or unavailable explicitly configured executable fail fast.
+
+### D-09 — Restart-required Tunnel config
+- Existing mutable execution policy/workspace configuration may continue using current hot reload where safe.
+- Tunnel id, API-key reference, tunnel-client version/source/hash/executable, and capability profile are startup identity and process-topology inputs; changes are detected and reported as restart-required.
+- Automatic Tunnel switching is excluded to avoid dropping or ambiguously routing in-flight requests.
+
+### D-10 — Local executable trust
+- An explicit local executable path is treated as an administrator/user trust decision and may omit SHA-256.
+- When a hash is supplied, every startup verifies it.
+- Every network-downloaded artifact must have a pinned expected SHA-256 before execution.
+
+
+## Final Repository Gap Findings
+
+### Direct-run reporting storage
+- Existing `agent_runs` persists full serialized Hub commands and full results for 24 hours.
+- Direct Tunnel calls have no Hub-created run row, so reporting needs an Agent-originated run upsert message and Hub insertion path.
+- A schema-compatible approach can retain non-null `command_json`/`command_hash` by storing a versioned direct-run report envelope and adding a `source` column defaulting to `hub`.
+- `hub.run.list` requires a bounded indexed query with filters; `hub.run.get` can continue returning the common run representation.
+
+### Session reporting
+- Local managed sessions retain terminal entries for 24 hours, capped at 100.
+- Session state is refreshed lazily on inspect/list/kill; the current monitor loop does not publish transition events.
+- D-01 therefore requires an explicit session observer/report hook at creation, state transition, and terminal completion rather than only reusing the current one-time Hub-command response.
+- Hub currently stores session snapshots in memory and removes an Agent's entire cache on disconnect.
+- For V1 coordinator semantics, `hub.session.list/get` can be defined as current/recent snapshots received during the active Hub connection; durable cross-disconnect session history is excluded because run records provide the retained execution history.
+
+### Connection directionality
+- A reporting connection still needs inbound heartbeat acknowledgements and optional remote confirmation responses, but must reject/never receive `HubCommandEnvelope` values.
+- Add an explicit connection mode to Hello/registry state, defaulting old clients to command-capable for wire compatibility.
+- `request_agent` must reject reporting-only connections before preparing/distributing a run.
+
+### Platform boundary
+- Agentic identifies itself as a Linux local agent and only publishes Linux x86_64/aarch64 release archives.
+- V1 tunnel-client management should support the corresponding official `linux-amd64` and `linux-arm64` assets; other targets fail with `unsupported_platform` before download.
+
+### Configuration migration
+- Shared skill configuration should move from `room.skills` to canonical top-level `skills`.
+- Legacy `room.skills` remains accepted when top-level `skills` is absent.
+- If both appear, top-level values win with a warning; config writes migrate to the canonical top-level block.
+- Default Tunnel cache stays under the project's existing `~/.agentic_gpt` home rather than introducing a second XDG root.
+
+### Supervisor observability
+- Agentic can launch tunnel-client directly with argv and a child-only secret environment variable; no persistent tunnel profile or shell wrapper is required.
+- tunnel-client stdout/stderr can be captured by the supervisor and re-emitted on Agentic stderr with component prefixes.
+- Use a private per-run health URL file beneath `~/.agentic_gpt/runtime/tunnel/<agentId>/`; readiness controls stable-run reset and startup diagnostics.
+- Config changes affecting Tunnel identity/distribution are logged as restart-required while the current child remains unchanged.
+
+
+## Decision Rationale: Final Round
+
+### D-11 — Configurable reporting detail
+- `metadata` is the privacy-preserving default and excludes tool/session content that could contain local code, file contents, credentials, or personal data.
+- `full` is explicit for debugging/dashboard use and remains bounded; oversized JSON is represented by size/hash metadata rather than partial content.
+- The setting affects only Tunnel-originated reporting. Existing Hub-originated commands retain their current full run storage behavior.
+
+### D-12 — Reporting opt-in
+- Default-disabled avoids meaningless Hub reconnects for Tunnel-only users and preserves Tunnel as an independently functional command path.
+- Enabling reporting reuses the existing Hub identity/config, but failure remains isolated from MCP execution.
+
+### D-13 — Bounded restart defaults
+- The accepted default is initial launch plus at most five restart attempts, with delays of 1/2/4/8/16 seconds.
+- The 30-second value is a cap for configurable/future larger retry budgets; it is not reached by the default five attempts.
+- Sixty seconds continuously ready resets the counter, preventing old transient failures from exhausting a later healthy runtime.
+
+## Handoff Readiness Findings
+- All Q-01 through Q-13 are resolved and represented by D-01 through D-13.
+- Current implementation evidence covers CLI/runtime, policy, config/migration, stdio server feasibility, command dispatch, sessions, Hub protocol/registry, run DB, MCP profiles, release packaging, official client trust/lifecycle, and end-to-end stub validation.
+- The only repository modifications during design are `.planning/.active_plan` and the new active planning directory.
+- Exact implementation entry is Phase 3; Phases 1–2 are complete and product implementation has not begun.
+- A focused planning checkpoint is appropriate but requires separate user authorization.
