@@ -133,6 +133,12 @@ The unit-file warning is independent of Agentic runtime/config/log contracts and
 - The real standalone probes preserve Normal/Room MCP surfaces, live policy/path/limit behavior, invalid reload fallback, existing-session survival, journal severity/timestamp rules, compact human ids, lifecycle cardinality, confirmation behavior, and machine-side full evidence.
 - The first unprivileged full-test attempt failed only because the sandbox could not create the host runtime tunnel directory; the controlled rerun passed without a product workaround.
 
+### Phase 5 verification results
+- Final focused Agent tests passed 162/162, including untimestamped journal grammar, immutable restart warning sequence, linearizable tracker interleavings, exact tool surfaces, confirmation, and machine-evidence regressions.
+- Final controlled standalone supervisor tests passed 5/5: Normal and Room supervised journal probes, timestamped/untimestamped severity, live reload, invalid-config warning ownership, and last-good behavior.
+- Final `cargo test --workspace` passed Agent 162/162, standalone 5/5, Hub 61/61, Protocol 9/9, and doc-tests 0/0. `cargo check --workspace`, format check, and diff check passed.
+- Product-only frozen-surface inspection found no `agent.info`, systemd unit, `StartLimitIntervalSec`, Hub/protocol, public-schema, or public-tool changes. The Phase 5 delivery is complete at the requested commit boundary.
+
 
 ## Independent Verification Findings — Phase 5 Trigger
 
@@ -150,3 +156,14 @@ Additional bounded cleanup: in supervised mode, invalid config is currently elig
 - Restart tests did not exercise change-away, repeat, and change-back against an immutable runtime identity.
 - Tracker tests covered serial orderings, not the check/clear/enqueue race or active-before-terminal visibility.
 - Invalid reload tests proved last-good behavior but did not assert one human warning across the supervised process tree.
+
+### Phase 5 implementation start
+- Checkpoint `8e3a400` is clean and already contains the frozen D-13 through D-16 contract; product work starts at Phase 5 only.
+- All existing exclusions remain binding: no `agent.info`, public surface/schema, Hub/protocol, policy matching, confirmation, machine-evidence, or systemd changes.
+
+### Phase 5 implementation findings
+- `forward_log` now parses a redacted first-token level when the hidden worker omits its timestamp under `JOURNAL_STREAM`; timestamped parsing and stream fallback remain unchanged.
+- The supervisor watcher now keeps immutable runtime identity separate from observed and warned file versions, and validates reloads before deriving startup identity. Returning the disk file to runtime values therefore emits no second restart warning.
+- `HumanTerminalTracker` now serializes response visibility, pending terminal state, lifecycle response emission, and terminal flush under one mutex. Active response emission happens before pending or subsequent terminal records.
+- The hidden worker recognizes the supervisor auth environment as supervised mode and suppresses only its human invalid-config warning; the supervisor emits the bounded warning once per observed failed version. The live subset remains untouched on failure.
+- Focused unit tests passed 162/162. The controlled real supervisor suite passed 5/5 before the Room probe was switched to journal mode; the final matrix will rerun it with both Normal and Room journal inheritance.

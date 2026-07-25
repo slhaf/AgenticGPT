@@ -9,7 +9,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{anyhow, Result};
 use chrono::DateTime;
@@ -60,7 +60,7 @@ pub(crate) async fn run(config_path: PathBuf, profile: CapabilityProfile) -> Res
     }
 
     let runtime_paths = RuntimePaths::prepare(&config.agent_id)?;
-    let startup_identity = StartupIdentity::from_config(&config, profile)?;
+    let runtime_identity = StartupIdentity::from_config(&config, profile)?;
     let result = async {
         let tunnel = config
             .tunnel
@@ -79,7 +79,7 @@ pub(crate) async fn run(config_path: PathBuf, profile: CapabilityProfile) -> Res
         run_doctor(&invocation).await?;
         let watcher = tokio::spawn(watch_startup_identity(
             config_path.clone(),
-            startup_identity,
+            runtime_identity,
         ));
         let result = run_loop(&invocation, &runtime_paths).await;
         watcher.abort();
@@ -215,38 +215,92 @@ impl StartupIdentity {
     }
 }
 
-async fn watch_startup_identity(config_path: PathBuf, mut previous: StartupIdentity) {
-    let mut last_modified = fs::metadata(&config_path)
-        .and_then(|meta| meta.modified())
-        .ok();
+#[derive(Debug, Default)]
+struct StartupIdentityWatchState {
+    observed_version: Option<SystemTime>,
+    warned_version: Option<SystemTime>,
+}
+
+impl StartupIdentityWatchState {
+    fn new(observed_version: Option<SystemTime>) -> Self {
+        Self {
+            observed_version,
+            warned_version: None,
+        }
+    }
+
+    fn observe_version(&mut self, version: Option<SystemTime>) -> bool {
+        let Some(version) = version else {
+            return false;
+        };
+        if self.observed_version == Some(version) {
+            return false;
+        }
+        self.observed_version = Some(version);
+        true
+    }
+
+    fn warn_once_for(&mut self, version: SystemTime) -> bool {
+        if self.warned_version == Some(version) {
+            return false;
+        }
+        self.warned_version = Some(version);
+        true
+    }
+}
+
+async fn watch_startup_identity(config_path: PathBuf, runtime_identity: StartupIdentity) {
+    let mut state = StartupIdentityWatchState::new(
+        fs::metadata(&config_path)
+            .and_then(|meta| meta.modified())
+            .ok(),
+    );
     loop {
         sleep(Duration::from_secs(2)).await;
         let modified = fs::metadata(&config_path)
             .and_then(|meta| meta.modified())
             .ok();
-        if modified.is_none() || modified == last_modified {
+        let Some(version) = modified else {
+            continue;
+        };
+        if !state.observe_version(Some(version)) {
             continue;
         }
-        last_modified = modified;
         let config = match Config::load(&config_path) {
             Ok(config) => config,
             Err(error) => {
+                if state.warn_once_for(version) {
+                    log_warn(format!(
+                        "standalone config reload failed; keeping current runtime; errorCode={}",
+                        bounded_error_code(&error.to_string())
+                    ));
+                }
+                continue;
+            }
+        };
+        if let Err(error) = config.validate_standalone() {
+            if state.warn_once_for(version) {
                 log_warn(format!(
                     "standalone config reload failed; keeping current runtime; errorCode={}",
                     bounded_error_code(&error.to_string())
                 ));
+            }
+            continue;
+        }
+        let current = match StartupIdentity::from_config(&config, runtime_identity.profile) {
+            Ok(current) => current,
+            Err(error) => {
+                if state.warn_once_for(version) {
+                    log_warn(format!(
+                        "standalone config reload failed; keeping current runtime; errorCode={}",
+                        bounded_error_code(&error.to_string())
+                    ));
+                }
                 continue;
             }
         };
-        let Ok(current) = StartupIdentity::from_config(&config, previous.profile) else {
-            log_warn(
-                "standalone config reload removed tunnel settings; restart_required".to_owned(),
-            );
-            continue;
-        };
-        if current != previous {
+        if current != runtime_identity && state.warn_once_for(version) {
             log_warn("restart_required: standalone tunnel startup identity changed".to_owned());
-            previous = current;
         }
     }
 }
@@ -576,33 +630,40 @@ struct ForwardedLog {
 }
 
 fn parse_forwarded_log(line: &str, fallback: ForwardedLevel) -> ForwardedLog {
-    let Some((timestamp, rest)) = line.split_once(' ') else {
+    let Some((first, rest)) = line.split_once(' ') else {
         return ForwardedLog {
             level: fallback,
             message: line.to_owned(),
         };
     };
-    if DateTime::parse_from_rfc3339(timestamp).is_err() {
+    let (level_token, message) = if DateTime::parse_from_rfc3339(first).is_ok() {
+        let Some((level, message)) = rest.split_once(' ') else {
+            return ForwardedLog {
+                level: fallback,
+                message: rest.to_owned(),
+            };
+        };
+        (level, message)
+    } else if matches!(first, "INFO" | "WARN" | "ERROR") {
+        (first, rest)
+    } else {
         return ForwardedLog {
             level: fallback,
             message: line.to_owned(),
         };
-    }
-
-    let Some((level, message)) = rest.split_once(' ') else {
-        return ForwardedLog {
-            level: fallback,
-            message: rest.to_owned(),
-        };
     };
-    let level = match level {
+    let level = match level_token {
         "INFO" => ForwardedLevel::Info,
         "WARN" => ForwardedLevel::Warn,
         "ERROR" => ForwardedLevel::Error,
         _ => {
             return ForwardedLog {
                 level: fallback,
-                message: rest.to_owned(),
+                message: if DateTime::parse_from_rfc3339(first).is_ok() {
+                    rest.to_owned()
+                } else {
+                    line.to_owned()
+                },
             }
         }
     };
@@ -954,6 +1015,54 @@ mod tests {
         );
         assert_eq!(stderr.level, ForwardedLevel::Warn);
         assert_eq!(stderr.message, "TRACE child warning");
+    }
+
+    #[test]
+    fn forwarded_journal_lines_preserve_untimestamped_severity_after_redaction() {
+        for (level, expected) in [
+            ("INFO", ForwardedLevel::Info),
+            ("WARN", ForwardedLevel::Warn),
+            ("ERROR", ForwardedLevel::Error),
+        ] {
+            let line = redact_sensitive(format!("{level} child secret"), &["secret"]);
+            let parsed = parse_forwarded_log(&line, ForwardedLevel::Warn);
+            assert_eq!(parsed.level, expected);
+            assert_eq!(parsed.message, "child [REDACTED]");
+        }
+    }
+
+    #[test]
+    fn restart_identity_warning_compares_to_immutable_runtime_and_warns_once() {
+        let runtime = test_startup_identity();
+        let mut changed = runtime.clone();
+        changed.agent_id = "agent-a".to_owned();
+        let runtime_version = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
+        let changed_version = SystemTime::UNIX_EPOCH + Duration::from_secs(2);
+        let returned_version = SystemTime::UNIX_EPOCH + Duration::from_secs(3);
+        let mut state = StartupIdentityWatchState::new(Some(runtime_version));
+
+        let mut warning_count = 0;
+        for (version, current) in [
+            (changed_version, &changed),
+            (changed_version, &changed),
+            (returned_version, &runtime),
+        ] {
+            if state.observe_version(Some(version))
+                && current != &runtime
+                && state.warn_once_for(version)
+            {
+                warning_count += 1;
+            }
+        }
+        assert_eq!(warning_count, 1);
+        assert_eq!(state.observed_version, Some(returned_version));
+        assert_eq!(state.warned_version, Some(changed_version));
+    }
+
+    fn test_startup_identity() -> StartupIdentity {
+        let mut config = Config::default_config().unwrap();
+        config.tunnel = Some(crate::config::TunnelConfig::default());
+        StartupIdentity::from_config(&config, CapabilityProfile::Normal).unwrap()
     }
 
     #[test]

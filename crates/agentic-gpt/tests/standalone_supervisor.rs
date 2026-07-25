@@ -26,7 +26,7 @@ fn hidden_worker_reloads_policy_and_limit_without_restart() {
 fn supervisor_launches_real_worker_and_completes_local_mcp_call() {
     let root = std::env::temp_dir().join(format!("agentic-standalone-e2e-{}", Uuid::new_v4()));
     fs::create_dir_all(&root).unwrap();
-    let result = run_smoke(&root, "normal", false);
+    let result = run_smoke(&root, "normal", false, false);
     let _ = fs::remove_dir_all(&root);
     result.unwrap();
 }
@@ -35,7 +35,7 @@ fn supervisor_launches_real_worker_and_completes_local_mcp_call() {
 fn supervisor_launches_real_room_worker_and_advertises_room_surface() {
     let root = std::env::temp_dir().join(format!("agentic-standalone-room-e2e-{}", Uuid::new_v4()));
     fs::create_dir_all(&root).unwrap();
-    let result = run_smoke(&root, "room", false);
+    let result = run_smoke(&root, "room", true, false);
     let _ = fs::remove_dir_all(&root);
     result.unwrap();
 }
@@ -44,12 +44,26 @@ fn supervisor_launches_real_room_worker_and_advertises_room_surface() {
 fn supervised_journal_mode_omits_agentic_inner_timestamp() {
     let root = std::env::temp_dir().join(format!("agentic-journal-e2e-{}", Uuid::new_v4()));
     fs::create_dir_all(&root).unwrap();
-    let result = run_smoke(&root, "normal", true);
+    let result = run_smoke(&root, "normal", true, false);
     let _ = fs::remove_dir_all(&root);
     result.unwrap();
 }
 
-fn run_smoke(root: &Path, profile: &str, journal_mode: bool) -> Result<(), String> {
+#[test]
+fn supervised_invalid_config_warning_is_supervisor_owned() {
+    let root = std::env::temp_dir().join(format!("agentic-invalid-reload-e2e-{}", Uuid::new_v4()));
+    fs::create_dir_all(&root).unwrap();
+    let result = run_smoke(&root, "normal", true, true);
+    let _ = fs::remove_dir_all(&root);
+    result.unwrap();
+}
+
+fn run_smoke(
+    root: &Path,
+    profile: &str,
+    journal_mode: bool,
+    invalid_config_probe: bool,
+) -> Result<(), String> {
     let binary = std::env::var("CARGO_BIN_EXE_agentic-gpt")
         .or_else(|_| std::env::var("CARGO_BIN_EXE_agentic_gpt"))
         .map(PathBuf::from)
@@ -136,6 +150,12 @@ fn run_smoke(root: &Path, profile: &str, journal_mode: bool) -> Result<(), Strin
         .spawn()
         .map_err(|error| format!("supervisor failed to spawn: {error}"))?;
 
+    if invalid_config_probe {
+        thread::sleep(Duration::from_millis(300));
+        fs::write(&config_path, "{ invalid json\n").map_err(|error| error.to_string())?;
+        thread::sleep(Duration::from_millis(2600));
+    }
+
     let completed = wait_for_marker(&mut supervisor, &marker_path);
     stop_supervisor(&mut supervisor);
     stop_health.store(true, Ordering::Release);
@@ -198,6 +218,22 @@ fn run_smoke(root: &Path, profile: &str, journal_mode: bool) -> Result<(), Strin
             .find(|line| line.contains("INFO tunnel.stdout: child-info"))
             .ok_or("journal child info line missing")?;
         assert!(info_line.starts_with("INFO tunnel.stdout: child-info"));
+        let worker_info = supervisor_stderr
+            .lines()
+            .find(|line| line.contains("INFO tunnel.stderr: stdio_tool;"))
+            .ok_or("journal hidden-worker INFO line missing")?;
+        assert!(worker_info.starts_with("INFO tunnel.stderr: stdio_tool;"));
+        assert!(!supervisor_stderr.contains("WARN tunnel.stderr: INFO stdio_tool;"));
+    }
+    if invalid_config_probe {
+        assert_eq!(
+            supervisor_stderr
+                .matches("standalone config reload failed;")
+                .count(),
+            1,
+            "expected one supervisor-owned invalid-config warning: {supervisor_stderr}"
+        );
+        assert!(!supervisor_stderr.contains("standalone live config reload rejected;"));
     }
     Ok(())
 }
@@ -572,6 +608,13 @@ fn fake_tunnel_script(
         response = sh_quote(&response_path.to_string_lossy()),
         worker_stderr = sh_quote(&worker_stderr_path.to_string_lossy()),
         marker = sh_quote(&marker_path.to_string_lossy()),
+    );
+    let script = script.replace(
+        "|| true\nif grep -q 'standalone-e2e-ok'",
+        &format!(
+            "|| true\nif [ -n \"${{JOURNAL_STREAM:-}}\" ]; then cat {} >&2; fi\nif grep -q 'standalone-e2e-ok'",
+            sh_quote(&worker_stderr_path.to_string_lossy())
+        ),
     );
     let child_prefix = format!("printf 'http://127.0.0.1:{health_port}\\n' > \"$health_url_file\"");
     let child_logs = format!(

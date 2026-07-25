@@ -276,6 +276,7 @@ async fn run_stdio_worker(
     supervisor_token: Option<String>,
 ) -> Result<()> {
     supervisor::authorize_worker(supervisor_token.as_deref())?;
+    let supervised = supervisor_token.is_some();
     let config = Config::load(&config_path)?;
     config.ensure_workspace()?;
     log_info(format!(
@@ -311,7 +312,7 @@ async fn run_stdio_worker(
         )),
     };
     state.skill_installs.recover(state.clone()).await?;
-    tokio::spawn(watch_standalone_live_config(state.clone()));
+    tokio::spawn(watch_standalone_live_config(state.clone(), supervised));
     if reporting_enabled {
         tokio::spawn(hub::connect_loop(state.clone()));
     }
@@ -516,7 +517,7 @@ async fn watch_config(state: AppState) {
     }
 }
 
-async fn watch_standalone_live_config(state: AppState) {
+async fn watch_standalone_live_config(state: AppState, supervised: bool) {
     let mut last_modified = fs::metadata(&state.config_path)
         .and_then(|meta| meta.modified())
         .ok();
@@ -533,18 +534,22 @@ async fn watch_standalone_live_config(state: AppState) {
         let config = match Config::load(&state.config_path) {
             Ok(config) => config,
             Err(error) => {
-                log_warn(format!(
-                    "standalone live config reload rejected; keeping previous subset; errorCode={}",
-                    error_code(&error.to_string())
-                ));
+                if !supervised {
+                    log_warn(format!(
+                        "standalone live config reload rejected; keeping previous subset; errorCode={}",
+                        error_code(&error.to_string())
+                    ));
+                }
                 continue;
             }
         };
         if let Err(error) = config.validate_standalone() {
-            log_warn(format!(
-                "standalone live config reload rejected; keeping previous subset; errorCode={}",
-                error_code(&error.to_string())
-            ));
+            if !supervised {
+                log_warn(format!(
+                    "standalone live config reload rejected; keeping previous subset; errorCode={}",
+                    error_code(&error.to_string())
+                ));
+            }
             continue;
         }
 

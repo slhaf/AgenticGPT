@@ -1,7 +1,4 @@
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
-};
+use std::sync::{Arc, Mutex};
 
 use agentic_gpt_protocol::{ExecRequest, HubCommand, SessionInfo};
 use anyhow::Result;
@@ -78,41 +75,74 @@ struct StdioMcpServer {
 }
 
 #[derive(Default)]
+enum HumanResponseState {
+    #[default]
+    Awaiting,
+    Inline,
+    Active,
+}
+
+#[derive(Default)]
+struct HumanTerminalState {
+    response: HumanResponseState,
+    pending: Vec<String>,
+}
+
 struct HumanTerminalTracker {
-    response_returned: AtomicBool,
-    suppress_inline: AtomicBool,
-    pending: Mutex<Vec<(String, String, SessionInfo)>>,
+    state: Mutex<HumanTerminalState>,
+    emitter: Arc<dyn Fn(String) + Send + Sync>,
+}
+
+impl Default for HumanTerminalTracker {
+    fn default() -> Self {
+        Self::with_emitter(crate::utils::log_info)
+    }
 }
 
 impl HumanTerminalTracker {
-    fn record(&self, profile: &str, source: &str, session: &SessionInfo) {
-        if self.suppress_inline.load(Ordering::Acquire) {
-            return;
-        }
-        if self.response_returned.load(Ordering::Acquire) {
-            crate::utils::log_info(managed_terminal_event_message(profile, source, session));
-        } else if let Ok(mut pending) = self.pending.lock() {
-            pending.push((profile.to_string(), source.to_string(), session.clone()));
+    fn with_emitter(emitter: impl Fn(String) + Send + Sync + 'static) -> Self {
+        Self {
+            state: Mutex::new(HumanTerminalState::default()),
+            emitter: Arc::new(emitter),
         }
     }
 
-    fn finish_response(&self, inline: bool) {
+    fn record(&self, profile: &str, source: &str, session: &SessionInfo) {
+        let message = managed_terminal_event_message(profile, source, session);
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match state.response {
+            HumanResponseState::Awaiting => state.pending.push(message),
+            HumanResponseState::Inline => {}
+            HumanResponseState::Active => (self.emitter)(message),
+        }
+    }
+
+    fn finish_response(&self, inline: bool, lifecycle_message: Option<String>) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !matches!(state.response, HumanResponseState::Awaiting) {
+            return;
+        }
         if inline {
-            self.suppress_inline.store(true, Ordering::Release);
-            if let Ok(mut pending) = self.pending.lock() {
-                pending.clear();
+            state.response = HumanResponseState::Inline;
+            state.pending.clear();
+            if let Some(message) = lifecycle_message {
+                (self.emitter)(message);
             }
             return;
         }
 
-        self.response_returned.store(true, Ordering::Release);
-        let pending = self
-            .pending
-            .lock()
-            .map(|mut pending| std::mem::take(&mut *pending))
-            .unwrap_or_default();
-        for (profile, source, session) in pending {
-            crate::utils::log_info(managed_terminal_event_message(&profile, &source, &session));
+        state.response = HumanResponseState::Active;
+        if let Some(message) = lifecycle_message {
+            (self.emitter)(message);
+        }
+        for message in std::mem::take(&mut state.pending) {
+            (self.emitter)(message);
         }
     }
 }
@@ -161,14 +191,14 @@ impl StdioMcpServer {
         {
             Ok(value) => value,
             Err(error) => {
-                terminal_tracker.finish_response(true);
-                crate::utils::log_info(format!(
+                let lifecycle = format!(
                     "stdio_tool; run={}; tool={name}; profile={}; status=failed; durationMs={}; errorCode={}",
                     crate::utils::compact_id(&run_id),
                     self.state.runtime.profile.label(),
                     (Utc::now() - started_at).num_milliseconds().max(0),
                     bounded_error_code(&error.to_string())
-                ));
+                );
+                terminal_tracker.finish_response(true, Some(lifecycle));
                 crate::hub::report_run_event(
                     &self.state,
                     &run_id,
@@ -203,7 +233,6 @@ impl StdioMcpServer {
         let human_reason = reason
             .clone()
             .or_else(|| human_failure_reason(&value, session.as_ref()));
-        terminal_tracker.finish_response(!active);
         let mut lifecycle = format!(
             "stdio_tool; run={}; tool={name}; profile={}; status={}; durationMs={}",
             crate::utils::compact_id(&run_id),
@@ -229,7 +258,7 @@ impl StdioMcpServer {
         if let Some(reason) = human_reason.as_deref() {
             lifecycle.push_str(&format!("; errorCode={}", bounded_error_code(reason)));
         }
-        crate::utils::log_info(lifecycle);
+        terminal_tracker.finish_response(!active, Some(lifecycle));
         crate::hub::report_run_event(
             &self.state,
             &run_id,
@@ -255,6 +284,7 @@ impl StdioMcpServer {
                 .as_ref()
                 .map(|value| !value_has_active_session(value))
                 .unwrap_or(true),
+            None,
         );
         result
     }
@@ -2550,8 +2580,76 @@ mod tests {
 
     #[test]
     fn inline_terminal_tracker_discards_pending_terminal_event() {
-        let tracker = HumanTerminalTracker::default();
-        let session = SessionInfo {
+        let emitted = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = emitted.clone();
+        let tracker = HumanTerminalTracker::with_emitter(move |message| {
+            sink.lock().unwrap().push(message);
+        });
+        let session = test_terminal_session();
+        tracker.record("normal", "tunnel:process.exec", &session);
+        assert_eq!(tracker.state.lock().unwrap().pending.len(), 1);
+        tracker.finish_response(true, None);
+        assert!(tracker.state.lock().unwrap().pending.is_empty());
+        assert!(matches!(
+            tracker.state.lock().unwrap().response,
+            HumanResponseState::Inline
+        ));
+        assert!(emitted.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn active_response_precedes_terminal_for_both_serial_orderings() {
+        for terminal_first in [true, false] {
+            let emitted = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let sink = emitted.clone();
+            let tracker = HumanTerminalTracker::with_emitter(move |message| {
+                sink.lock().unwrap().push(message);
+            });
+            let session = test_terminal_session();
+            if terminal_first {
+                tracker.record("normal", "tunnel:process.exec", &session);
+                tracker.finish_response(false, Some("status=active".to_string()));
+            } else {
+                tracker.finish_response(false, Some("status=active".to_string()));
+                tracker.record("normal", "tunnel:process.exec", &session);
+            }
+            let emitted = emitted.lock().unwrap();
+            assert_eq!(emitted.len(), 2);
+            assert_eq!(emitted[0], "status=active");
+            assert!(emitted[1].starts_with("managed_session;"));
+        }
+    }
+
+    #[test]
+    fn concurrent_check_clear_enqueue_interleaving_is_linearizable() {
+        let emitted = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = emitted.clone();
+        let tracker = Arc::new(HumanTerminalTracker::with_emitter(move |message| {
+            sink.lock().unwrap().push(message);
+        }));
+        let session = test_terminal_session();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        std::thread::scope(|scope| {
+            let record_tracker = tracker.clone();
+            let record_barrier = barrier.clone();
+            scope.spawn(move || {
+                record_barrier.wait();
+                record_tracker.record("normal", "tunnel:process.exec", &session);
+            });
+            let response_tracker = tracker.clone();
+            scope.spawn(move || {
+                barrier.wait();
+                response_tracker.finish_response(false, Some("status=active".to_string()));
+            });
+        });
+        let emitted = emitted.lock().unwrap();
+        assert_eq!(emitted.len(), 2);
+        assert_eq!(emitted[0], "status=active");
+        assert_eq!(emitted[1].matches("managed_session;").count(), 1);
+    }
+
+    fn test_terminal_session() -> SessionInfo {
+        SessionInfo {
             agent_id: "agent".to_string(),
             session_id: "sess_0123456789abcdef".to_string(),
             state: "exited".to_string(),
@@ -2566,12 +2664,7 @@ mod tests {
             stderr_tail: String::new(),
             truncated: false,
             reject_reason: None,
-        };
-        tracker.record("normal", "tunnel:process.exec", &session);
-        assert_eq!(tracker.pending.lock().unwrap().len(), 1);
-        tracker.finish_response(true);
-        assert!(tracker.pending.lock().unwrap().is_empty());
-        assert!(!tracker.response_returned.load(Ordering::Acquire));
+        }
     }
 
     #[test]

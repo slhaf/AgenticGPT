@@ -3,11 +3,11 @@
 ## Session: 2026-07-25
 
 ### Current Status
-- **Phase:** Phase 5 — Focused Verification Repair (ready)
-- **Workflow stage:** implementation_ready
+- **Phase:** Phase 5 — Focused Verification Repair (complete)
+- **Workflow stage:** delivery
 - **Role:** repair implementer
 - **Implementation authorized:** yes
-- **Entry phase:** Phase 5
+- **Entry phase:** none
 
 ### Actions Taken
 - Confirmed the previous standalone surface-compaction plan is delivered and the repository worktree is clean at `main...origin/main [ahead 10]`.
@@ -66,6 +66,31 @@
 - The unprivileged workspace test run reproduced only the known host runtime-directory permission failure (`runtime_directory_unavailable`); the same command passed with controlled filesystem access, without changing runtime ownership or paths.
 - Product diff inspection confirmed only the frozen runtime/log/docs/test/planning files changed; no unrelated changes remain.
 - Phase 4 planning/delivery commit: `docs(planning): record standalone runtime verification`.
+
+### Phase 5 start
+- Resumed from checkpoint `8e3a400`; the prior Phase 4 delivery conclusion is superseded.
+- Read the complete active plan, findings, progress log, and repository state before touching product code.
+- Scope is limited to D-13 through D-16: untimestamped journald severity, immutable restart comparison, linearizable terminal coordination and ordering, and supervisor-only invalid-config warnings.
+
+### Phase 5 implementation checkpoint
+- Implemented D-13 through D-16 in `supervisor.rs`, `stdio_server.rs`, `main.rs`, and the supervised integration fixtures.
+- Added parser, immutable-identity sequence, tracker serial/concurrent interleaving, hidden-worker journal inheritance, and supervisor-only invalid-config regression coverage.
+- Focused Agent unit suite passed 162/162; controlled standalone supervisor suite passed 5/5. The Room supervised probe is now configured for journal mode and will be rerun in the final verification matrix.
+
+### Phase 5 completion
+- D-13 preserves INFO/WARN/ERROR for redacted untimestamped journald child records; real Normal and Room supervised journal probes verify hidden-worker INFO is emitted as INFO, never rewrapped as WARN.
+- D-14 compares disk startup fields to immutable runtime identity and deduplicates by observed version; the R→A→A→R regression emits one warning only for A.
+- D-15 uses one synchronized terminal state machine; deterministic serial and concurrent interleavings prove no terminal loss/duplication and active-before-terminal ordering.
+- D-16 suppresses worker human invalid-config warnings only when invoked with a verified supervisor token; the supervisor emits exactly one warning per failed version while last-good live behavior remains covered.
+- Final verification passed: `cargo fmt --all -- --check`, `git diff --check`, `cargo check --workspace`, Agent 162/162, standalone supervisor 5/5, Hub 61/61, Protocol 9/9, and doc-tests 0/0.
+- Final product scope scan found no `agent.info`, systemd unit, or `StartLimitIntervalSec` change; public tools/schemas, Hub/protocol, exact policy matching, confirmation semantics, and machine evidence remain unchanged.
+- Phase 5 product commit: `fix(agent): harden standalone runtime log ordering`.
+
+## Phase 5 Error Log
+| Timestamp | Error | Attempt | Resolution |
+|---|---|---:|---|
+| 2026-07-26 | Initial focused compile used the test module's Tokio `Mutex` for the injected synchronous log sink. | 1 | Qualified the regression-test sink with `std::sync::Mutex`; focused tests then passed 162/162. |
+| 2026-07-26 | Initial frozen-surface scan matched the planning text that documents the forbidden `agent.info`/systemd scope. | 1 | Re-ran the scan over product paths (`crates/` and `docs/`) only; no forbidden product change was found. |
 
 ## Error Log
 | Timestamp | Error | Attempt | Resolution |

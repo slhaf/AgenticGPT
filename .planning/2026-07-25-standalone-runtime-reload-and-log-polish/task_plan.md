@@ -8,11 +8,11 @@ Make standalone policy/limit configuration changes take effect without restartin
 - **Current role:** repair implementer
 - **Implementation authorized:** yes
 - **Active plan:** `2026-07-25-standalone-runtime-reload-and-log-polish`
-- **Current phase:** Phase 5 — Focused Verification Repair (ready)
-- **Entry phase after handoff:** Phase 5
+- **Current phase:** Phase 5 — Focused Verification Repair (complete)
+- **Entry phase after handoff:** none
 - **Open blocking decisions:** none
 - **Design checkpoint:** `d1a0028` independently reviewed and superseded for delivery
-- **Next action:** implement only the Phase 5 verification repairs, then rerun independent acceptance
+- **Next action:** none; D-13 through D-16 are repaired and independently verified
 
 ## Scope and Constraints
 
@@ -285,7 +285,7 @@ Human-facing journal output follows these observable rules:
 **Completion boundary:** The four independent-review blockers are directly covered by failing-before/fixed-after regression evidence; all original acceptance criteria still pass; a fresh reviewer approves delivery.
 
 **Commit:** `fix(agent): harden standalone runtime log ordering`
-- **Status:** ready
+- **Status:** complete
 
 ## Acceptance Criteria
 1. A running standalone hidden worker applies policy additions/removals, path-policy changes, and limits changes without service restart within a bounded reload interval.
@@ -335,17 +335,17 @@ Implementation discretion may not change the public JSON forms, auto formula/cla
 - **N/A:** database migration, network API versioning, durable recovery, or rollback; this plan changes only local config interpretation, live in-memory state, and human log rendering.
 
 ## Implementation Handoff
-- **Plan maturity:** implementation_ready
+- **Plan maturity:** delivered after Phase 5 repair
 - **Design phase:** complete; independent verification repair appended
 - **Implementation authorized:** yes
-- **Entry phase:** Phase 5 — Focused Verification Repair
+- **Entry phase:** none
 - **Frozen decisions:** D-01 through D-16
 - **Open blocking decisions:** none
 - **Implementation discretion:** see `Implementation Discretion`; Phase 5 may choose private synchronization/parser structures but may not change observable contracts
 - **Verification convention:** direct regression tests for all four blockers, real supervised journal probes, isolated workspace suite, and fresh independent review
 - **Commit convention:** one focused Phase 5 product commit, followed by planning-only acceptance evidence if verification passes
 - **Design checkpoint:** `d1a0028` is the reviewed implementation baseline; delivery claim superseded pending Phase 5
-- **Next invocation:** `$planning-with-files` starting at Phase 5 only; do not add `agent.info` or broaden scope
+- **Next invocation:** none; do not push, deploy, tag, or create a release
 
 ## Errors Encountered
 | Error | Attempt | Resolution |
