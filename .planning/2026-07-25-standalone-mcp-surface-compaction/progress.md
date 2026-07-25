@@ -221,3 +221,32 @@ Start a later implementation request from Phase 3. Each phase must update all th
 - Final verification passed: `cargo fmt --all -- --check`, `git diff --check`, isolated `cargo check --workspace`, and isolated `cargo test --workspace` (Agent 139, supervisor 2, Hub 61, protocol 9, doc tests 0).
 - Phase 6 delivery commit: the focused `docs(agent): document compact standalone tools` commit (amended once for final plan-state reconciliation). Final worktree is clean; no repair commit was needed.
 - Phase 7 is complete. The active plan is delivered with no open blockers or remaining implementation work.
+
+## 2026-07-25 — Independent Acceptance Review and Repair Replanning
+
+### Independent acceptance review
+- Inspected the active frozen plan, final implementation commits, tool registry/dispatch, managed lifecycle/finalizer, skill lease path, output constants, audit source, local terminal hook, Room request decoding, and existing tests.
+- Confirmed the repository is clean at `c987e32` before planning edits.
+- Re-ran validation: Agent 139/139, supervisor 2/2, Hub 61/61, protocol 9/9; `cargo fmt --check`, `cargo check --workspace`, and `git diff --check` pass.
+- Found seven frozen-contract deviations F-01 through F-07. The prior Phase 7 claim that no repair was needed is superseded.
+- Product files changed during review/refinement: none.
+
+### Refinement round 10: reopen delivered plan for focused repair
+- Evidence inspected: both active skills, all refinement references, all three active planning files, current Git status/log, and raw source/test evidence for F-01–F-07.
+- Questions asked: none. The public contract is already frozen and the user confirmed reuse of the same active planning set plus a bounded repair handoff.
+- Decisions confirmed: D-21 through D-23.
+- Plan sections updated: Workflow State, Errors Encountered, Frozen Decisions, Phase 7 historical note, new Phases 8–9, Acceptance Criteria, Implementation Discretion context, and Implementation Handoff.
+- Maturity transition: `delivered` → `refining` → `implementation_ready` after the unchanged contract and exact repair boundary were reconciled.
+- Entry phase: Phase 8 — Focused Contract Repair.
+- Remaining blockers: none.
+- Product code changed during refinement: none.
+
+### Refreshed handoff readiness gate
+- Goal/scope/non-goals remain explicit; D-01–D-20 are unchanged except the already historical D-04 supersession.
+- Repository evidence identifies every repair seam and direct missing test.
+- Inputs, outputs, lifecycle, failure, security, limits, logs, audit, compatibility, and verification behavior are frozen for the repair.
+- Persistence/migration/restart recovery are N/A beyond preserving the existing in-memory model; no new data contract is introduced.
+- Every finding maps to Phase 8 work, a direct regression requirement, and Acceptance 13–19.
+- Phase 9 restores reviewer independence and prohibits delivery based only on a green aggregate suite.
+- Workflow and handoff agree on `implementation_ready`, Phase 8 entry, authorization yes, and no blockers.
+- Next invocation: hand to a fresh Implementer with `$planning-with-files` only; do not invoke refine during implementation.

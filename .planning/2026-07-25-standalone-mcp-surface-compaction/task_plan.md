@@ -4,14 +4,15 @@
 Reduce the public MCP schema exposed by each Tunnel-backed standalone Agent without introducing a generic RPC tool or weakening device isolation. The Tunnel stdio worker will expose a compact, role-correct tool surface; ordinary process execution and managed sessions will share one durable lifecycle; Room-only bootstrap remains absent from Normal; and every standalone tool call plus Hub-reporting connection transition will produce safe local logs.
 
 ## Workflow State
-- **Stage:** delivered
-- **Current role:** implementer
-- **Implementation authorized:** yes, for a later implementation request
+- **Stage:** implementation_ready
+- **Current role:** designer
+- **Implementation authorized:** yes, for a later focused repair request
 - **Active plan:** `2026-07-25-standalone-mcp-surface-compaction`
-- **Current phase:** Phase 7 — Independent Review and Delivery Check (complete)
-- **Entry phase after handoff:** Phase 6
+- **Current phase:** Phase 8 — Focused Contract Repair (pending)
+- **Entry phase after handoff:** Phase 8
 - **Open blocking decisions:** none
-
+- **Implementation baseline:** `c987e32`
+- **Next action:** hand Phase 8 to a fresh Implementer under `$planning-with-files` without `$refine-implementation-plan`
 ## Errors Encountered
 
 | Error | Attempt | Resolution |
@@ -20,6 +21,7 @@ Reduce the public MCP schema exposed by each Tunnel-backed standalone Agent with
 | Cargo focused-test invocation rejected multiple positional filters | 1 | Use one `sessions::tests` filter for the focused Phase 3 test run. |
 | Stdio regression tests still asserted the pre-compaction 29/39 tool counts and Normal legacy calls | 1 | Updated tests to the frozen 18/30 surface and `process.list`; added process lifecycle coverage. |
 | Workspace standalone supervisor test exited with `runtime_directory_unavailable` before worker startup | 1 | Reproduced with isolated HOME; runtime setup passed there. The fixture then exposed stale `agentId` in its process call, which was removed; the isolated workspace suite passed. |
+| Phase 7 self-review declared delivery complete while seven frozen-contract gaps remained | 1 | Reopened the same active plan, preserved D-01–D-20, and appended focused repair plus independent verification phases. |
 
 ## Scope
 
@@ -421,6 +423,9 @@ These are MCP serialization budgets, not a promise of an exact model-token ratio
 | D-18 | Managed `process.batchExec` preserves `batchId/status/results/startedAt/updatedAt` but omits `agentId`; each ordered result has input identity, `outcome=managed|rejected|skipped`, an optional embedded single-process response without duplicate `agentId`, and optional `rejectReason`. | confirmed |
 | D-19 | New merged adapters inherit existing result bodies instead of inventing generic envelopes: direct `SessionInfo` for get/kill, `{sessions}` for list, `{servers}`/`{tools}` for MCP list modes, and existing action-specific tmux result objects. | confirmed |
 | D-20 | Managed batch all-or-reject applies to admission only. After admission, each spawned process is independent; a sibling spawn failure finalizes only that element as `spawn_failed` and does not cancel already spawned siblings. | confirmed |
+| D-21 | Reopen this delivered plan rather than create a separate repair plan. The public contract in D-01–D-20 is unchanged; only implementation conformance and verification are reopened. | confirmed |
+| D-22 | Repair exactly the seven independently verified contract gaps and add direct regression tests for each before declaring delivery again. Do not redesign the 18/30 surface or broaden Hub scope. | confirmed |
+| D-23 | Use one focused Phase 8 repair commit after targeted and full verification; Phase 9 is an independent review/delivery gate and creates another commit only when new evidence requires repair. | confirmed |
 
 ## Implementation Phases
 
@@ -565,7 +570,69 @@ These are MCP serialization budgets, not a promise of an exact model-token ratio
 - Run final full suite and repository status.
 
 **Commit:** focused repair commit(s) only when evidenced.
+- **Original review conclusion:** superseded by the independent acceptance review at `c987e32`; see Phases 8–9.
 - **Status:** complete
+
+
+### Phase 8: Focused Contract Repair
+**Objective / visible outcome:** Close the seven independently reproduced gaps without changing the frozen Tunnel tool surface, Hub compatibility boundary, or public response contracts.
+
+**Prerequisites:** Phases 3–7 implementation at `c987e32`; D-01–D-23 frozen; worktree contains no unrelated product changes.
+
+**Relevant implementation:** `crates/agentic-gpt/src/stdio_server.rs`, `crates/agentic-gpt/src/sessions.rs`, `crates/agentic-gpt/src/utils.rs`, focused Agent tests, and real standalone supervisor probes. Hub full/coordinator code and protocol public types remain compatibility boundaries, not redesign targets.
+
+**Work boundaries:**
+1. Make Tunnel `process.batchExec` perform at most one configured-provider confirmation for the whole admitted batch. A successful batch confirmation must suppress per-element confirmation while preserving each element's effective policy and confirmation result in terminal audit.
+2. Retain a `skills.run` lease-admission failure such as `skill_update_pending` as the same queryable terminal managed session returned to the caller. It must be visible through `process.get`, finalize once, release resources, write one audit record, and invoke the terminal hook once.
+3. Preserve at least 64 KiB per stream for Tunnel `process.exec` and managed `process.batchExec` elements. The Implementer may raise the shared managed tail bound or use source-specific bounds; Hub one-shot limits and public truncation semantics must not regress. `skills.run` may inherit the larger shared bound but must remain bounded.
+4. Add `durationMs` to the one later managed-process terminal log, computed from the retained session timestamps and emitted exactly once without raw arguments, paths, output, or secrets.
+5. Distinguish Tunnel skill execution in terminal audit with `requestSource=tunnel:skills.run`; preserve the existing Hub skill source for Hub-routed execution.
+6. Enforce action-dependent input validation for `tmux.sessions` and `tmux.panes`. Missing and action-incompatible fields return invalid params/structured validation failure; no supplied field may be silently ignored.
+7. Enforce strict unknown-field rejection for every advertised Tunnel tool, including Room diary/notebook adapters. Legacy `agentId`, `agent_id`, and `confirmMethod` supplied to any Tunnel tool must fail before side effects or id allocation.
+8. Keep removed alias dispatch code cleanup optional. It may be deleted when safely unreachable, but cleanup must not alter Hub full aliases or expand the repair diff.
+
+**Required regression tests:**
+- A confirmation-provider spy/counter proves one batch confirmation and zero per-element confirmations after allow.
+- Batch denial/timeout still creates no sessions; allowed elements retain the batch confirmation result in audit.
+- `skills.run` lease failure returns a retained id; repeated `process.get` remains terminal and audit/hook counts stay exactly one.
+- A process emitting more than 32 KiB and at most 64 KiB per stream is not truncated before the 64 KiB boundary; output beyond the bound is truncated deterministically.
+- Managed terminal log includes `durationMs` and excludes sentinel arguments, paths, stdout/stderr, and secrets.
+- Tunnel and Hub `skills.run` audits preserve distinct request sources.
+- Every `tmux.sessions` and `tmux.panes` action rejects incompatible fields and accepts its valid field set.
+- Representative Normal and every Room diary/notebook adapter reject unknown fields; add a table-driven all-advertised-tool legacy-field test where practical.
+- Exact 18/30 tools, schema budgets, Normal bootstrap absence, Room bootstrap presence, Hub full/coordinator surfaces, and supervisor smoke remain green.
+
+**Verification:**
+- `cargo fmt --all -- --check`
+- `git diff --check`
+- focused Agent tests covering all seven gaps
+- isolated `cargo check --workspace`
+- isolated `cargo test --workspace`
+- real hidden stdio Normal/Room initialize, tools/list, and targeted tools/call probes
+
+**Completion boundary:** All seven gaps have direct regression evidence, no frozen public contract changes, and the Phase 8 diff is committed as one focused repair.
+
+**Commit:** `fix(agent): close standalone MCP contract gaps`
+- **Status:** pending
+
+### Phase 9: Independent Repair Verification and Delivery
+**Objective / visible outcome:** A fresh reviewer verifies the Phase 8 repair against the frozen plan and raw code/test evidence before restoring delivered status.
+
+**Prerequisites:** Phase 8 complete and committed; reviewer starts from the frozen planning files and the `c987e32..HEAD` diff rather than the Implementer's completion summary.
+
+**Review boundaries:**
+1. Reproduce or inspect direct proof for all seven original gaps; do not infer correctness from the full suite alone.
+2. Trace batch confirmation from stdio admission through managed child start and audit to prove there is exactly one provider interaction.
+3. Trace every terminal path for ordinary process, batch element, and skills run, including lease failure, cancellation, spawn failure, and repeated inspection.
+4. Inspect strict decoding at the public call boundary for all 18/30 advertised tools, with special attention to Room protocol request adapters and action-dependent tmux fields.
+5. Measure actual process output bounds and verify terminal log/audit fields and redaction.
+6. Confirm Hub full/coordinator, protocol, documentation, schema budgets, and hidden-worker stdout remain unchanged or compatible.
+7. Run formatting, checks, full isolated workspace tests, real Normal/Room probes, and final clean-status inspection.
+
+**Delivery rule:** Mark the plan `delivered` only when every Phase 8 acceptance item has independent evidence. Any discovered defect reopens Phase 8 or creates one narrowly scoped repair item; do not waive a frozen criterion because tests are otherwise green.
+
+**Commit:** none when review passes; one narrowly evidenced repair commit only when needed.
+- **Status:** pending
 
 ## Acceptance Criteria
 
@@ -581,6 +648,13 @@ These are MCP serialization budgets, not a promise of an exact model-token ratio
 10. Normal descriptor bytes are ≤11,500 and input schemas ≤6,200; Room descriptor bytes are ≤18,000 and input schemas ≤9,600.
 11. Hidden stdio worker stdout remains protocol-only; Normal and Room initialize/list/call smoke tests pass.
 12. Full workspace tests, formatting, checks, documentation inspection, and clean Git status pass before delivery.
+13. An allowed `process.batchExec` invokes the confirmation provider exactly once for the whole batch and never reconfirms individual elements; denied/timed-out confirmation creates no sessions.
+14. Every returned `skills.run` session id, including `skill_update_pending`, is retained and queryable through `process.get`, with exactly one terminal audit and terminal hook.
+15. Tunnel `process.exec` and managed batch elements preserve a 64 KiB-per-stream bound and deterministic truncation beyond it.
+16. `tmux.sessions` and `tmux.panes` reject every action-incompatible supplied field rather than ignoring it.
+17. Every advertised Tunnel adapter strictly rejects unknown fields, including legacy identity/provider fields on Room diary/notebook tools, before side effects or id allocation.
+18. Managed terminal logs include bounded `durationMs`; Tunnel `skills.run` audit records use `tunnel:skills.run`, while Hub skill execution preserves its existing source.
+19. Each repaired gap has a direct regression test or real probe that would fail against `c987e32`; full green suites alone are not sufficient evidence.
 
 ## Implementation Discretion
 
@@ -592,14 +666,15 @@ The implementer may choose private Rust type names, module splits, helper owners
 
 ## Implementation Handoff
 
-- **Plan maturity:** delivered
-- **Design phase:** complete
+- **Plan maturity:** implementation_ready
+- **Design phase:** reopened after independent acceptance review and complete again
 - **Implementation authorized:** yes
-- **Entry phase:** Phase 3 — Generalize the Managed-Process Lifecycle (completed)
-- **Frozen decisions:** D-01 through D-20 (D-04 superseded by D-16)
+- **Entry phase:** Phase 8 — Focused Contract Repair
+- **Frozen decisions:** D-01 through D-23 (D-04 superseded by D-16; D-01–D-20 otherwise unchanged)
 - **Open blocking decisions:** none
-- **Implementation discretion:** see `Implementation Discretion`; private helper/type ownership may vary but cannot change public Tunnel shapes, Hub compatibility, all-or-reject batch admission, lifecycle finalization, or logging/audit limits
-- **Verification convention:** focused tests per phase; full workspace and real hidden stdio Normal/Room probes before delivery
-- **Commit convention:** one focused local Git commit after each verified Phase 3–6; Phase 7 uses only evidenced repair commits
-- **Design checkpoint:** `7f2fc27` (`docs(planning): refine standalone MCP handoff`)
-- **Delivery:** Phases 3–6 are implemented and committed; Phase 7 review is complete. No further implementation phase remains.
+- **Implementation discretion:** private helpers, test fixture design, strict-adapter mechanism, and shared-vs-source-specific tail allocation may vary, but the seven Phase 8 observable outcomes may not change
+- **Verification convention:** direct regression evidence for each gap, then isolated full workspace checks and real hidden stdio Normal/Room probes; Phase 9 uses a fresh reviewer
+- **Commit convention:** one focused Phase 8 repair commit; Phase 9 creates no commit unless new evidence requires a narrow repair
+- **Design checkpoint:** implementation baseline `c987e32`; refreshed planning checkpoint not yet committed
+- **Delivery:** Phases 3–7 remain historical implementation records. Independent review superseded the previous no-repair conclusion; Phases 8–9 remain before delivery.
+- **Next invocation:** `$planning-with-files` without `$refine-implementation-plan`, starting at Phase 8

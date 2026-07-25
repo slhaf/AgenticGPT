@@ -188,3 +188,63 @@ Projected frozen surface:
 ## Decision Rationale — Q-06 / D-20
 - User selected independent continuation after admission. A sibling spawn failure finalizes only its own retained session as `spawn_failed`; already spawned siblings continue and remain controllable through `process.get/kill`.
 - This keeps managed batch semantics aligned with “launch multiple independent `process.exec` calls” and avoids pretending arbitrary command side effects can be rolled back transactionally.
+
+## Independent Acceptance Review — 2026-07-25
+
+### Review baseline and evidence
+- Review baseline is clean `main` at `c987e32` with seven local commits ahead of `origin/main`.
+- Full verification is green: Agent 139, standalone supervisor 2, Hub 61, and protocol 9; formatting, check, and whitespace validation also pass.
+- Green suites do not establish contract conformance here because the missing behaviors were not directly asserted.
+
+### F-01 — Managed batch confirms twice
+- `stdio_server.rs::dispatch_process_batch` calls `request_batch_confirmation` once before creating managed specs.
+- The specs retain `PolicyDecision::Confirm`; `sessions.rs::run_async_session` sees that decision and calls `request_confirmation_cancellable` again for each element.
+- This violates D-17 and the managed batch contract requiring one batch confirmation after preflight and before id allocation.
+
+### F-02 — `skill_update_pending` returns a detached session
+- `sessions.rs::start_skill_session_async_with_hook` returns a terminal `SessionInfo` directly when the shared skill lease cannot be acquired.
+- That record is not inserted into the managed-session map and does not pass through the common finalizer.
+- The returned id therefore becomes `session_not_found` through `process.get`, and terminal audit/hook/report behavior is absent. This violates D-07 and Acceptance 5–6.
+
+### F-03 — Tunnel process output bound regressed to 32 KiB
+- `utils.rs` preserves one-shot `STDOUT_MAX` and `STDERR_MAX` at 64 KiB but sets `SESSION_TAIL_MAX` to 32 KiB.
+- New Tunnel `process.exec` and managed batch elements use `sessions.rs` tail buffers and therefore inherit 32 KiB.
+- The frozen lifecycle contract explicitly forbids reducing the old Tunnel process bound; source-specific or shared 64 KiB repair remains implementation discretion.
+
+### F-04 — Merged tmux actions silently ignore incompatible fields
+- `stdio_server.rs` strictly decodes the broad merged structs but the action branches validate only required fields.
+- Examples: `tmux.sessions(action=list)` ignores `needConfirm`; `create` ignores `needConfirm`; `close` ignores `cwd`; `tmux.panes(action=list)` ignores `target/lines`; `capture` ignores `session`.
+- This violates the frozen conditional-validation contract even though top-level unknown fields are denied.
+
+### F-05 — Managed terminal log omits duration
+- `managed_terminal_event_hook` logs source, profile, state, session id, exit code, and bounded error code.
+- It does not render `durationMs`, while the frozen local logging contract requires duration on the later asynchronous terminal event.
+
+### F-06 — Tunnel skill audit source is not distinguishable
+- The stdio terminal hook uses `tunnel:skills.run`, but `sessions.rs::start_skill_session_async_with_hook` hard-codes the audit `request_source` to `skills.run` for both Tunnel and Hub callers.
+- The final audit cannot distinguish the Tunnel source required by the managed lifecycle contract.
+
+### F-07 — Room diary/notebook adapters accept unknown fields
+- Room stdio dispatch deserializes directly into shared protocol request structs.
+- Those protocol structs use `serde(rename_all = "camelCase")` without `deny_unknown_fields`.
+- An MCP client can therefore supply `agentId`, `agent_id`, `confirmMethod`, or other extra fields and have them ignored. Public descriptors omit the fields, but runtime strict rejection is not implemented for every Tunnel tool as D-02/D-03 require.
+
+## Repair Options and Tradeoffs
+
+### D-21 — Reuse the active plan
+- A separate plan would duplicate the unchanged D-01–D-20 contract and split implementation history from acceptance evidence.
+- Reopening the same plan preserves one canonical contract and makes the false Phase 7 delivery conclusion auditable rather than erased.
+
+### D-22 — Fixed repair scope
+- The seven findings are observable deviations from frozen behavior, not invitations to redesign the surface.
+- Unreachable legacy dispatch/helper cleanup is optional because the advertised-tool gate keeps it non-public; broad cleanup would increase regression risk without closing an acceptance gap.
+
+### D-23 — Commit and review separation
+- One focused repair commit gives the fresh reviewer a clean `c987e32..repair` diff.
+- A separate Phase 9 review restores independence; the Implementer's own green tests are evidence but not the final acceptance authority.
+
+## Risks and Unknowns
+- Raising every managed tail from 32 to 64 KiB increases worst-case in-memory tail storage. With the existing default four active sessions and two streams, this remains bounded; source-specific allocation is allowed if the Implementer prefers tighter memory use.
+- A batch-confirmation repair must preserve audit evidence that a Confirm policy was satisfied. Simply replacing every decision with Allow without retaining the confirmation result would fix prompts but weaken audit semantics.
+- Strict Room adapters should not add `deny_unknown_fields` globally to shared protocol types unless Hub/OpenAPI compatibility is proven; stdio-only wrappers or boundary key validation are safer default seams.
+- No database/config migration, durable restart recovery, new authentication, network behavior, or public versioning choice is introduced by this repair.
