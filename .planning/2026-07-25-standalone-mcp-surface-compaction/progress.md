@@ -186,3 +186,15 @@ Start a later implementation request from Phase 3. Each phase must update all th
 - `cargo test -p agentic-gpt --bin agentic-gpt stdio_server::tests` passed: 7 tests.
 - `cargo test -p agentic-gpt --bin agentic-gpt` passed: 137 tests, including Hub compatibility and all existing Agent tests.
 - Added tests for exact 18/30 counts, Normal bootstrap absence, removed alias rejection, strict `agentId`/`confirmMethod` rejection, quick/long/get/kill/list, managed batch success, and batch admission rejection.
+- Initial `cargo test --workspace` passed the 138 Agent tests but the standalone supervisor fixture failed before worker startup with `runtime_directory_unavailable` under the existing HOME; an isolated HOME confirmed the runtime code and then exposed the fixture's stale `agentId`.
+- Updated `tests/standalone_supervisor.rs` to send the frozen Tunnel process shape without `agentId`; isolated `standalone_supervisor` now passes.
+
+### Phase 5 start
+- Phase 4 committed as `75909ee` (`feat(agent): compact standalone process tools`).
+- Phase 5 now owns the remaining advertised compact names: `mcp.list`, merged skills list/activation, merged tmux actions, and Room-only bootstrap descriptors/dispatch. Hub full/coordinator compatibility remains out of scope.
+
+### Phase 5 verification
+- Added `mcp.list(serverId?)`, strict `mcp.callTool`, merged `skills.list`/`skills.setActive`, strict preserved skill adapters, merged `tmux.sessions`/`tmux.panes`, and strict tmux exec/paste adapters.
+- Moved bootstrap descriptors and strict bootstrap dispatch to Room only; Normal remains method-not-found for bootstrap.
+- `cargo test --workspace` with isolated HOME/runtime state passed: Agent 138 tests, standalone supervisor 1 test, Hub 61 tests, protocol 9 tests, and doc tests.
+- Phase 5 acceptance tests cover exact 18/30 names, no Tunnel `agentId`/`confirmMethod` schema fields, merged result envelopes, Room capability presence, and preserved Hub full/coordinator tests.

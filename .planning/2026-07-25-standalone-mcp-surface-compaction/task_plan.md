@@ -8,8 +8,8 @@ Reduce the public MCP schema exposed by each Tunnel-backed standalone Agent with
 - **Current role:** designer
 - **Implementation authorized:** yes, for a later implementation request
 - **Active plan:** `2026-07-25-standalone-mcp-surface-compaction`
-- **Current phase:** Phase 4 — Replace the Tunnel Process/Session Surface (complete)
-- **Entry phase after handoff:** Phase 5
+- **Current phase:** Phase 5 — Compact MCP, Skills, tmux, and Profile Capabilities (complete)
+- **Entry phase after handoff:** Phase 6
 - **Open blocking decisions:** none
 
 ## Errors Encountered
@@ -19,6 +19,7 @@ Reduce the public MCP schema exposed by each Tunnel-backed standalone Agent with
 | Rust borrow conflict while finalizing after tail-buffer guards | 1 | Scoped tail-buffer reads before invoking the mutable terminal finalizer. |
 | Cargo focused-test invocation rejected multiple positional filters | 1 | Use one `sessions::tests` filter for the focused Phase 3 test run. |
 | Stdio regression tests still asserted the pre-compaction 29/39 tool counts and Normal legacy calls | 1 | Updated tests to the frozen 18/30 surface and `process.list`; added process lifecycle coverage. |
+| Workspace standalone supervisor test exited with `runtime_directory_unavailable` before worker startup | 1 | Reproduced with isolated HOME; runtime setup passed there. The fixture then exposed stale `agentId` in its process call, which was removed; the isolated workspace suite passed. |
 
 ## Scope
 
@@ -518,7 +519,7 @@ These are MCP serialization budgets, not a promise of an exact model-token ratio
 **Verification:** focused protocol tests, `cargo test --workspace`.
 
 **Commit:** `feat(agent): compact standalone MCP surface`
-- **Status:** pending
+- **Status:** complete
 
 ### Phase 6: Local Observability, Documentation, and Schema Budgets
 **Objective / visible outcome:** Standalone execution is visible in local logs, reporting connection state is explicit, and schema compaction is permanently regression-tested and documented.

@@ -163,6 +163,62 @@ impl StdioMcpServer {
             "process.get" => self.dispatch_process_get(arguments).await,
             "process.kill" => self.dispatch_process_kill(arguments).await,
             "process.list" => self.dispatch_process_list(arguments).await,
+            "tmux.sessions" => {
+                let args: TmuxSessionsArgs = from_value(arguments)?;
+                match args.action.as_str() {
+                    "list" if args.name.is_none() && args.cwd.is_none() => {
+                        Ok(crate::tmux::list_sessions().await)
+                    }
+                    "create" => {
+                        let name = args
+                            .name
+                            .ok_or_else(|| anyhow::anyhow!("name is required for create"))?;
+                        let cwd = args
+                            .cwd
+                            .ok_or_else(|| anyhow::anyhow!("cwd is required for create"))?;
+                        Ok(crate::tmux::create_session(
+                            &self.state,
+                            agentic_gpt_protocol::TmuxCreateSessionRequest { name, cwd },
+                        )
+                        .await)
+                    }
+                    "close" => {
+                        let name = args
+                            .name
+                            .ok_or_else(|| anyhow::anyhow!("name is required for close"))?;
+                        Ok(crate::tmux::close_session(
+                            &self.state,
+                            agentic_gpt_protocol::TmuxCloseSessionRequest {
+                                name,
+                                need_confirm: args.need_confirm.unwrap_or(true),
+                            },
+                        )
+                        .await)
+                    }
+                    _ => Err(anyhow::anyhow!("invalid tmux.sessions action")),
+                }
+            }
+            "tmux.panes" => {
+                let args: TmuxPanesArgs = from_value(arguments)?;
+                match args.action.as_str() {
+                    "list" => Ok(crate::tmux::list_panes(
+                        agentic_gpt_protocol::TmuxListPanesRequest {
+                            session: args.session,
+                        },
+                    )
+                    .await),
+                    "capture" => Ok(crate::tmux::capture_pane(
+                        agentic_gpt_protocol::TmuxCapturePaneRequest {
+                            target: args
+                                .target
+                                .ok_or_else(|| anyhow::anyhow!("target is required for capture"))?,
+                            lines: args.lines.unwrap_or(160),
+                        },
+                    )
+                    .await),
+                    _ => Err(anyhow::anyhow!("invalid tmux.panes action")),
+                }
+            }
             "tmux.listSessions" => {
                 self.require_agent(&arguments).await?;
                 dispatch(self, HubCommand::TmuxListSessions { request_id }).await
@@ -190,26 +246,32 @@ impl StdioMcpServer {
                 .await
             }
             "tmux.pasteText" => {
-                self.require_agent(&arguments).await?;
-                dispatch(
-                    self,
-                    HubCommand::TmuxPasteText {
-                        request_id,
-                        payload: from_value(arguments)?,
+                let args: TmuxPasteArgs = from_value(arguments)?;
+                Ok(crate::tmux::paste_text(
+                    &self.state,
+                    agentic_gpt_protocol::TmuxPasteTextRequest {
+                        target: args.target,
+                        text: args.text,
+                        submit: args.submit,
+                        need_confirm: args.need_confirm.unwrap_or(true),
                     },
                 )
-                .await
+                .await)
             }
             "tmux.exec" => {
-                self.require_agent(&arguments).await?;
-                dispatch(
-                    self,
-                    HubCommand::TmuxExec {
-                        request_id,
-                        payload: from_value(arguments)?,
+                let args: TmuxExecArgs = from_value(arguments)?;
+                Ok(crate::tmux::exec(
+                    &self.state,
+                    agentic_gpt_protocol::TmuxExecRequest {
+                        target: args.target,
+                        program: args.program,
+                        args: args.args,
+                        need_confirm: args.need_confirm,
+                        wait_ms: args.wait_ms.unwrap_or(300),
+                        capture_lines: args.capture_lines.unwrap_or(120),
                     },
                 )
-                .await
+                .await)
             }
             "tmux.createSession" => {
                 self.require_agent(&arguments).await?;
@@ -233,6 +295,28 @@ impl StdioMcpServer {
                 )
                 .await
             }
+            "mcp.list" => {
+                let args: McpListArgs = from_value(arguments)?;
+                if let Some(server_id) = args.server_id {
+                    let config = self.state.config.read().await.clone();
+                    match crate::mcp::list_tools(
+                        &self.state,
+                        agentic_gpt_protocol::McpListToolsRequest {
+                            agent_id: config.agent_id,
+                            server_id,
+                        },
+                    )
+                    .await
+                    {
+                        Ok(value) => Ok(value),
+                        Err(error) => Ok(json!({
+                            "error": { "code": "mcp_list_tools_failed", "message": error.to_string() }
+                        })),
+                    }
+                } else {
+                    Ok(crate::mcp::list_servers(&self.state).await)
+                }
+            }
             "mcp.listServers" => {
                 self.require_optional_agent(&arguments).await?;
                 dispatch(self, HubCommand::McpListServers { request_id }).await
@@ -249,34 +333,51 @@ impl StdioMcpServer {
                 .await
             }
             "mcp.callTool" => {
-                self.require_agent(&arguments).await?;
-                dispatch(
-                    self,
-                    HubCommand::McpCallTool {
-                        request_id,
-                        payload: from_value(arguments)?,
+                let args: McpCallArgs = from_value(arguments)?;
+                let config = self.state.config.read().await.clone();
+                match crate::mcp::call_tool(
+                    &self.state,
+                    agentic_gpt_protocol::McpCallToolRequest {
+                        agent_id: config.agent_id,
+                        server_id: args.server_id,
+                        tool_name: args.tool_name,
+                        arguments: args.arguments,
                     },
                 )
                 .await
+                {
+                    Ok(value) => Ok(value),
+                    Err(error) => Ok(json!({
+                        "error": { "code": "mcp_call_tool_failed", "message": error.to_string() }
+                    })),
+                }
             }
-            "bootstrap" => dispatch(self, HubCommand::Bootstrap { request_id }).await,
+            "bootstrap" => {
+                let _: EmptyArgs = from_value(arguments)?;
+                dispatch(self, HubCommand::Bootstrap { request_id }).await
+            }
             "bootstrap.read" => {
+                let args: BootstrapReadArgs = from_value(arguments)?;
                 dispatch(
                     self,
                     HubCommand::BootstrapRead {
                         request_id,
-                        payload: from_value(arguments)?,
+                        payload: agentic_gpt_protocol::BootstrapReadRequest { id: args.id },
                     },
                 )
                 .await
             }
-            "skills.list" => dispatch(self, HubCommand::SkillsList { request_id }).await,
+            "skills.list" => self.dispatch_skills_list(arguments).await,
             "skills.read" => {
+                let args: SkillReadArgs = from_value(arguments)?;
                 dispatch(
                     self,
                     HubCommand::SkillsRead {
                         request_id,
-                        payload: from_value(arguments)?,
+                        payload: agentic_gpt_protocol::SkillReadRequest {
+                            id: args.id,
+                            path: args.path,
+                        },
                     },
                 )
                 .await
@@ -292,6 +393,16 @@ impl StdioMcpServer {
                 .await
             }
             "skills.active" => dispatch(self, HubCommand::SkillsActive { request_id }).await,
+            "skills.setActive" => {
+                let args: SkillSetActiveArgs = from_value(arguments)?;
+                let request = agentic_gpt_protocol::SkillActivationRequest { id: args.id };
+                let result = if args.active {
+                    crate::skills::activate(&self.state, request).await
+                } else {
+                    crate::skills::deactivate(&self.state, request).await
+                };
+                map_result_value(result, "skills_set_active_failed")
+            }
             "skills.activate" => {
                 dispatch(
                     self,
@@ -313,42 +424,63 @@ impl StdioMcpServer {
                 .await
             }
             "skills.install" => {
+                let args: SkillInstallArgs = from_value(arguments)?;
                 dispatch(
                     self,
                     HubCommand::SkillsInstall {
                         request_id,
-                        payload: from_value(arguments)?,
+                        payload: agentic_gpt_protocol::SkillInstallRequest {
+                            id: args.id,
+                            source: args.source,
+                            replace_existing: args.replace_existing,
+                            activate_after_install: args.activate_after_install,
+                            idempotency_key: args.idempotency_key,
+                        },
                     },
                 )
                 .await
             }
             "skills.install.get" => {
+                let args: SkillInstallGetArgs = from_value(arguments)?;
                 dispatch(
                     self,
                     HubCommand::SkillsInstallGet {
                         request_id,
-                        payload: from_value(arguments)?,
+                        payload: agentic_gpt_protocol::SkillInstallGetRequest {
+                            install_id: args.install_id,
+                            wait_seconds: args.wait_seconds,
+                        },
                     },
                 )
                 .await
             }
             "skills.install.cancel" => {
+                let args: SkillInstallCancelArgs = from_value(arguments)?;
                 dispatch(
                     self,
                     HubCommand::SkillsInstallCancel {
                         request_id,
-                        payload: from_value(arguments)?,
+                        payload: agentic_gpt_protocol::SkillInstallCancelRequest {
+                            install_id: args.install_id,
+                        },
                     },
                 )
                 .await
             }
             "skills.run" => {
+                let args: SkillRunArgs = from_value(arguments)?;
                 let mut value = dispatch(
                     self,
                     HubCommand::SkillsRun {
                         request_id,
                         session_id: task_id("sess"),
-                        payload: from_value(arguments)?,
+                        payload: agentic_gpt_protocol::SkillRunRequest {
+                            id: args.id,
+                            path: args.path,
+                            args: args.args,
+                            working_directory: args.working_directory,
+                            wait_seconds: args.wait_seconds,
+                        },
                     },
                 )
                 .await?;
@@ -731,6 +863,73 @@ impl StdioMcpServer {
         }))
     }
 
+    async fn dispatch_skills_list(&self, arguments: Value) -> Result<Value> {
+        let args: SkillListArgs = from_value(arguments)?;
+        let active = match crate::skills::active(&self.state).await {
+            Ok(active) => active,
+            Err(error) => {
+                return Ok(json!({
+                    "error": { "code": "skills_list_failed", "message": error.to_string() }
+                }))
+            }
+        };
+        let mut warnings = active.warnings.clone();
+        let mut skills = if args
+            .query
+            .as_deref()
+            .is_some_and(|query| !query.trim().is_empty())
+        {
+            match crate::skills::search(
+                &self.state,
+                agentic_gpt_protocol::SkillSearchRequest {
+                    query: args.query.clone().unwrap_or_default(),
+                    limit: args.limit,
+                },
+            )
+            .await
+            {
+                Ok(response) => {
+                    warnings.extend(response.warnings);
+                    response.skills
+                }
+                Err(error) => {
+                    return Ok(json!({
+                        "error": { "code": "skills_list_failed", "message": error.to_string() }
+                    }));
+                }
+            }
+        } else {
+            match crate::skills::list(&self.state).await {
+                Ok(response) => {
+                    warnings.extend(response.warnings);
+                    response.skills
+                }
+                Err(error) => {
+                    return Ok(json!({
+                        "error": { "code": "skills_list_failed", "message": error.to_string() }
+                    }));
+                }
+            }
+        };
+        if args.active_only {
+            skills.retain(|skill| skill.active);
+        }
+        if args
+            .query
+            .as_deref()
+            .is_none_or(|query| query.trim().is_empty())
+        {
+            if let Some(limit) = args.limit {
+                skills.truncate(limit.clamp(1, 100));
+            }
+        }
+        Ok(json!({
+            "skills": skills,
+            "activeSkills": active.active_skills,
+            "warnings": warnings,
+        }))
+    }
+
     async fn require_agent(&self, arguments: &Value) -> Result<()> {
         let supplied = arguments
             .get("agentId")
@@ -879,6 +1078,144 @@ struct TunnelBatchResponse {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct EmptyArgs {}
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct McpListArgs {
+    #[serde(default)]
+    server_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct McpCallArgs {
+    server_id: String,
+    tool_name: String,
+    #[serde(default)]
+    arguments: Value,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SkillListArgs {
+    #[serde(default)]
+    query: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    active_only: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SkillReadArgs {
+    id: String,
+    #[serde(default)]
+    path: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SkillSetActiveArgs {
+    id: String,
+    active: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SkillRunArgs {
+    id: String,
+    path: String,
+    #[serde(default)]
+    args: Option<Vec<String>>,
+    #[serde(default)]
+    working_directory: Option<String>,
+    #[serde(default)]
+    wait_seconds: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SkillInstallArgs {
+    id: String,
+    source: agentic_gpt_protocol::SkillInstallSource,
+    #[serde(default)]
+    replace_existing: bool,
+    #[serde(default)]
+    activate_after_install: Option<bool>,
+    #[serde(default)]
+    idempotency_key: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SkillInstallGetArgs {
+    install_id: String,
+    #[serde(default)]
+    wait_seconds: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SkillInstallCancelArgs {
+    install_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BootstrapReadArgs {
+    id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TmuxSessionsArgs {
+    action: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
+    need_confirm: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TmuxPanesArgs {
+    action: String,
+    #[serde(default)]
+    session: Option<String>,
+    #[serde(default)]
+    target: Option<String>,
+    #[serde(default)]
+    lines: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TmuxExecArgs {
+    target: String,
+    program: String,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    need_confirm: bool,
+    #[serde(default)]
+    wait_ms: Option<u64>,
+    #[serde(default)]
+    capture_lines: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TmuxPasteArgs {
+    target: String,
+    text: String,
+    #[serde(default)]
+    submit: bool,
+    #[serde(default)]
+    need_confirm: Option<bool>,
+}
+
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ManagedProcessResponse {
@@ -985,6 +1322,15 @@ fn from_value<T: DeserializeOwned>(value: Value) -> Result<T> {
     serde_json::from_value(value).map_err(Into::into)
 }
 
+fn map_result_value<T: serde::Serialize>(result: Result<T>, code: &str) -> Result<Value> {
+    match result {
+        Ok(value) => Ok(serde_json::to_value(value)?),
+        Err(error) => Ok(json!({
+            "error": { "code": code, "message": error.to_string() }
+        })),
+    }
+}
+
 fn request_id() -> String {
     task_id("req")
 }
@@ -1018,14 +1364,16 @@ fn tool_schema(name: &str) -> (Map<String, Value>, &'static [&'static str]) {
         "process.batchExec" => &["elements"],
         "process.get" => &["sessionId"],
         "process.kill" => &["sessionId"],
+        "mcp.callTool" => &["serverId", "toolName"],
+        "skills.setActive" => &["id", "active"],
+        "tmux.sessions" | "tmux.panes" => &["action"],
+        "tmux.exec" => &["target", "program"],
+        "tmux.pasteText" => &["target", "text"],
         "tmux.listPanes" => &["agentId"],
         "tmux.capturePane" => &["agentId", "target"],
-        "tmux.pasteText" => &["agentId", "target", "text"],
-        "tmux.exec" => &["agentId", "target", "program"],
         "tmux.createSession" => &["agentId", "name", "cwd"],
         "tmux.closeSession" => &["agentId", "name"],
         "mcp.listTools" => &["agentId", "serverId"],
-        "mcp.callTool" => &["agentId", "serverId", "toolName"],
         "bootstrap.read" => &["id"],
         "skills.read" => &["id"],
         "skills.search" => &["query"],
@@ -1058,16 +1406,14 @@ fn properties_for(name: &str) -> Map<String, Value> {
         name,
         "tmux.listPanes"
             | "tmux.capturePane"
-            | "tmux.pasteText"
-            | "tmux.exec"
             | "tmux.createSession"
             | "tmux.closeSession"
             | "mcp.listTools"
-            | "mcp.callTool"
     ) {
         add("agentId", string("Target local agent id."));
     }
     match name {
+        "mcp.list" => add("serverId", string("Optional configured MCP server id.")),
         "process.exec" => {
             add("program", string("Executable name or path."));
             add("args", strings("Direct argument vector."));
@@ -1116,6 +1462,27 @@ fn properties_for(name: &str) -> Map<String, Value> {
         "process.kill" => {
             add("sessionId", string("Managed session id."));
         }
+        "tmux.sessions" => {
+            add(
+                "action",
+                json!({"type": "string", "enum": ["list", "create", "close"]}),
+            );
+            add("name", string("tmux session name for create or close."));
+            add("cwd", string("Working directory for create."));
+            add(
+                "needConfirm",
+                boolean("Request confirmation before closing."),
+            );
+        }
+        "tmux.panes" => {
+            add(
+                "action",
+                json!({"type": "string", "enum": ["list", "capture"]}),
+            );
+            add("session", string("Optional tmux session name for list."));
+            add("target", string("tmux pane target for capture."));
+            add("lines", number("History lines for capture, default 160."));
+        }
         "tmux.listPanes" => add("session", string("Optional tmux session name.")),
         "tmux.capturePane" => {
             add("target", string("tmux pane target."));
@@ -1160,6 +1527,18 @@ fn properties_for(name: &str) -> Map<String, Value> {
             );
         }
         "bootstrap.read" => add("id", string("Guide id returned by bootstrap.")),
+        "skills.list" => {
+            add("query", string("Optional case-insensitive skill query."));
+            add("limit", number("Maximum skills returned."));
+            add(
+                "activeOnly",
+                boolean("Return only valid active skill summaries."),
+            );
+        }
+        "skills.setActive" => {
+            add("id", string("Skill id."));
+            add("active", boolean("Whether the skill should be active."));
+        }
         "skills.read" => {
             add("id", string("Skill id."));
             add("path", string("Optional package-relative resource path."));
@@ -1298,7 +1677,9 @@ fn tool_description(name: &str) -> String {
         "session.wait" => "Wait for a managed session with a bounded timeout.".to_string(),
         "session.kill" => "Kill a managed session.".to_string(),
         "tmux.listSessions" => "List persistent tmux sessions.".to_string(),
+        "tmux.sessions" => "List, create, or close tmux sessions.".to_string(),
         "tmux.listPanes" => "List tmux panes.".to_string(),
+        "tmux.panes" => "List or capture tmux panes.".to_string(),
         "tmux.capturePane" => "Capture bounded tmux pane history.".to_string(),
         "tmux.pasteText" => "Paste text into a tmux pane.".to_string(),
         "tmux.exec" => "Submit a command to a tmux shell pane.".to_string(),
@@ -1306,10 +1687,12 @@ fn tool_description(name: &str) -> String {
         "tmux.closeSession" => "Close a tmux session.".to_string(),
         "mcp.listServers" => "List configured downstream MCP servers.".to_string(),
         "mcp.listTools" => "List tools exposed by a downstream MCP server.".to_string(),
+        "mcp.list" => "List configured MCP servers or one server's tools.".to_string(),
         "mcp.callTool" => "Call a downstream MCP tool.".to_string(),
         "bootstrap" => "Load the local bootstrap manifest.".to_string(),
         "bootstrap.read" => "Read one local bootstrap guide.".to_string(),
         "skills.list" => "List local skills.".to_string(),
+        "skills.setActive" => "Activate or deactivate one local skill.".to_string(),
         "skills.read" => "Read a local skill or resource.".to_string(),
         "skills.search" => "Search local skills.".to_string(),
         "skills.active" => "List active local skills.".to_string(),
@@ -1340,6 +1723,7 @@ fn tool_is_read_only(name: &str) -> bool {
             | "process.batchExec"
             | "session.kill"
             | "process.kill"
+            | "tmux.sessions"
             | "tmux.pasteText"
             | "tmux.exec"
             | "tmux.createSession"
@@ -1362,10 +1746,12 @@ fn tool_is_destructive(name: &str) -> bool {
         name,
         "session.kill"
             | "process.kill"
+            | "tmux.sessions"
             | "tmux.closeSession"
             | "room.notebook.remove"
             | "skills.install"
             | "skills.install.cancel"
+            | "skills.setActive"
             | "skills.run"
     )
 }
@@ -1375,6 +1761,7 @@ fn tool_is_open_world(name: &str) -> bool {
         name,
         "process.exec"
             | "process.batchExec"
+            | "tmux.sessions"
             | "mcp.callTool"
             | "tmux.pasteText"
             | "tmux.exec"
@@ -1429,6 +1816,13 @@ mod tests {
             expected.sort();
             expected
         });
+        let serialized = serde_json::to_string(&normal.tools).unwrap();
+        assert!(!serialized.contains("agentId"));
+        assert!(!serialized.contains("confirmMethod"));
+        assert!(serialized.contains("mcp.list"));
+        assert!(serialized.contains("skills.setActive"));
+        assert!(serialized.contains("tmux.sessions"));
+        assert!(serialized.contains("tmux.panes"));
     }
 
     #[tokio::test]
@@ -1629,6 +2023,27 @@ mod tests {
         assert!(notebook["passages"].is_array());
         let diary = server.dispatch("room.diary.recent", json!({})).await?;
         assert!(diary["entries"].is_array());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn compact_mcp_skills_and_tmux_adapters_preserve_result_envelopes() -> anyhow::Result<()>
+    {
+        let server = StdioMcpServer::new(test_state(CapabilityProfile::Normal));
+        let mcp = server.dispatch("mcp.list", json!({})).await?;
+        assert!(mcp["servers"].is_array());
+        let skills = server.dispatch("skills.list", json!({})).await?;
+        assert!(skills["skills"].is_array());
+        assert!(skills["activeSkills"].is_array());
+        assert!(skills["warnings"].is_array());
+        let panes = server
+            .dispatch("tmux.panes", json!({"action": "list"}))
+            .await?;
+        assert!(panes.get("panes").is_some() || panes.get("error").is_some());
+        let sessions = server
+            .dispatch("tmux.sessions", json!({"action": "list"}))
+            .await?;
+        assert!(sessions.get("sessions").is_some() || sessions.get("error").is_some());
         Ok(())
     }
 

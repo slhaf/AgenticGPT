@@ -21,6 +21,7 @@
 - Batch admission failures create no sessions; validation failures preserve ordered rejected/skipped evidence. Post-admission spawn failures remain isolated to their own retained session while siblings continue.
 - Removed Tunnel process/session aliases are rejected by the existing advertised-tool gate as method-not-found. Strict `deny_unknown_fields` rejects both `agentId` and `confirmMethod` before managed session allocation.
 - Hub full/coordinator tests remain green after the Tunnel adapter bypassed Hub `Exec`/`BatchExec`; the shared Hub protocol commands were not changed.
+- The real standalone supervisor fixture had to be migrated with the intentional Tunnel break: its fake `process.exec` call no longer supplies `agentId`. With an isolated HOME for runtime state, the full workspace suite passes.
 
 ## Current Tunnel Tool Construction
 - `crates/agentic-gpt/src/stdio_server.rs` owns a manually generated descriptor table, schemas, descriptions, annotations, profile tool lists, dispatch, and run reporting.

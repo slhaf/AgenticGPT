@@ -83,7 +83,6 @@ fn run_smoke(root: &Path) -> Result<(), String> {
     let (health_port, stop_health, health_thread) = start_health_server()?;
     let script = fake_tunnel_script(
         health_port,
-        &agent_id,
         &response_path,
         &worker_stderr_path,
         &marker_path,
@@ -139,7 +138,6 @@ fn read_optional(path: &Path) -> String {
 
 fn fake_tunnel_script(
     health_port: u16,
-    agent_id: &str,
     response_path: &Path,
     worker_stderr_path: &Path,
     marker_path: &Path,
@@ -166,7 +164,6 @@ fn fake_tunnel_script(
         "params": {
             "name": "process.exec",
             "arguments": {
-                "agentId": agent_id,
                 "program": "/usr/bin/printf",
                 "args": ["standalone-e2e-ok"]
             }
