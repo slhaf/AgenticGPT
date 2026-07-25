@@ -258,6 +258,10 @@ async fn connect_reporting_websocket(state: AppState, config: Config) -> Result<
             .into_iter()
             .collect(),
     })?;
+    log_info(format!(
+        "hub reporting connected; transport=websocket; agentId={}",
+        config.agent_id
+    ));
     send_current_session_snapshots(&state, &event_tx).await;
     let mut heartbeat = tokio::time::interval(Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -287,6 +291,7 @@ async fn connect_reporting_websocket(state: AppState, config: Config) -> Result<
     }
     writer.abort();
     clear_reporting_senders(&state, &control_tx, &event_tx).await;
+    log_info("hub reporting disconnected; transport=websocket".to_string());
     Ok(())
 }
 
@@ -351,6 +356,10 @@ async fn connect_reporting_sse(state: AppState, config: Config) -> Result<()> {
             .into_iter()
             .collect(),
     })?;
+    log_info(format!(
+        "hub reporting connected; transport=sse; agentId={}",
+        config.agent_id
+    ));
     send_current_session_snapshots(&state, &event_tx).await;
     let heartbeat_tx = control_tx.clone();
     let heartbeat = tokio::spawn(async move {
@@ -396,6 +405,7 @@ async fn connect_reporting_sse(state: AppState, config: Config) -> Result<()> {
     writer.abort();
     heartbeat.abort();
     clear_reporting_senders(&state, &control_tx, &event_tx).await;
+    log_info("hub reporting disconnected; transport=sse".to_string());
     Ok(())
 }
 
@@ -1766,7 +1776,7 @@ async fn wait_for_skill_session(
     sessions::wait_for_session(state, info, wait_seconds).await
 }
 
-fn skill_run_command_error(error: anyhow::Error) -> serde_json::Value {
+pub(crate) fn skill_run_command_error(error: anyhow::Error) -> serde_json::Value {
     let message = error.to_string();
     let code = match message.as_str() {
         "invalid_id"

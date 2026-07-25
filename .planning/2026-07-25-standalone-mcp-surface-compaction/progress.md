@@ -198,3 +198,26 @@ Start a later implementation request from Phase 3. Each phase must update all th
 - Moved bootstrap descriptors and strict bootstrap dispatch to Room only; Normal remains method-not-found for bootstrap.
 - `cargo test --workspace` with isolated HOME/runtime state passed: Agent 138 tests, standalone supervisor 1 test, Hub 61 tests, protocol 9 tests, and doc tests.
 - Phase 5 acceptance tests cover exact 18/30 names, no Tunnel `agentId`/`confirmMethod` schema fields, merged result envelopes, Room capability presence, and preserved Hub full/coordinator tests.
+
+### Phase 6 start
+- Phase 5 committed as `02f025d` (`feat(agent): compact standalone MCP surface`).
+- Phase 6 now owns safe stdio lifecycle logs, managed terminal hook rendering, reporting connection transitions, schema byte ceilings, standalone docs, and real hidden-worker Normal/Room smoke.
+
+### Phase 6 verification
+- Added stderr-only bounded stdio lifecycle records for every standalone tool call, including run id, tool, profile, status, duration, safe session/exit metadata, and bounded error codes; raw arguments, results, paths, secrets, and process output are not rendered.
+- Bound the shared managed terminal hook to Tunnel process and skill starts, including each managed batch element, so asynchronous terminal completion is logged once by the existing finalizer.
+- Added explicit successful connected and normal disconnected logs for both Hub reporting WebSocket and SSE transports; retry/failure behavior remains unchanged.
+- Added serialized Normal/Room descriptor and summed input-schema ceilings of 11,500/6,200 and 18,000/9,600 bytes, alongside the exact no-`agentId`/no-`confirmMethod` schema assertions.
+- Updated `docs/standalone-runtime.md` with the exact 18/30 matrix, strict Tunnel input behavior, managed response/batch semantics, local log privacy, and Normal/Room hidden-worker verification scope.
+- Extended the real supervisor smoke to Normal and Room; both initialize, list, and call through the hidden worker successfully under isolated runtime HOME.
+- Verification passed: isolated `cargo test -p agentic-gpt` (139 unit tests plus 2 standalone supervisor tests), `cargo fmt --all`, and `git diff --check`. The same supervisor test is known to fail before startup with `runtime_directory_unavailable` under the host HOME; isolated HOME is the supported deterministic gate.
+- Phase 6 committed product, test, documentation, and planning changes are pending the final Phase 7 review commit boundary.
+
+### Phase 7 review and delivery
+- Reviewed the final diff against D-01 through D-20: Tunnel-only compaction is isolated from Hub full/coordinator routing and compatibility surfaces; no generic RPC or cross-Agent selection was introduced.
+- Verified the final advertised sets remain exactly Normal 18 and Room 30, with Room-only bootstrap and strict rejection of Tunnel `agentId`/`confirmMethod` inputs.
+- Verified the managed process wrapper, per-element batch sessions, shared waits, retained failures, terminal hook ownership, and direct Tunnel `skills.run` adapter preserve the frozen lifecycle contract.
+- Verified documentation has no stale Tunnel `session.*`, old compacted MCP/skills/tmux names, or Normal bootstrap claim; the remaining `session.start`/`hub.session.*` references are explicitly Hub/general path-policy material.
+- Final verification passed: `cargo fmt --all -- --check`, `git diff --check`, isolated `cargo check --workspace`, and isolated `cargo test --workspace` (Agent 139, supervisor 2, Hub 61, protocol 9, doc tests 0).
+- Phase 6 delivery commit: the focused `docs(agent): document compact standalone tools` commit (amended once for final plan-state reconciliation). Final worktree is clean; no repair commit was needed.
+- Phase 7 is complete. The active plan is delivered with no open blockers or remaining implementation work.

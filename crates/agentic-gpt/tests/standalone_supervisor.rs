@@ -17,12 +17,21 @@ use uuid::Uuid;
 fn supervisor_launches_real_worker_and_completes_local_mcp_call() {
     let root = std::env::temp_dir().join(format!("agentic-standalone-e2e-{}", Uuid::new_v4()));
     fs::create_dir_all(&root).unwrap();
-    let result = run_smoke(&root);
+    let result = run_smoke(&root, "normal");
     let _ = fs::remove_dir_all(&root);
     result.unwrap();
 }
 
-fn run_smoke(root: &Path) -> Result<(), String> {
+#[test]
+fn supervisor_launches_real_room_worker_and_advertises_room_surface() {
+    let root = std::env::temp_dir().join(format!("agentic-standalone-room-e2e-{}", Uuid::new_v4()));
+    fs::create_dir_all(&root).unwrap();
+    let result = run_smoke(&root, "room");
+    let _ = fs::remove_dir_all(&root);
+    result.unwrap();
+}
+
+fn run_smoke(root: &Path, profile: &str) -> Result<(), String> {
     let binary = std::env::var("CARGO_BIN_EXE_agentic-gpt")
         .or_else(|_| std::env::var("CARGO_BIN_EXE_agentic_gpt"))
         .map(PathBuf::from)
@@ -96,6 +105,8 @@ fn run_smoke(root: &Path) -> Result<(), String> {
             "run-as-standalone",
             "--config",
             config_path.to_str().unwrap(),
+            "--profile",
+            profile,
         ])
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -129,6 +140,17 @@ fn run_smoke(root: &Path) -> Result<(), String> {
             "worker response did not contain tool output: {response}"
         ));
     }
+    let room_tool = "room.diary.append";
+    if profile == "room" && !response.contains(room_tool) {
+        return Err(format!(
+            "room worker response did not advertise Room tools: {response}"
+        ));
+    }
+    if profile == "normal" && response.contains(room_tool) {
+        return Err(format!(
+            "Normal worker response advertised a Room tool: {response}"
+        ));
+    }
     Ok(())
 }
 
@@ -157,9 +179,15 @@ fn fake_tunnel_script(
         "method": "notifications/initialized",
         "params": {}
     });
-    let call = json!({
+    let list = json!({
         "jsonrpc": "2.0",
         "id": 2,
+        "method": "tools/list",
+        "params": {}
+    });
+    let call = json!({
+        "jsonrpc": "2.0",
+        "id": 3,
         "method": "tools/call",
         "params": {
             "name": "process.exec",
@@ -169,12 +197,13 @@ fn fake_tunnel_script(
             }
         }
     });
+    let requests = format!("{}\n{}", list, call);
     format!(
         "#!/bin/sh\nset -eu\nmode=\"$1\"\nhealth_url_file=\"\"\nmcp_binding=\"\"\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = \"--health.url-file\" ]; then shift; health_url_file=\"$1\"; fi\n  if [ \"$1\" = \"--mcp.command\" ]; then shift; mcp_binding=\"$1\"; fi\n  shift\ndone\nworker=\"${{mcp_binding#*command=}}\"\nfirst=\"$(printf '%.1s' \"$worker\")\"\nif [ \"$first\" = '\"' ] || [ \"$first\" = \"'\" ]; then printf 'invalid whole-command quoting\\n' >&2; exit 23; fi\nif [ \"$mode\" = \"doctor\" ]; then exit 0; fi\nprintf 'http://127.0.0.1:{health_port}\\n' > \"$health_url_file\"\nrequest_initialize={initialize}\nrequest_initialized={initialized}\nrequest_call={call}\nprintf '%s\\n%s\\n%s\\n' \"$request_initialize\" \"$request_initialized\" \"$request_call\" | sh -c \"$worker\" > {response} 2> {worker_stderr} || true\nif grep -q 'standalone-e2e-ok' {response}; then touch {marker}; fi\nsleep 60\n",
         health_port = health_port,
         initialize = sh_quote(&initialize.to_string()),
         initialized = sh_quote(&initialized.to_string()),
-        call = sh_quote(&call.to_string()),
+        call = sh_quote(&requests),
         response = sh_quote(&response_path.to_string_lossy()),
         worker_stderr = sh_quote(&worker_stderr_path.to_string_lossy()),
         marker = sh_quote(&marker_path.to_string_lossy()),

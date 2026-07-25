@@ -103,6 +103,10 @@ impl StdioMcpServer {
         let run_id = task_id("run");
         let report_request_id = task_id("req");
         let started_at = Utc::now();
+        crate::utils::log_info(format!(
+            "stdio_tool; runId={run_id}; tool={name}; profile={}; status=started",
+            self.state.runtime.profile.label()
+        ));
         crate::hub::report_tool_arguments(
             &self.state,
             &run_id,
@@ -114,6 +118,12 @@ impl StdioMcpServer {
         let value = match self.dispatch(&name, arguments).await {
             Ok(value) => value,
             Err(error) => {
+                crate::utils::log_info(format!(
+                    "stdio_tool; runId={run_id}; tool={name}; profile={}; status=failed; durationMs={}; errorCode={}",
+                    self.state.runtime.profile.label(),
+                    (Utc::now() - started_at).num_milliseconds().max(0),
+                    bounded_error_code(&error.to_string())
+                ));
                 crate::hub::report_run_event(
                     &self.state,
                     &run_id,
@@ -141,6 +151,24 @@ impl StdioMcpServer {
             .and_then(|error| error.get("message"))
             .and_then(Value::as_str)
             .map(str::to_string);
+        let session_id = session.as_ref().map(|session| session.session_id.as_str());
+        let exit_code = session.as_ref().and_then(|session| session.exit_code);
+        let mut lifecycle = format!(
+            "stdio_tool; runId={run_id}; tool={name}; profile={}; status={}; durationMs={}",
+            self.state.runtime.profile.label(),
+            if is_error { "failed" } else { "completed" },
+            (Utc::now() - started_at).num_milliseconds().max(0),
+        );
+        if let Some(session_id) = session_id {
+            lifecycle.push_str(&format!("; sessionId={session_id}"));
+        }
+        if let Some(exit_code) = exit_code {
+            lifecycle.push_str(&format!("; exitCode={exit_code}"));
+        }
+        if let Some(reason) = reason.as_deref() {
+            lifecycle.push_str(&format!("; errorCode={}", bounded_error_code(reason)));
+        }
+        crate::utils::log_info(lifecycle);
         crate::hub::report_run_event(
             &self.state,
             &run_id,
@@ -467,28 +495,7 @@ impl StdioMcpServer {
                 )
                 .await
             }
-            "skills.run" => {
-                let args: SkillRunArgs = from_value(arguments)?;
-                let mut value = dispatch(
-                    self,
-                    HubCommand::SkillsRun {
-                        request_id,
-                        session_id: task_id("sess"),
-                        payload: agentic_gpt_protocol::SkillRunRequest {
-                            id: args.id,
-                            path: args.path,
-                            args: args.args,
-                            working_directory: args.working_directory,
-                            wait_seconds: args.wait_seconds,
-                        },
-                    },
-                )
-                .await?;
-                if let Some(object) = value.as_object_mut() {
-                    object.remove("agentId");
-                }
-                Ok(value)
-            }
+            "skills.run" => self.dispatch_skill_run(arguments).await,
             "room.notebook.append" => {
                 dispatch(
                     self,
@@ -596,6 +603,8 @@ impl StdioMcpServer {
     async fn dispatch_process_exec(&self, arguments: Value) -> Result<Value> {
         let args: ProcessExecArgs = from_value(arguments)?;
         let config = self.state.config.read().await.clone();
+        let terminal_event_hook =
+            managed_terminal_event_hook(self.state.runtime.profile, "tunnel:process.exec");
         let session_id = task_id("sess");
         let info = crate::sessions::start_managed_session_async(
             self.state.clone(),
@@ -608,7 +617,10 @@ impl StdioMcpServer {
                 confirm_method: None,
                 working_directory: args.working_directory,
             },
-            crate::sessions::ManagedSessionOptions::for_source("tunnel:process.exec"),
+            crate::sessions::ManagedSessionOptions {
+                terminal_event_hook: Some(terminal_event_hook),
+                ..crate::sessions::ManagedSessionOptions::for_source("tunnel:process.exec")
+            },
         )
         .await;
         let info = crate::sessions::wait_for_session(
@@ -750,6 +762,8 @@ impl StdioMcpServer {
         }
 
         let agent_id = config.agent_id;
+        let terminal_event_hook =
+            managed_terminal_event_hook(self.state.runtime.profile, "tunnel:process.batchExec");
         let specs = prepared
             .into_iter()
             .map(|element| crate::sessions::ManagedProcessSpec {
@@ -768,6 +782,7 @@ impl StdioMcpServer {
                 working_directory: element.resolved_working_directory,
                 decision: element.decision,
                 request_source: "tunnel:process.batchExec".to_string(),
+                terminal_event_hook: Some(terminal_event_hook.clone()),
             })
             .collect::<Vec<_>>();
         let infos =
@@ -861,6 +876,53 @@ impl StdioMcpServer {
         Ok(json!({
             "sessions": crate::sessions::current_sessions(&self.state).await,
         }))
+    }
+
+    async fn dispatch_skill_run(&self, arguments: Value) -> Result<Value> {
+        let args: SkillRunArgs = from_value(arguments)?;
+        let request = agentic_gpt_protocol::SkillRunRequest {
+            id: args.id,
+            path: args.path,
+            args: args.args,
+            working_directory: args.working_directory,
+            wait_seconds: args.wait_seconds,
+        };
+        let program = match crate::skills::resolve_run_program(&self.state, &request).await {
+            Ok(program) => program,
+            Err(error) => return Ok(crate::hub::skill_run_command_error(error)),
+        };
+        let config = self.state.config.read().await.clone();
+        if let Some(working_directory) = request.working_directory.as_deref() {
+            if let Err(reason) =
+                crate::exec::resolve_working_directory(&config, Some(working_directory))
+            {
+                return Ok(json!({
+                    "error": { "code": "invalid_working_directory", "message": reason }
+                }));
+            }
+        }
+        let wait_seconds = request.effective_wait_seconds();
+        let info = crate::sessions::start_skill_session_async_with_hook(
+            self.state.clone(),
+            task_id("sess"),
+            ExecRequest {
+                agent_id: config.agent_id,
+                program: program.to_string_lossy().to_string(),
+                args: request.args.unwrap_or_default(),
+                need_confirm: false,
+                confirm_method: None,
+                working_directory: request.working_directory,
+            },
+            &request.id,
+            &request.path,
+            Some(managed_terminal_event_hook(
+                self.state.runtime.profile,
+                "tunnel:skills.run",
+            )),
+        )
+        .await;
+        let info = crate::sessions::wait_for_session(&self.state, info, wait_seconds).await;
+        Ok(managed_process_response(info))
     }
 
     async fn dispatch_skills_list(&self, arguments: Value) -> Result<Value> {
@@ -1337,6 +1399,36 @@ fn request_id() -> String {
 
 fn task_id(prefix: &str) -> String {
     format!("{prefix}_{}", Uuid::new_v4().simple())
+}
+
+fn bounded_error_code(value: &str) -> String {
+    let candidate = value
+        .split(|character: char| {
+            !character.is_ascii_alphanumeric() && character != '_' && character != '-'
+        })
+        .find(|part| !part.is_empty())
+        .unwrap_or("tool_error");
+    candidate.chars().take(64).collect()
+}
+
+fn managed_terminal_event_hook(
+    profile: CapabilityProfile,
+    source: &'static str,
+) -> crate::sessions::TerminalEventHook {
+    let profile = profile.label();
+    Arc::new(move |session| {
+        let mut message = format!(
+            "managed_session; source={source}; profile={profile}; status={}; sessionId={}",
+            session.state, session.session_id
+        );
+        if let Some(exit_code) = session.exit_code {
+            message.push_str(&format!("; exitCode={exit_code}"));
+        }
+        if let Some(reason) = session.reject_reason.as_deref() {
+            message.push_str(&format!("; errorCode={}", bounded_error_code(reason)));
+        }
+        crate::utils::log_info(message);
+    })
 }
 
 fn tool_descriptor(name: &str) -> Tool {
@@ -1823,6 +1915,34 @@ mod tests {
         assert!(serialized.contains("skills.setActive"));
         assert!(serialized.contains("tmux.sessions"));
         assert!(serialized.contains("tmux.panes"));
+    }
+
+    #[test]
+    fn compact_tool_schema_budgets_hold() {
+        let normal = StdioMcpServer::new(test_state(CapabilityProfile::Normal));
+        let room = StdioMcpServer::new(test_state(CapabilityProfile::Room));
+        for (label, tools, max_total, max_inputs) in [
+            ("normal", normal.tools.as_ref(), 11_500usize, 6_200usize),
+            ("room", room.tools.as_ref(), 18_000usize, 9_600usize),
+        ] {
+            let serialized = serde_json::to_vec(tools).unwrap();
+            let input_bytes = tools
+                .iter()
+                .map(|tool| {
+                    let value = serde_json::to_value(tool).unwrap();
+                    serde_json::to_vec(&value["inputSchema"]).unwrap().len()
+                })
+                .sum::<usize>();
+            assert!(
+                serialized.len() <= max_total,
+                "{label} tool schemas use {} bytes, budget is {max_total}",
+                serialized.len()
+            );
+            assert!(
+                input_bytes <= max_inputs,
+                "{label} input schemas use {input_bytes} bytes, budget is {max_inputs}"
+            );
+        }
     }
 
     #[tokio::test]

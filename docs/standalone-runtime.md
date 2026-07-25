@@ -37,31 +37,39 @@ and notebook, while Normal does not.
 
 ## Tunnel tool surfaces
 
-Tunnel Normal exposes exactly these MCP tools:
+Tunnel Normal advertises exactly 18 MCP tools:
 
-- Process: `process.exec`, `process.batchExec`.
-- Sessions: `session.start`, `session.list`, `session.inspect`, `session.wait`,
-  `session.kill`.
-- Tmux: `tmux.listSessions`, `tmux.listPanes`, `tmux.capturePane`,
-  `tmux.pasteText`, `tmux.exec`, `tmux.createSession`, `tmux.closeSession`.
-- Downstream MCP: `mcp.listServers`, `mcp.listTools`, `mcp.callTool`.
-- Skills: `skills.list`, `skills.read`, `skills.search`, `skills.active`,
-  `skills.activate`, `skills.deactivate`, `skills.install`,
-  `skills.install.get`, `skills.install.cancel`, `skills.run`.
-- Bootstrap: `bootstrap`, `bootstrap.read`.
+```text
+mcp.list, mcp.callTool
+process.exec, process.batchExec, process.get, process.kill, process.list
+skills.list, skills.read, skills.setActive, skills.install,
+skills.install.get, skills.install.cancel, skills.run
+tmux.sessions, tmux.panes, tmux.exec, tmux.pasteText
+```
 
-Tunnel Room adds:
+Tunnel Room advertises exactly 30 tools: the 18 Normal tools, `bootstrap` and
+`bootstrap.read`, plus these ten Room memory tools:
 
-- Notebook: `room.notebook.append`, `room.notebook.recent`,
-  `room.notebook.selectExact`, `room.notebook.search`,
-  `room.notebook.current`, `room.notebook.update`, `room.notebook.remove`.
-- Diary: `room.diary.append`, `room.diary.recent`,
-  `room.diary.selectExact`.
+```text
+room.diary.append, room.diary.recent, room.diary.selectExact
+room.notebook.append, room.notebook.current, room.notebook.recent,
+room.notebook.remove, room.notebook.search, room.notebook.selectExact,
+room.notebook.update
+```
 
-Tunnel surfaces do not expose Hub aggregation or notification tools. The
-worker validates any retained `agentId` argument against its local config and
-then dispatches through the same value-returning local service used by Hub
-commands.
+The standalone worker intentionally has no Tunnel `agentId` or
+`confirmMethod` input fields. The worker supplies its configured local agent
+identity internally; unexpected legacy fields are rejected. `bootstrap` is
+Room-only. `process.exec` and `skills.run` return a stable managed-session
+wrapper with `sessionId`, `completedInline`, `pollAfterMs`, and nested
+`session`; the nested session retains its `agentId` for reporting and local
+inspection. Batch execution returns one such wrapper per admitted element and
+rejects the whole batch before admission when any element fails preflight,
+policy, confirmation, or capacity checks.
+
+Tunnel surfaces do not expose Hub aggregation or notification tools. They use
+the same local policy, path-policy, confirmation, audit, and managed-session
+lifecycle as Hub execution while keeping the Hub out of the command path.
 
 ## Hub MCP profiles
 
@@ -216,6 +224,13 @@ bounded JSON arguments/results and bounded existing session snapshots; an
 oversized value becomes a byte-count/SHA-256 truncation record rather than a
 partial JSON fragment. Direct-run records remain in Hub storage for 24 hours.
 
+The worker also writes bounded lifecycle records to stderr for each tool call
+and managed process terminal event. These records contain the run/tool/profile
+and status, with duration and safe identifiers when available; they never
+contain arguments, results, paths, secrets, or process output. Reporting
+connection transitions are logged separately as connected/disconnected with
+the selected transport.
+
 ## Health, logs, restart, and recovery
 
 For agent id `laptop`, the supervisor uses the private runtime directory:
@@ -290,11 +305,12 @@ versus coordinator MCP surfaces. The repository's multi-target release script
 is [`scripts/dist-linux.sh`](../scripts/dist-linux.sh); it builds both Linux
 targets when `cross` and the corresponding toolchains are installed.
 
-`crates/agentic-gpt/tests/standalone_supervisor.rs` provides a stronger local
-smoke test: it launches the actual Agentic supervisor and hidden stdio worker,
-emulates only the tunnel client's local stdio handoff, sends MCP initialize and
-`process.exec`, and checks the returned local-tool result. That is still
-distinct from a real Secure MCP Tunnel control-plane call: the latter must
-invoke an actual external connector and return a local Agentic tool result, not
-merely pass `/healthz`, `doctor`, or a local fake handoff. Record those external
-credentials/environment prerequisites separately from repository tests.
+`crates/agentic-gpt/tests/standalone_supervisor.rs` launches the actual Agentic
+supervisor and hidden stdio worker for a Normal-profile initialize/list/call
+smoke. The in-process tests cover the corresponding Room profile. Together
+they verify that stdout remains MCP-only and that the compact Normal/Room
+surfaces are callable. These checks are still distinct from a real Secure MCP
+Tunnel control-plane call: the latter must invoke an actual external connector
+and return a local Agentic tool result, not merely pass `/healthz`, `doctor`, or
+a local fake handoff. Record external credentials/environment prerequisites
+separately from repository tests.

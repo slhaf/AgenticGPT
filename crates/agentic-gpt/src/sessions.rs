@@ -46,6 +46,7 @@ pub(crate) struct ManagedProcessSpec {
     pub(crate) working_directory: std::path::PathBuf,
     pub(crate) decision: PolicyDecision,
     pub(crate) request_source: String,
+    pub(crate) terminal_event_hook: Option<TerminalEventHook>,
 }
 
 impl ManagedSessionOptions {
@@ -343,7 +344,7 @@ pub(crate) async fn start_prepared_managed_batch(
             skill_id: None,
             skill_path: None,
             installed_digest: None,
-            terminal_event_hook: None,
+            terminal_event_hook: spec.terminal_event_hook.clone(),
         };
         registered.push((spec, info, stdout, stderr, cancel_requested, audit));
     }
@@ -377,7 +378,7 @@ pub(crate) async fn start_prepared_managed_batch(
                         skill_id: None,
                         skill_path: None,
                         installed_digest: None,
-                        terminal_event_hook: None,
+                        terminal_event_hook: audit.terminal_event_hook.clone(),
                     }),
                 },
             );
@@ -507,6 +508,18 @@ pub(crate) async fn start_skill_session_async(
     skill_id: &str,
     skill_path: &str,
 ) -> SessionInfo {
+    start_skill_session_async_with_hook(state, session_id, request, skill_id, skill_path, None)
+        .await
+}
+
+pub(crate) async fn start_skill_session_async_with_hook(
+    state: AppState,
+    session_id: String,
+    request: ExecRequest,
+    skill_id: &str,
+    skill_path: &str,
+    terminal_event_hook: Option<TerminalEventHook>,
+) -> SessionInfo {
     let config = state.config.read().await.clone();
     let lease = state.skill_leases.try_shared(skill_id).await;
     if lease.is_none() {
@@ -538,7 +551,7 @@ pub(crate) async fn start_skill_session_async(
                 skill_id: Some(skill_id.to_string()),
                 skill_path: Some(skill_path.to_string()),
                 installed_digest: crate::skill_installs::package_sha256(&config, skill_id).ok(),
-                terminal_event_hook: None,
+                terminal_event_hook,
             },
             None,
         )

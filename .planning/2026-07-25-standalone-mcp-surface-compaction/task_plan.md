@@ -4,11 +4,11 @@
 Reduce the public MCP schema exposed by each Tunnel-backed standalone Agent without introducing a generic RPC tool or weakening device isolation. The Tunnel stdio worker will expose a compact, role-correct tool surface; ordinary process execution and managed sessions will share one durable lifecycle; Room-only bootstrap remains absent from Normal; and every standalone tool call plus Hub-reporting connection transition will produce safe local logs.
 
 ## Workflow State
-- **Stage:** implementation_ready
-- **Current role:** designer
+- **Stage:** delivered
+- **Current role:** implementer
 - **Implementation authorized:** yes, for a later implementation request
 - **Active plan:** `2026-07-25-standalone-mcp-surface-compaction`
-- **Current phase:** Phase 5 — Compact MCP, Skills, tmux, and Profile Capabilities (complete)
+- **Current phase:** Phase 7 — Independent Review and Delivery Check (complete)
 - **Entry phase after handoff:** Phase 6
 - **Open blocking decisions:** none
 
@@ -550,7 +550,7 @@ These are MCP serialization budgets, not a promise of an exact model-token ratio
 - Hidden stdio Normal/Room smoke probe and measured descriptor report.
 
 **Commit:** `docs(agent): document compact standalone tools`
-- **Status:** pending
+- **Status:** complete
 
 ### Phase 7: Independent Review and Delivery Check
 **Objective / visible outcome:** A reviewer confirms the public reduction did not weaken safety, audit, Hub compatibility, or process lifecycle correctness.
@@ -565,7 +565,7 @@ These are MCP serialization budgets, not a promise of an exact model-token ratio
 - Run final full suite and repository status.
 
 **Commit:** focused repair commit(s) only when evidenced.
-- **Status:** pending
+- **Status:** complete
 
 ## Acceptance Criteria
 
@@ -592,14 +592,14 @@ The implementer may choose private Rust type names, module splits, helper owners
 
 ## Implementation Handoff
 
-- **Plan maturity:** implementation_ready
+- **Plan maturity:** delivered
 - **Design phase:** complete
 - **Implementation authorized:** yes
-- **Entry phase:** Phase 3 — Generalize the Managed-Process Lifecycle
+- **Entry phase:** Phase 3 — Generalize the Managed-Process Lifecycle (completed)
 - **Frozen decisions:** D-01 through D-20 (D-04 superseded by D-16)
 - **Open blocking decisions:** none
 - **Implementation discretion:** see `Implementation Discretion`; private helper/type ownership may vary but cannot change public Tunnel shapes, Hub compatibility, all-or-reject batch admission, lifecycle finalization, or logging/audit limits
 - **Verification convention:** focused tests per phase; full workspace and real hidden stdio Normal/Room probes before delivery
 - **Commit convention:** one focused local Git commit after each verified Phase 3–6; Phase 7 uses only evidenced repair commits
 - **Design checkpoint:** `7f2fc27` (`docs(planning): refine standalone MCP handoff`)
-- **Next invocation:** `$planning-with-files` without `$refine-implementation-plan`; begin Phase 3 and do not alter frozen public behavior without reopening refinement
+- **Delivery:** Phases 3–6 are implemented and committed; Phase 7 review is complete. No further implementation phase remains.
