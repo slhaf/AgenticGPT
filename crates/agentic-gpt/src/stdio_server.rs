@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 
 use agentic_gpt_protocol::{ExecRequest, HubCommand, SessionInfo};
 use anyhow::Result;
@@ -74,6 +77,46 @@ struct StdioMcpServer {
     tools: Arc<Vec<Tool>>,
 }
 
+#[derive(Default)]
+struct HumanTerminalTracker {
+    response_returned: AtomicBool,
+    suppress_inline: AtomicBool,
+    pending: Mutex<Vec<(String, String, SessionInfo)>>,
+}
+
+impl HumanTerminalTracker {
+    fn record(&self, profile: &str, source: &str, session: &SessionInfo) {
+        if self.suppress_inline.load(Ordering::Acquire) {
+            return;
+        }
+        if self.response_returned.load(Ordering::Acquire) {
+            crate::utils::log_info(managed_terminal_event_message(profile, source, session));
+        } else if let Ok(mut pending) = self.pending.lock() {
+            pending.push((profile.to_string(), source.to_string(), session.clone()));
+        }
+    }
+
+    fn finish_response(&self, inline: bool) {
+        if inline {
+            self.suppress_inline.store(true, Ordering::Release);
+            if let Ok(mut pending) = self.pending.lock() {
+                pending.clear();
+            }
+            return;
+        }
+
+        self.response_returned.store(true, Ordering::Release);
+        let pending = self
+            .pending
+            .lock()
+            .map(|mut pending| std::mem::take(&mut *pending))
+            .unwrap_or_default();
+        for (profile, source, session) in pending {
+            crate::utils::log_info(managed_terminal_event_message(&profile, &source, &session));
+        }
+    }
+}
+
 impl StdioMcpServer {
     fn new(state: AppState) -> Self {
         let profile = state.runtime.profile;
@@ -103,10 +146,7 @@ impl StdioMcpServer {
         let run_id = task_id("run");
         let report_request_id = task_id("req");
         let started_at = Utc::now();
-        crate::utils::log_info(format!(
-            "stdio_tool; runId={run_id}; tool={name}; profile={}; status=started",
-            self.state.runtime.profile.label()
-        ));
+        let terminal_tracker = Arc::new(HumanTerminalTracker::default());
         crate::hub::report_tool_arguments(
             &self.state,
             &run_id,
@@ -115,11 +155,16 @@ impl StdioMcpServer {
             arguments.clone(),
             started_at,
         );
-        let value = match self.dispatch(&name, arguments).await {
+        let value = match self
+            .dispatch_with_lifecycle(&name, arguments, terminal_tracker.clone())
+            .await
+        {
             Ok(value) => value,
             Err(error) => {
+                terminal_tracker.finish_response(true);
                 crate::utils::log_info(format!(
-                    "stdio_tool; runId={run_id}; tool={name}; profile={}; status=failed; durationMs={}; errorCode={}",
+                    "stdio_tool; run={}; tool={name}; profile={}; status=failed; durationMs={}; errorCode={}",
+                    crate::utils::compact_id(&run_id),
                     self.state.runtime.profile.label(),
                     (Utc::now() - started_at).num_milliseconds().max(0),
                     bounded_error_code(&error.to_string())
@@ -153,19 +198,35 @@ impl StdioMcpServer {
             .map(str::to_string);
         let session_id = session.as_ref().map(|session| session.session_id.as_str());
         let exit_code = session.as_ref().and_then(|session| session.exit_code);
+        let active = value_has_active_session(&value);
+        let terminal_failure = value_has_terminal_failure(&value);
+        let human_reason = reason
+            .clone()
+            .or_else(|| human_failure_reason(&value, session.as_ref()));
+        terminal_tracker.finish_response(!active);
         let mut lifecycle = format!(
-            "stdio_tool; runId={run_id}; tool={name}; profile={}; status={}; durationMs={}",
+            "stdio_tool; run={}; tool={name}; profile={}; status={}; durationMs={}",
+            crate::utils::compact_id(&run_id),
             self.state.runtime.profile.label(),
-            if is_error { "failed" } else { "completed" },
+            if is_error || terminal_failure {
+                "failed"
+            } else if active {
+                "active"
+            } else {
+                "completed"
+            },
             (Utc::now() - started_at).num_milliseconds().max(0),
         );
         if let Some(session_id) = session_id {
-            lifecycle.push_str(&format!("; sessionId={session_id}"));
+            lifecycle.push_str(&format!(
+                "; session={}",
+                crate::utils::compact_id(session_id)
+            ));
         }
         if let Some(exit_code) = exit_code {
             lifecycle.push_str(&format!("; exitCode={exit_code}"));
         }
-        if let Some(reason) = reason.as_deref() {
+        if let Some(reason) = human_reason.as_deref() {
             lifecycle.push_str(&format!("; errorCode={}", bounded_error_code(reason)));
         }
         crate::utils::log_info(lifecycle);
@@ -183,14 +244,40 @@ impl StdioMcpServer {
         Ok(value)
     }
 
+    #[cfg(test)]
     async fn dispatch(&self, name: &str, arguments: Value) -> Result<Value> {
+        let terminal_tracker = Arc::new(HumanTerminalTracker::default());
+        let result = self
+            .dispatch_with_lifecycle(name, arguments, terminal_tracker.clone())
+            .await;
+        terminal_tracker.finish_response(
+            result
+                .as_ref()
+                .map(|value| !value_has_active_session(value))
+                .unwrap_or(true),
+        );
+        result
+    }
+
+    async fn dispatch_with_lifecycle(
+        &self,
+        name: &str,
+        arguments: Value,
+        terminal_tracker: Arc<HumanTerminalTracker>,
+    ) -> Result<Value> {
         if self.tools.iter().any(|tool| tool.name == name) {
             validate_stdio_arguments(name, &arguments)?;
         }
         let request_id = request_id();
         match name {
-            "process.exec" => self.dispatch_process_exec(arguments).await,
-            "process.batchExec" => self.dispatch_process_batch(arguments).await,
+            "process.exec" => {
+                self.dispatch_process_exec(arguments, terminal_tracker)
+                    .await
+            }
+            "process.batchExec" => {
+                self.dispatch_process_batch(arguments, terminal_tracker)
+                    .await
+            }
             "process.get" => self.dispatch_process_get(arguments).await,
             "process.kill" => self.dispatch_process_kill(arguments).await,
             "process.list" => self.dispatch_process_list(arguments).await,
@@ -500,7 +587,7 @@ impl StdioMcpServer {
                 )
                 .await
             }
-            "skills.run" => self.dispatch_skill_run(arguments).await,
+            "skills.run" => self.dispatch_skill_run(arguments, terminal_tracker).await,
             "room.notebook.append" => {
                 dispatch(
                     self,
@@ -605,11 +692,18 @@ impl StdioMcpServer {
         }
     }
 
-    async fn dispatch_process_exec(&self, arguments: Value) -> Result<Value> {
+    async fn dispatch_process_exec(
+        &self,
+        arguments: Value,
+        terminal_tracker: Arc<HumanTerminalTracker>,
+    ) -> Result<Value> {
         let args: ProcessExecArgs = from_value(arguments)?;
         let config = self.state.config.read().await.clone();
-        let terminal_event_hook =
-            managed_terminal_event_hook(self.state.runtime.profile, "tunnel:process.exec");
+        let terminal_event_hook = managed_terminal_event_hook(
+            self.state.runtime.profile,
+            "tunnel:process.exec",
+            terminal_tracker,
+        );
         let session_id = task_id("sess");
         let info = crate::sessions::start_managed_session_async(
             self.state.clone(),
@@ -654,7 +748,11 @@ impl StdioMcpServer {
         }
     }
 
-    async fn dispatch_process_batch(&self, arguments: Value) -> Result<Value> {
+    async fn dispatch_process_batch(
+        &self,
+        arguments: Value,
+        terminal_tracker: Arc<HumanTerminalTracker>,
+    ) -> Result<Value> {
         let args: ProcessBatchArgs = from_value(arguments)?;
         let batch_id = task_id("batch");
         let started_at = Utc::now();
@@ -770,8 +868,11 @@ impl StdioMcpServer {
         };
 
         let agent_id = config.agent_id;
-        let terminal_event_hook =
-            managed_terminal_event_hook(self.state.runtime.profile, "tunnel:process.batchExec");
+        let terminal_event_hook = managed_terminal_event_hook(
+            self.state.runtime.profile,
+            "tunnel:process.batchExec",
+            terminal_tracker,
+        );
         let specs = prepared
             .into_iter()
             .map(|element| crate::sessions::ManagedProcessSpec {
@@ -886,7 +987,11 @@ impl StdioMcpServer {
         }))
     }
 
-    async fn dispatch_skill_run(&self, arguments: Value) -> Result<Value> {
+    async fn dispatch_skill_run(
+        &self,
+        arguments: Value,
+        terminal_tracker: Arc<HumanTerminalTracker>,
+    ) -> Result<Value> {
         let args: SkillRunArgs = from_value(arguments)?;
         let request = agentic_gpt_protocol::SkillRunRequest {
             id: args.id,
@@ -927,6 +1032,7 @@ impl StdioMcpServer {
             Some(managed_terminal_event_hook(
                 self.state.runtime.profile,
                 "tunnel:skills.run",
+                terminal_tracker,
             )),
         )
         .await;
@@ -1455,6 +1561,94 @@ fn task_id(prefix: &str) -> String {
     format!("{prefix}_{}", Uuid::new_v4().simple())
 }
 
+fn value_has_active_session(value: &Value) -> bool {
+    if value
+        .get("session")
+        .and_then(|session| session.get("state"))
+        .and_then(Value::as_str)
+        .is_some_and(|state| matches!(state, "starting" | "running" | "waiting_confirmation"))
+    {
+        return true;
+    }
+    value
+        .get("results")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|result| result.get("process"))
+        .filter_map(process_state)
+        .any(|state| matches!(state, "starting" | "running" | "waiting_confirmation"))
+}
+
+fn value_has_terminal_failure(value: &Value) -> bool {
+    value.get("error").is_some()
+        || value
+            .get("session")
+            .and_then(|session| session.get("state"))
+            .and_then(Value::as_str)
+            .is_some_and(|state| matches!(state, "failed" | "killed"))
+        || value
+            .get("results")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .any(|result| {
+                result
+                    .get("outcome")
+                    .and_then(Value::as_str)
+                    .is_some_and(|outcome| matches!(outcome, "rejected" | "failed"))
+                    || result
+                        .get("process")
+                        .and_then(process_state)
+                        .is_some_and(|state| matches!(state, "failed" | "killed"))
+            })
+}
+
+fn human_failure_reason(value: &Value, session: Option<&SessionInfo>) -> Option<String> {
+    session
+        .and_then(|session| session.reject_reason.clone())
+        .or_else(|| {
+            value
+                .get("results")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .find_map(|result| {
+                    result
+                        .get("rejectReason")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                        .or_else(|| {
+                            result
+                                .get("process")
+                                .and_then(process_reject_reason)
+                                .map(str::to_string)
+                        })
+                })
+        })
+}
+
+fn process_state(process: &Value) -> Option<&str> {
+    process.get("state").and_then(Value::as_str).or_else(|| {
+        process
+            .get("session")
+            .and_then(|session| session.get("state"))
+            .and_then(Value::as_str)
+    })
+}
+
+fn process_reject_reason(process: &Value) -> Option<&str> {
+    process
+        .get("rejectReason")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            process
+                .get("session")
+                .and_then(|session| session.get("rejectReason"))
+                .and_then(Value::as_str)
+        })
+}
+
 fn bounded_error_code(value: &str) -> String {
     let candidate = value
         .split(|character: char| {
@@ -1468,10 +1662,11 @@ fn bounded_error_code(value: &str) -> String {
 fn managed_terminal_event_hook(
     profile: CapabilityProfile,
     source: &'static str,
+    tracker: Arc<HumanTerminalTracker>,
 ) -> crate::sessions::TerminalEventHook {
     let profile = profile.label();
     Arc::new(move |session| {
-        crate::utils::log_info(managed_terminal_event_message(&profile, source, session));
+        tracker.record(&profile, source, session);
     })
 }
 
@@ -1480,8 +1675,9 @@ fn managed_terminal_event_message(profile: &str, source: &str, session: &Session
         .num_milliseconds()
         .max(0);
     let mut message = format!(
-        "managed_session; source={source}; profile={profile}; status={}; sessionId={}; durationMs={duration_ms}",
-        session.state, session.session_id
+        "managed_session; source={source}; profile={profile}; status={}; session={}; durationMs={duration_ms}",
+        session.state,
+        crate::utils::compact_id(&session.session_id)
     );
     if let Some(exit_code) = session.exit_code {
         message.push_str(&format!("; exitCode={exit_code}"));
@@ -2339,7 +2535,65 @@ mod tests {
         };
         let message = managed_terminal_event_message("normal", "tunnel:process.exec", &session);
         assert!(message.contains("durationMs=42"));
+        let human_session_id = message
+            .split("session=")
+            .nth(1)
+            .and_then(|value| value.split(';').next())
+            .unwrap();
+        assert_eq!(human_session_id.len(), 12);
+        assert!(human_session_id
+            .chars()
+            .all(|character| character.is_ascii_hexdigit()));
+        assert!(!message.contains("sessionId="));
         assert!(!message.contains("sentinel"));
+    }
+
+    #[test]
+    fn inline_terminal_tracker_discards_pending_terminal_event() {
+        let tracker = HumanTerminalTracker::default();
+        let session = SessionInfo {
+            agent_id: "agent".to_string(),
+            session_id: "sess_0123456789abcdef".to_string(),
+            state: "exited".to_string(),
+            program: "true".to_string(),
+            args: Vec::new(),
+            working_directory: None,
+            command_preview: "true".to_string(),
+            started_at: Utc::now(),
+            updated_at: Utc::now(),
+            exit_code: Some(0),
+            stdout_tail: String::new(),
+            stderr_tail: String::new(),
+            truncated: false,
+            reject_reason: None,
+        };
+        tracker.record("normal", "tunnel:process.exec", &session);
+        assert_eq!(tracker.pending.lock().unwrap().len(), 1);
+        tracker.finish_response(true);
+        assert!(tracker.pending.lock().unwrap().is_empty());
+        assert!(!tracker.response_returned.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn batch_lifecycle_detection_reads_nested_managed_process_session() {
+        let active = json!({
+            "results": [{"process": {"session": {"state": "running"}}}]
+        });
+        assert!(value_has_active_session(&active));
+        assert!(!value_has_terminal_failure(&active));
+
+        let failed = json!({
+            "results": [{"process": {"session": {
+                "state": "failed",
+                "rejectReason": "spawn_failed"
+            }}}]
+        });
+        assert!(!value_has_active_session(&failed));
+        assert!(value_has_terminal_failure(&failed));
+        assert_eq!(
+            human_failure_reason(&failed, None).as_deref(),
+            Some("spawn_failed")
+        );
     }
 
     #[tokio::test]

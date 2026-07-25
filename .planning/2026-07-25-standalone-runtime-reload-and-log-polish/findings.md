@@ -49,6 +49,14 @@
 - The full `agentic-gpt` unit suite passed, but the two real standalone supervisor integration tests initially failed before launching the worker because the sandbox denied creation of the host runtime directory under `~/.agentic_gpt/runtime/tunnel`; the reported product error was `runtime_directory_unavailable`. This is an environment permission issue and needs one controlled escalated rerun.
 - Controlled rerun of the two supervisor integration tests passed. The direct hidden-worker live-reload probe also passed for policy, path policy, limits, invalid reload fallback, and preservation of an already active session.
 
+### Phase 3 logging reconnaissance
+- `utils::log_line` is the single stderr rendering primitive; adding an injectable formatter there can omit the Agentic RFC3339 prefix when `JOURNAL_STREAM` or `INVOCATION_ID` is present while retaining foreground timestamps.
+- `supervisor::forward_log` currently redacts but sends every child line through `log_warn`. A redaction-first parser can recognize RFC3339 + `INFO`/`WARN`/`ERROR`, strip the child timestamp, and route the original level; stdout unknown lines should use INFO and stderr unknown lines WARN.
+- `stdio_server::call` currently emits `started`, then the managed terminal hook may emit `managed_session`, then emits `completed`; the hook is invoked from `sessions::finalize_session` after audit/reporting, so a per-call tracker can suppress inline terminal hooks while allowing post-response asynchronous terminal records.
+- Human lifecycle IDs are currently printed as `runId`/`sessionId` with full UUID bodies. Machine reporting/audit paths receive the full IDs separately, so compacting only the human formatter is safe. `stdio_server::dispatch` is widely used by tests; lifecycle-aware dispatch should be an internal wrapper so existing direct dispatch callers keep their API.
+- The direct hidden-worker probe now captures stderr and confirms inline calls emit no `status=started` or duplicate `managed_session` line, active calls emit `status=active` plus one later terminal record, and human run/session labels use 12-hex bodies without exposing full machine IDs.
+- The supervised fake tunnel emits parseable INFO/WARN/ERROR and unknown stdout/stderr lines; the real supervisor probe confirms redaction-first parsing, component prefixes, severity preservation, child timestamp stripping, and journal-mode omission of Agentic's inner timestamp.
+
 ## Contract Gaps
 - No standalone live-config watcher exists.
 - A whole-config swap would create misleading partial hot-reload semantics because startup-owned managers do not change.

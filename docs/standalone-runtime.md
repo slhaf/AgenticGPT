@@ -249,8 +249,10 @@ partial JSON fragment. Direct-run records remain in Hub storage for 24 hours.
 
 The worker also writes bounded lifecycle records to stderr for each tool call
 and managed process terminal event. These records contain the run/tool/profile
-and status, with duration and safe identifiers when available; they never
-contain arguments, results, paths, secrets, or process output. Reporting
+and status, with duration and safe 12-hex run/session identifiers when
+available; inline terminal calls emit one final record, while calls that
+return active emit one response record and one later terminal record. They
+never contain arguments, results, paths, secrets, or process output. Reporting
 connection transitions are logged separately as connected/disconnected with
 the selected transport.
 
@@ -267,8 +269,12 @@ For agent id `laptop`, the supervisor uses the private runtime directory:
 
 The supervisor runs `doctor --json` before the first child, waits up to 45
 seconds for loopback readiness, and forwards child output to Agentic stderr
-with component prefixes and secret redaction. The health URL and pid marker
-are removed on normal or failed cleanup; the structured log is retained.
+with component prefixes, secret redaction, and the child's known INFO/WARN/
+ERROR severity. Unknown child stdout is informational and unknown child
+stderr is warning-level. Under journald Agentic omits its own inner timestamp;
+foreground logs retain one self-contained timestamp. The health URL and pid
+marker are removed on normal or failed cleanup; the structured log is
+retained.
 
 Unexpected child exits and readiness failures use at most five retries with
 1/2/4/8/16-second delays. Sixty seconds continuously ready resets the failure

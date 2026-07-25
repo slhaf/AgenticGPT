@@ -103,6 +103,74 @@ pub(crate) fn log_warn(message: String) {
     log_line("WARN", message);
 }
 
+pub(crate) fn log_error(message: String) {
+    log_line("ERROR", message);
+}
+
 pub(crate) fn log_line(level: &str, message: String) {
-    eprintln!("{} {level} {message}", Utc::now().to_rfc3339());
+    eprintln!(
+        "{}",
+        render_log_line(level, &message, journald_active(), Utc::now())
+    );
+}
+
+fn journald_active() -> bool {
+    std::env::var_os("JOURNAL_STREAM").is_some() || std::env::var_os("INVOCATION_ID").is_some()
+}
+
+fn render_log_line(
+    level: &str,
+    message: &str,
+    journald: bool,
+    timestamp: chrono::DateTime<Utc>,
+) -> String {
+    if journald {
+        format!("{level} {message}")
+    } else {
+        format!("{} {level} {message}", timestamp.to_rfc3339())
+    }
+}
+
+pub(crate) fn compact_id(value: &str) -> String {
+    let body = value
+        .rsplit_once('_')
+        .map(|(_, body)| body)
+        .unwrap_or(value);
+    let prefix = body.chars().take(12).collect::<String>();
+    if prefix.chars().count() == 12
+        && prefix
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+    {
+        return prefix.to_ascii_lowercase();
+    }
+
+    let hash = value.bytes().fold(0xcbf29ce484222325u64, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+    });
+    format!("{:012x}", hash & 0x0000_ffff_ffff_ffff)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn journal_rendering_omits_inner_timestamp_only_in_journal_mode() {
+        let timestamp = Utc::now();
+        let journal = render_log_line("INFO", "component: ready", true, timestamp);
+        assert_eq!(journal, "INFO component: ready");
+
+        let foreground = render_log_line("INFO", "component: ready", false, timestamp);
+        assert!(foreground.starts_with(&format!("{} INFO ", timestamp.to_rfc3339())));
+    }
+
+    #[test]
+    fn compact_id_has_a_stable_twelve_hex_digit_body() {
+        assert_eq!(compact_id("run_0123456789abcdef"), "0123456789ab");
+        let short = compact_id("session");
+        assert_eq!(short.len(), 12);
+        assert!(short.chars().all(|character| character.is_ascii_hexdigit()));
+        assert_eq!(short, compact_id("session"));
+    }
 }

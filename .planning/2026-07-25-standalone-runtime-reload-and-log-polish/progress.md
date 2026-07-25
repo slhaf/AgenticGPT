@@ -3,11 +3,11 @@
 ## Session: 2026-07-25
 
 ### Current Status
-- **Phase:** Phase 2 — Live Runtime Configuration and Adaptive Limits (complete)
+- **Phase:** Phase 3 — Human-Facing Standalone Log Compaction (complete)
 - **Workflow stage:** implementation
 - **Role:** implementer
 - **Implementation authorized:** yes, for a later request
-- **Entry phase:** Phase 2
+- **Entry phase:** Phase 4
 
 ### Actions Taken
 - Confirmed the previous standalone surface-compaction plan is delivered and the repository worktree is clean at `main...origin/main [ahead 10]`.
@@ -38,7 +38,28 @@
 - Unified single, skill, and batch admission limit resolution; capacity errors retain the stable leading code and include `active`, `requested`, and `limit`. Batch session IDs are allocated only after atomic capacity reservation.
 - Added config/session unit coverage and a real hidden-worker no-restart integration probe covering policy/path/limit reloads, invalid fallback, active-session preservation, and explicit limit changes.
 - Phase 2 verification: `cargo test -p agentic-gpt` unit suite passed 153/153; controlled `cargo test -p agentic-gpt --test standalone_supervisor` passed 2/2; focused hidden-worker reload probe passed; `git diff --check` passed.
-- Phase 2 product commit pending: `feat(agent): reload standalone runtime limits`.
+- Phase 2 product commit: `c2e1378 feat(agent): reload standalone runtime limits`.
+
+### Phase 3 start
+- Re-read the frozen human log contract after the Phase 2 commit; no scope or contract changes.
+- Confirmed the post-Phase-2 worktree is clean before log changes.
+- Confirmed the three Phase 3 implementation seams: `utils::log_line`, supervisor child forwarding, and stdio/session terminal hooks.
+- Focused journal, child-forwarding, compact-id, and lifecycle-tracker tests are green; the real hidden-worker probe also validates human log cardinality and redaction boundaries.
+
+### Phase 3 completion
+- Made stderr rendering journal-aware: foreground retains one Agentic RFC3339 timestamp, journald mode omits the inner prefix.
+- Added redaction-first child log parsing with INFO/WARN/ERROR preservation and INFO/WARN defaults for unknown stdout/stderr.
+- Compacted only human run/session labels to deterministic 12-hex bodies; full machine IDs remain in MCP, audit, and reporting records.
+- Replaced started + inline terminal + completed noise with one inline final record, or one active response plus one later terminal record; failure and terminal error codes remain bounded and visible.
+- Added unit fixtures, direct hidden-worker stderr assertions, and supervised Normal/Room/journal probes.
+- Phase 3 verification: `cargo test -p agentic-gpt --bin agentic-gpt` passed 158/158; controlled `cargo test -p agentic-gpt --test standalone_supervisor` passed 4/4; `git diff --check` passed.
+- Phase 3 product commit pending: `refactor(agent): compact standalone lifecycle logs`.
+
+## Error Log
+| Timestamp | Error | Attempt | Resolution |
+|---|---|---:|---|
+| 2026-07-25 | Combined cargo test filters rejected the second filter with `unexpected argument 'compact_id'`. | 1 | Reran the journal and compact-id tests as separate valid filters; both passed. |
+| 2026-07-25 | The first compact-id fallback mask allowed a 13-digit hash body, failing the exact 12-hex assertion. | 1 | Corrected the mask to 48 bits; compact-id and lifecycle tests passed. |
 
 ## Error Log
 | Timestamp | Error | Attempt | Resolution |

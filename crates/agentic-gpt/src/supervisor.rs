@@ -12,6 +12,7 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
+use chrono::DateTime;
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use tokio::process::{Child, Command};
 use tokio::signal::unix::{signal, Signal, SignalKind};
@@ -23,7 +24,7 @@ use crate::config::{validate_secret_reference, Config};
 use crate::instance_lock::InstanceLock;
 use crate::state::CapabilityProfile;
 use crate::tunnel_distribution::ResolvedTunnelClient;
-use crate::utils::{agentic_home, ensure_parent, log_info, log_warn};
+use crate::utils::{agentic_home, ensure_parent, log_error, log_info, log_warn};
 
 pub(crate) const WORKER_AUTH_ENV: &str = "AGENTIC_GPT_SUPERVISOR_TOKEN";
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(45);
@@ -546,7 +547,68 @@ where
     while let Ok(Some(line)) = lines.next_line().await {
         let redactions = [secret.as_str(), worker_token.as_str()];
         let line = redact_sensitive(line, &redactions);
-        log_warn(format!("{component}: {line}"));
+        let fallback = if component.ends_with("stderr") {
+            ForwardedLevel::Warn
+        } else {
+            ForwardedLevel::Info
+        };
+        let forwarded = parse_forwarded_log(&line, fallback);
+        let message = format!("{component}: {}", forwarded.message);
+        match forwarded.level {
+            ForwardedLevel::Info => log_info(message),
+            ForwardedLevel::Warn => log_warn(message),
+            ForwardedLevel::Error => log_error(message),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ForwardedLevel {
+    Info,
+    Warn,
+    Error,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct ForwardedLog {
+    level: ForwardedLevel,
+    message: String,
+}
+
+fn parse_forwarded_log(line: &str, fallback: ForwardedLevel) -> ForwardedLog {
+    let Some((timestamp, rest)) = line.split_once(' ') else {
+        return ForwardedLog {
+            level: fallback,
+            message: line.to_owned(),
+        };
+    };
+    if DateTime::parse_from_rfc3339(timestamp).is_err() {
+        return ForwardedLog {
+            level: fallback,
+            message: line.to_owned(),
+        };
+    }
+
+    let Some((level, message)) = rest.split_once(' ') else {
+        return ForwardedLog {
+            level: fallback,
+            message: rest.to_owned(),
+        };
+    };
+    let level = match level {
+        "INFO" => ForwardedLevel::Info,
+        "WARN" => ForwardedLevel::Warn,
+        "ERROR" => ForwardedLevel::Error,
+        _ => {
+            return ForwardedLog {
+                level: fallback,
+                message: rest.to_owned(),
+            }
+        }
+    };
+    ForwardedLog {
+        level,
+        message: message.to_owned(),
     }
 }
 
@@ -865,6 +927,33 @@ mod tests {
         assert!(diagnostic.contains("[REDACTED]"));
         assert!(!diagnostic.contains("secret-value"));
         assert!(diagnostic.ends_with("...[truncated]"));
+    }
+
+    #[test]
+    fn forwarded_child_lines_preserve_known_severity_and_strip_timestamp() {
+        let timestamp = "2026-07-25T16:00:00+00:00";
+        assert_eq!(
+            parse_forwarded_log(
+                &redact_sensitive(
+                    format!("{timestamp} INFO child-ready secret").to_string(),
+                    &["secret"],
+                ),
+                ForwardedLevel::Warn,
+            ),
+            ForwardedLog {
+                level: ForwardedLevel::Info,
+                message: "child-ready [REDACTED]".to_string(),
+            }
+        );
+        let unknown = parse_forwarded_log("not-a-timestamp child output", ForwardedLevel::Info);
+        assert_eq!(unknown.level, ForwardedLevel::Info);
+        assert_eq!(unknown.message, "not-a-timestamp child output");
+        let stderr = parse_forwarded_log(
+            &format!("{timestamp} TRACE child warning"),
+            ForwardedLevel::Warn,
+        );
+        assert_eq!(stderr.level, ForwardedLevel::Warn);
+        assert_eq!(stderr.message, "TRACE child warning");
     }
 
     #[test]

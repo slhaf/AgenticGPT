@@ -26,7 +26,7 @@ fn hidden_worker_reloads_policy_and_limit_without_restart() {
 fn supervisor_launches_real_worker_and_completes_local_mcp_call() {
     let root = std::env::temp_dir().join(format!("agentic-standalone-e2e-{}", Uuid::new_v4()));
     fs::create_dir_all(&root).unwrap();
-    let result = run_smoke(&root, "normal");
+    let result = run_smoke(&root, "normal", false);
     let _ = fs::remove_dir_all(&root);
     result.unwrap();
 }
@@ -35,12 +35,21 @@ fn supervisor_launches_real_worker_and_completes_local_mcp_call() {
 fn supervisor_launches_real_room_worker_and_advertises_room_surface() {
     let root = std::env::temp_dir().join(format!("agentic-standalone-room-e2e-{}", Uuid::new_v4()));
     fs::create_dir_all(&root).unwrap();
-    let result = run_smoke(&root, "room");
+    let result = run_smoke(&root, "room", false);
     let _ = fs::remove_dir_all(&root);
     result.unwrap();
 }
 
-fn run_smoke(root: &Path, profile: &str) -> Result<(), String> {
+#[test]
+fn supervised_journal_mode_omits_agentic_inner_timestamp() {
+    let root = std::env::temp_dir().join(format!("agentic-journal-e2e-{}", Uuid::new_v4()));
+    fs::create_dir_all(&root).unwrap();
+    let result = run_smoke(&root, "normal", true);
+    let _ = fs::remove_dir_all(&root);
+    result.unwrap();
+}
+
+fn run_smoke(root: &Path, profile: &str, journal_mode: bool) -> Result<(), String> {
     let binary = std::env::var("CARGO_BIN_EXE_agentic-gpt")
         .or_else(|_| std::env::var("CARGO_BIN_EXE_agentic_gpt"))
         .map(PathBuf::from)
@@ -109,7 +118,8 @@ fn run_smoke(root: &Path, profile: &str) -> Result<(), String> {
     fs::set_permissions(&fake_tunnel, fs::Permissions::from_mode(0o755))
         .map_err(|error| error.to_string())?;
 
-    let mut supervisor = Command::new(&binary)
+    let mut supervisor_command = Command::new(&binary);
+    supervisor_command
         .args([
             "run-as-standalone",
             "--config",
@@ -118,7 +128,11 @@ fn run_smoke(root: &Path, profile: &str) -> Result<(), String> {
             profile,
         ])
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    if journal_mode {
+        supervisor_command.env("JOURNAL_STREAM", "9:9");
+    }
+    let mut supervisor = supervisor_command
         .spawn()
         .map_err(|error| format!("supervisor failed to spawn: {error}"))?;
 
@@ -126,19 +140,19 @@ fn run_smoke(root: &Path, profile: &str) -> Result<(), String> {
     stop_supervisor(&mut supervisor);
     stop_health.store(true, Ordering::Release);
     let _ = health_thread.join();
+    let supervisor_stderr = supervisor
+        .stderr
+        .take()
+        .map(|mut stream| {
+            let mut value = String::new();
+            let _ = stream.read_to_string(&mut value);
+            value
+        })
+        .unwrap_or_default();
 
     if let Err(error) = completed {
         let response = read_optional(&response_path);
         let worker_stderr = read_optional(&worker_stderr_path);
-        let supervisor_stderr = supervisor
-            .stderr
-            .take()
-            .map(|mut stream| {
-                let mut value = String::new();
-                let _ = stream.read_to_string(&mut value);
-                value
-            })
-            .unwrap_or_default();
         return Err(format!(
             "{error}; response={response}; worker_stderr={worker_stderr}; supervisor_stderr={supervisor_stderr}"
         ));
@@ -159,6 +173,31 @@ fn run_smoke(root: &Path, profile: &str) -> Result<(), String> {
         return Err(format!(
             "Normal worker response advertised a Room tool: {response}"
         ));
+    }
+    for expected in [
+        "INFO tunnel.stdout: child-info",
+        "WARN tunnel.stdout: child-warning",
+        "ERROR tunnel.stderr: child-error",
+        "INFO tunnel.stdout: unknown-stdout",
+        "WARN tunnel.stderr: unknown-stderr",
+    ] {
+        if !supervisor_stderr.contains(expected) {
+            return Err(format!(
+                "supervisor log missing `{expected}`: {supervisor_stderr}"
+            ));
+        }
+    }
+    if supervisor_stderr.contains("tunnel.stdout: 2026-07-25T16:00:00") {
+        return Err(format!(
+            "forwarded child timestamp was not stripped: {supervisor_stderr}"
+        ));
+    }
+    if journal_mode {
+        let info_line = supervisor_stderr
+            .lines()
+            .find(|line| line.contains("INFO tunnel.stdout: child-info"))
+            .ok_or("journal child info line missing")?;
+        assert!(info_line.starts_with("INFO tunnel.stdout: child-info"));
     }
     Ok(())
 }
@@ -229,12 +268,13 @@ fn run_live_reload(root: &Path) -> Result<(), String> {
         .env("AGENTIC_GPT_SUPERVISOR_TOKEN", token)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|error| format!("worker failed to spawn: {error}"))?;
     let mut stdin = worker.stdin.take().ok_or("worker stdin unavailable")?;
     let stdout = worker.stdout.take().ok_or("worker stdout unavailable")?;
     let mut stdout = BufReader::new(stdout);
+    let mut stderr = worker.stderr.take().ok_or("worker stderr unavailable")?;
 
     send_line(
         &mut stdin,
@@ -404,6 +444,27 @@ fn run_live_reload(root: &Path) -> Result<(), String> {
     drop(stdin);
     let _ = worker.kill();
     let _ = worker.wait();
+    let mut human_logs = String::new();
+    stderr
+        .read_to_string(&mut human_logs)
+        .map_err(|error| error.to_string())?;
+    assert!(!human_logs.contains("status=started"));
+    assert!(!human_logs.contains("runId="));
+    assert!(!human_logs.contains("sessionId="));
+    assert!(human_logs.contains("status=active"));
+    assert_eq!(human_logs.matches("managed_session;").count(), 1);
+    assert!(!human_logs.contains(&active_session_id));
+    for line in human_logs.lines().filter(|line| line.contains("run=")) {
+        let run_id = line
+            .split("run=")
+            .nth(1)
+            .and_then(|value| value.split(';').next())
+            .unwrap();
+        assert_eq!(run_id.len(), 12);
+        assert!(run_id
+            .chars()
+            .all(|character| character.is_ascii_hexdigit()));
+    }
     Ok(())
 }
 
@@ -502,7 +563,7 @@ fn fake_tunnel_script(
         }
     });
     let requests = format!("{}\n{}", list, call);
-    format!(
+    let script = format!(
         "#!/bin/sh\nset -eu\nmode=\"$1\"\nhealth_url_file=\"\"\nmcp_binding=\"\"\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = \"--health.url-file\" ]; then shift; health_url_file=\"$1\"; fi\n  if [ \"$1\" = \"--mcp.command\" ]; then shift; mcp_binding=\"$1\"; fi\n  shift\ndone\nworker=\"${{mcp_binding#*command=}}\"\nfirst=\"$(printf '%.1s' \"$worker\")\"\nif [ \"$first\" = '\"' ] || [ \"$first\" = \"'\" ]; then printf 'invalid whole-command quoting\\n' >&2; exit 23; fi\nif [ \"$mode\" = \"doctor\" ]; then exit 0; fi\nprintf 'http://127.0.0.1:{health_port}\\n' > \"$health_url_file\"\nrequest_initialize={initialize}\nrequest_initialized={initialized}\nrequest_call={call}\nprintf '%s\\n%s\\n%s\\n' \"$request_initialize\" \"$request_initialized\" \"$request_call\" | sh -c \"$worker\" > {response} 2> {worker_stderr} || true\nif grep -q 'standalone-e2e-ok' {response}; then touch {marker}; fi\nsleep 60\n",
         health_port = health_port,
         initialize = sh_quote(&initialize.to_string()),
@@ -511,7 +572,12 @@ fn fake_tunnel_script(
         response = sh_quote(&response_path.to_string_lossy()),
         worker_stderr = sh_quote(&worker_stderr_path.to_string_lossy()),
         marker = sh_quote(&marker_path.to_string_lossy()),
-    )
+    );
+    let child_prefix = format!("printf 'http://127.0.0.1:{health_port}\\n' > \"$health_url_file\"");
+    let child_logs = format!(
+        "{child_prefix}\nprintf '2026-07-25T16:00:00+00:00 INFO child-info\\n'\nprintf '2026-07-25T16:00:00+00:00 WARN child-warning\\n'\nprintf '2026-07-25T16:00:00+00:00 ERROR child-error\\n' >&2\nprintf 'unknown-stdout\\n'\nprintf 'unknown-stderr\\n' >&2"
+    );
+    script.replace(&child_prefix, &child_logs)
 }
 
 fn sh_quote(value: &str) -> String {
