@@ -184,6 +184,9 @@ impl StdioMcpServer {
     }
 
     async fn dispatch(&self, name: &str, arguments: Value) -> Result<Value> {
+        if self.tools.iter().any(|tool| tool.name == name) {
+            validate_stdio_arguments(name, &arguments)?;
+        }
         let request_id = request_id();
         match name {
             "process.exec" => self.dispatch_process_exec(arguments).await,
@@ -193,6 +196,7 @@ impl StdioMcpServer {
             "process.list" => self.dispatch_process_list(arguments).await,
             "tmux.sessions" => {
                 let args: TmuxSessionsArgs = from_value(arguments)?;
+                validate_tmux_sessions_args(&args)?;
                 match args.action.as_str() {
                     "list" if args.name.is_none() && args.cwd.is_none() => {
                         Ok(crate::tmux::list_sessions().await)
@@ -228,6 +232,7 @@ impl StdioMcpServer {
             }
             "tmux.panes" => {
                 let args: TmuxPanesArgs = from_value(arguments)?;
+                validate_tmux_panes_args(&args)?;
                 match args.action.as_str() {
                     "list" => Ok(crate::tmux::list_panes(
                         agentic_gpt_protocol::TmuxListPanesRequest {
@@ -741,7 +746,7 @@ impl StdioMcpServer {
             .filter(|element| element.decision == crate::policy::PolicyDecision::Confirm)
             .cloned()
             .collect::<Vec<_>>();
-        if !needs_confirmation.is_empty() {
+        let confirmation_result = if !needs_confirmation.is_empty() {
             let confirmation = crate::confirmation::request_batch_confirmation(
                 &self.state,
                 &config,
@@ -759,7 +764,10 @@ impl StdioMcpServer {
                     started_at,
                 ))?);
             }
-        }
+            Some(confirmation)
+        } else {
+            None
+        };
 
         let agent_id = config.agent_id;
         let terminal_event_hook =
@@ -781,6 +789,7 @@ impl StdioMcpServer {
                 },
                 working_directory: element.resolved_working_directory,
                 decision: element.decision,
+                confirmation_result: confirmation_result.clone(),
                 request_source: "tunnel:process.batchExec".to_string(),
                 terminal_event_hook: Some(terminal_event_hook.clone()),
             })
@@ -902,7 +911,7 @@ impl StdioMcpServer {
             }
         }
         let wait_seconds = request.effective_wait_seconds();
-        let info = crate::sessions::start_skill_session_async_with_hook(
+        let info = crate::sessions::start_skill_session_async_with_hook_and_source(
             self.state.clone(),
             task_id("sess"),
             ExecRequest {
@@ -915,6 +924,7 @@ impl StdioMcpServer {
             },
             &request.id,
             &request.path,
+            "tunnel:skills.run",
             Some(managed_terminal_event_hook(
                 self.state.runtime.profile,
                 "tunnel:skills.run",
@@ -1384,6 +1394,51 @@ fn from_value<T: DeserializeOwned>(value: Value) -> Result<T> {
     serde_json::from_value(value).map_err(Into::into)
 }
 
+fn validate_stdio_arguments(name: &str, arguments: &Value) -> Result<()> {
+    let object = arguments
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("tool arguments must be an object"))?;
+    let allowed = properties_for(name);
+    if let Some(unknown) = object.keys().find(|key| !allowed.contains_key(*key)) {
+        return Err(anyhow::anyhow!("unknown tool argument: {unknown}"));
+    }
+    Ok(())
+}
+
+fn validate_tmux_sessions_args(args: &TmuxSessionsArgs) -> Result<()> {
+    match args.action.as_str() {
+        "list" if args.name.is_none() && args.cwd.is_none() && args.need_confirm.is_none() => {
+            Ok(())
+        }
+        "create" if args.name.is_some() && args.cwd.is_some() && args.need_confirm.is_none() => {
+            Ok(())
+        }
+        "close" if args.name.is_some() && args.cwd.is_none() => Ok(()),
+        "list" => Err(anyhow::anyhow!("tmux.sessions list accepts only action")),
+        "create" => Err(anyhow::anyhow!(
+            "tmux.sessions create accepts action, name, and cwd"
+        )),
+        "close" => Err(anyhow::anyhow!(
+            "tmux.sessions close accepts action, name, and needConfirm"
+        )),
+        _ => Err(anyhow::anyhow!("invalid tmux.sessions action")),
+    }
+}
+
+fn validate_tmux_panes_args(args: &TmuxPanesArgs) -> Result<()> {
+    match args.action.as_str() {
+        "list" if args.target.is_none() && args.lines.is_none() => Ok(()),
+        "capture" if args.session.is_none() && args.target.is_some() => Ok(()),
+        "list" => Err(anyhow::anyhow!(
+            "tmux.panes list accepts action and session"
+        )),
+        "capture" => Err(anyhow::anyhow!(
+            "tmux.panes capture accepts action, target, and lines"
+        )),
+        _ => Err(anyhow::anyhow!("invalid tmux.panes action")),
+    }
+}
+
 fn map_result_value<T: serde::Serialize>(result: Result<T>, code: &str) -> Result<Value> {
     match result {
         Ok(value) => Ok(serde_json::to_value(value)?),
@@ -1417,18 +1472,25 @@ fn managed_terminal_event_hook(
 ) -> crate::sessions::TerminalEventHook {
     let profile = profile.label();
     Arc::new(move |session| {
-        let mut message = format!(
-            "managed_session; source={source}; profile={profile}; status={}; sessionId={}",
-            session.state, session.session_id
-        );
-        if let Some(exit_code) = session.exit_code {
-            message.push_str(&format!("; exitCode={exit_code}"));
-        }
-        if let Some(reason) = session.reject_reason.as_deref() {
-            message.push_str(&format!("; errorCode={}", bounded_error_code(reason)));
-        }
-        crate::utils::log_info(message);
+        crate::utils::log_info(managed_terminal_event_message(&profile, source, session));
     })
+}
+
+fn managed_terminal_event_message(profile: &str, source: &str, session: &SessionInfo) -> String {
+    let duration_ms = (session.updated_at - session.started_at)
+        .num_milliseconds()
+        .max(0);
+    let mut message = format!(
+        "managed_session; source={source}; profile={profile}; status={}; sessionId={}; durationMs={duration_ms}",
+        session.state, session.session_id
+    );
+    if let Some(exit_code) = session.exit_code {
+        message.push_str(&format!("; exitCode={exit_code}"));
+    }
+    if let Some(reason) = session.reject_reason.as_deref() {
+        message.push_str(&format!("; errorCode={}", bounded_error_code(reason)));
+    }
+    message
 }
 
 fn tool_descriptor(name: &str) -> Tool {
@@ -1866,11 +1928,19 @@ fn tool_is_open_world(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, path::PathBuf};
+    use std::{
+        collections::HashMap,
+        path::PathBuf,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        },
+    };
 
+    use agentic_gpt_protocol::{AgentMessage, SkillActivationRequest};
     use rmcp::{model::CallToolRequestParams, ServiceExt};
     use tokio::io::split;
-    use tokio::sync::{Mutex, RwLock};
+    use tokio::sync::{mpsc, Mutex, RwLock};
 
     use super::*;
     use crate::{
@@ -2133,6 +2203,180 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn managed_batch_uses_one_confirmation_for_all_elements() -> anyhow::Result<()> {
+        let server = StdioMcpServer::new(test_state(CapabilityProfile::Normal));
+        {
+            let mut config = server.state.config.write().await;
+            config.confirmation_provider.provider = "hub".to_string();
+        }
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        *server.state.hub_sender.lock().await = Some(sender);
+        let confirmation_count = Arc::new(AtomicUsize::new(0));
+        let confirmation_count_clone = confirmation_count.clone();
+        let response_state = server.state.clone();
+        let responder = tokio::spawn(async move {
+            while let Some(message) = receiver.recv().await {
+                if let AgentMessage::ConfirmationRequest { request_id, .. } = message {
+                    confirmation_count_clone.fetch_add(1, Ordering::SeqCst);
+                    if let Some(sender) = response_state
+                        .pending_confirmations
+                        .lock()
+                        .await
+                        .remove(&request_id)
+                    {
+                        let _ = sender.send("allow_once".to_string());
+                    }
+                }
+            }
+        });
+        let batch = server
+            .dispatch(
+                "process.batchExec",
+                json!({
+                    "elements": [{"program": "true"}, {"program": "true"}],
+                    "needConfirm": true,
+                    "waitSeconds": 5
+                }),
+            )
+            .await?;
+        assert_eq!(batch["status"], json!("completed"));
+        assert_eq!(confirmation_count.load(Ordering::SeqCst), 1);
+        let audit = std::fs::read_to_string(
+            server
+                .state
+                .config
+                .read()
+                .await
+                .workspace_root
+                .join(".agentic-gpt-audit.jsonl"),
+        )?;
+        assert_eq!(audit.lines().count(), 2);
+        assert!(audit.lines().all(|line| {
+            line.contains("\"policyDecision\":\"Confirm\"")
+                && line.contains("\"confirmationResult\":\"allow_once\"")
+        }));
+        responder.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn denied_managed_batch_creates_no_sessions() -> anyhow::Result<()> {
+        let server = StdioMcpServer::new(test_state(CapabilityProfile::Normal));
+        {
+            let mut config = server.state.config.write().await;
+            config.confirmation_provider.provider = "hub".to_string();
+        }
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        *server.state.hub_sender.lock().await = Some(sender);
+        let response_state = server.state.clone();
+        let responder = tokio::spawn(async move {
+            if let Some(AgentMessage::ConfirmationRequest { request_id, .. }) =
+                receiver.recv().await
+            {
+                if let Some(sender) = response_state
+                    .pending_confirmations
+                    .lock()
+                    .await
+                    .remove(&request_id)
+                {
+                    let _ = sender.send("deny".to_string());
+                }
+            }
+        });
+        let batch = server
+            .dispatch(
+                "process.batchExec",
+                json!({
+                    "elements": [{"program": "true"}, {"program": "true"}],
+                    "needConfirm": true,
+                    "waitSeconds": 5
+                }),
+            )
+            .await?;
+        assert_eq!(batch["status"], json!("rejected"));
+        let sessions = server.dispatch("process.list", json!({})).await?;
+        assert_eq!(sessions["sessions"], json!([]));
+        responder.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn tmux_actions_reject_incompatible_fields() {
+        let server = StdioMcpServer::new(test_state(CapabilityProfile::Normal));
+        let invalid = [
+            json!({"action": "list", "needConfirm": false}),
+            json!({"action": "create", "name": "demo", "cwd": ".", "needConfirm": false}),
+            json!({"action": "close", "name": "demo", "cwd": "."}),
+        ];
+        for arguments in invalid {
+            assert!(server.dispatch("tmux.sessions", arguments).await.is_err());
+        }
+        for arguments in [
+            json!({"action": "list", "target": "%0"}),
+            json!({"action": "capture", "target": "%0", "session": "demo"}),
+        ] {
+            assert!(server.dispatch("tmux.panes", arguments).await.is_err());
+        }
+    }
+
+    #[test]
+    fn managed_terminal_log_includes_duration() {
+        let started_at = Utc::now() - chrono::Duration::milliseconds(42);
+        let session = SessionInfo {
+            agent_id: "agent".to_string(),
+            session_id: "session".to_string(),
+            state: "exited".to_string(),
+            program: "true".to_string(),
+            args: vec!["sentinel-argument".to_string()],
+            working_directory: Some("/sentinel/path".to_string()),
+            command_preview: "true sentinel-argument".to_string(),
+            started_at,
+            updated_at: started_at + chrono::Duration::milliseconds(42),
+            exit_code: Some(0),
+            stdout_tail: "sentinel-stdout".to_string(),
+            stderr_tail: "sentinel-stderr".to_string(),
+            truncated: false,
+            reject_reason: None,
+        };
+        let message = managed_terminal_event_message("normal", "tunnel:process.exec", &session);
+        assert!(message.contains("durationMs=42"));
+        assert!(!message.contains("sentinel"));
+    }
+
+    #[tokio::test]
+    async fn tunnel_skill_audit_uses_tunnel_request_source() -> anyhow::Result<()> {
+        let server = StdioMcpServer::new(test_state(CapabilityProfile::Normal));
+        let workspace = server.state.config.read().await.workspace_root.clone();
+        let scripts = workspace.join("skills/demo/scripts");
+        std::fs::create_dir_all(&scripts)?;
+        std::fs::write(workspace.join("skills/demo/SKILL.md"), "# Demo\n")?;
+        let script = scripts.join("check.sh");
+        std::fs::write(&script, "#!/bin/sh\nprintf done\n")?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))?;
+        }
+        crate::skills::activate(
+            &server.state,
+            SkillActivationRequest {
+                id: "demo".to_string(),
+            },
+        )
+        .await?;
+        let result = server
+            .dispatch(
+                "skills.run",
+                json!({"id": "demo", "path": "scripts/check.sh", "waitSeconds": 5}),
+            )
+            .await?;
+        assert_eq!(result["session"]["state"], json!("exited"));
+        let audit = std::fs::read_to_string(workspace.join(".agentic-gpt-audit.jsonl"))?;
+        assert!(audit.contains("\"requestSource\":\"tunnel:skills.run\""));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn room_profile_dispatches_room_memory_tools() -> anyhow::Result<()> {
         let server = StdioMcpServer::new(test_state(CapabilityProfile::Room));
         let bootstrap = server.dispatch("bootstrap", json!({})).await?;
@@ -2144,6 +2388,53 @@ mod tests {
         let diary = server.dispatch("room.diary.recent", json!({})).await?;
         assert!(diary["entries"].is_array());
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn every_room_adapter_rejects_legacy_identity_fields() {
+        let server = StdioMcpServer::new(test_state(CapabilityProfile::Room));
+        let cases = [
+            (
+                "room.notebook.append",
+                json!({"scope":"x","significance":"Normal","abstract":"a","content":"c","agentId":"foreign"}),
+            ),
+            ("room.notebook.recent", json!({"agentId":"foreign"})),
+            (
+                "room.notebook.selectExact",
+                json!({"year":2026,"month":7,"day":25,"agentId":"foreign"}),
+            ),
+            (
+                "room.notebook.search",
+                json!({"query":"x","agentId":"foreign"}),
+            ),
+            (
+                "room.notebook.current",
+                json!({"scope":"x","agentId":"foreign"}),
+            ),
+            (
+                "room.notebook.update",
+                json!({"id":"x","agentId":"foreign"}),
+            ),
+            (
+                "room.notebook.remove",
+                json!({"id":"x","agentId":"foreign"}),
+            ),
+            (
+                "room.diary.append",
+                json!({"entry":"x","agentId":"foreign"}),
+            ),
+            ("room.diary.recent", json!({"agentId":"foreign"})),
+            (
+                "room.diary.selectExact",
+                json!({"year":2026,"month":7,"day":25,"agentId":"foreign"}),
+            ),
+        ];
+        for (name, arguments) in cases {
+            assert!(
+                server.dispatch(name, arguments).await.is_err(),
+                "{name} must reject unknown identity fields"
+            );
+        }
     }
 
     #[tokio::test]

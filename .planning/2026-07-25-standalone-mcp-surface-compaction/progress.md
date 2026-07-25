@@ -250,3 +250,26 @@ Start a later implementation request from Phase 3. Each phase must update all th
 - Phase 9 restores reviewer independence and prohibits delivery based only on a green aggregate suite.
 - Workflow and handoff agree on `implementation_ready`, Phase 8 entry, authorization yes, and no blockers.
 - Next invocation: hand to a fresh Implementer with `$planning-with-files` only; do not invoke refine during implementation.
+
+## 2026-07-25 — Phase 8 focused contract repair
+
+### Test-first evidence
+- Added direct regressions for all seven findings before implementation changes. Against the repair baseline, they reproduced: three confirmation-provider interactions for a two-element allowed batch, detached `skill_update_pending`, 32 KiB managed tails, ignored tmux fields, missing terminal duration, non-distinct Tunnel skill audit source, and accepted Room legacy fields.
+- A first supplementary Cargo invocation used two positional filters and was rejected by Cargo; the focused suites were then run separately with one filter each.
+
+### Repair implementation
+- Batch admission now passes one successful batch confirmation result into every managed element's audit context and suppresses child-level confirmation requests; denial creates no sessions.
+- Lease-admission failures use the managed registration/finalizer path, so their ids remain queryable and terminal audit/hook/report ownership stays exactly once.
+- Raised the managed tail bound from 32 KiB to 64 KiB; one test proves 40 KiB per stream is preserved and another proves deterministic truncation at 64 KiB.
+- Added action-dependent tmux validation, bounded terminal-log `durationMs`, source-aware skill audit construction, and strict public argument-key validation for every advertised Tunnel tool including all Room diary/notebook adapters.
+- Hub full/coordinator and shared protocol compatibility boundaries were not modified.
+
+### Phase 8 verification
+- `cargo test -p agentic-gpt --bin agentic-gpt sessions::tests`: 9 passed.
+- `cargo test -p agentic-gpt --bin agentic-gpt stdio_server::tests`: 15 passed.
+- Full Agent binary suite: 147 passed.
+- Isolated `cargo check --workspace`: passed with only the pre-existing `RunMode::Room`/`RunMode::role` dead-code warnings.
+- Isolated `cargo test --workspace`: Agent 147, standalone supervisor 2, Hub 61, protocol 9, doc tests 0; all passed. The supervisor suite exercised hidden Normal and Room initialize/list/call smoke.
+- `cargo fmt --all -- --check`, `git diff --check`, exact 18/30/schema-budget tests, and the Hub/protocol unchanged-file guard all passed.
+- Phase 8 is complete and the plan files now hand off to Phase 9. Per the request, Phase 9 independent acceptance was not executed.
+- The plan-specified single focused commit is `fix(agent): close standalone MCP contract gaps`; no separate repair or acceptance commit is created in this handoff.

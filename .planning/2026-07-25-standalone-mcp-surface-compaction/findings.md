@@ -248,3 +248,15 @@ Projected frozen surface:
 - A batch-confirmation repair must preserve audit evidence that a Confirm policy was satisfied. Simply replacing every decision with Allow without retaining the confirmation result would fix prompts but weaken audit semantics.
 - Strict Room adapters should not add `deny_unknown_fields` globally to shared protocol types unless Hub/OpenAPI compatibility is proven; stdio-only wrappers or boundary key validation are safer default seams.
 - No database/config migration, durable restart recovery, new authentication, network behavior, or public versioning choice is introduced by this repair.
+
+## Phase 8 Repair Implementation
+
+- F-01: managed batch specs now carry the single successful batch confirmation result; the shared runner records it in each audit and skips per-element provider calls. Denial still returns before session allocation.
+- F-02: skill lease admission failures now enter the managed map as retained terminal sessions and pass through the common audit/report/hook finalizer.
+- F-03: `SESSION_TAIL_MAX` is restored to 64 KiB for managed streams. Direct output tests cover 40 KiB preservation and deterministic 64 KiB truncation.
+- F-04: merged tmux actions now validate conditional field sets before invoking tmux handlers.
+- F-05: terminal hook rendering includes bounded elapsed `durationMs` while retaining redaction of command arguments, paths, output, and secrets.
+- F-06: skill start accepts a source-specific audit label; Hub keeps `skills.run` and Tunnel uses `tunnel:skills.run`.
+- F-07: advertised Tunnel dispatch validates public argument keys against the existing schemas before request-id/managed-session work. This keeps shared Hub protocol structs unchanged while making all Room diary/notebook adapters strict.
+- Direct regressions passed: `sessions::tests` 9/9 and `stdio_server::tests` 15/15, including batch allow/deny, retained lease failure, output bounds, tmux conditional fields, duration/redaction, source distinction, and all ten Room adapters.
+- Workspace verification passed in isolated HOME: Agent 147, standalone supervisor 2, Hub 61, protocol 9, doc tests 0; format, check, whitespace, schema budgets, exact 18/30 surfaces, and hidden Normal/Room smoke all remain green.

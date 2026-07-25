@@ -45,6 +45,7 @@ pub(crate) struct ManagedProcessSpec {
     pub(crate) request: ExecRequest,
     pub(crate) working_directory: std::path::PathBuf,
     pub(crate) decision: PolicyDecision,
+    pub(crate) confirmation_result: Option<String>,
     pub(crate) request_source: String,
     pub(crate) terminal_event_hook: Option<TerminalEventHook>,
 }
@@ -292,7 +293,7 @@ pub(crate) async fn start_managed_session_async(
     request: ExecRequest,
     options: ManagedSessionOptions,
 ) -> SessionInfo {
-    start_session_async_inner(state, session_id, request, None, options, None).await
+    start_session_async_inner(state, session_id, request, None, options, None, None).await
 }
 
 async fn start_prepared_session_async(
@@ -302,7 +303,7 @@ async fn start_prepared_session_async(
     options: ManagedSessionOptions,
     prepared: Option<(std::path::PathBuf, PolicyDecision)>,
 ) -> SessionInfo {
-    start_session_async_inner(state, session_id, request, None, options, prepared).await
+    start_session_async_inner(state, session_id, request, None, options, prepared, None).await
 }
 
 pub(crate) async fn start_prepared_managed_batch(
@@ -340,7 +341,7 @@ pub(crate) async fn start_prepared_managed_batch(
             request_source: spec.request_source.clone(),
             need_confirm: spec.request.need_confirm,
             policy_decision: format!("{:?}", spec.decision),
-            confirmation_result: None,
+            confirmation_result: spec.confirmation_result.clone(),
             skill_id: None,
             skill_path: None,
             installed_digest: None,
@@ -386,6 +387,7 @@ pub(crate) async fn start_prepared_managed_batch(
     }
     let mut infos = Vec::with_capacity(registered.len());
     for (spec, info, stdout, stderr, cancel_requested, _) in registered {
+        let confirmation_result = spec.confirmation_result.clone();
         let monitor_state = state.clone();
         let monitor_session_id = info.session_id.clone();
         tokio::spawn(run_async_session(
@@ -396,6 +398,7 @@ pub(crate) async fn start_prepared_managed_batch(
             stderr,
             cancel_requested,
             Some((spec.working_directory, spec.decision)),
+            confirmation_result,
         ));
         tokio::spawn(async move {
             monitor_session(monitor_state, monitor_session_id).await;
@@ -412,6 +415,7 @@ async fn start_session_async_inner(
     skill_lease: Option<SkillLease>,
     options: ManagedSessionOptions,
     prepared: Option<(std::path::PathBuf, PolicyDecision)>,
+    initial_failure: Option<String>,
 ) -> SessionInfo {
     let config = state.config.read().await.clone();
     let started_at = Utc::now();
@@ -481,6 +485,12 @@ async fn start_session_async_inner(
             .await
             .unwrap_or(registered_info);
     }
+    if let Some(reason) = initial_failure {
+        finish_pending_session(&state, &session_id, &reason).await;
+        return inspect_session(&state, &session_id)
+            .await
+            .unwrap_or(registered_info);
+    }
     let monitor_state = state.clone();
     tokio::spawn(async move {
         run_async_session(
@@ -491,6 +501,7 @@ async fn start_session_async_inner(
             stderr,
             cancel_requested,
             prepared,
+            None,
         )
         .await;
     });
@@ -520,43 +531,50 @@ pub(crate) async fn start_skill_session_async_with_hook(
     skill_path: &str,
     terminal_event_hook: Option<TerminalEventHook>,
 ) -> SessionInfo {
+    start_skill_session_async_with_hook_and_source(
+        state,
+        session_id,
+        request,
+        skill_id,
+        skill_path,
+        "skills.run",
+        terminal_event_hook,
+    )
+    .await
+}
+
+pub(crate) async fn start_skill_session_async_with_hook_and_source(
+    state: AppState,
+    session_id: String,
+    request: ExecRequest,
+    skill_id: &str,
+    skill_path: &str,
+    request_source: &str,
+    terminal_event_hook: Option<TerminalEventHook>,
+) -> SessionInfo {
     let config = state.config.read().await.clone();
     let lease = state.skill_leases.try_shared(skill_id).await;
-    if lease.is_none() {
-        let now = Utc::now();
-        return SessionInfo {
-            agent_id: request.agent_id.clone(),
-            session_id,
-            state: "failed".to_string(),
-            program: request.program.clone(),
-            args: request.args.clone(),
-            working_directory: request.working_directory.clone(),
-            command_preview: command_preview(&request.program, &request.args),
-            started_at: now,
-            updated_at: now,
-            exit_code: None,
-            stdout_tail: String::new(),
-            stderr_tail: String::new(),
-            truncated: false,
-            reject_reason: Some("skill_update_pending".to_string()),
-        };
-    } else {
-        start_session_async_inner(
-            state,
-            session_id,
-            request,
-            lease,
-            ManagedSessionOptions {
-                request_source: "skills.run".to_string(),
-                skill_id: Some(skill_id.to_string()),
-                skill_path: Some(skill_path.to_string()),
-                installed_digest: crate::skill_installs::package_sha256(&config, skill_id).ok(),
-                terminal_event_hook,
-            },
-            None,
-        )
-        .await
-    }
+    let lease_available = lease.is_some();
+    start_session_async_inner(
+        state,
+        session_id,
+        request,
+        lease,
+        ManagedSessionOptions {
+            request_source: request_source.to_string(),
+            skill_id: Some(skill_id.to_string()),
+            skill_path: Some(skill_path.to_string()),
+            installed_digest: crate::skill_installs::package_sha256(&config, skill_id).ok(),
+            terminal_event_hook,
+        },
+        None,
+        if !lease_available {
+            Some("skill_update_pending".to_string())
+        } else {
+            None
+        },
+    )
+    .await
 }
 
 pub(crate) async fn wait_for_session(
@@ -607,6 +625,7 @@ async fn run_async_session(
     stderr: Arc<Mutex<TailBuffer>>,
     cancel_requested: Arc<std::sync::atomic::AtomicBool>,
     prepared: Option<(std::path::PathBuf, PolicyDecision)>,
+    prepared_confirmation_result: Option<String>,
 ) {
     let config = state.config.read().await.clone();
     let (working_directory, decision) = if let Some(prepared) = prepared {
@@ -642,15 +661,19 @@ async fn run_async_session(
     }
     if decision == PolicyDecision::Confirm {
         set_session_state(&state, &session_id, "waiting_confirmation").await;
-        let confirmation = confirmation::request_confirmation_cancellable(
-            &state,
-            &config,
-            request.confirm_method.as_deref(),
-            &request.program,
-            &request.args,
-            cancel_requested.clone(),
-        )
-        .await;
+        let confirmation = if let Some(confirmation) = prepared_confirmation_result {
+            confirmation
+        } else {
+            confirmation::request_confirmation_cancellable(
+                &state,
+                &config,
+                request.confirm_method.as_deref(),
+                &request.program,
+                &request.args,
+                cancel_requested.clone(),
+            )
+            .await
+        };
         set_confirmation_result(&state, &session_id, confirmation.clone()).await;
         if confirmation != "allow_once" {
             finish_pending_session(&state, &session_id, &confirmation).await;
@@ -1128,6 +1151,102 @@ mod tests {
         let audit = std::fs::read_to_string(workspace.join(".agentic-gpt-audit.jsonl")).unwrap();
         assert_eq!(audit.lines().count(), 1);
         assert!(audit.contains("\"requestSource\":\"tunnel:process.exec\""));
+    }
+
+    #[tokio::test]
+    async fn skill_lease_admission_failure_is_retained_and_finalized_once() {
+        let (state, workspace) = test_state(2).await;
+        let _writer = state
+            .skill_leases
+            .acquire_exclusive("demo", Duration::from_secs(1))
+            .await
+            .unwrap();
+        let hook_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hook_count_clone = hook_count.clone();
+        let info = start_skill_session_async_with_hook(
+            state.clone(),
+            "sess-skill-pending".to_string(),
+            exec_request("true", &workspace),
+            "demo",
+            "scripts/check.sh",
+            Some(Arc::new(move |_| {
+                hook_count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            })),
+        )
+        .await;
+        assert_eq!(info.state, "failed");
+        assert_eq!(info.reject_reason.as_deref(), Some("skill_update_pending"));
+        let retained = inspect_session(&state, &info.session_id)
+            .await
+            .expect("lease failure must remain queryable");
+        assert_eq!(retained.state, "failed");
+        let _ = inspect_session(&state, &info.session_id).await;
+        assert_eq!(
+            hook_count.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "terminal hook must run once for retained lease failures"
+        );
+        let audit = fs::read_to_string(workspace.join(".agentic-gpt-audit.jsonl")).unwrap();
+        assert_eq!(audit.lines().count(), 1);
+        assert!(audit.contains("\"rejectReason\":\"skill_update_pending\""));
+    }
+
+    #[tokio::test]
+    async fn managed_process_preserves_sixty_four_kib_per_stream_bound() {
+        let (state, workspace) = test_state(2).await;
+        {
+            let mut config = state.config.write().await;
+            config.policy.allow.push(crate::config::Rule {
+                program: "sh".to_string(),
+                args_prefix: Vec::new(),
+            });
+        }
+        let request = ExecRequest {
+            agent_id: "test-agent".to_string(),
+            program: "sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                "dd if=/dev/zero bs=4096 count=10 2>/dev/null; dd if=/dev/zero bs=4096 count=10 >&2 2>/dev/null".to_string(),
+            ],
+            need_confirm: false,
+            confirm_method: None,
+            working_directory: Some(workspace.to_string_lossy().to_string()),
+        };
+        let info = start_managed_session_async(
+            state.clone(),
+            "sess-large-output".to_string(),
+            request,
+            ManagedSessionOptions::for_source("tunnel:process.exec"),
+        )
+        .await;
+        let terminal = wait_until_terminal(&state, &info.session_id).await;
+        assert_eq!(terminal.state, "exited");
+        assert_eq!(terminal.stdout_tail.len(), 40 * 1024);
+        assert_eq!(terminal.stderr_tail.len(), 40 * 1024);
+        assert!(!terminal.truncated);
+
+        let oversize = ExecRequest {
+            agent_id: "test-agent".to_string(),
+            program: "sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                "dd if=/dev/zero bs=4096 count=18 2>/dev/null; dd if=/dev/zero bs=4096 count=18 >&2 2>/dev/null".to_string(),
+            ],
+            need_confirm: false,
+            confirm_method: None,
+            working_directory: Some(workspace.to_string_lossy().to_string()),
+        };
+        let info = start_managed_session_async(
+            state.clone(),
+            "sess-oversize-output".to_string(),
+            oversize,
+            ManagedSessionOptions::for_source("tunnel:process.exec"),
+        )
+        .await;
+        let terminal = wait_until_terminal(&state, &info.session_id).await;
+        assert_eq!(terminal.stdout_tail.len(), 64 * 1024);
+        assert_eq!(terminal.stderr_tail.len(), 64 * 1024);
+        assert!(terminal.truncated);
     }
 
     #[tokio::test]

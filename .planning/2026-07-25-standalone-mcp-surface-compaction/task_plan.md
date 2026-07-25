@@ -4,15 +4,15 @@
 Reduce the public MCP schema exposed by each Tunnel-backed standalone Agent without introducing a generic RPC tool or weakening device isolation. The Tunnel stdio worker will expose a compact, role-correct tool surface; ordinary process execution and managed sessions will share one durable lifecycle; Room-only bootstrap remains absent from Normal; and every standalone tool call plus Hub-reporting connection transition will produce safe local logs.
 
 ## Workflow State
-- **Stage:** implementation_ready
-- **Current role:** designer
-- **Implementation authorized:** yes, for a later focused repair request
+- **Stage:** phase_8_complete
+- **Current role:** implementer
+- **Implementation authorized:** no; Phase 8 implementation and verification are complete
 - **Active plan:** `2026-07-25-standalone-mcp-surface-compaction`
-- **Current phase:** Phase 8 — Focused Contract Repair (pending)
-- **Entry phase after handoff:** Phase 8
+- **Current phase:** Phase 9 — Independent Repair Verification and Delivery (pending; not executed in this handoff)
+- **Entry phase after handoff:** Phase 9
 - **Open blocking decisions:** none
 - **Implementation baseline:** `c987e32`
-- **Next action:** hand Phase 8 to a fresh Implementer under `$planning-with-files` without `$refine-implementation-plan`
+- **Next action:** hand Phase 9 to a fresh independent reviewer; do not treat this Phase 8 completion as Phase 9 acceptance
 ## Errors Encountered
 
 | Error | Attempt | Resolution |
@@ -20,6 +20,7 @@ Reduce the public MCP schema exposed by each Tunnel-backed standalone Agent with
 | Rust borrow conflict while finalizing after tail-buffer guards | 1 | Scoped tail-buffer reads before invoking the mutable terminal finalizer. |
 | Cargo focused-test invocation rejected multiple positional filters | 1 | Use one `sessions::tests` filter for the focused Phase 3 test run. |
 | Stdio regression tests still asserted the pre-compaction 29/39 tool counts and Normal legacy calls | 1 | Updated tests to the frozen 18/30 surface and `process.list`; added process lifecycle coverage. |
+| Cargo focused-test invocation rejected multiple positional filters | 1 | Ran the two focused suites separately with one filter each; no test code or contract change was needed. |
 | Workspace standalone supervisor test exited with `runtime_directory_unavailable` before worker startup | 1 | Reproduced with isolated HOME; runtime setup passed there. The fixture then exposed stale `agentId` in its process call, which was removed; the isolated workspace suite passed. |
 | Phase 7 self-review declared delivery complete while seven frozen-contract gaps remained | 1 | Reopened the same active plan, preserved D-01–D-20, and appended focused repair plus independent verification phases. |
 
@@ -612,8 +613,15 @@ These are MCP serialization budgets, not a promise of an exact model-token ratio
 
 **Completion boundary:** All seven gaps have direct regression evidence, no frozen public contract changes, and the Phase 8 diff is committed as one focused repair.
 
+**Phase 8 verification evidence:**
+- Direct regression suites passed: `sessions::tests` 9/9 and `stdio_server::tests` 15/15; the full Agent binary suite passed 147/147.
+- Isolated `cargo check --workspace` and `cargo test --workspace` passed: Agent 147, standalone supervisor 2, Hub 61, protocol 9, doc tests 0.
+- `cargo fmt --all -- --check` and `git diff --check` passed.
+- The hidden-worker Normal/Room initialize, tools/list, and targeted tools/call smoke passed within the 2 standalone supervisor tests.
+- The repair diff is limited to `sessions.rs`, `stdio_server.rs`, and `utils.rs`; Hub full/coordinator and protocol public files are unchanged.
+
 **Commit:** `fix(agent): close standalone MCP contract gaps`
-- **Status:** pending
+- **Status:** complete; created as the single focused Phase 8 repair commit after this planning update
 
 ### Phase 9: Independent Repair Verification and Delivery
 **Objective / visible outcome:** A fresh reviewer verifies the Phase 8 repair against the frozen plan and raw code/test evidence before restoring delivered status.
@@ -666,15 +674,15 @@ The implementer may choose private Rust type names, module splits, helper owners
 
 ## Implementation Handoff
 
-- **Plan maturity:** implementation_ready
+- **Plan maturity:** phase_8_complete_pending_independent_review
 - **Design phase:** reopened after independent acceptance review and complete again
-- **Implementation authorized:** yes
-- **Entry phase:** Phase 8 — Focused Contract Repair
+- **Implementation authorized:** no; Phase 8 is complete
+- **Entry phase:** Phase 9 — Independent Repair Verification and Delivery
 - **Frozen decisions:** D-01 through D-23 (D-04 superseded by D-16; D-01–D-20 otherwise unchanged)
 - **Open blocking decisions:** none
 - **Implementation discretion:** private helpers, test fixture design, strict-adapter mechanism, and shared-vs-source-specific tail allocation may vary, but the seven Phase 8 observable outcomes may not change
 - **Verification convention:** direct regression evidence for each gap, then isolated full workspace checks and real hidden stdio Normal/Room probes; Phase 9 uses a fresh reviewer
-- **Commit convention:** one focused Phase 8 repair commit; Phase 9 creates no commit unless new evidence requires a narrow repair
-- **Design checkpoint:** implementation baseline `c987e32`; refreshed planning checkpoint not yet committed
+- **Commit convention:** one focused Phase 8 repair commit created; Phase 9 creates no commit unless new evidence requires a narrow repair
+- **Design checkpoint:** implementation baseline `c987e32`; Phase 8 repair starts from the clean planning handoff at `f7f09a4`
 - **Delivery:** Phases 3–7 remain historical implementation records. Independent review superseded the previous no-repair conclusion; Phases 8–9 remain before delivery.
-- **Next invocation:** `$planning-with-files` without `$refine-implementation-plan`, starting at Phase 8
+- **Next invocation:** `$planning-with-files` without `$refine-implementation-plan`, starting at Phase 9; do not infer Phase 9 acceptance from this Implementer handoff
