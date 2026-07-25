@@ -156,3 +156,21 @@ Start a later implementation request from Phase 3. Each phase must update all th
 ### Planning checkpoint
 - Formal refine checkpoint created: `7f2fc27` (`docs(planning): refine standalone MCP handoff`).
 - This checkpoint contains only the three active planning files and is the clean implementation baseline for Luna.
+
+## 2026-07-25 — Phase 3 implementation
+
+### Lifecycle generalization
+- Replaced the skill-only audit context with a generic managed audit context carrying request source, confirmation/policy metadata, optional skill provenance, installed digest, and one-shot terminal hook.
+- Added shared managed start and bounded-wait entrypoints; `skills.run` now uses the shared wait helper.
+- Registered asynchronous sessions and checked active capacity in one sessions-map critical section before spawning.
+- Retained capacity, preflight, policy, confirmation, cancellation, and spawn failures as terminal managed sessions after registration.
+- Added one terminal finalizer that writes audit, emits a best-effort reporting session update, releases skill leases, and invokes the terminal hook exactly once.
+- Added regression tests for ordinary managed audit exactly once and concurrent active-capacity admission.
+
+### Verification notes
+- `cargo check -p agentic-gpt --bin agentic-gpt` passed after fixing a Rust borrow-lifetime error in terminal tail collection.
+- First focused test command was invalid because Cargo accepts one test filter per invocation; this is recorded as a command error and will not be repeated. The replacement is the single `sessions::tests` filter.
+- Focused `cargo test -p agentic-gpt --bin agentic-gpt sessions::tests` passed: 7 tests.
+- Full `cargo test -p agentic-gpt --bin agentic-gpt` passed: 135 tests.
+- `cargo fmt --all` completed and the Phase 3 diff has no formatting or whitespace errors.
+- Hub compatibility review identified and preserved the old synchronous `session.start` preflight/rejection behavior; only the new Tunnel/skills managed entrypoint defers those checks after registration.

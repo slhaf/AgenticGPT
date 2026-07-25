@@ -8,9 +8,16 @@ Reduce the public MCP schema exposed by each Tunnel-backed standalone Agent with
 - **Current role:** designer
 - **Implementation authorized:** yes, for a later implementation request
 - **Active plan:** `2026-07-25-standalone-mcp-surface-compaction`
-- **Current phase:** Phase 2 — Contract Refinement & Handoff Freeze (complete)
-- **Entry phase after handoff:** Phase 3
+- **Current phase:** Phase 3 — Generalize the Managed-Process Lifecycle (complete)
+- **Entry phase after handoff:** Phase 4
 - **Open blocking decisions:** none
+
+## Errors Encountered
+
+| Error | Attempt | Resolution |
+|---|---:|---|
+| Rust borrow conflict while finalizing after tail-buffer guards | 1 | Scoped tail-buffer reads before invoking the mutable terminal finalizer. |
+| Cargo focused-test invocation rejected multiple positional filters | 1 | Use one `sessions::tests` filter for the focused Phase 3 test run. |
 
 ## Scope
 
@@ -458,7 +465,7 @@ These are MCP serialization budgets, not a promise of an exact model-token ratio
 - `cargo test -p agentic-gpt --bin agentic-gpt`
 
 **Commit:** `refactor(agent): unify managed process lifecycle`
-- **Status:** pending
+- **Status:** complete
 
 ### Phase 4: Replace the Tunnel Process/Session Surface
 **Objective / visible outcome:** Tunnel Normal exposes `process.exec/batchExec/get/kill/list`, with no `session.*`, input `agentId`, or `confirmMethod`.

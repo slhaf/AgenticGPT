@@ -6,6 +6,14 @@
 - Previous active plan `2026-07-24-agentic-standalone-tunnel-runtime` is implementation-complete and remains unchanged.
 - The new plan is a follow-up public-surface and observability refinement, not a redo of the Tunnel runtime architecture.
 
+## Phase 3 implementation findings
+
+- `ManagedAuditContext` now carries request source, `needConfirm`, policy decision, confirmation result, optional skill provenance, installed digest, and an optional one-shot terminal hook. The former skill-only audit branch is gone.
+- The generic `start_managed_session_async` registers the session before deferred path/preflight/policy/confirmation/spawn work, and active-capacity admission plus insertion occur under one sessions-map lock.
+- Terminal finalization consumes the audit context exactly once, emits a best-effort `SessionUpdate`, and invokes the hook once; repeated inspection cannot duplicate either event.
+- `start_session_async` remains a compatibility-prepared Hub path: its existing synchronous path/preflight/policy rejection behavior is preserved, while the shared managed finalizer is reused after admission. Tunnel/skills will use the deferred generic entrypoint in later phases.
+- `wait_for_session` is now the shared bounded polling helper used by `skills.run`; the existing maximum wait bound remains 30 seconds.
+
 ## Current Tunnel Tool Construction
 - `crates/agentic-gpt/src/stdio_server.rs` owns a manually generated descriptor table, schemas, descriptions, annotations, profile tool lists, dispatch, and run reporting.
 - Current Normal advertises 29 tools; Room adds ten diary/notebook tools for 39.

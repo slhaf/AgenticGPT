@@ -27,14 +27,41 @@ pub(crate) struct ManagedSession {
     last_activity: Instant,
     cancel_requested: Arc<std::sync::atomic::AtomicBool>,
     skill_lease: Option<SkillLease>,
-    skill_audit: Option<SkillAuditContext>,
+    audit: Option<ManagedAuditContext>,
 }
 
-struct SkillAuditContext {
+pub(crate) type TerminalEventHook = Arc<dyn Fn(&SessionInfo) + Send + Sync>;
+
+pub(crate) struct ManagedSessionOptions {
+    pub(crate) request_source: String,
+    pub(crate) skill_id: Option<String>,
+    pub(crate) skill_path: Option<String>,
+    pub(crate) installed_digest: Option<String>,
+    pub(crate) terminal_event_hook: Option<TerminalEventHook>,
+}
+
+impl ManagedSessionOptions {
+    pub(crate) fn for_source(request_source: impl Into<String>) -> Self {
+        Self {
+            request_source: request_source.into(),
+            skill_id: None,
+            skill_path: None,
+            installed_digest: None,
+            terminal_event_hook: None,
+        }
+    }
+}
+
+struct ManagedAuditContext {
     config: Config,
-    skill_id: String,
-    skill_path: String,
+    request_source: String,
+    need_confirm: bool,
+    policy_decision: String,
+    confirmation_result: Option<String>,
+    skill_id: Option<String>,
+    skill_path: Option<String>,
     installed_digest: Option<String>,
+    terminal_event_hook: Option<TerminalEventHook>,
 }
 
 #[derive(Clone, Default)]
@@ -179,7 +206,7 @@ pub(crate) async fn start_session(
     }
     let active_session_count = {
         let mut sessions = state.sessions.lock().await;
-        refresh_sessions(&mut sessions).await;
+        refresh_sessions(&state, &mut sessions).await;
         sessions
             .values()
             .filter(|session| is_active_session_state(&session.info.state))
@@ -202,7 +229,7 @@ pub(crate) async fn start_session(
                     last_activity: Instant::now(),
                     cancel_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                     skill_lease: None,
-                    skill_audit: None,
+                    audit: None,
                 },
             );
         }
@@ -219,7 +246,45 @@ pub(crate) async fn start_session_async(
     session_id: String,
     request: ExecRequest,
 ) -> SessionInfo {
-    start_session_async_inner(state, session_id, request, None, None).await
+    let config = state.config.read().await.clone();
+    let decision = policy_decision_for_profile(
+        &config,
+        state.runtime.profile,
+        &request.program,
+        &request.args,
+        request.need_confirm,
+    );
+    let working_directory =
+        match exec::resolve_working_directory(&config, request.working_directory.as_deref()) {
+            Ok(directory) => directory,
+            Err(reason) => return rejected_session(&request, session_id, reason),
+        };
+    if let Err(reason) =
+        exec::preflight(&config, &working_directory, &request.program, &request.args)
+    {
+        return rejected_session(&request, session_id, reason);
+    }
+    if decision == PolicyDecision::Deny {
+        return rejected_session(&request, session_id, "policy_denied".to_string());
+    }
+    start_managed_session_async(
+        state,
+        session_id,
+        request,
+        ManagedSessionOptions::for_source("hub:session.start"),
+        Some((working_directory, decision)),
+    )
+    .await
+}
+
+pub(crate) async fn start_managed_session_async(
+    state: AppState,
+    session_id: String,
+    request: ExecRequest,
+    options: ManagedSessionOptions,
+    prepared: Option<(std::path::PathBuf, PolicyDecision)>,
+) -> SessionInfo {
+    start_session_async_inner(state, session_id, request, None, options, prepared).await
 }
 
 async fn start_session_async_inner(
@@ -227,14 +292,19 @@ async fn start_session_async_inner(
     session_id: String,
     request: ExecRequest,
     skill_lease: Option<SkillLease>,
-    skill_audit: Option<SkillAuditContext>,
+    options: ManagedSessionOptions,
+    prepared: Option<(std::path::PathBuf, PolicyDecision)>,
 ) -> SessionInfo {
     let config = state.config.read().await.clone();
     let started_at = Utc::now();
-    let mut info = SessionInfo {
+    let info = SessionInfo {
         agent_id: request.agent_id.clone(),
         session_id: session_id.clone(),
-        state: "starting".to_string(),
+        state: if matches!(prepared.as_ref(), Some((_, PolicyDecision::Confirm))) {
+            "waiting_confirmation".to_string()
+        } else {
+            "starting".to_string()
+        },
         program: request.program.clone(),
         args: request.args.clone(),
         working_directory: request.working_directory.clone(),
@@ -247,81 +317,62 @@ async fn start_session_async_inner(
         truncated: false,
         reject_reason: None,
     };
-    let decision = policy_decision_for_profile(
-        &config,
-        state.runtime.profile,
-        &request.program,
-        &request.args,
-        request.need_confirm,
-    );
-    let working_directory =
-        match exec::resolve_working_directory(&config, request.working_directory.as_deref()) {
-            Ok(directory) => directory,
-            Err(reason) => {
-                info.state = "failed".to_string();
-                info.reject_reason = Some(reason);
-                return info;
-            }
-        };
-    if let Err(reason) =
-        exec::preflight(&config, &working_directory, &request.program, &request.args)
-    {
-        info.state = "failed".to_string();
-        info.reject_reason = Some(reason);
-        return info;
-    }
-    if decision == PolicyDecision::Deny {
-        info.state = "failed".to_string();
-        info.reject_reason = Some("policy_denied".to_string());
-        return info;
-    }
-    {
-        let mut sessions = state.sessions.lock().await;
-        prune_terminal_sessions(&mut sessions);
-    }
-    let active_session_count = {
-        let mut sessions = state.sessions.lock().await;
-        refresh_sessions(&mut sessions).await;
-        sessions
-            .values()
-            .filter(|session| is_active_session_state(&session.info.state))
-            .count()
-    };
-    if active_session_count >= config.limits.max_active_sessions {
-        info.state = "failed".to_string();
-        info.reject_reason = Some("max_active_sessions_reached".to_string());
-        return info;
-    }
-    if decision == PolicyDecision::Confirm {
-        info.state = "waiting_confirmation".to_string();
-    }
     let stdout = Arc::new(Mutex::new(TailBuffer::new(SESSION_TAIL_MAX)));
     let stderr = Arc::new(Mutex::new(TailBuffer::new(SESSION_TAIL_MAX)));
     let cancel_requested = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    state.sessions.lock().await.insert(
-        session_id.clone(),
-        ManagedSession {
-            info: info.clone(),
-            child: None,
-            stdout: stdout.clone(),
-            stderr: stderr.clone(),
-            last_activity: Instant::now(),
-            cancel_requested: cancel_requested.clone(),
-            skill_lease,
-            skill_audit,
-        },
-    );
+    let audit = ManagedAuditContext {
+        config: config.clone(),
+        request_source: options.request_source,
+        need_confirm: request.need_confirm,
+        policy_decision: prepared
+            .as_ref()
+            .map(|(_, decision)| format!("{decision:?}"))
+            .unwrap_or_else(|| "undetermined".to_string()),
+        confirmation_result: None,
+        skill_id: options.skill_id,
+        skill_path: options.skill_path,
+        installed_digest: options.installed_digest,
+        terminal_event_hook: options.terminal_event_hook,
+    };
+    let registered_info = info.clone();
+    let capacity_rejected = {
+        let mut sessions = state.sessions.lock().await;
+        refresh_sessions(&state, &mut sessions).await;
+        let active = sessions
+            .values()
+            .filter(|session| is_active_session_state(&session.info.state))
+            .count();
+        sessions.insert(
+            session_id.clone(),
+            ManagedSession {
+                info: info.clone(),
+                child: None,
+                stdout: stdout.clone(),
+                stderr: stderr.clone(),
+                last_activity: Instant::now(),
+                cancel_requested: cancel_requested.clone(),
+                skill_lease,
+                audit: Some(audit),
+            },
+        );
+        active >= config.limits.max_active_sessions
+    };
+    if capacity_rejected {
+        finish_pending_session(&state, &session_id, "max_active_sessions_reached").await;
+        return inspect_session(&state, &session_id)
+            .await
+            .unwrap_or(registered_info);
+    }
     let monitor_state = state.clone();
     tokio::spawn(async move {
         run_async_session(
             state,
             session_id,
             request,
-            working_directory,
-            decision,
             stdout,
             stderr,
             cancel_requested,
+            prepared,
         )
         .await;
     });
@@ -329,7 +380,7 @@ async fn start_session_async_inner(
     tokio::spawn(async move {
         monitor_session(monitor_state, monitor_session_id).await;
     });
-    info
+    registered_info
 }
 
 pub(crate) async fn start_skill_session_async(
@@ -365,14 +416,56 @@ pub(crate) async fn start_skill_session_async(
             session_id,
             request,
             lease,
-            Some(SkillAuditContext {
-                config: config.clone(),
-                skill_id: skill_id.to_string(),
-                skill_path: skill_path.to_string(),
+            ManagedSessionOptions {
+                request_source: "skills.run".to_string(),
+                skill_id: Some(skill_id.to_string()),
+                skill_path: Some(skill_path.to_string()),
                 installed_digest: crate::skill_installs::package_sha256(&config, skill_id).ok(),
-            }),
+                terminal_event_hook: None,
+            },
+            None,
         )
         .await
+    }
+}
+
+pub(crate) async fn wait_for_session(
+    state: &AppState,
+    mut info: SessionInfo,
+    wait_seconds: u64,
+) -> SessionInfo {
+    if wait_seconds == 0 {
+        return info;
+    }
+    let deadline = Instant::now() + std::time::Duration::from_secs(wait_seconds.min(30));
+    while is_active_session_state(&info.state) && Instant::now() < deadline {
+        sleep(std::time::Duration::from_millis(20)).await;
+        if let Some(latest) = inspect_session(state, &info.session_id).await {
+            info = latest;
+        } else {
+            break;
+        }
+    }
+    info
+}
+
+fn rejected_session(request: &ExecRequest, session_id: String, reason: String) -> SessionInfo {
+    let now = Utc::now();
+    SessionInfo {
+        agent_id: request.agent_id.clone(),
+        session_id,
+        state: "failed".to_string(),
+        program: request.program.clone(),
+        args: request.args.clone(),
+        working_directory: request.working_directory.clone(),
+        command_preview: command_preview(&request.program, &request.args),
+        started_at: now,
+        updated_at: now,
+        exit_code: None,
+        stdout_tail: String::new(),
+        stderr_tail: String::new(),
+        truncated: false,
+        reject_reason: Some(reason),
     }
 }
 
@@ -380,14 +473,45 @@ async fn run_async_session(
     state: AppState,
     session_id: String,
     request: ExecRequest,
-    working_directory: std::path::PathBuf,
-    decision: PolicyDecision,
     stdout: Arc<Mutex<TailBuffer>>,
     stderr: Arc<Mutex<TailBuffer>>,
     cancel_requested: Arc<std::sync::atomic::AtomicBool>,
+    prepared: Option<(std::path::PathBuf, PolicyDecision)>,
 ) {
+    let config = state.config.read().await.clone();
+    let (working_directory, decision) = if let Some(prepared) = prepared {
+        prepared
+    } else {
+        let decision = policy_decision_for_profile(
+            &config,
+            state.runtime.profile,
+            &request.program,
+            &request.args,
+            request.need_confirm,
+        );
+        set_policy_decision(&state, &session_id, format!("{decision:?}")).await;
+        let working_directory =
+            match exec::resolve_working_directory(&config, request.working_directory.as_deref()) {
+                Ok(directory) => directory,
+                Err(reason) => {
+                    finish_pending_session(&state, &session_id, &reason).await;
+                    return;
+                }
+            };
+        if let Err(reason) =
+            exec::preflight(&config, &working_directory, &request.program, &request.args)
+        {
+            finish_pending_session(&state, &session_id, &reason).await;
+            return;
+        }
+        (working_directory, decision)
+    };
+    if decision == PolicyDecision::Deny {
+        finish_pending_session(&state, &session_id, "policy_denied").await;
+        return;
+    }
     if decision == PolicyDecision::Confirm {
-        let config = state.config.read().await.clone();
+        set_session_state(&state, &session_id, "waiting_confirmation").await;
         let confirmation = confirmation::request_confirmation_cancellable(
             &state,
             &config,
@@ -397,6 +521,7 @@ async fn run_async_session(
             cancel_requested.clone(),
         )
         .await;
+        set_confirmation_result(&state, &session_id, confirmation.clone()).await;
         if confirmation != "allow_once" {
             finish_pending_session(&state, &session_id, &confirmation).await;
             return;
@@ -406,7 +531,6 @@ async fn run_async_session(
         finish_pending_session(&state, &session_id, "cancelled").await;
         return;
     }
-    let config = state.config.read().await.clone();
     let spawned = spawn_session_with_buffers(
         &config,
         &working_directory,
@@ -427,7 +551,7 @@ async fn run_async_session(
     let mut sessions = state.sessions.lock().await;
     let cancelled_before_attach = cancel_requested.load(std::sync::atomic::Ordering::Acquire);
     if let Some(session) = sessions.get_mut(&session_id) {
-        if cancelled_before_attach {
+        if cancelled_before_attach || !is_active_session_state(&session.info.state) {
             session.info.state = "killed".to_string();
             session.info.reject_reason = Some("cancelled".to_string());
         } else {
@@ -440,10 +564,14 @@ async fn run_async_session(
     drop(sessions);
     let mut child = child;
     let _ = child.kill().await;
-    if cancelled_before_attach {
-        finish_pending_session(&state, &session_id, "cancelled").await;
-    }
+    finish_pending_session(&state, &session_id, "cancelled").await;
 }
+
+/*
+ * The old skill-specific context was intentionally replaced with a generic
+ * managed audit context. Keep the construction above close to the skill
+ * entrypoint so the skill provenance fields remain explicit.
+ */
 
 async fn spawn_session_with_buffers(
     config: &Config,
@@ -481,45 +609,85 @@ async fn monitor_session(state: AppState, session_id: String) {
     }
 }
 
+async fn set_policy_decision(state: &AppState, session_id: &str, decision: String) {
+    let mut sessions = state.sessions.lock().await;
+    if let Some(session) = sessions.get_mut(session_id) {
+        if let Some(audit) = session.audit.as_mut() {
+            audit.policy_decision = decision;
+        }
+    }
+}
+
+async fn set_confirmation_result(state: &AppState, session_id: &str, result: String) {
+    let mut sessions = state.sessions.lock().await;
+    if let Some(session) = sessions.get_mut(session_id) {
+        if let Some(audit) = session.audit.as_mut() {
+            audit.confirmation_result = Some(result);
+        }
+    }
+}
+
+async fn set_session_state(state: &AppState, session_id: &str, state_name: &str) {
+    let mut sessions = state.sessions.lock().await;
+    if let Some(session) = sessions.get_mut(session_id) {
+        if is_active_session_state(&session.info.state) {
+            session.info.state = state_name.to_string();
+            session.info.updated_at = Utc::now();
+        }
+    }
+}
+
 async fn finish_pending_session(state: &AppState, session_id: &str, reason: &str) {
     let mut sessions = state.sessions.lock().await;
     if let Some(session) = sessions.get_mut(session_id) {
-        session.info.state = if reason == "cancelled" {
-            "killed".to_string()
-        } else {
-            "failed".to_string()
-        };
-        session.info.reject_reason = Some(reason.to_string());
-        session.info.updated_at = Utc::now();
-        session.skill_lease = None;
-        if let Some(context) = session.skill_audit.take() {
-            let _ = write_audit(
-                &context.config,
-                AuditRecord {
-                    task_id: None,
-                    session_id: Some(session.info.session_id.clone()),
-                    time: session.info.updated_at,
-                    program: session.info.program.clone(),
-                    args: session.info.args.clone(),
-                    working_directory: session.info.working_directory.clone(),
-                    need_confirm: false,
-                    policy_decision: "inherited".to_string(),
-                    confirmation_result: Some(reason.to_string()),
-                    exit_code: session.info.exit_code,
-                    duration_ms: (session.info.updated_at - session.info.started_at)
-                        .num_milliseconds()
-                        .max(0) as u128,
-                    truncated: session.info.truncated,
-                    request_source: "skills.run".to_string(),
-                    reject_reason: session.info.reject_reason.clone(),
-                    skill_id: Some(context.skill_id),
-                    skill_path: Some(context.skill_path),
-                    installed_digest: context.installed_digest,
-                },
-            );
+        if is_active_session_state(&session.info.state) {
+            session.info.state = if reason == "cancelled" {
+                "killed".to_string()
+            } else {
+                "failed".to_string()
+            };
+            session.info.reject_reason = Some(reason.to_string());
+            session.info.updated_at = Utc::now();
+            session.skill_lease = None;
         }
+        finalize_session(state, session).await;
     }
     prune_terminal_sessions(&mut sessions);
+}
+
+async fn finalize_session(state: &AppState, session: &mut ManagedSession) {
+    let Some(context) = session.audit.take() else {
+        return;
+    };
+    let info = session.info.clone();
+    let _ = write_audit(
+        &context.config,
+        AuditRecord {
+            task_id: None,
+            session_id: Some(info.session_id.clone()),
+            time: info.updated_at,
+            program: info.program.clone(),
+            args: info.args.clone(),
+            working_directory: info.working_directory.clone(),
+            need_confirm: context.need_confirm,
+            policy_decision: context.policy_decision,
+            confirmation_result: context.confirmation_result,
+            exit_code: info.exit_code,
+            duration_ms: (info.updated_at - info.started_at)
+                .num_milliseconds()
+                .max(0) as u128,
+            truncated: info.truncated,
+            request_source: context.request_source,
+            reject_reason: info.reject_reason.clone(),
+            skill_id: context.skill_id,
+            skill_path: context.skill_path,
+            installed_digest: context.installed_digest,
+        },
+    );
+    crate::hub::report_session(state, info.clone());
+    if let Some(hook) = context.terminal_event_hook {
+        hook(&info);
+    }
 }
 
 #[cfg(test)]
@@ -564,7 +732,7 @@ async fn read_tail<R: AsyncRead + Unpin>(
 
 pub(crate) async fn current_sessions(state: &AppState) -> Vec<SessionInfo> {
     let mut sessions = state.sessions.lock().await;
-    refresh_sessions(&mut sessions).await;
+    refresh_sessions(state, &mut sessions).await;
     prune_terminal_sessions(&mut sessions);
     sessions
         .values()
@@ -573,9 +741,12 @@ pub(crate) async fn current_sessions(state: &AppState) -> Vec<SessionInfo> {
         .collect()
 }
 
-async fn refresh_sessions(sessions: &mut std::collections::HashMap<String, ManagedSession>) {
+async fn refresh_sessions(
+    state: &AppState,
+    sessions: &mut std::collections::HashMap<String, ManagedSession>,
+) {
     for session in sessions.values_mut() {
-        refresh_session(session).await;
+        refresh_session(state, session).await;
     }
 }
 
@@ -586,7 +757,7 @@ fn is_active_session_state(state: &str) -> bool {
 pub(crate) async fn inspect_session(state: &AppState, session_id: &str) -> Option<SessionInfo> {
     let mut sessions = state.sessions.lock().await;
     let session = sessions.get_mut(session_id)?;
-    refresh_session(session).await;
+    refresh_session(state, session).await;
     let info = session.info.clone();
     prune_terminal_sessions(&mut sessions);
     Some(info)
@@ -601,60 +772,43 @@ pub(crate) async fn kill_session(state: &AppState, session_id: &str) -> Option<S
     if let Some(child) = session.child.as_mut() {
         let _ = child.kill().await;
     }
-    refresh_session(session).await;
+    refresh_session(state, session).await;
     if is_active_session_state(&session.info.state) {
         session.info.state = "killed".to_string();
         session.info.reject_reason = Some("killed".to_string());
         session.info.updated_at = Utc::now();
         session.skill_lease = None;
     }
+    finalize_session(state, session).await;
     let info = session.info.clone();
     prune_terminal_sessions(&mut sessions);
     Some(info)
 }
 
-async fn refresh_session(session: &mut ManagedSession) {
-    let mut terminal_audit = None;
+async fn refresh_session(state: &AppState, session: &mut ManagedSession) {
     if let Some(child) = session.child.as_mut() {
         if let Ok(Some(status)) = child.try_wait() {
             session.info.exit_code = status.code();
             session.info.state = if status.success() { "exited" } else { "failed" }.to_string();
             session.skill_lease = None;
-            terminal_audit = session.skill_audit.take();
         }
     }
-    let stdout = session.stdout.lock().await;
-    let stderr = session.stderr.lock().await;
-    session.info.stdout_tail = stdout.text();
-    session.info.stderr_tail = stderr.text();
-    session.info.truncated = stdout.truncated || stderr.truncated;
+    let (stdout_tail, stderr_tail, truncated) = {
+        let stdout = session.stdout.lock().await;
+        let stderr = session.stderr.lock().await;
+        (
+            stdout.text(),
+            stderr.text(),
+            stdout.truncated || stderr.truncated,
+        )
+    };
+    session.info.stdout_tail = stdout_tail;
+    session.info.stderr_tail = stderr_tail;
+    session.info.truncated = truncated;
     session.info.updated_at = Utc::now();
     session.last_activity = Instant::now();
-    if let Some(context) = terminal_audit {
-        let _ = write_audit(
-            &context.config,
-            AuditRecord {
-                task_id: None,
-                session_id: Some(session.info.session_id.clone()),
-                time: session.info.updated_at,
-                program: session.info.program.clone(),
-                args: session.info.args.clone(),
-                working_directory: session.info.working_directory.clone(),
-                need_confirm: false,
-                policy_decision: "inherited".to_string(),
-                confirmation_result: None,
-                exit_code: session.info.exit_code,
-                duration_ms: (session.info.updated_at - session.info.started_at)
-                    .num_milliseconds()
-                    .max(0) as u128,
-                truncated: session.info.truncated,
-                request_source: "skills.run".to_string(),
-                reject_reason: session.info.reject_reason.clone(),
-                skill_id: Some(context.skill_id),
-                skill_path: Some(context.skill_path),
-                installed_digest: context.installed_digest,
-            },
-        );
+    if !is_active_session_state(&session.info.state) {
+        finalize_session(state, session).await;
     }
 }
 
@@ -786,6 +940,97 @@ mod tests {
         ));
         let terminal = wait_until_terminal(&state, "sess-async").await;
         assert_eq!(terminal.state, "exited");
+    }
+
+    #[tokio::test]
+    async fn ordinary_managed_session_writes_one_terminal_audit() {
+        let (state, workspace) = test_state(2).await;
+        let info = start_session_async(
+            state.clone(),
+            "sess-audited".to_string(),
+            exec_request("true", &workspace),
+        )
+        .await;
+        let terminal = wait_until_terminal(&state, &info.session_id).await;
+        assert_eq!(terminal.state, "exited");
+        let _ = inspect_session(&state, &info.session_id).await;
+        let _ = inspect_session(&state, &info.session_id).await;
+        let audit = std::fs::read_to_string(workspace.join(".agentic-gpt-audit.jsonl")).unwrap();
+        assert_eq!(audit.lines().count(), 1);
+        assert!(audit.contains("\"requestSource\":\"hub:session.start\""));
+        assert!(audit.contains("\"sessionId\":\"sess-audited\""));
+    }
+
+    #[tokio::test]
+    async fn managed_preflight_failure_is_retained_and_terminal_hook_is_once() {
+        let (state, workspace) = test_state(2).await;
+        let events = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hook_events = events.clone();
+        let options = ManagedSessionOptions {
+            request_source: "tunnel:process.exec".to_string(),
+            skill_id: None,
+            skill_path: None,
+            installed_digest: None,
+            terminal_event_hook: Some(Arc::new(move |_| {
+                hook_events.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            })),
+        };
+        let request = ExecRequest {
+            agent_id: "test-agent".to_string(),
+            program: "true".to_string(),
+            args: Vec::new(),
+            need_confirm: false,
+            confirm_method: None,
+            working_directory: Some(workspace.join("missing").to_string_lossy().to_string()),
+        };
+        let info = start_managed_session_async(
+            state.clone(),
+            "sess-preflight".to_string(),
+            request,
+            options,
+            None,
+        )
+        .await;
+        assert_eq!(info.state, "starting");
+        let terminal = wait_until_terminal(&state, &info.session_id).await;
+        assert_eq!(terminal.state, "failed");
+        let _ = inspect_session(&state, &info.session_id).await;
+        assert_eq!(events.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let audit = std::fs::read_to_string(workspace.join(".agentic-gpt-audit.jsonl")).unwrap();
+        assert_eq!(audit.lines().count(), 1);
+        assert!(audit.contains("\"requestSource\":\"tunnel:process.exec\""));
+    }
+
+    #[tokio::test]
+    async fn concurrent_async_starts_reserve_active_capacity_atomically() {
+        let (state, workspace) = test_state(1).await;
+        let request = || ExecRequest {
+            agent_id: "test-agent".to_string(),
+            program: "sleep".to_string(),
+            args: vec!["1".to_string()],
+            need_confirm: false,
+            confirm_method: None,
+            working_directory: Some(workspace.to_string_lossy().to_string()),
+        };
+        let (first, second) = tokio::join!(
+            start_session_async(state.clone(), "sess-cap-1".to_string(), request()),
+            start_session_async(state.clone(), "sess-cap-2".to_string(), request()),
+        );
+        let states = [first.state.as_str(), second.state.as_str()];
+        assert_eq!(
+            states.iter().filter(|state| **state == "starting").count(),
+            1
+        );
+        assert_eq!(states.iter().filter(|state| **state == "failed").count(), 1);
+        let failed = if first.state == "failed" {
+            first
+        } else {
+            second
+        };
+        assert_eq!(
+            failed.reject_reason.as_deref(),
+            Some("max_active_sessions_reached")
+        );
     }
 
     #[tokio::test]

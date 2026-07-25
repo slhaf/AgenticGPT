@@ -1760,26 +1760,10 @@ pub(crate) async fn run_skill(
 
 async fn wait_for_skill_session(
     state: &AppState,
-    mut info: SessionInfo,
+    info: SessionInfo,
     wait_seconds: u64,
 ) -> SessionInfo {
-    if wait_seconds == 0 {
-        return info;
-    }
-    let deadline = Instant::now() + Duration::from_secs(wait_seconds.min(30));
-    while matches!(
-        info.state.as_str(),
-        "starting" | "running" | "waiting_confirmation"
-    ) && Instant::now() < deadline
-    {
-        sleep(Duration::from_millis(20)).await;
-        if let Some(latest) = sessions::inspect_session(state, &info.session_id).await {
-            info = latest;
-        } else {
-            break;
-        }
-    }
-    info
+    sessions::wait_for_session(state, info, wait_seconds).await
 }
 
 fn skill_run_command_error(error: anyhow::Error) -> serde_json::Value {
