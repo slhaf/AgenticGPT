@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use agentic_gpt_protocol::{BatchExecRequest, ExecRequest, HubCommand};
+use agentic_gpt_protocol::{ExecRequest, HubCommand, SessionInfo};
 use anyhow::Result;
 use chrono::Utc;
 use rmcp::{
@@ -13,7 +13,9 @@ use rmcp::{
     ServerHandler, ServiceExt,
 };
 use serde::de::DeserializeOwned;
+use serde::Deserialize;
 use serde_json::{json, Map, Value};
+use tokio::time::{sleep, Instant};
 use uuid::Uuid;
 
 use crate::{
@@ -21,39 +23,30 @@ use crate::{
     state::{AppState, CapabilityProfile},
 };
 
-const INSTRUCTIONS: &str = "Agentic GPT local Tunnel worker. Use process.exec for deterministic commands, session tools for managed processes, tmux for persistent workspaces, skills for the local skills workspace, and bootstrap for local startup guidance. All calls remain subject to local policy, path policy, confirmation, audit, and bounded waits.";
+const INSTRUCTIONS: &str = "Agentic GPT local Tunnel worker. Use process.* for managed local processes, tmux for persistent workspaces, skills for the local skills workspace, and bootstrap for Room startup guidance. All calls remain subject to local policy, path policy, configured confirmation, audit, and bounded waits.";
 
 const NORMAL_TOOLS: &[&str] = &[
-    "bootstrap",
-    "bootstrap.read",
     "mcp.callTool",
-    "mcp.listServers",
-    "mcp.listTools",
+    "mcp.list",
     "process.batchExec",
     "process.exec",
-    "session.inspect",
-    "session.kill",
-    "session.list",
-    "session.start",
-    "session.wait",
-    "skills.active",
-    "skills.activate",
-    "skills.deactivate",
+    "process.get",
+    "process.kill",
+    "process.list",
     "skills.install",
     "skills.install.cancel",
     "skills.install.get",
     "skills.list",
     "skills.read",
     "skills.run",
-    "skills.search",
-    "tmux.capturePane",
-    "tmux.closeSession",
-    "tmux.createSession",
+    "skills.setActive",
     "tmux.exec",
-    "tmux.listPanes",
-    "tmux.listSessions",
     "tmux.pasteText",
+    "tmux.panes",
+    "tmux.sessions",
 ];
+
+const ROOM_BOOTSTRAP_TOOLS: &[&str] = &["bootstrap", "bootstrap.read"];
 
 const ROOM_ONLY_TOOLS: &[&str] = &[
     "room.diary.append",
@@ -86,6 +79,7 @@ impl StdioMcpServer {
         let profile = state.runtime.profile;
         let mut names = NORMAL_TOOLS.to_vec();
         if profile == CapabilityProfile::Room {
+            names.extend_from_slice(ROOM_BOOTSTRAP_TOOLS);
             names.extend_from_slice(ROOM_ONLY_TOOLS);
         }
         names.sort_unstable();
@@ -164,101 +158,11 @@ impl StdioMcpServer {
     async fn dispatch(&self, name: &str, arguments: Value) -> Result<Value> {
         let request_id = request_id();
         match name {
-            "process.exec" | "session.start" => {
-                self.require_agent(&arguments).await?;
-                let mut value = object(arguments)?;
-                value.entry("args").or_insert_with(|| json!([]));
-                value.entry("needConfirm").or_insert_with(|| json!(false));
-                let payload: ExecRequest = from_object(value)?;
-                let session_id = task_id("sess");
-                let command = if name == "process.exec" {
-                    HubCommand::Exec {
-                        request_id,
-                        task_id: task_id("task"),
-                        payload,
-                    }
-                } else {
-                    HubCommand::StartSession {
-                        request_id,
-                        session_id: session_id.clone(),
-                        payload,
-                    }
-                };
-                let result = local_service::dispatch(self.state.clone(), command).await?;
-                if name == "session.start" {
-                    Ok(session_start_result(session_id, result))
-                } else {
-                    Ok(result)
-                }
-            }
-            "process.batchExec" => {
-                self.require_agent(&arguments).await?;
-                let mut value = object(arguments)?;
-                value.entry("needConfirm").or_insert_with(|| json!(false));
-                if let Some(elements) = value.get_mut("elements").and_then(Value::as_array_mut) {
-                    for element in elements {
-                        if let Some(element) = element.as_object_mut() {
-                            element.entry("args").or_insert_with(|| json!([]));
-                        }
-                    }
-                }
-                let payload: BatchExecRequest = from_object(value)?;
-                local_service::dispatch(
-                    self.state.clone(),
-                    HubCommand::BatchExec {
-                        request_id,
-                        task_id: task_id("batch"),
-                        payload,
-                    },
-                )
-                .await
-                .map_err(Into::into)
-            }
-            "session.list" => {
-                self.require_agent(&arguments).await?;
-                let value = dispatch(self, HubCommand::ListSessions { request_id }).await?;
-                Ok(json!({ "sessions": value }))
-            }
-            "session.inspect" => {
-                self.require_agent(&arguments).await?;
-                let value: SessionArgs = from_value(arguments)?;
-                let value = dispatch(
-                    self,
-                    HubCommand::InspectSession {
-                        request_id,
-                        session_id: value.session_id,
-                    },
-                )
-                .await?;
-                Ok(session_or_not_found(value))
-            }
-            "session.wait" => {
-                self.require_agent(&arguments).await?;
-                let value: WaitArgs = from_value(arguments)?;
-                let value = dispatch(
-                    self,
-                    HubCommand::WaitSession {
-                        request_id,
-                        session_id: value.session_id,
-                        seconds: value.seconds.unwrap_or(0).min(30),
-                    },
-                )
-                .await?;
-                Ok(session_or_not_found(value))
-            }
-            "session.kill" => {
-                self.require_agent(&arguments).await?;
-                let value: SessionArgs = from_value(arguments)?;
-                let value = dispatch(
-                    self,
-                    HubCommand::KillSession {
-                        request_id,
-                        session_id: value.session_id,
-                    },
-                )
-                .await?;
-                Ok(session_or_not_found(value))
-            }
+            "process.exec" => self.dispatch_process_exec(arguments).await,
+            "process.batchExec" => self.dispatch_process_batch(arguments).await,
+            "process.get" => self.dispatch_process_get(arguments).await,
+            "process.kill" => self.dispatch_process_kill(arguments).await,
+            "process.list" => self.dispatch_process_list(arguments).await,
             "tmux.listSessions" => {
                 self.require_agent(&arguments).await?;
                 dispatch(self, HubCommand::TmuxListSessions { request_id }).await
@@ -439,7 +343,7 @@ impl StdioMcpServer {
                 .await
             }
             "skills.run" => {
-                dispatch(
+                let mut value = dispatch(
                     self,
                     HubCommand::SkillsRun {
                         request_id,
@@ -447,7 +351,11 @@ impl StdioMcpServer {
                         payload: from_value(arguments)?,
                     },
                 )
-                .await
+                .await?;
+                if let Some(object) = value.as_object_mut() {
+                    object.remove("agentId");
+                }
+                Ok(value)
             }
             "room.notebook.append" => {
                 dispatch(
@@ -553,6 +461,276 @@ impl StdioMcpServer {
         }
     }
 
+    async fn dispatch_process_exec(&self, arguments: Value) -> Result<Value> {
+        let args: ProcessExecArgs = from_value(arguments)?;
+        let config = self.state.config.read().await.clone();
+        let session_id = task_id("sess");
+        let info = crate::sessions::start_managed_session_async(
+            self.state.clone(),
+            session_id,
+            ExecRequest {
+                agent_id: config.agent_id,
+                program: args.program,
+                args: args.args,
+                need_confirm: args.need_confirm,
+                confirm_method: None,
+                working_directory: args.working_directory,
+            },
+            crate::sessions::ManagedSessionOptions::for_source("tunnel:process.exec"),
+        )
+        .await;
+        let info = crate::sessions::wait_for_session(
+            &self.state,
+            info,
+            args.wait_seconds.unwrap_or(5).min(30),
+        )
+        .await;
+        Ok(managed_process_response(info))
+    }
+
+    async fn dispatch_process_get(&self, arguments: Value) -> Result<Value> {
+        let args: ProcessGetArgs = from_value(arguments)?;
+        let info = crate::sessions::inspect_session(&self.state, &args.session_id).await;
+        match info {
+            Some(info) => {
+                let info = crate::sessions::wait_for_session(
+                    &self.state,
+                    info,
+                    args.wait_seconds.unwrap_or(0).min(30),
+                )
+                .await;
+                Ok(serde_json::to_value(info)?)
+            }
+            None => Ok(session_not_found(args.session_id)),
+        }
+    }
+
+    async fn dispatch_process_batch(&self, arguments: Value) -> Result<Value> {
+        let args: ProcessBatchArgs = from_value(arguments)?;
+        let batch_id = task_id("batch");
+        let started_at = Utc::now();
+        let wait_seconds = args.wait_seconds.unwrap_or(5).min(30);
+        let inputs = args.elements;
+        if inputs.is_empty() {
+            return Ok(serde_json::to_value(TunnelBatchResponse {
+                batch_id,
+                status: "completed".to_string(),
+                results: Vec::new(),
+                started_at,
+                updated_at: Utc::now(),
+            })?);
+        }
+        let config = self.state.config.read().await.clone();
+        let mut prepared = Vec::with_capacity(inputs.len());
+        let mut rejection_reasons = vec![None; inputs.len()];
+        let mut first_rejection = None;
+        for (index, input) in inputs.iter().cloned().enumerate() {
+            let working_directory = input
+                .working_directory
+                .clone()
+                .or_else(|| args.working_directory.clone());
+            let decision = crate::policy::policy_decision_for_profile(
+                &config,
+                self.state.runtime.profile,
+                &input.program,
+                &input.args,
+                args.need_confirm,
+            );
+            let resolved =
+                match crate::exec::resolve_working_directory(&config, working_directory.as_deref())
+                {
+                    Ok(directory) => directory,
+                    Err(reason) => {
+                        rejection_reasons[index] = Some(reason.clone());
+                        first_rejection.get_or_insert((index, reason));
+                        continue;
+                    }
+                };
+            if let Err(reason) =
+                crate::exec::preflight(&config, &resolved, &input.program, &input.args)
+            {
+                rejection_reasons[index] = Some(reason.clone());
+                first_rejection.get_or_insert((index, reason));
+                continue;
+            }
+            if decision == crate::policy::PolicyDecision::Deny {
+                rejection_reasons[index] = Some("policy_denied".to_string());
+                first_rejection.get_or_insert((index, "policy_denied".to_string()));
+                continue;
+            }
+            prepared.push(PreparedTunnelBatchElement {
+                index,
+                input,
+                resolved_working_directory: resolved,
+                decision,
+            });
+        }
+        if let Some((index, reason)) = first_rejection {
+            return Ok(serde_json::to_value(rejected_batch_response_with_reasons(
+                batch_id,
+                inputs,
+                rejection_reasons,
+                index,
+                reason,
+                started_at,
+            ))?);
+        }
+
+        let confirmation_elements = prepared
+            .iter()
+            .map(|element| crate::exec::PreparedBatchElement {
+                index: element.index,
+                program: element.input.program.clone(),
+                args: element.input.args.clone(),
+                working_directory: element
+                    .input
+                    .working_directory
+                    .clone()
+                    .or_else(|| args.working_directory.clone()),
+                resolved_working_directory: element.resolved_working_directory.clone(),
+                decision: element.decision,
+                reject_reason: None,
+            })
+            .collect::<Vec<_>>();
+        let needs_confirmation = confirmation_elements
+            .iter()
+            .filter(|element| element.decision == crate::policy::PolicyDecision::Confirm)
+            .cloned()
+            .collect::<Vec<_>>();
+        if !needs_confirmation.is_empty() {
+            let confirmation = crate::confirmation::request_batch_confirmation(
+                &self.state,
+                &config,
+                None,
+                &needs_confirmation,
+                &confirmation_elements,
+            )
+            .await;
+            if confirmation != "allow_once" {
+                return Ok(serde_json::to_value(rejected_batch_response(
+                    batch_id,
+                    inputs,
+                    needs_confirmation[0].index,
+                    confirmation,
+                    started_at,
+                ))?);
+            }
+        }
+
+        let agent_id = config.agent_id;
+        let specs = prepared
+            .into_iter()
+            .map(|element| crate::sessions::ManagedProcessSpec {
+                session_id: task_id("sess"),
+                request: ExecRequest {
+                    agent_id: agent_id.clone(),
+                    program: element.input.program,
+                    args: element.input.args,
+                    need_confirm: args.need_confirm,
+                    confirm_method: None,
+                    working_directory: element
+                        .input
+                        .working_directory
+                        .or_else(|| args.working_directory.clone()),
+                },
+                working_directory: element.resolved_working_directory,
+                decision: element.decision,
+                request_source: "tunnel:process.batchExec".to_string(),
+            })
+            .collect::<Vec<_>>();
+        let infos =
+            match crate::sessions::start_prepared_managed_batch(self.state.clone(), specs).await {
+                Ok(infos) => infos,
+                Err(reason) => {
+                    return Ok(serde_json::to_value(rejected_batch_response(
+                        batch_id, inputs, 0, reason, started_at,
+                    ))?);
+                }
+            };
+        let deadline = Instant::now() + std::time::Duration::from_secs(wait_seconds);
+        let mut latest = infos;
+        loop {
+            let mut all_terminal = true;
+            for info in &mut latest {
+                if let Some(session) =
+                    crate::sessions::inspect_session(&self.state, &info.session_id).await
+                {
+                    *info = session;
+                }
+                if matches!(
+                    info.state.as_str(),
+                    "starting" | "running" | "waiting_confirmation"
+                ) {
+                    all_terminal = false;
+                }
+            }
+            if all_terminal || Instant::now() >= deadline {
+                break;
+            }
+            sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let results = latest
+            .into_iter()
+            .enumerate()
+            .map(|(index, info)| TunnelBatchResult {
+                index,
+                program: info.program.clone(),
+                args: info.args.clone(),
+                working_directory: info.working_directory.clone(),
+                outcome: "managed".to_string(),
+                process: Some(managed_process_response(info)),
+                reject_reason: None,
+            })
+            .collect::<Vec<_>>();
+        let status = if results.iter().any(|result| {
+            result
+                .process
+                .as_ref()
+                .and_then(|process| process.get("session"))
+                .and_then(|session| session.get("state"))
+                .and_then(Value::as_str)
+                .map(|state| matches!(state, "starting" | "running" | "waiting_confirmation"))
+                .unwrap_or(false)
+        }) {
+            "running"
+        } else if results.iter().any(|result| {
+            result
+                .process
+                .as_ref()
+                .and_then(|process| process.get("session"))
+                .and_then(|session| session.get("state"))
+                .and_then(Value::as_str)
+                .map(|state| state != "exited")
+                .unwrap_or(true)
+        }) {
+            "partial_failed"
+        } else {
+            "completed"
+        };
+        Ok(serde_json::to_value(TunnelBatchResponse {
+            batch_id,
+            status: status.to_string(),
+            results,
+            started_at,
+            updated_at: Utc::now(),
+        })?)
+    }
+
+    async fn dispatch_process_kill(&self, arguments: Value) -> Result<Value> {
+        let args: ProcessKillArgs = from_value(arguments)?;
+        match crate::sessions::kill_session(&self.state, &args.session_id).await {
+            Some(info) => Ok(serde_json::to_value(info)?),
+            None => Ok(session_not_found(args.session_id)),
+        }
+    }
+
+    async fn dispatch_process_list(&self, arguments: Value) -> Result<Value> {
+        let _: EmptyArgs = from_value(arguments)?;
+        Ok(json!({
+            "sessions": crate::sessions::current_sessions(&self.state).await,
+        }))
+    }
+
     async fn require_agent(&self, arguments: &Value) -> Result<()> {
         let supplied = arguments
             .get("agentId")
@@ -614,74 +792,197 @@ impl ServerHandler for StdioMcpServer {
     }
 }
 
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SessionArgs {
-    #[allow(dead_code)]
-    agent_id: String,
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ProcessExecArgs {
+    program: String,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    working_directory: Option<String>,
+    #[serde(default)]
+    need_confirm: bool,
+    #[serde(default)]
+    wait_seconds: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ProcessGetArgs {
+    session_id: String,
+    #[serde(default)]
+    wait_seconds: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ProcessKillArgs {
     session_id: String,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BatchElementArgs {
+    program: String,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    working_directory: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ProcessBatchArgs {
+    elements: Vec<BatchElementArgs>,
+    #[serde(default)]
+    working_directory: Option<String>,
+    #[serde(default)]
+    need_confirm: bool,
+    #[serde(default)]
+    wait_seconds: Option<u64>,
+}
+
+#[derive(Debug)]
+struct PreparedTunnelBatchElement {
+    index: usize,
+    input: BatchElementArgs,
+    resolved_working_directory: std::path::PathBuf,
+    decision: crate::policy::PolicyDecision,
+}
+
+#[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct WaitArgs {
-    #[allow(dead_code)]
-    agent_id: String,
+struct TunnelBatchResult {
+    index: usize,
+    program: String,
+    args: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    working_directory: Option<String>,
+    outcome: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    process: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reject_reason: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TunnelBatchResponse {
+    batch_id: String,
+    status: String,
+    results: Vec<TunnelBatchResult>,
+    started_at: chrono::DateTime<Utc>,
+    updated_at: chrono::DateTime<Utc>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct EmptyArgs {}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ManagedProcessResponse {
     session_id: String,
-    seconds: Option<u64>,
+    completed_inline: bool,
+    poll_after_ms: u64,
+    session: SessionInfo,
 }
 
 async fn dispatch(server: &StdioMcpServer, command: HubCommand) -> Result<Value> {
     local_service::dispatch(server.state.clone(), command).await
 }
 
-fn session_start_result(session_id: String, value: Value) -> Value {
-    let status = serde_json::from_value::<agentic_gpt_protocol::SessionInfo>(value.clone())
-        .ok()
-        .map(|session| {
-            if matches!(
-                session.state.as_str(),
-                "running" | "waiting_confirmation" | "starting"
-            ) {
-                "started"
-            } else {
-                "failed"
-            }
-        })
-        .unwrap_or("failed");
+fn session_not_found(session_id: String) -> Value {
     json!({
-        "status": status,
-        "sessionId": session_id,
-        "session": value
+        "error": {
+            "code": "session_not_found",
+            "message": format!("Session was not found: {session_id}"),
+        }
     })
 }
 
-fn session_or_not_found(value: Value) -> Value {
-    if value.is_null() {
+fn managed_process_response(info: SessionInfo) -> Value {
+    let completed_inline = !matches!(
+        info.state.as_str(),
+        "starting" | "running" | "waiting_confirmation"
+    );
+    serde_json::to_value(ManagedProcessResponse {
+        session_id: info.session_id.clone(),
+        completed_inline,
+        poll_after_ms: if completed_inline { 0 } else { 1_000 },
+        session: info,
+    })
+    .unwrap_or_else(|_| {
         json!({
             "error": {
-                "code": "session_not_found",
-                "message": "Session was not found"
+                "code": "process_response_failed",
+                "message": "failed to encode managed process response",
             }
         })
-    } else {
-        value
+    })
+}
+
+fn rejected_batch_response(
+    batch_id: String,
+    inputs: Vec<BatchElementArgs>,
+    rejected_index: usize,
+    reason: String,
+    started_at: chrono::DateTime<Utc>,
+) -> TunnelBatchResponse {
+    let mut reasons = vec![None; inputs.len()];
+    reasons[rejected_index] = Some(reason.clone());
+    rejected_batch_response_with_reasons(
+        batch_id,
+        inputs,
+        reasons,
+        rejected_index,
+        reason,
+        started_at,
+    )
+}
+
+fn rejected_batch_response_with_reasons(
+    batch_id: String,
+    inputs: Vec<BatchElementArgs>,
+    reasons: Vec<Option<String>>,
+    rejected_index: usize,
+    reason: String,
+    started_at: chrono::DateTime<Utc>,
+) -> TunnelBatchResponse {
+    let results = inputs
+        .into_iter()
+        .enumerate()
+        .map(|(index, input)| TunnelBatchResult {
+            index,
+            program: input.program,
+            args: input.args,
+            working_directory: input.working_directory,
+            outcome: if reasons[index].is_some() {
+                "rejected".to_string()
+            } else {
+                "skipped".to_string()
+            },
+            process: None,
+            reject_reason: if let Some(reason) = reasons[index].clone() {
+                Some(reason)
+            } else if index == rejected_index {
+                Some(reason.clone())
+            } else {
+                Some("batch_rejected".to_string())
+            },
+        })
+        .collect();
+    TunnelBatchResponse {
+        batch_id,
+        status: "rejected".to_string(),
+        results,
+        started_at,
+        updated_at: Utc::now(),
     }
 }
 
 fn from_value<T: DeserializeOwned>(value: Value) -> Result<T> {
     serde_json::from_value(value).map_err(Into::into)
-}
-
-fn from_object<T: DeserializeOwned>(value: Map<String, Value>) -> Result<T> {
-    from_value(Value::Object(value))
-}
-
-fn object(value: Value) -> Result<Map<String, Value>> {
-    value
-        .as_object()
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("tool arguments must be an object"))
 }
 
 fn request_id() -> String {
@@ -713,11 +1014,10 @@ fn tool_descriptor(name: &str) -> Tool {
 
 fn tool_schema(name: &str) -> (Map<String, Value>, &'static [&'static str]) {
     let required: &'static [&'static str] = match name {
-        "process.exec" | "session.start" => &["agentId", "program"],
-        "process.batchExec" => &["agentId", "elements"],
-        "session.list" | "tmux.listSessions" => &["agentId"],
-        "session.inspect" | "session.kill" => &["agentId", "sessionId"],
-        "session.wait" => &["agentId", "sessionId"],
+        "process.exec" => &["program"],
+        "process.batchExec" => &["elements"],
+        "process.get" => &["sessionId"],
+        "process.kill" => &["sessionId"],
         "tmux.listPanes" => &["agentId"],
         "tmux.capturePane" => &["agentId", "target"],
         "tmux.pasteText" => &["agentId", "target", "text"],
@@ -756,15 +1056,7 @@ fn properties_for(name: &str) -> Map<String, Value> {
     let strings = |description: &str| json!({"type": "array", "items": {"type": "string"}, "description": description});
     if matches!(
         name,
-        "process.exec"
-            | "process.batchExec"
-            | "session.start"
-            | "session.list"
-            | "session.inspect"
-            | "session.wait"
-            | "session.kill"
-            | "tmux.listSessions"
-            | "tmux.listPanes"
+        "tmux.listPanes"
             | "tmux.capturePane"
             | "tmux.pasteText"
             | "tmux.exec"
@@ -776,18 +1068,18 @@ fn properties_for(name: &str) -> Map<String, Value> {
         add("agentId", string("Target local agent id."));
     }
     match name {
-        "process.exec" | "session.start" => {
+        "process.exec" => {
             add("program", string("Executable name or path."));
             add("args", strings("Direct argument vector."));
             add(
                 "needConfirm",
                 boolean("Request confirmation before execution."),
             );
-            add(
-                "confirmMethod",
-                string("Optional confirmation provider override."),
-            );
             add("workingDirectory", string("Process working directory."));
+            add(
+                "waitSeconds",
+                number("Bounded inline wait in seconds, capped at 30."),
+            );
         }
         "process.batchExec" => {
             add(
@@ -798,7 +1090,7 @@ fn properties_for(name: &str) -> Map<String, Value> {
                         "program": string("Executable name or path."),
                         "args": strings("Direct argument vector."),
                         "workingDirectory": string("Per-element working directory.")
-                    }, "required": ["program"]}
+                    }, "required": ["program"], "additionalProperties": false}
                 }),
             );
             add(
@@ -806,20 +1098,23 @@ fn properties_for(name: &str) -> Map<String, Value> {
                 boolean("Request confirmation for the batch."),
             );
             add(
-                "confirmMethod",
-                string("Optional confirmation provider override."),
-            );
-            add(
                 "workingDirectory",
                 string("Default process working directory."),
             );
+            add(
+                "waitSeconds",
+                number("Bounded inline wait in seconds, capped at 30."),
+            );
         }
-        "session.inspect" | "session.kill" => {
+        "process.get" => {
             add("sessionId", string("Managed session id."));
+            add(
+                "waitSeconds",
+                number("Bounded wait in seconds, capped at 30."),
+            );
         }
-        "session.wait" => {
+        "process.kill" => {
             add("sessionId", string("Managed session id."));
-            add("seconds", number("Bounded wait in seconds, capped at 30."));
         }
         "tmux.listPanes" => add("session", string("Optional tmux session name.")),
         "tmux.capturePane" => {
@@ -992,8 +1287,11 @@ fn output_schema() -> Map<String, Value> {
 
 fn tool_description(name: &str) -> String {
     match name {
-        "process.exec" => "Run one short deterministic local process.".to_string(),
-        "process.batchExec" => "Run multiple short local processes.".to_string(),
+        "process.exec" => "Start one managed local process and wait briefly.".to_string(),
+        "process.batchExec" => "Start multiple managed local processes.".to_string(),
+        "process.get" => "Inspect or briefly wait for one managed local process.".to_string(),
+        "process.kill" => "Kill one managed local process.".to_string(),
+        "process.list" => "List active managed local processes.".to_string(),
         "session.start" => "Start a managed local process session.".to_string(),
         "session.list" => "List local managed sessions.".to_string(),
         "session.inspect" => "Inspect a managed session.".to_string(),
@@ -1040,8 +1338,8 @@ fn tool_is_read_only(name: &str) -> bool {
         name,
         "process.exec"
             | "process.batchExec"
-            | "session.start"
             | "session.kill"
+            | "process.kill"
             | "tmux.pasteText"
             | "tmux.exec"
             | "tmux.createSession"
@@ -1063,6 +1361,7 @@ fn tool_is_destructive(name: &str) -> bool {
     matches!(
         name,
         "session.kill"
+            | "process.kill"
             | "tmux.closeSession"
             | "room.notebook.remove"
             | "skills.install"
@@ -1076,7 +1375,6 @@ fn tool_is_open_world(name: &str) -> bool {
         name,
         "process.exec"
             | "process.batchExec"
-            | "session.start"
             | "mcp.callTool"
             | "tmux.pasteText"
             | "tmux.exec"
@@ -1115,8 +1413,8 @@ mod tests {
             .iter()
             .map(|tool| tool.name.to_string())
             .collect::<Vec<_>>();
-        assert_eq!(normal_names.len(), 29);
-        assert_eq!(room_names.len(), 39);
+        assert_eq!(normal_names.len(), 18);
+        assert_eq!(room_names.len(), 30);
         assert!(!normal_names.iter().any(|name| name.starts_with("room.")));
         assert!(room_names.iter().any(|name| name == "room.diary.append"));
         assert!(room_names.iter().any(|name| name == "room.notebook.remove"));
@@ -1157,14 +1455,9 @@ mod tests {
 
         let client = ().serve((client_read, client_write)).await?;
         let tools = client.list_all_tools().await?;
-        assert_eq!(tools.len(), 29);
+        assert_eq!(tools.len(), 18);
         let result = client
-            .call_tool(
-                CallToolRequestParams::new("session.list").with_arguments(Map::from_iter([(
-                    "agentId".to_string(),
-                    Value::String("stdio-test-agent".to_string()),
-                )])),
-            )
+            .call_tool(CallToolRequestParams::new("process.list"))
             .await?;
         assert_eq!(result.is_error, Some(false));
         assert_eq!(
@@ -1177,8 +1470,8 @@ mod tests {
         assert_eq!(skills.is_error, Some(false));
         let bootstrap = client
             .call_tool(CallToolRequestParams::new("bootstrap"))
-            .await?;
-        assert_eq!(bootstrap.is_error, Some(false));
+            .await;
+        assert!(bootstrap.is_err());
         let _ = client.cancel().await;
         server_task.await??;
         Ok(())
@@ -1198,7 +1491,7 @@ mod tests {
 
         let client = ().serve((client_read, client_write)).await?;
         let tools = client.list_all_tools().await?;
-        assert_eq!(tools.len(), 39);
+        assert_eq!(tools.len(), 30);
         let result = client
             .call_tool(CallToolRequestParams::new("room.diary.recent"))
             .await?;
@@ -1206,6 +1499,122 @@ mod tests {
         assert!(result.structured_content.as_ref().unwrap()["entries"].is_array());
         let _ = client.cancel().await;
         server_task.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn process_tools_reject_legacy_identity_and_confirmation_fields() {
+        let server = StdioMcpServer::new(test_state(CapabilityProfile::Normal));
+        let identity = server
+            .call(
+                CallToolRequestParams::new("process.exec").with_arguments(Map::from_iter([
+                    ("program".to_string(), Value::String("true".to_string())),
+                    (
+                        "agentId".to_string(),
+                        Value::String("stdio-test-agent".to_string()),
+                    ),
+                ])),
+            )
+            .await
+            .expect_err("Tunnel process schemas must reject agentId");
+        assert_eq!(identity.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+
+        let confirmation = server
+            .call(
+                CallToolRequestParams::new("process.exec").with_arguments(Map::from_iter([
+                    ("program".to_string(), Value::String("true".to_string())),
+                    (
+                        "confirmMethod".to_string(),
+                        Value::String("hub".to_string()),
+                    ),
+                ])),
+            )
+            .await
+            .expect_err("Tunnel process schemas must reject confirmMethod");
+        assert_eq!(confirmation.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+
+        let removed = server
+            .call(CallToolRequestParams::new("session.list"))
+            .await
+            .expect_err("Removed Tunnel aliases must not be callable");
+        assert_eq!(removed.code, rmcp::model::ErrorCode::METHOD_NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn process_exec_get_kill_and_batch_use_managed_sessions() -> anyhow::Result<()> {
+        let server = StdioMcpServer::new(test_state(CapabilityProfile::Normal));
+        let quick = server
+            .dispatch("process.exec", json!({"program": "true", "waitSeconds": 5}))
+            .await?;
+        assert_eq!(quick["completedInline"], json!(true));
+        assert!(quick.get("agentId").is_none());
+        let quick_session = quick["sessionId"].as_str().unwrap().to_string();
+        let fetched = server
+            .dispatch(
+                "process.get",
+                json!({"sessionId": quick_session, "waitSeconds": 0}),
+            )
+            .await?;
+        assert_eq!(fetched["state"], json!("exited"));
+
+        let long = server
+            .dispatch(
+                "process.exec",
+                json!({"program": "sleep", "args": ["2"], "waitSeconds": 0}),
+            )
+            .await?;
+        assert_eq!(long["completedInline"], json!(false));
+        let long_session = long["sessionId"].as_str().unwrap().to_string();
+        let listed = server.dispatch("process.list", json!({})).await?;
+        assert!(listed["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|session| session["sessionId"] == long_session));
+        let killed = server
+            .dispatch("process.kill", json!({"sessionId": long_session}))
+            .await?;
+        assert!(matches!(
+            killed["state"].as_str(),
+            Some("killed") | Some("failed") | Some("exited")
+        ));
+
+        let batch = server
+            .dispatch(
+                "process.batchExec",
+                json!({
+                    "elements": [
+                        {"program": "true"},
+                        {"program": "false"}
+                    ],
+                    "waitSeconds": 5
+                }),
+            )
+            .await?;
+        assert_eq!(batch["results"].as_array().unwrap().len(), 2);
+        assert_eq!(batch["status"], json!("partial_failed"));
+        assert!(batch["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|result| result["outcome"] == "managed"
+                && result["process"]["sessionId"].is_string()));
+
+        let rejected = server
+            .dispatch(
+                "process.batchExec",
+                json!({
+                    "elements": [
+                        {"program": "true"},
+                        {"program": "true", "workingDirectory": "/missing"}
+                    ],
+                    "waitSeconds": 0
+                }),
+            )
+            .await?;
+        assert_eq!(rejected["status"], json!("rejected"));
+        assert_eq!(rejected["results"][0]["outcome"], json!("skipped"));
+        assert_eq!(rejected["results"][1]["outcome"], json!("rejected"));
         Ok(())
     }
 

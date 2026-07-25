@@ -14,6 +14,14 @@
 - `start_session_async` remains a compatibility-prepared Hub path: its existing synchronous path/preflight/policy rejection behavior is preserved, while the shared managed finalizer is reused after admission. Tunnel/skills will use the deferred generic entrypoint in later phases.
 - `wait_for_session` is now the shared bounded polling helper used by `skills.run`; the existing maximum wait bound remains 30 seconds.
 
+## Phase 4 implementation findings
+
+- Tunnel `process.exec`, `process.get`, `process.kill`, and `process.list` now decode strict stdio-only request structs, inject configured `agent_id` internally, and use the shared managed lifecycle. The public process wrapper omits top-level `agentId`; nested `SessionInfo.agentId` remains protocol metadata.
+- Tunnel `process.batchExec` performs per-element working-directory/policy/preflight validation, one configured-provider batch confirmation, atomic aggregate capacity admission/insertion, concurrent child starts, one shared inline deadline, and per-element session follow-up data.
+- Batch admission failures create no sessions; validation failures preserve ordered rejected/skipped evidence. Post-admission spawn failures remain isolated to their own retained session while siblings continue.
+- Removed Tunnel process/session aliases are rejected by the existing advertised-tool gate as method-not-found. Strict `deny_unknown_fields` rejects both `agentId` and `confirmMethod` before managed session allocation.
+- Hub full/coordinator tests remain green after the Tunnel adapter bypassed Hub `Exec`/`BatchExec`; the shared Hub protocol commands were not changed.
+
 ## Current Tunnel Tool Construction
 - `crates/agentic-gpt/src/stdio_server.rs` owns a manually generated descriptor table, schemas, descriptions, annotations, profile tool lists, dispatch, and run reporting.
 - Current Normal advertises 29 tools; Room adds ten diary/notebook tools for 39.

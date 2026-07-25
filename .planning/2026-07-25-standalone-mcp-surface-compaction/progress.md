@@ -174,3 +174,15 @@ Start a later implementation request from Phase 3. Each phase must update all th
 - Full `cargo test -p agentic-gpt --bin agentic-gpt` passed: 135 tests.
 - `cargo fmt --all` completed and the Phase 3 diff has no formatting or whitespace errors.
 - Hub compatibility review identified and preserved the old synchronous `session.start` preflight/rejection behavior; only the new Tunnel/skills managed entrypoint defers those checks after registration.
+
+### Phase 4 start
+- Phase 3 committed as `eb76367` (`refactor(agent): unify managed process lifecycle`).
+- Phase 4 is now in progress. The implementation boundary is the Tunnel stdio adapter and the new managed entrypoint; Hub full/coordinator dispatch and legacy protocol variants remain untouched.
+- Initial stdio test run exposed only stale 29/39 assertions and Normal calls to removed `session.list`/`bootstrap`; tests were updated to the frozen 18/30 surface and `process.list`.
+
+### Phase 4 verification
+- Added strict Tunnel process argument structs and direct managed dispatch for single-process lifecycle operations.
+- Added managed batch admission/launch path with all-or-reject validation, configured confirmation, atomic capacity reservation/insertion, shared deadline, and independent post-admission sibling behavior.
+- `cargo test -p agentic-gpt --bin agentic-gpt stdio_server::tests` passed: 7 tests.
+- `cargo test -p agentic-gpt --bin agentic-gpt` passed: 137 tests, including Hub compatibility and all existing Agent tests.
+- Added tests for exact 18/30 counts, Normal bootstrap absence, removed alias rejection, strict `agentId`/`confirmMethod` rejection, quick/long/get/kill/list, managed batch success, and batch admission rejection.

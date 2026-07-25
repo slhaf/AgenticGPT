@@ -8,8 +8,8 @@ Reduce the public MCP schema exposed by each Tunnel-backed standalone Agent with
 - **Current role:** designer
 - **Implementation authorized:** yes, for a later implementation request
 - **Active plan:** `2026-07-25-standalone-mcp-surface-compaction`
-- **Current phase:** Phase 3 — Generalize the Managed-Process Lifecycle (complete)
-- **Entry phase after handoff:** Phase 4
+- **Current phase:** Phase 4 — Replace the Tunnel Process/Session Surface (complete)
+- **Entry phase after handoff:** Phase 5
 - **Open blocking decisions:** none
 
 ## Errors Encountered
@@ -18,6 +18,7 @@ Reduce the public MCP schema exposed by each Tunnel-backed standalone Agent with
 |---|---:|---|
 | Rust borrow conflict while finalizing after tail-buffer guards | 1 | Scoped tail-buffer reads before invoking the mutable terminal finalizer. |
 | Cargo focused-test invocation rejected multiple positional filters | 1 | Use one `sessions::tests` filter for the focused Phase 3 test run. |
+| Stdio regression tests still asserted the pre-compaction 29/39 tool counts and Normal legacy calls | 1 | Updated tests to the frozen 18/30 surface and `process.list`; added process lifecycle coverage. |
 
 ## Scope
 
@@ -490,7 +491,7 @@ These are MCP serialization budgets, not a promise of an exact model-token ratio
 **Verification:** focused stdio protocol tests and Agent/Hub tests.
 
 **Commit:** `feat(agent): compact standalone process tools`
-- **Status:** pending
+- **Status:** complete
 
 ### Phase 5: Compact MCP, Skills, tmux, and Profile Capabilities
 **Objective / visible outcome:** Complete the exact 18-tool Normal and 30-tool Room surfaces while preserving existing behavior behind fewer descriptors.

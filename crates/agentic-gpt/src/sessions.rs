@@ -40,6 +40,14 @@ pub(crate) struct ManagedSessionOptions {
     pub(crate) terminal_event_hook: Option<TerminalEventHook>,
 }
 
+pub(crate) struct ManagedProcessSpec {
+    pub(crate) session_id: String,
+    pub(crate) request: ExecRequest,
+    pub(crate) working_directory: std::path::PathBuf,
+    pub(crate) decision: PolicyDecision,
+    pub(crate) request_source: String,
+}
+
 impl ManagedSessionOptions {
     pub(crate) fn for_source(request_source: impl Into<String>) -> Self {
         Self {
@@ -267,7 +275,7 @@ pub(crate) async fn start_session_async(
     if decision == PolicyDecision::Deny {
         return rejected_session(&request, session_id, "policy_denied".to_string());
     }
-    start_managed_session_async(
+    start_prepared_session_async(
         state,
         session_id,
         request,
@@ -282,9 +290,118 @@ pub(crate) async fn start_managed_session_async(
     session_id: String,
     request: ExecRequest,
     options: ManagedSessionOptions,
+) -> SessionInfo {
+    start_session_async_inner(state, session_id, request, None, options, None).await
+}
+
+async fn start_prepared_session_async(
+    state: AppState,
+    session_id: String,
+    request: ExecRequest,
+    options: ManagedSessionOptions,
     prepared: Option<(std::path::PathBuf, PolicyDecision)>,
 ) -> SessionInfo {
     start_session_async_inner(state, session_id, request, None, options, prepared).await
+}
+
+pub(crate) async fn start_prepared_managed_batch(
+    state: AppState,
+    specs: Vec<ManagedProcessSpec>,
+) -> Result<Vec<SessionInfo>, String> {
+    if specs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let config = state.config.read().await.clone();
+    let mut registered = Vec::with_capacity(specs.len());
+    for spec in specs {
+        let started_at = Utc::now();
+        let info = SessionInfo {
+            agent_id: spec.request.agent_id.clone(),
+            session_id: spec.session_id.clone(),
+            state: "starting".to_string(),
+            program: spec.request.program.clone(),
+            args: spec.request.args.clone(),
+            working_directory: spec.request.working_directory.clone(),
+            command_preview: command_preview(&spec.request.program, &spec.request.args),
+            started_at,
+            updated_at: started_at,
+            exit_code: None,
+            stdout_tail: String::new(),
+            stderr_tail: String::new(),
+            truncated: false,
+            reject_reason: None,
+        };
+        let stdout = Arc::new(Mutex::new(TailBuffer::new(SESSION_TAIL_MAX)));
+        let stderr = Arc::new(Mutex::new(TailBuffer::new(SESSION_TAIL_MAX)));
+        let cancel_requested = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let audit = ManagedAuditContext {
+            config: config.clone(),
+            request_source: spec.request_source.clone(),
+            need_confirm: spec.request.need_confirm,
+            policy_decision: format!("{:?}", spec.decision),
+            confirmation_result: None,
+            skill_id: None,
+            skill_path: None,
+            installed_digest: None,
+            terminal_event_hook: None,
+        };
+        registered.push((spec, info, stdout, stderr, cancel_requested, audit));
+    }
+    {
+        let mut sessions = state.sessions.lock().await;
+        refresh_sessions(&state, &mut sessions).await;
+        let active = sessions
+            .values()
+            .filter(|session| is_active_session_state(&session.info.state))
+            .count();
+        if active + registered.len() > config.limits.max_active_sessions {
+            return Err("max_active_sessions_reached".to_string());
+        }
+        for (spec, info, stdout, stderr, cancel_requested, audit) in &registered {
+            sessions.insert(
+                spec.session_id.clone(),
+                ManagedSession {
+                    info: info.clone(),
+                    child: None,
+                    stdout: stdout.clone(),
+                    stderr: stderr.clone(),
+                    last_activity: Instant::now(),
+                    cancel_requested: cancel_requested.clone(),
+                    skill_lease: None,
+                    audit: Some(ManagedAuditContext {
+                        config: audit.config.clone(),
+                        request_source: audit.request_source.clone(),
+                        need_confirm: audit.need_confirm,
+                        policy_decision: audit.policy_decision.clone(),
+                        confirmation_result: audit.confirmation_result.clone(),
+                        skill_id: None,
+                        skill_path: None,
+                        installed_digest: None,
+                        terminal_event_hook: None,
+                    }),
+                },
+            );
+        }
+    }
+    let mut infos = Vec::with_capacity(registered.len());
+    for (spec, info, stdout, stderr, cancel_requested, _) in registered {
+        let monitor_state = state.clone();
+        let monitor_session_id = info.session_id.clone();
+        tokio::spawn(run_async_session(
+            state.clone(),
+            spec.session_id.clone(),
+            spec.request,
+            stdout,
+            stderr,
+            cancel_requested,
+            Some((spec.working_directory, spec.decision)),
+        ));
+        tokio::spawn(async move {
+            monitor_session(monitor_state, monitor_session_id).await;
+        });
+        infos.push(info);
+    }
+    Ok(infos)
 }
 
 async fn start_session_async_inner(
@@ -988,7 +1105,6 @@ mod tests {
             "sess-preflight".to_string(),
             request,
             options,
-            None,
         )
         .await;
         assert_eq!(info.state, "starting");
