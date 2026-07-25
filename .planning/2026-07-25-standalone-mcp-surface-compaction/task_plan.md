@@ -592,5 +592,5 @@ The implementer may choose private Rust type names, module splits, helper owners
 - **Implementation discretion:** see `Implementation Discretion`; private helper/type ownership may vary but cannot change public Tunnel shapes, Hub compatibility, all-or-reject batch admission, lifecycle finalization, or logging/audit limits
 - **Verification convention:** focused tests per phase; full workspace and real hidden stdio Normal/Room probes before delivery
 - **Commit convention:** one focused local Git commit after each verified Phase 3–6; Phase 7 uses only evidenced repair commits
-- **Design checkpoint:** not set for the formal refine diff; existing pre-refine planning checkpoint is `9b08dcc`
+- **Design checkpoint:** `7f2fc27` (`docs(planning): refine standalone MCP handoff`)
 - **Next invocation:** `$planning-with-files` without `$refine-implementation-plan`; begin Phase 3 and do not alter frozen public behavior without reopening refinement

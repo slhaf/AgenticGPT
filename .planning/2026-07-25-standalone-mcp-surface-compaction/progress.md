@@ -152,3 +152,7 @@ Start a later implementation request from Phase 3. Each phase must update all th
 - Phase audit passed: Phases 1–2 complete; Phases 3–7 pending with explicit prerequisites, implementation seams, acceptance tests, verification, and commit boundaries.
 - File-boundary and hygiene audit passed: only the three active planning files changed; `git diff --check` exit 0; no product code changed.
 - Result: ready for a planning-only checkpoint and handoff to Luna using `$planning-with-files` from Phase 3.
+
+### Planning checkpoint
+- Formal refine checkpoint created: `7f2fc27` (`docs(planning): refine standalone MCP handoff`).
+- This checkpoint contains only the three active planning files and is the clean implementation baseline for Luna.
