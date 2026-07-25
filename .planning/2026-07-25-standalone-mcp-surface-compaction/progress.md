@@ -273,3 +273,30 @@ Start a later implementation request from Phase 3. Each phase must update all th
 - `cargo fmt --all -- --check`, `git diff --check`, exact 18/30/schema-budget tests, and the Hub/protocol unchanged-file guard all passed.
 - Phase 8 is complete and the plan files now hand off to Phase 9. Per the request, Phase 9 independent acceptance was not executed.
 - The plan-specified single focused commit is `fix(agent): close standalone MCP contract gaps`; no separate repair or acceptance commit is created in this handoff.
+
+## 2026-07-25 — Phase 9 independent repair verification
+
+### Independent code and contract review
+- Started from the frozen planning handoff and raw `f7f09a4..03eb501` diff, not the Phase 8 completion narrative.
+- Confirmed the single repair commit and clean product boundary: only `sessions.rs`, `stdio_server.rs`, and `utils.rs` changed outside planning.
+- Traced F-01 through F-07 across public dispatch, managed registration, confirmation, lease admission, finalizer, audit, log, and Hub compatibility paths.
+- Found no new contract gap or implementation defect.
+
+### Direct focused verification
+- Re-ran eight repair-specific tests independently: batch allow/deny, retained lease failure, 64 KiB tails, tmux conditional fields, terminal duration/redaction, Tunnel skill source, and all Room legacy-field rejection; all passed.
+- Re-ran the preserved Hub skill provenance test, exact 18/30 set test, schema-budget test, formatting, and diff hygiene; all passed.
+
+### Raw hidden-worker probe
+- Launched isolated hidden stdio workers directly under the supervisor authorization boundary for both Normal and Room.
+- Actual tools/list counts: Normal 18, Room 30.
+- For every advertised tool, `agentId`, `agent_id`, and `confirmMethod` each produced an invalid-params unknown-field rejection before side effects.
+- Verified actual 40 KiB preservation and 72 KiB → 64 KiB deterministic truncation, tmux action-dependent rejection, terminal `durationMs`, Tunnel skill audit source, and protocol-only stdout.
+- Probe summary: Normal 65 parsed responses; Room 92 parsed responses; all JSON-RPC.
+
+### Full verification and delivery
+- Isolated `cargo check --workspace`: passed with only two pre-existing dead-code warnings.
+- Isolated `cargo test --workspace`: Agent 147, standalone supervisor 2, Hub 61, protocol 9, doc tests 0; all passed.
+- Phase 9 result: accepted. All 19 acceptance criteria pass; no Phase 9 product repair commit is needed.
+- Workflow transition: `phase_8_complete_pending_independent_review` → `delivered`.
+- Product files changed during Phase 9: none.
+- A planning-only delivery checkpoint records this evidence and restores a clean worktree.

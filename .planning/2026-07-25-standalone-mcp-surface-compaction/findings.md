@@ -260,3 +260,25 @@ Projected frozen surface:
 - F-07: advertised Tunnel dispatch validates public argument keys against the existing schemas before request-id/managed-session work. This keeps shared Hub protocol structs unchanged while making all Room diary/notebook adapters strict.
 - Direct regressions passed: `sessions::tests` 9/9 and `stdio_server::tests` 15/15, including batch allow/deny, retained lease failure, output bounds, tmux conditional fields, duration/redaction, source distinction, and all ten Room adapters.
 - Workspace verification passed in isolated HOME: Agent 147, standalone supervisor 2, Hub 61, protocol 9, doc tests 0; format, check, whitespace, schema budgets, exact 18/30 surfaces, and hidden Normal/Room smoke all remain green.
+
+## Phase 9 Independent Repair Verification — Accepted
+
+### Raw diff and compatibility boundary
+- Independently reviewed `f7f09a4..03eb501`; the product diff is confined to `crates/agentic-gpt/src/sessions.rs`, `stdio_server.rs`, and `utils.rs`.
+- `crates/agentic-gpt-hub`, `crates/agentic-gpt-protocol`, README, and standalone documentation have no Phase 8 diff. Hub full/coordinator and shared wire compatibility were therefore preserved structurally and by their full test suites.
+
+### Seven-finding disposition
+- F-01 passed: one allowed two-element managed batch produced one confirmation request and two terminal audits retaining `Confirm` plus `allow_once`; denial created no sessions.
+- F-02 passed: `skill_update_pending` is inserted into the managed map, remains queryable, and consumes its audit/hook context exactly once.
+- F-03 passed: managed tails are bounded at 64 KiB. Independent unit and raw stdio probes preserved 40 KiB and truncated 72 KiB to exactly 64 KiB.
+- F-04 passed: merged tmux actions accept only their frozen action field sets and reject incompatible supplied fields before tmux execution.
+- F-05 passed: asynchronous managed terminal records include non-negative `durationMs` and expose no command arguments, paths, or process output.
+- F-06 passed: Tunnel skill execution passes `tunnel:skills.run`; the unchanged Hub entrypoint still records `skills.run`.
+- F-07 passed: public stdio dispatch validates keys against the advertised descriptor before deserialization or side effects. A real worker probe tested all actual Normal and Room tools against `agentId`, `agent_id`, and `confirmMethod`.
+
+### Independent runtime and suite evidence
+- Raw worker probes: Normal 18 tools / 65 parsed responses; Room 30 tools / 92 parsed responses. Every stdout line parsed as JSON-RPC.
+- Direct repair tests: eight individually selected tests passed.
+- Additional focused checks: Hub skill provenance, exact tool sets, schema budgets, `cargo fmt --check`, and `git diff --check` passed.
+- Isolated workspace result: Agent 147, supervisor 2, Hub 61, protocol 9, doc tests 0; all passed.
+- No acceptance waiver, follow-up repair, migration, or new risk was introduced. The repair is accepted at `03eb501`.

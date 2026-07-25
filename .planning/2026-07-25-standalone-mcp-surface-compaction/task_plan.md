@@ -4,15 +4,16 @@
 Reduce the public MCP schema exposed by each Tunnel-backed standalone Agent without introducing a generic RPC tool or weakening device isolation. The Tunnel stdio worker will expose a compact, role-correct tool surface; ordinary process execution and managed sessions will share one durable lifecycle; Room-only bootstrap remains absent from Normal; and every standalone tool call plus Hub-reporting connection transition will produce safe local logs.
 
 ## Workflow State
-- **Stage:** phase_8_complete
-- **Current role:** implementer
-- **Implementation authorized:** no; Phase 8 implementation and verification are complete
+- **Stage:** delivered
+- **Current role:** designer
+- **Implementation authorized:** no; implementation and independent verification are complete
 - **Active plan:** `2026-07-25-standalone-mcp-surface-compaction`
-- **Current phase:** Phase 9 — Independent Repair Verification and Delivery (pending; not executed in this handoff)
-- **Entry phase after handoff:** Phase 9
+- **Current phase:** Phase 9 — Independent Repair Verification and Delivery (complete)
+- **Entry phase after handoff:** none
 - **Open blocking decisions:** none
 - **Implementation baseline:** `c987e32`
-- **Next action:** hand Phase 9 to a fresh independent reviewer; do not treat this Phase 8 completion as Phase 9 acceptance
+- **Repair commit:** `03eb501`
+- **Next action:** none for this plan; push/release only when separately requested
 ## Errors Encountered
 
 | Error | Attempt | Resolution |
@@ -639,8 +640,17 @@ These are MCP serialization budgets, not a promise of an exact model-token ratio
 
 **Delivery rule:** Mark the plan `delivered` only when every Phase 8 acceptance item has independent evidence. Any discovered defect reopens Phase 8 or creates one narrowly scoped repair item; do not waive a frozen criterion because tests are otherwise green.
 
-**Commit:** none when review passes; one narrowly evidenced repair commit only when needed.
-- **Status:** pending
+**Phase 9 independent verification evidence:**
+- Reviewed the raw `f7f09a4..03eb501` diff rather than relying on the Implementer summary; product changes are limited to `sessions.rs`, `stdio_server.rs`, and `utils.rs`, with Hub/protocol/docs compatibility files unchanged.
+- Traced all seven original findings through implementation and terminal paths. Batch confirmation is one provider interaction with preserved per-element audit evidence; lease admission failure is retained and finalized once; managed tails are 64 KiB; tmux conditional fields reject; terminal logs include bounded duration; Tunnel and Hub skill audit sources remain distinct; and public stdio argument validation covers every advertised tool.
+- Re-ran eight direct repair tests independently; all passed.
+- Ran a raw hidden-worker stdio probe for Normal and Room. Actual surfaces are 18/30; every advertised tool rejected each of `agentId`, `agent_id`, and `confirmMethod`; 40 KiB output was preserved, 72 KiB was deterministically truncated to 64 KiB; tmux incompatible fields rejected; managed terminal stderr included `durationMs`; Tunnel skill audit used `tunnel:skills.run`; every worker stdout line remained valid JSON-RPC.
+- Re-ran Hub skill provenance, exact tool-set, schema-budget, formatting, and diff-hygiene checks; all passed.
+- Isolated `cargo check --workspace` and `cargo test --workspace` passed: Agent 147, standalone supervisor 2, Hub 61, protocol 9, doc tests 0. Only the pre-existing `RunMode::Room` and `RunMode::role` dead-code warnings remain.
+- No new defect, contract change, or product repair was required during Phase 9.
+
+**Commit:** no Phase 9 product commit; one planning-only delivery checkpoint records the independent acceptance and restores a clean worktree.
+- **Status:** complete
 
 ## Acceptance Criteria
 
@@ -664,6 +674,8 @@ These are MCP serialization budgets, not a promise of an exact model-token ratio
 18. Managed terminal logs include bounded `durationMs`; Tunnel `skills.run` audit records use `tunnel:skills.run`, while Hub skill execution preserves its existing source.
 19. Each repaired gap has a direct regression test or real probe that would fail against `c987e32`; full green suites alone are not sufficient evidence.
 
+**Acceptance status:** all 19 criteria passed independently against repair commit `03eb501`.
+
 ## Implementation Discretion
 
 The implementer may choose private Rust type names, module splits, helper ownership, and whether the shared response is a new protocol type or an adapter-only struct, provided:
@@ -674,15 +686,15 @@ The implementer may choose private Rust type names, module splits, helper owners
 
 ## Implementation Handoff
 
-- **Plan maturity:** phase_8_complete_pending_independent_review
-- **Design phase:** reopened after independent acceptance review and complete again
-- **Implementation authorized:** no; Phase 8 is complete
-- **Entry phase:** Phase 9 — Independent Repair Verification and Delivery
+- **Plan maturity:** delivered
+- **Design phase:** complete
+- **Implementation authorized:** no; no implementation phase remains
+- **Entry phase:** none
 - **Frozen decisions:** D-01 through D-23 (D-04 superseded by D-16; D-01–D-20 otherwise unchanged)
 - **Open blocking decisions:** none
-- **Implementation discretion:** private helpers, test fixture design, strict-adapter mechanism, and shared-vs-source-specific tail allocation may vary, but the seven Phase 8 observable outcomes may not change
-- **Verification convention:** direct regression evidence for each gap, then isolated full workspace checks and real hidden stdio Normal/Room probes; Phase 9 uses a fresh reviewer
-- **Commit convention:** one focused Phase 8 repair commit created; Phase 9 creates no commit unless new evidence requires a narrow repair
-- **Design checkpoint:** implementation baseline `c987e32`; Phase 8 repair starts from the clean planning handoff at `f7f09a4`
-- **Delivery:** Phases 3–7 remain historical implementation records. Independent review superseded the previous no-repair conclusion; Phases 8–9 remain before delivery.
-- **Next invocation:** `$planning-with-files` without `$refine-implementation-plan`, starting at Phase 9; do not infer Phase 9 acceptance from this Implementer handoff
+- **Implementation discretion:** exhausted for this delivery; future requirement changes must reopen the affected contract
+- **Verification convention:** direct evidence for all seven repair findings, raw hidden-worker Normal/Room probes, and isolated full workspace verification completed
+- **Commit convention:** Phase 8 product repair is `03eb501`; Phase 9 required no product repair and is recorded by a planning-only delivery checkpoint
+- **Design checkpoint:** `f7f09a4`
+- **Delivery:** accepted. Phases 1–9 are complete, all 19 acceptance criteria pass, and no further implementation or verification work remains in this plan.
+- **Next invocation:** none for this plan; reopen with both planning skills only if a frozen requirement changes
