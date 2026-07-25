@@ -3,11 +3,11 @@
 ## Session: 2026-07-25
 
 ### Current Status
-- **Phase:** Phase 4 — Integrated Verification and Delivery (complete)
-- **Workflow stage:** delivery
-- **Role:** implementer
-- **Implementation authorized:** yes, for a later request
-- **Entry phase:** none
+- **Phase:** Phase 5 — Focused Verification Repair (ready)
+- **Workflow stage:** implementation_ready
+- **Role:** repair implementer
+- **Implementation authorized:** yes
+- **Entry phase:** Phase 5
 
 ### Actions Taken
 - Confirmed the previous standalone surface-compaction plan is delivered and the repository worktree is clean at `main...origin/main [ahead 10]`.
@@ -112,3 +112,11 @@
 | What's the goal? | No-restart operational config plus adaptive limits and clean safe journal logs. |
 | What have I learned? | See `findings.md`; root causes and ownership boundaries are identified. |
 | What have I done? | Created and refined the new scoped plan only; no product changes. |
+
+
+### Independent verification and Phase 5 reopening
+- Independently reviewed the Phase 2–4 implementation from planning checkpoint `196e146` through delivery record `d1a0028` rather than relying on the implementer's completion summary.
+- Confirmed the product scope and three-phase commit boundary were clean, but found four blocking production/race gaps: untimestamped journald INFO fallback to WARN, mutable restart comparison baseline, terminal-record loss race, and terminal-before-active ordering.
+- Confirmed existing focused and workspace tests were green but did not exercise the real inherited-journal forwarding path or forced concurrency interleavings.
+- Superseded the Phase 4 delivery conclusion and appended D-13 through D-16 plus Phase 5 focused repair. No product code was changed during reopening.
+- `agent.info`, policy matching changes, systemd unit edits, and all other new features remain explicitly deferred.

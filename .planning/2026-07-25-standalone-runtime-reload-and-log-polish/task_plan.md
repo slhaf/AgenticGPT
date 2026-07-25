@@ -5,14 +5,14 @@ Make standalone policy/limit configuration changes take effect without restartin
 
 ## Workflow State
 - **Stage:** implementation_ready
-- **Current role:** implementer
-- **Implementation authorized:** yes, for a later implementation request
+- **Current role:** repair implementer
+- **Implementation authorized:** yes
 - **Active plan:** `2026-07-25-standalone-runtime-reload-and-log-polish`
-- **Current phase:** Phase 4 — Integrated Verification and Delivery (complete)
-- **Entry phase after handoff:** none
+- **Current phase:** Phase 5 — Focused Verification Repair (ready)
+- **Entry phase after handoff:** Phase 5
 - **Open blocking decisions:** none
-- **Design checkpoint:** not set
-- **Next action:** none; implementation and delivery verification are complete
+- **Design checkpoint:** `d1a0028` independently reviewed and superseded for delivery
+- **Next action:** implement only the Phase 5 verification repairs, then rerun independent acceptance
 
 ## Scope and Constraints
 
@@ -141,6 +141,10 @@ Human-facing journal output follows these observable rules:
 | D-10 | Human ids | confirmed | Display 12-character ids in human logs; preserve full ids in machine-facing evidence. | Keeps correlation practical in narrow terminals without changing public identifiers. |
 | D-11 | Safety boundary | confirmed | Do not log commands/output and do not change exact policy program matching. | Prevents a polish task from weakening the existing security boundary. |
 | D-12 | Systemd warning | confirmed | Exclude `StartLimitIntervalSec` from this plan. | User will repair the unit manually. |
+| D-13 | Forwarded journal grammar | confirmed | The supervisor accepts both timestamped child records and journald-mode records beginning directly with `INFO`, `WARN`, or `ERROR`; parsing remains redaction-first and unknown stderr remains WARN. | The hidden worker inherits journal environment and legitimately omits its inner timestamp. |
+| D-14 | Restart comparison baseline | confirmed | Restart-required detection always compares disk config against immutable runtime startup identity; a separate last-observed/last-warned state provides bounded diagnostics. | Updating the comparison baseline to an unapplied disk value creates false restart warnings when config returns to the running value. |
+| D-15 | Human terminal ordering | confirmed | Response/terminal coordination is one linearizable state machine: no terminal record may be lost, and an active response record must become visible before its one later terminal record. | Independent review found a check/clear/enqueue race and a possible terminal-before-active ordering. |
+| D-16 | Invalid-config warning ownership | confirmed | The supervisor owns the human invalid-config warning for supervised standalone operation; the hidden worker keeps last-good state without emitting a duplicate human warning for the same failed version. | One bounded operator-facing warning is sufficient while preserving last-good behavior. |
 
 ## Phases
 
@@ -241,6 +245,48 @@ Human-facing journal output follows these observable rules:
 **Commit:** planning/delivery record only when needed after verification
 - **Status:** complete
 
+### Phase 5: Focused Verification Repair
+**Objective / visible outcome:** Close the independent-review gaps without changing the frozen config, capacity, tool-surface, safety, or machine-evidence contracts.
+
+**Primary areas:**
+- `crates/agentic-gpt/src/supervisor.rs`
+- `crates/agentic-gpt/src/stdio_server.rs`
+- focused supervisor/journal/lifecycle integration tests
+- planning evidence only outside the focused product changes
+
+**Work:**
+1. Extend redaction-first child-log parsing to accept journald-mode records whose first token is `INFO`, `WARN`, or `ERROR`, while retaining timestamped child parsing and fallback severity rules.
+2. Add a real supervised probe in which the hidden worker inherits journald environment; assert its normal INFO records never become outer WARN records.
+3. Keep the runtime startup identity immutable for the process lifetime; separate observed-file version and warning-dedup state so change-away warns once, repeated observation is quiet, and change-back-to-runtime is quiet.
+4. Replace the split-atomic `HumanTerminalTracker` coordination with one synchronized/linearizable state transition covering response visibility, pending terminal storage, and flush ordering.
+5. Guarantee cardinality and order for both races: inline terminal produces one completion record; returned-active produces active first and exactly one later terminal record, even when exit races the response boundary.
+6. Make invalid-config human warning ownership supervisor-only in supervised mode, while the worker retains the last valid live subset and no machine-facing evidence is weakened.
+7. Preserve all exclusions: no `agent.info`, no public tool/schema changes, no policy matching change, no systemd unit change, no Hub/protocol change.
+
+**Required tests:**
+- Timestamped child INFO/WARN/ERROR parsing remains correct.
+- Untimestamped journald child INFO/WARN/ERROR parsing preserves severity after redaction.
+- A real hidden worker inheriting `JOURNAL_STREAM` emits no `WARN tunnel.stderr: INFO ...` record.
+- Runtime identity sequence `R → A → A → R` yields exactly one restart-required warning, only for `A`; the live process identity remains `R` throughout.
+- Invalid config observed by the supervised tree yields one bounded human warning for that failed version and preserves last-good live behavior.
+- Deterministic concurrency tests force terminal-before-response, response-before-terminal, and the former check/clear/enqueue interleaving; none loses or duplicates a record.
+- Active-response ordering asserts `status=active` is emitted before its terminal record.
+- Existing inline, active, failure, cancellation, kill, spawn-failure, redaction, compact-id, and full machine-evidence tests remain green.
+
+**Verification:**
+- focused supervisor/parser/restart-identity/tracker tests
+- real supervised Normal and Room journal probes
+- `cargo fmt --all -- --check`
+- `git diff --check`
+- isolated `cargo check --workspace`
+- isolated `cargo test --workspace`
+- final product-diff inspection proving no Hub/protocol/systemd/public-surface changes
+
+**Completion boundary:** The four independent-review blockers are directly covered by failing-before/fixed-after regression evidence; all original acceptance criteria still pass; a fresh reviewer approves delivery.
+
+**Commit:** `fix(agent): harden standalone runtime log ordering`
+- **Status:** ready
+
 ## Acceptance Criteria
 1. A running standalone hidden worker applies policy additions/removals, path-policy changes, and limits changes without service restart within a bounded reload interval.
 2. Invalid reload content preserves the previous live configuration and never partially applies a subset.
@@ -256,6 +302,11 @@ Human-facing journal output follows these observable rules:
 12. Exact 18/30 Tunnel surfaces, Hub behavior, policy exact-match semantics, confirmation behavior, audit, Hub reporting, and 64 KiB session-tail bounds remain compatible.
 13. `StartLimitIntervalSec` and other systemd unit changes are absent from the product/planning diff for this plan.
 14. Formatting, focused tests, isolated workspace tests, real hidden-worker probes, supervised journal probes, and clean Git status pass before delivery.
+15. A journald-mode hidden worker may emit untimestamped leveled records, and the supervisor preserves their INFO/WARN/ERROR severity without false outer WARN classification.
+16. Restart-required diagnostics compare against immutable runtime identity: a change away warns once, repetition is quiet, and returning disk config to the running value emits no warning.
+17. Human response/terminal coordination is linearizable: terminal records are never lost or duplicated, and an active response is observable before its later terminal record.
+18. A failed config version produces one bounded supervisor-owned human warning in supervised mode while the worker retains the complete last-good live subset.
+19. Focused race/production-path probes and the complete isolated workspace suite pass before the plan returns to delivered.
 
 ## Implementation Discretion
 The Implementer may choose:
@@ -285,16 +336,16 @@ Implementation discretion may not change the public JSON forms, auto formula/cla
 
 ## Implementation Handoff
 - **Plan maturity:** implementation_ready
-- **Design phase:** complete
+- **Design phase:** complete; independent verification repair appended
 - **Implementation authorized:** yes
-- **Entry phase:** Phase 2 — Live Runtime Configuration and Adaptive Limits
-- **Frozen decisions:** D-01 through D-12
+- **Entry phase:** Phase 5 — Focused Verification Repair
+- **Frozen decisions:** D-01 through D-16
 - **Open blocking decisions:** none
-- **Implementation discretion:** see `Implementation Discretion`
-- **Verification convention:** focused config/session/log tests, isolated workspace suite, real hidden-worker live-reload probes, and supervised journal inspection
-- **Commit convention:** one focused product commit for Phase 2 and one for Phase 3; Phase 4 adds only evidence/planning updates unless repair is required
-- **Design checkpoint:** not set
-- **Next invocation:** `$planning-with-files` without `$refine-implementation-plan`, starting at Phase 2
+- **Implementation discretion:** see `Implementation Discretion`; Phase 5 may choose private synchronization/parser structures but may not change observable contracts
+- **Verification convention:** direct regression tests for all four blockers, real supervised journal probes, isolated workspace suite, and fresh independent review
+- **Commit convention:** one focused Phase 5 product commit, followed by planning-only acceptance evidence if verification passes
+- **Design checkpoint:** `d1a0028` is the reviewed implementation baseline; delivery claim superseded pending Phase 5
+- **Next invocation:** `$planning-with-files` starting at Phase 5 only; do not add `agent.info` or broaden scope
 
 ## Errors Encountered
 | Error | Attempt | Resolution |

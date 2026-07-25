@@ -132,3 +132,21 @@ The unit-file warning is independent of Agentic runtime/config/log contracts and
 - Controlled `cargo test --workspace` passed all workspace tests: Agent 158/158, Hub 61/61, Protocol 9/9, and standalone supervisor 4/4.
 - The real standalone probes preserve Normal/Room MCP surfaces, live policy/path/limit behavior, invalid reload fallback, existing-session survival, journal severity/timestamp rules, compact human ids, lifecycle cardinality, confirmation behavior, and machine-side full evidence.
 - The first unprivileged full-test attempt failed only because the sandbox could not create the host runtime tunnel directory; the controlled rerun passed without a product workaround.
+
+
+## Independent Verification Findings — Phase 5 Trigger
+
+A fresh review of `196e146..d1a0028` found four production-path gaps that existing green tests did not cover:
+
+1. **Untimestamped journald child records are misclassified.** The hidden worker inherits `JOURNAL_STREAM`/`INVOCATION_ID` and intentionally emits `INFO ...` without an RFC3339 prefix. The supervisor parser only accepts timestamp-prefixed leveled records, so the normal INFO line falls back to stderr WARN and recreates `WARN tunnel.stderr: INFO ...`.
+2. **Restart-required comparison drifts away from runtime truth.** The watcher advances its comparison identity to the latest disk config even though startup-owned values were not applied. For runtime `R`, the sequence `R → A → R` warns both times; returning to the actual running value should be quiet.
+3. **Human terminal coordination can lose a terminal record.** Separate atomics and a pending mutex permit: terminal observes response-not-returned, response clears pending and marks returned, terminal then enqueues into a queue that will never be flushed.
+4. **Active and terminal records can be reversed.** The response path flushes pending terminal state before printing `status=active`, so an exit near the inline boundary may appear terminal-first.
+
+Additional bounded cleanup: in supervised mode, invalid config is currently eligible for duplicate human warnings from supervisor and worker. D-16 assigns operator-facing warning ownership to the supervisor while preserving the worker's last-good behavior.
+
+### Test gaps exposed
+- The prior journal integration used a fake tunnel with timestamped records and redirected the real worker stderr away from the forwarding path.
+- Restart tests did not exercise change-away, repeat, and change-back against an immutable runtime identity.
+- Tracker tests covered serial orderings, not the check/clear/enqueue race or active-before-terminal visibility.
+- Invalid reload tests proved last-good behavior but did not assert one human warning across the supervised process tree.
