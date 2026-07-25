@@ -3,11 +3,11 @@
 ## Session: 2026-07-25
 
 ### Current Status
-- **Phase:** Phase 3 — Human-Facing Standalone Log Compaction (complete)
-- **Workflow stage:** implementation
+- **Phase:** Phase 4 — Integrated Verification and Delivery (complete)
+- **Workflow stage:** delivery
 - **Role:** implementer
 - **Implementation authorized:** yes, for a later request
-- **Entry phase:** Phase 4
+- **Entry phase:** none
 
 ### Actions Taken
 - Confirmed the previous standalone surface-compaction plan is delivered and the repository worktree is clean at `main...origin/main [ahead 10]`.
@@ -53,7 +53,19 @@
 - Replaced started + inline terminal + completed noise with one inline final record, or one active response plus one later terminal record; failure and terminal error codes remain bounded and visible.
 - Added unit fixtures, direct hidden-worker stderr assertions, and supervised Normal/Room/journal probes.
 - Phase 3 verification: `cargo test -p agentic-gpt --bin agentic-gpt` passed 158/158; controlled `cargo test -p agentic-gpt --test standalone_supervisor` passed 4/4; `git diff --check` passed.
-- Phase 3 product commit pending: `refactor(agent): compact standalone lifecycle logs`.
+- Phase 3 product commit: `f4e07e5 refactor(agent): compact standalone lifecycle logs`.
+
+### Phase 4 start
+- Entered integrated verification after the Phase 3 product commit; no product changes are planned unless a verification failure exposes a contract regression.
+- Verification scope is limited to the frozen reload, admission, logging, MCP-surface, evidence-preservation, and systemd-exclusion contracts.
+
+### Phase 4 completion
+- `cargo fmt --all -- --check`, `git diff --check`, and the final changed-file/systemd scope scan passed; no systemd unit or `StartLimitIntervalSec` change is present.
+- `cargo check --workspace` passed. The complete controlled `cargo test --workspace` passed Agent 158/158, Hub 61/61, Protocol 9/9, and standalone supervisor 4/4.
+- The standalone supervisor suite covered Normal and Room surfaces, live policy/path/limit reload with invalid-version fallback and active-session preservation, journal timestamp/severity behavior, compact human ids, and lifecycle deduplication/redaction. Existing tests cover exact 18/30 tool surfaces, confirmation semantics, exact structural program matching, and full machine evidence.
+- The unprivileged workspace test run reproduced only the known host runtime-directory permission failure (`runtime_directory_unavailable`); the same command passed with controlled filesystem access, without changing runtime ownership or paths.
+- Product diff inspection confirmed only the frozen runtime/log/docs/test/planning files changed; no unrelated changes remain.
+- Phase 4 planning/delivery commit: `docs(planning): record standalone runtime verification`.
 
 ## Error Log
 | Timestamp | Error | Attempt | Resolution |

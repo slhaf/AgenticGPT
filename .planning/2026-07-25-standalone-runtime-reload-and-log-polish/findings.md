@@ -122,3 +122,13 @@ The unit-file warning is independent of Agentic runtime/config/log contracts and
 - `crates/agentic-gpt/src/stdio_server.rs`: tool lifecycle and managed terminal human logs.
 - `crates/agentic-gpt/src/utils.rs`: timestamped stderr log primitive.
 - `docs/standalone-runtime.md`: operational config/log documentation to update during implementation.
+
+### Phase 4 verification setup
+- Phase 2 and Phase 3 product commits are present on `main`; the final phase will validate the workspace and the controlled real-supervisor probes, then record only evidence/planning changes.
+- The verification must explicitly inspect the product diff for systemd unit changes and `StartLimitIntervalSec`, because that surface is frozen out of scope.
+
+### Phase 4 verification results
+- Formatting, whitespace, workspace check, and final scope inspection passed. The product diff contains no systemd unit or `StartLimitIntervalSec` change.
+- Controlled `cargo test --workspace` passed all workspace tests: Agent 158/158, Hub 61/61, Protocol 9/9, and standalone supervisor 4/4.
+- The real standalone probes preserve Normal/Room MCP surfaces, live policy/path/limit behavior, invalid reload fallback, existing-session survival, journal severity/timestamp rules, compact human ids, lifecycle cardinality, confirmation behavior, and machine-side full evidence.
+- The first unprivileged full-test attempt failed only because the sandbox could not create the host runtime tunnel directory; the controlled rerun passed without a product workaround.
