@@ -38,6 +38,17 @@
 - Full run/session ids and repeated source/profile fields cause narrow-terminal wrapping.
 - Existing terminal records correctly avoid argv, paths, process output, and secrets; that safety behavior must remain.
 
+### Phase 2 implementation reconnaissance
+- `AppState.config` is an `Arc<RwLock<Config>>`; existing Hub `watch_config` replaces the whole config, while `run_stdio_worker` starts no watcher. A standalone worker watcher can update `policy`, `path_policy`, and `limits` under the same write lock, preserving an atomic complete live subset and leaving startup-owned fields untouched.
+- `Config::load` is the single typed JSON boundary and preserves flattened extra fields; changing `LimitsConfig.max_active_sessions` to a custom integer-or-`auto` value preserves explicit numeric serialization while allowing the new default to emit `auto`.
+- Session admission has three relevant checks: synchronous `start_session`, async single/skill registration, and atomic `start_prepared_managed_batch`. The latter already rejects before inserting sessions, but the stdio batch handler currently allocates per-element session IDs before invoking it; capacity preflight must move ahead of that allocation.
+- Capacity rejection is currently a bare `max_active_sessions_reached` string. A bounded helper should append deterministic `active`, `requested`, and `limit` fields while keeping the stable code as the leading token.
+- Supervisor `StartupIdentity` already owns tunnel/client/profile comparisons. It needs the frozen `agentId`, `workspaceRoot`, reporting connection identity, and skill-install concurrency fields; its poller should advance the observed file version on failed loads so one broken version produces one diagnostic rather than a warning every two seconds.
+
+### Phase 2 validation discovery
+- The full `agentic-gpt` unit suite passed, but the two real standalone supervisor integration tests initially failed before launching the worker because the sandbox denied creation of the host runtime directory under `~/.agentic_gpt/runtime/tunnel`; the reported product error was `runtime_directory_unavailable`. This is an environment permission issue and needs one controlled escalated rerun.
+- Controlled rerun of the two supervisor integration tests passed. The direct hidden-worker live-reload probe also passed for policy, path policy, limits, invalid reload fallback, and preservation of an already active session.
+
 ## Contract Gaps
 - No standalone live-config watcher exists.
 - A whole-config swap would create misleading partial hot-reload semantics because startup-owned managers do not change.

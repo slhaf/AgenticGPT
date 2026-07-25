@@ -237,7 +237,7 @@ async fn run(config_path: PathBuf, runtime: RuntimeModel) -> Result<()> {
         log_warn(format!("default tmux session unavailable: {error}"));
     }
     log_info(format!(
-        "config loaded; agentId={}; hubUrl={}; workspaceRoot={}; sandbox={}",
+        "config loaded; agentId={}; hubUrl={}; workspaceRoot={}; sandbox={}; {}",
         initial.agent_id,
         initial.hub_url,
         initial.workspace_root.display(),
@@ -245,7 +245,8 @@ async fn run(config_path: PathBuf, runtime: RuntimeModel) -> Result<()> {
             "enabled"
         } else {
             "disabled"
-        }
+        },
+        initial.limits.max_active_sessions.resolve().diagnostic()
     ));
     let max_concurrent_skill_installs = initial.skills.max_concurrent_installs;
     let state = AppState {
@@ -277,6 +278,16 @@ async fn run_stdio_worker(
     supervisor::authorize_worker(supervisor_token.as_deref())?;
     let config = Config::load(&config_path)?;
     config.ensure_workspace()?;
+    log_info(format!(
+        "standalone worker config loaded; {}; policyAllow={}; policyConfirm={}; policyDeny={}; pathWriteRoots={}; pathReadOnlyRoots={}; pathDenyRoots={}",
+        config.limits.max_active_sessions.resolve().diagnostic(),
+        config.policy.allow.len(),
+        config.policy.confirm.len(),
+        config.policy.deny.len(),
+        config.path_policy.write_roots.len(),
+        config.path_policy.read_only_roots.len(),
+        config.path_policy.deny_roots.len(),
+    ));
     let max_concurrent_skill_installs = config.skills.max_concurrent_installs;
     let reporting_enabled = config
         .tunnel
@@ -300,6 +311,7 @@ async fn run_stdio_worker(
         )),
     };
     state.skill_installs.recover(state.clone()).await?;
+    tokio::spawn(watch_standalone_live_config(state.clone()));
     if reporting_enabled {
         tokio::spawn(hub::connect_loop(state.clone()));
     }
@@ -485,14 +497,15 @@ async fn watch_config(state: AppState) {
             if let Ok(config) = Config::load(&state.config_path) {
                 let _ = config.ensure_workspace();
                 log_info(format!(
-                    "config reloaded; agentId={}; workspaceRoot={}; sandbox={}",
+                    "config reloaded; agentId={}; workspaceRoot={}; sandbox={}; {}",
                     config.agent_id,
                     config.workspace_root.display(),
                     if config.sandbox.enabled {
                         "enabled"
                     } else {
                         "disabled"
-                    }
+                    },
+                    config.limits.max_active_sessions.resolve().diagnostic()
                 ));
                 *state.config.write().await = config;
                 last_modified = modified;
@@ -501,6 +514,76 @@ async fn watch_config(state: AppState) {
             }
         }
     }
+}
+
+async fn watch_standalone_live_config(state: AppState) {
+    let mut last_modified = fs::metadata(&state.config_path)
+        .and_then(|meta| meta.modified())
+        .ok();
+    loop {
+        sleep(Duration::from_secs(2)).await;
+        let modified = fs::metadata(&state.config_path)
+            .and_then(|meta| meta.modified())
+            .ok();
+        if modified.is_none() || modified == last_modified {
+            continue;
+        }
+        last_modified = modified;
+
+        let config = match Config::load(&state.config_path) {
+            Ok(config) => config,
+            Err(error) => {
+                log_warn(format!(
+                    "standalone live config reload rejected; keeping previous subset; errorCode={}",
+                    error_code(&error.to_string())
+                ));
+                continue;
+            }
+        };
+        if let Err(error) = config.validate_standalone() {
+            log_warn(format!(
+                "standalone live config reload rejected; keeping previous subset; errorCode={}",
+                error_code(&error.to_string())
+            ));
+            continue;
+        }
+
+        let mut live = state.config.write().await;
+        let resolved = apply_standalone_live_subset(&mut live, config);
+        log_info(format!(
+            "standalone live config reloaded; {}; policyAllow={}; policyConfirm={}; policyDeny={}; pathWriteRoots={}; pathReadOnlyRoots={}; pathDenyRoots={}",
+            resolved.diagnostic(),
+            live.policy.allow.len(),
+            live.policy.confirm.len(),
+            live.policy.deny.len(),
+            live.path_policy.write_roots.len(),
+            live.path_policy.read_only_roots.len(),
+            live.path_policy.deny_roots.len(),
+        ));
+    }
+}
+
+fn apply_standalone_live_subset(
+    live: &mut Config,
+    candidate: Config,
+) -> config::ResolvedMaxActiveSessions {
+    let resolved = candidate.limits.max_active_sessions.resolve();
+    live.policy = candidate.policy;
+    live.path_policy = candidate.path_policy;
+    live.limits = candidate.limits;
+    resolved
+}
+
+fn error_code(value: &str) -> String {
+    value
+        .split(|character: char| {
+            !character.is_ascii_alphanumeric() && character != '_' && character != '-'
+        })
+        .find(|part| !part.is_empty())
+        .unwrap_or("config_reload_failed")
+        .chars()
+        .take(64)
+        .collect()
 }
 
 #[cfg(test)]
@@ -1535,6 +1618,41 @@ mod tests {
             },
         );
         assert!(policy.write_roots.is_empty());
+    }
+
+    #[test]
+    fn standalone_reload_replaces_only_the_frozen_live_subset() {
+        let mut live = Config::default_config().unwrap();
+        let original_agent_id = live.agent_id.clone();
+        let original_workspace = live.workspace_root.clone();
+        let mut candidate = live.clone();
+        candidate.agent_id = "must-not-reload".to_string();
+        candidate.workspace_root = PathBuf::from("/tmp/must-not-reload");
+        candidate.policy.allow.push(Rule {
+            program: "printf".to_string(),
+            args_prefix: Vec::new(),
+        });
+        candidate.path_policy.write_roots = vec![PathBuf::from("/tmp/live")];
+        candidate.limits.max_active_sessions = config::MaxActiveSessions::Explicit(9);
+
+        let resolved = apply_standalone_live_subset(&mut live, candidate);
+
+        assert_eq!(live.agent_id, original_agent_id);
+        assert_eq!(live.workspace_root, original_workspace);
+        assert!(live
+            .policy
+            .allow
+            .iter()
+            .any(|rule| rule.program == "printf"));
+        assert_eq!(
+            live.path_policy.write_roots,
+            vec![PathBuf::from("/tmp/live")]
+        );
+        assert_eq!(resolved.resolved, 9);
+        assert_eq!(
+            live.limits.max_active_sessions,
+            config::MaxActiveSessions::Explicit(9)
+        );
     }
 
     #[tokio::test]

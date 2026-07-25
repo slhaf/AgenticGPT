@@ -775,7 +775,6 @@ impl StdioMcpServer {
         let specs = prepared
             .into_iter()
             .map(|element| crate::sessions::ManagedProcessSpec {
-                session_id: task_id("sess"),
                 request: ExecRequest {
                     agent_id: agent_id.clone(),
                     program: element.input.program,

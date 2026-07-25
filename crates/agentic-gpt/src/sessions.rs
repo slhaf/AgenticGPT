@@ -9,6 +9,7 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Child;
 use tokio::sync::{Mutex, OwnedRwLockReadGuard, RwLock};
 use tokio::time::{sleep, Instant};
+use uuid::Uuid;
 
 use crate::{
     audit::{write_audit, AuditRecord},
@@ -18,6 +19,14 @@ use crate::{
     utils::{command_preview, SESSION_TAIL_MAX},
     AppState,
 };
+
+pub(crate) fn capacity_rejection(active: usize, requested: usize, limit: usize) -> String {
+    format!("max_active_sessions_reached; active={active}; requested={requested}; limit={limit}")
+}
+
+fn resolved_session_limit(config: &Config) -> usize {
+    config.limits.max_active_sessions.resolve().resolved
+}
 
 pub(crate) struct ManagedSession {
     info: SessionInfo,
@@ -41,7 +50,6 @@ pub(crate) struct ManagedSessionOptions {
 }
 
 pub(crate) struct ManagedProcessSpec {
-    pub(crate) session_id: String,
     pub(crate) request: ExecRequest,
     pub(crate) working_directory: std::path::PathBuf,
     pub(crate) decision: PolicyDecision,
@@ -222,9 +230,10 @@ pub(crate) async fn start_session(
             .filter(|session| is_active_session_state(&session.info.state))
             .count()
     };
-    if active_session_count >= config.limits.max_active_sessions {
+    let limit = resolved_session_limit(&config);
+    if active_session_count >= limit {
         info.state = "failed".to_string();
-        info.reject_reason = Some("max_active_sessions_reached".to_string());
+        info.reject_reason = Some(capacity_rejection(active_session_count, 1, limit));
         return info;
     }
     match spawn_session(&config, &working_directory, &request.program, &request.args).await {
@@ -314,41 +323,9 @@ pub(crate) async fn start_prepared_managed_batch(
         return Ok(Vec::new());
     }
     let config = state.config.read().await.clone();
-    let mut registered = Vec::with_capacity(specs.len());
-    for spec in specs {
-        let started_at = Utc::now();
-        let info = SessionInfo {
-            agent_id: spec.request.agent_id.clone(),
-            session_id: spec.session_id.clone(),
-            state: "starting".to_string(),
-            program: spec.request.program.clone(),
-            args: spec.request.args.clone(),
-            working_directory: spec.request.working_directory.clone(),
-            command_preview: command_preview(&spec.request.program, &spec.request.args),
-            started_at,
-            updated_at: started_at,
-            exit_code: None,
-            stdout_tail: String::new(),
-            stderr_tail: String::new(),
-            truncated: false,
-            reject_reason: None,
-        };
-        let stdout = Arc::new(Mutex::new(TailBuffer::new(SESSION_TAIL_MAX)));
-        let stderr = Arc::new(Mutex::new(TailBuffer::new(SESSION_TAIL_MAX)));
-        let cancel_requested = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let audit = ManagedAuditContext {
-            config: config.clone(),
-            request_source: spec.request_source.clone(),
-            need_confirm: spec.request.need_confirm,
-            policy_decision: format!("{:?}", spec.decision),
-            confirmation_result: spec.confirmation_result.clone(),
-            skill_id: None,
-            skill_path: None,
-            installed_digest: None,
-            terminal_event_hook: spec.terminal_event_hook.clone(),
-        };
-        registered.push((spec, info, stdout, stderr, cancel_requested, audit));
-    }
+    let limit = resolved_session_limit(&config);
+    let requested = specs.len();
+    let mut registered = Vec::with_capacity(requested);
     {
         let mut sessions = state.sessions.lock().await;
         refresh_sessions(&state, &mut sessions).await;
@@ -356,12 +333,44 @@ pub(crate) async fn start_prepared_managed_batch(
             .values()
             .filter(|session| is_active_session_state(&session.info.state))
             .count();
-        if active + registered.len() > config.limits.max_active_sessions {
-            return Err("max_active_sessions_reached".to_string());
+        if active.saturating_add(requested) > limit {
+            return Err(capacity_rejection(active, requested, limit));
         }
-        for (spec, info, stdout, stderr, cancel_requested, audit) in &registered {
+
+        for spec in specs {
+            let started_at = Utc::now();
+            let info = SessionInfo {
+                agent_id: spec.request.agent_id.clone(),
+                session_id: format!("sess_{}", Uuid::new_v4().simple()),
+                state: "starting".to_string(),
+                program: spec.request.program.clone(),
+                args: spec.request.args.clone(),
+                working_directory: spec.request.working_directory.clone(),
+                command_preview: command_preview(&spec.request.program, &spec.request.args),
+                started_at,
+                updated_at: started_at,
+                exit_code: None,
+                stdout_tail: String::new(),
+                stderr_tail: String::new(),
+                truncated: false,
+                reject_reason: None,
+            };
+            let stdout = Arc::new(Mutex::new(TailBuffer::new(SESSION_TAIL_MAX)));
+            let stderr = Arc::new(Mutex::new(TailBuffer::new(SESSION_TAIL_MAX)));
+            let cancel_requested = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let audit = ManagedAuditContext {
+                config: config.clone(),
+                request_source: spec.request_source.clone(),
+                need_confirm: spec.request.need_confirm,
+                policy_decision: format!("{:?}", spec.decision),
+                confirmation_result: spec.confirmation_result.clone(),
+                skill_id: None,
+                skill_path: None,
+                installed_digest: None,
+                terminal_event_hook: spec.terminal_event_hook.clone(),
+            };
             sessions.insert(
-                spec.session_id.clone(),
+                info.session_id.clone(),
                 ManagedSession {
                     info: info.clone(),
                     child: None,
@@ -370,29 +379,20 @@ pub(crate) async fn start_prepared_managed_batch(
                     last_activity: Instant::now(),
                     cancel_requested: cancel_requested.clone(),
                     skill_lease: None,
-                    audit: Some(ManagedAuditContext {
-                        config: audit.config.clone(),
-                        request_source: audit.request_source.clone(),
-                        need_confirm: audit.need_confirm,
-                        policy_decision: audit.policy_decision.clone(),
-                        confirmation_result: audit.confirmation_result.clone(),
-                        skill_id: None,
-                        skill_path: None,
-                        installed_digest: None,
-                        terminal_event_hook: audit.terminal_event_hook.clone(),
-                    }),
+                    audit: Some(audit),
                 },
             );
+            registered.push((spec, info, stdout, stderr, cancel_requested));
         }
     }
     let mut infos = Vec::with_capacity(registered.len());
-    for (spec, info, stdout, stderr, cancel_requested, _) in registered {
+    for (spec, info, stdout, stderr, cancel_requested) in registered {
         let confirmation_result = spec.confirmation_result.clone();
         let monitor_state = state.clone();
         let monitor_session_id = info.session_id.clone();
         tokio::spawn(run_async_session(
             state.clone(),
-            spec.session_id.clone(),
+            info.session_id.clone(),
             spec.request,
             stdout,
             stderr,
@@ -457,7 +457,7 @@ async fn start_session_async_inner(
         terminal_event_hook: options.terminal_event_hook,
     };
     let registered_info = info.clone();
-    let capacity_rejected = {
+    let capacity_error = {
         let mut sessions = state.sessions.lock().await;
         refresh_sessions(&state, &mut sessions).await;
         let active = sessions
@@ -477,10 +477,11 @@ async fn start_session_async_inner(
                 audit: Some(audit),
             },
         );
-        active >= config.limits.max_active_sessions
+        let limit = resolved_session_limit(&config);
+        (active >= limit).then(|| capacity_rejection(active, 1, limit))
     };
-    if capacity_rejected {
-        finish_pending_session(&state, &session_id, "max_active_sessions_reached").await;
+    if let Some(reason) = capacity_error {
+        finish_pending_session(&state, &session_id, &reason).await;
         return inspect_session(&state, &session_id)
             .await
             .unwrap_or(registered_info);
@@ -1013,7 +1014,8 @@ mod tests {
 
         let mut config = Config::default_config().unwrap();
         config.workspace_root = workspace.clone();
-        config.limits.max_active_sessions = max_active_sessions;
+        config.limits.max_active_sessions =
+            crate::config::MaxActiveSessions::Explicit(max_active_sessions);
         config.confirmation_provider.provider = "none".to_string();
 
         let state = AppState {
@@ -1275,10 +1277,33 @@ mod tests {
         } else {
             second
         };
+        let reason = failed.reject_reason.as_deref().unwrap();
+        assert!(reason.starts_with("max_active_sessions_reached; "));
+        assert!(reason.contains("active=1; requested=1; limit=1"));
+    }
+
+    #[tokio::test]
+    async fn oversized_batch_rejects_before_session_registration() {
+        let (state, workspace) = test_state(1).await;
+        let specs = (0..2)
+            .map(|_| ManagedProcessSpec {
+                request: exec_request("true", &workspace),
+                working_directory: workspace.clone(),
+                decision: PolicyDecision::Allow,
+                confirmation_result: None,
+                request_source: "test:batch".to_string(),
+                terminal_event_hook: None,
+            })
+            .collect();
+
+        let error = start_prepared_managed_batch(state.clone(), specs)
+            .await
+            .unwrap_err();
         assert_eq!(
-            failed.reject_reason.as_deref(),
-            Some("max_active_sessions_reached")
+            error,
+            "max_active_sessions_reached; active=0; requested=2; limit=1"
         );
+        assert!(state.sessions.lock().await.is_empty());
     }
 
     #[tokio::test]

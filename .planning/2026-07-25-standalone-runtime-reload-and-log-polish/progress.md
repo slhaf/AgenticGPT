@@ -3,9 +3,9 @@
 ## Session: 2026-07-25
 
 ### Current Status
-- **Phase:** Phase 1 — Discovery and Contract Refinement (complete)
-- **Workflow stage:** implementation_ready
-- **Role:** designer
+- **Phase:** Phase 2 — Live Runtime Configuration and Adaptive Limits (complete)
+- **Workflow stage:** implementation
+- **Role:** implementer
 - **Implementation authorized:** yes, for a later request
 - **Entry phase:** Phase 2
 
@@ -20,6 +20,30 @@
 - Created and selected `.planning/2026-07-25-standalone-runtime-reload-and-log-polish/`.
 - Wrote a four-phase executable plan with explicit config compatibility, concurrency, journal, safety, and verification contracts.
 - Product/config/test/systemd files changed during refinement: none.
+
+### Phase 2 start reconnaissance
+- Confirmed `run_stdio_worker` constructs the live config once and does not spawn `watch_config`; this is the standalone no-restart root cause.
+- Confirmed the shared config lock can atomically replace the three frozen live sections without mutating startup-owned fields.
+- Confirmed all session admission limit checks and that stdio `process.batchExec` currently creates session IDs before the atomic batch admission function.
+- Confirmed supervisor startup identity currently covers tunnel/client/profile only and failed reloads can repeat warnings every poll.
+
+### Phase 2 validation
+- `cargo test -p agentic-gpt`: 153 unit tests passed; the two standalone supervisor tests reached an environment-only `runtime_directory_unavailable` failure because the sandbox cannot write `~/.agentic_gpt/runtime/tunnel`.
+- Next validation action: rerun the same real supervisor integration suite with controlled filesystem approval; no product path change is authorized.
+
+### Phase 2 completion
+- Added backward-compatible `maxActiveSessions` integer/`auto` serde, frozen auto formula, default serialization, explicit numeric preservation, and startup/reload diagnostics.
+- Added standalone worker polling for atomic `policy`/`pathPolicy`/`limits` replacement with last-good fallback; startup-owned fields remain unchanged in the worker.
+- Expanded supervisor restart identity to include agent/workspace/reporting/skill-manager startup inputs and bounded failed-version diagnostics.
+- Unified single, skill, and batch admission limit resolution; capacity errors retain the stable leading code and include `active`, `requested`, and `limit`. Batch session IDs are allocated only after atomic capacity reservation.
+- Added config/session unit coverage and a real hidden-worker no-restart integration probe covering policy/path/limit reloads, invalid fallback, active-session preservation, and explicit limit changes.
+- Phase 2 verification: `cargo test -p agentic-gpt` unit suite passed 153/153; controlled `cargo test -p agentic-gpt --test standalone_supervisor` passed 2/2; focused hidden-worker reload probe passed; `git diff --check` passed.
+- Phase 2 product commit pending: `feat(agent): reload standalone runtime limits`.
+
+## Error Log
+| Timestamp | Error | Attempt | Resolution |
+|---|---|---:|---|
+| 2026-07-25 | Standalone supervisor integration tests could not create `~/.agentic_gpt/runtime/tunnel/<agentId>` inside the workspace sandbox and exited with `runtime_directory_unavailable`. | 1 | Treat as environment permission failure; rerun the real test with controlled escalation rather than changing runtime ownership/path behavior. |
 
 ### Refinement round 1: consolidated operational contract
 - **Evidence inspected:** current config and backups, `config.rs`, `main.rs`, `supervisor.rs`, `sessions.rs`, `stdio_server.rs`, `utils.rs`, focused tests, live journal evidence.

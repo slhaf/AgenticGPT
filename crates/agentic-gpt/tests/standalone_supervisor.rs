@@ -1,6 +1,6 @@
 use serde_json::{json, Value};
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -12,6 +12,15 @@ use std::sync::{
 use std::thread;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
+
+#[test]
+fn hidden_worker_reloads_policy_and_limit_without_restart() {
+    let root = std::env::temp_dir().join(format!("agentic-live-reload-e2e-{}", Uuid::new_v4()));
+    fs::create_dir_all(&root).unwrap();
+    let result = run_live_reload(&root);
+    let _ = fs::remove_dir_all(&root);
+    result.unwrap();
+}
 
 #[test]
 fn supervisor_launches_real_worker_and_completes_local_mcp_call() {
@@ -152,6 +161,301 @@ fn run_smoke(root: &Path, profile: &str) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+fn run_live_reload(root: &Path) -> Result<(), String> {
+    let binary = std::env::var("CARGO_BIN_EXE_agentic-gpt")
+        .or_else(|_| std::env::var("CARGO_BIN_EXE_agentic_gpt"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/agentic-gpt")
+        });
+    if !binary.exists() {
+        return Err(format!("agentic binary not found: {}", binary.display()));
+    }
+
+    let config_path = root.join("config.json");
+    let workspace = root.join("workspace");
+    let init = Command::new(&binary)
+        .args(["config", "--config", config_path.to_str().unwrap(), "init"])
+        .output()
+        .map_err(|error| format!("config init failed to spawn: {error}"))?;
+    if !init.status.success() {
+        return Err(format!(
+            "config init failed: {}",
+            String::from_utf8_lossy(&init.stderr)
+        ));
+    }
+    fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+    let path_root = root.join("path-target");
+    fs::create_dir_all(&path_root).map_err(|error| error.to_string())?;
+    let mut config: Value =
+        serde_json::from_str(&fs::read_to_string(&config_path).map_err(|error| error.to_string())?)
+            .map_err(|error| error.to_string())?;
+    config["workspaceRoot"] = Value::String(workspace.to_string_lossy().into_owned());
+    config["pathPolicy"]["writeRoots"] =
+        json!([workspace.to_string_lossy(), path_root.to_string_lossy()]);
+    config["tunnel"] = json!({
+        "tunnelId": "tunnel_live_reload_test",
+        "apiKey": "env:AGENTIC_TEST_TUNNEL_KEY",
+        "hubReporting": { "enabled": false, "detail": "metadata" }
+    });
+    config["policy"]["allow"] = json!([
+        { "program": "/usr/bin/printf", "argsPrefix": [] },
+        { "program": "/bin/sleep", "argsPrefix": [] },
+        { "program": "/usr/bin/touch", "argsPrefix": [] }
+    ]);
+    config["policy"]["deny"] = json!([
+        { "program": "/usr/bin/printf", "argsPrefix": [] }
+    ]);
+    config["limits"]["maxActiveSessions"] = json!(1);
+    fs::write(
+        &config_path,
+        serde_json::to_vec_pretty(&config).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+
+    let token = "live-reload-token";
+    let mut worker = Command::new(&binary)
+        .args([
+            "stdio-worker",
+            "--config",
+            config_path.to_str().unwrap(),
+            "--profile",
+            "normal",
+            "--supervisor-token",
+            token,
+        ])
+        .env("AGENTIC_GPT_SUPERVISOR_TOKEN", token)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| format!("worker failed to spawn: {error}"))?;
+    let mut stdin = worker.stdin.take().ok_or("worker stdin unavailable")?;
+    let stdout = worker.stdout.take().ok_or("worker stdout unavailable")?;
+    let mut stdout = BufReader::new(stdout);
+
+    send_line(
+        &mut stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": { "name": "live-reload-test", "version": "1" }
+            }
+        }),
+    )?;
+    let _ = response_for(&mut stdout, 1)?;
+    send_line(
+        &mut stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {}
+        }),
+    )?;
+
+    let denied = call_tool(
+        &mut stdin,
+        &mut stdout,
+        2,
+        "process.exec",
+        json!({ "program": "/usr/bin/printf", "args": ["denied"], "waitSeconds": 2 }),
+    )?;
+    assert_eq!(
+        denied["result"]["structuredContent"]["session"]["rejectReason"],
+        json!("policy_denied")
+    );
+
+    config["policy"]["deny"] = json!([]);
+    write_config(&config_path, &config)?;
+    thread::sleep(Duration::from_millis(2300));
+    let allowed = call_tool(
+        &mut stdin,
+        &mut stdout,
+        3,
+        "process.exec",
+        json!({ "program": "/usr/bin/printf", "args": ["reloaded"], "waitSeconds": 2 }),
+    )?;
+    assert_eq!(
+        allowed["result"]["structuredContent"]["session"]["state"],
+        json!("exited")
+    );
+
+    let path_target = path_root.join("reload-path-denied");
+    config["pathPolicy"]["denyRoots"] = json!([path_root.to_string_lossy()]);
+    write_config(&config_path, &config)?;
+    thread::sleep(Duration::from_millis(2300));
+    let path_denied = call_tool(
+        &mut stdin,
+        &mut stdout,
+        31,
+        "process.exec",
+        json!({
+            "program": "/usr/bin/touch",
+            "args": [path_target.to_string_lossy()],
+            "waitSeconds": 2
+        }),
+    )?;
+    assert_eq!(
+        path_denied["result"]["structuredContent"]["session"]["rejectReason"],
+        json!("path_denied")
+    );
+    config["pathPolicy"]["denyRoots"] = json!([]);
+    write_config(&config_path, &config)?;
+    thread::sleep(Duration::from_millis(2300));
+    let path_allowed = call_tool(
+        &mut stdin,
+        &mut stdout,
+        32,
+        "process.exec",
+        json!({
+            "program": "/usr/bin/touch",
+            "args": [path_target.to_string_lossy()],
+            "waitSeconds": 2
+        }),
+    )?;
+    assert_eq!(
+        path_allowed["result"]["structuredContent"]["session"]["state"],
+        json!("exited")
+    );
+    assert!(path_target.exists());
+
+    config["policy"]["deny"] = json!([
+        { "program": "/usr/bin/printf", "argsPrefix": [] }
+    ]);
+    config["limits"]["maxActiveSessions"] = json!("not-a-mode");
+    write_config(&config_path, &config)?;
+    thread::sleep(Duration::from_millis(2300));
+    let retained = call_tool(
+        &mut stdin,
+        &mut stdout,
+        33,
+        "process.exec",
+        json!({ "program": "/usr/bin/printf", "args": ["last-good"], "waitSeconds": 2 }),
+    )?;
+    assert_eq!(
+        retained["result"]["structuredContent"]["session"]["state"],
+        json!("exited")
+    );
+    config["policy"]["deny"] = json!([]);
+    config["limits"]["maxActiveSessions"] = json!(1);
+    write_config(&config_path, &config)?;
+    thread::sleep(Duration::from_millis(2300));
+
+    let active = call_tool(
+        &mut stdin,
+        &mut stdout,
+        4,
+        "process.exec",
+        json!({ "program": "/bin/sleep", "args": ["5"], "waitSeconds": 0 }),
+    )?;
+    let active_session_id = active["result"]["structuredContent"]["sessionId"]
+        .as_str()
+        .ok_or("active session id missing")?
+        .to_string();
+    assert_eq!(
+        active["result"]["structuredContent"]["session"]["state"],
+        json!("starting")
+    );
+
+    config["limits"]["maxActiveSessions"] = json!(0);
+    write_config(&config_path, &config)?;
+    thread::sleep(Duration::from_millis(2300));
+    let rejected = call_tool(
+        &mut stdin,
+        &mut stdout,
+        5,
+        "process.exec",
+        json!({ "program": "/usr/bin/printf", "args": ["blocked"], "waitSeconds": 2 }),
+    )?;
+    let reason = rejected["result"]["structuredContent"]["session"]["rejectReason"]
+        .as_str()
+        .ok_or("capacity rejection reason missing")?;
+    assert!(reason.starts_with("max_active_sessions_reached; "));
+    assert!(reason.contains("active=1; requested=1; limit=0"));
+
+    config["limits"]["maxActiveSessions"] = json!(2);
+    write_config(&config_path, &config)?;
+    thread::sleep(Duration::from_millis(2300));
+    let admitted = call_tool(
+        &mut stdin,
+        &mut stdout,
+        6,
+        "process.exec",
+        json!({ "program": "/usr/bin/printf", "args": ["limit-reloaded"], "waitSeconds": 2 }),
+    )?;
+    assert_eq!(
+        admitted["result"]["structuredContent"]["session"]["state"],
+        json!("exited")
+    );
+
+    let _ = call_tool(
+        &mut stdin,
+        &mut stdout,
+        7,
+        "process.kill",
+        json!({ "sessionId": active_session_id }),
+    )?;
+    drop(stdin);
+    let _ = worker.kill();
+    let _ = worker.wait();
+    Ok(())
+}
+
+fn write_config(path: &Path, config: &Value) -> Result<(), String> {
+    fs::write(
+        path,
+        serde_json::to_vec_pretty(config).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn send_line(stdin: &mut impl Write, value: Value) -> Result<(), String> {
+    writeln!(stdin, "{}", value).map_err(|error| error.to_string())?;
+    stdin.flush().map_err(|error| error.to_string())
+}
+
+fn response_for(reader: &mut impl BufRead, id: i64) -> Result<Value, String> {
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let read = reader
+            .read_line(&mut line)
+            .map_err(|error| error.to_string())?;
+        if read == 0 {
+            return Err(format!(
+                "worker closed stdout while waiting for response {id}"
+            ));
+        }
+        let value: Value = serde_json::from_str(line.trim()).map_err(|error| error.to_string())?;
+        if value["id"] == json!(id) {
+            return Ok(value);
+        }
+    }
+}
+
+fn call_tool(
+    stdin: &mut impl Write,
+    reader: &mut impl BufRead,
+    id: i64,
+    name: &str,
+    arguments: Value,
+) -> Result<Value, String> {
+    send_line(
+        stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/call",
+            "params": { "name": name, "arguments": arguments }
+        }),
+    )?;
+    response_for(reader, id)
 }
 
 fn read_optional(path: &Path) -> String {

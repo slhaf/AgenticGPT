@@ -133,6 +133,29 @@ A minimal standalone configuration uses references, not secret values:
 }
 ```
 
+The active-session limit accepts either the adaptive value or an explicit
+integer:
+
+```json
+"limits": {
+  "maxActiveSessions": "auto"
+}
+```
+
+`auto` resolves at worker startup and after each valid live limits reload as
+`clamp(ceil(availableParallelism * 1.5), 6, 24)`. Existing numeric values stay
+explicit and are not migrated. Capacity rejection keeps the
+`max_active_sessions_reached` code and includes bounded `active`, `requested`,
+and `limit` details; batch admission remains atomic and all-or-reject.
+
+While the standalone worker is running, edits to `policy`, `pathPolicy`, and
+`limits` are polled and applied atomically to new admissions. Invalid config
+versions keep the last valid live subset. Already admitted sessions continue
+with their original admission decision and are not cancelled by a reload.
+Startup-owned identity, workspace, tunnel/client, reporting connection, and
+skill-install concurrency changes remain restart-required and are reported by
+the supervisor.
+
 `apiKey` accepts only `env:NAME` and `file:PATH`. The resolved value is
 injected into the tunnel-client child environment as
 `CONTROL_PLANE_API_KEY`; it is not placed in argv, logs, config summaries,

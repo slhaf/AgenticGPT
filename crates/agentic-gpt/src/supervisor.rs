@@ -167,6 +167,14 @@ impl RuntimePaths {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct StartupIdentity {
+    agent_id: String,
+    agent_secret: String,
+    workspace_root: PathBuf,
+    hub_url: String,
+    hub_transport: String,
+    hub_reporting_enabled: bool,
+    hub_reporting_detail: crate::config::ReportingDetail,
+    skill_max_concurrent_installs: usize,
     tunnel_id: String,
     api_key_reference: String,
     version: Option<String>,
@@ -185,6 +193,14 @@ impl StartupIdentity {
             .as_ref()
             .ok_or_else(|| anyhow!("tunnel_config_required"))?;
         Ok(Self {
+            agent_id: config.agent_id.clone(),
+            agent_secret: config.agent_secret.clone(),
+            workspace_root: config.workspace_root.clone(),
+            hub_url: config.hub_url.clone(),
+            hub_transport: config.hub_transport.clone(),
+            hub_reporting_enabled: tunnel.hub_reporting.enabled,
+            hub_reporting_detail: tunnel.hub_reporting.detail,
+            skill_max_concurrent_installs: config.skills.max_concurrent_installs,
             tunnel_id: tunnel.tunnel_id.clone(),
             api_key_reference: tunnel.api_key.clone(),
             version: tunnel.client.version.clone(),
@@ -199,11 +215,27 @@ impl StartupIdentity {
 }
 
 async fn watch_startup_identity(config_path: PathBuf, mut previous: StartupIdentity) {
+    let mut last_modified = fs::metadata(&config_path)
+        .and_then(|meta| meta.modified())
+        .ok();
     loop {
         sleep(Duration::from_secs(2)).await;
-        let Ok(config) = Config::load(&config_path) else {
-            log_warn("standalone config reload failed; keeping current runtime".to_owned());
+        let modified = fs::metadata(&config_path)
+            .and_then(|meta| meta.modified())
+            .ok();
+        if modified.is_none() || modified == last_modified {
             continue;
+        }
+        last_modified = modified;
+        let config = match Config::load(&config_path) {
+            Ok(config) => config,
+            Err(error) => {
+                log_warn(format!(
+                    "standalone config reload failed; keeping current runtime; errorCode={}",
+                    bounded_error_code(&error.to_string())
+                ));
+                continue;
+            }
         };
         let Ok(current) = StartupIdentity::from_config(&config, previous.profile) else {
             log_warn(
@@ -216,6 +248,18 @@ async fn watch_startup_identity(config_path: PathBuf, mut previous: StartupIdent
             previous = current;
         }
     }
+}
+
+fn bounded_error_code(value: &str) -> String {
+    value
+        .split(|character: char| {
+            !character.is_ascii_alphanumeric() && character != '_' && character != '-'
+        })
+        .find(|part| !part.is_empty())
+        .unwrap_or("config_reload_failed")
+        .chars()
+        .take(64)
+        .collect()
 }
 
 #[derive(Clone)]

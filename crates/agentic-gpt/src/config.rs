@@ -8,7 +8,9 @@ use agentic_gpt_protocol::{
 };
 use anyhow::{anyhow, Result};
 use chrono::Utc;
-use serde::{Deserialize, Serialize};
+use serde::de::{self, Visitor};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::fmt;
 
 use crate::mcp::McpServerConfig;
 use crate::policy::{builtin_rules, paths_match, PolicyDecision};
@@ -93,8 +95,144 @@ pub(crate) struct Rule {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct LimitsConfig {
     pub(crate) max_concurrent_tasks: usize,
-    pub(crate) max_active_sessions: usize,
+    pub(crate) max_active_sessions: MaxActiveSessions,
     pub(crate) session_idle_timeout_secs: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MaxActiveSessions {
+    Auto,
+    Explicit(usize),
+}
+
+impl Default for MaxActiveSessions {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
+
+impl Serialize for MaxActiveSessions {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::Auto => serializer.serialize_str("auto"),
+            Self::Explicit(value) => serializer.serialize_u64(*value as u64),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for MaxActiveSessions {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct MaxActiveSessionsVisitor;
+
+        impl<'de> Visitor<'de> for MaxActiveSessionsVisitor {
+            type Value = MaxActiveSessions;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a non-negative integer or the string \"auto\"")
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                let value = usize::try_from(value)
+                    .map_err(|_| E::custom("maxActiveSessions is too large for this platform"))?;
+                Ok(MaxActiveSessions::Explicit(value))
+            }
+
+            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                if value < 0 {
+                    return Err(E::custom("maxActiveSessions must not be negative"));
+                }
+                self.visit_u64(value as u64)
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                if value == "auto" {
+                    Ok(MaxActiveSessions::Auto)
+                } else {
+                    Err(E::custom(
+                        "maxActiveSessions must be an integer or \"auto\"",
+                    ))
+                }
+            }
+
+            fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                self.visit_str(&value)
+            }
+        }
+
+        deserializer.deserialize_any(MaxActiveSessionsVisitor)
+    }
+}
+
+impl MaxActiveSessions {
+    pub(crate) const MIN_AUTO: usize = 6;
+    pub(crate) const MAX_AUTO: usize = 24;
+
+    pub(crate) fn configured_label(self) -> String {
+        match self {
+            Self::Auto => "auto".to_string(),
+            Self::Explicit(value) => value.to_string(),
+        }
+    }
+
+    pub(crate) fn resolve(self) -> ResolvedMaxActiveSessions {
+        let available_parallelism = std::thread::available_parallelism()
+            .ok()
+            .map(std::num::NonZeroUsize::get);
+        self.resolve_with_parallelism(available_parallelism)
+    }
+
+    fn resolve_with_parallelism(
+        self,
+        available_parallelism: Option<usize>,
+    ) -> ResolvedMaxActiveSessions {
+        let resolved = match self {
+            Self::Explicit(value) => value,
+            Self::Auto => available_parallelism
+                .map(|parallelism| parallelism.saturating_mul(3).saturating_add(1) / 2)
+                .unwrap_or(Self::MIN_AUTO)
+                .clamp(Self::MIN_AUTO, Self::MAX_AUTO),
+        };
+        ResolvedMaxActiveSessions {
+            configured: self,
+            resolved,
+            available_parallelism,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ResolvedMaxActiveSessions {
+    pub(crate) configured: MaxActiveSessions,
+    pub(crate) resolved: usize,
+    pub(crate) available_parallelism: Option<usize>,
+}
+
+impl ResolvedMaxActiveSessions {
+    pub(crate) fn diagnostic(self) -> String {
+        format!(
+            "maxActiveSessions={}; resolvedMaxActiveSessions={}",
+            self.configured.configured_label(),
+            self.resolved
+        )
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -259,7 +397,7 @@ impl Config {
             policy: PolicyConfig::default(),
             limits: LimitsConfig {
                 max_concurrent_tasks: 2,
-                max_active_sessions: 4,
+                max_active_sessions: MaxActiveSessions::Auto,
                 session_idle_timeout_secs: 3600,
             },
             skills: RoomSkillsConfig::default(),
@@ -681,6 +819,63 @@ mod tests {
 
     fn temp_config_path() -> PathBuf {
         std::env::temp_dir().join(format!("agentic-config-{}.json", Uuid::new_v4().simple()))
+    }
+
+    #[test]
+    fn max_active_sessions_supports_auto_and_explicit_round_trips() {
+        let auto: MaxActiveSessions = serde_json::from_value(json!("auto")).unwrap();
+        let explicit: MaxActiveSessions = serde_json::from_value(json!(12)).unwrap();
+        assert_eq!(auto, MaxActiveSessions::Auto);
+        assert_eq!(explicit, MaxActiveSessions::Explicit(12));
+        assert_eq!(serde_json::to_value(auto).unwrap(), json!("auto"));
+        assert_eq!(serde_json::to_value(explicit).unwrap(), json!(12));
+        assert!(serde_json::from_value::<MaxActiveSessions>(json!(-1)).is_err());
+        assert!(serde_json::from_value::<MaxActiveSessions>(json!("AUTO")).is_err());
+    }
+
+    #[test]
+    fn auto_max_active_sessions_uses_the_frozen_formula() {
+        for (parallelism, expected) in [(1, 6), (4, 6), (8, 12), (12, 18), (16, 24), (20, 24)] {
+            let resolved = MaxActiveSessions::Auto.resolve_with_parallelism(Some(parallelism));
+            assert_eq!(resolved.resolved, expected, "parallelism={parallelism}");
+        }
+        assert_eq!(
+            MaxActiveSessions::Auto
+                .resolve_with_parallelism(None)
+                .resolved,
+            6
+        );
+        assert_eq!(
+            MaxActiveSessions::Explicit(4)
+                .resolve_with_parallelism(Some(20))
+                .resolved,
+            4
+        );
+    }
+
+    #[test]
+    fn new_default_config_serializes_auto_limit() {
+        let value = serde_json::to_value(Config::default_config().unwrap()).unwrap();
+        assert_eq!(value["limits"]["maxActiveSessions"], json!("auto"));
+    }
+
+    #[test]
+    fn explicit_limit_stays_numeric_after_config_load_and_write() {
+        let path = temp_config_path();
+        let mut value = serde_json::to_value(Config::default_config().unwrap()).unwrap();
+        value["limits"]["maxActiveSessions"] = json!(4);
+        value["futureField"] = json!({"preserve": true});
+        fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+
+        let loaded = Config::load(&path).unwrap();
+        assert_eq!(
+            loaded.limits.max_active_sessions,
+            MaxActiveSessions::Explicit(4)
+        );
+        let written = serde_json::to_value(loaded).unwrap();
+        assert_eq!(written["limits"]["maxActiveSessions"], json!(4));
+        assert_eq!(written["futureField"]["preserve"], json!(true));
+        let _ = fs::remove_file(path);
     }
 
     #[test]
