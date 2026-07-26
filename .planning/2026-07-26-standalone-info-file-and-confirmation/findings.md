@@ -293,3 +293,13 @@ The user selected Q-04A. The workspace-root audit file and private file-tool tem
 - A fresh rebooted acceptance exposed the existing `file.search` regression test as underspecified: it expected `.gitignore` behavior without creating a Git repository.
 - Product semantics remain aligned with `ignore::WalkBuilder` defaults: `respectGitignore: true` applies Git ignore rules inside Git repositories, while ordinary non-repository directories are not implicitly filtered by stray `.gitignore` files.
 - The test now creates a `.git` directory before asserting that `ignored.rs` is excluded. No runtime search behavior changed.
+
+
+## Post-acceptance discovery R2 — resource and lifecycle hardening
+- `file.search` collected the entire `WalkBuilder` iterator into a `Vec` before applying the 10,000-file cap, so traversal memory and work were not actually bounded.
+- `file.batch` checked aggregate search files/bytes only after each child search completed, so the final child could overshoot the advertised 20,000-file / 128 MiB aggregate budget.
+- File reads used metadata-size checks followed by unbounded `fs::read`, leaving a growth race that could exceed the 8 MiB file bound. The same pattern existed in edit preparation and revision rechecks.
+- Per-path file mutexes were retained forever in `AppState.file_locks`; use weak entries with opportunistic pruning so a long-lived worker does not accumulate every historical path.
+- Permission preservation errors were ignored, created-file hard-link success could be reported as failure solely because temporary-link cleanup failed, rollback rename failure could leak a private temp file, and batch `auditStatus` did not aggregate per-edit audit failures.
+- Repair scope is limited to enforcing the already-frozen contracts; no public tool names, schemas, default confirmation behavior, or gitignore repository semantics change.
+- Resolution: search traversal is now streaming; direct and batch searches receive explicit file/byte budgets; all content/revision reads use a `limit + 1` bounded reader; path locks are weak and opportunistically pruned; staging treats permission preservation as required; successful no-replace creation is not misreported because private-temp unlink cleanup failed; rollback cleans failed restore temps; batch audit status aggregates edit and summary writes; match/context JSON accounting is exact at the 256 KiB limit.

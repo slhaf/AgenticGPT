@@ -204,3 +204,22 @@
 - Updated the regression fixture to create `.git` before asserting ignore behavior; runtime code is unchanged.
 - Verification passed: focused search regression 1/1; Agent 186/186; standalone supervisor 5/5; Hub 61/61; Protocol 9/9 plus doc tests; full workspace, format, and diff checks all exited 0.
 - Clarification commit: `test(agent): scope gitignore search to repositories`.
+
+
+### Post-acceptance Repair R2: resource and lifecycle hardening
+- **Status:** complete
+- Independent review found real boundedness gaps despite the green suite: eager walker collection, post-hoc batch scan accounting, metadata/read growth races, and non-reclaimed path locks.
+- Additional cleanup targets: permission failures, hard-link temp cleanup semantics, rollback temp cleanup, and aggregate audit status.
+- Implementation will preserve the existing public schemas and repository-scoped `.gitignore` semantics.
+- Planned repair: implement focused changes and add low-limit adversarial tests before the full workspace run.
+- Implemented streaming `WalkBuilder` iteration and exact match-payload byte accounting; no eager directory-entry collection remains in `file.search`.
+- Added remaining-budget propagation for batch search files/bytes and explicit aggregate-limit failure detection.
+- Replaced content and revision `fs::read` calls with a `limit + 1` bounded reader across read, search, single edit, batch preparation, commit recheck, and rollback guard paths.
+- Changed per-path lock storage to weak mutex references with opportunistic pruning.
+- Hardened permission preservation, no-replace temp cleanup semantics, rollback temp cleanup, and aggregate batch audit status.
+- Clarified schemas/docs that Git ignore rules apply inside repositories and that the 256 KiB cap covers returned match/context payload.
+- Added adversarial tests for bounded reads, streamed file/byte/output limits, remaining batch budgets, lock pruning, and audit-write failure reporting.
+- Verification: focused `file_ops` 13/13; Agent 191/191; standalone supervisor 5/5; Hub 61/61; Protocol 9/9 plus doc tests; full workspace passed; format passed; filtered strict clippy passed; diff check passed.
+- Product repair commit: `7e199dd` (`fix(agent): enforce standalone file bounds`).
+- Error: local shell has no `apply_patch`; the first repair edit command exited before changing files. Switched to assertion-checked Python replacements.
+- Error: the first focused `cargo test` command passed multiple positional filters, which Cargo rejects before running tests. Replaced it with serial single-filter invocations.
