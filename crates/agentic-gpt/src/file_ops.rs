@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -44,12 +45,32 @@ pub(crate) enum Access {
 pub(crate) async fn lock_target(state: &AppState, path: &Path) -> OwnedMutexGuard<()> {
     let lock = {
         let mut locks = state.file_locks.lock().await;
-        locks
-            .entry(path.to_path_buf())
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-            .clone()
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        if let Some(lock) = locks.get(path).and_then(std::sync::Weak::upgrade) {
+            lock
+        } else {
+            let lock = Arc::new(tokio::sync::Mutex::new(()));
+            locks.insert(path.to_path_buf(), Arc::downgrade(&lock));
+            lock
+        }
     };
     lock.lock_owned().await
+}
+
+enum BoundedRead {
+    Complete(Vec<u8>),
+    Exceeded,
+}
+
+fn read_bounded(path: &Path, limit: u64) -> std::io::Result<BoundedRead> {
+    let file = fs::File::open(path)?;
+    let mut bytes = Vec::new();
+    file.take(limit.saturating_add(1)).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > limit {
+        Ok(BoundedRead::Exceeded)
+    } else {
+        Ok(BoundedRead::Complete(bytes))
+    }
 }
 
 pub(crate) fn resolve_path(
@@ -247,8 +268,19 @@ pub(crate) fn read(
         }
         return Ok(result);
     }
-    let bytes = fs::read(&resolved.path)
-        .map_err(|_| FileError::new("file_read_failed", "file could not be read"))?;
+    let bytes = match read_bounded(&resolved.path, MAX_FILE_BYTES)
+        .map_err(|_| FileError::new("file_read_failed", "file could not be read"))?
+    {
+        BoundedRead::Complete(bytes) => bytes,
+        BoundedRead::Exceeded if !include_content => return Ok(result),
+        BoundedRead::Exceeded => {
+            return Err(FileError::new(
+                "file_too_large",
+                "file exceeds the 8 MiB content bound",
+            ))
+        }
+    };
+    result["sizeBytes"] = json!(bytes.len());
     let revision = revision(&bytes);
     let text = match String::from_utf8(bytes) {
         Ok(text) => text,
@@ -311,6 +343,8 @@ pub(crate) struct SearchOptions<'a> {
     pub(crate) max_results: usize,
     pub(crate) hidden: bool,
     pub(crate) respect_gitignore: bool,
+    pub(crate) scan_file_limit: usize,
+    pub(crate) scan_byte_limit: u64,
 }
 
 pub(crate) fn search(options: SearchOptions<'_>) -> std::result::Result<Value, FileError> {
@@ -346,6 +380,7 @@ pub(crate) fn search(options: SearchOptions<'_>) -> std::result::Result<Value, F
     let matcher = Regex::new(&pattern)
         .map_err(|_| FileError::new("file_invalid_regex", "query is not a valid regex"))?;
     let mut matches = Vec::new();
+    let mut matches_bytes = 2usize;
     let mut scanned_files = 0usize;
     let mut scanned_bytes = 0u64;
     let mut skipped = json!({
@@ -364,8 +399,7 @@ pub(crate) fn search(options: SearchOptions<'_>) -> std::result::Result<Value, F
         .git_global(options.respect_gitignore)
         .git_exclude(options.respect_gitignore)
         .follow_links(false)
-        .build()
-        .collect::<Vec<_>>();
+        .build();
     for entry in entries {
         let entry = match entry {
             Ok(entry) => entry,
@@ -386,12 +420,12 @@ pub(crate) fn search(options: SearchOptions<'_>) -> std::result::Result<Value, F
         if !path.is_file() {
             continue;
         }
-        scanned_files += 1;
-        if scanned_files > MAX_SEARCH_FILES {
+        if scanned_files >= options.scan_file_limit {
             truncated = true;
             truncation_reason = Some("scan_files");
             break;
         }
+        scanned_files += 1;
         let relative = if root_is_file {
             path.file_name()
                 .map(|name| name.to_string_lossy().to_string())
@@ -422,13 +456,24 @@ pub(crate) fn search(options: SearchOptions<'_>) -> std::result::Result<Value, F
             increment_skip(&mut skipped, "tooLarge");
             continue;
         }
-        if scanned_bytes.saturating_add(metadata.len()) > MAX_SEARCH_BYTES {
+        let remaining_bytes = options.scan_byte_limit.saturating_sub(scanned_bytes);
+        if metadata.len() > remaining_bytes {
             truncated = true;
             truncation_reason = Some("scan_bytes");
             break;
         }
-        let bytes = match fs::read(path) {
-            Ok(bytes) => bytes,
+        let read_limit = remaining_bytes.min(MAX_FILE_BYTES);
+        let bytes = match read_bounded(path, read_limit) {
+            Ok(BoundedRead::Complete(bytes)) => bytes,
+            Ok(BoundedRead::Exceeded) if read_limit < MAX_FILE_BYTES => {
+                truncated = true;
+                truncation_reason = Some("scan_bytes");
+                break;
+            }
+            Ok(BoundedRead::Exceeded) => {
+                increment_skip(&mut skipped, "tooLarge");
+                continue;
+            }
             Err(_) => {
                 increment_skip(&mut skipped, "unreadable");
                 continue;
@@ -464,19 +509,22 @@ pub(crate) fn search(options: SearchOptions<'_>) -> std::result::Result<Value, F
                     "before": before,
                     "after": after,
                 });
-                let candidate_bytes = serde_json::to_vec(&value).unwrap_or_default().len();
-                let current_bytes = serde_json::to_vec(&matches).unwrap_or_default().len();
                 if matches.len() >= options.max_results {
                     truncated = true;
                     truncation_reason = Some("max_results");
                     break;
                 }
-                if current_bytes.saturating_add(candidate_bytes) > MAX_SEARCH_OUTPUT_BYTES {
+                let candidate_bytes = serde_json::to_vec(&value).unwrap_or_default().len();
+                let next_matches_bytes = matches_bytes
+                    .saturating_add(candidate_bytes)
+                    .saturating_add(usize::from(!matches.is_empty()));
+                if next_matches_bytes > MAX_SEARCH_OUTPUT_BYTES {
                     truncated = true;
                     truncation_reason = Some("output_bytes");
                     break;
                 }
                 matches.push(value);
+                matches_bytes = next_matches_bytes;
             }
             if truncation_reason.is_some() {
                 break;
@@ -492,7 +540,7 @@ pub(crate) fn search(options: SearchOptions<'_>) -> std::result::Result<Value, F
         "mode": match options.mode { SearchMode::Literal => "literal", SearchMode::Regex => "regex" },
         "matches": matches,
         "matchCount": match_count,
-        "scannedFiles": scanned_files.min(MAX_SEARCH_FILES),
+        "scannedFiles": scanned_files,
         "scannedBytes": scanned_bytes,
         "skippedFiles": skipped,
         "truncated": truncated,
@@ -553,11 +601,10 @@ fn bounded_lines(
         return (String::new(), None, 0, false, true, None);
     }
     let mut output = String::new();
-    let mut line_number = 1;
     let mut returned_through = None;
     let mut truncated = false;
     let mut last_complete = true;
-    for line in text.split_inclusive('\n') {
+    for (line_number, line) in (1..).zip(text.split_inclusive('\n')) {
         let selected = line_number >= start && line_number <= end;
         if selected {
             let available = MAX_READ_OUTPUT_BYTES.saturating_sub(output.len());
@@ -575,12 +622,8 @@ fn bounded_lines(
         if line_number >= end {
             break;
         }
-        line_number += 1;
     }
-    let complete_end = returned_through == Some(end) || returned_through == Some(line_count(text));
-    if !complete_end && returned_through.is_some() && !last_complete {
-        truncated = true;
-    } else if returned_through.is_some() && returned_through.unwrap_or(0) < end {
+    if returned_through.is_some_and(|line| line < end) {
         truncated = true;
     }
     let next_start = (truncated && last_complete)
@@ -793,8 +836,17 @@ async fn edit_inner(
                 "file exceeds the 8 MiB edit bound",
             ));
         }
-        let bytes = fs::read(&target.path)
-            .map_err(|_| FileError::new("file_read_failed", "target could not be read"))?;
+        let bytes = match read_bounded(&target.path, MAX_FILE_BYTES)
+            .map_err(|_| FileError::new("file_read_failed", "target could not be read"))?
+        {
+            BoundedRead::Complete(bytes) => bytes,
+            BoundedRead::Exceeded => {
+                return Err(FileError::new(
+                    "file_too_large",
+                    "file exceeds the 8 MiB edit bound",
+                ))
+            }
+        };
         let text = String::from_utf8(bytes.clone())
             .map_err(|_| FileError::new("file_not_utf8", "file content is not UTF-8 text"))?;
         let revision = revision(&bytes);
@@ -867,7 +919,7 @@ async fn edit_inner(
                 .content
                 .as_deref()
                 .ok_or_else(|| FileError::new("file_write_failed", "content is required"))?;
-            if content.as_bytes().len() > MAX_FILE_BYTES as usize {
+            if content.len() > MAX_FILE_BYTES as usize {
                 return Err(FileError::new(
                     "file_too_large",
                     "candidate exceeds the 8 MiB edit bound",
@@ -932,9 +984,17 @@ async fn edit_inner(
     }
     revalidate_target(config, &target, existed)?;
     if existed {
-        let current = fs::read(&target.path).map_err(|_| {
-            FileError::new("file_revision_conflict", "target changed before commit")
-        })?;
+        let current = match read_bounded(&target.path, MAX_FILE_BYTES)
+            .map_err(|_| FileError::new("file_revision_conflict", "target changed before commit"))?
+        {
+            BoundedRead::Complete(bytes) => bytes,
+            BoundedRead::Exceeded => {
+                return Err(FileError::new(
+                    "file_revision_conflict",
+                    "target changed before commit",
+                ))
+            }
+        };
         if Some(revision(&current)) != before_revision {
             return Err(FileError::new(
                 "file_revision_conflict",
@@ -952,7 +1012,10 @@ async fn edit_inner(
         fs::rename(&temp, &target.path)
     } else {
         match fs::hard_link(&temp, &target.requested) {
-            Ok(()) => fs::remove_file(&temp),
+            Ok(()) => {
+                let _ = fs::remove_file(&temp);
+                Ok(())
+            }
             Err(error) => Err(error),
         }
     };
@@ -980,6 +1043,33 @@ const MAX_BATCH_CANDIDATE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_BATCH_SCAN_FILES: usize = 20_000;
 const MAX_BATCH_SCAN_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_BATCH_OUTPUT_BYTES: usize = 1024 * 1024;
+
+#[derive(Clone, Copy)]
+struct BatchSearchBudget {
+    file_limit: usize,
+    byte_limit: u64,
+    aggregate_file_limited: bool,
+    aggregate_byte_limited: bool,
+}
+
+fn remaining_batch_search_budget(scan_files: usize, scan_bytes: u64) -> BatchSearchBudget {
+    let remaining_files = MAX_BATCH_SCAN_FILES.saturating_sub(scan_files);
+    let remaining_bytes = MAX_BATCH_SCAN_BYTES.saturating_sub(scan_bytes);
+    BatchSearchBudget {
+        file_limit: remaining_files.min(MAX_SEARCH_FILES),
+        byte_limit: remaining_bytes.min(MAX_SEARCH_BYTES),
+        aggregate_file_limited: remaining_files < MAX_SEARCH_FILES,
+        aggregate_byte_limited: remaining_bytes < MAX_SEARCH_BYTES,
+    }
+}
+
+fn aggregate_search_limit_hit(value: &Value, budget: BatchSearchBudget) -> bool {
+    match value["truncationReason"].as_str() {
+        Some("scan_files") => budget.aggregate_file_limited,
+        Some("scan_bytes") => budget.aggregate_byte_limited,
+        _ => false,
+    }
+}
 
 struct BatchCandidate {
     target: ResolvedPath,
@@ -1112,8 +1202,17 @@ fn batch_candidate(
                 "file exceeds the 8 MiB edit bound",
             ));
         }
-        let bytes = fs::read(&target.path)
-            .map_err(|_| FileError::new("file_read_failed", "target could not be read"))?;
+        let bytes = match read_bounded(&target.path, MAX_FILE_BYTES)
+            .map_err(|_| FileError::new("file_read_failed", "target could not be read"))?
+        {
+            BoundedRead::Complete(bytes) => bytes,
+            BoundedRead::Exceeded => {
+                return Err(FileError::new(
+                    "file_too_large",
+                    "file exceeds the 8 MiB edit bound",
+                ))
+            }
+        };
         let text = String::from_utf8(bytes.clone())
             .map_err(|_| FileError::new("file_not_utf8", "file content is not UTF-8 text"))?;
         let revision = revision(&bytes);
@@ -1310,6 +1409,7 @@ pub(crate) async fn batch(state: &AppState, request: BatchRequest) -> Value {
             }
             continue;
         }
+        let mut search_budget = None;
         let result = match operation.kind.as_str() {
             "read" => match resolve_path(&config, &operation.path, Access::Read) {
                 Ok(path) => read(
@@ -1354,6 +1454,8 @@ pub(crate) async fn batch(state: &AppState, request: BatchRequest) -> Value {
                         continue;
                     }
                 };
+                let budget = remaining_batch_search_budget(scan_files, scan_bytes);
+                search_budget = Some(budget);
                 search(SearchOptions {
                     root: &path,
                     query: operation.query.as_deref().unwrap_or_default(),
@@ -1365,6 +1467,8 @@ pub(crate) async fn batch(state: &AppState, request: BatchRequest) -> Value {
                     max_results: operation.max_results,
                     hidden: operation.hidden,
                     respect_gitignore: operation.respect_gitignore,
+                    scan_file_limit: budget.file_limit,
+                    scan_byte_limit: budget.byte_limit,
                 })
             }
             "edit" => continue,
@@ -1372,13 +1476,26 @@ pub(crate) async fn batch(state: &AppState, request: BatchRequest) -> Value {
         };
         match result {
             Ok(value) => {
+                let mut aggregate_limit_hit = false;
                 if operation.kind == "search" {
                     scan_files = scan_files
                         .saturating_add(value["scannedFiles"].as_u64().unwrap_or(0) as usize);
                     scan_bytes =
                         scan_bytes.saturating_add(value["scannedBytes"].as_u64().unwrap_or(0));
+                    aggregate_limit_hit = search_budget
+                        .is_some_and(|budget| aggregate_search_limit_hit(&value, budget));
                 }
-                results[index] = operation_envelope(index, operation, "completed", value);
+                if aggregate_limit_hit {
+                    hard_read_error = true;
+                    let error = batch_error(
+                        "file_batch_scan_limit_exceeded",
+                        "aggregate search scan exceeds the batch bound",
+                    );
+                    response["error"] = error["error"].clone();
+                    results[index] = operation_error_envelope(index, operation, "failed", error);
+                } else {
+                    results[index] = operation_envelope(index, operation, "completed", value);
+                }
             }
             Err(error) => {
                 results[index] =
@@ -1389,14 +1506,8 @@ pub(crate) async fn batch(state: &AppState, request: BatchRequest) -> Value {
             }
         }
     }
-    if scan_files > MAX_BATCH_SCAN_FILES || scan_bytes > MAX_BATCH_SCAN_BYTES {
-        hard_read_error = true;
-        response["error"] = batch_error(
-            "file_batch_scan_limit_exceeded",
-            "aggregate search scan exceeds the batch bound",
-        )["error"]
-            .clone();
-    }
+    debug_assert!(scan_files <= MAX_BATCH_SCAN_FILES);
+    debug_assert!(scan_bytes <= MAX_BATCH_SCAN_BYTES);
     if edit_count == 0 {
         let failed = results
             .iter()
@@ -1596,7 +1707,7 @@ pub(crate) async fn batch(state: &AppState, request: BatchRequest) -> Value {
             .map(|item| {
                 let changed = &item.candidate.response["changedLines"];
                 format!(
-                    "{}:{}:{}:{}->{}:{}:{}:{}",
+                    "{}:{}:{}:{}->{}:{}:{}:+{}-{}",
                     item.index,
                     item.candidate.target.path.display(),
                     edit_mode_label(batch_edit_request(&item.operation).unwrap().mode),
@@ -1607,11 +1718,8 @@ pub(crate) async fn batch(state: &AppState, request: BatchRequest) -> Value {
                     item.candidate.after_revision,
                     item.candidate.before_bytes.as_ref().map_or(0, Vec::len),
                     item.candidate.candidate.len(),
-                    format!(
-                        "+{}-{}",
-                        changed["added"].as_u64().unwrap_or(0),
-                        changed["removed"].as_u64().unwrap_or(0)
-                    ),
+                    changed["added"].as_u64().unwrap_or(0),
+                    changed["removed"].as_u64().unwrap_or(0),
                 )
             })
             .collect::<Vec<_>>();
@@ -1668,8 +1776,9 @@ pub(crate) async fn batch(state: &AppState, request: BatchRequest) -> Value {
             break;
         }
         if item.candidate.existed {
-            match fs::read(&item.candidate.target.path) {
-                Ok(bytes) if Some(revision(&bytes)) == item.candidate.before_revision => {}
+            match read_bounded(&item.candidate.target.path, MAX_FILE_BYTES) {
+                Ok(BoundedRead::Complete(bytes))
+                    if Some(revision(&bytes)) == item.candidate.before_revision => {}
                 _ => {
                     commit_error = Some(batch_error(
                         "file_revision_conflict",
@@ -1699,7 +1808,10 @@ pub(crate) async fn batch(state: &AppState, request: BatchRequest) -> Value {
             fs::rename(&temp, &item.candidate.target.path)
         } else {
             match fs::hard_link(&temp, &item.candidate.target.requested) {
-                Ok(()) => fs::remove_file(&temp),
+                Ok(()) => {
+                    let _ = fs::remove_file(&temp);
+                    Ok(())
+                }
                 Err(error) => Err(error),
             }
         };
@@ -1717,9 +1829,11 @@ pub(crate) async fn batch(state: &AppState, request: BatchRequest) -> Value {
     if let Some(error) = commit_error {
         let mut rollback_failed = false;
         for item in prepared.iter_mut().filter(|item| item.committed) {
-            let current_matches = fs::read(&item.candidate.target.path)
-                .ok()
-                .is_some_and(|bytes| revision(&bytes) == item.candidate.after_revision);
+            let current_matches = matches!(
+                read_bounded(&item.candidate.target.path, MAX_FILE_BYTES),
+                Ok(BoundedRead::Complete(bytes))
+                    if revision(&bytes) == item.candidate.after_revision
+            );
             if !current_matches {
                 rollback_failed = true;
                 results[item.index] = operation_error_envelope(
@@ -1741,9 +1855,16 @@ pub(crate) async fn batch(state: &AppState, request: BatchRequest) -> Value {
                         item.candidate.before_mode.as_ref(),
                     )
                     .and_then(|temp| {
-                        fs::rename(temp, &item.candidate.target.path).map_err(|_| {
-                            FileError::new("file_batch_rollback_failed", "restore rename failed")
-                        })
+                        match fs::rename(&temp, &item.candidate.target.path) {
+                            Ok(()) => Ok(()),
+                            Err(_) => {
+                                let _ = fs::remove_file(&temp);
+                                Err(FileError::new(
+                                    "file_batch_rollback_failed",
+                                    "restore rename failed",
+                                ))
+                            }
+                        }
                     }),
                     None => Err(FileError::new(
                         "file_batch_rollback_failed",
@@ -1795,21 +1916,12 @@ pub(crate) async fn batch(state: &AppState, request: BatchRequest) -> Value {
         });
     } else {
         for item in &prepared {
-            if item.candidate.response["status"] == "unchanged" {
-                results[item.index] = operation_envelope(
-                    item.index,
-                    &item.operation,
-                    "completed",
-                    item.candidate.response.clone(),
-                );
-            } else {
-                results[item.index] = operation_envelope(
-                    item.index,
-                    &item.operation,
-                    "completed",
-                    item.candidate.response.clone(),
-                );
-            }
+            results[item.index] = operation_envelope(
+                item.index,
+                &item.operation,
+                "completed",
+                item.candidate.response.clone(),
+            );
         }
         response["status"] = json!("completed");
     }
@@ -1829,6 +1941,7 @@ fn finalize_batch(
     request: &BatchRequest,
 ) -> Value {
     response["updatedAt"] = json!(Utc::now());
+    let mut audits_written = true;
     if !request.dry_run {
         if let Some(results) = response["results"].as_array() {
             for (index, operation) in request.operations.iter().enumerate() {
@@ -1847,7 +1960,7 @@ fn finalize_batch(
                         removed: lines.get("removed")?.as_u64()? as usize,
                     })
                 });
-                let _ = write_file_audit(
+                if write_file_audit(
                     config,
                     FileAuditRecord {
                         time: Utc::now(),
@@ -1888,10 +2001,15 @@ fn finalize_batch(
                             .map(|value| value as usize),
                         changed_lines,
                     },
-                );
+                )
+                .is_err()
+                {
+                    audits_written = false;
+                }
             }
         }
     }
+    response["auditStatus"] = json!("pending");
     let mut finalized = truncate_batch_response(response);
     let status = finalized["status"]
         .as_str()
@@ -1902,7 +2020,7 @@ fn finalize_batch(
         .unwrap_or("file_batch_unknown")
         .to_string();
     let truncated = finalized["truncated"].as_bool().unwrap_or(false);
-    let audit_status = if write_batch_audit(
+    if write_batch_audit(
         config,
         BatchAuditRecord {
             time: Utc::now(),
@@ -1923,13 +2041,11 @@ fn finalize_batch(
             truncated,
         },
     )
-    .is_ok()
+    .is_err()
     {
-        "written"
-    } else {
-        "failed"
-    };
-    finalized["auditStatus"] = json!(audit_status);
+        audits_written = false;
+    }
+    finalized["auditStatus"] = json!(if audits_written { "written" } else { "failed" });
     finalized
 }
 
@@ -2065,15 +2181,28 @@ fn stage_temp(
             Err(_) => continue,
         };
         use std::io::Write;
-        if file.write_all(bytes).is_err() || file.sync_all().is_err() {
+        if file.write_all(bytes).is_err() {
+            let _ = fs::remove_file(&temp);
+            return Err(FileError::new(
+                "file_write_failed",
+                "temporary file could not be written",
+            ));
+        }
+        if let Some(permissions) = permissions {
+            if file.set_permissions(permissions.clone()).is_err() {
+                let _ = fs::remove_file(&temp);
+                return Err(FileError::new(
+                    "file_write_failed",
+                    "temporary file permissions could not be preserved",
+                ));
+            }
+        }
+        if file.sync_all().is_err() {
             let _ = fs::remove_file(&temp);
             return Err(FileError::new(
                 "file_write_failed",
                 "temporary file could not be synced",
             ));
-        }
-        if let Some(permissions) = permissions {
-            let _ = fs::set_permissions(&temp, permissions.clone());
         }
         return Ok(temp);
     }
@@ -2451,6 +2580,26 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    #[test]
+    fn bounded_reader_never_returns_more_than_the_requested_limit() {
+        let root = std::env::temp_dir().join(format!(
+            "file-bounded-read-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("sample.txt");
+        fs::write(&path, b"12345").unwrap();
+        assert!(matches!(
+            read_bounded(&path, 4).unwrap(),
+            BoundedRead::Exceeded
+        ));
+        match read_bounded(&path, 5).unwrap() {
+            BoundedRead::Complete(bytes) => assert_eq!(bytes, b"12345"),
+            BoundedRead::Exceeded => panic!("exact-bound read must complete"),
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[cfg(unix)]
     #[test]
     fn symlinks_are_allowed_only_when_the_canonical_target_stays_inside_policy() {
@@ -2510,6 +2659,8 @@ mod tests {
             max_results: 50,
             hidden: false,
             respect_gitignore: true,
+            scan_file_limit: MAX_SEARCH_FILES,
+            scan_byte_limit: MAX_SEARCH_BYTES,
         })
         .unwrap();
         assert_eq!(value["matchCount"], 2);
@@ -2530,12 +2681,121 @@ mod tests {
             max_results: 1,
             hidden: true,
             respect_gitignore: false,
+            scan_file_limit: MAX_SEARCH_FILES,
+            scan_byte_limit: MAX_SEARCH_BYTES,
         })
         .unwrap();
         assert_eq!(regex["matchCount"], 1);
         assert_eq!(regex["truncated"], true);
         assert_eq!(regex["truncationReason"], "max_results");
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn search_streams_file_and_byte_limits_without_overshoot() {
+        let root = std::env::temp_dir().join(format!(
+            "file-search-bounds-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("a.txt"),
+            "needle
+",
+        )
+        .unwrap();
+        fs::write(
+            root.join("b.txt"),
+            "needle
+",
+        )
+        .unwrap();
+        let config = config(&root);
+        let resolved = resolve_path(&config, ".", Access::Read).unwrap();
+        let empty = Vec::new();
+        let files = search(SearchOptions {
+            root: &resolved,
+            query: "needle",
+            mode: SearchMode::Literal,
+            case_sensitive: true,
+            include: &empty,
+            exclude: &empty,
+            context_lines: 0,
+            max_results: 50,
+            hidden: false,
+            respect_gitignore: true,
+            scan_file_limit: 1,
+            scan_byte_limit: MAX_SEARCH_BYTES,
+        })
+        .unwrap();
+        assert_eq!(files["scannedFiles"], 1);
+        assert_eq!(files["truncated"], true);
+        assert_eq!(files["truncationReason"], "scan_files");
+
+        let file = resolve_path(&config, "a.txt", Access::Read).unwrap();
+        let bytes = search(SearchOptions {
+            root: &file,
+            query: "needle",
+            mode: SearchMode::Literal,
+            case_sensitive: true,
+            include: &empty,
+            exclude: &empty,
+            context_lines: 0,
+            max_results: 50,
+            hidden: false,
+            respect_gitignore: true,
+            scan_file_limit: MAX_SEARCH_FILES,
+            scan_byte_limit: 3,
+        })
+        .unwrap();
+        assert_eq!(bytes["scannedBytes"], 0);
+        assert_eq!(bytes["truncated"], true);
+        assert_eq!(bytes["truncationReason"], "scan_bytes");
+
+        let output_path = root.join("large-output.txt");
+        let long_line = format!("needle{}\n", "x".repeat(MAX_LINE_DISPLAY_BYTES));
+        fs::write(&output_path, long_line.repeat(80)).unwrap();
+        let output_file = resolve_path(&config, "large-output.txt", Access::Read).unwrap();
+        let output = search(SearchOptions {
+            root: &output_file,
+            query: "needle",
+            mode: SearchMode::Literal,
+            case_sensitive: true,
+            include: &empty,
+            exclude: &empty,
+            context_lines: 0,
+            max_results: MAX_SEARCH_RESULTS,
+            hidden: false,
+            respect_gitignore: true,
+            scan_file_limit: MAX_SEARCH_FILES,
+            scan_byte_limit: MAX_SEARCH_BYTES,
+        })
+        .unwrap();
+        assert_eq!(output["truncationReason"], "output_bytes");
+        assert!(serde_json::to_vec(&output["matches"]).unwrap().len() <= MAX_SEARCH_OUTPUT_BYTES);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn batch_search_budget_exposes_only_the_remaining_aggregate_capacity() {
+        let budget =
+            remaining_batch_search_budget(MAX_BATCH_SCAN_FILES - 3, MAX_BATCH_SCAN_BYTES - 7);
+        assert_eq!(budget.file_limit, 3);
+        assert_eq!(budget.byte_limit, 7);
+        assert!(budget.aggregate_file_limited);
+        assert!(budget.aggregate_byte_limited);
+        assert!(aggregate_search_limit_hit(
+            &json!({"truncationReason":"scan_files"}),
+            budget,
+        ));
+        assert!(aggregate_search_limit_hit(
+            &json!({"truncationReason":"scan_bytes"}),
+            budget,
+        ));
+        assert!(!aggregate_search_limit_hit(
+            &json!({"truncationReason":"max_results"}),
+            budget,
+        ));
     }
 
     #[test]
@@ -2560,6 +2820,8 @@ mod tests {
             max_results: 50,
             hidden: false,
             respect_gitignore: true,
+            scan_file_limit: MAX_SEARCH_FILES,
+            scan_byte_limit: MAX_SEARCH_BYTES,
         })
         .unwrap_err();
         assert_eq!(invalid_regex.code, "file_invalid_regex");
@@ -2574,6 +2836,8 @@ mod tests {
             max_results: 50,
             hidden: false,
             respect_gitignore: true,
+            scan_file_limit: MAX_SEARCH_FILES,
+            scan_byte_limit: MAX_SEARCH_BYTES,
         })
         .unwrap_err();
         assert_eq!(invalid_glob.code, "file_invalid_glob");

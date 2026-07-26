@@ -364,6 +364,8 @@ impl StdioMcpServer {
                             max_results: args.max_results,
                             hidden: args.hidden,
                             respect_gitignore: args.respect_gitignore,
+                            scan_file_limit: crate::file_ops::MAX_SEARCH_FILES,
+                            scan_byte_limit: crate::file_ops::MAX_SEARCH_BYTES,
                         },
                     )),
                     Err(error) if error.code == "file_not_found" => {
@@ -2184,7 +2186,7 @@ fn properties_for(name: &str) -> Map<String, Value> {
             add("hidden", boolean("Include hidden files; default false."));
             add(
                 "respectGitignore",
-                boolean("Honor ignore files; default true."),
+                boolean("Honor Git ignore rules inside repositories; default true."),
             );
         }
         "file.edit" => {
@@ -2238,7 +2240,7 @@ fn properties_for(name: &str) -> Map<String, Value> {
                     "caseSensitive":boolean("Case-sensitive; default true."), "include":strings("Include globs; max 16."),
                     "exclude":strings("Exclude globs; max 16."), "contextLines":number("Context lines, max 5."),
                     "maxResults":number("Maximum matches, max 200."), "hidden":boolean("Include hidden files; default false."),
-                    "respectGitignore":boolean("Honor ignore files; default true.")
+                    "respectGitignore":boolean("Honor Git ignore rules inside repositories; default true.")
                 }, "required":["type","path","query"]
             });
             let edit = json!({
@@ -3597,6 +3599,49 @@ mod tests {
             "file_batch_confirmation_unavailable"
         );
         assert_eq!(std::fs::read_to_string(&path)?, "before\n");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn file_lock_registry_prunes_released_paths() -> anyhow::Result<()> {
+        let server = StdioMcpServer::new(test_state(CapabilityProfile::Normal));
+        let workspace = server.state.config.read().await.workspace_root.clone();
+        {
+            let _guard =
+                crate::file_ops::lock_target(&server.state, &workspace.join("one.txt")).await;
+        }
+        {
+            let _guard =
+                crate::file_ops::lock_target(&server.state, &workspace.join("two.txt")).await;
+        }
+        assert_eq!(server.state.file_locks.lock().await.len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn file_batch_reports_failure_when_any_audit_write_fails() -> anyhow::Result<()> {
+        let server = StdioMcpServer::new(test_state(CapabilityProfile::Normal));
+        let workspace = server.state.config.read().await.workspace_root.clone();
+        std::fs::create_dir(workspace.join(".agentic-gpt-audit.jsonl"))?;
+        let path = workspace.join("batch-audit.txt");
+        std::fs::write(
+            &path, "before
+",
+        )?;
+        let revision = crate::file_ops::revision(&std::fs::read(&path)?);
+        let result = server
+            .dispatch(
+                "file.batch",
+                json!({"operations":[{"type":"edit","mode":"replace","path":"batch-audit.txt","expectedRevision":revision,"oldText":"before","newText":"after"}]}),
+            )
+            .await?;
+        assert_eq!(result["status"], "completed");
+        assert_eq!(result["auditStatus"], "failed");
+        assert_eq!(
+            std::fs::read_to_string(&path)?,
+            "after
+"
+        );
         Ok(())
     }
 

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use agentic_gpt_protocol::{AgentMessage, AgentRole};
 use chrono::{DateTime, Utc};
@@ -157,7 +157,7 @@ pub(crate) struct AppState {
     pub(crate) runtime: RuntimeModel,
     pub(crate) started_at: DateTime<Utc>,
     pub(crate) supervised: bool,
-    pub(crate) file_locks: Arc<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>>,
+    pub(crate) file_locks: Arc<Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>>,
     pub(crate) sessions: Arc<Mutex<HashMap<String, sessions::ManagedSession>>>,
     pub(crate) hub_sender: Arc<Mutex<Option<mpsc::UnboundedSender<AgentMessage>>>>,
     pub(crate) reporting_sender: Arc<Mutex<Option<mpsc::Sender<AgentMessage>>>>,

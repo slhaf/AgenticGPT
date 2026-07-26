@@ -80,8 +80,9 @@ lifecycle as Hub execution while keeping the Hub out of the command path.
 relative to `workspaceRoot` (or absolute paths authorized by `pathPolicy`),
 resolve symlinks before policy checks, and never invoke a shell or external
 search process. Reads support metadata-only inspection, line ranges, and a
-256 KiB response bound. Search is ignore-aware by default and bounds files,
-bytes, matches, context, and output.
+256 KiB response bound. Inside Git repositories, search honors Git ignore
+rules by default and caps its returned match/context payload at 256 KiB while
+also bounding scanned files and bytes.
 
 `file.edit` is the guarded single-file mutation tool. Its `replace`, `patch`,
 and `write` modes operate on UTF-8 text only. Existing files require an exact
