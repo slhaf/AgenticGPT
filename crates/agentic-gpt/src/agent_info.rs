@@ -51,14 +51,10 @@ pub(crate) async fn collect(state: &AppState) -> Value {
             .write_roots
             .iter()
             .chain(std::iter::once(&config.workspace_root)),
-        &config.workspace_root,
     );
-    let (read_only_roots, read_only_truncated) = path_values(
-        config.path_policy.read_only_roots.iter(),
-        &config.workspace_root,
-    );
-    let (deny_roots, deny_truncated) =
-        path_values(config.path_policy.deny_roots.iter(), &config.workspace_root);
+    let (read_only_roots, read_only_truncated) =
+        path_values(config.path_policy.read_only_roots.iter());
+    let (deny_roots, deny_truncated) = path_values(config.path_policy.deny_roots.iter());
     let policy_summary = policy_summary(&config, state.runtime.profile);
     let paths_truncated = write_truncated || read_only_truncated || deny_truncated;
     let channels = config
@@ -188,14 +184,13 @@ fn reporting_status(
 fn exact_path(path: &Path) -> String {
     exec::expand_pathbuf(path)
         .unwrap_or_else(|_| path.to_path_buf())
+        .components()
+        .collect::<PathBuf>()
         .to_string_lossy()
         .into_owned()
 }
 
-fn path_values<'a>(
-    roots: impl Iterator<Item = &'a PathBuf>,
-    workspace_root: &Path,
-) -> (Vec<String>, bool) {
+fn path_values<'a>(roots: impl Iterator<Item = &'a PathBuf>) -> (Vec<String>, bool) {
     let mut values = Vec::new();
     let mut truncated = false;
     for root in roots {
@@ -207,9 +202,6 @@ fn path_values<'a>(
         if !values.contains(&value) {
             values.push(value);
         }
-    }
-    if values.is_empty() {
-        values.push(exact_path(workspace_root));
     }
     (values, truncated)
 }
@@ -427,6 +419,38 @@ mod tests {
         let serialized = serde_json::to_string(&value).unwrap();
         assert!(!serialized.contains("change-me"));
         assert!(!serialized.contains("agent_secret"));
+    }
+
+    #[tokio::test]
+    async fn info_preserves_empty_policy_lists_and_deduplicates_workspace_root() {
+        let app = state(CapabilityProfile::Room);
+        let root =
+            std::env::temp_dir().join(format!("agent-info-room-{}", uuid::Uuid::new_v4().simple()));
+        {
+            let mut config = app.config.write().await;
+            config.workspace_root = PathBuf::from(format!("{}/", root.display()));
+            config.path_policy.write_roots = vec![root.clone(), PathBuf::from("/tmp")];
+            config.path_policy.read_only_roots.clear();
+            config.path_policy.deny_roots.clear();
+        }
+
+        let value = collect(&app).await;
+        assert_eq!(value["workspace"]["root"], root.to_string_lossy().as_ref());
+        assert_eq!(
+            value["workspace"]["pathPolicy"]["writeRoots"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(value["workspace"]["pathPolicy"]["readOnlyRoots"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert!(value["workspace"]["pathPolicy"]["denyRoots"]
+            .as_array()
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]
