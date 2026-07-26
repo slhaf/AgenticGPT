@@ -401,6 +401,7 @@ mod tests {
             runtime: crate::state::RuntimeModel::tunnel(profile, false),
             started_at: Utc::now(),
             supervised: true,
+            file_locks: Arc::new(Mutex::new(HashMap::new())),
             sessions: Arc::new(Mutex::new(HashMap::new())),
             hub_sender: Arc::new(Mutex::new(None)),
             reporting_sender: Arc::new(Mutex::new(None)),

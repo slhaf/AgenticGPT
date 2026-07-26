@@ -5,6 +5,7 @@ mod config;
 mod confirmation;
 mod diary;
 mod exec;
+mod file_ops;
 mod hub;
 mod instance_lock;
 mod local_service;
@@ -256,6 +257,7 @@ async fn run(config_path: PathBuf, runtime: RuntimeModel) -> Result<()> {
         runtime,
         started_at: chrono::Utc::now(),
         supervised: false,
+        file_locks: Arc::new(Mutex::new(HashMap::new())),
         sessions: Arc::new(Mutex::new(HashMap::new())),
         hub_sender: Arc::new(Mutex::new(None)),
         reporting_sender: Arc::new(Mutex::new(None)),
@@ -304,6 +306,7 @@ async fn run_stdio_worker(
         runtime: RuntimeModel::tunnel(profile, reporting_enabled),
         started_at: chrono::Utc::now(),
         supervised,
+        file_locks: Arc::new(Mutex::new(HashMap::new())),
         sessions: Arc::new(Mutex::new(HashMap::new())),
         hub_sender: Arc::new(Mutex::new(None)),
         reporting_sender: Arc::new(Mutex::new(None)),
@@ -712,6 +715,7 @@ mod tests {
                 runtime: RuntimeModel::hub(run_mode.profile()),
                 started_at: chrono::Utc::now(),
                 supervised: false,
+                file_locks: Arc::new(Mutex::new(HashMap::new())),
                 sessions: Arc::new(Mutex::new(HashMap::new())),
                 hub_sender: Arc::new(Mutex::new(Some(tx))),
                 reporting_sender: Arc::new(Mutex::new(None)),
@@ -1281,6 +1285,7 @@ mod tests {
             runtime: RuntimeModel::hub(CapabilityProfile::Normal),
             started_at: chrono::Utc::now(),
             supervised: false,
+            file_locks: Arc::new(Mutex::new(HashMap::new())),
             sessions: Arc::new(Mutex::new(HashMap::new())),
             hub_sender: Arc::new(Mutex::new(None)),
             reporting_sender: Arc::new(Mutex::new(None)),

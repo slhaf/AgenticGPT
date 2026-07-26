@@ -32,7 +32,43 @@ pub(crate) struct AuditRecord {
     pub(crate) installed_digest: Option<String>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct FileAuditRecord {
+    pub(crate) time: DateTime<Utc>,
+    pub(crate) tool: String,
+    pub(crate) action: String,
+    pub(crate) path: String,
+    pub(crate) mode: Option<String>,
+    pub(crate) requested_confirmation: bool,
+    pub(crate) confirmation_result: Option<String>,
+    pub(crate) before_revision: Option<String>,
+    pub(crate) after_revision: Option<String>,
+    pub(crate) outcome: String,
+    pub(crate) error_code: Option<String>,
+    pub(crate) duration_ms: u128,
+    pub(crate) replacement_count: Option<usize>,
+    pub(crate) changed_lines: Option<ChangedLines>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ChangedLines {
+    pub(crate) added: usize,
+    pub(crate) removed: usize,
+}
+
 pub(crate) fn write_audit(config: &Config, record: AuditRecord) -> Result<()> {
+    let audit_path = config.workspace_root.join(".agentic-gpt-audit.jsonl");
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(audit_path)?;
+    writeln!(file, "{}", serde_json::to_string(&record)?)?;
+    Ok(())
+}
+
+pub(crate) fn write_file_audit(config: &Config, record: FileAuditRecord) -> Result<()> {
     let audit_path = config.workspace_root.join(".agentic-gpt-audit.jsonl");
     let mut file = OpenOptions::new()
         .create(true)

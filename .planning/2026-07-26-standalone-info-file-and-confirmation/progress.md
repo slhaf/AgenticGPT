@@ -30,6 +30,17 @@
 - Phase B focused result: `cargo test -p agentic-gpt agent_info::tests --no-fail-fast` passed (3/3).
 - Phase B full Agent result: `cargo test -p agentic-gpt --bin agentic-gpt --no-fail-fast` passed (168/168).
 - Phase B is complete; next is Implementation Phase C (`file.read` and shared file core).
+- Phase C focused test initially expected read-only to override an encompassing write root; existing pathPolicy semantics intentionally let a write root win after deny checks. The test is being corrected to place the read-only root outside the implicit workspace write root, preserving D-13 compatibility.
+- Phase B commit: `aa9ced6` (`feat(agent): expose standalone runtime info`). Git staging required the approved escalated Git operation because `.git` is read-only in the default sandbox.
+
+### Implementation Phase C: File core and reads
+- **Status:** complete
+- Added `file_ops` shared path-policy resolution, deny/read-only checks, canonical symlink containment, reserved-path guard, SHA-256 revisions, UTF-8/size/range bounds, and per-target locks.
+- Added redacted file audit record types without changing existing command audit JSONL.
+- Registered `file.read` in both profiles with metadata-only and ranged content schemas/dispatch.
+- Focused result: `cargo test -p agentic-gpt file_ops::tests --no-fail-fast` passed (6/6); stdio dispatch read test passed (1/1).
+- Full Agent result: `cargo test -p agentic-gpt --bin agentic-gpt --no-fail-fast` passed (175/175).
+- Next: begin Implementation Phase D (`file.search`).
 
 ### Phase 1: Requirements and Repository Discovery
 - **Status:** in_progress

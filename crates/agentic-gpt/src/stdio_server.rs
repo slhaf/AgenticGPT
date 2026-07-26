@@ -306,6 +306,24 @@ impl StdioMcpServer {
                 let _: EmptyArgs = from_value(arguments)?;
                 Ok(crate::agent_info::collect(&self.state).await)
             }
+            "file.read" => {
+                let args: FileReadArgs = from_value(arguments)?;
+                let config = self.state.config.read().await.clone();
+                let resolved = crate::file_ops::resolve_path(
+                    &config,
+                    &args.path,
+                    crate::file_ops::Access::Read,
+                );
+                match resolved {
+                    Ok(resolved) => crate::file_ops::to_result(crate::file_ops::read(
+                        &resolved,
+                        args.include_content,
+                        args.start_line,
+                        args.end_line,
+                    )),
+                    Err(error) => Ok(error.value()),
+                }
+            }
             "process.exec" => {
                 self.dispatch_process_exec(arguments, terminal_tracker)
                     .await
@@ -1293,6 +1311,22 @@ struct EmptyArgs {}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FileReadArgs {
+    path: String,
+    #[serde(default = "default_true")]
+    include_content: bool,
+    #[serde(default)]
+    start_line: Option<usize>,
+    #[serde(default)]
+    end_line: Option<usize>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct McpListArgs {
     #[serde(default)]
     server_id: Option<String>,
@@ -1749,6 +1783,7 @@ fn tool_schema(name: &str) -> (Map<String, Value>, &'static [&'static str]) {
         "process.batchExec" => &["elements"],
         "process.get" => &["sessionId"],
         "process.kill" => &["sessionId"],
+        "file.read" => &["path"],
         "mcp.callTool" => &["serverId", "toolName"],
         "skills.setActive" => &["id", "active"],
         "tmux.sessions" | "tmux.panes" => &["action"],
@@ -1798,6 +1833,15 @@ fn properties_for(name: &str) -> Map<String, Value> {
         add("agentId", string("Target local agent id."));
     }
     match name {
+        "file.read" => {
+            add("path", string("File or directory path within pathPolicy."));
+            add(
+                "includeContent",
+                boolean("Return bounded UTF-8 content; defaults to true."),
+            );
+            add("startLine", number("1-based inclusive start line."));
+            add("endLine", number("1-based inclusive end line."));
+        }
         "mcp.list" => add("serverId", string("Optional configured MCP server id.")),
         "process.exec" => {
             add("program", string("Executable name or path."));
@@ -2052,6 +2096,7 @@ fn output_schema() -> Map<String, Value> {
 fn tool_description(name: &str) -> String {
     match name {
         "agent.info" => "Inspect bounded local Agent identity, capabilities, policy, capacity, confirmation, connection, and config health.".to_string(),
+        "file.read" => "Read bounded UTF-8 file content or metadata under path policy.".to_string(),
         "process.exec" => "Start one managed local process and wait briefly.".to_string(),
         "process.batchExec" => "Start multiple managed local processes.".to_string(),
         "process.get" => "Inspect or briefly wait for one managed local process.".to_string(),
@@ -2124,13 +2169,17 @@ fn tool_is_read_only(name: &str) -> bool {
             | "skills.install"
             | "skills.install.cancel"
             | "skills.run"
+            | "file.edit"
+            | "file.batch"
     )
 }
 
 fn tool_is_destructive(name: &str) -> bool {
     matches!(
         name,
-        "session.kill"
+        "file.batch"
+            | "file.edit"
+            | "session.kill"
             | "process.kill"
             | "tmux.sessions"
             | "tmux.closeSession"
@@ -2820,6 +2869,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn file_read_dispatch_supports_content_and_metadata_modes() -> anyhow::Result<()> {
+        let server = StdioMcpServer::new(test_state(CapabilityProfile::Normal));
+        let workspace = server.state.config.read().await.workspace_root.clone();
+        std::fs::write(workspace.join("read-me.txt"), "first\nsecond\n")?;
+        let content = server
+            .dispatch(
+                "file.read",
+                json!({"path":"read-me.txt", "startLine": 2, "endLine": 2}),
+            )
+            .await?;
+        assert_eq!(content["content"], "second\n");
+        assert_eq!(content["totalLines"], 2);
+        let metadata = server
+            .dispatch(
+                "file.read",
+                json!({"path":"read-me.txt", "includeContent": false}),
+            )
+            .await?;
+        assert!(metadata.get("content").is_none());
+        assert!(metadata["revision"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:"));
+        let missing = server
+            .dispatch("file.read", json!({"path":"missing.txt"}))
+            .await?;
+        assert_eq!(missing["error"]["code"], "file_not_found");
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn compact_mcp_skills_and_tmux_adapters_preserve_result_envelopes() -> anyhow::Result<()>
     {
         let server = StdioMcpServer::new(test_state(CapabilityProfile::Normal));
@@ -2861,6 +2941,7 @@ mod tests {
             runtime: RuntimeModel::tunnel(profile, false),
             started_at: chrono::Utc::now(),
             supervised: true,
+            file_locks: Arc::new(Mutex::new(HashMap::new())),
             sessions: Arc::new(Mutex::new(HashMap::new())),
             hub_sender: Arc::new(Mutex::new(None)),
             reporting_sender: Arc::new(Mutex::new(None)),

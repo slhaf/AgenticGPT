@@ -13,7 +13,7 @@ Add a model-facing standalone `agent.info` tool, a bounded and concurrency-safe 
 - **Open blocking decisions:** none
 - **Design checkpoint:** `3fb762b` (`docs(plan): checkpoint standalone info and file tools plan`)
 - **Baseline:** `d04f8e0`; branch `main` is clean and 16 commits ahead of `origin/main`
-- **Next action:** record Phase A verification and commit, then begin Phase B
+- **Next action:** implement Phase C (`file.read` and shared file core) under `planning-with-files`
 
 ## Scope and Constraints
 
@@ -128,6 +128,17 @@ Expected surface counts after this plan:
 - [x] Derive bounded/redacted surface, policy, capacity, confirmation, connection, and config-health fields.
 - [x] Complete focused Phase B tests and commit.
 - **Status:** complete; focused info tests and full Agent binary unit suite passed (168/168).
+
+### Implementation Phase C — File core and reads
+- [x] Add shared bounded file path-policy/revision/lock/read core and file-shaped audit records.
+- [x] Register `file.read` in both standalone profiles with metadata-only and ranged UTF-8 modes.
+- [x] Verify deny/read-only precedence, canonical symlink containment, binary/large-file handling, exact newlines, and revision stability.
+- **Status:** complete; focused file/read tests passed (7 total) and full Agent binary unit suite passed (175/175).
+
+### Phase commit ledger
+- Design checkpoint: `3fb762b`
+- Phase A: `9c06c48` — `refactor(agent): clarify confirmation channel semantics`
+- Phase B: `aa9ced6` — `feat(agent): expose standalone runtime info`
 
 
 
