@@ -65,7 +65,7 @@
 - Full Agent run initially exposed three stale intermediate surface assertions (agent.info 33→34 and stdio 21/33→22/34); assertions were corrected without changing the public contract.
 - Phase E pre-commit gate: `cargo test -p agentic-gpt --bin agentic-gpt --no-fail-fast` passed 182/182.
 - Phase E is complete; next is Implementation Phase F (`file.batch`).
-- Phase E commit: `eb97a8a` (`feat(agent): add guarded file edits`).
+- Phase E commit: `ed9bb6e` (`feat(agent): add guarded file edits`).
 
 ### Phase 1: Requirements and Repository Discovery
 - **Status:** in_progress
