@@ -8,12 +8,12 @@ Add a model-facing standalone `agent.info` tool, a bounded and concurrency-safe 
 - **Current role:** implementer
 - **Implementation authorized:** yes
 - **Active plan:** `2026-07-26-standalone-info-file-and-confirmation`
-- **Current phase:** Implementation Phase F — Batch
+- **Current phase:** Implementation Phase G — Surface, docs, and acceptance
 - **Entry phase:** Implementation Phase A — Confirmation semantics
 - **Open blocking decisions:** none
 - **Design checkpoint:** `3fb762b` (`docs(plan): checkpoint standalone info and file tools plan`)
 - **Baseline:** `d04f8e0`; branch `main` is clean and 16 commits ahead of `origin/main`
-- **Next action:** implement bounded mixed-operation `file.batch` with staged commit and guarded rollback
+- **Next action:** finalize docs and run the complete acceptance/security/surface/smoke suite
 
 ## Scope and Constraints
 
@@ -364,7 +364,7 @@ Each implementation phase ends with focused tests and one commit. Planning files
 - Commit intent: `feat(agent): add guarded file edits`.
 
 ### Implementation Phase F — Batch
-- **Status:** in_progress
+- **Status:** complete; focused and full Agent tests passed; commit pending handoff record
 - Implement discriminated embedded operations with top-level dry-run/confirmation controls and aggregate bounds.
 - Execute reads/searches first, resolve duplicate normalized edit targets, acquire sorted locks, stage all candidates, confirm once, revalidate, commit, and best-effort rollback.
 - Implement deterministic original-order response envelopes and global output truncation.

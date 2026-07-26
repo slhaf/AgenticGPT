@@ -76,6 +76,11 @@
 - Focused batch tests passed 3/3 (read-before-write/order, duplicate/preflight rejection, dry-run/one confirmation boundary). Full Agent binary suite passed 185/185.
 - Discovery/fix: batch audit initially tested ordinary field names as content; redaction test now uses unique secret strings and verifies those values never enter audit JSONL. Batch summary and each non-dry-run edit now report `auditStatus`/file-shaped audit evidence.
 - Final Phase F focused rerun after normalizing embedded missing-search errors to `file_search_path_not_found`: 3/3 passed; `cargo fmt --all -- --check` and `git diff --check` passed.
+- Phase F commit: `6a965d6` (`feat(agent): add coordinated file batches`).
+
+### Implementation Phase G: Surface, docs, and acceptance
+- **Status:** in_progress
+- Final standalone surface is now Normal 23 / Room 35 with `agent.info`, `file.read`, `file.search`, `file.edit`, and `file.batch`; next update will complete documentation and acceptance evidence.
 
 ### Phase 1: Requirements and Repository Discovery
 - **Status:** in_progress
