@@ -1594,12 +1594,24 @@ pub(crate) async fn batch(state: &AppState, request: BatchRequest) -> Value {
             .iter()
             .filter(|item| item.candidate.response["status"] != "unchanged")
             .map(|item| {
+                let changed = &item.candidate.response["changedLines"];
                 format!(
-                    "{}:{}:{}->{}",
+                    "{}:{}:{}:{}->{}:{}:{}:{}",
                     item.index,
                     item.candidate.target.path.display(),
                     edit_mode_label(batch_edit_request(&item.operation).unwrap().mode),
-                    item.candidate.candidate.len()
+                    item.candidate
+                        .before_revision
+                        .as_deref()
+                        .unwrap_or("absent"),
+                    item.candidate.after_revision,
+                    item.candidate.before_bytes.as_ref().map_or(0, Vec::len),
+                    item.candidate.candidate.len(),
+                    format!(
+                        "+{}-{}",
+                        changed["added"].as_u64().unwrap_or(0),
+                        changed["removed"].as_u64().unwrap_or(0)
+                    ),
                 )
             })
             .collect::<Vec<_>>();
@@ -1880,15 +1892,16 @@ fn finalize_batch(
             }
         }
     }
-    let status = response["status"]
+    let mut finalized = truncate_batch_response(response);
+    let status = finalized["status"]
         .as_str()
         .unwrap_or("rejected")
         .to_string();
-    let batch_id = response["batchId"]
+    let batch_id = finalized["batchId"]
         .as_str()
         .unwrap_or("file_batch_unknown")
         .to_string();
-    let truncated = response["truncated"].as_bool().unwrap_or(false);
+    let truncated = finalized["truncated"].as_bool().unwrap_or(false);
     let audit_status = if write_batch_audit(
         config,
         BatchAuditRecord {
@@ -1902,7 +1915,7 @@ fn finalize_batch(
                 .iter()
                 .filter(|operation| operation.kind == "edit")
                 .count(),
-            confirmation_result: response["confirmation"]["result"]
+            confirmation_result: finalized["confirmation"]["result"]
                 .as_str()
                 .map(str::to_string),
             outcome: status,
@@ -1916,8 +1929,8 @@ fn finalize_batch(
     } else {
         "failed"
     };
-    response["auditStatus"] = json!(audit_status);
-    truncate_batch_response(response)
+    finalized["auditStatus"] = json!(audit_status);
+    finalized
 }
 
 fn truncate_batch_response(mut response: Value) -> Value {

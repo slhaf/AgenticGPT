@@ -413,31 +413,7 @@ impl StdioMcpServer {
                 let operations = args
                     .operations
                     .into_iter()
-                    .map(|operation| crate::file_ops::BatchOperation {
-                        id: operation.id,
-                        kind: operation.kind,
-                        path: operation.path.unwrap_or_default(),
-                        include_content: operation.include_content,
-                        start_line: operation.start_line,
-                        end_line: operation.end_line,
-                        query: operation.query,
-                        search_mode: operation.mode.clone(),
-                        case_sensitive: operation.case_sensitive,
-                        include: operation.include,
-                        exclude: operation.exclude,
-                        context_lines: operation.context_lines,
-                        max_results: operation.max_results,
-                        hidden: operation.hidden,
-                        respect_gitignore: operation.respect_gitignore,
-                        edit_mode: operation.mode,
-                        expected_revision: operation.expected_revision,
-                        expected_absent: operation.expected_absent,
-                        old_text: operation.old_text,
-                        new_text: operation.new_text,
-                        expected_matches: operation.expected_matches,
-                        patch: operation.patch,
-                        content: operation.content,
-                    })
+                    .map(to_file_batch_operation)
                     .collect();
                 Ok(crate::file_ops::batch(
                     &self.state,
@@ -1505,52 +1481,64 @@ struct FileBatchArgs {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct FileBatchOperationArgs {
-    #[serde(rename = "type")]
-    kind: String,
-    #[serde(default)]
-    id: Option<String>,
-    #[serde(default)]
-    path: Option<String>,
-    #[serde(default = "default_true")]
-    include_content: bool,
-    #[serde(default)]
-    start_line: Option<usize>,
-    #[serde(default)]
-    end_line: Option<usize>,
-    #[serde(default)]
-    query: Option<String>,
-    #[serde(default)]
-    mode: Option<String>,
-    #[serde(default = "default_true")]
-    case_sensitive: bool,
-    #[serde(default)]
-    include: Vec<String>,
-    #[serde(default)]
-    exclude: Vec<String>,
-    #[serde(default)]
-    context_lines: usize,
-    #[serde(default = "default_max_search_results")]
-    max_results: usize,
-    #[serde(default)]
-    hidden: bool,
-    #[serde(default = "default_true")]
-    respect_gitignore: bool,
-    #[serde(default)]
-    expected_revision: Option<String>,
-    #[serde(default)]
-    expected_absent: Option<bool>,
-    #[serde(default)]
-    old_text: Option<String>,
-    #[serde(default)]
-    new_text: Option<String>,
-    #[serde(default)]
-    expected_matches: Option<usize>,
-    #[serde(default)]
-    patch: Option<String>,
-    #[serde(default)]
-    content: Option<String>,
+#[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
+enum FileBatchOperationArgs {
+    #[serde(rename = "read")]
+    Read {
+        #[serde(default)]
+        id: Option<String>,
+        path: String,
+        #[serde(default = "default_true", rename = "includeContent")]
+        include_content: bool,
+        #[serde(default)]
+        start_line: Option<usize>,
+        #[serde(default)]
+        end_line: Option<usize>,
+    },
+    #[serde(rename = "search")]
+    Search {
+        #[serde(default)]
+        id: Option<String>,
+        path: String,
+        query: String,
+        #[serde(default)]
+        mode: Option<String>,
+        #[serde(default = "default_true", rename = "caseSensitive")]
+        case_sensitive: bool,
+        #[serde(default)]
+        include: Vec<String>,
+        #[serde(default)]
+        exclude: Vec<String>,
+        #[serde(default, rename = "contextLines")]
+        context_lines: usize,
+        #[serde(default = "default_max_search_results", rename = "maxResults")]
+        max_results: usize,
+        #[serde(default)]
+        hidden: bool,
+        #[serde(default = "default_true", rename = "respectGitignore")]
+        respect_gitignore: bool,
+    },
+    #[serde(rename = "edit")]
+    Edit {
+        #[serde(default)]
+        id: Option<String>,
+        mode: String,
+        path: String,
+        #[serde(default, rename = "expectedRevision")]
+        expected_revision: Option<String>,
+        #[serde(default, rename = "expectedAbsent")]
+        expected_absent: Option<bool>,
+        #[serde(default, rename = "oldText")]
+        old_text: Option<String>,
+        #[serde(default, rename = "newText")]
+        new_text: Option<String>,
+        #[serde(default, rename = "expectedMatches")]
+        expected_matches: Option<usize>,
+        #[serde(default)]
+        patch: Option<String>,
+        #[serde(default)]
+        content: Option<String>,
+    },
 }
 
 fn default_max_search_results() -> usize {
@@ -1559,6 +1547,106 @@ fn default_max_search_results() -> usize {
 
 fn default_true() -> bool {
     true
+}
+
+fn to_file_batch_operation(operation: FileBatchOperationArgs) -> crate::file_ops::BatchOperation {
+    let empty = || crate::file_ops::BatchOperation {
+        id: None,
+        kind: String::new(),
+        path: String::new(),
+        include_content: true,
+        start_line: None,
+        end_line: None,
+        query: None,
+        search_mode: None,
+        case_sensitive: true,
+        include: Vec::new(),
+        exclude: Vec::new(),
+        context_lines: 0,
+        max_results: default_max_search_results(),
+        hidden: false,
+        respect_gitignore: true,
+        edit_mode: None,
+        expected_revision: None,
+        expected_absent: None,
+        old_text: None,
+        new_text: None,
+        expected_matches: None,
+        patch: None,
+        content: None,
+    };
+    match operation {
+        FileBatchOperationArgs::Read {
+            id,
+            path,
+            include_content,
+            start_line,
+            end_line,
+        } => {
+            let mut value = empty();
+            value.id = id;
+            value.kind = "read".to_string();
+            value.path = path;
+            value.include_content = include_content;
+            value.start_line = start_line;
+            value.end_line = end_line;
+            value
+        }
+        FileBatchOperationArgs::Search {
+            id,
+            path,
+            query,
+            mode,
+            case_sensitive,
+            include,
+            exclude,
+            context_lines,
+            max_results,
+            hidden,
+            respect_gitignore,
+        } => {
+            let mut value = empty();
+            value.id = id;
+            value.kind = "search".to_string();
+            value.path = path;
+            value.query = Some(query);
+            value.search_mode = mode;
+            value.case_sensitive = case_sensitive;
+            value.include = include;
+            value.exclude = exclude;
+            value.context_lines = context_lines;
+            value.max_results = max_results;
+            value.hidden = hidden;
+            value.respect_gitignore = respect_gitignore;
+            value
+        }
+        FileBatchOperationArgs::Edit {
+            id,
+            mode,
+            path,
+            expected_revision,
+            expected_absent,
+            old_text,
+            new_text,
+            expected_matches,
+            patch,
+            content,
+        } => {
+            let mut value = empty();
+            value.id = id;
+            value.kind = "edit".to_string();
+            value.path = path;
+            value.edit_mode = Some(mode);
+            value.expected_revision = expected_revision;
+            value.expected_absent = expected_absent;
+            value.old_text = old_text;
+            value.new_text = new_text;
+            value.expected_matches = expected_matches;
+            value.patch = patch;
+            value.content = content;
+            value
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
