@@ -91,6 +91,7 @@
 - Exact schema/surface checks passed: Normal 23 / Room 35 assertions and bounded schema budgets passed; in-process Normal/Room initialize/list/call smoke tests passed. Real supervisor Normal/Room smoke remains blocked only by `runtime_directory_unavailable`.
 - Updated English/Chinese README and standalone runtime documentation with the five-tool surface, file bounds/preconditions/rollback boundary, canonical confirmation channels, legacy aliases, and unchanged Hub-owned ntfy callback semantics.
 - Phase G acceptance is complete pending the focused docs/surface commit; no Hub or Protocol public-surface files changed.
+- Phase G commit: `03187a8` (`docs(agent): finalize info and file tool contracts`).
 
 ### Phase 1: Requirements and Repository Discovery
 - **Status:** in_progress
