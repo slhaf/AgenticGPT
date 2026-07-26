@@ -89,7 +89,7 @@ agentic-gpt config init
 agentic-gpt config set hubUrl http://127.0.0.1:8787
 agentic-gpt config set agentId laptop
 agentic-gpt config set agentSecret '<agent-secret>'
-agentic-gpt config set confirmationProvider freedesktop-then-hub
+agentic-gpt config set confirmationProvider freedesktop-then-ntfy
 agentic-gpt config set confirmationLanguage zh-CN
 agentic-gpt run
 ```
@@ -123,15 +123,20 @@ OAuth discovery 和 token exchange 由 Hub 的 OAuth shim 提供。
 Local agent 可以在命令匹配 confirm 策略时请求用户确认。
 
 ```bash
-agentic-gpt config set confirmationProvider freedesktop-then-hub
+agentic-gpt config set confirmationProvider freedesktop-then-ntfy
 agentic-gpt config set confirmationLanguage zh-CN
 ```
 
-支持的确认 provider：
+支持的确认通道：
 
 - `freedesktop`：本地桌面通知按钮。
-- `hub`：Hub 远程确认。
-- `freedesktop-then-hub`：优先本地桌面确认；仅在本地 provider 不可用时回退到 Hub。
+- `ntfy`：沿用现有 Hub 回调路径的远程确认通道。
+- `freedesktop-then-ntfy`：优先本地桌面确认；仅在本地通道不可用时回退到 Hub-relayed ntfy。
+
+新的或由 Agentic 写回的配置使用规范的有序形式
+`{"channels":["freedesktop","ntfy"]}`。为兼容旧配置，`hub`、
+`freedesktop-then-hub`、`freedesktopThenHub`、`default` 以及
+`{"provider":"..."}` 仍可读取。
 
 本地拒绝或超时是最终结果，不会继续回退到 Hub。
 

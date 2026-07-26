@@ -91,7 +91,7 @@ agentic-gpt config init
 agentic-gpt config set hubUrl http://127.0.0.1:8787
 agentic-gpt config set agentId laptop
 agentic-gpt config set agentSecret '<agent-secret>'
-agentic-gpt config set confirmationProvider freedesktop-then-hub
+agentic-gpt config set confirmationProvider freedesktop-then-ntfy
 agentic-gpt run
 ```
 
@@ -116,7 +116,7 @@ OAuth discovery and token exchange are implemented by the Hub OAuth shim.
 For a direct Secure MCP Tunnel deployment, configure `tunnel.tunnelId` and a
 secret reference (`file:PATH` or `env:NAME`), then run
 `agentic-gpt run-as-standalone`. Use `--profile room` for the Room surface.
-The Tunnel worker exposes a compact 18-tool Normal surface or a 30-tool Room
+The Tunnel worker exposes a compact 23-tool Normal surface or a 35-tool Room
 surface; it supplies its local identity internally and rejects legacy
 `agentId`/`confirmMethod` inputs. The complete topology, tool matrix, pinned
 client assets, reporting privacy modes, and recovery procedure are in
@@ -129,15 +129,20 @@ Room skills are exposed without an input `agentId`: use `skills.install` and pol
 The local agent can request confirmation before commands that match confirm policy rules.
 
 ```bash
-agentic-gpt config set confirmationProvider freedesktop-then-hub
+agentic-gpt config set confirmationProvider freedesktop-then-ntfy
 agentic-gpt config set confirmationLanguage zh-CN
 ```
 
-Supported confirmation providers:
+Supported confirmation channels:
 
 - `freedesktop`: local desktop notification actions.
-- `hub`: Hub-backed remote confirmation.
-- `freedesktop-then-hub`: try local desktop confirmation first; fall back to Hub only when the local provider is unavailable.
+- `ntfy`: Hub-relayed remote confirmation using the existing ntfy callback path.
+- `freedesktop-then-ntfy`: try local desktop confirmation first; fall back to the Hub-relayed ntfy channel only when the local provider is unavailable.
+
+New and rewritten configuration uses the canonical ordered form
+`{"channels":["freedesktop","ntfy"]}`. Legacy `hub`,
+`freedesktop-then-hub`, `freedesktopThenHub`, `default`, and the object form
+`{"provider":"..."}` remain readable for compatibility.
 
 A local denial or timeout is final and does not fall back to Hub.
 

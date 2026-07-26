@@ -2198,6 +2198,12 @@ fn apply_unified_patch(
         while index < patch_lines.len() && !patch_lines[index].starts_with("@@ ") {
             let line = patch_lines[index];
             index += 1;
+            if line.starts_with("--- ") || line.starts_with("+++ ") {
+                return Err(FileError::new(
+                    "file_patch_invalid",
+                    "multiple file headers are not supported",
+                ));
+            }
             let (kind, content) = line.split_at(1);
             match kind {
                 " " => {
@@ -2584,5 +2590,45 @@ mod tests {
                 .code,
             "file_patch_invalid"
         );
+        let multi_file = "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1,1 +1,1 @@\n-one\n+ONE\n--- a/src/other.rs\n+++ b/src/other.rs\n@@ -1,1 +1,1 @@\n-two\n+TWO\n";
+        assert_eq!(
+            apply_unified_patch(original, multi_file, target)
+                .unwrap_err()
+                .code,
+            "file_patch_invalid"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn absent_commit_uses_no_replace_and_overwrite_preserves_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let root =
+            std::env::temp_dir().join(format!("file-atomic-{}", uuid::Uuid::new_v4().simple()));
+        fs::create_dir_all(&root).unwrap();
+        let config = config(&root);
+        let absent = resolve_absent_path(&config, "new.txt").unwrap();
+        let temp = stage_temp(&absent.path, b"new", None).unwrap();
+        fs::write(&absent.requested, b"raced").unwrap();
+        assert!(fs::hard_link(&temp, &absent.requested).is_err());
+        assert_eq!(fs::read(&absent.requested).unwrap(), b"raced");
+        let _ = fs::remove_file(temp);
+
+        let existing = root.join("existing.txt");
+        fs::write(&existing, b"old").unwrap();
+        fs::set_permissions(&existing, fs::Permissions::from_mode(0o640)).unwrap();
+        let resolved = resolve_path(&config, "existing.txt", Access::Write).unwrap();
+        let temp = stage_temp(
+            &resolved.path,
+            b"new",
+            Some(&fs::metadata(&existing).unwrap().permissions()),
+        )
+        .unwrap();
+        fs::rename(temp, &resolved.path).unwrap();
+        assert_eq!(
+            fs::metadata(&existing).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        let _ = fs::remove_dir_all(root);
     }
 }

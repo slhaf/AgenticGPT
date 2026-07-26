@@ -373,6 +373,7 @@ Each implementation phase ends with focused tests and one commit. Planning files
 - Commit intent: `feat(agent): add coordinated file batches`.
 
 ### Implementation Phase G — Surface, docs, and acceptance
+- **Status:** complete; focused/full Agent, Hub, Protocol, schema, formatting, and diff checks passed; supervisor real-launch smoke is environment-blocked as recorded in progress.
 - Update exact profile arrays/tests to Normal 23 and Room 35.
 - Update standalone runtime documentation, config examples, tool workflow guidance, security boundaries, and migration notes.
 - Verify Hub full/coordinator tool surfaces and public Hub `/v1/info` remain unchanged except canonical confirmation summary text where protocol compatibility requires it.

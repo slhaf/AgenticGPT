@@ -81,6 +81,16 @@
 ### Implementation Phase G: Surface, docs, and acceptance
 - **Status:** in_progress
 - Final standalone surface is now Normal 23 / Room 35 with `agent.info`, `file.read`, `file.search`, `file.edit`, and `file.batch`; next update will complete documentation and acceptance evidence.
+- Phase G focused Agent checks passed: file core 9/9, edit 3/3, batch 3/3; format and diff checks passed.
+- Standalone supervisor integration: 1/5 passed; the four real-launch tests fail before tool calls with environment error `runtime_directory_unavailable` (the hidden worker/reload test passed). This is the same sandbox runtime-directory prerequisite failure observed earlier; no test was weakened.
+- Hub tests passed 61/61; Protocol unit/doc tests passed 9/9 and 0 doc tests.
+- Full workspace run: Agent unit tests 185/185, Hub 61/61, Protocol 9/9 + 0 docs passed; workspace command remains nonzero solely because the same 4/5 standalone supervisor real-launch tests hit `runtime_directory_unavailable`.
+- Independent security checks: canonical target/deny/read-only precedence and symlink containment tests pass; exact revision checks and final revalidation remain in both edit and batch paths; no-replace creation and ordinary permission preservation tests pass; malformed/fuzzy/multi-file patch rejection and CRLF preservation pass; file and batch audit assertions contain no unique file-content secrets.
+- Hub/ntfy review: Agent confirmation still calls the existing `request_hub_confirmation` path for the `ntfy` channel; pending callback state, publication, and relay remain Hub-owned, and no Hub crate/public execution surface files changed.
+- Final Agent rerun after multi-file patch rejection hardening passed 186/186.
+- Exact schema/surface checks passed: Normal 23 / Room 35 assertions and bounded schema budgets passed; in-process Normal/Room initialize/list/call smoke tests passed. Real supervisor Normal/Room smoke remains blocked only by `runtime_directory_unavailable`.
+- Updated English/Chinese README and standalone runtime documentation with the five-tool surface, file bounds/preconditions/rollback boundary, canonical confirmation channels, legacy aliases, and unchanged Hub-owned ntfy callback semantics.
+- Phase G acceptance is complete pending the focused docs/surface commit; no Hub or Protocol public-surface files changed.
 
 ### Phase 1: Requirements and Repository Discovery
 - **Status:** in_progress

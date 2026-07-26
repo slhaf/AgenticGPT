@@ -37,7 +37,9 @@ and notebook, while Normal does not.
 
 ## Tunnel tool surfaces
 
-Tunnel Normal advertises exactly 18 MCP tools:
+Tunnel Normal advertises exactly 23 MCP tools. Start with `agent.info` to
+inspect the active profile, bounded path policy, capacity, confirmation
+availability, and reporting state:
 
 ```text
 mcp.list, mcp.callTool
@@ -45,9 +47,10 @@ process.exec, process.batchExec, process.get, process.kill, process.list
 skills.list, skills.read, skills.setActive, skills.install,
 skills.install.get, skills.install.cancel, skills.run
 tmux.sessions, tmux.panes, tmux.exec, tmux.pasteText
+agent.info, file.read, file.search, file.edit, file.batch
 ```
 
-Tunnel Room advertises exactly 30 tools: the 18 Normal tools, `bootstrap` and
+Tunnel Room advertises exactly 35 tools: the 23 Normal tools, `bootstrap` and
 `bootstrap.read`, plus these ten Room memory tools:
 
 ```text
@@ -70,6 +73,33 @@ policy, confirmation, or capacity checks.
 Tunnel surfaces do not expose Hub aggregation or notification tools. They use
 the same local policy, path-policy, confirmation, audit, and managed-session
 lifecycle as Hub execution while keeping the Hub out of the command path.
+
+### Standalone file tools
+
+`file.read` and `file.search` are bounded UTF-8 operations. They accept paths
+relative to `workspaceRoot` (or absolute paths authorized by `pathPolicy`),
+resolve symlinks before policy checks, and never invoke a shell or external
+search process. Reads support metadata-only inspection, line ranges, and a
+256 KiB response bound. Search is ignore-aware by default and bounds files,
+bytes, matches, context, and output.
+
+`file.edit` is the guarded single-file mutation tool. Its `replace`, `patch`,
+and `write` modes operate on UTF-8 text only. Existing files require an exact
+`expectedRevision` (`sha256:<hex>`); new files require `expectedAbsent: true`.
+Replace counts exact matches, patch accepts one exact single-file unified diff,
+and write creates or overwrites complete content. Candidates are capped at
+8 MiB, dry runs and no-ops do not write or request confirmation, and successful
+mutations use a synced same-directory temporary file with atomic replacement
+(or atomic no-replace creation) while preserving ordinary overwrite
+permissions. Every non-dry-run attempt is redacted in the audit JSONL.
+
+`file.batch` accepts 1–32 ordered `read`, `search`, and `edit` operations (at
+most 16 edits). Reads/searches complete before batch-owned writes; edit targets
+are normalized and locked in sorted order, then all candidates are staged and
+preflighted before one optional confirmation. Commits are ordered and a normal
+handled failure uses guarded best-effort rollback; crash/power-loss recovery
+is not claimed. Batch responses and audits omit file content, replacement
+text, patch text, and full diffs.
 
 ## Hub MCP profiles
 
@@ -132,6 +162,20 @@ A minimal standalone configuration uses references, not secret values:
   }
 }
 ```
+
+Confirmation channels are serialized canonically as an ordered array:
+
+```json
+"confirmationProvider": {
+  "channels": ["freedesktop", "ntfy"]
+}
+```
+
+The legacy scalar/object forms (`hub`, `freedesktop-then-hub`,
+`freedesktopThenHub`, `default`, and `{ "provider": "..." }`) remain readable
+and preserve behavior; Agentic-managed writes emit the canonical `channels`
+form. `ntfy` is the truthful channel name, while notification publication,
+callback tokens, pending state, and decision relay remain owned by the Hub.
 
 The active-session limit accepts either the adaptive value or an explicit
 integer:
