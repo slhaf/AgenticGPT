@@ -93,6 +93,7 @@
 - Phase G acceptance is complete pending the focused docs/surface commit; no Hub or Protocol public-surface files changed.
 - Phase G commit: `03187a8` (`docs(agent): finalize info and file tool contracts`).
 - Post-acceptance hardening: batch operation decoding now uses runtime-discriminated serde variants (unknown fields cannot cross read/search/edit boundaries); confirmation previews include revisions, sizes, and changed-line counts; batch audit truncation state is recorded after response shaping. Final Agent rerun passed 186/186. A single concurrent full run transiently failed the fake-tunnel test with `tunnel_doctor_spawn_failed`; its focused rerun and the subsequent full rerun passed.
+- Hardening commit: `9af6e60` (`fix(agent): enforce batch operation discriminators`).
 
 ### Phase 1: Requirements and Repository Discovery
 - **Status:** in_progress
