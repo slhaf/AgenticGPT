@@ -9,7 +9,7 @@ use agentic_gpt_protocol::{
 use anyhow::{anyhow, Result};
 use chrono::Utc;
 use serde::de::{self, Visitor};
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{ser::SerializeStruct, Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 
 use crate::mcp::McpServerConfig;
@@ -51,10 +51,137 @@ pub(crate) struct Config {
     pub(crate) extra: BTreeMap<String, serde_json::Value>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ConfirmationChannel {
+    Freedesktop,
+    Ntfy,
+}
+
+impl ConfirmationChannel {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Freedesktop => "freedesktop",
+            Self::Ntfy => "ntfy",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ConfirmationProviderConfig {
-    pub(crate) provider: String,
+    pub(crate) channels: Vec<ConfirmationChannel>,
+}
+
+impl ConfirmationProviderConfig {
+    pub(crate) fn default_channels() -> Vec<ConfirmationChannel> {
+        vec![ConfirmationChannel::Freedesktop, ConfirmationChannel::Ntfy]
+    }
+
+    pub(crate) fn from_legacy(value: &str) -> Result<Self, String> {
+        let normalized = value.trim();
+        let channels = match normalized {
+            "none" => Vec::new(),
+            "freedesktop" => vec![ConfirmationChannel::Freedesktop],
+            "hub" | "ntfy" => vec![ConfirmationChannel::Ntfy],
+            "freedesktop-then-hub" | "freedesktopThenHub" | "freedesktop-then-ntfy" | "default" => {
+                Self::default_channels()
+            }
+            other => return Err(format!("unknown confirmation channel: {other}")),
+        };
+        Ok(Self { channels })
+    }
+
+    pub(crate) fn from_channels(channels: Vec<ConfirmationChannel>) -> Result<Self, String> {
+        if channels
+            .iter()
+            .enumerate()
+            .any(|(index, channel)| channels[..index].contains(channel))
+        {
+            return Err("duplicate confirmation channel".to_string());
+        }
+        Ok(Self { channels })
+    }
+
+    pub(crate) fn set_legacy(&mut self, value: &str) -> Result<(), String> {
+        self.channels = Self::from_legacy(value)?.channels;
+        Ok(())
+    }
+
+    pub(crate) fn display_label(&self) -> String {
+        match self.channels.as_slice() {
+            [] => "none".to_string(),
+            [ConfirmationChannel::Freedesktop] => "freedesktop".to_string(),
+            [ConfirmationChannel::Ntfy] => "ntfy".to_string(),
+            [ConfirmationChannel::Freedesktop, ConfirmationChannel::Ntfy] => {
+                "freedesktop-then-ntfy".to_string()
+            }
+            _ => self
+                .channels
+                .iter()
+                .map(|channel| channel.as_str())
+                .collect::<Vec<_>>()
+                .join("-then-"),
+        }
+    }
+}
+
+impl Serialize for ConfirmationProviderConfig {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let channels = self
+            .channels
+            .iter()
+            .map(|channel| channel.as_str())
+            .collect::<Vec<_>>();
+        let mut state = serializer.serialize_struct("ConfirmationProviderConfig", 1)?;
+        state.serialize_field("channels", &channels)?;
+        state.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for ConfirmationProviderConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let object = value
+            .as_object()
+            .ok_or_else(|| de::Error::custom("confirmationProvider must be an object"))?;
+        if let Some(channels) = object.get("channels") {
+            let values = channels.as_array().ok_or_else(|| {
+                de::Error::custom("confirmationProvider.channels must be an array")
+            })?;
+            let mut parsed = Vec::with_capacity(values.len());
+            for value in values {
+                let name = value.as_str().ok_or_else(|| {
+                    de::Error::custom("confirmationProvider.channels entries must be strings")
+                })?;
+                let channel = match name {
+                    "freedesktop" => ConfirmationChannel::Freedesktop,
+                    "ntfy" => ConfirmationChannel::Ntfy,
+                    other => {
+                        return Err(de::Error::custom(format!(
+                            "unknown confirmation channel: {other}"
+                        )))
+                    }
+                };
+                if parsed.contains(&channel) {
+                    return Err(de::Error::custom("duplicate confirmation channel"));
+                }
+                parsed.push(channel);
+            }
+            return Self::from_channels(parsed).map_err(de::Error::custom);
+        }
+        let provider = object
+            .get("provider")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                de::Error::custom("confirmationProvider requires channels or legacy provider")
+            })?;
+        Self::from_legacy(provider).map_err(de::Error::custom)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -378,7 +505,7 @@ impl Config {
             workspace_root: base.join("workspace"),
             backup_limit: DEFAULT_BACKUP_LIMIT,
             confirmation_provider: ConfirmationProviderConfig {
-                provider: "freedesktop-then-hub".to_string(),
+                channels: ConfirmationProviderConfig::default_channels(),
             },
             confirmation_language: default_confirmation_language(),
             mcp_servers: BTreeMap::new(),
@@ -496,7 +623,7 @@ impl Config {
                     )),
                 },
             },
-            confirmation_provider: self.confirmation_provider.provider.clone(),
+            confirmation_provider: self.confirmation_provider.display_label(),
             tunnel: self.tunnel.as_ref().map(|tunnel| SafeTunnelSummary {
                 configured: true,
                 tunnel_id: (!tunnel.tunnel_id.trim().is_empty()).then(|| tunnel.tunnel_id.clone()),
@@ -857,6 +984,51 @@ mod tests {
     fn new_default_config_serializes_auto_limit() {
         let value = serde_json::to_value(Config::default_config().unwrap()).unwrap();
         assert_eq!(value["limits"]["maxActiveSessions"], json!("auto"));
+        assert_eq!(
+            value["confirmationProvider"]["channels"],
+            json!(["freedesktop", "ntfy"])
+        );
+        assert!(value["confirmationProvider"].get("provider").is_none());
+    }
+
+    #[test]
+    fn confirmation_provider_accepts_legacy_aliases_and_canonicalizes() {
+        for (legacy, expected) in [
+            ("none", json!([])),
+            ("freedesktop", json!(["freedesktop"])),
+            ("hub", json!(["ntfy"])),
+            ("ntfy", json!(["ntfy"])),
+            ("freedesktop-then-hub", json!(["freedesktop", "ntfy"])),
+            ("freedesktopThenHub", json!(["freedesktop", "ntfy"])),
+            ("freedesktop-then-ntfy", json!(["freedesktop", "ntfy"])),
+            ("default", json!(["freedesktop", "ntfy"])),
+        ] {
+            let parsed = serde_json::from_value::<ConfirmationProviderConfig>(json!({
+                "provider": legacy
+            }))
+            .unwrap();
+            assert_eq!(serde_json::to_value(parsed).unwrap()["channels"], expected);
+        }
+    }
+
+    #[test]
+    fn confirmation_provider_rejects_duplicate_or_unknown_channels() {
+        assert!(serde_json::from_value::<ConfirmationProviderConfig>(json!({
+            "channels": ["ntfy", "ntfy"]
+        }))
+        .is_err());
+        assert!(serde_json::from_value::<ConfirmationProviderConfig>(json!({
+            "channels": ["email"]
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn confirmation_provider_display_label_is_truthful() {
+        let mut provider = ConfirmationProviderConfig::from_legacy("hub").unwrap();
+        assert_eq!(provider.display_label(), "ntfy");
+        provider.set_legacy("freedesktop-then-hub").unwrap();
+        assert_eq!(provider.display_label(), "freedesktop-then-ntfy");
     }
 
     #[test]

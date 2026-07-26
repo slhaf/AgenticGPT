@@ -7,7 +7,17 @@
 - Completed the required planning-with-files catch-up/reboot flow.
 - Re-read `task_plan.md`, `findings.md`, and `progress.md` completely.
 - Verified the worktree contains only the expected active-plan pointer and new active planning directory.
-- Next: commit the finalized planning files as the design checkpoint, record its hash in workflow state, then begin Implementation Phase A.
+- Created design checkpoint commit `3fb762b` (`docs(plan): checkpoint standalone info and file tools plan`).
+- Recorded the checkpoint hash in `task_plan.md`; beginning Implementation Phase A.
+
+### Implementation Phase A: Confirmation semantics
+- Replaced the string-only confirmation provider with canonical ordered `freedesktop`/`ntfy` channels.
+- Added custom compatibility deserialization for canonical `channels` and legacy `{provider}` objects, plus canonical serialization.
+- Centralized scalar override parsing for `default`, `hub`, `ntfy`, `freedesktopThenHub`, and related aliases across batch, normal, cancellable, and MCP confirmation paths.
+- Kept ntfy confirmation routed through the existing Hub request/callback path and changed `SafeConfigSummary` to the canonical display label.
+- Added alias, duplicate/unknown-channel, serialization, and display-label regression tests.
+- Focused result: `cargo test -p agentic-gpt --no-fail-fast` Agent unit tests passed (165/165).
+- Supervisor integration result: 1 existing capacity/reload test passed; 4 tests failed before tool calls with `runtime_directory_unavailable` in the sandbox. This is recorded as an environment limitation, not a product regression.
 
 ### Phase 1: Requirements and Repository Discovery
 - **Status:** in_progress

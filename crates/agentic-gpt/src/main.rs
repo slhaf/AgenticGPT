@@ -369,7 +369,10 @@ async fn handle_config(config_path: PathBuf, command: ConfigCommand) -> Result<(
                     }
                     config.workspace_root = new_workspace;
                 }
-                "confirmationProvider" => config.confirmation_provider.provider = value,
+                "confirmationProvider" => config
+                    .confirmation_provider
+                    .set_legacy(&value)
+                    .map_err(|error| anyhow!(error))?,
                 "confirmationLanguage" => {
                     config.confirmation_language = normalize_confirmation_language(&value)
                 }
@@ -1258,7 +1261,7 @@ mod tests {
 
         let mut config = Config::default_config().unwrap();
         config.workspace_root = workspace.clone();
-        config.confirmation_provider.provider = "none".to_string();
+        config.confirmation_provider.set_legacy("none").unwrap();
         config.path_policy = PathPolicyConfig {
             write_roots: Vec::new(),
             read_only_roots: Vec::new(),

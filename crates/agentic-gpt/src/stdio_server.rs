@@ -2432,7 +2432,7 @@ mod tests {
         let server = StdioMcpServer::new(test_state(CapabilityProfile::Normal));
         {
             let mut config = server.state.config.write().await;
-            config.confirmation_provider.provider = "hub".to_string();
+            config.confirmation_provider.set_legacy("hub").unwrap();
         }
         let (sender, mut receiver) = mpsc::unbounded_channel();
         *server.state.hub_sender.lock().await = Some(sender);
@@ -2489,7 +2489,7 @@ mod tests {
         let server = StdioMcpServer::new(test_state(CapabilityProfile::Normal));
         {
             let mut config = server.state.config.write().await;
-            config.confirmation_provider.provider = "hub".to_string();
+            config.confirmation_provider.set_legacy("hub").unwrap();
         }
         let (sender, mut receiver) = mpsc::unbounded_channel();
         *server.state.hub_sender.lock().await = Some(sender);

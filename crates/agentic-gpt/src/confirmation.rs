@@ -9,7 +9,9 @@ use tokio::time::{sleep, timeout, Duration};
 use uuid::Uuid;
 
 use crate::{
-    config::{confirmation_language_is_zh, Config},
+    config::{
+        confirmation_language_is_zh, Config, ConfirmationChannel, ConfirmationProviderConfig,
+    },
     exec::PreparedBatchElement,
     hub,
     utils::{
@@ -100,31 +102,36 @@ pub(crate) async fn request_batch_confirmation(
     needs_confirmation: &[PreparedBatchElement],
     all_elements: &[PreparedBatchElement],
 ) -> String {
-    let configured_provider = config.confirmation_provider.provider.as_str();
-    let provider = confirm_method
-        .filter(|method| !method.trim().is_empty())
-        .unwrap_or(configured_provider);
-    let provider = if provider == "default" {
-        configured_provider
-    } else if provider == "freedesktopThenHub" {
-        "freedesktop-then-hub"
-    } else {
-        provider
-    };
+    let channels = confirmation_channels(config, confirm_method);
     let preview = batch_confirmation_preview(config, needs_confirmation, all_elements);
-    if provider == "freedesktop" || provider == "freedesktop-then-hub" {
-        let local =
-            request_freedesktop_batch_confirmation(config, &preview, needs_confirmation).await;
-        if local == "confirmation_provider_unavailable" && provider == "freedesktop-then-hub" {
-            return request_hub_batch_confirmation(state, config, &preview, needs_confirmation)
-                .await;
+    for channel in channels {
+        let result = match channel {
+            ConfirmationChannel::Freedesktop => {
+                request_freedesktop_batch_confirmation(config, &preview, needs_confirmation).await
+            }
+            ConfirmationChannel::Ntfy => {
+                request_hub_batch_confirmation(state, config, &preview, needs_confirmation).await
+            }
+        };
+        if result != "confirmation_provider_unavailable" {
+            return result;
         }
-        return local;
-    }
-    if provider == "hub" {
-        return request_hub_batch_confirmation(state, config, &preview, needs_confirmation).await;
     }
     "confirmation_provider_unavailable".to_string()
+}
+
+fn confirmation_channels(
+    config: &Config,
+    confirm_method: Option<&str>,
+) -> Vec<ConfirmationChannel> {
+    let override_value = confirm_method.filter(|method| !method.trim().is_empty());
+    match override_value {
+        None => config.confirmation_provider.channels.clone(),
+        Some("default") => config.confirmation_provider.channels.clone(),
+        Some(value) => ConfirmationProviderConfig::from_legacy(value)
+            .map(|provider| provider.channels)
+            .unwrap_or_default(),
+    }
 }
 
 async fn request_freedesktop_batch_confirmation(
@@ -235,26 +242,18 @@ pub(crate) async fn request_confirmation(
     program: &str,
     args: &[String],
 ) -> String {
-    let configured_provider = config.confirmation_provider.provider.as_str();
-    let provider = confirm_method
-        .filter(|method| !method.trim().is_empty())
-        .unwrap_or(configured_provider);
-    let provider = if provider == "default" {
-        configured_provider
-    } else if provider == "freedesktopThenHub" {
-        "freedesktop-then-hub"
-    } else {
-        provider
-    };
-    if provider == "freedesktop" || provider == "freedesktop-then-hub" {
-        let local = request_freedesktop_confirmation(config, program, args).await;
-        if local == "confirmation_provider_unavailable" && provider == "freedesktop-then-hub" {
-            return request_hub_confirmation(state, config, program, args).await;
+    for channel in confirmation_channels(config, confirm_method) {
+        let result = match channel {
+            ConfirmationChannel::Freedesktop => {
+                request_freedesktop_confirmation(config, program, args).await
+            }
+            ConfirmationChannel::Ntfy => {
+                request_hub_confirmation(state, config, program, args).await
+            }
+        };
+        if result != "confirmation_provider_unavailable" {
+            return result;
         }
-        return local;
-    }
-    if provider == "hub" {
-        return request_hub_confirmation(state, config, program, args).await;
     }
     "confirmation_provider_unavailable".to_string()
 }
@@ -270,43 +269,26 @@ pub(crate) async fn request_confirmation_cancellable(
     args: &[String],
     cancel_requested: Arc<AtomicBool>,
 ) -> String {
-    let configured_provider = config.confirmation_provider.provider.as_str();
-    let provider = confirm_method
-        .filter(|method| !method.trim().is_empty())
-        .unwrap_or(configured_provider);
-    let provider = if provider == "default" {
-        configured_provider
-    } else if provider == "freedesktopThenHub" {
-        "freedesktop-then-hub"
-    } else {
-        provider
-    };
-    if provider == "freedesktop" || provider == "freedesktop-then-hub" {
-        let local = tokio::select! {
-            result = request_freedesktop_confirmation(config, program, args) => result,
-            _ = wait_for_cancellation(cancel_requested.clone()) => "cancelled".to_string(),
+    for channel in confirmation_channels(config, confirm_method) {
+        let result = match channel {
+            ConfirmationChannel::Freedesktop => tokio::select! {
+                result = request_freedesktop_confirmation(config, program, args) => result,
+                _ = wait_for_cancellation(cancel_requested.clone()) => "cancelled".to_string(),
+            },
+            ConfirmationChannel::Ntfy => {
+                request_hub_confirmation_cancellable(
+                    state,
+                    config,
+                    program,
+                    args,
+                    cancel_requested.clone(),
+                )
+                .await
+            }
         };
-        if local == "confirmation_provider_unavailable" && provider == "freedesktop-then-hub" {
-            return request_hub_confirmation_cancellable(
-                state,
-                config,
-                program,
-                args,
-                cancel_requested,
-            )
-            .await;
+        if result != "confirmation_provider_unavailable" {
+            return result;
         }
-        return local;
-    }
-    if provider == "hub" {
-        return request_hub_confirmation_cancellable(
-            state,
-            config,
-            program,
-            args,
-            cancel_requested,
-        )
-        .await;
     }
     "confirmation_provider_unavailable".to_string()
 }
@@ -557,22 +539,18 @@ async fn request_mcp_tool_confirmation(
     tool_name: &str,
     arguments: &serde_json::Value,
 ) -> String {
-    let provider = match config.confirmation_provider.provider.as_str() {
-        "default" => "freedesktop-then-hub",
-        "freedesktopThenHub" => "freedesktop-then-hub",
-        other => other,
-    };
-    if provider == "freedesktop" || provider == "freedesktop-then-hub" {
-        let local =
-            request_freedesktop_mcp_confirmation(config, server_id, tool_name, arguments).await;
-        if local == "confirmation_provider_unavailable" && provider == "freedesktop-then-hub" {
-            return request_hub_mcp_confirmation(state, config, server_id, tool_name, arguments)
-                .await;
+    for channel in &config.confirmation_provider.channels {
+        let result = match channel {
+            ConfirmationChannel::Freedesktop => {
+                request_freedesktop_mcp_confirmation(config, server_id, tool_name, arguments).await
+            }
+            ConfirmationChannel::Ntfy => {
+                request_hub_mcp_confirmation(state, config, server_id, tool_name, arguments).await
+            }
+        };
+        if result != "confirmation_provider_unavailable" {
+            return result;
         }
-        return local;
-    }
-    if provider == "hub" {
-        return request_hub_mcp_confirmation(state, config, server_id, tool_name, arguments).await;
     }
     "confirmation_provider_unavailable".to_string()
 }

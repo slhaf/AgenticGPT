@@ -1016,7 +1016,7 @@ mod tests {
         config.workspace_root = workspace.clone();
         config.limits.max_active_sessions =
             crate::config::MaxActiveSessions::Explicit(max_active_sessions);
-        config.confirmation_provider.provider = "none".to_string();
+        config.confirmation_provider.set_legacy("none").unwrap();
 
         let state = AppState {
             config_path: root.join("config.json"),

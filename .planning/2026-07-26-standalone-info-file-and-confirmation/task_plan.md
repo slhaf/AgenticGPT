@@ -11,9 +11,9 @@ Add a model-facing standalone `agent.info` tool, a bounded and concurrency-safe 
 - **Current phase:** Implementation Phase A — Confirmation semantics
 - **Entry phase:** Implementation Phase A — Confirmation semantics
 - **Open blocking decisions:** none
-- **Design checkpoint:** pending commit
+- **Design checkpoint:** `3fb762b` (`docs(plan): checkpoint standalone info and file tools plan`)
 - **Baseline:** `d04f8e0`; branch `main` is clean and 16 commits ahead of `origin/main`
-- **Next action:** create the finalized planning-files design checkpoint, record its hash, then implement Phase A under `planning-with-files`
+- **Next action:** record Phase A verification and commit, then begin Phase B
 
 ## Scope and Constraints
 
@@ -114,6 +114,13 @@ Expected surface counts after this plan:
 - [ ] Independently review security, compatibility, output bounds, and race behavior.
 - [ ] Leave the worktree clean and report the final commit without pushing/deploying/releasing.
 - **Status:** in_progress
+
+### Implementation Phase A — Confirmation semantics
+- [x] Replace raw confirmation-provider execution with canonical ordered channels and shared legacy parsing.
+- [x] Accept canonical `channels` and legacy `{provider}` config forms; serialize canonical `channels`.
+- [x] Preserve scalar CLI/protocol aliases and Hub-relayed ntfy request/callback behavior.
+- [x] Update `SafeConfigSummary` to emit the truthful canonical display label.
+- **Status:** complete; focused Agent unit suite passed, with standalone supervisor failures isolated to missing runtime directory in the test environment.
 
 
 
