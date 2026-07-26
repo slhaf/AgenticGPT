@@ -13,7 +13,7 @@ Add a model-facing standalone `agent.info` tool, a bounded and concurrency-safe 
 - **Open blocking decisions:** none
 - **Design checkpoint:** `3fb762b` (`docs(plan): checkpoint standalone info and file tools plan`)
 - **Baseline:** `d04f8e0`; branch `main` is clean and 16 commits ahead of `origin/main`
-- **Next action:** implement Phase C (`file.read` and shared file core) under `planning-with-files`
+- **Next action:** implement Phase E (`file.edit`) under `planning-with-files`
 
 ## Scope and Constraints
 
@@ -135,10 +135,17 @@ Expected surface counts after this plan:
 - [x] Verify deny/read-only precedence, canonical symlink containment, binary/large-file handling, exact newlines, and revision stability.
 - **Status:** complete; focused file/read tests passed (7 total) and full Agent binary unit suite passed (175/175).
 
+### Implementation Phase D — Search
+- [x] Add pinned direct ignore/regex/glob dependencies and in-process bounded traversal.
+- [x] Implement literal/regex/case/glob/hidden/gitignore/context behavior and all scan/result/skip bounds.
+- [x] Register `file.search` in both profiles and verify no external process is used.
+- **Status:** complete; focused search/dispatch tests passed (3 total) and full Agent binary unit suite passed (178/178).
+
 ### Phase commit ledger
 - Design checkpoint: `3fb762b`
 - Phase A: `9c06c48` — `refactor(agent): clarify confirmation channel semantics`
 - Phase B: `aa9ced6` — `feat(agent): expose standalone runtime info`
+- Phase C: `ccddaf2` — `feat(agent): add bounded file reads`
 
 
 

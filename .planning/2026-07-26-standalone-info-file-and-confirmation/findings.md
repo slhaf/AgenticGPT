@@ -261,6 +261,12 @@ The workspace currently contains `.agentic-gpt-audit.jsonl` plus optional diary,
 - External non-cooperating writers cannot be fully excluded from the final overwrite race; the contract intentionally avoids claiming filesystem compare-and-swap.
 - Ntfy remote delivery health remains unknown to Agent until Hub explicitly advertises it; V1 reports only local relay availability.
 
+## Implementation Discovery: Search Dependencies and Read Core
+- Direct search dependencies are pinned to the lock-resolved releases: `ignore = 0.4.31`, `globset = 0.4.19`, and `regex = 1.13.1`; all are used in-process and no external `rg`/shell command is invoked.
+- The shared file core canonicalizes existing targets (including symlinks) and checks resolved targets against normalized deny/write/read-only roots, matching existing pathPolicy precedence where a write root wins after deny checks.
+- Metadata-only reads of small binary files return bounded metadata without a revision; content/search/edit remain UTF-8-only. Files above 8 MiB retain metadata but are rejected for content.
+- The existing MCP schema budget needed a finite increase for the three newly frozen read/info/search descriptors; it now asserts 32 KiB Normal / 48 KiB Room serialized caps and 16/24 KiB aggregate input-schema caps, rather than dropping any fields or leaving schema growth unbounded.
+
 
 ## Decision Rationale: Refinement Round 2
 

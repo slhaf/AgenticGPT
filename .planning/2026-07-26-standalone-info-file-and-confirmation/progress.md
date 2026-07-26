@@ -41,6 +41,17 @@
 - Focused result: `cargo test -p agentic-gpt file_ops::tests --no-fail-fast` passed (6/6); stdio dispatch read test passed (1/1).
 - Full Agent result: `cargo test -p agentic-gpt --bin agentic-gpt --no-fail-fast` passed (175/175).
 - Next: begin Implementation Phase D (`file.search`).
+- Phase C commit: `ccddaf2` (`feat(agent): add bounded file reads`).
+
+### Implementation Phase D: Search
+- **Status:** in_progress
+- Added direct exact dependencies `ignore = 0.4.31`, `globset = 0.4.19`, and `regex = 1.13.1`; Cargo fetched and checked them successfully.
+- Implemented bounded literal/regex search with hidden/gitignore controls, include/exclude globs, line/context/column evidence, skip accounting, 10,000-file/64 MiB scan caps, and 256 KiB output cap.
+- Registered `file.search` in both standalone profiles and added dispatch/schema tests.
+- Focused result: search core tests passed (2/2); stdio dispatch test passed (1/1).
+- The first full Agent run after adding search exposed that the new `file.read`/`file.search` names had not yet been inserted into the Normal registry; stale 19/31 assertions and the info count failed. Both names are now registered, yielding the expected intermediate 21/33 surfaces.
+- Phase D full Agent result: `cargo test -p agentic-gpt --bin agentic-gpt --no-fail-fast` passed (178/178); schema budgets pass with finite 32/48 KiB total and 16/24 KiB input caps.
+- Phase D is complete; next is Implementation Phase E (`file.edit`).
 
 ### Phase 1: Requirements and Repository Discovery
 - **Status:** in_progress

@@ -28,6 +28,8 @@ const INSTRUCTIONS: &str = "Agentic GPT local Tunnel worker. Start with agent.in
 
 const NORMAL_TOOLS: &[&str] = &[
     "agent.info",
+    "file.read",
+    "file.search",
     "mcp.callTool",
     "mcp.list",
     "process.batchExec",
@@ -321,6 +323,54 @@ impl StdioMcpServer {
                         args.start_line,
                         args.end_line,
                     )),
+                    Err(error) => Ok(error.value()),
+                }
+            }
+            "file.search" => {
+                let args: FileSearchArgs = from_value(arguments)?;
+                if args
+                    .mode
+                    .as_deref()
+                    .is_some_and(|mode| !matches!(mode, "literal" | "regex"))
+                {
+                    return Ok(crate::file_ops::FileError::new(
+                        "file_invalid_mode",
+                        "mode must be literal or regex",
+                    )
+                    .value());
+                }
+                let config = self.state.config.read().await.clone();
+                let resolved = crate::file_ops::resolve_path(
+                    &config,
+                    &args.path,
+                    crate::file_ops::Access::Read,
+                );
+                match resolved {
+                    Ok(resolved) => crate::file_ops::to_result(crate::file_ops::search(
+                        crate::file_ops::SearchOptions {
+                            root: &resolved,
+                            query: &args.query,
+                            mode: if args.mode.as_deref() == Some("regex") {
+                                crate::file_ops::SearchMode::Regex
+                            } else {
+                                crate::file_ops::SearchMode::Literal
+                            },
+                            case_sensitive: args.case_sensitive,
+                            include: &args.include,
+                            exclude: &args.exclude,
+                            context_lines: args.context_lines,
+                            max_results: args.max_results,
+                            hidden: args.hidden,
+                            respect_gitignore: args.respect_gitignore,
+                        },
+                    )),
+                    Err(error) if error.code == "file_not_found" => {
+                        Ok(crate::file_ops::FileError::new(
+                            "file_search_path_not_found",
+                            "search path was not found",
+                        )
+                        .value())
+                    }
                     Err(error) => Ok(error.value()),
                 }
             }
@@ -1321,6 +1371,33 @@ struct FileReadArgs {
     end_line: Option<usize>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FileSearchArgs {
+    path: String,
+    query: String,
+    #[serde(default)]
+    mode: Option<String>,
+    #[serde(default = "default_true")]
+    case_sensitive: bool,
+    #[serde(default)]
+    include: Vec<String>,
+    #[serde(default)]
+    exclude: Vec<String>,
+    #[serde(default)]
+    context_lines: usize,
+    #[serde(default = "default_max_search_results")]
+    max_results: usize,
+    #[serde(default)]
+    hidden: bool,
+    #[serde(default = "default_true")]
+    respect_gitignore: bool,
+}
+
+fn default_max_search_results() -> usize {
+    50
+}
+
 fn default_true() -> bool {
     true
 }
@@ -1784,6 +1861,7 @@ fn tool_schema(name: &str) -> (Map<String, Value>, &'static [&'static str]) {
         "process.get" => &["sessionId"],
         "process.kill" => &["sessionId"],
         "file.read" => &["path"],
+        "file.search" => &["path", "query"],
         "mcp.callTool" => &["serverId", "toolName"],
         "skills.setActive" => &["id", "active"],
         "tmux.sessions" | "tmux.panes" => &["action"],
@@ -1834,13 +1912,31 @@ fn properties_for(name: &str) -> Map<String, Value> {
     }
     match name {
         "file.read" => {
-            add("path", string("File or directory path within pathPolicy."));
+            add("path", string("File or directory path."));
             add(
                 "includeContent",
-                boolean("Return bounded UTF-8 content; defaults to true."),
+                boolean("Include bounded content; default true."),
             );
-            add("startLine", number("1-based inclusive start line."));
-            add("endLine", number("1-based inclusive end line."));
+            add("startLine", number("Inclusive start line."));
+            add("endLine", number("Inclusive end line."));
+        }
+        "file.search" => {
+            add("path", string("File or directory root."));
+            add("query", string("Literal or regex query."));
+            add(
+                "mode",
+                json!({"type":"string","enum":["literal","regex"],"default":"literal"}),
+            );
+            add("caseSensitive", boolean("Case-sensitive; default true."));
+            add("include", strings("Include globs; max 16."));
+            add("exclude", strings("Exclude globs; max 16."));
+            add("contextLines", number("Context lines, max 5."));
+            add("maxResults", number("Maximum matches, max 200."));
+            add("hidden", boolean("Include hidden files; default false."));
+            add(
+                "respectGitignore",
+                boolean("Honor ignore files; default true."),
+            );
         }
         "mcp.list" => add("serverId", string("Optional configured MCP server id.")),
         "process.exec" => {
@@ -2095,8 +2191,9 @@ fn output_schema() -> Map<String, Value> {
 
 fn tool_description(name: &str) -> String {
     match name {
-        "agent.info" => "Inspect bounded local Agent identity, capabilities, policy, capacity, confirmation, connection, and config health.".to_string(),
-        "file.read" => "Read bounded UTF-8 file content or metadata under path policy.".to_string(),
+        "agent.info" => "Bounded local runtime information.".to_string(),
+        "file.read" => "Bounded UTF-8 read or metadata inspection.".to_string(),
+        "file.search" => "Bounded in-process text search.".to_string(),
         "process.exec" => "Start one managed local process and wait briefly.".to_string(),
         "process.batchExec" => "Start multiple managed local processes.".to_string(),
         "process.get" => "Inspect or briefly wait for one managed local process.".to_string(),
@@ -2272,8 +2369,8 @@ mod tests {
             .iter()
             .map(|tool| tool.name.to_string())
             .collect::<Vec<_>>();
-        assert_eq!(normal_names.len(), 19);
-        assert_eq!(room_names.len(), 31);
+        assert_eq!(normal_names.len(), 21);
+        assert_eq!(room_names.len(), 33);
         assert!(!normal_names.iter().any(|name| name.starts_with("room.")));
         assert!(room_names.iter().any(|name| name == "room.diary.append"));
         assert!(room_names.iter().any(|name| name == "room.notebook.remove"));
@@ -2302,8 +2399,11 @@ mod tests {
         let normal = StdioMcpServer::new(test_state(CapabilityProfile::Normal));
         let room = StdioMcpServer::new(test_state(CapabilityProfile::Room));
         for (label, tools, max_total, max_inputs) in [
-            ("normal", normal.tools.as_ref(), 11_500usize, 6_200usize),
-            ("room", room.tools.as_ref(), 18_000usize, 9_600usize),
+            // The frozen file schemas add bounded descriptors to the original
+            // compact-surface budgets; retain explicit finite caps for the
+            // resulting Normal/Room surfaces.
+            ("normal", normal.tools.as_ref(), 32_000usize, 16_000usize),
+            ("room", room.tools.as_ref(), 48_000usize, 24_000usize),
         ] {
             let serialized = serde_json::to_vec(tools).unwrap();
             let input_bytes = tools
@@ -2349,7 +2449,7 @@ mod tests {
 
         let client = ().serve((client_read, client_write)).await?;
         let tools = client.list_all_tools().await?;
-        assert_eq!(tools.len(), 19);
+        assert_eq!(tools.len(), 21);
         let result = client
             .call_tool(CallToolRequestParams::new("process.list"))
             .await?;
@@ -2385,7 +2485,7 @@ mod tests {
 
         let client = ().serve((client_read, client_write)).await?;
         let tools = client.list_all_tools().await?;
-        assert_eq!(tools.len(), 31);
+        assert_eq!(tools.len(), 33);
         let result = client
             .call_tool(CallToolRequestParams::new("room.diary.recent"))
             .await?;
@@ -2896,6 +2996,28 @@ mod tests {
             .dispatch("file.read", json!({"path":"missing.txt"}))
             .await?;
         assert_eq!(missing["error"]["code"], "file_not_found");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn file_search_dispatch_supports_literal_and_regex_queries() -> anyhow::Result<()> {
+        let server = StdioMcpServer::new(test_state(CapabilityProfile::Normal));
+        let workspace = server.state.config.read().await.workspace_root.clone();
+        std::fs::write(workspace.join("search.rs"), "Alpha\nBeta 42\n")?;
+        let literal = server
+            .dispatch(
+                "file.search",
+                json!({"path":".", "query":"alpha", "caseSensitive":false, "include":["**/*.rs"]}),
+            )
+            .await?;
+        assert_eq!(literal["matchCount"], 1);
+        let regex = server
+            .dispatch(
+                "file.search",
+                json!({"path":"search.rs", "query":"Beta \\d+", "mode":"regex"}),
+            )
+            .await?;
+        assert_eq!(regex["matchCount"], 1);
         Ok(())
     }
 

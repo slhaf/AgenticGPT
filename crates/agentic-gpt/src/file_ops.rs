@@ -4,6 +4,9 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use globset::{Glob, GlobSet, GlobSetBuilder};
+use ignore::WalkBuilder;
+use regex::Regex;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tokio::sync::OwnedMutexGuard;
@@ -15,6 +18,11 @@ use crate::state::AppState;
 pub(crate) const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
 pub(crate) const MAX_READ_OUTPUT_BYTES: usize = 256 * 1024;
 pub(crate) const MAX_LINE_DISPLAY_BYTES: usize = 4 * 1024;
+pub(crate) const MAX_SEARCH_FILES: usize = 10_000;
+pub(crate) const MAX_SEARCH_BYTES: u64 = 64 * 1024 * 1024;
+pub(crate) const MAX_SEARCH_RESULTS: usize = 200;
+pub(crate) const MAX_SEARCH_CONTEXT: usize = 5;
+pub(crate) const MAX_SEARCH_OUTPUT_BYTES: usize = 256 * 1024;
 
 #[derive(Clone, Debug)]
 pub(crate) struct ResolvedPath {
@@ -279,6 +287,244 @@ pub(crate) fn revision(bytes: &[u8]) -> String {
     format!("sha256:{digest:x}")
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SearchMode {
+    Literal,
+    Regex,
+}
+
+pub(crate) struct SearchOptions<'a> {
+    pub(crate) root: &'a ResolvedPath,
+    pub(crate) query: &'a str,
+    pub(crate) mode: SearchMode,
+    pub(crate) case_sensitive: bool,
+    pub(crate) include: &'a [String],
+    pub(crate) exclude: &'a [String],
+    pub(crate) context_lines: usize,
+    pub(crate) max_results: usize,
+    pub(crate) hidden: bool,
+    pub(crate) respect_gitignore: bool,
+}
+
+pub(crate) fn search(options: SearchOptions<'_>) -> std::result::Result<Value, FileError> {
+    if options.query.trim().is_empty() {
+        return Err(FileError::new(
+            "file_search_query_empty",
+            "query must not be empty",
+        ));
+    }
+    if options.context_lines > MAX_SEARCH_CONTEXT {
+        return Err(FileError::new(
+            "file_context_limit_exceeded",
+            "contextLines exceeds the bound",
+        ));
+    }
+    if options.max_results == 0 || options.max_results > MAX_SEARCH_RESULTS {
+        return Err(FileError::new(
+            "file_result_limit_exceeded",
+            "maxResults is outside the bound",
+        ));
+    }
+    let include_set = compile_globs(options.include)?;
+    let exclude_set = compile_globs(options.exclude)?;
+    let pattern = match options.mode {
+        SearchMode::Literal => regex::escape(options.query),
+        SearchMode::Regex => options.query.to_string(),
+    };
+    let pattern = if options.case_sensitive {
+        pattern
+    } else {
+        format!("(?i:{pattern})")
+    };
+    let matcher = Regex::new(&pattern)
+        .map_err(|_| FileError::new("file_invalid_regex", "query is not a valid regex"))?;
+    let mut matches = Vec::new();
+    let mut scanned_files = 0usize;
+    let mut scanned_bytes = 0u64;
+    let mut skipped = json!({
+        "tooLarge": 0,
+        "nonUtf8": 0,
+        "symlink": 0,
+        "unreadable": 0,
+    });
+    let mut truncated = false;
+    let mut truncation_reason = None::<&str>;
+
+    let root_is_file = options.root.path.is_file();
+    let entries = WalkBuilder::new(&options.root.path)
+        .hidden(!options.hidden)
+        .git_ignore(options.respect_gitignore)
+        .git_global(options.respect_gitignore)
+        .git_exclude(options.respect_gitignore)
+        .follow_links(false)
+        .build()
+        .collect::<Vec<_>>();
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => {
+                increment_skip(&mut skipped, "unreadable");
+                continue;
+            }
+        };
+        let path = entry.path();
+        if path == options.root.path && path.is_dir() {
+            continue;
+        }
+        let file_type = entry.file_type();
+        if file_type.is_some_and(|kind| kind.is_symlink()) {
+            increment_skip(&mut skipped, "symlink");
+            continue;
+        }
+        if !path.is_file() {
+            continue;
+        }
+        scanned_files += 1;
+        if scanned_files > MAX_SEARCH_FILES {
+            truncated = true;
+            truncation_reason = Some("scan_files");
+            break;
+        }
+        let relative = if root_is_file {
+            path.file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_default()
+        } else {
+            path.strip_prefix(&options.root.path)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .replace(std::path::MAIN_SEPARATOR, "/")
+        };
+        if include_set
+            .as_ref()
+            .is_some_and(|set| !set.is_match(&relative))
+            || exclude_set
+                .as_ref()
+                .is_some_and(|set| set.is_match(&relative))
+        {
+            continue;
+        }
+        let metadata = match fs::metadata(path) {
+            Ok(metadata) => metadata,
+            Err(_) => {
+                increment_skip(&mut skipped, "unreadable");
+                continue;
+            }
+        };
+        if metadata.len() > MAX_FILE_BYTES {
+            increment_skip(&mut skipped, "tooLarge");
+            continue;
+        }
+        if scanned_bytes.saturating_add(metadata.len()) > MAX_SEARCH_BYTES {
+            truncated = true;
+            truncation_reason = Some("scan_bytes");
+            break;
+        }
+        let bytes = match fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                increment_skip(&mut skipped, "unreadable");
+                continue;
+            }
+        };
+        scanned_bytes += bytes.len() as u64;
+        if bytes.contains(&0) {
+            increment_skip(&mut skipped, "nonUtf8");
+            continue;
+        }
+        let text = match String::from_utf8(bytes) {
+            Ok(text) => text,
+            Err(_) => {
+                increment_skip(&mut skipped, "nonUtf8");
+                continue;
+            }
+        };
+        let lines = text.lines().collect::<Vec<_>>();
+        for (index, line) in lines.iter().enumerate() {
+            for found in matcher.find_iter(line) {
+                let before = (index.saturating_sub(options.context_lines)..index)
+                    .map(|line_index| line_display(lines[line_index]))
+                    .collect::<Vec<_>>();
+                let after = ((index + 1)
+                    ..=(index + options.context_lines).min(lines.len().saturating_sub(1)))
+                    .map(|line_index| line_display(lines[line_index]))
+                    .collect::<Vec<_>>();
+                let value = json!({
+                    "path": &relative,
+                    "line": index + 1,
+                    "column": line[..found.start()].chars().count() + 1,
+                    "lineText": line_display(line),
+                    "before": before,
+                    "after": after,
+                });
+                let candidate_bytes = serde_json::to_vec(&value).unwrap_or_default().len();
+                let current_bytes = serde_json::to_vec(&matches).unwrap_or_default().len();
+                if matches.len() >= options.max_results {
+                    truncated = true;
+                    truncation_reason = Some("max_results");
+                    break;
+                }
+                if current_bytes.saturating_add(candidate_bytes) > MAX_SEARCH_OUTPUT_BYTES {
+                    truncated = true;
+                    truncation_reason = Some("output_bytes");
+                    break;
+                }
+                matches.push(value);
+            }
+            if truncation_reason.is_some() {
+                break;
+            }
+        }
+        if truncation_reason.is_some() {
+            break;
+        }
+    }
+    let match_count = matches.len();
+    Ok(json!({
+        "query": options.query,
+        "mode": match options.mode { SearchMode::Literal => "literal", SearchMode::Regex => "regex" },
+        "matches": matches,
+        "matchCount": match_count,
+        "scannedFiles": scanned_files.min(MAX_SEARCH_FILES),
+        "scannedBytes": scanned_bytes,
+        "skippedFiles": skipped,
+        "truncated": truncated,
+        "truncationReason": truncation_reason,
+    }))
+}
+
+fn compile_globs(patterns: &[String]) -> std::result::Result<Option<GlobSet>, FileError> {
+    if patterns.len() > 16 {
+        return Err(FileError::new(
+            "file_invalid_glob",
+            "too many glob patterns",
+        ));
+    }
+    if patterns.is_empty() {
+        return Ok(None);
+    }
+    let mut builder = GlobSetBuilder::new();
+    for pattern in patterns {
+        let glob = Glob::new(pattern)
+            .map_err(|_| FileError::new("file_invalid_glob", "invalid glob pattern"))?;
+        builder.add(glob);
+    }
+    builder
+        .build()
+        .map(Some)
+        .map_err(|_| FileError::new("file_invalid_glob", "invalid glob pattern"))
+}
+
+fn increment_skip(skipped: &mut Value, key: &str) {
+    if let Some(value) = skipped.get(key).and_then(Value::as_u64) {
+        skipped[key] = json!(value.saturating_add(1));
+    }
+}
+
+fn line_display(line: &str) -> String {
+    utf8_prefix(line, MAX_LINE_DISPLAY_BYTES).to_string()
+}
+
 fn line_count(text: &str) -> usize {
     if text.is_empty() {
         0
@@ -524,6 +770,106 @@ mod tests {
         assert!(resolve_path(&config, "inside-link.txt", Access::Read).is_ok());
         let error = resolve_path(&config, "escape-link.txt", Access::Read).unwrap_err();
         assert_eq!(error.code, "path_denied");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn search_supports_literal_regex_glob_context_and_skip_accounting() {
+        let root =
+            std::env::temp_dir().join(format!("file-search-{}", uuid::Uuid::new_v4().simple()));
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(
+            root.join("src/a.rs"),
+            "before\nNeedle here\nafter\nNeedle twice\n",
+        )
+        .unwrap();
+        fs::write(root.join("src/b.txt"), "Needle text\n").unwrap();
+        fs::write(root.join(".hidden.rs"), "Needle hidden\n").unwrap();
+        fs::write(root.join("binary.rs"), [0_u8, 1, 2]).unwrap();
+        fs::write(root.join(".gitignore"), "ignored.rs\n").unwrap();
+        fs::write(root.join("ignored.rs"), "Needle ignored\n").unwrap();
+        let config = config(&root);
+        let resolved = resolve_path(&config, ".", Access::Read).unwrap();
+        let include = vec!["**/*.rs".to_string()];
+        let empty = Vec::new();
+        let value = search(SearchOptions {
+            root: &resolved,
+            query: "needle",
+            mode: SearchMode::Literal,
+            case_sensitive: false,
+            include: &include,
+            exclude: &empty,
+            context_lines: 1,
+            max_results: 50,
+            hidden: false,
+            respect_gitignore: true,
+        })
+        .unwrap();
+        assert_eq!(value["matchCount"], 2);
+        assert_eq!(value["matches"][0]["line"], 2);
+        assert_eq!(value["matches"][0]["column"], 1);
+        assert_eq!(value["matches"][0]["before"][0], "before");
+        assert_eq!(value["matches"][0]["after"][0], "after");
+        assert_eq!(value["skippedFiles"]["nonUtf8"], 1);
+
+        let regex = search(SearchOptions {
+            root: &resolved,
+            query: r"Needle \w+",
+            mode: SearchMode::Regex,
+            case_sensitive: true,
+            include: &empty,
+            exclude: &empty,
+            context_lines: 0,
+            max_results: 1,
+            hidden: true,
+            respect_gitignore: false,
+        })
+        .unwrap();
+        assert_eq!(regex["matchCount"], 1);
+        assert_eq!(regex["truncated"], true);
+        assert_eq!(regex["truncationReason"], "max_results");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn search_rejects_invalid_patterns_and_enforces_bounds() {
+        let root = std::env::temp_dir().join(format!(
+            "file-search-invalid-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("a.txt"), "x\n").unwrap();
+        let config = config(&root);
+        let resolved = resolve_path(&config, ".", Access::Read).unwrap();
+        let empty = Vec::new();
+        let invalid_regex = search(SearchOptions {
+            root: &resolved,
+            query: "[",
+            mode: SearchMode::Regex,
+            case_sensitive: true,
+            include: &empty,
+            exclude: &empty,
+            context_lines: 0,
+            max_results: 50,
+            hidden: false,
+            respect_gitignore: true,
+        })
+        .unwrap_err();
+        assert_eq!(invalid_regex.code, "file_invalid_regex");
+        let invalid_glob = search(SearchOptions {
+            root: &resolved,
+            query: "x",
+            mode: SearchMode::Literal,
+            case_sensitive: true,
+            include: &["[".to_string()],
+            exclude: &empty,
+            context_lines: 0,
+            max_results: 50,
+            hidden: false,
+            respect_gitignore: true,
+        })
+        .unwrap_err();
+        assert_eq!(invalid_glob.code, "file_invalid_glob");
         let _ = fs::remove_dir_all(root);
     }
 }
