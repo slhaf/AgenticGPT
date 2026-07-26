@@ -1,3 +1,4 @@
+mod agent_info;
 mod audit;
 mod bootstrap;
 mod config;
@@ -253,6 +254,8 @@ async fn run(config_path: PathBuf, runtime: RuntimeModel) -> Result<()> {
         config_path: config_path.clone(),
         config: Arc::new(RwLock::new(initial)),
         runtime,
+        started_at: chrono::Utc::now(),
+        supervised: false,
         sessions: Arc::new(Mutex::new(HashMap::new())),
         hub_sender: Arc::new(Mutex::new(None)),
         reporting_sender: Arc::new(Mutex::new(None)),
@@ -299,6 +302,8 @@ async fn run_stdio_worker(
         config_path,
         config: Arc::new(RwLock::new(config)),
         runtime: RuntimeModel::tunnel(profile, reporting_enabled),
+        started_at: chrono::Utc::now(),
+        supervised,
         sessions: Arc::new(Mutex::new(HashMap::new())),
         hub_sender: Arc::new(Mutex::new(None)),
         reporting_sender: Arc::new(Mutex::new(None)),
@@ -705,6 +710,8 @@ mod tests {
                 config_path: PathBuf::from("test-config.json"),
                 config: Arc::new(RwLock::new(config)),
                 runtime: RuntimeModel::hub(run_mode.profile()),
+                started_at: chrono::Utc::now(),
+                supervised: false,
                 sessions: Arc::new(Mutex::new(HashMap::new())),
                 hub_sender: Arc::new(Mutex::new(Some(tx))),
                 reporting_sender: Arc::new(Mutex::new(None)),
@@ -1272,6 +1279,8 @@ mod tests {
             config_path: root.join("config.json"),
             config: Arc::new(RwLock::new(config)),
             runtime: RuntimeModel::hub(CapabilityProfile::Normal),
+            started_at: chrono::Utc::now(),
+            supervised: false,
             sessions: Arc::new(Mutex::new(HashMap::new())),
             hub_sender: Arc::new(Mutex::new(None)),
             reporting_sender: Arc::new(Mutex::new(None)),

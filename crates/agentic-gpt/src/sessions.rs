@@ -1022,6 +1022,8 @@ mod tests {
             config_path: root.join("config.json"),
             config: Arc::new(RwLock::new(config)),
             runtime: crate::state::RuntimeModel::hub(crate::state::CapabilityProfile::Normal),
+            started_at: chrono::Utc::now(),
+            supervised: false,
             sessions: Arc::new(Mutex::new(HashMap::new())),
             hub_sender: Arc::new(Mutex::new(None)),
             reporting_sender: Arc::new(Mutex::new(None)),

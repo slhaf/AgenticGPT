@@ -19,6 +19,18 @@
 - Focused result: `cargo test -p agentic-gpt --no-fail-fast` Agent unit tests passed (165/165).
 - Supervisor integration result: 1 existing capacity/reload test passed; 4 tests failed before tool calls with `runtime_directory_unavailable` in the sandbox. This is recorded as an environment limitation, not a product regression.
 
+### Implementation Phase B: Runtime info discovery
+- Added startup metadata fields to `AppState` and populated supervised/unsupervised construction paths and test fixtures.
+- Added the dedicated `agent_info` response builder with bounded exact path/policy summaries, profile-correct builtins, current capacity, confirmation availability, reporting state, on-demand config comparison, and redacted health issues.
+- Added the no-argument `agent.info` descriptor/dispatch/instructions and a schema-sensitive surface revision over names, schemas, and annotations.
+- Test command correction: a first attempt passed two cargo test filters in one invocation and was rejected by Cargo (`unexpected argument`); the next checks will run each filter separately.
+- Phase B test discovery: the first relay-availability assertion used a tunnel state while setting only `hub_sender`; this correctly exposed that ntfy availability follows `reporting_sender` for tunnel workers. The focused test is being corrected to use a command-capable Hub state for that assertion.
+- A first attempt to run the Agent unit suite with `--lib` was invalid because `agentic-gpt` is a binary-only crate (`no library targets found`); the valid `--bin agentic-gpt` command follows.
+- The first full Agent binary suite after adding `agent.info` found two stale in-process MCP count assertions (18/30); they are being updated to the intermediate 19/31 surfaces, with no behavior failures.
+- Phase B focused result: `cargo test -p agentic-gpt agent_info::tests --no-fail-fast` passed (3/3).
+- Phase B full Agent result: `cargo test -p agentic-gpt --bin agentic-gpt --no-fail-fast` passed (168/168).
+- Phase B is complete; next is Implementation Phase C (`file.read` and shared file core).
+
 ### Phase 1: Requirements and Repository Discovery
 - **Status:** in_progress
 - **Started:** 2026-07-26

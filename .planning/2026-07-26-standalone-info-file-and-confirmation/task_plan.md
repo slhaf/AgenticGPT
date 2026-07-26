@@ -122,6 +122,13 @@ Expected surface counts after this plan:
 - [x] Update `SafeConfigSummary` to emit the truthful canonical display label.
 - **Status:** complete; focused Agent unit suite passed, with standalone supervisor failures isolated to missing runtime directory in the test environment.
 
+### Implementation Phase B — `agent.info`
+- [x] Add startup metadata and local info response module.
+- [x] Register no-argument `agent.info` in both standalone profiles and include workflow guidance.
+- [x] Derive bounded/redacted surface, policy, capacity, confirmation, connection, and config-health fields.
+- [x] Complete focused Phase B tests and commit.
+- **Status:** complete; focused info tests and full Agent binary unit suite passed (168/168).
+
 
 
 

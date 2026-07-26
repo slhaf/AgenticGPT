@@ -15,6 +15,7 @@ use rmcp::{
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 use tokio::time::{sleep, Instant};
 use uuid::Uuid;
 
@@ -23,9 +24,10 @@ use crate::{
     state::{AppState, CapabilityProfile},
 };
 
-const INSTRUCTIONS: &str = "Agentic GPT local Tunnel worker. Use process.* for managed local processes, tmux for persistent workspaces, skills for the local skills workspace, and bootstrap for Room startup guidance. All calls remain subject to local policy, path policy, configured confirmation, audit, and bounded waits.";
+const INSTRUCTIONS: &str = "Agentic GPT local Tunnel worker. Start with agent.info to inspect the active profile, exact workspace/path policy, capacity, confirmation channels, and connection state. Use file.read/search/edit/batch for bounded UTF-8 workspace work, process.* for managed local processes, tmux for persistent workspaces, skills for the local skills workspace, and bootstrap for Room startup guidance. All calls remain subject to path policy, configured confirmation, audit, and bounded waits.";
 
 const NORMAL_TOOLS: &[&str] = &[
+    "agent.info",
     "mcp.callTool",
     "mcp.list",
     "process.batchExec",
@@ -300,6 +302,10 @@ impl StdioMcpServer {
         }
         let request_id = request_id();
         match name {
+            "agent.info" => {
+                let _: EmptyArgs = from_value(arguments)?;
+                Ok(crate::agent_info::collect(&self.state).await)
+            }
             "process.exec" => {
                 self.dispatch_process_exec(arguments, terminal_tracker)
                     .await
@@ -2045,6 +2051,7 @@ fn output_schema() -> Map<String, Value> {
 
 fn tool_description(name: &str) -> String {
     match name {
+        "agent.info" => "Inspect bounded local Agent identity, capabilities, policy, capacity, confirmation, connection, and config health.".to_string(),
         "process.exec" => "Start one managed local process and wait briefly.".to_string(),
         "process.batchExec" => "Start multiple managed local processes.".to_string(),
         "process.get" => "Inspect or briefly wait for one managed local process.".to_string(),
@@ -2151,6 +2158,35 @@ fn tool_is_open_world(name: &str) -> bool {
     )
 }
 
+pub(crate) fn standalone_surface(profile: CapabilityProfile) -> (Vec<String>, String) {
+    let mut names = NORMAL_TOOLS.to_vec();
+    if profile == CapabilityProfile::Room {
+        names.extend_from_slice(ROOM_BOOTSTRAP_TOOLS);
+        names.extend_from_slice(ROOM_ONLY_TOOLS);
+    }
+    names.sort_unstable();
+    let names = names.into_iter().map(str::to_string).collect::<Vec<_>>();
+    let tools = names
+        .iter()
+        .map(|name| {
+            let (properties, required) = tool_schema(name);
+            json!({
+                "name": name,
+                "inputSchema": schema(properties, required),
+                "annotations": {
+                    "readOnly": tool_is_read_only(name),
+                    "destructive": tool_is_destructive(name),
+                    "openWorld": tool_is_open_world(name),
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    let canonical = json!({"surfaceSchemaVersion": 1, "tools": tools});
+    let digest =
+        Sha256::digest(serde_json::to_vec(&canonical).expect("standalone surface is serializable"));
+    (names, format!("sha256:{digest:x}"))
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -2187,8 +2223,8 @@ mod tests {
             .iter()
             .map(|tool| tool.name.to_string())
             .collect::<Vec<_>>();
-        assert_eq!(normal_names.len(), 18);
-        assert_eq!(room_names.len(), 30);
+        assert_eq!(normal_names.len(), 19);
+        assert_eq!(room_names.len(), 31);
         assert!(!normal_names.iter().any(|name| name.starts_with("room.")));
         assert!(room_names.iter().any(|name| name == "room.diary.append"));
         assert!(room_names.iter().any(|name| name == "room.notebook.remove"));
@@ -2264,7 +2300,7 @@ mod tests {
 
         let client = ().serve((client_read, client_write)).await?;
         let tools = client.list_all_tools().await?;
-        assert_eq!(tools.len(), 18);
+        assert_eq!(tools.len(), 19);
         let result = client
             .call_tool(CallToolRequestParams::new("process.list"))
             .await?;
@@ -2300,7 +2336,7 @@ mod tests {
 
         let client = ().serve((client_read, client_write)).await?;
         let tools = client.list_all_tools().await?;
-        assert_eq!(tools.len(), 30);
+        assert_eq!(tools.len(), 31);
         let result = client
             .call_tool(CallToolRequestParams::new("room.diary.recent"))
             .await?;
@@ -2823,6 +2859,8 @@ mod tests {
             config_path: PathBuf::from("stdio-test-config.json"),
             config: Arc::new(RwLock::new(config)),
             runtime: RuntimeModel::tunnel(profile, false),
+            started_at: chrono::Utc::now(),
+            supervised: true,
             sessions: Arc::new(Mutex::new(HashMap::new())),
             hub_sender: Arc::new(Mutex::new(None)),
             reporting_sender: Arc::new(Mutex::new(None)),
