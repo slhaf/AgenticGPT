@@ -287,3 +287,9 @@ The user selected Q-04A. The workspace-root audit file and private file-tool tem
 - The user accepted the consolidated D-01 through D-15 contract and authorized implementation.
 - Exact entry phase is Implementation Phase A — Confirmation semantics.
 - Refinement is complete; implementation proceeds with `planning-with-files` only.
+
+
+## Post-acceptance clarification — `.gitignore` repository boundary
+- A fresh rebooted acceptance exposed the existing `file.search` regression test as underspecified: it expected `.gitignore` behavior without creating a Git repository.
+- Product semantics remain aligned with `ignore::WalkBuilder` defaults: `respectGitignore: true` applies Git ignore rules inside Git repositories, while ordinary non-repository directories are not implicitly filtered by stray `.gitignore` files.
+- The test now creates a `.git` directory before asserting that `ignored.rs` is excluded. No runtime search behavior changed.

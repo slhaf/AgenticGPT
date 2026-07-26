@@ -2484,6 +2484,7 @@ mod tests {
         let root =
             std::env::temp_dir().join(format!("file-search-{}", uuid::Uuid::new_v4().simple()));
         fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir(root.join(".git")).unwrap();
         fs::write(
             root.join("src/a.rs"),
             "before\nNeedle here\nafter\nNeedle twice\n",

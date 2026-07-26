@@ -8,12 +8,12 @@ Add a model-facing standalone `agent.info` tool, a bounded and concurrency-safe 
 - **Current role:** implementer
 - **Implementation authorized:** yes
 - **Active plan:** `2026-07-26-standalone-info-file-and-confirmation`
-- **Current phase:** Implementation Phase G — Surface, docs, and acceptance
+- **Current phase:** Post-acceptance clarification — gitignore repository boundary (complete)
 - **Entry phase:** Implementation Phase A — Confirmation semantics
 - **Open blocking decisions:** none
 - **Design checkpoint:** `3fb762b` (`docs(plan): checkpoint standalone info and file tools plan`)
 - **Baseline:** `d04f8e0`; branch `main` is clean and 16 commits ahead of `origin/main`
-- **Next action:** none; implementation and acceptance are complete
+- **Next action:** none; implementation, clarification, and acceptance are complete
 
 ## Scope and Constraints
 

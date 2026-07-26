@@ -194,3 +194,13 @@
 - Implementation Phases A–G are complete in order; final product/planning worktree is clean.
 - Focused commits: `3fb762b` design checkpoint, `9c06c48` Phase A, `aa9ced6` Phase B, `ccddaf2` Phase C, `e865e91` Phase D, `ed9bb6e` Phase E, `6a965d6` Phase F, `03187a8` Phase G. Planning handoff records: `306bd6f`, `d5e4413`, `74195cb`.
 - Acceptance evidence and the sole environment-limited supervisor result are recorded above; no push, deploy, production connector restart, tag, publish, or release was performed.
+
+
+### Post-acceptance clarification: gitignore repository boundary
+- **Status:** complete
+- Revisited the deterministic `file.search` test failure after discussing intended semantics.
+- Chosen behavior: keep the library default `require_git(true)` so `.gitignore` is honored only within a Git repository boundary.
+- Reset the three local-only repair commits back to `4d13f6b`; no remote history was affected.
+- Updated the regression fixture to create `.git` before asserting ignore behavior; runtime code is unchanged.
+- Verification passed: focused search regression 1/1; Agent 186/186; standalone supervisor 5/5; Hub 61/61; Protocol 9/9 plus doc tests; full workspace, format, and diff checks all exited 0.
+- Clarification commit: `test(agent): scope gitignore search to repositories`.
