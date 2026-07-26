@@ -27,6 +27,7 @@ pub(crate) const MAX_SEARCH_OUTPUT_BYTES: usize = 256 * 1024;
 #[derive(Clone, Debug)]
 pub(crate) struct ResolvedPath {
     pub(crate) input: String,
+    pub(crate) requested: PathBuf,
     pub(crate) path: PathBuf,
 }
 
@@ -90,6 +91,7 @@ pub(crate) fn resolve_path(
     }
     Ok(ResolvedPath {
         input: input.to_string(),
+        requested: candidate,
         path: resolved,
     })
 }
@@ -132,6 +134,7 @@ pub(crate) fn resolve_absent_path(
     }
     Ok(ResolvedPath {
         input: input.to_string(),
+        requested: candidate,
         path: resolved,
     })
 }
@@ -620,6 +623,669 @@ pub(crate) fn to_result(result: std::result::Result<Value, FileError>) -> Result
     Ok(result.unwrap_or_else(|error| error.value()))
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum EditMode {
+    Replace,
+    Patch,
+    Write,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct EditRequest {
+    pub(crate) mode: EditMode,
+    pub(crate) path: String,
+    pub(crate) expected_revision: Option<String>,
+    pub(crate) expected_absent: Option<bool>,
+    pub(crate) old_text: Option<String>,
+    pub(crate) new_text: Option<String>,
+    pub(crate) expected_matches: Option<usize>,
+    pub(crate) patch: Option<String>,
+    pub(crate) content: Option<String>,
+    pub(crate) dry_run: bool,
+    pub(crate) need_confirm: bool,
+}
+
+pub(crate) async fn edit(state: &AppState, request: EditRequest) -> Value {
+    let started = std::time::Instant::now();
+    let config = state.config.read().await.clone();
+    let mut value = match edit_inner(state, &config, &request).await {
+        Ok(value) => value,
+        Err(error) => error.value(),
+    };
+    let error_code = value
+        .get("error")
+        .and_then(|error| error.get("code"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let resolved_path = value
+        .get("resolvedPath")
+        .and_then(Value::as_str)
+        .unwrap_or(&request.path)
+        .to_string();
+    let before_revision = value
+        .get("beforeRevision")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let after_revision = value
+        .get("afterRevision")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let confirmation_result = value
+        .get("confirmation")
+        .and_then(|confirmation| confirmation.get("result"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let replacement_count = value
+        .get("replacementCount")
+        .and_then(Value::as_u64)
+        .map(|count| count as usize);
+    let changed_lines = value.get("changedLines").and_then(|lines| {
+        Some(crate::audit::ChangedLines {
+            added: lines.get("added")?.as_u64()? as usize,
+            removed: lines.get("removed")?.as_u64()? as usize,
+        })
+    });
+    let outcome = value
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("failed")
+        .to_string();
+    let record = crate::audit::FileAuditRecord {
+        time: Utc::now(),
+        tool: "file.edit".to_string(),
+        action: "edit".to_string(),
+        path: resolved_path,
+        mode: Some(edit_mode_label(request.mode).to_string()),
+        requested_confirmation: request.need_confirm,
+        confirmation_result,
+        before_revision,
+        after_revision,
+        outcome,
+        error_code,
+        duration_ms: started.elapsed().as_millis(),
+        replacement_count,
+        changed_lines,
+    };
+    if request.dry_run {
+        return value;
+    }
+    let audit_status = match crate::audit::write_file_audit(&config, record) {
+        Ok(()) => "written",
+        Err(_) => "failed",
+    };
+    if let Some(object) = value.as_object_mut() {
+        object.insert("auditStatus".to_string(), json!(audit_status));
+    }
+    value
+}
+
+async fn edit_inner(
+    state: &AppState,
+    config: &Config,
+    request: &EditRequest,
+) -> std::result::Result<Value, FileError> {
+    let (target, existed) = match resolve_path(config, &request.path, Access::Write) {
+        Ok(target) => (target, true),
+        Err(error) if error.code == "file_not_found" => {
+            let target = resolve_absent_path(config, &request.path)?;
+            (target, false)
+        }
+        Err(error) => return Err(error),
+    };
+    let _lock = lock_target(state, &target.path).await;
+    revalidate_target(config, &target, existed)?;
+    if existed && request.expected_absent == Some(true) {
+        return Err(FileError::new(
+            "file_already_exists",
+            "target already exists",
+        ));
+    }
+    let (before_bytes, before_text, before_revision, before_mode) = if existed {
+        let metadata = fs::metadata(&target.path)
+            .map_err(|_| FileError::new("file_not_found", "target was not found"))?;
+        if !metadata.is_file() {
+            return Err(FileError::new(
+                "file_not_regular",
+                "target is not a regular file",
+            ));
+        }
+        if metadata.len() > MAX_FILE_BYTES {
+            return Err(FileError::new(
+                "file_too_large",
+                "file exceeds the 8 MiB edit bound",
+            ));
+        }
+        let bytes = fs::read(&target.path)
+            .map_err(|_| FileError::new("file_read_failed", "target could not be read"))?;
+        let text = String::from_utf8(bytes.clone())
+            .map_err(|_| FileError::new("file_not_utf8", "file content is not UTF-8 text"))?;
+        let revision = revision(&bytes);
+        validate_expected_revision(request.expected_revision.as_deref(), &revision)?;
+        let mode = fs::metadata(&target.path)
+            .ok()
+            .map(|meta| meta.permissions());
+        (Some(bytes), Some(text), Some(revision), mode)
+    } else {
+        if request.mode != EditMode::Write || request.expected_absent != Some(true) {
+            return Err(FileError::new(
+                "file_revision_required",
+                "new files require expectedAbsent: true",
+            ));
+        }
+        if request.expected_revision.is_some() {
+            return Err(FileError::new(
+                "file_revision_invalid",
+                "expectedAbsent and expectedRevision are mutually exclusive",
+            ));
+        }
+        (None, None, None, None)
+    };
+    let mut replacement_count = 0usize;
+    let candidate = match request.mode {
+        EditMode::Replace => {
+            let old_text = request.old_text.as_deref().ok_or_else(|| {
+                FileError::new("file_match_count_mismatch", "oldText is required")
+            })?;
+            if old_text.is_empty() {
+                return Err(FileError::new(
+                    "file_match_count_mismatch",
+                    "oldText must not be empty",
+                ));
+            }
+            let new_text = request.new_text.as_deref().unwrap_or_default();
+            let source = before_text.as_deref().unwrap_or_default();
+            let matches = source.match_indices(old_text).count();
+            let expected = request.expected_matches.unwrap_or(1);
+            if expected == 0 {
+                return Err(FileError::new(
+                    "file_match_count_mismatch",
+                    "expectedMatches must be positive",
+                ));
+            }
+            if matches != expected {
+                return Err(FileError::new(
+                    "file_match_count_mismatch",
+                    &format!("expected {expected} matches but found {matches}"),
+                ));
+            }
+            replacement_count = matches;
+            source.replace(old_text, new_text)
+        }
+        EditMode::Patch => {
+            let patch = request
+                .patch
+                .as_deref()
+                .ok_or_else(|| FileError::new("file_patch_invalid", "patch is required"))?;
+            apply_unified_patch(
+                before_text.as_deref().ok_or_else(|| {
+                    FileError::new("file_patch_invalid", "patch requires an existing file")
+                })?,
+                patch,
+                &target.path,
+            )?
+        }
+        EditMode::Write => {
+            let content = request
+                .content
+                .as_deref()
+                .ok_or_else(|| FileError::new("file_write_failed", "content is required"))?;
+            if content.as_bytes().len() > MAX_FILE_BYTES as usize {
+                return Err(FileError::new(
+                    "file_too_large",
+                    "candidate exceeds the 8 MiB edit bound",
+                ));
+            }
+            content.to_string()
+        }
+    };
+    let candidate_bytes = candidate.as_bytes();
+    if candidate_bytes.len() > MAX_FILE_BYTES as usize {
+        return Err(FileError::new(
+            "file_too_large",
+            "candidate exceeds the 8 MiB edit bound",
+        ));
+    }
+    let after_revision = revision(candidate_bytes);
+    let before_size = before_bytes.as_ref().map_or(0, Vec::len);
+    let unchanged = before_bytes.as_deref() == Some(candidate_bytes);
+    let (diff, diff_truncated, changed_lines) =
+        bounded_diff(before_text.as_deref().unwrap_or(""), &candidate);
+    let mut response = json!({
+        "path": request.path,
+        "resolvedPath": target.path.to_string_lossy(),
+        "mode": edit_mode_label(request.mode),
+        "status": if unchanged { "unchanged" } else if request.dry_run { "dry-run" } else if existed { "updated" } else { "created" },
+        "beforeRevision": before_revision,
+        "afterRevision": after_revision,
+        "beforeSizeBytes": before_size,
+        "afterSizeBytes": candidate_bytes.len(),
+        "replacementCount": replacement_count,
+        "diff": diff,
+        "diffTruncated": diff_truncated,
+        "changedLines": changed_lines,
+    });
+    if unchanged || request.dry_run {
+        return Ok(response);
+    }
+    if request.need_confirm {
+        let confirmation = crate::confirmation::request_confirmation(
+            state,
+            config,
+            None,
+            "file.edit",
+            &[
+                request.path.clone(),
+                edit_mode_label(request.mode).to_string(),
+            ],
+        )
+        .await;
+        response["confirmation"] = json!({"requested": true, "result": confirmation});
+        if confirmation != "allow_once" {
+            let code = if matches!(
+                confirmation.as_str(),
+                "provider_unavailable" | "confirmation_provider_unavailable"
+            ) {
+                "file_confirmation_unavailable"
+            } else {
+                "file_confirmation_denied"
+            };
+            return Err(FileError::new(code, "file mutation was not confirmed"));
+        }
+    }
+    revalidate_target(config, &target, existed)?;
+    if existed {
+        let current = fs::read(&target.path).map_err(|_| {
+            FileError::new("file_revision_conflict", "target changed before commit")
+        })?;
+        if Some(revision(&current)) != before_revision {
+            return Err(FileError::new(
+                "file_revision_conflict",
+                "target changed before commit",
+            ));
+        }
+    } else if fs::symlink_metadata(&target.requested).is_ok() {
+        return Err(FileError::new(
+            "file_already_exists",
+            "target appeared before commit",
+        ));
+    }
+    let temp = stage_temp(&target.path, candidate_bytes, before_mode.as_ref())?;
+    let commit_result = if existed {
+        fs::rename(&temp, &target.path)
+    } else {
+        match fs::hard_link(&temp, &target.requested) {
+            Ok(()) => fs::remove_file(&temp),
+            Err(error) => Err(error),
+        }
+    };
+    if let Err(error) = commit_result {
+        let _ = fs::remove_file(&temp);
+        return Err(FileError::new(
+            "file_write_failed",
+            &format!("atomic file commit failed: {error}"),
+        ));
+    }
+    sync_parent(&target.path);
+    response["status"] = json!(if existed { "updated" } else { "created" });
+    response["confirmation"] = response
+        .get("confirmation")
+        .cloned()
+        .unwrap_or_else(|| json!({"requested": false, "result": null}));
+    Ok(response)
+}
+
+fn edit_mode_label(mode: EditMode) -> &'static str {
+    match mode {
+        EditMode::Replace => "replace",
+        EditMode::Patch => "patch",
+        EditMode::Write => "write",
+    }
+}
+
+fn validate_expected_revision(
+    expected: Option<&str>,
+    actual: &str,
+) -> std::result::Result<(), FileError> {
+    let expected = expected.ok_or_else(|| {
+        FileError::new(
+            "file_revision_required",
+            "existing-file mutations require expectedRevision",
+        )
+    })?;
+    if !is_revision(expected) {
+        return Err(FileError::new(
+            "file_revision_invalid",
+            "expectedRevision is invalid",
+        ));
+    }
+    if expected != actual {
+        return Err(FileError::new(
+            "file_revision_conflict",
+            "target revision does not match",
+        ));
+    }
+    Ok(())
+}
+
+fn is_revision(value: &str) -> bool {
+    value.len() == 71
+        && value.starts_with("sha256:")
+        && value[7..].bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn revalidate_target(
+    config: &Config,
+    target: &ResolvedPath,
+    existed: bool,
+) -> std::result::Result<(), FileError> {
+    if existed {
+        let current = resolve_path(config, &target.input, Access::Write)?;
+        if current.path != target.path {
+            return Err(FileError::new(
+                "file_symlink_rejected",
+                "target path changed before commit",
+            ));
+        }
+    } else {
+        if fs::symlink_metadata(&target.requested).is_ok() {
+            return Err(FileError::new(
+                "file_already_exists",
+                "target already exists",
+            ));
+        }
+        let parent = target.requested.parent().ok_or_else(|| {
+            FileError::new("file_parent_not_found", "parent directory was not found")
+        })?;
+        let canonical_parent = fs::canonicalize(parent).map_err(|_| {
+            FileError::new("file_parent_not_found", "parent directory was not found")
+        })?;
+        if canonical_parent != target.path.parent().unwrap_or(Path::new("")) {
+            return Err(FileError::new(
+                "file_symlink_rejected",
+                "parent path changed before commit",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn stage_temp(
+    target: &Path,
+    bytes: &[u8],
+    permissions: Option<&fs::Permissions>,
+) -> std::result::Result<PathBuf, FileError> {
+    let parent = target
+        .parent()
+        .ok_or_else(|| FileError::new("file_parent_not_found", "target parent was not found"))?;
+    for _ in 0..3 {
+        let temp = parent.join(format!(
+            ".agentic-file-tmp-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let mut file = match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+        {
+            Ok(file) => file,
+            Err(_) => continue,
+        };
+        use std::io::Write;
+        if file.write_all(bytes).is_err() || file.sync_all().is_err() {
+            let _ = fs::remove_file(&temp);
+            return Err(FileError::new(
+                "file_write_failed",
+                "temporary file could not be synced",
+            ));
+        }
+        if let Some(permissions) = permissions {
+            let _ = fs::set_permissions(&temp, permissions.clone());
+        }
+        return Ok(temp);
+    }
+    Err(FileError::new(
+        "file_write_failed",
+        "temporary file could not be created",
+    ))
+}
+
+fn sync_parent(target: &Path) {
+    if let Some(parent) = target.parent() {
+        if let Ok(file) = fs::File::open(parent) {
+            let _ = file.sync_all();
+        }
+    }
+}
+
+fn bounded_diff(before: &str, after: &str) -> (String, bool, Value) {
+    let before_lines = logical_lines(before);
+    let after_lines = logical_lines(after);
+    let mut prefix = 0;
+    while prefix < before_lines.len()
+        && prefix < after_lines.len()
+        && before_lines[prefix] == after_lines[prefix]
+    {
+        prefix += 1;
+    }
+    let mut suffix = 0;
+    while suffix < before_lines.len().saturating_sub(prefix)
+        && suffix < after_lines.len().saturating_sub(prefix)
+        && before_lines[before_lines.len() - 1 - suffix]
+            == after_lines[after_lines.len() - 1 - suffix]
+    {
+        suffix += 1;
+    }
+    let removed = before_lines.len().saturating_sub(prefix + suffix);
+    let added = after_lines.len().saturating_sub(prefix + suffix);
+    let mut diff = format!(
+        "--- before\n+++ after\n@@ -{},{} +{},{} @@\n",
+        prefix + 1,
+        removed,
+        prefix + 1,
+        added
+    );
+    for line in before_lines.iter().skip(prefix).take(removed) {
+        diff.push('-');
+        diff.push_str(line);
+        diff.push('\n');
+    }
+    for line in after_lines.iter().skip(prefix).take(added) {
+        diff.push('+');
+        diff.push_str(line);
+        diff.push('\n');
+    }
+    let truncated = diff.len() > 64 * 1024;
+    if truncated {
+        diff = utf8_prefix(&diff, 64 * 1024).to_string();
+    }
+    (diff, truncated, json!({"added": added, "removed": removed}))
+}
+
+fn logical_lines(text: &str) -> Vec<String> {
+    let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    text.split(newline)
+        .map(str::to_string)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .take_while(|line| !(line.is_empty() && text.ends_with(newline)))
+        .collect()
+}
+
+fn apply_unified_patch(
+    original: &str,
+    patch: &str,
+    target: &Path,
+) -> std::result::Result<String, FileError> {
+    let patch_lines = patch.lines().collect::<Vec<_>>();
+    if patch_lines.is_empty() {
+        return Err(FileError::new("file_patch_invalid", "patch is empty"));
+    }
+    let mut index = 0;
+    if patch_lines
+        .first()
+        .is_some_and(|line| line.starts_with("--- "))
+    {
+        if patch_lines.len() < 2 || !patch_lines[1].starts_with("+++ ") {
+            return Err(FileError::new(
+                "file_patch_invalid",
+                "patch headers are incomplete",
+            ));
+        }
+        let old = normalize_patch_header(&patch_lines[0][4..]);
+        let new = normalize_patch_header(&patch_lines[1][4..]);
+        if old != new || !header_matches_target(&new, target) {
+            return Err(FileError::new(
+                "file_patch_invalid",
+                "patch target does not match requested file",
+            ));
+        }
+        index = 2;
+    }
+    let newline = if original.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let mut lines = logical_lines(original);
+    let mut offset = 0isize;
+    while index < patch_lines.len() {
+        let header = patch_lines[index];
+        if !header.starts_with("@@ ") {
+            return Err(FileError::new(
+                "file_patch_invalid",
+                "expected a unified hunk",
+            ));
+        }
+        let (old_start, old_len, new_len) = parse_hunk_header(header)?;
+        index += 1;
+        let start = old_start
+            .checked_sub(1)
+            .and_then(|base| (base as isize).checked_add(offset))
+            .filter(|start| *start >= 0)
+            .map(|start| start as usize)
+            .ok_or_else(|| FileError::new("file_patch_conflict", "hunk location does not match"))?;
+        if start > lines.len() {
+            return Err(FileError::new(
+                "file_patch_conflict",
+                "hunk location does not match",
+            ));
+        }
+        let mut cursor = start;
+        let mut consumed_old = 0usize;
+        let mut replacement = Vec::new();
+        let mut consumed_new = 0usize;
+        while index < patch_lines.len() && !patch_lines[index].starts_with("@@ ") {
+            let line = patch_lines[index];
+            index += 1;
+            let (kind, content) = line.split_at(1);
+            match kind {
+                " " => {
+                    if lines.get(cursor).map(String::as_str) != Some(content) {
+                        return Err(FileError::new(
+                            "file_patch_conflict",
+                            "context does not match",
+                        ));
+                    }
+                    cursor += 1;
+                    consumed_old += 1;
+                    replacement.push(content.to_string());
+                    consumed_new += 1;
+                }
+                "-" => {
+                    if lines.get(cursor).map(String::as_str) != Some(content) {
+                        return Err(FileError::new(
+                            "file_patch_conflict",
+                            "removed text does not match",
+                        ));
+                    }
+                    cursor += 1;
+                    consumed_old += 1;
+                }
+                "+" => {
+                    replacement.push(content.to_string());
+                    consumed_new += 1;
+                }
+                _ => return Err(FileError::new("file_patch_invalid", "invalid hunk line")),
+            }
+        }
+        if consumed_old != old_len || consumed_new != new_len {
+            return Err(FileError::new(
+                "file_patch_invalid",
+                "hunk line counts do not match",
+            ));
+        }
+        let replacement_end = start + consumed_old;
+        lines.splice(start..replacement_end, replacement);
+        offset += new_len as isize - old_len as isize;
+    }
+    Ok(lines.join(newline)
+        + if original.ends_with(newline) {
+            newline
+        } else {
+            ""
+        })
+}
+
+fn normalize_patch_header(value: &str) -> String {
+    value
+        .split('\t')
+        .next()
+        .unwrap_or(value)
+        .trim_start_matches("a/")
+        .trim_start_matches("b/")
+        .to_string()
+}
+
+fn header_matches_target(header: &str, target: &Path) -> bool {
+    let target = target
+        .to_string_lossy()
+        .replace(std::path::MAIN_SEPARATOR, "/");
+    let target_name = Path::new(&target)
+        .file_name()
+        .and_then(|name| name.to_str());
+    header == target
+        || target.ends_with(&format!("/{header}"))
+        || (!header.contains('/') && Some(header) == target_name)
+}
+
+fn parse_hunk_header(header: &str) -> std::result::Result<(usize, usize, usize), FileError> {
+    let body = header
+        .strip_prefix("@@ ")
+        .and_then(|body| body.split(" @@").next())
+        .ok_or_else(|| FileError::new("file_patch_invalid", "invalid hunk header"))?;
+    let mut fields = body.split_whitespace();
+    let old = fields
+        .next()
+        .and_then(|value| value.strip_prefix('-'))
+        .ok_or_else(|| FileError::new("file_patch_invalid", "invalid old hunk range"))?;
+    let new = fields
+        .next()
+        .and_then(|value| value.strip_prefix('+'))
+        .ok_or_else(|| FileError::new("file_patch_invalid", "invalid new hunk range"))?;
+    let (old_start, old_len) = parse_range(old)?;
+    let (_, new_len) = parse_range(new)?;
+    Ok((old_start, old_len, new_len))
+}
+
+fn parse_range(value: &str) -> std::result::Result<(usize, usize), FileError> {
+    let mut values = value.split(',');
+    let start = values
+        .next()
+        .and_then(|value| value.parse().ok())
+        .ok_or_else(|| FileError::new("file_patch_invalid", "invalid hunk range"))?;
+    if start == 0 {
+        return Err(FileError::new(
+            "file_patch_invalid",
+            "hunk range starts at zero",
+        ));
+    }
+    let len = values
+        .next()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(1);
+    Ok((start, len))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -871,5 +1537,31 @@ mod tests {
         .unwrap_err();
         assert_eq!(invalid_glob.code, "file_invalid_glob");
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn unified_patch_is_exact_single_file_and_preserves_crlf() {
+        let target = Path::new("/workspace/src/main.rs");
+        let original = "one\r\ntwo\r\nthree\r\n";
+        let patch =
+            "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1,3 +1,3 @@\n one\n-two\n+TWO\n three\n";
+        assert_eq!(
+            apply_unified_patch(original, patch, target).unwrap(),
+            "one\r\nTWO\r\nthree\r\n"
+        );
+        let fuzzy = "@@ -1,3 +1,3 @@\n one\n-wrong\n+TWO\n three\n";
+        assert_eq!(
+            apply_unified_patch(original, fuzzy, target)
+                .unwrap_err()
+                .code,
+            "file_patch_conflict"
+        );
+        let wrong_target = "--- a/other.rs\n+++ b/other.rs\n@@ -1,1 +1,1 @@\n-one\n+ONE\n";
+        assert_eq!(
+            apply_unified_patch(original, wrong_target, target)
+                .unwrap_err()
+                .code,
+            "file_patch_invalid"
+        );
     }
 }

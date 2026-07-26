@@ -52,6 +52,20 @@
 - The first full Agent run after adding search exposed that the new `file.read`/`file.search` names had not yet been inserted into the Normal registry; stale 19/31 assertions and the info count failed. Both names are now registered, yielding the expected intermediate 21/33 surfaces.
 - Phase D full Agent result: `cargo test -p agentic-gpt --bin agentic-gpt --no-fail-fast` passed (178/178); schema budgets pass with finite 32/48 KiB total and 16/24 KiB input caps.
 - Phase D is complete; next is Implementation Phase E (`file.edit`).
+- Phase D commit: `e865e91` (`feat(agent): add bounded file search`).
+
+### Implementation Phase E: Single-file edits
+- **Status:** in_progress
+- Added `file.edit` with exact replace, one-file unified patch, and guarded UTF-8 write/create modes.
+- Existing mutations require `expectedRevision`; creates require `expectedAbsent: true`; candidates are bounded to 8 MiB, staged/synced in the target directory, and committed by overwrite rename or atomic no-replace hard link.
+- Added target locks, final path/revision revalidation, ordinary permission preservation, bounded diff/change counts, redacted file audit records, dry-run/no-op handling, and explicit confirmation unavailable/denied errors.
+- Registered the closed-world destructive `file.edit` schema/dispatch and updated the intermediate surface expectation to Normal 22 / Room 34 (agent.info + file.read + file.search + file.edit).
+- Discovery/fix: the initial patch hunk counter compared removed lines without context; corrected to validate full old/new hunk counts and preserve context lines. Header paths are single-target checked and CRLF output is preserved.
+- Focused tests: file core 9/9 and `file_edit_` dispatch/audit/confirmation tests 3/3.
+- Full Agent run initially exposed three stale intermediate surface assertions (agent.info 33→34 and stdio 21/33→22/34); assertions were corrected without changing the public contract.
+- Phase E pre-commit gate: `cargo test -p agentic-gpt --bin agentic-gpt --no-fail-fast` passed 182/182.
+- Phase E is complete; next is Implementation Phase F (`file.batch`).
+- Phase E commit: `eb97a8a` (`feat(agent): add guarded file edits`).
 
 ### Phase 1: Requirements and Repository Discovery
 - **Status:** in_progress

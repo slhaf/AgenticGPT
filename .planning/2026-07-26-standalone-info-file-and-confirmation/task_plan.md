@@ -8,12 +8,12 @@ Add a model-facing standalone `agent.info` tool, a bounded and concurrency-safe 
 - **Current role:** implementer
 - **Implementation authorized:** yes
 - **Active plan:** `2026-07-26-standalone-info-file-and-confirmation`
-- **Current phase:** Implementation Phase A — Confirmation semantics
+- **Current phase:** Implementation Phase F — Batch
 - **Entry phase:** Implementation Phase A — Confirmation semantics
 - **Open blocking decisions:** none
 - **Design checkpoint:** `3fb762b` (`docs(plan): checkpoint standalone info and file tools plan`)
 - **Baseline:** `d04f8e0`; branch `main` is clean and 16 commits ahead of `origin/main`
-- **Next action:** implement Phase E (`file.edit`) under `planning-with-files`
+- **Next action:** implement bounded mixed-operation `file.batch` with staged commit and guarded rollback
 
 ## Scope and Constraints
 
@@ -146,6 +146,7 @@ Expected surface counts after this plan:
 - Phase A: `9c06c48` — `refactor(agent): clarify confirmation channel semantics`
 - Phase B: `aa9ced6` — `feat(agent): expose standalone runtime info`
 - Phase C: `ccddaf2` — `feat(agent): add bounded file reads`
+- Phase D: `e865e91` — `feat(agent): add bounded file search`
 
 
 
@@ -354,6 +355,7 @@ Each implementation phase ends with focused tests and one commit. Planning files
 - Commit intent: `feat(agent): add bounded file search`.
 
 ### Implementation Phase E — Single-file edits
+- **Status:** complete; focused and full Agent tests passed; commit pending
 - Implement exact replace, exact single-file unified patch, and guarded write/create.
 - Add direct, pinned diff/patch dependencies only after API/license review; keep exact hunk behavior and no external process.
 - Implement dry-run, no-op, expected revision/absence, candidate limits, bounded diff evidence, in-process target lock, final revalidation, atomic same-directory commit, ordinary permission preservation, and file audit.
