@@ -31,6 +31,7 @@ const NORMAL_TOOLS: &[&str] = &[
     "file.read",
     "file.search",
     "file.edit",
+    "file.batch",
     "mcp.callTool",
     "mcp.list",
     "process.batchExec",
@@ -401,6 +402,47 @@ impl StdioMcpServer {
                         expected_matches: args.expected_matches,
                         patch: args.patch,
                         content: args.content,
+                        dry_run: args.dry_run,
+                        need_confirm: args.need_confirm,
+                    },
+                )
+                .await)
+            }
+            "file.batch" => {
+                let args: FileBatchArgs = from_value(arguments)?;
+                let operations = args
+                    .operations
+                    .into_iter()
+                    .map(|operation| crate::file_ops::BatchOperation {
+                        id: operation.id,
+                        kind: operation.kind,
+                        path: operation.path.unwrap_or_default(),
+                        include_content: operation.include_content,
+                        start_line: operation.start_line,
+                        end_line: operation.end_line,
+                        query: operation.query,
+                        search_mode: operation.mode.clone(),
+                        case_sensitive: operation.case_sensitive,
+                        include: operation.include,
+                        exclude: operation.exclude,
+                        context_lines: operation.context_lines,
+                        max_results: operation.max_results,
+                        hidden: operation.hidden,
+                        respect_gitignore: operation.respect_gitignore,
+                        edit_mode: operation.mode,
+                        expected_revision: operation.expected_revision,
+                        expected_absent: operation.expected_absent,
+                        old_text: operation.old_text,
+                        new_text: operation.new_text,
+                        expected_matches: operation.expected_matches,
+                        patch: operation.patch,
+                        content: operation.content,
+                    })
+                    .collect();
+                Ok(crate::file_ops::batch(
+                    &self.state,
+                    crate::file_ops::BatchRequest {
+                        operations,
                         dry_run: args.dry_run,
                         need_confirm: args.need_confirm,
                     },
@@ -1452,6 +1494,65 @@ struct FileEditArgs {
     need_confirm: bool,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FileBatchArgs {
+    operations: Vec<FileBatchOperationArgs>,
+    #[serde(default)]
+    dry_run: bool,
+    #[serde(default)]
+    need_confirm: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FileBatchOperationArgs {
+    #[serde(rename = "type")]
+    kind: String,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default = "default_true")]
+    include_content: bool,
+    #[serde(default)]
+    start_line: Option<usize>,
+    #[serde(default)]
+    end_line: Option<usize>,
+    #[serde(default)]
+    query: Option<String>,
+    #[serde(default)]
+    mode: Option<String>,
+    #[serde(default = "default_true")]
+    case_sensitive: bool,
+    #[serde(default)]
+    include: Vec<String>,
+    #[serde(default)]
+    exclude: Vec<String>,
+    #[serde(default)]
+    context_lines: usize,
+    #[serde(default = "default_max_search_results")]
+    max_results: usize,
+    #[serde(default)]
+    hidden: bool,
+    #[serde(default = "default_true")]
+    respect_gitignore: bool,
+    #[serde(default)]
+    expected_revision: Option<String>,
+    #[serde(default)]
+    expected_absent: Option<bool>,
+    #[serde(default)]
+    old_text: Option<String>,
+    #[serde(default)]
+    new_text: Option<String>,
+    #[serde(default)]
+    expected_matches: Option<usize>,
+    #[serde(default)]
+    patch: Option<String>,
+    #[serde(default)]
+    content: Option<String>,
+}
+
 fn default_max_search_results() -> usize {
     50
 }
@@ -1921,6 +2022,7 @@ fn tool_schema(name: &str) -> (Map<String, Value>, &'static [&'static str]) {
         "file.read" => &["path"],
         "file.search" => &["path", "query"],
         "file.edit" => &["mode", "path"],
+        "file.batch" => &["operations"],
         "mcp.callTool" => &["serverId", "toolName"],
         "skills.setActive" => &["id", "active"],
         "tmux.sessions" | "tmux.panes" => &["action"],
@@ -2029,6 +2131,54 @@ fn properties_for(name: &str) -> Map<String, Value> {
             add(
                 "needConfirm",
                 boolean("Request confirmation before mutation."),
+            );
+        }
+        "file.batch" => {
+            let read = json!({
+                "type":"object", "additionalProperties":false,
+                "properties": {
+                    "type":{"const":"read"}, "id":string("Optional operation id."),
+                    "path":string("File or directory path."), "includeContent":boolean("Include bounded content; default true."),
+                    "startLine":number("Inclusive start line."), "endLine":number("Inclusive end line.")
+                }, "required":["type","path"]
+            });
+            let search = json!({
+                "type":"object", "additionalProperties":false,
+                "properties": {
+                    "type":{"const":"search"}, "id":string("Optional operation id."), "path":string("File or directory root."),
+                    "query":string("Literal or regex query."), "mode":{"type":"string","enum":["literal","regex"],"default":"literal"},
+                    "caseSensitive":boolean("Case-sensitive; default true."), "include":strings("Include globs; max 16."),
+                    "exclude":strings("Exclude globs; max 16."), "contextLines":number("Context lines, max 5."),
+                    "maxResults":number("Maximum matches, max 200."), "hidden":boolean("Include hidden files; default false."),
+                    "respectGitignore":boolean("Honor ignore files; default true.")
+                }, "required":["type","path","query"]
+            });
+            let edit = json!({
+                "type":"object", "additionalProperties":false,
+                "properties": {
+                    "type":{"const":"edit"}, "id":string("Optional operation id."),
+                    "mode":{"type":"string","enum":["replace","patch","write"]}, "path":string("UTF-8 text file path."),
+                    "expectedRevision":string("Required revision for existing files."), "expectedAbsent":boolean("Require a new target; write mode only."),
+                    "oldText":string("Exact non-empty text to replace."), "newText":string("Replacement text."),
+                    "expectedMatches":number("Expected exact replacement count, default 1."), "patch":string("Exact single-file unified diff."),
+                    "content":string("Complete UTF-8 content for write mode.")
+                }, "required":["type","mode","path"]
+            });
+            add(
+                "operations",
+                json!({
+                    "type":"array", "minItems":1, "maxItems":32,
+                    "items":{"oneOf":[read,search,edit]},
+                    "description":"Ordered bounded read, search, and edit operations."
+                }),
+            );
+            add(
+                "dryRun",
+                boolean("Preview edits without confirmation or writes."),
+            );
+            add(
+                "needConfirm",
+                boolean("Request one confirmation for effective edits."),
             );
         }
         "mcp.list" => add("serverId", string("Optional configured MCP server id.")),
@@ -2288,6 +2438,7 @@ fn tool_description(name: &str) -> String {
         "file.read" => "Bounded UTF-8 read or metadata inspection.".to_string(),
         "file.search" => "Bounded in-process text search.".to_string(),
         "file.edit" => "Guarded bounded UTF-8 text replacement, patch, or write.".to_string(),
+        "file.batch" => "Bounded mixed file reads, searches, and coordinated edits.".to_string(),
         "process.exec" => "Start one managed local process and wait briefly.".to_string(),
         "process.batchExec" => "Start multiple managed local processes.".to_string(),
         "process.get" => "Inspect or briefly wait for one managed local process.".to_string(),
@@ -2463,8 +2614,8 @@ mod tests {
             .iter()
             .map(|tool| tool.name.to_string())
             .collect::<Vec<_>>();
-        assert_eq!(normal_names.len(), 22);
-        assert_eq!(room_names.len(), 34);
+        assert_eq!(normal_names.len(), 23);
+        assert_eq!(room_names.len(), 35);
         assert!(!normal_names.iter().any(|name| name.starts_with("room.")));
         assert!(room_names.iter().any(|name| name == "room.diary.append"));
         assert!(room_names.iter().any(|name| name == "room.notebook.remove"));
@@ -2543,7 +2694,7 @@ mod tests {
 
         let client = ().serve((client_read, client_write)).await?;
         let tools = client.list_all_tools().await?;
-        assert_eq!(tools.len(), 22);
+        assert_eq!(tools.len(), 23);
         let result = client
             .call_tool(CallToolRequestParams::new("process.list"))
             .await?;
@@ -2579,7 +2730,7 @@ mod tests {
 
         let client = ().serve((client_read, client_write)).await?;
         let tools = client.list_all_tools().await?;
-        assert_eq!(tools.len(), 34);
+        assert_eq!(tools.len(), 35);
         let result = client
             .call_tool(CallToolRequestParams::new("room.diary.recent"))
             .await?;
@@ -3251,6 +3402,112 @@ mod tests {
             )
             .await?;
         assert_eq!(result["error"]["code"], "file_confirmation_unavailable");
+        assert_eq!(std::fs::read_to_string(&path)?, "before\n");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn file_batch_reads_before_edits_and_preserves_order() -> anyhow::Result<()> {
+        let server = StdioMcpServer::new(test_state(CapabilityProfile::Normal));
+        let workspace = server.state.config.read().await.workspace_root.clone();
+        let path = workspace.join("batch.txt");
+        std::fs::write(&path, "secret-before\n")?;
+        let revision = crate::file_ops::revision(&std::fs::read(&path)?);
+        let result = server
+            .dispatch(
+                "file.batch",
+                json!({
+                    "operations":[
+                        {"type":"read", "id":"pre", "path":"batch.txt"},
+                        {"type":"search", "id":"find", "path":"batch.txt", "query":"secret-before"},
+                        {"type":"edit", "id":"mutate", "mode":"replace", "path":"batch.txt", "expectedRevision":revision, "oldText":"secret-before", "newText":"secret-after"}
+                    ]
+                }),
+            )
+            .await?;
+        assert_eq!(result["status"], "completed");
+        assert_eq!(result["results"][0]["id"], "pre");
+        assert_eq!(result["results"][0]["result"]["content"], "secret-before\n");
+        assert_eq!(
+            result["results"][1]["result"]["matches"][0]["lineText"],
+            "secret-before"
+        );
+        assert_eq!(result["results"][2]["id"], "mutate");
+        assert_eq!(result["results"][2]["result"]["status"], "updated");
+        assert_eq!(result["auditStatus"], "written");
+        let audit = std::fs::read_to_string(workspace.join(".agentic-gpt-audit.jsonl"))?;
+        assert!(audit.contains("file.batch"));
+        assert!(!audit.contains("secret-before"));
+        assert!(!audit.contains("secret-after"));
+        assert_eq!(std::fs::read_to_string(&path)?, "secret-after\n");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn file_batch_rejects_duplicate_targets_and_preflight_errors_without_writes(
+    ) -> anyhow::Result<()> {
+        let server = StdioMcpServer::new(test_state(CapabilityProfile::Normal));
+        let workspace = server.state.config.read().await.workspace_root.clone();
+        let path = workspace.join("batch-guard.txt");
+        std::fs::write(&path, "same\n")?;
+        let revision = crate::file_ops::revision(&std::fs::read(&path)?);
+        let result = server
+            .dispatch(
+                "file.batch",
+                json!({
+                    "operations":[
+                        {"type":"read", "path":"missing.txt"},
+                        {"type":"edit", "mode":"replace", "path":"batch-guard.txt", "expectedRevision":revision, "oldText":"same", "newText":"one"},
+                        {"type":"edit", "mode":"replace", "path":"./batch-guard.txt", "expectedRevision":revision, "oldText":"same", "newText":"two"}
+                    ]
+                }),
+            )
+            .await?;
+        assert_eq!(result["status"], "rejected");
+        assert!(result["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| { entry["error"]["code"] == "file_batch_duplicate_edit_target" }));
+        assert!(result["results"].as_array().unwrap().iter().any(|entry| {
+            entry["status"] == "skipped" && entry["error"]["code"] == "file_batch_rejected"
+        }));
+        assert_eq!(std::fs::read_to_string(&path)?, "same\n");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn file_batch_dry_run_and_confirmation_are_single_boundary() -> anyhow::Result<()> {
+        let server = StdioMcpServer::new(test_state(CapabilityProfile::Normal));
+        let workspace = server.state.config.read().await.workspace_root.clone();
+        let path = workspace.join("batch-confirm.txt");
+        std::fs::write(&path, "before\n")?;
+        let revision = crate::file_ops::revision(&std::fs::read(&path)?);
+        let dry = server
+            .dispatch(
+                "file.batch",
+                json!({"dryRun":true,"needConfirm":true,"operations":[{"type":"edit","mode":"replace","path":"batch-confirm.txt","expectedRevision":revision,"oldText":"before","newText":"after"}]}),
+            )
+            .await?;
+        assert_eq!(dry["status"], "dry-run");
+        assert_eq!(dry["confirmation"]["requested"], false);
+        assert_eq!(std::fs::read_to_string(&path)?, "before\n");
+        {
+            let mut config = server.state.config.write().await;
+            config.confirmation_provider.channels.clear();
+        }
+        let revision = crate::file_ops::revision(&std::fs::read(&path)?);
+        let denied = server
+            .dispatch(
+                "file.batch",
+                json!({"needConfirm":true,"operations":[{"type":"edit","mode":"replace","path":"batch-confirm.txt","expectedRevision":revision,"oldText":"before","newText":"after"}]}),
+            )
+            .await?;
+        assert_eq!(denied["status"], "rejected");
+        assert_eq!(
+            denied["results"][0]["error"]["code"],
+            "file_batch_confirmation_unavailable"
+        );
         assert_eq!(std::fs::read_to_string(&path)?, "before\n");
         Ok(())
     }

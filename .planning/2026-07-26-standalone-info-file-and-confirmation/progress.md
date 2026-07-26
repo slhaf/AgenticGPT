@@ -67,6 +67,16 @@
 - Phase E is complete; next is Implementation Phase F (`file.batch`).
 - Phase E commit: `ed9bb6e` (`feat(agent): add guarded file edits`).
 
+### Implementation Phase F: Batch
+- **Status:** in_progress
+- Added discriminated `file.batch` operations for ordered read/search/edit entries, 1–32 operation and 16-edit limits, duplicate-id/target rejection, request/original/candidate/search aggregate bounds, and bounded response truncation.
+- Reads/searches execute in input order before edit preflight. Edit targets are canonicalized, sorted locks are acquired, revisions/absence/symlinks are revalidated, candidates are staged and synced, one optional confirmation is requested, and commits use the same atomic overwrite/no-replace primitives as `file.edit`.
+- Added guarded best-effort rollback for committed targets, partial-failure statuses, operation envelopes preserving input order, redacted per-edit and batch audit records, dry-run/no-op behavior, and no-write preflight/confirmation rejection.
+- Registered the closed-world destructive `file.batch` schema/dispatch with read/search/edit `oneOf` operation shapes. Final surface assertions now target Normal 23 / Room 35.
+- Focused batch tests passed 3/3 (read-before-write/order, duplicate/preflight rejection, dry-run/one confirmation boundary). Full Agent binary suite passed 185/185.
+- Discovery/fix: batch audit initially tested ordinary field names as content; redaction test now uses unique secret strings and verifies those values never enter audit JSONL. Batch summary and each non-dry-run edit now report `auditStatus`/file-shaped audit evidence.
+- Final Phase F focused rerun after normalizing embedded missing-search errors to `file_search_path_not_found`: 3/3 passed; `cargo fmt --all -- --check` and `git diff --check` passed.
+
 ### Phase 1: Requirements and Repository Discovery
 - **Status:** in_progress
 - **Started:** 2026-07-26

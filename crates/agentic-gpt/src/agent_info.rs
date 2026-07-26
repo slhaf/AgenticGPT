@@ -417,7 +417,7 @@ mod tests {
     #[tokio::test]
     async fn info_is_bounded_redacted_and_profile_correct() {
         let value = collect(&state(CapabilityProfile::Room)).await;
-        assert_eq!(value["surface"]["toolCount"], 34);
+        assert_eq!(value["surface"]["toolCount"], 35);
         assert_eq!(value["identity"]["profile"], "room");
         assert_eq!(
             value["workspace"]["pathPolicy"]["writeRoots"][0].is_string(),

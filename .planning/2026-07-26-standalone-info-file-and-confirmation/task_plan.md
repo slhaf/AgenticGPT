@@ -364,6 +364,7 @@ Each implementation phase ends with focused tests and one commit. Planning files
 - Commit intent: `feat(agent): add guarded file edits`.
 
 ### Implementation Phase F — Batch
+- **Status:** in_progress
 - Implement discriminated embedded operations with top-level dry-run/confirmation controls and aggregate bounds.
 - Execute reads/searches first, resolve duplicate normalized edit targets, acquire sorted locks, stage all candidates, confirm once, revalidate, commit, and best-effort rollback.
 - Implement deterministic original-order response envelopes and global output truncation.

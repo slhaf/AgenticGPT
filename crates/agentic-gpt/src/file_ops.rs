@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -11,6 +12,9 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tokio::sync::OwnedMutexGuard;
 
+use crate::audit::{
+    write_batch_audit, write_file_audit, BatchAuditRecord, ChangedLines, FileAuditRecord,
+};
 use crate::config::Config;
 use crate::exec;
 use crate::state::AppState;
@@ -645,6 +649,40 @@ pub(crate) struct EditRequest {
     pub(crate) need_confirm: bool,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct BatchOperation {
+    pub(crate) id: Option<String>,
+    pub(crate) kind: String,
+    pub(crate) path: String,
+    pub(crate) include_content: bool,
+    pub(crate) start_line: Option<usize>,
+    pub(crate) end_line: Option<usize>,
+    pub(crate) query: Option<String>,
+    pub(crate) search_mode: Option<String>,
+    pub(crate) case_sensitive: bool,
+    pub(crate) include: Vec<String>,
+    pub(crate) exclude: Vec<String>,
+    pub(crate) context_lines: usize,
+    pub(crate) max_results: usize,
+    pub(crate) hidden: bool,
+    pub(crate) respect_gitignore: bool,
+    pub(crate) edit_mode: Option<String>,
+    pub(crate) expected_revision: Option<String>,
+    pub(crate) expected_absent: Option<bool>,
+    pub(crate) old_text: Option<String>,
+    pub(crate) new_text: Option<String>,
+    pub(crate) expected_matches: Option<usize>,
+    pub(crate) patch: Option<String>,
+    pub(crate) content: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct BatchRequest {
+    pub(crate) operations: Vec<BatchOperation>,
+    pub(crate) dry_run: bool,
+    pub(crate) need_confirm: bool,
+}
+
 pub(crate) async fn edit(state: &AppState, request: EditRequest) -> Value {
     let started = std::time::Instant::now();
     let config = state.config.read().await.clone();
@@ -932,6 +970,989 @@ async fn edit_inner(
         .cloned()
         .unwrap_or_else(|| json!({"requested": false, "result": null}));
     Ok(response)
+}
+
+const MAX_BATCH_OPERATIONS: usize = 32;
+const MAX_BATCH_EDITS: usize = 16;
+const MAX_BATCH_REQUEST_BYTES: usize = 16 * 1024 * 1024;
+const MAX_BATCH_ORIGINAL_BYTES: usize = 32 * 1024 * 1024;
+const MAX_BATCH_CANDIDATE_BYTES: usize = 32 * 1024 * 1024;
+const MAX_BATCH_SCAN_FILES: usize = 20_000;
+const MAX_BATCH_SCAN_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_BATCH_OUTPUT_BYTES: usize = 1024 * 1024;
+
+struct BatchCandidate {
+    target: ResolvedPath,
+    existed: bool,
+    before_bytes: Option<Vec<u8>>,
+    before_revision: Option<String>,
+    before_mode: Option<fs::Permissions>,
+    candidate: Vec<u8>,
+    after_revision: String,
+    response: Value,
+}
+
+struct BatchPreparedEdit {
+    index: usize,
+    operation: BatchOperation,
+    candidate: BatchCandidate,
+    temp: Option<PathBuf>,
+    committed: bool,
+}
+
+fn batch_error(code: &str, message: &str) -> Value {
+    FileError::new(code, message).value()
+}
+
+fn operation_envelope(
+    index: usize,
+    operation: &BatchOperation,
+    status: &str,
+    result: Value,
+) -> Value {
+    let mut envelope = json!({
+        "index": index,
+        "type": operation.kind,
+        "status": status,
+        "result": result,
+    });
+    if let Some(id) = operation.id.as_deref() {
+        envelope["id"] = json!(id);
+    }
+    envelope
+}
+
+fn operation_error_envelope(
+    index: usize,
+    operation: &BatchOperation,
+    status: &str,
+    error: Value,
+) -> Value {
+    let mut envelope = json!({
+        "index": index,
+        "type": operation.kind,
+        "status": status,
+        "error": error.get("error").cloned().unwrap_or(error),
+    });
+    if let Some(id) = operation.id.as_deref() {
+        envelope["id"] = json!(id);
+    }
+    envelope
+}
+
+fn batch_edit_request(operation: &BatchOperation) -> std::result::Result<EditRequest, FileError> {
+    let mode = match operation.edit_mode.as_deref() {
+        Some("replace") => EditMode::Replace,
+        Some("patch") => EditMode::Patch,
+        Some("write") => EditMode::Write,
+        _ => {
+            return Err(FileError::new(
+                "file_invalid_mode",
+                "edit mode must be replace, patch, or write",
+            ))
+        }
+    };
+    Ok(EditRequest {
+        mode,
+        path: operation.path.clone(),
+        expected_revision: operation.expected_revision.clone(),
+        expected_absent: operation.expected_absent,
+        old_text: operation.old_text.clone(),
+        new_text: operation.new_text.clone(),
+        expected_matches: operation.expected_matches,
+        patch: operation.patch.clone(),
+        content: operation.content.clone(),
+        dry_run: false,
+        need_confirm: false,
+    })
+}
+
+fn batch_request_text_bytes(operation: &BatchOperation) -> usize {
+    operation.query.as_deref().unwrap_or("").len()
+        + operation.include.iter().map(String::len).sum::<usize>()
+        + operation.exclude.iter().map(String::len).sum::<usize>()
+        + operation.old_text.as_deref().unwrap_or("").len()
+        + operation.new_text.as_deref().unwrap_or("").len()
+        + operation.patch.as_deref().unwrap_or("").len()
+        + operation.content.as_deref().unwrap_or("").len()
+}
+
+fn valid_batch_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+fn batch_candidate(
+    _config: &Config,
+    request: &EditRequest,
+    target: ResolvedPath,
+    existed: bool,
+) -> std::result::Result<BatchCandidate, FileError> {
+    if existed && request.expected_absent == Some(true) {
+        return Err(FileError::new(
+            "file_already_exists",
+            "target already exists",
+        ));
+    }
+    let (before_bytes, before_text, before_revision, before_mode) = if existed {
+        let metadata = fs::metadata(&target.path)
+            .map_err(|_| FileError::new("file_not_found", "target was not found"))?;
+        if !metadata.is_file() {
+            return Err(FileError::new(
+                "file_not_regular",
+                "target is not a regular file",
+            ));
+        }
+        if metadata.len() > MAX_FILE_BYTES {
+            return Err(FileError::new(
+                "file_too_large",
+                "file exceeds the 8 MiB edit bound",
+            ));
+        }
+        let bytes = fs::read(&target.path)
+            .map_err(|_| FileError::new("file_read_failed", "target could not be read"))?;
+        let text = String::from_utf8(bytes.clone())
+            .map_err(|_| FileError::new("file_not_utf8", "file content is not UTF-8 text"))?;
+        let revision = revision(&bytes);
+        validate_expected_revision(request.expected_revision.as_deref(), &revision)?;
+        (
+            Some(bytes),
+            Some(text),
+            Some(revision),
+            Some(metadata.permissions()),
+        )
+    } else {
+        if request.mode != EditMode::Write || request.expected_absent != Some(true) {
+            return Err(FileError::new(
+                "file_revision_required",
+                "new files require expectedAbsent: true",
+            ));
+        }
+        if request.expected_revision.is_some() {
+            return Err(FileError::new(
+                "file_revision_invalid",
+                "expectedAbsent and expectedRevision are mutually exclusive",
+            ));
+        }
+        (None, None, None, None)
+    };
+    let mut replacement_count = 0usize;
+    let candidate = match request.mode {
+        EditMode::Replace => {
+            let old_text = request.old_text.as_deref().ok_or_else(|| {
+                FileError::new("file_match_count_mismatch", "oldText is required")
+            })?;
+            if old_text.is_empty() {
+                return Err(FileError::new(
+                    "file_match_count_mismatch",
+                    "oldText must not be empty",
+                ));
+            }
+            let source = before_text.as_deref().unwrap_or_default();
+            let matches = source.match_indices(old_text).count();
+            let expected = request.expected_matches.unwrap_or(1);
+            if expected == 0 || matches != expected {
+                return Err(FileError::new(
+                    "file_match_count_mismatch",
+                    &format!("expected {expected} matches but found {matches}"),
+                ));
+            }
+            replacement_count = matches;
+            source.replace(old_text, request.new_text.as_deref().unwrap_or_default())
+        }
+        EditMode::Patch => apply_unified_patch(
+            before_text.as_deref().ok_or_else(|| {
+                FileError::new("file_patch_invalid", "patch requires an existing file")
+            })?,
+            request
+                .patch
+                .as_deref()
+                .ok_or_else(|| FileError::new("file_patch_invalid", "patch is required"))?,
+            &target.path,
+        )?,
+        EditMode::Write => request
+            .content
+            .as_deref()
+            .ok_or_else(|| FileError::new("file_write_failed", "content is required"))?
+            .to_string(),
+    };
+    let candidate = candidate.into_bytes();
+    if candidate.len() > MAX_FILE_BYTES as usize {
+        return Err(FileError::new(
+            "file_too_large",
+            "candidate exceeds the 8 MiB edit bound",
+        ));
+    }
+    let after_revision = revision(&candidate);
+    let unchanged = before_bytes.as_deref() == Some(candidate.as_slice());
+    let (diff, diff_truncated, changed_lines) = bounded_diff(
+        before_text.as_deref().unwrap_or(""),
+        std::str::from_utf8(&candidate).unwrap_or(""),
+    );
+    let response = json!({
+        "path": request.path,
+        "resolvedPath": target.path.to_string_lossy(),
+        "mode": edit_mode_label(request.mode),
+        "status": if unchanged { "unchanged" } else if existed { "updated" } else { "created" },
+        "beforeRevision": before_revision,
+        "afterRevision": after_revision,
+        "beforeSizeBytes": before_bytes.as_ref().map_or(0, Vec::len),
+        "afterSizeBytes": candidate.len(),
+        "replacementCount": replacement_count,
+        "diff": diff,
+        "diffTruncated": diff_truncated,
+        "changedLines": changed_lines,
+    });
+    Ok(BatchCandidate {
+        target,
+        existed,
+        before_bytes,
+        before_revision,
+        before_mode,
+        candidate,
+        after_revision,
+        response,
+    })
+}
+
+pub(crate) async fn batch(state: &AppState, request: BatchRequest) -> Value {
+    let started = std::time::Instant::now();
+    let config = state.config.read().await.clone();
+    let batch_id = format!("file_batch_{}", uuid::Uuid::new_v4().simple());
+    let mut response = json!({
+        "batchId": batch_id,
+        "status": "rejected",
+        "startedAt": Utc::now(),
+        "updatedAt": Utc::now(),
+        "operationCount": request.operations.len(),
+        "editCount": 0,
+        "effectiveMutationCount": 0,
+        "confirmation": {"requested": false, "result": Value::Null},
+        "results": [],
+        "truncated": false,
+        "truncationReason": Value::Null,
+    });
+    if request.operations.is_empty() {
+        response["error"] =
+            batch_error("file_batch_empty", "operations must not be empty")["error"].clone();
+        return finalize_batch(response, &config, started, &request);
+    }
+    if request.operations.len() > MAX_BATCH_OPERATIONS {
+        response["error"] = batch_error(
+            "file_batch_too_many_operations",
+            "operations exceed the 32-entry bound",
+        )["error"]
+            .clone();
+        return finalize_batch(response, &config, started, &request);
+    }
+    let mut ids = HashSet::new();
+    let mut edit_count = 0usize;
+    let mut request_bytes = 0usize;
+    let mut validation_errors = vec![None::<Value>; request.operations.len()];
+    for (index, operation) in request.operations.iter().enumerate() {
+        if let Some(id) = operation.id.as_deref() {
+            if !valid_batch_id(id) {
+                validation_errors[index] = Some(batch_error(
+                    "file_batch_invalid_id",
+                    "operation id is invalid",
+                ));
+            } else if !ids.insert(id.to_string()) {
+                validation_errors[index] = Some(batch_error(
+                    "file_batch_duplicate_id",
+                    "operation ids must be unique",
+                ));
+            }
+        }
+        if !matches!(operation.kind.as_str(), "read" | "search" | "edit") {
+            validation_errors[index] = Some(batch_error(
+                "file_batch_invalid_type",
+                "operation type must be read, search, or edit",
+            ));
+        }
+        if operation.kind == "edit" {
+            edit_count += 1;
+            if operation.edit_mode.is_none() {
+                validation_errors[index] =
+                    Some(batch_error("file_invalid_mode", "edit mode is required"));
+            }
+        }
+        request_bytes = request_bytes.saturating_add(batch_request_text_bytes(operation));
+    }
+    if edit_count > MAX_BATCH_EDITS {
+        response["error"] = batch_error(
+            "file_batch_too_many_edits",
+            "edits exceed the 16-entry bound",
+        )["error"]
+            .clone();
+        return finalize_batch(response, &config, started, &request);
+    }
+    if request_bytes > MAX_BATCH_REQUEST_BYTES {
+        response["error"] = batch_error(
+            "file_batch_request_too_large",
+            "aggregate request text exceeds the 16 MiB bound",
+        )["error"]
+            .clone();
+        return finalize_batch(response, &config, started, &request);
+    }
+    response["editCount"] = json!(edit_count);
+    let mut results = vec![Value::Null; request.operations.len()];
+    let mut hard_read_error = false;
+    let mut scan_files = 0usize;
+    let mut scan_bytes = 0u64;
+    for (index, operation) in request.operations.iter().enumerate() {
+        if let Some(error) = validation_errors[index].clone() {
+            results[index] = operation_error_envelope(index, operation, "failed", error);
+            if operation.kind != "edit" {
+                hard_read_error = true;
+            }
+            continue;
+        }
+        let result = match operation.kind.as_str() {
+            "read" => match resolve_path(&config, &operation.path, Access::Read) {
+                Ok(path) => read(
+                    &path,
+                    operation.include_content,
+                    operation.start_line,
+                    operation.end_line,
+                ),
+                Err(error) => Err(error),
+            },
+            "search" => {
+                let mode = match operation.search_mode.as_deref() {
+                    Some("regex") => SearchMode::Regex,
+                    Some("literal") | None => SearchMode::Literal,
+                    _ => {
+                        results[index] = operation_error_envelope(
+                            index,
+                            operation,
+                            "failed",
+                            batch_error("file_invalid_mode", "mode must be literal or regex"),
+                        );
+                        hard_read_error = true;
+                        continue;
+                    }
+                };
+                let path = match resolve_path(&config, &operation.path, Access::Read) {
+                    Ok(path) => path,
+                    Err(error) if error.code == "file_not_found" => {
+                        results[index] = operation_error_envelope(
+                            index,
+                            operation,
+                            "failed",
+                            batch_error("file_search_path_not_found", "search path was not found"),
+                        );
+                        hard_read_error = true;
+                        continue;
+                    }
+                    Err(error) => {
+                        results[index] =
+                            operation_error_envelope(index, operation, "failed", error.value());
+                        hard_read_error = true;
+                        continue;
+                    }
+                };
+                search(SearchOptions {
+                    root: &path,
+                    query: operation.query.as_deref().unwrap_or_default(),
+                    mode,
+                    case_sensitive: operation.case_sensitive,
+                    include: &operation.include,
+                    exclude: &operation.exclude,
+                    context_lines: operation.context_lines,
+                    max_results: operation.max_results,
+                    hidden: operation.hidden,
+                    respect_gitignore: operation.respect_gitignore,
+                })
+            }
+            "edit" => continue,
+            _ => unreachable!(),
+        };
+        match result {
+            Ok(value) => {
+                if operation.kind == "search" {
+                    scan_files = scan_files
+                        .saturating_add(value["scannedFiles"].as_u64().unwrap_or(0) as usize);
+                    scan_bytes =
+                        scan_bytes.saturating_add(value["scannedBytes"].as_u64().unwrap_or(0));
+                }
+                results[index] = operation_envelope(index, operation, "completed", value);
+            }
+            Err(error) => {
+                results[index] =
+                    operation_error_envelope(index, operation, "failed", error.value());
+                if operation.kind != "edit" {
+                    hard_read_error = true;
+                }
+            }
+        }
+    }
+    if scan_files > MAX_BATCH_SCAN_FILES || scan_bytes > MAX_BATCH_SCAN_BYTES {
+        hard_read_error = true;
+        response["error"] = batch_error(
+            "file_batch_scan_limit_exceeded",
+            "aggregate search scan exceeds the batch bound",
+        )["error"]
+            .clone();
+    }
+    if edit_count == 0 {
+        let failed = results
+            .iter()
+            .filter(|value| value["status"] == "failed")
+            .count();
+        response["status"] = json!(if failed == 0 {
+            "completed"
+        } else {
+            "completed_with_errors"
+        });
+        response["results"] = json!(results);
+        return finalize_batch(response, &config, started, &request);
+    }
+    let mut edit_targets = Vec::new();
+    let mut duplicate_targets = HashSet::new();
+    let mut target_paths = HashSet::new();
+    for (index, operation) in request.operations.iter().enumerate() {
+        if operation.kind != "edit" || validation_errors[index].is_some() {
+            continue;
+        }
+        let resolved = match resolve_path(&config, &operation.path, Access::Write) {
+            Ok(path) => Some((path, true)),
+            Err(error) if error.code == "file_not_found" => {
+                match resolve_absent_path(&config, &operation.path) {
+                    Ok(path) => Some((path, false)),
+                    Err(error) => {
+                        results[index] =
+                            operation_error_envelope(index, operation, "failed", error.value());
+                        None
+                    }
+                }
+            }
+            Err(error) => {
+                results[index] =
+                    operation_error_envelope(index, operation, "failed", error.value());
+                None
+            }
+        };
+        if let Some((target, existed)) = resolved {
+            if !target_paths.insert(target.path.clone()) {
+                duplicate_targets.insert(index);
+                results[index] = operation_error_envelope(
+                    index,
+                    operation,
+                    "failed",
+                    batch_error(
+                        "file_batch_duplicate_edit_target",
+                        "edit targets must be unique",
+                    ),
+                );
+            } else {
+                edit_targets.push((index, operation.clone(), target, existed));
+            }
+        }
+    }
+    if hard_read_error || !duplicate_targets.is_empty() || edit_targets.len() != edit_count {
+        for (index, operation) in request.operations.iter().enumerate() {
+            if operation.kind == "edit" && results[index].is_null() {
+                results[index] = operation_error_envelope(
+                    index,
+                    operation,
+                    "skipped",
+                    batch_error("file_batch_rejected", "batch preflight rejected all edits"),
+                );
+            }
+        }
+        response["status"] = json!("rejected");
+        response["results"] = json!(results);
+        return finalize_batch(response, &config, started, &request);
+    }
+    edit_targets.sort_by(|left, right| left.2.path.cmp(&right.2.path));
+    let mut locks = Vec::new();
+    for (_, _, target, _) in &edit_targets {
+        locks.push(lock_target(state, &target.path).await);
+    }
+    let mut prepared = Vec::new();
+    let mut original_bytes = 0usize;
+    let mut candidate_bytes = 0usize;
+    let mut preflight_error = None::<Value>;
+    for (index, operation, target, existed) in edit_targets {
+        let request = match batch_edit_request(&operation) {
+            Ok(request) => request,
+            Err(error) => {
+                preflight_error = Some(error.value());
+                results[index] =
+                    operation_error_envelope(index, &operation, "failed", error.value());
+                continue;
+            }
+        };
+        if let Err(error) = revalidate_target(&config, &target, existed) {
+            preflight_error = Some(error.value());
+            results[index] = operation_error_envelope(index, &operation, "failed", error.value());
+            continue;
+        }
+        let candidate = match batch_candidate(&config, &request, target, existed) {
+            Ok(candidate) => candidate,
+            Err(error) => {
+                preflight_error = Some(error.value());
+                results[index] =
+                    operation_error_envelope(index, &operation, "failed", error.value());
+                continue;
+            }
+        };
+        original_bytes =
+            original_bytes.saturating_add(candidate.before_bytes.as_ref().map_or(0, Vec::len));
+        candidate_bytes = candidate_bytes.saturating_add(candidate.candidate.len());
+        if original_bytes > MAX_BATCH_ORIGINAL_BYTES || candidate_bytes > MAX_BATCH_CANDIDATE_BYTES
+        {
+            preflight_error = Some(batch_error(
+                "file_batch_candidate_limit_exceeded",
+                "aggregate batch file bytes exceed the bound",
+            ));
+            results[index] = operation_error_envelope(
+                index,
+                &operation,
+                "failed",
+                preflight_error.clone().unwrap(),
+            );
+            continue;
+        }
+        prepared.push(BatchPreparedEdit {
+            index,
+            operation,
+            candidate,
+            temp: None,
+            committed: false,
+        });
+    }
+    if preflight_error.is_some() || prepared.len() != edit_count {
+        for item in &prepared {
+            if item.candidate.response["status"] != "unchanged" {
+                results[item.index] = operation_error_envelope(
+                    item.index,
+                    &item.operation,
+                    "skipped",
+                    batch_error("file_batch_rejected", "batch preflight rejected all edits"),
+                );
+            } else {
+                results[item.index] = operation_envelope(
+                    item.index,
+                    &item.operation,
+                    "completed",
+                    item.candidate.response.clone(),
+                );
+            }
+        }
+        response["status"] = json!("rejected");
+        response["results"] = json!(results);
+        return finalize_batch(response, &config, started, &request);
+    }
+    let effective: Vec<usize> = prepared
+        .iter()
+        .filter(|item| item.candidate.response["status"] != "unchanged")
+        .map(|item| item.index)
+        .collect();
+    response["effectiveMutationCount"] = json!(effective.len());
+    if !request.dry_run && !effective.is_empty() {
+        for item in prepared
+            .iter_mut()
+            .filter(|item| item.candidate.response["status"] != "unchanged")
+        {
+            match stage_temp(
+                &item.candidate.target.path,
+                &item.candidate.candidate,
+                item.candidate.before_mode.as_ref(),
+            ) {
+                Ok(temp) => item.temp = Some(temp),
+                Err(error) => {
+                    preflight_error = Some(error.value());
+                    break;
+                }
+            }
+        }
+    }
+    if let Some(error) = preflight_error {
+        for item in &prepared {
+            if let Some(temp) = &item.temp {
+                let _ = fs::remove_file(temp);
+            }
+            if item.candidate.response["status"] != "unchanged" {
+                results[item.index] = operation_error_envelope(
+                    item.index,
+                    &item.operation,
+                    "skipped",
+                    batch_error("file_batch_rejected", "batch staging failed"),
+                );
+            }
+        }
+        response["error"] = error["error"].clone();
+        response["results"] = json!(results);
+        return finalize_batch(response, &config, started, &request);
+    }
+    if request.need_confirm && !request.dry_run && !effective.is_empty() {
+        let preview = prepared
+            .iter()
+            .filter(|item| item.candidate.response["status"] != "unchanged")
+            .map(|item| {
+                format!(
+                    "{}:{}:{}->{}",
+                    item.index,
+                    item.candidate.target.path.display(),
+                    edit_mode_label(batch_edit_request(&item.operation).unwrap().mode),
+                    item.candidate.candidate.len()
+                )
+            })
+            .collect::<Vec<_>>();
+        let confirmation =
+            crate::confirmation::request_confirmation(state, &config, None, "file.batch", &preview)
+                .await;
+        response["confirmation"] = json!({"requested": true, "result": confirmation});
+        if confirmation != "allow_once" {
+            for item in &prepared {
+                if let Some(temp) = &item.temp {
+                    let _ = fs::remove_file(temp);
+                }
+                if item.candidate.response["status"] != "unchanged" {
+                    let code = if confirmation == "confirmation_provider_unavailable" {
+                        "file_batch_confirmation_unavailable"
+                    } else {
+                        "file_batch_confirmation_denied"
+                    };
+                    results[item.index] = operation_error_envelope(
+                        item.index,
+                        &item.operation,
+                        "failed",
+                        batch_error(code, "batch mutation was not confirmed"),
+                    );
+                }
+            }
+            response["status"] = json!("rejected");
+            response["results"] = json!(results);
+            return finalize_batch(response, &config, started, &request);
+        }
+    }
+    if request.dry_run {
+        for item in &prepared {
+            let mut value = item.candidate.response.clone();
+            if value["status"] != "unchanged" {
+                value["status"] = json!("dry-run");
+            }
+            results[item.index] =
+                operation_envelope(item.index, &item.operation, "completed", value);
+        }
+        response["status"] = json!("dry-run");
+        response["results"] = json!(results);
+        return finalize_batch(response, &config, started, &request);
+    }
+    let mut commit_error = None::<Value>;
+    for item in prepared
+        .iter_mut()
+        .filter(|item| item.candidate.response["status"] != "unchanged")
+    {
+        if let Err(error) =
+            revalidate_target(&config, &item.candidate.target, item.candidate.existed)
+        {
+            commit_error = Some(error.value());
+            break;
+        }
+        if item.candidate.existed {
+            match fs::read(&item.candidate.target.path) {
+                Ok(bytes) if Some(revision(&bytes)) == item.candidate.before_revision => {}
+                _ => {
+                    commit_error = Some(batch_error(
+                        "file_revision_conflict",
+                        "target changed before batch commit",
+                    ));
+                    break;
+                }
+            }
+        } else if fs::symlink_metadata(&item.candidate.target.requested).is_ok() {
+            commit_error = Some(batch_error(
+                "file_already_exists",
+                "target appeared before batch commit",
+            ));
+            break;
+        }
+        let temp = match item.temp.take() {
+            Some(temp) => temp,
+            None => {
+                commit_error = Some(batch_error(
+                    "file_batch_commit_failed",
+                    "batch staging file is missing",
+                ));
+                break;
+            }
+        };
+        let result = if item.candidate.existed {
+            fs::rename(&temp, &item.candidate.target.path)
+        } else {
+            match fs::hard_link(&temp, &item.candidate.target.requested) {
+                Ok(()) => fs::remove_file(&temp),
+                Err(error) => Err(error),
+            }
+        };
+        if let Err(error) = result {
+            let _ = fs::remove_file(&temp);
+            commit_error = Some(batch_error(
+                "file_batch_commit_failed",
+                &format!("atomic batch commit failed: {error}"),
+            ));
+            break;
+        }
+        sync_parent(&item.candidate.target.path);
+        item.committed = true;
+    }
+    if let Some(error) = commit_error {
+        let mut rollback_failed = false;
+        for item in prepared.iter_mut().filter(|item| item.committed) {
+            let current_matches = fs::read(&item.candidate.target.path)
+                .ok()
+                .is_some_and(|bytes| revision(&bytes) == item.candidate.after_revision);
+            if !current_matches {
+                rollback_failed = true;
+                results[item.index] = operation_error_envelope(
+                    item.index,
+                    &item.operation,
+                    "rollback_failed",
+                    batch_error(
+                        "file_batch_rollback_failed",
+                        "target changed before rollback",
+                    ),
+                );
+                continue;
+            }
+            let restored = if item.candidate.existed {
+                match item.candidate.before_bytes.as_deref() {
+                    Some(bytes) => stage_temp(
+                        &item.candidate.target.path,
+                        bytes,
+                        item.candidate.before_mode.as_ref(),
+                    )
+                    .and_then(|temp| {
+                        fs::rename(temp, &item.candidate.target.path).map_err(|_| {
+                            FileError::new("file_batch_rollback_failed", "restore rename failed")
+                        })
+                    }),
+                    None => Err(FileError::new(
+                        "file_batch_rollback_failed",
+                        "original bytes are unavailable",
+                    )),
+                }
+            } else {
+                fs::remove_file(&item.candidate.target.requested).map_err(|_| {
+                    FileError::new(
+                        "file_batch_rollback_failed",
+                        "created target could not be removed",
+                    )
+                })
+            };
+            if restored.is_ok() {
+                results[item.index] = operation_error_envelope(
+                    item.index,
+                    &item.operation,
+                    "rolled_back",
+                    batch_error("file_batch_rejected", "batch commit rolled back"),
+                );
+            } else {
+                rollback_failed = true;
+                results[item.index] = operation_error_envelope(
+                    item.index,
+                    &item.operation,
+                    "rollback_failed",
+                    batch_error(
+                        "file_batch_rollback_failed",
+                        "rollback could not restore target",
+                    ),
+                );
+            }
+        }
+        for item in &prepared {
+            if !item.committed && results[item.index].is_null() {
+                results[item.index] = operation_error_envelope(
+                    item.index,
+                    &item.operation,
+                    "not_committed",
+                    error.clone(),
+                );
+            }
+        }
+        response["status"] = json!(if rollback_failed {
+            "partial_failed"
+        } else {
+            "rolled_back"
+        });
+    } else {
+        for item in &prepared {
+            if item.candidate.response["status"] == "unchanged" {
+                results[item.index] = operation_envelope(
+                    item.index,
+                    &item.operation,
+                    "completed",
+                    item.candidate.response.clone(),
+                );
+            } else {
+                results[item.index] = operation_envelope(
+                    item.index,
+                    &item.operation,
+                    "completed",
+                    item.candidate.response.clone(),
+                );
+            }
+        }
+        response["status"] = json!("completed");
+    }
+    for item in &prepared {
+        if let Some(temp) = &item.temp {
+            let _ = fs::remove_file(temp);
+        }
+    }
+    response["results"] = json!(results);
+    finalize_batch(response, &config, started, &request)
+}
+
+fn finalize_batch(
+    mut response: Value,
+    config: &Config,
+    started: std::time::Instant,
+    request: &BatchRequest,
+) -> Value {
+    response["updatedAt"] = json!(Utc::now());
+    if !request.dry_run {
+        if let Some(results) = response["results"].as_array() {
+            for (index, operation) in request.operations.iter().enumerate() {
+                if operation.kind != "edit" {
+                    continue;
+                }
+                let value = results
+                    .get(index)
+                    .cloned()
+                    .unwrap_or_else(|| json!({"status":"failed"}));
+                let payload = value.get("result").cloned().unwrap_or_default();
+                let mode = operation.edit_mode.as_deref().map(|mode| mode.to_string());
+                let changed_lines = payload.get("changedLines").and_then(|lines| {
+                    Some(ChangedLines {
+                        added: lines.get("added")?.as_u64()? as usize,
+                        removed: lines.get("removed")?.as_u64()? as usize,
+                    })
+                });
+                let _ = write_file_audit(
+                    config,
+                    FileAuditRecord {
+                        time: Utc::now(),
+                        tool: "file.edit".to_string(),
+                        action: "batch-edit".to_string(),
+                        path: payload
+                            .get("resolvedPath")
+                            .and_then(Value::as_str)
+                            .unwrap_or(&operation.path)
+                            .to_string(),
+                        mode,
+                        requested_confirmation: request.need_confirm,
+                        confirmation_result: response["confirmation"]["result"]
+                            .as_str()
+                            .map(str::to_string),
+                        before_revision: payload
+                            .get("beforeRevision")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                        after_revision: payload
+                            .get("afterRevision")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                        outcome: value
+                            .get("status")
+                            .and_then(Value::as_str)
+                            .unwrap_or("failed")
+                            .to_string(),
+                        error_code: value
+                            .get("error")
+                            .and_then(|error| error.get("code"))
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                        duration_ms: started.elapsed().as_millis(),
+                        replacement_count: payload
+                            .get("replacementCount")
+                            .and_then(Value::as_u64)
+                            .map(|value| value as usize),
+                        changed_lines,
+                    },
+                );
+            }
+        }
+    }
+    let status = response["status"]
+        .as_str()
+        .unwrap_or("rejected")
+        .to_string();
+    let batch_id = response["batchId"]
+        .as_str()
+        .unwrap_or("file_batch_unknown")
+        .to_string();
+    let truncated = response["truncated"].as_bool().unwrap_or(false);
+    let audit_status = if write_batch_audit(
+        config,
+        BatchAuditRecord {
+            time: Utc::now(),
+            tool: "file.batch".to_string(),
+            action: "batch".to_string(),
+            batch_id,
+            operation_count: request.operations.len(),
+            edit_count: request
+                .operations
+                .iter()
+                .filter(|operation| operation.kind == "edit")
+                .count(),
+            confirmation_result: response["confirmation"]["result"]
+                .as_str()
+                .map(str::to_string),
+            outcome: status,
+            duration_ms: started.elapsed().as_millis(),
+            truncated,
+        },
+    )
+    .is_ok()
+    {
+        "written"
+    } else {
+        "failed"
+    };
+    response["auditStatus"] = json!(audit_status);
+    truncate_batch_response(response)
+}
+
+fn truncate_batch_response(mut response: Value) -> Value {
+    let mut bytes = serde_json::to_vec(&response).unwrap_or_default();
+    if bytes.len() <= MAX_BATCH_OUTPUT_BYTES {
+        return response;
+    }
+    response["truncated"] = json!(true);
+    response["truncationReason"] = json!("output_bytes");
+    let result_count = response["results"].as_array().map_or(0, Vec::len);
+    for index in 0..result_count {
+        if let Some(result) = response["results"].get_mut(index) {
+            if let Some(payload) = result.get_mut("result").and_then(Value::as_object_mut) {
+                payload.remove("content");
+                payload.remove("matches");
+                payload.remove("diff");
+                payload.insert("resultTruncated".to_string(), json!(true));
+            }
+            bytes = serde_json::to_vec(&response).unwrap_or_default();
+            if bytes.len() <= MAX_BATCH_OUTPUT_BYTES {
+                break;
+            }
+        }
+    }
+    if bytes.len() > MAX_BATCH_OUTPUT_BYTES {
+        response["results"] = response["results"].as_array().map(|results| {
+            Value::Array(results.iter().map(|result| {
+                let mut compact = json!({"index": result["index"], "type": result["type"], "status": result["status"]});
+                if result.get("id").is_some() { compact["id"] = result["id"].clone(); }
+                if result.get("error").is_some() { compact["error"] = result["error"].clone(); }
+                compact
+            }).collect())
+        }).unwrap_or_else(|| json!([]));
+    }
+    response
 }
 
 fn edit_mode_label(mode: EditMode) -> &'static str {
