@@ -34,7 +34,13 @@ pub(crate) async fn collect(state: &AppState) -> Value {
     let ntfy_available = match state.runtime.transport {
         Transport::Hub => hub_sender,
         Transport::TunnelStdio => reporting_sender,
+        Transport::LocalUnix => false,
     };
+    let local_mcp_enabled = matches!(
+        state.runtime.transport,
+        Transport::TunnelStdio | Transport::LocalUnix
+    );
+    let local_mcp = crate::local_control::status(&config.agent_id, local_mcp_enabled);
     let config_health = config_health(state, &config);
     let mcp_config_revision = crate::mcp::server_config_revision(&config.mcp_servers);
     let mcp_enabled_count = config
@@ -144,6 +150,7 @@ pub(crate) async fn collect(state: &AppState) -> Value {
                 "enabled": state.runtime.hub_mode != HubMode::Disabled,
                 "status": reporting_status(state.runtime, hub_sender, reporting_sender),
             },
+            "localMcp": local_mcp,
         },
         "mcp": {
             "configRevision": mcp_config_revision,

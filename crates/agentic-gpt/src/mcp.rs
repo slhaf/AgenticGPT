@@ -167,7 +167,11 @@ pub(crate) async fn list_tools(state: &AppState, payload: McpListToolsRequest) -
     Ok(json!({ "tools": tools }))
 }
 
-pub(crate) async fn call_tool(state: &AppState, payload: McpCallToolRequest) -> Result<Value> {
+pub(crate) async fn call_tool(
+    state: &AppState,
+    payload: McpCallToolRequest,
+    request_source: &str,
+) -> Result<Value> {
     let started = Instant::now();
     let config = state.config.read().await.clone();
     let server = match server_config(state, &payload.server_id).await {
@@ -176,6 +180,7 @@ pub(crate) async fn call_tool(state: &AppState, payload: McpCallToolRequest) -> 
             audit_mcp_call(
                 &config,
                 &payload,
+                request_source,
                 "Deny",
                 None,
                 None,
@@ -197,6 +202,7 @@ pub(crate) async fn call_tool(state: &AppState, payload: McpCallToolRequest) -> 
         audit_mcp_call(
             &config,
             &payload,
+            request_source,
             "Confirm",
             Some(authorization.clone()),
             None,
@@ -212,6 +218,7 @@ pub(crate) async fn call_tool(state: &AppState, payload: McpCallToolRequest) -> 
             audit_mcp_call(
                 &config,
                 &payload,
+                request_source,
                 "Deny",
                 Some(authorization),
                 None,
@@ -227,6 +234,7 @@ pub(crate) async fn call_tool(state: &AppState, payload: McpCallToolRequest) -> 
             audit_mcp_call(
                 &config,
                 &payload,
+                request_source,
                 "Confirm",
                 Some(authorization),
                 None,
@@ -246,6 +254,7 @@ pub(crate) async fn call_tool(state: &AppState, payload: McpCallToolRequest) -> 
             audit_mcp_call(
                 &config,
                 &payload,
+                request_source,
                 if authorization == "temporary_mcp_allow" {
                     "AllowTemporary"
                 } else {
@@ -262,6 +271,7 @@ pub(crate) async fn call_tool(state: &AppState, payload: McpCallToolRequest) -> 
             audit_mcp_call(
                 &config,
                 &payload,
+                request_source,
                 "Confirm",
                 Some(authorization),
                 None,
@@ -283,6 +293,7 @@ fn mcp_authorization_allows(value: &str) -> bool {
 fn audit_mcp_call(
     config: &Config,
     payload: &McpCallToolRequest,
+    request_source: &str,
     policy_decision: &str,
     confirmation_result: Option<String>,
     exit_code: Option<i32>,
@@ -311,7 +322,7 @@ fn audit_mcp_call(
             exit_code,
             duration_ms,
             truncated,
-            request_source: "hub:mcp".to_string(),
+            request_source: request_source.to_string(),
             reject_reason,
             skill_id: None,
             skill_path: None,

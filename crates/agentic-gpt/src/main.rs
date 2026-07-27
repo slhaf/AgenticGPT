@@ -8,6 +8,7 @@ mod exec;
 mod file_ops;
 mod hub;
 mod instance_lock;
+mod local_control;
 mod local_service;
 mod mcp;
 mod notebook;
@@ -29,9 +30,11 @@ use clap::{Parser, Subcommand};
 use config::{normalize_confirmation_language, write_config_with_backup, Config, ReportingDetail};
 use mcp::McpConfigCommand;
 use policy::PolicyDecision;
+use serde_json::{Map, Value};
 use state::{AppState, CapabilityProfile, RuntimeModel};
 use std::collections::HashMap;
 use std::fs;
+use std::io::Read;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
@@ -61,6 +64,18 @@ enum Commands {
         config: Option<PathBuf>,
         #[arg(long, value_enum, default_value_t = WorkerProfile::Normal)]
         profile: WorkerProfile,
+    },
+    RunAsLocal {
+        #[arg(long)]
+        config: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = WorkerProfile::Normal)]
+        profile: WorkerProfile,
+    },
+    Local {
+        #[arg(long, global = true)]
+        config: Option<PathBuf>,
+        #[command(subcommand)]
+        command: LocalCommand,
     },
     #[command(name = "stdio-worker", hide = true)]
     StdioWorker {
@@ -98,6 +113,18 @@ impl WorkerProfile {
             Self::Room => CapabilityProfile::Room,
         }
     }
+}
+
+#[derive(Subcommand)]
+enum LocalCommand {
+    ListTools,
+    Call {
+        tool: String,
+        #[arg(long, conflicts_with = "arguments_file")]
+        arguments: Option<String>,
+        #[arg(long, value_name = "PATH|-", conflicts_with = "arguments")]
+        arguments_file: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -210,6 +237,10 @@ async fn main() -> Result<()> {
         Commands::RunAsStandalone { config, profile } => {
             supervisor::run(config_path(config), profile.capability_profile()).await
         }
+        Commands::RunAsLocal { config, profile } => {
+            run_as_local(config_path(config), profile.capability_profile()).await
+        }
+        Commands::Local { config, command } => handle_local(config_path(config), command).await,
         Commands::StdioWorker {
             config,
             profile,
@@ -251,26 +282,7 @@ async fn run(config_path: PathBuf, runtime: RuntimeModel) -> Result<()> {
         },
         initial.limits.max_active_sessions.resolve().diagnostic()
     ));
-    let max_concurrent_skill_installs = initial.skills.max_concurrent_installs;
-    let state = AppState {
-        config_path: config_path.clone(),
-        config: Arc::new(RwLock::new(initial)),
-        runtime,
-        started_at: chrono::Utc::now(),
-        supervised: false,
-        file_locks: Arc::new(Mutex::new(HashMap::new())),
-        sessions: Arc::new(Mutex::new(HashMap::new())),
-        hub_sender: Arc::new(Mutex::new(None)),
-        reporting_sender: Arc::new(Mutex::new(None)),
-        pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
-        temporary_mcp_allows: Arc::new(Mutex::new(Vec::new())),
-        notebook_writes: Arc::new(Mutex::new(())),
-        skills_writes: Arc::new(Mutex::new(())),
-        skill_leases: Arc::new(sessions::SkillLeaseManager::new()),
-        skill_installs: Arc::new(skill_installs::InstallManager::with_concurrency(
-            max_concurrent_skill_installs,
-        )),
-    };
+    let state = build_app_state(config_path.clone(), initial, runtime, false);
     state.skill_installs.recover(state.clone()).await?;
     tokio::spawn(watch_config(state.clone()));
     hub::connect_loop(state).await
@@ -296,16 +308,59 @@ async fn run_stdio_worker(
         config.path_policy.read_only_roots.len(),
         config.path_policy.deny_roots.len(),
     ));
-    let max_concurrent_skill_installs = config.skills.max_concurrent_installs;
     let reporting_enabled = config
         .tunnel
         .as_ref()
         .map(|tunnel| tunnel.hub_reporting.enabled)
         .unwrap_or(false);
-    let state = AppState {
+    let agent_id = config.agent_id.clone();
+    let state = build_app_state(
+        config_path,
+        config,
+        RuntimeModel::tunnel(profile, reporting_enabled),
+        supervised,
+    );
+    state.skill_installs.recover(state.clone()).await?;
+    tokio::spawn(watch_standalone_live_config(state.clone(), supervised));
+    if reporting_enabled {
+        tokio::spawn(hub::connect_loop(state.clone()));
+    }
+    let listener = local_control::bind(&agent_id).await?;
+    log_info(format!(
+        "local MCP ingress ready; transport=unix; path={}",
+        listener.path().display()
+    ));
+    let mut local_task = tokio::spawn(listener.serve(state.clone()));
+    let stdio = stdio_server::serve_stdio(state);
+    tokio::pin!(stdio);
+    tokio::select! {
+        result = &mut stdio => {
+            local_task.abort();
+            let _ = local_task.await;
+            result
+        }
+        result = &mut local_task => {
+            match result {
+                Ok(result) => result,
+                Err(_) => Err(anyhow!("local_mcp_listener_task_failed")),
+            }
+        }
+    }
+}
+
+const MAX_LOCAL_ARGUMENT_BYTES: usize = 2 * 1024 * 1024;
+
+fn build_app_state(
+    config_path: PathBuf,
+    config: Config,
+    runtime: RuntimeModel,
+    supervised: bool,
+) -> AppState {
+    let max_concurrent_skill_installs = config.skills.max_concurrent_installs;
+    AppState {
         config_path,
         config: Arc::new(RwLock::new(config)),
-        runtime: RuntimeModel::tunnel(profile, reporting_enabled),
+        runtime,
         started_at: chrono::Utc::now(),
         supervised,
         file_locks: Arc::new(Mutex::new(HashMap::new())),
@@ -320,13 +375,112 @@ async fn run_stdio_worker(
         skill_installs: Arc::new(skill_installs::InstallManager::with_concurrency(
             max_concurrent_skill_installs,
         )),
-    };
-    state.skill_installs.recover(state.clone()).await?;
-    tokio::spawn(watch_standalone_live_config(state.clone(), supervised));
-    if reporting_enabled {
-        tokio::spawn(hub::connect_loop(state.clone()));
     }
-    stdio_server::serve(state).await
+}
+
+async fn run_as_local(config_path: PathBuf, profile: CapabilityProfile) -> Result<()> {
+    log_info(format!(
+        "local agent starting; profile={}; config={}",
+        profile.label(),
+        config_path.display()
+    ));
+    ensure_parent(&config_path)?;
+    let _instance_lock = instance_lock::InstanceLock::acquire(&config_path, ".run.lock", "agent")?;
+    if !config_path.exists() {
+        write_config_with_backup(&config_path, &Config::default_config()?)?;
+        log_info("default config created".to_string());
+    }
+    let config = Config::load(&config_path)?;
+    config.validate_local()?;
+    config.ensure_workspace()?;
+    if let Err(error) = tmux::ensure_default_session(&config.workspace_root).await {
+        log_warn(format!("default tmux session unavailable: {error}"));
+    }
+    let agent_id = config.agent_id.clone();
+    let state = build_app_state(config_path, config, RuntimeModel::local(profile), false);
+    state.skill_installs.recover(state.clone()).await?;
+    tokio::spawn(watch_standalone_live_config(state.clone(), false));
+    let listener = local_control::bind(&agent_id).await?;
+    log_info(format!(
+        "local MCP ingress ready; transport=unix; path={}",
+        listener.path().display()
+    ));
+    let mut local_task = tokio::spawn(listener.serve(state));
+    tokio::select! {
+        result = &mut local_task => match result {
+            Ok(result) => result,
+            Err(_) => Err(anyhow!("local_mcp_listener_task_failed")),
+        },
+        signal = wait_for_local_shutdown_signal() => {
+            signal?;
+            local_task.abort();
+            let _ = local_task.await;
+            Ok(())
+        }
+    }
+}
+
+async fn wait_for_local_shutdown_signal() -> Result<()> {
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .map_err(|_| anyhow!("local_shutdown_signal_failed"))?;
+    tokio::select! {
+        signal = tokio::signal::ctrl_c() => {
+            signal.map_err(|_| anyhow!("local_shutdown_signal_failed"))
+        }
+        _ = terminate.recv() => Ok(()),
+    }
+}
+
+async fn handle_local(config_path: PathBuf, command: LocalCommand) -> Result<()> {
+    let value = match command {
+        LocalCommand::ListTools => local_control::list_tools(&config_path).await?,
+        LocalCommand::Call {
+            tool,
+            arguments,
+            arguments_file,
+        } => {
+            let arguments = read_local_arguments(arguments, arguments_file)?;
+            local_control::call_tool(&config_path, tool, arguments).await?
+        }
+    };
+    println!("{}", serde_json::to_string_pretty(&value)?);
+    Ok(())
+}
+
+fn read_local_arguments(
+    inline: Option<String>,
+    arguments_file: Option<String>,
+) -> Result<Map<String, Value>> {
+    let bytes = if let Some(inline) = inline {
+        let bytes = inline.into_bytes();
+        if bytes.len() > MAX_LOCAL_ARGUMENT_BYTES {
+            return Err(anyhow!("local_arguments_too_large"));
+        }
+        bytes
+    } else if let Some(source) = arguments_file {
+        let reader: Box<dyn Read> = if source == "-" {
+            Box::new(std::io::stdin())
+        } else {
+            Box::new(fs::File::open(source).map_err(|_| anyhow!("local_arguments_unavailable"))?)
+        };
+        let mut bytes = Vec::new();
+        reader
+            .take((MAX_LOCAL_ARGUMENT_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|_| anyhow!("local_arguments_unavailable"))?;
+        if bytes.len() > MAX_LOCAL_ARGUMENT_BYTES {
+            return Err(anyhow!("local_arguments_too_large"));
+        }
+        bytes
+    } else {
+        b"{}".to_vec()
+    };
+    let value: Value =
+        serde_json::from_slice(&bytes).map_err(|_| anyhow!("local_arguments_invalid_json"))?;
+    value
+        .as_object()
+        .cloned()
+        .ok_or_else(|| anyhow!("local_arguments_must_be_object"))
 }
 
 async fn handle_tmux(config_path: PathBuf, command: TmuxCommand) -> Result<()> {
@@ -582,7 +736,11 @@ async fn reload_standalone_live_config_once(
     state: &AppState,
 ) -> Result<config::ResolvedMaxActiveSessions> {
     let candidate = Config::load(&state.config_path)?;
-    candidate.validate_standalone()?;
+    match state.runtime.transport {
+        crate::state::Transport::TunnelStdio => candidate.validate_standalone()?,
+        crate::state::Transport::LocalUnix => candidate.validate_local()?,
+        crate::state::Transport::Hub => candidate.validate_mcp_servers()?,
+    }
     let mut live = state.config.write().await;
     Ok(apply_standalone_live_subset(&mut live, candidate))
 }
@@ -680,6 +838,65 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn local_cli_accepts_config_before_or_after_subcommand() {
+        for args in [
+            vec![
+                "agentic-gpt",
+                "local",
+                "--config",
+                "/tmp/local.json",
+                "list-tools",
+            ],
+            vec![
+                "agentic-gpt",
+                "local",
+                "list-tools",
+                "--config",
+                "/tmp/local.json",
+            ],
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            assert!(matches!(
+                cli.command,
+                Commands::Local {
+                    config: Some(ref path),
+                    command: LocalCommand::ListTools,
+                } if path == &PathBuf::from("/tmp/local.json")
+            ));
+        }
+    }
+
+    #[test]
+    fn local_arguments_are_bounded_objects_from_inline_or_file() {
+        assert!(read_local_arguments(None, None).unwrap().is_empty());
+        let inline = read_local_arguments(Some(r#"{"value":"ok"}"#.to_string()), None).unwrap();
+        assert_eq!(inline["value"], "ok");
+
+        let root = unique_temp_dir("local-arguments");
+        let path = root.join("args.json");
+        fs::write(&path, br#"{"fromFile":true}"#).unwrap();
+        let from_file =
+            read_local_arguments(None, Some(path.to_string_lossy().into_owned())).unwrap();
+        assert_eq!(from_file["fromFile"], true);
+
+        assert!(read_local_arguments(Some("[]".to_string()), None)
+            .unwrap_err()
+            .to_string()
+            .starts_with("local_arguments_must_be_object"));
+        assert!(read_local_arguments(Some("{".to_string()), None)
+            .unwrap_err()
+            .to_string()
+            .starts_with("local_arguments_invalid_json"));
+        assert!(
+            read_local_arguments(Some("x".repeat(MAX_LOCAL_ARGUMENT_BYTES + 1)), None)
+                .unwrap_err()
+                .to_string()
+                .starts_with("local_arguments_too_large")
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

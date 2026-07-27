@@ -81,12 +81,14 @@ async fn dispatch_inner(state: AppState, command: HubCommand) -> Result<serde_js
                 "error": { "code": "mcp_list_tools_failed", "message": error.to_string() }
             })),
         },
-        HubCommand::McpCallTool { payload, .. } => match mcp::call_tool(&state, payload).await {
-            Ok(result) => Ok(result),
-            Err(error) => Ok(serde_json::json!({
-                "error": { "code": "mcp_call_tool_failed", "message": error.to_string() }
-            })),
-        },
+        HubCommand::McpCallTool { payload, .. } => {
+            match mcp::call_tool(&state, payload, "hub:mcp").await {
+                Ok(result) => Ok(result),
+                Err(error) => Ok(serde_json::json!({
+                    "error": { "code": "mcp_call_tool_failed", "message": error.to_string() }
+                })),
+            }
+        }
         HubCommand::UserNotifyDeliver { payload, .. } => {
             if !state.runtime.capabilities().notifications {
                 return Ok(capability_error("user.notify.deliver"));

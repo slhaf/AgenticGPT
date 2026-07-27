@@ -645,8 +645,12 @@ impl Config {
         crate::mcp::validate_server_configs(&self.mcp_servers)
     }
 
+    pub(crate) fn validate_local(&self) -> Result<()> {
+        self.validate_mcp_servers()
+    }
+
     pub(crate) fn validate_standalone(&self) -> Result<()> {
-        self.validate_mcp_servers()?;
+        self.validate_local()?;
         let tunnel = self
             .tunnel
             .as_ref()

@@ -116,10 +116,14 @@ OAuth discovery and token exchange are implemented by the Hub OAuth shim.
 For a direct Secure MCP Tunnel deployment, configure `tunnel.tunnelId` and a
 secret reference (`file:PATH` or `env:NAME`), then run
 `agentic-gpt run-as-standalone`. Use `--profile room` for the Room surface.
-The Tunnel worker exposes a compact 23-tool Normal surface or a 35-tool Room
-surface; it supplies its local identity internally and rejects legacy
-`agentId`/`confirmMethod` inputs. The complete topology, tool matrix, pinned
-client assets, reporting privacy modes, and recovery procedure are in
+The same worker also exposes an owner-only Unix MCP socket for local
+integration. For development without tunnel credentials, run
+`agentic-gpt run-as-local`, then use `agentic-gpt local list-tools` or
+`agentic-gpt local call <tool>` with the same config. Both ingress paths expose
+the same compact 23-tool Normal surface or 35-tool Room surface and share
+policy, confirmation, audit, config, and managed execution state. The complete
+topology, local CLI contract, tool matrix, pinned client assets, reporting
+privacy modes, and recovery procedure are in
 [`docs/standalone-runtime.md`](docs/standalone-runtime.md).
 
 Room skills are exposed without an input `agentId`: use `skills.install` and poll `skills.install.get` (or the matching `/v1/room/skills/*` Actions routes), then use `skills.run` for executable files beneath an active skill's `scripts/` directory. Installation starts asynchronously for Apps-compatible bounded requests; terminal status includes redacted source provenance and `pollAfterMs` guidance.

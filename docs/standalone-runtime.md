@@ -1,9 +1,9 @@
-# Standalone Tunnel runtime
+# Standalone and local MCP runtimes
 
-Agentic has two ways to expose a local machine to ChatGPT. The existing Hub
-runtime keeps the Hub in the command path. The standalone runtime puts the
-official OpenAI `tunnel-client` in front of an Agentic stdio MCP worker; the
-Hub is optional and, when enabled, is reporting-only.
+Agentic has three runtime shapes. Hub mode keeps the Hub in the command path.
+Standalone mode puts the official OpenAI `tunnel-client` in front of an Agentic
+worker and may use the Hub only for reporting. Local integration mode serves
+the same Agent surface over a private Unix socket without tunnel credentials.
 
 ## Runtime topology
 
@@ -12,34 +12,79 @@ Hub mode:
 ChatGPT -> HTTPS Hub -> WebSocket/SSE -> agentic-gpt -> local policy/services
 
 Standalone mode:
-Secure MCP Tunnel -> tunnel-client -> agentic-gpt stdio-worker
+Secure MCP Tunnel -> tunnel-client -> agentic-gpt worker
+                                      |-> stdio MCP ingress
+                                      |-> owner-only Unix MCP ingress
                                       \-> optional reporting-only Hub connection
+
+Local integration mode:
+local rmcp CLI/client -> owner-only Unix socket -> agentic-gpt worker
 ```
 
-The public entrypoint is `agentic-gpt run-as-standalone`. Agentic resolves and
+The tunnel entrypoint is `agentic-gpt run-as-standalone`. Agentic resolves and
 verifies the tunnel client, runs its `doctor --json` preflight, creates the
 worker command, supervises the tunnel/worker process tree, and keeps the
-worker's stdout reserved for MCP framing. Do not start the hidden
+worker's stdout reserved for MCP framing. That same worker also publishes an
+owner-only Unix MCP socket for local integration. Do not start the hidden
 `stdio-worker` command directly.
 
-### Four public runtime mappings
+For development without tunnel configuration or Hub reporting, use
+`agentic-gpt run-as-local`. It loads the same Normal/Room capability profile,
+policy, path policy, confirmation, audit, live config, and managed execution
+state, but serves only the Unix MCP ingress.
+
+### Six public runtime mappings
 
 | Command | Command transport | Capability profile | Hub connection |
 | --- | --- | --- | --- |
 | `agentic-gpt run` | Hub | Normal | command-capable |
 | `agentic-gpt run-as-room` | Hub | Room | command-capable |
-| `agentic-gpt run-as-standalone` | Tunnel stdio | Normal | disabled by default; reporting-only when enabled |
-| `agentic-gpt run-as-standalone --profile room` | Tunnel stdio | Room | disabled by default; reporting-only when enabled |
+| `agentic-gpt run-as-standalone` | Tunnel stdio + local Unix MCP | Normal | disabled by default; reporting-only when enabled |
+| `agentic-gpt run-as-standalone --profile room` | Tunnel stdio + local Unix MCP | Room | disabled by default; reporting-only when enabled |
+| `agentic-gpt run-as-local` | Local Unix MCP | Normal | disabled |
+| `agentic-gpt run-as-local --profile room` | Local Unix MCP | Room | disabled |
 
-Transport does not change local policy. Tunnel Normal and Tunnel Room use the
-same policy boundaries as their corresponding local profiles; Room adds diary
-and notebook, while Normal does not.
+Transport does not change local policy. Tunnel and local Unix ingress use the
+same policy boundaries for a profile; Room adds diary and notebook, while
+Normal does not. Calls entering one worker share the same live config,
+confirmation state, audit, capacity, and managed execution registry.
 
-## Tunnel tool surfaces
+## Local Unix MCP control channel
 
-Tunnel Normal advertises exactly 23 MCP tools. Start with `agent.info` to
-inspect the active profile, bounded path policy, capacity, confirmation
-availability, and reporting state:
+The socket path is derived from the configured identity:
+
+```text
+~/.agentic_gpt/runtime/agent/<agentId>/mcp.sock
+```
+
+The runtime directory is mode `0700`, the socket is mode `0600`, and accepted
+connections must report the same local UID. Agentic never opens a TCP debug
+port. Startup rejects an active socket, safely removes only a proven stale
+owned socket, and uses the existing per-config `.run.lock`, so tunnel-backed
+and local-only runtimes cannot own the same configuration simultaneously.
+`agent.info.connections.localMcp` reports `ready`/`unavailable` and the exact
+socket path.
+
+Use the built-in real rmcp client to inspect or call the running surface:
+
+```bash
+agentic-gpt local list-tools --config ~/.agentic_gpt/config.json
+agentic-gpt local call agent.info --config ~/.agentic_gpt/config.json --arguments '{}'
+printf '%s' '{"path":"README.md"}' | \
+  agentic-gpt local call file.read --config ~/.agentic_gpt/config.json \
+  --arguments-file -
+```
+
+`--arguments` and `--arguments-file PATH|-` accept one JSON object, capped at
+2 MiB. Structured MCP results are written to stdout; logs and typed connection
+errors are written to stderr. A stopped/restarting runtime returns
+`local_mcp_unavailable`; clients may reconnect but must not replay side effects.
+
+## Tunnel and local tool surfaces
+
+Normal advertises exactly 23 MCP tools through either tunnel stdio or local
+Unix MCP. Start with `agent.info` to inspect the active profile, bounded path
+policy, capacity, confirmation availability, and reporting state:
 
 ```text
 mcp.list, mcp.callTool
@@ -50,8 +95,8 @@ tmux.sessions, tmux.panes, tmux.exec, tmux.pasteText
 agent.info, file.read, file.search, file.edit, file.batch
 ```
 
-Tunnel Room advertises exactly 35 tools: the 23 Normal tools, `bootstrap` and
-`bootstrap.read`, plus these ten Room memory tools:
+Room advertises exactly 35 tools through either ingress: the 23 Normal tools,
+`bootstrap` and `bootstrap.read`, plus these ten Room memory tools:
 
 ```text
 room.diary.append, room.diary.recent, room.diary.selectExact

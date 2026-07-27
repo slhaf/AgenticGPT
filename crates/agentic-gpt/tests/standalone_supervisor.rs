@@ -220,10 +220,10 @@ fn run_smoke(
         assert!(info_line.starts_with("INFO tunnel.stdout: child-info"));
         let worker_info = supervisor_stderr
             .lines()
-            .find(|line| line.contains("INFO tunnel.stderr: stdio_tool;"))
+            .find(|line| line.contains("INFO tunnel.stderr: mcp_tool; ingress=tunnel:stdio;"))
             .ok_or("journal hidden-worker INFO line missing")?;
-        assert!(worker_info.starts_with("INFO tunnel.stderr: stdio_tool;"));
-        assert!(!supervisor_stderr.contains("WARN tunnel.stderr: INFO stdio_tool;"));
+        assert!(worker_info.starts_with("INFO tunnel.stderr: mcp_tool; ingress=tunnel:stdio;"));
+        assert!(!supervisor_stderr.contains("WARN tunnel.stderr: INFO mcp_tool;"));
     }
     if invalid_config_probe {
         assert_eq!(
@@ -267,6 +267,8 @@ fn run_live_reload(root: &Path) -> Result<(), String> {
     let mut config: Value =
         serde_json::from_str(&fs::read_to_string(&config_path).map_err(|error| error.to_string())?)
             .map_err(|error| error.to_string())?;
+    let agent_id = format!("live-reload-e2e-{}", Uuid::new_v4().simple());
+    config["agentId"] = Value::String(agent_id.clone());
     config["workspaceRoot"] = Value::String(workspace.to_string_lossy().into_owned());
     config["pathPolicy"]["writeRoots"] =
         json!([workspace.to_string_lossy(), path_root.to_string_lossy()]);
@@ -341,6 +343,52 @@ fn run_live_reload(root: &Path) -> Result<(), String> {
             "params": {}
         }),
     )?;
+
+    let socket_path = local_socket_path(&agent_id)?;
+    wait_for_unix_socket(&socket_path, Duration::from_secs(5))?;
+    let local_tools = Command::new(&binary)
+        .args(["local", "list-tools", "--config"])
+        .arg(&config_path)
+        .output()
+        .map_err(|error| format!("local peer list-tools failed to spawn: {error}"))?;
+    if !local_tools.status.success() {
+        return Err(format!(
+            "local peer list-tools failed: {}",
+            String::from_utf8_lossy(&local_tools.stderr)
+        ));
+    }
+    let local_tools: Value =
+        serde_json::from_slice(&local_tools.stdout).map_err(|error| error.to_string())?;
+    let local_tools = local_tools
+        .as_array()
+        .ok_or("local peer tool list is not an array")?;
+    assert_eq!(local_tools.len(), 23);
+    assert!(local_tools
+        .iter()
+        .all(|tool| tool["_meta"]["surface"] == "agent-local"));
+
+    let local_info = Command::new(&binary)
+        .args(["local", "call", "agent.info", "--config"])
+        .arg(&config_path)
+        .args(["--arguments", "{}"])
+        .output()
+        .map_err(|error| format!("local peer agent.info failed to spawn: {error}"))?;
+    if !local_info.status.success() {
+        return Err(format!(
+            "local peer agent.info failed: {}",
+            String::from_utf8_lossy(&local_info.stderr)
+        ));
+    }
+    let local_info: Value =
+        serde_json::from_slice(&local_info.stdout).map_err(|error| error.to_string())?;
+    assert_eq!(
+        local_info["structuredContent"]["identity"]["transport"],
+        "tunnel-stdio"
+    );
+    assert_eq!(
+        local_info["structuredContent"]["connections"]["localMcp"]["status"],
+        "ready"
+    );
 
     let baseline_mcp = call_tool(&mut stdin, &mut stdout, 20, "mcp.list", json!({}))?;
     let baseline_servers = baseline_mcp["result"]["structuredContent"]["servers"]
@@ -537,8 +585,8 @@ fn run_live_reload(root: &Path) -> Result<(), String> {
         json!({ "sessionId": active_session_id }),
     )?;
     drop(stdin);
-    let _ = worker.kill();
-    let _ = worker.wait();
+    stop_child_gracefully(&mut worker, Duration::from_secs(5));
+    wait_for_path_absent(&socket_path, Duration::from_secs(2))?;
     let mut human_logs = String::new();
     stderr
         .read_to_string(&mut human_logs)
@@ -716,6 +764,57 @@ fn respond_health(stream: &mut TcpStream) {
     let _ = stream.read(&mut request);
     let response = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
     let _ = stream.write_all(response);
+}
+
+fn local_socket_path(agent_id: &str) -> Result<PathBuf, String> {
+    let home = std::env::var_os("HOME").ok_or("HOME is unavailable")?;
+    Ok(PathBuf::from(home)
+        .join(".agentic_gpt/runtime/agent")
+        .join(agent_id)
+        .join("mcp.sock"))
+}
+
+fn wait_for_unix_socket(path: &Path, duration: Duration) -> Result<(), String> {
+    let deadline = Instant::now() + duration;
+    while Instant::now() < deadline {
+        if fs::symlink_metadata(path)
+            .map(|metadata| std::os::unix::fs::FileTypeExt::is_socket(&metadata.file_type()))
+            .unwrap_or(false)
+        {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    Err(format!(
+        "timed out waiting for Unix MCP socket: {}",
+        path.display()
+    ))
+}
+
+fn wait_for_path_absent(path: &Path, duration: Duration) -> Result<(), String> {
+    let deadline = Instant::now() + duration;
+    while Instant::now() < deadline {
+        if !path.exists() {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    Err(format!(
+        "runtime path survived shutdown: {}",
+        path.display()
+    ))
+}
+
+fn stop_child_gracefully(child: &mut Child, duration: Duration) {
+    let deadline = Instant::now() + duration;
+    while Instant::now() < deadline {
+        if child.try_wait().ok().flatten().is_some() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 fn wait_for_marker(supervisor: &mut Child, marker: &Path) -> Result<(), String> {

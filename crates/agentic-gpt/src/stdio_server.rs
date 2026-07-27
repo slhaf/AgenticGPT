@@ -68,17 +68,41 @@ const ROOM_ONLY_TOOLS: &[&str] = &[
     "room.notebook.update",
 ];
 
-pub(crate) async fn serve(state: AppState) -> Result<()> {
-    let server = StdioMcpServer::new(state);
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RequestIngress {
+    TunnelStdio,
+    LocalUnix,
+}
+
+impl RequestIngress {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::TunnelStdio => "tunnel:stdio",
+            Self::LocalUnix => "local:unix",
+        }
+    }
+
+    fn source(self, tool: &str) -> String {
+        let prefix = match self {
+            Self::TunnelStdio => "tunnel",
+            Self::LocalUnix => "local",
+        };
+        format!("{prefix}:{tool}")
+    }
+}
+
+pub(crate) async fn serve_stdio(state: AppState) -> Result<()> {
+    let server = AgentMcpServer::new(state);
     let running = server.serve(stdio()).await?;
     let _ = running.waiting().await?;
     Ok(())
 }
 
 #[derive(Clone)]
-struct StdioMcpServer {
+pub(crate) struct AgentMcpServer {
     state: AppState,
     tools: Arc<Vec<Tool>>,
+    ingress: RequestIngress,
 }
 
 #[derive(Default)]
@@ -154,8 +178,12 @@ impl HumanTerminalTracker {
     }
 }
 
-impl StdioMcpServer {
-    fn new(state: AppState) -> Self {
+impl AgentMcpServer {
+    pub(crate) fn new(state: AppState) -> Self {
+        Self::with_ingress(state, RequestIngress::TunnelStdio)
+    }
+
+    pub(crate) fn with_ingress(state: AppState, ingress: RequestIngress) -> Self {
         let profile = state.runtime.profile;
         let mut names = NORMAL_TOOLS.to_vec();
         if profile == CapabilityProfile::Room {
@@ -167,6 +195,7 @@ impl StdioMcpServer {
         Self {
             state,
             tools: Arc::new(tools),
+            ingress,
         }
     }
 
@@ -199,7 +228,8 @@ impl StdioMcpServer {
             Ok(value) => value,
             Err(error) => {
                 let lifecycle = format!(
-                    "stdio_tool; run={}; tool={name}; profile={}; status=failed; durationMs={}; errorCode={}",
+                    "mcp_tool; ingress={}; run={}; tool={name}; profile={}; status=failed; durationMs={}; errorCode={}",
+                    self.ingress.label(),
                     crate::utils::compact_id(&run_id),
                     self.state.runtime.profile.label(),
                     (Utc::now() - started_at).num_milliseconds().max(0),
@@ -241,7 +271,8 @@ impl StdioMcpServer {
             .clone()
             .or_else(|| human_failure_reason(&value, session.as_ref()));
         let mut lifecycle = format!(
-            "stdio_tool; run={}; tool={name}; profile={}; status={}; durationMs={}",
+            "mcp_tool; ingress={}; run={}; tool={name}; profile={}; status={}; durationMs={}",
+            self.ingress.label(),
             crate::utils::compact_id(&run_id),
             self.state.runtime.profile.label(),
             if is_error || terminal_failure {
@@ -613,6 +644,7 @@ impl StdioMcpServer {
             "mcp.callTool" => {
                 let args: McpCallArgs = from_value(arguments)?;
                 let config = self.state.config.read().await.clone();
+                let request_source = self.ingress.source("mcp.callTool");
                 match crate::mcp::call_tool(
                     &self.state,
                     agentic_gpt_protocol::McpCallToolRequest {
@@ -621,6 +653,7 @@ impl StdioMcpServer {
                         tool_name: args.tool_name,
                         arguments: args.arguments,
                     },
+                    &request_source,
                 )
                 .await
                 {
@@ -846,7 +879,7 @@ impl StdioMcpServer {
                 )
                 .await
             }
-            _ => Err(anyhow::anyhow!("unknown stdio tool: {name}")),
+            _ => Err(anyhow::anyhow!("unknown agent tool: {name}")),
         }
     }
 
@@ -857,9 +890,10 @@ impl StdioMcpServer {
     ) -> Result<Value> {
         let args: ProcessExecArgs = from_value(arguments)?;
         let config = self.state.config.read().await.clone();
+        let request_source = self.ingress.source("process.exec");
         let terminal_event_hook = managed_terminal_event_hook(
             self.state.runtime.profile,
-            "tunnel:process.exec",
+            request_source.clone(),
             terminal_tracker,
         );
         let session_id = task_id("sess");
@@ -876,7 +910,7 @@ impl StdioMcpServer {
             },
             crate::sessions::ManagedSessionOptions {
                 terminal_event_hook: Some(terminal_event_hook),
-                ..crate::sessions::ManagedSessionOptions::for_source("tunnel:process.exec")
+                ..crate::sessions::ManagedSessionOptions::for_source(request_source)
             },
         )
         .await;
@@ -1026,9 +1060,10 @@ impl StdioMcpServer {
         };
 
         let agent_id = config.agent_id;
+        let request_source = self.ingress.source("process.batchExec");
         let terminal_event_hook = managed_terminal_event_hook(
             self.state.runtime.profile,
-            "tunnel:process.batchExec",
+            request_source.clone(),
             terminal_tracker,
         );
         let specs = prepared
@@ -1048,7 +1083,7 @@ impl StdioMcpServer {
                 working_directory: element.resolved_working_directory,
                 decision: element.decision,
                 confirmation_result: confirmation_result.clone(),
-                request_source: "tunnel:process.batchExec".to_string(),
+                request_source: request_source.clone(),
                 terminal_event_hook: Some(terminal_event_hook.clone()),
             })
             .collect::<Vec<_>>();
@@ -1173,6 +1208,7 @@ impl StdioMcpServer {
             }
         }
         let wait_seconds = request.effective_wait_seconds();
+        let request_source = self.ingress.source("skills.run");
         let info = crate::sessions::start_skill_session_async_with_hook_and_source(
             self.state.clone(),
             task_id("sess"),
@@ -1186,10 +1222,10 @@ impl StdioMcpServer {
             },
             &request.id,
             &request.path,
-            "tunnel:skills.run",
+            &request_source,
             Some(managed_terminal_event_hook(
                 self.state.runtime.profile,
-                "tunnel:skills.run",
+                request_source.clone(),
                 terminal_tracker,
             )),
         )
@@ -1285,7 +1321,7 @@ impl StdioMcpServer {
     }
 }
 
-impl ServerHandler for StdioMcpServer {
+impl ServerHandler for AgentMcpServer {
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
@@ -1319,7 +1355,7 @@ impl ServerHandler for StdioMcpServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(rmcp::model::Implementation::new(
-                "agentic-gpt-stdio-worker",
+                "agentic-gpt-local-agent",
                 env!("CARGO_PKG_VERSION"),
             ))
             .with_instructions(INSTRUCTIONS)
@@ -1799,7 +1835,7 @@ struct ManagedProcessResponse {
     session: SessionInfo,
 }
 
-async fn dispatch(server: &StdioMcpServer, command: HubCommand) -> Result<Value> {
+async fn dispatch(server: &AgentMcpServer, command: HubCommand) -> Result<Value> {
     local_service::dispatch(server.state.clone(), command).await
 }
 
@@ -2058,12 +2094,13 @@ fn bounded_error_code(value: &str) -> String {
 
 fn managed_terminal_event_hook(
     profile: CapabilityProfile,
-    source: &'static str,
+    source: impl Into<String>,
     tracker: Arc<HumanTerminalTracker>,
 ) -> crate::sessions::TerminalEventHook {
+    let source = source.into();
     let profile = profile.label();
     Arc::new(move |session| {
-        tracker.record(&profile, source, session);
+        tracker.record(&profile, &source, session);
     })
 }
 
@@ -2099,8 +2136,8 @@ fn tool_descriptor(name: &str) -> Tool {
     .with_annotations(annotations)
     .with_raw_output_schema(Arc::new(output_schema()))
     .with_meta(Meta(Map::from_iter([(
-        "transport".to_string(),
-        Value::String("stdio".to_string()),
+        "surface".to_string(),
+        Value::String("agent-local".to_string()),
     )])))
 }
 
@@ -2698,8 +2735,8 @@ mod tests {
 
     #[test]
     fn normal_and_room_tool_sets_are_exact() {
-        let normal = StdioMcpServer::new(test_state(CapabilityProfile::Normal));
-        let room = StdioMcpServer::new(test_state(CapabilityProfile::Room));
+        let normal = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
+        let room = AgentMcpServer::new(test_state(CapabilityProfile::Room));
         let normal_names = normal
             .tools
             .iter()
@@ -2737,8 +2774,8 @@ mod tests {
 
     #[test]
     fn compact_tool_schema_budgets_hold() {
-        let normal = StdioMcpServer::new(test_state(CapabilityProfile::Normal));
-        let room = StdioMcpServer::new(test_state(CapabilityProfile::Room));
+        let normal = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
+        let room = AgentMcpServer::new(test_state(CapabilityProfile::Room));
         for (label, tools, max_total, max_inputs) in [
             // The frozen file schemas add bounded descriptors to the original
             // compact-surface budgets; retain explicit finite caps for the
@@ -3015,7 +3052,7 @@ mod tests {
         let (client_io, server_io) = tokio::io::duplex(64 * 1024);
         let (client_read, client_write) = split(client_io);
         let (server_read, server_write) = split(server_io);
-        let server = StdioMcpServer::new(state);
+        let server = AgentMcpServer::new(state);
         let server_task = tokio::spawn(async move {
             let running = server.serve((server_read, server_write)).await?;
             let _ = running.waiting().await?;
@@ -3091,7 +3128,7 @@ mod tests {
 
     #[tokio::test]
     async fn absent_room_tool_is_rejected_for_normal_worker() {
-        let server = StdioMcpServer::new(test_state(CapabilityProfile::Normal));
+        let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
         let error = server
             .call(CallToolRequestParams::new("room.diary.recent"))
             .await
@@ -3104,7 +3141,7 @@ mod tests {
         let (client_io, server_io) = tokio::io::duplex(64 * 1024);
         let (client_read, client_write) = split(client_io);
         let (server_read, server_write) = split(server_io);
-        let server = StdioMcpServer::new(test_state(CapabilityProfile::Normal));
+        let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
         let server_task = tokio::spawn(async move {
             let running = server.serve((server_read, server_write)).await?;
             let _ = running.waiting().await?;
@@ -3140,7 +3177,7 @@ mod tests {
         let (client_io, server_io) = tokio::io::duplex(64 * 1024);
         let (client_read, client_write) = split(client_io);
         let (server_read, server_write) = split(server_io);
-        let server = StdioMcpServer::new(test_state(CapabilityProfile::Room));
+        let server = AgentMcpServer::new(test_state(CapabilityProfile::Room));
         let server_task = tokio::spawn(async move {
             let running = server.serve((server_read, server_write)).await?;
             let _ = running.waiting().await?;
@@ -3162,7 +3199,7 @@ mod tests {
 
     #[tokio::test]
     async fn process_tools_reject_legacy_identity_and_confirmation_fields() {
-        let server = StdioMcpServer::new(test_state(CapabilityProfile::Normal));
+        let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
         let identity = server
             .call(
                 CallToolRequestParams::new("process.exec").with_arguments(Map::from_iter([
@@ -3200,7 +3237,7 @@ mod tests {
 
     #[tokio::test]
     async fn process_exec_get_kill_and_batch_use_managed_sessions() -> anyhow::Result<()> {
-        let server = StdioMcpServer::new(test_state(CapabilityProfile::Normal));
+        let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
         let quick = server
             .dispatch("process.exec", json!({"program": "true", "waitSeconds": 5}))
             .await?;
@@ -3278,7 +3315,7 @@ mod tests {
 
     #[tokio::test]
     async fn managed_batch_uses_one_confirmation_for_all_elements() -> anyhow::Result<()> {
-        let server = StdioMcpServer::new(test_state(CapabilityProfile::Normal));
+        let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
         {
             let mut config = server.state.config.write().await;
             config.confirmation_provider.set_legacy("hub").unwrap();
@@ -3335,7 +3372,7 @@ mod tests {
 
     #[tokio::test]
     async fn denied_managed_batch_creates_no_sessions() -> anyhow::Result<()> {
-        let server = StdioMcpServer::new(test_state(CapabilityProfile::Normal));
+        let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
         {
             let mut config = server.state.config.write().await;
             config.confirmation_provider.set_legacy("hub").unwrap();
@@ -3376,7 +3413,7 @@ mod tests {
 
     #[tokio::test]
     async fn tmux_actions_reject_incompatible_fields() {
-        let server = StdioMcpServer::new(test_state(CapabilityProfile::Normal));
+        let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
         let invalid = [
             json!({"action": "list", "needConfirm": false}),
             json!({"action": "create", "name": "demo", "cwd": ".", "needConfirm": false}),
@@ -3538,9 +3575,80 @@ mod tests {
         );
     }
 
+    #[test]
+    fn tunnel_and_local_ingress_advertise_identical_surface() {
+        let state = test_state(CapabilityProfile::Normal);
+        let tunnel = AgentMcpServer::with_ingress(state.clone(), RequestIngress::TunnelStdio);
+        let local = AgentMcpServer::with_ingress(state, RequestIngress::LocalUnix);
+        assert_eq!(
+            serde_json::to_value(tunnel.tools.as_ref()).unwrap(),
+            serde_json::to_value(local.tools.as_ref()).unwrap()
+        );
+        assert_eq!(tunnel.ingress.label(), "tunnel:stdio");
+        assert_eq!(local.ingress.label(), "local:unix");
+    }
+
+    #[tokio::test]
+    async fn local_skill_audit_uses_local_request_source() -> anyhow::Result<()> {
+        let server = AgentMcpServer::with_ingress(
+            test_state(CapabilityProfile::Normal),
+            RequestIngress::LocalUnix,
+        );
+        let workspace = server.state.config.read().await.workspace_root.clone();
+        let scripts = workspace.join("skills/demo/scripts");
+        std::fs::create_dir_all(&scripts)?;
+        std::fs::write(workspace.join("skills/demo/SKILL.md"), "# Demo\n")?;
+        let script = scripts.join("check.sh");
+        std::fs::write(&script, "#!/bin/sh\nprintf done\n")?;
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))?;
+        crate::skills::activate(
+            &server.state,
+            SkillActivationRequest {
+                id: "demo".to_string(),
+            },
+        )
+        .await?;
+        let result = server
+            .dispatch(
+                "skills.run",
+                json!({"id": "demo", "path": "scripts/check.sh", "waitSeconds": 5}),
+            )
+            .await?;
+        assert_eq!(result["session"]["state"], json!("exited"));
+        let audit = std::fs::read_to_string(workspace.join(".agentic-gpt-audit.jsonl"))?;
+        assert!(audit.contains("\"requestSource\":\"local:skills.run\""));
+        assert!(!audit.contains("\"requestSource\":\"tunnel:skills.run\""));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn local_mcp_call_audit_uses_local_request_source() -> anyhow::Result<()> {
+        let server = AgentMcpServer::with_ingress(
+            test_state(CapabilityProfile::Normal),
+            RequestIngress::LocalUnix,
+        );
+        let workspace = server.state.config.read().await.workspace_root.clone();
+        let result = server
+            .dispatch(
+                "mcp.callTool",
+                json!({
+                    "serverId": "missing",
+                    "toolName": "noop",
+                    "arguments": {}
+                }),
+            )
+            .await?;
+        assert_eq!(result["error"]["code"], "mcp_call_tool_failed");
+        let audit = std::fs::read_to_string(workspace.join(".agentic-gpt-audit.jsonl"))?;
+        assert!(audit.contains("\"requestSource\":\"local:mcp.callTool\""));
+        assert!(!audit.contains("\"requestSource\":\"hub:mcp\""));
+        Ok(())
+    }
+
     #[tokio::test]
     async fn tunnel_skill_audit_uses_tunnel_request_source() -> anyhow::Result<()> {
-        let server = StdioMcpServer::new(test_state(CapabilityProfile::Normal));
+        let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
         let workspace = server.state.config.read().await.workspace_root.clone();
         let scripts = workspace.join("skills/demo/scripts");
         std::fs::create_dir_all(&scripts)?;
@@ -3573,7 +3681,7 @@ mod tests {
 
     #[tokio::test]
     async fn room_profile_dispatches_room_memory_tools() -> anyhow::Result<()> {
-        let server = StdioMcpServer::new(test_state(CapabilityProfile::Room));
+        let server = AgentMcpServer::new(test_state(CapabilityProfile::Room));
         let bootstrap = server.dispatch("bootstrap", json!({})).await?;
         assert!(bootstrap.get("entrypoint").is_some());
         let skills = server.dispatch("skills.list", json!({})).await?;
@@ -3587,7 +3695,7 @@ mod tests {
 
     #[tokio::test]
     async fn every_room_adapter_rejects_legacy_identity_fields() {
-        let server = StdioMcpServer::new(test_state(CapabilityProfile::Room));
+        let server = AgentMcpServer::new(test_state(CapabilityProfile::Room));
         let cases = [
             (
                 "room.notebook.append",
@@ -3634,7 +3742,7 @@ mod tests {
 
     #[tokio::test]
     async fn file_read_dispatch_supports_content_and_metadata_modes() -> anyhow::Result<()> {
-        let server = StdioMcpServer::new(test_state(CapabilityProfile::Normal));
+        let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
         let workspace = server.state.config.read().await.workspace_root.clone();
         std::fs::write(workspace.join("read-me.txt"), "first\nsecond\n")?;
         let content = server
@@ -3665,7 +3773,7 @@ mod tests {
 
     #[tokio::test]
     async fn file_search_dispatch_supports_literal_and_regex_queries() -> anyhow::Result<()> {
-        let server = StdioMcpServer::new(test_state(CapabilityProfile::Normal));
+        let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
         let workspace = server.state.config.read().await.workspace_root.clone();
         std::fs::write(workspace.join("search.rs"), "Alpha\nBeta 42\n")?;
         let literal = server
@@ -3687,7 +3795,7 @@ mod tests {
 
     #[tokio::test]
     async fn file_edit_replace_write_patch_and_revision_guards() -> anyhow::Result<()> {
-        let server = StdioMcpServer::new(test_state(CapabilityProfile::Normal));
+        let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
         let workspace = server.state.config.read().await.workspace_root.clone();
         let path = workspace.join("edit.txt");
         std::fs::write(&path, "old\nold\n")?;
@@ -3783,7 +3891,7 @@ mod tests {
 
     #[tokio::test]
     async fn file_edit_rejects_conflicts_and_redacts_audit() -> anyhow::Result<()> {
-        let server = StdioMcpServer::new(test_state(CapabilityProfile::Normal));
+        let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
         let workspace = server.state.config.read().await.workspace_root.clone();
         let path = workspace.join("guard.txt");
         std::fs::write(&path, "audit-old\n")?;
@@ -3821,7 +3929,7 @@ mod tests {
 
     #[tokio::test]
     async fn file_edit_confirmation_unavailable_does_not_write() -> anyhow::Result<()> {
-        let server = StdioMcpServer::new(test_state(CapabilityProfile::Normal));
+        let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
         {
             let mut config = server.state.config.write().await;
             config.confirmation_provider.channels.clear();
@@ -3843,7 +3951,7 @@ mod tests {
 
     #[tokio::test]
     async fn file_batch_reads_before_edits_and_preserves_order() -> anyhow::Result<()> {
-        let server = StdioMcpServer::new(test_state(CapabilityProfile::Normal));
+        let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
         let workspace = server.state.config.read().await.workspace_root.clone();
         let path = workspace.join("batch.txt");
         std::fs::write(&path, "secret-before\n")?;
@@ -3889,7 +3997,7 @@ mod tests {
     #[tokio::test]
     async fn file_batch_rejects_duplicate_targets_and_preflight_errors_without_writes(
     ) -> anyhow::Result<()> {
-        let server = StdioMcpServer::new(test_state(CapabilityProfile::Normal));
+        let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
         let workspace = server.state.config.read().await.workspace_root.clone();
         let path = workspace.join("batch-guard.txt");
         std::fs::write(&path, "same\n")?;
@@ -3921,7 +4029,7 @@ mod tests {
 
     #[tokio::test]
     async fn file_batch_dry_run_and_confirmation_are_single_boundary() -> anyhow::Result<()> {
-        let server = StdioMcpServer::new(test_state(CapabilityProfile::Normal));
+        let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
         let workspace = server.state.config.read().await.workspace_root.clone();
         let path = workspace.join("batch-confirm.txt");
         std::fs::write(&path, "before\n")?;
@@ -3961,7 +4069,7 @@ mod tests {
 
     #[tokio::test]
     async fn file_lock_registry_prunes_released_paths() -> anyhow::Result<()> {
-        let server = StdioMcpServer::new(test_state(CapabilityProfile::Normal));
+        let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
         let workspace = server.state.config.read().await.workspace_root.clone();
         {
             let _guard =
@@ -3977,7 +4085,7 @@ mod tests {
 
     #[tokio::test]
     async fn file_batch_reports_failure_when_any_audit_write_fails() -> anyhow::Result<()> {
-        let server = StdioMcpServer::new(test_state(CapabilityProfile::Normal));
+        let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
         let workspace = server.state.config.read().await.workspace_root.clone();
         std::fs::create_dir(workspace.join(".agentic-gpt-audit.jsonl"))?;
         let path = workspace.join("batch-audit.txt");
@@ -4005,7 +4113,7 @@ mod tests {
     #[tokio::test]
     async fn compact_mcp_skills_and_tmux_adapters_preserve_result_envelopes() -> anyhow::Result<()>
     {
-        let server = StdioMcpServer::new(test_state(CapabilityProfile::Normal));
+        let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
         let mcp = server.dispatch("mcp.list", json!({})).await?;
         assert!(mcp["servers"].is_array());
         let skills = server.dispatch("skills.list", json!({})).await?;

@@ -31,6 +31,7 @@ impl RunMode {
 pub(crate) enum Transport {
     Hub,
     TunnelStdio,
+    LocalUnix,
 }
 
 impl Transport {
@@ -38,6 +39,7 @@ impl Transport {
         match self {
             Self::Hub => "hub",
             Self::TunnelStdio => "tunnel-stdio",
+            Self::LocalUnix => "local-unix",
         }
     }
 }
@@ -109,6 +111,14 @@ impl RuntimeModel {
         }
     }
 
+    pub(crate) fn local(profile: CapabilityProfile) -> Self {
+        Self {
+            transport: Transport::LocalUnix,
+            profile,
+            hub_mode: HubMode::Disabled,
+        }
+    }
+
     pub(crate) fn label(self) -> String {
         format!("{}:{}", self.transport.label(), self.profile.label())
     }
@@ -123,14 +133,16 @@ impl RuntimeModel {
                 notifications: true,
             },
             (Transport::Hub, CapabilityProfile::Room)
-            | (Transport::TunnelStdio, CapabilityProfile::Room) => Capabilities {
+            | (Transport::TunnelStdio, CapabilityProfile::Room)
+            | (Transport::LocalUnix, CapabilityProfile::Room) => Capabilities {
                 skills: true,
                 bootstrap: true,
                 diary: true,
                 notebook: true,
                 notifications: true,
             },
-            (Transport::TunnelStdio, CapabilityProfile::Normal) => Capabilities {
+            (Transport::TunnelStdio, CapabilityProfile::Normal)
+            | (Transport::LocalUnix, CapabilityProfile::Normal) => Capabilities {
                 skills: true,
                 bootstrap: true,
                 diary: false,
@@ -188,6 +200,11 @@ mod tests {
         assert!(!tunnel_normal.diary);
         assert!(!tunnel_normal.notebook);
         assert!(!tunnel_normal.notifications);
+
+        let local_normal = RuntimeModel::local(CapabilityProfile::Normal);
+        assert_eq!(local_normal.transport, Transport::LocalUnix);
+        assert_eq!(local_normal.hub_mode, HubMode::Disabled);
+        assert_eq!(local_normal.capabilities(), tunnel_normal);
 
         let tunnel_room = RuntimeModel::tunnel(CapabilityProfile::Room, true);
         assert_eq!(tunnel_room.hub_mode, HubMode::ReportingOnly);

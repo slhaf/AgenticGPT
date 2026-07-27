@@ -1297,7 +1297,7 @@ async fn handle_hub_command_legacy(
             request_id,
             payload,
         } => {
-            let result = match mcp::call_tool(&state, payload).await {
+            let result = match mcp::call_tool(&state, payload, "hub:mcp").await {
                 Ok(result) => result,
                 Err(error) => serde_json::json!({
                     "error": {
