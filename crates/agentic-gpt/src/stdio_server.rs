@@ -1492,9 +1492,9 @@ enum FileBatchOperationArgs {
         path: String,
         #[serde(default = "default_true", rename = "includeContent")]
         include_content: bool,
-        #[serde(default)]
+        #[serde(default, rename = "startLine")]
         start_line: Option<usize>,
-        #[serde(default)]
+        #[serde(default, rename = "endLine")]
         end_line: Option<usize>,
     },
     #[serde(rename = "search")]
@@ -2228,7 +2228,8 @@ fn properties_for(name: &str) -> Map<String, Value> {
                 "type":"object", "additionalProperties":false,
                 "properties": {
                     "type":{"const":"read"}, "id":string("Optional operation id."),
-                    "path":string("File or directory path."), "includeContent":boolean("Include bounded content; default true."),
+                    "path":string("File or directory path."),
+                    "includeContent":{"type":"boolean","description":"Include bounded content; default true.","default":true},
                     "startLine":number("Inclusive start line."), "endLine":number("Inclusive end line.")
                 }, "required":["type","path"]
             });
@@ -2237,10 +2238,13 @@ fn properties_for(name: &str) -> Map<String, Value> {
                 "properties": {
                     "type":{"const":"search"}, "id":string("Optional operation id."), "path":string("File or directory root."),
                     "query":string("Literal or regex query."), "mode":{"type":"string","enum":["literal","regex"],"default":"literal"},
-                    "caseSensitive":boolean("Case-sensitive; default true."), "include":strings("Include globs; max 16."),
-                    "exclude":strings("Exclude globs; max 16."), "contextLines":number("Context lines, max 5."),
-                    "maxResults":number("Maximum matches, max 200."), "hidden":boolean("Include hidden files; default false."),
-                    "respectGitignore":boolean("Honor Git ignore rules inside repositories; default true.")
+                    "caseSensitive":{"type":"boolean","description":"Case-sensitive; default true.","default":true},
+                    "include":{"type":"array","items":{"type":"string"},"description":"Include globs; max 16.","default":[]},
+                    "exclude":{"type":"array","items":{"type":"string"},"description":"Exclude globs; max 16.","default":[]},
+                    "contextLines":{"type":"integer","description":"Context lines, max 5.","default":0},
+                    "maxResults":{"type":"integer","description":"Maximum matches, max 200.","default":50},
+                    "hidden":{"type":"boolean","description":"Include hidden files; default false.","default":false},
+                    "respectGitignore":{"type":"boolean","description":"Honor Git ignore rules inside repositories; default true.","default":true}
                 }, "required":["type","path","query"]
             });
             let edit = json!({
@@ -2250,7 +2254,8 @@ fn properties_for(name: &str) -> Map<String, Value> {
                     "mode":{"type":"string","enum":["replace","patch","write"]}, "path":string("UTF-8 text file path."),
                     "expectedRevision":string("Required revision for existing files."), "expectedAbsent":boolean("Require a new target; write mode only."),
                     "oldText":string("Exact non-empty text to replace."), "newText":string("Replacement text."),
-                    "expectedMatches":number("Expected exact replacement count, default 1."), "patch":string("Exact single-file unified diff."),
+                    "expectedMatches":{"type":"integer","description":"Expected exact replacement count, default 1.","default":1},
+                    "patch":string("Exact single-file unified diff."),
                     "content":string("Complete UTF-8 content for write mode.")
                 }, "required":["type","mode","path"]
             });
@@ -2671,7 +2676,7 @@ pub(crate) fn standalone_surface(profile: CapabilityProfile) -> (Vec<String>, St
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::HashMap,
+        collections::{BTreeSet, HashMap},
         path::PathBuf,
         sync::{
             atomic::{AtomicUsize, Ordering},
@@ -2758,6 +2763,305 @@ mod tests {
                 "{label} input schemas use {input_bytes} bytes, budget is {max_inputs}"
             );
         }
+    }
+
+    #[test]
+    fn file_batch_descriptor_fields_defaults_and_runtime_are_in_sync() -> anyhow::Result<()> {
+        let descriptor = serde_json::to_value(tool_descriptor("file.batch"))?;
+        let (_, revision) = standalone_surface(CapabilityProfile::Normal);
+        assert_ne!(
+            revision, "sha256:ae1d453a2a98cf054ea01d8aa212bb8f8291e6cb412987e42665571618d67cf5",
+            "the connector schema change must advance the standalone surface revision"
+        );
+        let variants = descriptor["inputSchema"]["properties"]["operations"]["items"]["oneOf"]
+            .as_array()
+            .expect("file.batch operation variants");
+
+        let expected = [
+            (
+                "read",
+                [
+                    "type",
+                    "id",
+                    "path",
+                    "includeContent",
+                    "startLine",
+                    "endLine",
+                ]
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+            ),
+            (
+                "search",
+                [
+                    "type",
+                    "id",
+                    "path",
+                    "query",
+                    "mode",
+                    "caseSensitive",
+                    "include",
+                    "exclude",
+                    "contextLines",
+                    "maxResults",
+                    "hidden",
+                    "respectGitignore",
+                ]
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+            ),
+            (
+                "edit",
+                [
+                    "type",
+                    "id",
+                    "mode",
+                    "path",
+                    "expectedRevision",
+                    "expectedAbsent",
+                    "oldText",
+                    "newText",
+                    "expectedMatches",
+                    "patch",
+                    "content",
+                ]
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+            ),
+        ];
+
+        for (kind, expected_fields) in expected {
+            let variant = variants
+                .iter()
+                .find(|variant| variant["properties"]["type"]["const"] == kind)
+                .unwrap_or_else(|| panic!("missing {kind} operation schema"));
+            let actual_fields = variant["properties"]
+                .as_object()
+                .expect("operation properties")
+                .keys()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>();
+            assert_eq!(actual_fields, expected_fields, "{kind} schema fields");
+        }
+
+        let read_schema = variants
+            .iter()
+            .find(|variant| variant["properties"]["type"]["const"] == "read")
+            .unwrap();
+        assert_eq!(
+            read_schema["properties"]["includeContent"]["default"],
+            json!(true)
+        );
+        let search_schema = variants
+            .iter()
+            .find(|variant| variant["properties"]["type"]["const"] == "search")
+            .unwrap();
+        for (field, value) in [
+            ("mode", json!("literal")),
+            ("caseSensitive", json!(true)),
+            ("include", json!([])),
+            ("exclude", json!([])),
+            ("contextLines", json!(0)),
+            ("maxResults", json!(50)),
+            ("hidden", json!(false)),
+            ("respectGitignore", json!(true)),
+        ] {
+            assert_eq!(search_schema["properties"][field]["default"], value);
+        }
+        let edit_schema = variants
+            .iter()
+            .find(|variant| variant["properties"]["type"]["const"] == "edit")
+            .unwrap();
+        assert_eq!(
+            edit_schema["properties"]["expectedMatches"]["default"],
+            json!(1)
+        );
+
+        let args: FileBatchArgs = from_value(json!({
+            "dryRun": true,
+            "needConfirm": true,
+            "operations": [
+                {
+                    "type": "read",
+                    "id": "read-all",
+                    "path": "sample.txt",
+                    "includeContent": false,
+                    "startLine": 2,
+                    "endLine": 4
+                },
+                {
+                    "type": "search",
+                    "id": "search-all",
+                    "path": ".",
+                    "query": "needle",
+                    "mode": "regex",
+                    "caseSensitive": false,
+                    "include": ["*.rs"],
+                    "exclude": ["target/**"],
+                    "contextLines": 3,
+                    "maxResults": 7,
+                    "hidden": true,
+                    "respectGitignore": false
+                },
+                {
+                    "type": "edit",
+                    "id": "edit-all",
+                    "mode": "replace",
+                    "path": "sample.txt",
+                    "expectedRevision": "sha256:test",
+                    "expectedAbsent": false,
+                    "oldText": "before",
+                    "newText": "after",
+                    "expectedMatches": 2,
+                    "patch": "patch",
+                    "content": "content"
+                }
+            ]
+        }))?;
+        assert!(args.dry_run);
+        assert!(args.need_confirm);
+        let operations = args
+            .operations
+            .into_iter()
+            .map(to_file_batch_operation)
+            .collect::<Vec<_>>();
+        assert_eq!(operations[0].id.as_deref(), Some("read-all"));
+        assert!(!operations[0].include_content);
+        assert_eq!(operations[0].start_line, Some(2));
+        assert_eq!(operations[0].end_line, Some(4));
+        assert_eq!(operations[1].search_mode.as_deref(), Some("regex"));
+        assert!(!operations[1].case_sensitive);
+        assert_eq!(operations[1].include, vec!["*.rs"]);
+        assert_eq!(operations[1].exclude, vec!["target/**"]);
+        assert_eq!(operations[1].context_lines, 3);
+        assert_eq!(operations[1].max_results, 7);
+        assert!(operations[1].hidden);
+        assert!(!operations[1].respect_gitignore);
+        assert_eq!(
+            operations[2].expected_revision.as_deref(),
+            Some("sha256:test")
+        );
+        assert_eq!(operations[2].expected_absent, Some(false));
+        assert_eq!(operations[2].old_text.as_deref(), Some("before"));
+        assert_eq!(operations[2].new_text.as_deref(), Some("after"));
+        assert_eq!(operations[2].expected_matches, Some(2));
+        assert_eq!(operations[2].patch.as_deref(), Some("patch"));
+        assert_eq!(operations[2].content.as_deref(), Some("content"));
+
+        let defaults: FileBatchArgs = from_value(json!({
+            "operations": [
+                {"type": "read", "path": "sample.txt"},
+                {"type": "search", "path": ".", "query": "needle"},
+                {"type": "edit", "mode": "replace", "path": "sample.txt"}
+            ]
+        }))?;
+        let defaults = defaults
+            .operations
+            .into_iter()
+            .map(to_file_batch_operation)
+            .collect::<Vec<_>>();
+        assert!(defaults[0].include_content);
+        assert_eq!(defaults[0].start_line, None);
+        assert_eq!(defaults[0].end_line, None);
+        assert_eq!(defaults[1].search_mode, None);
+        assert!(defaults[1].case_sensitive);
+        assert!(defaults[1].include.is_empty());
+        assert!(defaults[1].exclude.is_empty());
+        assert_eq!(defaults[1].context_lines, 0);
+        assert_eq!(defaults[1].max_results, 50);
+        assert!(!defaults[1].hidden);
+        assert!(defaults[1].respect_gitignore);
+        assert_eq!(defaults[2].expected_matches, None);
+
+        let error = from_value::<FileBatchArgs>(json!({
+            "operations": [{"type": "read", "path": "sample.txt", "start_line": 1}]
+        }))
+        .expect_err("snake_case nested fields must remain rejected");
+        assert!(error.to_string().contains("unknown field `start_line`"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn in_process_stdio_file_batch_schema_and_ranged_read() -> anyhow::Result<()> {
+        let state = test_state(CapabilityProfile::Normal);
+        let workspace = state.config.read().await.workspace_root.clone();
+        std::fs::write(workspace.join("ranged.txt"), "one\ntwo\nthree\nfour\n")?;
+
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let (client_read, client_write) = split(client_io);
+        let (server_read, server_write) = split(server_io);
+        let server = StdioMcpServer::new(state);
+        let server_task = tokio::spawn(async move {
+            let running = server.serve((server_read, server_write)).await?;
+            let _ = running.waiting().await?;
+            anyhow::Result::<()>::Ok(())
+        });
+
+        let client = ().serve((client_read, client_write)).await?;
+        let tools = client.list_all_tools().await?;
+        let file_batch = tools
+            .iter()
+            .find(|tool| tool.name.as_ref() == "file.batch")
+            .expect("file.batch descriptor");
+        let schema = Value::Object(file_batch.input_schema.as_ref().clone());
+        let read_properties = schema["properties"]["operations"]["items"]["oneOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|variant| variant["properties"]["type"]["const"] == "read")
+            .unwrap()["properties"]
+            .as_object()
+            .unwrap();
+        assert!(read_properties.contains_key("startLine"));
+        assert!(read_properties.contains_key("endLine"));
+        assert!(!read_properties.contains_key("start_line"));
+        assert!(!read_properties.contains_key("end_line"));
+
+        let result = client
+            .call_tool(
+                CallToolRequestParams::new("file.batch").with_arguments(Map::from_iter([(
+                    "operations".to_string(),
+                    json!([{
+                        "type": "read",
+                        "id": "range",
+                        "path": "ranged.txt",
+                        "includeContent": true,
+                        "startLine": 2,
+                        "endLine": 3
+                    }]),
+                )])),
+            )
+            .await?;
+        assert_eq!(result.is_error, Some(false));
+        let structured = result.structured_content.as_ref().unwrap();
+        assert_eq!(structured["status"], "completed");
+        assert_eq!(structured["results"][0]["id"], "range");
+        assert_eq!(
+            structured["results"][0]["result"]["content"],
+            "two\nthree\n"
+        );
+        assert_eq!(structured["results"][0]["result"]["startLine"], 2);
+        assert_eq!(structured["results"][0]["result"]["returnedThroughLine"], 3);
+
+        let error = client
+            .call_tool(
+                CallToolRequestParams::new("file.batch").with_arguments(Map::from_iter([(
+                    "operations".to_string(),
+                    json!([{"type": "read", "path": "ranged.txt", "start_line": 2}]),
+                )])),
+            )
+            .await
+            .expect_err("snake_case nested field must fail through rmcp");
+        match error {
+            rmcp::service::ServiceError::McpError(error) => {
+                assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+            }
+            other => panic!("expected MCP invalid-params error, got {other:?}"),
+        }
+
+        let _ = client.cancel().await;
+        server_task.await??;
+        Ok(())
     }
 
     #[tokio::test]
