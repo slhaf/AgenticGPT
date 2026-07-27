@@ -540,7 +540,8 @@ mod tests {
             agents: Arc::new(Mutex::new(HashMap::new())),
             pending: Arc::new(Mutex::new(HashMap::new())),
             pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
-            sessions: Arc::new(Mutex::new(HashMap::new())),
+            jobs: Arc::new(Mutex::new(HashMap::new())),
+            boot_generations: Arc::new(Mutex::new(HashMap::new())),
             active_room: Arc::new(Mutex::new(None)),
             http: reqwest::Client::new(),
             public_base_url: Some("https://hub.example.invalid".to_string()),
@@ -570,6 +571,7 @@ mod tests {
                 role,
                 connection_mode: agentic_gpt_protocol::AgentConnectionMode::CommandCapable,
                 hello_received: true,
+                boot_generation: Some("testboot".to_string()),
                 transport: AgentTransport::WebSocket,
                 config_summary: None,
                 notification_channels: Vec::new(),
@@ -610,7 +612,7 @@ mod tests {
         {
             let conn = state.db.lock().unwrap();
             let capabilities = serde_json::to_string(&Capabilities {
-                sessions: true,
+                jobs: true,
                 confirmation: true,
                 notification_actions: false,
             })
@@ -753,7 +755,7 @@ mod tests {
         {
             let conn = state.db.lock().unwrap();
             let capabilities = serde_json::to_string(&Capabilities {
-                sessions: true,
+                jobs: true,
                 confirmation: true,
                 notification_actions: false,
             })

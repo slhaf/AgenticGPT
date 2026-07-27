@@ -8,13 +8,13 @@ mod exec;
 mod file_ops;
 mod hub;
 mod instance_lock;
+mod jobs;
 mod local_control;
 mod local_service;
 mod mcp;
 mod notebook;
 mod notify;
 mod policy;
-mod sessions;
 mod skill_installs;
 mod skills;
 mod state;
@@ -280,7 +280,7 @@ async fn run(config_path: PathBuf, runtime: RuntimeModel) -> Result<()> {
         } else {
             "disabled"
         },
-        initial.limits.max_active_sessions.resolve().diagnostic()
+        initial.limits.max_active_jobs.resolve().diagnostic()
     ));
     let state = build_app_state(config_path.clone(), initial, runtime, false);
     state.skill_installs.recover(state.clone()).await?;
@@ -300,7 +300,7 @@ async fn run_stdio_worker(
     config.ensure_workspace()?;
     log_info(format!(
         "standalone worker config loaded; {}; policyAllow={}; policyConfirm={}; policyDeny={}; pathWriteRoots={}; pathReadOnlyRoots={}; pathDenyRoots={}",
-        config.limits.max_active_sessions.resolve().diagnostic(),
+        config.limits.max_active_jobs.resolve().diagnostic(),
         config.policy.allow.len(),
         config.policy.confirm.len(),
         config.policy.deny.len(),
@@ -362,16 +362,17 @@ fn build_app_state(
         config: Arc::new(RwLock::new(config)),
         runtime,
         started_at: chrono::Utc::now(),
+        boot_generation: uuid::Uuid::new_v4().simple().to_string()[..12].to_string(),
         supervised,
         file_locks: Arc::new(Mutex::new(HashMap::new())),
-        sessions: Arc::new(Mutex::new(HashMap::new())),
+        jobs: Arc::new(Mutex::new(HashMap::new())),
         hub_sender: Arc::new(Mutex::new(None)),
         reporting_sender: Arc::new(Mutex::new(None)),
         pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
         temporary_mcp_allows: Arc::new(Mutex::new(Vec::new())),
         notebook_writes: Arc::new(Mutex::new(())),
         skills_writes: Arc::new(Mutex::new(())),
-        skill_leases: Arc::new(sessions::SkillLeaseManager::new()),
+        skill_leases: Arc::new(jobs::SkillLeaseManager::new()),
         skill_installs: Arc::new(skill_installs::InstallManager::with_concurrency(
             max_concurrent_skill_installs,
         )),
@@ -677,7 +678,7 @@ async fn watch_config(state: AppState) {
                         } else {
                             "disabled"
                         },
-                        config.limits.max_active_sessions.resolve().diagnostic(),
+                        config.limits.max_active_jobs.resolve().diagnostic(),
                         config.mcp_servers.len(),
                     ));
                     *state.config.write().await = config;
@@ -734,7 +735,7 @@ async fn watch_standalone_live_config(state: AppState, supervised: bool) {
 
 async fn reload_standalone_live_config_once(
     state: &AppState,
-) -> Result<config::ResolvedMaxActiveSessions> {
+) -> Result<config::ResolvedMaxActiveJobs> {
     let candidate = Config::load(&state.config_path)?;
     match state.runtime.transport {
         crate::state::Transport::TunnelStdio => candidate.validate_standalone()?,
@@ -748,8 +749,8 @@ async fn reload_standalone_live_config_once(
 fn apply_standalone_live_subset(
     live: &mut Config,
     candidate: Config,
-) -> config::ResolvedMaxActiveSessions {
-    let resolved = candidate.limits.max_active_sessions.resolve();
+) -> config::ResolvedMaxActiveJobs {
+    let resolved = candidate.limits.max_active_jobs.resolve();
     live.policy = candidate.policy;
     live.path_policy = candidate.path_policy;
     live.limits = candidate.limits;
@@ -775,23 +776,12 @@ mod tests {
     use crate::config::{PathPolicyConfig, Rule, TunnelConfig};
     use crate::exec::PreparedBatchElement;
     use crate::mcp::McpServerConfig;
-    use crate::policy::policy_decision;
-    use crate::state::RunMode;
     use agentic_gpt_protocol::{
-        AgentMessage, BatchExecRequest, BootstrapReadRequest, ExecElement, HubCommand,
-        NotebookAppendRequest, NotebookRemoveRequest, NotebookUpdateRequest, PassageSignificance,
+        AgentMessage, BootstrapReadRequest, HubCommand, NotebookAppendRequest,
+        NotebookRemoveRequest, NotebookUpdateRequest, PassageSignificance,
     };
     use tokio::sync::mpsc;
     use uuid::Uuid;
-
-    #[test]
-    fn run_modes_declare_expected_roles() {
-        assert_eq!(
-            RunMode::Normal.role(),
-            agentic_gpt_protocol::AgentRole::Normal
-        );
-        assert_eq!(RunMode::Room.role(), agentic_gpt_protocol::AgentRole::Room);
-    }
 
     #[test]
     fn sse_post_status_classification_stops_on_stale_connection() {
@@ -929,7 +919,7 @@ mod tests {
     }
 
     fn command_test_state(
-        run_mode: RunMode,
+        profile: CapabilityProfile,
         workspace_root: PathBuf,
     ) -> (AppState, mpsc::UnboundedReceiver<AgentMessage>) {
         let mut config = Config::default_config().unwrap();
@@ -939,18 +929,19 @@ mod tests {
             AppState {
                 config_path: PathBuf::from("test-config.json"),
                 config: Arc::new(RwLock::new(config)),
-                runtime: RuntimeModel::hub(run_mode.profile()),
+                runtime: RuntimeModel::hub(profile),
                 started_at: chrono::Utc::now(),
+                boot_generation: "testboot0001".to_string(),
                 supervised: false,
                 file_locks: Arc::new(Mutex::new(HashMap::new())),
-                sessions: Arc::new(Mutex::new(HashMap::new())),
+                jobs: Arc::new(Mutex::new(HashMap::new())),
                 hub_sender: Arc::new(Mutex::new(Some(tx))),
                 reporting_sender: Arc::new(Mutex::new(None)),
                 pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
                 temporary_mcp_allows: Arc::new(Mutex::new(Vec::new())),
                 notebook_writes: Arc::new(Mutex::new(())),
                 skills_writes: Arc::new(Mutex::new(())),
-                skill_leases: Arc::new(sessions::SkillLeaseManager::new()),
+                skill_leases: Arc::new(jobs::SkillLeaseManager::new()),
                 skill_installs: Arc::new(skill_installs::InstallManager::new()),
             },
             rx,
@@ -969,7 +960,7 @@ mod tests {
     async fn normal_mode_rejects_update_and_remove_room_commands() {
         let workspace = unique_temp_dir("normal-room-update-remove").join("workspace");
         fs::create_dir_all(&workspace).unwrap();
-        let (state, mut rx) = command_test_state(RunMode::Normal, workspace);
+        let (state, mut rx) = command_test_state(CapabilityProfile::Normal, workspace);
         hub::handle_hub_command(
             state.clone(),
             HubCommand::RoomNotebookUpdate {
@@ -1009,7 +1000,7 @@ mod tests {
     async fn hub_adapter_and_local_dispatcher_share_capability_errors() {
         let workspace = unique_temp_dir("dispatcher-parity").join("workspace");
         fs::create_dir_all(&workspace).unwrap();
-        let (state, mut rx) = command_test_state(RunMode::Normal, workspace);
+        let (state, mut rx) = command_test_state(CapabilityProfile::Normal, workspace);
         let command = HubCommand::RoomBootstrap {
             request_id: "req-parity".to_string(),
         };
@@ -1027,7 +1018,7 @@ mod tests {
     async fn normal_mode_rejects_bootstrap_commands() {
         let workspace = unique_temp_dir("normal-room-bootstrap").join("workspace");
         fs::create_dir_all(&workspace).unwrap();
-        let (state, mut rx) = command_test_state(RunMode::Normal, workspace);
+        let (state, mut rx) = command_test_state(CapabilityProfile::Normal, workspace);
         hub::handle_hub_command(
             state.clone(),
             HubCommand::RoomBootstrap {
@@ -1075,7 +1066,7 @@ mod tests {
             "---\nid: guide\nkind: guide\ntitle: Guide\nsummary: Use guide\n---\nbody\n",
         )
         .unwrap();
-        let (state, mut rx) = command_test_state(RunMode::Room, workspace);
+        let (state, mut rx) = command_test_state(CapabilityProfile::Room, workspace);
 
         hub::handle_hub_command(
             state.clone(),
@@ -1115,7 +1106,7 @@ mod tests {
     async fn room_mode_executes_update_and_remove_room_commands() {
         let workspace = unique_temp_dir("room-update-remove").join("workspace");
         fs::create_dir_all(&workspace).unwrap();
-        let (state, mut rx) = command_test_state(RunMode::Room, workspace);
+        let (state, mut rx) = command_test_state(CapabilityProfile::Room, workspace);
         let appended = notebook::append(
             &state,
             NotebookAppendRequest {
@@ -1167,11 +1158,17 @@ mod tests {
     fn room_policy_overlay_differs_from_normal_policy() {
         let config = Config::default_config().unwrap();
         assert_eq!(
-            policy::policy_decision_for_mode(&config, RunMode::Normal, "rm", &[], false),
+            policy::policy_decision_for_profile(
+                &config,
+                CapabilityProfile::Normal,
+                "rm",
+                &[],
+                false
+            ),
             PolicyDecision::Confirm
         );
         assert_eq!(
-            policy::policy_decision_for_mode(&config, RunMode::Room, "rm", &[], false),
+            policy::policy_decision_for_profile(&config, CapabilityProfile::Room, "rm", &[], false),
             PolicyDecision::Allow
         );
     }
@@ -1181,12 +1178,24 @@ mod tests {
         let config = Config::default_config().unwrap();
         for program in ["sudo", "scp", "mount", "systemctl", "service"] {
             assert_eq!(
-                policy::policy_decision_for_mode(&config, RunMode::Room, program, &[], false),
+                policy::policy_decision_for_profile(
+                    &config,
+                    CapabilityProfile::Room,
+                    program,
+                    &[],
+                    false
+                ),
                 PolicyDecision::Confirm
             );
         }
         assert_eq!(
-            policy::policy_decision_for_mode(&config, RunMode::Room, "ssh", &[], false),
+            policy::policy_decision_for_profile(
+                &config,
+                CapabilityProfile::Room,
+                "ssh",
+                &[],
+                false
+            ),
             PolicyDecision::Deny
         );
     }
@@ -1303,7 +1312,13 @@ mod tests {
             args_prefix: vec!["status".to_string()],
         });
         assert_eq!(
-            policy_decision(&config, "git", &["status".to_string()], true),
+            policy::policy_decision_for_profile(
+                &config,
+                CapabilityProfile::Normal,
+                "git",
+                &["status".to_string()],
+                true
+            ),
             PolicyDecision::Allow
         );
     }
@@ -1316,7 +1331,13 @@ mod tests {
             args_prefix: vec!["--version".to_string()],
         });
         assert_eq!(
-            policy_decision(&config, "curl", &["--version".to_string()], false),
+            policy::policy_decision_for_profile(
+                &config,
+                CapabilityProfile::Normal,
+                "curl",
+                &["--version".to_string()],
+                false
+            ),
             PolicyDecision::Allow
         );
     }
@@ -1329,7 +1350,13 @@ mod tests {
             args_prefix: vec!["-V".to_string()],
         });
         assert_eq!(
-            policy_decision(&config, "ssh", &["-V".to_string()], false),
+            policy::policy_decision_for_profile(
+                &config,
+                CapabilityProfile::Normal,
+                "ssh",
+                &["-V".to_string()],
+                false
+            ),
             PolicyDecision::Allow
         );
     }
@@ -1346,7 +1373,13 @@ mod tests {
             args_prefix: vec!["push".to_string()],
         });
         assert_eq!(
-            policy_decision(&config, "git", &["push".to_string()], false),
+            policy::policy_decision_for_profile(
+                &config,
+                CapabilityProfile::Normal,
+                "git",
+                &["push".to_string()],
+                false
+            ),
             PolicyDecision::Deny
         );
     }
@@ -1490,82 +1523,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn batch_rejects_entire_group_when_confirmation_is_unavailable() {
-        let root = unique_temp_dir("batch-confirm-unavailable");
-        let workspace = root.join("workspace");
-        fs::create_dir_all(&workspace).unwrap();
-        fs::write(workspace.join("marker.txt"), "untouched").unwrap();
-
-        let mut config = Config::default_config().unwrap();
-        config.workspace_root = workspace.clone();
-        config.confirmation_provider.set_legacy("none").unwrap();
-        config.path_policy = PathPolicyConfig {
-            write_roots: Vec::new(),
-            read_only_roots: Vec::new(),
-            deny_roots: Vec::new(),
-        };
-
-        let state = AppState {
-            config_path: root.join("config.json"),
-            config: Arc::new(RwLock::new(config)),
-            runtime: RuntimeModel::hub(CapabilityProfile::Normal),
-            started_at: chrono::Utc::now(),
-            supervised: false,
-            file_locks: Arc::new(Mutex::new(HashMap::new())),
-            sessions: Arc::new(Mutex::new(HashMap::new())),
-            hub_sender: Arc::new(Mutex::new(None)),
-            reporting_sender: Arc::new(Mutex::new(None)),
-            pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
-            temporary_mcp_allows: Arc::new(Mutex::new(Vec::new())),
-            notebook_writes: Arc::new(Mutex::new(())),
-            skills_writes: Arc::new(Mutex::new(())),
-            skill_leases: Arc::new(sessions::SkillLeaseManager::new()),
-            skill_installs: Arc::new(skill_installs::InstallManager::new()),
-        };
-
-        let result = exec::run_batch_task(
-            state,
-            "batch_test".to_string(),
-            BatchExecRequest {
-                agent_id: "test-agent".to_string(),
-                elements: vec![
-                    ExecElement {
-                        program: "pwd".to_string(),
-                        args: Vec::new(),
-                        working_directory: None,
-                    },
-                    ExecElement {
-                        program: "bash".to_string(),
-                        args: vec!["-lc".to_string(), "echo changed > marker.txt".to_string()],
-                        working_directory: None,
-                    },
-                ],
-                need_confirm: false,
-                confirm_method: None,
-                working_directory: None,
-            },
-        )
-        .await;
-
-        assert_eq!(result.status, "rejected");
-        assert_eq!(result.results.len(), 2);
-        assert_eq!(result.results[0].result.status, "skipped");
-        assert_eq!(
-            result.results[0].result.reject_reason.as_deref(),
-            Some("batch_rejected")
-        );
-        assert_eq!(result.results[1].result.status, "rejected");
-        assert_eq!(
-            result.results[1].result.reject_reason.as_deref(),
-            Some("batch_confirmation_confirmation_provider_unavailable")
-        );
-        assert_eq!(
-            fs::read_to_string(workspace.join("marker.txt")).unwrap(),
-            "untouched"
-        );
-    }
-
     #[test]
     fn batch_confirmation_preview_supports_chinese() {
         let mut config = Config::default_config().unwrap();
@@ -1577,7 +1534,6 @@ mod tests {
             working_directory: Some("/tmp".to_string()),
             resolved_working_directory: PathBuf::from("/tmp"),
             decision: PolicyDecision::Confirm,
-            reject_reason: None,
         };
         let preview =
             confirmation::batch_confirmation_preview(&config, &[element.clone()], &[element]);
@@ -1586,49 +1542,6 @@ mod tests {
         assert!(preview.contains("工作目录：/tmp"));
         assert!(preview.contains("是否允许整个批次执行一次？"));
         assert!(!preview.contains("\\n"));
-    }
-
-    #[test]
-    fn batch_prepare_detects_confirm_and_reject_before_execution() {
-        let root = unique_temp_dir("batch-prepare");
-        let workspace = root.join("workspace");
-        let secret = workspace.join("secret");
-        fs::create_dir_all(&secret).unwrap();
-
-        let mut config = Config::default_config().unwrap();
-        config.workspace_root = workspace;
-        config.path_policy = PathPolicyConfig {
-            write_roots: Vec::new(),
-            read_only_roots: Vec::new(),
-            deny_roots: vec![secret],
-        };
-
-        let confirm = exec::prepare_batch_element(
-            &config,
-            0,
-            ExecElement {
-                program: "bash".to_string(),
-                args: vec!["-lc".to_string(), "echo hi".to_string()],
-                working_directory: None,
-            },
-            None,
-            false,
-        );
-        assert_eq!(confirm.decision, PolicyDecision::Confirm);
-        assert!(confirm.reject_reason.is_none());
-
-        let rejected = exec::prepare_batch_element(
-            &config,
-            1,
-            ExecElement {
-                program: "cat".to_string(),
-                args: vec!["./secret/token".to_string()],
-                working_directory: None,
-            },
-            None,
-            false,
-        );
-        assert_eq!(rejected.reject_reason.as_deref(), Some("path_denied"));
     }
 
     #[test]
@@ -1882,7 +1795,7 @@ mod tests {
             args_prefix: Vec::new(),
         });
         candidate.path_policy.write_roots = vec![PathBuf::from("/tmp/live")];
-        candidate.limits.max_active_sessions = config::MaxActiveSessions::Explicit(9);
+        candidate.limits.max_active_jobs = config::MaxActiveJobs::Explicit(9);
         live.mcp_servers.insert(
             "primary".to_string(),
             McpServerConfig {
@@ -1916,8 +1829,8 @@ mod tests {
         );
         assert_eq!(resolved.resolved, 9);
         assert_eq!(
-            live.limits.max_active_sessions,
-            config::MaxActiveSessions::Explicit(9)
+            live.limits.max_active_jobs,
+            config::MaxActiveJobs::Explicit(9)
         );
         assert_eq!(
             live.mcp_servers["primary"].url.as_deref(),
@@ -1938,7 +1851,7 @@ mod tests {
         let config_path = root.join("config.json");
         let workspace = root.join("workspace");
         fs::create_dir_all(&workspace).unwrap();
-        let (mut state, _rx) = command_test_state(RunMode::Normal, workspace.clone());
+        let (mut state, _rx) = command_test_state(CapabilityProfile::Normal, workspace.clone());
         state.config_path = config_path.clone();
 
         let mut initial = state.config.read().await.clone();

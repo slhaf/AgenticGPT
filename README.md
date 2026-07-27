@@ -4,13 +4,13 @@
 
 Agentic GPT is a Linux local execution agent and Rust Hub for connecting ChatGPT to local machines in a controlled way.
 
-It is designed for workflows where ChatGPT needs to inspect local state, run short commands, start long-running sessions, bridge configured MCP servers, and ask for explicit confirmation before sensitive actions.
+It is designed for workflows where ChatGPT needs to inspect local state, run short commands, start and inspect long-running Jobs, bridge configured MCP servers, and ask for explicit confirmation before sensitive actions.
 
 ```text
 ChatGPT Actions / ChatGPT Apps MCP
   -> HTTPS API on Rust Hub
   -> WebSocket connection to Local Agent
-  -> local process / session / confirmation / MCP bridge / sandbox
+  -> local process / Job / confirmation / MCP bridge / sandbox
 ```
 
 The current mainline uses the Rust Hub. The older Cloudflare Worker implementation was moved out of `main`; see branch `legacy/cf-worker-before-removal` only if you need the historical Cloudflare-only Hub.
@@ -18,7 +18,7 @@ The current mainline uses the Rust Hub. The older Cloudflare Worker implementati
 ## Features
 
 - Local command execution through a persistent agent connection.
-- Short synchronous commands and long-running sessions.
+- Managed process and skill Jobs with bounded inline waits and later inspection/cancellation.
 - Batch command execution with all-or-nothing confirmation semantics.
 - Local desktop confirmation and optional Hub-backed remote confirmation.
 - Configurable command policy: allow, confirm, deny.
@@ -204,7 +204,7 @@ agentic-gpt config path deny add ~/.secrets
 agentic-gpt config path write remove ~/Projects
 ```
 
-`process.exec`, `process.batchExec`, and `session.start` also support `workingDirectory`. The resolved directory must exist, must be inside writable roots, and must not be inside denied roots.
+`process.exec` and `process.batch` also support `workingDirectory`. The resolved directory must exist, must be inside writable roots, and must not be inside denied roots.
 
 ## Interfaces
 
@@ -245,7 +245,7 @@ Recommended defaults:
 - Keep high-entropy Hub API keys and agent secrets.
 - Keep credential directories in denied roots.
 - Prefer confirmation for shell interpreters and network tools.
-- Use sessions for long-running commands instead of forcing short command timeouts.
+- Use the Job envelope and `job.get` for long-running commands instead of forcing unbounded inline waits.
 - Review `~/.agentic_gpt/audit.log` when debugging or tightening policy.
 
 ## License

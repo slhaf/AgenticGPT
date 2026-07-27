@@ -39,10 +39,10 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "500":
           $ref: "#/components/responses/InternalError"
-  /v1/exec:
+  /v1/process/exec:
     post:
-      operationId: exec
-      description: Run one short, one-shot inspection, detection, or deterministic command and return its exit status. Use startSession for long-running managed processes and tmux for persistent collaborative work.
+      operationId: processExec
+      description: Start one managed process and wait briefly. The response is always a Job envelope; use getJob for later state/output and cancelJob for cancellation evidence.
       x-openai-isConsequential: false
       requestBody:
         required: true
@@ -52,63 +52,11 @@ paths:
               $ref: "#/components/schemas/ExecRequest"
       responses:
         "200":
-          description: Synchronous short command result.
+          description: Managed process Job envelope.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/TaskResult"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "500":
-          $ref: "#/components/responses/InternalError"
-  /v1/batchExec:
-    post:
-      operationId: batchExec
-      description: Run multiple short commands on a local Agentic agent. Top-level workingDirectory is the default process working directory for all elements; per-element workingDirectory overrides it.
-      x-openai-isConsequential: false
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/BatchExecRequest"
-      responses:
-        "200":
-          description: Synchronous batch command result.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/BatchExecResult"
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "500":
-          $ref: "#/components/responses/InternalError"
-  /v1/sessions/start:
-    post:
-      operationId: startSession
-      description: Start a long-running or background managed process. Observe it with waitSession or inspectSession. Use tmux when work needs a persistent interactive workspace or user-agent handoff.
-      x-openai-isConsequential: false
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/ExecRequest"
-      responses:
-        "200":
-          description: Started session id and current session state.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/StartSessionResponse"
+                $ref: "#/components/schemas/JobResponse"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -119,95 +67,24 @@ paths:
           $ref: "#/components/responses/InternalError"
         "504":
           $ref: "#/components/responses/GatewayTimeout"
-  /v1/sessions:
-    get:
-      operationId: listSessions
-      description: List running or recently cached command sessions for one local Agentic agent.
-      x-openai-isConsequential: false
-      parameters:
-        - name: agentId
-          in: query
-          required: true
-          schema:
-            type: string
-      responses:
-        "200":
-          description: Running or waiting sessions.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ListSessionsResponse"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "500":
-          $ref: "#/components/responses/InternalError"
-  /v1/sessions/{sessionId}:
-    get:
-      operationId: inspectSession
-      description: Inspect one command session by id and return current state plus recent stdout/stderr tails.
-      x-openai-isConsequential: false
-      parameters:
-        - name: sessionId
-          in: path
-          required: true
-          schema:
-            type: string
-        - name: agentId
-          in: query
-          required: true
-          schema:
-            type: string
-      responses:
-        "200":
-          description: Session state and recent output.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/SessionInfo"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "500":
-          $ref: "#/components/responses/InternalError"
-  /v1/sessions/{sessionId}/wait:
+  /v1/process/batch:
     post:
-      operationId: waitSession
-      description: Wait up to seconds for a session update, capped at 30 seconds. Use 0 for immediate cached state.
+      operationId: processBatch
+      description: Atomically admit multiple managed processes with one confirmation decision. Returns ordered child Jobs; use getJob and cancelJob for lifecycle control.
       x-openai-isConsequential: false
-      parameters:
-        - name: sessionId
-          in: path
-          required: true
-          schema:
-            type: string
-        - name: agentId
-          in: query
-          required: true
-          schema:
-            type: string
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              type: object
-              required:
-                - seconds
-              properties:
-                seconds:
-                  type: integer
-                  maximum: 30
-                  minimum: 0
+              $ref: "#/components/schemas/BatchExecRequest"
       responses:
         "200":
-          description: Session state after waiting.
+          description: Managed process batch Job envelope.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SessionInfo"
+                $ref: "#/components/schemas/ProcessBatchResponse"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -216,13 +93,94 @@ paths:
           $ref: "#/components/responses/NotFound"
         "500":
           $ref: "#/components/responses/InternalError"
-  /v1/sessions/{sessionId}/kill:
-    post:
-      operationId: killSession
-      description: Stop a running command session by id on a local Agentic agent.
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+  /v1/jobs:
+    get:
+      operationId: listJobs
+      description: List active or recently retained Jobs for one local Agentic agent with optional kind/state filters.
       x-openai-isConsequential: false
       parameters:
-        - name: sessionId
+        - name: agentId
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: kind
+          in: query
+          required: false
+          schema:
+            $ref: "#/components/schemas/JobKind"
+        - name: state
+          in: query
+          required: false
+          schema:
+            $ref: "#/components/schemas/JobState"
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 100
+      responses:
+        "200":
+          description: Active or recently retained Jobs.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/jobs/{jobId}:
+    get:
+      operationId: getJob
+      description: Inspect or briefly wait for one Job. waitSeconds is capped at 30; cached state is used if the Agent is temporarily unavailable.
+      x-openai-isConsequential: false
+      parameters:
+        - name: jobId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: agentId
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: waitSeconds
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 30
+            default: 0
+      responses:
+        "200":
+          description: Current Job state and bounded output.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobInfo"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/jobs/{jobId}/cancel:
+    post:
+      operationId: cancelJob
+      description: Request kind-aware cancellation for one Job and return cancellation outcome and termination evidence.
+      x-openai-isConsequential: true
+      parameters:
+        - name: jobId
           in: path
           required: true
           schema:
@@ -234,11 +192,11 @@ paths:
             type: string
       responses:
         "200":
-          description: Killed session state.
+          description: Job state after the cancellation request.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SessionInfo"
+                $ref: "#/components/schemas/JobInfo"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
@@ -964,7 +922,7 @@ paths:
   /v1/room/skills/run:
     post:
       operationId: roomSkillsRun
-      description: Run an executable scripts/ file from an active workspace skill through the Room Agent managed-session engine. Fast terminal results are returned inline; otherwise use the returned sessionId with the existing session tools. No agentId is used.
+      description: Run an executable scripts/ file from an active workspace skill through the Room Agent ManagedJob engine. Fast terminal results are returned inline; otherwise use the returned jobId with getJob or cancelJob. No agentId is used.
       x-openai-isConsequential: true
       requestBody:
         required: true
@@ -1384,14 +1342,14 @@ components:
           required:
             - pendingRequestCount
             - pendingConfirmationCount
-            - cachedSessionCount
+            - cachedJobCount
           additionalProperties: false
           properties:
             pendingRequestCount:
               type: integer
             pendingConfirmationCount:
               type: integer
-            cachedSessionCount:
+            cachedJobCount:
               type: integer
         generatedAt:
           type: string
@@ -2873,20 +2831,7 @@ components:
           maximum: 30
           default: 5
     SkillRunResponse:
-      type: object
-      required: [agentId, sessionId, completedInline, pollAfterMs, session]
-      additionalProperties: false
-      properties:
-        agentId:
-          type: string
-        sessionId:
-          type: string
-        completedInline:
-          type: boolean
-        pollAfterMs:
-          type: integer
-        session:
-          $ref: "#/components/schemas/SessionInfo"
+      $ref: "#/components/schemas/JobResponse"
     SkillsSearchResponse:
       type: object
       required:
@@ -2964,42 +2909,12 @@ components:
         workingDirectory:
           type: string
           description: Optional command working directory. Relative values are resolved from the agent workspace root. The resolved directory must exist and be inside writable roots, not denied roots.
-    TaskResult:
-      type: object
-      required:
-        - agentId
-        - taskId
-        - status
-        - exitCode
-        - stdoutTail
-        - stderrTail
-        - truncated
-        - startedAt
-        - updatedAt
-      additionalProperties: true
-      properties:
-        agentId:
-          type: string
-        taskId:
-          type: string
-        status:
-          type: string
-        exitCode:
-          type:
-            - integer
-            - "null"
-        stdoutTail:
-          type: string
-        stderrTail:
-          type: string
-        truncated:
-          type: boolean
-        rejectReason:
-          type: string
-        startedAt:
-          type: string
-        updatedAt:
-          type: string
+        waitSeconds:
+          type: integer
+          minimum: 0
+          maximum: 30
+          default: 5
+          description: Bounded inline wait. The Job remains inspectable when it is still active after this interval.
     BatchExecRequest:
       type: object
       required:
@@ -3043,97 +2958,65 @@ components:
         workingDirectory:
           type: string
           description: Optional default working directory for all batch elements. Relative values are resolved from the agent workspace root. Per-element workingDirectory values override this.
-    BatchExecResult:
+        waitSeconds:
+          type: integer
+          minimum: 0
+          maximum: 30
+          default: 5
+          description: Bounded inline wait for all admitted child Jobs.
+    JobKind:
+      type: string
+      enum: [process, skill, mcp]
+    JobState:
+      type: string
+      enum:
+        - queued
+        - waiting_confirmation
+        - starting
+        - running
+        - completed
+        - failed
+        - rejected
+        - cancel_requested
+        - cancelled
+        - timed_out
+        - detached
+        - unknown_after_restart
+        - skipped
+    JobInfo:
       type: object
       required:
         - agentId
-        - batchId
-        - status
-        - results
+        - jobId
+        - kind
+        - state
+        - createdAt
         - startedAt
         - updatedAt
-      additionalProperties: true
+        - truncated
+        - cancelRequested
+      additionalProperties: false
       properties:
         agentId:
           type: string
-        batchId:
+        jobId:
           type: string
-        status:
+        kind:
+          $ref: "#/components/schemas/JobKind"
+        state:
+          $ref: "#/components/schemas/JobState"
+        createdAt:
           type: string
-        results:
-          type: array
-          items:
-            type: object
-            required:
-              - index
-              - program
-              - args
-              - result
-            additionalProperties: false
-            properties:
-              index:
-                type: integer
-              program:
-                type: string
-              args:
-                type: array
-                items:
-                  type: string
-              workingDirectory:
-                type: string
-              result:
-                $ref: "#/components/schemas/TaskResult"
+          format: date-time
         startedAt:
           type: string
+          format: date-time
         updatedAt:
           type: string
-    StartSessionResponse:
-      type: object
-      required:
-        - status
-        - sessionId
-        - session
-      additionalProperties: false
-      properties:
-        status:
+          format: date-time
+        finishedAt:
           type: string
-        sessionId:
-          type: string
-        session:
-          $ref: "#/components/schemas/SessionInfo"
-    ListSessionsResponse:
-      type: object
-      required:
-        - sessions
-      additionalProperties: false
-      properties:
-        sessions:
-          type: array
-          items:
-            $ref: "#/components/schemas/SessionInfo"
-    SessionInfo:
-      type: object
-      required:
-        - agentId
-        - sessionId
-        - state
-        - program
-        - args
-        - commandPreview
-        - startedAt
-        - updatedAt
-        - exitCode
-        - stdoutTail
-        - stderrTail
-        - truncated
-      additionalProperties: true
-      properties:
-        agentId:
-          type: string
-        sessionId:
-          type: string
-        state:
-          type: string
+          format: date-time
         program:
           type: string
         args:
@@ -3144,14 +3027,8 @@ components:
           type: string
         commandPreview:
           type: string
-        startedAt:
-          type: string
-        updatedAt:
-          type: string
         exitCode:
-          type:
-            - integer
-            - "null"
+          type: integer
         stdoutTail:
           type: string
         stderrTail:
@@ -3160,3 +3037,107 @@ components:
           type: boolean
         rejectReason:
           type: string
+        skillId:
+          type: string
+        skillPath:
+          type: string
+        installedDigest:
+          type: string
+        mcpServerId:
+          type: string
+        mcpToolName:
+          type: string
+        cancelRequested:
+          type: boolean
+        cancelOutcome:
+          type: string
+          enum: [cancelled, cancelled_before_start, already_terminal, cancel_failed]
+        terminationEvidence:
+          type: string
+          enum: [local_process_kill_completed, cancel_flag_before_process_start, process_exit_after_cancel, process_exit_status, process_kill_error, job_state]
+    JobResponse:
+      type: object
+      required:
+        - status
+        - completedInline
+        - jobId
+        - pollAfterMs
+        - job
+      additionalProperties: false
+      properties:
+        status:
+          $ref: "#/components/schemas/JobState"
+        completedInline:
+          type: boolean
+        jobId:
+          type: string
+        pollAfterMs:
+          type: integer
+          minimum: 0
+        job:
+          $ref: "#/components/schemas/JobInfo"
+    ProcessBatchResponse:
+      oneOf:
+        - $ref: "#/components/schemas/JobBatchResponse"
+        - $ref: "#/components/schemas/JobRejectedResponse"
+    JobRejectedResponse:
+      type: object
+      required:
+        - status
+        - completedInline
+        - pollAfterMs
+        - error
+      additionalProperties: false
+      properties:
+        status:
+          type: string
+          const: rejected
+        completedInline:
+          type: boolean
+          const: true
+        pollAfterMs:
+          type: integer
+          const: 0
+        error:
+          type: object
+          required: [code, message]
+          additionalProperties: false
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+    JobBatchResponse:
+      type: object
+      required:
+        - batchId
+        - status
+        - completedInline
+        - pollAfterMs
+        - jobs
+      additionalProperties: false
+      properties:
+        batchId:
+          type: string
+        status:
+          type: string
+          enum: [running, completed, completed_with_errors]
+        completedInline:
+          type: boolean
+        pollAfterMs:
+          type: integer
+          minimum: 0
+        jobs:
+          type: array
+          items:
+            $ref: "#/components/schemas/JobInfo"
+    JobListResponse:
+      type: object
+      required:
+        - jobs
+      additionalProperties: false
+      properties:
+        jobs:
+          type: array
+          items:
+            $ref: "#/components/schemas/JobInfo"

@@ -1,8 +1,7 @@
 use agentic_gpt_protocol::HubCommand;
 use anyhow::Result;
-use tokio::time::{sleep, Duration, Instant};
 
-use crate::{bootstrap, diary, exec, mcp, notebook, notify, sessions, skills, tmux, AppState};
+use crate::{bootstrap, diary, jobs, mcp, notebook, notify, skills, tmux, AppState};
 
 /// Value-returning local operation layer shared by transport adapters.
 ///
@@ -17,52 +16,50 @@ pub(crate) async fn dispatch(state: AppState, command: HubCommand) -> Result<ser
 
 async fn dispatch_inner(state: AppState, command: HubCommand) -> Result<serde_json::Value> {
     match command {
-        HubCommand::Exec {
-            task_id, payload, ..
-        } => Ok(serde_json::to_value(
-            exec::run_exec_task(state, task_id, payload).await,
+        HubCommand::Exec { payload, .. } => Ok(serde_json::to_value(
+            jobs::start_and_wait_process(
+                state,
+                payload,
+                jobs::ManagedJobOptions::for_source("hub:process.exec"),
+            )
+            .await,
         )?),
-        HubCommand::BatchExec {
-            task_id, payload, ..
-        } => Ok(serde_json::to_value(
-            exec::run_batch_task(state, task_id, payload).await,
-        )?),
-        HubCommand::StartSession {
-            session_id,
-            payload,
-            ..
-        } => Ok(serde_json::to_value(
-            sessions::start_session_async(state, session_id, payload).await,
-        )?),
-        HubCommand::ListSessions { .. } => Ok(serde_json::to_value(
-            sessions::current_sessions(&state).await,
-        )?),
-        HubCommand::InspectSession { session_id, .. } => Ok(serde_json::to_value(
-            sessions::inspect_session(&state, &session_id).await,
-        )?),
-        HubCommand::WaitSession {
-            session_id,
-            seconds,
-            ..
-        } => {
-            let deadline = Instant::now() + Duration::from_secs(seconds.min(30));
-            let mut session = sessions::inspect_session(&state, &session_id).await;
-            while let Some(info) = session.as_ref() {
-                if !matches!(
-                    info.state.as_str(),
-                    "starting" | "running" | "waiting_confirmation"
-                ) || Instant::now() >= deadline
-                {
-                    break;
-                }
-                sleep(Duration::from_millis(20)).await;
-                session = sessions::inspect_session(&state, &session_id).await;
+        HubCommand::ProcessBatch { payload, .. } => {
+            match jobs::start_process_batch(state, payload, "hub:process.batch".to_string(), None)
+                .await
+            {
+                Ok(response) => Ok(serde_json::to_value(response)?),
+                Err(reason) => Ok(serde_json::json!({
+                    "status": "rejected",
+                    "completedInline": true,
+                    "pollAfterMs": 0,
+                    "error": {"code": "process_batch_rejected", "message": reason}
+                })),
             }
-            Ok(serde_json::to_value(session)?)
         }
-        HubCommand::KillSession { session_id, .. } => Ok(serde_json::to_value(
-            sessions::kill_session(&state, &session_id).await,
-        )?),
+        HubCommand::JobList { payload, .. } => {
+            Ok(serde_json::json!({ "jobs": jobs::list_jobs(&state, payload).await }))
+        }
+        HubCommand::JobGet { payload, .. } => match jobs::get_job(
+            &state,
+            &payload.job_id,
+            payload.wait_seconds.unwrap_or(0).min(30),
+        )
+        .await
+        {
+            Ok(job) => Ok(serde_json::to_value(job)?),
+            Err(reason) => Ok(serde_json::json!({
+                "error": {"code": reason, "message": reason}
+            })),
+        },
+        HubCommand::JobCancel { payload, .. } => {
+            match jobs::cancel_job(&state, &payload.job_id).await {
+                Ok(job) => Ok(serde_json::to_value(job)?),
+                Err(reason) => Ok(serde_json::json!({
+                    "error": {"code": reason, "message": reason}
+                })),
+            }
+        }
         HubCommand::TmuxListSessions { .. } => Ok(tmux::list_sessions().await),
         HubCommand::TmuxListPanes { payload, .. } => Ok(tmux::list_panes(payload).await),
         HubCommand::TmuxCapturePane { payload, .. } => Ok(tmux::capture_pane(payload).await),
@@ -224,13 +221,9 @@ async fn dispatch_inner(state: AppState, command: HubCommand) -> Result<serde_js
             require_capability(&state, |capabilities| capabilities.skills)?;
             map_install_result(state.skill_installs.cancel(&state, payload).await)
         }
-        HubCommand::SkillsRun {
-            session_id,
-            payload,
-            ..
-        } => {
+        HubCommand::SkillsRun { payload, .. } => {
             require_capability(&state, |capabilities| capabilities.skills)?;
-            Ok(crate::hub::run_skill(&state, session_id, payload).await)
+            Ok(crate::hub::run_skill(&state, payload).await)
         }
     }
 }

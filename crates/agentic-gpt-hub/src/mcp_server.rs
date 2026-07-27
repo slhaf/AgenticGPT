@@ -1,13 +1,14 @@
 use agentic_gpt_protocol::{
     BatchExecRequest, BootstrapReadRequest, DiaryAppendRequest, DiaryRecentRequest,
-    DiarySelectExactRequest, ExecElement, ExecRequest, HubCommand, McpCallToolRequest,
-    McpListToolsRequest, NotebookAppendRequest, NotebookCurrentRequest, NotebookRecentRequest,
-    NotebookRemoveRequest, NotebookSearchRequest, NotebookSelectExactRequest,
-    NotebookUpdateRequest, NotificationAction, PassageSignificance, SessionInfo,
-    SkillActivationRequest, SkillInstallCancelRequest, SkillInstallFile, SkillInstallGetRequest,
-    SkillInstallRequest, SkillInstallSource, SkillReadRequest, SkillRunRequest, SkillSearchRequest,
-    TmuxCapturePaneRequest, TmuxCloseSessionRequest, TmuxCreateSessionRequest, TmuxExecRequest,
-    TmuxListPanesRequest, TmuxPasteTextRequest, UserNotifySendRequest,
+    DiarySelectExactRequest, ExecElement, ExecRequest, HubCommand, JobCancelRequest, JobGetRequest,
+    JobKind, JobListRequest, JobState, McpCallToolRequest, McpListToolsRequest,
+    NotebookAppendRequest, NotebookCurrentRequest, NotebookRecentRequest, NotebookRemoveRequest,
+    NotebookSearchRequest, NotebookSelectExactRequest, NotebookUpdateRequest, NotificationAction,
+    PassageSignificance, SkillActivationRequest, SkillInstallCancelRequest, SkillInstallFile,
+    SkillInstallGetRequest, SkillInstallRequest, SkillInstallSource, SkillReadRequest,
+    SkillRunRequest, SkillSearchRequest, TmuxCapturePaneRequest, TmuxCloseSessionRequest,
+    TmuxCreateSessionRequest, TmuxExecRequest, TmuxListPanesRequest, TmuxPasteTextRequest,
+    UserNotifySendRequest,
 };
 use axum::extract::{Request, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -24,10 +25,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use crate::agentic_result::AgenticResult;
-use crate::agents::{
-    cached_session, mcp_list_servers_all_agents, request_agent, timeout_batch_result,
-    timeout_task_result,
-};
+use crate::agents::{cached_job, mcp_list_servers_all_agents, request_agent};
 use crate::notify::{notification_channels, send_user_notification, NotifyRouteError};
 use crate::registry::{registry_entries, registry_entry};
 use crate::room::{request_active_room, RoomRouteError};
@@ -36,15 +34,15 @@ use crate::state::{HubState, McpProfile};
 use crate::utils::random_id;
 use crate::{default_config_summary, MAX_WAIT_SECONDS, REQUEST_TIMEOUT_SECS};
 
-const MCP_INSTRUCTIONS: &str = "Agentic GPT Hub provides three execution layers. Use process.exec for short, one-shot inspection, detection, and deterministic tasks where an exit code is required. Use session.start for long-running or background managed processes whose lifecycle and output should be observed through session tools. Use tmux as the persistent shared workspace for stateful development, iterative debugging, TUIs, and user-agent handoff. For tmux work, discover the workspace with tmux.listSessions and tmux.listPanes, inspect it with tmux.capturePane, then use tmux.exec for shell panes or tmux.pasteText for non-shell panes. tmux.exec confirms submission to the interactive shell and returns a bounded post-submit pane snapshot; it is still not proof of command completion, so use process.exec when a deterministic exit status is required. At Room session start, call room.bootstrap, then call room.bootstrap.read for relevant guide ids listed in its manifest. Room skills are managed only by the active Room Agent: use skills.install for asynchronous GitHub/HTTPS/inline installation, then skills.install.get with waitSeconds (default 5) and pollAfterMs, and skills.install.cancel when needed. Use skills.read with an optional package-relative path for bounded resources. Use skills.run for active installed scripts; it returns terminal output inline when it completes within waitSeconds (default 5), otherwise follow the returned sessionId with session.inspect/session.wait/session.kill. Commands remain subject to Agentic local policy, path policy, confirmation, and audit.";
-const COORDINATOR_INSTRUCTIONS: &str = "Agentic GPT Hub coordinator profile. This connector exposes only Hub-native agent status, retained run history, current session snapshots, and notification tools. It never dispatches execution, session-control, tmux, downstream MCP, skills, bootstrap, diary, or notebook commands to an Agent.";
+const MCP_INSTRUCTIONS: &str = "Agentic GPT Hub exposes domain-specific job creation plus one generic lifecycle. Use process.exec for one managed process and process.batch for multiple managed processes; both wait briefly and return a Job envelope, so long-running work does not require a separate start tool. Use job.get with waitSeconds to inspect or briefly wait, job.list for bounded filtered discovery, and job.cancel for kind-aware cancellation evidence. Use tmux as the persistent shared workspace for stateful development, iterative debugging, TUIs, and user-agent handoff. For tmux work, discover the workspace with tmux.listSessions and tmux.listPanes, inspect it with tmux.capturePane, then use tmux.exec for shell panes or tmux.pasteText for non-shell panes. At Room start, call room.bootstrap, then room.bootstrap.read for relevant guides. Room skills are managed only by the active Room Agent; skills.run returns the same Job envelope and is followed through job.get/job.cancel. Commands remain subject to Agentic local policy, path policy, confirmation, capacity, and audit.";
+const COORDINATOR_INSTRUCTIONS: &str = "Agentic GPT Hub coordinator profile. This connector exposes only Hub-native agent status, retained run history, current job snapshots, and notification tools. It never dispatches execution, job-control, tmux, downstream MCP, skills, bootstrap, diary, or notebook commands to an Agent.";
 const COORDINATOR_TOOLS: &[&str] = &[
     "hub.info",
     "agent.list",
     "hub.run.list",
     "hub.run.get",
-    "hub.session.list",
-    "hub.session.get",
+    "hub.job.list",
+    "hub.job.get",
     "user.notify.channels",
     "user.notify.send",
 ];
@@ -86,8 +84,7 @@ fn decorate_tool_descriptors(tool_router: &mut ToolRouter<AgenticMcpServer>) {
         let open_world = matches!(
             name,
             "process.exec"
-                | "process.batchExec"
-                | "session.start"
+                | "process.batch"
                 | "mcp.callTool"
                 | "tmux.pasteText"
                 | "tmux.exec"
@@ -99,7 +96,7 @@ fn decorate_tool_descriptors(tool_router: &mut ToolRouter<AgenticMcpServer>) {
         let read_only = tool_is_read_only(name);
         let destructive = matches!(
             name,
-            "session.kill"
+            "job.cancel"
                 | "tmux.closeSession"
                 | "room.notebook.remove"
                 | "skills.install"
@@ -126,9 +123,8 @@ fn tool_is_read_only(name: &str) -> bool {
     !matches!(
         name,
         "process.exec"
-            | "process.batchExec"
-            | "session.start"
-            | "session.kill"
+            | "process.batch"
+            | "job.cancel"
             | "tmux.pasteText"
             | "tmux.exec"
             | "tmux.createSession"
@@ -145,6 +141,40 @@ fn tool_is_read_only(name: &str) -> bool {
             | "skills.install.cancel"
             | "skills.run"
     )
+}
+
+fn parse_job_kind(value: Option<&str>) -> Result<Option<JobKind>, ErrorData> {
+    match value {
+        None => Ok(None),
+        Some("process") => Ok(Some(JobKind::Process)),
+        Some("skill") => Ok(Some(JobKind::Skill)),
+        Some("mcp") => Ok(Some(JobKind::Mcp)),
+        Some(_) => Err(mcp_invalid_params(
+            "job_kind_invalid",
+            "kind must be process, skill, or mcp",
+        )),
+    }
+}
+
+fn parse_job_state(value: Option<&str>) -> Result<Option<JobState>, ErrorData> {
+    let state = match value {
+        None => return Ok(None),
+        Some("queued") => JobState::Queued,
+        Some("waiting_confirmation") => JobState::WaitingConfirmation,
+        Some("starting") => JobState::Starting,
+        Some("running") => JobState::Running,
+        Some("completed") => JobState::Completed,
+        Some("failed") => JobState::Failed,
+        Some("rejected") => JobState::Rejected,
+        Some("cancel_requested") => JobState::CancelRequested,
+        Some("cancelled") => JobState::Cancelled,
+        Some("timed_out") => JobState::TimedOut,
+        Some("detached") => JobState::Detached,
+        Some("unknown_after_restart") => JobState::UnknownAfterRestart,
+        Some("skipped") => JobState::Skipped,
+        Some(_) => return Err(mcp_invalid_params("job_state_invalid", "unknown Job state")),
+    };
+    Ok(Some(state))
 }
 
 fn object_schema() -> Map<String, Value> {
@@ -225,32 +255,10 @@ async fn call_app_tool(server: &AgenticMcpServer, params: Value) -> Result<Value
     let result = match name {
         "agent.list" => server.list_agents().await,
         "process.exec" => server.exec(Parameters(decode_args(arguments)?)).await,
-        "process.batchExec" => server.batch_exec(Parameters(decode_args(arguments)?)).await,
-        "session.start" => {
-            server
-                .start_session(Parameters(decode_args(arguments)?))
-                .await
-        }
-        "session.list" => {
-            server
-                .list_sessions(Parameters(decode_args(arguments)?))
-                .await
-        }
-        "session.inspect" => {
-            server
-                .inspect_session(Parameters(decode_args(arguments)?))
-                .await
-        }
-        "session.wait" => {
-            server
-                .wait_session(Parameters(decode_args(arguments)?))
-                .await
-        }
-        "session.kill" => {
-            server
-                .kill_session(Parameters(decode_args(arguments)?))
-                .await
-        }
+        "process.batch" => server.batch_exec(Parameters(decode_args(arguments)?)).await,
+        "job.list" => server.job_list(Parameters(decode_args(arguments)?)).await,
+        "job.get" => server.job_get(Parameters(decode_args(arguments)?)).await,
+        "job.cancel" => server.job_cancel(Parameters(decode_args(arguments)?)).await,
         "tmux.listSessions" => {
             server
                 .tmux_list_sessions(Parameters(decode_args(arguments)?))
@@ -309,14 +317,14 @@ async fn call_app_tool(server: &AgenticMcpServer, params: Value) -> Result<Value
                 .hub_run_list(Parameters(decode_args(arguments)?))
                 .await
         }
-        "hub.session.list" => {
+        "hub.job.list" => {
             server
-                .hub_session_list(Parameters(decode_args(arguments)?))
+                .hub_job_list(Parameters(decode_args(arguments)?))
                 .await
         }
-        "hub.session.get" => {
+        "hub.job.get" => {
             server
-                .hub_session_get(Parameters(decode_args(arguments)?))
+                .hub_job_get(Parameters(decode_args(arguments)?))
                 .await
         }
         "user.notify.send" => {
@@ -434,23 +442,44 @@ fn decode_args<T: for<'de> Deserialize<'de>>(value: Value) -> Result<T, String> 
     serde_json::from_value(value).map_err(|error| format!("Invalid tool arguments: {error}"))
 }
 
-async fn snapshot_session_list(state: &HubState, agent_id: &str) -> Value {
-    let sessions = state
-        .sessions
+async fn snapshot_job_list(state: &HubState, agent_id: &str) -> Value {
+    let mut jobs = state
+        .jobs
         .lock()
         .await
         .get(agent_id)
-        .map(|sessions| sessions.values().cloned().collect::<Vec<_>>())
+        .map(|jobs| jobs.values().cloned().collect::<Vec<_>>())
         .unwrap_or_default();
-    json!({ "sessions": sessions })
+    jobs.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    json!({ "jobs": jobs })
 }
 
-async fn snapshot_session_get(state: &HubState, agent_id: &str, session_id: &str) -> Value {
-    match cached_session(state, agent_id, session_id).await {
-        Some(session) => serde_json::to_value(session)
-            .unwrap_or_else(|error| json!({ "error": error.to_string() })),
+async fn snapshot_job_list_filtered(
+    state: &HubState,
+    agent_id: &str,
+    request: &JobListRequest,
+) -> Value {
+    let mut jobs = state
+        .jobs
+        .lock()
+        .await
+        .get(agent_id)
+        .map(|jobs| jobs.values().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    jobs.retain(|job| request.kind.is_none_or(|kind| job.kind == kind));
+    jobs.retain(|job| request.state.is_none_or(|state| job.state == state));
+    jobs.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    jobs.truncate(request.limit.unwrap_or(100).clamp(1, 100));
+    json!({ "jobs": jobs })
+}
+
+async fn snapshot_job_get(state: &HubState, agent_id: &str, job_id: &str) -> Value {
+    match cached_job(state, agent_id, job_id).await {
+        Some(job) => {
+            serde_json::to_value(job).unwrap_or_else(|error| json!({ "error": error.to_string() }))
+        }
         None => {
-            json!({ "error": { "code": "session_not_found", "message": "Session was not found" } })
+            json!({ "error": { "code": "job_not_found", "message": "Job was not found" } })
         }
     }
 }
@@ -538,7 +567,7 @@ impl ServerHandler for AgenticMcpServer {
 impl AgenticMcpServer {
     #[tool(
         name = "hub.info",
-        description = "Return the safe Hub runtime summary, including version, public URL, agent counts, confirmation status, and bounded pending/session counts."
+        description = "Return the safe Hub runtime summary, including version, public URL, agent counts, confirmation status, and bounded pending/Job counts."
     )]
     async fn hub_info(&self) -> Result<CallToolResult, ErrorData> {
         let info = crate::routes::build_hub_info_response(&self.state)
@@ -622,36 +651,36 @@ impl AgenticMcpServer {
     }
 
     #[tool(
-        name = "hub.session.list",
-        description = "List current or recently cached session snapshots without dispatching a command to an Agent."
+        name = "hub.job.list",
+        description = "List current or recently cached job snapshots without dispatching a command to an Agent."
     )]
-    async fn hub_session_list(
+    async fn hub_job_list(
         &self,
         params: Parameters<AgentIdArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let agent_id = params.0.agent_id;
         self.ensure_agent_enabled(&agent_id)?;
-        Ok(ok_json(snapshot_session_list(&self.state, &agent_id).await))
+        Ok(ok_json(snapshot_job_list(&self.state, &agent_id).await))
     }
 
     #[tool(
-        name = "hub.session.get",
-        description = "Get one current or recently cached session snapshot without dispatching a command to an Agent."
+        name = "hub.job.get",
+        description = "Get one current or recently cached job snapshot without dispatching a command to an Agent."
     )]
-    async fn hub_session_get(
+    async fn hub_job_get(
         &self,
-        params: Parameters<SessionIdArgs>,
+        params: Parameters<JobIdArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let params = params.0;
         self.ensure_agent_enabled(&params.agent_id)?;
         Ok(result_from_value(
-            snapshot_session_get(&self.state, &params.agent_id, &params.session_id).await,
+            snapshot_job_get(&self.state, &params.agent_id, &params.job_id).await,
         ))
     }
 
     #[tool(
         name = "process.exec",
-        description = "Run one short, one-shot inspection, detection, or deterministic command on a local Agentic agent and return its exit status. workingDirectory is the process CWD. Use session.start for long-running managed processes and tmux for persistent collaborative work."
+        description = "Start one managed process on a local Agentic agent and wait briefly. The response is always a Job envelope; use job.get for later state/output and job.cancel for cancellation evidence."
     )]
     async fn exec(&self, params: Parameters<ExecArgs>) -> Result<CallToolResult, ErrorData> {
         let params = params.0;
@@ -663,33 +692,28 @@ impl AgenticMcpServer {
             need_confirm: params.need_confirm.unwrap_or(false),
             confirm_method: params.confirm_method,
             working_directory: params.working_directory,
+            wait_seconds: params.wait_seconds,
         };
-        let task_id = random_id("task");
         let command = HubCommand::Exec {
             request_id: random_id("req"),
-            task_id: task_id.clone(),
             payload: payload.clone(),
         };
-        let value = match request_agent(
+        let value = request_agent(
             &self.state,
             &payload.agent_id,
             command,
             REQUEST_TIMEOUT_SECS,
         )
         .await
-        {
-            Ok(value) => value,
-            Err(reason) => {
-                serde_json::to_value(timeout_task_result(&payload.agent_id, &task_id, reason))
-                    .unwrap_or_else(|error| json!({ "error": error.to_string() }))
-            }
-        };
+        .unwrap_or_else(
+            |reason| json!({ "error": { "code": "process_exec_timeout", "message": reason } }),
+        );
         Ok(result_from_value(value))
     }
 
     #[tool(
-        name = "process.batchExec",
-        description = "Run multiple short commands on a local Agentic agent. Top-level workingDirectory is the default process CWD for all elements; per-element workingDirectory overrides it."
+        name = "process.batch",
+        description = "Start multiple managed processes on a local Agentic agent with one admission/confirmation decision. Returns ordered child Jobs; use job.get/job.cancel for lifecycle control."
     )]
     async fn batch_exec(
         &self,
@@ -711,160 +735,87 @@ impl AgenticMcpServer {
             need_confirm: params.need_confirm.unwrap_or(false),
             confirm_method: params.confirm_method,
             working_directory: params.working_directory,
+            wait_seconds: params.wait_seconds,
         };
-        let batch_id = random_id("batch");
-        let command = HubCommand::BatchExec {
+        let command = HubCommand::ProcessBatch {
             request_id: random_id("req"),
-            task_id: batch_id.clone(),
             payload: payload.clone(),
         };
-        let value = match request_agent(
+        let value = request_agent(
             &self.state,
             &payload.agent_id,
             command,
             REQUEST_TIMEOUT_SECS,
         )
         .await
-        {
+        .unwrap_or_else(
+            |reason| json!({ "error": { "code": "process_batch_timeout", "message": reason } }),
+        );
+        Ok(result_from_value(value))
+    }
+
+    #[tool(
+        name = "job.list",
+        description = "List active or recently retained Jobs for one local Agentic agent with optional kind/state filters."
+    )]
+    async fn job_list(&self, params: Parameters<JobListArgs>) -> Result<CallToolResult, ErrorData> {
+        let params = params.0;
+        self.ensure_agent_enabled(&params.agent_id)?;
+        let payload = JobListRequest {
+            kind: parse_job_kind(params.kind.as_deref())?,
+            state: parse_job_state(params.state.as_deref())?,
+            limit: params.limit,
+        };
+        let command = HubCommand::JobList {
+            request_id: random_id("req"),
+            payload: payload.clone(),
+        };
+        let value = match request_agent(&self.state, &params.agent_id, command, 2).await {
             Ok(value) => value,
-            Err(reason) => serde_json::to_value(timeout_batch_result(&payload, &batch_id, reason))
-                .unwrap_or_else(|error| json!({ "error": error.to_string() })),
+            Err(_) => snapshot_job_list_filtered(&self.state, &params.agent_id, &payload).await,
         };
         Ok(result_from_value(value))
     }
 
     #[tool(
-        name = "session.start",
-        description = "Start a long-running or background managed process on a local Agentic agent. workingDirectory is the process CWD; observe lifecycle and output with session.wait or session.inspect. Use tmux instead when the work needs a persistent interactive workspace or user-agent handoff."
+        name = "job.get",
+        description = "Inspect or briefly wait for one Job by id. waitSeconds is capped at 30; cached state is used if the Agent is temporarily unavailable."
     )]
-    async fn start_session(
-        &self,
-        params: Parameters<ExecArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
+    async fn job_get(&self, params: Parameters<JobGetArgs>) -> Result<CallToolResult, ErrorData> {
         let params = params.0;
         self.ensure_agent_enabled(&params.agent_id)?;
-        let payload = ExecRequest {
-            agent_id: params.agent_id.clone(),
-            program: params.program,
-            args: params.args.unwrap_or_default(),
-            need_confirm: params.need_confirm.unwrap_or(false),
-            confirm_method: params.confirm_method,
-            working_directory: params.working_directory,
-        };
-        let session_id = random_id("sess");
-        let command = HubCommand::StartSession {
+        let wait_seconds = params.wait_seconds.unwrap_or(0).min(MAX_WAIT_SECONDS);
+        let command = HubCommand::JobGet {
             request_id: random_id("req"),
-            session_id: session_id.clone(),
-            payload: payload.clone(),
-        };
-        let value = match request_agent(
-            &self.state,
-            &payload.agent_id,
-            command,
-            REQUEST_TIMEOUT_SECS,
-        )
-        .await
-        {
-            Ok(value) => {
-                let status = serde_json::from_value::<SessionInfo>(value.clone())
-                    .ok()
-                    .map(|session| {
-                        if session.state == "running" || session.state == "waiting_confirmation" {
-                            "started"
-                        } else {
-                            "failed"
-                        }
-                    })
-                    .unwrap_or("started");
-                json!({ "status": status, "sessionId": session_id, "session": value })
-            }
-            Err(reason) => {
-                json!({ "error": { "code": "session_start_timeout", "message": reason } })
-            }
-        };
-        Ok(result_from_value(value))
-    }
-
-    #[tool(
-        name = "session.list",
-        description = "List running or recently cached command sessions for a local Agentic agent."
-    )]
-    async fn list_sessions(
-        &self,
-        params: Parameters<AgentIdArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let agent_id = params.0.agent_id;
-        self.ensure_agent_enabled(&agent_id)?;
-        let value = snapshot_session_list(&self.state, &agent_id).await;
-        Ok(ok_json(value))
-    }
-
-    #[tool(
-        name = "session.inspect",
-        description = "Inspect one command session by id and return current state plus recent stdout/stderr tails."
-    )]
-    async fn inspect_session(
-        &self,
-        params: Parameters<SessionIdArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let params = params.0;
-        self.ensure_agent_enabled(&params.agent_id)?;
-        let value = snapshot_session_get(&self.state, &params.agent_id, &params.session_id).await;
-        Ok(result_from_value(value))
-    }
-
-    #[tool(
-        name = "session.wait",
-        description = "Wait up to seconds for a session update, capped at 30 seconds. Use 0 or omit seconds to return cached state immediately."
-    )]
-    async fn wait_session(
-        &self,
-        params: Parameters<WaitSessionArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let params = params.0;
-        self.ensure_agent_enabled(&params.agent_id)?;
-        let seconds = params.seconds.unwrap_or(0).min(MAX_WAIT_SECONDS);
-        let command = HubCommand::WaitSession {
-            request_id: random_id("req"),
-            session_id: params.session_id.clone(),
-            seconds,
-        };
-        let value = match request_agent(&self.state, &params.agent_id, command, seconds + 2).await {
-            Ok(value) if !value.is_null() => value,
-            _ => match cached_session(&self.state, &params.agent_id, &params.session_id).await {
-                Some(session) => serde_json::to_value(session)
-                    .unwrap_or_else(|error| json!({ "error": error.to_string() })),
-                None => {
-                    json!({ "error": { "code": "session_not_found", "message": "Session was not found" } })
-                }
+            payload: JobGetRequest {
+                job_id: params.job_id.clone(),
+                wait_seconds: Some(wait_seconds),
             },
         };
+        let value =
+            match request_agent(&self.state, &params.agent_id, command, wait_seconds + 2).await {
+                Ok(value) if value.get("error").is_none() => value,
+                _ => snapshot_job_get(&self.state, &params.agent_id, &params.job_id).await,
+            };
         Ok(result_from_value(value))
     }
 
     #[tool(
-        name = "session.kill",
-        description = "Kill a running command session by id on a local Agentic agent."
+        name = "job.cancel",
+        description = "Request kind-aware cancellation for one Job and return cancellation outcome/termination evidence."
     )]
-    async fn kill_session(
-        &self,
-        params: Parameters<SessionIdArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
+    async fn job_cancel(&self, params: Parameters<JobIdArgs>) -> Result<CallToolResult, ErrorData> {
         let params = params.0;
         self.ensure_agent_enabled(&params.agent_id)?;
-        let command = HubCommand::KillSession {
+        let command = HubCommand::JobCancel {
             request_id: random_id("req"),
-            session_id: params.session_id.clone(),
+            payload: JobCancelRequest {
+                job_id: params.job_id.clone(),
+            },
         };
         let value = match request_agent(&self.state, &params.agent_id, command, 5).await {
-            Ok(value) if !value.is_null() => value,
-            _ => match cached_session(&self.state, &params.agent_id, &params.session_id).await {
-                Some(session) => serde_json::to_value(session)
-                    .unwrap_or_else(|error| json!({ "error": error.to_string() })),
-                None => {
-                    json!({ "error": { "code": "session_not_found", "message": "Session was not found" } })
-                }
-            },
+            Ok(value) if value.get("error").is_none() => value,
+            _ => snapshot_job_get(&self.state, &params.agent_id, &params.job_id).await,
         };
         Ok(result_from_value(value))
     }
@@ -1723,19 +1674,17 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "skills.run",
-        description = "Run an executable scripts/ file from an active workspace skill through the Room Agent managed-session engine. Returns terminal output inline when it finishes within waitSeconds (default 5), otherwise returns the session id for session.inspect/session.wait/session.kill. No agentId is used."
+        description = "Run an executable scripts/ file from an active workspace skill through the Room Agent ManagedJob engine. Returns terminal output inline when it finishes within waitSeconds (default 5), otherwise returns jobId for job.get/job.cancel. No agentId is used."
     )]
     async fn skills_run(
         &self,
         params: Parameters<SkillRunArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let params = params.0;
-        let session_id = random_id("sess");
         let value = request_active_room(
             &self.state,
             HubCommand::SkillsRun {
                 request_id: random_id("req"),
-                session_id,
                 payload: SkillRunRequest {
                     id: params.id,
                     path: params.path,
@@ -1832,6 +1781,9 @@ struct ExecArgs {
         description = "Process working directory. Relative values resolve from the agent workspace root; prefer this over cd in shell commands."
     )]
     working_directory: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "Bounded inline wait in seconds, default 5 and capped at 30.")]
+    wait_seconds: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
@@ -1858,6 +1810,9 @@ struct BatchExecArgs {
         description = "Default process working directory for all batch elements. Relative values resolve from the agent workspace root."
     )]
     working_directory: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "Bounded inline wait in seconds, default 5 and capped at 30.")]
+    wait_seconds: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
@@ -1877,25 +1832,41 @@ struct BatchExecElementArgs {
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
-struct SessionIdArgs {
+struct JobIdArgs {
     #[schemars(description = "Target local agent id.")]
     agent_id: String,
-    #[schemars(description = "Session id returned by session.start or session.list.")]
-    session_id: String,
+    #[schemars(
+        description = "Managed Job id returned by process.exec, process.batch, or skills.run."
+    )]
+    job_id: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
-struct WaitSessionArgs {
+struct JobGetArgs {
     #[schemars(description = "Target local agent id.")]
     agent_id: String,
-    #[schemars(description = "Session id returned by session.start or session.list.")]
-    session_id: String,
+    #[schemars(description = "Managed Job id.")]
+    job_id: String,
     #[serde(default)]
-    #[schemars(
-        description = "Maximum seconds to wait for new session output or state, capped at 30. Use 0 or omit for immediate cached state."
-    )]
-    seconds: Option<u64>,
+    #[schemars(description = "Maximum seconds to wait for an update, capped at 30.")]
+    wait_seconds: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct JobListArgs {
+    #[schemars(description = "Target local agent id.")]
+    agent_id: String,
+    #[serde(default)]
+    #[schemars(description = "Optional Job kind: process, skill, or mcp.")]
+    kind: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "Optional Job state filter.")]
+    state: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "Maximum retained Jobs, default 100 and capped at 100.")]
+    limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
@@ -2504,7 +2475,8 @@ mod tests {
             agents: Arc::new(Mutex::new(HashMap::new())),
             pending: Arc::new(Mutex::new(HashMap::new())),
             pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
-            sessions: Arc::new(Mutex::new(HashMap::new())),
+            jobs: Arc::new(Mutex::new(HashMap::new())),
+            boot_generations: Arc::new(Mutex::new(HashMap::new())),
             active_room: Arc::new(Mutex::new(None)),
             http: reqwest::Client::new(),
             public_base_url: Some("https://hub.example.invalid".to_string()),
@@ -2522,7 +2494,7 @@ mod tests {
     fn tool_read_only_hints_match_side_effect_semantics() {
         for name in [
             "agent.list",
-            "session.list",
+            "job.list",
             "tmux.listSessions",
             "tmux.listPanes",
             "tmux.capturePane",
@@ -2542,8 +2514,8 @@ mod tests {
         }
         for name in [
             "process.exec",
-            "session.start",
-            "session.kill",
+            "process.exec",
+            "job.cancel",
             "tmux.exec",
             "tmux.pasteText",
             "tmux.createSession",
@@ -2579,10 +2551,10 @@ mod tests {
             vec![
                 "agent.list",
                 "hub.info",
+                "hub.job.get",
+                "hub.job.list",
                 "hub.run.get",
                 "hub.run.list",
-                "hub.session.get",
-                "hub.session.list",
                 "user.notify.channels",
                 "user.notify.send",
             ]
@@ -2621,7 +2593,7 @@ mod tests {
         assert!(names.iter().any(|name| name == "bootstrap"));
         assert!(names.iter().any(|name| name == "bootstrap.read"));
         assert!(names.iter().any(|name| name == "process.exec"));
-        assert!(names.iter().any(|name| name == "hub.session.list"));
+        assert!(names.iter().any(|name| name == "hub.job.list"));
     }
 
     #[test]
@@ -2773,7 +2745,7 @@ mod tests {
 
     #[test]
     fn native_tool_values_use_agentic_result_shape() {
-        let value = json!({ "sessions": [] });
+        let value = json!({ "jobs": [] });
 
         let result = result_from_value(value.clone());
         let serialized = serde_json::to_value(result).unwrap();

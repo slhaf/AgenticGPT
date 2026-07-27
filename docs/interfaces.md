@@ -10,13 +10,11 @@ Core endpoints:
 
 - `GET /v1/info`: safe Hub runtime summary.
 - `GET /v1/agents`: enabled local agents with online status and safe config summaries.
-- `POST /v1/exec`: short synchronous command execution. Supports optional `workingDirectory`.
-- `POST /v1/batchExec`: short synchronous batch execution. Supports a batch-level `workingDirectory` and per-element overrides. Batch confirmation is all-or-nothing: if any element is denied, the whole batch is rejected; if any element needs confirmation, one confirmation decision applies to the entire batch.
-- `POST /v1/sessions/start`: start a long-running command session. Supports optional `workingDirectory`.
-- `GET /v1/sessions`: list sessions for one agent.
-- `GET /v1/sessions/{sessionId}`: inspect one session.
-- `POST /v1/sessions/{sessionId}/wait`: wait briefly for session output updates.
-- `POST /v1/sessions/{sessionId}/kill`: stop a running session.
+- `POST /v1/process/exec`: start one managed process and wait briefly. The response is always a Job envelope and supports optional `workingDirectory` and bounded `waitSeconds`.
+- `POST /v1/process/batch`: atomically admit a managed process batch with batch-level `workingDirectory`, per-element overrides, one confirmation decision, and ordered child Jobs.
+- `GET /v1/jobs?agentId=...`: list active or recently retained Jobs with optional kind/state/limit filters.
+- `GET /v1/jobs/{jobId}?agentId=...&waitSeconds=...`: inspect or briefly wait for one Job.
+- `POST /v1/jobs/{jobId}/cancel?agentId=...`: request kind-aware cancellation and return outcome/termination evidence.
 - `POST /v1/mcp/servers`: list MCP servers configured inside one local agent, or omit `agentId` to group MCP servers for all currently connected agents.
 - `POST /v1/mcp/tools`: list tools exposed by one MCP server.
 - `POST /v1/mcp/callTool`: call one MCP tool through the selected local agent.
@@ -25,11 +23,11 @@ Core endpoints:
 - `POST /v1/room/skills/install`: asynchronously install one skill from public GitHub, HTTPS file entries, or inline UTF-8/base64 files. The response returns an `installId` before network work begins.
 - `POST /v1/room/skills/install/get`: query an installation with bounded long polling (`waitSeconds`, default 5, maximum 30); terminal responses set `pollAfterMs` to `0`.
 - `POST /v1/room/skills/install/cancel`: request idempotent cooperative cancellation before atomic commit.
-- `POST /v1/room/skills/run`: run an executable active workspace skill script under `scripts/`. It returns terminal session output inline when possible, otherwise the same `sessionId` used by the existing inspect/wait/kill session APIs. These endpoints do not take `agentId`.
+- `POST /v1/room/skills/run`: run an executable active workspace skill script under `scripts/`. It returns terminal Job output inline when possible, otherwise the same `jobId` used by `job.get` and `job.cancel`. These endpoints do not take `agentId`.
 - `POST /v1/room/bootstrap`: load the active Room Agent's repeated session entrypoint and deterministic guide manifest. It has no request body or `agentId`.
 - `POST /v1/room/bootstrap/read`: read one valid bootstrap guide by its frontmatter `id`. It has no `agentId`.
 
-`/v1/info` intentionally returns only safe metadata: Hub version, public base URL, timeout settings, remote confirmation status, agent counts, and pending request/session counts. It must not expose secrets, confirmation callback URLs, or private config values.
+`/v1/info` intentionally returns only safe metadata: Hub version, public base URL, timeout settings, remote confirmation status, agent counts, and pending request/Job counts. It must not expose secrets, confirmation callback URLs, or private config values.
 
 `/v1/agents` returns one safe config summary per enabled local agent. When an agent is online, the summary includes coarse sandbox mode, confirmation provider, path policy roots, configured command policy rules, and builtin command policy rules. Path roots are display paths such as `workspace`, `~/Documents`, or `/tmp`; private home paths should be shortened with `~` where possible. Offline agents may return an `unknown` summary because the Hub does not persist the last local config summary. Local confirmation prompts can use English or Simplified Chinese via `confirmationLanguage` (`en` or `zh-CN`).
 
@@ -60,7 +58,7 @@ The Hub MCP profile is selected at Hub startup with `--mcp-profile full|coordina
 or `AGENTIC_GPT_HUB_MCP_PROFILE`. `full` is the default and preserves the
 execution surface plus the transport-neutral `bootstrap` aliases. `coordinator`
 advertises only the Hub-native tools `hub.info`, `agent.list`, `hub.run.list`,
-`hub.run.get`, `hub.session.list`, `hub.session.get`, `user.notify.channels`,
+`hub.run.get`, `hub.job.list`, `hub.job.get`, `user.notify.channels`,
 and `user.notify.send`; it never dispatches an Agent command. See
 [`standalone-runtime.md`](standalone-runtime.md) for the complete profile and
 standalone Tunnel documentation.
@@ -147,11 +145,11 @@ Keep MCP argument schemas in the tool definition; put selection and recovery rul
 ---
 id: execution
 kind: guide
-title: Execution and session choice
-summary: Choose deterministic commands, managed sessions, or persistent panes deliberately.
+title: Execution and Job choice
+summary: Choose managed Jobs or persistent panes deliberately.
 loadPolicy: startup
 priority: 90
-toolBindings: [process.exec, session.start, tmux.exec]
+toolBindings: [process.exec, process.batch, job.get, job.cancel, tmux.exec]
 tags: [operations, safety]
 ---
 Use the tool schema for arguments and this guide for workflow, confirmation, and recovery.
@@ -204,8 +202,8 @@ POST /v1/agents/{agentId}/messages?connectionId=...
 
 WebSocket and HTTP/SSE share reliable ack/replay semantics for request/response-style `HubCommand` messages. The Hub sends a command envelope containing `eventId`, `runId`, `requestId`, `commandHash`, and the original `HubCommand`. The agent writes the accepted command to its local transport ledger before sending `TransportAck`; command results include `runId` and are accepted as late results when `agentId`, `runId`, and `requestId` match, even if the original connection is stale.
 
-For HTTP/SSE, the Hub treats only the latest `connectionId` for an agent as the current connection. Stale `Hello`, `Heartbeat`, `SessionUpdate`, and `ConfirmationRequest` messages sent to `/messages` are rejected with `409 stale_connection`; the local agent should stop the writer for that `connectionId`. Stale reliable messages (`TransportAck`, `TransportRunStatus`, and `Response`) may still be accepted when their run metadata matches an existing Hub run, preserving late-result delivery after reconnects.
+For HTTP/SSE, the Hub treats only the latest `connectionId` for an agent as the current connection. Stale `Hello`, `Heartbeat`, `JobUpdate`, and `ConfirmationRequest` messages sent to `/messages` are rejected with `409 stale_connection`; the local agent should stop the writer for that `connectionId`. Stale reliable messages (`TransportAck`, `TransportRunStatus`, and `Response`) may still be accepted when their run metadata matches an existing Hub run, preserving late-result delivery after reconnects.
 
-`Hello`, `Heartbeat`, `HeartbeatAck`, confirmation messages, and `SessionUpdate` remain best-effort/legacy messages in V1. `session.start` itself is a reliable request/response command; later session state updates continue to use the existing session cache plus `session.inspect`/`session.wait` queries.
+`Hello`, `Heartbeat`, `HeartbeatAck`, confirmation messages, and `JobUpdate` remain best-effort lifecycle messages in V1. `process.exec`, `process.batch`, `job.get`, and `job.cancel` are reliable request/response commands. `Hello.bootGeneration` changes cause active cached Jobs to become `unknown_after_restart`; terminal Jobs remain retained and side effects are never replayed.
 
 On agent restart, the local ledger is reconciled as follows: completed runs resend their result, accepted-but-not-started runs continue execution from the stored command, and started/running runs without a completed result report `unknown` instead of replaying side effects. The Hub also marks acked runs without a status/result as `unknown` after a timeout so callers can query a terminal state via `/v1/runs/{runId}`.

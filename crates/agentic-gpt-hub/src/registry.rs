@@ -62,7 +62,7 @@ pub(crate) fn handle_agent_command(conn: &Connection, command: AgentCommand) -> 
         } => {
             let alias = normalize_alias(alias.as_deref())?;
             let capabilities = Capabilities {
-                sessions: true,
+                jobs: true,
                 confirmation: true,
                 notification_actions: true,
             };
@@ -186,7 +186,7 @@ fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentRegistryEntry>
                 .map(|value| value.with_timezone(&Utc))
         }),
         capabilities: serde_json::from_str(&capabilities_json).unwrap_or(Capabilities {
-            sessions: true,
+            jobs: true,
             confirmation: true,
             notification_actions: false,
         }),

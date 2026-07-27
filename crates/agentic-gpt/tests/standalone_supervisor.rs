@@ -285,7 +285,7 @@ fn run_live_reload(root: &Path) -> Result<(), String> {
     config["policy"]["deny"] = json!([
         { "program": "/usr/bin/printf", "argsPrefix": [] }
     ]);
-    config["limits"]["maxActiveSessions"] = json!(1);
+    config["limits"]["maxActiveJobs"] = json!(1);
     config["mcpServers"] = json!({
         "primary": {
             "enabled": true,
@@ -406,7 +406,7 @@ fn run_live_reload(root: &Path) -> Result<(), String> {
         json!({ "program": "/usr/bin/printf", "args": ["denied"], "waitSeconds": 2 }),
     )?;
     assert_eq!(
-        denied["result"]["structuredContent"]["session"]["rejectReason"],
+        denied["result"]["structuredContent"]["job"]["rejectReason"],
         json!("policy_denied")
     );
 
@@ -427,8 +427,8 @@ fn run_live_reload(root: &Path) -> Result<(), String> {
         json!({ "program": "/usr/bin/printf", "args": ["reloaded"], "waitSeconds": 2 }),
     )?;
     assert_eq!(
-        allowed["result"]["structuredContent"]["session"]["state"],
-        json!("exited")
+        allowed["result"]["structuredContent"]["job"]["state"],
+        json!("completed")
     );
     let changed_mcp = call_tool(&mut stdin, &mut stdout, 21, "mcp.list", json!({}))?;
     let changed_servers = changed_mcp["result"]["structuredContent"]["servers"]
@@ -460,7 +460,7 @@ fn run_live_reload(root: &Path) -> Result<(), String> {
         }),
     )?;
     assert_eq!(
-        path_denied["result"]["structuredContent"]["session"]["rejectReason"],
+        path_denied["result"]["structuredContent"]["job"]["rejectReason"],
         json!("path_denied")
     );
     config["pathPolicy"]["denyRoots"] = json!([]);
@@ -478,8 +478,8 @@ fn run_live_reload(root: &Path) -> Result<(), String> {
         }),
     )?;
     assert_eq!(
-        path_allowed["result"]["structuredContent"]["session"]["state"],
-        json!("exited")
+        path_allowed["result"]["structuredContent"]["job"]["state"],
+        json!("completed")
     );
     assert!(path_target.exists());
 
@@ -497,8 +497,8 @@ fn run_live_reload(root: &Path) -> Result<(), String> {
         json!({ "program": "/usr/bin/printf", "args": ["last-good"], "waitSeconds": 2 }),
     )?;
     assert_eq!(
-        retained["result"]["structuredContent"]["session"]["state"],
-        json!("exited")
+        retained["result"]["structuredContent"]["job"]["state"],
+        json!("completed")
     );
     let retained_mcp = call_tool(&mut stdin, &mut stdout, 22, "mcp.list", json!({}))?;
     let retained_servers = retained_mcp["result"]["structuredContent"]["servers"]
@@ -512,7 +512,7 @@ fn run_live_reload(root: &Path) -> Result<(), String> {
     }));
 
     config["policy"]["deny"] = json!([]);
-    config["limits"]["maxActiveSessions"] = json!(1);
+    config["limits"]["maxActiveJobs"] = json!(1);
     config["mcpServers"]["primary"]["transport"] = json!("streamable-http");
     config["mcpServers"]["primary"]["enabled"] = json!(false);
     config["mcpServers"]
@@ -537,16 +537,16 @@ fn run_live_reload(root: &Path) -> Result<(), String> {
         "process.exec",
         json!({ "program": "/bin/sleep", "args": ["5"], "waitSeconds": 0 }),
     )?;
-    let active_session_id = active["result"]["structuredContent"]["sessionId"]
+    let active_job_id = active["result"]["structuredContent"]["jobId"]
         .as_str()
-        .ok_or("active session id missing")?
+        .ok_or("active Job id missing")?
         .to_string();
-    assert_eq!(
-        active["result"]["structuredContent"]["session"]["state"],
-        json!("starting")
-    );
+    let active_state = active["result"]["structuredContent"]["job"]["state"]
+        .as_str()
+        .ok_or("active Job state missing")?;
+    assert!(matches!(active_state, "starting" | "running"));
 
-    config["limits"]["maxActiveSessions"] = json!(0);
+    config["limits"]["maxActiveJobs"] = json!(0);
     write_config(&config_path, &config)?;
     thread::sleep(Duration::from_millis(2300));
     let rejected = call_tool(
@@ -556,13 +556,13 @@ fn run_live_reload(root: &Path) -> Result<(), String> {
         "process.exec",
         json!({ "program": "/usr/bin/printf", "args": ["blocked"], "waitSeconds": 2 }),
     )?;
-    let reason = rejected["result"]["structuredContent"]["session"]["rejectReason"]
+    let reason = rejected["result"]["structuredContent"]["job"]["rejectReason"]
         .as_str()
         .ok_or("capacity rejection reason missing")?;
-    assert!(reason.starts_with("max_active_sessions_reached; "));
+    assert!(reason.starts_with("max_active_jobs_reached; "));
     assert!(reason.contains("active=1; requested=1; limit=0"));
 
-    config["limits"]["maxActiveSessions"] = json!(2);
+    config["limits"]["maxActiveJobs"] = json!(2);
     write_config(&config_path, &config)?;
     thread::sleep(Duration::from_millis(2300));
     let admitted = call_tool(
@@ -573,16 +573,16 @@ fn run_live_reload(root: &Path) -> Result<(), String> {
         json!({ "program": "/usr/bin/printf", "args": ["limit-reloaded"], "waitSeconds": 2 }),
     )?;
     assert_eq!(
-        admitted["result"]["structuredContent"]["session"]["state"],
-        json!("exited")
+        admitted["result"]["structuredContent"]["job"]["state"],
+        json!("completed")
     );
 
     let _ = call_tool(
         &mut stdin,
         &mut stdout,
         7,
-        "process.kill",
-        json!({ "sessionId": active_session_id }),
+        "job.cancel",
+        json!({ "jobId": active_job_id }),
     )?;
     drop(stdin);
     stop_child_gracefully(&mut worker, Duration::from_secs(5));
@@ -593,10 +593,10 @@ fn run_live_reload(root: &Path) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     assert!(!human_logs.contains("status=started"));
     assert!(!human_logs.contains("runId="));
-    assert!(!human_logs.contains("sessionId="));
+    assert!(!human_logs.contains("jobId="));
     assert!(human_logs.contains("status=active"));
-    assert_eq!(human_logs.matches("managed_session;").count(), 1);
-    assert!(!human_logs.contains(&active_session_id));
+    assert_eq!(human_logs.matches("managed_job;").count(), 1);
+    assert!(!human_logs.contains(&active_job_id));
     for line in human_logs.lines().filter(|line| line.contains("run=")) {
         let run_id = line
             .split("run=")

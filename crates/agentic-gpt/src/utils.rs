@@ -5,11 +5,8 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 
 pub(crate) const DEFAULT_BACKUP_LIMIT: usize = 5;
-pub(crate) const EXEC_TIMEOUT_SECS: u64 = 30;
 pub(crate) const CONFIRM_TIMEOUT_SECS: u64 = 45;
-pub(crate) const STDOUT_MAX: usize = 64 * 1024;
-pub(crate) const STDERR_MAX: usize = 64 * 1024;
-pub(crate) const SESSION_TAIL_MAX: usize = 64 * 1024;
+pub(crate) const JOB_TAIL_MAX: usize = 64 * 1024;
 pub(crate) const RECONNECT_DELAY_SECS: u64 = 3;
 pub(crate) const CONNECT_TIMEOUT_SECS: u64 = 20;
 pub(crate) const HEARTBEAT_INTERVAL_SECS: u64 = 15;
@@ -168,9 +165,9 @@ mod tests {
     #[test]
     fn compact_id_has_a_stable_twelve_hex_digit_body() {
         assert_eq!(compact_id("run_0123456789abcdef"), "0123456789ab");
-        let short = compact_id("session");
+        let short = compact_id("job");
         assert_eq!(short.len(), 12);
         assert!(short.chars().all(|character| character.is_ascii_hexdigit()));
-        assert_eq!(short, compact_id("session"));
+        assert_eq!(short, compact_id("job"));
     }
 }

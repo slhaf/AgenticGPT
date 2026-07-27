@@ -6,26 +6,7 @@ use agentic_gpt_protocol::{AgentMessage, AgentRole};
 use chrono::{DateTime, Utc};
 use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
 
-use crate::{config::Config, confirmation, sessions};
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum RunMode {
-    Normal,
-    Room,
-}
-
-impl RunMode {
-    pub(crate) fn profile(self) -> CapabilityProfile {
-        match self {
-            RunMode::Normal => CapabilityProfile::Normal,
-            RunMode::Room => CapabilityProfile::Room,
-        }
-    }
-
-    pub(crate) fn role(self) -> AgentRole {
-        self.profile().role()
-    }
-}
+use crate::{config::Config, confirmation, jobs};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Transport {
@@ -168,17 +149,35 @@ pub(crate) struct AppState {
     pub(crate) config: Arc<RwLock<Config>>,
     pub(crate) runtime: RuntimeModel,
     pub(crate) started_at: DateTime<Utc>,
+    pub(crate) boot_generation: String,
     pub(crate) supervised: bool,
     pub(crate) file_locks: Arc<Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>>,
-    pub(crate) sessions: Arc<Mutex<HashMap<String, sessions::ManagedSession>>>,
+    pub(crate) jobs: Arc<Mutex<HashMap<String, jobs::ManagedJob>>>,
     pub(crate) hub_sender: Arc<Mutex<Option<mpsc::UnboundedSender<AgentMessage>>>>,
     pub(crate) reporting_sender: Arc<Mutex<Option<mpsc::Sender<AgentMessage>>>>,
     pub(crate) pending_confirmations: Arc<Mutex<HashMap<String, oneshot::Sender<String>>>>,
     pub(crate) temporary_mcp_allows: Arc<Mutex<Vec<confirmation::TemporaryMcpAllow>>>,
     pub(crate) notebook_writes: Arc<Mutex<()>>,
     pub(crate) skills_writes: Arc<Mutex<()>>,
-    pub(crate) skill_leases: Arc<sessions::SkillLeaseManager>,
+    pub(crate) skill_leases: Arc<jobs::SkillLeaseManager>,
     pub(crate) skill_installs: Arc<crate::skill_installs::InstallManager>,
+}
+
+impl AppState {
+    pub(crate) fn new_job_id(&self) -> String {
+        format!(
+            "job_{}_{}",
+            self.boot_generation,
+            uuid::Uuid::new_v4().simple()
+        )
+    }
+
+    pub(crate) fn job_id_generation<'a>(&self, job_id: &'a str) -> Option<&'a str> {
+        job_id
+            .strip_prefix("job_")
+            .and_then(|value| value.split_once('_'))
+            .map(|(generation, _)| generation)
+    }
 }
 
 #[cfg(test)]

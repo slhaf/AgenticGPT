@@ -11,7 +11,7 @@ use crate::config::Config;
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AuditRecord {
     pub(crate) task_id: Option<String>,
-    pub(crate) session_id: Option<String>,
+    pub(crate) job_id: Option<String>,
     pub(crate) time: DateTime<Utc>,
     pub(crate) program: String,
     pub(crate) args: Vec<String>,

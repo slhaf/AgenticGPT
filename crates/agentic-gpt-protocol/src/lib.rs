@@ -86,7 +86,7 @@ pub struct SafeConfigSummary {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Capabilities {
-    pub sessions: bool,
+    pub jobs: bool,
     pub confirmation: bool,
     pub notification_actions: bool,
 }
@@ -107,6 +107,10 @@ pub enum AgentConnectionMode {
 }
 
 impl AgentConnectionMode {
+    pub fn as_str(self) -> &'static str {
+        self.label()
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::CommandCapable => "command_capable",
@@ -139,7 +143,7 @@ pub struct AgentRunReport {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
+    pub job_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -149,7 +153,7 @@ pub struct AgentRunReport {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<BoundedJsonValue>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session: Option<SessionInfo>,
+    pub job: Option<JobInfo>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -174,7 +178,7 @@ pub struct HubInfoAgents {
 pub struct HubInfoCounts {
     pub pending_request_count: usize,
     pub pending_confirmation_count: usize,
-    pub cached_session_count: usize,
+    pub cached_job_count: usize,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -215,6 +219,19 @@ pub struct ExecRequest {
     pub confirm_method: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub working_directory: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_seconds: Option<u64>,
+}
+
+impl ExecRequest {
+    pub const DEFAULT_WAIT_SECONDS: u64 = 5;
+    pub const MAX_WAIT_SECONDS: u64 = 30;
+
+    pub fn effective_wait_seconds(&self) -> u64 {
+        self.wait_seconds
+            .unwrap_or(Self::DEFAULT_WAIT_SECONDS)
+            .min(Self::MAX_WAIT_SECONDS)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -236,6 +253,19 @@ pub struct BatchExecRequest {
     pub confirm_method: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub working_directory: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_seconds: Option<u64>,
+}
+
+impl BatchExecRequest {
+    pub const DEFAULT_WAIT_SECONDS: u64 = 5;
+    pub const MAX_WAIT_SECONDS: u64 = 30;
+
+    pub fn effective_wait_seconds(&self) -> u64 {
+        self.wait_seconds
+            .unwrap_or(Self::DEFAULT_WAIT_SECONDS)
+            .min(Self::MAX_WAIT_SECONDS)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1026,25 +1056,14 @@ impl SkillRunRequest {
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SkillRunSessionState {
-    Starting,
-    WaitingConfirmation,
-    Running,
-    Exited,
-    Failed,
-    Killed,
-}
-
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SkillRunResponse {
-    pub agent_id: String,
-    pub session_id: String,
+    pub status: JobState,
     pub completed_inline: bool,
+    pub job_id: String,
     pub poll_after_ms: u64,
-    pub session: SessionInfo,
+    pub job: JobInfo,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1071,63 +1090,168 @@ pub struct SkillActivationResponse {
     pub activated_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TaskResult {
-    pub agent_id: String,
-    pub task_id: String,
-    pub status: String,
-    pub exit_code: Option<i32>,
-    pub stdout_tail: String,
-    pub stderr_tail: String,
-    pub truncated: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reject_reason: Option<String>,
-    pub started_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JobKind {
+    Process,
+    Skill,
+    Mcp,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JobState {
+    Queued,
+    WaitingConfirmation,
+    Starting,
+    Running,
+    Completed,
+    Failed,
+    Rejected,
+    CancelRequested,
+    Cancelled,
+    TimedOut,
+    Detached,
+    UnknownAfterRestart,
+    Skipped,
+}
+
+impl JobState {
+    pub fn as_str(self) -> &'static str {
+        self.label()
+    }
+
+    pub fn is_active(self) -> bool {
+        matches!(
+            self,
+            Self::Queued
+                | Self::WaitingConfirmation
+                | Self::Starting
+                | Self::Running
+                | Self::CancelRequested
+        )
+    }
+
+    pub fn is_terminal(self) -> bool {
+        !self.is_active()
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::WaitingConfirmation => "waiting_confirmation",
+            Self::Starting => "starting",
+            Self::Running => "running",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Rejected => "rejected",
+            Self::CancelRequested => "cancel_requested",
+            Self::Cancelled => "cancelled",
+            Self::TimedOut => "timed_out",
+            Self::Detached => "detached",
+            Self::UnknownAfterRestart => "unknown_after_restart",
+            Self::Skipped => "skipped",
+        }
+    }
+}
+
+impl std::fmt::Display for JobState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.label())
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BatchElementResult {
-    pub index: usize,
-    pub program: String,
+pub struct JobInfo {
+    pub agent_id: String,
+    pub job_id: String,
+    pub kind: JobKind,
+    pub state: JobState,
+    pub created_at: DateTime<Utc>,
+    pub started_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub working_directory: Option<String>,
-    pub result: TaskResult,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_preview: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub stdout_tail: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub stderr_tail: String,
+    #[serde(default)]
+    pub truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reject_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installed_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_server_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_tool_name: Option<String>,
+    #[serde(default)]
+    pub cancel_requested: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancel_outcome: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub termination_evidence: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BatchExecResult {
-    pub agent_id: String,
+pub struct JobResponse {
+    pub status: JobState,
+    pub completed_inline: bool,
+    pub job_id: String,
+    pub poll_after_ms: u64,
+    pub job: JobInfo,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobBatchResponse {
     pub batch_id: String,
     pub status: String,
-    pub results: Vec<BatchElementResult>,
-    pub started_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub completed_inline: bool,
+    pub poll_after_ms: u64,
+    pub jobs: Vec<JobInfo>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobListRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<JobKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<JobState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SessionInfo {
-    pub agent_id: String,
-    pub session_id: String,
-    pub state: String,
-    pub program: String,
-    pub args: Vec<String>,
+pub struct JobGetRequest {
+    pub job_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub working_directory: Option<String>,
-    pub command_preview: String,
-    pub started_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-    pub exit_code: Option<i32>,
-    pub stdout_tail: String,
-    pub stderr_tail: String,
-    pub truncated: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reject_reason: Option<String>,
+    pub wait_seconds: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobCancelRequest {
+    pub job_id: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1243,38 +1367,27 @@ pub enum HubCommand {
     #[serde(rename = "process.exec")]
     Exec {
         request_id: String,
-        task_id: String,
         payload: ExecRequest,
     },
-    #[serde(rename = "process.batchExec")]
-    BatchExec {
+    #[serde(rename = "process.batch")]
+    ProcessBatch {
         request_id: String,
-        task_id: String,
         payload: BatchExecRequest,
     },
-    #[serde(rename = "session.start")]
-    StartSession {
+    #[serde(rename = "job.list")]
+    JobList {
         request_id: String,
-        session_id: String,
-        payload: ExecRequest,
+        payload: JobListRequest,
     },
-    #[serde(rename = "session.list")]
-    ListSessions { request_id: String },
-    #[serde(rename = "session.inspect")]
-    InspectSession {
+    #[serde(rename = "job.get")]
+    JobGet {
         request_id: String,
-        session_id: String,
+        payload: JobGetRequest,
     },
-    #[serde(rename = "session.wait")]
-    WaitSession {
+    #[serde(rename = "job.cancel")]
+    JobCancel {
         request_id: String,
-        session_id: String,
-        seconds: u64,
-    },
-    #[serde(rename = "session.kill")]
-    KillSession {
-        request_id: String,
-        session_id: String,
+        payload: JobCancelRequest,
     },
     #[serde(rename = "tmux.listSessions")]
     TmuxListSessions { request_id: String },
@@ -1431,7 +1544,6 @@ pub enum HubCommand {
     #[serde(rename = "skills.run")]
     SkillsRun {
         request_id: String,
-        session_id: String,
         payload: SkillRunRequest,
     },
 }
@@ -1440,12 +1552,10 @@ impl HubCommand {
     pub fn request_id(&self) -> &str {
         match self {
             Self::Exec { request_id, .. }
-            | Self::BatchExec { request_id, .. }
-            | Self::StartSession { request_id, .. }
-            | Self::ListSessions { request_id }
-            | Self::InspectSession { request_id, .. }
-            | Self::WaitSession { request_id, .. }
-            | Self::KillSession { request_id, .. }
+            | Self::ProcessBatch { request_id, .. }
+            | Self::JobList { request_id, .. }
+            | Self::JobGet { request_id, .. }
+            | Self::JobCancel { request_id, .. }
             | Self::TmuxListSessions { request_id }
             | Self::TmuxListPanes { request_id, .. }
             | Self::TmuxCapturePane { request_id, .. }
@@ -1500,6 +1610,8 @@ pub struct HubCommandEnvelope {
 pub enum AgentMessage {
     Hello {
         role: AgentRole,
+        #[serde(rename = "bootGeneration")]
+        boot_generation: String,
         #[serde(default, rename = "connectionMode")]
         connection_mode: AgentConnectionMode,
         #[serde(rename = "configSummary")]
@@ -1511,8 +1623,8 @@ pub enum AgentMessage {
         #[serde(rename = "sentAt")]
         sent_at: DateTime<Utc>,
     },
-    SessionUpdate {
-        session: SessionInfo,
+    JobUpdate {
+        job: JobInfo,
     },
     RunReport {
         report: AgentRunReport,
@@ -1672,13 +1784,12 @@ mod tmux_tests {
 
         let command = HubCommand::SkillsRun {
             request_id: "req".to_string(),
-            session_id: "session-1".to_string(),
             payload: run,
         };
         let value = serde_json::to_value(command).unwrap();
         assert_eq!(value["type"], "skills.run");
         assert_eq!(value["requestId"], "req");
-        assert_eq!(value["sessionId"], "session-1");
+        assert!(value.get("jobId").is_none());
         assert_eq!(value["payload"]["waitSeconds"], serde_json::Value::Null);
 
         let install = HubCommand::SkillsInstall {
@@ -1865,10 +1976,11 @@ mod tmux_tests {
     }
 
     #[test]
-    fn old_agent_hello_defaults_to_command_capable() {
+    fn hello_defaults_to_command_capable_when_generation_is_present() {
         let message: AgentMessage = serde_json::from_value(serde_json::json!({
             "type": "hello",
             "role": "normal",
+            "bootGeneration": "boot-test",
             "configSummary": {
                 "workspaceRoot": "/workspace",
                 "sandbox": {"enabled": false, "mode": "disabled"},
@@ -1896,6 +2008,35 @@ mod tmux_tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn hello_without_boot_generation_is_rejected() {
+        let error = serde_json::from_value::<AgentMessage>(serde_json::json!({
+            "type": "hello",
+            "role": "normal",
+            "configSummary": {
+                "workspaceRoot": "/workspace",
+                "sandbox": {"enabled": false, "mode": "disabled"},
+                "pathPolicy": {
+                    "writeRootCount": 0,
+                    "readOnlyRootCount": 0,
+                    "denyRootCount": 0,
+                    "writeRoots": [],
+                    "readOnlyRoots": [],
+                    "denyRoots": []
+                },
+                "policyRuleCounts": {"allow": 0, "confirm": 0, "deny": 0},
+                "policyRules": {
+                    "allow": [], "confirm": [], "deny": [],
+                    "builtins": {"confirm": [], "deny": []}
+                },
+                "confirmationProvider": "none"
+            }
+        }))
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("bootGeneration"));
     }
 }
 

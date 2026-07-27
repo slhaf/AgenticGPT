@@ -45,6 +45,6 @@ the package and never executes its scripts.
 For an active workspace-backed skill, `skills.run` accepts the skill `id`, a
 package-relative executable path below `scripts/`, optional direct `args`, an
 optional policy-validated `workingDirectory`, and a bounded `waitSeconds`.
-It returns a managed `sessionId`. Fast terminal executions are included in
-the response; otherwise use the existing `session.inspect`, `session.wait`,
-and `session.kill` tools with that session ID.
+It returns a managed Job envelope. Fast terminal executions are included in
+the response; otherwise use `job.get` with bounded `waitSeconds` and
+`job.cancel` with that `jobId`.

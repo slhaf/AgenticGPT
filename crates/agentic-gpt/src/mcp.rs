@@ -307,7 +307,7 @@ fn audit_mcp_call(
         config,
         AuditRecord {
             task_id: None,
-            session_id: None,
+            job_id: None,
             time: Utc::now(),
             program: "mcp.callTool".to_string(),
             args: vec![

@@ -53,11 +53,11 @@ pub(crate) fn init_db(conn: &Connection) -> Result<()> {
     ensure_column(conn, "agent_runs", "source", "source text")?;
     ensure_column(conn, "agent_runs", "profile", "profile text")?;
     ensure_column(conn, "agent_runs", "detail", "detail text")?;
-    ensure_column(conn, "agent_runs", "session_id", "session_id text")?;
+    ensure_column(conn, "agent_runs", "job_id", "job_id text")?;
     ensure_column(conn, "agent_runs", "duration_ms", "duration_ms integer")?;
     ensure_column(conn, "agent_runs", "exit_code", "exit_code integer")?;
     ensure_column(conn, "agent_runs", "arguments_json", "arguments_json text")?;
-    ensure_column(conn, "agent_runs", "session_json", "session_json text")?;
+    ensure_column(conn, "agent_runs", "job_json", "job_json text")?;
     conn.execute_batch(
         "create unique index if not exists agents_alias_unique on agents(alias) where alias is not null;",
     )?;
@@ -87,7 +87,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         init_db(&conn).unwrap();
         let capabilities = serde_json::to_string(&Capabilities {
-            sessions: true,
+            jobs: true,
             confirmation: true,
             notification_actions: false,
         })

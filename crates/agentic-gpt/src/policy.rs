@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{write_config_with_backup, Config, PathPolicyConfig, Rule};
 use crate::exec;
-use crate::state::{CapabilityProfile, RunMode};
+use crate::state::CapabilityProfile;
 use crate::utils::command_preview;
 use crate::{PathCommand, PathRootCommand, PathRootKind, RuleCommand};
 
@@ -18,25 +18,6 @@ pub(crate) enum PolicyDecision {
     Confirm,
     Deny,
 }
-pub(crate) fn policy_decision(
-    config: &Config,
-    program: &str,
-    args: &[String],
-    need_confirm: bool,
-) -> PolicyDecision {
-    policy_decision_for_mode(config, RunMode::Normal, program, args, need_confirm)
-}
-
-pub(crate) fn policy_decision_for_mode(
-    config: &Config,
-    run_mode: RunMode,
-    program: &str,
-    args: &[String],
-    need_confirm: bool,
-) -> PolicyDecision {
-    policy_decision_for_profile(config, run_mode.profile(), program, args, need_confirm)
-}
-
 pub(crate) fn policy_decision_for_profile(
     config: &Config,
     profile: CapabilityProfile,

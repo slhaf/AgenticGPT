@@ -203,7 +203,9 @@ fn run_local_e2e(root: &Path) -> Result<(), String> {
     )?;
     let guarded: Value =
         serde_json::from_slice(&guarded.stdout).map_err(|error| error.to_string())?;
-    if guarded["structuredContent"]["session"]["state"] != "failed" {
+    if guarded["structuredContent"]["job"]["state"] != "rejected"
+        || guarded["structuredContent"]["job"]["rejectReason"] != "policy_denied"
+    {
         return Err("guarded local process was not rejected".to_string());
     }
 

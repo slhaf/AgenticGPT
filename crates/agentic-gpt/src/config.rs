@@ -219,26 +219,25 @@ pub(crate) struct Rule {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct LimitsConfig {
     pub(crate) max_concurrent_tasks: usize,
-    pub(crate) max_active_sessions: MaxActiveSessions,
-    pub(crate) session_idle_timeout_secs: u64,
+    pub(crate) max_active_jobs: MaxActiveJobs,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum MaxActiveSessions {
+pub(crate) enum MaxActiveJobs {
     Auto,
     Explicit(usize),
 }
 
-impl Default for MaxActiveSessions {
+impl Default for MaxActiveJobs {
     fn default() -> Self {
         Self::Auto
     }
 }
 
-impl Serialize for MaxActiveSessions {
+impl Serialize for MaxActiveJobs {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -250,15 +249,15 @@ impl Serialize for MaxActiveSessions {
     }
 }
 
-impl<'de> Deserialize<'de> for MaxActiveSessions {
+impl<'de> Deserialize<'de> for MaxActiveJobs {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
-        struct MaxActiveSessionsVisitor;
+        struct MaxActiveJobsVisitor;
 
-        impl<'de> Visitor<'de> for MaxActiveSessionsVisitor {
-            type Value = MaxActiveSessions;
+        impl<'de> Visitor<'de> for MaxActiveJobsVisitor {
+            type Value = MaxActiveJobs;
 
             fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
                 formatter.write_str("a non-negative integer or the string \"auto\"")
@@ -269,8 +268,8 @@ impl<'de> Deserialize<'de> for MaxActiveSessions {
                 E: de::Error,
             {
                 let value = usize::try_from(value)
-                    .map_err(|_| E::custom("maxActiveSessions is too large for this platform"))?;
-                Ok(MaxActiveSessions::Explicit(value))
+                    .map_err(|_| E::custom("maxActiveJobs is too large for this platform"))?;
+                Ok(MaxActiveJobs::Explicit(value))
             }
 
             fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
@@ -278,7 +277,7 @@ impl<'de> Deserialize<'de> for MaxActiveSessions {
                 E: de::Error,
             {
                 if value < 0 {
-                    return Err(E::custom("maxActiveSessions must not be negative"));
+                    return Err(E::custom("maxActiveJobs must not be negative"));
                 }
                 self.visit_u64(value as u64)
             }
@@ -288,11 +287,9 @@ impl<'de> Deserialize<'de> for MaxActiveSessions {
                 E: de::Error,
             {
                 if value == "auto" {
-                    Ok(MaxActiveSessions::Auto)
+                    Ok(MaxActiveJobs::Auto)
                 } else {
-                    Err(E::custom(
-                        "maxActiveSessions must be an integer or \"auto\"",
-                    ))
+                    Err(E::custom("maxActiveJobs must be an integer or \"auto\""))
                 }
             }
 
@@ -304,11 +301,11 @@ impl<'de> Deserialize<'de> for MaxActiveSessions {
             }
         }
 
-        deserializer.deserialize_any(MaxActiveSessionsVisitor)
+        deserializer.deserialize_any(MaxActiveJobsVisitor)
     }
 }
 
-impl MaxActiveSessions {
+impl MaxActiveJobs {
     pub(crate) const MIN_AUTO: usize = 6;
     pub(crate) const MAX_AUTO: usize = 24;
 
@@ -319,7 +316,7 @@ impl MaxActiveSessions {
         }
     }
 
-    pub(crate) fn resolve(self) -> ResolvedMaxActiveSessions {
+    pub(crate) fn resolve(self) -> ResolvedMaxActiveJobs {
         let available_parallelism = std::thread::available_parallelism()
             .ok()
             .map(std::num::NonZeroUsize::get);
@@ -329,7 +326,7 @@ impl MaxActiveSessions {
     fn resolve_with_parallelism(
         self,
         available_parallelism: Option<usize>,
-    ) -> ResolvedMaxActiveSessions {
+    ) -> ResolvedMaxActiveJobs {
         let resolved = match self {
             Self::Explicit(value) => value,
             Self::Auto => available_parallelism
@@ -337,7 +334,7 @@ impl MaxActiveSessions {
                 .unwrap_or(Self::MIN_AUTO)
                 .clamp(Self::MIN_AUTO, Self::MAX_AUTO),
         };
-        ResolvedMaxActiveSessions {
+        ResolvedMaxActiveJobs {
             configured: self,
             resolved,
             available_parallelism,
@@ -346,16 +343,16 @@ impl MaxActiveSessions {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct ResolvedMaxActiveSessions {
-    pub(crate) configured: MaxActiveSessions,
+pub(crate) struct ResolvedMaxActiveJobs {
+    pub(crate) configured: MaxActiveJobs,
     pub(crate) resolved: usize,
     pub(crate) available_parallelism: Option<usize>,
 }
 
-impl ResolvedMaxActiveSessions {
+impl ResolvedMaxActiveJobs {
     pub(crate) fn diagnostic(self) -> String {
         format!(
-            "maxActiveSessions={}; resolvedMaxActiveSessions={}",
+            "maxActiveJobs={}; resolvedMaxActiveJobs={}",
             self.configured.configured_label(),
             self.resolved
         )
@@ -524,8 +521,7 @@ impl Config {
             policy: PolicyConfig::default(),
             limits: LimitsConfig {
                 max_concurrent_tasks: 2,
-                max_active_sessions: MaxActiveSessions::Auto,
-                session_idle_timeout_secs: 3600,
+                max_active_jobs: MaxActiveJobs::Auto,
             },
             skills: RoomSkillsConfig::default(),
             room: default_room_config(),
@@ -958,31 +954,50 @@ mod tests {
     }
 
     #[test]
-    fn max_active_sessions_supports_auto_and_explicit_round_trips() {
-        let auto: MaxActiveSessions = serde_json::from_value(json!("auto")).unwrap();
-        let explicit: MaxActiveSessions = serde_json::from_value(json!(12)).unwrap();
-        assert_eq!(auto, MaxActiveSessions::Auto);
-        assert_eq!(explicit, MaxActiveSessions::Explicit(12));
+    fn max_active_jobs_supports_auto_and_explicit_round_trips() {
+        let auto: MaxActiveJobs = serde_json::from_value(json!("auto")).unwrap();
+        let explicit: MaxActiveJobs = serde_json::from_value(json!(12)).unwrap();
+        assert_eq!(auto, MaxActiveJobs::Auto);
+        assert_eq!(explicit, MaxActiveJobs::Explicit(12));
         assert_eq!(serde_json::to_value(auto).unwrap(), json!("auto"));
         assert_eq!(serde_json::to_value(explicit).unwrap(), json!(12));
-        assert!(serde_json::from_value::<MaxActiveSessions>(json!(-1)).is_err());
-        assert!(serde_json::from_value::<MaxActiveSessions>(json!("AUTO")).is_err());
+        assert!(serde_json::from_value::<MaxActiveJobs>(json!(-1)).is_err());
+        assert!(serde_json::from_value::<MaxActiveJobs>(json!("AUTO")).is_err());
     }
 
     #[test]
-    fn auto_max_active_sessions_uses_the_frozen_formula() {
+    fn limits_reject_removed_max_active_sessions_field() {
+        let error = serde_json::from_value::<LimitsConfig>(json!({
+            "maxConcurrentTasks": 2,
+            "maxActiveSessions": 4
+        }))
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("unknown field `maxActiveSessions`"));
+        assert!(error.contains("maxActiveJobs"));
+
+        let error = serde_json::from_value::<LimitsConfig>(json!({
+            "maxConcurrentTasks": 2,
+            "maxActiveJobs": 4,
+            "jobIdleTimeoutSecs": 900
+        }))
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("unknown field `jobIdleTimeoutSecs`"));
+    }
+
+    #[test]
+    fn auto_max_active_jobs_uses_the_frozen_formula() {
         for (parallelism, expected) in [(1, 6), (4, 6), (8, 12), (12, 18), (16, 24), (20, 24)] {
-            let resolved = MaxActiveSessions::Auto.resolve_with_parallelism(Some(parallelism));
+            let resolved = MaxActiveJobs::Auto.resolve_with_parallelism(Some(parallelism));
             assert_eq!(resolved.resolved, expected, "parallelism={parallelism}");
         }
         assert_eq!(
-            MaxActiveSessions::Auto
-                .resolve_with_parallelism(None)
-                .resolved,
+            MaxActiveJobs::Auto.resolve_with_parallelism(None).resolved,
             6
         );
         assert_eq!(
-            MaxActiveSessions::Explicit(4)
+            MaxActiveJobs::Explicit(4)
                 .resolve_with_parallelism(Some(20))
                 .resolved,
             4
@@ -992,7 +1007,7 @@ mod tests {
     #[test]
     fn new_default_config_serializes_auto_limit() {
         let value = serde_json::to_value(Config::default_config().unwrap()).unwrap();
-        assert_eq!(value["limits"]["maxActiveSessions"], json!("auto"));
+        assert_eq!(value["limits"]["maxActiveJobs"], json!("auto"));
         assert_eq!(
             value["confirmationProvider"]["channels"],
             json!(["freedesktop", "ntfy"])
@@ -1044,17 +1059,14 @@ mod tests {
     fn explicit_limit_stays_numeric_after_config_load_and_write() {
         let path = temp_config_path();
         let mut value = serde_json::to_value(Config::default_config().unwrap()).unwrap();
-        value["limits"]["maxActiveSessions"] = json!(4);
+        value["limits"]["maxActiveJobs"] = json!(4);
         value["futureField"] = json!({"preserve": true});
         fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
 
         let loaded = Config::load(&path).unwrap();
-        assert_eq!(
-            loaded.limits.max_active_sessions,
-            MaxActiveSessions::Explicit(4)
-        );
+        assert_eq!(loaded.limits.max_active_jobs, MaxActiveJobs::Explicit(4));
         let written = serde_json::to_value(loaded).unwrap();
-        assert_eq!(written["limits"]["maxActiveSessions"], json!(4));
+        assert_eq!(written["limits"]["maxActiveJobs"], json!(4));
         assert_eq!(written["futureField"]["preserve"], json!(true));
         let _ = fs::remove_file(path);
     }

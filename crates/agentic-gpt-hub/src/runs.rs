@@ -30,7 +30,7 @@ pub(crate) struct AgentRun {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) arguments: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) session: Option<Value>,
+    pub(crate) job: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) reason: Option<String>,
     pub(crate) created_at: DateTime<Utc>,
@@ -55,12 +55,10 @@ pub(crate) struct PendingReplay {
 pub(crate) fn command_type(command: &HubCommand) -> &'static str {
     match command {
         HubCommand::Exec { .. } => "process.exec",
-        HubCommand::BatchExec { .. } => "process.batchExec",
-        HubCommand::StartSession { .. } => "session.start",
-        HubCommand::ListSessions { .. } => "session.list",
-        HubCommand::InspectSession { .. } => "session.inspect",
-        HubCommand::WaitSession { .. } => "session.wait",
-        HubCommand::KillSession { .. } => "session.kill",
+        HubCommand::ProcessBatch { .. } => "process.batch",
+        HubCommand::JobList { .. } => "job.list",
+        HubCommand::JobGet { .. } => "job.get",
+        HubCommand::JobCancel { .. } => "job.cancel",
         HubCommand::TmuxListSessions { .. } => "tmux.listSessions",
         HubCommand::TmuxListPanes { .. } => "tmux.listPanes",
         HubCommand::TmuxCapturePane { .. } => "tmux.capturePane",
@@ -316,9 +314,9 @@ pub(crate) fn upsert_agent_report(
     } else {
         None
     };
-    let session = if detail == "full" {
+    let job = if detail == "full" {
         report
-            .session
+            .job
             .map(|value| serde_json::to_string(&value))
             .transpose()?
     } else {
@@ -382,7 +380,7 @@ pub(crate) fn upsert_agent_report(
         "insert into agent_runs(
             run_id, request_id, agent_id, command_type, command_json, command_hash,
             status, result_json, result_hash, reason, created_at, updated_at, expires_at,
-            source, profile, detail, session_id, duration_ms, exit_code, arguments_json, session_json
+            source, profile, detail, job_id, duration_ms, exit_code, arguments_json, job_json
         ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
         on conflict(run_id) do update set
             status = excluded.status,
@@ -390,11 +388,11 @@ pub(crate) fn upsert_agent_report(
             result_hash = coalesce(excluded.result_hash, agent_runs.result_hash),
             reason = excluded.reason,
             updated_at = excluded.updated_at,
-            session_id = excluded.session_id,
+            job_id = excluded.job_id,
             duration_ms = excluded.duration_ms,
             exit_code = excluded.exit_code,
             arguments_json = coalesce(excluded.arguments_json, agent_runs.arguments_json),
-            session_json = coalesce(excluded.session_json, agent_runs.session_json)",
+            job_json = coalesce(excluded.job_json, agent_runs.job_json)",
         params![
             report.run_id,
             report.request_id,
@@ -412,11 +410,11 @@ pub(crate) fn upsert_agent_report(
             report.source,
             report.profile,
             detail,
-            report.session_id,
+            report.job_id,
             report.duration_ms.map(|value| value as i64),
             report.exit_code,
             arguments,
-            session,
+            job,
         ],
     )?;
     Ok(())
@@ -426,13 +424,13 @@ pub(crate) fn get_run(state: &HubState, run_id: &str) -> Result<Option<AgentRun>
     let conn = state.db.lock().unwrap();
     conn.query_row(
         "select run_id, request_id, agent_id, command_type, command_hash, source, profile, detail,
-                status, result_json, arguments_json, session_json, reason, created_at, updated_at
+                status, result_json, arguments_json, job_json, reason, created_at, updated_at
          from agent_runs where run_id = ?1",
         params![run_id],
         |row| {
             let result_json: Option<String> = row.get(9)?;
             let arguments_json: Option<String> = row.get(10)?;
-            let session_json: Option<String> = row.get(11)?;
+            let job_json: Option<String> = row.get(11)?;
             Ok(AgentRun {
                 run_id: row.get(0)?,
                 request_id: row.get(1)?,
@@ -445,7 +443,7 @@ pub(crate) fn get_run(state: &HubState, run_id: &str) -> Result<Option<AgentRun>
                 status: row.get(8)?,
                 result: result_json.and_then(|json| serde_json::from_str(&json).ok()),
                 arguments: arguments_json.and_then(|json| serde_json::from_str(&json).ok()),
-                session: session_json.and_then(|json| serde_json::from_str(&json).ok()),
+                job: job_json.and_then(|json| serde_json::from_str(&json).ok()),
                 reason: row.get(12)?,
                 created_at: row.get(13)?,
                 updated_at: row.get(14)?,
@@ -556,7 +554,8 @@ mod tests {
             agents: Arc::new(Mutex::new(HashMap::new())),
             pending: Arc::new(Mutex::new(HashMap::new())),
             pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
-            sessions: Arc::new(Mutex::new(HashMap::new())),
+            jobs: Arc::new(Mutex::new(HashMap::new())),
+            boot_generations: Arc::new(Mutex::new(HashMap::new())),
             active_room: Arc::new(Mutex::new(None)),
             http: reqwest::Client::new(),
             public_base_url: None,
@@ -614,7 +613,7 @@ mod tests {
                 started_at: started,
                 updated_at: started,
                 duration_ms: None,
-                session_id: None,
+                job_id: None,
                 exit_code: None,
                 reason: None,
                 arguments: Some(BoundedJsonValue {
@@ -624,7 +623,7 @@ mod tests {
                     truncated: false,
                 }),
                 result: None,
-                session: None,
+                job: None,
             },
         )
         .unwrap();
@@ -642,7 +641,7 @@ mod tests {
                 started_at: started,
                 updated_at: started + Duration::seconds(1),
                 duration_ms: Some(1000),
-                session_id: None,
+                job_id: None,
                 exit_code: Some(0),
                 reason: None,
                 arguments: None,
@@ -652,7 +651,7 @@ mod tests {
                     sha256: "b".repeat(64),
                     truncated: false,
                 }),
-                session: None,
+                job: None,
             },
         )
         .unwrap();
@@ -670,12 +669,12 @@ mod tests {
                 started_at: started,
                 updated_at: started,
                 duration_ms: None,
-                session_id: None,
+                job_id: None,
                 exit_code: None,
                 reason: None,
                 arguments: None,
                 result: None,
-                session: None,
+                job: None,
             },
         )
         .unwrap();

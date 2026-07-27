@@ -1,6 +1,6 @@
 use agentic_gpt_protocol::{
     AgentConnectionMode, AgentMessage, AgentRunReport, BoundedJsonValue, ExecRequest, HubCommand,
-    HubCommandEnvelope, HubMessage, SessionInfo, SkillRunRequest, SkillRunResponse,
+    HubCommandEnvelope, HubMessage, JobInfo, SkillRunRequest, SkillRunResponse,
 };
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
@@ -19,11 +19,10 @@ use tokio_tungstenite::{
 use uuid::Uuid;
 
 use crate::{
-    bootstrap,
     config::Config,
-    confirmation, diary, exec, mcp, notebook, notify, sessions, skills, tmux, transport_ledger,
+    confirmation, exec, jobs, notify, skills, transport_ledger,
     utils::{
-        command_preview, log_info, log_warn, CONNECT_TIMEOUT_SECS, HEARTBEAT_ACK_TIMEOUT_SECS,
+        log_info, log_warn, CONNECT_TIMEOUT_SECS, HEARTBEAT_ACK_TIMEOUT_SECS,
         HEARTBEAT_INTERVAL_SECS, RECONNECT_DELAY_SECS,
     },
     AppState,
@@ -91,6 +90,7 @@ pub(crate) async fn connect_loop(state: AppState) -> Result<()> {
                     }
                 });
                 let hello = AgentMessage::Hello {
+                    boot_generation: state.boot_generation.clone(),
                     role: state.runtime.profile.role(),
                     connection_mode: AgentConnectionMode::CommandCapable,
                     config_summary: config.safe_summary(),
@@ -251,6 +251,7 @@ async fn connect_reporting_websocket(state: AppState, config: Config) -> Result<
         }
     });
     control_tx.send(AgentMessage::Hello {
+        boot_generation: state.boot_generation.clone(),
         role: state.runtime.profile.role(),
         connection_mode: AgentConnectionMode::ReportingOnly,
         config_summary: config.safe_summary(),
@@ -262,7 +263,7 @@ async fn connect_reporting_websocket(state: AppState, config: Config) -> Result<
         "hub reporting connected; transport=websocket; agentId={}",
         config.agent_id
     ));
-    send_current_session_snapshots(&state, &event_tx).await;
+    send_current_job_snapshots(&state, &event_tx).await;
     let mut heartbeat = tokio::time::interval(Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut last_heartbeat_ack = Instant::now();
@@ -349,6 +350,7 @@ async fn connect_reporting_sse(state: AppState, config: Config) -> Result<()> {
         }
     });
     control_tx.send(AgentMessage::Hello {
+        boot_generation: state.boot_generation.clone(),
         role: state.runtime.profile.role(),
         connection_mode: AgentConnectionMode::ReportingOnly,
         config_summary: config.safe_summary(),
@@ -360,7 +362,7 @@ async fn connect_reporting_sse(state: AppState, config: Config) -> Result<()> {
         "hub reporting connected; transport=sse; agentId={}",
         config.agent_id
     ));
-    send_current_session_snapshots(&state, &event_tx).await;
+    send_current_job_snapshots(&state, &event_tx).await;
     let heartbeat_tx = control_tx.clone();
     let heartbeat = tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
@@ -455,10 +457,10 @@ async fn clear_reporting_senders(
     }
 }
 
-async fn send_current_session_snapshots(state: &AppState, sender: &mpsc::Sender<AgentMessage>) {
-    for session in sessions::current_sessions(state).await {
-        let _ = sender.try_send(AgentMessage::SessionUpdate {
-            session: session_for_reporting(state, session),
+async fn send_current_job_snapshots(state: &AppState, sender: &mpsc::Sender<AgentMessage>) {
+    for job in jobs::current_jobs(state).await {
+        let _ = sender.try_send(AgentMessage::JobUpdate {
+            job: job_for_reporting(state, job),
         });
     }
 }
@@ -474,7 +476,7 @@ pub(crate) fn report_run_event(
     started_at: DateTime<Utc>,
     result: Option<serde_json::Value>,
     reason: Option<String>,
-    session: Option<SessionInfo>,
+    job: Option<JobInfo>,
 ) {
     let detail = reporting_detail(state);
     let updated_at = Utc::now();
@@ -485,7 +487,7 @@ pub(crate) fn report_run_event(
     } else {
         None
     };
-    let session_id = session.as_ref().map(|value| value.session_id.clone());
+    let job_id = job.as_ref().map(|value| value.job_id.clone());
     try_send_reporting(
         state,
         AgentMessage::RunReport {
@@ -504,12 +506,12 @@ pub(crate) fn report_run_event(
                 } else {
                     Some((updated_at - started_at).num_milliseconds().max(0) as u64)
                 },
-                session_id,
-                exit_code: session.as_ref().and_then(|value| value.exit_code),
+                job_id,
+                exit_code: job.as_ref().and_then(|value| value.exit_code),
                 reason: reason.map(|value| bounded_reason(&value)),
                 arguments,
                 result,
-                session: if full { session } else { None },
+                job: if full { job } else { None },
             },
         },
     );
@@ -543,22 +545,22 @@ pub(crate) fn report_tool_arguments(
                 started_at,
                 updated_at: started_at,
                 duration_ms: None,
-                session_id: None,
+                job_id: None,
                 exit_code: None,
                 reason: None,
                 arguments,
                 result: None,
-                session: None,
+                job: None,
             },
         },
     );
 }
 
-pub(crate) fn report_session(state: &AppState, session: SessionInfo) {
+pub(crate) fn report_job(state: &AppState, job: JobInfo) {
     try_send_reporting(
         state,
-        AgentMessage::SessionUpdate {
-            session: session_for_reporting(state, session),
+        AgentMessage::JobUpdate {
+            job: job_for_reporting(state, job),
         },
     );
 }
@@ -577,17 +579,17 @@ fn reporting_detail(state: &AppState) -> String {
         .unwrap_or_else(|| "metadata".to_string())
 }
 
-fn session_for_reporting(state: &AppState, mut session: SessionInfo) -> SessionInfo {
+fn job_for_reporting(state: &AppState, mut job: JobInfo) -> JobInfo {
     if reporting_detail(state) == "metadata" {
-        session.program = "<redacted>".to_string();
-        session.args.clear();
-        session.working_directory = None;
-        session.command_preview = "<redacted>".to_string();
-        session.stdout_tail.clear();
-        session.stderr_tail.clear();
-        session.truncated = false;
+        job.program = Some("<redacted>".to_string());
+        job.args.clear();
+        job.working_directory = None;
+        job.command_preview = Some("<redacted>".to_string());
+        job.stdout_tail.clear();
+        job.stderr_tail.clear();
+        job.truncated = false;
     }
-    session
+    job
 }
 
 fn try_send_reporting(state: &AppState, message: AgentMessage) {
@@ -720,6 +722,7 @@ async fn connect_sse(state: AppState, config: Config) -> Result<()> {
 
     let result = async {
         tx.send(AgentMessage::Hello {
+            boot_generation: state.boot_generation.clone(),
             role: state.runtime.profile.role(),
             connection_mode: AgentConnectionMode::CommandCapable,
             config_summary: config.safe_summary(),
@@ -1035,7 +1038,6 @@ pub(crate) async fn handle_hub_command(
     run_id: Option<String>,
 ) -> Result<()> {
     let request_id = command.request_id().to_string();
-    let is_session_start = matches!(command, HubCommand::StartSession { .. });
     let data = match crate::local_service::dispatch(state.clone(), command).await {
         Ok(data) => data,
         Err(error) if error.to_string() == "room_agent_required" => room_agent_required_error(),
@@ -1046,681 +1048,36 @@ pub(crate) async fn handle_hub_command(
             }
         }),
     };
-    if is_session_start {
-        if let Ok(session) = serde_json::from_value::<SessionInfo>(data.clone()) {
-            send_session(&state, &session).await?;
-        }
+    for job in jobs_from_command_response(&data) {
+        send_agent_message(&state, AgentMessage::JobUpdate { job }).await?;
     }
     send_response(&state, run_id.as_deref(), &request_id, data).await
 }
 
-#[allow(dead_code)]
-async fn handle_hub_command_legacy(
-    state: AppState,
-    command: HubCommand,
-    run_id: Option<String>,
-) -> Result<()> {
-    match command {
-        HubCommand::Exec {
-            request_id,
-            task_id,
-            payload,
-        } => {
-            log_info(format!(
-                "exec received; taskId={task_id}; command={}",
-                command_preview(&payload.program, &payload.args)
-            ));
-            let result = exec::run_exec_task(state.clone(), task_id, payload).await;
-            log_info(format!(
-                "exec finished; taskId={}; status={}; exitCode={:?}; rejectReason={:?}",
-                result.task_id, result.status, result.exit_code, result.reject_reason
-            ));
-            send_response(
-                &state,
-                run_id.as_deref(),
-                &request_id,
-                serde_json::to_value(&result)?,
-            )
-            .await?;
-        }
-        HubCommand::BatchExec {
-            request_id,
-            task_id,
-            payload,
-        } => {
-            log_info(format!(
-                "process.batchExec received; batchId={task_id}; elements={}",
-                payload.elements.len()
-            ));
-            let result = exec::run_batch_task(state.clone(), task_id, payload).await;
-            log_info(format!(
-                "process.batchExec finished; batchId={}; status={}; results={}",
-                result.batch_id,
-                result.status,
-                result.results.len()
-            ));
-            send_response(
-                &state,
-                run_id.as_deref(),
-                &request_id,
-                serde_json::to_value(&result)?,
-            )
-            .await?;
-        }
-        HubCommand::StartSession {
-            request_id,
-            session_id,
-            payload,
-        } => {
-            log_info(format!(
-                "session.start received; sessionId={session_id}; command={}",
-                command_preview(&payload.program, &payload.args)
-            ));
-            let info = sessions::start_session_async(state.clone(), session_id, payload).await;
-            log_info(format!(
-                "session.start result; sessionId={}; state={}; rejectReason={:?}",
-                info.session_id, info.state, info.reject_reason
-            ));
-            send_session(&state, &info).await?;
-            send_response(
-                &state,
-                run_id.as_deref(),
-                &request_id,
-                serde_json::to_value(&info)?,
-            )
-            .await?;
-        }
-        HubCommand::ListSessions { request_id } => {
-            let sessions = sessions::current_sessions(&state).await;
-            send_response(
-                &state,
-                run_id.as_deref(),
-                &request_id,
-                serde_json::to_value(sessions)?,
-            )
-            .await?;
-        }
-        HubCommand::InspectSession {
-            request_id,
-            session_id,
-        } => {
-            let session = sessions::inspect_session(&state, &session_id).await;
-            send_response(
-                &state,
-                run_id.as_deref(),
-                &request_id,
-                serde_json::to_value(session)?,
-            )
-            .await?;
-        }
-        HubCommand::WaitSession {
-            request_id,
-            session_id,
-            seconds,
-        } => {
-            let deadline = Instant::now() + Duration::from_secs(seconds.min(30));
-            let mut session = sessions::inspect_session(&state, &session_id).await;
-            while let Some(info) = session.as_ref() {
-                if !matches!(
-                    info.state.as_str(),
-                    "starting" | "running" | "waiting_confirmation"
-                ) || Instant::now() >= deadline
-                {
-                    break;
-                }
-                sleep(Duration::from_millis(20)).await;
-                session = sessions::inspect_session(&state, &session_id).await;
-            }
-            send_response(
-                &state,
-                run_id.as_deref(),
-                &request_id,
-                serde_json::to_value(session)?,
-            )
-            .await?;
-        }
-        HubCommand::KillSession {
-            request_id,
-            session_id,
-        } => {
-            log_info(format!("session.kill received; sessionId={session_id}"));
-            let session = sessions::kill_session(&state, &session_id).await;
-            send_response(
-                &state,
-                run_id.as_deref(),
-                &request_id,
-                serde_json::to_value(session)?,
-            )
-            .await?;
-        }
-        HubCommand::TmuxListSessions { request_id } => {
-            send_response(
-                &state,
-                run_id.as_deref(),
-                &request_id,
-                tmux::list_sessions().await,
-            )
-            .await?;
-        }
-        HubCommand::TmuxListPanes {
-            request_id,
-            payload,
-        } => {
-            send_response(
-                &state,
-                run_id.as_deref(),
-                &request_id,
-                tmux::list_panes(payload).await,
-            )
-            .await?;
-        }
-        HubCommand::TmuxCapturePane {
-            request_id,
-            payload,
-        } => {
-            send_response(
-                &state,
-                run_id.as_deref(),
-                &request_id,
-                tmux::capture_pane(payload).await,
-            )
-            .await?;
-        }
-        HubCommand::TmuxPasteText {
-            request_id,
-            payload,
-        } => {
-            send_response(
-                &state,
-                run_id.as_deref(),
-                &request_id,
-                tmux::paste_text(&state, payload).await,
-            )
-            .await?;
-        }
-        HubCommand::TmuxExec {
-            request_id,
-            payload,
-        } => {
-            send_response(
-                &state,
-                run_id.as_deref(),
-                &request_id,
-                tmux::exec(&state, payload).await,
-            )
-            .await?;
-        }
-        HubCommand::TmuxCreateSession {
-            request_id,
-            payload,
-        } => {
-            send_response(
-                &state,
-                run_id.as_deref(),
-                &request_id,
-                tmux::create_session(&state, payload).await,
-            )
-            .await?;
-        }
-        HubCommand::TmuxCloseSession {
-            request_id,
-            payload,
-        } => {
-            send_response(
-                &state,
-                run_id.as_deref(),
-                &request_id,
-                tmux::close_session(&state, payload).await,
-            )
-            .await?;
-        }
-        HubCommand::McpListServers { request_id } => {
-            let result = mcp::list_servers(&state).await;
-            send_response(&state, run_id.as_deref(), &request_id, result).await?;
-        }
-        HubCommand::McpListTools {
-            request_id,
-            payload,
-        } => {
-            let result = match mcp::list_tools(&state, payload).await {
-                Ok(result) => result,
-                Err(error) => serde_json::json!({
-                    "error": {
-                        "code": "mcp_list_tools_failed",
-                        "message": error.to_string()
-                    }
-                }),
-            };
-            send_response(&state, run_id.as_deref(), &request_id, result).await?;
-        }
-        HubCommand::McpCallTool {
-            request_id,
-            payload,
-        } => {
-            let result = match mcp::call_tool(&state, payload, "hub:mcp").await {
-                Ok(result) => result,
-                Err(error) => serde_json::json!({
-                    "error": {
-                        "code": "mcp_call_tool_failed",
-                        "message": error.to_string()
-                    }
-                }),
-            };
-            send_response(&state, run_id.as_deref(), &request_id, result).await?;
-        }
-        HubCommand::UserNotifyDeliver {
-            request_id,
-            payload,
-        } => {
-            let result = notify::deliver_freedesktop_notification(payload).await;
-            send_response(
-                &state,
-                run_id.as_deref(),
-                &request_id,
-                serde_json::to_value(result)?,
-            )
-            .await?;
-        }
-        HubCommand::RoomNotebookAppend {
-            request_id,
-            payload,
-        } => {
-            let result = if !state.runtime.capabilities().notebook {
-                room_agent_required_error()
-            } else {
-                match notebook::append(&state, payload).await {
-                    Ok(result) => serde_json::to_value(result)?,
-                    Err(error) => serde_json::json!({
-                        "error": { "code": "room_notebook_append_failed", "message": error.to_string() }
-                    }),
-                }
-            };
-            send_response(&state, run_id.as_deref(), &request_id, result).await?;
-        }
-        HubCommand::RoomNotebookRecent {
-            request_id,
-            payload,
-        } => {
-            let result = if !state.runtime.capabilities().notebook {
-                room_agent_required_error()
-            } else {
-                match notebook::recent(&state, payload).await {
-                    Ok(result) => serde_json::to_value(result)?,
-                    Err(error) => serde_json::json!({
-                        "error": { "code": "room_notebook_recent_failed", "message": error.to_string() }
-                    }),
-                }
-            };
-            send_response(&state, run_id.as_deref(), &request_id, result).await?;
-        }
-        HubCommand::RoomNotebookSelectExact {
-            request_id,
-            payload,
-        } => {
-            let result = if !state.runtime.capabilities().notebook {
-                room_agent_required_error()
-            } else {
-                match notebook::select_exact(&state, payload).await {
-                    Ok(result) => serde_json::to_value(result)?,
-                    Err(error) => serde_json::json!({
-                        "error": { "code": "room_notebook_select_exact_failed", "message": error.to_string() }
-                    }),
-                }
-            };
-            send_response(&state, run_id.as_deref(), &request_id, result).await?;
-        }
-        HubCommand::RoomNotebookSearch {
-            request_id,
-            payload,
-        } => {
-            let result = if !state.runtime.capabilities().notebook {
-                room_agent_required_error()
-            } else {
-                match notebook::search(&state, payload).await {
-                    Ok(result) => serde_json::to_value(result)?,
-                    Err(error) => serde_json::json!({
-                        "error": { "code": "room_notebook_search_failed", "message": error.to_string() }
-                    }),
-                }
-            };
-            send_response(&state, run_id.as_deref(), &request_id, result).await?;
-        }
-        HubCommand::RoomNotebookCurrent {
-            request_id,
-            payload,
-        } => {
-            let result = if !state.runtime.capabilities().notebook {
-                room_agent_required_error()
-            } else {
-                match notebook::current(&state, payload).await {
-                    Ok(result) => serde_json::to_value(result)?,
-                    Err(error) => serde_json::json!({
-                        "error": { "code": "room_notebook_current_failed", "message": error.to_string() }
-                    }),
-                }
-            };
-            send_response(&state, run_id.as_deref(), &request_id, result).await?;
-        }
-        HubCommand::RoomNotebookUpdate {
-            request_id,
-            payload,
-        } => {
-            let result = if !state.runtime.capabilities().notebook {
-                room_agent_required_error()
-            } else {
-                match notebook::update(&state, payload).await {
-                    Ok(result) => serde_json::to_value(result)?,
-                    Err(error) => notebook_command_error("room_notebook_update_failed", error),
-                }
-            };
-            send_response(&state, run_id.as_deref(), &request_id, result).await?;
-        }
-        HubCommand::RoomNotebookRemove {
-            request_id,
-            payload,
-        } => {
-            let result = if !state.runtime.capabilities().diary {
-                room_agent_required_error()
-            } else {
-                match notebook::remove(&state, payload).await {
-                    Ok(result) => serde_json::to_value(result)?,
-                    Err(error) => notebook_command_error("room_notebook_remove_failed", error),
-                }
-            };
-            send_response(&state, run_id.as_deref(), &request_id, result).await?;
-        }
-        HubCommand::RoomDiaryAppend {
-            request_id,
-            payload,
-        } => {
-            let result = if !state.runtime.capabilities().diary {
-                room_agent_required_error()
-            } else {
-                match diary::append(&state, payload).await {
-                    Ok(result) => serde_json::to_value(result)?,
-                    Err(error) => serde_json::json!({
-                        "error": { "code": "room_diary_append_failed", "message": error.to_string() }
-                    }),
-                }
-            };
-            send_response(&state, run_id.as_deref(), &request_id, result).await?;
-        }
-        HubCommand::RoomDiaryRecent {
-            request_id,
-            payload,
-        } => {
-            let result = if !state.runtime.capabilities().diary {
-                room_agent_required_error()
-            } else {
-                match diary::recent(&state, payload).await {
-                    Ok(result) => serde_json::to_value(result)?,
-                    Err(error) => serde_json::json!({
-                        "error": { "code": "room_diary_recent_failed", "message": error.to_string() }
-                    }),
-                }
-            };
-            send_response(&state, run_id.as_deref(), &request_id, result).await?;
-        }
-        HubCommand::RoomDiarySelectExact {
-            request_id,
-            payload,
-        } => {
-            let result = if !state.runtime.capabilities().bootstrap {
-                room_agent_required_error()
-            } else {
-                match diary::select_exact(&state, payload).await {
-                    Ok(result) => serde_json::to_value(result)?,
-                    Err(error) => serde_json::json!({
-                        "error": { "code": "room_diary_select_exact_failed", "message": error.to_string() }
-                    }),
-                }
-            };
-            send_response(&state, run_id.as_deref(), &request_id, result).await?;
-        }
-        HubCommand::RoomBootstrap { request_id } => {
-            let result = if !state.runtime.capabilities().bootstrap {
-                room_agent_required_error()
-            } else {
-                match bootstrap::load(&state).await {
-                    Ok(result) => serde_json::to_value(result)?,
-                    Err(error) => bootstrap_command_error("bootstrap_read_failed", error),
-                }
-            };
-            send_response(&state, run_id.as_deref(), &request_id, result).await?;
-        }
-        HubCommand::RoomBootstrapRead {
-            request_id,
-            payload,
-        } => {
-            let result = if !state.runtime.capabilities().skills {
-                room_agent_required_error()
-            } else {
-                match bootstrap::read(&state, payload).await {
-                    Ok(result) => serde_json::to_value(result)?,
-                    Err(error) => bootstrap_command_error("bootstrap_read_failed", error),
-                }
-            };
-            send_response(&state, run_id.as_deref(), &request_id, result).await?;
-        }
-        HubCommand::Bootstrap { request_id } => {
-            let result = if !state.runtime.capabilities().bootstrap {
-                room_agent_required_error()
-            } else {
-                match bootstrap::load(&state).await {
-                    Ok(result) => serde_json::to_value(result)?,
-                    Err(error) => bootstrap_command_error("bootstrap_read_failed", error),
-                }
-            };
-            send_response(&state, run_id.as_deref(), &request_id, result).await?;
-        }
-        HubCommand::BootstrapRead {
-            request_id,
-            payload,
-        } => {
-            let result = if !state.runtime.capabilities().bootstrap {
-                room_agent_required_error()
-            } else {
-                match bootstrap::read(&state, payload).await {
-                    Ok(result) => serde_json::to_value(result)?,
-                    Err(error) => bootstrap_command_error("bootstrap_read_failed", error),
-                }
-            };
-            send_response(&state, run_id.as_deref(), &request_id, result).await?;
-        }
-        HubCommand::SkillsList { request_id } => {
-            let result = if !state.runtime.capabilities().skills {
-                room_agent_required_error()
-            } else {
-                match skills::list(&state).await {
-                    Ok(result) => serde_json::to_value(result)?,
-                    Err(error) => skills_command_error("skills_list_failed", error),
-                }
-            };
-            send_response(&state, run_id.as_deref(), &request_id, result).await?;
-        }
-        HubCommand::SkillsRead {
-            request_id,
-            payload,
-        } => {
-            let result = if !state.runtime.capabilities().skills {
-                room_agent_required_error()
-            } else {
-                match skills::read(&state, payload).await {
-                    Ok(result) => serde_json::to_value(result)?,
-                    Err(error) => skills_command_error("skills_read_failed", error),
-                }
-            };
-            send_response(&state, run_id.as_deref(), &request_id, result).await?;
-        }
-        HubCommand::SkillsSearch {
-            request_id,
-            payload,
-        } => {
-            let result = if !state.runtime.capabilities().skills {
-                room_agent_required_error()
-            } else {
-                match skills::search(&state, payload).await {
-                    Ok(result) => serde_json::to_value(result)?,
-                    Err(error) => skills_command_error("skills_search_failed", error),
-                }
-            };
-            send_response(&state, run_id.as_deref(), &request_id, result).await?;
-        }
-        HubCommand::SkillsActive { request_id } => {
-            let result = if !state.runtime.capabilities().skills {
-                room_agent_required_error()
-            } else {
-                match skills::active(&state).await {
-                    Ok(result) => serde_json::to_value(result)?,
-                    Err(error) => skills_command_error("skills_active_failed", error),
-                }
-            };
-            send_response(&state, run_id.as_deref(), &request_id, result).await?;
-        }
-        HubCommand::SkillsActivate {
-            request_id,
-            payload,
-        } => {
-            let result = if !state.runtime.capabilities().skills {
-                room_agent_required_error()
-            } else {
-                match skills::activate(&state, payload).await {
-                    Ok(result) => serde_json::to_value(result)?,
-                    Err(error) => skills_command_error("skills_activate_failed", error),
-                }
-            };
-            send_response(&state, run_id.as_deref(), &request_id, result).await?;
-        }
-        HubCommand::SkillsDeactivate {
-            request_id,
-            payload,
-        } => {
-            let result = if !state.runtime.capabilities().skills {
-                room_agent_required_error()
-            } else {
-                match skills::deactivate(&state, payload).await {
-                    Ok(result) => serde_json::to_value(result)?,
-                    Err(error) => skills_command_error("skills_deactivate_failed", error),
-                }
-            };
-            send_response(&state, run_id.as_deref(), &request_id, result).await?;
-        }
-        HubCommand::SkillsInstall {
-            request_id,
-            payload,
-        } => {
-            let result = if !state.runtime.capabilities().skills {
-                room_agent_required_error()
-            } else {
-                match state.skill_installs.start(state.clone(), payload).await {
-                    Ok(result) => serde_json::to_value(result)?,
-                    Err(error) => install_command_error(error),
-                }
-            };
-            send_response(&state, run_id.as_deref(), &request_id, result).await?;
-        }
-        HubCommand::SkillsInstallGet {
-            request_id,
-            payload,
-        } => {
-            let result = if !state.runtime.capabilities().skills {
-                room_agent_required_error()
-            } else {
-                match state.skill_installs.get(&state, payload).await {
-                    Ok(result) => serde_json::to_value(result)?,
-                    Err(error) => install_command_error(error),
-                }
-            };
-            send_response(&state, run_id.as_deref(), &request_id, result).await?;
-        }
-        HubCommand::SkillsInstallCancel {
-            request_id,
-            payload,
-        } => {
-            let result = if !state.runtime.capabilities().skills {
-                room_agent_required_error()
-            } else {
-                match state.skill_installs.cancel(&state, payload).await {
-                    Ok(result) => serde_json::to_value(result)?,
-                    Err(error) => install_command_error(error),
-                }
-            };
-            send_response(&state, run_id.as_deref(), &request_id, result).await?;
-        }
-        HubCommand::SkillsRun {
-            request_id,
-            session_id,
-            payload,
-        } => {
-            let result = if !state.runtime.capabilities().skills {
-                room_agent_required_error()
-            } else {
-                run_skill(&state, session_id, payload).await
-            };
-            send_response(&state, run_id.as_deref(), &request_id, result).await?;
-        }
+fn jobs_from_command_response(data: &serde_json::Value) -> Vec<JobInfo> {
+    if let Some(job) = data
+        .get("job")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+    {
+        return vec![job];
     }
-    Ok(())
+    if data.get("batchId").is_some() {
+        return data
+            .get("jobs")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|value| serde_json::from_value(value.clone()).ok())
+            .collect();
+    }
+    serde_json::from_value::<JobInfo>(data.clone())
+        .ok()
+        .into_iter()
+        .collect()
 }
 
-fn skills_command_error(default_code: &str, error: anyhow::Error) -> serde_json::Value {
-    let message = error.to_string();
-    let code = match message.as_str() {
-        "invalid_id" | "query_required" => "validation_error",
-        "not_found" => "not_found",
-        _ => default_code,
-    };
-    serde_json::json!({
-        "error": {
-            "code": code,
-            "message": if code == "not_found" { "skill not found" } else { &message }
-        }
-    })
-}
-
-fn bootstrap_command_error(default_code: &str, error: anyhow::Error) -> serde_json::Value {
-    let message = error.to_string();
-    let code = match message.as_str() {
-        "bootstrap_not_found"
-        | "guide_not_found"
-        | "bootstrap_invalid"
-        | "bootstrap_read_failed" => message.as_str(),
-        _ => default_code,
-    };
-    serde_json::json!({ "error": { "code": code, "message": message } })
-}
-
-fn install_command_error(error: anyhow::Error) -> serde_json::Value {
-    let message = error.to_string();
-    let code = match message.as_str() {
-        "install_not_found" => "install_not_found",
-        "target_exists" => "target_exists",
-        "idempotency_conflict" => "idempotency_conflict",
-        "reserved_id" => "reserved_id",
-        "invalid_id"
-        | "invalid_files"
-        | "invalid_file_source"
-        | "invalid_path"
-        | "duplicate_path"
-        | "invalid_base64"
-        | "package_limit_exceeded"
-        | "download_blocked"
-        | "invalid_github_source"
-        | "invalid_github_repository"
-        | "invalid_github_url"
-        | "unsupported_github_host"
-        | "ambiguous_github_url"
-        | "invalid_idempotency_key" => "validation_error",
-        _ => "skills_install_failed",
-    };
-    serde_json::json!({ "error": { "code": code, "message": message } })
-}
-
-pub(crate) async fn run_skill(
-    state: &AppState,
-    session_id: String,
-    request: SkillRunRequest,
-) -> serde_json::Value {
+pub(crate) async fn run_skill(state: &AppState, request: SkillRunRequest) -> serde_json::Value {
     let program = match skills::resolve_run_program(state, &request).await {
         Ok(program) => program,
         Err(error) => return skill_run_command_error(error),
@@ -1734,46 +1091,37 @@ pub(crate) async fn run_skill(
             });
         }
     }
-    let info = sessions::start_skill_session_async(
+    let info = jobs::start_skill_job_with_hook_and_source(
         state.clone(),
-        session_id.clone(),
         ExecRequest {
-            agent_id: config.agent_id.clone(),
+            agent_id: config.agent_id,
             program: program.to_string_lossy().to_string(),
             args: request.args.unwrap_or_default(),
             need_confirm: false,
             confirm_method: None,
             working_directory: request.working_directory,
+            wait_seconds: Some(wait_seconds),
         },
         &request.id,
         &request.path,
+        "hub:skills.run",
+        None,
     )
     .await;
-    let info = wait_for_skill_session(state, info, wait_seconds).await;
-    let completed_inline = !matches!(
-        info.state.as_str(),
-        "starting" | "running" | "waiting_confirmation"
-    );
+    let info = jobs::wait_for_job(state, info, wait_seconds).await;
+    let completed_inline = info.state.is_terminal();
     let response = SkillRunResponse {
-        agent_id: config.agent_id,
-        session_id,
+        status: info.state,
         completed_inline,
+        job_id: info.job_id.clone(),
         poll_after_ms: if completed_inline { 0 } else { 1_000 },
-        session: info,
+        job: info,
     };
     serde_json::to_value(response).unwrap_or_else(|_| {
         serde_json::json!({
             "error": { "code": "skills_run_failed", "message": "failed to encode skill run response" }
         })
     })
-}
-
-async fn wait_for_skill_session(
-    state: &AppState,
-    info: SessionInfo,
-    wait_seconds: u64,
-) -> SessionInfo {
-    sessions::wait_for_session(state, info, wait_seconds).await
 }
 
 pub(crate) fn skill_run_command_error(error: anyhow::Error) -> serde_json::Value {
@@ -1793,26 +1141,6 @@ pub(crate) fn skill_run_command_error(error: anyhow::Error) -> serde_json::Value
     serde_json::json!({ "error": { "code": code, "message": message } })
 }
 
-fn notebook_command_error(default_code: &str, error: anyhow::Error) -> serde_json::Value {
-    let message = error.to_string();
-    let code = if message == "not_found" {
-        "not_found"
-    } else if message.starts_with("validation_error")
-        || message.ends_with("_required")
-        || message.ends_with("_too_long")
-    {
-        "validation_error"
-    } else {
-        default_code
-    };
-    serde_json::json!({
-        "error": {
-            "code": code,
-            "message": if code == "not_found" { "passage not found" } else { &message }
-        }
-    })
-}
-
 pub(crate) fn room_agent_required_error() -> serde_json::Value {
     serde_json::json!({
         "error": {
@@ -1820,16 +1148,6 @@ pub(crate) fn room_agent_required_error() -> serde_json::Value {
             "message": "room commands require run-as-room"
         }
     })
-}
-
-async fn send_session(state: &AppState, session: &SessionInfo) -> Result<()> {
-    send_agent_message(
-        state,
-        AgentMessage::SessionUpdate {
-            session: session.clone(),
-        },
-    )
-    .await
 }
 
 async fn send_response(
@@ -1868,6 +1186,46 @@ pub(crate) async fn send_agent_message(state: &AppState, message: AgentMessage) 
 #[cfg(test)]
 mod reporting_tests {
     use super::*;
+
+    #[test]
+    fn command_response_job_extraction_skips_lists_and_covers_creation_shapes() {
+        let now = Utc::now();
+        let job = JobInfo {
+            agent_id: "agent".to_string(),
+            job_id: "job_boot_1".to_string(),
+            kind: agentic_gpt_protocol::JobKind::Process,
+            state: agentic_gpt_protocol::JobState::Running,
+            created_at: now,
+            started_at: now,
+            updated_at: now,
+            finished_at: None,
+            program: Some("sleep".to_string()),
+            args: vec!["1".to_string()],
+            working_directory: None,
+            command_preview: Some("sleep 1".to_string()),
+            exit_code: None,
+            stdout_tail: String::new(),
+            stderr_tail: String::new(),
+            truncated: false,
+            reject_reason: None,
+            skill_id: None,
+            skill_path: None,
+            installed_digest: None,
+            mcp_server_id: None,
+            mcp_tool_name: None,
+            cancel_requested: false,
+            cancel_outcome: None,
+            termination_evidence: None,
+        };
+        let wrapped = serde_json::json!({"job": job});
+        assert_eq!(jobs_from_command_response(&wrapped).len(), 1);
+        let batch = serde_json::json!({"batchId": "batch_1", "jobs": [job]});
+        assert_eq!(jobs_from_command_response(&batch).len(), 1);
+        let direct = serde_json::to_value(&job).unwrap();
+        assert_eq!(jobs_from_command_response(&direct).len(), 1);
+        let list = serde_json::json!({"jobs": [job]});
+        assert!(jobs_from_command_response(&list).is_empty());
+    }
 
     #[test]
     fn oversized_report_json_becomes_a_hash_record() {

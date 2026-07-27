@@ -38,8 +38,8 @@ After deploying a new Hub or local agent build:
 
 1. Confirm `/v1/info` responds through the public HTTPS domain.
 2. Confirm `/v1/agents` shows the expected agents online.
-3. Run one harmless short command through `/v1/exec`.
-4. Start and inspect one session if session support changed.
+3. Run one harmless command through `/v1/process/exec`.
+4. Start and inspect one Job through `/v1/jobs/{jobId}` if Job support changed.
 5. List MCP servers and tools if MCP support changed.
 6. Trigger one MCP tool call that requires confirmation when confirmation policy changed.
 
@@ -49,4 +49,4 @@ After deploying a new Hub or local agent build:
 - OAuth and confirmation callback routes stay outside the GPT Actions schema.
 - Safe summaries may include counts and coarse modes, but not secrets or full private path lists.
 - Local confirmation denial or timeout is final; it should not silently fall back to remote confirmation.
-- Long-running commands should use sessions, not `/v1/exec`.
+- Long-running commands should use the Job envelope and bounded `/v1/jobs/{jobId}` inspection, not an unbounded HTTP request.

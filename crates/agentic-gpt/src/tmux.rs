@@ -492,7 +492,7 @@ async fn audit_tmux(
     state: &AppState,
     program: &str,
     args: Vec<String>,
-    session_id: Option<String>,
+    job_id: Option<String>,
     working_directory: Option<String>,
     need_confirm: bool,
     policy_decision: &str,
@@ -516,7 +516,7 @@ async fn audit_tmux(
         &config,
         AuditRecord {
             task_id: Some(format!("tmux-{}", Uuid::new_v4())),
-            session_id,
+            job_id,
             time: Utc::now(),
             program: program.to_string(),
             args,

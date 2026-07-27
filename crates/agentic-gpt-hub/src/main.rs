@@ -171,7 +171,8 @@ async fn serve(
         agents: Arc::new(Mutex::new(HashMap::new())),
         pending: Arc::new(Mutex::new(HashMap::new())),
         pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
-        sessions: Arc::new(Mutex::new(HashMap::new())),
+        jobs: Arc::new(Mutex::new(HashMap::new())),
+        boot_generations: Arc::new(Mutex::new(HashMap::new())),
         active_room: Arc::new(Mutex::new(None)),
         http: reqwest::Client::new(),
         public_base_url: public_base_url.map(|value| value.trim_end_matches('/').to_string()),
@@ -200,13 +201,11 @@ async fn serve(
             "/v1/confirmations/:confirmation_id/:decision",
             post(confirmation_callback),
         )
-        .route("/v1/exec", post(routes::exec))
-        .route("/v1/batchExec", post(routes::batch_exec))
-        .route("/v1/sessions/start", post(routes::start_session))
-        .route("/v1/sessions", get(routes::list_sessions))
-        .route("/v1/sessions/:session_id", get(routes::inspect_session))
-        .route("/v1/sessions/:session_id/wait", post(routes::wait_session))
-        .route("/v1/sessions/:session_id/kill", post(routes::kill_session))
+        .route("/v1/process/exec", post(routes::process_exec))
+        .route("/v1/process/batch", post(routes::process_batch))
+        .route("/v1/jobs", get(routes::list_jobs))
+        .route("/v1/jobs/:job_id", get(routes::get_job))
+        .route("/v1/jobs/:job_id/cancel", post(routes::cancel_job))
         .route("/v1/tmux/sessions", get(routes::tmux_list_sessions))
         .route("/v1/tmux/panes", get(routes::tmux_list_panes))
         .route("/v1/tmux/capture", post(routes::tmux_capture_pane))
@@ -836,7 +835,8 @@ mod tests {
             agents: Arc::new(Mutex::new(HashMap::new())),
             pending: Arc::new(Mutex::new(HashMap::new())),
             pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
-            sessions: Arc::new(Mutex::new(HashMap::new())),
+            jobs: Arc::new(Mutex::new(HashMap::new())),
+            boot_generations: Arc::new(Mutex::new(HashMap::new())),
             active_room: Arc::new(Mutex::new(None)),
             http: reqwest::Client::new(),
             public_base_url: Some("https://hub.example.invalid".to_string()),
@@ -893,6 +893,28 @@ mod tests {
         assert!(openapi.contains("workingDirectory"));
         assert!(openapi.contains("Optional command working directory"));
         assert!(openapi.contains("Optional default working directory for all batch elements"));
+        assert!(openapi.contains("/v1/process/exec:"));
+        assert!(openapi.contains("/v1/process/batch:"));
+        assert!(openapi.contains("/v1/jobs:"));
+        assert!(openapi.contains("/v1/jobs/{jobId}:"));
+        assert!(openapi.contains("/v1/jobs/{jobId}/cancel:"));
+        assert!(openapi.contains("JobInfo:"));
+        assert!(openapi.contains("JobResponse:"));
+        assert!(openapi.contains("JobBatchResponse:"));
+        assert!(openapi.contains("unknown_after_restart"));
+        for removed in [
+            "/v1/exec:",
+            "/v1/batchExec:",
+            "/v1/sessions/start:",
+            "/v1/sessions/{sessionId}:",
+            "StartSessionResponse:",
+            "SessionInfo:",
+        ] {
+            assert!(
+                !openapi.contains(removed),
+                "removed OpenAPI contract survived: {removed}"
+            );
+        }
         for tmux_path in [
             "/v1/tmux/sessions:",
             "/v1/tmux/panes:",
@@ -1031,7 +1053,6 @@ mod tests {
             },
             HubCommand::SkillsRun {
                 request_id: "req-run".to_string(),
-                session_id: "sess-1".to_string(),
                 payload: agentic_gpt_protocol::SkillRunRequest {
                     id: "demo".to_string(),
                     path: "scripts/check.sh".to_string(),

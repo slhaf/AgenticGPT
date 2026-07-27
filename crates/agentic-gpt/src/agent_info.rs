@@ -6,9 +6,9 @@ use serde_json::{json, Value};
 
 use crate::config::{Config, ConfirmationChannel, Rule};
 use crate::exec;
+use crate::jobs;
 use crate::notify;
 use crate::policy::{self, PolicyDecision};
-use crate::sessions;
 use crate::state::{AppState, CapabilityProfile, HubMode, Transport};
 
 const MAX_SUMMARY_ENTRIES: usize = 128;
@@ -19,9 +19,9 @@ pub(crate) async fn collect(state: &AppState) -> Value {
     let config = state.config.read().await.clone();
     let (surface_tools, surface_revision) =
         crate::stdio_server::standalone_surface(state.runtime.profile);
-    let active = sessions::current_sessions(state).await;
+    let active = jobs::current_jobs(state).await;
     let active_count = active.len();
-    let resolved_limit = config.limits.max_active_sessions.resolve();
+    let resolved_limit = config.limits.max_active_jobs.resolve();
     let pending_count = state.pending_confirmations.lock().await.len();
     let (hub_sender, reporting_sender) =
         tokio::join!(async { state.hub_sender.lock().await.is_some() }, async {
@@ -132,8 +132,8 @@ pub(crate) async fn collect(state: &AppState) -> Value {
         },
         "execution": {
             "programMatching": "exact",
-            "sessions": {
-                "configuredMax": config.limits.max_active_sessions.configured_label(),
+            "jobs": {
+                "configuredMax": config.limits.max_active_jobs.configured_label(),
                 "resolvedMax": resolved_limit.resolved,
                 "active": active_count,
                 "available": resolved_limit.resolved.saturating_sub(active_count),
@@ -416,16 +416,17 @@ mod tests {
             config: Arc::new(RwLock::new(config)),
             runtime: crate::state::RuntimeModel::tunnel(profile, false),
             started_at: Utc::now(),
+            boot_generation: uuid::Uuid::new_v4().simple().to_string()[..12].to_string(),
             supervised: true,
             file_locks: Arc::new(Mutex::new(HashMap::new())),
-            sessions: Arc::new(Mutex::new(HashMap::new())),
+            jobs: Arc::new(Mutex::new(HashMap::new())),
             hub_sender: Arc::new(Mutex::new(None)),
             reporting_sender: Arc::new(Mutex::new(None)),
             pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
             temporary_mcp_allows: Arc::new(Mutex::new(Vec::new())),
             notebook_writes: Arc::new(Mutex::new(())),
             skills_writes: Arc::new(Mutex::new(())),
-            skill_leases: Arc::new(sessions::SkillLeaseManager::new()),
+            skill_leases: Arc::new(jobs::SkillLeaseManager::new()),
             skill_installs: Arc::new(crate::skill_installs::InstallManager::new()),
         }
     }
@@ -595,8 +596,7 @@ mod tests {
         ));
         fs::write(&invalid, b"not-json").unwrap();
         app.config_path = invalid.clone();
-        app.config.write().await.limits.max_active_sessions =
-            crate::config::MaxActiveSessions::Explicit(0);
+        app.config.write().await.limits.max_active_jobs = crate::config::MaxActiveJobs::Explicit(0);
         let value = collect(&app).await;
         assert_eq!(value["config"]["diskStatus"], "invalid");
         assert_eq!(value["health"]["status"], "degraded");

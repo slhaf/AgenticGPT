@@ -1,6 +1,6 @@
 use agentic_gpt_protocol::{
-    AgentConnectionMode, AgentRole, ConfirmationDecision, NotificationChannel, SafeConfigSummary,
-    SessionInfo,
+    AgentConnectionMode, AgentRole, ConfirmationDecision, JobInfo, NotificationChannel,
+    SafeConfigSummary,
 };
 use chrono::{DateTime, Utc};
 use rusqlite::Connection;
@@ -20,7 +20,8 @@ pub(crate) struct HubState {
     pub(crate) agents: Arc<Mutex<HashMap<String, AgentConnection>>>,
     pub(crate) pending: Arc<Mutex<HashMap<String, oneshot::Sender<Value>>>>,
     pub(crate) pending_confirmations: Arc<Mutex<HashMap<String, PendingConfirmation>>>,
-    pub(crate) sessions: Arc<Mutex<HashMap<String, HashMap<String, SessionInfo>>>>,
+    pub(crate) jobs: Arc<Mutex<HashMap<String, HashMap<String, JobInfo>>>>,
+    pub(crate) boot_generations: Arc<Mutex<HashMap<String, String>>>,
     pub(crate) active_room: Arc<Mutex<Option<room::ActiveRoomConnection>>>,
     pub(crate) http: reqwest::Client,
     pub(crate) public_base_url: Option<String>,
@@ -54,6 +55,7 @@ pub(crate) struct AgentConnection {
     pub(crate) role: AgentRole,
     pub(crate) connection_mode: AgentConnectionMode,
     pub(crate) hello_received: bool,
+    pub(crate) boot_generation: Option<String>,
     pub(crate) transport: AgentTransport,
     pub(crate) config_summary: Option<SafeConfigSummary>,
     pub(crate) notification_channels: Vec<NotificationChannel>,

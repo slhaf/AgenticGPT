@@ -88,7 +88,7 @@ policy, capacity, confirmation availability, and reporting state:
 
 ```text
 mcp.list, mcp.callTool
-process.exec, process.batchExec, process.get, process.kill, process.list
+process.exec, process.batch, job.get, job.list, job.cancel
 skills.list, skills.read, skills.setActive, skills.install,
 skills.install.get, skills.install.cancel, skills.run
 tmux.sessions, tmux.panes, tmux.exec, tmux.pasteText
@@ -108,16 +108,15 @@ room.notebook.update
 The standalone worker intentionally has no Tunnel `agentId` or
 `confirmMethod` input fields. The worker supplies its configured local agent
 identity internally; unexpected legacy fields are rejected. `bootstrap` is
-Room-only. `process.exec` and `skills.run` return a stable managed-session
-wrapper with `sessionId`, `completedInline`, `pollAfterMs`, and nested
-`session`; the nested session retains its `agentId` for reporting and local
-inspection. Batch execution returns one such wrapper per admitted element and
+Room-only. `process.exec` and `skills.run` return a stable Job envelope with
+`jobId`, `completedInline`, `pollAfterMs`, and nested `job`; the Job retains its
+`agentId`, kind, state, bounded output, and cancellation evidence. Batch
+execution returns ordered child Jobs and
 rejects the whole batch before admission when any element fails preflight,
 policy, confirmation, or capacity checks.
 
 Tunnel surfaces do not expose Hub aggregation or notification tools. They use
-the same local policy, path-policy, confirmation, audit, and managed-session
-lifecycle as Hub execution while keeping the Hub out of the command path.
+the same local policy, path-policy, confirmation, audit, and ManagedJob lifecycle as Hub execution while keeping the Hub out of the command path.
 
 ### Standalone file tools
 
@@ -165,7 +164,7 @@ coordinator profile exposes exactly these eight Hub-native tools:
 - `hub.info`
 - `agent.list`
 - `hub.run.list`, `hub.run.get`
-- `hub.session.list`, `hub.session.get`
+- `hub.job.list`, `hub.job.get`
 - `user.notify.channels`, `user.notify.send`
 
 Coordinator calls never dispatch an Agent command. Session queries read only
@@ -225,27 +224,37 @@ and preserve behavior; Agentic-managed writes emit the canonical `channels`
 form. `ntfy` is the truthful channel name, while notification publication,
 callback tokens, pending state, and decision relay remain owned by the Hub.
 
-The active-session limit accepts either the adaptive value or an explicit
+The active-Job limit accepts either the adaptive value or an explicit
 integer:
 
 ```json
 "limits": {
-  "maxActiveSessions": "auto"
+  "maxActiveJobs": "auto"
 }
 ```
 
 `auto` resolves at worker startup and after each valid live limits reload as
 `clamp(ceil(availableParallelism * 1.5), 6, 24)`. Existing numeric values stay
 explicit and are not migrated. Capacity rejection keeps the
-`max_active_sessions_reached` code and includes bounded `active`, `requested`,
+`max_active_jobs_reached` code and includes bounded `active`, `requested`,
 and `limit` details; batch admission remains atomic and all-or-reject.
+
+This is a breaking v0.9 migration. Before starting the new binary, replace
+`limits.maxActiveSessions` with `limits.maxActiveJobs` and remove the historical
+`sessionIdleTimeoutSecs` field, which never controlled runtime behavior. The
+strict limits object rejects both removed fields. The managed execution tool
+and HTTP aliases are also removed rather than wrapped: use `process.batch`,
+`job.get`, `job.list`, `job.cancel`, `/v1/process/*`, and `/v1/jobs/*`; old
+`process.batchExec`, `process.get/list/kill`, managed `session.*`, `/v1/exec`,
+`/v1/batchExec`, and `/v1/sessions/*` calls fail explicitly. tmux session names
+and tmux session APIs are unchanged.
 
 While the standalone worker is running, edits to `policy`, `pathPolicy`,
 `limits`, and `mcpServers` are polled, fully validated, and applied atomically
 to new admissions/calls. MCP server ids use `A-Z`, `a-z`, `0-9`, `.`, `_`, or
 `-` (maximum 64 bytes); `streamable-http` requires an absolute HTTP(S) URL and
 `stdio` requires a non-empty command. Invalid config versions keep the last
-valid live subset. Already admitted sessions and already-created downstream
+valid live subset. Already admitted Jobs and already-created downstream
 MCP clients retain their original decision/server definition and are not
 cancelled or rerouted by a reload. Because downstream clients are currently
 created per call, no separate reload or reconnect command is needed.
@@ -332,7 +341,7 @@ agentic-gpt config set tunnel.hubReporting.detail metadata
 ```
 
 The reporting connection identifies itself as `reporting-only`. It can send
-hello/heartbeat, direct-run lifecycle events, session snapshots, and the
+hello/heartbeat, direct-run lifecycle events, Job snapshots, and the
 existing confirmation traffic, but it never accepts Hub execution envelopes.
 Hub requests reject reporting-only agents before creating a run. Reporting
 disconnects, queue drops, and Hub unavailability never delay or change the
@@ -341,13 +350,13 @@ local MCP result.
 `metadata` records tool/source/profile/status/timestamps/duration, identifiers,
 exit code, and bounded failure reason. It omits arguments, results, program
 argv, working directories, and stdout/stderr. `full` additionally stores
-bounded JSON arguments/results and bounded existing session snapshots; an
+bounded JSON arguments/results and bounded existing Job snapshots; an
 oversized value becomes a byte-count/SHA-256 truncation record rather than a
 partial JSON fragment. Direct-run records remain in Hub storage for 24 hours.
 
 The worker also writes bounded lifecycle records to stderr for each tool call
 and managed process terminal event. These records contain the run/tool/profile
-and status, with duration and safe 12-hex run/session identifiers when
+and status, with duration and safe 12-hex run/Job identifiers when
 available; inline terminal calls emit one final record, while calls that
 return active emit one response record and one later terminal record. They
 never contain arguments, results, paths, secrets, or process output. Reporting
@@ -399,7 +408,7 @@ Recovery checklist:
 
 For Hub mode, use `GET /v1/info`, `GET /v1/agents`, `hub.info`, and
 `agent.list` for safe diagnostics. Use `hub.run.list`/`hub.run.get` for retained
-run history and `hub.session.list`/`hub.session.get` for current snapshots.
+run history and `hub.job.list`/`hub.job.get` for current snapshots.
 
 ## Existing centralized Hub mode
 

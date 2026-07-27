@@ -219,7 +219,7 @@ async fn request_hub_batch_confirmation(
         "MEDIUM"
     };
     let payload = ConfirmationPayload {
-        program: "process.batchExec".to_string(),
+        program: "process.batch".to_string(),
         args: Vec::new(),
         command_preview: truncate_chars(preview, 1000),
         risk_level: risk.to_string(),
@@ -228,7 +228,7 @@ async fn request_hub_batch_confirmation(
         } else {
             "Batch contains command(s) matching confirm policy".to_string()
         },
-        kind: Some("process.batchExec".to_string()),
+        kind: Some("process.batch".to_string()),
         server_id: None,
         tool_name: None,
     };
@@ -258,9 +258,9 @@ pub(crate) async fn request_confirmation(
     "confirmation_provider_unavailable".to_string()
 }
 
-/// Confirmation used by an asynchronously registered session. Hub-backed
-/// requests remove their pending sender when the session is cancelled, so a
-/// killed `waiting_confirmation` session cannot leak a durable callback entry.
+/// Confirmation used by an asynchronously registered Job. Hub-backed
+/// requests remove their pending sender when the Job is cancelled, so a
+/// cancelled `waiting_confirmation` Job cannot leak a durable callback entry.
 pub(crate) async fn request_confirmation_cancellable(
     state: &AppState,
     config: &Config,

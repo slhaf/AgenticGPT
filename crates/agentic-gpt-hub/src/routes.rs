@@ -1,8 +1,9 @@
 use agentic_gpt_protocol::{
     BatchExecRequest, ExecRequest, HubCommand, HubInfoAgents, HubInfoCounts,
-    HubInfoRemoteConfirmation, HubInfoResponse, McpCallToolRequest, McpListServersRequest,
-    McpListToolsRequest, SessionInfo, TmuxCapturePaneRequest, TmuxCloseSessionRequest,
-    TmuxCreateSessionRequest, TmuxExecRequest, TmuxListPanesRequest, TmuxPasteTextRequest,
+    HubInfoRemoteConfirmation, HubInfoResponse, JobCancelRequest, JobGetRequest, JobKind,
+    JobListRequest, JobState, McpCallToolRequest, McpListServersRequest, McpListToolsRequest,
+    TmuxCapturePaneRequest, TmuxCloseSessionRequest, TmuxCreateSessionRequest, TmuxExecRequest,
+    TmuxListPanesRequest, TmuxPasteTextRequest,
 };
 use anyhow::Result;
 use axum::extract::{Path, Query, State};
@@ -14,10 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
 
-use crate::agents::{
-    cached_session, mcp_list_servers_all_agents, request_agent, timeout_batch_result,
-    timeout_task_result,
-};
+use crate::agents::{cached_job, mcp_list_servers_all_agents, request_agent};
 use crate::registry::{registry_entries, registry_entry};
 use crate::runs;
 use crate::state::HubState;
@@ -31,8 +29,19 @@ pub(crate) struct AgentIdQuery {
 }
 
 #[derive(Deserialize)]
-pub(crate) struct WaitRequest {
-    seconds: Option<u64>,
+#[serde(rename_all = "camelCase")]
+pub(crate) struct JobListQuery {
+    agent_id: String,
+    kind: Option<JobKind>,
+    state: Option<JobState>,
+    limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct JobGetQuery {
+    agent_id: String,
+    wait_seconds: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -147,7 +156,7 @@ pub(crate) async fn build_hub_info_response(state: &HubState) -> Result<HubInfoR
         .values()
         .filter(|confirmation| !confirmation.resolved)
         .count();
-    let cached_session_count = state.sessions.lock().await.values().map(HashMap::len).sum();
+    let cached_job_count = state.jobs.lock().await.values().map(HashMap::len).sum();
 
     let remote = &state.config.remote_confirmation;
     let ntfy = &remote.ntfy;
@@ -172,7 +181,7 @@ pub(crate) async fn build_hub_info_response(state: &HubState) -> Result<HubInfoR
         counts: HubInfoCounts {
             pending_request_count,
             pending_confirmation_count,
-            cached_session_count,
+            cached_job_count,
         },
         generated_at: Utc::now(),
     })
@@ -225,7 +234,7 @@ pub(crate) async fn get_run(
     }
 }
 
-pub(crate) async fn exec(
+pub(crate) async fn process_exec(
     State(state): State<HubState>,
     headers: HeaderMap,
     Json(payload): Json<ExecRequest>,
@@ -236,21 +245,17 @@ pub(crate) async fn exec(
     if let Err(response) = require_agent_enabled(&state, &payload.agent_id) {
         return response;
     }
-    let task_id = random_id("task");
     let command = HubCommand::Exec {
         request_id: random_id("req"),
-        task_id: task_id.clone(),
         payload: payload.clone(),
     };
     match request_agent(&state, &payload.agent_id, command, REQUEST_TIMEOUT_SECS).await {
         Ok(value) => Json(value).into_response(),
-        Err(reason) => {
-            Json(timeout_task_result(&payload.agent_id, &task_id, reason)).into_response()
-        }
+        Err(reason) => api_error(StatusCode::GATEWAY_TIMEOUT, "process_exec_timeout", reason),
     }
 }
 
-pub(crate) async fn batch_exec(
+pub(crate) async fn process_batch(
     State(state): State<HubState>,
     headers: HeaderMap,
     Json(payload): Json<BatchExecRequest>,
@@ -261,61 +266,20 @@ pub(crate) async fn batch_exec(
     if let Err(response) = require_agent_enabled(&state, &payload.agent_id) {
         return response;
     }
-    let batch_id = random_id("batch");
-    let command = HubCommand::BatchExec {
+    let command = HubCommand::ProcessBatch {
         request_id: random_id("req"),
-        task_id: batch_id.clone(),
         payload: payload.clone(),
     };
     match request_agent(&state, &payload.agent_id, command, REQUEST_TIMEOUT_SECS).await {
         Ok(value) => Json(value).into_response(),
-        Err(reason) => Json(timeout_batch_result(&payload, &batch_id, reason)).into_response(),
+        Err(reason) => api_error(StatusCode::GATEWAY_TIMEOUT, "process_batch_timeout", reason),
     }
 }
 
-pub(crate) async fn start_session(
+pub(crate) async fn list_jobs(
     State(state): State<HubState>,
     headers: HeaderMap,
-    Json(payload): Json<ExecRequest>,
-) -> Response {
-    if let Err(response) = require_action_auth(&state, &headers) {
-        return response;
-    }
-    if let Err(response) = require_agent_enabled(&state, &payload.agent_id) {
-        return response;
-    }
-    let session_id = random_id("sess");
-    let command = HubCommand::StartSession {
-        request_id: random_id("req"),
-        session_id: session_id.clone(),
-        payload: payload.clone(),
-    };
-    match request_agent(&state, &payload.agent_id, command, REQUEST_TIMEOUT_SECS).await {
-        Ok(value) => {
-            let status = serde_json::from_value::<SessionInfo>(value.clone())
-                .ok()
-                .map(|session| {
-                    if session.state == "starting"
-                        || session.state == "running"
-                        || session.state == "waiting_confirmation"
-                    {
-                        "started"
-                    } else {
-                        "failed"
-                    }
-                })
-                .unwrap_or("started");
-            Json(json!({ "status": status, "sessionId": session_id, "session": value }))
-                .into_response()
-        }
-        Err(reason) => api_error(StatusCode::GATEWAY_TIMEOUT, "session_start_timeout", reason),
-    }
-}
-
-pub(crate) async fn list_sessions(
-    State(state): State<HubState>,
-    headers: HeaderMap,
-    Query(query): Query<AgentIdQuery>,
+    Query(query): Query<JobListQuery>,
 ) -> Response {
     if let Err(response) = require_action_auth(&state, &headers) {
         return response;
@@ -323,29 +287,39 @@ pub(crate) async fn list_sessions(
     if let Err(response) = require_agent_enabled(&state, &query.agent_id) {
         return response;
     }
-    let command = HubCommand::ListSessions {
+    let payload = JobListRequest {
+        kind: query.kind,
+        state: query.state,
+        limit: query.limit,
+    };
+    let command = HubCommand::JobList {
         request_id: random_id("req"),
+        payload: payload.clone(),
     };
     match request_agent(&state, &query.agent_id, command, 2).await {
-        Ok(value) => Json(json!({ "sessions": value })).into_response(),
+        Ok(value) => Json(value).into_response(),
         Err(_) => {
-            let sessions = state
-                .sessions
+            let mut jobs = state
+                .jobs
                 .lock()
                 .await
                 .get(&query.agent_id)
-                .map(|sessions| sessions.values().cloned().collect::<Vec<_>>())
+                .map(|jobs| jobs.values().cloned().collect::<Vec<_>>())
                 .unwrap_or_default();
-            Json(json!({ "sessions": sessions })).into_response()
+            jobs.retain(|job| payload.kind.is_none_or(|kind| job.kind == kind));
+            jobs.retain(|job| payload.state.is_none_or(|state| job.state == state));
+            jobs.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+            jobs.truncate(payload.limit.unwrap_or(100).clamp(1, 100));
+            Json(json!({ "jobs": jobs })).into_response()
         }
     }
 }
 
-pub(crate) async fn inspect_session(
+pub(crate) async fn get_job(
     State(state): State<HubState>,
     headers: HeaderMap,
-    Path(session_id): Path<String>,
-    Query(query): Query<AgentIdQuery>,
+    Path(job_id): Path<String>,
+    Query(query): Query<JobGetQuery>,
 ) -> Response {
     if let Err(response) = require_action_auth(&state, &headers) {
         return response;
@@ -353,29 +327,30 @@ pub(crate) async fn inspect_session(
     if let Err(response) = require_agent_enabled(&state, &query.agent_id) {
         return response;
     }
-    let command = HubCommand::InspectSession {
+    let command = HubCommand::JobGet {
         request_id: random_id("req"),
-        session_id: session_id.clone(),
+        payload: JobGetRequest {
+            job_id: job_id.clone(),
+            wait_seconds: query
+                .wait_seconds
+                .map(|seconds| seconds.min(MAX_WAIT_SECONDS)),
+        },
     };
-    match request_agent(&state, &query.agent_id, command, 2).await {
-        Ok(value) if !value.is_null() => Json(value).into_response(),
-        _ => match cached_session(&state, &query.agent_id, &session_id).await {
-            Some(session) => Json(session).into_response(),
-            None => api_error(
-                StatusCode::NOT_FOUND,
-                "session_not_found",
-                "Session was not found",
-            ),
+    let timeout_seconds = query.wait_seconds.unwrap_or(0).min(MAX_WAIT_SECONDS) + 2;
+    match request_agent(&state, &query.agent_id, command, timeout_seconds).await {
+        Ok(value) if value.get("error").is_none() => Json(value).into_response(),
+        _ => match cached_job(&state, &query.agent_id, &job_id).await {
+            Some(job) => Json(job).into_response(),
+            None => api_error(StatusCode::NOT_FOUND, "job_not_found", "Job was not found"),
         },
     }
 }
 
-pub(crate) async fn wait_session(
+pub(crate) async fn cancel_job(
     State(state): State<HubState>,
     headers: HeaderMap,
-    Path(session_id): Path<String>,
+    Path(job_id): Path<String>,
     Query(query): Query<AgentIdQuery>,
-    Json(body): Json<WaitRequest>,
 ) -> Response {
     if let Err(response) = require_action_auth(&state, &headers) {
         return response;
@@ -383,50 +358,17 @@ pub(crate) async fn wait_session(
     if let Err(response) = require_agent_enabled(&state, &query.agent_id) {
         return response;
     }
-    let seconds = body.seconds.unwrap_or(0).min(MAX_WAIT_SECONDS);
-    let command = HubCommand::WaitSession {
+    let command = HubCommand::JobCancel {
         request_id: random_id("req"),
-        session_id: session_id.clone(),
-        seconds,
-    };
-    match request_agent(&state, &query.agent_id, command, seconds + 2).await {
-        Ok(value) if !value.is_null() => Json(value).into_response(),
-        _ => match cached_session(&state, &query.agent_id, &session_id).await {
-            Some(session) => Json(session).into_response(),
-            None => api_error(
-                StatusCode::NOT_FOUND,
-                "session_not_found",
-                "Session was not found",
-            ),
+        payload: JobCancelRequest {
+            job_id: job_id.clone(),
         },
-    }
-}
-
-pub(crate) async fn kill_session(
-    State(state): State<HubState>,
-    headers: HeaderMap,
-    Path(session_id): Path<String>,
-    Query(query): Query<AgentIdQuery>,
-) -> Response {
-    if let Err(response) = require_action_auth(&state, &headers) {
-        return response;
-    }
-    if let Err(response) = require_agent_enabled(&state, &query.agent_id) {
-        return response;
-    }
-    let command = HubCommand::KillSession {
-        request_id: random_id("req"),
-        session_id: session_id.clone(),
     };
     match request_agent(&state, &query.agent_id, command, 5).await {
-        Ok(value) if !value.is_null() => Json(value).into_response(),
-        _ => match cached_session(&state, &query.agent_id, &session_id).await {
-            Some(session) => Json(session).into_response(),
-            None => api_error(
-                StatusCode::NOT_FOUND,
-                "session_not_found",
-                "Session was not found",
-            ),
+        Ok(value) if value.get("error").is_none() => Json(value).into_response(),
+        _ => match cached_job(&state, &query.agent_id, &job_id).await {
+            Some(job) => Json(job).into_response(),
+            None => api_error(StatusCode::NOT_FOUND, "job_not_found", "Job was not found"),
         },
     }
 }

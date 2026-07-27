@@ -1,6 +1,6 @@
 use agentic_gpt_protocol::{
-    AgentConnectionMode, AgentMessage, AgentRole, BatchExecRequest, BatchExecResult, HubCommand,
-    HubCommandEnvelope, HubMessage, SessionInfo, TaskResult,
+    AgentConnectionMode, AgentMessage, AgentRole, HubCommand, HubCommandEnvelope, HubMessage,
+    JobInfo, JobState,
 };
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
@@ -238,6 +238,7 @@ async fn handle_agent_message(
     }
     match parsed {
         AgentMessage::Hello {
+            boot_generation,
             role,
             connection_mode,
             config_summary,
@@ -246,13 +247,25 @@ async fn handle_agent_message(
             .await
         {
             Ok(()) => {
-                let mut agents = state.agents.lock().await;
-                if let Some(connection) = agents.get_mut(agent_id) {
-                    connection.role = role;
-                    connection.connection_mode = connection_mode;
-                    connection.hello_received = true;
-                    connection.config_summary = Some(config_summary);
-                    connection.notification_channels = notification_channels;
+                let generation_changed = {
+                    let mut generations = state.boot_generations.lock().await;
+                    generations
+                        .insert(agent_id.to_string(), boot_generation.clone())
+                        .is_some_and(|previous| previous != boot_generation)
+                };
+                if generation_changed {
+                    mark_cached_jobs_unknown_after_restart(state, agent_id).await;
+                }
+                {
+                    let mut agents = state.agents.lock().await;
+                    if let Some(connection) = agents.get_mut(agent_id) {
+                        connection.role = role;
+                        connection.connection_mode = connection_mode;
+                        connection.hello_received = true;
+                        connection.boot_generation = Some(boot_generation);
+                        connection.config_summary = Some(config_summary);
+                        connection.notification_channels = notification_channels;
+                    }
                 }
                 if connection_mode == AgentConnectionMode::CommandCapable {
                     let sender = state
@@ -296,14 +309,14 @@ async fn handle_agent_message(
             )
             .await;
         }
-        AgentMessage::SessionUpdate { session } => {
+        AgentMessage::JobUpdate { job } => {
             state
-                .sessions
+                .jobs
                 .lock()
                 .await
                 .entry(agent_id.to_string())
                 .or_default()
-                .insert(session.session_id.clone(), session);
+                .insert(job.job_id.clone(), job);
         }
         AgentMessage::RunReport { report } => {
             if let Err(error) = runs::upsert_agent_report(state, agent_id, report) {
@@ -473,7 +486,6 @@ async fn disconnect_agent(state: &HubState, agent_id: &str, connection_id: &str)
     if removed_current_connection {
         room::release_active_room_if_current(state, agent_id, connection_id).await;
         discard_agent_confirmations(state, agent_id).await;
-        state.sessions.lock().await.remove(agent_id);
     }
     info!(%agent_id, %connection_id, removedCurrentConnection = removed_current_connection, "agent disconnected");
 }
@@ -525,10 +537,10 @@ pub(crate) async fn request_agent(
         Ok(Ok(value)) => Ok(value),
         _ => {
             state.pending.lock().await.remove(&request_id);
-            if let Err(error) = runs::mark_timeout(state, &run.run_id, "exec_timeout_use_session") {
+            if let Err(error) = runs::mark_timeout(state, &run.run_id, "process_exec_timeout") {
                 warn!(runId = %run.run_id, %error, "failed to mark run timeout");
             }
-            Err(format!("exec_timeout_use_session; runId={}", run.run_id))
+            Err(format!("process_exec_timeout; runId={}", run.run_id))
         }
     }
 }
@@ -586,6 +598,7 @@ pub(crate) async fn replace_agent_connection(
                 role: AgentRole::Normal,
                 connection_mode: AgentConnectionMode::CommandCapable,
                 hello_received: false,
+                boot_generation: None,
                 transport,
                 config_summary: None,
                 notification_channels: Vec::new(),
@@ -595,7 +608,6 @@ pub(crate) async fn replace_agent_connection(
     if let Some(old) = old {
         room::release_active_room_if_current(state, agent_id, &old.connection_id).await;
         let _ = old.sender.send(OutboundAgentMessage::Close);
-        state.sessions.lock().await.remove(agent_id);
     }
 }
 
@@ -687,12 +699,10 @@ pub(crate) async fn mcp_list_servers_all_agents(
 pub(crate) fn command_request_id(command: &HubCommand) -> &str {
     match command {
         HubCommand::Exec { request_id, .. }
-        | HubCommand::BatchExec { request_id, .. }
-        | HubCommand::StartSession { request_id, .. }
-        | HubCommand::ListSessions { request_id }
-        | HubCommand::InspectSession { request_id, .. }
-        | HubCommand::WaitSession { request_id, .. }
-        | HubCommand::KillSession { request_id, .. }
+        | HubCommand::ProcessBatch { request_id, .. }
+        | HubCommand::JobList { request_id, .. }
+        | HubCommand::JobGet { request_id, .. }
+        | HubCommand::JobCancel { request_id, .. }
         | HubCommand::TmuxListSessions { request_id }
         | HubCommand::TmuxListPanes { request_id, .. }
         | HubCommand::TmuxCapturePane { request_id, .. }
@@ -734,12 +744,10 @@ pub(crate) fn command_request_id(command: &HubCommand) -> &str {
 pub(crate) fn set_command_request_id(command: &mut HubCommand, value: String) {
     match command {
         HubCommand::Exec { request_id, .. }
-        | HubCommand::BatchExec { request_id, .. }
-        | HubCommand::StartSession { request_id, .. }
-        | HubCommand::ListSessions { request_id }
-        | HubCommand::InspectSession { request_id, .. }
-        | HubCommand::WaitSession { request_id, .. }
-        | HubCommand::KillSession { request_id, .. }
+        | HubCommand::ProcessBatch { request_id, .. }
+        | HubCommand::JobList { request_id, .. }
+        | HubCommand::JobGet { request_id, .. }
+        | HubCommand::JobCancel { request_id, .. }
         | HubCommand::TmuxListSessions { request_id }
         | HubCommand::TmuxListPanes { request_id, .. }
         | HubCommand::TmuxCapturePane { request_id, .. }
@@ -778,17 +786,29 @@ pub(crate) fn set_command_request_id(command: &mut HubCommand, value: String) {
     }
 }
 
-pub(crate) async fn cached_session(
-    state: &HubState,
-    agent_id: &str,
-    session_id: &str,
-) -> Option<SessionInfo> {
+pub(crate) async fn cached_job(state: &HubState, agent_id: &str, job_id: &str) -> Option<JobInfo> {
     state
-        .sessions
+        .jobs
         .lock()
         .await
         .get(agent_id)
-        .and_then(|sessions| sessions.get(session_id).cloned())
+        .and_then(|jobs| jobs.get(job_id).cloned())
+}
+
+async fn mark_cached_jobs_unknown_after_restart(state: &HubState, agent_id: &str) {
+    let mut jobs = state.jobs.lock().await;
+    let Some(agent_jobs) = jobs.get_mut(agent_id) else {
+        return;
+    };
+    let now = chrono::Utc::now();
+    for job in agent_jobs.values_mut() {
+        if job.state.is_active() {
+            job.state = JobState::UnknownAfterRestart;
+            job.updated_at = now;
+            job.finished_at = Some(now);
+            job.reject_reason = Some("unknown_after_restart".to_string());
+        }
+    }
 }
 
 async fn touch_agent(state: &HubState, agent_id: &str) {
@@ -797,74 +817,12 @@ async fn touch_agent(state: &HubState, agent_id: &str) {
     }
 }
 
-pub(crate) fn timeout_task_result(agent_id: &str, task_id: &str, reason: String) -> TaskResult {
-    let at = chrono::Utc::now();
-    TaskResult {
-        agent_id: agent_id.to_string(),
-        task_id: task_id.to_string(),
-        status: if reason == "agent_offline" {
-            "failed"
-        } else {
-            "timeout"
-        }
-        .to_string(),
-        exit_code: None,
-        stdout_tail: String::new(),
-        stderr_tail: String::new(),
-        truncated: false,
-        reject_reason: Some(reason),
-        started_at: at,
-        updated_at: at,
-    }
-}
-
-pub(crate) fn timeout_batch_result(
-    payload: &BatchExecRequest,
-    batch_id: &str,
-    reason: String,
-) -> BatchExecResult {
-    let at = chrono::Utc::now();
-    let status = if reason == "agent_offline" {
-        "partial_failed"
-    } else {
-        "timeout"
-    };
-    BatchExecResult {
-        agent_id: payload.agent_id.clone(),
-        batch_id: batch_id.to_string(),
-        status: status.to_string(),
-        results: payload
-            .elements
-            .iter()
-            .enumerate()
-            .map(
-                |(index, element)| agentic_gpt_protocol::BatchElementResult {
-                    index,
-                    program: element.program.clone(),
-                    args: element.args.clone(),
-                    working_directory: element
-                        .working_directory
-                        .clone()
-                        .or_else(|| payload.working_directory.clone()),
-                    result: timeout_task_result(
-                        &payload.agent_id,
-                        &format!("{batch_id}:element:{index}"),
-                        reason.clone(),
-                    ),
-                },
-            )
-            .collect(),
-        started_at: at,
-        updated_at: at,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::db::init_db;
     use crate::{HubConfig, McpProfile, NtfyConfig, RemoteConfirmationConfig};
-    use agentic_gpt_protocol::{Capabilities, ExecRequest};
+    use agentic_gpt_protocol::{Capabilities, ExecRequest, JobKind, SafeConfigSummary};
     use axum::http::HeaderValue;
     use rusqlite::{params, Connection};
     use std::collections::HashMap;
@@ -893,7 +851,8 @@ mod tests {
             agents: Arc::new(Mutex::new(HashMap::new())),
             pending: Arc::new(Mutex::new(HashMap::new())),
             pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
-            sessions: Arc::new(Mutex::new(HashMap::new())),
+            jobs: Arc::new(Mutex::new(HashMap::new())),
+            boot_generations: Arc::new(Mutex::new(HashMap::new())),
             active_room: Arc::new(Mutex::new(None)),
             http: reqwest::Client::new(),
             public_base_url: None,
@@ -906,7 +865,7 @@ mod tests {
     fn register_agent(state: &HubState, agent_id: &str, secret: &str) {
         let conn = state.db.lock().unwrap();
         let capabilities = Capabilities {
-            sessions: true,
+            jobs: true,
             confirmation: true,
             notification_actions: true,
         };
@@ -920,6 +879,61 @@ mod tests {
             ],
         )
         .unwrap();
+    }
+
+    fn test_running_job(job_id: &str) -> JobInfo {
+        let now = chrono::Utc::now();
+        JobInfo {
+            agent_id: "agent".to_string(),
+            job_id: job_id.to_string(),
+            kind: JobKind::Process,
+            state: JobState::Running,
+            created_at: now,
+            started_at: now,
+            updated_at: now,
+            finished_at: None,
+            program: Some("sleep".to_string()),
+            args: vec!["10".to_string()],
+            working_directory: None,
+            command_preview: Some("sleep 10".to_string()),
+            exit_code: None,
+            stdout_tail: String::new(),
+            stderr_tail: String::new(),
+            truncated: false,
+            reject_reason: None,
+            skill_id: None,
+            skill_path: None,
+            installed_digest: None,
+            mcp_server_id: None,
+            mcp_tool_name: None,
+            cancel_requested: false,
+            cancel_outcome: None,
+            termination_evidence: None,
+        }
+    }
+
+    fn test_config_summary() -> SafeConfigSummary {
+        serde_json::from_value(json!({
+            "workspaceRoot": "configured",
+            "sandbox": {"enabled": false, "mode": "disabled"},
+            "pathPolicy": {
+                "writeRootCount": 1,
+                "readOnlyRootCount": 0,
+                "denyRootCount": 0,
+                "writeRoots": [{"path": "workspace", "source": "workspace"}],
+                "readOnlyRoots": [],
+                "denyRoots": []
+            },
+            "policyRuleCounts": {"allow": 0, "confirm": 0, "deny": 0},
+            "policyRules": {
+                "allow": [],
+                "confirm": [],
+                "deny": [],
+                "builtins": {"confirm": [], "deny": []}
+            },
+            "confirmationProvider": "none"
+        }))
+        .unwrap()
     }
 
     fn agent_headers(secret: &str) -> HeaderMap {
@@ -944,6 +958,7 @@ mod tests {
                 role: AgentRole::Normal,
                 connection_mode: AgentConnectionMode::CommandCapable,
                 hello_received: true,
+                boot_generation: Some("testboot".to_string()),
                 transport: AgentTransport::Sse,
                 config_summary: None,
                 notification_channels: Vec::new(),
@@ -953,11 +968,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn changed_boot_generation_marks_only_active_jobs_unknown_after_restart() {
+        let state = test_state();
+        register_agent(&state, "agent", "secret");
+        let _rx = insert_connection(&state, "agent", "current", chrono::Utc::now()).await;
+        state
+            .boot_generations
+            .lock()
+            .await
+            .insert("agent".to_string(), "boot-a".to_string());
+        let running = test_running_job("job_boot-a_running");
+        let mut completed = test_running_job("job_boot-a_completed");
+        completed.state = JobState::Completed;
+        completed.finished_at = Some(completed.updated_at);
+        state.jobs.lock().await.insert(
+            "agent".to_string(),
+            HashMap::from([
+                (running.job_id.clone(), running),
+                (completed.job_id.clone(), completed),
+            ]),
+        );
+
+        handle_agent_message(
+            &state,
+            "agent",
+            "current",
+            AgentMessage::Hello {
+                role: AgentRole::Normal,
+                boot_generation: "boot-b".to_string(),
+                connection_mode: AgentConnectionMode::CommandCapable,
+                config_summary: test_config_summary(),
+                notification_channels: Vec::new(),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+
+        let jobs = state.jobs.lock().await;
+        let agent_jobs = jobs.get("agent").unwrap();
+        let running = agent_jobs.get("job_boot-a_running").unwrap();
+        assert_eq!(running.state, JobState::UnknownAfterRestart);
+        assert_eq!(
+            running.reject_reason.as_deref(),
+            Some("unknown_after_restart")
+        );
+        assert!(running.finished_at.is_some());
+        assert_eq!(
+            agent_jobs.get("job_boot-a_completed").unwrap().state,
+            JobState::Completed
+        );
+        drop(jobs);
+        assert_eq!(
+            state
+                .boot_generations
+                .lock()
+                .await
+                .get("agent")
+                .map(String::as_str),
+            Some("boot-b")
+        );
+        assert_eq!(
+            state
+                .agents
+                .lock()
+                .await
+                .get("agent")
+                .and_then(|connection| connection.boot_generation.as_deref()),
+            Some("boot-b")
+        );
+    }
+
+    #[tokio::test]
     async fn pending_replay_sends_reliable_envelope() {
         let state = test_state();
         let command = HubCommand::Exec {
             request_id: "req_replay".to_string(),
-            task_id: "task_replay".to_string(),
             payload: ExecRequest {
                 agent_id: "agent".to_string(),
                 program: "printf".to_string(),
@@ -965,6 +1051,7 @@ mod tests {
                 need_confirm: false,
                 confirm_method: None,
                 working_directory: None,
+                wait_seconds: None,
             },
         };
         let run = runs::prepare_run(&state, "agent", "req_replay", &command).unwrap();
@@ -1012,7 +1099,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stale_session_update_is_rejected_without_writing_session_cache() {
+    async fn stale_job_update_is_rejected_without_writing_job_cache() {
         let state = test_state();
         register_agent(&state, "agent", "secret");
         let _rx = insert_connection(&state, "agent", "current", chrono::Utc::now()).await;
@@ -1024,29 +1111,14 @@ mod tests {
                 connection_id: Some("old".to_string()),
             }),
             agent_headers("secret"),
-            axum::Json(AgentMessage::SessionUpdate {
-                session: SessionInfo {
-                    agent_id: "agent".to_string(),
-                    session_id: "session-old".to_string(),
-                    program: "sleep".to_string(),
-                    args: vec!["10".to_string()],
-                    working_directory: None,
-                    command_preview: "sleep 10".to_string(),
-                    state: "running".to_string(),
-                    started_at: chrono::Utc::now(),
-                    updated_at: chrono::Utc::now(),
-                    exit_code: None,
-                    stdout_tail: String::new(),
-                    stderr_tail: String::new(),
-                    truncated: false,
-                    reject_reason: None,
-                },
+            axum::Json(AgentMessage::JobUpdate {
+                job: test_running_job("job_oldboot_123"),
             }),
         )
         .await;
 
         assert_eq!(response.status(), StatusCode::CONFLICT);
-        assert!(state.sessions.lock().await.is_empty());
+        assert!(state.jobs.lock().await.is_empty());
     }
 
     #[tokio::test]
@@ -1056,7 +1128,6 @@ mod tests {
         let _rx = insert_connection(&state, "agent", "current", chrono::Utc::now()).await;
         let command = HubCommand::Exec {
             request_id: "req_late".to_string(),
-            task_id: "task_late".to_string(),
             payload: ExecRequest {
                 agent_id: "agent".to_string(),
                 program: "printf".to_string(),
@@ -1064,6 +1135,7 @@ mod tests {
                 need_confirm: false,
                 confirm_method: None,
                 working_directory: None,
+                wait_seconds: None,
             },
         };
         let run = runs::prepare_run(&state, "agent", "req_late", &command).unwrap();
@@ -1096,7 +1168,6 @@ mod tests {
         drop(rx);
         let command = HubCommand::Exec {
             request_id: "req_send_failed".to_string(),
-            task_id: "task_send_failed".to_string(),
             payload: ExecRequest {
                 agent_id: "agent".to_string(),
                 program: "printf".to_string(),
@@ -1104,6 +1175,7 @@ mod tests {
                 need_confirm: false,
                 confirm_method: None,
                 working_directory: None,
+                wait_seconds: None,
             },
         };
 
@@ -1126,7 +1198,6 @@ mod tests {
             .connection_mode = AgentConnectionMode::ReportingOnly;
         let command = HubCommand::Exec {
             request_id: "req_reporting_only".to_string(),
-            task_id: "task_reporting_only".to_string(),
             payload: ExecRequest {
                 agent_id: "agent".to_string(),
                 program: "printf".to_string(),
@@ -1134,6 +1205,7 @@ mod tests {
                 need_confirm: false,
                 confirm_method: None,
                 working_directory: None,
+                wait_seconds: None,
             },
         };
 

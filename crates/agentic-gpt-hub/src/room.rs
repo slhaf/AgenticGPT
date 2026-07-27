@@ -326,13 +326,11 @@ pub(crate) async fn skills_run(
     headers: HeaderMap,
     Json(payload): Json<SkillRunRequest>,
 ) -> Response {
-    let session_id = random_id("sess");
     forward_room_command(
         state,
         headers,
         HubCommand::SkillsRun {
             request_id: random_id("req"),
-            session_id,
             payload,
         },
         "skills_run_timeout",
@@ -521,7 +519,8 @@ mod tests {
             agents: Arc::new(Mutex::new(HashMap::new())),
             pending: Arc::new(Mutex::new(HashMap::new())),
             pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
-            sessions: Arc::new(Mutex::new(HashMap::new())),
+            jobs: Arc::new(Mutex::new(HashMap::new())),
+            boot_generations: Arc::new(Mutex::new(HashMap::new())),
             active_room: Arc::new(Mutex::new(None)),
             http: reqwest::Client::new(),
             public_base_url: Some("https://hub.example.invalid".to_string()),
@@ -551,6 +550,7 @@ mod tests {
                 role,
                 connection_mode: AgentConnectionMode::CommandCapable,
                 hello_received: true,
+                boot_generation: Some("testboot".to_string()),
                 transport: AgentTransport::WebSocket,
                 config_summary: None,
                 notification_channels: Vec::new(),
