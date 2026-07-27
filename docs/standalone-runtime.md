@@ -428,6 +428,17 @@ executables, checksum failures, and tunnel authentication/authorization
 failures are permanent startup failures. SIGINT/SIGTERM stops the tunnel
 process group and worker, then uses a bounded kill fallback.
 
+A tunnel control-plane logical connection can outlive a restarted stdio child.
+When the fresh worker receives a non-ping request before a new MCP `initialize`,
+the tunnel-only stdio transport restores rmcp's local initialization state with
+a private handshake, suppresses that private response, and then replays the
+original request with its original id. Pre-initialize notifications from the
+stale logical connection are ignored. Ordinary client-led initialization is
+passed through unchanged, and the owner-only Local Unix ingress does not use
+this recovery shim. Successful recovery emits bounded diagnostics
+`mcp_stdio_session_resume` and `mcp_stdio_session_resumed`; neither log contains
+request arguments or results.
+
 Recovery checklist:
 
 1. Read the Agentic stderr diagnostic and the retained
@@ -481,9 +492,12 @@ targets when `cross` and the corresponding toolchains are installed.
 
 `crates/agentic-gpt/tests/standalone_supervisor.rs` launches the actual Agentic
 supervisor and hidden stdio worker for a Normal-profile initialize/list/call
-smoke. The in-process tests cover the corresponding Room profile. Together
-they verify that stdout remains MCP-only and that the compact Normal/Room
-surfaces are callable. These checks are still distinct from a real Secure MCP
+smoke. It also launches the hidden worker with a stale initialized notification
+and a tool call as the first request, proving restart recovery keeps the worker
+alive, hides the private handshake, and accepts a follow-up call. The in-process
+tests cover the corresponding Room profile. Together they verify that stdout
+remains MCP-only and that the compact Normal/Room surfaces are callable. These
+checks are still distinct from a real Secure MCP
 Tunnel control-plane call: the latter must invoke an actual external connector
 and return a local Agentic tool result, not merely pass `/healthz`, `doctor`, or
 a local fake handoff. Record external credentials/environment prerequisites

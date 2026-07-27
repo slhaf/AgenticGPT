@@ -72,6 +72,7 @@ Expected contract:
 - `agent.info.mcp.concurrency` reports global limit 8, per-server limit 2, and bounded active/queued counts;
 - Local Unix MCP uses an owner-only `0700` runtime directory and `0600` socket;
 - Local Unix and tunnel stdio descriptor/schema revisions match for the same profile;
+- a fresh hidden stdio worker can receive a resumed `tools/call` before `initialize`, return the original request id, remain alive for a follow-up call, and log `mcp_stdio_session_resumed` without leaking request payloads;
 - `config.example.json` parses under the strict v0.9 config type and contains no usable credentials.
 
 A no-side-effect `mcp.batch` dispatch smoke can use duplicate call ids. It must fail before confirmation or downstream connection and write one aggregate `validation_rejected` audit with no child `mcp.callTool` records:

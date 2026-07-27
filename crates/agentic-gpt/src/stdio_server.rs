@@ -1,4 +1,7 @@
-use std::sync::{Arc, Mutex};
+use std::{
+    future::Future,
+    sync::{Arc, Mutex},
+};
 
 use agentic_gpt_protocol::{
     BatchExecRequest, ExecElement, ExecRequest, HubCommand, JobInfo, JobKind, JobListRequest,
@@ -8,11 +11,13 @@ use anyhow::Result;
 use chrono::Utc;
 use rmcp::{
     model::{
-        CallToolRequestParams, CallToolResult, ErrorData, ListToolsResult, Meta,
-        PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool, ToolAnnotations,
+        CallToolRequestParams, CallToolResult, ClientCapabilities, ClientJsonRpcMessage,
+        ClientRequest, ErrorData, Implementation, InitializeRequest, InitializeRequestParams,
+        ListToolsResult, Meta, PaginatedRequestParams, ProtocolVersion, RequestId,
+        ServerCapabilities, ServerInfo, ServerJsonRpcMessage, Tool, ToolAnnotations,
     },
     service::{RequestContext, RoleServer},
-    transport::stdio,
+    transport::{async_rw::AsyncRwTransport, stdio, Transport},
     ServerHandler, ServiceExt,
 };
 use serde::de::DeserializeOwned;
@@ -96,9 +101,175 @@ impl RequestIngress {
 
 pub(crate) async fn serve_stdio(state: AppState) -> Result<()> {
     let server = AgentMcpServer::new(state);
-    let running = server.serve(stdio()).await?;
+    let (stdin, stdout) = stdio();
+    let transport = AsyncRwTransport::<RoleServer, _, _>::new_server(stdin, stdout);
+    let running = server
+        .serve(ResumableStdioTransport::new(transport))
+        .await?;
     let _ = running.waiting().await?;
     Ok(())
+}
+
+const INTERNAL_STDIO_CLIENT_NAME: &str = "agentic-gpt-stdio-resume";
+
+#[derive(Debug)]
+enum StdioInitializationState {
+    AwaitingClientInitialize,
+    SyntheticInitializePending { id: RequestId },
+    Initialized,
+}
+
+/// Restores rmcp's private server state when the tunnel control plane resumes
+/// an initialized logical connection against a freshly restarted stdio worker.
+/// The synthetic handshake stays inside this transport so its private request
+/// id can never leak into the tunnel request/response stream.
+struct ResumableStdioTransport<T> {
+    inner: T,
+    state: StdioInitializationState,
+    pending: Option<ClientJsonRpcMessage>,
+}
+
+impl<T> ResumableStdioTransport<T> {
+    fn new(inner: T) -> Self {
+        Self {
+            inner,
+            state: StdioInitializationState::AwaitingClientInitialize,
+            pending: None,
+        }
+    }
+
+    fn synthetic_initialize(id: RequestId) -> ClientJsonRpcMessage {
+        let params = InitializeRequestParams::new(
+            ClientCapabilities::default(),
+            Implementation::new(INTERNAL_STDIO_CLIENT_NAME, env!("CARGO_PKG_VERSION")),
+        )
+        .with_protocol_version(ProtocolVersion::V_2025_06_18);
+        ClientJsonRpcMessage::request(
+            ClientRequest::InitializeRequest(InitializeRequest::new(params)),
+            id,
+        )
+    }
+}
+
+impl<T> Transport<RoleServer> for ResumableStdioTransport<T>
+where
+    T: Transport<RoleServer> + 'static,
+{
+    type Error = T::Error;
+
+    fn send(
+        &mut self,
+        item: ServerJsonRpcMessage,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        let synthetic_result = match (&self.state, &item) {
+            (
+                StdioInitializationState::SyntheticInitializePending { id },
+                ServerJsonRpcMessage::Response(response),
+            ) if &response.id == id => Some(true),
+            (
+                StdioInitializationState::SyntheticInitializePending { id },
+                ServerJsonRpcMessage::Error(error),
+            ) if error.id.as_ref() == Some(id) => Some(false),
+            _ => None,
+        };
+
+        if let Some(success) = synthetic_result {
+            if success {
+                self.state = StdioInitializationState::Initialized;
+                crate::utils::log_info(
+                    "mcp_stdio_session_resumed; ingress=tunnel:stdio; workerContinues=true"
+                        .to_string(),
+                );
+            } else {
+                crate::utils::log_warn(
+                    "mcp_stdio_session_resume_failed; ingress=tunnel:stdio".to_string(),
+                );
+            }
+        }
+
+        let delegated = if synthetic_result.is_some() {
+            None
+        } else {
+            Some(self.inner.send(item))
+        };
+        async move {
+            match delegated {
+                Some(send) => send.await,
+                None => Ok(()),
+            }
+        }
+    }
+
+    async fn receive(&mut self) -> Option<ClientJsonRpcMessage> {
+        if matches!(self.state, StdioInitializationState::Initialized) {
+            if let Some(pending) = self.pending.take() {
+                return Some(pending);
+            }
+            return self.inner.receive().await;
+        }
+
+        if matches!(
+            self.state,
+            StdioInitializationState::SyntheticInitializePending { .. }
+        ) {
+            crate::utils::log_warn(
+                "mcp_stdio_session_resume_invariant_failed; ingress=tunnel:stdio".to_string(),
+            );
+            return None;
+        }
+
+        loop {
+            let message = self.inner.receive().await?;
+            match message {
+                ClientJsonRpcMessage::Request(request)
+                    if matches!(&request.request, ClientRequest::InitializeRequest(_)) =>
+                {
+                    self.state = StdioInitializationState::Initialized;
+                    return Some(ClientJsonRpcMessage::Request(request));
+                }
+                ClientJsonRpcMessage::Request(request)
+                    if matches!(&request.request, ClientRequest::PingRequest(_)) =>
+                {
+                    return Some(ClientJsonRpcMessage::Request(request));
+                }
+                ClientJsonRpcMessage::Request(request) => {
+                    let trigger_method = request.request.method().to_string();
+                    let id = RequestId::String(
+                        format!("agentic-gpt-internal-init-{}", Uuid::new_v4()).into(),
+                    );
+                    self.pending = Some(ClientJsonRpcMessage::Request(request));
+                    self.state =
+                        StdioInitializationState::SyntheticInitializePending { id: id.clone() };
+                    crate::utils::log_warn(format!(
+                        "mcp_stdio_session_resume; ingress=tunnel:stdio; triggerMethod={trigger_method}; action=synthetic_initialize"
+                    ));
+                    return Some(Self::synthetic_initialize(id));
+                }
+                ClientJsonRpcMessage::Notification(_) => {
+                    crate::utils::log_warn(
+                        "mcp_message_before_initialize; ingress=tunnel:stdio; messageKind=notification; action=ignored"
+                            .to_string(),
+                    );
+                }
+                ClientJsonRpcMessage::Response(_) => {
+                    crate::utils::log_warn(
+                        "mcp_message_before_initialize; ingress=tunnel:stdio; messageKind=response; action=ignored"
+                            .to_string(),
+                    );
+                }
+                ClientJsonRpcMessage::Error(_) => {
+                    crate::utils::log_warn(
+                        "mcp_message_before_initialize; ingress=tunnel:stdio; messageKind=error; action=ignored"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+    }
+
+    fn close(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send {
+        self.inner.close()
+    }
 }
 
 #[derive(Clone)]
@@ -2546,7 +2717,7 @@ mod tests {
 
     use agentic_gpt_protocol::{AgentMessage, SkillActivationRequest};
     use rmcp::{model::CallToolRequestParams, ServiceExt};
-    use tokio::io::split;
+    use tokio::io::{split, AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::sync::{mpsc, Mutex, RwLock};
 
     use super::*;
@@ -2876,7 +3047,11 @@ mod tests {
         let (server_read, server_write) = split(server_io);
         let server = AgentMcpServer::new(state);
         let server_task = tokio::spawn(async move {
-            let running = server.serve((server_read, server_write)).await?;
+            let transport =
+                AsyncRwTransport::<RoleServer, _, _>::new_server(server_read, server_write);
+            let running = server
+                .serve(ResumableStdioTransport::new(transport))
+                .await?;
             let _ = running.waiting().await?;
             anyhow::Result::<()>::Ok(())
         });
@@ -2959,13 +3134,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stdio_resumes_stale_logical_session_before_first_tool_call() -> anyhow::Result<()> {
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let (client_read, mut client_write) = split(client_io);
+        let (server_read, server_write) = split(server_io);
+        let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
+        let server_task = tokio::spawn(async move {
+            let transport =
+                AsyncRwTransport::<RoleServer, _, _>::new_server(server_read, server_write);
+            let running = server
+                .serve(ResumableStdioTransport::new(transport))
+                .await?;
+            let _ = running.waiting().await?;
+            anyhow::Result::<()>::Ok(())
+        });
+        let mut client_read = BufReader::new(client_read);
+
+        client_write
+            .write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n")
+            .await?;
+        client_write
+            .write_all(
+                b"{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"tools/call\",\"params\":{\"name\":\"agent.info\",\"arguments\":{}}}\n",
+            )
+            .await?;
+        client_write.flush().await?;
+
+        let mut line = String::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            client_read.read_line(&mut line),
+        )
+        .await??;
+        let response: Value = serde_json::from_str(&line)?;
+        assert_eq!(response["id"], 0);
+        assert!(response.get("error").is_none());
+        assert_eq!(
+            response["result"]["structuredContent"]["identity"]["profile"],
+            "normal"
+        );
+        assert!(
+            !line.contains("agentic-gpt-internal-init-"),
+            "private initialize response leaked into the tunnel stream"
+        );
+
+        client_write
+            .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{}}\n")
+            .await?;
+        client_write.flush().await?;
+        line.clear();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            client_read.read_line(&mut line),
+        )
+        .await??;
+        let follow_up: Value = serde_json::from_str(&line)?;
+        assert_eq!(follow_up["id"], 1);
+        assert_eq!(
+            follow_up["result"]["tools"].as_array().map(Vec::len),
+            Some(24)
+        );
+
+        drop(client_write);
+        drop(client_read);
+        server_task.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn in_process_stdio_initialize_list_and_call() -> anyhow::Result<()> {
         let (client_io, server_io) = tokio::io::duplex(64 * 1024);
         let (client_read, client_write) = split(client_io);
         let (server_read, server_write) = split(server_io);
         let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
         let server_task = tokio::spawn(async move {
-            let running = server.serve((server_read, server_write)).await?;
+            let transport =
+                AsyncRwTransport::<RoleServer, _, _>::new_server(server_read, server_write);
+            let running = server
+                .serve(ResumableStdioTransport::new(transport))
+                .await?;
             let _ = running.waiting().await?;
             anyhow::Result::<()>::Ok(())
         });
@@ -3001,7 +3248,11 @@ mod tests {
         let (server_read, server_write) = split(server_io);
         let server = AgentMcpServer::new(test_state(CapabilityProfile::Room));
         let server_task = tokio::spawn(async move {
-            let running = server.serve((server_read, server_write)).await?;
+            let transport =
+                AsyncRwTransport::<RoleServer, _, _>::new_server(server_read, server_write);
+            let running = server
+                .serve(ResumableStdioTransport::new(transport))
+                .await?;
             let _ = running.waiting().await?;
             anyhow::Result::<()>::Ok(())
         });

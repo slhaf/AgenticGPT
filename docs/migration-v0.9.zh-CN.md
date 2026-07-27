@@ -88,4 +88,5 @@ agentic-gpt local call agent.info \
 - `job.get/list/cancel` 与 `mcp.batch` 存在；
 - managed `session.*`、`process.get/list/kill`、`process.batchExec` 不存在；
 - `agent.info.execution.jobs` 与 `agent.info.mcp.concurrency` 存在；
-- local/tunnel descriptor revision 一致。
+- local/tunnel descriptor revision 一致；
+- standalone 重启后，即使控制面先续发 `tools/call`、尚未发送新的 `initialize`，hidden worker 也不会因 `expect initialized request` 退出，并能继续处理后续请求。

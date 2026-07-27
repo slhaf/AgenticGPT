@@ -14,6 +14,15 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 #[test]
+fn hidden_worker_recovers_stale_tunnel_session_before_first_call() {
+    let root = std::env::temp_dir().join(format!("agentic-stdio-resume-e2e-{}", Uuid::new_v4()));
+    fs::create_dir_all(&root).unwrap();
+    let result = run_stdio_resume(&root);
+    let _ = fs::remove_dir_all(&root);
+    result.unwrap();
+}
+
+#[test]
 fn hidden_worker_reloads_policy_path_limit_and_mcp_without_restart() {
     let root = std::env::temp_dir().join(format!("agentic-live-reload-e2e-{}", Uuid::new_v4()));
     fs::create_dir_all(&root).unwrap();
@@ -235,6 +244,139 @@ fn run_smoke(
         );
         assert!(!supervisor_stderr.contains("standalone live config reload rejected;"));
     }
+    Ok(())
+}
+
+fn run_stdio_resume(root: &Path) -> Result<(), String> {
+    let binary = std::env::var("CARGO_BIN_EXE_agentic-gpt")
+        .or_else(|_| std::env::var("CARGO_BIN_EXE_agentic_gpt"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/agentic-gpt")
+        });
+    if !binary.exists() {
+        return Err(format!("agentic binary not found: {}", binary.display()));
+    }
+
+    let config_path = root.join("config.json");
+    let workspace = root.join("workspace");
+    let init = Command::new(&binary)
+        .args(["config", "--config", config_path.to_str().unwrap(), "init"])
+        .output()
+        .map_err(|error| format!("config init failed to spawn: {error}"))?;
+    if !init.status.success() {
+        return Err(format!(
+            "config init failed: {}",
+            String::from_utf8_lossy(&init.stderr)
+        ));
+    }
+
+    fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+    let mut config: Value =
+        serde_json::from_str(&fs::read_to_string(&config_path).map_err(|error| error.to_string())?)
+            .map_err(|error| error.to_string())?;
+    config["agentId"] = Value::String(format!("stdio-resume-e2e-{}", Uuid::new_v4().simple()));
+    config["workspaceRoot"] = Value::String(workspace.to_string_lossy().into_owned());
+    config["pathPolicy"]["writeRoots"] = json!([workspace.to_string_lossy()]);
+    config["tunnel"] = json!({
+        "tunnelId": "tunnel_stdio_resume_test",
+        "apiKey": "env:AGENTIC_TEST_TUNNEL_KEY",
+        "hubReporting": { "enabled": false, "detail": "metadata" }
+    });
+    fs::write(
+        &config_path,
+        serde_json::to_vec_pretty(&config).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+
+    let token = "stdio-resume-token";
+    let mut worker = Command::new(&binary)
+        .args([
+            "stdio-worker",
+            "--config",
+            config_path.to_str().unwrap(),
+            "--profile",
+            "normal",
+            "--supervisor-token",
+            token,
+        ])
+        .env("AGENTIC_GPT_SUPERVISOR_TOKEN", token)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("worker failed to spawn: {error}"))?;
+    let mut stdin = worker.stdin.take().ok_or("worker stdin unavailable")?;
+    let stdout = worker.stdout.take().ok_or("worker stdout unavailable")?;
+    let mut stdout = BufReader::new(stdout);
+    let mut stderr = worker.stderr.take().ok_or("worker stderr unavailable")?;
+
+    send_line(
+        &mut stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {}
+        }),
+    )?;
+    send_line(
+        &mut stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "tools/call",
+            "params": { "name": "agent.info", "arguments": {} }
+        }),
+    )?;
+
+    let mut first_line = String::new();
+    stdout
+        .read_line(&mut first_line)
+        .map_err(|error| error.to_string())?;
+    if first_line.is_empty() {
+        let status = worker.try_wait().map_err(|error| error.to_string())?;
+        stop_child_gracefully(&mut worker, Duration::from_secs(2));
+        let mut logs = String::new();
+        stderr
+            .read_to_string(&mut logs)
+            .map_err(|error| error.to_string())?;
+        return Err(format!(
+            "worker closed stdout before resumed call response; status={status:?}; stderr={logs}"
+        ));
+    }
+    let first: Value =
+        serde_json::from_str(first_line.trim()).map_err(|error| error.to_string())?;
+    assert_eq!(first["id"], 0);
+    assert_eq!(
+        first["result"]["structuredContent"]["identity"]["profile"],
+        "normal"
+    );
+    assert!(!first_line.contains("agentic-gpt-internal-init-"));
+
+    send_line(
+        &mut stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list",
+            "params": {}
+        }),
+    )?;
+    let follow_up = response_for(&mut stdout, 1)?;
+    assert_eq!(
+        follow_up["result"]["tools"].as_array().map(Vec::len),
+        Some(24)
+    );
+
+    drop(stdin);
+    stop_child_gracefully(&mut worker, Duration::from_secs(5));
+    let mut logs = String::new();
+    stderr
+        .read_to_string(&mut logs)
+        .map_err(|error| error.to_string())?;
+    assert!(logs.contains("mcp_stdio_session_resume;"));
+    assert!(logs.contains("mcp_stdio_session_resumed;"));
+    assert!(!logs.contains("expect initialized request"));
     Ok(())
 }
 

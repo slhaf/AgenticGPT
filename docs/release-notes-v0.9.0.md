@@ -12,6 +12,7 @@ v0.9.0 unifies managed execution around kind-aware Jobs and adds a local integra
 - `mcp.batch` with 1–16 atomic child Jobs, one aggregate confirmation, parallel/sequential modes, safe fail-fast, global 8 / per-server 2 concurrency, ordered results, and 2 MiB aggregate budgets.
 - Boot-generation-aware Hub cache reconciliation; active Jobs become `unknown_after_restart` without replaying side effects.
 - Normal/Room standalone surfaces are fixed at 24/36 tools.
+- Tunnel stdio workers recover when a restarted child receives a resumed tool request before a fresh MCP `initialize`; the private recovery handshake is never exposed to the tunnel stream.
 - Actions OpenAPI, Apps MCP, HTTP, reliable protocol, local/tunnel descriptors, documentation, and tests share the same contract.
 
 ## Breaking changes
@@ -25,4 +26,4 @@ v0.9.0 unifies managed execution around kind-aware Jobs and adds a local integra
 
 ## Verification baseline
 
-The implementation was accepted with workspace formatting/check/tests, strict OpenAPI parsing/reference validation, clippy with warnings denied, real local Unix MCP E2E, hidden standalone worker E2E, Hub Full/Coordinator MCP tests, deterministic rmcp downstream tests, and live connector availability checks. No tag, push, deployment, or GitHub Release is created by the implementation commits themselves.
+The implementation was accepted with workspace formatting/check/tests, strict OpenAPI parsing/reference validation, clippy with warnings denied, real local Unix MCP E2E, hidden standalone worker E2E including stale logical-session recovery before the first tool call, Hub Full/Coordinator MCP tests, deterministic rmcp downstream tests, and live connector availability checks. No tag, push, deployment, or GitHub Release is created by the implementation commits themselves.
