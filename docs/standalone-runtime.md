@@ -87,8 +87,10 @@ also bounding scanned files and bytes.
 `file.edit` is the guarded single-file mutation tool. Its `replace`, `patch`,
 and `write` modes operate on UTF-8 text only. Existing files require an exact
 `expectedRevision` (`sha256:<hex>`); new files require `expectedAbsent: true`.
-Replace counts exact matches, patch accepts one exact single-file unified diff,
-and write creates or overwrites complete content. Candidates are capped at
+Replace counts exact matches; patch accepts one standard single-file unified
+diff with hunk headers such as `@@ -1,2 +1,2 @@` (an omitted count means 1,
+while bare `@@` is invalid); and write creates or overwrites complete content.
+Candidates are capped at
 8 MiB, dry runs and no-ops do not write or request confirmation, and successful
 mutations use a synced same-directory temporary file with atomic replacement
 (or atomic no-replace creation) while preserving ordinary overwrite

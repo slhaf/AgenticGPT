@@ -25,6 +25,7 @@ use crate::{
 };
 
 const INSTRUCTIONS: &str = "Agentic GPT local Tunnel worker. Start with agent.info to inspect the active profile, exact workspace/path policy, capacity, confirmation channels, and connection state. Use file.read/search/edit/batch for bounded UTF-8 workspace work, process.* for managed local processes, tmux for persistent workspaces, skills for the local skills workspace, and bootstrap for Room startup guidance. All calls remain subject to path policy, configured confirmation, audit, and bounded waits.";
+const PATCH_SCHEMA_DESCRIPTION: &str = "Standard single-file unified diff with hunk headers like @@ -1,2 +1,2 @@. Omitted counts mean 1; bare @@ is invalid.";
 
 const NORMAL_TOOLS: &[&str] = &[
     "agent.info",
@@ -2209,7 +2210,7 @@ fn properties_for(name: &str) -> Map<String, Value> {
                 "expectedMatches",
                 number("Expected exact replacement count, default 1."),
             );
-            add("patch", string("Exact single-file unified diff."));
+            add("patch", string(PATCH_SCHEMA_DESCRIPTION));
             add(
                 "content",
                 string("Complete UTF-8 file content for write mode."),
@@ -2255,7 +2256,7 @@ fn properties_for(name: &str) -> Map<String, Value> {
                     "expectedRevision":string("Required revision for existing files."), "expectedAbsent":boolean("Require a new target; write mode only."),
                     "oldText":string("Exact non-empty text to replace."), "newText":string("Replacement text."),
                     "expectedMatches":{"type":"integer","description":"Expected exact replacement count, default 1.","default":1},
-                    "patch":string("Exact single-file unified diff."),
+                    "patch":string(PATCH_SCHEMA_DESCRIPTION),
                     "content":string("Complete UTF-8 content for write mode.")
                 }, "required":["type","mode","path"]
             });
@@ -2763,6 +2764,30 @@ mod tests {
                 "{label} input schemas use {input_bytes} bytes, budget is {max_inputs}"
             );
         }
+    }
+
+    #[test]
+    fn file_patch_schema_documents_standard_hunk_contract() {
+        let file_edit = tool_descriptor("file.edit");
+        let description = file_edit.input_schema["properties"]["patch"]["description"]
+            .as_str()
+            .expect("file.edit patch description");
+        assert!(description.contains("@@ -1,2 +1,2 @@"));
+        assert!(description.contains("Omitted counts mean 1"));
+        assert!(description.contains("bare @@ is invalid"));
+
+        let file_batch = tool_descriptor("file.batch");
+        let variants = file_batch.input_schema["properties"]["operations"]["items"]["oneOf"]
+            .as_array()
+            .expect("file.batch operation variants");
+        let edit = variants
+            .iter()
+            .find(|variant| variant["properties"]["type"]["const"] == "edit")
+            .expect("file.batch edit schema");
+        assert_eq!(
+            edit["properties"]["patch"]["description"],
+            PATCH_SCHEMA_DESCRIPTION
+        );
     }
 
     #[test]
@@ -3678,6 +3703,9 @@ mod tests {
             .await?;
         assert_eq!(replaced["status"], "updated");
         assert_eq!(replaced["replacementCount"], 2);
+        assert_eq!(replaced["changedLines"], json!({"added": 2, "removed": 2}));
+        assert!(replaced["diff"].as_str().unwrap().contains("-old"));
+        assert!(replaced["diff"].as_str().unwrap().contains("+secret-new"));
         assert_eq!(std::fs::read_to_string(&path)?, "secret-new\nsecret-new\n");
         let dry_revision = crate::file_ops::revision(&std::fs::read(&path)?);
         let dry_run = server
@@ -3687,6 +3715,8 @@ mod tests {
             )
             .await?;
         assert_eq!(dry_run["status"], "dry-run");
+        assert_eq!(dry_run["changedLines"], json!({"added": 2, "removed": 2}));
+        assert!(dry_run["diff"].as_str().unwrap().contains("+preview"));
         assert!(dry_run.get("auditStatus").is_none());
         assert_eq!(std::fs::read_to_string(&path)?, "secret-new\nsecret-new\n");
         let no_op = server
@@ -3696,6 +3726,8 @@ mod tests {
             )
             .await?;
         assert_eq!(no_op["status"], "unchanged");
+        assert_eq!(no_op["changedLines"], json!({"added": 0, "removed": 0}));
+        assert_eq!(no_op["diff"], "");
         assert!(no_op.get("confirmation").is_none());
         assert_eq!(
             server
@@ -3714,6 +3746,8 @@ mod tests {
             )
             .await?;
         assert_eq!(new_file["status"], "created");
+        assert_eq!(new_file["changedLines"], json!({"added": 1, "removed": 0}));
+        assert!(new_file["diff"].as_str().unwrap().contains("+created"));
         let new_revision = new_file["afterRevision"].as_str().unwrap().to_string();
         let overwritten = server
             .dispatch(
@@ -3722,6 +3756,10 @@ mod tests {
             )
             .await?;
         assert_eq!(overwritten["status"], "updated");
+        assert_eq!(
+            overwritten["changedLines"],
+            json!({"added": 1, "removed": 1})
+        );
 
         let patch_path = workspace.join("patch.txt");
         std::fs::write(&patch_path, "a\nb\nc\n")?;
@@ -3736,6 +3774,9 @@ mod tests {
             )
             .await?;
         assert_eq!(patched["status"], "updated");
+        assert_eq!(patched["changedLines"], json!({"added": 1, "removed": 1}));
+        assert!(patched["diff"].as_str().unwrap().contains("-b"));
+        assert!(patched["diff"].as_str().unwrap().contains("+B"));
         assert_eq!(std::fs::read_to_string(&patch_path)?, "a\nB\nc\n");
         Ok(())
     }
@@ -3828,6 +3869,14 @@ mod tests {
         );
         assert_eq!(result["results"][2]["id"], "mutate");
         assert_eq!(result["results"][2]["result"]["status"], "updated");
+        assert_eq!(
+            result["results"][2]["result"]["changedLines"],
+            json!({"added": 1, "removed": 1})
+        );
+        assert!(result["results"][2]["result"]["diff"]
+            .as_str()
+            .unwrap()
+            .contains("+secret-after"));
         assert_eq!(result["auditStatus"], "written");
         let audit = std::fs::read_to_string(workspace.join(".agentic-gpt-audit.jsonl"))?;
         assert!(audit.contains("file.batch"));
@@ -3884,6 +3933,10 @@ mod tests {
             )
             .await?;
         assert_eq!(dry["status"], "dry-run");
+        assert_eq!(
+            dry["results"][0]["result"]["changedLines"],
+            json!({"added": 1, "removed": 1})
+        );
         assert_eq!(dry["confirmation"]["requested"], false);
         assert_eq!(std::fs::read_to_string(&path)?, "before\n");
         {

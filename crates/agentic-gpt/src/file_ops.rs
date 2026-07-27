@@ -11,6 +11,7 @@ use ignore::WalkBuilder;
 use regex::Regex;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use similar::{ChangeTag, TextDiff};
 use tokio::sync::OwnedMutexGuard;
 
 use crate::audit::{
@@ -2220,57 +2221,40 @@ fn sync_parent(target: &Path) {
     }
 }
 
+const MAX_DIFF_BYTES: usize = 64 * 1024;
+const DIFF_CONTEXT_LINES: usize = 3;
+const NO_NEWLINE_MARKER: &str = "\\ No newline at end of file";
+
 fn bounded_diff(before: &str, after: &str) -> (String, bool, Value) {
-    let before_lines = logical_lines(before);
-    let after_lines = logical_lines(after);
-    let mut prefix = 0;
-    while prefix < before_lines.len()
-        && prefix < after_lines.len()
-        && before_lines[prefix] == after_lines[prefix]
-    {
-        prefix += 1;
+    let text_diff = TextDiff::from_lines(before, after);
+    let mut added = 0usize;
+    let mut removed = 0usize;
+    for change in text_diff.iter_all_changes() {
+        match change.tag() {
+            ChangeTag::Insert => added += 1,
+            ChangeTag::Delete => removed += 1,
+            ChangeTag::Equal => {}
+        }
     }
-    let mut suffix = 0;
-    while suffix < before_lines.len().saturating_sub(prefix)
-        && suffix < after_lines.len().saturating_sub(prefix)
-        && before_lines[before_lines.len() - 1 - suffix]
-            == after_lines[after_lines.len() - 1 - suffix]
-    {
-        suffix += 1;
-    }
-    let removed = before_lines.len().saturating_sub(prefix + suffix);
-    let added = after_lines.len().saturating_sub(prefix + suffix);
-    let mut diff = format!(
-        "--- before\n+++ after\n@@ -{},{} +{},{} @@\n",
-        prefix + 1,
-        removed,
-        prefix + 1,
-        added
-    );
-    for line in before_lines.iter().skip(prefix).take(removed) {
-        diff.push('-');
-        diff.push_str(line);
-        diff.push('\n');
-    }
-    for line in after_lines.iter().skip(prefix).take(added) {
-        diff.push('+');
-        diff.push_str(line);
-        diff.push('\n');
-    }
-    let truncated = diff.len() > 64 * 1024;
+
+    let mut diff = text_diff
+        .unified_diff()
+        .context_radius(DIFF_CONTEXT_LINES)
+        .header("before", "after")
+        .to_string();
+    let truncated = diff.len() > MAX_DIFF_BYTES;
     if truncated {
-        diff = utf8_prefix(&diff, 64 * 1024).to_string();
+        diff = utf8_prefix(&diff, MAX_DIFF_BYTES).to_string();
     }
     (diff, truncated, json!({"added": added, "removed": removed}))
 }
 
 fn logical_lines(text: &str) -> Vec<String> {
-    let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
-    text.split(newline)
-        .map(str::to_string)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .take_while(|line| !(line.is_empty() && text.ends_with(newline)))
+    text.split_inclusive('\n')
+        .map(|line| {
+            let line = line.strip_suffix('\n').unwrap_or(line);
+            line.strip_suffix('\r').unwrap_or(line).to_string()
+        })
         .collect()
 }
 
@@ -2311,6 +2295,9 @@ fn apply_unified_patch(
     };
     let mut lines = logical_lines(original);
     let mut offset = 0isize;
+    let mut old_missing_newline = false;
+    let mut new_missing_newline = false;
+    let mut last_new_range_end = None;
     while index < patch_lines.len() {
         let header = patch_lines[index];
         if !header.starts_with("@@ ") {
@@ -2319,14 +2306,22 @@ fn apply_unified_patch(
                 "expected a unified hunk",
             ));
         }
-        let (old_start, old_len, new_len) = parse_hunk_header(header)?;
+        let (old_start, old_len, new_start, new_len) = parse_hunk_header(header)?;
         index += 1;
-        let start = old_start
-            .checked_sub(1)
-            .and_then(|base| (base as isize).checked_add(offset))
+        let old_index = range_index(old_start, old_len)?;
+        let new_index = range_index(new_start, new_len)?;
+        let start = (old_index as isize)
+            .checked_add(offset)
             .filter(|start| *start >= 0)
             .map(|start| start as usize)
             .ok_or_else(|| FileError::new("file_patch_conflict", "hunk location does not match"))?;
+        if new_index != start {
+            return Err(FileError::new(
+                "file_patch_invalid",
+                "old and new hunk ranges are inconsistent",
+            ));
+        }
+        last_new_range_end = Some(new_index.saturating_add(new_len));
         if start > lines.len() {
             return Err(FileError::new(
                 "file_patch_conflict",
@@ -2337,6 +2332,7 @@ fn apply_unified_patch(
         let mut consumed_old = 0usize;
         let mut replacement = Vec::new();
         let mut consumed_new = 0usize;
+        let mut previous_kind = None;
         while index < patch_lines.len() && !patch_lines[index].starts_with("@@ ") {
             let line = patch_lines[index];
             index += 1;
@@ -2346,9 +2342,33 @@ fn apply_unified_patch(
                     "multiple file headers are not supported",
                 ));
             }
-            let (kind, content) = line.split_at(1);
+            if line == NO_NEWLINE_MARKER {
+                match previous_kind {
+                    Some('-') => old_missing_newline = true,
+                    Some('+') => new_missing_newline = true,
+                    Some(' ') => {
+                        old_missing_newline = true;
+                        new_missing_newline = true;
+                    }
+                    _ => {
+                        return Err(FileError::new(
+                            "file_patch_invalid",
+                            "newline marker must follow a hunk line",
+                        ))
+                    }
+                }
+                previous_kind = None;
+                continue;
+            }
+            let (kind, content) = match line.as_bytes().first() {
+                Some(b' ') => (' ', &line[1..]),
+                Some(b'-') => ('-', &line[1..]),
+                Some(b'+') => ('+', &line[1..]),
+                _ => return Err(FileError::new("file_patch_invalid", "invalid hunk line")),
+            };
+            previous_kind = Some(kind);
             match kind {
-                " " => {
+                ' ' => {
                     if lines.get(cursor).map(String::as_str) != Some(content) {
                         return Err(FileError::new(
                             "file_patch_conflict",
@@ -2360,7 +2380,7 @@ fn apply_unified_patch(
                     replacement.push(content.to_string());
                     consumed_new += 1;
                 }
-                "-" => {
+                '-' => {
                     if lines.get(cursor).map(String::as_str) != Some(content) {
                         return Err(FileError::new(
                             "file_patch_conflict",
@@ -2370,7 +2390,7 @@ fn apply_unified_patch(
                     cursor += 1;
                     consumed_old += 1;
                 }
-                "+" => {
+                '+' => {
                     replacement.push(content.to_string());
                     consumed_new += 1;
                 }
@@ -2387,12 +2407,15 @@ fn apply_unified_patch(
         lines.splice(start..replacement_end, replacement);
         offset += new_len as isize - old_len as isize;
     }
-    Ok(lines.join(newline)
-        + if original.ends_with(newline) {
-            newline
-        } else {
-            ""
-        })
+    let hunk_reaches_new_eof = last_new_range_end == Some(lines.len());
+    let has_final_newline = if lines.is_empty() || new_missing_newline {
+        false
+    } else if old_missing_newline || hunk_reaches_new_eof {
+        true
+    } else {
+        original.ends_with('\n')
+    };
+    Ok(lines.join(newline) + if has_final_newline { newline } else { "" })
 }
 
 fn normalize_patch_header(value: &str) -> String {
@@ -2417,7 +2440,7 @@ fn header_matches_target(header: &str, target: &Path) -> bool {
         || (!header.contains('/') && Some(header) == target_name)
 }
 
-fn parse_hunk_header(header: &str) -> std::result::Result<(usize, usize, usize), FileError> {
+fn parse_hunk_header(header: &str) -> std::result::Result<(usize, usize, usize, usize), FileError> {
     let body = header
         .strip_prefix("@@ ")
         .and_then(|body| body.split(" @@").next())
@@ -2431,9 +2454,15 @@ fn parse_hunk_header(header: &str) -> std::result::Result<(usize, usize, usize),
         .next()
         .and_then(|value| value.strip_prefix('+'))
         .ok_or_else(|| FileError::new("file_patch_invalid", "invalid new hunk range"))?;
+    if fields.next().is_some() {
+        return Err(FileError::new(
+            "file_patch_invalid",
+            "invalid hunk header fields",
+        ));
+    }
     let (old_start, old_len) = parse_range(old)?;
-    let (_, new_len) = parse_range(new)?;
-    Ok((old_start, old_len, new_len))
+    let (new_start, new_len) = parse_range(new)?;
+    Ok((old_start, old_len, new_start, new_len))
 }
 
 fn parse_range(value: &str) -> std::result::Result<(usize, usize), FileError> {
@@ -2442,17 +2471,26 @@ fn parse_range(value: &str) -> std::result::Result<(usize, usize), FileError> {
         .next()
         .and_then(|value| value.parse().ok())
         .ok_or_else(|| FileError::new("file_patch_invalid", "invalid hunk range"))?;
-    if start == 0 {
-        return Err(FileError::new(
-            "file_patch_invalid",
-            "hunk range starts at zero",
-        ));
+    let len = match values.next() {
+        Some(value) => value
+            .parse()
+            .map_err(|_| FileError::new("file_patch_invalid", "invalid hunk range"))?,
+        None => 1,
+    };
+    if values.next().is_some() || (start == 0 && len != 0) {
+        return Err(FileError::new("file_patch_invalid", "invalid hunk range"));
     }
-    let len = values
-        .next()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(1);
     Ok((start, len))
+}
+
+fn range_index(start: usize, len: usize) -> std::result::Result<usize, FileError> {
+    if len == 0 {
+        Ok(start)
+    } else {
+        start
+            .checked_sub(1)
+            .ok_or_else(|| FileError::new("file_patch_invalid", "invalid hunk range"))
+    }
 }
 
 #[cfg(test)]
@@ -2842,6 +2880,139 @@ mod tests {
         .unwrap_err();
         assert_eq!(invalid_glob.code, "file_invalid_glob");
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn bounded_diff_preserves_blank_lines_and_emits_disjoint_hunks() {
+        let before = "top\n\nold-a\nkeep-1\nkeep-2\nkeep-3\nkeep-4\nkeep-5\nkeep-6\nkeep-7\nkeep-8\nold-b\n\nbottom\n";
+        let after = "top\n\nnew-a\nkeep-1\nkeep-2\nkeep-3\nkeep-4\nkeep-5\nkeep-6\nkeep-7\nkeep-8\nnew-b\n\nbottom\n";
+        let (diff, truncated, changed) = bounded_diff(before, after);
+        assert!(!truncated);
+        assert_eq!(changed, json!({"added": 2, "removed": 2}));
+        assert!(diff.contains("-old-a"));
+        assert!(diff.contains("+new-a"));
+        assert!(diff.contains("-old-b"));
+        assert!(diff.contains("+new-b"));
+        assert_eq!(diff.matches("@@ -").count(), 2);
+    }
+
+    #[test]
+    fn bounded_diff_counts_create_delete_crlf_and_final_newline() {
+        let (created, truncated, changed) = bounded_diff("", "one\n\ntwo\n");
+        assert!(!truncated);
+        assert_eq!(changed, json!({"added": 3, "removed": 0}));
+        assert!(created.contains("+one"));
+        assert!(created.contains("+two"));
+
+        let (deleted, truncated, changed) = bounded_diff("one\n\ntwo\n", "");
+        assert!(!truncated);
+        assert_eq!(changed, json!({"added": 0, "removed": 3}));
+        assert!(deleted.contains("-one"));
+        assert!(deleted.contains("-two"));
+
+        let (crlf, truncated, changed) =
+            bounded_diff("one\r\nold\r\nthree\r\n", "one\r\nnew\r\nthree\r\n");
+        assert!(!truncated);
+        assert_eq!(changed, json!({"added": 1, "removed": 1}));
+        assert!(crlf.contains("-old\r\n"));
+        assert!(crlf.contains("+new\r\n"));
+
+        let (newline, truncated, changed) = bounded_diff("one", "one\n");
+        assert!(!truncated);
+        assert_eq!(changed, json!({"added": 1, "removed": 1}));
+        assert!(newline.contains(NO_NEWLINE_MARKER));
+        assert!(!newline.is_empty());
+
+        let (unchanged, truncated, changed) = bounded_diff("same\n", "same\n");
+        assert!(!truncated);
+        assert_eq!(changed, json!({"added": 0, "removed": 0}));
+        assert!(unchanged.is_empty());
+    }
+
+    #[test]
+    fn bounded_diff_truncates_utf8_after_computing_complete_counts() {
+        let before = (0..4_000)
+            .map(|index| format!("旧内容-{index:04}-abcdefghijk\n"))
+            .collect::<String>();
+        let after = (0..4_000)
+            .map(|index| format!("新内容-{index:04}-ABCDEFGHIJK\n"))
+            .collect::<String>();
+        let (diff, truncated, changed) = bounded_diff(&before, &after);
+        assert!(truncated);
+        assert!(diff.len() <= MAX_DIFF_BYTES);
+        assert!(diff.is_char_boundary(diff.len()));
+        assert_eq!(changed, json!({"added": 4_000, "removed": 4_000}));
+    }
+
+    #[test]
+    fn generated_diff_hunks_round_trip_through_patch_parser() {
+        let target = Path::new("/workspace/example.txt");
+        let before = "first\nkeep-1\nkeep-2\nkeep-3\nkeep-4\nkeep-5\nkeep-6\nkeep-7\nlast";
+        let after = "FIRST\nkeep-1\nkeep-2\nkeep-3\nkeep-4\nkeep-5\nkeep-6\nkeep-7\nLAST\n";
+        let (diff, truncated, changed) = bounded_diff(before, after);
+        assert!(!truncated);
+        assert_eq!(changed, json!({"added": 2, "removed": 2}));
+        assert_eq!(diff.matches("@@ -").count(), 2);
+        let hunks = diff.lines().skip(2).collect::<Vec<_>>().join("\n") + "\n";
+        assert_eq!(apply_unified_patch(before, &hunks, target).unwrap(), after);
+    }
+
+    #[test]
+    fn unified_patch_accepts_standard_zero_ranges_and_newline_markers() {
+        let target = Path::new("/workspace/example.txt");
+        assert_eq!(
+            apply_unified_patch("", "@@ -0,0 +1,1 @@\n+first\n", target).unwrap(),
+            "first\n"
+        );
+        assert_eq!(
+            apply_unified_patch("only\n", "@@ -1,1 +0,0 @@\n-only\n", target).unwrap(),
+            ""
+        );
+        assert_eq!(
+            apply_unified_patch("one\n", "@@ -1 +1 @@\n-one\n+ONE\n", target).unwrap(),
+            "ONE\n"
+        );
+        assert_eq!(
+            apply_unified_patch(
+                "one",
+                "@@ -1 +1 @@\n-one\n\\ No newline at end of file\n+one\n",
+                target,
+            )
+            .unwrap(),
+            "one\n"
+        );
+        assert_eq!(
+            apply_unified_patch(
+                "one\n",
+                "@@ -1 +1 @@\n-one\n+one\n\\ No newline at end of file\n",
+                target,
+            )
+            .unwrap(),
+            "one"
+        );
+    }
+
+    #[test]
+    fn unified_patch_rejects_bare_and_malformed_hunk_ranges() {
+        let target = Path::new("/workspace/example.txt");
+        for patch in [
+            "@@\n-old\n+new\n",
+            "@@ -1,x +1,1 @@\n-old\n+new\n",
+            "@@ -1,1,1 +1,1 @@\n-old\n+new\n",
+            "@@ -0,1 +1,1 @@\n-old\n+new\n",
+            "@@ -1,1 +2,1 @@\n-old\n+new\n",
+            "@@ -1,1 +1,1 @@\n\\ No newline at end of file\n-old\n+new\n",
+            "@@ -1,1 +1,1 @@\n\n",
+            "@@ -1,1 +1,1 @@\n你不是合法的 hunk 行\n",
+        ] {
+            assert_eq!(
+                apply_unified_patch("old\n", patch, target)
+                    .unwrap_err()
+                    .code,
+                "file_patch_invalid",
+                "patch should be rejected: {patch:?}"
+            );
+        }
     }
 
     #[test]
