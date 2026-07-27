@@ -1,4 +1,4 @@
-use std::{env, path::PathBuf};
+use std::{collections::BTreeMap, env, path::PathBuf};
 
 use agentic_gpt_protocol::{McpCallToolRequest, McpListToolsRequest, McpServerSummary};
 use anyhow::{anyhow, Context, Result};
@@ -14,6 +14,7 @@ use rmcp::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use tokio::time::Instant;
 
 use crate::{
@@ -44,7 +45,7 @@ pub(crate) enum McpConfigCommand {
     },
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct McpServerConfig {
     pub(crate) enabled: bool,
@@ -93,7 +94,54 @@ pub(crate) fn mutate_servers(config_path: PathBuf, command: McpConfigCommand) ->
             server.enabled = false;
         }
     }
+    validate_server_configs(&config.mcp_servers)?;
     write_config_with_backup(&config_path, &config)
+}
+
+pub(crate) fn validate_server_configs(servers: &BTreeMap<String, McpServerConfig>) -> Result<()> {
+    for (server_id, server) in servers {
+        if server_id.is_empty()
+            || server_id.len() > 64
+            || server_id.trim() != server_id
+            || !server_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        {
+            return Err(anyhow!("mcp_server_id_invalid: {server_id}"));
+        }
+        let raw_endpoint = server.url.as_deref().unwrap_or_default();
+        let endpoint = raw_endpoint.trim();
+        match server.transport.as_str() {
+            "streamable-http" => {
+                if endpoint.is_empty() {
+                    return Err(anyhow!("mcp_server_url_missing: {server_id}"));
+                }
+                if endpoint != raw_endpoint {
+                    return Err(anyhow!("mcp_server_url_invalid: {server_id}"));
+                }
+                let url = reqwest::Url::parse(endpoint)
+                    .map_err(|_| anyhow!("mcp_server_url_invalid: {server_id}"))?;
+                if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+                    return Err(anyhow!("mcp_server_url_invalid: {server_id}"));
+                }
+            }
+            "stdio" => {
+                if endpoint.is_empty() {
+                    return Err(anyhow!("mcp_server_command_missing: {server_id}"));
+                }
+                if endpoint != raw_endpoint || endpoint.chars().any(|character| character == '\0') {
+                    return Err(anyhow!("mcp_server_command_invalid: {server_id}"));
+                }
+            }
+            other => return Err(anyhow!("unsupported_mcp_transport: {server_id}: {other}")),
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn server_config_revision(servers: &BTreeMap<String, McpServerConfig>) -> String {
+    let bytes = serde_json::to_vec(servers).unwrap_or_default();
+    format!("sha256:{:x}", Sha256::digest(bytes))
 }
 
 pub(crate) async fn list_servers(state: &AppState) -> Value {
@@ -338,5 +386,149 @@ fn tool_arguments(arguments: Value) -> Result<JsonObject> {
         Value::Null => Ok(JsonObject::new()),
         Value::Object(map) => Ok(map),
         other => Err(anyhow!("mcp_tool_arguments_must_be_object: {other}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn server(transport: &str, endpoint: Option<&str>) -> McpServerConfig {
+        McpServerConfig {
+            enabled: true,
+            transport: transport.to_string(),
+            url: endpoint.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn server_config_validation_is_complete_and_typed() {
+        let mut servers = BTreeMap::new();
+        servers.insert(
+            "http-main".to_string(),
+            server("streamable-http", Some("http://127.0.0.1:3000/mcp")),
+        );
+        servers.insert(
+            "stdio_main".to_string(),
+            server("stdio", Some("node ./server.mjs")),
+        );
+        assert!(validate_server_configs(&servers).is_ok());
+
+        for (id, config, code) in [
+            (
+                "bad id",
+                server("stdio", Some("echo ok")),
+                "mcp_server_id_invalid",
+            ),
+            (
+                "missing-http",
+                server("streamable-http", None),
+                "mcp_server_url_missing",
+            ),
+            (
+                "bad-http",
+                server("streamable-http", Some("file:///tmp/mcp.sock")),
+                "mcp_server_url_invalid",
+            ),
+            (
+                "spaced-http",
+                server("streamable-http", Some(" https://example.test/mcp")),
+                "mcp_server_url_invalid",
+            ),
+            (
+                "missing-command",
+                server("stdio", Some("  ")),
+                "mcp_server_command_missing",
+            ),
+            (
+                "bad-command",
+                server("stdio", Some("echo\0bad")),
+                "mcp_server_command_invalid",
+            ),
+            (
+                "spaced-command",
+                server("stdio", Some(" echo ok")),
+                "mcp_server_command_invalid",
+            ),
+            (
+                "unsupported",
+                server("sse", Some("https://example.test/mcp")),
+                "unsupported_mcp_transport",
+            ),
+        ] {
+            let mut candidate = BTreeMap::new();
+            candidate.insert(id.to_string(), config);
+            let error = validate_server_configs(&candidate).unwrap_err().to_string();
+            assert!(error.starts_with(code), "error={error}");
+        }
+    }
+
+    #[test]
+    fn config_cli_rejects_invalid_server_without_writing_and_accepts_valid_server() {
+        let root = std::env::temp_dir().join(format!(
+            "agentic-mcp-config-test-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("config.json");
+        let config = Config::default_config().unwrap();
+        std::fs::write(&path, serde_json::to_vec_pretty(&config).unwrap()).unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        let error = mutate_servers(
+            path.clone(),
+            McpConfigCommand::Add {
+                server_id: "invalid".to_string(),
+                url: "https://example.test/mcp".to_string(),
+                transport: "sse".to_string(),
+                enabled: true,
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.starts_with("unsupported_mcp_transport"));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+
+        mutate_servers(
+            path.clone(),
+            McpConfigCommand::Add {
+                server_id: "valid-http".to_string(),
+                url: "https://example.test/mcp".to_string(),
+                transport: "streamable-http".to_string(),
+                enabled: true,
+            },
+        )
+        .unwrap();
+        let written = Config::load(&path).unwrap();
+        assert_eq!(
+            written.mcp_servers["valid-http"].url.as_deref(),
+            Some("https://example.test/mcp")
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn server_config_revision_is_deterministic_and_content_sensitive() {
+        let mut first = BTreeMap::new();
+        first.insert(
+            "b".to_string(),
+            server("streamable-http", Some("https://b.example/mcp")),
+        );
+        first.insert("a".to_string(), server("stdio", Some("node a.mjs")));
+        let mut second = BTreeMap::new();
+        second.insert("a".to_string(), server("stdio", Some("node a.mjs")));
+        second.insert(
+            "b".to_string(),
+            server("streamable-http", Some("https://b.example/mcp")),
+        );
+        assert_eq!(
+            server_config_revision(&first),
+            server_config_revision(&second)
+        );
+        second.get_mut("b").unwrap().enabled = false;
+        assert_ne!(
+            server_config_revision(&first),
+            server_config_revision(&second)
+        );
     }
 }

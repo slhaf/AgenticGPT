@@ -641,7 +641,12 @@ impl Config {
         }
     }
 
+    pub(crate) fn validate_mcp_servers(&self) -> Result<()> {
+        crate::mcp::validate_server_configs(&self.mcp_servers)
+    }
+
     pub(crate) fn validate_standalone(&self) -> Result<()> {
+        self.validate_mcp_servers()?;
         let tunnel = self
             .tunnel
             .as_ref()
@@ -1080,6 +1085,26 @@ mod tests {
         let config = Config::load(&path).unwrap();
         assert_eq!(config.skills.max_files, 11);
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn mcp_server_semantics_are_validated_before_standalone_use() {
+        let mut config = Config::default_config().unwrap();
+        config.mcp_servers.insert(
+            "valid-http".to_string(),
+            McpServerConfig {
+                enabled: true,
+                transport: "streamable-http".to_string(),
+                url: Some("https://example.test/mcp".to_string()),
+            },
+        );
+        assert!(config.validate_mcp_servers().is_ok());
+        config.mcp_servers.get_mut("valid-http").unwrap().transport = "sse".to_string();
+        assert!(config
+            .validate_mcp_servers()
+            .unwrap_err()
+            .to_string()
+            .starts_with("unsupported_mcp_transport"));
     }
 
     #[test]

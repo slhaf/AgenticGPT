@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 #[test]
-fn hidden_worker_reloads_policy_and_limit_without_restart() {
+fn hidden_worker_reloads_policy_path_limit_and_mcp_without_restart() {
     let root = std::env::temp_dir().join(format!("agentic-live-reload-e2e-{}", Uuid::new_v4()));
     fs::create_dir_all(&root).unwrap();
     let result = run_live_reload(&root);
@@ -284,6 +284,13 @@ fn run_live_reload(root: &Path) -> Result<(), String> {
         { "program": "/usr/bin/printf", "argsPrefix": [] }
     ]);
     config["limits"]["maxActiveSessions"] = json!(1);
+    config["mcpServers"] = json!({
+        "primary": {
+            "enabled": true,
+            "transport": "streamable-http",
+            "url": "https://old.example/mcp"
+        }
+    });
     fs::write(
         &config_path,
         serde_json::to_vec_pretty(&config).map_err(|error| error.to_string())?,
@@ -335,6 +342,14 @@ fn run_live_reload(root: &Path) -> Result<(), String> {
         }),
     )?;
 
+    let baseline_mcp = call_tool(&mut stdin, &mut stdout, 20, "mcp.list", json!({}))?;
+    let baseline_servers = baseline_mcp["result"]["structuredContent"]["servers"]
+        .as_array()
+        .ok_or("baseline mcp servers missing")?;
+    assert_eq!(baseline_servers.len(), 1);
+    assert_eq!(baseline_servers[0]["id"], "primary");
+    assert_eq!(baseline_servers[0]["url"], "https://old.example/mcp");
+
     let denied = call_tool(
         &mut stdin,
         &mut stdout,
@@ -348,6 +363,12 @@ fn run_live_reload(root: &Path) -> Result<(), String> {
     );
 
     config["policy"]["deny"] = json!([]);
+    config["mcpServers"]["primary"]["url"] = json!("https://new.example/mcp");
+    config["mcpServers"]["local"] = json!({
+        "enabled": false,
+        "transport": "stdio",
+        "url": "node ./local.mjs"
+    });
     write_config(&config_path, &config)?;
     thread::sleep(Duration::from_millis(2300));
     let allowed = call_tool(
@@ -361,6 +382,19 @@ fn run_live_reload(root: &Path) -> Result<(), String> {
         allowed["result"]["structuredContent"]["session"]["state"],
         json!("exited")
     );
+    let changed_mcp = call_tool(&mut stdin, &mut stdout, 21, "mcp.list", json!({}))?;
+    let changed_servers = changed_mcp["result"]["structuredContent"]["servers"]
+        .as_array()
+        .ok_or("changed mcp servers missing")?;
+    assert_eq!(changed_servers.len(), 2);
+    assert!(changed_servers.iter().any(|server| {
+        server["id"] == "primary"
+            && server["url"] == "https://new.example/mcp"
+            && server["enabled"] == true
+    }));
+    assert!(changed_servers.iter().any(|server| {
+        server["id"] == "local" && server["transport"] == "stdio" && server["enabled"] == false
+    }));
 
     let path_target = path_root.join("reload-path-denied");
     config["pathPolicy"]["denyRoots"] = json!([path_root.to_string_lossy()]);
@@ -404,7 +438,7 @@ fn run_live_reload(root: &Path) -> Result<(), String> {
     config["policy"]["deny"] = json!([
         { "program": "/usr/bin/printf", "argsPrefix": [] }
     ]);
-    config["limits"]["maxActiveSessions"] = json!("not-a-mode");
+    config["mcpServers"]["primary"]["transport"] = json!("sse");
     write_config(&config_path, &config)?;
     thread::sleep(Duration::from_millis(2300));
     let retained = call_tool(
@@ -418,10 +452,35 @@ fn run_live_reload(root: &Path) -> Result<(), String> {
         retained["result"]["structuredContent"]["session"]["state"],
         json!("exited")
     );
+    let retained_mcp = call_tool(&mut stdin, &mut stdout, 22, "mcp.list", json!({}))?;
+    let retained_servers = retained_mcp["result"]["structuredContent"]["servers"]
+        .as_array()
+        .ok_or("retained mcp servers missing")?;
+    assert_eq!(retained_servers.len(), 2);
+    assert!(retained_servers.iter().any(|server| {
+        server["id"] == "primary"
+            && server["transport"] == "streamable-http"
+            && server["url"] == "https://new.example/mcp"
+    }));
+
     config["policy"]["deny"] = json!([]);
     config["limits"]["maxActiveSessions"] = json!(1);
+    config["mcpServers"]["primary"]["transport"] = json!("streamable-http");
+    config["mcpServers"]["primary"]["enabled"] = json!(false);
+    config["mcpServers"]
+        .as_object_mut()
+        .unwrap()
+        .remove("local");
     write_config(&config_path, &config)?;
     thread::sleep(Duration::from_millis(2300));
+    let removed_mcp = call_tool(&mut stdin, &mut stdout, 23, "mcp.list", json!({}))?;
+    let removed_servers = removed_mcp["result"]["structuredContent"]["servers"]
+        .as_array()
+        .ok_or("removed mcp servers missing")?;
+    assert_eq!(removed_servers.len(), 1);
+    assert_eq!(removed_servers[0]["id"], "primary");
+    assert_eq!(removed_servers[0]["enabled"], false);
+    assert_eq!(removed_servers[0]["url"], "https://new.example/mcp");
 
     let active = call_tool(
         &mut stdin,

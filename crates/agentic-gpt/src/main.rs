@@ -234,6 +234,7 @@ async fn run(config_path: PathBuf, runtime: RuntimeModel) -> Result<()> {
         log_info("default config created".to_string());
     }
     let initial = Config::load(&config_path)?;
+    initial.validate_mcp_servers()?;
     initial.ensure_workspace()?;
     if let Err(error) = tmux::ensure_default_session(&initial.workspace_root).await {
         log_warn(format!("default tmux session unavailable: {error}"));
@@ -283,6 +284,7 @@ async fn run_stdio_worker(
     supervisor::authorize_worker(supervisor_token.as_deref())?;
     let supervised = supervisor_token.is_some();
     let config = Config::load(&config_path)?;
+    config.validate_standalone()?;
     config.ensure_workspace()?;
     log_info(format!(
         "standalone worker config loaded; {}; policyAllow={}; policyConfirm={}; policyDeny={}; pathWriteRoots={}; pathReadOnlyRoots={}; pathDenyRoots={}",
@@ -506,23 +508,30 @@ async fn watch_config(state: AppState) {
             .and_then(|meta| meta.modified())
             .ok();
         if modified.is_some() && modified != last_modified {
-            if let Ok(config) = Config::load(&state.config_path) {
-                let _ = config.ensure_workspace();
-                log_info(format!(
-                    "config reloaded; agentId={}; workspaceRoot={}; sandbox={}; {}",
-                    config.agent_id,
-                    config.workspace_root.display(),
-                    if config.sandbox.enabled {
-                        "enabled"
-                    } else {
-                        "disabled"
-                    },
-                    config.limits.max_active_sessions.resolve().diagnostic()
-                ));
-                *state.config.write().await = config;
-                last_modified = modified;
-            } else {
-                log_warn("config reload failed; keeping previous config".to_string());
+            match Config::load(&state.config_path).and_then(|config| {
+                config.validate_mcp_servers()?;
+                Ok(config)
+            }) {
+                Ok(config) => {
+                    let _ = config.ensure_workspace();
+                    log_info(format!(
+                        "config reloaded; agentId={}; workspaceRoot={}; sandbox={}; {}; mcpServers={}",
+                        config.agent_id,
+                        config.workspace_root.display(),
+                        if config.sandbox.enabled {
+                            "enabled"
+                        } else {
+                            "disabled"
+                        },
+                        config.limits.max_active_sessions.resolve().diagnostic(),
+                        config.mcp_servers.len(),
+                    ));
+                    *state.config.write().await = config;
+                    last_modified = modified;
+                }
+                Err(_) => {
+                    log_warn("config reload failed; keeping previous config".to_string());
+                }
             }
         }
     }
@@ -542,8 +551,8 @@ async fn watch_standalone_live_config(state: AppState, supervised: bool) {
         }
         last_modified = modified;
 
-        let config = match Config::load(&state.config_path) {
-            Ok(config) => config,
+        let resolved = match reload_standalone_live_config_once(&state).await {
+            Ok(resolved) => resolved,
             Err(error) => {
                 if !supervised {
                     log_warn(format!(
@@ -554,20 +563,9 @@ async fn watch_standalone_live_config(state: AppState, supervised: bool) {
                 continue;
             }
         };
-        if let Err(error) = config.validate_standalone() {
-            if !supervised {
-                log_warn(format!(
-                    "standalone live config reload rejected; keeping previous subset; errorCode={}",
-                    error_code(&error.to_string())
-                ));
-            }
-            continue;
-        }
-
-        let mut live = state.config.write().await;
-        let resolved = apply_standalone_live_subset(&mut live, config);
+        let live = state.config.read().await;
         log_info(format!(
-            "standalone live config reloaded; {}; policyAllow={}; policyConfirm={}; policyDeny={}; pathWriteRoots={}; pathReadOnlyRoots={}; pathDenyRoots={}",
+            "standalone live config reloaded; {}; policyAllow={}; policyConfirm={}; policyDeny={}; pathWriteRoots={}; pathReadOnlyRoots={}; pathDenyRoots={}; mcpServers={}",
             resolved.diagnostic(),
             live.policy.allow.len(),
             live.policy.confirm.len(),
@@ -575,8 +573,18 @@ async fn watch_standalone_live_config(state: AppState, supervised: bool) {
             live.path_policy.write_roots.len(),
             live.path_policy.read_only_roots.len(),
             live.path_policy.deny_roots.len(),
+            live.mcp_servers.len(),
         ));
     }
+}
+
+async fn reload_standalone_live_config_once(
+    state: &AppState,
+) -> Result<config::ResolvedMaxActiveSessions> {
+    let candidate = Config::load(&state.config_path)?;
+    candidate.validate_standalone()?;
+    let mut live = state.config.write().await;
+    Ok(apply_standalone_live_subset(&mut live, candidate))
 }
 
 fn apply_standalone_live_subset(
@@ -587,6 +595,7 @@ fn apply_standalone_live_subset(
     live.policy = candidate.policy;
     live.path_policy = candidate.path_policy;
     live.limits = candidate.limits;
+    live.mcp_servers = candidate.mcp_servers;
     resolved
 }
 
@@ -605,8 +614,9 @@ fn error_code(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{PathPolicyConfig, Rule};
+    use crate::config::{PathPolicyConfig, Rule, TunnelConfig};
     use crate::exec::PreparedBatchElement;
+    use crate::mcp::McpServerConfig;
     use crate::policy::policy_decision;
     use crate::state::RunMode;
     use agentic_gpt_protocol::{
@@ -1643,7 +1653,7 @@ mod tests {
     }
 
     #[test]
-    fn standalone_reload_replaces_only_the_frozen_live_subset() {
+    fn standalone_reload_replaces_the_frozen_live_subset() {
         let mut live = Config::default_config().unwrap();
         let original_agent_id = live.agent_id.clone();
         let original_workspace = live.workspace_root.clone();
@@ -1656,6 +1666,23 @@ mod tests {
         });
         candidate.path_policy.write_roots = vec![PathBuf::from("/tmp/live")];
         candidate.limits.max_active_sessions = config::MaxActiveSessions::Explicit(9);
+        live.mcp_servers.insert(
+            "primary".to_string(),
+            McpServerConfig {
+                enabled: true,
+                transport: "streamable-http".to_string(),
+                url: Some("https://old.example/mcp".to_string()),
+            },
+        );
+        let in_flight = live.mcp_servers["primary"].clone();
+        candidate.mcp_servers.insert(
+            "primary".to_string(),
+            McpServerConfig {
+                enabled: false,
+                transport: "streamable-http".to_string(),
+                url: Some("https://new.example/mcp".to_string()),
+            },
+        );
 
         let resolved = apply_standalone_live_subset(&mut live, candidate);
 
@@ -1675,6 +1702,81 @@ mod tests {
             live.limits.max_active_sessions,
             config::MaxActiveSessions::Explicit(9)
         );
+        assert_eq!(
+            live.mcp_servers["primary"].url.as_deref(),
+            Some("https://new.example/mcp")
+        );
+        assert!(!live.mcp_servers["primary"].enabled);
+        assert_eq!(
+            in_flight.url.as_deref(),
+            Some("https://old.example/mcp"),
+            "an already-cloned in-flight definition retains the old endpoint"
+        );
+    }
+
+    #[tokio::test]
+    async fn standalone_live_reload_applies_valid_mcp_map_and_rejects_invalid_candidate() {
+        let root = unique_temp_dir("standalone-live-mcp-reload");
+        fs::create_dir_all(&root).unwrap();
+        let config_path = root.join("config.json");
+        let workspace = root.join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let (mut state, _rx) = command_test_state(RunMode::Normal, workspace.clone());
+        state.config_path = config_path.clone();
+
+        let mut initial = state.config.read().await.clone();
+        initial.workspace_root = workspace;
+        initial.tunnel = Some(TunnelConfig {
+            tunnel_id: "tunnel_test".to_string(),
+            api_key: "env:AGENTIC_TUNNEL_API_KEY".to_string(),
+            ..TunnelConfig::default()
+        });
+        initial.mcp_servers.insert(
+            "primary".to_string(),
+            McpServerConfig {
+                enabled: true,
+                transport: "streamable-http".to_string(),
+                url: Some("https://old.example/mcp".to_string()),
+            },
+        );
+        *state.config.write().await = initial.clone();
+
+        let mut valid = initial.clone();
+        valid.mcp_servers.insert(
+            "primary".to_string(),
+            McpServerConfig {
+                enabled: true,
+                transport: "streamable-http".to_string(),
+                url: Some("https://new.example/mcp".to_string()),
+            },
+        );
+        valid.mcp_servers.insert(
+            "local".to_string(),
+            McpServerConfig {
+                enabled: false,
+                transport: "stdio".to_string(),
+                url: Some("node ./local-server.mjs".to_string()),
+            },
+        );
+        fs::write(&config_path, serde_json::to_vec_pretty(&valid).unwrap()).unwrap();
+        reload_standalone_live_config_once(&state).await.unwrap();
+        let live_after_valid = state.config.read().await.clone();
+        assert_eq!(live_after_valid.mcp_servers, valid.mcp_servers);
+
+        let mut invalid = valid;
+        invalid.mcp_servers.get_mut("primary").unwrap().transport = "sse".to_string();
+        fs::write(&config_path, serde_json::to_vec_pretty(&invalid).unwrap()).unwrap();
+        let error = reload_standalone_live_config_once(&state)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.starts_with("unsupported_mcp_transport"));
+        assert_eq!(
+            state.config.read().await.mcp_servers,
+            live_after_valid.mcp_servers,
+            "invalid disk changes must not partially replace the live map"
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     #[tokio::test]

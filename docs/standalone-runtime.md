@@ -195,13 +195,19 @@ explicit and are not migrated. Capacity rejection keeps the
 `max_active_sessions_reached` code and includes bounded `active`, `requested`,
 and `limit` details; batch admission remains atomic and all-or-reject.
 
-While the standalone worker is running, edits to `policy`, `pathPolicy`, and
-`limits` are polled and applied atomically to new admissions. Invalid config
-versions keep the last valid live subset. Already admitted sessions continue
-with their original admission decision and are not cancelled by a reload.
+While the standalone worker is running, edits to `policy`, `pathPolicy`,
+`limits`, and `mcpServers` are polled, fully validated, and applied atomically
+to new admissions/calls. MCP server ids use `A-Z`, `a-z`, `0-9`, `.`, `_`, or
+`-` (maximum 64 bytes); `streamable-http` requires an absolute HTTP(S) URL and
+`stdio` requires a non-empty command. Invalid config versions keep the last
+valid live subset. Already admitted sessions and already-created downstream
+MCP clients retain their original decision/server definition and are not
+cancelled or rerouted by a reload. Because downstream clients are currently
+created per call, no separate reload or reconnect command is needed.
 Startup-owned identity, workspace, tunnel/client, reporting connection, and
 skill-install concurrency changes remain restart-required and are reported by
-the supervisor.
+the supervisor. `agent.info.mcp` reports only the effective config revision,
+configured/enabled counts, and client lifecycle; it does not expose endpoints.
 
 `apiKey` accepts only `env:NAME` and `file:PATH`. The resolved value is
 injected into the tunnel-client child environment as

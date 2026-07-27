@@ -36,6 +36,12 @@ pub(crate) async fn collect(state: &AppState) -> Value {
         Transport::TunnelStdio => reporting_sender,
     };
     let config_health = config_health(state, &config);
+    let mcp_config_revision = crate::mcp::server_config_revision(&config.mcp_servers);
+    let mcp_enabled_count = config
+        .mcp_servers
+        .values()
+        .filter(|server| server.enabled)
+        .count();
     let mut issues = config_health.issues.clone();
     if active_count >= resolved_limit.resolved {
         issues.push("active_session_capacity_exhausted");
@@ -138,6 +144,12 @@ pub(crate) async fn collect(state: &AppState) -> Value {
                 "enabled": state.runtime.hub_mode != HubMode::Disabled,
                 "status": reporting_status(state.runtime, hub_sender, reporting_sender),
             },
+        },
+        "mcp": {
+            "configRevision": mcp_config_revision,
+            "configuredServerCount": config.mcp_servers.len(),
+            "enabledServerCount": mcp_enabled_count,
+            "clientLifecycle": "per-call",
         },
         "config": {
             "path": exact_path(&state.config_path),
@@ -289,16 +301,12 @@ fn config_health(state: &AppState, effective: &Config) -> ConfigHealth {
     let disk = match Config::load(&state.config_path) {
         Ok(config) => config,
         Err(_) => {
-            return ConfigHealth {
-                disk_status: "invalid",
-                modified_at,
-                live_subset_matches_disk: false,
-                restart_required_fields: Vec::new(),
-                error_code: Some("config_invalid".to_string()),
-                issues: vec!["config_invalid"],
-            }
+            return invalid_config_health(modified_at);
         }
     };
+    if disk.validate_mcp_servers().is_err() {
+        return invalid_config_health(modified_at);
+    }
     let live_subset_matches_disk = live_subset(effective) == live_subset(&disk);
     let restart_required_fields = restart_fields(effective, &disk);
     let mut issues = Vec::new();
@@ -318,11 +326,23 @@ fn config_health(state: &AppState, effective: &Config) -> ConfigHealth {
     }
 }
 
+fn invalid_config_health(modified_at: Option<String>) -> ConfigHealth {
+    ConfigHealth {
+        disk_status: "invalid",
+        modified_at,
+        live_subset_matches_disk: false,
+        restart_required_fields: Vec::new(),
+        error_code: Some("config_invalid".to_string()),
+        issues: vec!["config_invalid"],
+    }
+}
+
 fn live_subset(config: &Config) -> Value {
     json!({
         "policy": config.policy,
         "pathPolicy": config.path_policy,
         "limits": config.limits,
+        "mcpServers": config.mcp_servers,
     })
 }
 
@@ -359,10 +379,6 @@ fn restart_fields(effective: &Config, disk: &Config) -> Vec<String> {
             json!(effective.confirmation_language) != json!(disk.confirmation_language),
         ),
         ("sandbox", json!(effective.sandbox) != json!(disk.sandbox)),
-        (
-            "mcpServers",
-            json!(effective.mcp_servers) != json!(disk.mcp_servers),
-        ),
         ("skills", json!(effective.skills) != json!(disk.skills)),
         ("room", json!(effective.room) != json!(disk.room)),
         ("tunnel", json!(effective.tunnel) != json!(disk.tunnel)),
@@ -376,6 +392,7 @@ fn restart_fields(effective: &Config, disk: &Config) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mcp::McpServerConfig;
     use agentic_gpt_protocol::AgentMessage;
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -480,6 +497,85 @@ mod tests {
             value["confirmation"]["providers"][1]["deliveryHealth"],
             "unknown"
         );
+        let _ = fs::remove_file(disk_path);
+    }
+
+    #[tokio::test]
+    async fn info_reports_mcp_live_subset_revision_without_restart_requirement() {
+        let mut app = state(CapabilityProfile::Normal);
+        let disk_path = std::env::temp_dir().join(format!(
+            "agent-info-mcp-config-{}.json",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let mut effective = app.config.read().await.clone();
+        effective.mcp_servers.insert(
+            "primary".to_string(),
+            McpServerConfig {
+                enabled: true,
+                transport: "streamable-http".to_string(),
+                url: Some("https://old.example/mcp".to_string()),
+            },
+        );
+        *app.config.write().await = effective.clone();
+        app.config_path = disk_path.clone();
+
+        let mut disk = effective.clone();
+        disk.mcp_servers.insert(
+            "primary".to_string(),
+            McpServerConfig {
+                enabled: false,
+                transport: "streamable-http".to_string(),
+                url: Some("https://new.example/mcp".to_string()),
+            },
+        );
+        disk.mcp_servers.insert(
+            "local".to_string(),
+            McpServerConfig {
+                enabled: true,
+                transport: "stdio".to_string(),
+                url: Some("node ./local.mjs".to_string()),
+            },
+        );
+        fs::write(&disk_path, serde_json::to_vec_pretty(&disk).unwrap()).unwrap();
+
+        let before_reload = collect(&app).await;
+        assert_eq!(before_reload["config"]["liveSubsetMatchesDisk"], false);
+        assert!(!before_reload["config"]["restartRequiredFields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|field| field == "mcpServers"));
+        assert_eq!(before_reload["mcp"]["configuredServerCount"], 1);
+        assert_eq!(before_reload["mcp"]["enabledServerCount"], 1);
+        assert_eq!(before_reload["mcp"]["clientLifecycle"], "per-call");
+        let before_revision = before_reload["mcp"]["configRevision"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(!serde_json::to_string(&before_reload)
+            .unwrap()
+            .contains("old.example"));
+
+        app.config.write().await.mcp_servers = disk.mcp_servers.clone();
+        let after_reload = collect(&app).await;
+        assert_eq!(after_reload["config"]["liveSubsetMatchesDisk"], true);
+        assert_eq!(after_reload["mcp"]["configuredServerCount"], 2);
+        assert_eq!(after_reload["mcp"]["enabledServerCount"], 1);
+        assert_ne!(
+            after_reload["mcp"]["configRevision"].as_str().unwrap(),
+            before_revision
+        );
+        assert!(!after_reload["config"]["restartRequiredFields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|field| field == "mcpServers"));
+
+        disk.mcp_servers.get_mut("primary").unwrap().transport = "sse".to_string();
+        fs::write(&disk_path, serde_json::to_vec_pretty(&disk).unwrap()).unwrap();
+        let invalid = collect(&app).await;
+        assert_eq!(invalid["config"]["diskStatus"], "invalid");
+        assert_eq!(invalid["config"]["errorCode"], "config_invalid");
         let _ = fs::remove_file(disk_path);
     }
 
