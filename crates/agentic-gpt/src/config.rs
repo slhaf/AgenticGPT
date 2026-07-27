@@ -971,11 +971,17 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(source).unwrap();
         let config: Config = serde_json::from_value(value.clone()).unwrap();
         config.validate_mcp_servers().unwrap();
+        config.validate_standalone().unwrap();
         assert_eq!(config.agent_id, "laptop");
         assert_eq!(config.limits.max_active_jobs, MaxActiveJobs::Auto);
         assert_eq!(config.mcp_servers.len(), 2);
         assert!(config.mcp_servers.values().all(|server| !server.enabled));
         assert_eq!(value["agentSecret"], "change-me-before-use");
+        assert_eq!(value["tunnel"]["tunnelId"], "tunnel_replace-me");
+        assert!(value["tunnel"]["apiKey"]
+            .as_str()
+            .is_some_and(|reference| reference.starts_with("file:")));
+        assert_eq!(value["tunnel"]["hubReporting"]["enabled"], false);
         assert!(value["limits"].get("maxActiveSessions").is_none());
         assert!(value["limits"].get("sessionIdleTimeoutSecs").is_none());
         assert!(!source.contains("AGENTIC_GPT_API_KEY="));

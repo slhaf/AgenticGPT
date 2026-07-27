@@ -1,17 +1,15 @@
 # Standalone and local MCP runtimes
 
-Agentic has three runtime shapes. Hub mode keeps the Hub in the command path.
-Standalone mode puts the official OpenAI `tunnel-client` in front of an Agentic
-worker and may use the Hub only for reporting. Local integration mode serves
+Agentic has three runtime shapes. Standalone is the recommended direct
+deployment: it puts the official OpenAI `tunnel-client` in front of one Agentic
+worker and does not require Hub in the command path. Local integration serves
 the same Agent surface over a private Unix socket without tunnel credentials.
+Hub mode remains the optional centralized topology.
 
 ## Runtime topology
 
 ```text
-Hub mode:
-ChatGPT -> HTTPS Hub -> WebSocket/SSE -> agentic-gpt -> local policy/services
-
-Standalone mode:
+Standalone mode (recommended):
 Secure MCP Tunnel -> tunnel-client -> agentic-gpt worker
                                       |-> stdio MCP ingress
                                       |-> owner-only Unix MCP ingress
@@ -19,6 +17,9 @@ Secure MCP Tunnel -> tunnel-client -> agentic-gpt worker
 
 Local integration mode:
 local rmcp CLI/client -> owner-only Unix socket -> agentic-gpt worker
+
+Hub mode (centralized):
+ChatGPT -> HTTPS Hub -> WebSocket/SSE -> agentic-gpt -> local policy/services
 ```
 
 The tunnel entrypoint is `agentic-gpt run-as-standalone`. Agentic resolves and
@@ -37,12 +38,12 @@ state, but serves only the Unix MCP ingress.
 
 | Command | Command transport | Capability profile | Hub connection |
 | --- | --- | --- | --- |
-| `agentic-gpt run` | Hub | Normal | command-capable |
-| `agentic-gpt run-as-room` | Hub | Room | command-capable |
 | `agentic-gpt run-as-standalone` | Tunnel stdio + local Unix MCP | Normal | disabled by default; reporting-only when enabled |
 | `agentic-gpt run-as-standalone --profile room` | Tunnel stdio + local Unix MCP | Room | disabled by default; reporting-only when enabled |
 | `agentic-gpt run-as-local` | Local Unix MCP | Normal | disabled |
 | `agentic-gpt run-as-local --profile room` | Local Unix MCP | Room | disabled |
+| `agentic-gpt run` | Hub | Normal | command-capable |
+| `agentic-gpt run-as-room` | Hub | Room | command-capable |
 
 Transport does not change local policy. Tunnel and local Unix ingress use the
 same policy boundaries for a profile; Room adds diary and notebook, while
@@ -219,9 +220,10 @@ identifies the selected profile without advertising hidden tools.
 
 ## Configuration
 
-The local configuration is normally `~/.agentic_gpt/config.json`. The tunnel
-block is additive; old configurations without it continue to work for Hub
-mode. The canonical skill block is top-level `skills`. A legacy `room.skills`
+The local configuration is normally `~/.agentic_gpt/config.json`. Standalone
+requires the `tunnel` block; Hub and Local modes do not. The complete
+cross-runtime field reference is [`configuration.md`](configuration.md). The
+canonical skill block is top-level `skills`. A legacy `room.skills`
 block is read only when top-level `skills` is absent; when both are present,
 top-level values win and a later config write serializes the canonical block.
 
@@ -459,9 +461,10 @@ For Hub mode, use `GET /v1/info`, `GET /v1/agents`, `hub.info`, and
 `agent.list` for safe diagnostics. Use `hub.run.list`/`hub.run.get` for retained
 run history and `hub.job.list`/`hub.job.get` for current snapshots.
 
-## Existing centralized Hub mode
+## Optional centralized Hub mode
 
-Standalone mode is additive. Existing centralized deployments continue to use:
+Hub mode remains available when centralized routing, Actions, history, or
+reporting is worth the shared infrastructure:
 
 ```bash
 agentic-gpt-hub init

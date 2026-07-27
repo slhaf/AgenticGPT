@@ -4,6 +4,7 @@ v0.9.0 unifies managed execution around kind-aware Jobs and adds a local integra
 
 ## Highlights
 
+- Secure MCP Tunnel / Standalone is the recommended direct deployment; Hub remains an optional centralized mode.
 - One `ManagedJob` lifecycle for process, skill, and MCP work.
 - `job.get`, `job.list`, and `job.cancel` replace process/session lifecycle wrappers.
 - Owner-only Unix MCP ingress, `run-as-local`, and real local rmcp CLI clients.

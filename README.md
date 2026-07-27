@@ -2,71 +2,162 @@
 
 [中文文档](README.zh-CN.md)
 
-Agentic GPT is a Linux local execution agent and Rust Hub for connecting ChatGPT to local machines in a controlled way.
+Agentic GPT connects ChatGPT to Linux machines through a per-machine Secure MCP Tunnel, an optional centralized Rust Hub, or a private local MCP socket.
 
-It is designed for workflows where ChatGPT needs to inspect local state, run short commands, start and inspect long-running Jobs, bridge configured MCP servers, and ask for explicit confirmation before sensitive actions.
+For most deployments, **Secure MCP Tunnel / Standalone mode is the recommended path**. It requires no VPS, public reverse proxy, or self-hosted Hub in the command path. Each machine owns an independent tunnel and worker, so one disconnected agent does not interrupt the others.
 
 ```text
-ChatGPT Actions / ChatGPT Apps MCP
-  -> HTTPS API on Rust Hub
-  -> WebSocket connection to Local Agent
-  -> local process / Job / confirmation / MCP bridge / sandbox
+Recommended — Standalone
+ChatGPT Secure MCP Tunnel
+  -> official tunnel-client
+  -> agentic-gpt worker
+  -> policy / files / process Jobs / skills / downstream MCP / tmux
+
+Centralized — Hub
+ChatGPT Actions or Apps MCP
+  -> HTTPS Rust Hub
+  -> WebSocket or SSE Local Agents
+  -> the same local execution services
+
+Development — Local
+local MCP client or agentic-gpt CLI
+  -> owner-only Unix MCP socket
+  -> the same Agent surface
 ```
 
-The current mainline uses the Rust Hub. The older Cloudflare Worker implementation was moved out of `main`; see branch `legacy/cf-worker-before-removal` only if you need the historical Cloudflare-only Hub.
+The historical Cloudflare-only Hub has been removed from `main`; it remains on branch `legacy/cf-worker-before-removal` for archival use.
+
+## Why Standalone first?
+
+- No VPS, public domain, reverse proxy, Hub database, or shared command router is required.
+- Every machine has an independent connection and restart boundary.
+- The tunnel and owner-only Unix MCP ingress expose the same 24-tool Normal or 36-tool Room surface.
+- Policy, confirmation, audit, live configuration, capacity, and managed Jobs stay local to that machine.
+- A fresh stdio worker can recover a resumed tunnel request that arrives before a new MCP `initialize` handshake.
+
+Hub mode remains useful when you need one public endpoint for many agents, Custom GPT Actions, centralized run history, Hub-native aggregation/notifications, or Hub-relayed confirmation.
+
+## Choose a runtime
+
+| Runtime | Best for | Public server | Failure scope | Entrypoint |
+| --- | --- | --- | --- | --- |
+| **Secure MCP Tunnel / Standalone** | Recommended direct deployment | Not required | One tunnel/agent | `agentic-gpt run-as-standalone` |
+| **Hub + Local Agents** | Central routing, Actions, shared history/reporting | Required | Hub is shared | `agentic-gpt-hub serve` + `agentic-gpt run` |
+| **Local Unix MCP** | Development, smoke tests, local automation | Not required | One local worker | `agentic-gpt run-as-local` |
 
 ## Features
 
-- Local command execution through a persistent agent connection.
-- Managed process and skill Jobs with bounded inline waits and later inspection/cancellation.
-- Batch command execution with all-or-nothing confirmation semantics.
-- Local desktop confirmation and optional Hub-backed remote confirmation.
-- Configurable command policy: allow, confirm, deny.
-- Path policy with writable, read-only, and denied roots.
+- Unified managed Jobs for `process.exec`, `process.batch`, `skills.run`, `mcp.callTool`, and `mcp.batch`.
+- `job.get`, `job.list`, and `job.cancel` for shared lifecycle control.
+- Atomic batch admission and bounded confirmation boundaries.
+- Configurable allow / confirm / deny command policy.
+- Writable, read-only, and denied path roots.
+- Local desktop confirmation and optional Hub-backed ntfy confirmation.
 - Optional bubblewrap sandbox integration.
-- MCP bridge from ChatGPT to MCP servers configured on the local agent.
-- Room-scoped asynchronous skill installation from public GitHub/HTTPS/inline sources, plus managed execution of active skill scripts.
-- Room-scoped repeated session bootstrap with a concise entrypoint and generic frontmatter-driven capability guides.
-- Optional standalone Secure MCP Tunnel runtime with Normal/Room profiles and opt-in reporting-only Hub telemetry.
-- ChatGPT Actions OpenAPI schema and ChatGPT Apps-friendly MCP endpoint.
+- Bounded downstream MCP arguments/results, exact request-id cancellation, and truthful detached state when remote termination cannot be proven.
+- Room bootstrap, diary/notebook tools, public skill installation, managed skill execution, and tmux workspaces.
+- Optional Rust Hub with Actions OpenAPI, Apps-compatible `/mcp`, OAuth shim, HTTP API, WebSocket/SSE agents, history, reporting, and notifications.
 
 ## Repository layout
 
-- `crates/agentic-gpt`: Linux local agent CLI.
-- `crates/agentic-gpt-hub`: Rust Hub HTTP/WebSocket service.
-- `crates/agentic-gpt-protocol`: Shared JSON protocol types.
-- `openapi/hub.yaml`: Custom GPT Actions schema for the Rust Hub.
-- `docs/interfaces.md`: Interface map for Actions, Apps MCP, and Local Agent WebSocket.
-- `docs/standalone-runtime.md`: Standalone Tunnel topology, configuration, trust, recovery, reporting, and Hub profiles.
-- `docs/operations.md`: Local verification, smoke tests, deployment checks, and safety invariants.
-- `scripts/dist-linux.sh`: Multi-target Linux release build script.
+- `crates/agentic-gpt`: Linux agent, standalone supervisor, local MCP runtime, and CLI.
+- `crates/agentic-gpt-hub`: optional Rust Hub HTTP/WebSocket/SSE/MCP service.
+- `crates/agentic-gpt-protocol`: shared JSON protocol types.
+- `config.example.json`: strict v0.9 standalone-first configuration example with no usable secrets.
+- `openapi/hub.yaml`: Custom GPT Actions schema for Hub mode.
+- `docs/configuration.md`: runtime-specific configuration, secrets, and reload boundaries.
+- `docs/standalone-runtime.md`: Tunnel/local topology, trust, recovery, reporting, and tool matrices.
+- `docs/interfaces.md`: Hub HTTP, Actions, Apps MCP, and agent protocol map.
+- `docs/operations.md`: verification, deployment, and smoke checks.
 
 ## Requirements
 
-- Linux local machine for the local agent.
-- Release binaries for your target, or Rust stable if building from source.
-- A server or VPS for the Hub if you want remote ChatGPT access.
-- HTTPS reverse proxy such as Caddy or Nginx for public Hub access.
-- Optional: `bubblewrap` for sandboxed execution.
-- Optional: `ntfy` for Hub-backed remote confirmation.
+Common requirements:
+
+- A Linux machine for `agentic-gpt`.
+- A release binary for the target, or Rust stable when building from source.
+- Optional `bubblewrap` for sandboxed execution.
+
+Standalone additionally needs an assigned Secure MCP Tunnel id and API key reference. It does **not** require a VPS or inbound public port.
+
+Hub mode additionally needs a server/VPS, HTTPS, a reverse proxy when exposed publicly, a Hub API key, and per-agent secrets.
 
 ## Installation
 
-Download a release archive for your target from GitHub Releases, then extract both binaries and put them somewhere in your `PATH`:
+Release archives contain both binaries. Standalone and Local modes need only `agentic-gpt`; install `agentic-gpt-hub` only for Hub mode.
 
 ```bash
 tar -xzf agentic-gpt-x86_64-unknown-linux-gnu.tar.gz
-install -m 0755 agentic-gpt agentic-gpt-hub ~/.local/bin/
+install -m 0755 agentic-gpt ~/.local/bin/
+# Hub mode only:
+install -m 0755 agentic-gpt-hub ~/.local/bin/
 ```
 
-Supported release targets:
+Supported targets:
 
 - `x86_64-unknown-linux-gnu`
 - `aarch64-unknown-linux-gnu`
 
-For building from source, CI, and release publishing, see [`docs/development.md`](docs/development.md).
+Source builds, CI, and release publishing are documented in [`docs/development.md`](docs/development.md).
 
-## Quick start
+## Quick start: Secure MCP Tunnel (recommended)
+
+### 1. Initialize the local configuration
+
+```bash
+agentic-gpt config init
+agentic-gpt config set agentId laptop
+agentic-gpt config set confirmationProvider freedesktop
+```
+
+The default config path is `~/.agentic_gpt/config.json`. Review [`config.example.json`](config.example.json) and [`docs/configuration.md`](docs/configuration.md) before exposing write roots or enabling MCP servers.
+
+### 2. Store the tunnel secret by reference
+
+```bash
+install -d -m 700 "$HOME/.config/agentic-gpt"
+# Write the API key with a secret manager or protected editor.
+chmod 600 "$HOME/.config/agentic-gpt/tunnel-api-key"
+
+agentic-gpt config set tunnel.tunnelId tunnel_<assigned-id>
+agentic-gpt config set tunnel.apiKey file:"$HOME/.config/agentic-gpt/tunnel-api-key"
+agentic-gpt config set tunnel.client.autoDownload true
+```
+
+`tunnel.apiKey` accepts only `file:PATH` or `env:NAME`; plaintext secrets are rejected.
+
+### 3. Start the standalone worker
+
+```bash
+agentic-gpt run-as-standalone --profile normal
+```
+
+Use `--profile room` for the 36-tool Room surface. The same worker also exposes an owner-only Unix MCP socket for local inspection:
+
+```bash
+agentic-gpt local list-tools
+agentic-gpt local call agent.info --arguments '{}'
+```
+
+Connect ChatGPT through the Secure MCP Tunnel assigned to this agent. Each machine is configured and started independently.
+
+Complete tunnel-client trust, cache, recovery, reporting, and service-manager guidance is in [`docs/standalone-runtime.md`](docs/standalone-runtime.md).
+
+## Local-only development
+
+No tunnel credentials are needed:
+
+```bash
+agentic-gpt run-as-local --profile normal
+agentic-gpt local list-tools
+agentic-gpt local call agent.info --arguments '{}'
+```
+
+Local mode uses the same policy, path policy, confirmation, audit, live config, and Job implementation as Standalone mode, but serves only the owner-only Unix socket.
+
+## Centralized Hub mode
+
+Choose Hub mode when the shared endpoint and centralized capabilities are worth the extra infrastructure.
 
 ### 1. Start the Hub
 
@@ -80,186 +171,99 @@ AGENTIC_GPT_API_KEY='<high-entropy-api-key>' \
   agentic-gpt-hub serve --bind 127.0.0.1:8787
 ```
 
-Hub state defaults to `~/.agentic_gpt/hub.sqlite3`; Hub config defaults to `~/.agentic_gpt/hub.json`.
+Put Caddy or Nginx in front of the Hub and expose it over HTTPS. Hub state defaults to `~/.agentic_gpt/hub.sqlite3`; Hub config defaults to `~/.agentic_gpt/hub.json`.
 
-For public access, put Caddy or Nginx in front of the Hub and expose it over HTTPS. The Hub serves both HTTP APIs and WebSocket endpoints.
-
-### 2. Start the Local Agent
+### 2. Start a Hub-connected agent
 
 ```bash
 agentic-gpt config init
-agentic-gpt config set hubUrl http://127.0.0.1:8787
+agentic-gpt config set hubUrl https://agentic-gpt.example.com
+agentic-gpt config set hubTransport websocket
 agentic-gpt config set agentId laptop
 agentic-gpt config set agentSecret '<agent-secret>'
-agentic-gpt config set confirmationProvider freedesktop-then-ntfy
 agentic-gpt run
 ```
 
-Local agent config lives at `~/.agentic_gpt/config.json`; audit logs are written as JSONL to `~/.agentic_gpt/audit.log`.
+Use `agentic-gpt run-as-room` for the Room profile. `hubTransport` may be `websocket` or `sse`.
 
-`workerUrl` is accepted as a legacy alias when reading or setting config, but `hubUrl` is the canonical field.
+### 3. Connect ChatGPT to the Hub
 
-### 3. Connect ChatGPT
+- Custom GPT Actions: import [`openapi/hub.yaml`](openapi/hub.yaml) and use `AGENTIC_GPT_API_KEY` as Bearer auth.
+- ChatGPT Apps MCP: connect to `https://<your-hub-domain>/mcp`.
 
-For Custom GPT Actions, use `openapi/hub.yaml`, replace the server URL with your HTTPS Hub URL, and configure Bearer auth with `AGENTIC_GPT_API_KEY`.
+Hub-native and forwarded execution use the same managed Job envelopes. Active work is inspected with `job.get` and cancelled with `job.cancel`.
 
-For ChatGPT Apps / MCP, use the Apps-friendly MCP endpoint:
+## Managed Jobs and safety boundaries
 
-```text
-https://<your-hub-domain>/mcp
-```
+- Normal exposes 24 tools; Room exposes 36.
+- `process.exec`, `skills.run`, and `mcp.callTool` return `JobResponse`.
+- `mcp.batch` accepts 1–16 ordered calls, uses one aggregate confirmation, and enforces global/per-server concurrency.
+- MCP arguments are JSON objects capped at 256 KiB per call; retained results are capped at 512 KiB; aggregate batch arguments/results are capped at 2 MiB.
+- Audit records contain bounded metadata, hashes, states, and termination evidence rather than raw MCP arguments/results.
+- Use `agent.info` before execution to inspect the active profile, path policy, capacity, confirmation, MCP configuration summary, and connection state.
 
-The `/mcp` `tools/call` response uses the Hub `AgenticResult` envelope, which is compatible with ChatGPT Apps / MCP tool results. Hub-native tools return `content`, `structuredContent`, and `isError`. `mcp.callTool` returns the same managed `JobResponse` as process and skill creation. `mcp.batch` atomically admits 1–16 ordinary MCP child Jobs, applies one aggregate confirmation, preserves input order, and supports parallel or sequential execution plus safe fail-fast scheduling. Active children are followed with `job.get` or `job.cancel`.
-
-OAuth discovery and token exchange are implemented by the Hub OAuth shim.
-
-For a direct Secure MCP Tunnel deployment, configure `tunnel.tunnelId` and a
-secret reference (`file:PATH` or `env:NAME`), then run
-`agentic-gpt run-as-standalone`. Use `--profile room` for the Room surface.
-The same worker also exposes an owner-only Unix MCP socket for local
-integration. For development without tunnel credentials, run
-`agentic-gpt run-as-local`, then use `agentic-gpt local list-tools` or
-`agentic-gpt local call <tool>` with the same config. Both ingress paths expose
-the same compact 24-tool Normal surface or 36-tool Room surface and share
-policy, confirmation, audit, config, and managed execution state. The complete
-topology, local CLI contract, tool matrix, pinned client assets, reporting
-privacy modes, and recovery procedure are in
-[`docs/standalone-runtime.md`](docs/standalone-runtime.md).
-
-Room skills are exposed without an input `agentId`: use `skills.install` and poll `skills.install.get` (or the matching `/v1/room/skills/*` Actions routes), then use `skills.run` for executable files beneath an active skill's `scripts/` directory. Installation starts asynchronously for Apps-compatible bounded requests; terminal status includes redacted source provenance and `pollAfterMs` guidance.
-
-## Confirmation
-
-The local agent can request confirmation before commands that match confirm policy rules.
+## Confirmation, command policy, and path policy
 
 ```bash
-agentic-gpt config set confirmationProvider freedesktop-then-ntfy
+agentic-gpt config set confirmationProvider freedesktop
 agentic-gpt config set confirmationLanguage zh-CN
-```
 
-Supported confirmation channels:
-
-- `freedesktop`: local desktop notification actions.
-- `ntfy`: Hub-relayed remote confirmation using the existing ntfy callback path.
-- `freedesktop-then-ntfy`: try local desktop confirmation first; fall back to the Hub-relayed ntfy channel only when the local provider is unavailable.
-
-New and rewritten configuration uses the canonical ordered form
-`{"channels":["freedesktop","ntfy"]}`. Legacy `hub`,
-`freedesktop-then-hub`, `freedesktopThenHub`, `default`, and the object form
-`{"provider":"..."}` remain readable for compatibility.
-
-A local denial or timeout is final and does not fall back to Hub.
-
-Supported confirmation languages:
-
-- `en`
-- `zh-CN`
-
-Remote confirmation is disabled by default. Enable it on the Hub, not on each Local Agent:
-
-```json
-{
-  "remoteConfirmation": {
-    "enabled": true,
-    "provider": "ntfy",
-    "timeoutSeconds": 45,
-    "ntfy": {
-      "serverUrl": "https://ntfy.example.com",
-      "topic": "<high-entropy-topic>",
-      "callbackBaseUrl": "https://agentic-gpt.example.com"
-    }
-  }
-}
-```
-
-The ntfy callback routes are intentionally not part of the GPT Actions OpenAPI. They are called only from ntfy action buttons and require the one-time confirmation token in the callback URL.
-
-## Command policy
-
-Command policy rules can be added or removed by command. `remove` matches `program` plus optional `argsPrefix`; if multiple rules match in an interactive terminal, the CLI asks which one to delete.
-
-```bash
 agentic-gpt config allow add bash
-agentic-gpt config allow remove bash
 agentic-gpt config confirm add python -c
-agentic-gpt config confirm remove python -c
 agentic-gpt config deny add ssh
-```
 
-Policy precedence is intentionally conservative. Builtin deny rules still apply unless explicitly overridden by configured allow rules.
-
-## Path policy
-
-Path access is controlled by `pathPolicy` in the local agent config.
-
-`workspaceRoot` is always a write root. Defaults also allow writes under `~/Documents`, `~/Downloads`, `~/Projects`, and `/tmp`, allow read-only access to selected system/cache paths, and deny common credential, browser, auth, and cloud config paths.
-
-Manage roots with:
-
-```bash
 agentic-gpt config path list
 agentic-gpt config path write add ~/Projects
 agentic-gpt config path readonly add /var/log
 agentic-gpt config path deny add ~/.secrets
-agentic-gpt config path write remove ~/Projects
 ```
 
-`process.exec` and `process.batch` also support `workingDirectory`. The resolved directory must exist, must be inside writable roots, and must not be inside denied roots.
+Hub-backed `ntfy` is optional and is useful only when Hub mode or standalone Hub reporting/confirmation relay is configured. Local denial or timeout is final.
 
-## Interfaces
-
-The Hub exposes the versioned HTTP API, Local Agent WebSocket endpoints, and the Apps-compatible `/mcp` endpoint. The complete route and tool map is maintained in [`docs/interfaces.md`](docs/interfaces.md); the generated Actions contract is [`openapi/hub.yaml`](openapi/hub.yaml).
-
-The direct local and standalone workers expose the same Normal/Room MCP descriptors over owner-only Unix MCP and tunnel stdio ingress. Use `agentic-gpt local list-tools` to inspect the active contract and `agentic-gpt local call <tool>` for local integration tests.
+Detailed field definitions and live-reload behavior are in [`docs/configuration.md`](docs/configuration.md).
 
 ## Upgrade to v0.9
 
-v0.9 is intentionally breaking. Upgrade the Hub and Local Agents together, migrate `limits.maxActiveSessions` to `limits.maxActiveJobs`, remove `sessionIdleTimeoutSecs`, and replace managed `session.*` / `process.get|list|kill` calls with `job.*`. See:
+v0.9 is intentionally breaking:
 
-- [`docs/migration-v0.9.md`](docs/migration-v0.9.md): required configuration, tool, HTTP, protocol, and response-envelope changes.
-- [`docs/release-notes-v0.9.0.md`](docs/release-notes-v0.9.0.md): feature and verification summary.
-- [`config.example.json`](config.example.json): strict v0.9 example with no usable secrets.
+- `limits.maxActiveSessions` becomes `limits.maxActiveJobs`.
+- Remove `sessionIdleTimeoutSecs`.
+- Managed `session.*` and `process.get/list/kill` become `job.get/list/cancel`.
+- `process.batchExec` becomes `process.batch`.
+- `mcp.callTool` returns a managed `JobResponse`.
 
-No compatibility aliases are provided for the removed managed execution names. tmux session names and tmux APIs are unchanged.
+Standalone/Local deployments upgrade `agentic-gpt` independently. Hub deployments must upgrade Hub and connected agents together because the v0.9 protocol is not wire-compatible with v0.8. See [`docs/migration-v0.9.md`](docs/migration-v0.9.md).
 
 ## More documentation
 
-- [`docs/interfaces.md`](docs/interfaces.md): API, Actions, Apps MCP, and Local Agent WebSocket interface map.
-- [`docs/standalone-runtime.md`](docs/standalone-runtime.md): standalone/local topology, exact tool matrices, trust, reporting, recovery, and managed MCP limits.
-- [`docs/operations.md`](docs/operations.md): deployment checks, connector smoke tests, and safety invariants.
-- [`docs/development.md`](docs/development.md): source development, verification, CI, and release publishing.
-- [`docs/migration-v0.9.md`](docs/migration-v0.9.md): v0.8 to v0.9 migration guide.
+- [`docs/configuration.md`](docs/configuration.md): runtime selection, all major config sections, secret references, and reload/restart boundaries.
+- [`docs/standalone-runtime.md`](docs/standalone-runtime.md): standalone/local operation, tunnel-client trust, recovery, reporting, and exact tool matrices.
+- [`docs/interfaces.md`](docs/interfaces.md): Hub HTTP, Actions, Apps MCP, protocol, and direct MCP surface references.
+- [`docs/operations.md`](docs/operations.md): local verification, Standalone-first deployment checks, Hub checks, and safety invariants.
+- [`docs/migration-v0.9.md`](docs/migration-v0.9.md): v0.8 to v0.9 migration by runtime.
+- [`docs/release-notes-v0.9.0.md`](docs/release-notes-v0.9.0.md): v0.9.0 feature and verification summary.
+- [`docs/development.md`](docs/development.md): development, CI, and release publishing.
 
 ## Build and release
 
-Local multi-target Linux builds use `scripts/dist-linux.sh` and write binaries beneath `dist/<target>/`. Pushing a version tag triggers the release workflow:
-
 ```bash
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
 git tag v0.9.0
 git push origin v0.9.0
 ```
 
-Release archives contain both binaries for one target:
-
-- `agentic-gpt-x86_64-unknown-linux-gnu.tar.gz`
-- `agentic-gpt-aarch64-unknown-linux-gnu.tar.gz`
-- `SHA256SUMS`
-
-Creating or pushing a tag is a separate release action; normal development commits do not publish anything.
+Creating or pushing a tag is a separate release action; normal commits do not publish anything.
 
 ## Security notes
 
-Agentic GPT makes local execution explicit, bounded, and auditable; it does not make arbitrary local execution risk-free. Treat Hub API keys, agent secrets, tunnel secrets, and ntfy topics as credentials.
-
-Recommended defaults:
-
-- Use HTTPS in front of the Hub.
-- Keep high-entropy Hub API keys and agent secrets.
-- Keep credential directories in denied roots.
-- Prefer confirmation for shell interpreters, network tools, and unfamiliar MCP servers.
-- Use managed Jobs and bounded waits instead of long blocking requests.
-- Inspect `agent.info` before execution and review the workspace audit JSONL when tightening policy.
-- Do not deploy v0.9 binaries against an unmigrated v0.8 config.
+- Treat tunnel API keys, Hub API keys, agent secrets, and ntfy topics as credentials.
+- Prefer `file:` or protected `env:` secret references; never store a tunnel key as plaintext config.
+- Keep credential, browser, cloud, and SSH directories in denied roots.
+- Prefer confirmation for shells, network tools, and unfamiliar MCP servers.
+- Use bounded Job waits instead of long blocking HTTP/MCP requests.
+- Hub mode must use HTTPS when exposed publicly.
+- Do not start v0.9 with an unmigrated v0.8 limits object.
 
 ## License
 

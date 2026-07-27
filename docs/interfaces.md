@@ -1,6 +1,11 @@
 # Interfaces
 
-Agentic GPT exposes two public integration surfaces from the Rust Hub.
+The recommended Standalone runtime exposes the Normal/Room MCP surface directly
+through Secure MCP Tunnel and owner-only Unix MCP. Its transport and tool
+contract is documented in [`standalone-runtime.md`](standalone-runtime.md).
+
+This page primarily maps the optional Rust Hub surfaces: GPT Actions, Apps MCP,
+Hub-native tools, and the Hub-to-Agent protocol.
 
 ## GPT Actions API
 

@@ -1,6 +1,22 @@
 {
   "agentId": "laptop",
   "displayName": "agentic-gpt-linux",
+  "tunnel": {
+    "tunnelId": "tunnel_replace-me",
+    "apiKey": "file:/home/your-user/.config/agentic-gpt/tunnel-api-key",
+    "client": {
+      "version": null,
+      "cacheDir": "~/.agentic_gpt/cache/tunnel-client",
+      "autoDownload": true,
+      "executable": null,
+      "downloadUrl": null,
+      "sha256": null
+    },
+    "hubReporting": {
+      "enabled": false,
+      "detail": "metadata"
+    }
+  },
   "hubUrl": "https://agentic-gpt.example.com",
   "hubTransport": "websocket",
   "agentSecret": "change-me-before-use",
