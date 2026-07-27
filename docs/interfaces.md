@@ -17,7 +17,7 @@ Core endpoints:
 - `POST /v1/jobs/{jobId}/cancel?agentId=...`: request kind-aware cancellation and return outcome/termination evidence.
 - `POST /v1/mcp/servers`: list MCP servers configured inside one local agent, or omit `agentId` to group MCP servers for all currently connected agents.
 - `POST /v1/mcp/tools`: list tools exposed by one MCP server.
-- `POST /v1/mcp/callTool`: call one MCP tool through the selected local agent.
+- `POST /v1/mcp/callTool`: start one managed downstream MCP tool Job through the selected local agent. `waitSeconds` defaults to 5 and is capped at 30; `timeoutSeconds` defaults to 300 and is capped at 900.
 - `GET /v1/runs/{runId}`: inspect persisted status and optional late result for one Hub-to-Agent command run.
 - `POST /v1/room/skills/list`, `/read`, `/search`, `/active`, `/activate`, `/deactivate`: discover workspace skills through the active Room Agent and maintain local active skill state. These endpoints do not take `agentId`.
 - `POST /v1/room/skills/install`: asynchronously install one skill from public GitHub, HTTPS file entries, or inline UTF-8/base64 files. The response returns an `installId` before network work begins.
@@ -35,14 +35,11 @@ Core endpoints:
 
 `/mcp` is the Apps-friendly MCP endpoint. It is protected by the Hub OAuth shim and forwards MCP requests to the configured local agent and local MCP server.
 
-All `/mcp` `tools/call` responses use the Hub `AgenticResult` envelope, which is directly compatible with the ChatGPT Apps / MCP tool result shape:
+All `/mcp` `tools/call` responses use the Hub `AgenticResult` envelope, which is directly compatible with the ChatGPT Apps / MCP tool result shape. Hub-native JSON is exposed as `structuredContent` plus a JSON text content block; a top-level `error` makes the MCP tool result `isError=true`.
 
-- `content`: model/client-visible MCP content blocks, including non-text blocks such as `image`, `audio`, `resource`, and `resource_link` when returned by downstream MCP servers.
-- `structuredContent`: concise JSON visible to the model and Apps component.
-- `_meta`: widget-only MCP result metadata.
-- `isError`: tool-result error flag.
+`mcp.callTool` no longer passes a downstream result envelope through at the Hub top level. It returns a managed `JobResponse`. A terminal downstream result is retained under `result`; downstream `isError=true` produces a failed Job while retaining that result. Serialized arguments are capped at 256 KiB. Serialized results up to 512 KiB are retained; larger results are omitted and replaced by `resultBytes`, `resultSha256`, and a UTF-8-safe `resultPreview`. Active calls are inspected with `job.get` and cancelled with `job.cancel`.
 
-Hub-native `/mcp` tools wrap their JSON payloads as `AgenticResult` with both `structuredContent` and a JSON text content block. The `mcp.callTool` tool recognizes downstream MCP tool result envelopes and passes through their top-level `content`, `structuredContent`, `_meta`, and `isError` instead of nesting them inside a Hub JSON payload.
+Cancellation is evidence-based. Agentic sends MCP `notifications/cancelled` with the exact downstream request id. If no downstream terminal response is observed, the Job becomes `detached` rather than claiming cancellation succeeded. Hub cache-only `job.get` responses set `detailAvailable=false`, and Hub never reports a cached snapshot as a successful `job.cancel`.
 
 This contract applies to the Apps MCP `/mcp` surface. The GPT Actions endpoints under `/v1/*` keep their OpenAPI-described JSON response shapes.
 

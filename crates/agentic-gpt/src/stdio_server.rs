@@ -652,8 +652,15 @@ impl AgentMcpServer {
                         server_id: args.server_id,
                         tool_name: args.tool_name,
                         arguments: args.arguments,
+                        wait_seconds: args.wait_seconds,
+                        timeout_seconds: args.timeout_seconds,
                     },
                     &request_source,
+                    Some(managed_terminal_event_hook(
+                        self.state.runtime.profile,
+                        request_source.clone(),
+                        terminal_tracker,
+                    )),
                 )
                 .await
                 {
@@ -918,7 +925,7 @@ impl AgentMcpServer {
 
     async fn dispatch_job_get(&self, arguments: Value) -> Result<Value> {
         let args: JobGetArgs = from_value(arguments)?;
-        match crate::jobs::get_job(
+        match crate::jobs::get_job_detail(
             &self.state,
             &args.job_id,
             args.wait_seconds.unwrap_or(0).min(30),
@@ -1502,6 +1509,10 @@ struct McpCallArgs {
     tool_name: String,
     #[serde(default)]
     arguments: Value,
+    #[serde(default)]
+    wait_seconds: Option<u64>,
+    #[serde(default)]
+    timeout_seconds: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2106,7 +2117,31 @@ fn properties_for(name: &str) -> Map<String, Value> {
             add("toolName", string("Downstream MCP tool name."));
             add(
                 "arguments",
-                json!({"type": "object", "description": "Downstream tool arguments."}),
+                json!({
+                    "type": "object",
+                    "description": "Downstream tool arguments; maximum serialized size 256 KiB.",
+                    "default": {}
+                }),
+            );
+            add(
+                "waitSeconds",
+                json!({
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 30,
+                    "default": 5,
+                    "description": "Bounded inline wait before returning the Job envelope."
+                }),
+            );
+            add(
+                "timeoutSeconds",
+                json!({
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 900,
+                    "default": 300,
+                    "description": "Absolute downstream execution deadline."
+                }),
             );
         }
         "bootstrap.read" => add("id", string("Guide id returned by bootstrap.")),
@@ -2271,7 +2306,7 @@ fn tool_description(name: &str) -> String {
         "mcp.listServers" => "List configured downstream MCP servers.".to_string(),
         "mcp.listTools" => "List tools exposed by a downstream MCP server.".to_string(),
         "mcp.list" => "List configured MCP servers or one server's tools.".to_string(),
-        "mcp.callTool" => "Call a downstream MCP tool.".to_string(),
+        "mcp.callTool" => "Start a managed downstream MCP tool Job with bounded inline wait, retained result, timeout, and truthful cancellation evidence.".to_string(),
         "bootstrap" => "Load the local bootstrap manifest.".to_string(),
         "bootstrap.read" => "Read one local bootstrap guide.".to_string(),
         "skills.list" => "List local skills.".to_string(),
@@ -2935,8 +2970,8 @@ mod tests {
         let fetched = server
             .dispatch("job.get", json!({"jobId": quick_job, "waitSeconds": 0}))
             .await?;
-        assert_eq!(fetched["kind"], "process");
-        assert_eq!(fetched["state"], "completed");
+        assert_eq!(fetched["job"]["kind"], "process");
+        assert_eq!(fetched["job"]["state"], "completed");
 
         let long = server
             .dispatch(
@@ -2950,7 +2985,7 @@ mod tests {
             let state = server
                 .dispatch("job.get", json!({"jobId": long_job, "waitSeconds": 0}))
                 .await?;
-            if state["state"] == "running" {
+            if state["job"]["state"] == "running" {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -2966,10 +3001,10 @@ mod tests {
         let cancelled = server
             .dispatch("job.cancel", json!({"jobId": long_job}))
             .await?;
-        assert_eq!(cancelled["state"], "cancelled");
-        assert_eq!(cancelled["cancelOutcome"], "cancelled");
+        assert_eq!(cancelled["job"]["state"], "cancelled");
+        assert_eq!(cancelled["job"]["cancelOutcome"], "cancelled");
         assert_eq!(
-            cancelled["terminationEvidence"],
+            cancelled["job"]["terminationEvidence"],
             "local_process_kill_completed"
         );
 
@@ -3339,9 +3374,18 @@ mod tests {
                 }),
             )
             .await?;
-        assert_eq!(result["error"]["code"], "mcp_call_tool_failed");
+        assert_eq!(result["status"], "rejected");
+        assert_eq!(result["job"]["kind"], "mcp");
+        assert_eq!(result["job"]["rejectReason"], "mcp_server_not_found");
+        assert_eq!(result["error"]["code"], "mcp_server_not_found");
+        assert_eq!(
+            result["job"]["terminationEvidence"],
+            "server_config_validation"
+        );
         let audit = std::fs::read_to_string(workspace.join(".agentic-gpt-audit.jsonl"))?;
         assert!(audit.contains("\"requestSource\":\"local:mcp.callTool\""));
+        assert!(audit.contains("\"terminalState\":\"rejected\""));
+        assert!(audit.contains("\"terminationEvidence\":\"server_config_validation\""));
         assert!(!audit.contains("\"requestSource\":\"hub:mcp\""));
         Ok(())
     }

@@ -475,9 +475,11 @@ async fn snapshot_job_list_filtered(
 
 async fn snapshot_job_get(state: &HubState, agent_id: &str, job_id: &str) -> Value {
     match cached_job(state, agent_id, job_id).await {
-        Some(job) => {
-            serde_json::to_value(job).unwrap_or_else(|error| json!({ "error": error.to_string() }))
-        }
+        Some(job) => json!({
+            "job": job,
+            "detailAvailable": false,
+            "resultTruncated": false
+        }),
         None => {
             json!({ "error": { "code": "job_not_found", "message": "Job was not found" } })
         }
@@ -815,7 +817,17 @@ impl AgenticMcpServer {
         };
         let value = match request_agent(&self.state, &params.agent_id, command, 5).await {
             Ok(value) if value.get("error").is_none() => value,
-            _ => snapshot_job_get(&self.state, &params.agent_id, &params.job_id).await,
+            Ok(value) => value,
+            Err(reason) => {
+                let cached = snapshot_job_get(&self.state, &params.agent_id, &params.job_id).await;
+                json!({
+                    "error": {
+                        "code": "job_cancel_unavailable",
+                        "message": reason
+                    },
+                    "cached": cached
+                })
+            }
         };
         Ok(result_from_value(value))
     }
@@ -1040,7 +1052,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "mcp.callTool",
-        description = "Call a tool on an MCP server configured inside a local Agentic agent. Arguments are forwarded as JSON; local Agentic confirmation and policy still apply."
+        description = "Start a managed tool Job on an MCP server configured inside a local Agentic agent. Returns a Job envelope after a bounded inline wait; use job.get/job.cancel for later result or cancellation evidence."
     )]
     async fn mcp_call_tool(
         &self,
@@ -1053,22 +1065,20 @@ impl AgenticMcpServer {
             server_id: params.server_id,
             tool_name: params.tool_name,
             arguments: params.arguments.unwrap_or_else(|| json!({})),
+            wait_seconds: params.wait_seconds,
+            timeout_seconds: params.timeout_seconds,
         };
         let command = HubCommand::McpCallTool {
             request_id: random_id("req"),
             payload: payload.clone(),
         };
-        let value = request_agent(
-            &self.state,
-            &payload.agent_id,
-            command,
-            REQUEST_TIMEOUT_SECS,
-        )
-        .await
-        .unwrap_or_else(
-            |reason| json!({ "error": { "code": "mcp_call_tool_timeout", "message": reason } }),
-        );
-        Ok(result_from_mcp_tool_value(value))
+        let request_timeout = payload.effective_wait_seconds() + 2;
+        let value = request_agent(&self.state, &payload.agent_id, command, request_timeout)
+            .await
+            .unwrap_or_else(
+                |reason| json!({ "error": { "code": "mcp_call_tool_timeout", "message": reason } }),
+            );
+        Ok(result_from_value(value))
     }
 
     #[tool(
@@ -1996,8 +2006,18 @@ struct McpCallToolArgs {
     #[schemars(description = "Tool name returned by mcp.listTools.")]
     tool_name: String,
     #[serde(default)]
-    #[schemars(description = "JSON object arguments forwarded to the MCP tool.")]
+    #[schemars(
+        description = "JSON object arguments forwarded to the MCP tool; maximum serialized size 256 KiB."
+    )]
     arguments: Option<Value>,
+    #[serde(default)]
+    #[schemars(description = "Bounded inline wait in seconds, default 5 and capped at 30.")]
+    wait_seconds: Option<u64>,
+    #[serde(default)]
+    #[schemars(
+        description = "Absolute downstream execution deadline in seconds, default 300 and capped at 900."
+    )]
+    timeout_seconds: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
@@ -2364,10 +2384,6 @@ fn ok_json(value: Value) -> CallToolResult {
 
 fn result_from_value(value: Value) -> CallToolResult {
     AgenticResult::from_native_value(value).into_call_tool_result()
-}
-
-fn result_from_mcp_tool_value(value: Value) -> CallToolResult {
-    AgenticResult::from_mcp_or_native_value(value).into_call_tool_result()
 }
 
 fn room_route_error_value(error: RoomRouteError) -> Value {
@@ -2753,23 +2769,6 @@ mod tests {
         assert_eq!(serialized["structuredContent"], value);
         assert_eq!(serialized["isError"], false);
         assert_eq!(serialized["content"][0]["type"], "text");
-    }
-
-    #[test]
-    fn mcp_tool_values_pass_through_mcp_result_envelope() {
-        let value = json!({
-            "content": [{ "type": "image", "data": "aW1hZ2U=", "mimeType": "image/png" }],
-            "_meta": { "hidden": "widget-only" },
-            "isError": false
-        });
-
-        let result = result_from_mcp_tool_value(value);
-        let serialized = serde_json::to_value(result).unwrap();
-
-        assert_eq!(serialized["content"][0]["type"], "image");
-        assert_eq!(serialized["content"][0]["mimeType"], "image/png");
-        assert_eq!(serialized["_meta"]["hidden"], "widget-only");
-        assert!(serialized.get("structuredContent").is_none());
     }
 
     #[tokio::test]

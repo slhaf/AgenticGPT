@@ -109,7 +109,7 @@ For ChatGPT Apps / MCP, use the Apps-friendly MCP endpoint:
 https://<your-hub-domain>/mcp
 ```
 
-The `/mcp` `tools/call` response uses the Hub `AgenticResult` envelope, which is compatible with ChatGPT Apps / MCP tool results. Hub-native tools return `content`, `structuredContent`, and `isError`; `mcp.callTool` passes through downstream MCP result envelopes, including non-text content blocks and `_meta`.
+The `/mcp` `tools/call` response uses the Hub `AgenticResult` envelope, which is compatible with ChatGPT Apps / MCP tool results. Hub-native tools return `content`, `structuredContent`, and `isError`. `mcp.callTool` now returns the same managed `JobResponse` as process and skill creation: it waits briefly, retains a bounded downstream result under `result`, and is followed with `job.get` or `job.cancel` when still active.
 
 OAuth discovery and token exchange are implemented by the Hub OAuth shim.
 

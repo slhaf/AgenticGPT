@@ -1,6 +1,6 @@
 use agentic_gpt_protocol::{
     AgentConnectionMode, AgentMessage, AgentRunReport, BoundedJsonValue, ExecRequest, HubCommand,
-    HubCommandEnvelope, HubMessage, JobInfo, SkillRunRequest, SkillRunResponse,
+    HubCommandEnvelope, HubMessage, JobInfo, SkillRunRequest,
 };
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
@@ -1109,14 +1109,7 @@ pub(crate) async fn run_skill(state: &AppState, request: SkillRunRequest) -> ser
     )
     .await;
     let info = jobs::wait_for_job(state, info, wait_seconds).await;
-    let completed_inline = info.state.is_terminal();
-    let response = SkillRunResponse {
-        status: info.state,
-        completed_inline,
-        job_id: info.job_id.clone(),
-        poll_after_ms: if completed_inline { 0 } else { 1_000 },
-        job: info,
-    };
+    let response = jobs::response(info.clone(), info.state.is_terminal());
     serde_json::to_value(response).unwrap_or_else(|_| {
         serde_json::json!({
             "error": { "code": "skills_run_failed", "message": "failed to encode skill run response" }

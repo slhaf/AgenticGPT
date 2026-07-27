@@ -902,6 +902,19 @@ mod tests {
         assert!(openapi.contains("JobResponse:"));
         assert!(openapi.contains("JobBatchResponse:"));
         assert!(openapi.contains("unknown_after_restart"));
+        assert!(openapi.contains("/v1/mcp/callTool:"));
+        assert!(openapi.contains("McpCallToolRequest:"));
+        assert!(openapi.contains("JobDetail:"));
+        assert!(openapi.contains("JobResponse:"));
+        assert!(!openapi.contains("allOf:"));
+        assert!(openapi.contains("detailAvailable"));
+        assert!(openapi.contains("resultSha256"));
+        assert!(openapi.contains("resultPreview"));
+        assert!(openapi.contains("Absolute downstream execution deadline"));
+        assert!(openapi.contains("maximum serialized size 256 KiB"));
+        assert!(openapi.contains("exceeds 512 KiB"));
+        assert!(!openapi.contains("McpCallToolResponse:"));
+        assert!(!openapi.contains("SkillRunResponse:"));
         for removed in [
             "/v1/exec:",
             "/v1/batchExec:",

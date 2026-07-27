@@ -40,7 +40,7 @@ async fn dispatch_inner(state: AppState, command: HubCommand) -> Result<serde_js
         HubCommand::JobList { payload, .. } => {
             Ok(serde_json::json!({ "jobs": jobs::list_jobs(&state, payload).await }))
         }
-        HubCommand::JobGet { payload, .. } => match jobs::get_job(
+        HubCommand::JobGet { payload, .. } => match jobs::get_job_detail(
             &state,
             &payload.job_id,
             payload.wait_seconds.unwrap_or(0).min(30),
@@ -79,7 +79,7 @@ async fn dispatch_inner(state: AppState, command: HubCommand) -> Result<serde_js
             })),
         },
         HubCommand::McpCallTool { payload, .. } => {
-            match mcp::call_tool(&state, payload, "hub:mcp").await {
+            match mcp::call_tool(&state, payload, "hub:mcp", None).await {
                 Ok(result) => Ok(result),
                 Err(error) => Ok(serde_json::json!({
                     "error": { "code": "mcp_call_tool_failed", "message": error.to_string() }

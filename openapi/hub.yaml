@@ -167,7 +167,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/JobInfo"
+                $ref: "#/components/schemas/JobDetail"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
@@ -196,7 +196,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/JobInfo"
+                $ref: "#/components/schemas/JobDetail"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
@@ -430,7 +430,7 @@ paths:
   /v1/mcp/callTool:
     post:
       operationId: mcpCallTool
-      description: Call a tool on an MCP server configured inside a local Agentic agent. Arguments are forwarded as JSON; local Agentic confirmation and policy apply.
+      description: Start a managed downstream MCP tool Job through a local Agentic agent. Returns a bounded JobResponse; use job.get/job.cancel for later result or cancellation evidence.
       x-openai-isConsequential: false
       requestBody:
         required: true
@@ -440,11 +440,11 @@ paths:
               $ref: "#/components/schemas/McpCallToolRequest"
       responses:
         "200":
-          description: Result returned by the MCP tool.
+          description: Managed MCP Job envelope after the bounded inline wait.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/McpCallToolResponse"
+                $ref: "#/components/schemas/JobResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
@@ -936,7 +936,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SkillRunResponse"
+                $ref: "#/components/schemas/JobResponse"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -1703,6 +1703,19 @@ components:
           type: object
           additionalProperties: true
           properties: {}
+          description: Downstream tool arguments; maximum serialized size 256 KiB.
+        waitSeconds:
+          type: integer
+          minimum: 0
+          maximum: 30
+          default: 5
+          description: Bounded inline wait before returning the Job envelope.
+        timeoutSeconds:
+          type: integer
+          minimum: 1
+          maximum: 900
+          default: 300
+          description: Absolute downstream execution deadline.
     McpListToolsResponse:
       type: object
       required:
@@ -1723,26 +1736,6 @@ components:
                 type: object
                 additionalProperties: true
                 properties: {}
-    McpCallToolResponse:
-      type: object
-      additionalProperties: true
-      properties:
-        content:
-          type: array
-          items:
-            type: object
-            additionalProperties: true
-            properties:
-              type:
-                type: string
-              text:
-                type: string
-        structuredContent:
-          type: object
-          additionalProperties: true
-          properties: {}
-        isError:
-          type: boolean
     UserNotifyChannelsResponse:
       type: object
       required:
@@ -2830,8 +2823,6 @@ components:
           minimum: 0
           maximum: 30
           default: 5
-    SkillRunResponse:
-      $ref: "#/components/schemas/JobResponse"
     SkillsSearchResponse:
       type: object
       required:
@@ -3051,10 +3042,43 @@ components:
           type: boolean
         cancelOutcome:
           type: string
-          enum: [cancelled, cancelled_before_start, already_terminal, cancel_failed]
+          description: Bounded kind-specific cancellation outcome such as cancelled, notification_sent, detached, already_terminal, or cancel_failed.
         terminationEvidence:
           type: string
-          enum: [local_process_kill_completed, cancel_flag_before_process_start, process_exit_after_cancel, process_exit_status, process_kill_error, job_state]
+          description: Bounded evidence describing the local/remote event actually observed.
+    JobError:
+      type: object
+      required: [code, message]
+      additionalProperties: false
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+    JobDetail:
+      type: object
+      required: [job, detailAvailable, resultTruncated]
+      additionalProperties: false
+      properties:
+        job:
+          $ref: "#/components/schemas/JobInfo"
+        detailAvailable:
+          type: boolean
+          description: True when result/error detail came from the live Agent registry; false for Hub cache-only fallback.
+        result:
+          description: Retained bounded result. Omitted when the serialized result exceeds 512 KiB.
+        error:
+          $ref: "#/components/schemas/JobError"
+        resultTruncated:
+          type: boolean
+        resultBytes:
+          type: integer
+          minimum: 0
+        resultSha256:
+          type: string
+        resultPreview:
+          type: string
+          description: UTF-8-safe bounded preview for an omitted oversized result.
     JobResponse:
       type: object
       required:
@@ -3063,6 +3087,8 @@ components:
         - jobId
         - pollAfterMs
         - job
+        - detailAvailable
+        - resultTruncated
       additionalProperties: false
       properties:
         status:
@@ -3076,6 +3102,23 @@ components:
           minimum: 0
         job:
           $ref: "#/components/schemas/JobInfo"
+        detailAvailable:
+          type: boolean
+          description: True when result/error detail came from the live Agent registry.
+        result:
+          description: Retained bounded result. Omitted when the serialized result exceeds 512 KiB.
+        error:
+          $ref: "#/components/schemas/JobError"
+        resultTruncated:
+          type: boolean
+        resultBytes:
+          type: integer
+          minimum: 0
+        resultSha256:
+          type: string
+        resultPreview:
+          type: string
+          description: UTF-8-safe bounded preview for an omitted oversized result.
     ProcessBatchResponse:
       oneOf:
         - $ref: "#/components/schemas/JobBatchResponse"

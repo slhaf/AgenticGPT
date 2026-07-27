@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use chrono::Utc;
+use sha2::{Digest, Sha256};
 
 pub(crate) const DEFAULT_BACKUP_LIMIT: usize = 5;
 pub(crate) const CONFIRM_TIMEOUT_SECS: u64 = 45;
@@ -11,17 +12,41 @@ pub(crate) const RECONNECT_DELAY_SECS: u64 = 3;
 pub(crate) const CONNECT_TIMEOUT_SECS: u64 = 20;
 pub(crate) const HEARTBEAT_INTERVAL_SECS: u64 = 15;
 pub(crate) const HEARTBEAT_ACK_TIMEOUT_SECS: u64 = 45;
+const MCP_ARGUMENT_KEY_LIMIT: usize = 32;
+const MCP_ARGUMENT_KEY_CHAR_LIMIT: usize = 80;
+
+pub(crate) fn bounded_mcp_argument_keys(
+    arguments: &serde_json::Value,
+) -> (Vec<String>, usize, bool) {
+    let mut keys = arguments
+        .as_object()
+        .map(|arguments| arguments.keys().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    keys.sort();
+    let total = keys.len();
+    let mut truncated = total > MCP_ARGUMENT_KEY_LIMIT;
+    keys.truncate(MCP_ARGUMENT_KEY_LIMIT);
+    for key in &mut keys {
+        let bounded = truncate_chars(key, MCP_ARGUMENT_KEY_CHAR_LIMIT);
+        truncated |= bounded != *key;
+        *key = bounded;
+    }
+    (keys, total, truncated)
+}
 
 pub(crate) fn mcp_tool_command_preview(
     server_id: &str,
     tool_name: &str,
     arguments: &serde_json::Value,
 ) -> String {
-    let arguments = serde_json::to_string_pretty(arguments)
-        .unwrap_or_else(|_| serde_json::to_string(arguments).unwrap_or_else(|_| "{}".to_string()));
+    let bytes = serde_json::to_vec(arguments).unwrap_or_default();
+    let (keys, total_keys, keys_truncated) = bounded_mcp_argument_keys(arguments);
+    let sha256 = format!("sha256:{:x}", Sha256::digest(&bytes));
     format!(
-        "MCP Tool Call\nServer: {server_id}\nTool: {tool_name}\nArguments:\n{}",
-        truncate_chars(&arguments, 2000)
+        "MCP Tool Call\nServer: {server_id}\nTool: {tool_name}\nArgument keys (showing {} of {total_keys}, truncated={keys_truncated}): [{}]\nArgument bytes: {}\nArgument SHA-256: {sha256}",
+        keys.len(),
+        keys.join(", "),
+        bytes.len()
     )
 }
 
@@ -160,6 +185,44 @@ mod tests {
 
         let foreground = render_log_line("INFO", "component: ready", false, timestamp);
         assert!(foreground.starts_with(&format!("{} INFO ", timestamp.to_rfc3339())));
+    }
+
+    #[test]
+    fn mcp_confirmation_preview_is_sorted_bounded_metadata_without_values() {
+        let preview = mcp_tool_command_preview(
+            "server",
+            "tool",
+            &serde_json::json!({
+                "zeta": "super-secret-value",
+                "alpha": 1
+            }),
+        );
+        assert!(preview.contains("Argument keys (showing 2 of 2, truncated=false): [alpha, zeta]"));
+        assert!(preview.contains("Argument bytes:"));
+        assert!(preview.contains("Argument SHA-256: sha256:"));
+        assert!(!preview.contains("super-secret-value"));
+        assert!(!preview.contains("\"alpha\":1"));
+    }
+
+    #[test]
+    fn mcp_argument_key_summary_is_counted_and_bounded() {
+        let mut arguments = serde_json::Map::new();
+        for index in 0..40 {
+            arguments.insert(
+                format!("key-{index:02}-{}", "x".repeat(100)),
+                serde_json::json!("hidden-value"),
+            );
+        }
+        let value = serde_json::Value::Object(arguments);
+        let (keys, total, truncated) = bounded_mcp_argument_keys(&value);
+        assert_eq!(total, 40);
+        assert_eq!(keys.len(), 32);
+        assert!(truncated);
+        assert!(keys.iter().all(|key| key.chars().count() <= 83));
+        let preview = mcp_tool_command_preview("server", "tool", &value);
+        assert!(preview.contains("showing 32 of 40, truncated=true"));
+        assert!(!preview.contains("hidden-value"));
+        assert!(preview.len() < 4_096);
     }
 
     #[test]

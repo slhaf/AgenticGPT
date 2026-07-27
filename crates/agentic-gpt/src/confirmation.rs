@@ -488,19 +488,30 @@ pub(crate) async fn fail_pending_confirmations(state: &AppState, reason: &str) {
     }
 }
 
-pub(crate) async fn authorize_mcp_tool_call(
+pub(crate) async fn authorize_mcp_tool_call_cancellable(
     state: &AppState,
     server_id: &str,
     tool_name: &str,
     arguments: &serde_json::Value,
+    cancel_requested: Arc<AtomicBool>,
 ) -> String {
     if temporary_mcp_allowed(state, server_id).await {
         return "temporary_mcp_allow".to_string();
     }
+    if cancel_requested.load(Ordering::Acquire) {
+        return "cancelled".to_string();
+    }
 
     let config = state.config.read().await.clone();
-    let decision =
-        request_mcp_tool_confirmation(&state, &config, server_id, tool_name, arguments).await;
+    let decision = request_mcp_tool_confirmation_cancellable(
+        state,
+        &config,
+        server_id,
+        tool_name,
+        arguments,
+        cancel_requested,
+    )
+    .await;
     match decision.as_str() {
         "allow_mcp_server_15m" => add_temporary_mcp_allow(state, server_id, 15).await,
         "allow_mcp_server_30m" => add_temporary_mcp_allow(state, server_id, 30).await,
@@ -519,6 +530,11 @@ async fn temporary_mcp_allowed(state: &AppState, server_id: &str) -> bool {
         .any(|allow| allow.agent_id == agent_id && allow.server_id == server_id)
 }
 
+#[cfg(test)]
+pub(crate) async fn allow_mcp_server_for_test(state: &AppState, server_id: &str) {
+    add_temporary_mcp_allow(state, server_id, 15).await;
+}
+
 async fn add_temporary_mcp_allow(state: &AppState, server_id: &str, minutes: i64) {
     let agent_id = state.config.read().await.agent_id.clone();
     let expires_at = Utc::now() + chrono::Duration::minutes(minutes);
@@ -532,23 +548,38 @@ async fn add_temporary_mcp_allow(state: &AppState, server_id: &str, minutes: i64
     });
 }
 
-async fn request_mcp_tool_confirmation(
+async fn request_mcp_tool_confirmation_cancellable(
     state: &AppState,
     config: &Config,
     server_id: &str,
     tool_name: &str,
     arguments: &serde_json::Value,
+    cancel_requested: Arc<AtomicBool>,
 ) -> String {
     for channel in &config.confirmation_provider.channels {
+        if cancel_requested.load(Ordering::Acquire) {
+            return "cancelled".to_string();
+        }
         let result = match channel {
             ConfirmationChannel::Freedesktop => {
-                request_freedesktop_mcp_confirmation(config, server_id, tool_name, arguments).await
+                tokio::select! {
+                    result = request_freedesktop_mcp_confirmation(config, server_id, tool_name, arguments) => result,
+                    _ = wait_for_cancellation(cancel_requested.clone()) => "cancelled".to_string(),
+                }
             }
             ConfirmationChannel::Ntfy => {
-                request_hub_mcp_confirmation(state, config, server_id, tool_name, arguments).await
+                request_hub_mcp_confirmation_cancellable(
+                    state,
+                    config,
+                    server_id,
+                    tool_name,
+                    arguments,
+                    cancel_requested.clone(),
+                )
+                .await
             }
         };
-        if result != "confirmation_provider_unavailable" {
+        if result == "cancelled" || result != "confirmation_provider_unavailable" {
             return result;
         }
     }
@@ -606,13 +637,17 @@ async fn request_freedesktop_mcp_confirmation(
     }
 }
 
-async fn request_hub_mcp_confirmation(
+async fn request_hub_mcp_confirmation_cancellable(
     state: &AppState,
     config: &Config,
     server_id: &str,
     tool_name: &str,
     arguments: &serde_json::Value,
+    cancel_requested: Arc<AtomicBool>,
 ) -> String {
+    if cancel_requested.load(Ordering::Acquire) {
+        return "cancelled".to_string();
+    }
     let request_id = format!("confirm_req_{}", Uuid::new_v4().simple());
     let (tx, rx) = oneshot::channel();
     state
@@ -644,13 +679,17 @@ async fn request_hub_mcp_confirmation(
     log_info(format!(
         "hub MCP confirmation requested; requestId={request_id}; serverId={server_id}; toolName={tool_name}"
     ));
-    match timeout(Duration::from_secs(CONFIRM_TIMEOUT_SECS + 5), rx).await {
-        Ok(Ok(decision)) => decision,
-        _ => {
-            state.pending_confirmations.lock().await.remove(&request_id);
-            "timeout".to_string()
+    let result = tokio::select! {
+        result = timeout(Duration::from_secs(CONFIRM_TIMEOUT_SECS + 5), rx) => {
+            match result {
+                Ok(Ok(decision)) => decision,
+                _ => "timeout".to_string(),
+            }
         }
-    }
+        _ = wait_for_cancellation(cancel_requested) => "cancelled".to_string(),
+    };
+    state.pending_confirmations.lock().await.remove(&request_id);
+    result
 }
 
 pub(crate) fn confirmation_decision_value(decision: ConfirmationDecision) -> String {

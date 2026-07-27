@@ -340,7 +340,12 @@ pub(crate) async fn get_job(
     match request_agent(&state, &query.agent_id, command, timeout_seconds).await {
         Ok(value) if value.get("error").is_none() => Json(value).into_response(),
         _ => match cached_job(&state, &query.agent_id, &job_id).await {
-            Some(job) => Json(job).into_response(),
+            Some(job) => Json(json!({
+                "job": job,
+                "detailAvailable": false,
+                "resultTruncated": false
+            }))
+            .into_response(),
             None => api_error(StatusCode::NOT_FOUND, "job_not_found", "Job was not found"),
         },
     }
@@ -366,10 +371,8 @@ pub(crate) async fn cancel_job(
     };
     match request_agent(&state, &query.agent_id, command, 5).await {
         Ok(value) if value.get("error").is_none() => Json(value).into_response(),
-        _ => match cached_job(&state, &query.agent_id, &job_id).await {
-            Some(job) => Json(job).into_response(),
-            None => api_error(StatusCode::NOT_FOUND, "job_not_found", "Job was not found"),
-        },
+        Ok(value) => Json(value).into_response(),
+        Err(reason) => api_error(StatusCode::BAD_GATEWAY, "job_cancel_unavailable", reason),
     }
 }
 
@@ -639,7 +642,8 @@ pub(crate) async fn mcp_call_tool(
         request_id: random_id("req"),
         payload: payload.clone(),
     };
-    match request_agent(&state, &payload.agent_id, command, REQUEST_TIMEOUT_SECS).await {
+    let request_timeout = payload.effective_wait_seconds() + 2;
+    match request_agent(&state, &payload.agent_id, command, request_timeout).await {
         Ok(value) => Json(value).into_response(),
         Err(reason) => api_error(StatusCode::GATEWAY_TIMEOUT, "mcp_call_tool_timeout", reason),
     }

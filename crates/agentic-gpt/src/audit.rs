@@ -30,6 +30,30 @@ pub(crate) struct AuditRecord {
     pub(crate) skill_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) installed_digest: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) mcp_server_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) mcp_tool_name: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) argument_keys: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) argument_key_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) argument_keys_truncated: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) argument_bytes: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) argument_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) config_revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) result_bytes: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) result_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) terminal_state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) termination_evidence: Option<String>,
 }
 
 #[derive(Serialize)]

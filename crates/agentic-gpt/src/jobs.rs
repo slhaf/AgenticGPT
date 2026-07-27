@@ -3,11 +3,13 @@ use std::process::Stdio;
 use std::sync::Arc;
 
 use agentic_gpt_protocol::{
-    BatchExecRequest, ExecRequest, JobBatchResponse, JobInfo, JobKind, JobListRequest, JobResponse,
-    JobState,
+    BatchExecRequest, ExecRequest, JobBatchResponse, JobDetail, JobError, JobInfo, JobKind,
+    JobListRequest, JobResponse, JobState,
 };
 use anyhow::Result;
 use chrono::{Duration as ChronoDuration, Utc};
+use rmcp::{model::RequestId, service::Peer, RoleClient};
+use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Child;
 use tokio::sync::{Mutex, OwnedRwLockReadGuard, RwLock};
@@ -25,6 +27,10 @@ use crate::{
 const TERMINAL_JOB_RETENTION_HOURS: i64 = 24;
 const MAX_TERMINAL_JOBS: usize = 100;
 const MAX_LIST_JOBS: usize = 100;
+pub(crate) const MAX_MCP_ARGUMENT_BYTES: usize = 256 * 1024;
+pub(crate) const MAX_MCP_RESULT_BYTES: usize = 512 * 1024;
+const MAX_MCP_RESULT_PREVIEW_BYTES: usize = 8 * 1024;
+const MAX_JOB_ERROR_BYTES: usize = 8 * 1024;
 
 pub(crate) fn capacity_rejection(active: usize, requested: usize, limit: usize) -> String {
     format!("max_active_jobs_reached; active={active}; requested={requested}; limit={limit}")
@@ -38,13 +44,30 @@ pub(crate) type TerminalEventHook = Arc<dyn Fn(&JobInfo) + Send + Sync>;
 
 pub(crate) struct ManagedJob {
     info: JobInfo,
+    detail: ManagedJobDetail,
     runtime: ManagedJobRuntime,
     cancel_requested: Arc<std::sync::atomic::AtomicBool>,
     audit: Option<ManagedAuditContext>,
 }
 
+#[derive(Default)]
+struct ManagedJobDetail {
+    result: Option<serde_json::Value>,
+    error: Option<JobError>,
+    result_truncated: bool,
+    result_bytes: Option<usize>,
+    result_sha256: Option<String>,
+    result_preview: Option<String>,
+}
+
 pub(crate) enum ManagedJobRuntime {
     Process(ManagedProcessRuntime),
+    Mcp(ManagedMcpRuntime),
+}
+
+pub(crate) struct ManagedMcpRuntime {
+    peer: Option<Peer<RoleClient>>,
+    request_id: Option<RequestId>,
 }
 
 pub(crate) struct ManagedProcessRuntime {
@@ -83,6 +106,25 @@ pub(crate) struct ManagedProcessSpec {
     pub(crate) terminal_event_hook: Option<TerminalEventHook>,
 }
 
+pub(crate) struct ManagedMcpSpec {
+    pub(crate) agent_id: String,
+    pub(crate) server_id: String,
+    pub(crate) tool_name: String,
+    pub(crate) request_source: String,
+    pub(crate) argument_keys: Vec<String>,
+    pub(crate) argument_key_count: usize,
+    pub(crate) argument_keys_truncated: bool,
+    pub(crate) argument_bytes: usize,
+    pub(crate) argument_sha256: String,
+    pub(crate) config_revision: String,
+    pub(crate) terminal_event_hook: Option<TerminalEventHook>,
+}
+
+pub(crate) struct ManagedMcpRegistration {
+    pub(crate) info: JobInfo,
+    pub(crate) cancel_requested: Arc<std::sync::atomic::AtomicBool>,
+}
+
 struct ManagedAuditContext {
     config: Config,
     request_source: String,
@@ -92,6 +134,14 @@ struct ManagedAuditContext {
     skill_id: Option<String>,
     skill_path: Option<String>,
     installed_digest: Option<String>,
+    mcp_server_id: Option<String>,
+    mcp_tool_name: Option<String>,
+    argument_keys: Vec<String>,
+    argument_key_count: Option<usize>,
+    argument_keys_truncated: Option<bool>,
+    argument_bytes: Option<usize>,
+    argument_sha256: Option<String>,
+    config_revision: Option<String>,
     terminal_event_hook: Option<TerminalEventHook>,
 }
 
@@ -211,13 +261,310 @@ pub(crate) async fn start_skill_job_with_hook_and_source(
     .await
 }
 
+pub(crate) async fn register_mcp_job(
+    state: &AppState,
+    spec: ManagedMcpSpec,
+) -> Result<ManagedMcpRegistration, String> {
+    let config = state.config.read().await.clone();
+    let job_id = state.new_job_id();
+    let now = Utc::now();
+    let info = JobInfo {
+        agent_id: spec.agent_id,
+        job_id: job_id.clone(),
+        kind: JobKind::Mcp,
+        state: JobState::WaitingConfirmation,
+        created_at: now,
+        started_at: now,
+        updated_at: now,
+        finished_at: None,
+        program: None,
+        args: Vec::new(),
+        working_directory: None,
+        command_preview: None,
+        exit_code: None,
+        stdout_tail: String::new(),
+        stderr_tail: String::new(),
+        truncated: false,
+        reject_reason: None,
+        skill_id: None,
+        skill_path: None,
+        installed_digest: None,
+        mcp_server_id: Some(spec.server_id.clone()),
+        mcp_tool_name: Some(spec.tool_name.clone()),
+        cancel_requested: false,
+        cancel_outcome: None,
+        termination_evidence: None,
+    };
+    let cancel_requested = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut jobs = state.jobs.lock().await;
+    refresh_jobs(state, &mut jobs).await;
+    let active = jobs
+        .values()
+        .filter(|job| job.info.state.is_active())
+        .count();
+    let limit = resolved_job_limit(&config);
+    if active >= limit {
+        return Err(capacity_rejection(active, 1, limit));
+    }
+    jobs.insert(
+        job_id,
+        ManagedJob {
+            info: info.clone(),
+            detail: ManagedJobDetail::default(),
+            runtime: ManagedJobRuntime::Mcp(ManagedMcpRuntime {
+                peer: None,
+                request_id: None,
+            }),
+            cancel_requested: cancel_requested.clone(),
+            audit: Some(ManagedAuditContext {
+                config,
+                request_source: spec.request_source,
+                need_confirm: true,
+                policy_decision: "pending".to_string(),
+                confirmation_result: None,
+                skill_id: None,
+                skill_path: None,
+                installed_digest: None,
+                mcp_server_id: Some(spec.server_id),
+                mcp_tool_name: Some(spec.tool_name),
+                argument_keys: spec.argument_keys,
+                argument_key_count: Some(spec.argument_key_count),
+                argument_keys_truncated: Some(spec.argument_keys_truncated),
+                argument_bytes: Some(spec.argument_bytes),
+                argument_sha256: Some(spec.argument_sha256),
+                config_revision: Some(spec.config_revision),
+                terminal_event_hook: spec.terminal_event_hook,
+            }),
+        },
+    );
+    Ok(ManagedMcpRegistration {
+        info,
+        cancel_requested,
+    })
+}
+
+pub(crate) async fn set_mcp_preflight_rejection(
+    state: &AppState,
+    job_id: &str,
+) -> Result<(), String> {
+    let mut jobs = state.jobs.lock().await;
+    let job = jobs
+        .get_mut(job_id)
+        .ok_or_else(|| missing_job_reason(state, job_id))?;
+    if let Some(audit) = job.audit.as_mut() {
+        audit.policy_decision = "Rejected".to_string();
+        audit.confirmation_result = None;
+    }
+    Ok(())
+}
+
+pub(crate) async fn set_mcp_authorization(
+    state: &AppState,
+    job_id: &str,
+    decision: &str,
+) -> Result<(), String> {
+    let mut jobs = state.jobs.lock().await;
+    let job = jobs
+        .get_mut(job_id)
+        .ok_or_else(|| missing_job_reason(state, job_id))?;
+    let Some(audit) = job.audit.as_mut() else {
+        return Ok(());
+    };
+    audit.policy_decision = if matches!(
+        decision,
+        "allow_once" | "allow_mcp_server_15m" | "allow_mcp_server_30m" | "temporary_mcp_allow"
+    ) {
+        "Allow".to_string()
+    } else {
+        "Confirm".to_string()
+    };
+    audit.confirmation_result = Some(decision.to_string());
+    Ok(())
+}
+
+pub(crate) async fn set_mcp_job_state(
+    state: &AppState,
+    job_id: &str,
+    state_name: JobState,
+) -> Result<(), String> {
+    let mut jobs = state.jobs.lock().await;
+    let job = jobs
+        .get_mut(job_id)
+        .ok_or_else(|| missing_job_reason(state, job_id))?;
+    if job.info.state.is_active() {
+        job.info.state = state_name;
+        job.info.updated_at = Utc::now();
+    }
+    Ok(())
+}
+
+pub(crate) async fn attach_mcp_request(
+    state: &AppState,
+    job_id: &str,
+    peer: Peer<RoleClient>,
+    request_id: RequestId,
+) -> Result<(), String> {
+    let mut jobs = state.jobs.lock().await;
+    let job = jobs
+        .get_mut(job_id)
+        .ok_or_else(|| missing_job_reason(state, job_id))?;
+    let ManagedJobRuntime::Mcp(runtime) = &mut job.runtime else {
+        return Err("job_kind_mismatch".to_string());
+    };
+    if !job.info.state.is_active() {
+        return Err("job_not_active".to_string());
+    }
+    runtime.peer = Some(peer);
+    runtime.request_id = Some(request_id);
+    job.info.state = JobState::Running;
+    job.info.updated_at = Utc::now();
+    Ok(())
+}
+
+pub(crate) async fn complete_mcp_result(
+    state: &AppState,
+    job_id: &str,
+    value: serde_json::Value,
+    downstream_error: bool,
+    cancel_outcome: Option<(&str, &str)>,
+) -> Result<JobDetail, String> {
+    let bytes = serde_json::to_vec(&value).map_err(|_| "mcp_result_encode_failed".to_string())?;
+    let byte_count = bytes.len();
+    let sha256 = format!("sha256:{:x}", Sha256::digest(&bytes));
+    let truncated = byte_count > MAX_MCP_RESULT_BYTES;
+    let preview = truncated.then(|| {
+        let text = String::from_utf8_lossy(&bytes);
+        utf8_prefix(&text, MAX_MCP_RESULT_PREVIEW_BYTES).to_string()
+    });
+    let mut jobs = state.jobs.lock().await;
+    let job = jobs
+        .get_mut(job_id)
+        .ok_or_else(|| missing_job_reason(state, job_id))?;
+    if job.info.state.is_terminal() {
+        return Ok(job_detail(job));
+    }
+    job.detail.result = (!truncated).then_some(value);
+    job.detail.result_truncated = truncated;
+    job.info.truncated |= truncated;
+    job.detail.result_bytes = Some(byte_count);
+    job.detail.result_sha256 = Some(sha256);
+    job.detail.result_preview = preview;
+    if downstream_error {
+        job.detail.error = Some(JobError {
+            code: "mcp_tool_error".to_string(),
+            message: "Downstream MCP tool returned isError=true".to_string(),
+        });
+    }
+    let now = Utc::now();
+    job.info.state = if downstream_error {
+        JobState::Failed
+    } else {
+        JobState::Completed
+    };
+    job.info.updated_at = now;
+    job.info.finished_at = Some(now);
+    if let Some((outcome, evidence)) = cancel_outcome {
+        job.info.cancel_requested = true;
+        job.info.cancel_outcome = Some(outcome.to_string());
+        job.info.termination_evidence = Some(evidence.to_string());
+    } else {
+        job.info.termination_evidence = Some("remote_response".to_string());
+    }
+    finalize_job(state, job).await;
+    let detail = job_detail(job);
+    prune_terminal_jobs(&mut jobs);
+    Ok(detail)
+}
+
+pub(crate) async fn finish_mcp_error(
+    state: &AppState,
+    job_id: &str,
+    terminal: JobState,
+    code: impl Into<String>,
+    message: impl Into<String>,
+    cancel_outcome: Option<&str>,
+    evidence: Option<&str>,
+) -> Result<JobDetail, String> {
+    let code = code.into();
+    let message = bounded_error_message(message.into());
+    let mut jobs = state.jobs.lock().await;
+    let job = jobs
+        .get_mut(job_id)
+        .ok_or_else(|| missing_job_reason(state, job_id))?;
+    if job.info.state.is_terminal() {
+        return Ok(job_detail(job));
+    }
+    let now = Utc::now();
+    job.info.state = terminal;
+    job.info.updated_at = now;
+    job.info.finished_at = Some(now);
+    job.info.reject_reason = Some(code.clone());
+    job.detail.error = Some(JobError { code, message });
+    if let Some(outcome) = cancel_outcome {
+        job.info.cancel_requested = true;
+        job.info.cancel_outcome = Some(outcome.to_string());
+    }
+    if let Some(evidence) = evidence {
+        job.info.termination_evidence = Some(evidence.to_string());
+    }
+    finalize_job(state, job).await;
+    let detail = job_detail(job);
+    prune_terminal_jobs(&mut jobs);
+    Ok(detail)
+}
+
+pub(crate) async fn mcp_job_response(
+    state: &AppState,
+    job_id: &str,
+    wait_seconds: u64,
+) -> Result<JobResponse, String> {
+    let detail = get_job_detail(state, job_id, wait_seconds).await?;
+    let completed_inline = detail.job.state.is_terminal();
+    Ok(JobResponse {
+        status: detail.job.state,
+        completed_inline,
+        job_id: detail.job.job_id.clone(),
+        poll_after_ms: if completed_inline { 0 } else { 1_000 },
+        detail,
+    })
+}
+
+fn bounded_error_message(value: String) -> String {
+    if value.len() <= MAX_JOB_ERROR_BYTES {
+        return value;
+    }
+    const SUFFIX: &str = "...[truncated]";
+    let prefix_limit = MAX_JOB_ERROR_BYTES.saturating_sub(SUFFIX.len());
+    format!("{}{}", utf8_prefix(&value, prefix_limit), SUFFIX)
+}
+
+fn utf8_prefix(value: &str, max_bytes: usize) -> &str {
+    if value.len() <= max_bytes {
+        return value;
+    }
+    let mut end = max_bytes;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end]
+}
+
 pub(crate) fn response(job: JobInfo, completed_inline: bool) -> JobResponse {
     JobResponse {
         status: job.state,
         completed_inline,
         job_id: job.job_id.clone(),
         poll_after_ms: if completed_inline { 0 } else { 1_000 },
-        job,
+        detail: JobDetail {
+            job,
+            detail_available: true,
+            result: None,
+            error: None,
+            result_truncated: false,
+            result_bytes: None,
+            result_sha256: None,
+            result_preview: None,
+        },
     }
 }
 
@@ -400,6 +747,14 @@ pub(crate) async fn start_prepared_managed_batch(
                 skill_id: None,
                 skill_path: None,
                 installed_digest: None,
+                mcp_server_id: None,
+                mcp_tool_name: None,
+                argument_keys: Vec::new(),
+                argument_key_count: None,
+                argument_keys_truncated: None,
+                argument_bytes: None,
+                argument_sha256: None,
+                config_revision: None,
                 terminal_event_hook: spec.terminal_event_hook.clone(),
             };
             let stdout = runtime.stdout.clone();
@@ -408,6 +763,7 @@ pub(crate) async fn start_prepared_managed_batch(
                 info.job_id.clone(),
                 ManagedJob {
                     info: info.clone(),
+                    detail: ManagedJobDetail::default(),
                     runtime: ManagedJobRuntime::Process(runtime),
                     cancel_requested: cancel_requested.clone(),
                     audit: Some(audit),
@@ -479,6 +835,14 @@ async fn start_process_job_inner(
         skill_id: options.skill_id,
         skill_path: options.skill_path,
         installed_digest: options.installed_digest,
+        mcp_server_id: None,
+        mcp_tool_name: None,
+        argument_keys: Vec::new(),
+        argument_key_count: None,
+        argument_keys_truncated: None,
+        argument_bytes: None,
+        argument_sha256: None,
+        config_revision: None,
         terminal_event_hook: options.terminal_event_hook,
     };
     let capacity_error = {
@@ -494,6 +858,7 @@ async fn start_process_job_inner(
             job_id.clone(),
             ManagedJob {
                 info: info.clone(),
+                detail: ManagedJobDetail::default(),
                 runtime: ManagedJobRuntime::Process(runtime),
                 cancel_requested: cancel_requested.clone(),
                 audit: Some(audit),
@@ -678,7 +1043,12 @@ async fn run_async_job(
     }
     job.info.state = JobState::Running;
     job.info.updated_at = Utc::now();
-    let ManagedJobRuntime::Process(runtime) = &mut job.runtime;
+    let ManagedJobRuntime::Process(runtime) = &mut job.runtime else {
+        drop(jobs);
+        let mut child = child;
+        let _ = child.kill().await;
+        return;
+    };
     runtime.child = Some(child);
 }
 
@@ -775,8 +1145,9 @@ async fn finish_job(state: &AppState, job_id: &str, terminal: JobState, reason: 
                 job.info.cancel_outcome = Some("cancelled".to_string());
                 job.info.termination_evidence = Some("local_process".to_string());
             }
-            let ManagedJobRuntime::Process(runtime) = &mut job.runtime;
-            runtime.skill_lease = None;
+            if let ManagedJobRuntime::Process(runtime) = &mut job.runtime {
+                runtime.skill_lease = None;
+            }
         }
         finalize_job(state, job).await;
     }
@@ -794,7 +1165,11 @@ async fn finalize_job(state: &AppState, job: &mut ManagedJob) {
             task_id: None,
             job_id: Some(info.job_id.clone()),
             time: info.updated_at,
-            program: info.program.clone().unwrap_or_default(),
+            program: if info.kind == JobKind::Mcp {
+                "mcp.callTool".to_string()
+            } else {
+                info.program.clone().unwrap_or_default()
+            },
             args: info.args.clone(),
             working_directory: info.working_directory.clone(),
             need_confirm: context.need_confirm,
@@ -804,12 +1179,24 @@ async fn finalize_job(state: &AppState, job: &mut ManagedJob) {
             duration_ms: (info.updated_at - info.started_at)
                 .num_milliseconds()
                 .max(0) as u128,
-            truncated: info.truncated,
+            truncated: info.truncated || job.detail.result_truncated,
             request_source: context.request_source,
             reject_reason: info.reject_reason.clone(),
             skill_id: context.skill_id,
             skill_path: context.skill_path,
             installed_digest: context.installed_digest,
+            mcp_server_id: context.mcp_server_id,
+            mcp_tool_name: context.mcp_tool_name,
+            argument_keys: context.argument_keys,
+            argument_key_count: context.argument_key_count,
+            argument_keys_truncated: context.argument_keys_truncated,
+            argument_bytes: context.argument_bytes,
+            argument_sha256: context.argument_sha256,
+            config_revision: context.config_revision,
+            result_bytes: job.detail.result_bytes,
+            result_sha256: job.detail.result_sha256.clone(),
+            terminal_state: Some(info.state.label().to_string()),
+            termination_evidence: info.termination_evidence.clone(),
         },
     );
     crate::hub::report_job(state, info.clone());
@@ -884,6 +1271,33 @@ pub(crate) async fn get_job(
     Ok(wait_for_job(state, info, wait_seconds).await)
 }
 
+pub(crate) async fn get_job_detail(
+    state: &AppState,
+    job_id: &str,
+    wait_seconds: u64,
+) -> Result<JobDetail, String> {
+    get_job(state, job_id, wait_seconds).await?;
+    let mut jobs = state.jobs.lock().await;
+    let job = jobs
+        .get_mut(job_id)
+        .ok_or_else(|| missing_job_reason(state, job_id))?;
+    refresh_job(state, job).await;
+    Ok(job_detail(job))
+}
+
+fn job_detail(job: &ManagedJob) -> JobDetail {
+    JobDetail {
+        job: job.info.clone(),
+        detail_available: true,
+        result: job.detail.result.clone(),
+        error: job.detail.error.clone(),
+        result_truncated: job.detail.result_truncated,
+        result_bytes: job.detail.result_bytes,
+        result_sha256: job.detail.result_sha256.clone(),
+        result_preview: job.detail.result_preview.clone(),
+    }
+}
+
 async fn get_job_now(state: &AppState, job_id: &str) -> Option<JobInfo> {
     let mut jobs = state.jobs.lock().await;
     let job = jobs.get_mut(job_id)?;
@@ -893,7 +1307,22 @@ async fn get_job_now(state: &AppState, job_id: &str) -> Option<JobInfo> {
     Some(info)
 }
 
-pub(crate) async fn cancel_job(state: &AppState, job_id: &str) -> Result<JobInfo, String> {
+pub(crate) async fn cancel_job(state: &AppState, job_id: &str) -> Result<JobDetail, String> {
+    let kind = {
+        let mut jobs = state.jobs.lock().await;
+        let Some(job) = jobs.get_mut(job_id) else {
+            return Err(missing_job_reason(state, job_id));
+        };
+        refresh_job(state, job).await;
+        job.info.kind
+    };
+    match kind {
+        JobKind::Process | JobKind::Skill => cancel_process_job(state, job_id).await,
+        JobKind::Mcp => cancel_mcp_job(state, job_id).await,
+    }
+}
+
+async fn cancel_process_job(state: &AppState, job_id: &str) -> Result<JobDetail, String> {
     let child = {
         let mut jobs = state.jobs.lock().await;
         let Some(job) = jobs.get_mut(job_id) else {
@@ -906,11 +1335,13 @@ pub(crate) async fn cancel_job(state: &AppState, job_id: &str) -> Result<JobInfo
         if job.info.state.is_terminal() {
             job.info.cancel_outcome = Some("already_terminal".to_string());
             job.info.termination_evidence = Some("job_state".to_string());
-            return Ok(job.info.clone());
+            return Ok(job_detail(job));
         }
         job.info.state = JobState::CancelRequested;
         job.info.updated_at = Utc::now();
-        let ManagedJobRuntime::Process(runtime) = &mut job.runtime;
+        let ManagedJobRuntime::Process(runtime) = &mut job.runtime else {
+            return Err("job_kind_mismatch".to_string());
+        };
         match runtime.child.take() {
             Some(child) => Some(child),
             None => {
@@ -921,9 +1352,9 @@ pub(crate) async fn cancel_job(state: &AppState, job_id: &str) -> Result<JobInfo
                 );
                 runtime.skill_lease = None;
                 finalize_job(state, job).await;
-                let info = job.info.clone();
+                let detail = job_detail(job);
                 prune_terminal_jobs(&mut jobs);
-                return Ok(info);
+                return Ok(detail);
             }
         }
     };
@@ -936,7 +1367,9 @@ pub(crate) async fn cancel_job(state: &AppState, job_id: &str) -> Result<JobInfo
     let Some(job) = jobs.get_mut(job_id) else {
         return Err("job_not_found".to_string());
     };
-    let ManagedJobRuntime::Process(runtime) = &mut job.runtime;
+    let ManagedJobRuntime::Process(runtime) = &mut job.runtime else {
+        return Err("job_kind_changed".to_string());
+    };
     match kill_result {
         Ok(()) => {
             mark_cancelled(&mut job.info, "cancelled", "local_process_kill_completed");
@@ -969,9 +1402,109 @@ pub(crate) async fn cancel_job(state: &AppState, job_id: &str) -> Result<JobInfo
     if job.info.state.is_terminal() {
         finalize_job(state, job).await;
     }
-    let info = job.info.clone();
+    let detail = job_detail(job);
     prune_terminal_jobs(&mut jobs);
-    Ok(info)
+    Ok(detail)
+}
+
+async fn cancel_mcp_job(state: &AppState, job_id: &str) -> Result<JobDetail, String> {
+    let request = {
+        let mut jobs = state.jobs.lock().await;
+        let Some(job) = jobs.get_mut(job_id) else {
+            return Err(missing_job_reason(state, job_id));
+        };
+        job.cancel_requested
+            .store(true, std::sync::atomic::Ordering::Release);
+        job.info.cancel_requested = true;
+        if job.info.state.is_terminal() {
+            job.info.cancel_outcome = Some("already_terminal".to_string());
+            job.info.termination_evidence = Some("job_state".to_string());
+            return Ok(job_detail(job));
+        }
+        let ManagedJobRuntime::Mcp(runtime) = &job.runtime else {
+            return Err("job_kind_mismatch".to_string());
+        };
+        let request = runtime.peer.clone().zip(runtime.request_id.clone());
+        if request.is_none() {
+            let now = Utc::now();
+            job.info.state = JobState::Cancelled;
+            job.info.updated_at = now;
+            job.info.finished_at = Some(now);
+            job.info.reject_reason = Some("mcp_cancelled".to_string());
+            job.info.cancel_outcome = Some("cancelled_before_request".to_string());
+            job.info.termination_evidence =
+                Some("local_cancel_before_downstream_request".to_string());
+            job.detail.error = Some(JobError {
+                code: "mcp_cancelled".to_string(),
+                message: "MCP Job was cancelled before the downstream request started".to_string(),
+            });
+            finalize_job(state, job).await;
+            let detail = job_detail(job);
+            prune_terminal_jobs(&mut jobs);
+            return Ok(detail);
+        }
+        job.info.state = JobState::CancelRequested;
+        job.info.updated_at = Utc::now();
+        request
+    };
+    let Some((peer, request_id)) = request else {
+        return Err("job_cancel_internal".to_string());
+    };
+    let notification = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        peer.notify_cancelled(rmcp::model::CancelledNotificationParam {
+            request_id,
+            reason: Some("Cancelled by Agentic job.cancel".to_string()),
+        }),
+    )
+    .await;
+    let mut jobs = state.jobs.lock().await;
+    let Some(job) = jobs.get_mut(job_id) else {
+        return Err("job_not_found".to_string());
+    };
+    if job.info.state.is_terminal() {
+        return Ok(job_detail(job));
+    }
+    match notification {
+        Ok(Ok(())) => {
+            job.info.state = JobState::CancelRequested;
+            job.info.cancel_outcome = Some("notification_sent".to_string());
+            job.info.termination_evidence = Some("mcp_cancel_notification_sent".to_string());
+        }
+        Ok(Err(error)) => {
+            let now = Utc::now();
+            job.info.state = JobState::Detached;
+            job.info.updated_at = now;
+            job.info.finished_at = Some(now);
+            job.info.reject_reason = Some("mcp_cancel_notification_failed".to_string());
+            job.info.cancel_outcome = Some("notification_failed".to_string());
+            job.info.termination_evidence =
+                Some("mcp_cancel_notification_delivery_failed".to_string());
+            job.detail.error = Some(JobError {
+                code: "mcp_cancel_notification_failed".to_string(),
+                message: bounded_error_message(error.to_string()),
+            });
+            finalize_job(state, job).await;
+        }
+        Err(_) => {
+            let now = Utc::now();
+            job.info.state = JobState::Detached;
+            job.info.updated_at = now;
+            job.info.finished_at = Some(now);
+            job.info.reject_reason = Some("mcp_cancel_notification_timeout".to_string());
+            job.info.cancel_outcome = Some("notification_timeout".to_string());
+            job.info.termination_evidence =
+                Some("mcp_cancel_notification_delivery_timeout".to_string());
+            job.detail.error = Some(JobError {
+                code: "mcp_cancel_notification_timeout".to_string(),
+                message: "MCP cancellation notification delivery exceeded 2 seconds".to_string(),
+            });
+            finalize_job(state, job).await;
+        }
+    }
+    let detail = job_detail(job);
+    prune_terminal_jobs(&mut jobs);
+    Ok(detail)
 }
 
 fn mark_cancelled(info: &mut JobInfo, outcome: &str, evidence: &str) {
@@ -1001,7 +1534,12 @@ async fn refresh_jobs(state: &AppState, jobs: &mut std::collections::HashMap<Str
 }
 
 async fn refresh_job(state: &AppState, job: &mut ManagedJob) {
-    let ManagedJobRuntime::Process(runtime) = &mut job.runtime;
+    let ManagedJobRuntime::Process(runtime) = &mut job.runtime else {
+        if job.info.state.is_terminal() {
+            finalize_job(state, job).await;
+        }
+        return;
+    };
     if let Some(child) = runtime.child.as_mut() {
         if let Ok(Some(status)) = child.try_wait() {
             let now = Utc::now();
@@ -1123,6 +1661,15 @@ mod tests {
         wait_for_job(state, job, 3).await
     }
 
+    #[test]
+    fn job_error_messages_are_utf8_safe_and_bounded() {
+        let value = "错".repeat(MAX_JOB_ERROR_BYTES);
+        let bounded = bounded_error_message(value);
+        assert!(bounded.len() <= MAX_JOB_ERROR_BYTES);
+        assert!(bounded.ends_with("...[truncated]"));
+        assert!(bounded.is_char_boundary(bounded.len()));
+    }
+
     #[tokio::test]
     async fn completed_jobs_release_capacity_and_keep_output() {
         let (state, workspace) = test_state(1).await;
@@ -1164,10 +1711,10 @@ mod tests {
             .starts_with("max_active_jobs_reached"));
 
         let cancelled = cancel_job(&state, &running.job_id).await.unwrap();
-        assert_eq!(cancelled.state, JobState::Cancelled);
-        assert_eq!(cancelled.cancel_outcome.as_deref(), Some("cancelled"));
+        assert_eq!(cancelled.job.state, JobState::Cancelled);
+        assert_eq!(cancelled.job.cancel_outcome.as_deref(), Some("cancelled"));
         assert_eq!(
-            cancelled.termination_evidence.as_deref(),
+            cancelled.job.termination_evidence.as_deref(),
             Some("local_process_kill_completed")
         );
     }
@@ -1181,13 +1728,16 @@ mod tests {
         )
         .await;
         let cancelled = cancel_job(&state, &completed.job_id).await.unwrap();
-        assert_eq!(cancelled.state, JobState::Completed);
-        assert!(cancelled.cancel_requested);
+        assert_eq!(cancelled.job.state, JobState::Completed);
+        assert!(cancelled.job.cancel_requested);
         assert_eq!(
-            cancelled.cancel_outcome.as_deref(),
+            cancelled.job.cancel_outcome.as_deref(),
             Some("already_terminal")
         );
-        assert_eq!(cancelled.termination_evidence.as_deref(), Some("job_state"));
+        assert_eq!(
+            cancelled.job.termination_evidence.as_deref(),
+            Some("job_state")
+        );
     }
 
     #[tokio::test]

@@ -105,6 +105,22 @@ room.notebook.remove, room.notebook.search, room.notebook.selectExact,
 room.notebook.update
 ```
 
+Managed `mcp.callTool` uses the same Job registry and capacity limit as
+process and skill Jobs. Its `waitSeconds` defaults to 5 and is capped at 30;
+`timeoutSeconds` is an absolute confirmation/connect/request deadline that
+defaults to 300 and is capped at 900. Arguments must be a JSON object and their
+serialized size is capped at 256 KiB. Results up to 512 KiB are retained in
+`JobDetail.result`; larger results set `resultTruncated=true` and retain only
+byte count, SHA-256, and an 8 KiB UTF-8-safe preview. A downstream
+`isError=true` result is retained while the Job state becomes `failed`.
+
+MCP cancellation uses the exact rmcp request id. `job.cancel` and execution
+timeouts send `notifications/cancelled`; if the transport does not provide a
+terminal cancellation response, Agentic reports `detached` with bounded
+termination evidence rather than claiming `cancelled`. Audit records contain
+server/tool names, a bounded argument-key subset plus total count, byte counts, and hashes, config revision, result
+size/hash, and terminal evidence, but never raw arguments or raw results.
+
 The standalone worker intentionally has no Tunnel `agentId` or
 `confirmMethod` input fields. The worker supplies its configured local agent
 identity internally; unexpected legacy fields are rejected. `bootstrap` is

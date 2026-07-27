@@ -299,6 +299,30 @@ pub struct McpCallToolRequest {
     pub tool_name: String,
     #[serde(default)]
     pub arguments: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_seconds: Option<u64>,
+}
+
+impl McpCallToolRequest {
+    pub const DEFAULT_WAIT_SECONDS: u64 = 5;
+    pub const MAX_WAIT_SECONDS: u64 = 30;
+    pub const DEFAULT_TIMEOUT_SECONDS: u64 = 300;
+    pub const MIN_TIMEOUT_SECONDS: u64 = 1;
+    pub const MAX_TIMEOUT_SECONDS: u64 = 900;
+
+    pub fn effective_wait_seconds(&self) -> u64 {
+        self.wait_seconds
+            .unwrap_or(Self::DEFAULT_WAIT_SECONDS)
+            .min(Self::MAX_WAIT_SECONDS)
+    }
+
+    pub fn effective_timeout_seconds(&self) -> u64 {
+        self.timeout_seconds
+            .unwrap_or(Self::DEFAULT_TIMEOUT_SECONDS)
+            .clamp(Self::MIN_TIMEOUT_SECONDS, Self::MAX_TIMEOUT_SECONDS)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1058,16 +1082,6 @@ impl SkillRunRequest {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SkillRunResponse {
-    pub status: JobState,
-    pub completed_inline: bool,
-    pub job_id: String,
-    pub poll_after_ms: u64,
-    pub job: JobInfo,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct SkillsSearchResponse {
     pub skills: Vec<SkillSummary>,
     pub warnings: Vec<String>,
@@ -1211,12 +1225,39 @@ pub struct JobInfo {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct JobError {
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobDetail {
+    pub job: JobInfo,
+    pub detail_available: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<JobError>,
+    #[serde(default)]
+    pub result_truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_bytes: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_preview: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct JobResponse {
     pub status: JobState,
     pub completed_inline: bool,
     pub job_id: String,
     pub poll_after_ms: u64,
-    pub job: JobInfo,
+    #[serde(flatten)]
+    pub detail: JobDetail,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1973,6 +2014,43 @@ mod tmux_tests {
         .unwrap();
         assert_eq!(request.id, "diary");
         assert_eq!(serde_json::to_value(request).unwrap()["id"], "diary");
+    }
+
+    #[test]
+    fn managed_mcp_call_defaults_and_bounds_are_frozen() {
+        let defaults: McpCallToolRequest = serde_json::from_value(serde_json::json!({
+            "agentId": "agent",
+            "serverId": "server",
+            "toolName": "tool",
+            "arguments": {}
+        }))
+        .unwrap();
+        assert_eq!(defaults.effective_wait_seconds(), 5);
+        assert_eq!(defaults.effective_timeout_seconds(), 300);
+
+        let bounded: McpCallToolRequest = serde_json::from_value(serde_json::json!({
+            "agentId": "agent",
+            "serverId": "server",
+            "toolName": "tool",
+            "arguments": {},
+            "waitSeconds": 999,
+            "timeoutSeconds": 9999
+        }))
+        .unwrap();
+        assert_eq!(bounded.effective_wait_seconds(), 30);
+        assert_eq!(bounded.effective_timeout_seconds(), 900);
+
+        let minimum: McpCallToolRequest = serde_json::from_value(serde_json::json!({
+            "agentId": "agent",
+            "serverId": "server",
+            "toolName": "tool",
+            "arguments": {},
+            "waitSeconds": 0,
+            "timeoutSeconds": 0
+        }))
+        .unwrap();
+        assert_eq!(minimum.effective_wait_seconds(), 0);
+        assert_eq!(minimum.effective_timeout_seconds(), 1);
     }
 
     #[test]

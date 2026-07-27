@@ -532,6 +532,18 @@ async fn audit_tmux(
             skill_id: None,
             skill_path: None,
             installed_digest: None,
+            mcp_server_id: None,
+            mcp_tool_name: None,
+            argument_keys: Vec::new(),
+            argument_key_count: None,
+            argument_keys_truncated: None,
+            argument_bytes: None,
+            argument_sha256: None,
+            config_revision: None,
+            result_bytes: None,
+            result_sha256: None,
+            terminal_state: None,
+            termination_evidence: None,
         },
     );
 }
