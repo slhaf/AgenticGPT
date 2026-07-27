@@ -1063,13 +1063,19 @@ fn jobs_from_command_response(data: &serde_json::Value) -> Vec<JobInfo> {
         return vec![job];
     }
     if data.get("batchId").is_some() {
-        return data
-            .get("jobs")
-            .and_then(serde_json::Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(|value| serde_json::from_value(value.clone()).ok())
-            .collect();
+        if let Some(jobs) = data.get("jobs").and_then(serde_json::Value::as_array) {
+            return jobs
+                .iter()
+                .filter_map(|value| serde_json::from_value(value.clone()).ok())
+                .collect();
+        }
+        if let Some(results) = data.get("results").and_then(serde_json::Value::as_array) {
+            return results
+                .iter()
+                .filter_map(|value| value.get("job"))
+                .filter_map(|value| serde_json::from_value(value.clone()).ok())
+                .collect();
+        }
     }
     serde_json::from_value::<JobInfo>(data.clone())
         .ok()
@@ -1186,6 +1192,9 @@ mod reporting_tests {
         let job = JobInfo {
             agent_id: "agent".to_string(),
             job_id: "job_boot_1".to_string(),
+            batch_id: None,
+            batch_call_id: None,
+            batch_index: None,
             kind: agentic_gpt_protocol::JobKind::Process,
             state: agentic_gpt_protocol::JobState::Running,
             created_at: now,
@@ -1214,6 +1223,11 @@ mod reporting_tests {
         assert_eq!(jobs_from_command_response(&wrapped).len(), 1);
         let batch = serde_json::json!({"batchId": "batch_1", "jobs": [job]});
         assert_eq!(jobs_from_command_response(&batch).len(), 1);
+        let mcp_batch = serde_json::json!({
+            "batchId": "batch_2",
+            "results": [{"index": 0, "job": job, "detailAvailable": true, "resultTruncated": false}]
+        });
+        assert_eq!(jobs_from_command_response(&mcp_batch).len(), 1);
         let direct = serde_json::to_value(&job).unwrap();
         assert_eq!(jobs_from_command_response(&direct).len(), 1);
         let list = serde_json::json!({"jobs": [job]});

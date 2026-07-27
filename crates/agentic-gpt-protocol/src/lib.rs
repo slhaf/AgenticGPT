@@ -325,6 +325,62 @@ impl McpCallToolRequest {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpBatchMode {
+    #[default]
+    Parallel,
+    Sequential,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpBatchCall {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub server_id: String,
+    pub tool_name: String,
+    #[serde(default)]
+    pub arguments: serde_json::Value,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpBatchRequest {
+    pub agent_id: String,
+    pub calls: Vec<McpBatchCall>,
+    #[serde(default)]
+    pub mode: McpBatchMode,
+    #[serde(default)]
+    pub fail_fast: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_seconds: Option<u64>,
+}
+
+impl McpBatchRequest {
+    pub const MIN_CALLS: usize = 1;
+    pub const MAX_CALLS: usize = 16;
+    pub const MAX_AGGREGATE_ARGUMENT_BYTES: usize = 2 * 1024 * 1024;
+    pub const MAX_AGGREGATE_RESULT_BYTES: usize = 2 * 1024 * 1024;
+
+    pub fn effective_wait_seconds(&self) -> u64 {
+        self.wait_seconds
+            .unwrap_or(McpCallToolRequest::DEFAULT_WAIT_SECONDS)
+            .min(McpCallToolRequest::MAX_WAIT_SECONDS)
+    }
+
+    pub fn effective_timeout_seconds(&self) -> u64 {
+        self.timeout_seconds
+            .unwrap_or(McpCallToolRequest::DEFAULT_TIMEOUT_SECONDS)
+            .clamp(
+                McpCallToolRequest::MIN_TIMEOUT_SECONDS,
+                McpCallToolRequest::MAX_TIMEOUT_SECONDS,
+            )
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NotificationChannel {
@@ -1180,6 +1236,12 @@ impl std::fmt::Display for JobState {
 pub struct JobInfo {
     pub agent_id: String,
     pub job_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_call_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_index: Option<usize>,
     pub kind: JobKind,
     pub state: JobState,
     pub created_at: DateTime<Utc>,
@@ -1258,6 +1320,41 @@ pub struct JobResponse {
     pub poll_after_ms: u64,
     #[serde(flatten)]
     pub detail: JobDetail,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpBatchStatus {
+    Running,
+    Completed,
+    CompletedWithErrors,
+    Rejected,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpBatchChildResponse {
+    pub index: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(flatten)]
+    pub detail: JobDetail,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpBatchResponse {
+    pub batch_id: String,
+    pub status: McpBatchStatus,
+    pub completed_inline: bool,
+    pub poll_after_ms: u64,
+    pub results: Vec<McpBatchChildResponse>,
+    #[serde(default)]
+    pub aggregate_truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aggregate_bytes: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<JobError>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1474,6 +1571,11 @@ pub enum HubCommand {
         request_id: String,
         payload: McpCallToolRequest,
     },
+    #[serde(rename = "mcp.batch")]
+    McpBatch {
+        request_id: String,
+        payload: McpBatchRequest,
+    },
     #[serde(rename = "user.notify.deliver")]
     UserNotifyDeliver {
         request_id: String,
@@ -1607,6 +1709,7 @@ impl HubCommand {
             | Self::McpListServers { request_id }
             | Self::McpListTools { request_id, .. }
             | Self::McpCallTool { request_id, .. }
+            | Self::McpBatch { request_id, .. }
             | Self::UserNotifyDeliver { request_id, .. }
             | Self::RoomNotebookAppend { request_id, .. }
             | Self::RoomNotebookRecent { request_id, .. }
@@ -2051,6 +2154,55 @@ mod tmux_tests {
         .unwrap();
         assert_eq!(minimum.effective_wait_seconds(), 0);
         assert_eq!(minimum.effective_timeout_seconds(), 1);
+    }
+
+    #[test]
+    fn managed_mcp_batch_defaults_bounds_and_wire_type_are_frozen() {
+        let defaults: McpBatchRequest = serde_json::from_value(serde_json::json!({
+            "agentId": "agent",
+            "calls": [{
+                "id": "first",
+                "serverId": "server",
+                "toolName": "tool",
+                "arguments": {}
+            }]
+        }))
+        .unwrap();
+        assert_eq!(defaults.mode, McpBatchMode::Parallel);
+        assert!(!defaults.fail_fast);
+        assert_eq!(defaults.effective_wait_seconds(), 5);
+        assert_eq!(defaults.effective_timeout_seconds(), 300);
+        assert_eq!(McpBatchRequest::MIN_CALLS, 1);
+        assert_eq!(McpBatchRequest::MAX_CALLS, 16);
+        assert_eq!(
+            McpBatchRequest::MAX_AGGREGATE_ARGUMENT_BYTES,
+            2 * 1024 * 1024
+        );
+        assert_eq!(McpBatchRequest::MAX_AGGREGATE_RESULT_BYTES, 2 * 1024 * 1024);
+
+        let bounded: McpBatchRequest = serde_json::from_value(serde_json::json!({
+            "agentId": "agent",
+            "calls": [{"serverId": "server", "toolName": "tool"}],
+            "mode": "sequential",
+            "failFast": true,
+            "waitSeconds": 999,
+            "timeoutSeconds": 9999
+        }))
+        .unwrap();
+        assert_eq!(bounded.mode, McpBatchMode::Sequential);
+        assert!(bounded.fail_fast);
+        assert_eq!(bounded.effective_wait_seconds(), 30);
+        assert_eq!(bounded.effective_timeout_seconds(), 900);
+
+        let command = HubCommand::McpBatch {
+            request_id: "req-batch".to_string(),
+            payload: defaults,
+        };
+        assert_eq!(command.request_id(), "req-batch");
+        let value = serde_json::to_value(command).unwrap();
+        assert_eq!(value["type"], "mcp.batch");
+        assert_eq!(value["requestId"], "req-batch");
+        assert_eq!(value["payload"]["calls"][0]["id"], "first");
     }
 
     #[test]

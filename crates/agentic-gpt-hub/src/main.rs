@@ -219,6 +219,7 @@ async fn serve(
         .route("/v1/mcp/servers", post(routes::mcp_list_servers))
         .route("/v1/mcp/tools", post(routes::mcp_list_tools))
         .route("/v1/mcp/callTool", post(routes::mcp_call_tool))
+        .route("/v1/mcp/batch", post(routes::mcp_batch))
         .route("/v1/notify/channels", get(notify::notify_channels))
         .route("/v1/notify/send", post(notify::notify_send))
         .route(
@@ -434,7 +435,10 @@ async fn publish_ntfy(
         "Agent {agent_id} wants to run:\n{command_preview}\n\nReason: {}\nRisk: {}",
         payload.reason, payload.risk_level
     );
-    let actions = if payload.kind.as_deref() == Some("mcpTool") {
+    let actions = if matches!(
+        payload.kind.as_deref(),
+        Some("mcpTool" | "mcpBatchSingleServer")
+    ) {
         json!([
             {
                 "action": "http",
@@ -903,6 +907,12 @@ mod tests {
         assert!(openapi.contains("JobBatchResponse:"));
         assert!(openapi.contains("unknown_after_restart"));
         assert!(openapi.contains("/v1/mcp/callTool:"));
+        assert!(openapi.contains("/v1/mcp/batch:"));
+        assert!(openapi.contains("McpBatchRequest:"));
+        assert!(openapi.contains("McpBatchResponse:"));
+        assert!(openapi.contains("McpBatchChildResponse:"));
+        assert!(openapi.contains("aggregateTruncated"));
+        assert!(openapi.contains("already-started calls are never cancelled"));
         assert!(openapi.contains("McpCallToolRequest:"));
         assert!(openapi.contains("JobDetail:"));
         assert!(openapi.contains("JobResponse:"));

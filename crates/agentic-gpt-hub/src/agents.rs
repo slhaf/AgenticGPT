@@ -713,6 +713,7 @@ pub(crate) fn command_request_id(command: &HubCommand) -> &str {
         | HubCommand::McpListServers { request_id }
         | HubCommand::McpListTools { request_id, .. }
         | HubCommand::McpCallTool { request_id, .. }
+        | HubCommand::McpBatch { request_id, .. }
         | HubCommand::UserNotifyDeliver { request_id, .. }
         | HubCommand::RoomNotebookAppend { request_id, .. }
         | HubCommand::RoomNotebookRecent { request_id, .. }
@@ -758,6 +759,7 @@ pub(crate) fn set_command_request_id(command: &mut HubCommand, value: String) {
         | HubCommand::McpListServers { request_id }
         | HubCommand::McpListTools { request_id, .. }
         | HubCommand::McpCallTool { request_id, .. }
+        | HubCommand::McpBatch { request_id, .. }
         | HubCommand::UserNotifyDeliver { request_id, .. }
         | HubCommand::RoomNotebookAppend { request_id, .. }
         | HubCommand::RoomNotebookRecent { request_id, .. }
@@ -886,6 +888,9 @@ mod tests {
         JobInfo {
             agent_id: "agent".to_string(),
             job_id: job_id.to_string(),
+            batch_id: None,
+            batch_call_id: None,
+            batch_index: None,
             kind: JobKind::Process,
             state: JobState::Running,
             created_at: now,

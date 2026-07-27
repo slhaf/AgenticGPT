@@ -517,6 +517,9 @@ async fn audit_tmux(
         AuditRecord {
             task_id: Some(format!("tmux-{}", Uuid::new_v4())),
             job_id,
+            batch_id: None,
+            batch_call_id: None,
+            batch_index: None,
             time: Utc::now(),
             program: program.to_string(),
             args,

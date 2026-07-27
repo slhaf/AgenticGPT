@@ -488,6 +488,184 @@ pub(crate) async fn fail_pending_confirmations(state: &AppState, reason: &str) {
     }
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct McpBatchConfirmationItem {
+    pub(crate) index: usize,
+    pub(crate) id: Option<String>,
+    pub(crate) server_id: String,
+    pub(crate) tool_name: String,
+    pub(crate) argument_keys: Vec<String>,
+    pub(crate) argument_key_count: usize,
+    pub(crate) argument_keys_truncated: bool,
+    pub(crate) argument_bytes: usize,
+    pub(crate) argument_sha256: String,
+}
+
+pub(crate) async fn authorize_mcp_batch_cancellable(
+    state: &AppState,
+    items: &[McpBatchConfirmationItem],
+    temporary_server: Option<&str>,
+    cancel_requested: Arc<AtomicBool>,
+) -> String {
+    if items.is_empty() {
+        return "temporary_mcp_allow".to_string();
+    }
+    if cancel_requested.load(Ordering::Acquire) {
+        return "cancelled".to_string();
+    }
+    let config = state.config.read().await.clone();
+    let preview = mcp_batch_confirmation_preview(items);
+    let result = request_mcp_batch_confirmation_cancellable(
+        state,
+        &config,
+        &preview,
+        temporary_server,
+        cancel_requested,
+    )
+    .await;
+    match (result.as_str(), temporary_server) {
+        ("allow_mcp_server_15m", Some(server_id)) => {
+            add_temporary_mcp_allow(state, server_id, 15).await
+        }
+        ("allow_mcp_server_30m", Some(server_id)) => {
+            add_temporary_mcp_allow(state, server_id, 30).await
+        }
+        _ => {}
+    }
+    result
+}
+
+pub(crate) async fn temporary_mcp_allowed(state: &AppState, server_id: &str) -> bool {
+    let agent_id = state.config.read().await.agent_id.clone();
+    let now = Utc::now();
+    let mut allows = state.temporary_mcp_allows.lock().await;
+    allows.retain(|allow| allow.expires_at > now);
+    allows
+        .iter()
+        .any(|allow| allow.agent_id == agent_id && allow.server_id == server_id)
+}
+
+fn mcp_batch_confirmation_preview(items: &[McpBatchConfirmationItem]) -> String {
+    let mut lines = vec![format!(
+        "MCP Batch Call\nCalls requiring confirmation: {}",
+        items.len()
+    )];
+    for item in items {
+        let id = item.id.as_deref().unwrap_or("-");
+        lines.push(format!(
+            "#{} id={} server={} tool={} keys(showing {} of {}, truncated={}): [{}] bytes={} sha256={}",
+            item.index,
+            id,
+            item.server_id,
+            item.tool_name,
+            item.argument_keys.len(),
+            item.argument_key_count,
+            item.argument_keys_truncated,
+            item.argument_keys.join(", "),
+            item.argument_bytes,
+            item.argument_sha256,
+        ));
+    }
+    truncate_chars(&lines.join("\n"), 8 * 1024)
+}
+
+async fn request_mcp_batch_confirmation_cancellable(
+    state: &AppState,
+    config: &Config,
+    preview: &str,
+    temporary_server: Option<&str>,
+    cancel_requested: Arc<AtomicBool>,
+) -> String {
+    for channel in &config.confirmation_provider.channels {
+        if cancel_requested.load(Ordering::Acquire) {
+            return "cancelled".to_string();
+        }
+        let result = match channel {
+            ConfirmationChannel::Freedesktop => {
+                tokio::select! {
+                    result = request_freedesktop_mcp_batch_confirmation(preview, temporary_server.is_some()) => result,
+                    _ = wait_for_cancellation(cancel_requested.clone()) => "cancelled".to_string(),
+                }
+            }
+            ConfirmationChannel::Ntfy => {
+                let payload = ConfirmationPayload {
+                    program: "mcp.batch".to_string(),
+                    args: Vec::new(),
+                    command_preview: preview.to_string(),
+                    risk_level: "MEDIUM".to_string(),
+                    reason: "MCP batch requires one aggregate confirmation".to_string(),
+                    kind: Some(if temporary_server.is_some() {
+                        "mcpBatchSingleServer".to_string()
+                    } else {
+                        "mcpBatch".to_string()
+                    }),
+                    server_id: temporary_server.map(str::to_string),
+                    tool_name: None,
+                };
+                request_hub_confirmation_payload_cancellable(
+                    state,
+                    payload,
+                    Some(cancel_requested.clone()),
+                )
+                .await
+            }
+        };
+        if result == "cancelled" || result != "confirmation_provider_unavailable" {
+            return result;
+        }
+    }
+    "confirmation_provider_unavailable".to_string()
+}
+
+async fn request_freedesktop_mcp_batch_confirmation(
+    preview: &str,
+    allow_temporary_server: bool,
+) -> String {
+    let supports_actions = tokio::task::spawn_blocking(|| {
+        notify_rust::get_capabilities()
+            .map(|capabilities| {
+                capabilities
+                    .iter()
+                    .any(|capability| capability == "actions")
+            })
+            .unwrap_or(false)
+    })
+    .await
+    .unwrap_or(false);
+    if !supports_actions {
+        return "confirmation_provider_unavailable".to_string();
+    }
+    let mut notification = notify_rust::Notification::new();
+    notification
+        .summary("Agentic GPT MCP batch confirmation")
+        .body(preview)
+        .action("allow_once", "Allow once")
+        .action("deny", "Deny")
+        .timeout((CONFIRM_TIMEOUT_SECS * 1000) as i32);
+    if allow_temporary_server {
+        notification
+            .action("allow_mcp_server_15m", "Allow this MCP 15m")
+            .action("allow_mcp_server_30m", "Allow this MCP 30m");
+    }
+    match notification.show() {
+        Ok(handle) => {
+            let action = tokio::task::spawn_blocking(move || {
+                let mut selected = "timeout".to_string();
+                handle.wait_for_action(|action| selected = action.to_string());
+                selected
+            })
+            .await
+            .unwrap_or_else(|_| "timeout".to_string());
+            match action.as_str() {
+                "allow_once" => action,
+                "allow_mcp_server_15m" | "allow_mcp_server_30m" if allow_temporary_server => action,
+                _ => "deny".to_string(),
+            }
+        }
+        Err(_) => "confirmation_provider_unavailable".to_string(),
+    }
+}
+
 pub(crate) async fn authorize_mcp_tool_call_cancellable(
     state: &AppState,
     server_id: &str,
@@ -518,16 +696,6 @@ pub(crate) async fn authorize_mcp_tool_call_cancellable(
         _ => {}
     }
     decision
-}
-
-async fn temporary_mcp_allowed(state: &AppState, server_id: &str) -> bool {
-    let agent_id = state.config.read().await.agent_id.clone();
-    let now = Utc::now();
-    let mut allows = state.temporary_mcp_allows.lock().await;
-    allows.retain(|allow| allow.expires_at > now);
-    allows
-        .iter()
-        .any(|allow| allow.agent_id == agent_id && allow.server_id == server_id)
 }
 
 #[cfg(test)]

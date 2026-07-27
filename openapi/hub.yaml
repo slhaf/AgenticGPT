@@ -451,6 +451,32 @@ paths:
           $ref: "#/components/responses/NotFound"
         "504":
           $ref: "#/components/responses/GatewayTimeout"
+  /v1/mcp/batch:
+    post:
+      operationId: mcpBatch
+      description: Atomically admit 1..16 managed downstream MCP child Jobs with one aggregate confirmation, bounded global/per-server concurrency, ordered results, and optional fail-fast scheduling.
+      x-openai-isConsequential: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/McpBatchRequest"
+      responses:
+        "200":
+          description: Managed MCP batch response or typed preflight/capacity error.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/McpBatchResponse"
+                  - $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
   /v1/notify/channels:
     get:
       operationId: userNotifyChannels
@@ -1736,6 +1762,63 @@ components:
                 type: object
                 additionalProperties: true
                 properties: {}
+    McpBatchMode:
+      type: string
+      enum: [parallel, sequential]
+      default: parallel
+    McpBatchCall:
+      type: object
+      required: [serverId, toolName]
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          minLength: 1
+          maxLength: 64
+          pattern: "^[A-Za-z0-9._:-]+$"
+          description: Optional unique stable call id within the batch.
+        serverId:
+          type: string
+        toolName:
+          type: string
+        arguments:
+          type: object
+          additionalProperties: true
+          properties: {}
+          description: Per-call downstream arguments; maximum serialized size 256 KiB.
+    McpBatchRequest:
+      type: object
+      required: [agentId, calls]
+      additionalProperties: false
+      properties:
+        agentId:
+          type: string
+        calls:
+          type: array
+          minItems: 1
+          maxItems: 16
+          description: Ordered calls; aggregate serialized arguments are capped at 2 MiB.
+          items:
+            $ref: "#/components/schemas/McpBatchCall"
+        mode:
+          $ref: "#/components/schemas/McpBatchMode"
+        failFast:
+          type: boolean
+          default: false
+          description: Prevent not-yet-started children from starting after a hard child failure; already-started calls are never cancelled.
+        waitSeconds:
+          type: integer
+          minimum: 0
+          maximum: 30
+          default: 5
+          description: Bounded inline wait for the ordered child Job response.
+        timeoutSeconds:
+          type: integer
+          minimum: 1
+          maximum: 900
+          default: 300
+          description: Per-child downstream execution deadline after scheduler admission.
+
     UserNotifyChannelsResponse:
       type: object
       required:
@@ -2992,6 +3075,16 @@ components:
           type: string
         jobId:
           type: string
+        batchId:
+          type: string
+          description: Coordinator batch id when this Job was created by mcp.batch.
+        batchCallId:
+          type: string
+          description: Optional caller-provided batch call id.
+        batchIndex:
+          type: integer
+          minimum: 0
+          description: Zero-based input-order index within mcp.batch.
         kind:
           $ref: "#/components/schemas/JobKind"
         state:
@@ -3150,6 +3243,75 @@ components:
               type: string
             message:
               type: string
+    McpBatchStatus:
+      type: string
+      enum: [running, completed, completed_with_errors, rejected]
+    McpBatchChildResponse:
+      type: object
+      required:
+        - index
+        - job
+        - detailAvailable
+        - resultTruncated
+      additionalProperties: false
+      properties:
+        index:
+          type: integer
+          minimum: 0
+        id:
+          type: string
+        job:
+          $ref: "#/components/schemas/JobInfo"
+        detailAvailable:
+          type: boolean
+        result:
+          description: Retained bounded child result; omitted when clipped by child or aggregate budgets.
+        error:
+          $ref: "#/components/schemas/JobError"
+        resultTruncated:
+          type: boolean
+        resultBytes:
+          type: integer
+          minimum: 0
+        resultSha256:
+          type: string
+        resultPreview:
+          type: string
+    McpBatchResponse:
+      type: object
+      required:
+        - batchId
+        - status
+        - completedInline
+        - pollAfterMs
+        - results
+        - aggregateTruncated
+      additionalProperties: false
+      properties:
+        batchId:
+          type: string
+        status:
+          $ref: "#/components/schemas/McpBatchStatus"
+        completedInline:
+          type: boolean
+        pollAfterMs:
+          type: integer
+          minimum: 0
+        results:
+          type: array
+          minItems: 1
+          maxItems: 16
+          description: Child responses in original input order.
+          items:
+            $ref: "#/components/schemas/McpBatchChildResponse"
+        aggregateTruncated:
+          type: boolean
+        aggregateBytes:
+          type: integer
+          minimum: 0
+          maximum: 2097152
+        error:
+          $ref: "#/components/schemas/JobError"
     JobBatchResponse:
       type: object
       required:

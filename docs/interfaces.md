@@ -18,6 +18,7 @@ Core endpoints:
 - `POST /v1/mcp/servers`: list MCP servers configured inside one local agent, or omit `agentId` to group MCP servers for all currently connected agents.
 - `POST /v1/mcp/tools`: list tools exposed by one MCP server.
 - `POST /v1/mcp/callTool`: start one managed downstream MCP tool Job through the selected local agent. `waitSeconds` defaults to 5 and is capped at 30; `timeoutSeconds` defaults to 300 and is capped at 900.
+- `POST /v1/mcp/batch`: atomically admit 1–16 ordered downstream MCP child Jobs. It uses one aggregate confirmation, parallel or sequential mode, optional safe fail-fast scheduling, shared global/per-server concurrency limits, and a 2 MiB aggregate response budget.
 - `GET /v1/runs/{runId}`: inspect persisted status and optional late result for one Hub-to-Agent command run.
 - `POST /v1/room/skills/list`, `/read`, `/search`, `/active`, `/activate`, `/deactivate`: discover workspace skills through the active Room Agent and maintain local active skill state. These endpoints do not take `agentId`.
 - `POST /v1/room/skills/install`: asynchronously install one skill from public GitHub, HTTPS file entries, or inline UTF-8/base64 files. The response returns an `installId` before network work begins.
@@ -39,7 +40,22 @@ All `/mcp` `tools/call` responses use the Hub `AgenticResult` envelope, which is
 
 `mcp.callTool` no longer passes a downstream result envelope through at the Hub top level. It returns a managed `JobResponse`. A terminal downstream result is retained under `result`; downstream `isError=true` produces a failed Job while retaining that result. Serialized arguments are capped at 256 KiB. Serialized results up to 512 KiB are retained; larger results are omitted and replaced by `resultBytes`, `resultSha256`, and a UTF-8-safe `resultPreview`. Active calls are inspected with `job.get` and cancelled with `job.cancel`.
 
-Cancellation is evidence-based. Agentic sends MCP `notifications/cancelled` with the exact downstream request id. If no downstream terminal response is observed, the Job becomes `detached` rather than claiming cancellation succeeded. Hub cache-only `job.get` responses set `detailAvailable=false`, and Hub never reports a cached snapshot as a successful `job.cancel`.
+`mcp.batch` returns `McpBatchResponse` with child details in original input
+order. Validation and capacity admission happen before confirmation and before
+any child starts. Parallel mode uses the shared scheduler (eight globally, two
+per server); sequential mode waits for each child terminal state. With
+`failFast=true`, only not-yet-started children become `skipped`; already-started
+calls are not cancelled. Single-server batches can receive temporary server
+allow actions, while multi-server confirmation remains batch-scoped. Each
+child is an ordinary MCP Job with `batchId`, optional `batchCallId`, and
+`batchIndex`, so later inspection and cancellation use the same `job.*`
+lifecycle.
+
+Cancellation is evidence-based. Agentic sends MCP `notifications/cancelled`
+with the exact downstream request id. If no downstream terminal response is
+observed, the Job becomes `detached` rather than claiming cancellation
+succeeded. Hub cache-only `job.get` responses set `detailAvailable=false`, and
+Hub never reports a cached snapshot as a successful `job.cancel`.
 
 This contract applies to the Apps MCP `/mcp` surface. The GPT Actions endpoints under `/v1/*` keep their OpenAPI-described JSON response shapes.
 

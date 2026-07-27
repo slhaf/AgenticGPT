@@ -26,7 +26,7 @@ use crate::{
     state::{AppState, CapabilityProfile},
 };
 
-const INSTRUCTIONS: &str = "Agentic GPT local Tunnel worker. Start with agent.info to inspect the active profile, exact workspace/path policy, capacity, confirmation channels, and connection state. Use file.read/search/edit/batch for bounded UTF-8 workspace work, process.exec/process.batch to create managed Jobs, job.get/list/cancel for lifecycle control, tmux for persistent workspaces, skills for the local skills workspace, and bootstrap for Room startup guidance. All calls remain subject to path policy, configured confirmation, audit, and bounded waits.";
+const INSTRUCTIONS: &str = "Agentic GPT local Tunnel worker. Start with agent.info to inspect the active profile, exact workspace/path policy, capacity, confirmation channels, MCP scheduler state, and connection state. Use file.read/search/edit/batch for bounded UTF-8 workspace work, process.exec/process.batch for process Jobs, mcp.callTool for one downstream MCP Job, mcp.batch for 1..16 atomically admitted child Jobs with one aggregate confirmation and bounded 8/2 concurrency, job.get/list/cancel for lifecycle control, tmux for persistent workspaces, skills for the local skills workspace, and bootstrap for Room startup guidance. All calls remain subject to path policy, configured confirmation, audit, and bounded waits.";
 const PATCH_SCHEMA_DESCRIPTION: &str = "Standard single-file unified diff with hunk headers like @@ -1,2 +1,2 @@. Omitted counts mean 1; bare @@ is invalid.";
 
 const NORMAL_TOOLS: &[&str] = &[
@@ -35,6 +35,7 @@ const NORMAL_TOOLS: &[&str] = &[
     "file.search",
     "file.edit",
     "file.batch",
+    "mcp.batch",
     "mcp.callTool",
     "mcp.list",
     "process.batch",
@@ -667,6 +668,44 @@ impl AgentMcpServer {
                     Ok(value) => Ok(value),
                     Err(error) => Ok(json!({
                         "error": { "code": "mcp_call_tool_failed", "message": error.to_string() }
+                    })),
+                }
+            }
+            "mcp.batch" => {
+                let args: McpBatchArgs = from_value(arguments)?;
+                let config = self.state.config.read().await.clone();
+                let request_source = self.ingress.source("mcp.batch");
+                match crate::mcp::batch(
+                    &self.state,
+                    agentic_gpt_protocol::McpBatchRequest {
+                        agent_id: config.agent_id,
+                        calls: args
+                            .calls
+                            .into_iter()
+                            .map(|call| agentic_gpt_protocol::McpBatchCall {
+                                id: call.id,
+                                server_id: call.server_id,
+                                tool_name: call.tool_name,
+                                arguments: call.arguments,
+                            })
+                            .collect(),
+                        mode: args.mode.unwrap_or_default(),
+                        fail_fast: args.fail_fast,
+                        wait_seconds: args.wait_seconds,
+                        timeout_seconds: args.timeout_seconds,
+                    },
+                    &request_source,
+                    Some(managed_terminal_event_hook(
+                        self.state.runtime.profile,
+                        request_source.clone(),
+                        terminal_tracker,
+                    )),
+                )
+                .await
+                {
+                    Ok(value) => Ok(value),
+                    Err(error) => Ok(json!({
+                        "error": { "code": "mcp_batch_failed", "message": error.to_string() }
                     })),
                 }
             }
@@ -1517,6 +1556,31 @@ struct McpCallArgs {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct McpBatchArgs {
+    calls: Vec<McpBatchCallArgs>,
+    #[serde(default)]
+    mode: Option<agentic_gpt_protocol::McpBatchMode>,
+    #[serde(default)]
+    fail_fast: bool,
+    #[serde(default)]
+    wait_seconds: Option<u64>,
+    #[serde(default)]
+    timeout_seconds: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct McpBatchCallArgs {
+    #[serde(default)]
+    id: Option<String>,
+    server_id: String,
+    tool_name: String,
+    #[serde(default)]
+    arguments: Value,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct SkillListArgs {
     #[serde(default)]
     query: Option<String>,
@@ -1834,6 +1898,7 @@ fn tool_schema(name: &str) -> (Map<String, Value>, &'static [&'static str]) {
         "file.edit" => &["mode", "path"],
         "file.batch" => &["operations"],
         "mcp.callTool" => &["serverId", "toolName"],
+        "mcp.batch" => &["calls"],
         "skills.setActive" => &["id", "active"],
         "tmux.sessions" | "tmux.panes" => &["action"],
         "tmux.exec" => &["target", "program"],
@@ -2112,6 +2177,50 @@ fn properties_for(name: &str) -> Map<String, Value> {
         }
         "mcp.listServers" => add("agentId", string("Optional local agent id.")),
         "mcp.listTools" => add("serverId", string("Configured MCP server id.")),
+        "mcp.batch" => {
+            add(
+                "calls",
+                json!({
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 16,
+                    "description": "Ordered downstream MCP calls; aggregate serialized arguments are capped at 2 MiB.",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["serverId", "toolName"],
+                        "properties": {
+                            "id": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 64,
+                                "pattern": "^[A-Za-z0-9._:-]+$"
+                            },
+                            "serverId": {"type": "string"},
+                            "toolName": {"type": "string"},
+                            "arguments": {
+                                "type": "object",
+                                "default": {},
+                                "description": "Per-call arguments capped at 256 KiB serialized."
+                            }
+                        }
+                    }
+                }),
+            );
+            add(
+                "mode",
+                json!({"type":"string","enum":["parallel","sequential"],"default":"parallel"}),
+            );
+            add("failFast", json!({"type":"boolean","default":false}));
+            add(
+                "waitSeconds",
+                json!({"type":"integer","minimum":0,"maximum":30,"default":5}),
+            );
+            add(
+                "timeoutSeconds",
+                json!({"type":"integer","minimum":1,"maximum":900,"default":300}),
+            );
+        }
         "mcp.callTool" => {
             add("serverId", string("Configured MCP server id."));
             add("toolName", string("Downstream MCP tool name."));
@@ -2306,6 +2415,7 @@ fn tool_description(name: &str) -> String {
         "mcp.listServers" => "List configured downstream MCP servers.".to_string(),
         "mcp.listTools" => "List tools exposed by a downstream MCP server.".to_string(),
         "mcp.list" => "List configured MCP servers or one server's tools.".to_string(),
+        "mcp.batch" => "Atomically admit 1..16 managed downstream MCP child Jobs with one confirmation boundary, bounded concurrency, ordered results, and optional fail-fast scheduling.".to_string(),
         "mcp.callTool" => "Start a managed downstream MCP tool Job with bounded inline wait, retained result, timeout, and truthful cancellation evidence.".to_string(),
         "bootstrap" => "Load the local bootstrap manifest.".to_string(),
         "bootstrap.read" => "Read one local bootstrap guide.".to_string(),
@@ -2345,6 +2455,7 @@ fn tool_is_read_only(name: &str) -> bool {
             | "tmux.exec"
             | "tmux.createSession"
             | "tmux.closeSession"
+            | "mcp.batch"
             | "mcp.callTool"
             | "room.notebook.append"
             | "room.notebook.update"
@@ -2382,6 +2493,7 @@ fn tool_is_open_world(name: &str) -> bool {
         "process.exec"
             | "process.batch"
             | "tmux.sessions"
+            | "mcp.batch"
             | "mcp.callTool"
             | "tmux.pasteText"
             | "tmux.exec"
@@ -2457,8 +2569,8 @@ mod tests {
             .iter()
             .map(|tool| tool.name.to_string())
             .collect::<Vec<_>>();
-        assert_eq!(normal_names.len(), 23);
-        assert_eq!(room_names.len(), 35);
+        assert_eq!(normal_names.len(), 24);
+        assert_eq!(room_names.len(), 36);
         assert!(!normal_names.iter().any(|name| name.starts_with("room.")));
         assert!(room_names.iter().any(|name| name == "room.diary.append"));
         assert!(room_names.iter().any(|name| name == "room.notebook.remove"));
@@ -2860,7 +2972,7 @@ mod tests {
 
         let client = ().serve((client_read, client_write)).await?;
         let tools = client.list_all_tools().await?;
-        assert_eq!(tools.len(), 23);
+        assert_eq!(tools.len(), 24);
         let result = client
             .call_tool(CallToolRequestParams::new("job.list"))
             .await?;
@@ -2896,7 +3008,7 @@ mod tests {
 
         let client = ().serve((client_read, client_write)).await?;
         let tools = client.list_all_tools().await?;
-        assert_eq!(tools.len(), 35);
+        assert_eq!(tools.len(), 36);
         let result = client
             .call_tool(CallToolRequestParams::new("room.diary.recent"))
             .await?;
@@ -3260,6 +3372,9 @@ mod tests {
         JobInfo {
             agent_id: "agent".to_string(),
             job_id: "job_testboot_0123456789abcdef".to_string(),
+            batch_id: None,
+            batch_call_id: None,
+            batch_index: None,
             kind: JobKind::Process,
             state: JobState::Completed,
             created_at: now,
@@ -3904,6 +4019,7 @@ mod tests {
             reporting_sender: Arc::new(Mutex::new(None)),
             pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
             temporary_mcp_allows: Arc::new(Mutex::new(Vec::new())),
+            mcp_concurrency: Arc::new(crate::jobs::McpConcurrency::new()),
             notebook_writes: Arc::new(Mutex::new(())),
             skills_writes: Arc::new(Mutex::new(())),
             skill_leases: Arc::new(SkillLeaseManager::new()),

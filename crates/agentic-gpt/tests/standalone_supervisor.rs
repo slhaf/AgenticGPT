@@ -362,7 +362,7 @@ fn run_live_reload(root: &Path) -> Result<(), String> {
     let local_tools = local_tools
         .as_array()
         .ok_or("local peer tool list is not an array")?;
-    assert_eq!(local_tools.len(), 23);
+    assert_eq!(local_tools.len(), 24);
     assert!(local_tools
         .iter()
         .all(|tool| tool["_meta"]["surface"] == "agent-local"));

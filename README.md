@@ -109,7 +109,7 @@ For ChatGPT Apps / MCP, use the Apps-friendly MCP endpoint:
 https://<your-hub-domain>/mcp
 ```
 
-The `/mcp` `tools/call` response uses the Hub `AgenticResult` envelope, which is compatible with ChatGPT Apps / MCP tool results. Hub-native tools return `content`, `structuredContent`, and `isError`. `mcp.callTool` now returns the same managed `JobResponse` as process and skill creation: it waits briefly, retains a bounded downstream result under `result`, and is followed with `job.get` or `job.cancel` when still active.
+The `/mcp` `tools/call` response uses the Hub `AgenticResult` envelope, which is compatible with ChatGPT Apps / MCP tool results. Hub-native tools return `content`, `structuredContent`, and `isError`. `mcp.callTool` returns the same managed `JobResponse` as process and skill creation. `mcp.batch` atomically admits 1–16 ordinary MCP child Jobs, applies one aggregate confirmation, preserves input order, and supports parallel or sequential execution plus safe fail-fast scheduling. Active children are followed with `job.get` or `job.cancel`.
 
 OAuth discovery and token exchange are implemented by the Hub OAuth shim.
 
@@ -120,7 +120,7 @@ The same worker also exposes an owner-only Unix MCP socket for local
 integration. For development without tunnel credentials, run
 `agentic-gpt run-as-local`, then use `agentic-gpt local list-tools` or
 `agentic-gpt local call <tool>` with the same config. Both ingress paths expose
-the same compact 23-tool Normal surface or 35-tool Room surface and share
+the same compact 24-tool Normal surface or 36-tool Room surface and share
 policy, confirmation, audit, config, and managed execution state. The complete
 topology, local CLI contract, tool matrix, pinned client assets, reporting
 privacy modes, and recovery procedure are in

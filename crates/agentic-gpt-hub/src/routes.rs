@@ -1,9 +1,9 @@
 use agentic_gpt_protocol::{
     BatchExecRequest, ExecRequest, HubCommand, HubInfoAgents, HubInfoCounts,
     HubInfoRemoteConfirmation, HubInfoResponse, JobCancelRequest, JobGetRequest, JobKind,
-    JobListRequest, JobState, McpCallToolRequest, McpListServersRequest, McpListToolsRequest,
-    TmuxCapturePaneRequest, TmuxCloseSessionRequest, TmuxCreateSessionRequest, TmuxExecRequest,
-    TmuxListPanesRequest, TmuxPasteTextRequest,
+    JobListRequest, JobState, McpBatchRequest, McpCallToolRequest, McpListServersRequest,
+    McpListToolsRequest, TmuxCapturePaneRequest, TmuxCloseSessionRequest, TmuxCreateSessionRequest,
+    TmuxExecRequest, TmuxListPanesRequest, TmuxPasteTextRequest,
 };
 use anyhow::Result;
 use axum::extract::{Path, Query, State};
@@ -646,6 +646,28 @@ pub(crate) async fn mcp_call_tool(
     match request_agent(&state, &payload.agent_id, command, request_timeout).await {
         Ok(value) => Json(value).into_response(),
         Err(reason) => api_error(StatusCode::GATEWAY_TIMEOUT, "mcp_call_tool_timeout", reason),
+    }
+}
+
+pub(crate) async fn mcp_batch(
+    State(state): State<HubState>,
+    headers: HeaderMap,
+    Json(payload): Json<McpBatchRequest>,
+) -> Response {
+    if let Err(response) = require_action_auth(&state, &headers) {
+        return response;
+    }
+    if let Err(response) = require_agent_enabled(&state, &payload.agent_id) {
+        return response;
+    }
+    let command = HubCommand::McpBatch {
+        request_id: random_id("req"),
+        payload: payload.clone(),
+    };
+    let request_timeout = payload.effective_wait_seconds() + 2;
+    match request_agent(&state, &payload.agent_id, command, request_timeout).await {
+        Ok(value) => Json(value).into_response(),
+        Err(reason) => api_error(StatusCode::GATEWAY_TIMEOUT, "mcp_batch_timeout", reason),
     }
 }
 

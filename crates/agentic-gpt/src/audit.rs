@@ -12,6 +12,12 @@ use crate::config::Config;
 pub(crate) struct AuditRecord {
     pub(crate) task_id: Option<String>,
     pub(crate) job_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) batch_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) batch_call_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) batch_index: Option<usize>,
     pub(crate) time: DateTime<Utc>,
     pub(crate) program: String,
     pub(crate) args: Vec<String>,
@@ -97,7 +103,37 @@ pub(crate) struct BatchAuditRecord {
     pub(crate) truncated: bool,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct McpBatchAuditRecord {
+    pub(crate) time: DateTime<Utc>,
+    pub(crate) tool: String,
+    pub(crate) batch_id: String,
+    pub(crate) request_source: String,
+    pub(crate) call_count: usize,
+    pub(crate) server_count: usize,
+    pub(crate) mode: String,
+    pub(crate) fail_fast: bool,
+    pub(crate) confirmation_required_count: usize,
+    pub(crate) confirmation_result: Option<String>,
+    pub(crate) child_job_ids: Vec<String>,
+    pub(crate) outcome: String,
+    pub(crate) error_code: Option<String>,
+    pub(crate) duration_ms: u128,
+    pub(crate) truncated: bool,
+}
+
 pub(crate) fn write_audit(config: &Config, record: AuditRecord) -> Result<()> {
+    let audit_path = config.workspace_root.join(".agentic-gpt-audit.jsonl");
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(audit_path)?;
+    writeln!(file, "{}", serde_json::to_string(&record)?)?;
+    Ok(())
+}
+
+pub(crate) fn write_mcp_batch_audit(config: &Config, record: McpBatchAuditRecord) -> Result<()> {
     let audit_path = config.workspace_root.join(".agentic-gpt-audit.jsonl");
     let mut file = OpenOptions::new()
         .create(true)

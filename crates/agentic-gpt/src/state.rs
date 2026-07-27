@@ -157,6 +157,7 @@ pub(crate) struct AppState {
     pub(crate) reporting_sender: Arc<Mutex<Option<mpsc::Sender<AgentMessage>>>>,
     pub(crate) pending_confirmations: Arc<Mutex<HashMap<String, oneshot::Sender<String>>>>,
     pub(crate) temporary_mcp_allows: Arc<Mutex<Vec<confirmation::TemporaryMcpAllow>>>,
+    pub(crate) mcp_concurrency: Arc<jobs::McpConcurrency>,
     pub(crate) notebook_writes: Arc<Mutex<()>>,
     pub(crate) skills_writes: Arc<Mutex<()>>,
     pub(crate) skill_leases: Arc<jobs::SkillLeaseManager>,

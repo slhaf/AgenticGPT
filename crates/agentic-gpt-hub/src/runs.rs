@@ -69,6 +69,7 @@ pub(crate) fn command_type(command: &HubCommand) -> &'static str {
         HubCommand::McpListServers { .. } => "mcp.listServers",
         HubCommand::McpListTools { .. } => "mcp.listTools",
         HubCommand::McpCallTool { .. } => "mcp.callTool",
+        HubCommand::McpBatch { .. } => "mcp.batch",
         HubCommand::UserNotifyDeliver { .. } => "user.notify.deliver",
         HubCommand::RoomNotebookAppend { .. } => "room.notebook.append",
         HubCommand::RoomNotebookRecent { .. } => "room.notebook.recent",

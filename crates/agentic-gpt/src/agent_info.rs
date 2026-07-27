@@ -157,6 +157,12 @@ pub(crate) async fn collect(state: &AppState) -> Value {
             "configuredServerCount": config.mcp_servers.len(),
             "enabledServerCount": mcp_enabled_count,
             "clientLifecycle": "per-call",
+            "concurrency": {
+                "globalLimit": jobs::MCP_GLOBAL_CONCURRENCY,
+                "perServerLimit": jobs::MCP_PER_SERVER_CONCURRENCY,
+                "active": state.mcp_concurrency.active(),
+                "queued": state.mcp_concurrency.queued(),
+            },
         },
         "config": {
             "path": exact_path(&state.config_path),
@@ -424,6 +430,7 @@ mod tests {
             reporting_sender: Arc::new(Mutex::new(None)),
             pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
             temporary_mcp_allows: Arc::new(Mutex::new(Vec::new())),
+            mcp_concurrency: Arc::new(crate::jobs::McpConcurrency::new()),
             notebook_writes: Arc::new(Mutex::new(())),
             skills_writes: Arc::new(Mutex::new(())),
             skill_leases: Arc::new(jobs::SkillLeaseManager::new()),
@@ -434,13 +441,17 @@ mod tests {
     #[tokio::test]
     async fn info_is_bounded_redacted_and_profile_correct() {
         let value = collect(&state(CapabilityProfile::Room)).await;
-        assert_eq!(value["surface"]["toolCount"], 35);
+        assert_eq!(value["surface"]["toolCount"], 36);
         assert_eq!(value["identity"]["profile"], "room");
         assert_eq!(
             value["workspace"]["pathPolicy"]["writeRoots"][0].is_string(),
             true
         );
         assert_eq!(value["config"]["diskStatus"], "missing");
+        assert_eq!(value["mcp"]["concurrency"]["globalLimit"], 8);
+        assert_eq!(value["mcp"]["concurrency"]["perServerLimit"], 2);
+        assert_eq!(value["mcp"]["concurrency"]["active"], 0);
+        assert_eq!(value["mcp"]["concurrency"]["queued"], 0);
         let serialized = serde_json::to_string(&value).unwrap();
         assert!(!serialized.contains("change-me"));
         assert!(!serialized.contains("agent_secret"));

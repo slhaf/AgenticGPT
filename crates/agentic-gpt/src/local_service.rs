@@ -86,6 +86,14 @@ async fn dispatch_inner(state: AppState, command: HubCommand) -> Result<serde_js
                 })),
             }
         }
+        HubCommand::McpBatch { payload, .. } => {
+            match mcp::batch(&state, payload, "hub:mcp.batch", None).await {
+                Ok(result) => Ok(result),
+                Err(error) => Ok(serde_json::json!({
+                    "error": { "code": "mcp_batch_failed", "message": error.to_string() }
+                })),
+            }
+        }
         HubCommand::UserNotifyDeliver { payload, .. } => {
             if !state.runtime.capabilities().notifications {
                 return Ok(capability_error("user.notify.deliver"));

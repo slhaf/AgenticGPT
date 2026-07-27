@@ -1,6 +1,9 @@
 use std::path::Path;
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+    Arc, Weak,
+};
 
 use agentic_gpt_protocol::{
     BatchExecRequest, ExecRequest, JobBatchResponse, JobDetail, JobError, JobInfo, JobKind,
@@ -12,7 +15,7 @@ use rmcp::{model::RequestId, service::Peer, RoleClient};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Child;
-use tokio::sync::{Mutex, OwnedRwLockReadGuard, RwLock};
+use tokio::sync::{Mutex, OwnedRwLockReadGuard, OwnedSemaphorePermit, RwLock, Semaphore};
 use tokio::time::{sleep, Instant};
 
 use crate::{
@@ -31,6 +34,8 @@ pub(crate) const MAX_MCP_ARGUMENT_BYTES: usize = 256 * 1024;
 pub(crate) const MAX_MCP_RESULT_BYTES: usize = 512 * 1024;
 const MAX_MCP_RESULT_PREVIEW_BYTES: usize = 8 * 1024;
 const MAX_JOB_ERROR_BYTES: usize = 8 * 1024;
+pub(crate) const MCP_GLOBAL_CONCURRENCY: usize = 8;
+pub(crate) const MCP_PER_SERVER_CONCURRENCY: usize = 2;
 
 pub(crate) fn capacity_rejection(active: usize, requested: usize, limit: usize) -> String {
     format!("max_active_jobs_reached; active={active}; requested={requested}; limit={limit}")
@@ -41,6 +46,111 @@ fn resolved_job_limit(config: &Config) -> usize {
 }
 
 pub(crate) type TerminalEventHook = Arc<dyn Fn(&JobInfo) + Send + Sync>;
+
+pub(crate) struct McpConcurrency {
+    global: Arc<Semaphore>,
+    per_server: Mutex<std::collections::HashMap<String, Weak<Semaphore>>>,
+    queued: AtomicUsize,
+    active: Arc<AtomicUsize>,
+}
+
+pub(crate) struct McpConcurrencyPermit {
+    _global: OwnedSemaphorePermit,
+    _server: OwnedSemaphorePermit,
+    active: Arc<AtomicUsize>,
+}
+
+impl Drop for McpConcurrencyPermit {
+    fn drop(&mut self) {
+        self.active.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+impl Default for McpConcurrency {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl McpConcurrency {
+    pub(crate) fn new() -> Self {
+        Self {
+            global: Arc::new(Semaphore::new(MCP_GLOBAL_CONCURRENCY)),
+            per_server: Mutex::new(std::collections::HashMap::new()),
+            queued: AtomicUsize::new(0),
+            active: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    async fn server_semaphore(&self, server_id: &str) -> Arc<Semaphore> {
+        let mut semaphores = self.per_server.lock().await;
+        semaphores.retain(|_, semaphore| semaphore.strong_count() > 0);
+        if let Some(semaphore) = semaphores.get(server_id).and_then(Weak::upgrade) {
+            return semaphore;
+        }
+        let semaphore = Arc::new(Semaphore::new(MCP_PER_SERVER_CONCURRENCY));
+        semaphores.insert(server_id.to_string(), Arc::downgrade(&semaphore));
+        semaphore
+    }
+
+    pub(crate) async fn acquire(
+        &self,
+        server_id: &str,
+        cancel_requested: Arc<AtomicBool>,
+    ) -> Result<McpConcurrencyPermit, String> {
+        let server = self.server_semaphore(server_id).await;
+        self.queued.fetch_add(1, Ordering::AcqRel);
+        let permits = loop {
+            if cancel_requested.load(Ordering::Acquire) {
+                break Err("cancelled".to_string());
+            }
+            match server.clone().try_acquire_owned() {
+                Ok(server_permit) => match self.global.clone().try_acquire_owned() {
+                    Ok(global_permit) => break Ok((global_permit, server_permit)),
+                    Err(tokio::sync::TryAcquireError::NoPermits) => {
+                        drop(server_permit);
+                    }
+                    Err(tokio::sync::TryAcquireError::Closed) => {
+                        drop(server_permit);
+                        break Err("mcp_concurrency_closed".to_string());
+                    }
+                },
+                Err(tokio::sync::TryAcquireError::NoPermits) => {}
+                Err(tokio::sync::TryAcquireError::Closed) => {
+                    break Err("mcp_concurrency_closed".to_string());
+                }
+            }
+            tokio::select! {
+                _ = sleep(std::time::Duration::from_millis(10)) => {}
+                _ = wait_for_atomic_cancel(cancel_requested.clone()) => {
+                    break Err("cancelled".to_string());
+                }
+            }
+        };
+        self.queued.fetch_sub(1, Ordering::AcqRel);
+        let (global, server) = permits?;
+        self.active.fetch_add(1, Ordering::AcqRel);
+        Ok(McpConcurrencyPermit {
+            _global: global,
+            _server: server,
+            active: self.active.clone(),
+        })
+    }
+
+    pub(crate) fn active(&self) -> usize {
+        self.active.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn queued(&self) -> usize {
+        self.queued.load(Ordering::Acquire)
+    }
+}
+
+async fn wait_for_atomic_cancel(cancel_requested: Arc<AtomicBool>) {
+    while !cancel_requested.load(Ordering::Acquire) {
+        sleep(std::time::Duration::from_millis(25)).await;
+    }
+}
 
 pub(crate) struct ManagedJob {
     info: JobInfo,
@@ -108,6 +218,9 @@ pub(crate) struct ManagedProcessSpec {
 
 pub(crate) struct ManagedMcpSpec {
     pub(crate) agent_id: String,
+    pub(crate) batch_id: Option<String>,
+    pub(crate) batch_call_id: Option<String>,
+    pub(crate) batch_index: Option<usize>,
     pub(crate) server_id: String,
     pub(crate) tool_name: String,
     pub(crate) request_source: String,
@@ -134,6 +247,9 @@ struct ManagedAuditContext {
     skill_id: Option<String>,
     skill_path: Option<String>,
     installed_digest: Option<String>,
+    batch_id: Option<String>,
+    batch_call_id: Option<String>,
+    batch_index: Option<usize>,
     mcp_server_id: Option<String>,
     mcp_tool_name: Option<String>,
     argument_keys: Vec<String>,
@@ -271,6 +387,9 @@ pub(crate) async fn register_mcp_job(
     let info = JobInfo {
         agent_id: spec.agent_id,
         job_id: job_id.clone(),
+        batch_id: spec.batch_id.clone(),
+        batch_call_id: spec.batch_call_id.clone(),
+        batch_index: spec.batch_index,
         kind: JobKind::Mcp,
         state: JobState::WaitingConfirmation,
         created_at: now,
@@ -325,6 +444,9 @@ pub(crate) async fn register_mcp_job(
                 skill_id: None,
                 skill_path: None,
                 installed_digest: None,
+                batch_id: spec.batch_id,
+                batch_call_id: spec.batch_call_id,
+                batch_index: spec.batch_index,
                 mcp_server_id: Some(spec.server_id),
                 mcp_tool_name: Some(spec.tool_name),
                 argument_keys: spec.argument_keys,
@@ -341,6 +463,102 @@ pub(crate) async fn register_mcp_job(
         info,
         cancel_requested,
     })
+}
+
+pub(crate) async fn register_mcp_batch(
+    state: &AppState,
+    specs: Vec<ManagedMcpSpec>,
+) -> Result<Vec<ManagedMcpRegistration>, String> {
+    if specs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let config = state.config.read().await.clone();
+    let requested = specs.len();
+    let limit = resolved_job_limit(&config);
+    let now = Utc::now();
+    let mut jobs = state.jobs.lock().await;
+    refresh_jobs(state, &mut jobs).await;
+    let active = jobs
+        .values()
+        .filter(|job| job.info.state.is_active())
+        .count();
+    if active.saturating_add(requested) > limit {
+        return Err(capacity_rejection(active, requested, limit));
+    }
+    let mut registrations = Vec::with_capacity(requested);
+    for spec in specs {
+        let job_id = state.new_job_id();
+        let info = JobInfo {
+            agent_id: spec.agent_id,
+            job_id: job_id.clone(),
+            batch_id: spec.batch_id.clone(),
+            batch_call_id: spec.batch_call_id.clone(),
+            batch_index: spec.batch_index,
+            kind: JobKind::Mcp,
+            state: JobState::WaitingConfirmation,
+            created_at: now,
+            started_at: now,
+            updated_at: now,
+            finished_at: None,
+            program: None,
+            args: Vec::new(),
+            working_directory: None,
+            command_preview: None,
+            exit_code: None,
+            stdout_tail: String::new(),
+            stderr_tail: String::new(),
+            truncated: false,
+            reject_reason: None,
+            skill_id: None,
+            skill_path: None,
+            installed_digest: None,
+            mcp_server_id: Some(spec.server_id.clone()),
+            mcp_tool_name: Some(spec.tool_name.clone()),
+            cancel_requested: false,
+            cancel_outcome: None,
+            termination_evidence: None,
+        };
+        let cancel_requested = Arc::new(AtomicBool::new(false));
+        jobs.insert(
+            job_id,
+            ManagedJob {
+                info: info.clone(),
+                detail: ManagedJobDetail::default(),
+                runtime: ManagedJobRuntime::Mcp(ManagedMcpRuntime {
+                    peer: None,
+                    request_id: None,
+                }),
+                cancel_requested: cancel_requested.clone(),
+                audit: Some(ManagedAuditContext {
+                    config: config.clone(),
+                    request_source: spec.request_source,
+                    need_confirm: true,
+                    policy_decision: "pending".to_string(),
+                    confirmation_result: None,
+                    skill_id: None,
+                    skill_path: None,
+                    installed_digest: None,
+                    batch_id: spec.batch_id,
+                    batch_call_id: spec.batch_call_id,
+                    batch_index: spec.batch_index,
+                    mcp_server_id: Some(spec.server_id),
+                    mcp_tool_name: Some(spec.tool_name),
+                    argument_keys: spec.argument_keys,
+                    argument_key_count: Some(spec.argument_key_count),
+                    argument_keys_truncated: Some(spec.argument_keys_truncated),
+                    argument_bytes: Some(spec.argument_bytes),
+                    argument_sha256: Some(spec.argument_sha256),
+                    config_revision: Some(spec.config_revision),
+                    terminal_event_hook: spec.terminal_event_hook,
+                }),
+            },
+        );
+        registrations.push(ManagedMcpRegistration {
+            info,
+            cancel_requested,
+        });
+    }
+    Ok(registrations)
 }
 
 pub(crate) async fn set_mcp_preflight_rejection(
@@ -747,6 +965,9 @@ pub(crate) async fn start_prepared_managed_batch(
                 skill_id: None,
                 skill_path: None,
                 installed_digest: None,
+                batch_id: None,
+                batch_call_id: None,
+                batch_index: None,
                 mcp_server_id: None,
                 mcp_tool_name: None,
                 argument_keys: Vec::new(),
@@ -835,6 +1056,9 @@ async fn start_process_job_inner(
         skill_id: options.skill_id,
         skill_path: options.skill_path,
         installed_digest: options.installed_digest,
+        batch_id: None,
+        batch_call_id: None,
+        batch_index: None,
         mcp_server_id: None,
         mcp_tool_name: None,
         argument_keys: Vec::new(),
@@ -899,6 +1123,9 @@ fn process_job_info(
     JobInfo {
         agent_id: request.agent_id.clone(),
         job_id,
+        batch_id: None,
+        batch_call_id: None,
+        batch_index: None,
         kind,
         state,
         created_at: now,
@@ -1164,6 +1391,9 @@ async fn finalize_job(state: &AppState, job: &mut ManagedJob) {
         AuditRecord {
             task_id: None,
             job_id: Some(info.job_id.clone()),
+            batch_id: context.batch_id,
+            batch_call_id: context.batch_call_id,
+            batch_index: context.batch_index,
             time: info.updated_at,
             program: if info.kind == JobKind::Mcp {
                 "mcp.callTool".to_string()
@@ -1649,6 +1879,7 @@ mod tests {
             reporting_sender: Arc::new(Mutex::new(None)),
             pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
             temporary_mcp_allows: Arc::new(Mutex::new(Vec::new())),
+            mcp_concurrency: Arc::new(crate::jobs::McpConcurrency::new()),
             notebook_writes: Arc::new(Mutex::new(())),
             skills_writes: Arc::new(Mutex::new(())),
             skill_leases: Arc::new(SkillLeaseManager::new()),

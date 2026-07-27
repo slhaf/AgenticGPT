@@ -1,14 +1,14 @@
 use agentic_gpt_protocol::{
     BatchExecRequest, BootstrapReadRequest, DiaryAppendRequest, DiaryRecentRequest,
     DiarySelectExactRequest, ExecElement, ExecRequest, HubCommand, JobCancelRequest, JobGetRequest,
-    JobKind, JobListRequest, JobState, McpCallToolRequest, McpListToolsRequest,
-    NotebookAppendRequest, NotebookCurrentRequest, NotebookRecentRequest, NotebookRemoveRequest,
-    NotebookSearchRequest, NotebookSelectExactRequest, NotebookUpdateRequest, NotificationAction,
-    PassageSignificance, SkillActivationRequest, SkillInstallCancelRequest, SkillInstallFile,
-    SkillInstallGetRequest, SkillInstallRequest, SkillInstallSource, SkillReadRequest,
-    SkillRunRequest, SkillSearchRequest, TmuxCapturePaneRequest, TmuxCloseSessionRequest,
-    TmuxCreateSessionRequest, TmuxExecRequest, TmuxListPanesRequest, TmuxPasteTextRequest,
-    UserNotifySendRequest,
+    JobKind, JobListRequest, JobState, McpBatchCall, McpBatchMode, McpBatchRequest,
+    McpCallToolRequest, McpListToolsRequest, NotebookAppendRequest, NotebookCurrentRequest,
+    NotebookRecentRequest, NotebookRemoveRequest, NotebookSearchRequest,
+    NotebookSelectExactRequest, NotebookUpdateRequest, NotificationAction, PassageSignificance,
+    SkillActivationRequest, SkillInstallCancelRequest, SkillInstallFile, SkillInstallGetRequest,
+    SkillInstallRequest, SkillInstallSource, SkillReadRequest, SkillRunRequest, SkillSearchRequest,
+    TmuxCapturePaneRequest, TmuxCloseSessionRequest, TmuxCreateSessionRequest, TmuxExecRequest,
+    TmuxListPanesRequest, TmuxPasteTextRequest, UserNotifySendRequest,
 };
 use axum::extract::{Request, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -34,7 +34,7 @@ use crate::state::{HubState, McpProfile};
 use crate::utils::random_id;
 use crate::{default_config_summary, MAX_WAIT_SECONDS, REQUEST_TIMEOUT_SECS};
 
-const MCP_INSTRUCTIONS: &str = "Agentic GPT Hub exposes domain-specific job creation plus one generic lifecycle. Use process.exec for one managed process and process.batch for multiple managed processes; both wait briefly and return a Job envelope, so long-running work does not require a separate start tool. Use job.get with waitSeconds to inspect or briefly wait, job.list for bounded filtered discovery, and job.cancel for kind-aware cancellation evidence. Use tmux as the persistent shared workspace for stateful development, iterative debugging, TUIs, and user-agent handoff. For tmux work, discover the workspace with tmux.listSessions and tmux.listPanes, inspect it with tmux.capturePane, then use tmux.exec for shell panes or tmux.pasteText for non-shell panes. At Room start, call room.bootstrap, then room.bootstrap.read for relevant guides. Room skills are managed only by the active Room Agent; skills.run returns the same Job envelope and is followed through job.get/job.cancel. Commands remain subject to Agentic local policy, path policy, confirmation, capacity, and audit.";
+const MCP_INSTRUCTIONS: &str = "Agentic GPT Hub exposes domain-specific job creation plus one generic lifecycle. Use process.exec for one managed process and process.batch for multiple managed processes; both wait briefly and return Job envelopes. Use mcp.callTool for one downstream MCP Job and mcp.batch for 1..16 atomically admitted child Jobs with one aggregate confirmation, ordered results, global/per-server concurrency bounds, and optional fail-fast scheduling. Use job.get with waitSeconds to inspect or briefly wait, job.list for bounded filtered discovery, and job.cancel for kind-aware cancellation evidence. Use tmux as the persistent shared workspace for stateful development, iterative debugging, TUIs, and user-agent handoff. For tmux work, discover the workspace with tmux.listSessions and tmux.listPanes, inspect it with tmux.capturePane, then use tmux.exec for shell panes or tmux.pasteText for non-shell panes. At Room start, call room.bootstrap, then room.bootstrap.read for relevant guides. Room skills are managed only by the active Room Agent; skills.run returns the same Job envelope and is followed through job.get/job.cancel. Commands remain subject to Agentic local policy, path policy, confirmation, capacity, and audit.";
 const COORDINATOR_INSTRUCTIONS: &str = "Agentic GPT Hub coordinator profile. This connector exposes only Hub-native agent status, retained run history, current job snapshots, and notification tools. It never dispatches execution, job-control, tmux, downstream MCP, skills, bootstrap, diary, or notebook commands to an Agent.";
 const COORDINATOR_TOOLS: &[&str] = &[
     "hub.info",
@@ -85,6 +85,7 @@ fn decorate_tool_descriptors(tool_router: &mut ToolRouter<AgenticMcpServer>) {
             name,
             "process.exec"
                 | "process.batch"
+                | "mcp.batch"
                 | "mcp.callTool"
                 | "tmux.pasteText"
                 | "tmux.exec"
@@ -129,6 +130,7 @@ fn tool_is_read_only(name: &str) -> bool {
             | "tmux.exec"
             | "tmux.createSession"
             | "tmux.closeSession"
+            | "mcp.batch"
             | "mcp.callTool"
             | "user.notify.send"
             | "room.notebook.append"
@@ -305,6 +307,7 @@ async fn call_app_tool(server: &AgenticMcpServer, params: Value) -> Result<Value
                 .mcp_call_tool(Parameters(decode_args(arguments)?))
                 .await
         }
+        "mcp.batch" => server.mcp_batch(Parameters(decode_args(arguments)?)).await,
         "hub.info" => server.hub_info().await,
         "user.notify.channels" => server.user_notify_channels().await,
         "hub.run.get" => {
@@ -1077,6 +1080,46 @@ impl AgenticMcpServer {
             .await
             .unwrap_or_else(
                 |reason| json!({ "error": { "code": "mcp_call_tool_timeout", "message": reason } }),
+            );
+        Ok(result_from_value(value))
+    }
+
+    #[tool(
+        name = "mcp.batch",
+        description = "Atomically admit 1..16 managed downstream MCP child Jobs with one aggregate confirmation, bounded global/per-server concurrency, ordered results, and optional fail-fast scheduling."
+    )]
+    async fn mcp_batch(
+        &self,
+        params: Parameters<McpBatchArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let params = params.0;
+        self.ensure_agent_enabled(&params.agent_id)?;
+        let payload = McpBatchRequest {
+            agent_id: params.agent_id.clone(),
+            calls: params
+                .calls
+                .into_iter()
+                .map(|call| McpBatchCall {
+                    id: call.id,
+                    server_id: call.server_id,
+                    tool_name: call.tool_name,
+                    arguments: call.arguments.unwrap_or_else(|| json!({})),
+                })
+                .collect(),
+            mode: params.mode.unwrap_or_default().into(),
+            fail_fast: params.fail_fast.unwrap_or(false),
+            wait_seconds: params.wait_seconds,
+            timeout_seconds: params.timeout_seconds,
+        };
+        let command = HubCommand::McpBatch {
+            request_id: random_id("req"),
+            payload: payload.clone(),
+        };
+        let request_timeout = payload.effective_wait_seconds() + 2;
+        let value = request_agent(&self.state, &payload.agent_id, command, request_timeout)
+            .await
+            .unwrap_or_else(
+                |reason| json!({ "error": { "code": "mcp_batch_timeout", "message": reason } }),
             );
         Ok(result_from_value(value))
     }
@@ -2020,6 +2063,67 @@ struct McpCallToolArgs {
     timeout_seconds: Option<u64>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum McpBatchModeArgs {
+    #[default]
+    Parallel,
+    Sequential,
+}
+
+impl From<McpBatchModeArgs> for McpBatchMode {
+    fn from(value: McpBatchModeArgs) -> Self {
+        match value {
+            McpBatchModeArgs::Parallel => Self::Parallel,
+            McpBatchModeArgs::Sequential => Self::Sequential,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct McpBatchCallArgs {
+    #[serde(default)]
+    #[schemars(
+        description = "Optional stable call id matching ^[A-Za-z0-9._:-]{1,64}$; ids must be unique within the batch."
+    )]
+    id: Option<String>,
+    #[schemars(description = "Configured MCP server id.")]
+    server_id: String,
+    #[schemars(description = "Downstream MCP tool name.")]
+    tool_name: String,
+    #[serde(default)]
+    #[schemars(description = "JSON object arguments; maximum serialized size 256 KiB per call.")]
+    arguments: Option<Value>,
+}
+
+#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct McpBatchArgs {
+    #[schemars(description = "Target local agent id.")]
+    agent_id: String,
+    #[schemars(
+        description = "Ordered 1..16 downstream MCP calls; aggregate serialized arguments are capped at 2 MiB."
+    )]
+    calls: Vec<McpBatchCallArgs>,
+    #[serde(default)]
+    #[schemars(description = "Execution mode: parallel by default, or sequential.")]
+    mode: Option<McpBatchModeArgs>,
+    #[serde(default)]
+    #[schemars(
+        description = "When true, prevent not-yet-started children from starting after a hard child failure; already-started calls are never cancelled."
+    )]
+    fail_fast: Option<bool>,
+    #[serde(default)]
+    #[schemars(description = "Bounded inline wait in seconds, default 5 and capped at 30.")]
+    wait_seconds: Option<u64>,
+    #[serde(default)]
+    #[schemars(
+        description = "Per-child downstream execution deadline in seconds after scheduling, default 300 and capped at 900."
+    )]
+    timeout_seconds: Option<u64>,
+}
+
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 struct UserNotifySendArgs {
@@ -2536,6 +2640,7 @@ mod tests {
             "tmux.pasteText",
             "tmux.createSession",
             "tmux.closeSession",
+            "mcp.batch",
             "mcp.callTool",
             "user.notify.send",
             "room.notebook.append",
@@ -2609,6 +2714,7 @@ mod tests {
         assert!(names.iter().any(|name| name == "bootstrap"));
         assert!(names.iter().any(|name| name == "bootstrap.read"));
         assert!(names.iter().any(|name| name == "process.exec"));
+        assert!(names.iter().any(|name| name == "mcp.batch"));
         assert!(names.iter().any(|name| name == "hub.job.list"));
     }
 

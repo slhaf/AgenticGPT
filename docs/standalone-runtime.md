@@ -82,12 +82,12 @@ errors are written to stderr. A stopped/restarting runtime returns
 
 ## Tunnel and local tool surfaces
 
-Normal advertises exactly 23 MCP tools through either tunnel stdio or local
+Normal advertises exactly 24 MCP tools through either tunnel stdio or local
 Unix MCP. Start with `agent.info` to inspect the active profile, bounded path
 policy, capacity, confirmation availability, and reporting state:
 
 ```text
-mcp.list, mcp.callTool
+mcp.list, mcp.callTool, mcp.batch
 process.exec, process.batch, job.get, job.list, job.cancel
 skills.list, skills.read, skills.setActive, skills.install,
 skills.install.get, skills.install.cancel, skills.run
@@ -95,7 +95,7 @@ tmux.sessions, tmux.panes, tmux.exec, tmux.pasteText
 agent.info, file.read, file.search, file.edit, file.batch
 ```
 
-Room advertises exactly 35 tools through either ingress: the 23 Normal tools,
+Room advertises exactly 36 tools through either ingress: the 24 Normal tools,
 `bootstrap` and `bootstrap.read`, plus these ten Room memory tools:
 
 ```text
@@ -114,12 +114,34 @@ serialized size is capped at 256 KiB. Results up to 512 KiB are retained in
 byte count, SHA-256, and an 8 KiB UTF-8-safe preview. A downstream
 `isError=true` result is retained while the Job state becomes `failed`.
 
+`mcp.batch` accepts 1–16 ordered calls. Every call is fully validated before
+capacity admission or confirmation; invalid input and insufficient shared Job
+capacity create no child Jobs and start no downstream side effects. Admission
+is atomic. The batch then requests one aggregate confirmation after excluding
+servers already covered by temporary allow state. A single-server batch may
+receive a 15- or 30-minute server grant; a multi-server batch only supports one
+batch-scoped allow or deny.
+
+Parallel mode is the default; sequential mode waits for each child to become
+terminal before starting the next. The shared scheduler permits at most eight
+active MCP children globally and two per server, and `agent.info` reports the
+limits plus active/queued counts. `failFast=true` only prevents children that
+have not started from beginning after a hard failure; already-started calls are
+never cancelled. Child results remain in input order. Per-call arguments and
+results keep the 256 KiB / 512 KiB bounds, while aggregate arguments and the
+serialized batch response are each capped at 2 MiB. If the response budget is
+exceeded, later child result bodies are removed first while hashes, sizes,
+previews, states, and Job ids remain available.
+
 MCP cancellation uses the exact rmcp request id. `job.cancel` and execution
 timeouts send `notifications/cancelled`; if the transport does not provide a
 terminal cancellation response, Agentic reports `detached` with bounded
-termination evidence rather than claiming `cancelled`. Audit records contain
-server/tool names, a bounded argument-key subset plus total count, byte counts, and hashes, config revision, result
-size/hash, and terminal evidence, but never raw arguments or raw results.
+termination evidence rather than claiming `cancelled`. Child audit records
+carry `batchId`, optional `batchCallId`, and `batchIndex`; one aggregate audit
+records mode, fail-fast, confirmation outcome, child Job ids, final outcome,
+and clipping. Confirmation/audit records contain server/tool names, a bounded
+argument-key subset plus total count, byte counts and hashes, config revision,
+result size/hash, and terminal evidence, but never raw arguments or raw results.
 
 The standalone worker intentionally has no Tunnel `agentId` or
 `confirmMethod` input fields. The worker supplies its configured local agent
