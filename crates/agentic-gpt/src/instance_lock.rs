@@ -21,6 +21,7 @@ impl InstanceLock {
         let lock_path = lock_path(&resource, suffix);
         let mut file = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(&lock_path)

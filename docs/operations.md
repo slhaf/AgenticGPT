@@ -7,8 +7,9 @@ This page records the minimum checks for keeping Agentic GPT reproducible after 
 From the repository root:
 
 ```bash
-cargo fmt
+cargo fmt --all --check
 cargo check --workspace
+cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 python3 - <<'PY'
 import yaml
@@ -42,6 +43,54 @@ After deploying a new Hub or local agent build:
 4. Start and inspect one Job through `/v1/jobs/{jobId}` if Job support changed.
 5. List MCP servers and tools if MCP support changed.
 6. Trigger one MCP tool call that requires confirmation when confirmation policy changed.
+
+## v0.9 acceptance checklist
+
+Run these checks from the same commit that will be deployed:
+
+```bash
+cargo fmt --all --check
+cargo check --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+
+agentic-gpt --version
+agentic-gpt-hub --version
+agentic-gpt local list-tools --config ~/.agentic_gpt/config.json
+agentic-gpt local call agent.info \
+  --config ~/.agentic_gpt/config.json \
+  --arguments '{}'
+```
+
+Expected contract:
+
+- both binaries report `0.9.0`;
+- Normal local/tunnel surfaces expose 24 tools and Room exposes 36;
+- `mcp.batch`, `mcp.callTool`, `job.get`, `job.list`, and `job.cancel` are present;
+- `process.batchExec`, managed `session.*`, and `process.get/list/kill` are absent;
+- `agent.info.execution.jobs` is present;
+- `agent.info.mcp.concurrency` reports global limit 8, per-server limit 2, and bounded active/queued counts;
+- Local Unix MCP uses an owner-only `0700` runtime directory and `0600` socket;
+- Local Unix and tunnel stdio descriptor/schema revisions match for the same profile;
+- `config.example.json` parses under the strict v0.9 config type and contains no usable credentials.
+
+A no-side-effect `mcp.batch` dispatch smoke can use duplicate call ids. It must fail before confirmation or downstream connection and write one aggregate `validation_rejected` audit with no child `mcp.callTool` records:
+
+```bash
+agentic-gpt local call mcp.batch \
+  --config ~/.agentic_gpt/config.json \
+  --arguments '{
+    "calls": [
+      {"id":"dup","serverId":"configured-server","toolName":"probe","arguments":{}},
+      {"id":"dup","serverId":"configured-server","toolName":"probe","arguments":{}}
+    ],
+    "waitSeconds": 0
+  }'
+```
+
+The expected structured error is `mcp_batch_failed` with a message beginning `mcp_batch_call_id_duplicate`. This validates schema → serde → dispatch → aggregate audit without starting downstream work.
+
+Before a release tag, also validate [`openapi/hub.yaml`](../openapi/hub.yaml) with the intended Actions importer and refresh the Custom GPT schema. Tagging and deployment remain separate actions.
 
 ## Safety invariants
 

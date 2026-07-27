@@ -225,16 +225,11 @@ pub(crate) struct LimitsConfig {
     pub(crate) max_active_jobs: MaxActiveJobs,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum MaxActiveJobs {
+    #[default]
     Auto,
     Explicit(usize),
-}
-
-impl Default for MaxActiveJobs {
-    fn default() -> Self {
-        Self::Auto
-    }
 }
 
 impl Serialize for MaxActiveJobs {
@@ -371,7 +366,7 @@ pub(crate) struct RoomConfig {
     pub(crate) skills: RoomSkillsConfig,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TunnelConfig {
     pub(crate) tunnel_id: String,
@@ -380,17 +375,6 @@ pub(crate) struct TunnelConfig {
     pub(crate) client: TunnelClientConfig,
     #[serde(default)]
     pub(crate) hub_reporting: HubReportingConfig,
-}
-
-impl Default for TunnelConfig {
-    fn default() -> Self {
-        Self {
-            tunnel_id: String::new(),
-            api_key: String::new(),
-            client: TunnelClientConfig::default(),
-            hub_reporting: HubReportingConfig::default(),
-        }
-    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -943,6 +927,34 @@ pub(crate) fn default_path_policy(workspace_root: &Path) -> PathPolicyConfig {
     }
 }
 
+pub(crate) fn write_config_with_backup(path: &Path, config: &Config) -> Result<()> {
+    ensure_parent(path)?;
+    if path.exists() {
+        let backup_dir = path.parent().unwrap().join("backups");
+        fs::create_dir_all(&backup_dir)?;
+        let backup = backup_dir.join(format!("config.{}.json", Utc::now().timestamp_millis()));
+        fs::copy(path, backup)?;
+        prune_backups(&backup_dir, config.backup_limit)?;
+    }
+    fs::write(path, serde_json::to_string_pretty(config)?)?;
+    Ok(())
+}
+
+fn prune_backups(dir: &Path, limit: usize) -> Result<()> {
+    let mut entries = fs::read_dir(dir)?
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with("config."))
+        .collect::<Vec<_>>();
+    entries.sort_by_key(|entry| entry.metadata().and_then(|meta| meta.modified()).ok());
+    while entries.len() > limit {
+        if let Some(entry) = entries.first() {
+            fs::remove_file(entry.path())?;
+        }
+        entries.remove(0);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -951,6 +963,23 @@ mod tests {
 
     fn temp_config_path() -> PathBuf {
         std::env::temp_dir().join(format!("agentic-config-{}.json", Uuid::new_v4().simple()))
+    }
+
+    #[test]
+    fn checked_in_v09_config_example_is_strict_and_safe_to_copy() {
+        let source = include_str!("../../../config.example.json");
+        let value: serde_json::Value = serde_json::from_str(source).unwrap();
+        let config: Config = serde_json::from_value(value.clone()).unwrap();
+        config.validate_mcp_servers().unwrap();
+        assert_eq!(config.agent_id, "laptop");
+        assert_eq!(config.limits.max_active_jobs, MaxActiveJobs::Auto);
+        assert_eq!(config.mcp_servers.len(), 2);
+        assert!(config.mcp_servers.values().all(|server| !server.enabled));
+        assert_eq!(value["agentSecret"], "change-me-before-use");
+        assert!(value["limits"].get("maxActiveSessions").is_none());
+        assert!(value["limits"].get("sessionIdleTimeoutSecs").is_none());
+        assert!(!source.contains("AGENTIC_GPT_API_KEY="));
+        assert!(!source.contains("integration-secret"));
     }
 
     #[test]
@@ -1144,31 +1173,4 @@ mod tests {
         config.tunnel.as_mut().unwrap().api_key = "secret".to_string();
         assert!(config.validate_standalone().is_err());
     }
-}
-pub(crate) fn write_config_with_backup(path: &Path, config: &Config) -> Result<()> {
-    ensure_parent(path)?;
-    if path.exists() {
-        let backup_dir = path.parent().unwrap().join("backups");
-        fs::create_dir_all(&backup_dir)?;
-        let backup = backup_dir.join(format!("config.{}.json", Utc::now().timestamp_millis()));
-        fs::copy(path, backup)?;
-        prune_backups(&backup_dir, config.backup_limit)?;
-    }
-    fs::write(path, serde_json::to_string_pretty(config)?)?;
-    Ok(())
-}
-
-fn prune_backups(dir: &Path, limit: usize) -> Result<()> {
-    let mut entries = fs::read_dir(dir)?
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| entry.file_name().to_string_lossy().starts_with("config."))
-        .collect::<Vec<_>>();
-    entries.sort_by_key(|entry| entry.metadata().and_then(|meta| meta.modified()).ok());
-    while entries.len() > limit {
-        if let Some(entry) = entries.first() {
-            fs::remove_file(entry.path())?;
-        }
-        entries.remove(0);
-    }
-    Ok(())
 }

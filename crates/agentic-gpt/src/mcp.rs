@@ -546,6 +546,7 @@ async fn prepare_mcp_batch(
     Ok(prepared)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_mcp_batch_coordinator(
     state: AppState,
     prepared: Vec<PreparedMcpBatchCall>,
@@ -810,6 +811,7 @@ fn batch_error_code(message: &str) -> String {
     message[..end].chars().take(128).collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn write_batch_audit(
     state: &AppState,
     batch_id: &str,
@@ -957,6 +959,7 @@ async fn start_managed_call_with_factory(
         .map_err(|reason| anyhow!(reason))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_managed_call(
     state: AppState,
     payload: McpCallToolRequest,

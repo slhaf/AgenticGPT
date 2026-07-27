@@ -308,7 +308,7 @@ pub(crate) async fn list_jobs(
                 .unwrap_or_default();
             jobs.retain(|job| payload.kind.is_none_or(|kind| job.kind == kind));
             jobs.retain(|job| payload.state.is_none_or(|state| job.state == state));
-            jobs.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+            jobs.sort_by_key(|job| std::cmp::Reverse(job.updated_at));
             jobs.truncate(payload.limit.unwrap_or(100).clamp(1, 100));
             Json(json!({ "jobs": jobs })).into_response()
         }
@@ -671,6 +671,7 @@ pub(crate) async fn mcp_batch(
     }
 }
 
+#[allow(clippy::result_large_err)]
 pub(crate) fn require_action_auth(
     state: &HubState,
     headers: &HeaderMap,
@@ -706,6 +707,7 @@ pub(crate) fn parse_bearer_token(value: &str) -> Option<String> {
     }
 }
 
+#[allow(clippy::result_large_err)]
 pub(crate) fn require_agent_enabled(
     state: &HubState,
     agent_id: &str,

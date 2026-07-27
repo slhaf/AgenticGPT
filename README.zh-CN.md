@@ -2,67 +2,60 @@
 
 [English README](README.md)
 
-Agentic GPT 是一个 Linux 本地执行代理和 Rust Hub，用来让 ChatGPT 在受控条件下连接本地机器。
-
-它适合这样的工作流：ChatGPT 需要查看本地状态、执行短命令、启动长时间会话、桥接本地配置的 MCP 服务，并且在敏感操作前请求用户确认。
+Agentic GPT 是一个 Linux 本地执行代理与 Rust Hub，用来让 ChatGPT 在明确的策略、确认、容量和审计边界内连接本地机器。
 
 ```text
 ChatGPT Actions / ChatGPT Apps MCP
-  -> Rust Hub 的 HTTPS API
-  -> 到 Local Agent 的 WebSocket 连接
-  -> 本地进程 / 会话 / 确认 / MCP 桥接 / 沙箱
+  -> Rust Hub HTTPS API / MCP
+  -> Local Agent WebSocket，或 Secure MCP Tunnel
+  -> 本地 Unix MCP / 进程 Job / Skill Job / MCP Job / tmux / 文件系统
 ```
 
-当前主线使用 Rust Hub。旧的 Cloudflare Worker 实现已经从 `main` 移出；如果确实需要历史上的 Cloudflare-only Hub，可以查看 `legacy/cf-worker-before-removal` 分支。
+当前主线使用 Rust Hub。历史 Cloudflare-only Hub 已移出 `main`，仅保留在 `legacy/cf-worker-before-removal` 分支。
 
-## 功能
+## v0.9 主要能力
 
-- 通过常驻 local agent 执行本地命令。
-- 支持短命令同步执行和长时间会话。
-- 支持批量命令执行，并采用 all-or-nothing 的确认语义。
-- 支持本地桌面确认，以及可选的 Hub 远程确认。
-- 可配置命令策略：allow、confirm、deny。
-- 可配置路径策略：可写根目录、只读根目录、拒绝访问根目录。
-- 可选 bubblewrap 沙箱。
-- 支持把 ChatGPT 请求桥接到 local agent 内配置的 MCP server。
-- 提供 ChatGPT Actions OpenAPI schema 和 ChatGPT Apps 友好的 MCP endpoint。
-- 提供 Room 作用域的重复会话 bootstrap：简短入口文件加上由 frontmatter 驱动的通用能力指南。
+- 统一的 `ManagedJob` 执行模型：`process.exec`、`process.batch`、`skills.run`、`mcp.callTool` 和 `mcp.batch` 共用容量、生命周期、审计和 `job.*` 管理入口。
+- `job.get`、`job.list`、`job.cancel` 提供统一的查询与取消，不再保留 managed `session.*` 或 `process.get/list/kill` 包装。
+- `mcp.callTool` 支持 bounded inline wait、绝对执行 deadline、精确 MCP request-id 取消、结果保留和超大结果摘要。
+- `mcp.batch` 原子接纳 1–16 个普通 MCP child Job，只确认一次，支持 parallel / sequential、安全 fail-fast、全局 8 / 单 server 2 的共享并发限制，并保持输入顺序。
+- Normal surface 固定为 24 个工具，Room surface 固定为 36 个工具；Tunnel stdio 与本地 Unix MCP 的 descriptor/schema 一致。
+- 本地开发可直接运行 `run-as-local`，不需要 tunnel 凭据；同一 worker 也可在 `run-as-standalone` 下同时提供 tunnel 与 owner-only Unix MCP。
+- 完整的命令策略、路径策略、桌面/ntfy 确认、bubblewrap、Room bootstrap、Skill 安装与 tmux 持久工作区。
+- Hub 提供 Actions OpenAPI、Apps 兼容 `/mcp`、OAuth shim、HTTP API 与 Local Agent WebSocket。
 
 ## 仓库结构
 
-- `crates/agentic-gpt`：Linux local agent CLI。
-- `crates/agentic-gpt-hub`：Rust Hub HTTP/WebSocket 服务。
+- `crates/agentic-gpt`：Linux Local Agent CLI。
+- `crates/agentic-gpt-hub`：Rust Hub HTTP/WebSocket/MCP 服务。
 - `crates/agentic-gpt-protocol`：共享 JSON 协议类型。
-- `openapi/hub.yaml`：Rust Hub 的 Custom GPT Actions schema。
-- `docs/interfaces.md`：Actions、Apps MCP、Local Agent WebSocket 的接口地图。
-- `docs/standalone-runtime.md`：独立 Tunnel 的拓扑、配置、信任校验、reporting、Hub profile 和故障恢复。
-- `docs/operations.md`：本地验证、smoke test、部署检查和安全不变量。
-- `scripts/dist-linux.sh`：多目标 Linux release 构建脚本。
+- `openapi/hub.yaml`：Custom GPT Actions schema。
+- `config.example.json`：无可用密钥的严格 v0.9 配置示例。
+- `docs/interfaces.md`：接口与工具地图。
+- `docs/standalone-runtime.md`：Tunnel/local runtime、工具矩阵、信任与恢复。
+- `docs/operations.md`：部署与 smoke test。
+- `docs/migration-v0.9.zh-CN.md`：v0.8 → v0.9 迁移指南。
 
 ## 运行要求
 
-- local agent 运行在 Linux 机器上。
-- 对应目标平台的 release 二进制；如果从源码构建，则需要 Rust stable。
-- 如果要让远端 ChatGPT 访问，需要一台服务器或 VPS 跑 Hub。
-- 对外暴露 Hub 时建议使用 Caddy 或 Nginx 做 HTTPS 反代。
-- 可选：`bubblewrap`，用于沙箱执行。
-- 可选：`ntfy`，用于 Hub 远程确认。
+- Local Agent 运行在 Linux 上。
+- 使用 release 二进制，或安装 Rust stable 从源码构建。
+- 远程访问需要部署 Rust Hub，并建议在前面使用 Caddy/Nginx 提供 HTTPS。
+- 可选：`bubblewrap` 用于沙箱；`ntfy` 用于 Hub 远程确认。
 
 ## 安装
-
-从 GitHub Releases 下载对应目标平台的 release archive，然后解压两个二进制并放到 `PATH` 中：
 
 ```bash
 tar -xzf agentic-gpt-x86_64-unknown-linux-gnu.tar.gz
 install -m 0755 agentic-gpt agentic-gpt-hub ~/.local/bin/
 ```
 
-当前 release 目标：
+支持的 release target：
 
 - `x86_64-unknown-linux-gnu`
 - `aarch64-unknown-linux-gnu`
 
-源码构建、CI 和 release 发布流程见 [`docs/development.zh-CN.md`](docs/development.zh-CN.md)。
+源码构建、CI 与发布流程见 [`docs/development.zh-CN.md`](docs/development.zh-CN.md)。
 
 ## 快速开始
 
@@ -78,9 +71,7 @@ AGENTIC_GPT_API_KEY='<high-entropy-api-key>' \
   agentic-gpt-hub serve --bind 127.0.0.1:8787
 ```
 
-Hub 状态默认保存在 `~/.agentic_gpt/hub.sqlite3`，Hub 配置默认保存在 `~/.agentic_gpt/hub.json`。
-
-如果要公开访问，把 Caddy 或 Nginx 放在 Hub 前面，并通过 HTTPS 暴露。Hub 同时提供 HTTP API 和 WebSocket endpoint。
+Hub 状态默认位于 `~/.agentic_gpt/hub.sqlite3`，配置默认位于 `~/.agentic_gpt/hub.json`。
 
 ### 2. 启动 Local Agent
 
@@ -94,143 +85,124 @@ agentic-gpt config set confirmationLanguage zh-CN
 agentic-gpt run
 ```
 
-Local agent 配置位于 `~/.agentic_gpt/config.json`；审计日志以 JSONL 写入 `~/.agentic_gpt/audit.log`。
-
-`workerUrl` 作为旧字段别名仍然可以读取和设置，但规范字段是 `hubUrl`。
+Local Agent 配置位于 `~/.agentic_gpt/config.json`。升级前请先阅读 [`docs/migration-v0.9.zh-CN.md`](docs/migration-v0.9.zh-CN.md)。
 
 ### 3. 连接 ChatGPT
 
-Custom GPT Actions 使用 `openapi/hub.yaml`，把里面的 server URL 替换成你的 HTTPS Hub 地址，并用 `AGENTIC_GPT_API_KEY` 配置 Bearer auth。
+Custom GPT Actions 使用 [`openapi/hub.yaml`](openapi/hub.yaml)，并通过 `AGENTIC_GPT_API_KEY` 配置 Bearer auth。
 
-ChatGPT Apps / MCP 使用 Apps 友好的 MCP endpoint：
+ChatGPT Apps / MCP endpoint：
 
 ```text
 https://<your-hub-domain>/mcp
 ```
 
-`/mcp` 的 `tools/call` 响应使用 Hub 的 `AgenticResult` 外壳，兼容 ChatGPT Apps / MCP tool result。Hub 原生工具返回 `content`、`structuredContent` 和 `isError`；`mcp.callTool` 会透传下游 MCP result envelope，包括非文本 content block 和 `_meta`。
+`mcp.callTool` 返回统一 `JobResponse`；调用仍在执行时，通过 `job.get` 获取结果或通过 `job.cancel` 请求取消。`mcp.batch` 返回有序 child Job 结果；child 后续仍使用同一套 `job.*` 生命周期。
 
-OAuth discovery 和 token exchange 由 Hub 的 OAuth shim 提供。
+## 本地与 Tunnel runtime
 
-如果使用独立 Secure MCP Tunnel，请配置 `tunnel.tunnelId` 和
-`file:PATH` 或 `env:NAME` 形式的 secret reference，然后运行
-`agentic-gpt run-as-standalone`；Room surface 使用 `--profile room`。
-完整的拓扑、tool matrix、固定版本 tunnel-client、reporting 隐私模式和
-故障恢复流程见 [`docs/standalone-runtime.md`](docs/standalone-runtime.md)。
+不需要 tunnel 的本地联调：
+
+```bash
+agentic-gpt run-as-local --config ~/.agentic_gpt/config.json --profile normal
+agentic-gpt local list-tools --config ~/.agentic_gpt/config.json
+agentic-gpt local call agent.info --config ~/.agentic_gpt/config.json --arguments '{}'
+```
+
+Secure MCP Tunnel：
+
+```bash
+agentic-gpt run-as-standalone --config ~/.agentic_gpt/config.json --profile normal
+```
+
+Room surface 使用 `--profile room`。两种 ingress 共用同一个 `AppState`、Job registry、配置热加载、策略、确认和审计；完整说明见 [`docs/standalone-runtime.md`](docs/standalone-runtime.md)。
+
+## Managed Job 与 MCP 边界
+
+- `process.exec` / `skills.run` / `mcp.callTool` 返回 `JobResponse`。
+- `job.get` / `job.cancel` 返回 `JobDetail`；Hub 仅有缓存摘要时会设置 `detailAvailable=false`。
+- MCP 参数必须是 JSON object，单调用参数上限 256 KiB，单调用结果保留上限 512 KiB。
+- `mcp.batch` 每批 1–16 项，aggregate 参数与响应各上限 2 MiB。
+- MCP cancel 使用精确 downstream request id；无法证明远端终止时返回 `detached`，不会虚报 `cancelled`。
+- 审计只记录 bounded 键名摘要、字节数、哈希、状态与终止证据，不记录原始参数值或原始结果。
 
 ## 确认机制
 
-Local agent 可以在命令匹配 confirm 策略时请求用户确认。
-
-```bash
-agentic-gpt config set confirmationProvider freedesktop-then-ntfy
-agentic-gpt config set confirmationLanguage zh-CN
-```
-
 支持的确认通道：
 
-- `freedesktop`：本地桌面通知按钮。
-- `ntfy`：沿用现有 Hub 回调路径的远程确认通道。
-- `freedesktop-then-ntfy`：优先本地桌面确认；仅在本地通道不可用时回退到 Hub-relayed ntfy。
+- `freedesktop`：本地桌面按钮。
+- `ntfy`：Hub relay 的远程确认。
+- `freedesktop-then-ntfy`：本地不可用时再回退到 Hub。
 
-新的或由 Agentic 写回的配置使用规范的有序形式
-`{"channels":["freedesktop","ntfy"]}`。为兼容旧配置，`hub`、
-`freedesktop-then-hub`、`freedesktopThenHub`、`default` 以及
-`{"provider":"..."}` 仍可读取。
-
-本地拒绝或超时是最终结果，不会继续回退到 Hub。
-
-支持的确认语言：
-
-- `en`
-- `zh-CN`
-
-远程确认默认关闭，需要在 Hub 侧启用，而不是每个 Local Agent 单独启用：
+规范配置形式：
 
 ```json
 {
-  "remoteConfirmation": {
-    "enabled": true,
-    "provider": "ntfy",
-    "timeoutSeconds": 45,
-    "ntfy": {
-      "serverUrl": "https://ntfy.example.com",
-      "topic": "<high-entropy-topic>",
-      "callbackBaseUrl": "https://agentic-gpt.example.com"
-    }
-  }
+  "confirmationProvider": {
+    "channels": ["freedesktop", "ntfy"]
+  },
+  "confirmationLanguage": "zh-CN"
 }
 ```
 
-ntfy callback route 不会出现在 GPT Actions OpenAPI 里。它们只由 ntfy 按钮调用，并且要求 callback URL 中的一次性确认 token。
+`mcp.batch` 在完成全部验证与原子容量接纳后只请求一次 aggregate confirmation。单 server 批次可以授予 15/30 分钟 server allow；多 server 批次只提供 batch-scoped allow/deny。
 
-## 命令策略
-
-命令策略可以通过命令本身添加或删除。`remove` 使用 `program` 加可选 `argsPrefix` 匹配；如果交互式终端中命中多条规则，CLI 会询问删除哪一条。
+## 命令与路径策略
 
 ```bash
 agentic-gpt config allow add bash
-agentic-gpt config allow remove bash
 agentic-gpt config confirm add python -c
-agentic-gpt config confirm remove python -c
 agentic-gpt config deny add ssh
-```
 
-策略优先级偏保守。内置 deny 规则仍会生效，除非用配置里的 allow 规则显式覆盖。
-
-## 路径策略
-
-路径访问由 local agent 配置中的 `pathPolicy` 控制。
-
-`workspaceRoot` 总是可写根目录。默认还允许写入 `~/Documents`、`~/Downloads`、`~/Projects` 和 `/tmp`，允许只读访问部分系统/cache 路径，并拒绝访问常见凭据、浏览器、认证和云服务配置路径。
-
-管理路径根目录：
-
-```bash
 agentic-gpt config path list
 agentic-gpt config path write add ~/Projects
 agentic-gpt config path readonly add /var/log
 agentic-gpt config path deny add ~/.secrets
-agentic-gpt config path write remove ~/Projects
 ```
 
-`process.exec`、`process.batchExec` 和 `session.start` 也支持 `workingDirectory`。解析后的目录必须存在，必须位于可写根目录内，并且不能位于拒绝访问根目录内。
+`process.exec` 与 `process.batch` 支持 `workingDirectory`。解析后的目录必须存在、位于可写根内，并且不在 denied roots 内。
+
+## 从 v0.8 升级
+
+v0.9 是 breaking release，Hub 与 Local Agent 应同时升级：
+
+- `limits.maxActiveSessions` → `limits.maxActiveJobs`
+- 删除从未控制运行时行为的 `sessionIdleTimeoutSecs`
+- managed `session.*` 与 `process.get/list/kill` → `job.get/list/cancel`
+- `process.batchExec` → `process.batch`
+- `/v1/exec`、`/v1/batchExec`、`/v1/sessions/*` → `/v1/process/*`、`/v1/jobs/*`
+- `mcp.callTool` 不再 raw passthrough，而是返回 managed `JobResponse`
+- Agent `Hello` 必须包含 `bootGeneration`
+
+不提供这些旧 managed execution 名称的兼容 alias。tmux session 名称和 tmux API 不变。完整步骤见 [`docs/migration-v0.9.zh-CN.md`](docs/migration-v0.9.zh-CN.md)。
+
 ## 更多文档
 
-- [`docs/interfaces.md`](docs/interfaces.md)：API、Actions、Apps MCP 和 Local Agent WebSocket 的接口地图。
-- [`docs/standalone-runtime.md`](docs/standalone-runtime.md)：独立 Tunnel 的配置、profile、信任校验、reporting 和恢复流程。
-- [`docs/operations.md`](docs/operations.md)：部署检查、smoke test 和安全不变量。
-- [`docs/development.zh-CN.md`](docs/development.zh-CN.md)：源码开发、验证、CI 和 release 发布。
+- [`docs/interfaces.md`](docs/interfaces.md)：HTTP、Actions、Apps MCP、Local Agent WebSocket。
+- [`docs/standalone-runtime.md`](docs/standalone-runtime.md)：local/tunnel runtime 与 24/36 工具矩阵。
+- [`docs/operations.md`](docs/operations.md)：部署、smoke test 与安全不变量。
+- [`docs/development.zh-CN.md`](docs/development.zh-CN.md)：开发、CI 与 release。
+- [`docs/release-notes-v0.9.0.md`](docs/release-notes-v0.9.0.md)：v0.9.0 变更摘要。
 
-`
-- `dist/aarch64-unknown-linux-gnu/agentic-gpt`
-- `dist/aarch64-unknown-linux-gnu/agentic-gpt-hub`
-
-推送版本 tag 会构建 Linux release archives 并发布 GitHub Release：
+## 构建与发布
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+git tag v0.9.0
+git push origin v0.9.0
 ```
 
-Release archive 每个 target 包含两个二进制：
-
-- `agentic-gpt-x86_64-unknown-linux-gnu.tar.gz`
-- `agentic-gpt-aarch64-unknown-linux-gnu.tar.gz`
-- `SHA256SUMS`
+创建或推送 tag 是独立发布动作；普通开发提交不会发布任何内容。
 
 ## 安全说明
 
-Agentic GPT 的目标是让本地执行变得明确、受控、可审计，而不是让本地执行“没有风险”。Hub API key、agent secret、ntfy topic 都应视为敏感凭据。
-
-推荐默认做法：
-
-- Hub 前面使用 HTTPS。
-- 使用高熵 Hub API key 和 agent secret。
-- 把凭据目录保留在 denied roots 内。
-- 对 shell interpreter 和网络工具优先使用 confirm。
-- 长时间命令使用 session，不要硬塞进短命令超时。
-- 调试或收紧策略时查看 `~/.agentic_gpt/audit.log`。
+- Hub 必须通过 HTTPS 暴露。
+- 使用高熵 Hub API key、agent secret、tunnel secret 与 ntfy topic。
+- 凭据目录保留在 denied roots。
+- 对 shell、网络工具和陌生 MCP server 优先要求确认。
+- 使用 bounded Job wait，不要让 HTTP/MCP 请求无限等待。
+- 部署 v0.9 前先迁移配置，并通过 `agent.info` 与 `local list-tools` 检查 surface。
 
 ## License
 

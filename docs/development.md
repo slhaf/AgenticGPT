@@ -15,8 +15,9 @@ cargo run -p agentic-gpt -- run
 ## Verification
 
 ```bash
-cargo fmt --all -- --check
+cargo fmt --all --check
 cargo check --workspace
+cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 python3 -c "import yaml; yaml.safe_load(open('openapi/hub.yaml')); print('openapi yaml ok')"
 ```
@@ -40,8 +41,8 @@ Artifacts are written to:
 Pushing a version tag builds Linux release archives and publishes a GitHub Release:
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.9.0
+git push origin v0.9.0
 ```
 
 Release archives contain both binaries for one target:
@@ -55,8 +56,9 @@ Release archives contain both binaries for one target:
 
 GitHub Actions runs CI on pushes and pull requests to `main`:
 
-- `cargo fmt --all -- --check`
+- `cargo fmt --all --check`
 - `cargo check --workspace`
+- `cargo clippy --workspace --all-targets -- -D warnings`
 - `cargo test --workspace`
 - OpenAPI YAML parsing for `openapi/hub.yaml`
 

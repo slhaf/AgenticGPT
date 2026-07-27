@@ -1161,6 +1161,7 @@ fn process_runtime(skill_lease: Option<SkillLease>) -> ManagedProcessRuntime {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_async_job(
     state: AppState,
     job_id: String,
@@ -1465,7 +1466,7 @@ pub(crate) async fn list_jobs(state: &AppState, request: JobListRequest) -> Vec<
         .filter(|job| request.kind.is_none_or(|kind| job.kind == kind))
         .filter(|job| request.state.is_none_or(|state| job.state == state))
         .collect::<Vec<_>>();
-    infos.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    infos.sort_by_key(|job| std::cmp::Reverse(job.updated_at));
     infos.truncate(
         request
             .limit
@@ -1823,7 +1824,7 @@ fn prune_terminal_jobs(jobs: &mut std::collections::HashMap<String, ManagedJob>)
         .filter(|(_, job)| job.info.state.is_terminal())
         .map(|(id, job)| (id.clone(), job.info.updated_at))
         .collect::<Vec<_>>();
-    terminal.sort_by(|left, right| right.1.cmp(&left.1));
+    terminal.sort_by_key(|entry| std::cmp::Reverse(entry.1));
     for (index, (id, updated_at)) in terminal.into_iter().enumerate() {
         if index >= MAX_TERMINAL_JOBS || updated_at < cutoff {
             jobs.remove(&id);

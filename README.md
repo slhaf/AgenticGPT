@@ -208,25 +208,35 @@ agentic-gpt config path write remove ~/Projects
 
 ## Interfaces
 
-The Hub exposes:
+The Hub exposes the versioned HTTP API, Local Agent WebSocket endpoints, and the Apps-compatible `/mcp` endpoint. The complete route and tool map is maintained in [`docs/interfaces.md`](docs/interfaces.md); the generated Actions contract is [`openapi/hub.yaml`](openapi/hub.yaml).
 
-- `GET /v1/info`: safe runtime summary.
-- `GET /v1/agents`: ag## More documentation
+The direct local and standalone workers expose the same Normal/Room MCP descriptors over owner-only Unix MCP and tunnel stdio ingress. Use `agentic-gpt local list-tools` to inspect the active contract and `agentic-gpt local call <tool>` for local integration tests.
+
+## Upgrade to v0.9
+
+v0.9 is intentionally breaking. Upgrade the Hub and Local Agents together, migrate `limits.maxActiveSessions` to `limits.maxActiveJobs`, remove `sessionIdleTimeoutSecs`, and replace managed `session.*` / `process.get|list|kill` calls with `job.*`. See:
+
+- [`docs/migration-v0.9.md`](docs/migration-v0.9.md): required configuration, tool, HTTP, protocol, and response-envelope changes.
+- [`docs/release-notes-v0.9.0.md`](docs/release-notes-v0.9.0.md): feature and verification summary.
+- [`config.example.json`](config.example.json): strict v0.9 example with no usable secrets.
+
+No compatibility aliases are provided for the removed managed execution names. tmux session names and tmux APIs are unchanged.
+
+## More documentation
 
 - [`docs/interfaces.md`](docs/interfaces.md): API, Actions, Apps MCP, and Local Agent WebSocket interface map.
-- [`docs/operations.md`](docs/operations.md): deployment checks, smoke tests, and safety invariants.
+- [`docs/standalone-runtime.md`](docs/standalone-runtime.md): standalone/local topology, exact tool matrices, trust, reporting, recovery, and managed MCP limits.
+- [`docs/operations.md`](docs/operations.md): deployment checks, connector smoke tests, and safety invariants.
 - [`docs/development.md`](docs/development.md): source development, verification, CI, and release publishing.
+- [`docs/migration-v0.9.md`](docs/migration-v0.9.md): v0.8 to v0.9 migration guide.
 
-gentic-gpt`
-- `dist/x86_64-unknown-linux-gnu/agentic-gpt-hub`
-- `dist/aarch64-unknown-linux-gnu/agentic-gpt`
-- `dist/aarch64-unknown-linux-gnu/agentic-gpt-hub`
+## Build and release
 
-Pushing a version tag builds Linux release archives and publishes a GitHub Release:
+Local multi-target Linux builds use `scripts/dist-linux.sh` and write binaries beneath `dist/<target>/`. Pushing a version tag triggers the release workflow:
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.9.0
+git push origin v0.9.0
 ```
 
 Release archives contain both binaries for one target:
@@ -235,18 +245,21 @@ Release archives contain both binaries for one target:
 - `agentic-gpt-aarch64-unknown-linux-gnu.tar.gz`
 - `SHA256SUMS`
 
+Creating or pushing a tag is a separate release action; normal development commits do not publish anything.
+
 ## Security notes
 
-Agentic GPT is designed to make local execution explicit and auditable, not risk-free. Treat the Hub API key, agent secrets, and ntfy topics as sensitive credentials.
+Agentic GPT makes local execution explicit, bounded, and auditable; it does not make arbitrary local execution risk-free. Treat Hub API keys, agent secrets, tunnel secrets, and ntfy topics as credentials.
 
 Recommended defaults:
 
 - Use HTTPS in front of the Hub.
 - Keep high-entropy Hub API keys and agent secrets.
 - Keep credential directories in denied roots.
-- Prefer confirmation for shell interpreters and network tools.
-- Use the Job envelope and `job.get` for long-running commands instead of forcing unbounded inline waits.
-- Review `~/.agentic_gpt/audit.log` when debugging or tightening policy.
+- Prefer confirmation for shell interpreters, network tools, and unfamiliar MCP servers.
+- Use managed Jobs and bounded waits instead of long blocking requests.
+- Inspect `agent.info` before execution and review the workspace audit JSONL when tightening policy.
+- Do not deploy v0.9 binaries against an unmigrated v0.8 config.
 
 ## License
 

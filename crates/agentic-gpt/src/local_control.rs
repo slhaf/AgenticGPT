@@ -289,11 +289,10 @@ impl Drop for SocketGuard {
         if metadata.file_type().is_socket()
             && metadata.dev() == self.device
             && metadata.ino() == self.inode
+            && fs::remove_file(&self.path).is_ok()
         {
-            if fs::remove_file(&self.path).is_ok() {
-                if let Some(parent) = self.path.parent() {
-                    let _ = fs::remove_dir(parent);
-                }
+            if let Some(parent) = self.path.parent() {
+                let _ = fs::remove_dir(parent);
             }
         }
     }

@@ -50,6 +50,7 @@ const MAX_COMMAND_PREVIEW_CHARS: usize = 1000;
 
 #[derive(Parser)]
 #[command(name = "agentic-gpt-hub")]
+#[command(version)]
 #[command(about = "VPS Hub for Agentic GPT")]
 struct Cli {
     #[arg(long, env = "AGENTIC_GPT_HUB_DB")]
@@ -852,6 +853,18 @@ mod tests {
                 result: notify::NtfyHealthStatus::Healthy,
             }))),
         }
+    }
+
+    #[test]
+    fn cli_version_uses_crate_version() {
+        let error = match Cli::try_parse_from(["agentic-gpt-hub", "--version"]) {
+            Ok(_) => panic!("--version unexpectedly parsed as a runnable command"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), clap::error::ErrorKind::DisplayVersion);
+        let rendered = error.to_string();
+        assert!(rendered.contains("agentic-gpt-hub 0.9.0"));
+        assert!(rendered.contains(env!("CARGO_PKG_VERSION")));
     }
 
     #[tokio::test]

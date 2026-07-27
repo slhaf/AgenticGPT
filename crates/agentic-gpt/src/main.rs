@@ -43,6 +43,7 @@ use utils::{config_path, ensure_parent, log_info, log_warn};
 
 #[derive(Parser)]
 #[command(name = "agentic-gpt")]
+#[command(version)]
 #[command(about = "Linux local agent for Agentic GPT")]
 struct Cli {
     #[command(subcommand)]
@@ -783,6 +784,18 @@ mod tests {
     };
     use tokio::sync::mpsc;
     use uuid::Uuid;
+
+    #[test]
+    fn cli_version_uses_crate_version() {
+        let error = match Cli::try_parse_from(["agentic-gpt", "--version"]) {
+            Ok(_) => panic!("--version unexpectedly parsed as a runnable command"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), clap::error::ErrorKind::DisplayVersion);
+        let rendered = error.to_string();
+        assert!(rendered.contains("agentic-gpt 0.9.0"));
+        assert!(rendered.contains(env!("CARGO_PKG_VERSION")));
+    }
 
     #[test]
     fn sse_post_status_classification_stops_on_stale_connection() {
@@ -1537,8 +1550,11 @@ mod tests {
             resolved_working_directory: PathBuf::from("/tmp"),
             decision: PolicyDecision::Confirm,
         };
-        let preview =
-            confirmation::batch_confirmation_preview(&config, &[element.clone()], &[element]);
+        let preview = confirmation::batch_confirmation_preview(
+            &config,
+            std::slice::from_ref(&element),
+            std::slice::from_ref(&element),
+        );
 
         assert!(preview.contains("该批次共有 1 条命令，其中 1 条需要确认"));
         assert!(preview.contains("工作目录：/tmp"));

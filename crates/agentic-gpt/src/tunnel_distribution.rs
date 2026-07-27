@@ -736,8 +736,10 @@ mod tests {
         assert_eq!(spec.version, PINNED_VERSION);
         assert_eq!(spec.source, TunnelClientSource::ManagedCache);
 
-        let mut unknown = TunnelClientConfig::default();
-        unknown.version = Some("9.9.9".to_owned());
+        let unknown = TunnelClientConfig {
+            version: Some("9.9.9".to_owned()),
+            ..TunnelClientConfig::default()
+        };
         assert_eq!(
             artifact_spec(&unknown, "linux-amd64")
                 .unwrap_err()
@@ -745,9 +747,11 @@ mod tests {
             "unsupported_tunnel_client_version"
         );
 
-        let mut custom = TunnelClientConfig::default();
-        custom.download_url = Some("http://127.0.0.1/client.zip".to_owned());
-        custom.sha256 = Some("a".repeat(64));
+        let mut custom = TunnelClientConfig {
+            download_url: Some("http://127.0.0.1/client.zip".to_owned()),
+            sha256: Some("a".repeat(64)),
+            ..TunnelClientConfig::default()
+        };
         assert_eq!(
             artifact_spec(&custom, "linux-amd64")
                 .unwrap_err()

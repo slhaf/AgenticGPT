@@ -453,7 +453,7 @@ async fn snapshot_job_list(state: &HubState, agent_id: &str) -> Value {
         .get(agent_id)
         .map(|jobs| jobs.values().cloned().collect::<Vec<_>>())
         .unwrap_or_default();
-    jobs.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    jobs.sort_by_key(|job| std::cmp::Reverse(job.updated_at));
     json!({ "jobs": jobs })
 }
 
@@ -471,7 +471,7 @@ async fn snapshot_job_list_filtered(
         .unwrap_or_default();
     jobs.retain(|job| request.kind.is_none_or(|kind| job.kind == kind));
     jobs.retain(|job| request.state.is_none_or(|state| job.state == state));
-    jobs.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    jobs.sort_by_key(|job| std::cmp::Reverse(job.updated_at));
     jobs.truncate(request.limit.unwrap_or(100).clamp(1, 100));
     json!({ "jobs": jobs })
 }
@@ -1835,7 +1835,10 @@ struct ExecArgs {
     )]
     working_directory: Option<String>,
     #[serde(default)]
-    #[schemars(description = "Bounded inline wait in seconds, default 5 and capped at 30.")]
+    #[schemars(
+        range(min = 0, max = 30),
+        description = "Bounded inline wait in seconds, default 5 and capped at 30."
+    )]
     wait_seconds: Option<u64>,
 }
 
@@ -2103,6 +2106,7 @@ struct McpBatchArgs {
     #[schemars(description = "Target local agent id.")]
     agent_id: String,
     #[schemars(
+        length(min = 1, max = 16),
         description = "Ordered 1..16 downstream MCP calls; aggregate serialized arguments are capped at 2 MiB."
     )]
     calls: Vec<McpBatchCallArgs>,
@@ -2115,10 +2119,14 @@ struct McpBatchArgs {
     )]
     fail_fast: Option<bool>,
     #[serde(default)]
-    #[schemars(description = "Bounded inline wait in seconds, default 5 and capped at 30.")]
+    #[schemars(
+        range(min = 0, max = 30),
+        description = "Bounded inline wait in seconds, default 5 and capped at 30."
+    )]
     wait_seconds: Option<u64>,
     #[serde(default)]
     #[schemars(
+        range(min = 1, max = 900),
         description = "Per-child downstream execution deadline in seconds after scheduling, default 300 and capped at 900."
     )]
     timeout_seconds: Option<u64>,
@@ -2716,6 +2724,43 @@ mod tests {
         assert!(names.iter().any(|name| name == "process.exec"));
         assert!(names.iter().any(|name| name == "mcp.batch"));
         assert!(names.iter().any(|name| name == "hub.job.list"));
+    }
+
+    #[test]
+    fn mcp_batch_descriptor_freezes_bounds_and_side_effect_annotations() {
+        let server = AgenticMcpServer::new(test_state());
+        let tools = app_tool_descriptors(&server);
+        let batch = tools
+            .iter()
+            .find(|tool| tool.get("name").and_then(Value::as_str) == Some("mcp.batch"))
+            .expect("mcp.batch descriptor missing");
+        assert_eq!(batch["annotations"]["readOnlyHint"], false);
+        assert_eq!(batch["annotations"]["destructiveHint"], false);
+        assert_eq!(batch["annotations"]["openWorldHint"], true);
+        let calls = &batch["inputSchema"]["properties"]["calls"];
+        assert_eq!(calls["type"], "array");
+        assert_eq!(calls["minItems"], 1);
+        assert_eq!(calls["maxItems"], 16);
+        assert_eq!(
+            batch["inputSchema"]["properties"]["waitSeconds"]["minimum"],
+            0
+        );
+        assert_eq!(
+            batch["inputSchema"]["properties"]["waitSeconds"]["maximum"],
+            30
+        );
+        assert_eq!(
+            batch["inputSchema"]["properties"]["timeoutSeconds"]["minimum"],
+            1
+        );
+        assert_eq!(
+            batch["inputSchema"]["properties"]["timeoutSeconds"]["maximum"],
+            900
+        );
+        assert!(batch["inputSchema"]["required"]
+            .as_array()
+            .is_some_and(|required| required.contains(&json!("agentId"))
+                && required.contains(&json!("calls"))));
     }
 
     #[test]

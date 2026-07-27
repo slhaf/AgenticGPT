@@ -14,6 +14,7 @@ use tokio::process::Command;
 use tokio::time::sleep;
 use uuid::Uuid;
 
+use crate::audit::{write_audit, AuditRecord};
 use crate::config::Config;
 use crate::policy::{policy_decision_for_profile, PolicyDecision};
 use crate::{confirmation, exec, AppState};
@@ -802,4 +803,3 @@ mod tests {
         assert!(all.iter().any(|argument| argument == "-a"));
     }
 }
-use crate::audit::{write_audit, AuditRecord};

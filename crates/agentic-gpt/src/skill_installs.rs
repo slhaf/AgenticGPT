@@ -783,7 +783,7 @@ impl InstallManager {
                 ));
             }
         }
-        terminal.sort_by(|left, right| right.0.cmp(&left.0));
+        terminal.sort_by_key(|entry| std::cmp::Reverse(entry.0));
         for (index, (finished_at, install_id)) in terminal.into_iter().enumerate() {
             if index >= MAX_TERMINAL_RECORDS
                 || now - finished_at > ChronoDuration::days(TERMINAL_RETENTION_DAYS)

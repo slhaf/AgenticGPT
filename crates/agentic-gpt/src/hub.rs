@@ -467,6 +467,7 @@ async fn send_current_job_snapshots(state: &AppState, sender: &mpsc::Sender<Agen
 
 const REPORT_MAX_JSON_BYTES: usize = 16 * 1024;
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn report_run_event(
     state: &AppState,
     run_id: &str,
@@ -491,7 +492,7 @@ pub(crate) fn report_run_event(
     try_send_reporting(
         state,
         AgentMessage::RunReport {
-            report: AgentRunReport {
+            report: Box::new(AgentRunReport {
                 run_id: run_id.to_string(),
                 request_id: request_id.to_string(),
                 tool_name: tool_name.to_string(),
@@ -512,7 +513,7 @@ pub(crate) fn report_run_event(
                 arguments,
                 result,
                 job: if full { job } else { None },
-            },
+            }),
         },
     );
 }
@@ -534,7 +535,7 @@ pub(crate) fn report_tool_arguments(
     try_send_reporting(
         state,
         AgentMessage::RunReport {
-            report: AgentRunReport {
+            report: Box::new(AgentRunReport {
                 run_id: run_id.to_string(),
                 request_id: request_id.to_string(),
                 tool_name: tool_name.to_string(),
@@ -551,7 +552,7 @@ pub(crate) fn report_tool_arguments(
                 arguments,
                 result: None,
                 job: None,
-            },
+            }),
         },
     );
 }
@@ -634,7 +635,7 @@ fn bounded_reason(value: &str) -> String {
     const MAX_REASON_CHARS: usize = 2048;
     let mut output = value.chars().take(MAX_REASON_CHARS).collect::<String>();
     if value.chars().count() > MAX_REASON_CHARS {
-        output.push_str("…");
+        output.push('…');
     }
     output
 }

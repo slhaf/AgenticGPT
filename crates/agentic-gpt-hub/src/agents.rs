@@ -141,6 +141,7 @@ fn sse_stream(
     })
 }
 
+#[allow(clippy::result_large_err)]
 fn require_agent_secret(
     state: &HubState,
     agent_id: &str,
@@ -192,7 +193,7 @@ async fn handle_socket(state: HubState, agent_id: String, socket: WebSocket) {
         while let Some(message) = rx.recv().await {
             match message {
                 OutboundAgentMessage::Text(text) => {
-                    if sink.send(Message::Text(text.into())).await.is_err() {
+                    if sink.send(Message::Text(text)).await.is_err() {
                         break;
                     }
                 }
@@ -319,7 +320,7 @@ async fn handle_agent_message(
                 .insert(job.job_id.clone(), job);
         }
         AgentMessage::RunReport { report } => {
-            if let Err(error) = runs::upsert_agent_report(state, agent_id, report) {
+            if let Err(error) = runs::upsert_agent_report(state, agent_id, *report) {
                 warn!(%agent_id, %error, "failed to store agent run report");
             }
         }

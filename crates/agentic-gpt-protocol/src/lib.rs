@@ -1771,7 +1771,7 @@ pub enum AgentMessage {
         job: JobInfo,
     },
     RunReport {
-        report: AgentRunReport,
+        report: Box<AgentRunReport>,
     },
     Response {
         #[serde(default, skip_serializing_if = "Option::is_none", rename = "runId")]

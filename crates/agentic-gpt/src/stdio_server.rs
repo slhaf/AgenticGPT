@@ -1849,7 +1849,7 @@ fn managed_terminal_event_hook(
     let source = source.into();
     let profile = profile.label();
     Arc::new(move |job| {
-        tracker.record(&profile, &source, job);
+        tracker.record(profile, &source, job);
     })
 }
 

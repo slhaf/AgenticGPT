@@ -15,8 +15,9 @@ cargo run -p agentic-gpt -- run
 ## 验证
 
 ```bash
-cargo fmt --all -- --check
+cargo fmt --all --check
 cargo check --workspace
+cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 python3 -c "import yaml; yaml.safe_load(open('openapi/hub.yaml')); print('openapi yaml ok')"
 ```
@@ -40,8 +41,8 @@ cargo install cross --git https://github.com/cross-rs/cross
 推送版本 tag 会构建 Linux release archives 并发布 GitHub Release：
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.9.0
+git push origin v0.9.0
 ```
 
 Release archive 每个 target 包含两个二进制：
@@ -55,8 +56,9 @@ Release archive 每个 target 包含两个二进制：
 
 GitHub Actions 会在 push 和 pull request 到 `main` 时运行 CI：
 
-- `cargo fmt --all -- --check`
+- `cargo fmt --all --check`
 - `cargo check --workspace`
+- `cargo clippy --workspace --all-targets -- -D warnings`
 - `cargo test --workspace`
 - 解析 `openapi/hub.yaml`，确认 OpenAPI YAML 可读取
 

@@ -239,7 +239,7 @@ fn scan_guides(
             ));
         }
     };
-    entries.sort_by(|left, right| display_path(left).cmp(&display_path(right)));
+    entries.sort_by_key(|path| display_path(path));
 
     let mut guides = Vec::new();
     let mut candidate_paths = BTreeMap::<String, Vec<String>>::new();

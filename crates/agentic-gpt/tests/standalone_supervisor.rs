@@ -398,6 +398,36 @@ fn run_live_reload(root: &Path) -> Result<(), String> {
     assert_eq!(baseline_servers[0]["id"], "primary");
     assert_eq!(baseline_servers[0]["url"], "https://old.example/mcp");
 
+    let tunnel_batch = call_tool(
+        &mut stdin,
+        &mut stdout,
+        24,
+        "mcp.batch",
+        json!({
+            "calls": [
+                {"id": "dup", "serverId": "primary", "toolName": "fake.tool", "arguments": {}},
+                {"id": "dup", "serverId": "primary", "toolName": "fake.tool", "arguments": {}}
+            ],
+            "waitSeconds": 0
+        }),
+    )?;
+    assert_eq!(
+        tunnel_batch["result"]["structuredContent"]["error"]["code"],
+        "mcp_batch_failed"
+    );
+    assert!(
+        tunnel_batch["result"]["structuredContent"]["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.starts_with("mcp_batch_call_id_duplicate"))
+    );
+    let tunnel_batch_audit = fs::read_to_string(workspace.join(".agentic-gpt-audit.jsonl"))
+        .map_err(|error| error.to_string())?;
+    assert!(tunnel_batch_audit.contains("\"tool\":\"mcp.batch\""));
+    assert!(tunnel_batch_audit.contains("\"requestSource\":\"tunnel:mcp.batch\""));
+    assert!(tunnel_batch_audit.contains("\"outcome\":\"validation_rejected\""));
+    assert!(tunnel_batch_audit.contains("\"errorCode\":\"mcp_batch_call_id_duplicate\""));
+    assert!(!tunnel_batch_audit.contains("\"program\":\"mcp.callTool\""));
+
     let denied = call_tool(
         &mut stdin,
         &mut stdout,

@@ -443,10 +443,7 @@ mod tests {
         let value = collect(&state(CapabilityProfile::Room)).await;
         assert_eq!(value["surface"]["toolCount"], 36);
         assert_eq!(value["identity"]["profile"], "room");
-        assert_eq!(
-            value["workspace"]["pathPolicy"]["writeRoots"][0].is_string(),
-            true
-        );
+        assert!(value["workspace"]["pathPolicy"]["writeRoots"][0].is_string());
         assert_eq!(value["config"]["diskStatus"], "missing");
         assert_eq!(value["mcp"]["concurrency"]["globalLimit"], 8);
         assert_eq!(value["mcp"]["concurrency"]["perServerLimit"], 2);

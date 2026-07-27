@@ -1,0 +1,104 @@
+{
+  "agentId": "laptop",
+  "displayName": "agentic-gpt-linux",
+  "hubUrl": "https://agentic-gpt.example.com",
+  "hubTransport": "websocket",
+  "agentSecret": "change-me-before-use",
+  "workspaceRoot": "/home/your-user/.agentic_gpt/workspace",
+  "backupLimit": 5,
+  "confirmationProvider": {
+    "channels": [
+      "freedesktop"
+    ]
+  },
+  "confirmationLanguage": "zh-CN",
+  "sandbox": {
+    "enabled": false,
+    "bubblewrapPath": "bwrap",
+    "requiredRuntimePaths": [
+      "/usr",
+      "/bin",
+      "/lib",
+      "/lib64",
+      "/etc/ssl"
+    ]
+  },
+  "mcpServers": {
+    "example-http": {
+      "enabled": false,
+      "transport": "streamable-http",
+      "url": "https://mcp.example.com/mcp"
+    },
+    "example-stdio": {
+      "enabled": false,
+      "transport": "stdio",
+      "url": "node /home/your-user/mcp/server.mjs"
+    }
+  },
+  "pathPolicy": {
+    "writeRoots": [
+      "/home/your-user/.agentic_gpt/workspace",
+      "~/Documents",
+      "~/Downloads",
+      "~/Projects",
+      "/tmp"
+    ],
+    "readOnlyRoots": [
+      "~/.cache",
+      "~/.local/share",
+      "/etc/os-release",
+      "/proc/meminfo",
+      "/proc/cpuinfo",
+      "/proc/loadavg",
+      "/proc/uptime",
+      "/sys/class/power_supply",
+      "/sys/class/thermal"
+    ],
+    "denyRoots": [
+      "~/.ssh",
+      "~/.gnupg",
+      "~/.local/share/keyrings",
+      "~/.password-store",
+      "~/.mozilla",
+      "~/.config/google-chrome",
+      "~/.config/chromium",
+      "~/.npmrc",
+      "~/.pypirc",
+      "~/.cargo/credentials",
+      "~/.docker/config.json",
+      "~/.kube",
+      "~/.aws",
+      "~/.config/gcloud",
+      "~/.config/gh"
+    ]
+  },
+  "policy": {
+    "allow": [],
+    "confirm": [],
+    "deny": []
+  },
+  "limits": {
+    "maxConcurrentTasks": 2,
+    "maxActiveJobs": "auto"
+  },
+  "skills": {
+    "maxFiles": 256,
+    "maxFileBytes": 10485760,
+    "maxPackageBytes": 52428800,
+    "maxSkillMdBytes": 262144,
+    "maxInlineBytes": 2097152,
+    "connectTimeoutSecs": 10,
+    "requestTimeoutSecs": 120,
+    "idleTimeoutSecs": 30,
+    "maxRedirects": 5,
+    "maxConcurrentInstalls": 2,
+    "maxParallelDownloads": 4,
+    "maxAttempts": 3,
+    "totalDeadlineSecs": 600,
+    "allowedHosts": []
+  },
+  "room": {
+    "timezone": "Asia/Shanghai",
+    "diaryDayBoundaryHour": 5
+  }
+}

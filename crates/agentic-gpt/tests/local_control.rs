@@ -156,6 +156,36 @@ fn run_local_e2e(root: &Path) -> Result<(), String> {
         return Err("ranged local read mismatch".to_string());
     }
 
+    let batch_rejected = local_output(
+        &binary,
+        &config_path,
+        [
+            "call",
+            "mcp.batch",
+            "--arguments",
+            r#"{"calls":[{"id":"dup","serverId":"primary","toolName":"fake.tool","arguments":{}},{"id":"dup","serverId":"primary","toolName":"fake.tool","arguments":{}}],"waitSeconds":0}"#,
+        ],
+    )?;
+    let batch_rejected: Value =
+        serde_json::from_slice(&batch_rejected.stdout).map_err(|error| error.to_string())?;
+    if batch_rejected["structuredContent"]["error"]["code"] != "mcp_batch_failed"
+        || batch_rejected["structuredContent"]["error"]["message"]
+            .as_str()
+            .is_none_or(|message| !message.starts_with("mcp_batch_call_id_duplicate"))
+    {
+        return Err("local mcp.batch typed preflight rejection mismatch".to_string());
+    }
+    let batch_audit = fs::read_to_string(workspace.join(".agentic-gpt-audit.jsonl"))
+        .map_err(|error| error.to_string())?;
+    if !batch_audit.contains("\"tool\":\"mcp.batch\"")
+        || !batch_audit.contains("\"requestSource\":\"local:mcp.batch\"")
+        || !batch_audit.contains("\"outcome\":\"validation_rejected\"")
+        || !batch_audit.contains("\"errorCode\":\"mcp_batch_call_id_duplicate\"")
+        || batch_audit.contains("\"program\":\"mcp.callTool\"")
+    {
+        return Err("local mcp.batch aggregate audit mismatch".to_string());
+    }
+
     config["mcpServers"]["primary"]["url"] = json!("https://new.example/mcp");
     config["mcpServers"]["local"] = json!({
         "enabled": false,
