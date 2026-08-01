@@ -534,6 +534,7 @@ mod tests {
                 enabled: true,
                 transport: "streamable-http".to_string(),
                 url: Some("https://old.example/mcp".to_string()),
+                headers: std::collections::BTreeMap::new(),
             },
         );
         *app.config.write().await = effective.clone();
@@ -546,6 +547,7 @@ mod tests {
                 enabled: false,
                 transport: "streamable-http".to_string(),
                 url: Some("https://new.example/mcp".to_string()),
+                headers: std::collections::BTreeMap::new(),
             },
         );
         disk.mcp_servers.insert(
@@ -554,6 +556,7 @@ mod tests {
                 enabled: true,
                 transport: "stdio".to_string(),
                 url: Some("node ./local.mjs".to_string()),
+                headers: std::collections::BTreeMap::new(),
             },
         );
         fs::write(&disk_path, serde_json::to_vec_pretty(&disk).unwrap()).unwrap();
@@ -597,6 +600,37 @@ mod tests {
         assert_eq!(invalid["config"]["diskStatus"], "invalid");
         assert_eq!(invalid["config"]["errorCode"], "config_invalid");
         let _ = fs::remove_file(disk_path);
+    }
+
+    #[tokio::test]
+    async fn info_keeps_mcp_header_sources_and_revisions_free_of_resolved_values() {
+        let app = state(CapabilityProfile::Normal);
+        let secret = "Bearer agent-info-secret";
+        let env_name = format!("AGENTIC_AGENT_INFO_{}", uuid::Uuid::new_v4().simple());
+        std::env::set_var(&env_name, secret);
+        {
+            let mut config = app.config.write().await;
+            config.mcp_servers.insert(
+                "headers".to_string(),
+                McpServerConfig {
+                    enabled: true,
+                    transport: "streamable-http".to_string(),
+                    url: Some("https://headers.example/mcp".to_string()),
+                    headers: std::collections::BTreeMap::from([(
+                        "Authorization".to_string(),
+                        format!("env:{env_name}"),
+                    )]),
+                },
+            );
+        }
+        let value = collect(&app).await;
+        let serialized = serde_json::to_string(&value).unwrap();
+        assert!(!serialized.contains(secret));
+        assert!(!value["mcp"]["configRevision"]
+            .as_str()
+            .unwrap()
+            .contains(secret));
+        std::env::remove_var(&env_name);
     }
 
     #[tokio::test]

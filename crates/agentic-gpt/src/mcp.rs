@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     env,
     future::Future,
     path::PathBuf,
@@ -16,6 +16,7 @@ use agentic_gpt_protocol::{
 };
 use anyhow::{anyhow, Context, Result};
 use clap::Subcommand;
+use reqwest::header::{HeaderName, HeaderValue};
 use rmcp::{
     model::{
         CallToolRequest, CallToolRequestParams, CancelledNotificationParam, ClientInfo,
@@ -70,7 +71,8 @@ pub(crate) enum McpConfigCommand {
 
 type McpClient = RunningService<rmcp::RoleClient, ClientInfo>;
 type McpClientFuture = Pin<Box<dyn Future<Output = Result<McpClient>> + Send>>;
-type McpClientFactory = Arc<dyn Fn(McpServerConfig) -> McpClientFuture + Send + Sync + 'static>;
+type McpClientFactory =
+    Arc<dyn Fn(ResolvedMcpServerConfig) -> McpClientFuture + Send + Sync + 'static>;
 
 #[derive(Clone)]
 struct PreparedMcpBatchCall {
@@ -78,7 +80,7 @@ struct PreparedMcpBatchCall {
     id: Option<String>,
     payload: McpCallToolRequest,
     arguments: JsonObject,
-    server: McpServerConfig,
+    server: ResolvedMcpServerConfig,
     config_revision: String,
     argument_keys: Vec<String>,
     argument_key_count: usize,
@@ -95,6 +97,15 @@ pub(crate) struct McpServerConfig {
     pub(crate) transport: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) url: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) headers: BTreeMap<String, String>,
+}
+
+#[derive(Clone)]
+struct ResolvedMcpServerConfig {
+    transport: String,
+    url: Option<String>,
+    headers: HashMap<HeaderName, HeaderValue>,
 }
 
 pub(crate) fn mutate_servers(config_path: PathBuf, command: McpConfigCommand) -> Result<()> {
@@ -116,6 +127,7 @@ pub(crate) fn mutate_servers(config_path: PathBuf, command: McpConfigCommand) ->
                     enabled,
                     transport,
                     url: Some(url),
+                    headers: BTreeMap::new(),
                 },
             );
         }
@@ -156,6 +168,7 @@ pub(crate) fn validate_server_configs(servers: &BTreeMap<String, McpServerConfig
         let endpoint = raw_endpoint.trim();
         match server.transport.as_str() {
             "streamable-http" => {
+                validate_header_config(server_id, server)?;
                 if endpoint.is_empty() {
                     return Err(anyhow!("mcp_server_url_missing: {server_id}"));
                 }
@@ -169,6 +182,7 @@ pub(crate) fn validate_server_configs(servers: &BTreeMap<String, McpServerConfig
                 }
             }
             "stdio" => {
+                validate_header_config(server_id, server)?;
                 if endpoint.is_empty() {
                     return Err(anyhow!("mcp_server_command_missing: {server_id}"));
                 }
@@ -178,6 +192,53 @@ pub(crate) fn validate_server_configs(servers: &BTreeMap<String, McpServerConfig
             }
             other => return Err(anyhow!("unsupported_mcp_transport: {server_id}: {other}")),
         }
+    }
+    Ok(())
+}
+
+const RESERVED_CUSTOM_HEADERS: &[&str] = &[
+    "accept",
+    "content-type",
+    "mcp-session-id",
+    "last-event-id",
+    "mcp-protocol-version",
+];
+
+fn validate_header_config(server_id: &str, server: &McpServerConfig) -> Result<()> {
+    if server.headers.is_empty() {
+        return Ok(());
+    }
+    if server.transport != "streamable-http" {
+        return Err(anyhow!("mcp_header_transport_invalid: {server_id}"));
+    }
+    let mut names = HashSet::new();
+    for (name, reference) in &server.headers {
+        let parsed = HeaderName::from_bytes(name.as_bytes())
+            .map_err(|_| anyhow!("mcp_header_name_invalid: {server_id}"))?;
+        let normalized = parsed.as_str().to_ascii_lowercase();
+        if !names.insert(normalized) {
+            return Err(anyhow!("mcp_header_duplicate: {server_id}"));
+        }
+        if RESERVED_CUSTOM_HEADERS
+            .iter()
+            .any(|reserved| parsed.as_str().eq_ignore_ascii_case(reserved))
+        {
+            return Err(anyhow!("mcp_header_reserved: {server_id}"));
+        }
+        crate::secrets::validate_reference(reference).map_err(|error| {
+            anyhow!(match error {
+                crate::secrets::SecretReferenceError::PlaintextRejected => {
+                    format!("mcp_header_reference_plaintext_rejected: {server_id}")
+                }
+                crate::secrets::SecretReferenceError::InvalidReference => {
+                    format!("mcp_header_reference_invalid: {server_id}")
+                }
+                crate::secrets::SecretReferenceError::Unavailable
+                | crate::secrets::SecretReferenceError::InvalidValue => {
+                    format!("mcp_header_reference_invalid: {server_id}")
+                }
+            })
+        })?;
     }
     Ok(())
 }
@@ -204,8 +265,13 @@ pub(crate) async fn list_servers(state: &AppState) -> Value {
 
 pub(crate) async fn list_tools(state: &AppState, payload: McpListToolsRequest) -> Result<Value> {
     let server = server_config(state, &payload.server_id).await?;
-    let client = client(&server).await?;
-    let tools = client.list_all_tools().await;
+    let client = client(&server)
+        .await
+        .map_err(|_| anyhow!("mcp_client_connect_failed"))?;
+    let tools = client
+        .list_all_tools()
+        .await
+        .map_err(|_| anyhow!("mcp_request_failed"));
     close_client(client).await;
     Ok(json!({ "tools": tools? }))
 }
@@ -964,7 +1030,7 @@ async fn run_managed_call(
     state: AppState,
     payload: McpCallToolRequest,
     arguments: JsonObject,
-    server: McpServerConfig,
+    server: ResolvedMcpServerConfig,
     cancel_requested: Arc<AtomicBool>,
     timeout_seconds: u64,
     job_id: String,
@@ -1095,13 +1161,13 @@ async fn run_managed_call(
     };
     let client = match downstream {
         Ok(client) => client,
-        Err(error) => {
+        Err(_error) => {
             let _ = jobs::finish_mcp_error(
                 &state,
                 &job_id,
                 JobState::Failed,
                 "mcp_client_connect_failed",
-                error.to_string(),
+                "Downstream MCP client connection failed",
                 None,
                 Some("local_client_error"),
             )
@@ -1160,14 +1226,14 @@ async fn run_managed_call(
     };
     let handle = match handle {
         Ok(handle) => handle,
-        Err(error) => {
+        Err(_error) => {
             close_client(client).await;
             let _ = jobs::finish_mcp_error(
                 &state,
                 &job_id,
                 JobState::Failed,
                 "mcp_request_start_failed",
-                error.to_string(),
+                "Downstream MCP request could not be started",
                 None,
                 Some("local_request_error"),
             )
@@ -1292,31 +1358,31 @@ async fn finish_from_response(
                 job_id,
                 JobState::Cancelled,
                 "mcp_cancelled",
-                error.to_string(),
+                "Downstream MCP request was cancelled",
                 Some("cancelled"),
                 Some("downstream_cancellation_response"),
             )
             .await;
         }
-        Ok(Err(error)) if after_cancel => {
+        Ok(Err(_error)) if after_cancel => {
             let _ = jobs::finish_mcp_error(
                 state,
                 job_id,
                 JobState::Detached,
                 "mcp_cancel_detached",
-                error.to_string(),
+                "Downstream MCP request ended without a terminal response",
                 Some("notification_sent"),
                 Some("transport_or_remote_error_after_cancel"),
             )
             .await;
         }
-        Ok(Err(error)) => {
+        Ok(Err(_error)) => {
             let _ = jobs::finish_mcp_error(
                 state,
                 job_id,
                 JobState::Failed,
                 "mcp_request_failed",
-                error.to_string(),
+                "Downstream MCP request failed",
                 None,
                 Some("downstream_or_transport_error"),
             )
@@ -1379,15 +1445,15 @@ fn mcp_authorization_allows(value: &str) -> bool {
 async fn server_config_snapshot(
     state: &AppState,
     server_id: &str,
-) -> (String, Result<McpServerConfig, String>) {
+) -> (String, Result<ResolvedMcpServerConfig, String>) {
     let config = state.config.read().await;
     let revision = server_config_revision(&config.mcp_servers);
     let server = config.mcp_servers.get(server_id).cloned();
     drop(config);
     let result = match server {
-        Some(server) => validate_selected_server(server_id, &server)
-            .map(|_| server)
-            .map_err(|error| error.to_string()),
+        Some(server) => {
+            resolve_selected_server(server_id, &server).map_err(|error| error.to_string())
+        }
         None => Err(format!("mcp_server_not_found: {server_id}")),
     };
     (revision, result)
@@ -1399,11 +1465,13 @@ fn validate_selected_server(server_id: &str, server: &McpServerConfig) -> Result
     }
     match server.transport.as_str() {
         "streamable-http" => {
+            validate_header_config(server_id, server)?;
             if server.url.as_deref().unwrap_or_default().trim().is_empty() {
                 return Err(anyhow!("mcp_server_url_missing: {server_id}"));
             }
         }
         "stdio" => {
+            validate_header_config(server_id, server)?;
             if server.url.as_deref().unwrap_or_default().trim().is_empty() {
                 return Err(anyhow!("mcp_server_command_missing: {server_id}"));
             }
@@ -1413,28 +1481,76 @@ fn validate_selected_server(server_id: &str, server: &McpServerConfig) -> Result
     Ok(())
 }
 
-async fn server_config(state: &AppState, server_id: &str) -> Result<McpServerConfig> {
+fn resolve_selected_server(
+    server_id: &str,
+    server: &McpServerConfig,
+) -> Result<ResolvedMcpServerConfig> {
+    validate_selected_server(server_id, server)?;
+    Ok(ResolvedMcpServerConfig {
+        transport: server.transport.clone(),
+        url: server.url.clone(),
+        headers: resolve_headers(server_id, &server.headers)?,
+    })
+}
+
+fn resolve_headers(
+    server_id: &str,
+    headers: &BTreeMap<String, String>,
+) -> Result<HashMap<HeaderName, HeaderValue>> {
+    let mut resolved = HashMap::with_capacity(headers.len());
+    for (name, reference) in headers {
+        let parsed_name = HeaderName::from_bytes(name.as_bytes())
+            .map_err(|_| anyhow!("mcp_header_name_invalid: {server_id}"))?;
+        let value = crate::secrets::resolve_reference(reference)
+            .map_err(|error| mcp_header_secret_error(server_id, error))?;
+        if value.trim().is_empty() || value.chars().any(char::is_control) {
+            return Err(anyhow!("mcp_header_value_invalid: {server_id}"));
+        }
+        let mut parsed_value = HeaderValue::from_str(&value)
+            .map_err(|_| anyhow!("mcp_header_value_invalid: {server_id}"))?;
+        parsed_value.set_sensitive(true);
+        resolved.insert(parsed_name, parsed_value);
+    }
+    Ok(resolved)
+}
+
+fn mcp_header_secret_error(
+    server_id: &str,
+    error: crate::secrets::SecretReferenceError,
+) -> anyhow::Error {
+    let code = match error {
+        crate::secrets::SecretReferenceError::PlaintextRejected => {
+            "mcp_header_reference_plaintext_rejected"
+        }
+        crate::secrets::SecretReferenceError::InvalidReference => "mcp_header_reference_invalid",
+        crate::secrets::SecretReferenceError::Unavailable => "mcp_header_secret_unavailable",
+        crate::secrets::SecretReferenceError::InvalidValue => "mcp_header_value_invalid",
+    };
+    anyhow!("{code}: {server_id}")
+}
+
+async fn server_config(state: &AppState, server_id: &str) -> Result<ResolvedMcpServerConfig> {
     let config = state.config.read().await;
     let server = config
         .mcp_servers
         .get(server_id)
         .cloned()
         .ok_or_else(|| anyhow!("mcp_server_not_found: {server_id}"))?;
-    validate_selected_server(server_id, &server)?;
-    Ok(server)
+    drop(config);
+    resolve_selected_server(server_id, &server)
 }
 
 fn production_client_factory() -> McpClientFactory {
     Arc::new(|server| Box::pin(async move { client(&server).await }))
 }
 
-async fn client(server: &McpServerConfig) -> Result<McpClient> {
+async fn client(server: &ResolvedMcpServerConfig) -> Result<McpClient> {
     match server.transport.as_str() {
         "streamable-http" => {
             let url = server.url.clone().context("mcp_server_url_missing")?;
-            let transport = StreamableHttpClientTransport::from_config(
-                StreamableHttpClientTransportConfig::with_uri(url),
-            );
+            let config = StreamableHttpClientTransportConfig::with_uri(url)
+                .custom_headers(server.headers.clone());
+            let transport = StreamableHttpClientTransport::from_config(config);
             Ok(ClientInfo::default().serve(transport).await?)
         }
         "stdio" => {
@@ -1465,12 +1581,15 @@ fn tool_arguments(arguments: Value) -> Result<JsonObject> {
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
 
     fn server(transport: &str, endpoint: Option<&str>) -> McpServerConfig {
         McpServerConfig {
             enabled: true,
             transport: transport.to_string(),
             url: endpoint.map(str::to_string),
+            headers: BTreeMap::new(),
         }
     }
 
@@ -1691,6 +1810,7 @@ mod tests {
                 enabled: true,
                 transport: "stdio".to_string(),
                 url: Some("fake-command".to_string()),
+                headers: BTreeMap::new(),
             },
         );
         let state = AppState {
@@ -1723,6 +1843,7 @@ mod tests {
                 enabled: true,
                 transport: "stdio".to_string(),
                 url: Some(server_id.to_string()),
+                headers: BTreeMap::new(),
             },
         );
         if temporary_allow {
@@ -2766,6 +2887,336 @@ mod tests {
         assert!(fake.calls.lock().unwrap().is_empty());
         assert!(receiver.try_recv().is_err());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    struct MockHttpRequest {
+        method: String,
+        headers: String,
+        body: Value,
+    }
+
+    async fn read_http_request(stream: &mut TcpStream) -> Option<MockHttpRequest> {
+        let mut bytes = Vec::new();
+        let mut chunk = [0u8; 8192];
+        let header_end = loop {
+            let read = stream.read(&mut chunk).await.ok()?;
+            if read == 0 {
+                return None;
+            }
+            bytes.extend_from_slice(&chunk[..read]);
+            if let Some(position) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+                break position;
+            }
+        };
+        let header_text = String::from_utf8_lossy(&bytes[..header_end]).into_owned();
+        let content_length = header_text
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("Content-Length:")
+                    .or_else(|| line.strip_prefix("content-length:"))
+                    .and_then(|value| value.trim().parse::<usize>().ok())
+            })
+            .unwrap_or(0);
+        let body_start = header_end + 4;
+        while bytes.len() < body_start + content_length {
+            let read = stream.read(&mut chunk).await.ok()?;
+            if read == 0 {
+                return None;
+            }
+            bytes.extend_from_slice(&chunk[..read]);
+        }
+        let body = serde_json::from_slice(&bytes[body_start..body_start + content_length]).ok()?;
+        let method = header_text
+            .lines()
+            .next()?
+            .split_whitespace()
+            .next()?
+            .to_owned();
+        Some(MockHttpRequest {
+            method,
+            headers: header_text,
+            body,
+        })
+    }
+
+    async fn spawn_http_mock() -> (
+        String,
+        Arc<std::sync::Mutex<Vec<MockHttpRequest>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = requests.clone();
+        let task = tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let captured = captured.clone();
+                tokio::spawn(async move {
+                    let Some(request) = read_http_request(&mut stream).await else {
+                        return;
+                    };
+                    let method = request.body["method"].as_str();
+                    let response = if request.method == "GET" {
+                        "HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                            .to_owned()
+                    } else if method == Some("notifications/initialized") {
+                        "HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                            .to_owned()
+                    } else {
+                        let result = match method {
+                            Some("initialize") => json!({
+                                "protocolVersion": "2025-06-18",
+                                "capabilities": {"tools": {}},
+                                "serverInfo": {"name": "header-mock", "version": "test"}
+                            }),
+                            Some("tools/list") => json!({"tools": []}),
+                            _ => json!({}),
+                        };
+                        let body = json!({
+                            "jsonrpc": "2.0",
+                            "id": request.body.get("id").cloned().unwrap_or(Value::Null),
+                            "result": result,
+                        })
+                        .to_string();
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nMcp-Session-Id: test-session\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(), body
+                        )
+                    };
+                    captured.lock().unwrap().push(request);
+                    let _ = stream.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        (url, requests, task)
+    }
+
+    #[tokio::test]
+    async fn streamable_http_headers_resolve_from_env_and_file_and_reach_requests() {
+        let root = std::env::temp_dir().join(format!("agentic-mcp-http-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let file_secret = root.join("tenant-header");
+        std::fs::write(&file_secret, "file-tenant\r\n").unwrap();
+        let env_name = format!("AGENTIC_MCP_HEADER_{}", uuid::Uuid::new_v4().simple());
+        let env_secret = "Bearer env-token";
+        std::env::set_var(&env_name, env_secret);
+        let (url, requests, task) = spawn_http_mock().await;
+        let mut raw = server("streamable-http", Some(&url));
+        raw.headers
+            .insert("Authorization".to_string(), format!("env:{env_name}"));
+        raw.headers.insert(
+            "X-Tenant".to_string(),
+            format!("file:{}", file_secret.display()),
+        );
+
+        let resolved = resolve_selected_server("headers", &raw).unwrap();
+        assert!(resolved
+            .headers
+            .get(&HeaderName::from_static("authorization"))
+            .unwrap()
+            .is_sensitive());
+        assert_eq!(
+            server_config_revision(&BTreeMap::from([("headers".to_string(), raw.clone(),)])),
+            server_config_revision(&BTreeMap::from([("headers".to_string(), raw.clone(),)]))
+        );
+        let client = client(&resolved).await.unwrap();
+        assert!(client.list_all_tools().await.unwrap().is_empty());
+        close_client(client).await;
+        task.abort();
+        let requests = requests.lock().unwrap();
+        let post_requests = requests
+            .iter()
+            .filter(|request| request.method == "POST")
+            .collect::<Vec<_>>();
+        assert!(post_requests.len() >= 3);
+        for request in post_requests {
+            let headers = request.headers.to_ascii_lowercase();
+            assert!(headers.contains("authorization: bearer env-token"));
+            assert!(headers.contains("x-tenant: file-tenant"));
+        }
+        let serialized = serde_json::to_string(&raw).unwrap();
+        assert!(!serialized.contains(env_secret));
+        assert!(!serialized.contains("file-tenant"));
+        std::env::remove_var(&env_name);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn mcp_snapshots_keep_resolved_headers_across_reload() {
+        let (state, root) = managed_test_state(2).await;
+        let old_name = format!("AGENTIC_MCP_OLD_{}", uuid::Uuid::new_v4().simple());
+        let new_name = format!("AGENTIC_MCP_NEW_{}", uuid::Uuid::new_v4().simple());
+        std::env::set_var(&old_name, "Bearer old-token");
+        std::env::set_var(&new_name, "Bearer new-token");
+        {
+            let mut config = state.config.write().await;
+            let server = config.mcp_servers.get_mut("fake").unwrap();
+            server.transport = "streamable-http".to_string();
+            server.url = Some("http://127.0.0.1:1/mcp".to_string());
+            server
+                .headers
+                .insert("Authorization".to_string(), format!("env:{old_name}"));
+        }
+        let (old_revision, old_server) = server_config_snapshot(&state, "fake").await;
+        let old_server = old_server.unwrap();
+        {
+            let mut config = state.config.write().await;
+            config
+                .mcp_servers
+                .get_mut("fake")
+                .unwrap()
+                .headers
+                .insert("Authorization".to_string(), format!("env:{new_name}"));
+        }
+        let (new_revision, new_server) = server_config_snapshot(&state, "fake").await;
+        let new_server = new_server.unwrap();
+        assert_ne!(old_revision, new_revision);
+        assert_eq!(
+            old_server
+                .headers
+                .get(&HeaderName::from_static("authorization"))
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "Bearer old-token"
+        );
+        assert_eq!(
+            new_server
+                .headers
+                .get(&HeaderName::from_static("authorization"))
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "Bearer new-token"
+        );
+        std::env::remove_var(&old_name);
+        std::env::remove_var(&new_name);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn missing_mcp_header_secret_is_safe_in_job_error() {
+        let (state, root) = managed_test_state(2).await;
+        let env_name = format!("AGENTIC_MCP_JOB_MISSING_{}", uuid::Uuid::new_v4().simple());
+        {
+            let mut config = state.config.write().await;
+            let server = config.mcp_servers.get_mut("fake").unwrap();
+            server.transport = "streamable-http".to_string();
+            server.url = Some("http://127.0.0.1:1/mcp".to_string());
+            server
+                .headers
+                .insert("Authorization".to_string(), format!("env:{env_name}"));
+        }
+        let response = start_managed_call_with_factory(
+            &state,
+            managed_request(json!({}), 0),
+            "local:mcp.callTool",
+            None,
+            fake_factory(FakeMcpServer::new(FakeBehavior::Fast)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status, JobState::Rejected);
+        let error = response.detail.error.unwrap();
+        assert_eq!(error.code, "mcp_header_secret_unavailable");
+        assert_eq!(error.message, "mcp_header_secret_unavailable: fake");
+        assert!(!error.message.contains(&env_name));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn mcp_header_resolution_errors_do_not_include_sources_or_values() {
+        let env_name = format!("AGENTIC_MCP_MISSING_{}", uuid::Uuid::new_v4().simple());
+        let mut missing = server("streamable-http", Some("https://example.test/mcp"));
+        missing
+            .headers
+            .insert("Authorization".to_string(), format!("env:{env_name}"));
+        let error = match resolve_selected_server("headers", &missing) {
+            Ok(_) => panic!("missing secret unexpectedly resolved"),
+            Err(error) => error.to_string(),
+        };
+        assert_eq!(error, "mcp_header_secret_unavailable: headers");
+        assert!(!error.contains(&env_name));
+
+        let root = std::env::temp_dir().join(format!("agentic-mcp-error-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("value");
+        std::fs::write(&path, "Bearer super-token\nline\n").unwrap();
+        let mut invalid = server("streamable-http", Some("https://example.test/mcp"));
+        invalid.headers.insert(
+            "Authorization".to_string(),
+            format!("file:{}", path.display()),
+        );
+        let error = match resolve_selected_server("headers", &invalid) {
+            Ok(_) => panic!("invalid secret unexpectedly resolved"),
+            Err(error) => error.to_string(),
+        };
+        assert_eq!(error, "mcp_header_value_invalid: headers");
+        assert!(!error.contains(path.to_string_lossy().as_ref()));
+        assert!(!error.contains("super-token"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn header_validation_rejects_literals_reserved_duplicates_and_stdio() {
+        let mut literal = server("streamable-http", Some("https://example.test/mcp"));
+        literal
+            .headers
+            .insert("Authorization".to_string(), "literal-secret".to_string());
+        assert!(
+            validate_server_configs(&BTreeMap::from([("literal".to_string(), literal,)]))
+                .unwrap_err()
+                .to_string()
+                .starts_with("mcp_header_reference_plaintext_rejected")
+        );
+
+        for name in [
+            "Accept",
+            "Content-Type",
+            "Mcp-Session-Id",
+            "Last-Event-Id",
+            "MCP-Protocol-Version",
+        ] {
+            let mut reserved = server("streamable-http", Some("https://example.test/mcp"));
+            reserved
+                .headers
+                .insert(name.to_string(), "env:AGENTIC_MCP_HEADER".to_string());
+            assert!(validate_server_configs(&BTreeMap::from([
+                ("reserved".to_string(), reserved,)
+            ]))
+            .unwrap_err()
+            .to_string()
+            .starts_with("mcp_header_reserved"));
+        }
+
+        let mut duplicate = server("streamable-http", Some("https://example.test/mcp"));
+        duplicate
+            .headers
+            .insert("X-Trace".to_string(), "env:AGENTIC_MCP_HEADER".to_string());
+        duplicate.headers.insert(
+            "x-trace".to_string(),
+            "env:AGENTIC_MCP_HEADER_2".to_string(),
+        );
+        assert!(
+            validate_server_configs(&BTreeMap::from([("duplicate".to_string(), duplicate,)]))
+                .unwrap_err()
+                .to_string()
+                .starts_with("mcp_header_duplicate")
+        );
+
+        let mut invalid_stdio = server("stdio", Some("node ./server.mjs"));
+        invalid_stdio
+            .headers
+            .insert("X-Trace".to_string(), "env:AGENTIC_MCP_HEADER".to_string());
+        assert!(
+            validate_server_configs(&BTreeMap::from([("stdio".to_string(), invalid_stdio,)]))
+                .unwrap_err()
+                .to_string()
+                .starts_with("mcp_header_transport_invalid")
+        );
     }
 
     #[test]

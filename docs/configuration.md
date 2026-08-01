@@ -190,7 +190,11 @@ v0.9 rejects `maxActiveSessions` and `sessionIdleTimeoutSecs`.
     "docs": {
       "enabled": false,
       "transport": "streamable-http",
-      "url": "https://mcp.example.com/mcp"
+      "url": "https://mcp.example.com/mcp",
+      "headers": {
+        "Authorization": "env:TODOS_MCP_AUTHORIZATION",
+        "X-Tenant": "file:/run/secrets/todos-mcp-tenant"
+      }
     },
     "local-tool": {
       "enabled": false,
@@ -202,6 +206,10 @@ v0.9 rejects `maxActiveSessions` and `sessionIdleTimeoutSecs`.
 ```
 
 Server ids are at most 64 bytes and use letters, digits, `.`, `_`, or `-`. `streamable-http` requires an absolute HTTP(S) URL. `stdio` requires a non-empty command. Keep examples disabled until their trust and confirmation policy are reviewed.
+
+`streamable-http` supports static custom HTTP headers through `headers`. Header names are case-insensitive; transport-managed names such as `Accept`, `Content-Type`, `Mcp-Session-Id`, `Last-Event-Id`, and `MCP-Protocol-Version` are rejected. Every Header value must be an entire `env:VARIABLE_NAME` or `file:/path` reference; plaintext credentials are rejected. For an Authorization header, the referenced value should include the complete value such as `Bearer <token>`.
+
+References are resolved when a new MCP admission/call snapshot is created. The raw reference may appear in the config file and configuration revision, but the resolved value is kept only in the private in-memory client snapshot. Missing, empty, or invalid secret sources reject that call without changing other servers. No OAuth flow is implied by this static-header feature.
 
 ## Skills, Room, and sandbox
 
@@ -237,7 +245,7 @@ Standalone and Local workers poll the config and atomically apply a valid live s
 | `hubUrl`, `hubTransport`, `agentSecret`, reporting mode | Restart required for the related connection |
 | Skill install concurrency/startup-owned settings | Restart required |
 
-The Standalone supervisor emits `restart_required` when a startup identity field changes. Do not assume editing the file switched the existing child tree.
+Header references are re-resolved for new MCP snapshots after a valid `mcpServers` reload; an already-created downstream call keeps its resolved Header snapshot. The Standalone supervisor emits `restart_required` when a startup identity field changes. Do not assume editing the file switched the existing child tree.
 
 ## Validation and inspection
 

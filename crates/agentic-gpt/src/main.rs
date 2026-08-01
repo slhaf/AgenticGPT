@@ -15,6 +15,7 @@ mod mcp;
 mod notebook;
 mod notify;
 mod policy;
+mod secrets;
 mod skill_installs;
 mod skills;
 mod state;
@@ -782,6 +783,7 @@ mod tests {
         AgentMessage, BootstrapReadRequest, HubCommand, NotebookAppendRequest,
         NotebookRemoveRequest, NotebookUpdateRequest, PassageSignificance,
     };
+    use std::collections::BTreeMap;
     use tokio::sync::mpsc;
     use uuid::Uuid;
 
@@ -1821,6 +1823,10 @@ mod tests {
                 enabled: true,
                 transport: "streamable-http".to_string(),
                 url: Some("https://old.example/mcp".to_string()),
+                headers: BTreeMap::from([(
+                    "Authorization".to_string(),
+                    "env:OLD_MCP_AUTHORIZATION".to_string(),
+                )]),
             },
         );
         let in_flight = live.mcp_servers["primary"].clone();
@@ -1830,6 +1836,10 @@ mod tests {
                 enabled: false,
                 transport: "streamable-http".to_string(),
                 url: Some("https://new.example/mcp".to_string()),
+                headers: BTreeMap::from([(
+                    "Authorization".to_string(),
+                    "env:NEW_MCP_AUTHORIZATION".to_string(),
+                )]),
             },
         );
 
@@ -1862,6 +1872,14 @@ mod tests {
             Some("https://old.example/mcp"),
             "an already-cloned in-flight definition retains the old endpoint"
         );
+        assert_eq!(
+            live.mcp_servers["primary"].headers["Authorization"],
+            "env:NEW_MCP_AUTHORIZATION"
+        );
+        assert_eq!(
+            in_flight.headers["Authorization"],
+            "env:OLD_MCP_AUTHORIZATION"
+        );
     }
 
     #[tokio::test]
@@ -1887,6 +1905,10 @@ mod tests {
                 enabled: true,
                 transport: "streamable-http".to_string(),
                 url: Some("https://old.example/mcp".to_string()),
+                headers: BTreeMap::from([(
+                    "Authorization".to_string(),
+                    "env:OLD_MCP_AUTHORIZATION".to_string(),
+                )]),
             },
         );
         *state.config.write().await = initial.clone();
@@ -1898,6 +1920,10 @@ mod tests {
                 enabled: true,
                 transport: "streamable-http".to_string(),
                 url: Some("https://new.example/mcp".to_string()),
+                headers: BTreeMap::from([(
+                    "Authorization".to_string(),
+                    "env:NEW_MCP_AUTHORIZATION".to_string(),
+                )]),
             },
         );
         valid.mcp_servers.insert(
@@ -1906,6 +1932,7 @@ mod tests {
                 enabled: false,
                 transport: "stdio".to_string(),
                 url: Some("node ./local-server.mjs".to_string()),
+                headers: BTreeMap::new(),
             },
         );
         valid.limits.max_file_search_context_lines = 20;

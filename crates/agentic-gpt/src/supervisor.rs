@@ -20,7 +20,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
 use uuid::Uuid;
 
-use crate::config::{validate_secret_reference, Config};
+use crate::config::Config;
 use crate::instance_lock::InstanceLock;
 use crate::state::CapabilityProfile;
 use crate::tunnel_distribution::ResolvedTunnelClient;
@@ -101,24 +101,18 @@ pub(crate) fn authorize_worker(token: Option<&str>) -> Result<()> {
 }
 
 fn resolve_secret(reference: &str) -> Result<String> {
-    validate_secret_reference(reference)?;
-    let value = if let Some(name) = reference.strip_prefix("env:") {
-        std::env::var(name).map_err(|_| anyhow!("tunnel_api_key_unavailable"))?
-    } else if let Some(path) = reference.strip_prefix("file:") {
-        fs::read_to_string(path)
-            .map_err(|_| anyhow!("tunnel_api_key_unavailable"))?
-            .trim_end_matches(['\r', '\n'])
-            .to_owned()
-    } else {
-        return Err(anyhow!("tunnel_api_key_reference_plaintext_rejected"));
-    };
-    if value.trim().is_empty() {
-        return Err(anyhow!("tunnel_api_key_unavailable"));
-    }
-    if value.chars().any(char::is_control) {
-        return Err(anyhow!("tunnel_api_key_invalid"));
-    }
-    Ok(value)
+    crate::secrets::resolve_reference(reference).map_err(|error| {
+        anyhow!(match error {
+            crate::secrets::SecretReferenceError::PlaintextRejected => {
+                "tunnel_api_key_reference_plaintext_rejected"
+            }
+            crate::secrets::SecretReferenceError::InvalidReference => {
+                "tunnel_api_key_reference_invalid"
+            }
+            crate::secrets::SecretReferenceError::Unavailable => "tunnel_api_key_unavailable",
+            crate::secrets::SecretReferenceError::InvalidValue => "tunnel_api_key_invalid",
+        })
+    })
 }
 
 #[derive(Clone, Debug)]

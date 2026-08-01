@@ -190,7 +190,11 @@ v0.9 会拒绝 `maxActiveSessions` 与 `sessionIdleTimeoutSecs`。
     "docs": {
       "enabled": false,
       "transport": "streamable-http",
-      "url": "https://mcp.example.com/mcp"
+      "url": "https://mcp.example.com/mcp",
+      "headers": {
+        "Authorization": "env:TODOS_MCP_AUTHORIZATION",
+        "X-Tenant": "file:/run/secrets/todos-mcp-tenant"
+      }
     },
     "local-tool": {
       "enabled": false,
@@ -202,6 +206,10 @@ v0.9 会拒绝 `maxActiveSessions` 与 `sessionIdleTimeoutSecs`。
 ```
 
 Server id 最长 64 字节，只使用字母、数字、`.`、`_`、`-`。`streamable-http` 需要绝对 HTTP(S) URL；`stdio` 需要非空命令。在审查信任与确认策略之前，示例应保持 disabled。
+
+`streamable-http` 支持通过 `headers` 配置静态自定义 HTTP Header。Header 名称不区分大小写；`Accept`、`Content-Type`、`Mcp-Session-Id`、`Last-Event-Id`、`MCP-Protocol-Version` 等由 transport 管理的名称会被拒绝。每个 Header 值必须完整引用 `env:VARIABLE_NAME` 或 `file:/path`；明文 credential 会被拒绝。Authorization Header 的引用值应包含完整内容，例如 `Bearer <token>`。
+
+引用会在新的 MCP admission/call 快照创建时解析。配置文件和配置 revision 中只保留原始引用；解析后的值只存在于私有内存 client 快照中。secret source 缺失、为空或无效时，仅当前调用失败，不影响其他 server。该静态 Header 功能不包含 OAuth 流程。
 
 ## Skills、Room 与 sandbox
 
@@ -237,7 +245,7 @@ Standalone 与 Local worker 会轮询配置，并原子应用通过验证的 liv
 | `hubUrl`、`hubTransport`、`agentSecret`、reporting mode | 对相关连接需要重启 |
 | Skill install 并发等 startup-owned 设置 | 需要重启 |
 
-Standalone supervisor 检测到 startup identity 变化时会输出 `restart_required`。不要把“文件已修改”误认为现有子进程树已经切换。
+有效的 `mcpServers` 热加载后，新 MCP 快照会重新解析 Header 引用；已经创建的下游调用继续使用原有解析后的 Header 快照。Standalone supervisor 检测到 startup identity 变化时会输出 `restart_required`。不要把“文件已修改”误认为现有子进程树已经切换。
 
 ## 验证与检查
 

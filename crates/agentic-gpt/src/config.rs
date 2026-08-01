@@ -848,24 +848,18 @@ fn default_tunnel_cache_dir() -> PathBuf {
 }
 
 pub(crate) fn validate_secret_reference(reference: &str) -> Result<()> {
-    if let Some(name) = reference.strip_prefix("env:") {
-        if name.is_empty()
-            || !name.bytes().enumerate().all(|(index, byte)| {
-                byte == b'_'
-                    || byte.is_ascii_alphanumeric() && (index > 0 || byte.is_ascii_alphabetic())
-            })
-        {
-            return Err(anyhow!("tunnel_api_key_reference_invalid"));
-        }
-        return Ok(());
-    }
-    if let Some(path) = reference.strip_prefix("file:") {
-        if path.trim().is_empty() {
-            return Err(anyhow!("tunnel_api_key_reference_invalid"));
-        }
-        return Ok(());
-    }
-    Err(anyhow!("tunnel_api_key_reference_plaintext_rejected"))
+    crate::secrets::validate_reference(reference).map_err(|error| {
+        anyhow!(match error {
+            crate::secrets::SecretReferenceError::PlaintextRejected => {
+                "tunnel_api_key_reference_plaintext_rejected"
+            }
+            crate::secrets::SecretReferenceError::InvalidReference
+            | crate::secrets::SecretReferenceError::Unavailable
+            | crate::secrets::SecretReferenceError::InvalidValue => {
+                "tunnel_api_key_reference_invalid"
+            }
+        })
+    })
 }
 
 fn secret_reference_kind(reference: &str) -> Option<String> {
@@ -1006,6 +1000,14 @@ mod tests {
         );
         assert_eq!(config.mcp_servers.len(), 2);
         assert!(config.mcp_servers.values().all(|server| !server.enabled));
+        assert_eq!(
+            value["mcpServers"]["example-http"]["headers"]["Authorization"],
+            "env:TODOS_MCP_AUTHORIZATION"
+        );
+        assert_eq!(
+            value["mcpServers"]["example-http"]["headers"]["X-Tenant"],
+            "file:/run/secrets/todos-mcp-tenant"
+        );
         assert_eq!(value["agentSecret"], "change-me-before-use");
         assert_eq!(value["tunnel"]["tunnelId"], "tunnel_replace-me");
         assert!(value["tunnel"]["apiKey"]
@@ -1211,6 +1213,7 @@ mod tests {
                 enabled: true,
                 transport: "streamable-http".to_string(),
                 url: Some("https://example.test/mcp".to_string()),
+                headers: BTreeMap::new(),
             },
         );
         assert!(config.validate_mcp_servers().is_ok());

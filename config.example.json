@@ -43,7 +43,11 @@
     "example-http": {
       "enabled": false,
       "transport": "streamable-http",
-      "url": "https://mcp.example.com/mcp"
+      "url": "https://mcp.example.com/mcp",
+      "headers": {
+        "Authorization": "env:TODOS_MCP_AUTHORIZATION",
+        "X-Tenant": "file:/run/secrets/todos-mcp-tenant"
+      }
     },
     "example-stdio": {
       "enabled": false,
