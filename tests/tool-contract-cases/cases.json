@@ -1,0 +1,175 @@
+[
+  {
+    "id": "search_context_overshoot",
+    "tool": "file.search",
+    "kind": "positive",
+    "arguments": {
+      "path": "contract-fixture.txt",
+      "query": "needle",
+      "contextLines": 8
+    },
+    "expect": {
+      "resultFields": ["requestedContextLines", "effectiveContextLines", "contextLinesClipped"],
+      "requestedContextLines": 8,
+      "effectiveContextLines": 5,
+      "contextLinesClipped": true
+    }
+  },
+  {
+    "id": "batch_same_file_dry_run",
+    "tool": "file.batch",
+    "kind": "positive",
+    "arguments": {
+      "dryRun": true,
+      "operations": [
+        {
+          "type": "edit",
+          "id": "first",
+          "mode": "replace",
+          "path": "contract-fixture.txt",
+          "expectedRevision": "$fixtureRevision",
+          "oldText": "needle",
+          "newText": "changed"
+        },
+        {
+          "type": "edit",
+          "id": "second",
+          "mode": "replace",
+          "path": "./contract-fixture.txt",
+          "expectedRevision": "$fixtureRevision",
+          "oldText": "changed",
+          "newText": "final"
+        }
+      ]
+    },
+    "expect": {
+      "status": "dry-run",
+      "operationCount": 2,
+      "groupTotal": 1,
+      "groupStatus": "dry-run",
+      "committed": false
+    }
+  },
+  {
+    "id": "batch_unrelated_missing_target",
+    "tool": "file.batch",
+    "kind": "positive",
+    "arguments": {
+      "dryRun": true,
+      "operations": [
+        {
+          "type": "edit",
+          "id": "valid",
+          "mode": "replace",
+          "path": "contract-fixture.txt",
+          "expectedRevision": "$fixtureRevision",
+          "oldText": "needle",
+          "newText": "valid"
+        },
+        {
+          "type": "edit",
+          "id": "missing-parent",
+          "mode": "write",
+          "path": "missing-parent/contract-fixture.txt",
+          "expectedAbsent": true,
+          "content": "not-created\n"
+        }
+      ]
+    },
+    "expect": {
+      "status": "dry-run",
+      "groupTotal": 2,
+      "failedGroups": 1,
+      "failureCount": 1
+    }
+  },
+  {
+    "id": "file_edit_guarded_create",
+    "tool": "file.edit",
+    "kind": "positive",
+    "arguments": {
+      "mode": "write",
+      "path": "contract-created.txt",
+      "expectedAbsent": true,
+      "content": "created\n",
+      "dryRun": true
+    },
+    "expect": {
+      "status": "dry-run",
+      "changedLinesAdded": 1,
+      "changedLinesRemoved": 0
+    }
+  },
+  {
+    "id": "job_discovery",
+    "tool": "job.list",
+    "kind": "positive",
+    "arguments": {
+      "kind": "process",
+      "limit": 10
+    },
+    "expect": {
+      "resultFields": ["jobs"]
+    }
+  },
+  {
+    "id": "mcp_batch_admission_descriptor",
+    "tool": "mcp.batch",
+    "kind": "descriptor",
+    "arguments": {
+      "calls": [
+        {
+          "id": "call-1",
+          "serverId": "configured-server",
+          "toolName": "tool",
+          "arguments": {}
+        }
+      ]
+    },
+    "expect": {
+      "descriptionIncludes": ["1..16", "not rolled back"],
+      "required": ["calls"]
+    }
+  },
+  {
+    "id": "file_edit_missing_revision",
+    "tool": "file.edit",
+    "kind": "negative",
+    "arguments": {
+      "mode": "replace",
+      "path": "contract-fixture.txt",
+      "oldText": "needle",
+      "newText": "invalid"
+    },
+    "expect": {
+      "errorCode": "file_revision_required"
+    }
+  },
+  {
+    "id": "file_search_negative_context",
+    "tool": "file.search",
+    "kind": "negative",
+    "arguments": {
+      "path": "contract-fixture.txt",
+      "query": "needle",
+      "contextLines": -1
+    },
+    "expect": {
+      "errorIncludes": "invalid value"
+    }
+  },
+  {
+    "id": "mcp_batch_missing_server",
+    "tool": "mcp.batch",
+    "kind": "negative",
+    "arguments": {
+      "calls": [
+        {"id": "call-1", "serverId": "missing-server", "toolName": "one", "arguments": {}}
+      ]
+    },
+    "expect": {
+      "errorCode": "mcp_batch_failed",
+      "errorIncludes": "mcp_server_not_found"
+    }
+  }
+]

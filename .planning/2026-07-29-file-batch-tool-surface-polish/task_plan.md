@@ -9,11 +9,11 @@ Repair the real-use `file.search` / `file.batch` brittleness recorded on 2026-07
 - **Implementation authorized:** yes
 - **Active plan:** `2026-07-29-file-batch-tool-surface-polish`
 - **Baseline:** clean `main`, aligned with `origin/main`, Agentic v0.9.0
-- **Current phase:** Phase D — complete
+- **Current phase:** Phase E — in_progress
 - **Entry phase:** Phase A
 - **Open blocking decisions:** none
 - **Design checkpoint:** user-accepted contract at 2026-07-30T11:10+08:00
-- **Next action:** commit the completed Phase D independently, then begin Phase E deterministic contract corpus work.
+- **Next action:** encode the checked-in deterministic contract corpus, run positive cases through descriptors/serde/dispatch/dry-run, add typed negative cases, then commit Phase E independently before Phase F.
 
 ## Scope and Constraints
 1. Make `file.search.contextLines` resilient to requests above the configured limit while preserving typed rejection for structurally invalid values.
@@ -163,7 +163,7 @@ Repair the real-use `file.search` / `file.batch` brittleness recorded on 2026-07
 **Completed 2026-08-01:** Repaired priority standalone and Hub descriptions/property annotations for file, Job, process, MCP, tmux, skills, bootstrap, diary, and notebook boundaries; added `docs/tool-contract-matrix.md` for every Normal/Room/Hub profile tool; linked the matrix from interface/runtime/README docs; added descriptor phrase/annotation/parity tests; and verified Normal 24 / Room 36 counts. Formatting, workspace check, workspace clippy, full Agent tests (241/241 with authorized escalation), and full Hub tests (59/59) pass.
 
 ### Phase E — Deterministic contract corpus and optional model evaluation
-**Status:** pending.
+**Status:** complete.
 
 **Prerequisite:** Phase D contract matrix complete; frozen D-12.
 **Objective:** Turn today’s failures into repeatable regressions.
@@ -175,6 +175,10 @@ Repair the real-use `file.search` / `file.batch` brittleness recorded on 2026-07
 2. Run positive fixtures through actual descriptors, serde, and dispatch/dry-run; run negative fixtures against typed errors.
 3. Add a provider-neutral optional model runner that scores tool selection and argument validity but is not a required network CI gate and stores no credentials.
 4. Document how to add a regression from future model misuse.
+
+**Started 2026-08-01:** Phase D commit `1251285` is complete. Phase E begins from the recorded real-use failures and keeps the fixture corpus provider-neutral; required tests never need network access or credentials.
+
+**Completed 2026-08-01:** Added nine checked-in cases and contributor guidance; the Agent test loads them through the live descriptors, argument validation, serde, dispatch, and dry-run paths; typed negative cases cover missing revision, invalid negative context, and missing MCP server; and the optional standard-library evaluator scores provider-supplied predictions without network or credentials. Final Phase E gates pass: corpus (9/9), file.batch (14/14), full Agent (242/242 with authorized escalation), formatting/diff, workspace check, and workspace clippy.
 
 ### Phase F — Full acceptance and release boundary
 **Status:** pending.
@@ -245,3 +249,7 @@ Repair the real-use `file.search` / `file.batch` brittleness recorded on 2026-07
 | The first Phase D Hub description test found the intended mcp attribute text had not landed at the exact generated attribute lines; a second assertion then required the explicit “bounded inline wait” phrase. | 2 | Patched the exact Hub `mcp.callTool`/`mcp.batch` attributes and reran the focused test successfully. |
 | Phase D full Agent tests ran 241 tests; 237 passed and the same four local-control/supervisor/tunnel tests failed with sandbox permission errors. | 1 | Retain as environment-limited evidence; all descriptor, file.batch, Agent, and Hub contract tests pass. |
 | The four sandbox-sensitive Agent tests initially failed only because the default sandbox denied local socket/HTTP bind and fake subprocess operations. | 1 | With the user's authorization, reran the complete Agent suite with escalation: 241/241 passed, including both local-control tests, fake tunnel, and bounded download. |
+| The first deterministic corpus run expected `completed_with_errors` for a mixed dry-run, but the frozen contract correctly reports `dry-run` while retaining failed group/failure counts. | 1 | Updated the fixture expectation to assert `dry-run` plus `failedGroups`/`failureCount`; rerun passes. |
+| The first MCP negative corpus shape attempted to assert duplicate-call-id before server resolution; the runtime correctly failed earlier with `mcp_server_not_found`. | 1 | Changed the fixture to the stable missing-server typed failure; duplicate-id behavior remains covered by the existing MCP unit test. |
+| `uv run python scripts/evaluate_tool_contracts.py` could not acquire its read-only cache lock under the default sandbox, and a pipe masked the command's error status. | 1 | Reran the provider-neutral script directly with system `python3`; corpus listing succeeds and no network/credentials are required. |
+| A combined cargo test filter using a pipe expression selected zero tests because Cargo treats the filter as a literal substring, not a regex. | 1 | Reran the deterministic corpus and `file_batch` filters separately; both pass. |

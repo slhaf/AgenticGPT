@@ -43,6 +43,11 @@
 - Phase D static gates pass: formatting check, workspace check, workspace clippy with `-D warnings`; Hub package tests pass 59/59. Agent package tests run 241 with 237 pass and four unchanged sandbox permission failures, matching the Phase C environment limitation.
 - After user-authorized escalation, reran the full Agent package suite with local socket/HTTP/subprocess permissions: 241/241 passed. Phase D verification is fully green.
 - Marked Phase D complete. The next independent commit contains only the D-11 matrix, wording/annotation repairs, tests, links, and phase evidence; Phase E remains the next pending implementation boundary.
+- Committed Phase D independently as `1251285`; verified a clean `main` worktree and no tag/push/deploy/publish.
+- Marked Phase E `in_progress`. Next action is to add deterministic positive/negative contract fixtures and an optional no-network evaluator.
+- Added `tests/tool-contract-cases/cases.json` (9 cases) plus contributor instructions and the optional evaluator script. The deterministic in-tree corpus test passes after correcting dry-run/missing-server expectations.
+- `python3 scripts/evaluate_tool_contracts.py --cases tests/tool-contract-cases/cases.json` prints all 9 contracts; `uv run` was not used further because its cache lock is outside the writable sandbox.
+- Full Phase E validation passes: 9/9 deterministic corpus, 14/14 file.batch, 242/242 full Agent with authorized escalation, workspace check, workspace clippy, formatting, and diff checks. Marked Phase E complete; next is its independent commit, then Phase F acceptance.
 
 ## 2026-08-01
 

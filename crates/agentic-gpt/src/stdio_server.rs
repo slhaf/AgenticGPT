@@ -2754,6 +2754,7 @@ mod tests {
 
     use agentic_gpt_protocol::{AgentMessage, SkillActivationRequest};
     use rmcp::{model::CallToolRequestParams, ServiceExt};
+    use serde::Deserialize;
     use tokio::io::{split, AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::sync::{mpsc, Mutex, RwLock};
 
@@ -2762,6 +2763,34 @@ mod tests {
         config::Config, jobs::SkillLeaseManager, skill_installs::InstallManager,
         state::RuntimeModel,
     };
+
+    #[derive(Debug, Deserialize)]
+    struct ToolContractCase {
+        id: String,
+        tool: String,
+        kind: String,
+        arguments: Value,
+        expect: Value,
+    }
+
+    fn replace_fixture_revision(value: &mut Value, revision: &str) {
+        match value {
+            Value::String(text) if text == "$fixtureRevision" => {
+                *text = revision.to_string();
+            }
+            Value::Array(values) => {
+                for value in values {
+                    replace_fixture_revision(value, revision);
+                }
+            }
+            Value::Object(values) => {
+                for value in values.values_mut() {
+                    replace_fixture_revision(value, revision);
+                }
+            }
+            _ => {}
+        }
+    }
 
     #[test]
     fn normal_and_room_tool_sets_are_exact() {
@@ -2963,6 +2992,186 @@ mod tests {
         let job_get = serde_json::to_value(tool_descriptor("job.get"))?;
         assert_eq!(job_get["annotations"]["readOnlyHint"], true);
         assert_eq!(job_get["annotations"]["destructiveHint"], false);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn deterministic_tool_contract_corpus_exercises_public_dispatch() -> anyhow::Result<()> {
+        let cases: Vec<ToolContractCase> = serde_json::from_str(include_str!(
+            "../../../tests/tool-contract-cases/cases.json"
+        ))?;
+        let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
+        let workspace = server.state.config.read().await.workspace_root.clone();
+        let fixture_path = workspace.join("contract-fixture.txt");
+        std::fs::write(&fixture_path, "prefix\nneedle\nsuffix\n")?;
+        let fixture_revision = crate::file_ops::revision(&std::fs::read(&fixture_path)?);
+
+        for case in cases {
+            let descriptor = serde_json::to_value(tool_descriptor(&case.tool))?;
+            validate_stdio_arguments(&case.tool, &case.arguments).unwrap_or_else(|error| {
+                panic!("{} descriptor arguments rejected: {error}", case.id)
+            });
+            let expected = &case.expect;
+
+            if case.kind == "descriptor" {
+                for phrase in expected["descriptionIncludes"]
+                    .as_array()
+                    .expect("descriptor phrases")
+                {
+                    let phrase = phrase.as_str().expect("descriptor phrase string");
+                    assert!(
+                        descriptor["description"]
+                            .as_str()
+                            .is_some_and(|description| description.contains(phrase)),
+                        "{} missing descriptor phrase {phrase:?}",
+                        case.id
+                    );
+                }
+                for required in expected["required"].as_array().expect("required fields") {
+                    assert!(
+                        descriptor["inputSchema"]["required"]
+                            .as_array()
+                            .is_some_and(|fields| fields.contains(required)),
+                        "{} missing required field {required}",
+                        case.id
+                    );
+                }
+                continue;
+            }
+
+            let mut arguments = case.arguments;
+            replace_fixture_revision(&mut arguments, &fixture_revision);
+            if case.kind == "negative" {
+                match server.dispatch(&case.tool, arguments).await {
+                    Ok(value) => {
+                        if let Some(code) = expected["errorCode"].as_str() {
+                            assert_eq!(value["error"]["code"], code, "{} error code", case.id);
+                        }
+                        if let Some(message) = expected["errorIncludes"].as_str() {
+                            assert!(
+                                value["error"]["message"]
+                                    .as_str()
+                                    .is_some_and(|text| text.contains(message)),
+                                "{} error message missing {message:?}: {}",
+                                case.id,
+                                value
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        let expected_text = expected["errorIncludes"]
+                            .as_str()
+                            .expect("negative dispatch error phrase");
+                        assert!(
+                            error.to_string().contains(expected_text),
+                            "{} dispatch error missing {expected_text:?}: {error}",
+                            case.id
+                        );
+                    }
+                }
+                continue;
+            }
+
+            let value = server
+                .dispatch(&case.tool, arguments)
+                .await
+                .unwrap_or_else(|error| panic!("{} dispatch failed: {error}", case.id));
+            if let Some(fields) = expected["resultFields"].as_array() {
+                for field in fields {
+                    let field = field.as_str().expect("result field string");
+                    assert!(
+                        value.get(field).is_some(),
+                        "{} missing result field {field}",
+                        case.id
+                    );
+                }
+            }
+            if let Some(status) = expected["status"].as_str() {
+                assert_eq!(value["status"], status, "{} status", case.id);
+            }
+            if let Some(requested) = expected["requestedContextLines"].as_u64() {
+                assert_eq!(
+                    value["requestedContextLines"], requested,
+                    "{} requested context",
+                    case.id
+                );
+            }
+            if let Some(effective) = expected["effectiveContextLines"].as_u64() {
+                assert_eq!(
+                    value["effectiveContextLines"], effective,
+                    "{} effective context",
+                    case.id
+                );
+            }
+            if let Some(clipped) = expected["contextLinesClipped"].as_bool() {
+                assert_eq!(
+                    value["contextLinesClipped"], clipped,
+                    "{} clipped context",
+                    case.id
+                );
+            }
+            if let Some(count) = expected["operationCount"].as_u64() {
+                assert_eq!(
+                    value["results"].as_array().map_or(0, Vec::len),
+                    count as usize,
+                    "{} operation count",
+                    case.id
+                );
+            }
+            if let Some(total) = expected["groupTotal"].as_u64() {
+                assert_eq!(
+                    value["groupCounts"]["total"], total,
+                    "{} group total",
+                    case.id
+                );
+            }
+            if let Some(status) = expected["groupStatus"].as_str() {
+                assert!(
+                    value["groups"]
+                        .as_array()
+                        .is_some_and(|groups| groups.iter().any(|group| group["status"] == status)),
+                    "{} missing group status {status}",
+                    case.id
+                );
+            }
+            if let Some(committed) = expected["committed"].as_bool() {
+                assert!(
+                    value["groups"].as_array().is_some_and(|groups| groups
+                        .iter()
+                        .any(|group| group["committed"] == committed)),
+                    "{} missing committed={committed}",
+                    case.id
+                );
+            }
+            if let Some(failed) = expected["failedGroups"].as_u64() {
+                assert_eq!(
+                    value["groupCounts"]["failed"], failed,
+                    "{} failed groups",
+                    case.id
+                );
+            }
+            if let Some(failure_count) = expected["failureCount"].as_u64() {
+                assert_eq!(
+                    value["failureCount"], failure_count,
+                    "{} failure count",
+                    case.id
+                );
+            }
+            if let Some(added) = expected["changedLinesAdded"].as_u64() {
+                assert_eq!(
+                    value["changedLines"]["added"], added,
+                    "{} added lines",
+                    case.id
+                );
+            }
+            if let Some(removed) = expected["changedLinesRemoved"].as_u64() {
+                assert_eq!(
+                    value["changedLines"]["removed"], removed,
+                    "{} removed lines",
+                    case.id
+                );
+            }
+        }
         Ok(())
     }
 
