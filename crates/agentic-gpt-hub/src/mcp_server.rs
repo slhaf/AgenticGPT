@@ -685,7 +685,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "process.exec",
-        description = "Start one managed process on a local Agentic agent and wait briefly. The response is always a Job envelope; use job.get for later state/output and job.cancel for cancellation evidence."
+        description = "Start one managed process on a local Agentic agent and wait briefly. The response is always a Job envelope; policy/confirmation/capacity can reject before spawn, and job.get/job.cancel provide later state or cancellation evidence."
     )]
     async fn exec(&self, params: Parameters<ExecArgs>) -> Result<CallToolResult, ErrorData> {
         let params = params.0;
@@ -718,7 +718,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "process.batch",
-        description = "Start multiple managed processes on a local Agentic agent with one admission/confirmation decision. Returns ordered child Jobs; use job.get/job.cancel for lifecycle control."
+        description = "Admit multiple managed processes on a local Agentic agent with one confirmation boundary and ordered child Jobs. Validation/capacity rejection starts none; already-started children are not rolled back, and job.get/job.cancel provide lifecycle control."
     )]
     async fn batch_exec(
         &self,
@@ -761,7 +761,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "job.list",
-        description = "List active or recently retained Jobs for one local Agentic agent with optional kind/state filters."
+        description = "List active or recently retained Jobs for one local Agentic agent with optional kind/state filters. This is bounded read-only discovery and never starts work."
     )]
     async fn job_list(&self, params: Parameters<JobListArgs>) -> Result<CallToolResult, ErrorData> {
         let params = params.0;
@@ -784,7 +784,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "job.get",
-        description = "Inspect or briefly wait for one Job by id. waitSeconds is capped at 30; cached state is used if the Agent is temporarily unavailable."
+        description = "Inspect or briefly wait for one Job by id. waitSeconds is capped at 30; cached state may be returned when the Agent is temporarily unavailable and is not proof of a fresh live result."
     )]
     async fn job_get(&self, params: Parameters<JobGetArgs>) -> Result<CallToolResult, ErrorData> {
         let params = params.0;
@@ -807,7 +807,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "job.cancel",
-        description = "Request kind-aware cancellation for one Job and return cancellation outcome/termination evidence."
+        description = "Request kind-aware cancellation for one Job and return observed outcome/termination evidence. A remote or unconfirmed stop is reported as detached rather than claimed cancelled."
     )]
     async fn job_cancel(&self, params: Parameters<JobIdArgs>) -> Result<CallToolResult, ErrorData> {
         let params = params.0;
@@ -1024,7 +1024,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "mcp.listTools",
-        description = "List tools exposed by one MCP server configured inside a local Agentic agent. Use mcp.callTool with the returned serverId and tool name."
+        description = "List tools exposed by one MCP server configured inside a local Agentic agent. Use the returned serverId/tool name/schema for mcp.callTool or mcp.batch; this is read-only discovery."
     )]
     async fn mcp_list_tools(
         &self,
@@ -1055,7 +1055,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "mcp.callTool",
-        description = "Start a managed tool Job on an MCP server configured inside a local Agentic agent. Returns a Job envelope after a bounded inline wait; use job.get/job.cancel for later result or cancellation evidence."
+        description = "Start one downstream MCP call as a managed Job on a configured local Agentic agent. Arguments are bounded, the response is a Job envelope after a bounded inline wait (maximum 30 seconds), and job.get/job.cancel provide later result or cancellation evidence; this is not a direct transactional call."
     )]
     async fn mcp_call_tool(
         &self,
@@ -1086,7 +1086,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "mcp.batch",
-        description = "Atomically admit 1..16 managed downstream MCP child Jobs with one aggregate confirmation, bounded global/per-server concurrency, ordered results, and optional fail-fast scheduling."
+        description = "Atomically validate/admit 1..16 managed downstream MCP child Jobs with one aggregate confirmation, bounded global/per-server concurrency, ordered results, and optional fail-fast scheduling. Admission/confirmation is atomic; downstream side effects are not rolled back."
     )]
     async fn mcp_batch(
         &self,
@@ -2761,6 +2761,74 @@ mod tests {
             .as_array()
             .is_some_and(|required| required.contains(&json!("agentId"))
                 && required.contains(&json!("calls"))));
+    }
+
+    #[test]
+    fn priority_hub_descriptions_preserve_job_and_admission_boundaries() {
+        let server = AgenticMcpServer::new(test_state());
+        let tools = app_tool_descriptors(&server);
+        let description = |name: &str| {
+            tools
+                .iter()
+                .find(|tool| tool.get("name").and_then(Value::as_str) == Some(name))
+                .and_then(|tool| tool.get("description"))
+                .and_then(Value::as_str)
+                .unwrap_or_else(|| panic!("missing Hub tool description for {name}"))
+        };
+        for (name, phrases) in [
+            (
+                "process.exec",
+                ["Job envelope", "policy/confirmation/capacity", "job.cancel"].as_slice(),
+            ),
+            (
+                "process.batch",
+                [
+                    "one confirmation boundary",
+                    "starts none",
+                    "not rolled back",
+                ]
+                .as_slice(),
+            ),
+            (
+                "job.get",
+                [
+                    "waitSeconds",
+                    "capped at 30",
+                    "not proof of a fresh live result",
+                ]
+                .as_slice(),
+            ),
+            (
+                "job.cancel",
+                ["termination evidence", "detached", "claimed cancelled"].as_slice(),
+            ),
+            (
+                "mcp.callTool",
+                [
+                    "managed Job",
+                    "bounded inline wait",
+                    "not a direct transactional",
+                ]
+                .as_slice(),
+            ),
+            (
+                "mcp.batch",
+                [
+                    "1..16",
+                    "Admission/confirmation is atomic",
+                    "not rolled back",
+                ]
+                .as_slice(),
+            ),
+        ] {
+            let text = description(name);
+            for phrase in phrases {
+                assert!(
+                    text.contains(phrase),
+                    "{name} description missing contract phrase {phrase:?}: {text}"
+                );
+            }
+        }
     }
 
     #[test]

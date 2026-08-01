@@ -2122,7 +2122,10 @@ fn properties_for(name: &str) -> Map<String, Value> {
     }
     match name {
         "file.read" => {
-            add("path", string("File or directory path."));
+            add(
+                "path",
+                string("File or directory path; resolved and checked by path policy."),
+            );
             add(
                 "includeContent",
                 boolean("Include bounded content; default true."),
@@ -2131,7 +2134,10 @@ fn properties_for(name: &str) -> Map<String, Value> {
             add("endLine", number("Inclusive end line."));
         }
         "file.search" => {
-            add("path", string("File or directory root."));
+            add(
+                "path",
+                string("File or directory root; resolved and checked by path policy."),
+            );
             add("query", string("Literal or regex query."));
             add(
                 "mode",
@@ -2161,33 +2167,44 @@ fn properties_for(name: &str) -> Map<String, Value> {
                 "mode",
                 json!({"type":"string","enum":["replace","patch","write"]}),
             );
-            add("path", string("UTF-8 text file path."));
+            add(
+                "path",
+                string("UTF-8 text file path; resolved and checked by path policy."),
+            );
             add(
                 "expectedRevision",
-                string("Required revision for existing files."),
+                string("Required sha256:<hex> revision for an existing target; do not combine with expectedAbsent."),
             );
             add(
                 "expectedAbsent",
-                boolean("Require a new target; write mode only."),
+                boolean("Require a missing target; only write mode may create, and its parent must already exist."),
             );
-            add("oldText", string("Exact non-empty text to replace."));
-            add("newText", string("Replacement text."));
+            add(
+                "oldText",
+                string("Exact non-empty text to replace; required for replace mode."),
+            );
+            add(
+                "newText",
+                string("Replacement text for replace mode; may be empty."),
+            );
             add(
                 "expectedMatches",
-                number("Expected exact replacement count, default 1."),
+                number("Expected exact replacement count in replace mode; defaults to 1."),
             );
             add("patch", string(PATCH_SCHEMA_DESCRIPTION));
             add(
                 "content",
-                string("Complete UTF-8 file content for write mode."),
+                string("Complete UTF-8 file content; required for write mode and used for guarded create/overwrite."),
             );
             add(
                 "dryRun",
-                boolean("Validate and preview without confirmation or write."),
+                boolean(
+                    "Validate and preview without confirmation or physical write; default false.",
+                ),
             );
             add(
                 "needConfirm",
-                boolean("Request confirmation before mutation."),
+                boolean("Request one confirmation before an effective mutation; default false."),
             );
         }
         "file.batch" => {
@@ -2195,15 +2212,15 @@ fn properties_for(name: &str) -> Map<String, Value> {
                 "type":"object", "additionalProperties":false,
                 "properties": {
                     "type":{"const":"read"}, "id":string("Optional operation id."),
-                    "path":string("File or directory path."),
+                    "path":string("File or directory path; resolved and checked by path policy."),
                     "includeContent":{"type":"boolean","description":"Include bounded content; default true.","default":true},
-                    "startLine":number("Inclusive start line."), "endLine":number("Inclusive end line.")
+                    "startLine":number("Inclusive start line; optional."), "endLine":number("Inclusive end line; optional.")
                 }, "required":["type","path"]
             });
             let search = json!({
                 "type":"object", "additionalProperties":false,
                 "properties": {
-                    "type":{"const":"search"}, "id":string("Optional operation id."), "path":string("File or directory root."),
+                    "type":{"const":"search"}, "id":string("Optional operation id."), "path":string("File or directory root; resolved and checked by path policy."),
                     "query":string("Literal or regex query."), "mode":{"type":"string","enum":["literal","regex"],"default":"literal"},
                     "caseSensitive":{"type":"boolean","description":"Case-sensitive; default true.","default":true},
                     "include":{"type":"array","items":{"type":"string"},"description":"Include globs; max 16.","default":[]},
@@ -2218,12 +2235,12 @@ fn properties_for(name: &str) -> Map<String, Value> {
                 "type":"object", "additionalProperties":false,
                 "properties": {
                     "type":{"const":"edit"}, "id":string("Optional operation id."),
-                    "mode":{"type":"string","enum":["replace","patch","write"]}, "path":string("UTF-8 text file path."),
-                    "expectedRevision":string("Required revision for existing files."), "expectedAbsent":boolean("Require a new target; write mode only."),
-                    "oldText":string("Exact non-empty text to replace."), "newText":string("Replacement text."),
-                    "expectedMatches":{"type":"integer","description":"Expected exact replacement count, default 1.","default":1},
+                    "mode":{"type":"string","enum":["replace","patch","write"]}, "path":string("UTF-8 text file path; resolved and checked by path policy."),
+                    "expectedRevision":string("Required sha256:<hex> revision for an existing target; do not combine with expectedAbsent."), "expectedAbsent":boolean("Require a missing target; only write mode may create, and its parent must already exist."),
+                    "oldText":string("Exact non-empty text to replace; required for replace mode."), "newText":string("Replacement text for replace mode; may be empty."),
+                    "expectedMatches":{"type":"integer","description":"Expected exact replacement count in replace mode; defaults to 1.","default":1},
                     "patch":string(PATCH_SCHEMA_DESCRIPTION),
-                    "content":string("Complete UTF-8 content for write mode.")
+                    "content":string("Complete UTF-8 file content; required for write mode and used for guarded create/overwrite.")
                 }, "required":["type","mode","path"]
             });
             add(
@@ -2231,16 +2248,16 @@ fn properties_for(name: &str) -> Map<String, Value> {
                 json!({
                     "type":"array", "minItems":1, "maxItems":32,
                     "items":{"oneOf":[read,search,edit]},
-                    "description":"Ordered bounded read, search, and edit operations."
+                    "description":"Ordered bounded read, search, and edit operations. Reads/searches run before edits; edit groups commit independently by normalized target."
                 }),
             );
             add(
                 "dryRun",
-                boolean("Preview edits without confirmation or writes."),
+                boolean("Preview the whole request without confirmation or writes; default false."),
             );
             add(
                 "needConfirm",
-                boolean("Request one confirmation for effective edits."),
+                boolean("Request one aggregate confirmation for valid effective edit groups; default false."),
             );
         }
         "mcp.list" => add("serverId", string("Optional configured MCP server id.")),
@@ -2366,7 +2383,7 @@ fn properties_for(name: &str) -> Map<String, Value> {
                     "type": "array",
                     "minItems": 1,
                     "maxItems": 16,
-                    "description": "Ordered downstream MCP calls; aggregate serialized arguments are capped at 2 MiB.",
+                    "description": "Ordered downstream MCP calls; every call is validated before capacity admission/confirmation, aggregate serialized arguments are capped at 2 MiB, and downstream side effects are not rolled back.",
                     "items": {
                         "type": "object",
                         "additionalProperties": false,
@@ -2378,8 +2395,8 @@ fn properties_for(name: &str) -> Map<String, Value> {
                                 "maxLength": 64,
                                 "pattern": "^[A-Za-z0-9._:-]+$"
                             },
-                            "serverId": {"type": "string"},
-                            "toolName": {"type": "string"},
+                            "serverId": {"type": "string", "description": "Configured downstream MCP server id."},
+                            "toolName": {"type": "string", "description": "Tool name returned by mcp.listTools for this server."},
                             "arguments": {
                                 "type": "object",
                                 "default": {},
@@ -2391,26 +2408,35 @@ fn properties_for(name: &str) -> Map<String, Value> {
             );
             add(
                 "mode",
-                json!({"type":"string","enum":["parallel","sequential"],"default":"parallel"}),
+                json!({"type":"string","enum":["parallel","sequential"],"default":"parallel","description":"Scheduling mode; sequential waits for each child to become terminal."}),
             );
-            add("failFast", json!({"type":"boolean","default":false}));
+            add(
+                "failFast",
+                json!({"type":"boolean","default":false,"description":"After a hard failure, skip only children that have not started; already-started calls are never cancelled."}),
+            );
             add(
                 "waitSeconds",
-                json!({"type":"integer","minimum":0,"maximum":30,"default":5}),
+                json!({"type":"integer","minimum":0,"maximum":30,"default":5,"description":"Bounded inline wait before returning child Job envelopes; maximum 30 seconds."}),
             );
             add(
                 "timeoutSeconds",
-                json!({"type":"integer","minimum":1,"maximum":900,"default":300}),
+                json!({"type":"integer","minimum":1,"maximum":900,"default":300,"description":"Absolute downstream confirmation/connect/request deadline; maximum 900 seconds."}),
             );
         }
         "mcp.callTool" => {
-            add("serverId", string("Configured MCP server id."));
-            add("toolName", string("Downstream MCP tool name."));
+            add(
+                "serverId",
+                string("Configured downstream MCP server id; discover valid values with mcp.list."),
+            );
+            add(
+                "toolName",
+                string("Downstream MCP tool name returned by mcp.list for serverId."),
+            );
             add(
                 "arguments",
                 json!({
                     "type": "object",
-                    "description": "Downstream tool arguments; maximum serialized size 256 KiB.",
+                    "description": "Downstream tool arguments as a JSON object; maximum serialized size 256 KiB.",
                     "default": {}
                 }),
             );
@@ -2575,53 +2601,53 @@ fn output_schema() -> Map<String, Value> {
 
 fn tool_description(name: &str) -> String {
     match name {
-        "agent.info" => "Bounded local runtime information.".to_string(),
-        "file.read" => "Bounded UTF-8 read or metadata inspection.".to_string(),
-        "file.search" => "Bounded in-process text search; context overshoots are clipped and reported.".to_string(),
-        "file.edit" => "Guarded bounded UTF-8 text replacement, patch, or write.".to_string(),
-        "file.batch" => "Bounded mixed file reads, searches, and coordinated edits.".to_string(),
-        "process.exec" => "Start one managed local process and wait briefly.".to_string(),
-        "process.batch" => "Start multiple managed local processes.".to_string(),
-        "job.get" => "Inspect or briefly wait for one managed Job.".to_string(),
-        "job.list" => "List active or recently retained managed Jobs.".to_string(),
-        "job.cancel" => "Request kind-aware cancellation for one managed Job.".to_string(),
-        "tmux.listSessions" => "List persistent tmux sessions.".to_string(),
-        "tmux.sessions" => "List, create, or close tmux sessions.".to_string(),
-        "tmux.listPanes" => "List tmux panes.".to_string(),
-        "tmux.panes" => "List or capture tmux panes.".to_string(),
-        "tmux.capturePane" => "Capture bounded tmux pane history.".to_string(),
-        "tmux.pasteText" => "Paste text into a tmux pane.".to_string(),
-        "tmux.exec" => "Submit a command to a tmux shell pane.".to_string(),
-        "tmux.createSession" => "Create a tmux session.".to_string(),
-        "tmux.closeSession" => "Close a tmux session.".to_string(),
-        "mcp.listServers" => "List configured downstream MCP servers.".to_string(),
-        "mcp.listTools" => "List tools exposed by a downstream MCP server.".to_string(),
-        "mcp.list" => "List configured MCP servers or one server's tools.".to_string(),
-        "mcp.batch" => "Atomically admit 1..16 managed downstream MCP child Jobs with one confirmation boundary, bounded concurrency, ordered results, and optional fail-fast scheduling.".to_string(),
-        "mcp.callTool" => "Start a managed downstream MCP tool Job with bounded inline wait, retained result, timeout, and truthful cancellation evidence.".to_string(),
-        "bootstrap" => "Load the local bootstrap manifest.".to_string(),
-        "bootstrap.read" => "Read one local bootstrap guide.".to_string(),
-        "skills.list" => "List local skills.".to_string(),
-        "skills.setActive" => "Activate or deactivate one local skill.".to_string(),
-        "skills.read" => "Read a local skill or resource.".to_string(),
-        "skills.search" => "Search local skills.".to_string(),
-        "skills.active" => "List active local skills.".to_string(),
-        "skills.activate" => "Activate a local skill.".to_string(),
-        "skills.deactivate" => "Deactivate a local skill.".to_string(),
-        "skills.install" => "Start a local skill installation.".to_string(),
-        "skills.install.get" => "Get local skill installation status.".to_string(),
-        "skills.install.cancel" => "Cancel a local skill installation.".to_string(),
-        "skills.run" => "Run an executable from a local skill.".to_string(),
-        "room.notebook.append" => "Append a Room notebook passage.".to_string(),
-        "room.notebook.recent" => "Read recent Room notebook passages.".to_string(),
-        "room.notebook.selectExact" => "Read Room notebook passages for a date.".to_string(),
-        "room.notebook.search" => "Search Room notebook passages.".to_string(),
-        "room.notebook.current" => "Read current Room notebook state.".to_string(),
-        "room.notebook.update" => "Update a Room notebook passage.".to_string(),
-        "room.notebook.remove" => "Remove a Room notebook passage.".to_string(),
-        "room.diary.append" => "Append a Room diary entry.".to_string(),
-        "room.diary.recent" => "Read recent Room diary entries.".to_string(),
-        "room.diary.selectExact" => "Read Room diary entries for a date.".to_string(),
+        "agent.info" => "Inspect bounded local profile, workspace/path policy, confirmation, capacity, live limits, MCP state, and Job diagnostics; read-only and does not execute work.".to_string(),
+        "file.read" => "Read bounded UTF-8 file content or metadata by path; read-only, no shell/external process, and line ranges are optional and inclusive.".to_string(),
+        "file.search" => "Search workspace text in-process with literal or regex matching; read-only, bounded by path/search limits, and context requests above the live maximum are clipped and reported.".to_string(),
+        "file.edit" => "Apply one guarded UTF-8 replace, patch, or write; existing files require expectedRevision, new writes require expectedAbsent, replace/patch never create, and dryRun previews without writing.".to_string(),
+        "file.batch" => "Run ordered bounded reads, searches, and guarded edits; reads/searches use the pre-edit snapshot, edits commit per normalized file group, and mixed group outcomes are reported without cross-file rollback.".to_string(),
+        "process.exec" => "Start one managed local process and return a Job envelope after a bounded inline wait; use job.get for later state/output and job.cancel for cancellation evidence.".to_string(),
+        "process.batch" => "Admit multiple managed local processes with one confirmation boundary and ordered child Jobs; preflight/capacity rejection starts none, and use job.get/job.cancel for lifecycle.".to_string(),
+        "job.get" => "Inspect one managed Job or wait up to waitSeconds (maximum 30); this is lifecycle inspection only, and cached state may be marked unavailable after an Agent restart.".to_string(),
+        "job.list" => "List active or recently retained managed Jobs with optional kind/state filters; read-only discovery, bounded output, and no new work is started.".to_string(),
+        "job.cancel" => "Request kind-aware cancellation for one managed Job and return observed outcome/termination evidence; a remote or unconfirmed stop is reported as detached rather than claimed cancelled.".to_string(),
+        "tmux.listSessions" => "Read-only list of persistent tmux sessions; use tmux.sessions when creating or closing one.".to_string(),
+        "tmux.sessions" => "List, create, or close persistent tmux sessions; close is destructive and may require confirmation.".to_string(),
+        "tmux.listPanes" => "Read-only list of tmux panes with cwd/foreground state; use tmux.exec only for shell panes.".to_string(),
+        "tmux.panes" => "List or capture bounded tmux pane history; capture is read-only and requires the action-compatible target fields.".to_string(),
+        "tmux.capturePane" => "Capture bounded history from one tmux pane; read-only and does not submit input.".to_string(),
+        "tmux.pasteText" => "Paste text into a non-shell tmux pane or TUI; shell panes are rejected and must use tmux.exec.".to_string(),
+        "tmux.exec" => "Submit one structured command to a tmux shell pane and return a bounded post-submit snapshot; submission does not prove completion.".to_string(),
+        "tmux.createSession" => "Create one persistent tmux session in a policy-allowed cwd; prefer reusing an existing session when possible.".to_string(),
+        "tmux.closeSession" => "Close one persistent tmux session; destructive, confirmation-aware, and only for explicitly finished workspaces.".to_string(),
+        "mcp.listServers" => "List configured downstream MCP servers for the local Agent; read-only discovery before mcp.callTool or mcp.batch.".to_string(),
+        "mcp.listTools" => "List tools exposed by one configured downstream MCP server; use returned names and schemas for mcp.callTool/mcp.batch.".to_string(),
+        "mcp.list" => "List configured downstream MCP servers or one server's tools; read-only discovery before managed calls.".to_string(),
+        "mcp.batch" => "Atomically validate/admit 1..16 downstream MCP child Jobs with one aggregate confirmation, bounded concurrency, ordered results, and optional fail-fast scheduling; admission is atomic, downstream side effects are not rolled back.".to_string(),
+        "mcp.callTool" => "Start one downstream MCP call as a managed Job with bounded arguments, inline wait, timeout, retained/truncated result evidence, and job.get/job.cancel follow-up; it is not a direct transactional tool call.".to_string(),
+        "bootstrap" => "Load the Room bootstrap manifest and guide summaries; read-only startup guidance, not a generic file reader.".to_string(),
+        "bootstrap.read" => "Read one validated Room bootstrap guide by id; read-only and package-relative, not an arbitrary path reader.".to_string(),
+        "skills.list" => "List valid local skills with optional query/active filtering; read-only discovery.".to_string(),
+        "skills.setActive" => "Set one local skill's active flag; this changes workspace state but grants no permissions and executes nothing.".to_string(),
+        "skills.read" => "Read one local skill package or bounded package-relative resource; not a generic workspace file reader.".to_string(),
+        "skills.search" => "Search local skill metadata/content; read-only discovery.".to_string(),
+        "skills.active" => "List active local skills, including stale entries; read-only discovery.".to_string(),
+        "skills.activate" => "Mark one existing valid local skill active; no execution or permission grant.".to_string(),
+        "skills.deactivate" => "Remove active state for one local skill; stale/missing entries may still be removed.".to_string(),
+        "skills.install" => "Start an asynchronous local skill installation; returns an installId before network work, then use skills.install.get/cancel.".to_string(),
+        "skills.install.get" => "Inspect or briefly wait for one skill installation by installId; read-only lifecycle inspection.".to_string(),
+        "skills.install.cancel" => "Request cooperative cancellation of one skill installation before its atomic commit; outcome is evidence-based.".to_string(),
+        "skills.run" => "Run one executable from an active local skill as a managed Job; use job.get/job.cancel when it does not finish inline.".to_string(),
+        "room.notebook.append" => "Append one explicit Room notebook passage; durable workspace state, not a transient chat note.".to_string(),
+        "room.notebook.recent" => "Read recent Room notebook passages with optional scope/significance filters; read-only.".to_string(),
+        "room.notebook.selectExact" => "Read Room notebook passages for one exact room-timezone calendar date; read-only.".to_string(),
+        "room.notebook.search" => "Search Room notebook passages by bounded substring fields; no vector search, read-only.".to_string(),
+        "room.notebook.current" => "Read recoverable current Room notebook state for one scope; read-only.".to_string(),
+        "room.notebook.update" => "Update editable fields of one Room notebook passage; scope and datetime remain immutable.".to_string(),
+        "room.notebook.remove" => "Remove one Room notebook passage; destructive and current-state fallback is reported.".to_string(),
+        "room.diary.append" => "Append one dated Room diary entry; durable diary state, not notebook replacement.".to_string(),
+        "room.diary.recent" => "Read recent Room diary entries with bounded day/limit filters; read-only.".to_string(),
+        "room.diary.selectExact" => "Read Room diary entries for one exact room-timezone calendar date; read-only.".to_string(),
         _ => "Agentic GPT local tool.".to_string(),
     }
 }
@@ -2845,6 +2871,99 @@ mod tests {
                 .unwrap()
                 .contains("live configured maximum")
         );
+    }
+
+    #[test]
+    fn priority_tool_descriptions_state_use_and_lifecycle_boundaries() -> anyhow::Result<()> {
+        let expectations = [
+            (
+                "file.read",
+                ["read-only", "no shell", "line ranges"].as_slice(),
+            ),
+            (
+                "file.search",
+                ["literal or regex", "read-only", "clipped and reported"].as_slice(),
+            ),
+            (
+                "file.edit",
+                ["expectedRevision", "expectedAbsent", "never create"].as_slice(),
+            ),
+            (
+                "file.batch",
+                [
+                    "pre-edit snapshot",
+                    "per normalized file group",
+                    "without cross-file rollback",
+                ]
+                .as_slice(),
+            ),
+            (
+                "job.get",
+                ["waitSeconds", "maximum 30", "Agent restart"].as_slice(),
+            ),
+            (
+                "job.cancel",
+                ["termination evidence", "detached", "claimed cancelled"].as_slice(),
+            ),
+            (
+                "mcp.callTool",
+                [
+                    "managed Job",
+                    "job.get/job.cancel",
+                    "not a direct transactional",
+                ]
+                .as_slice(),
+            ),
+            (
+                "mcp.batch",
+                ["1..16", "aggregate confirmation", "not rolled back"].as_slice(),
+            ),
+        ];
+        for (name, needles) in expectations {
+            let descriptor = serde_json::to_value(tool_descriptor(name))?;
+            let description = descriptor["description"]
+                .as_str()
+                .unwrap_or_else(|| panic!("missing description for {name}"));
+            for needle in needles {
+                assert!(
+                    description.contains(needle),
+                    "{name} description missing contract phrase {needle:?}: {description}"
+                );
+            }
+        }
+
+        let edit = serde_json::to_value(tool_descriptor("file.edit"))?;
+        assert!(
+            edit["inputSchema"]["properties"]["expectedRevision"]["description"]
+                .as_str()
+                .is_some_and(|description| description.contains("expectedAbsent"))
+        );
+        assert!(
+            edit["inputSchema"]["properties"]["expectedAbsent"]["description"]
+                .as_str()
+                .is_some_and(|description| description.contains("parent must already exist"))
+        );
+
+        let batch = serde_json::to_value(tool_descriptor("mcp.batch"))?;
+        assert!(batch["inputSchema"]["properties"]["calls"]["description"]
+            .as_str()
+            .is_some_and(|description| description.contains("not rolled back")));
+        assert!(
+            batch["inputSchema"]["properties"]["failFast"]["description"]
+                .as_str()
+                .is_some_and(
+                    |description| description.contains("already-started calls are never cancelled")
+                )
+        );
+        assert!(!batch.to_string().contains("atomicity"));
+
+        let file_batch = serde_json::to_value(tool_descriptor("file.batch"))?;
+        assert_eq!(file_batch["annotations"]["readOnlyHint"], false);
+        assert_eq!(file_batch["annotations"]["destructiveHint"], true);
+        let job_get = serde_json::to_value(tool_descriptor("job.get"))?;
+        assert_eq!(job_get["annotations"]["readOnlyHint"], true);
+        assert_eq!(job_get["annotations"]["destructiveHint"], false);
+        Ok(())
     }
 
     #[test]

@@ -7,6 +7,9 @@ contract is documented in [`standalone-runtime.md`](standalone-runtime.md).
 This page primarily maps the optional Rust Hub surfaces: GPT Actions, Apps MCP,
 Hub-native tools, and the Hub-to-Agent protocol.
 
+The cross-surface use/non-use, conditional-input, bounds, lifecycle, and parity
+matrix is maintained in [`tool-contract-matrix.md`](tool-contract-matrix.md).
+
 ## GPT Actions API
 
 The GPT Actions API is described by `openapi/hub.yaml` and is protected by the Hub API key.

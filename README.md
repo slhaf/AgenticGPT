@@ -239,6 +239,7 @@ Standalone/Local deployments upgrade `agentic-gpt` independently. Hub deployment
 - [`docs/configuration.md`](docs/configuration.md): runtime selection, all major config sections, secret references, and reload/restart boundaries.
 - [`docs/standalone-runtime.md`](docs/standalone-runtime.md): standalone/local operation, tunnel-client trust, recovery, reporting, and exact tool matrices.
 - [`docs/interfaces.md`](docs/interfaces.md): Hub HTTP, Actions, Apps MCP, protocol, and direct MCP surface references.
+- [`docs/tool-contract-matrix.md`](docs/tool-contract-matrix.md): checked-in Normal/Room/Hub tool contract and parity matrix.
 - [`docs/operations.md`](docs/operations.md): local verification, Standalone-first deployment checks, Hub checks, and safety invariants.
 - [`docs/migration-v0.9.md`](docs/migration-v0.9.md): v0.8 to v0.9 migration by runtime.
 - [`docs/migration-v0.10.md`](docs/migration-v0.10.md): file.batch per-file group and partial-success migration.

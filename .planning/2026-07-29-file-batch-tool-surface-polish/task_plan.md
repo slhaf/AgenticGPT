@@ -9,11 +9,11 @@ Repair the real-use `file.search` / `file.batch` brittleness recorded on 2026-07
 - **Implementation authorized:** yes
 - **Active plan:** `2026-07-29-file-batch-tool-surface-polish`
 - **Baseline:** clean `main`, aligned with `origin/main`, Agentic v0.9.0
-- **Current phase:** Phase C — complete
+- **Current phase:** Phase D — complete
 - **Entry phase:** Phase A
 - **Open blocking decisions:** none
 - **Design checkpoint:** user-accepted contract at 2026-07-30T11:10+08:00
-- **Next action:** commit the completed Phase C independently, then begin Phase D public tool-contract audit.
+- **Next action:** commit the completed Phase D independently, then begin Phase E deterministic contract corpus work.
 
 ## Scope and Constraints
 1. Make `file.search.contextLines` resilient to requests above the configured limit while preserving typed rejection for structurally invalid values.
@@ -143,7 +143,7 @@ Repair the real-use `file.search` / `file.batch` brittleness recorded on 2026-07
 **Completed 2026-08-01:** Isolated read, planning, staging, confirmation, and commit failures by normalized file group; removed cross-file rollback retention, execution, response states, and errors; added bounded group/commit/failure evidence, audit correlation/counts, migration docs, and deterministic staging/conflict/isolation coverage. Focused `file_batch` tests (14/14), workspace check, strict Agent clippy, formatting, and diff checks passed. The full Agent package ran 240 tests with 236 passing; the four unrelated local-control/supervisor/tunnel tests remain blocked by sandbox `Operation not permitted` permissions.
 
 ### Phase D — Public tool contract audit and wording repair
-**Status:** pending.
+**Status:** complete.
 
 **Prerequisite:** Phases A–C complete so descriptions target final runtime semantics; frozen D-11.
 **Objective:** Make the tool surface self-explanatory without schema bloat.
@@ -157,6 +157,10 @@ Repair the real-use `file.search` / `file.batch` brittleness recorded on 2026-07
 4. Keep detailed positive/negative examples in docs/fixtures; enforce finite descriptor/schema budgets and surface revision updates.
 
 **Completion boundary:** Tool count remains 24/36 and no compatibility alias is introduced.
+
+**Started 2026-08-01:** Phase C commit `2303762` is complete. Phase D began with a checked-in contract matrix and a descriptor/schema inventory; runtime behavior and tool counts remained frozen while wording and annotations were audited.
+
+**Completed 2026-08-01:** Repaired priority standalone and Hub descriptions/property annotations for file, Job, process, MCP, tmux, skills, bootstrap, diary, and notebook boundaries; added `docs/tool-contract-matrix.md` for every Normal/Room/Hub profile tool; linked the matrix from interface/runtime/README docs; added descriptor phrase/annotation/parity tests; and verified Normal 24 / Room 36 counts. Formatting, workspace check, workspace clippy, full Agent tests (241/241 with authorized escalation), and full Hub tests (59/59) pass.
 
 ### Phase E — Deterministic contract corpus and optional model evaluation
 **Status:** pending.
@@ -238,3 +242,6 @@ Repair the real-use `file.search` / `file.batch` brittleness recorded on 2026-07
 | Full `cargo test -p agentic-gpt` after Phase B ran 235 tests; 231 passed and the same four unrelated local-control/supervisor/tunnel tests failed with sandbox permission errors. | 1 | Retain as environment-limited evidence; all file.batch and Phase B tests pass. |
 | Phase C full `cargo test -p agentic-gpt` ran 240 tests; 236 passed and the same four unrelated local-control/supervisor/tunnel tests failed with sandbox `Operation not permitted`/`local_mcp_bind_failed` errors. | 1 | Retain as environment-limited evidence; all Phase C file.batch tests and product checks pass, with no Phase C failure. |
 | A text-search command included shell backtick syntax and unintentionally invoked a nested cargo test while constructing its pattern. | 1 | No repository files changed; use single-quoted search patterns and record the command mistake here for reproducibility. |
+| The first Phase D Hub description test found the intended mcp attribute text had not landed at the exact generated attribute lines; a second assertion then required the explicit “bounded inline wait” phrase. | 2 | Patched the exact Hub `mcp.callTool`/`mcp.batch` attributes and reran the focused test successfully. |
+| Phase D full Agent tests ran 241 tests; 237 passed and the same four local-control/supervisor/tunnel tests failed with sandbox permission errors. | 1 | Retain as environment-limited evidence; all descriptor, file.batch, Agent, and Hub contract tests pass. |
+| The four sandbox-sensitive Agent tests initially failed only because the default sandbox denied local socket/HTTP bind and fake subprocess operations. | 1 | With the user's authorization, reran the complete Agent suite with escalation: 241/241 passed, including both local-control tests, fake tunnel, and bounded download. |

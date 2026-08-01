@@ -35,6 +35,14 @@
 - Full Phase C package verification completed: `cargo test -p agentic-gpt` ran 240 tests, with 236 passing and the same four sandbox-permission-sensitive local-control/supervisor/tunnel failures; no Phase C test failed.
 - Final Phase C evidence is complete: formatting, workspace check, strict Agent clippy, focused 14-test batch coverage, and `git diff --check` are clean. Phase C is marked complete; next step is its independent commit, followed by Phase D.
 - A shell-backtick mistake in one diagnostic `rg` command invoked an unintended nested cargo test but changed no files; the error is recorded in `task_plan.md`.
+- Committed Phase C independently as `2303762`; verified a clean worktree on `main` and did not tag, push, deploy, or publish.
+- Marked Phase D `in_progress`. Next action is to inventory all public Normal/Room/Hub tool contracts and add the checked-in matrix before wording repairs.
+- Inventoried 24 Normal names, 36 Room names, 47 dotted Hub names plus the `bootstrap` alias, and the 8-tool coordinator profile; no count change is planned.
+- Repaired standalone priority descriptions/properties (`file.*`, `job.*`, `mcp.*`, process, tmux, skills, bootstrap, diary/notebook) and synchronized Hub process/job/MCP wording. Added descriptor tests for conditional guards, admission/rollback boundaries, and annotations; matrix documentation remains to add before verification.
+- Added `docs/tool-contract-matrix.md` covering every Normal/Room name plus Hub full/coordinator groups, and linked it from README/interface/runtime docs. Standalone descriptor, schema-budget, and Hub priority-description tests pass after correcting the exact Hub mcp attribute patch.
+- Phase D static gates pass: formatting check, workspace check, workspace clippy with `-D warnings`; Hub package tests pass 59/59. Agent package tests run 241 with 237 pass and four unchanged sandbox permission failures, matching the Phase C environment limitation.
+- After user-authorized escalation, reran the full Agent package suite with local socket/HTTP/subprocess permissions: 241/241 passed. Phase D verification is fully green.
+- Marked Phase D complete. The next independent commit contains only the D-11 matrix, wording/annotation repairs, tests, links, and phase evidence; Phase E remains the next pending implementation boundary.
 
 ## 2026-08-01
 

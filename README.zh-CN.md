@@ -238,6 +238,7 @@ Standalone/Local 只需独立升级 `agentic-gpt`。Hub 模式由于 v0.9 与 v0
 - [`docs/configuration.zh-CN.md`](docs/configuration.zh-CN.md)：runtime 选择、主要配置块、secret 引用与 reload/restart 边界。
 - [`docs/standalone-runtime.md`](docs/standalone-runtime.md)：Standalone/local 运行、tunnel-client 信任、恢复、报告与精确工具矩阵。
 - [`docs/interfaces.md`](docs/interfaces.md)：Hub HTTP、Actions、Apps MCP、协议与直接 MCP surface。
+- [`docs/tool-contract-matrix.md`](docs/tool-contract-matrix.md)：Normal/Room/Hub 工具契约、边界与 surface parity 矩阵。
 - [`docs/operations.md`](docs/operations.md)：本地验证、Standalone-first 部署检查、Hub 检查与安全不变量。
 - [`docs/migration-v0.9.zh-CN.md`](docs/migration-v0.9.zh-CN.md)：按 runtime 划分的 v0.8 → v0.9 迁移。
 - [`docs/migration-v0.10.zh-CN.md`](docs/migration-v0.10.zh-CN.md)：`file.batch` 文件组与部分成功语义迁移。

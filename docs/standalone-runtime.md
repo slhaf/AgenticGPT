@@ -157,6 +157,10 @@ policy, confirmation, or capacity checks.
 Tunnel surfaces do not expose Hub aggregation or notification tools. They use
 the same local policy, path-policy, confirmation, audit, and ManagedJob lifecycle as Hub execution while keeping the Hub out of the command path.
 
+The checked-in [public tool contract matrix](tool-contract-matrix.md) records
+use/non-use guidance, conditional fields, bounds, lifecycle/failure semantics,
+and standalone/Hub parity for every Normal, Room, and Hub profile tool.
+
 ### Standalone file tools
 
 `file.read` and `file.search` are bounded UTF-8 operations. They accept paths
