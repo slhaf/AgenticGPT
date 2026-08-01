@@ -4201,6 +4201,172 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn file_batch_isolates_read_and_edit_group_failures() -> anyhow::Result<()> {
+        let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
+        let workspace = server.state.config.read().await.workspace_root.clone();
+        let valid_path = workspace.join("batch-independent.txt");
+        std::fs::write(&valid_path, "before\n")?;
+        let revision = crate::file_ops::revision(&std::fs::read(&valid_path)?);
+        let result = server
+            .dispatch(
+                "file.batch",
+                json!({
+                    "operations":[
+                        {"type":"read", "id":"missing-read", "path":"missing-read.txt"},
+                        {"type":"edit", "id":"good", "mode":"replace", "path":"batch-independent.txt", "expectedRevision":revision, "oldText":"before", "newText":"after"},
+                        {"type":"edit", "id":"bad", "mode":"write", "path":"missing-parent/bad.txt", "expectedAbsent":true, "content":"not-created\n"}
+                    ]
+                }),
+            )
+            .await?;
+        assert_eq!(result["status"], "completed_with_errors");
+        assert_eq!(result["results"][0]["status"], "failed");
+        assert_eq!(result["results"][0]["error"]["code"], "file_not_found");
+        assert_eq!(result["results"][1]["status"], "completed");
+        assert_eq!(result["results"][1]["committed"], true);
+        assert_eq!(result["results"][2]["status"], "failed");
+        assert_eq!(
+            result["results"][2]["error"]["code"],
+            "file_parent_not_found"
+        );
+        assert_eq!(result["groupCounts"]["total"], 2);
+        assert_eq!(result["groupCounts"]["committed"], 1);
+        assert_eq!(result["groupCounts"]["failed"], 1);
+        assert_eq!(result["failureCount"], 2);
+        assert_eq!(std::fs::read_to_string(&valid_path)?, "after\n");
+        let groups = result["groups"].as_array().unwrap();
+        assert!(groups.iter().any(|group| {
+            group["status"] == "committed"
+                && group["committed"] == true
+                && group["operationIds"] == json!(["good"])
+        }));
+        assert!(groups.iter().any(|group| {
+            group["status"] == "failed"
+                && group["committed"] == false
+                && group["operationIds"] == json!(["bad"])
+        }));
+        let audit = std::fs::read_to_string(workspace.join(".agentic-gpt-audit.jsonl"))?;
+        assert!(audit.contains("\"groupCount\":2"));
+        assert!(audit.contains("\"committedGroupCount\":1"));
+        assert!(audit.contains("\"failedGroupCount\":1"));
+        assert!(audit.contains("\"operationIndex\":1"));
+        assert!(audit.contains("\"groupId\":\"file_group_1\""));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn file_batch_commit_conflict_isolated_without_rollback() -> anyhow::Result<()> {
+        let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
+        {
+            let mut config = server.state.config.write().await;
+            config.confirmation_provider.set_legacy("hub").unwrap();
+        }
+        let workspace = server.state.config.read().await.workspace_root.clone();
+        let conflict_path = workspace.join("a-batch-race.txt");
+        let valid_path = workspace.join("b-batch-valid.txt");
+        std::fs::write(&conflict_path, "before-race\n")?;
+        std::fs::write(&valid_path, "before-valid\n")?;
+        let conflict_revision = crate::file_ops::revision(&std::fs::read(&conflict_path)?);
+        let valid_revision = crate::file_ops::revision(&std::fs::read(&valid_path)?);
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        *server.state.hub_sender.lock().await = Some(sender);
+        let response_state = server.state.clone();
+        let conflict_for_responder = conflict_path.clone();
+        let responder = tokio::spawn(async move {
+            while let Some(message) = receiver.recv().await {
+                if let AgentMessage::ConfirmationRequest { request_id, .. } = message {
+                    std::fs::write(&conflict_for_responder, "external-race\n").unwrap();
+                    if let Some(sender) = response_state
+                        .pending_confirmations
+                        .lock()
+                        .await
+                        .remove(&request_id)
+                    {
+                        let _ = sender.send("allow_once".to_string());
+                    }
+                    break;
+                }
+            }
+        });
+        let result = server
+            .dispatch(
+                "file.batch",
+                json!({
+                    "needConfirm":true,
+                    "operations":[
+                        {"type":"edit", "id":"race", "mode":"replace", "path":"a-batch-race.txt", "expectedRevision":conflict_revision, "oldText":"before-race", "newText":"agent-race"},
+                        {"type":"edit", "id":"valid", "mode":"replace", "path":"b-batch-valid.txt", "expectedRevision":valid_revision, "oldText":"before-valid", "newText":"after-valid"}
+                    ]
+                }),
+            )
+            .await?;
+        responder.await?;
+        assert_eq!(result["status"], "completed_with_errors");
+        assert_eq!(result["results"][0]["status"], "failed");
+        assert_eq!(
+            result["results"][0]["error"]["code"],
+            "file_revision_conflict"
+        );
+        assert_eq!(result["results"][1]["status"], "completed");
+        assert_eq!(result["results"][1]["committed"], true);
+        assert_eq!(result["groupCounts"]["committed"], 1);
+        assert_eq!(result["groupCounts"]["failed"], 1);
+        assert_eq!(std::fs::read_to_string(&conflict_path)?, "external-race\n");
+        assert_eq!(std::fs::read_to_string(&valid_path)?, "after-valid\n");
+        let groups = result["groups"].as_array().unwrap();
+        assert!(groups.iter().any(|group| {
+            group["operationIds"] == json!(["race"])
+                && group["status"] == "failed"
+                && group["committed"] == false
+        }));
+        assert!(groups.iter().any(|group| {
+            group["operationIds"] == json!(["valid"])
+                && group["status"] == "committed"
+                && group["committed"] == true
+        }));
+        assert!(!result.to_string().contains("rolled_back"));
+        assert!(!result.to_string().contains("rollback_failed"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn file_batch_stage_failure_isolated_to_one_group() -> anyhow::Result<()> {
+        let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
+        let workspace = server.state.config.read().await.workspace_root.clone();
+        let failed_path = workspace.join("a-batch-stage.txt");
+        let valid_path = workspace.join("b-batch-stage.txt");
+        std::fs::write(&failed_path, "before-failed\n")?;
+        std::fs::write(&valid_path, "before-valid\n")?;
+        let failed_revision = crate::file_ops::revision(&std::fs::read(&failed_path)?);
+        let valid_revision = crate::file_ops::revision(&std::fs::read(&valid_path)?);
+        crate::file_ops::inject_batch_stage_failure(&failed_path);
+        let result = server
+            .dispatch(
+                "file.batch",
+                json!({
+                    "operations":[
+                        {"type":"edit", "id":"stage-failed", "mode":"replace", "path":"a-batch-stage.txt", "expectedRevision":failed_revision, "oldText":"before-failed", "newText":"not-written"},
+                        {"type":"edit", "id":"stage-valid", "mode":"replace", "path":"b-batch-stage.txt", "expectedRevision":valid_revision, "oldText":"before-valid", "newText":"written"}
+                    ]
+                }),
+            )
+            .await?;
+        assert_eq!(result["status"], "completed_with_errors");
+        assert_eq!(result["results"][0]["status"], "failed");
+        assert_eq!(
+            result["results"][0]["error"]["code"],
+            "file_batch_stage_failed"
+        );
+        assert_eq!(result["results"][1]["status"], "completed");
+        assert_eq!(result["results"][1]["committed"], true);
+        assert_eq!(std::fs::read_to_string(&failed_path)?, "before-failed\n");
+        assert_eq!(std::fs::read_to_string(&valid_path)?, "written\n");
+        assert_eq!(result["groupCounts"]["committed"], 1);
+        assert_eq!(result["groupCounts"]["failed"], 1);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn file_batch_groups_normalized_aliases_and_chains_candidates() -> anyhow::Result<()> {
         let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
         let workspace = server.state.config.read().await.workspace_root.clone();

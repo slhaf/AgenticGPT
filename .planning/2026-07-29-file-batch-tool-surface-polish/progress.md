@@ -14,6 +14,28 @@
 - Added the remaining Phase B regression cases and ran `cargo fmt --all && cargo test -p agentic-gpt --bin agentic-gpt file_batch -- --nocapture`; all 11 focused tests pass, including the external revision race and oversized candidate rejection.
 - Final verification: `cargo fmt --all -- --check`, `cargo check --workspace`, and `cargo clippy -p agentic-gpt --all-targets -- -D warnings` pass. `cargo test -p agentic-gpt` runs 237 tests with 233 passing; four known sandbox permission failures remain in local-control socket binding, fake tunnel startup, and bounded local download setup.
 
+## 2026-08-01 Phase C
+
+### Session start
+- Ran the planning catch-up script; no unsynced prior-session report was emitted.
+- Verified clean `main` at Phase B commit `08562b5` and re-read the frozen Phase C work list.
+- Marked Phase C `in_progress`; implementation is limited to D-07 through D-10 and D-13. Phase D tool-description work remains pending.
+- Mapped the current global preflight/rollback/operation-only audit seams and recorded the per-file group response/audit shape before editing product code.
+- Reworked `file_ops::batch` to keep read/search and edit-group failures local, stage/commit each changed group independently, and emit group evidence; `cargo fmt --all && cargo check -p agentic-gpt` passes. The legacy rollback states are no longer in the active batch code path, but audit/schema/docs/tests still need the Phase C pass.
+- Audit-field compile attempt hit one Rust ownership error (`outcome` was moved before its committed flag was derived); recorded and changed the order of that calculation.
+- Re-ran format/check and the 11-test `file_batch` filter after the audit changes; both pass. Next work is deterministic Phase C failure isolation and audit/group assertions.
+- Added migration docs, group-aware redacted audit fields/counts, truncation preservation for group correlation, aggregate byte accounting that excludes rejected groups, and a deterministic stage-failure injection/test. Fresh Phase C verification is pending.
+- Focused Phase C run found and logged a test-only injection race under parallel execution; narrowed the staging hook from a global boolean to a target-path keyed one-shot.
+- The target-keyed hook initially compared pre-canonical paths; canonicalizing both sides fixed the isolated staging test. Full focused rerun remains pending.
+- Made the hook consume only when the current canonical target matches, then reran the full 14-test `file_batch` filter successfully under parallel execution.
+- Phase C focused behavior is green at 14 tests. Documentation now links the v0.10 file-batch migration, and the remaining gate is workspace/clippy/full-suite verification plus final cleanup and commit.
+- Final gate attempt recorded one rustfmt-only diff in the edit-free batch evidence call; formatting must be rerun before workspace check.
+- Clippy verification found and logged one `too_many_arguments` error in the group-failure helper; refactored the two skipped-error strings into a tuple.
+- `cargo fmt --all && cargo clippy -p agentic-gpt --all-targets -- -D warnings` passes, followed by 14/14 focused file.batch tests passing.
+- Full Phase C package verification completed: `cargo test -p agentic-gpt` ran 240 tests, with 236 passing and the same four sandbox-permission-sensitive local-control/supervisor/tunnel failures; no Phase C test failed.
+- Final Phase C evidence is complete: formatting, workspace check, strict Agent clippy, focused 14-test batch coverage, and `git diff --check` are clean. Phase C is marked complete; next step is its independent commit, followed by Phase D.
+- A shell-backtick mistake in one diagnostic `rg` command invoked an unintended nested cargo test but changed no files; the error is recorded in `task_plan.md`.
+
 ## 2026-08-01
 
 ### Implementation session start

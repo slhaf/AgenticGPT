@@ -9,11 +9,11 @@ Repair the real-use `file.search` / `file.batch` brittleness recorded on 2026-07
 - **Implementation authorized:** yes
 - **Active plan:** `2026-07-29-file-batch-tool-surface-polish`
 - **Baseline:** clean `main`, aligned with `origin/main`, Agentic v0.9.0
-- **Current phase:** Phase B — complete
+- **Current phase:** Phase C — complete
 - **Entry phase:** Phase A
 - **Open blocking decisions:** none
 - **Design checkpoint:** user-accepted contract at 2026-07-30T11:10+08:00
-- **Next action:** commit the completed Phase B independently, then begin Phase C under `planning-with-files` without `refine-implementation-plan`.
+- **Next action:** commit the completed Phase C independently, then begin Phase D public tool-contract audit.
 
 ## Scope and Constraints
 1. Make `file.search.contextLines` resilient to requests above the configured limit while preserving typed rejection for structurally invalid values.
@@ -123,7 +123,7 @@ Repair the real-use `file.search` / `file.batch` brittleness recorded on 2026-07
 **Completed 2026-08-01:** Replaced duplicate normalized-target rejection with one group/candidate chain per resolved file, merged repeated/conflicting guards, preserved guarded create/replace/patch and one-lock/one-stage behavior, added candidate-relative no-op/UTF-8/size/race coverage, and passed all Phase B focused and static gates. Legacy cross-file preflight/rollback behavior remains intentionally unchanged for Phase C.
 
 ### Phase C — Per-file commit orchestration, confirmation, audit, and legacy cleanup
-**Status:** pending.
+**Status:** complete.
 
 **Prerequisite:** Phase B complete; frozen D-07 through D-10 and D-13.
 **Objective:** Make file-local partial success the only mutation behavior and remove misleading cross-file rollback machinery.
@@ -139,6 +139,8 @@ Repair the real-use `file.search` / `file.batch` brittleness recorded on 2026-07
 6. Add deterministic failure injection for staging, commit conflict, audit failure, missing parent, invalid read/search, and mixed valid/invalid groups.
 
 **Completion boundary:** Observable behavior matches frozen D-03 through D-10 and D-13.
+
+**Completed 2026-08-01:** Isolated read, planning, staging, confirmation, and commit failures by normalized file group; removed cross-file rollback retention, execution, response states, and errors; added bounded group/commit/failure evidence, audit correlation/counts, migration docs, and deterministic staging/conflict/isolation coverage. Focused `file_batch` tests (14/14), workspace check, strict Agent clippy, formatting, and diff checks passed. The full Agent package ran 240 tests with 236 passing; the four unrelated local-control/supervisor/tunnel tests remain blocked by sandbox `Operation not permitted` permissions.
 
 ### Phase D — Public tool contract audit and wording repair
 **Status:** pending.
@@ -234,3 +236,5 @@ Repair the real-use `file.search` / `file.batch` brittleness recorded on 2026-07
 | First Phase B compile check rejected `[u8]::len` in a JSON expression and reported an immutable/mutable borrow conflict while iterating group operation indexes. | 1 | Replace the function item with a closure and clone the group index list before mutating the group candidate. |
 | Existing duplicate-target regression expected the removed `file_batch_duplicate_edit_target` rejection and failed after grouped planning was enabled. | 1 | Replace it with Phase B coverage for same-file sequential edits and guard conflict behavior. |
 | Full `cargo test -p agentic-gpt` after Phase B ran 235 tests; 231 passed and the same four unrelated local-control/supervisor/tunnel tests failed with sandbox permission errors. | 1 | Retain as environment-limited evidence; all file.batch and Phase B tests pass. |
+| Phase C full `cargo test -p agentic-gpt` ran 240 tests; 236 passed and the same four unrelated local-control/supervisor/tunnel tests failed with sandbox `Operation not permitted`/`local_mcp_bind_failed` errors. | 1 | Retain as environment-limited evidence; all Phase C file.batch tests and product checks pass, with no Phase C failure. |
+| A text-search command included shell backtick syntax and unintentionally invoked a nested cargo test while constructing its pattern. | 1 | No repository files changed; use single-quoted search patterns and record the command mistake here for reproducibility. |

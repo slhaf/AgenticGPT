@@ -68,6 +68,14 @@ pub(crate) struct FileAuditRecord {
     pub(crate) time: DateTime<Utc>,
     pub(crate) tool: String,
     pub(crate) action: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) batch_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) group_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) operation_index: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) operation_id: Option<String>,
     pub(crate) path: String,
     pub(crate) mode: Option<String>,
     pub(crate) requested_confirmation: bool,
@@ -79,6 +87,8 @@ pub(crate) struct FileAuditRecord {
     pub(crate) duration_ms: u128,
     pub(crate) replacement_count: Option<usize>,
     pub(crate) changed_lines: Option<ChangedLines>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) committed: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -97,6 +107,11 @@ pub(crate) struct BatchAuditRecord {
     pub(crate) batch_id: String,
     pub(crate) operation_count: usize,
     pub(crate) edit_count: usize,
+    pub(crate) group_count: usize,
+    pub(crate) committed_group_count: usize,
+    pub(crate) failed_group_count: usize,
+    pub(crate) unchanged_group_count: usize,
+    pub(crate) failure_count: usize,
     pub(crate) confirmation_result: Option<String>,
     pub(crate) outcome: String,
     pub(crate) duration_ms: u128,

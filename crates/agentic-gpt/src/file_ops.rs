@@ -4,6 +4,9 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+#[cfg(test)]
+use std::sync::Mutex;
+
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use globset::{Glob, GlobSet, GlobSetBuilder};
@@ -28,6 +31,17 @@ pub(crate) const MAX_SEARCH_FILES: usize = 10_000;
 pub(crate) const MAX_SEARCH_BYTES: u64 = 64 * 1024 * 1024;
 pub(crate) const MAX_SEARCH_RESULTS: usize = 200;
 pub(crate) const MAX_SEARCH_OUTPUT_BYTES: usize = 256 * 1024;
+
+#[cfg(test)]
+static INJECT_BATCH_STAGE_FAILURE: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+#[cfg(test)]
+pub(crate) fn inject_batch_stage_failure(target: &Path) {
+    *INJECT_BATCH_STAGE_FAILURE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+        Some(fs::canonicalize(target).unwrap_or_else(|_| target.to_path_buf()));
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct ResolvedPath {
@@ -790,10 +804,15 @@ pub(crate) async fn edit(state: &AppState, request: EditRequest) -> Value {
         .and_then(Value::as_str)
         .unwrap_or("failed")
         .to_string();
+    let committed = Some(!request.dry_run && matches!(outcome.as_str(), "created" | "updated"));
     let record = crate::audit::FileAuditRecord {
         time: Utc::now(),
         tool: "file.edit".to_string(),
         action: "edit".to_string(),
+        batch_id: None,
+        group_id: None,
+        operation_index: None,
+        operation_id: None,
         path: resolved_path,
         mode: Some(edit_mode_label(request.mode).to_string()),
         requested_confirmation: request.need_confirm,
@@ -805,6 +824,7 @@ pub(crate) async fn edit(state: &AppState, request: EditRequest) -> Value {
         duration_ms: started.elapsed().as_millis(),
         replacement_count,
         changed_lines,
+        committed,
     };
     if request.dry_run {
         return value;
@@ -1091,6 +1111,7 @@ fn aggregate_search_limit_hit(value: &Value, budget: BatchSearchBudget) -> bool 
 }
 
 struct BatchFileGroup {
+    group_id: String,
     target: ResolvedPath,
     existed: bool,
     before_bytes: Option<Vec<u8>>,
@@ -1102,16 +1123,95 @@ struct BatchFileGroup {
 }
 
 struct BatchPreparedGroup {
+    group_id: String,
     target: ResolvedPath,
     existed: bool,
-    before_bytes: Option<Vec<u8>>,
     before_revision: Option<String>,
+    before_size_bytes: usize,
     before_mode: Option<fs::Permissions>,
     candidate: Vec<u8>,
     after_revision: String,
     operation_indices: Vec<usize>,
     temp: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug)]
+struct BatchGroupRecord {
+    group_id: String,
+    target: String,
+    operation_indices: Vec<usize>,
+    base_revision: Option<String>,
+    final_revision: Option<String>,
+    status: String,
     committed: bool,
+    failure_count: usize,
+    error_code: Option<String>,
+}
+
+impl BatchGroupRecord {
+    fn from_group(group: &BatchFileGroup) -> Self {
+        Self {
+            group_id: group.group_id.clone(),
+            target: group.target.path.to_string_lossy().to_string(),
+            operation_indices: group.operation_indices.clone(),
+            base_revision: None,
+            final_revision: None,
+            status: "pending".to_string(),
+            committed: false,
+            failure_count: 0,
+            error_code: None,
+        }
+    }
+
+    fn synthetic(index: usize, operation: &BatchOperation) -> Self {
+        Self {
+            group_id: format!("file_group_{index}"),
+            target: operation.path.clone(),
+            operation_indices: vec![index],
+            base_revision: None,
+            final_revision: None,
+            status: "failed".to_string(),
+            committed: false,
+            failure_count: 1,
+            error_code: None,
+        }
+    }
+
+    fn refresh_failure_count(&mut self, results: &[Value]) {
+        self.failure_count = self
+            .operation_indices
+            .iter()
+            .filter(|index| {
+                matches!(
+                    results[**index]["status"].as_str(),
+                    Some("failed" | "skipped")
+                )
+            })
+            .count();
+    }
+
+    fn value(&self, operations: &[BatchOperation]) -> Value {
+        let operation_ids = self
+            .operation_indices
+            .iter()
+            .filter_map(|index| operations[*index].id.clone())
+            .collect::<Vec<_>>();
+        let mut value = json!({
+            "groupId": self.group_id,
+            "target": self.target,
+            "operationIndexes": self.operation_indices,
+            "operationIds": operation_ids,
+            "baseRevision": self.base_revision,
+            "finalRevision": self.final_revision,
+            "status": self.status,
+            "committed": self.committed,
+            "failureCount": self.failure_count,
+        });
+        if let Some(error_code) = &self.error_code {
+            value["errorCode"] = json!(error_code);
+        }
+        value
+    }
 }
 
 fn batch_error(code: &str, message: &str) -> Value {
@@ -1393,6 +1493,7 @@ fn apply_batch_operation(
     let response = json!({
         "path": request.path,
         "resolvedPath": group.target.path.to_string_lossy(),
+        "groupId": group.group_id,
         "mode": edit_mode_label(request.mode),
         "status": if unchanged { "unchanged" } else if before_bytes.is_some() { "updated" } else { "created" },
         "beforeRevision": before_revision,
@@ -1413,26 +1514,138 @@ fn mark_group_failure(
     results: &mut [Value],
     operations: &[BatchOperation],
     indices: &[usize],
+    group_id: &str,
     failed_index: usize,
     error: Value,
+    skipped: (&str, &str),
 ) {
     for index in indices {
         if *index == failed_index {
-            results[*index] =
-                operation_error_envelope(*index, &operations[*index], "failed", error.clone());
+            results[*index] = annotate_group_result(
+                operation_error_envelope(*index, &operations[*index], "failed", error.clone()),
+                group_id,
+                false,
+            );
         } else {
-            results[*index] = operation_error_envelope(
-                *index,
-                &operations[*index],
-                "skipped",
-                batch_error("file_batch_group_rejected", "file group preflight failed"),
+            results[*index] = annotate_group_result(
+                operation_error_envelope(
+                    *index,
+                    &operations[*index],
+                    "skipped",
+                    batch_error(skipped.0, skipped.1),
+                ),
+                group_id,
+                false,
             );
         }
     }
 }
 
+fn mark_group_all_failure(
+    results: &mut [Value],
+    operations: &[BatchOperation],
+    indices: &[usize],
+    group_id: &str,
+    code: &str,
+    message: &str,
+) {
+    for index in indices {
+        results[*index] = annotate_group_result(
+            operation_error_envelope(
+                *index,
+                &operations[*index],
+                "failed",
+                batch_error(code, message),
+            ),
+            group_id,
+            false,
+        );
+    }
+}
+
+fn annotate_group_result(mut result: Value, group_id: &str, committed: bool) -> Value {
+    result["groupId"] = json!(group_id);
+    result["committed"] = json!(committed);
+    if let Some(payload) = result.get_mut("result").and_then(Value::as_object_mut) {
+        payload.insert("groupId".to_string(), json!(group_id));
+        payload.insert("committed".to_string(), json!(committed));
+    }
+    result
+}
+
+fn annotate_group_operations(
+    results: &mut [Value],
+    indices: &[usize],
+    group_id: &str,
+    committed: bool,
+) {
+    for index in indices {
+        if !results[*index].is_null() {
+            results[*index] = annotate_group_result(results[*index].take(), group_id, committed);
+        }
+    }
+}
+
 fn prepared_group_changed(group: &BatchPreparedGroup) -> bool {
-    group.before_bytes.as_deref() != Some(group.candidate.as_slice())
+    if group.existed {
+        group.before_revision.as_deref() != Some(group.after_revision.as_str())
+    } else {
+        true
+    }
+}
+
+fn attach_batch_group_evidence(
+    response: &mut Value,
+    group_records: &mut [BatchGroupRecord],
+    operations: &[BatchOperation],
+    results: &[Value],
+) {
+    for record in group_records.iter_mut() {
+        record.refresh_failure_count(results);
+    }
+    group_records.sort_by_key(|record| {
+        record
+            .operation_indices
+            .first()
+            .copied()
+            .unwrap_or(usize::MAX)
+    });
+    let total = group_records.len();
+    let committed = group_records
+        .iter()
+        .filter(|record| record.committed)
+        .count();
+    let failed = group_records
+        .iter()
+        .filter(|record| record.status == "failed")
+        .count();
+    let unchanged = group_records
+        .iter()
+        .filter(|record| record.status == "unchanged")
+        .count();
+    let dry_run = group_records
+        .iter()
+        .filter(|record| record.status == "dry-run")
+        .count();
+    let failure_count = results
+        .iter()
+        .filter(|result| matches!(result["status"].as_str(), Some("failed" | "skipped")))
+        .count();
+    response["groups"] = Value::Array(
+        group_records
+            .iter()
+            .map(|record| record.value(operations))
+            .collect(),
+    );
+    response["groupCounts"] = json!({
+        "total": total,
+        "committed": committed,
+        "failed": failed,
+        "unchanged": unchanged,
+        "dryRun": dry_run,
+    });
+    response["failureCount"] = json!(failure_count);
+    response["results"] = Value::Array(results.to_vec());
 }
 
 pub(crate) async fn batch(state: &AppState, request: BatchRequest) -> Value {
@@ -1449,6 +1662,14 @@ pub(crate) async fn batch(state: &AppState, request: BatchRequest) -> Value {
         "effectiveMutationCount": 0,
         "confirmation": {"requested": false, "result": Value::Null},
         "results": [],
+        "groups": [],
+        "groupCounts": {
+            "total": 0,
+            "committed": 0,
+            "failed": 0,
+            "unchanged": 0,
+        },
+        "failureCount": 0,
         "truncated": false,
         "truncationReason": Value::Null,
     });
@@ -1516,15 +1737,11 @@ pub(crate) async fn batch(state: &AppState, request: BatchRequest) -> Value {
     }
     response["editCount"] = json!(edit_count);
     let mut results = vec![Value::Null; request.operations.len()];
-    let mut hard_read_error = false;
     let mut scan_files = 0usize;
     let mut scan_bytes = 0u64;
     for (index, operation) in request.operations.iter().enumerate() {
         if let Some(error) = validation_errors[index].clone() {
             results[index] = operation_error_envelope(index, operation, "failed", error);
-            if operation.kind != "edit" {
-                hard_read_error = true;
-            }
             continue;
         }
         let mut search_budget = None;
@@ -1549,7 +1766,6 @@ pub(crate) async fn batch(state: &AppState, request: BatchRequest) -> Value {
                             "failed",
                             batch_error("file_invalid_mode", "mode must be literal or regex"),
                         );
-                        hard_read_error = true;
                         continue;
                     }
                 };
@@ -1562,13 +1778,11 @@ pub(crate) async fn batch(state: &AppState, request: BatchRequest) -> Value {
                             "failed",
                             batch_error("file_search_path_not_found", "search path was not found"),
                         );
-                        hard_read_error = true;
                         continue;
                     }
                     Err(error) => {
                         results[index] =
                             operation_error_envelope(index, operation, "failed", error.value());
-                        hard_read_error = true;
                         continue;
                     }
                 };
@@ -1607,7 +1821,6 @@ pub(crate) async fn batch(state: &AppState, request: BatchRequest) -> Value {
                         .is_some_and(|budget| aggregate_search_limit_hit(&value, budget));
                 }
                 if aggregate_limit_hit {
-                    hard_read_error = true;
                     let error = batch_error(
                         "file_batch_scan_limit_exceeded",
                         "aggregate search scan exceeds the batch bound",
@@ -1621,9 +1834,6 @@ pub(crate) async fn batch(state: &AppState, request: BatchRequest) -> Value {
             Err(error) => {
                 results[index] =
                     operation_error_envelope(index, operation, "failed", error.value());
-                if operation.kind != "edit" {
-                    hard_read_error = true;
-                }
             }
         }
     }
@@ -1639,14 +1849,26 @@ pub(crate) async fn batch(state: &AppState, request: BatchRequest) -> Value {
         } else {
             "completed_with_errors"
         });
-        response["results"] = json!(results);
+        let mut no_groups = Vec::new();
+        attach_batch_group_evidence(&mut response, &mut no_groups, &request.operations, &results);
         return finalize_batch(response, &config, started, &request);
     }
     let mut groups = Vec::<BatchFileGroup>::new();
     let mut group_indexes = HashMap::<PathBuf, usize>::new();
-    let mut group_resolution_error = false;
+    let mut group_record_indexes = HashMap::<String, usize>::new();
+    let mut group_records = Vec::<BatchGroupRecord>::new();
     for (index, operation) in request.operations.iter().enumerate() {
-        if operation.kind != "edit" || validation_errors[index].is_some() {
+        if operation.kind != "edit" {
+            continue;
+        }
+        if validation_errors[index].is_some() {
+            let record = BatchGroupRecord::synthetic(index, operation);
+            let group_id = record.group_id.clone();
+            if !results[index].is_null() {
+                results[index] = annotate_group_result(results[index].take(), &group_id, false);
+            }
+            group_record_indexes.insert(group_id, group_records.len());
+            group_records.push(record);
             continue;
         }
         let resolved = match resolve_path(&config, &operation.path, Access::Write) {
@@ -1657,7 +1879,12 @@ pub(crate) async fn batch(state: &AppState, request: BatchRequest) -> Value {
                     Err(error) => {
                         results[index] =
                             operation_error_envelope(index, operation, "failed", error.value());
-                        group_resolution_error = true;
+                        let record = BatchGroupRecord::synthetic(index, operation);
+                        let group_id = record.group_id.clone();
+                        results[index] =
+                            annotate_group_result(results[index].take(), &group_id, false);
+                        group_record_indexes.insert(group_id, group_records.len());
+                        group_records.push(record);
                         None
                     }
                 }
@@ -1665,16 +1892,26 @@ pub(crate) async fn batch(state: &AppState, request: BatchRequest) -> Value {
             Err(error) => {
                 results[index] =
                     operation_error_envelope(index, operation, "failed", error.value());
-                group_resolution_error = true;
+                let record = BatchGroupRecord::synthetic(index, operation);
+                let group_id = record.group_id.clone();
+                results[index] = annotate_group_result(results[index].take(), &group_id, false);
+                group_record_indexes.insert(group_id, group_records.len());
+                group_records.push(record);
                 None
             }
         };
         if let Some((target, existed)) = resolved {
             if let Some(group_index) = group_indexes.get(&target.path).copied() {
                 groups[group_index].operation_indices.push(index);
+                let group_id = groups[group_index].group_id.clone();
+                if let Some(record_index) = group_record_indexes.get(&group_id).copied() {
+                    group_records[record_index].operation_indices.push(index);
+                }
             } else {
+                let group_id = format!("file_group_{index}");
                 group_indexes.insert(target.path.clone(), groups.len());
-                groups.push(BatchFileGroup {
+                let group = BatchFileGroup {
+                    group_id: group_id.clone(),
                     target,
                     existed,
                     before_bytes: None,
@@ -1683,29 +1920,12 @@ pub(crate) async fn batch(state: &AppState, request: BatchRequest) -> Value {
                     candidate: None,
                     candidate_revision: None,
                     operation_indices: vec![index],
-                });
+                };
+                group_record_indexes.insert(group_id, group_records.len());
+                group_records.push(BatchGroupRecord::from_group(&group));
+                groups.push(group);
             }
         }
-    }
-    let edit_validation_error = request
-        .operations
-        .iter()
-        .enumerate()
-        .any(|(index, operation)| operation.kind == "edit" && validation_errors[index].is_some());
-    if hard_read_error || group_resolution_error || edit_validation_error {
-        for (index, operation) in request.operations.iter().enumerate() {
-            if operation.kind == "edit" && results[index].is_null() {
-                results[index] = operation_error_envelope(
-                    index,
-                    operation,
-                    "skipped",
-                    batch_error("file_batch_rejected", "batch preflight rejected all edits"),
-                );
-            }
-        }
-        response["status"] = json!("rejected");
-        response["results"] = json!(results);
-        return finalize_batch(response, &config, started, &request);
     }
     groups.sort_by(|left, right| left.target.path.cmp(&right.target.path));
     let mut locks = Vec::new();
@@ -1715,9 +1935,8 @@ pub(crate) async fn batch(state: &AppState, request: BatchRequest) -> Value {
     let mut prepared = Vec::new();
     let mut original_bytes = 0usize;
     let mut candidate_bytes = 0usize;
-    let mut preflight_error = None::<Value>;
-    let group_count = groups.len();
     for mut group in groups {
+        let record_index = group_record_indexes[&group.group_id];
         let first_index = group.operation_indices[0];
         let mut group_error = None::<(usize, Value)>;
         if let Err(error) = revalidate_target(&config, &group.target, group.existed) {
@@ -1753,16 +1972,21 @@ pub(crate) async fn batch(state: &AppState, request: BatchRequest) -> Value {
             }
         }
         if let Some((failed_index, error)) = group_error {
-            if preflight_error.is_none() {
-                preflight_error = Some(error.clone());
-            }
             mark_group_failure(
                 &mut results,
                 &request.operations,
                 &group.operation_indices,
+                &group.group_id,
                 failed_index,
                 error,
+                ("file_batch_group_rejected", "file group preflight failed"),
             );
+            group_records[record_index].status = "failed".to_string();
+            group_records[record_index].error_code = results[failed_index]
+                .get("error")
+                .and_then(|error| error.get("code"))
+                .and_then(Value::as_str)
+                .map(str::to_string);
             continue;
         }
         let final_candidate = match group.candidate.take() {
@@ -1772,73 +1996,78 @@ pub(crate) async fn batch(state: &AppState, request: BatchRequest) -> Value {
                     "file_batch_candidate_missing",
                     "file group did not produce a candidate",
                 );
-                if preflight_error.is_none() {
-                    preflight_error = Some(error.clone());
-                }
                 mark_group_failure(
                     &mut results,
                     &request.operations,
                     &group.operation_indices,
+                    &group.group_id,
                     *group.operation_indices.last().unwrap_or(&first_index),
                     error,
+                    (
+                        "file_batch_group_rejected",
+                        "file group candidate planning failed",
+                    ),
                 );
+                group_records[record_index].status = "failed".to_string();
+                group_records[record_index].error_code =
+                    Some("file_batch_candidate_missing".to_string());
                 continue;
             }
         };
-        original_bytes =
-            original_bytes.saturating_add(group.before_bytes.as_ref().map_or(0, Vec::len));
-        candidate_bytes = candidate_bytes.saturating_add(final_candidate.len());
-        if original_bytes > MAX_BATCH_ORIGINAL_BYTES || candidate_bytes > MAX_BATCH_CANDIDATE_BYTES
+        let before_revision = group.before_revision.clone();
+        let before_size_bytes = group.before_bytes.as_ref().map_or(0, Vec::len);
+        let next_original_bytes = original_bytes.saturating_add(before_size_bytes);
+        let next_candidate_bytes = candidate_bytes.saturating_add(final_candidate.len());
+        if next_original_bytes > MAX_BATCH_ORIGINAL_BYTES
+            || next_candidate_bytes > MAX_BATCH_CANDIDATE_BYTES
         {
             let error = batch_error(
                 "file_batch_candidate_limit_exceeded",
                 "aggregate batch file bytes exceed the bound",
             );
-            if preflight_error.is_none() {
-                preflight_error = Some(error.clone());
-            }
             mark_group_failure(
                 &mut results,
                 &request.operations,
                 &group.operation_indices,
+                &group.group_id,
                 *group.operation_indices.last().unwrap_or(&first_index),
                 error,
+                (
+                    "file_batch_group_rejected",
+                    "file group candidate exceeds the batch bound",
+                ),
             );
+            group_records[record_index].status = "failed".to_string();
+            group_records[record_index].error_code =
+                Some("file_batch_candidate_limit_exceeded".to_string());
             continue;
         }
+        original_bytes = next_original_bytes;
+        candidate_bytes = next_candidate_bytes;
         let after_revision = group
             .candidate_revision
             .take()
             .unwrap_or_else(|| revision(&final_candidate));
+        group_records[record_index].base_revision = before_revision.clone();
+        group_records[record_index].final_revision = Some(after_revision.clone());
+        group_records[record_index].status =
+            if group.existed && before_revision.as_deref() == Some(after_revision.as_str()) {
+                "unchanged".to_string()
+            } else {
+                "pending".to_string()
+            };
         prepared.push(BatchPreparedGroup {
+            group_id: group.group_id,
             target: group.target,
             existed: group.existed,
-            before_bytes: group.before_bytes,
-            before_revision: group.before_revision,
+            before_revision,
+            before_size_bytes,
             before_mode: group.before_mode,
             candidate: final_candidate,
             after_revision,
             operation_indices: group.operation_indices,
             temp: None,
-            committed: false,
         });
-    }
-    if preflight_error.is_some() || prepared.len() != group_count {
-        for item in &prepared {
-            for index in &item.operation_indices {
-                if results[*index]["result"]["status"] != "unchanged" {
-                    results[*index] = operation_error_envelope(
-                        *index,
-                        &request.operations[*index],
-                        "skipped",
-                        batch_error("file_batch_rejected", "batch preflight rejected all edits"),
-                    );
-                }
-            }
-        }
-        response["status"] = json!("rejected");
-        response["results"] = json!(results);
-        return finalize_batch(response, &config, started, &request);
     }
     let effective: Vec<usize> = request
         .operations
@@ -1851,48 +2080,46 @@ pub(crate) async fn batch(state: &AppState, request: BatchRequest) -> Value {
         .collect();
     let has_changed_groups = prepared.iter().any(prepared_group_changed);
     response["effectiveMutationCount"] = json!(effective.len());
+    let mut commit_attempted = false;
     if !request.dry_run && has_changed_groups {
         for item in prepared
             .iter_mut()
             .filter(|item| prepared_group_changed(item))
         {
-            match stage_temp(
+            let record_index = group_record_indexes[&item.group_id];
+            match stage_batch_temp(
                 &item.target.path,
                 &item.candidate,
                 item.before_mode.as_ref(),
             ) {
-                Ok(temp) => item.temp = Some(temp),
+                Ok(temp) => {
+                    item.temp = Some(temp);
+                    group_records[record_index].status = "staged".to_string();
+                }
                 Err(error) => {
-                    preflight_error = Some(error.value());
-                    break;
-                }
-            }
-        }
-    }
-    if let Some(error) = preflight_error {
-        for item in &prepared {
-            if let Some(temp) = &item.temp {
-                let _ = fs::remove_file(temp);
-            }
-            if prepared_group_changed(item) {
-                for index in &item.operation_indices {
-                    results[*index] = operation_error_envelope(
-                        *index,
-                        &request.operations[*index],
-                        "skipped",
-                        batch_error("file_batch_rejected", "batch staging failed"),
+                    let error_value = error.value();
+                    mark_group_failure(
+                        &mut results,
+                        &request.operations,
+                        &item.operation_indices,
+                        &item.group_id,
+                        *item.operation_indices.first().unwrap_or(&0),
+                        error_value,
+                        ("file_batch_group_rejected", "file group staging failed"),
                     );
+                    group_records[record_index].status = "failed".to_string();
+                    group_records[record_index].error_code = Some(error.code);
                 }
             }
         }
-        response["error"] = error["error"].clone();
-        response["results"] = json!(results);
-        return finalize_batch(response, &config, started, &request);
     }
-    if request.need_confirm && !request.dry_run && has_changed_groups {
+    let staged_changed_groups = prepared
+        .iter()
+        .any(|item| prepared_group_changed(item) && item.temp.is_some());
+    if request.need_confirm && !request.dry_run && staged_changed_groups {
         let preview = prepared
             .iter()
-            .filter(|item| prepared_group_changed(item))
+            .filter(|item| prepared_group_changed(item) && item.temp.is_some())
             .map(|item| {
                 let last_index = *item.operation_indices.last().unwrap_or(&0);
                 let changed = &results[last_index]["result"]["changedLines"];
@@ -1913,7 +2140,7 @@ pub(crate) async fn batch(state: &AppState, request: BatchRequest) -> Value {
                     mode,
                     item.before_revision.as_deref().unwrap_or("absent"),
                     item.after_revision,
-                    item.before_bytes.as_ref().map_or(0, Vec::len),
+                    item.before_size_bytes,
                     item.candidate.len(),
                     changed["added"].as_u64().unwrap_or(0),
                     changed["removed"].as_u64().unwrap_or(0),
@@ -1925,206 +2152,200 @@ pub(crate) async fn batch(state: &AppState, request: BatchRequest) -> Value {
                 .await;
         response["confirmation"] = json!({"requested": true, "result": confirmation});
         if confirmation != "allow_once" {
-            for item in &prepared {
-                if let Some(temp) = &item.temp {
-                    let _ = fs::remove_file(temp);
-                }
-                if prepared_group_changed(item) {
-                    let code = if confirmation == "confirmation_provider_unavailable" {
-                        "file_batch_confirmation_unavailable"
-                    } else {
-                        "file_batch_confirmation_denied"
-                    };
-                    for index in &item.operation_indices {
-                        results[*index] = operation_error_envelope(
-                            *index,
-                            &request.operations[*index],
-                            "failed",
-                            batch_error(code, "batch mutation was not confirmed"),
-                        );
+            let code = if confirmation == "confirmation_provider_unavailable" {
+                "file_batch_confirmation_unavailable"
+            } else {
+                "file_batch_confirmation_denied"
+            };
+            for item in prepared.iter_mut() {
+                if prepared_group_changed(item) && item.temp.is_some() {
+                    if let Some(temp) = item.temp.take() {
+                        let _ = fs::remove_file(temp);
                     }
+                    let record_index = group_record_indexes[&item.group_id];
+                    mark_group_all_failure(
+                        &mut results,
+                        &request.operations,
+                        &item.operation_indices,
+                        &item.group_id,
+                        code,
+                        "batch mutation was not confirmed",
+                    );
+                    group_records[record_index].status = "failed".to_string();
+                    group_records[record_index].error_code = Some(code.to_string());
+                }
+            }
+            for item in prepared.iter_mut() {
+                if let Some(temp) = item.temp.take() {
+                    let _ = fs::remove_file(temp);
                 }
             }
             response["status"] = json!("rejected");
-            response["results"] = json!(results);
+            for item in &prepared {
+                if !prepared_group_changed(item) {
+                    annotate_group_operations(
+                        &mut results,
+                        &item.operation_indices,
+                        &item.group_id,
+                        false,
+                    );
+                }
+            }
+            attach_batch_group_evidence(
+                &mut response,
+                &mut group_records,
+                &request.operations,
+                &results,
+            );
             return finalize_batch(response, &config, started, &request);
         }
     }
     if request.dry_run {
         for item in &prepared {
+            let record_index = group_record_indexes[&item.group_id];
             for index in &item.operation_indices {
                 if let Some(mut value) = results[*index].get("result").cloned() {
                     if value["status"] != "unchanged" {
                         value["status"] = json!("dry-run");
                     }
-                    results[*index] =
-                        operation_envelope(*index, &request.operations[*index], "completed", value);
+                    results[*index] = annotate_group_result(
+                        operation_envelope(*index, &request.operations[*index], "completed", value),
+                        &item.group_id,
+                        false,
+                    );
                 }
             }
+            group_records[record_index].status = if prepared_group_changed(item) {
+                "dry-run".to_string()
+            } else {
+                "unchanged".to_string()
+            };
         }
         response["status"] = json!("dry-run");
-        response["results"] = json!(results);
+        attach_batch_group_evidence(
+            &mut response,
+            &mut group_records,
+            &request.operations,
+            &results,
+        );
         return finalize_batch(response, &config, started, &request);
     }
-    let mut commit_error = None::<Value>;
     for item in prepared
         .iter_mut()
-        .filter(|item| prepared_group_changed(item))
+        .filter(|item| prepared_group_changed(item) && item.temp.is_some())
     {
-        if let Err(error) = revalidate_target(&config, &item.target, item.existed) {
-            commit_error = Some(error.value());
-            break;
-        }
-        if item.existed {
-            match read_bounded(&item.target.path, MAX_FILE_BYTES) {
-                Ok(BoundedRead::Complete(bytes))
-                    if Some(revision(&bytes)) == item.before_revision => {}
-                _ => {
-                    commit_error = Some(batch_error(
-                        "file_revision_conflict",
-                        "target changed before batch commit",
-                    ));
-                    break;
+        {
+            commit_attempted = true;
+            let record_index = group_record_indexes[&item.group_id];
+            let mut commit_error = None::<FileError>;
+            if let Err(error) = revalidate_target(&config, &item.target, item.existed) {
+                commit_error = Some(error);
+            } else if item.existed {
+                match read_bounded(&item.target.path, MAX_FILE_BYTES) {
+                    Ok(BoundedRead::Complete(bytes))
+                        if Some(revision(&bytes)) == item.before_revision => {}
+                    _ => {
+                        commit_error = Some(FileError::new(
+                            "file_revision_conflict",
+                            "target changed before batch commit",
+                        ));
+                    }
                 }
-            }
-        } else if fs::symlink_metadata(&item.target.requested).is_ok() {
-            commit_error = Some(batch_error(
-                "file_already_exists",
-                "target appeared before batch commit",
-            ));
-            break;
-        }
-        let temp = match item.temp.take() {
-            Some(temp) => temp,
-            None => {
-                commit_error = Some(batch_error(
-                    "file_batch_commit_failed",
-                    "batch staging file is missing",
+            } else if fs::symlink_metadata(&item.target.requested).is_ok() {
+                commit_error = Some(FileError::new(
+                    "file_already_exists",
+                    "target appeared before batch commit",
                 ));
-                break;
             }
-        };
-        let result = if item.existed {
-            fs::rename(&temp, &item.target.path)
-        } else {
-            match fs::hard_link(&temp, &item.target.requested) {
-                Ok(()) => {
-                    let _ = fs::remove_file(&temp);
-                    Ok(())
-                }
-                Err(error) => Err(error),
-            }
-        };
-        if let Err(error) = result {
-            let _ = fs::remove_file(&temp);
-            commit_error = Some(batch_error(
-                "file_batch_commit_failed",
-                &format!("atomic batch commit failed: {error}"),
-            ));
-            break;
-        }
-        sync_parent(&item.target.path);
-        item.committed = true;
-    }
-    if let Some(error) = commit_error {
-        let mut rollback_failed = false;
-        for item in prepared.iter_mut().filter(|item| item.committed) {
-            let current_matches = matches!(
-                read_bounded(&item.target.path, MAX_FILE_BYTES),
-                Ok(BoundedRead::Complete(bytes))
-                    if revision(&bytes) == item.after_revision
-            );
-            if !current_matches {
-                rollback_failed = true;
-                for index in &item.operation_indices {
-                    results[*index] = operation_error_envelope(
-                        *index,
-                        &request.operations[*index],
-                        "rollback_failed",
-                        batch_error(
-                            "file_batch_rollback_failed",
-                            "target changed before rollback",
-                        ),
-                    );
-                }
-                continue;
-            }
-            let restored = if item.existed {
-                match item.before_bytes.as_deref() {
-                    Some(bytes) => stage_temp(&item.target.path, bytes, item.before_mode.as_ref())
-                        .and_then(|temp| match fs::rename(&temp, &item.target.path) {
-                            Ok(()) => Ok(()),
-                            Err(_) => {
-                                let _ = fs::remove_file(&temp);
-                                Err(FileError::new(
-                                    "file_batch_rollback_failed",
-                                    "restore rename failed",
-                                ))
+            let temp = item.temp.take();
+            if commit_error.is_none() {
+                let temp = temp.ok_or_else(|| {
+                    FileError::new("file_batch_commit_failed", "batch staging file is missing")
+                });
+                match temp {
+                    Ok(temp) => {
+                        let result = if item.existed {
+                            fs::rename(&temp, &item.target.path)
+                        } else {
+                            match fs::hard_link(&temp, &item.target.requested) {
+                                Ok(()) => {
+                                    let _ = fs::remove_file(&temp);
+                                    Ok(())
+                                }
+                                Err(error) => Err(error),
                             }
-                        }),
-                    None => Err(FileError::new(
-                        "file_batch_rollback_failed",
-                        "original bytes are unavailable",
-                    )),
+                        };
+                        if let Err(error) = result {
+                            let _ = fs::remove_file(&temp);
+                            commit_error = Some(FileError::new(
+                                "file_batch_commit_failed",
+                                &format!("atomic file commit failed: {error}"),
+                            ));
+                        }
+                    }
+                    Err(error) => commit_error = Some(error),
                 }
+            } else if let Some(temp) = temp {
+                let _ = fs::remove_file(temp);
+            }
+            if let Some(error) = commit_error {
+                let error_code = error.code.clone();
+                mark_group_failure(
+                    &mut results,
+                    &request.operations,
+                    &item.operation_indices,
+                    &item.group_id,
+                    *item.operation_indices.first().unwrap_or(&0),
+                    error.value(),
+                    ("file_batch_group_rejected", "file group commit failed"),
+                );
+                group_records[record_index].status = "failed".to_string();
+                group_records[record_index].error_code = Some(error_code);
             } else {
-                fs::remove_file(&item.target.requested).map_err(|_| {
-                    FileError::new(
-                        "file_batch_rollback_failed",
-                        "created target could not be removed",
-                    )
-                })
-            };
-            if restored.is_ok() {
-                for index in &item.operation_indices {
-                    results[*index] = operation_error_envelope(
-                        *index,
-                        &request.operations[*index],
-                        "rolled_back",
-                        batch_error("file_batch_rejected", "batch commit rolled back"),
-                    );
-                }
-            } else {
-                rollback_failed = true;
-                for index in &item.operation_indices {
-                    results[*index] = operation_error_envelope(
-                        *index,
-                        &request.operations[*index],
-                        "rollback_failed",
-                        batch_error(
-                            "file_batch_rollback_failed",
-                            "rollback could not restore target",
-                        ),
-                    );
-                }
+                sync_parent(&item.target.path);
+                group_records[record_index].status = "committed".to_string();
+                group_records[record_index].committed = true;
+                annotate_group_operations(
+                    &mut results,
+                    &item.operation_indices,
+                    &item.group_id,
+                    true,
+                );
             }
         }
-        for item in &prepared {
-            if !item.committed && prepared_group_changed(item) {
-                for index in &item.operation_indices {
-                    results[*index] = operation_error_envelope(
-                        *index,
-                        &request.operations[*index],
-                        "not_committed",
-                        error.clone(),
-                    );
-                }
-            }
-        }
-        response["status"] = json!(if rollback_failed {
-            "partial_failed"
-        } else {
-            "rolled_back"
-        });
-    } else {
-        response["status"] = json!("completed");
     }
     for item in &prepared {
+        let record_index = group_record_indexes[&item.group_id];
+        if !prepared_group_changed(item) {
+            group_records[record_index].status = "unchanged".to_string();
+            annotate_group_operations(&mut results, &item.operation_indices, &item.group_id, false);
+        }
         if let Some(temp) = &item.temp {
             let _ = fs::remove_file(temp);
         }
     }
-    response["results"] = json!(results);
+    let operation_failures = results
+        .iter()
+        .any(|result| matches!(result["status"].as_str(), Some("failed" | "skipped")));
+    let successful_groups = group_records
+        .iter()
+        .filter(|record| matches!(record.status.as_str(), "committed" | "unchanged"))
+        .count();
+    response["status"] = json!(if operation_failures {
+        if commit_attempted || successful_groups > 0 {
+            "completed_with_errors"
+        } else {
+            "rejected"
+        }
+    } else {
+        "completed"
+    });
+    attach_batch_group_evidence(
+        &mut response,
+        &mut group_records,
+        &request.operations,
+        &results,
+    );
     finalize_batch(response, &config, started, &request)
 }
 
@@ -2135,6 +2356,10 @@ fn finalize_batch(
     request: &BatchRequest,
 ) -> Value {
     response["updatedAt"] = json!(Utc::now());
+    let batch_id = response["batchId"]
+        .as_str()
+        .unwrap_or("file_batch_unknown")
+        .to_string();
     let mut audits_written = true;
     if !request.dry_run {
         if let Some(results) = response["results"].as_array() {
@@ -2147,6 +2372,15 @@ fn finalize_batch(
                     .cloned()
                     .unwrap_or_else(|| json!({"status":"failed"}));
                 let payload = value.get("result").cloned().unwrap_or_default();
+                let group_id = value
+                    .get("groupId")
+                    .and_then(Value::as_str)
+                    .or_else(|| payload.get("groupId").and_then(Value::as_str))
+                    .map(str::to_string);
+                let committed = value
+                    .get("committed")
+                    .and_then(Value::as_bool)
+                    .or_else(|| payload.get("committed").and_then(Value::as_bool));
                 let mode = operation.edit_mode.as_deref().map(|mode| mode.to_string());
                 let changed_lines = payload.get("changedLines").and_then(|lines| {
                     Some(ChangedLines {
@@ -2160,6 +2394,10 @@ fn finalize_batch(
                         time: Utc::now(),
                         tool: "file.edit".to_string(),
                         action: "batch-edit".to_string(),
+                        batch_id: Some(batch_id.clone()),
+                        group_id,
+                        operation_index: Some(index),
+                        operation_id: operation.id.clone(),
                         path: payload
                             .get("resolvedPath")
                             .and_then(Value::as_str)
@@ -2194,6 +2432,7 @@ fn finalize_batch(
                             .and_then(Value::as_u64)
                             .map(|value| value as usize),
                         changed_lines,
+                        committed,
                     },
                 )
                 .is_err()
@@ -2209,10 +2448,7 @@ fn finalize_batch(
         .as_str()
         .unwrap_or("rejected")
         .to_string();
-    let batch_id = finalized["batchId"]
-        .as_str()
-        .unwrap_or("file_batch_unknown")
-        .to_string();
+    let group_counts = &finalized["groupCounts"];
     let truncated = finalized["truncated"].as_bool().unwrap_or(false);
     if write_batch_audit(
         config,
@@ -2227,6 +2463,11 @@ fn finalize_batch(
                 .iter()
                 .filter(|operation| operation.kind == "edit")
                 .count(),
+            group_count: group_counts["total"].as_u64().unwrap_or(0) as usize,
+            committed_group_count: group_counts["committed"].as_u64().unwrap_or(0) as usize,
+            failed_group_count: group_counts["failed"].as_u64().unwrap_or(0) as usize,
+            unchanged_group_count: group_counts["unchanged"].as_u64().unwrap_or(0) as usize,
+            failure_count: finalized["failureCount"].as_u64().unwrap_or(0) as usize,
             confirmation_result: finalized["confirmation"]["result"]
                 .as_str()
                 .map(str::to_string),
@@ -2270,6 +2511,8 @@ fn truncate_batch_response(mut response: Value) -> Value {
             Value::Array(results.iter().map(|result| {
                 let mut compact = json!({"index": result["index"], "type": result["type"], "status": result["status"]});
                 if result.get("id").is_some() { compact["id"] = result["id"].clone(); }
+                if result.get("groupId").is_some() { compact["groupId"] = result["groupId"].clone(); }
+                if result.get("committed").is_some() { compact["committed"] = result["committed"].clone(); }
                 if result.get("error").is_some() { compact["error"] = result["error"].clone(); }
                 compact
             }).collect())
@@ -2404,6 +2647,34 @@ fn stage_temp(
         "file_write_failed",
         "temporary file could not be created",
     ))
+}
+
+fn stage_batch_temp(
+    target: &Path,
+    bytes: &[u8],
+    permissions: Option<&fs::Permissions>,
+) -> std::result::Result<PathBuf, FileError> {
+    #[cfg(test)]
+    let injected_failure = {
+        let mut expected_target = INJECT_BATCH_STAGE_FAILURE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let matches_target = expected_target.as_ref().is_some_and(|expected| {
+            fs::canonicalize(target).unwrap_or_else(|_| target.to_path_buf()) == *expected
+        });
+        if matches_target {
+            expected_target.take();
+        }
+        matches_target
+    };
+    #[cfg(test)]
+    if injected_failure {
+        return Err(FileError::new(
+            "file_batch_stage_failed",
+            "injected batch staging failure",
+        ));
+    }
+    stage_temp(target, bytes, permissions)
 }
 
 fn sync_parent(target: &Path) {

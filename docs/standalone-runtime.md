@@ -188,11 +188,16 @@ permissions. Every non-dry-run attempt is redacted in the audit JSONL.
 
 `file.batch` accepts 1–32 ordered `read`, `search`, and `edit` operations (at
 most 16 edits). Reads/searches complete before batch-owned writes; edit targets
-are normalized and locked in sorted order, then all candidates are staged and
-preflighted before one optional confirmation. Commits are ordered and a normal
-handled failure uses guarded best-effort rollback; crash/power-loss recovery
-is not claimed. Batch responses and audits omit file content, replacement
-text, patch text, and full diffs.
+are normalized into file groups and locked in sorted order. Each group has one
+candidate, one staged file, and one guarded atomic replacement (or no-replace
+creation). One optional confirmation covers all valid effective groups. A read,
+search, staging, or commit failure is reported on its own group and does not
+roll back or block unrelated groups; mixed outcomes use `completed_with_errors`.
+Responses include ordered operation envelopes plus bounded `groups` summaries
+with group ids, revisions, committed state, and failure counts. `dryRun:true`
+is the whole-request preview path. No cross-file rollback or atomicity selector
+is provided, and crash/power-loss recovery is not claimed. Batch responses and
+audits omit file content, replacement text, patch text, and full diffs.
 
 ## Hub MCP profiles
 
@@ -295,6 +300,10 @@ and HTTP aliases are also removed rather than wrapped: use `process.batch`,
 `process.batchExec`, `process.get/list/kill`, managed `session.*`, `/v1/exec`,
 `/v1/batchExec`, and `/v1/sessions/*` calls fail explicitly. tmux session names
 and tmux session APIs are unchanged.
+
+The v0.10 `file.batch` mutation boundary is documented in
+[`migration-v0.10.md`](migration-v0.10.md): file groups commit independently,
+and the old cross-file rollback states and guarantees no longer apply.
 
 While the standalone worker is running, edits to `policy`, `pathPolicy`,
 `limits`, and `mcpServers` are polled, fully validated, and applied atomically
