@@ -170,12 +170,15 @@ agentic-gpt config path deny add ~/.secrets
 {
   "limits": {
     "maxConcurrentTasks": 2,
-    "maxActiveJobs": "auto"
+    "maxActiveJobs": "auto",
+    "maxFileSearchContextLines": 5
   }
 }
 ```
 
 `maxActiveJobs` 接受非负整数或 `"auto"`。Auto 按 `ceil(availableParallelism * 1.5)` 计算，并限制在 6–24。Process、Skill 与 MCP Job 共用该容量。
+
+`maxFileSearchContextLines` 是 `file.search` 对每个匹配返回的前后文行数 live 上限，默认 5，接受 0–100 的整数。请求可以超过该值；运行时会裁剪到 effective 值，并返回 `requestedContextLines`、`effectiveContextLines`、`contextLinesClipped` 与一个有界 warning。负数或非整数请求仍会被拒绝。
 
 v0.9 会拒绝 `maxActiveSessions` 与 `sessionIdleTimeoutSecs`。
 

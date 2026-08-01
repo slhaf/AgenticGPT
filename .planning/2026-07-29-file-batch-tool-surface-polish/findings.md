@@ -132,3 +132,37 @@
 - Compact group-id generation and helper naming.
 - Exact failure-injection mechanism and optional model-provider adapters.
 - Test assertion wording and internal refactoring boundaries that do not alter the frozen contract.
+
+## 2026-08-01 implementation handoff
+- The active plan marker resolves to this scoped plan; the worktree is clean on `main` before product changes.
+- Phase A is the current implementation boundary. It covers only live search context limits, search result evidence, diagnostics, descriptors, configuration/docs, and focused regression coverage; batch mutation semantics remain frozen for later phases.
+- The accepted contract requires `limits.maxFileSearchContextLines` (default 5, range 0–100), clamping rather than rejecting non-negative overshoots, and requested/effective/clipped evidence on single and batch search results.
+
+## Phase A code mapping
+- `file_ops::search` currently owns the hard-coded `MAX_SEARCH_CONTEXT = 5` rejection and accepts `usize`, so typed negative/non-integer input rejection occurs at the RPC DTO boundary rather than inside the scanner.
+- The shared search result is a `serde_json::Value`; single and batch callers both pass `SearchOptions`, making one result-envelope change sufficient for parity.
+- `LimitsConfig` is `deny_unknown_fields` and currently contains only `maxConcurrentTasks` and `maxActiveJobs`; `Config::default_config` and the existing live limits subset are the migration points for the additive hot-reloadable field.
+- Descriptor wording for both single and nested batch search is still the static `Context lines, max 5.` and has no `minimum`; `agent.info` has existing operational diagnostics that can expose the effective limit without adding a new tool.
+- Existing response families already use bounded `warnings` arrays, so search can report a single stable clipping warning without introducing a new error channel.
+- `apply_standalone_live_subset` replaces `live.limits` atomically, and the normal watcher replaces the whole validated config; adding the field to `LimitsConfig` automatically gives Phase A live reload for standalone/local calls.
+- `agent_info::collect` currently publishes `execution` and `config` diagnostics plus serialized `limits` near its lower-level helper; the effective search limit should be surfaced in the top-level operational payload while preserving the existing shape/count budgets.
+- `FileSearchArgs` and nested batch search use `usize`, which already rejects JSON negatives, fractions, strings, and booleans during argument validation. The public schema still needs explicit `minimum: 0` and dynamic-limit wording.
+- The existing stdio tests cover descriptor defaults/parity, live dispatch, and a mixed file.batch read/search/edit flow. Phase A can extend these in place for schema minimum/evidence and batch-search clipping without changing batch mutation tests.
+- `docs/configuration.md`, its Chinese counterpart, `config.example.json`, and `docs/standalone-runtime.md` are the user-facing configuration/runtime references that currently omit the file-search context limit.
+
+## Phase A implementation notes
+- Search now needs two entry paths: a default wrapper for direct unit callers and an explicit configured-limit path for single and batch dispatch. This keeps existing internal test fixtures stable while ensuring runtime calls use the live `limits` snapshot.
+- The configured value is serde-defaulted to 5 and range-checked at 0–100; the search result will retain bounded scan/output limits and add only requested/effective/clipped fields plus one stable warning code when clipping occurs.
+
+## Verification notes
+- `cargo fmt --all` completed after the first formatting check identified only mechanical indentation/wrapping changes.
+- `cargo check -p agentic-gpt` passed; the default `search` test helper is explicitly annotated as intentional compatibility coverage, and `cargo clippy -p agentic-gpt --all-targets -- -D warnings` is clean.
+- The first focused test command used `--lib`, but this crate has no library target; package-level binary tests are the correct harness.
+- Package-level tests compiled and ran all 232 unit tests: 228 passed. Four pre-existing environment-sensitive tests failed while creating/binding local sockets or starting a fake tunnel/local download, each with `Operation not permitted` or `local_mcp_bind_failed`; none touched Phase A search/config paths.
+- Focused Phase A filters pass: config range/default tests plus single-search clipping/configured-20/configured-0 cases (2), the batch read/search/edit clipping case, the `agent.info` diagnostic, standalone live-subset replacement, and both descriptor/schema parity tests.
+
+## Phase A completion evidence
+- The final implementation preserves the pre-edit read/search ordering and all existing scan/result/output bounds; only context-line selection and its evidence changed.
+- Runtime callers pass the cloned live limit from `Config`; config reload tests prove a valid value of 20 is applied and an invalid MCP candidate still leaves the live subset intact.
+- The schema advertises `minimum: 0` and no static maximum, while runtime output makes clipping explicit. Existing tool counts and schema budget tests remain green.
+- Final gates passed: `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo clippy -p agentic-gpt --all-targets -- -D warnings`, `git diff --check`, and all focused Phase A filters.

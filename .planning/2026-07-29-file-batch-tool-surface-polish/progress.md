@@ -1,5 +1,32 @@
 # Progress: File Batch and Tool Surface Polish
 
+## 2026-08-01
+
+### Implementation session start
+- Ran the planning session catch-up script; no unsynced prior-session report was emitted.
+- Re-read the active Phase A handoff, findings, and progress files and verified a clean `main` worktree before implementation.
+- Marked Phase A `in_progress`; D-01 through D-13 remain frozen and no product changes had yet been made in this session.
+
+### Phase A implementation started
+- Added `limits.maxFileSearchContextLines` with default 5 and serde validation for the inclusive 0–100 range.
+- Routed standalone single and batch searches through the live configured limit; oversize non-negative requests now clamp instead of returning `file_context_limit_exceeded`.
+- Added search response evidence (`requestedContextLines`, `effectiveContextLines`, `contextLinesClipped`, bounded `warnings`) and surfaced `agent.info.execution.fileSearch.maxContextLines`.
+- Updated the single and nested batch search schemas with `minimum: 0`, default 0, and live-limit clipping wording; updated the `file.search` descriptor summary.
+- `cargo fmt --all` completed; `cargo check -p agentic-gpt` passed with one intentional unused-helper warning still to clean up.
+- `cargo test -p agentic-gpt --lib` was invalid for this binary-only package; logged and replaced with package-level tests.
+- `cargo test -p agentic-gpt` completed compilation and 232 tests: 228 passed; four unrelated sandbox-permission-sensitive local-control/supervisor/tunnel tests failed. Phase A focused tests are still required.
+- Focused tests now pass for config validation, single-search clipping at default/configured 20/configured 0, batch-search evidence, agent.info diagnostics, live-subset replacement, and descriptor/schema parity.
+- Config example/docs and regression assertions are now complete; the remaining work is phase-level final verification and commit preparation.
+
+### Phase A verification and completion
+- `cargo fmt --all -- --check` passed.
+- `cargo check --workspace` passed.
+- `cargo clippy -p agentic-gpt --all-targets -- -D warnings` passed.
+- `git diff --check` passed.
+- Focused Phase A test filters passed after the final edits: config/search (2), batch search evidence, standalone live reload, frozen live-subset replacement, agent.info, and both descriptor parity tests.
+- Full `cargo test -p agentic-gpt` remains 228/232 passing because four unrelated sandbox-permission-sensitive local-control/supervisor/tunnel tests cannot bind or start resources in this environment; the failure details remain in the Errors Encountered table.
+- Phase A implementation boundary is complete. The next phase is Phase B (normalized file-group candidate engine), with D-03 through D-06 unchanged and still frozen.
+
 ## 2026-07-29
 
 ### Discovery

@@ -9,11 +9,11 @@ Repair the real-use `file.search` / `file.batch` brittleness recorded on 2026-07
 - **Implementation authorized:** yes
 - **Active plan:** `2026-07-29-file-batch-tool-surface-polish`
 - **Baseline:** clean `main`, aligned with `origin/main`, Agentic v0.9.0
-- **Current phase:** Design complete — implementation not started
+- **Current phase:** Phase A — complete
 - **Entry phase:** Phase A
 - **Open blocking decisions:** none
 - **Design checkpoint:** user-accepted contract at 2026-07-30T11:10+08:00
-- **Next action:** begin Phase A under `planning-with-files` without `refine-implementation-plan`.
+- **Next action:** commit the completed Phase A independently, then begin Phase B under `planning-with-files` without `refine-implementation-plan`.
 
 ## Scope and Constraints
 1. Make `file.search.contextLines` resilient to requests above the configured limit while preserving typed rejection for structurally invalid values.
@@ -84,7 +84,7 @@ Repair the real-use `file.search` / `file.batch` brittleness recorded on 2026-07
 ## Implementation Phases
 
 ### Phase A — Search context resilience and operations visibility
-**Status:** pending.
+**Status:** complete.
 
 **Prerequisite:** frozen D-01/D-02 and implementation-ready handoff.
 **Objective:** Accept bounded overshoot without losing results.
@@ -99,6 +99,8 @@ Repair the real-use `file.search` / `file.batch` brittleness recorded on 2026-07
 5. Add unit, serde, live-reload, descriptor, single-search, and batch-search cases including 0, 5, 8, configured 20, configured 0, negative, and non-integer inputs.
 
 **Completion boundary:** No batch mutation semantics change in this phase.
+
+**Completed 2026-08-01:** Added the live 0–100 config limit with default 5, clamped/evidenced single and batch searches, agent.info diagnostics, schema minimum/wording, config/runtime docs, and focused regression coverage. No Phase B/C mutation behavior was changed.
 
 ### Phase B — File-group planner and sequential candidate engine
 **Status:** pending.
@@ -225,3 +227,5 @@ Repair the real-use `file.search` / `file.batch` brittleness recorded on 2026-07
 | Second planning batch omitted the existing `.active_plan` revision, causing all otherwise valid new-file writes to be skipped. | 1 | Read the current revision and retried with optimistic concurrency evidence. |
 | A planning-file unified patch used mismatched terminal context. | 1 | No write occurred; switched to exact revision-guarded replacement. |
 | `skills.run` rejected `check-complete.sh` as non-executable; the same direct invocation was inadvertently repeated. | 8 | Stopped using `skills.run` for this script and invoked it explicitly through `sh`; readiness was then checked from the canonical plan state. |
+| `cargo test -p agentic-gpt --lib` found no library target because `agentic-gpt` is a binary-only crate. | 1 | Switched to the package-level binary test command `cargo test -p agentic-gpt`. |
+| Full `cargo test -p agentic-gpt` ran 232 tests; 228 passed and four unrelated socket/tunnel download tests failed with sandbox `Operation not permitted`/`local_mcp_bind_failed` permission errors. | 1 | Treat as environment-blocked unrelated failures; run Phase A focused tests separately and retain the full-suite result for handoff. |

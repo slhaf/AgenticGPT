@@ -552,26 +552,29 @@ impl AgentMcpServer {
                     crate::file_ops::Access::Read,
                 );
                 match resolved {
-                    Ok(resolved) => crate::file_ops::to_result(crate::file_ops::search(
-                        crate::file_ops::SearchOptions {
-                            root: &resolved,
-                            query: &args.query,
-                            mode: if args.mode.as_deref() == Some("regex") {
-                                crate::file_ops::SearchMode::Regex
-                            } else {
-                                crate::file_ops::SearchMode::Literal
+                    Ok(resolved) => {
+                        crate::file_ops::to_result(crate::file_ops::search_with_context_limit(
+                            crate::file_ops::SearchOptions {
+                                root: &resolved,
+                                query: &args.query,
+                                mode: if args.mode.as_deref() == Some("regex") {
+                                    crate::file_ops::SearchMode::Regex
+                                } else {
+                                    crate::file_ops::SearchMode::Literal
+                                },
+                                case_sensitive: args.case_sensitive,
+                                include: &args.include,
+                                exclude: &args.exclude,
+                                context_lines: args.context_lines,
+                                max_results: args.max_results,
+                                hidden: args.hidden,
+                                respect_gitignore: args.respect_gitignore,
+                                scan_file_limit: crate::file_ops::MAX_SEARCH_FILES,
+                                scan_byte_limit: crate::file_ops::MAX_SEARCH_BYTES,
                             },
-                            case_sensitive: args.case_sensitive,
-                            include: &args.include,
-                            exclude: &args.exclude,
-                            context_lines: args.context_lines,
-                            max_results: args.max_results,
-                            hidden: args.hidden,
-                            respect_gitignore: args.respect_gitignore,
-                            scan_file_limit: crate::file_ops::MAX_SEARCH_FILES,
-                            scan_byte_limit: crate::file_ops::MAX_SEARCH_BYTES,
-                        },
-                    )),
+                            config.limits.max_file_search_context_lines,
+                        ))
+                    }
                     Err(error) if error.code == "file_not_found" => {
                         Ok(crate::file_ops::FileError::new(
                             "file_search_path_not_found",
@@ -2137,7 +2140,15 @@ fn properties_for(name: &str) -> Map<String, Value> {
             add("caseSensitive", boolean("Case-sensitive; default true."));
             add("include", strings("Include globs; max 16."));
             add("exclude", strings("Exclude globs; max 16."));
-            add("contextLines", number("Context lines, max 5."));
+            add(
+                "contextLines",
+                json!({
+                    "type":"integer",
+                    "minimum":0,
+                    "description":"Requested context lines; values above the live configured maximum are clipped and reported.",
+                    "default":0
+                }),
+            );
             add("maxResults", number("Maximum matches, max 200."));
             add("hidden", boolean("Include hidden files; default false."));
             add(
@@ -2197,7 +2208,7 @@ fn properties_for(name: &str) -> Map<String, Value> {
                     "caseSensitive":{"type":"boolean","description":"Case-sensitive; default true.","default":true},
                     "include":{"type":"array","items":{"type":"string"},"description":"Include globs; max 16.","default":[]},
                     "exclude":{"type":"array","items":{"type":"string"},"description":"Exclude globs; max 16.","default":[]},
-                    "contextLines":{"type":"integer","description":"Context lines, max 5.","default":0},
+                    "contextLines":{"type":"integer","minimum":0,"description":"Requested context lines; values above the live configured maximum are clipped and reported.","default":0},
                     "maxResults":{"type":"integer","description":"Maximum matches, max 200.","default":50},
                     "hidden":{"type":"boolean","description":"Include hidden files; default false.","default":false},
                     "respectGitignore":{"type":"boolean","description":"Honor Git ignore rules inside repositories; default true.","default":true}
@@ -2566,7 +2577,7 @@ fn tool_description(name: &str) -> String {
     match name {
         "agent.info" => "Bounded local runtime information.".to_string(),
         "file.read" => "Bounded UTF-8 read or metadata inspection.".to_string(),
-        "file.search" => "Bounded in-process text search.".to_string(),
+        "file.search" => "Bounded in-process text search; context overshoots are clipped and reported.".to_string(),
         "file.edit" => "Guarded bounded UTF-8 text replacement, patch, or write.".to_string(),
         "file.batch" => "Bounded mixed file reads, searches, and coordinated edits.".to_string(),
         "process.exec" => "Start one managed local process and wait briefly.".to_string(),
@@ -2818,6 +2829,22 @@ mod tests {
             edit["properties"]["patch"]["description"],
             PATCH_SCHEMA_DESCRIPTION
         );
+
+        let file_search = tool_descriptor("file.search");
+        assert_eq!(
+            file_search.input_schema["properties"]["contextLines"]["minimum"],
+            0
+        );
+        assert_eq!(
+            file_search.input_schema["properties"]["contextLines"]["default"],
+            0
+        );
+        assert!(
+            file_search.input_schema["properties"]["contextLines"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("live configured maximum")
+        );
     }
 
     #[test]
@@ -2911,6 +2938,11 @@ mod tests {
             .iter()
             .find(|variant| variant["properties"]["type"]["const"] == "search")
             .unwrap();
+        assert_eq!(search_schema["properties"]["contextLines"]["minimum"], 0);
+        assert!(search_schema["properties"]["contextLines"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("live configured maximum"));
         for (field, value) in [
             ("mode", json!("literal")),
             ("caseSensitive", json!(true)),
@@ -3033,6 +3065,18 @@ mod tests {
         }))
         .expect_err("snake_case nested fields must remain rejected");
         assert!(error.to_string().contains("unknown field `start_line`"));
+        assert!(from_value::<FileSearchArgs>(json!({
+            "path": ".",
+            "query": "needle",
+            "contextLines": -1
+        }))
+        .is_err());
+        assert!(from_value::<FileSearchArgs>(json!({
+            "path": ".",
+            "query": "needle",
+            "contextLines": 1.5
+        }))
+        .is_err());
         Ok(())
     }
 
@@ -3887,6 +3931,54 @@ mod tests {
         let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
         let workspace = server.state.config.read().await.workspace_root.clone();
         std::fs::write(workspace.join("search.rs"), "Alpha\nBeta 42\n")?;
+        let clipped = server
+            .dispatch(
+                "file.search",
+                json!({"path":"search.rs", "query":"Beta", "contextLines":8}),
+            )
+            .await?;
+        assert_eq!(clipped["requestedContextLines"], 8);
+        assert_eq!(clipped["effectiveContextLines"], 5);
+        assert_eq!(clipped["contextLinesClipped"], true);
+        assert_eq!(
+            clipped["warnings"][0],
+            "context_lines_clipped_to_configured_limit"
+        );
+
+        server
+            .state
+            .config
+            .write()
+            .await
+            .limits
+            .max_file_search_context_lines = 20;
+        let expanded = server
+            .dispatch(
+                "file.search",
+                json!({"path":"search.rs", "query":"Beta", "contextLines":8}),
+            )
+            .await?;
+        assert_eq!(expanded["requestedContextLines"], 8);
+        assert_eq!(expanded["effectiveContextLines"], 8);
+        assert_eq!(expanded["contextLinesClipped"], false);
+        assert!(expanded["warnings"].as_array().unwrap().is_empty());
+
+        server
+            .state
+            .config
+            .write()
+            .await
+            .limits
+            .max_file_search_context_lines = 0;
+        let disabled_context = server
+            .dispatch(
+                "file.search",
+                json!({"path":"search.rs", "query":"Beta", "contextLines":5}),
+            )
+            .await?;
+        assert_eq!(disabled_context["effectiveContextLines"], 0);
+        assert_eq!(disabled_context["contextLinesClipped"], true);
+
         let literal = server
             .dispatch(
                 "file.search",
@@ -4073,7 +4165,7 @@ mod tests {
                 json!({
                     "operations":[
                         {"type":"read", "id":"pre", "path":"batch.txt"},
-                        {"type":"search", "id":"find", "path":"batch.txt", "query":"secret-before"},
+                        {"type":"search", "id":"find", "path":"batch.txt", "query":"secret-before", "contextLines":8},
                         {"type":"edit", "id":"mutate", "mode":"replace", "path":"batch.txt", "expectedRevision":revision, "oldText":"secret-before", "newText":"secret-after"}
                     ]
                 }),
@@ -4086,6 +4178,9 @@ mod tests {
             result["results"][1]["result"]["matches"][0]["lineText"],
             "secret-before"
         );
+        assert_eq!(result["results"][1]["result"]["requestedContextLines"], 8);
+        assert_eq!(result["results"][1]["result"]["effectiveContextLines"], 5);
+        assert_eq!(result["results"][1]["result"]["contextLinesClipped"], true);
         assert_eq!(result["results"][2]["id"], "mutate");
         assert_eq!(result["results"][2]["result"]["status"], "updated");
         assert_eq!(

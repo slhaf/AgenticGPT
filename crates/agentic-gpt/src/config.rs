@@ -223,6 +223,31 @@ pub(crate) struct Rule {
 pub(crate) struct LimitsConfig {
     pub(crate) max_concurrent_tasks: usize,
     pub(crate) max_active_jobs: MaxActiveJobs,
+    #[serde(
+        default = "default_max_file_search_context_lines",
+        deserialize_with = "deserialize_max_file_search_context_lines"
+    )]
+    pub(crate) max_file_search_context_lines: usize,
+}
+
+pub(crate) const DEFAULT_MAX_FILE_SEARCH_CONTEXT_LINES: usize = 5;
+pub(crate) const MAX_FILE_SEARCH_CONTEXT_LINES: usize = 100;
+
+fn default_max_file_search_context_lines() -> usize {
+    DEFAULT_MAX_FILE_SEARCH_CONTEXT_LINES
+}
+
+fn deserialize_max_file_search_context_lines<'de, D>(deserializer: D) -> Result<usize, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = usize::deserialize(deserializer)?;
+    if value > MAX_FILE_SEARCH_CONTEXT_LINES {
+        return Err(de::Error::custom(format!(
+            "maxFileSearchContextLines must be between 0 and {MAX_FILE_SEARCH_CONTEXT_LINES}"
+        )));
+    }
+    Ok(value)
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -506,6 +531,7 @@ impl Config {
             limits: LimitsConfig {
                 max_concurrent_tasks: 2,
                 max_active_jobs: MaxActiveJobs::Auto,
+                max_file_search_context_lines: DEFAULT_MAX_FILE_SEARCH_CONTEXT_LINES,
             },
             skills: RoomSkillsConfig::default(),
             room: default_room_config(),
@@ -974,6 +1000,10 @@ mod tests {
         config.validate_standalone().unwrap();
         assert_eq!(config.agent_id, "laptop");
         assert_eq!(config.limits.max_active_jobs, MaxActiveJobs::Auto);
+        assert_eq!(
+            config.limits.max_file_search_context_lines,
+            DEFAULT_MAX_FILE_SEARCH_CONTEXT_LINES
+        );
         assert_eq!(config.mcp_servers.len(), 2);
         assert!(config.mcp_servers.values().all(|server| !server.enabled));
         assert_eq!(value["agentSecret"], "change-me-before-use");
@@ -998,6 +1028,36 @@ mod tests {
         assert_eq!(serde_json::to_value(explicit).unwrap(), json!(12));
         assert!(serde_json::from_value::<MaxActiveJobs>(json!(-1)).is_err());
         assert!(serde_json::from_value::<MaxActiveJobs>(json!("AUTO")).is_err());
+    }
+
+    #[test]
+    fn file_search_context_limit_defaults_and_rejects_invalid_values() {
+        let base = |value: serde_json::Value| {
+            serde_json::from_value::<LimitsConfig>(json!({
+                "maxConcurrentTasks": 2,
+                "maxActiveJobs": "auto",
+                "maxFileSearchContextLines": value,
+            }))
+        };
+
+        let defaults = serde_json::from_value::<LimitsConfig>(json!({
+            "maxConcurrentTasks": 2,
+            "maxActiveJobs": "auto",
+        }))
+        .unwrap();
+        assert_eq!(
+            defaults.max_file_search_context_lines,
+            DEFAULT_MAX_FILE_SEARCH_CONTEXT_LINES
+        );
+        for value in [0, 5, 20, MAX_FILE_SEARCH_CONTEXT_LINES] {
+            assert_eq!(
+                base(json!(value)).unwrap().max_file_search_context_lines,
+                value
+            );
+        }
+        assert!(base(json!(-1)).is_err());
+        assert!(base(json!(1.5)).is_err());
+        assert!(base(json!(MAX_FILE_SEARCH_CONTEXT_LINES + 1)).is_err());
     }
 
     #[test]
@@ -1043,6 +1103,10 @@ mod tests {
     fn new_default_config_serializes_auto_limit() {
         let value = serde_json::to_value(Config::default_config().unwrap()).unwrap();
         assert_eq!(value["limits"]["maxActiveJobs"], json!("auto"));
+        assert_eq!(
+            value["limits"]["maxFileSearchContextLines"],
+            json!(DEFAULT_MAX_FILE_SEARCH_CONTEXT_LINES)
+        );
         assert_eq!(
             value["confirmationProvider"]["channels"],
             json!(["freedesktop", "ntfy"])

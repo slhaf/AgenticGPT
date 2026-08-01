@@ -27,7 +27,6 @@ pub(crate) const MAX_LINE_DISPLAY_BYTES: usize = 4 * 1024;
 pub(crate) const MAX_SEARCH_FILES: usize = 10_000;
 pub(crate) const MAX_SEARCH_BYTES: u64 = 64 * 1024 * 1024;
 pub(crate) const MAX_SEARCH_RESULTS: usize = 200;
-pub(crate) const MAX_SEARCH_CONTEXT: usize = 5;
 pub(crate) const MAX_SEARCH_OUTPUT_BYTES: usize = 256 * 1024;
 
 #[derive(Clone, Debug)]
@@ -348,19 +347,34 @@ pub(crate) struct SearchOptions<'a> {
     pub(crate) scan_byte_limit: u64,
 }
 
+#[allow(dead_code)]
 pub(crate) fn search(options: SearchOptions<'_>) -> std::result::Result<Value, FileError> {
+    search_with_context_limit(
+        options,
+        crate::config::DEFAULT_MAX_FILE_SEARCH_CONTEXT_LINES,
+    )
+}
+
+pub(crate) fn search_with_context_limit(
+    options: SearchOptions<'_>,
+    configured_max_context_lines: usize,
+) -> std::result::Result<Value, FileError> {
     if options.query.trim().is_empty() {
         return Err(FileError::new(
             "file_search_query_empty",
             "query must not be empty",
         ));
     }
-    if options.context_lines > MAX_SEARCH_CONTEXT {
-        return Err(FileError::new(
-            "file_context_limit_exceeded",
-            "contextLines exceeds the bound",
-        ));
-    }
+    let effective_context_lines = options
+        .context_lines
+        .min(configured_max_context_lines)
+        .min(crate::config::MAX_FILE_SEARCH_CONTEXT_LINES);
+    let context_lines_clipped = options.context_lines != effective_context_lines;
+    let warnings = if context_lines_clipped {
+        json!(["context_lines_clipped_to_configured_limit"])
+    } else {
+        json!([])
+    };
     if options.max_results == 0 || options.max_results > MAX_SEARCH_RESULTS {
         return Err(FileError::new(
             "file_result_limit_exceeded",
@@ -495,11 +509,11 @@ pub(crate) fn search(options: SearchOptions<'_>) -> std::result::Result<Value, F
         let lines = text.lines().collect::<Vec<_>>();
         for (index, line) in lines.iter().enumerate() {
             for found in matcher.find_iter(line) {
-                let before = (index.saturating_sub(options.context_lines)..index)
+                let before = (index.saturating_sub(effective_context_lines)..index)
                     .map(|line_index| line_display(lines[line_index]))
                     .collect::<Vec<_>>();
                 let after = ((index + 1)
-                    ..=(index + options.context_lines).min(lines.len().saturating_sub(1)))
+                    ..=(index + effective_context_lines).min(lines.len().saturating_sub(1)))
                     .map(|line_index| line_display(lines[line_index]))
                     .collect::<Vec<_>>();
                 let value = json!({
@@ -539,6 +553,10 @@ pub(crate) fn search(options: SearchOptions<'_>) -> std::result::Result<Value, F
     Ok(json!({
         "query": options.query,
         "mode": match options.mode { SearchMode::Literal => "literal", SearchMode::Regex => "regex" },
+        "requestedContextLines": options.context_lines,
+        "effectiveContextLines": effective_context_lines,
+        "contextLinesClipped": context_lines_clipped,
+        "warnings": warnings,
         "matches": matches,
         "matchCount": match_count,
         "scannedFiles": scanned_files,
@@ -1457,20 +1475,23 @@ pub(crate) async fn batch(state: &AppState, request: BatchRequest) -> Value {
                 };
                 let budget = remaining_batch_search_budget(scan_files, scan_bytes);
                 search_budget = Some(budget);
-                search(SearchOptions {
-                    root: &path,
-                    query: operation.query.as_deref().unwrap_or_default(),
-                    mode,
-                    case_sensitive: operation.case_sensitive,
-                    include: &operation.include,
-                    exclude: &operation.exclude,
-                    context_lines: operation.context_lines,
-                    max_results: operation.max_results,
-                    hidden: operation.hidden,
-                    respect_gitignore: operation.respect_gitignore,
-                    scan_file_limit: budget.file_limit,
-                    scan_byte_limit: budget.byte_limit,
-                })
+                search_with_context_limit(
+                    SearchOptions {
+                        root: &path,
+                        query: operation.query.as_deref().unwrap_or_default(),
+                        mode,
+                        case_sensitive: operation.case_sensitive,
+                        include: &operation.include,
+                        exclude: &operation.exclude,
+                        context_lines: operation.context_lines,
+                        max_results: operation.max_results,
+                        hidden: operation.hidden,
+                        respect_gitignore: operation.respect_gitignore,
+                        scan_file_limit: budget.file_limit,
+                        scan_byte_limit: budget.byte_limit,
+                    },
+                    config.limits.max_file_search_context_lines,
+                )
             }
             "edit" => continue,
             _ => unreachable!(),

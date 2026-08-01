@@ -138,6 +138,9 @@ pub(crate) async fn collect(state: &AppState) -> Value {
                 "active": active_count,
                 "available": resolved_limit.resolved.saturating_sub(active_count),
             },
+            "fileSearch": {
+                "maxContextLines": config.limits.max_file_search_context_lines,
+            },
             "policy": policy_summary,
         },
         "confirmation": {
@@ -449,6 +452,7 @@ mod tests {
         assert_eq!(value["mcp"]["concurrency"]["perServerLimit"], 2);
         assert_eq!(value["mcp"]["concurrency"]["active"], 0);
         assert_eq!(value["mcp"]["concurrency"]["queued"], 0);
+        assert_eq!(value["execution"]["fileSearch"]["maxContextLines"], 5);
         let serialized = serde_json::to_string(&value).unwrap();
         assert!(!serialized.contains("change-me"));
         assert!(!serialized.contains("agent_secret"));

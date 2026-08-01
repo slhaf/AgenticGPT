@@ -95,7 +95,8 @@
   },
   "limits": {
     "maxConcurrentTasks": 2,
-    "maxActiveJobs": "auto"
+    "maxActiveJobs": "auto",
+    "maxFileSearchContextLines": 5
   },
   "skills": {
     "maxFiles": 256,

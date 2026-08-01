@@ -170,12 +170,15 @@ Configured allow rules may explicitly override builtin confirmation/deny rules. 
 {
   "limits": {
     "maxConcurrentTasks": 2,
-    "maxActiveJobs": "auto"
+    "maxActiveJobs": "auto",
+    "maxFileSearchContextLines": 5
   }
 }
 ```
 
 `maxActiveJobs` accepts a non-negative integer or `"auto"`. Auto resolves as `ceil(availableParallelism * 1.5)` clamped to 6–24. Process, skill, and MCP Jobs share this capacity.
+
+`maxFileSearchContextLines` is the live maximum number of before/after lines that `file.search` returns for one match. It defaults to 5 and accepts an integer from 0 through 100. A search request may ask for more; the runtime clips it to the effective value and reports `requestedContextLines`, `effectiveContextLines`, `contextLinesClipped`, and a bounded warning. Negative or non-integer requests remain invalid.
 
 v0.9 rejects `maxActiveSessions` and `sessionIdleTimeoutSecs`.
 

@@ -1814,6 +1814,7 @@ mod tests {
         });
         candidate.path_policy.write_roots = vec![PathBuf::from("/tmp/live")];
         candidate.limits.max_active_jobs = config::MaxActiveJobs::Explicit(9);
+        candidate.limits.max_file_search_context_lines = 20;
         live.mcp_servers.insert(
             "primary".to_string(),
             McpServerConfig {
@@ -1850,6 +1851,7 @@ mod tests {
             live.limits.max_active_jobs,
             config::MaxActiveJobs::Explicit(9)
         );
+        assert_eq!(live.limits.max_file_search_context_lines, 20);
         assert_eq!(
             live.mcp_servers["primary"].url.as_deref(),
             Some("https://new.example/mcp")
@@ -1906,10 +1908,12 @@ mod tests {
                 url: Some("node ./local-server.mjs".to_string()),
             },
         );
+        valid.limits.max_file_search_context_lines = 20;
         fs::write(&config_path, serde_json::to_vec_pretty(&valid).unwrap()).unwrap();
         reload_standalone_live_config_once(&state).await.unwrap();
         let live_after_valid = state.config.read().await.clone();
         assert_eq!(live_after_valid.mcp_servers, valid.mcp_servers);
+        assert_eq!(live_after_valid.limits.max_file_search_context_lines, 20);
 
         let mut invalid = valid;
         invalid.mcp_servers.get_mut("primary").unwrap().transport = "sse".to_string();

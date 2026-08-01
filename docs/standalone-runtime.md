@@ -167,6 +167,13 @@ search process. Reads support metadata-only inspection, line ranges, and a
 rules by default and caps its returned match/context payload at 256 KiB while
 also bounding scanned files and bytes.
 
+`contextLines` is a non-negative integer with a default of 0. The live maximum
+is `limits.maxFileSearchContextLines` (default 5, configurable from 0 through
+100 and visible as `agent.info.execution.fileSearch.maxContextLines`). Requests
+above that maximum are clipped rather than discarded; search responses expose
+the requested/effective values, a `contextLinesClipped` flag, and one bounded
+warning. Negative or non-integer values fail argument validation.
+
 `file.edit` is the guarded single-file mutation tool. Its `replace`, `patch`,
 and `write` modes operate on UTF-8 text only. Existing files require an exact
 `expectedRevision` (`sha256:<hex>`); new files require `expectedAbsent: true`.
