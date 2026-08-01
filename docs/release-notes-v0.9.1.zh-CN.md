@@ -1,6 +1,6 @@
-# Agentic GPT v0.10.0 release boundary 说明
+# Agentic GPT v0.9.1 release notes
 
-本文记录 v0.10.0 candidate 的 breaking `file.batch` 契约与验证边界；不创建
+本文记录 v0.9.1 release 的 breaking `file.batch` 契约与验证边界；不创建
 tag、不 push 分支、不部署 artifact，也不发布 release。
 
 ## 重点变化
@@ -27,7 +27,7 @@ tag、不 push 分支、不部署 artifact，也不发布 release。
 - 删除 `rolled_back`、`partial_failed`、`rollback_failed`、`not_committed` 及仅用于 rollback 的错误码处理。
 - 保留精确 `expectedRevision` / `expectedAbsent:true` 守卫；检查当前状态后只重试失败的规范化文件组。
 
-v0.9 的 Job 名称/config 迁移仍适用；本边界不增加兼容 alias。
+现有 v0.9 的 Job 名称/config 迁移仍适用；本次 v0.9.1 不增加兼容 alias。
 
 ## 验证边界
 

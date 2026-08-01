@@ -1,8 +1,8 @@
-# Agentic GPT v0.10.0 release-boundary notes
+# Agentic GPT v0.9.1 release notes
 
-These notes describe the v0.10.0 candidate boundary. They document the
-breaking `file.batch` contract and verification; they do not create a tag,
-push a branch, deploy an artifact, or publish a release.
+These notes describe the v0.9.1 release boundary. They document the breaking
+`file.batch` contract and verification; they do not create a tag, push a
+branch, deploy an artifact, or publish a release.
 
 ## Highlights
 
@@ -37,8 +37,8 @@ Consumers must:
 - Preserve exact `expectedRevision` / `expectedAbsent:true` guards and retry
   only the failed normalized file group after inspecting its current state.
 
-The v0.9 migration remains applicable for Job names/config changes; this
-boundary does not add compatibility aliases.
+The existing v0.9 migration remains applicable for Job names/config changes;
+this v0.9.1 release does not add compatibility aliases.
 
 ## Verification boundary
 

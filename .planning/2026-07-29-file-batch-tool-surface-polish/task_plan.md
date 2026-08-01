@@ -188,11 +188,11 @@ Repair the real-use `file.search` / `file.batch` brittleness recorded on 2026-07
 
 **Verification:** focused tests per phase; full Agent, Hub, and Protocol suites; Local Unix connector E2E; standalone supervisor E2E; schema/reference/document-link checks; `cargo fmt --all --check`; `cargo check --workspace`; `cargo clippy --workspace --all-targets -- -D warnings`; `git diff --check`.
 
-**Release boundary:** recommend v0.10.0 because `file.batch` failure semantics change and legacy rollback-only states/guarantees are removed, with explicit migration and release notes. No tag/push/deploy without separate authorization.
+**Release boundary:** use v0.9.1 for this release despite the `file.batch` failure-semantics change and removal of legacy rollback-only states/guarantees; retain explicit migration and release notes. No tag/push/deploy without separate authorization.
 
 **Started 2026-08-01:** Phase E commit `90294c3` is complete. Phase F is documentation and verification only: it does not introduce a compatibility alias, release artifact, tag, push, deployment, or publication.
 
-**Completed 2026-08-01:** Added English/Chinese v0.10.0 release-boundary notes and README links. `cargo test --workspace` passed Agent 242/242, local-control 1/1, standalone supervisor 6/6, Hub 59/59, Protocol 12/12, and doc-tests 0; final formatting, workspace check, workspace clippy, diff check, and 40 local Markdown links with 0 missing targets passed. The release boundary is documented but not tagged, pushed, deployed, or published.
+**Completed 2026-08-01:** Added English/Chinese v0.9.1 release notes and README links. `cargo test --workspace` passed Agent 242/242, local-control 1/1, standalone supervisor 6/6, Hub 59/59, Protocol 12/12, and doc-tests 0; final formatting, workspace check, workspace clippy, diff check, and 40 local Markdown links with 0 missing targets passed. The release boundary is documented but not tagged, pushed, deployed, or published.
 
 ## Acceptance Criteria
 - `contextLines:8` succeeds under the default max 5 and reports requested 8/effective 5/clipped=true.

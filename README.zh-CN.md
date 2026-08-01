@@ -242,7 +242,7 @@ Standalone/Local 只需独立升级 `agentic-gpt`。Hub 模式由于 v0.9 与 v0
 - [`docs/operations.md`](docs/operations.md)：本地验证、Standalone-first 部署检查、Hub 检查与安全不变量。
 - [`docs/migration-v0.9.zh-CN.md`](docs/migration-v0.9.zh-CN.md)：按 runtime 划分的 v0.8 → v0.9 迁移。
 - [`docs/migration-v0.10.zh-CN.md`](docs/migration-v0.10.zh-CN.md)：`file.batch` 文件组与部分成功语义迁移。
-- [`docs/release-notes-v0.10.0.zh-CN.md`](docs/release-notes-v0.10.0.zh-CN.md)：v0.10.0 candidate 边界与验证摘要。
+- [`docs/release-notes-v0.9.1.zh-CN.md`](docs/release-notes-v0.9.1.zh-CN.md)：v0.9.1 release 边界与验证摘要。
 - [`docs/release-notes-v0.9.0.md`](docs/release-notes-v0.9.0.md)：v0.9.0 变更与验证摘要。
 - [`docs/development.zh-CN.md`](docs/development.zh-CN.md)：开发、CI 与 release。
 
