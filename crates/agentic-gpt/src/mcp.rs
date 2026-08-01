@@ -180,6 +180,7 @@ pub(crate) fn validate_server_configs(servers: &BTreeMap<String, McpServerConfig
                 if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
                     return Err(anyhow!("mcp_server_url_invalid: {server_id}"));
                 }
+                validate_header_endpoint_security(server_id, server, &url)?;
             }
             "stdio" => {
                 validate_header_config(server_id, server)?;
@@ -241,6 +242,27 @@ fn validate_header_config(server_id: &str, server: &McpServerConfig) -> Result<(
         })?;
     }
     Ok(())
+}
+
+fn validate_header_endpoint_security(
+    server_id: &str,
+    server: &McpServerConfig,
+    url: &reqwest::Url,
+) -> Result<()> {
+    if !server.headers.is_empty() && url.scheme() != "https" && !url_is_loopback(url) {
+        return Err(anyhow!("mcp_header_https_required: {server_id}"));
+    }
+    Ok(())
+}
+
+fn url_is_loopback(url: &reqwest::Url) -> bool {
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
 }
 
 pub(crate) fn server_config_revision(servers: &BTreeMap<String, McpServerConfig>) -> String {
@@ -1466,9 +1488,16 @@ fn validate_selected_server(server_id: &str, server: &McpServerConfig) -> Result
     match server.transport.as_str() {
         "streamable-http" => {
             validate_header_config(server_id, server)?;
-            if server.url.as_deref().unwrap_or_default().trim().is_empty() {
+            let endpoint = server.url.as_deref().unwrap_or_default().trim();
+            if endpoint.is_empty() {
                 return Err(anyhow!("mcp_server_url_missing: {server_id}"));
             }
+            let url = reqwest::Url::parse(endpoint)
+                .map_err(|_| anyhow!("mcp_server_url_invalid: {server_id}"))?;
+            if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+                return Err(anyhow!("mcp_server_url_invalid: {server_id}"));
+            }
+            validate_header_endpoint_security(server_id, server, &url)?;
         }
         "stdio" => {
             validate_header_config(server_id, server)?;
@@ -1550,7 +1579,15 @@ async fn client(server: &ResolvedMcpServerConfig) -> Result<McpClient> {
             let url = server.url.clone().context("mcp_server_url_missing")?;
             let config = StreamableHttpClientTransportConfig::with_uri(url)
                 .custom_headers(server.headers.clone());
-            let transport = StreamableHttpClientTransport::from_config(config);
+            let transport = if server.headers.is_empty() {
+                StreamableHttpClientTransport::from_config(config)
+            } else {
+                let http_client = reqwest::Client::builder()
+                    .redirect(reqwest::redirect::Policy::none())
+                    .build()
+                    .map_err(|_| anyhow!("mcp_http_client_init_failed"))?;
+                StreamableHttpClientTransport::with_client(http_client, config)
+            };
             Ok(ClientInfo::default().serve(transport).await?)
         }
         "stdio" => {
@@ -2973,6 +3010,10 @@ mod tests {
                                 "serverInfo": {"name": "header-mock", "version": "test"}
                             }),
                             Some("tools/list") => json!({"tools": []}),
+                            Some("tools/call") => json!({
+                                "content": [{"type": "text", "text": "ok"}],
+                                "isError": false
+                            }),
                             _ => json!({}),
                         };
                         let body = json!({
@@ -2992,6 +3033,79 @@ mod tests {
             }
         });
         (url, requests, task)
+    }
+
+    async fn spawn_cross_origin_redirect_mocks() -> (
+        String,
+        Arc<std::sync::Mutex<Vec<MockHttpRequest>>>,
+        tokio::task::JoinHandle<()>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let target_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_url = format!("http://{}/mcp", target_listener.local_addr().unwrap());
+        let target_requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured_target = target_requests.clone();
+        let target_task = tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = target_listener.accept().await else {
+                    break;
+                };
+                let captured_target = captured_target.clone();
+                tokio::spawn(async move {
+                    let Some(request) = read_http_request(&mut stream).await else {
+                        return;
+                    };
+                    captured_target.lock().unwrap().push(request);
+                    let _ = stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        )
+                        .await;
+                });
+            }
+        });
+
+        let redirect_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let redirect_url = format!("http://{}/mcp", redirect_listener.local_addr().unwrap());
+        let redirect_task = tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = redirect_listener.accept().await else {
+                    break;
+                };
+                let location = target_url.clone();
+                tokio::spawn(async move {
+                    if read_http_request(&mut stream).await.is_some() {
+                        let response = format!(
+                            "HTTP/1.1 307 Temporary Redirect\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        );
+                        let _ = stream.write_all(response.as_bytes()).await;
+                    }
+                });
+            }
+        });
+        (redirect_url, target_requests, redirect_task, target_task)
+    }
+
+    #[tokio::test]
+    async fn streamable_http_header_redirect_does_not_forward_to_other_origin() {
+        let root =
+            std::env::temp_dir().join(format!("agentic-mcp-redirect-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let env_name = format!("AGENTIC_MCP_REDIRECT_{}", uuid::Uuid::new_v4().simple());
+        std::env::set_var(&env_name, "Bearer redirect-secret");
+        let (url, target_requests, redirect_task, target_task) =
+            spawn_cross_origin_redirect_mocks().await;
+        let mut raw = server("streamable-http", Some(&url));
+        raw.headers
+            .insert("Authorization".to_string(), format!("env:{env_name}"));
+        let resolved = resolve_selected_server("redirect", &raw).unwrap();
+        let result = client(&resolved).await;
+        assert!(result.is_err());
+        redirect_task.abort();
+        target_task.abort();
+        assert!(target_requests.lock().unwrap().is_empty());
+        std::env::remove_var(&env_name);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]
@@ -3018,10 +3132,6 @@ mod tests {
             .get(&HeaderName::from_static("authorization"))
             .unwrap()
             .is_sensitive());
-        assert_eq!(
-            server_config_revision(&BTreeMap::from([("headers".to_string(), raw.clone(),)])),
-            server_config_revision(&BTreeMap::from([("headers".to_string(), raw.clone(),)]))
-        );
         let client = client(&resolved).await.unwrap();
         assert!(client.list_all_tools().await.unwrap().is_empty());
         close_client(client).await;
@@ -3045,8 +3155,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn streamable_http_without_headers_remains_compatible() {
+        let (url, requests, task) = spawn_http_mock().await;
+        let raw = server("streamable-http", Some(&url));
+        let resolved = resolve_selected_server("no-headers", &raw).unwrap();
+        let client = client(&resolved).await.unwrap();
+        assert!(client.list_all_tools().await.unwrap().is_empty());
+        close_client(client).await;
+        task.abort();
+        let requests = requests.lock().unwrap();
+        assert!(requests.iter().any(|request| request.method == "POST"));
+        assert!(requests.iter().all(|request| {
+            let headers = request.headers.to_ascii_lowercase();
+            !headers.contains("authorization:") && !headers.contains("x-tenant:")
+        }));
+    }
+
+    #[tokio::test]
+    async fn managed_mcp_static_headers_do_not_leak_into_audit_or_job_output() {
+        let (state, root) = managed_test_state(2).await;
+        let (url, requests, task) = spawn_http_mock().await;
+        let env_name = format!("AGENTIC_MCP_AUDIT_{}", uuid::Uuid::new_v4().simple());
+        let secret = "Bearer audit-secret";
+        std::env::set_var(&env_name, secret);
+        {
+            let mut config = state.config.write().await;
+            let server = config.mcp_servers.get_mut("fake").unwrap();
+            server.transport = "streamable-http".to_string();
+            server.url = Some(url);
+            server
+                .headers
+                .insert("Authorization".to_string(), format!("env:{env_name}"));
+        }
+        let response = start_managed_call_with_factory(
+            &state,
+            managed_request(json!({}), 5),
+            "local:mcp.callTool",
+            None,
+            production_client_factory(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status, JobState::Completed);
+        let detail = crate::jobs::get_job_detail(&state, &response.job_id, 0)
+            .await
+            .unwrap();
+        let audit =
+            std::fs::read_to_string(root.join("workspace").join(".agentic-gpt-audit.jsonl"))
+                .unwrap();
+        let serialized_config = serde_json::to_string(&state.config.read().await.clone()).unwrap();
+        assert!(!serde_json::to_string(&detail).unwrap().contains(secret));
+        assert!(!audit.contains(secret));
+        assert!(!serialized_config.contains(secret));
+        task.abort();
+        let requests = requests.lock().unwrap();
+        assert!(requests.iter().any(|request| {
+            request.method == "POST"
+                && request
+                    .headers
+                    .to_ascii_lowercase()
+                    .contains("authorization: bearer audit-secret")
+        }));
+        std::env::remove_var(&env_name);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
     async fn mcp_snapshots_keep_resolved_headers_across_reload() {
         let (state, root) = managed_test_state(2).await;
+        let (url, requests, task) = spawn_http_mock().await;
         let old_name = format!("AGENTIC_MCP_OLD_{}", uuid::Uuid::new_v4().simple());
         let new_name = format!("AGENTIC_MCP_NEW_{}", uuid::Uuid::new_v4().simple());
         std::env::set_var(&old_name, "Bearer old-token");
@@ -3055,13 +3232,16 @@ mod tests {
             let mut config = state.config.write().await;
             let server = config.mcp_servers.get_mut("fake").unwrap();
             server.transport = "streamable-http".to_string();
-            server.url = Some("http://127.0.0.1:1/mcp".to_string());
+            server.url = Some(url.clone());
             server
                 .headers
                 .insert("Authorization".to_string(), format!("env:{old_name}"));
         }
         let (old_revision, old_server) = server_config_snapshot(&state, "fake").await;
         let old_server = old_server.unwrap();
+        let old_client = client(&old_server).await.unwrap();
+        assert!(old_client.list_all_tools().await.unwrap().is_empty());
+        close_client(old_client).await;
         {
             let mut config = state.config.write().await;
             config
@@ -3073,6 +3253,9 @@ mod tests {
         }
         let (new_revision, new_server) = server_config_snapshot(&state, "fake").await;
         let new_server = new_server.unwrap();
+        let new_client = client(&new_server).await.unwrap();
+        assert!(new_client.list_all_tools().await.unwrap().is_empty());
+        close_client(new_client).await;
         assert_ne!(old_revision, new_revision);
         assert_eq!(
             old_server
@@ -3092,8 +3275,66 @@ mod tests {
                 .unwrap(),
             "Bearer new-token"
         );
+        let serialized_config = serde_json::to_string(&state.config.read().await.clone()).unwrap();
+        task.abort();
+        let requests = requests.lock().unwrap();
+        let post_headers = requests
+            .iter()
+            .filter(|request| request.method == "POST")
+            .map(|request| request.headers.to_ascii_lowercase())
+            .collect::<Vec<_>>();
+        assert!(post_headers
+            .iter()
+            .any(|headers| headers.contains("authorization: bearer old-token")));
+        assert!(post_headers
+            .iter()
+            .any(|headers| headers.contains("authorization: bearer new-token")));
+        assert!(!serialized_config.contains("Bearer old-token"));
+        assert!(!serialized_config.contains("Bearer new-token"));
         std::env::remove_var(&old_name);
         std::env::remove_var(&new_name);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn mcp_revision_ignores_rotated_secret_source_value() {
+        let (state, root) = managed_test_state(2).await;
+        let env_name = format!("AGENTIC_MCP_ROTATED_{}", uuid::Uuid::new_v4().simple());
+        std::env::set_var(&env_name, "Bearer first-token");
+        {
+            let mut config = state.config.write().await;
+            let server = config.mcp_servers.get_mut("fake").unwrap();
+            server.transport = "streamable-http".to_string();
+            server.url = Some("http://127.0.0.1:1/mcp".to_string());
+            server
+                .headers
+                .insert("Authorization".to_string(), format!("env:{env_name}"));
+        }
+        let (first_revision, first_server) = server_config_snapshot(&state, "fake").await;
+        let first_server = first_server.unwrap();
+        std::env::set_var(&env_name, "Bearer second-token");
+        let (second_revision, second_server) = server_config_snapshot(&state, "fake").await;
+        let second_server = second_server.unwrap();
+        assert_eq!(first_revision, second_revision);
+        assert_eq!(
+            first_server
+                .headers
+                .get(&HeaderName::from_static("authorization"))
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "Bearer first-token"
+        );
+        assert_eq!(
+            second_server
+                .headers
+                .get(&HeaderName::from_static("authorization"))
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "Bearer second-token"
+        );
+        std::env::remove_var(&env_name);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -3172,6 +3413,31 @@ mod tests {
                 .to_string()
                 .starts_with("mcp_header_reference_plaintext_rejected")
         );
+
+        let mut insecure = server("streamable-http", Some("http://example.test/mcp"));
+        insecure.headers.insert(
+            "Authorization".to_string(),
+            "env:AGENTIC_MCP_HEADER".to_string(),
+        );
+        assert!(
+            validate_server_configs(&BTreeMap::from([("insecure".to_string(), insecure,)]))
+                .unwrap_err()
+                .to_string()
+                .starts_with("mcp_header_https_required")
+        );
+
+        let mut invalid_name = server("streamable-http", Some("https://example.test/mcp"));
+        invalid_name.headers.insert(
+            "Bad Header".to_string(),
+            "env:AGENTIC_MCP_HEADER".to_string(),
+        );
+        assert!(validate_server_configs(&BTreeMap::from([(
+            "invalid-name".to_string(),
+            invalid_name,
+        )]))
+        .unwrap_err()
+        .to_string()
+        .starts_with("mcp_header_name_invalid"));
 
         for name in [
             "Accept",

@@ -209,7 +209,7 @@ Server id 最长 64 字节，只使用字母、数字、`.`、`_`、`-`。`strea
 
 `streamable-http` 支持通过 `headers` 配置静态自定义 HTTP Header。Header 名称不区分大小写；`Accept`、`Content-Type`、`Mcp-Session-Id`、`Last-Event-Id`、`MCP-Protocol-Version` 等由 transport 管理的名称会被拒绝。每个 Header 值必须完整引用 `env:VARIABLE_NAME` 或 `file:/path`；明文 credential 会被拒绝。Authorization Header 的引用值应包含完整内容，例如 `Bearer <token>`。
 
-引用会在新的 MCP admission/call 快照创建时解析。配置文件和配置 revision 中只保留原始引用；解析后的值只存在于私有内存 client 快照中。secret source 缺失、为空或无效时，仅当前调用失败，不影响其他 server。该静态 Header 功能不包含 OAuth 流程。
+引用会在新的 MCP admission/call 快照创建时解析。配置 revision 基于原始引用计算；解析后的值不参与 revision，只存在于私有内存 client 快照中。secret source 缺失、为空或无效时，仅当前调用失败，不影响其他 server。带 Header 的非 loopback endpoint 必须使用 HTTPS；携带这些 Header 的 client 禁止重定向，因此重定向请求不会把 Header 转发到其他 origin。该静态 Header 功能不包含 OAuth 流程。
 
 ## Skills、Room 与 sandbox
 

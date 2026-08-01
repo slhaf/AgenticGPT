@@ -1974,6 +1974,18 @@ mod tests {
         assert_eq!(response.reason.as_deref(), Some("unsupported_channel"));
     }
 
+    #[test]
+    fn live_reload_log_error_code_does_not_include_secret_sources_or_values() {
+        let secret = "Bearer reload-log-secret";
+        let diagnostic = format!("mcp_header_secret_unavailable: {secret}");
+        let logged = format!(
+            "standalone live config reload rejected; keeping previous subset; errorCode={}",
+            error_code(&diagnostic)
+        );
+        assert_eq!(error_code(&diagnostic), "mcp_header_secret_unavailable");
+        assert!(!logged.contains(secret));
+    }
+
     fn unique_temp_dir(prefix: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("{prefix}-{}", Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();

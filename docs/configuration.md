@@ -209,7 +209,7 @@ Server ids are at most 64 bytes and use letters, digits, `.`, `_`, or `-`. `stre
 
 `streamable-http` supports static custom HTTP headers through `headers`. Header names are case-insensitive; transport-managed names such as `Accept`, `Content-Type`, `Mcp-Session-Id`, `Last-Event-Id`, and `MCP-Protocol-Version` are rejected. Every Header value must be an entire `env:VARIABLE_NAME` or `file:/path` reference; plaintext credentials are rejected. For an Authorization header, the referenced value should include the complete value such as `Bearer <token>`.
 
-References are resolved when a new MCP admission/call snapshot is created. The raw reference may appear in the config file and configuration revision, but the resolved value is kept only in the private in-memory client snapshot. Missing, empty, or invalid secret sources reject that call without changing other servers. No OAuth flow is implied by this static-header feature.
+References are resolved when a new MCP admission/call snapshot is created. The configuration revision is derived from the raw references; resolved values do not participate in the revision and are kept only in the private in-memory client snapshot. Missing, empty, or invalid secret sources reject that call without changing other servers. Header-bearing non-loopback endpoints must use HTTPS. Redirects are disabled for clients carrying these Headers, so a redirected request cannot forward them to another origin. No OAuth flow is implied by this static-header feature.
 
 ## Skills, Room, and sandbox
 
