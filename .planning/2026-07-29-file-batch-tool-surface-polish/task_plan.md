@@ -250,6 +250,48 @@ Repair the real-use `file.search` / `file.batch` brittleness recorded on 2026-07
 | Full `cargo test -p agentic-gpt` after Phase B ran 235 tests; 231 passed and the same four unrelated local-control/supervisor/tunnel tests failed with sandbox permission errors. | 1 | Retain as environment-limited evidence; all file.batch and Phase B tests pass. |
 | Phase C full `cargo test -p agentic-gpt` ran 240 tests; 236 passed and the same four unrelated local-control/supervisor/tunnel tests failed with sandbox `Operation not permitted`/`local_mcp_bind_failed` errors. | 1 | Retain as environment-limited evidence; all Phase C file.batch tests and product checks pass, with no Phase C failure. |
 | A text-search command included shell backtick syntax and unintentionally invoked a nested cargo test while constructing its pattern. | 1 | No repository files changed; use single-quoted search patterns and record the command mistake here for reproducibility. |
+
+## Follow-up: local integration validation (2026-08-01)
+
+**Status:** complete
+
+**Scope:** Validate the completed D-01 through D-13 implementation through a real
+`run-local` process and a temporary fixture directory/configuration. Exercise the
+live Unix MCP surface, not only in-process unit tests. No product source,
+configuration example, generated artifact, tag, push, deployment, or publication
+is in scope.
+
+**Phases:**
+
+1. Prepare an isolated fixture directory and minimal config with explicit path
+   policy, `maxFileSearchContextLines`, and one local downstream MCP fixture.
+2. Start `run-local` and exercise search clipping, grouped same-file batch edits,
+   independent group failure/partial success, dry-run, confirmation boundaries,
+   and tool/agent diagnostics through the real MCP client path.
+3. Stop the process, verify fixture outcomes and audit evidence, record findings,
+   and remove only the temporary fixture/process state.
+
+**Acceptance:** The real local MCP surface returns the new search evidence and
+per-file group outcomes; valid groups commit while an unrelated invalid group is
+isolated; dry-run does not modify files; the configured test directory remains
+within path policy; and no repository files are changed except these planning
+logs.
+
+**Completed 2026-08-01:** Used a temporary `/tmp` fixture and an independent
+config with `run-as-local --profile normal`. The live Unix MCP surface exposed
+24 Normal tools and `agent.info` reported `local-unix` ready. Verified search
+clipping at 5 and after live reload to 2, negative context rejection, one-group
+same-file sequential edits, mixed `completed_with_errors` isolation, dry-run
+non-write behavior, confirmation-unavailable rejection, path-policy denial,
+bounded audit group counts, and cleanup of all temporary state. No product files,
+runtime config, generated artifacts, tag, push, deployment, or publication
+changed.
+
+**Follow-up errors:** The default sandbox could not create the owner-only runtime
+directory (`local_mcp_runtime_directory_unavailable`), so the live process and
+socket client were rerun with user-authorized escalation. An initial separate
+`config show` invocation returned `Is a directory`; using the equivalent
+`--config=<path>` form succeeded and the fixture config validated.
 | The first Phase D Hub description test found the intended mcp attribute text had not landed at the exact generated attribute lines; a second assertion then required the explicit “bounded inline wait” phrase. | 2 | Patched the exact Hub `mcp.callTool`/`mcp.batch` attributes and reran the focused test successfully. |
 | Phase D full Agent tests ran 241 tests; 237 passed and the same four local-control/supervisor/tunnel tests failed with sandbox permission errors. | 1 | Retain as environment-limited evidence; all descriptor, file.batch, Agent, and Hub contract tests pass. |
 | The four sandbox-sensitive Agent tests initially failed only because the default sandbox denied local socket/HTTP bind and fake subprocess operations. | 1 | With the user's authorization, reran the complete Agent suite with escalation: 241/241 passed, including both local-control tests, fake tunnel, and bounded download. |

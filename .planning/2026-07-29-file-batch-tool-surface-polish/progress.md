@@ -57,6 +57,28 @@
 
 ## 2026-08-01
 
+### Local integration follow-up start
+- User authorized a real local integration pass over the completed D-01 through
+  D-13 changes using `run-local`.
+- Added a follow-up phase to the canonical plan; the test fixture will live under
+  `/tmp` and will not modify repository runtime configuration or generated files.
+- Next: inspect the `run-local` CLI contract and existing local-control harness,
+  then create the fixture directory/configuration and launch the live MCP path.
+- Confirmed the CLI contract and found a built `target/debug/agentic-gpt`; the
+  live client uses `agentic-gpt local --config ... list-tools|call ...`, while
+  the server uses a unique agent id under the owner-only runtime socket root.
+
+### Local integration follow-up complete
+- Started the fixture with `run-as-local --profile normal` using user-authorized
+  escalation after the default sandbox rejected the runtime socket directory.
+- Verified 24 Normal tools, local readiness, search clipping and negative-input
+  validation, live `maxFileSearchContextLines` reload, grouped same-file edits,
+  mixed per-group failure isolation, dry-run/confirmation boundaries, path
+  policy denial, and redacted group audit counts through the real local MCP CLI.
+- Stopped the process and removed the temporary `/tmp` fixture and unique runtime
+  socket directory. No product files or runtime repository configuration changed;
+  follow-up status is complete.
+
 ### Implementation session start
 - Ran the planning session catch-up script; no unsynced prior-session report was emitted.
 - Re-read the active Phase A handoff, findings, and progress files and verified a clean `main` worktree before implementation.

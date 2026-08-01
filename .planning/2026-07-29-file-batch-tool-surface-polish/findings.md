@@ -154,6 +154,57 @@
 - Search now needs two entry paths: a default wrapper for direct unit callers and an explicit configured-limit path for single and batch dispatch. This keeps existing internal test fixtures stable while ensuring runtime calls use the live `limits` snapshot.
 - The configured value is serde-defaulted to 5 and range-checked at 0–100; the search result will retain bounded scan/output limits and add only requested/effective/clipped fields plus one stable warning code when clipping occurs.
 
+## 2026-08-01 local integration follow-up
+- The previous implementation already has real Unix MCP coverage in
+  `crates/agentic-gpt/tests/local_control.rs`; this follow-up must still use a
+  separately created fixture directory/config and a live `run-local` process to
+  validate the user-facing path.
+- The fixture will use a temporary workspace under `/tmp`, an explicit
+  `workspaceRoot`, a bounded `limits.maxFileSearchContextLines`, and a minimal
+  policy that permits the fixture paths only. Secrets and repository config will
+  not be reused.
+- The target evidence is the public MCP response/audit shape: search clipping
+  fields, ordered batch operation evidence, bounded `groups` summaries,
+  `completed_with_errors` for mixed commit outcomes, and unchanged dry-run
+  files. Any inability to bind the local Unix socket or spawn the CLI is an
+  environment permission issue to log separately, not a product conclusion.
+
+## Local integration setup findings
+- The live entrypoint is `agentic-gpt run-as-local --config <path> --profile
+  normal|room`; the client path is `agentic-gpt local --config <path>
+  list-tools|call <tool> --arguments/--arguments-file`.
+- `run-as-local` creates the owner-only socket at
+  `~/.agentic_gpt/runtime/agent/<agentId>/mcp.sock`, so the fixture must use a
+  unique `agentId` and clean that socket directory after shutdown.
+- The existing `local_control` integration test confirms the binary is already
+  built at `target/debug/agentic-gpt` and provides the correct readiness and
+  SIGTERM/SIGKILL cleanup pattern; the manual pass will extend coverage rather
+  than alter that test harness.
+
+## Local integration results
+- A live Normal `run-as-local` process exposed exactly 24 `agent-local` tools;
+  `agent.info` reported `transport=local-unix`, `hubMode=disabled`, and a ready
+  owner-only socket. The runtime binary currently reports package version
+  `0.9.0`; the release-note/version-label follow-up remains documentation-only.
+- `file.search` with `contextLines:8` returned requested 8/effective 5,
+  `contextLinesClipped:true`, and the bounded clipping warning. A live config
+  edit from max 5 to max 2 was picked up by the watcher; `agent.info` and the
+  next search both reported/effective-clipped at 2.
+- Two guarded replacements against one target chained over one evolving
+  candidate and committed as one `file_group_0`; the final file contained the
+  second replacement and the aggregate audit recorded one committed group.
+- A mixed request with a missing read, one valid edit, and one missing-parent
+  create returned `completed_with_errors`; the valid file committed, the bad
+  target was not created, and the response/audit reported two groups with one
+  committed and one failed.
+- `dryRun:true` returned `dry-run`, suppressed confirmation, retained changed
+  line evidence, and left the file unchanged. A real `needConfirm:true` request
+  with empty confirmation channels returned
+  `file_batch_confirmation_unavailable` and also left the file unchanged.
+- A read outside the configured fixture write root returned typed `path_denied`.
+  The temporary workspace, config, audit log, lock, and socket directory were
+  removed after the process stopped.
+
 ## Verification notes
 - `cargo fmt --all` completed after the first formatting check identified only mechanical indentation/wrapping changes.
 - `cargo check -p agentic-gpt` passed; the default `search` test helper is explicitly annotated as intentional compatibility coverage, and `cargo clippy -p agentic-gpt --all-targets -- -D warnings` is clean.
