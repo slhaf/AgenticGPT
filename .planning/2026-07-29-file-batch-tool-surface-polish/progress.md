@@ -1,5 +1,19 @@
 # Progress: File Batch and Tool Surface Polish
 
+## 2026-08-01 Phase B
+
+### Session start
+- Re-ran the planning catch-up script; no unsynced prior-session report was emitted.
+- Verified `main` is clean at Phase A commit `3d0d2f8` and re-read the active Phase B handoff.
+- Marked Phase B `in_progress`; D-03 through D-06 remain frozen, and Phase C cross-file commit/rollback changes are out of scope for this phase.
+- First compile attempt reached the new grouped implementation but failed on one callback syntax error and one borrow-checker conflict; both are logged and being fixed without repeating the same approach.
+- `cargo fmt --all && cargo check -p agentic-gpt` now passes. The file.batch-focused test run has one expected failure: the old duplicate-target regression still asserts the removed rejection code.
+- Replaced the obsolete duplicate-target test and added Phase B coverage for alias chaining, guard conflicts, absent-file create/replace/patch, and later operation failure; all 9 `file_batch`-filtered tests pass.
+- Full `cargo test -p agentic-gpt` completed 235 tests with 231 passing; the same four environment-blocked permission tests failed and are unrelated to Phase B.
+- Re-read the Phase B completion checklist and confirmed the remaining explicit regression gaps are no-op chaining, grouped UTF-8/size bounds, and commit-time external revision protection; the implementation already has the corresponding candidate and revalidation paths.
+- Added the remaining Phase B regression cases and ran `cargo fmt --all && cargo test -p agentic-gpt --bin agentic-gpt file_batch -- --nocapture`; all 11 focused tests pass, including the external revision race and oversized candidate rejection.
+- Final verification: `cargo fmt --all -- --check`, `cargo check --workspace`, and `cargo clippy -p agentic-gpt --all-targets -- -D warnings` pass. `cargo test -p agentic-gpt` runs 237 tests with 233 passing; four known sandbox permission failures remain in local-control socket binding, fake tunnel startup, and bounded local download setup.
+
 ## 2026-08-01
 
 ### Implementation session start

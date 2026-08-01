@@ -9,11 +9,11 @@ Repair the real-use `file.search` / `file.batch` brittleness recorded on 2026-07
 - **Implementation authorized:** yes
 - **Active plan:** `2026-07-29-file-batch-tool-surface-polish`
 - **Baseline:** clean `main`, aligned with `origin/main`, Agentic v0.9.0
-- **Current phase:** Phase A — complete
+- **Current phase:** Phase B — complete
 - **Entry phase:** Phase A
 - **Open blocking decisions:** none
 - **Design checkpoint:** user-accepted contract at 2026-07-30T11:10+08:00
-- **Next action:** commit the completed Phase A independently, then begin Phase B under `planning-with-files` without `refine-implementation-plan`.
+- **Next action:** commit the completed Phase B independently, then begin Phase C under `planning-with-files` without `refine-implementation-plan`.
 
 ## Scope and Constraints
 1. Make `file.search.contextLines` resilient to requests above the configured limit while preserving typed rejection for structurally invalid values.
@@ -103,7 +103,7 @@ Repair the real-use `file.search` / `file.batch` brittleness recorded on 2026-07
 **Completed 2026-08-01:** Added the live 0–100 config limit with default 5, clamped/evidenced single and batch searches, agent.info diagnostics, schema minimum/wording, config/runtime docs, and focused regression coverage. No Phase B/C mutation behavior was changed.
 
 ### Phase B — File-group planner and sequential candidate engine
-**Status:** pending.
+**Status:** complete.
 
 **Prerequisite:** Phase A complete; frozen D-03 through D-06.
 **Objective:** Make same-file edits composable before changing cross-file commit behavior.
@@ -119,6 +119,8 @@ Repair the real-use `file.search` / `file.batch` brittleness recorded on 2026-07
 6. Cover aliases, repeated guards, conflicting guards, create-then-replace/patch, later locator failure, no-op chains, UTF-8/size bounds, and concurrent external changes.
 
 **Completion boundary:** The grouped candidate engine is complete, but legacy cross-file rollback removal waits for Phase C.
+
+**Completed 2026-08-01:** Replaced duplicate normalized-target rejection with one group/candidate chain per resolved file, merged repeated/conflicting guards, preserved guarded create/replace/patch and one-lock/one-stage behavior, added candidate-relative no-op/UTF-8/size/race coverage, and passed all Phase B focused and static gates. Legacy cross-file preflight/rollback behavior remains intentionally unchanged for Phase C.
 
 ### Phase C — Per-file commit orchestration, confirmation, audit, and legacy cleanup
 **Status:** pending.
@@ -229,3 +231,6 @@ Repair the real-use `file.search` / `file.batch` brittleness recorded on 2026-07
 | `skills.run` rejected `check-complete.sh` as non-executable; the same direct invocation was inadvertently repeated. | 8 | Stopped using `skills.run` for this script and invoked it explicitly through `sh`; readiness was then checked from the canonical plan state. |
 | `cargo test -p agentic-gpt --lib` found no library target because `agentic-gpt` is a binary-only crate. | 1 | Switched to the package-level binary test command `cargo test -p agentic-gpt`. |
 | Full `cargo test -p agentic-gpt` ran 232 tests; 228 passed and four unrelated socket/tunnel download tests failed with sandbox `Operation not permitted`/`local_mcp_bind_failed` permission errors. | 1 | Treat as environment-blocked unrelated failures; run Phase A focused tests separately and retain the full-suite result for handoff. |
+| First Phase B compile check rejected `[u8]::len` in a JSON expression and reported an immutable/mutable borrow conflict while iterating group operation indexes. | 1 | Replace the function item with a closure and clone the group index list before mutating the group candidate. |
+| Existing duplicate-target regression expected the removed `file_batch_duplicate_edit_target` rejection and failed after grouped planning was enabled. | 1 | Replace it with Phase B coverage for same-file sequential edits and guard conflict behavior. |
+| Full `cargo test -p agentic-gpt` after Phase B ran 235 tests; 231 passed and the same four unrelated local-control/supervisor/tunnel tests failed with sandbox permission errors. | 1 | Retain as environment-limited evidence; all file.batch and Phase B tests pass. |

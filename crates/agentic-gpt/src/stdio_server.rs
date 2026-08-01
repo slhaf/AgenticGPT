@@ -4201,8 +4201,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn file_batch_rejects_duplicate_targets_and_preflight_errors_without_writes(
-    ) -> anyhow::Result<()> {
+    async fn file_batch_groups_normalized_aliases_and_chains_candidates() -> anyhow::Result<()> {
         let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
         let workspace = server.state.config.read().await.workspace_root.clone();
         let path = workspace.join("batch-guard.txt");
@@ -4213,22 +4212,207 @@ mod tests {
                 "file.batch",
                 json!({
                     "operations":[
-                        {"type":"read", "path":"missing.txt"},
-                        {"type":"edit", "mode":"replace", "path":"batch-guard.txt", "expectedRevision":revision, "oldText":"same", "newText":"one"},
-                        {"type":"edit", "mode":"replace", "path":"./batch-guard.txt", "expectedRevision":revision, "oldText":"same", "newText":"two"}
+                        {"type":"edit", "mode":"replace", "path":"batch-guard.txt", "expectedRevision":revision, "oldText":"same", "newText":"same"},
+                        {"type":"edit", "mode":"replace", "path":"./batch-guard.txt", "expectedRevision":revision, "oldText":"same", "newText":"one"},
+                        {"type":"edit", "mode":"replace", "path":"batch-guard.txt", "expectedRevision":revision, "oldText":"one", "newText":"two"}
+                    ]
+                }),
+            )
+            .await?;
+        assert_eq!(result["status"], "completed");
+        assert_eq!(result["effectiveMutationCount"], 2);
+        assert_eq!(result["results"][0]["result"]["status"], "unchanged");
+        assert_eq!(result["results"][0]["result"]["beforeRevision"], revision);
+        assert_eq!(result["results"][1]["result"]["status"], "updated");
+        assert_eq!(result["results"][2]["result"]["status"], "updated");
+        assert_eq!(
+            result["results"][2]["result"]["beforeRevision"],
+            result["results"][1]["result"]["afterRevision"]
+        );
+        assert_eq!(
+            result["results"][0]["result"]["resolvedPath"],
+            result["results"][1]["result"]["resolvedPath"]
+        );
+        assert_eq!(
+            result["results"][1]["result"]["resolvedPath"],
+            result["results"][2]["result"]["resolvedPath"]
+        );
+        assert_eq!(std::fs::read_to_string(&path)?, "two\n");
+        assert!(std::fs::read_dir(&workspace)?
+            .filter_map(Result::ok)
+            .all(|entry| !entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".agentic-file-tmp-")));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn file_batch_group_handles_utf8_and_rejects_oversized_candidate() -> anyhow::Result<()> {
+        let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
+        let workspace = server.state.config.read().await.workspace_root.clone();
+        let unicode_path = workspace.join("batch-unicode.txt");
+        std::fs::write(&unicode_path, "前\n")?;
+        let revision = crate::file_ops::revision(&std::fs::read(&unicode_path)?);
+        let result = server
+            .dispatch(
+                "file.batch",
+                json!({
+                    "operations":[
+                        {"type":"edit", "mode":"replace", "path":"batch-unicode.txt", "expectedRevision":revision, "oldText":"前", "newText":"后"},
+                        {"type":"edit", "mode":"replace", "path":"./batch-unicode.txt", "expectedRevision":revision, "oldText":"后", "newText":"终"}
+                    ]
+                }),
+            )
+            .await?;
+        assert_eq!(result["status"], "completed");
+        assert_eq!(std::fs::read_to_string(&unicode_path)?, "终\n");
+
+        let oversized_path = workspace.join("batch-oversized.txt");
+        let oversized = "x".repeat(crate::file_ops::MAX_FILE_BYTES as usize + 1);
+        let result = server
+            .dispatch(
+                "file.batch",
+                json!({
+                    "operations":[
+                        {"type":"edit", "mode":"write", "path":"batch-oversized.txt", "expectedAbsent":true, "content":oversized}
                     ]
                 }),
             )
             .await?;
         assert_eq!(result["status"], "rejected");
-        assert!(result["results"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|entry| { entry["error"]["code"] == "file_batch_duplicate_edit_target" }));
-        assert!(result["results"].as_array().unwrap().iter().any(|entry| {
-            entry["status"] == "skipped" && entry["error"]["code"] == "file_batch_rejected"
-        }));
+        assert_eq!(result["results"][0]["status"], "failed");
+        assert_eq!(result["results"][0]["error"]["code"], "file_too_large");
+        assert!(!oversized_path.exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn file_batch_revalidates_after_external_revision_change() -> anyhow::Result<()> {
+        let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
+        let workspace = server.state.config.read().await.workspace_root.clone();
+        let path = workspace.join("batch-race.txt");
+        std::fs::write(&path, "same\n")?;
+        let revision = crate::file_ops::revision(&std::fs::read(&path)?);
+        let lock = crate::file_ops::lock_target(&server.state, &path).await;
+        let pending = {
+            let server = server.clone();
+            tokio::spawn(async move {
+                server
+                    .dispatch(
+                        "file.batch",
+                        json!({"operations":[{"type":"edit","mode":"replace","path":"batch-race.txt","expectedRevision":revision,"oldText":"same","newText":"agent"}]}),
+                    )
+                    .await
+            })
+        };
+        tokio::task::yield_now().await;
+        std::fs::write(&path, "external\n")?;
+        drop(lock);
+        let result = pending.await??;
+        assert_eq!(result["status"], "rejected");
+        assert_eq!(result["results"][0]["status"], "failed");
+        assert_eq!(
+            result["results"][0]["error"]["code"],
+            "file_revision_conflict"
+        );
+        assert_eq!(std::fs::read_to_string(&path)?, "external\n");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn file_batch_rejects_conflicting_same_file_guards() -> anyhow::Result<()> {
+        let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
+        let workspace = server.state.config.read().await.workspace_root.clone();
+        let path = workspace.join("batch-conflict.txt");
+        std::fs::write(&path, "same\n")?;
+        let revision = crate::file_ops::revision(&std::fs::read(&path)?);
+        let conflicting = crate::file_ops::revision(b"other\n");
+        let result = server
+            .dispatch(
+                "file.batch",
+                json!({
+                    "operations":[
+                        {"type":"edit", "mode":"replace", "path":"batch-conflict.txt", "expectedRevision":revision, "oldText":"same", "newText":"one"},
+                        {"type":"edit", "mode":"replace", "path":"./batch-conflict.txt", "expectedRevision":conflicting, "oldText":"same", "newText":"two"}
+                    ]
+                }),
+            )
+            .await?;
+        assert_eq!(result["status"], "rejected");
+        assert_eq!(result["results"][0]["status"], "failed");
+        assert_eq!(
+            result["results"][0]["error"]["code"],
+            "file_batch_guard_conflict"
+        );
+        assert_eq!(result["results"][1]["status"], "skipped");
+        assert_eq!(
+            result["results"][1]["error"]["code"],
+            "file_batch_group_rejected"
+        );
+        assert_eq!(std::fs::read_to_string(&path)?, "same\n");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn file_batch_create_then_replace_and_patch_uses_one_candidate_chain(
+    ) -> anyhow::Result<()> {
+        let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
+        let workspace = server.state.config.read().await.workspace_root.clone();
+        let path = workspace.join("batch-create.txt");
+        let result = server
+            .dispatch(
+                "file.batch",
+                json!({
+                    "operations":[
+                        {"type":"edit", "mode":"write", "path":"batch-create.txt", "expectedAbsent":true, "content":"one\n"},
+                        {"type":"edit", "mode":"replace", "path":"./batch-create.txt", "expectedAbsent":true, "oldText":"one", "newText":"two"},
+                        {"type":"edit", "mode":"patch", "path":"batch-create.txt", "expectedAbsent":true, "patch":"--- a/batch-create.txt\n+++ b/batch-create.txt\n@@ -1,1 +1,1 @@\n-two\n+three\n"}
+                    ]
+                }),
+            )
+            .await?;
+        assert_eq!(result["status"], "completed");
+        assert_eq!(result["results"][0]["result"]["status"], "created");
+        assert_eq!(result["results"][1]["result"]["status"], "updated");
+        assert_eq!(result["results"][2]["result"]["status"], "updated");
+        assert_eq!(
+            result["results"][2]["result"]["beforeRevision"],
+            result["results"][1]["result"]["afterRevision"]
+        );
+        assert_eq!(std::fs::read_to_string(&path)?, "three\n");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn file_batch_later_locator_failure_leaves_the_group_unchanged() -> anyhow::Result<()> {
+        let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
+        let workspace = server.state.config.read().await.workspace_root.clone();
+        let path = workspace.join("batch-locator.txt");
+        std::fs::write(&path, "same\n")?;
+        let revision = crate::file_ops::revision(&std::fs::read(&path)?);
+        let result = server
+            .dispatch(
+                "file.batch",
+                json!({
+                    "operations":[
+                        {"type":"edit", "mode":"replace", "path":"batch-locator.txt", "expectedRevision":revision, "oldText":"same", "newText":"one"},
+                        {"type":"edit", "mode":"replace", "path":"./batch-locator.txt", "expectedRevision":revision, "oldText":"missing", "newText":"two"}
+                    ]
+                }),
+            )
+            .await?;
+        assert_eq!(result["status"], "rejected");
+        assert_eq!(result["results"][0]["status"], "skipped");
+        assert_eq!(
+            result["results"][0]["error"]["code"],
+            "file_batch_group_rejected"
+        );
+        assert_eq!(result["results"][1]["status"], "failed");
+        assert_eq!(
+            result["results"][1]["error"]["code"],
+            "file_match_count_mismatch"
+        );
         assert_eq!(std::fs::read_to_string(&path)?, "same\n");
         Ok(())
     }

@@ -166,3 +166,28 @@
 - Runtime callers pass the cloned live limit from `Config`; config reload tests prove a valid value of 20 is applied and an invalid MCP candidate still leaves the live subset intact.
 - The schema advertises `minimum: 0` and no static maximum, while runtime output makes clipping explicit. Existing tool counts and schema budget tests remain green.
 - Final gates passed: `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo clippy -p agentic-gpt --all-targets -- -D warnings`, `git diff --check`, and all focused Phase A filters.
+
+## 2026-08-01 Phase B session start
+- Phase A is present as commit `3d0d2f8`; the worktree is clean on `main` before Phase B changes.
+- Phase B is limited to normalized file-group planning, same-file guard merging, sequential candidate application, and pre-commit/dry-run evidence. Cross-file commit/rollback cleanup remains Phase C.
+- Frozen behavior to preserve: reads/searches use the pre-edit disk snapshot (D-07), the existing confirmation/commit boundary is not redesigned here, and guarded create/overwrite/path/lock/size semantics remain authoritative.
+
+## Phase B implementation mapping
+- The current batch path rejects duplicate canonical targets in the resolution loop, then sorts one operation per target before locking and calling `batch_candidate`; this is the exact seam for replacing duplicate rejection with `HashMap<PathBuf, group_index>` construction.
+- `batch_candidate` rereads disk and validates one operation at a time. It owns base bytes/revision/mode and returns one candidate response, so it must be replaced by a group base loader plus an apply-on-current-candidate helper.
+- Existing commit code stages and renames every `BatchPreparedEdit`, then performs legacy cross-file rollback. Phase B will retain the rollback state machine but change prepared units to one final candidate per normalized file group, ensuring at most one stage/commit per group; Phase C will remove rollback and make commit failures per-group.
+- Existing response/audit code is operation-index based. Phase B can keep that envelope and populate each operation's candidate-relative `beforeRevision`/`afterRevision` while deferring compact group summaries and partial-success states to Phase C.
+- The current preflight coupling (`hard_read_error`, any resolution/guard/candidate error rejects all edits) is intentionally preserved until Phase C; Phase B should still expose the failing operation/group evidence before the global preflight return.
+
+## Phase B verification notes
+- The first compile attempt found two mechanical Rust issues in the new grouped path: array type method syntax is not accepted as the `Option::map_or` callback in this expression, and the group index vector must be cloned before applying operations mutably. Both are localized fixes; no contract decision changed.
+- After the mechanical fixes, the grouped implementation compiles and the existing file.batch filter passes all unchanged tests except the intentionally obsolete duplicate-target assertion; that test is now the migration point for Phase B same-file behavior.
+- The replacement Phase B suite now passes: normalized aliases chain over one evolving candidate, repeated base guards succeed, conflicting guards reject the group with `file_batch_guard_conflict`, create→replace→patch chains work for absent targets, and a later locator/match failure leaves the disk file unchanged with group rejection evidence.
+- Full package tests now report 231/235 passing; the four failures are unchanged sandbox permission failures in local-control socket binding, fake tunnel startup, and local download setup. All 9 file.batch tests plus all other Agent tests pass.
+
+## Phase B coverage follow-up
+- Re-read the frozen Phase B checklist before finalizing tests: the grouped engine already supports no-op candidates, byte/UTF-8 validation, and commit-time revision revalidation, but the regression suite should make those guarantees explicit rather than relying only on lower-level edit tests.
+- The no-op path is candidate-relative: an unchanged first operation preserves the base revision, later operations can still consume that candidate, and the group is physically skipped when the final candidate equals the base.
+- The commit loop revalidates each changed group immediately before staging commit; a concurrent external rewrite therefore yields `file_revision_conflict` before replacement. This remains observable coverage even while Phase B retains the legacy cross-file rollback state machine for Phase C.
+- Added deterministic coverage for a no-op followed by two alias edits, multi-byte UTF-8 candidates, an over-8 MiB create candidate, and an external rewrite while the normalized target lock is held; the focused `file_batch` suite now passes all 11 tests.
+- Final Phase B gates so far: `cargo fmt --all -- --check`, `cargo check --workspace`, and `cargo clippy -p agentic-gpt --all-targets -- -D warnings` pass. The full Agent package now runs 237 tests with 233 passing; the four failures are the same sandbox-permission-sensitive local-control/fake-tunnel/local-download tests and remain unrelated to file.batch.
