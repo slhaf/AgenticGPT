@@ -30,6 +30,7 @@ serde_json.workspace = true
 serde_yaml.workspace = true
 sha2 = "0.10"
 similar = "=3.1.1"
+sse-stream = "0.2.3"
 tokio.workspace = true
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
 urlencoding = "2.1"

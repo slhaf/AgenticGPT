@@ -16,6 +16,7 @@ use agentic_gpt_protocol::{
 };
 use anyhow::{anyhow, Context, Result};
 use clap::Subcommand;
+use futures_util::stream::BoxStream;
 use reqwest::header::{HeaderName, HeaderValue};
 use rmcp::{
     model::{
@@ -24,8 +25,11 @@ use rmcp::{
     },
     service::{PeerRequestOptions, RunningService, ServiceError},
     transport::{
-        streamable_http_client::StreamableHttpClientTransportConfig, ConfigureCommandExt,
-        StreamableHttpClientTransport, TokioChildProcess,
+        streamable_http_client::{
+            SseError, StreamableHttpClient, StreamableHttpClientTransportConfig,
+            StreamableHttpError, StreamableHttpPostResponse,
+        },
+        ConfigureCommandExt, StreamableHttpClientTransport, TokioChildProcess,
     },
     ServiceExt,
 };
@@ -106,6 +110,94 @@ struct ResolvedMcpServerConfig {
     transport: String,
     url: Option<String>,
     headers: HashMap<HeaderName, HeaderValue>,
+}
+
+#[derive(Clone)]
+struct RedactedHttpClient(reqwest::Client);
+
+#[derive(Debug)]
+struct RedactedHttpClientError;
+
+impl std::fmt::Display for RedactedHttpClientError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("downstream HTTP client error")
+    }
+}
+
+impl std::error::Error for RedactedHttpClientError {}
+
+fn redact_streamable_http_error<E>(
+    _error: StreamableHttpError<E>,
+) -> StreamableHttpError<RedactedHttpClientError>
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
+    StreamableHttpError::UnexpectedServerResponse("downstream MCP request failed".into())
+}
+
+impl StreamableHttpClient for RedactedHttpClient {
+    type Error = RedactedHttpClientError;
+
+    async fn post_message(
+        &self,
+        uri: Arc<str>,
+        message: rmcp::model::ClientJsonRpcMessage,
+        session_id: Option<Arc<str>>,
+        auth_token: Option<String>,
+        custom_headers: HashMap<HeaderName, HeaderValue>,
+    ) -> Result<StreamableHttpPostResponse, StreamableHttpError<Self::Error>> {
+        <reqwest::Client as StreamableHttpClient>::post_message(
+            &self.0,
+            uri,
+            message,
+            session_id,
+            auth_token,
+            custom_headers,
+        )
+        .await
+        .map_err(redact_streamable_http_error)
+    }
+
+    async fn delete_session(
+        &self,
+        uri: Arc<str>,
+        session: Arc<str>,
+        auth_token: Option<String>,
+        custom_headers: HashMap<HeaderName, HeaderValue>,
+    ) -> Result<(), StreamableHttpError<Self::Error>> {
+        <reqwest::Client as StreamableHttpClient>::delete_session(
+            &self.0,
+            uri,
+            session,
+            auth_token,
+            custom_headers,
+        )
+        .await
+        .map_err(redact_streamable_http_error)
+    }
+
+    async fn get_stream(
+        &self,
+        uri: Arc<str>,
+        session_id: Arc<str>,
+        last_event_id: Option<String>,
+        auth_token: Option<String>,
+        custom_headers: HashMap<HeaderName, HeaderValue>,
+    ) -> Result<
+        BoxStream<'static, Result<sse_stream::Sse, SseError>>,
+        StreamableHttpError<Self::Error>,
+    > {
+        <reqwest::Client as StreamableHttpClient>::get_stream(
+            &self.0,
+            uri,
+            session_id,
+            last_event_id,
+            auth_token,
+            custom_headers,
+        )
+        .await
+        .map_err(redact_streamable_http_error)
+    }
 }
 
 pub(crate) fn mutate_servers(config_path: PathBuf, command: McpConfigCommand) -> Result<()> {
@@ -259,6 +351,10 @@ fn url_is_loopback(url: &reqwest::Url) -> bool {
     let Some(host) = url.host_str() else {
         return false;
     };
+    let host = host
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(host);
     host.eq_ignore_ascii_case("localhost")
         || host
             .parse::<std::net::IpAddr>()
@@ -1577,17 +1673,25 @@ async fn client(server: &ResolvedMcpServerConfig) -> Result<McpClient> {
     match server.transport.as_str() {
         "streamable-http" => {
             let url = server.url.clone().context("mcp_server_url_missing")?;
-            let config = StreamableHttpClientTransportConfig::with_uri(url)
+            let config = StreamableHttpClientTransportConfig::with_uri(url.clone())
                 .custom_headers(server.headers.clone());
-            let transport = if server.headers.is_empty() {
-                StreamableHttpClientTransport::from_config(config)
-            } else {
-                let http_client = reqwest::Client::builder()
-                    .redirect(reqwest::redirect::Policy::none())
-                    .build()
-                    .map_err(|_| anyhow!("mcp_http_client_init_failed"))?;
-                StreamableHttpClientTransport::with_client(http_client, config)
-            };
+            if server.headers.is_empty() {
+                let transport = StreamableHttpClientTransport::from_config(config);
+                return Ok(ClientInfo::default().serve(transport).await?);
+            }
+            let endpoint =
+                reqwest::Url::parse(&url).map_err(|_| anyhow!("mcp_server_url_invalid"))?;
+            let mut builder = reqwest::Client::builder()
+                .pool_max_idle_per_host(0)
+                .redirect(reqwest::redirect::Policy::none());
+            if url_is_loopback(&endpoint) {
+                builder = builder.no_proxy();
+            }
+            let http_client = builder
+                .build()
+                .map_err(|_| anyhow!("mcp_http_client_init_failed"))?;
+            let transport =
+                StreamableHttpClientTransport::with_client(RedactedHttpClient(http_client), config);
             Ok(ClientInfo::default().serve(transport).await?)
         }
         "stdio" => {
@@ -1620,6 +1724,15 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
+
+    static PROXY_ENV_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+
+    async fn lock_proxy_environment() -> tokio::sync::MutexGuard<'static, ()> {
+        PROXY_ENV_LOCK
+            .get_or_init(|| tokio::sync::Mutex::new(()))
+            .lock()
+            .await
+    }
 
     fn server(transport: &str, endpoint: Option<&str>) -> McpServerConfig {
         McpServerConfig {
@@ -3035,6 +3148,123 @@ mod tests {
         (url, requests, task)
     }
 
+    async fn spawn_failing_http_mock(
+        canary: &str,
+        fail_initialize: bool,
+    ) -> (
+        String,
+        Arc<std::sync::Mutex<Vec<MockHttpRequest>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = requests.clone();
+        let canary = canary.to_string();
+        let task = tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let captured = captured.clone();
+                let canary = canary.clone();
+                tokio::spawn(async move {
+                    let Some(request) = read_http_request(&mut stream).await else {
+                        return;
+                    };
+                    let method = request.body["method"].as_str();
+                    let fail = method == Some("tools/call")
+                        || (fail_initialize && method == Some("initialize"));
+                    let response = if fail {
+                        let body = format!("downstream failure canary={canary}");
+                        format!(
+                            "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Bearer error=\"{canary}\"\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(), body
+                        )
+                    } else if request.method == "GET" {
+                        "HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                            .to_owned()
+                    } else if method == Some("notifications/initialized") {
+                        "HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                            .to_owned()
+                    } else {
+                        let result = match method {
+                            Some("initialize") => json!({
+                                "protocolVersion": "2025-06-18",
+                                "capabilities": {"tools": {}},
+                                "serverInfo": {"name": "header-failure-mock", "version": "test"}
+                            }),
+                            Some("tools/list") => json!({"tools": []}),
+                            _ => json!({}),
+                        };
+                        let body = json!({
+                            "jsonrpc": "2.0",
+                            "id": request.body.get("id").cloned().unwrap_or(Value::Null),
+                            "result": result,
+                        })
+                        .to_string();
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nMcp-Session-Id: failure-session\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(), body
+                        )
+                    };
+                    captured.lock().unwrap().push(request);
+                    let _ = stream.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        (url, requests, task)
+    }
+
+    async fn spawn_proxy_probe() -> (
+        String,
+        Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = requests.clone();
+        let task = tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let captured = captured.clone();
+                tokio::spawn(async move {
+                    let mut bytes = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    loop {
+                        let Ok(read) =
+                            timeout(Duration::from_millis(500), stream.read(&mut chunk)).await
+                        else {
+                            break;
+                        };
+                        let Ok(read) = read else {
+                            break;
+                        };
+                        if read == 0 {
+                            break;
+                        }
+                        bytes.extend_from_slice(&chunk[..read]);
+                        if bytes.windows(4).any(|window| window == b"\r\n\r\n")
+                            || bytes.len() >= 16 * 1024
+                        {
+                            break;
+                        }
+                    }
+                    captured.lock().unwrap().push(bytes);
+                    let _ = stream
+                        .write_all(
+                            b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        )
+                        .await;
+                });
+            }
+        });
+        (url, requests, task)
+    }
+
     async fn spawn_cross_origin_redirect_mocks() -> (
         String,
         Arc<std::sync::Mutex<Vec<MockHttpRequest>>>,
@@ -3156,6 +3386,7 @@ mod tests {
 
     #[tokio::test]
     async fn streamable_http_without_headers_remains_compatible() {
+        let _proxy_env_guard = lock_proxy_environment().await;
         let (url, requests, task) = spawn_http_mock().await;
         let raw = server("streamable-http", Some(&url));
         let resolved = resolve_selected_server("no-headers", &raw).unwrap();
@@ -3221,6 +3452,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn managed_mcp_downstream_failures_redact_body_headers_and_worker_diagnostics() {
+        let (state, root) = managed_test_state(2).await;
+        let canary = "mcp-downstream-canary";
+        let (url, requests, task) = spawn_failing_http_mock(canary, false).await;
+        let env_name = format!("AGENTIC_MCP_FAILURE_{}", uuid::Uuid::new_v4().simple());
+        std::env::set_var(&env_name, "Bearer failure-token");
+        {
+            let mut config = state.config.write().await;
+            let server = config.mcp_servers.get_mut("fake").unwrap();
+            server.transport = "streamable-http".to_string();
+            server.url = Some(url);
+            server
+                .headers
+                .insert("Authorization".to_string(), format!("env:{env_name}"));
+        }
+        let response = start_managed_call_with_factory(
+            &state,
+            managed_request(json!({}), 5),
+            "local:mcp.callTool",
+            None,
+            production_client_factory(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status, JobState::Failed);
+        let detail = crate::jobs::get_job_detail(&state, &response.job_id, 0)
+            .await
+            .unwrap();
+        let audit =
+            std::fs::read_to_string(root.join("workspace").join(".agentic-gpt-audit.jsonl"))
+                .unwrap();
+        assert_eq!(detail.job.state, JobState::Failed);
+        assert_eq!(detail.error.as_ref().unwrap().code, "mcp_request_failed");
+        assert!(!serde_json::to_string(&response).unwrap().contains(canary));
+        assert!(!serde_json::to_string(&detail).unwrap().contains(canary));
+        assert!(!audit.contains(canary));
+
+        let (init_url, init_requests, init_task) = spawn_failing_http_mock(canary, true).await;
+        let mut init_raw = server("streamable-http", Some(&init_url));
+        init_raw
+            .headers
+            .insert("Authorization".to_string(), format!("env:{env_name}"));
+        let init_resolved = resolve_selected_server("init-failure", &init_raw).unwrap();
+        let init_error = client(&init_resolved).await.unwrap_err();
+        let worker_diagnostic = format!("worker stderr: {init_error:?}");
+        assert!(!worker_diagnostic.contains(canary));
+
+        task.abort();
+        init_task.abort();
+        assert!(requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|request| { request.method == "POST" && request.body["method"] == "tools/call" }));
+        assert!(init_requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|request| { request.method == "POST" && request.body["method"] == "initialize" }));
+        std::env::remove_var(&env_name);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
     async fn mcp_snapshots_keep_resolved_headers_across_reload() {
         let (state, root) = managed_test_state(2).await;
         let (url, requests, task) = spawn_http_mock().await;
@@ -3236,26 +3531,33 @@ mod tests {
             server
                 .headers
                 .insert("Authorization".to_string(), format!("env:{old_name}"));
+            std::fs::write(
+                &state.config_path,
+                serde_json::to_vec_pretty(&*config).unwrap(),
+            )
+            .unwrap();
         }
         let (old_revision, old_server) = server_config_snapshot(&state, "fake").await;
         let old_server = old_server.unwrap();
-        let old_client = client(&old_server).await.unwrap();
-        assert!(old_client.list_all_tools().await.unwrap().is_empty());
-        close_client(old_client).await;
-        {
-            let mut config = state.config.write().await;
-            config
-                .mcp_servers
-                .get_mut("fake")
-                .unwrap()
-                .headers
-                .insert("Authorization".to_string(), format!("env:{new_name}"));
-        }
+
+        let mut reloaded = state.config.read().await.clone();
+        reloaded
+            .mcp_servers
+            .get_mut("fake")
+            .unwrap()
+            .headers
+            .insert("Authorization".to_string(), format!("env:{new_name}"));
+        std::fs::write(
+            &state.config_path,
+            serde_json::to_vec_pretty(&reloaded).unwrap(),
+        )
+        .unwrap();
+        crate::reload_standalone_live_config_once(&state)
+            .await
+            .unwrap();
+
         let (new_revision, new_server) = server_config_snapshot(&state, "fake").await;
         let new_server = new_server.unwrap();
-        let new_client = client(&new_server).await.unwrap();
-        assert!(new_client.list_all_tools().await.unwrap().is_empty());
-        close_client(new_client).await;
         assert_ne!(old_revision, new_revision);
         assert_eq!(
             old_server
@@ -3275,6 +3577,14 @@ mod tests {
                 .unwrap(),
             "Bearer new-token"
         );
+
+        let old_client = client(&old_server).await.unwrap();
+        assert!(old_client.list_all_tools().await.unwrap().is_empty());
+        close_client(old_client).await;
+        let new_client = client(&new_server).await.unwrap();
+        assert!(new_client.list_all_tools().await.unwrap().is_empty());
+        close_client(new_client).await;
+
         let serialized_config = serde_json::to_string(&state.config.read().await.clone()).unwrap();
         task.abort();
         let requests = requests.lock().unwrap();
@@ -3483,6 +3793,77 @@ mod tests {
                 .to_string()
                 .starts_with("mcp_header_transport_invalid")
         );
+    }
+
+    #[test]
+    fn loopback_url_detection_accepts_ipv4_ipv6_and_localhost() {
+        for endpoint in [
+            "http://127.0.0.1:3000/mcp",
+            "http://[::1]:3000/mcp",
+            "http://localhost:3000/mcp",
+        ] {
+            let url = reqwest::Url::parse(endpoint).unwrap();
+            assert!(url_is_loopback(&url), "endpoint={endpoint}");
+        }
+        let mut ipv6 = server("streamable-http", Some("http://[::1]:3000/mcp"));
+        ipv6.headers.insert(
+            "Authorization".to_string(),
+            "env:AGENTIC_MCP_IPV6".to_string(),
+        );
+        assert!(validate_server_configs(&BTreeMap::from([("ipv6".to_string(), ipv6)])).is_ok());
+        let external = reqwest::Url::parse("http://192.0.2.1:3000/mcp").unwrap();
+        assert!(!url_is_loopback(&external));
+    }
+
+    #[tokio::test]
+    async fn loopback_header_clients_bypass_system_proxy() {
+        let _proxy_env_guard = lock_proxy_environment().await;
+        let (url, target_requests, target_task) = spawn_http_mock().await;
+        let (proxy_url, proxy_requests, proxy_task) = spawn_proxy_probe().await;
+        let saved_proxy_environment = [
+            "HTTP_PROXY",
+            "http_proxy",
+            "HTTPS_PROXY",
+            "https_proxy",
+            "ALL_PROXY",
+            "all_proxy",
+            "NO_PROXY",
+            "no_proxy",
+        ]
+        .into_iter()
+        .map(|name| (name, std::env::var_os(name)))
+        .collect::<Vec<_>>();
+        for (name, _) in &saved_proxy_environment {
+            std::env::remove_var(name);
+        }
+        std::env::set_var("HTTP_PROXY", &proxy_url);
+        let env_name = format!("AGENTIC_MCP_PROXY_{}", uuid::Uuid::new_v4().simple());
+        std::env::set_var(&env_name, "Bearer proxy-canary");
+        let mut raw = server("streamable-http", Some(&url));
+        raw.headers
+            .insert("Authorization".to_string(), format!("env:{env_name}"));
+        let resolved = resolve_selected_server("proxy", &raw).unwrap();
+        let client = client(&resolved).await.unwrap();
+        assert!(client.list_all_tools().await.unwrap().is_empty());
+        close_client(client).await;
+        std::env::remove_var(&env_name);
+        for (name, value) in saved_proxy_environment {
+            if let Some(value) = value {
+                std::env::set_var(name, value);
+            } else {
+                std::env::remove_var(name);
+            }
+        }
+        proxy_task.abort();
+        target_task.abort();
+        assert!(proxy_requests.lock().unwrap().is_empty());
+        assert!(target_requests.lock().unwrap().iter().any(|request| {
+            request.method == "POST"
+                && request
+                    .headers
+                    .to_ascii_lowercase()
+                    .contains("authorization: bearer proxy-canary")
+        }));
     }
 
     #[test]

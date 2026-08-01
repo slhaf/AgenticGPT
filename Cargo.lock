@@ -33,6 +33,7 @@ dependencies = [
  "serde_yaml",
  "sha2",
  "similar",
+ "sse-stream",
  "tokio",
  "tokio-tungstenite 0.28.0",
  "urlencoding",
