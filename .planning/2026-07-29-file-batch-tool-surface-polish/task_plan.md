@@ -4,16 +4,16 @@
 Repair the real-use `file.search` / `file.batch` brittleness recorded on 2026-07-29, then audit the public Agentic tool contracts so models can select tools, build valid arguments, and interpret partial success without relying on hidden implementation knowledge. This design pass may edit planning files only.
 
 ## Workflow State
-- **Stage:** implementation_ready
-- **Current role:** designer
+- **Stage:** implementation_complete
+- **Current role:** implementer
 - **Implementation authorized:** yes
 - **Active plan:** `2026-07-29-file-batch-tool-surface-polish`
 - **Baseline:** clean `main`, aligned with `origin/main`, Agentic v0.9.0
-- **Current phase:** Phase E — in_progress
+- **Current phase:** Phase F — complete
 - **Entry phase:** Phase A
 - **Open blocking decisions:** none
 - **Design checkpoint:** user-accepted contract at 2026-07-30T11:10+08:00
-- **Next action:** encode the checked-in deterministic contract corpus, run positive cases through descriptors/serde/dispatch/dry-run, add typed negative cases, then commit Phase E independently before Phase F.
+- **Next action:** none; release actions remain separately authorized and were intentionally not performed.
 
 ## Scope and Constraints
 1. Make `file.search.contextLines` resilient to requests above the configured limit while preserving typed rejection for structurally invalid values.
@@ -181,7 +181,7 @@ Repair the real-use `file.search` / `file.batch` brittleness recorded on 2026-07
 **Completed 2026-08-01:** Added nine checked-in cases and contributor guidance; the Agent test loads them through the live descriptors, argument validation, serde, dispatch, and dry-run paths; typed negative cases cover missing revision, invalid negative context, and missing MCP server; and the optional standard-library evaluator scores provider-supplied predictions without network or credentials. Final Phase E gates pass: corpus (9/9), file.batch (14/14), full Agent (242/242 with authorized escalation), formatting/diff, workspace check, and workspace clippy.
 
 ### Phase F — Full acceptance and release boundary
-**Status:** pending.
+**Status:** complete.
 
 **Prerequisite:** Phases A–E complete.
 **Objective:** Verify all surfaces and package the behavioral migration.
@@ -189,6 +189,10 @@ Repair the real-use `file.search` / `file.batch` brittleness recorded on 2026-07
 **Verification:** focused tests per phase; full Agent, Hub, and Protocol suites; Local Unix connector E2E; standalone supervisor E2E; schema/reference/document-link checks; `cargo fmt --all --check`; `cargo check --workspace`; `cargo clippy --workspace --all-targets -- -D warnings`; `git diff --check`.
 
 **Release boundary:** recommend v0.10.0 because `file.batch` failure semantics change and legacy rollback-only states/guarantees are removed, with explicit migration and release notes. No tag/push/deploy without separate authorization.
+
+**Started 2026-08-01:** Phase E commit `90294c3` is complete. Phase F is documentation and verification only: it does not introduce a compatibility alias, release artifact, tag, push, deployment, or publication.
+
+**Completed 2026-08-01:** Added English/Chinese v0.10.0 release-boundary notes and README links. `cargo test --workspace` passed Agent 242/242, local-control 1/1, standalone supervisor 6/6, Hub 59/59, Protocol 12/12, and doc-tests 0; final formatting, workspace check, workspace clippy, diff check, and 40 local Markdown links with 0 missing targets passed. The release boundary is documented but not tagged, pushed, deployed, or published.
 
 ## Acceptance Criteria
 - `contextLines:8` succeeds under the default max 5 and reports requested 8/effective 5/clipped=true.
@@ -220,7 +224,7 @@ Repair the real-use `file.search` / `file.batch` brittleness recorded on 2026-07
 - Repository status contains planning changes only; no product source, tests, runtime configuration, dependencies, or generated artifacts changed during refinement.
 
 ## Implementation Handoff
-- **Plan maturity:** implementation_ready
+- **Plan maturity:** implementation_complete
 - **Design phase:** complete
 - **Implementation authorized:** yes
 - **Entry phase:** Phase A
@@ -230,7 +234,7 @@ Repair the real-use `file.search` / `file.batch` brittleness recorded on 2026-07
 - **Verification convention:** focused verification per phase, then the full Phase F matrix
 - **Commit convention:** one focused commit after each completed Phase A–E; Phase F acceptance/release documentation remains a separate final commit when authorized
 - **Design checkpoint:** user-accepted contract at 2026-07-30T11:10+08:00; no checkpoint commit created
-- **Next invocation:** `planning-with-files` without `refine-implementation-plan`
+- **Next invocation:** none; resume only for separately authorized release or follow-up work.
 
 ## Errors Encountered
 | Error | Attempt | Resolution |

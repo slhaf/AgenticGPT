@@ -243,6 +243,7 @@ Standalone/Local deployments upgrade `agentic-gpt` independently. Hub deployment
 - [`docs/operations.md`](docs/operations.md): local verification, Standalone-first deployment checks, Hub checks, and safety invariants.
 - [`docs/migration-v0.9.md`](docs/migration-v0.9.md): v0.8 to v0.9 migration by runtime.
 - [`docs/migration-v0.10.md`](docs/migration-v0.10.md): file.batch per-file group and partial-success migration.
+- [`docs/release-notes-v0.10.0.md`](docs/release-notes-v0.10.0.md): v0.10.0 candidate boundary and verification summary.
 - [`docs/release-notes-v0.9.0.md`](docs/release-notes-v0.9.0.md): v0.9.0 feature and verification summary.
 - [`docs/development.md`](docs/development.md): development, CI, and release publishing.
 

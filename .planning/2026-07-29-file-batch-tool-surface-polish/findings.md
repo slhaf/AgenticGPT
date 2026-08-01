@@ -235,3 +235,9 @@
 - Added `scripts/evaluate_tool_contracts.py`, a standard-library optional scorer that reads cases/predictions, treats `$...` values as wildcards, performs no provider/network/credential access, and supports `--strict` without becoming a required CI gate.
 - Corpus verification initially exposed two expectation mistakes (dry-run status and MCP server-resolution order); both were corrected to the actual frozen runtime contract. Direct `python3` evaluation listing succeeds; `uv` cache locking is sandbox-limited only.
 - Final Phase E verification is fully green: 9/9 corpus cases, 14/14 file.batch cases, 242/242 full Agent tests with escalation, formatting/diff, workspace check, and workspace clippy. Phase E is complete at D-12; no network/provider credentials were used.
+- Phase E was independently committed as `90294c3` (`test(agent): add deterministic tool contract corpus`); the worktree is clean and no release action occurred.
+- Phase F is now active. The remaining work is the full acceptance matrix and explicit v0.10 release-boundary notes, with the user instruction to stop before tag/push/deploy/publish.
+- Full workspace acceptance is green: Agent 242/242, local-control 1/1, standalone supervisor 6/6, Hub 59/59, Protocol 12/12, and doc-tests 0. Final fmt/check/clippy/diff gates pass; a local Markdown link scan checked 40 links with 0 missing targets.
+- Added `docs/release-notes-v0.10.0.md` and `.zh-CN.md` as candidate release-boundary notes. They explicitly document the v0.10 breaking migration and verification while stopping before tag/push/deploy/publish.
+- Phase F is complete; all frozen D-01 through D-13 implementation phases have independently reviewable commits.
+- Closed the active plan at `implementation_complete`; no follow-up invocation or release action is pending.

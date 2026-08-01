@@ -48,6 +48,12 @@
 - Added `tests/tool-contract-cases/cases.json` (9 cases) plus contributor instructions and the optional evaluator script. The deterministic in-tree corpus test passes after correcting dry-run/missing-server expectations.
 - `python3 scripts/evaluate_tool_contracts.py --cases tests/tool-contract-cases/cases.json` prints all 9 contracts; `uv run` was not used further because its cache lock is outside the writable sandbox.
 - Full Phase E validation passes: 9/9 deterministic corpus, 14/14 file.batch, 242/242 full Agent with authorized escalation, workspace check, workspace clippy, formatting, and diff checks. Marked Phase E complete; next is its independent commit, then Phase F acceptance.
+- Committed Phase E independently as `90294c3`; verified clean `main` and no tag/push/deploy/publish.
+- Marked Phase F `in_progress`. Next action is full workspace/connector/supervisor acceptance plus release-boundary documentation.
+- `cargo test --workspace` passed with escalation: Agent 242, local-control 1, standalone supervisor 6, Hub 59, Protocol 12, and zero doc-test failures.
+- Final `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `git diff --check`, and 40-link/0-missing Markdown scan pass.
+- Added and linked v0.10.0 English/Chinese release-boundary notes; Phase F is complete and the next action is the independent final documentation commit only.
+- Updated the canonical plan state to `implementation_complete` with no next invocation; only separately authorized release/follow-up work remains.
 
 ## 2026-08-01
 
