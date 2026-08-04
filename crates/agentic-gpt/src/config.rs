@@ -667,6 +667,31 @@ impl Config {
         self.validate_mcp_servers()
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "The upcoming explicit initializer uses this; it is intentionally not runtime startup yet."
+        )
+    )]
+    pub(crate) fn validate_hub(&self) -> Result<()> {
+        self.validate_local()?;
+        let url = reqwest::Url::parse(&self.hub_url).map_err(|_| anyhow!("hub_url_invalid"))?;
+        if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+            return Err(anyhow!("hub_url_invalid"));
+        }
+        if !matches!(self.hub_transport.as_str(), "websocket" | "sse") {
+            return Err(anyhow!("hub_transport_invalid"));
+        }
+        if self.agent_id.trim().is_empty() {
+            return Err(anyhow!("agent_id_required"));
+        }
+        if self.agent_secret.trim().is_empty() || self.agent_secret == "change-me" {
+            return Err(anyhow!("agent_secret_required"));
+        }
+        Ok(())
+    }
+
     pub(crate) fn validate_standalone(&self) -> Result<()> {
         self.validate_local()?;
         let tunnel = self

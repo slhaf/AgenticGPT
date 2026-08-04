@@ -4,6 +4,11 @@ mod bootstrap;
 mod cli_i18n;
 mod config;
 mod config_cli;
+#[expect(
+    dead_code,
+    reason = "The mode/profile template API is wired by the next planned init tasks."
+)]
+mod config_templates;
 mod confirmation;
 mod diary;
 mod exec;
@@ -107,7 +112,7 @@ enum Commands {
     },
 }
 
-#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
 enum WorkerProfile {
     Normal,
     Room,
