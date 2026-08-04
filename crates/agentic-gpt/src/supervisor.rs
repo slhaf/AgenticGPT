@@ -820,14 +820,22 @@ fn read_health_url(path: &Path) -> Option<String> {
     Some(value.to_owned())
 }
 
-async fn health_ready(base_url: &str) -> bool {
-    let client = match reqwest::Client::builder()
+fn health_client(builder: reqwest::ClientBuilder) -> Option<reqwest::Client> {
+    builder
+        .no_proxy()
         .timeout(Duration::from_secs(2))
         .build()
-    {
-        Ok(client) => client,
-        Err(_) => return false,
+        .ok()
+}
+
+async fn health_ready(base_url: &str) -> bool {
+    let Some(client) = health_client(reqwest::Client::builder()) else {
+        return false;
     };
+    health_ready_with_client(&client, base_url).await
+}
+
+async fn health_ready_with_client(client: &reqwest::Client, base_url: &str) -> bool {
     let base_url = base_url.trim_end_matches('/');
     let health = format!("{base_url}/healthz");
     let ready = format!("{base_url}/readyz");
@@ -1087,6 +1095,27 @@ mod tests {
             restart_decision(1, Some(2), &BACKOFFS),
             RestartDecision::Permanent
         );
+    }
+
+    #[tokio::test]
+    async fn health_probe_disables_configured_proxy() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let health_task = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0u8; 1024];
+                let _ = stream.read(&mut request).await;
+                let response =
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
+                let _ = stream.write_all(response).await;
+            }
+        });
+        let proxy = reqwest::Proxy::all("http://127.0.0.1:9").unwrap();
+        let client = health_client(reqwest::Client::builder().proxy(proxy)).unwrap();
+
+        assert!(health_ready_with_client(&client, &base_url).await);
+        health_task.await.unwrap();
     }
 
     #[test]
