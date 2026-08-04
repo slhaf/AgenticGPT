@@ -1,6 +1,7 @@
 mod agent_info;
 mod audit;
 mod bootstrap;
+mod cli_i18n;
 mod config;
 mod config_cli;
 mod confirmation;
@@ -28,6 +29,7 @@ mod utils;
 
 use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
+use cli_i18n::LanguageChoice;
 use config::{write_config_with_backup, Config};
 use config_cli::ConfigCommand;
 #[cfg(test)]
@@ -48,6 +50,8 @@ use utils::{config_path, ensure_parent, log_info, log_warn};
 #[command(version)]
 #[command(about = "Linux local agent for Agentic GPT")]
 struct Cli {
+    #[arg(long, global = true, value_enum, default_value_t = LanguageChoice::Auto)]
+    language: LanguageChoice,
     #[command(subcommand)]
     command: Commands,
 }
