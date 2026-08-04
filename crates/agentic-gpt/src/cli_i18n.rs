@@ -1,11 +1,3 @@
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "The catalog and runtime interfaces are wired by later planned tasks."
-    )
-)]
-
 use std::ffi::{OsStr, OsString};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
@@ -39,6 +31,20 @@ pub(crate) fn resolve_language(choice: LanguageChoice, env: &impl LocaleSource) 
             }
             UiLanguage::En
         }
+    }
+}
+
+pub(crate) fn process_language() -> UiLanguage {
+    let args = std::env::args_os().collect::<Vec<_>>();
+    let choice = prescan_language(&args).unwrap_or(LanguageChoice::Auto);
+    resolve_language(choice, &ProcessLocale)
+}
+
+struct ProcessLocale;
+
+impl LocaleSource for ProcessLocale {
+    fn get(&self, key: &str) -> Option<OsString> {
+        std::env::var_os(key)
     }
 }
 
@@ -87,6 +93,13 @@ fn normalize_locale(value: &OsStr) -> UiLanguage {
     }
 }
 
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "Remaining CLI catalog entries are reserved for later command help and init flows."
+    )
+)]
 pub(crate) struct CliText {
     pub app_about: &'static str,
     pub config_about: &'static str,

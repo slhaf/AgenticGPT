@@ -237,16 +237,21 @@ fn default_max_file_search_context_lines() -> usize {
     DEFAULT_MAX_FILE_SEARCH_CONTEXT_LINES
 }
 
+pub(crate) fn validate_max_file_search_context_lines(value: usize) -> Result<()> {
+    if value > MAX_FILE_SEARCH_CONTEXT_LINES {
+        return Err(anyhow!(
+            "maxFileSearchContextLines must be between 0 and {MAX_FILE_SEARCH_CONTEXT_LINES}"
+        ));
+    }
+    Ok(())
+}
+
 fn deserialize_max_file_search_context_lines<'de, D>(deserializer: D) -> Result<usize, D::Error>
 where
     D: Deserializer<'de>,
 {
     let value = usize::deserialize(deserializer)?;
-    if value > MAX_FILE_SEARCH_CONTEXT_LINES {
-        return Err(de::Error::custom(format!(
-            "maxFileSearchContextLines must be between 0 and {MAX_FILE_SEARCH_CONTEXT_LINES}"
-        )));
-    }
+    validate_max_file_search_context_lines(value).map_err(de::Error::custom)?;
     Ok(value)
 }
 
@@ -255,6 +260,13 @@ pub(crate) enum MaxActiveJobs {
     #[default]
     Auto,
     Explicit(usize),
+}
+
+pub(crate) fn parse_max_active_jobs(value: &str) -> Result<MaxActiveJobs> {
+    if value == "auto" {
+        return Ok(MaxActiveJobs::Auto);
+    }
+    Ok(MaxActiveJobs::Explicit(value.parse::<usize>()?))
 }
 
 impl Serialize for MaxActiveJobs {

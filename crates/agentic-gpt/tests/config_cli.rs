@@ -65,3 +65,57 @@ fn config_init_set_and_show_round_trip() {
 
     let _ = fs::remove_dir_all(root);
 }
+
+#[test]
+fn config_keys_json_lists_registry() {
+    let binary = binary_path();
+    let keys = Command::new(&binary)
+        .args(["--language", "en", "config", "keys", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        keys.status.success(),
+        "{}",
+        String::from_utf8_lossy(&keys.stderr)
+    );
+    let value: Value = serde_json::from_slice(&keys.stdout).unwrap();
+    assert!(value["keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| { entry["key"] == "limits.maxActiveJobs" }));
+}
+
+#[test]
+fn config_set_rejects_file_search_context_bound_without_writing() {
+    let root = temp_root("reject-file-search-context");
+    fs::create_dir_all(&root).unwrap();
+    let config = root.join("config.json");
+    let binary = binary_path();
+
+    let init = Command::new(&binary)
+        .args(["config", "--config"])
+        .arg(&config)
+        .arg("init")
+        .output()
+        .unwrap();
+    assert!(
+        init.status.success(),
+        "{}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+    let before = fs::read(&config).unwrap();
+
+    let set = Command::new(&binary)
+        .args(["--language", "en", "config", "--config"])
+        .arg(&config)
+        .args(["set", "limits.maxFileSearchContextLines", "101"])
+        .output()
+        .unwrap();
+    assert!(!set.status.success());
+    assert!(String::from_utf8_lossy(&set.stderr)
+        .contains("maxFileSearchContextLines must be between 0 and 100"));
+    assert_eq!(fs::read(&config).unwrap(), before);
+
+    let _ = fs::remove_dir_all(root);
+}
