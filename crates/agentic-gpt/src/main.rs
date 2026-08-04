@@ -793,7 +793,7 @@ mod tests {
         };
         assert_eq!(error.kind(), clap::error::ErrorKind::DisplayVersion);
         let rendered = error.to_string();
-        assert!(rendered.contains("agentic-gpt 0.9.0"));
+        assert!(rendered.contains("agentic-gpt 0.9.1"));
         assert!(rendered.contains(env!("CARGO_PKG_VERSION")));
     }
 
