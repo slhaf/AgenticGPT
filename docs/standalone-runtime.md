@@ -336,8 +336,13 @@ argv:
 
 ```bash
 install -d -m 700 "$HOME/.agentic_gpt/secrets"
-# Write the value using your secret manager; do not paste it into this command.
+touch "$HOME/.agentic_gpt/secrets/tunnel-api-key"
 chmod 600 "$HOME/.agentic_gpt/secrets/tunnel-api-key"
+read -rsp "Tunnel API key: " AGENTIC_TUNNEL_API_KEY
+printf '\n'
+printf '%s' "$AGENTIC_TUNNEL_API_KEY" > "$HOME/.agentic_gpt/secrets/tunnel-api-key"
+unset AGENTIC_TUNNEL_API_KEY
+
 agentic-gpt config set tunnel.tunnelId tunnel_<assigned-id>
 agentic-gpt config set tunnel.apiKey file:"$HOME/.agentic_gpt/secrets/tunnel-api-key"
 agentic-gpt config set tunnel.client.autoDownload true
