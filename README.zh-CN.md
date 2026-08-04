@@ -114,12 +114,12 @@ agentic-gpt config set confirmationProvider freedesktop
 ### 2. 通过引用保存 tunnel 密钥
 
 ```bash
-install -d -m 700 "$HOME/.config/agentic-gpt"
+install -d -m 700 "$HOME/.agentic_gpt/secrets"
 # 使用 secret manager 或受保护的编辑器写入 API key。
-chmod 600 "$HOME/.config/agentic-gpt/tunnel-api-key"
+chmod 600 "$HOME/.agentic_gpt/secrets/tunnel-api-key"
 
 agentic-gpt config set tunnel.tunnelId tunnel_<assigned-id>
-agentic-gpt config set tunnel.apiKey file:"$HOME/.config/agentic-gpt/tunnel-api-key"
+agentic-gpt config set tunnel.apiKey file:"$HOME/.agentic_gpt/secrets/tunnel-api-key"
 agentic-gpt config set tunnel.client.autoDownload true
 ```
 

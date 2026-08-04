@@ -34,12 +34,12 @@ agentic-gpt config init
 agentic-gpt config set agentId laptop
 agentic-gpt config set confirmationProvider freedesktop
 
-install -d -m 700 "$HOME/.config/agentic-gpt"
+install -d -m 700 "$HOME/.agentic_gpt/secrets"
 # 使用 secret manager 或受保护的编辑器写入 API key。
-chmod 600 "$HOME/.config/agentic-gpt/tunnel-api-key"
+chmod 600 "$HOME/.agentic_gpt/secrets/tunnel-api-key"
 
 agentic-gpt config set tunnel.tunnelId tunnel_<assigned-id>
-agentic-gpt config set tunnel.apiKey file:"$HOME/.config/agentic-gpt/tunnel-api-key"
+agentic-gpt config set tunnel.apiKey file:"$HOME/.agentic_gpt/secrets/tunnel-api-key"
 agentic-gpt config set tunnel.client.autoDownload true
 agentic-gpt run-as-standalone --profile normal
 ```
@@ -74,7 +74,7 @@ Room surface 使用 `--profile room`。
 {
   "tunnel": {
     "tunnelId": "tunnel_<assigned-id>",
-    "apiKey": "file:/home/me/.config/agentic-gpt/tunnel-api-key",
+    "apiKey": "file:/home/me/.agentic_gpt/secrets/tunnel-api-key",
     "client": {
       "version": null,
       "cacheDir": "~/.agentic_gpt/cache/tunnel-client",

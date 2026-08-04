@@ -115,12 +115,12 @@ The default config path is `~/.agentic_gpt/config.json`. Review [`config.example
 ### 2. Store the tunnel secret by reference
 
 ```bash
-install -d -m 700 "$HOME/.config/agentic-gpt"
+install -d -m 700 "$HOME/.agentic_gpt/secrets"
 # Write the API key with a secret manager or protected editor.
-chmod 600 "$HOME/.config/agentic-gpt/tunnel-api-key"
+chmod 600 "$HOME/.agentic_gpt/secrets/tunnel-api-key"
 
 agentic-gpt config set tunnel.tunnelId tunnel_<assigned-id>
-agentic-gpt config set tunnel.apiKey file:"$HOME/.config/agentic-gpt/tunnel-api-key"
+agentic-gpt config set tunnel.apiKey file:"$HOME/.agentic_gpt/secrets/tunnel-api-key"
 agentic-gpt config set tunnel.client.autoDownload true
 ```
 

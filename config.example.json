@@ -3,7 +3,7 @@
   "displayName": "agentic-gpt-linux",
   "tunnel": {
     "tunnelId": "tunnel_replace-me",
-    "apiKey": "file:/home/your-user/.config/agentic-gpt/tunnel-api-key",
+    "apiKey": "file:/home/your-user/.agentic_gpt/secrets/tunnel-api-key",
     "client": {
       "version": null,
       "cacheDir": "~/.agentic_gpt/cache/tunnel-client",

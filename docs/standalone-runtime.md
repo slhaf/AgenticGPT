@@ -249,7 +249,7 @@ A minimal standalone configuration uses references, not secret values:
 {
   "tunnel": {
     "tunnelId": "tunnel_<assigned-id>",
-    "apiKey": "file:/home/me/.config/agentic-gpt/tunnel-api-key",
+    "apiKey": "file:/home/me/.agentic_gpt/secrets/tunnel-api-key",
     "client": {
       "version": null,
       "cacheDir": "~/.agentic_gpt/cache/tunnel-client",
@@ -335,11 +335,11 @@ example, configure the path without putting the key in shell history or
 argv:
 
 ```bash
-install -d -m 700 "$HOME/.config/agentic-gpt"
+install -d -m 700 "$HOME/.agentic_gpt/secrets"
 # Write the value using your secret manager; do not paste it into this command.
-chmod 600 "$HOME/.config/agentic-gpt/tunnel-api-key"
+chmod 600 "$HOME/.agentic_gpt/secrets/tunnel-api-key"
 agentic-gpt config set tunnel.tunnelId tunnel_<assigned-id>
-agentic-gpt config set tunnel.apiKey file:"$HOME/.config/agentic-gpt/tunnel-api-key"
+agentic-gpt config set tunnel.apiKey file:"$HOME/.agentic_gpt/secrets/tunnel-api-key"
 agentic-gpt config set tunnel.client.autoDownload true
 ```
 
