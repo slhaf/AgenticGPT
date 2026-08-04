@@ -6,10 +6,10 @@ use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 
 use crate::config::{write_config_with_backup, Config, PathPolicyConfig, Rule};
+use crate::config_cli::{PathCommand, PathRootCommand, PathRootKind, RuleCommand};
 use crate::exec;
 use crate::state::CapabilityProfile;
 use crate::utils::command_preview;
-use crate::{PathCommand, PathRootCommand, PathRootKind, RuleCommand};
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize, ValueEnum)]
 #[serde(rename_all = "lowercase")]
