@@ -8,3 +8,6 @@ dist/
 .codegraph/
 
 .omo/
+
+# Local git worktrees
+.worktrees/
