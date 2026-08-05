@@ -627,7 +627,11 @@ const CONFIG_SECTION_ORDER: [ConfigSection; 8] = [
     ConfigSection::Tunnel,
 ];
 
-fn print_config_keys(section: Option<ConfigSection>, json: bool) -> Result<()> {
+fn print_config_keys(
+    section: Option<ConfigSection>,
+    json: bool,
+    language: UiLanguage,
+) -> Result<()> {
     if json {
         let output = ConfigKeysOutput {
             keys: CONFIG_KEYS
@@ -651,7 +655,6 @@ fn print_config_keys(section: Option<ConfigSection>, json: bool) -> Result<()> {
         return Ok(());
     }
 
-    let language = cli_i18n::process_language();
     println!("{}", cli_i18n::text(language).config_keys_about);
     let sections = section.map_or_else(|| CONFIG_SECTION_ORDER.to_vec(), |section| vec![section]);
     for section in sections {
@@ -1119,8 +1122,11 @@ pub(crate) enum PathRootKind {
     Deny,
 }
 
-pub(crate) async fn handle_config(config_path: PathBuf, command: ConfigCommand) -> Result<()> {
-    let language = cli_i18n::process_language();
+pub(crate) async fn handle_config(
+    config_path: PathBuf,
+    command: ConfigCommand,
+    language: UiLanguage,
+) -> Result<()> {
     match command {
         ConfigCommand::Init(args) => handle_init(&config_path, args, language)?,
         ConfigCommand::Show => {
@@ -1128,7 +1134,7 @@ pub(crate) async fn handle_config(config_path: PathBuf, command: ConfigCommand) 
             println!("{}", serde_json::to_string_pretty(&config)?);
         }
         ConfigCommand::Keys { section, json } => {
-            print_config_keys(section, json)?;
+            print_config_keys(section, json, language)?;
         }
         ConfigCommand::Set { key, value } => {
             let mut config = Config::load_or_default(&config_path)?;

@@ -11,6 +11,244 @@ fn binary_path() -> PathBuf {
         })
 }
 
+#[test]
+fn config_help_is_fully_localized_without_changing_tokens() {
+    let zh = Command::new(binary_path())
+        .args(["--language", "zh-CN", "config", "--help"])
+        .output()
+        .unwrap();
+    assert!(zh.status.success(), "Chinese config help command failed");
+    let zh = String::from_utf8(zh.stdout).unwrap();
+
+    let en = Command::new(binary_path())
+        .args(["--language", "en", "config", "--help"])
+        .output()
+        .unwrap();
+    assert!(en.status.success(), "English config help command failed");
+    let en = String::from_utf8(en.stdout).unwrap();
+
+    assert!(zh.contains("用法："));
+    assert!(zh.contains("命令："));
+    assert!(zh.contains("初始化配置"));
+    assert!(en.contains("Usage:"));
+    assert!(en.contains("Commands:"));
+    assert!(en.contains("Initialize configuration"));
+    for token in [
+        "init", "show", "set", "keys", "allow", "confirm", "deny", "path", "mcp",
+    ] {
+        assert!(zh.contains(token), "Chinese help omitted token {token}");
+        assert!(en.contains(token), "English help omitted token {token}");
+    }
+}
+
+#[test]
+fn every_visible_command_has_help() {
+    let command_paths: &[&[&str]] = &[
+        &["--help"],
+        &["run", "--help"],
+        &["run-as-room", "--help"],
+        &["run-as-standalone", "--help"],
+        &["run-as-local", "--help"],
+        &["local", "--help"],
+        &["local", "call", "--help"],
+        &["config", "--help"],
+        &["config", "init", "--help"],
+        &["config", "show", "--help"],
+        &["config", "set", "--help"],
+        &["config", "keys", "--help"],
+        &["config", "allow", "--help"],
+        &["config", "allow", "add", "--help"],
+        &["config", "allow", "remove", "--help"],
+        &["config", "confirm", "--help"],
+        &["config", "deny", "--help"],
+        &["config", "path", "--help"],
+        &["config", "path", "list", "--help"],
+        &["config", "path", "write", "--help"],
+        &["config", "path", "write", "add", "--help"],
+        &["config", "path", "readonly", "--help"],
+        &["config", "path", "deny", "--help"],
+        &["config", "mcp", "--help"],
+        &["config", "mcp", "add", "--help"],
+        &["config", "mcp", "remove", "--help"],
+        &["config", "mcp", "enable", "--help"],
+        &["config", "mcp", "disable", "--help"],
+        &["tmux", "--help"],
+        &["tmux", "list", "--help"],
+        &["tmux", "attach", "--help"],
+        &["tmux", "create", "--help"],
+        &["tmux", "close", "--help"],
+    ];
+
+    for path in command_paths {
+        for language in ["en", "zh-CN"] {
+            let mut args = vec!["--language", language];
+            args.extend(path.iter().copied());
+            let output = Command::new(binary_path()).args(args).output().unwrap();
+            assert!(
+                output.status.success(),
+                "help command failed for {language} {:?}",
+                path
+            );
+            let text = String::from_utf8(output.stdout).unwrap();
+            let headings = ["Commands:", "命令："];
+            for heading in headings {
+                let Some(start) = text.find(heading) else {
+                    continue;
+                };
+                let section = &text[start + heading.len()..];
+                let mut saw_entry = false;
+                for line in section.lines().take_while(|line| {
+                    !matches!(line.trim(), "Options:" | "选项：" | "Arguments:" | "参数：")
+                }) {
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() {
+                        if saw_entry {
+                            break;
+                        }
+                        continue;
+                    }
+                    saw_entry = true;
+                    let Some(first_whitespace) = trimmed.find(char::is_whitespace) else {
+                        panic!("command entry has no description for {language} {:?}", path);
+                    };
+                    assert!(
+                        !trimmed[first_whitespace..].trim().is_empty(),
+                        "blank command entry for {language} {:?}: {trimmed}",
+                        path
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn language_flag_is_equivalent_before_and_after_subcommand() {
+    let before = Command::new(binary_path())
+        .args(["--language", "zh-CN", "config", "init", "--help"])
+        .output()
+        .unwrap();
+    let after = Command::new(binary_path())
+        .args(["config", "init", "--language", "zh-CN", "--help"])
+        .output()
+        .unwrap();
+    assert!(before.status.success(), "language-before help failed");
+    assert!(after.status.success(), "language-after help failed");
+    assert_eq!(before.stdout, after.stdout);
+    assert!(String::from_utf8_lossy(&before.stdout).contains("用法："));
+}
+
+#[test]
+fn language_auto_detection_obeys_locale_precedence() {
+    let output = Command::new(binary_path())
+        .env_clear()
+        .env("LANG", "zh_CN.UTF-8")
+        .env("LC_MESSAGES", "zh_TW.UTF-8")
+        .env("LC_ALL", "C.UTF-8")
+        .args(["config", "--help"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "locale precedence help failed");
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Usage:"));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("用法："));
+
+    let output = Command::new(binary_path())
+        .env_clear()
+        .env("LANG", "en_US.UTF-8")
+        .env("LC_MESSAGES", "zh_CN.UTF-8")
+        .args(["config", "--help"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "LC_MESSAGES locale help failed");
+    assert!(String::from_utf8_lossy(&output.stdout).contains("用法："));
+
+    let output = Command::new(binary_path())
+        .env_clear()
+        .env("LANG", "zh_CN.UTF-8")
+        .args(["--language", "en", "config", "--help"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "explicit language help failed");
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Usage:"));
+}
+
+#[test]
+fn invalid_mode_is_localized_without_changing_valid_tokens() {
+    for language in ["en", "zh-CN"] {
+        let output = Command::new(binary_path())
+            .args(["--language", language, "config", "init", "--mode", "nope"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "invalid mode exit code changed"
+        );
+        let text = String::from_utf8_lossy(&output.stderr);
+        assert!(text.contains("nope"), "invalid value was omitted");
+        for token in ["standalone", "hub", "local"] {
+            assert!(text.contains(token), "valid token {token} was omitted");
+        }
+        if language == "zh-CN" {
+            assert!(text.contains("无效"), "Chinese invalid-value text missing");
+        } else {
+            assert!(
+                text.contains("invalid value"),
+                "English invalid-value text missing"
+            );
+        }
+    }
+}
+
+#[test]
+fn invalid_owned_parse_errors_keep_stream_and_tokens() {
+    let cases = [
+        (
+            ["config", "init", "--bogus"].as_slice(),
+            "--bogus",
+            "--bogus",
+            "意外参数",
+            "unexpected argument",
+        ),
+        (
+            ["config", "ninit"].as_slice(),
+            "ninit",
+            "ninit",
+            "无法识别的子命令",
+            "unrecognized subcommand",
+        ),
+        (
+            ["config", "set"].as_slice(),
+            "<键>",
+            "<KEY>",
+            "必需参数",
+            "required arguments",
+        ),
+    ];
+    for (args, zh_token, en_token, zh_message, en_message) in cases {
+        let zh = Command::new(binary_path())
+            .args(["--language", "zh-CN"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert_eq!(zh.status.code(), Some(2), "Chinese parse exit code changed");
+        assert!(zh
+            .stderr
+            .windows(zh_token.len())
+            .any(|window| window == zh_token.as_bytes()));
+        assert!(String::from_utf8_lossy(&zh.stderr).contains(zh_message));
+
+        let en = Command::new(binary_path())
+            .args(["--language", "en"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert_eq!(en.status.code(), Some(2), "English parse exit code changed");
+        assert!(String::from_utf8_lossy(&en.stderr).contains(en_token));
+        assert!(String::from_utf8_lossy(&en.stderr).contains(en_message));
+    }
+}
+
 fn temp_root(label: &str) -> PathBuf {
     std::env::temp_dir().join(format!(
         "agentic-config-cli-{label}-{}",

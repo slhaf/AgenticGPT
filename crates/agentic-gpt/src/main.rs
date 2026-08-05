@@ -155,7 +155,13 @@ enum TmuxCommand {
 #[tokio::main]
 async fn main() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let cli = Cli::parse();
+    let args = std::env::args_os().collect::<Vec<_>>();
+    let choice = cli_i18n::prescan_language(&args).unwrap_or(LanguageChoice::Auto);
+    let language = cli_i18n::resolve_language(choice, &cli_i18n::ProcessLocale);
+    let cli = match cli_i18n::parse_cli(args, &cli_i18n::ProcessLocale) {
+        Ok((cli, _)) => cli,
+        Err(error) => cli_i18n::exit_with_cli_error(error, language),
+    };
     match cli.command {
         Commands::Run { config } => {
             run(
@@ -184,7 +190,7 @@ async fn main() -> Result<()> {
             supervisor_token,
         } => run_stdio_worker(config, profile.capability_profile(), supervisor_token).await,
         Commands::Config { config, command } => {
-            config_cli::handle_config(config_path(config), command).await
+            config_cli::handle_config(config_path(config), command, language).await
         }
         Commands::Tmux { config, command } => handle_tmux(config_path(config), command).await,
     }
