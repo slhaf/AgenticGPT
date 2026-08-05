@@ -103,13 +103,36 @@ install -m 0755 agentic-gpt-hub ~/.local/bin/
 
 ### 1. 初始化本地配置
 
+在终端中运行 `agentic-gpt config init` 会启动交互式向导，默认选择 Standalone 模式和
+Normal 能力配置。只有当 stdin、stdout、stderr 全部都是终端时才会进入向导；管道、重定向
+的流，或显式指定 `--non-interactive` 时，会使用不提示的确定性构建流程。
+
 ```bash
 agentic-gpt config init
 agentic-gpt config set agentId laptop
 agentic-gpt config set confirmationProvider freedesktop
 ```
 
+脚本中请显式提供需要确定的值，并加上 `--non-interactive`：
+
+```bash
+agentic-gpt config init --non-interactive
+agentic-gpt config init --mode local --profile normal --non-interactive
+agentic-gpt config init \
+  --mode standalone \
+  --profile room \
+  --tunnel-id tunnel_<assigned-id> \
+  --tunnel-api-key file:"$HOME/.agentic_gpt/secrets/tunnel-api-key" \
+  --non-interactive
+```
+
+第一条命令会写入安全的 Standalone + Normal 占位配置，并报告仍待处理的 tunnel ID 与密钥
+引用步骤；它不会自动配置密钥。`--mode` 选择运行时传输方式（Standalone、Hub 或 Local），
+`--profile` 选择工具能力面（Normal 或 Room）。`--agent-secret` 会暴露在 shell 历史和本地
+进程检查中；优先使用向导的隐藏交互输入。Tunnel API key 请使用 `file:`/`env:` 引用。
+
 默认配置路径为 `~/.agentic_gpt/config.json`。开放写入根或启用 MCP server 前，请先检查 [`config.example.json`](config.example.json) 与 [`docs/configuration.zh-CN.md`](docs/configuration.zh-CN.md)。
+使用 `agentic-gpt config keys [--section <SECTION>] [--json]` 可以查看受控的 `config set` registry。
 
 ### 2. 通过引用保存 tunnel 密钥
 

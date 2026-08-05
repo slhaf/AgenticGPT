@@ -104,13 +104,39 @@ Source builds, CI, and release publishing are documented in [`docs/development.m
 
 ### 1. Initialize the local configuration
 
+On a terminal, `agentic-gpt config init` starts the interactive wizard. Its defaults are
+Standalone mode and the Normal capability profile. The wizard is selected only when stdin,
+stdout, and stderr are all terminals; a pipe, redirected stream, or `--non-interactive` uses
+the deterministic builder without prompting.
+
 ```bash
 agentic-gpt config init
 agentic-gpt config set agentId laptop
 agentic-gpt config set confirmationProvider freedesktop
 ```
 
+For scripts, pass every value that must be deterministic and add `--non-interactive`:
+
+```bash
+agentic-gpt config init --non-interactive
+agentic-gpt config init --mode local --profile normal --non-interactive
+agentic-gpt config init \
+  --mode standalone \
+  --profile room \
+  --tunnel-id tunnel_<assigned-id> \
+  --tunnel-api-key file:"$HOME/.agentic_gpt/secrets/tunnel-api-key" \
+  --non-interactive
+```
+
+The first command writes safe Standalone + Normal placeholders and reports the tunnel ID and
+secret-reference actions still pending; it does not provision a secret automatically. `--mode`
+selects the runtime transport (Standalone, Hub, or Local), while `--profile` selects the tool
+surface (Normal or Room). `--agent-secret` is visible to shell history and local process
+inspection; prefer the wizard's hidden interactive input. For tunnel API keys, use a
+`file:`/`env:` reference.
+
 The default config path is `~/.agentic_gpt/config.json`. Review [`config.example.json`](config.example.json) and [`docs/configuration.md`](docs/configuration.md) before exposing write roots or enabling MCP servers.
+Use `agentic-gpt config keys [--section <SECTION>] [--json]` to inspect the controlled `config set` registry.
 
 ### 2. Store the tunnel secret by reference
 

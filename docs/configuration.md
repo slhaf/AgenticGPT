@@ -15,6 +15,58 @@ agentic-gpt config show
 
 [`config.example.json`](../config.example.json) is a strict v0.9 superset example. It is Standalone-first, contains no usable credentials, keeps all example downstream MCP servers disabled, and includes optional Hub fields for deployments that need them.
 
+## Initializer behavior
+
+`agentic-gpt config init` is an interactive wizard only when stdin, stdout, and stderr are all
+terminals. A pipe, redirected stream, or `--non-interactive` always takes the non-interactive
+path and never waits for input. The default mode is `standalone` and the default profile is
+`normal`.
+
+Mode and profile are independent choices:
+
+- `--mode standalone|hub|local` selects the runtime connection and configuration shape.
+- `--profile normal|room` selects the capability/tool surface. Normal exposes 24 tools and Room
+  exposes 36 tools; a profile does not turn a Local runtime into a Hub runtime.
+
+For deterministic scripts, use the exact CLI grammar below and provide values that must not be
+placeholders:
+
+```bash
+agentic-gpt config init --non-interactive
+agentic-gpt config init --mode local --profile normal --non-interactive
+agentic-gpt config init \
+  --mode standalone \
+  --profile room \
+  --tunnel-id tunnel_<assigned-id> \
+  --tunnel-api-key file:"$HOME/.agentic_gpt/secrets/tunnel-api-key" \
+  --non-interactive
+```
+
+With no values supplied, the non-interactive Standalone + Normal template uses safe placeholders
+such as `tunnel_replace-me` and a `file:` reference under the Agentic home. It reports pending
+actions to replace the tunnel ID and provision the referenced secret; it does not create or
+provision secret material automatically. Hub defaults similarly report pending Hub URL and
+agent-secret actions when those values are omitted. `--agent-secret` is visible to shell history
+and local process inspection, so hidden interactive input is preferred. A `file:` or `env:`
+reference avoids putting a tunnel secret in the command line; plaintext tunnel API keys are
+rejected.
+
+The wizard asks for required values for the selected mode, then offers an optional-settings
+menu. Identity/display name, workspace/path policy, confirmation/language, limits, and sandbox
+are always available. Room settings are offered only for the Room profile. Tunnel-client
+overrides and Hub reporting are offered only for Standalone mode. Hub and Local modes do not
+show those tunnel sections. Selecting no optional sections keeps the template defaults.
+
+`config init --language auto|zh-CN|en` selects the CLI interface language. With `auto`, locale
+variables are checked in this order: `LC_ALL`, then `LC_MESSAGES`, then `LANG`, then English.
+An explicit `zh-CN` or `en` wins over the environment. This interface choice is separate from
+the persisted `confirmationLanguage`, which controls the language of confirmation prompts sent
+by the runtime and can be set through the optional wizard section or `config set`.
+
+The wizard's first-run scope deliberately excludes MCP server collections and command-policy
+collections. Configure those after initialization with `config mcp` and `config allow`,
+`config confirm`, or `config deny` (and use `config path` for path roots).
+
 ## Runtime-specific requirements
 
 | Field group | Standalone | Local Unix MCP | Hub-connected Agent |
@@ -217,7 +269,29 @@ Server ids are at most 64 bytes and use letters, digits, `.`, `_`, or `-`. `stre
 
 ## CLI-managed keys
 
-`agentic-gpt config set` supports common scalar values including:
+`config set` is a controlled registry, not a general JSONPath editor. List the registry in the
+current locale with:
+
+```text
+agentic-gpt config keys [--section <SECTION>] [--json]
+```
+
+The text form groups keys by `identity`, `hub`, `confirmation`, `sandbox`, `limits`, `skills`,
+`room`, and `tunnel`; `--section` filters to one of those names. `--json` returns machine-readable
+metadata including the value type, nullability, example, bilingual descriptions, and aliases
+(for example, `workerUrl` is an alias of `hubUrl`). Only keys in this registry are accepted by
+`config set`; structured policy and MCP collections use their dedicated commands.
+
+The value is one shell argument after the registered key. JSON list values therefore need shell
+quoting, and `room.notebookRoot` is nullable: use the literal JSON value `null` to clear it.
+
+```bash
+agentic-gpt config set sandbox.requiredRuntimePaths '["/usr","/opt/runtime"]'
+agentic-gpt config set skills.allowedHosts '["skills.example.com"]'
+agentic-gpt config set room.notebookRoot null
+```
+
+The registry includes common scalar values such as:
 
 - `agentId`, `agentSecret`, `hubUrl`, `hubTransport`, `workspaceRoot`
 - `confirmationProvider`, `confirmationLanguage`, `sandbox.enabled`
@@ -227,6 +301,17 @@ Server ids are at most 64 bytes and use letters, digits, `.`, `_`, or `-`. `stre
 - the documented `skills.*` scalar/list fields
 
 Use `config allow/confirm/deny`, `config path`, and `config mcp` for structured policy/MCP changes. Complex JSON may also be edited directly while the process is stopped, followed by `agentic-gpt config show` and a smoke test.
+
+## Secret files and transactional writes
+
+Tunnel secrets must be referenced as `file:PATH` or `env:NAME`; the `file:` path may be absolute
+or use the usual home expansion, while an environment name must be a valid shell variable name.
+The wizard's optional file writer creates the parent directory with mode `0700` and the secret
+file with mode `0600`, writes through a temporary file, and atomically renames it into place.
+If the subsequent config write fails, it removes a newly-created secret or restores the prior
+secret bytes and mode. Escape, Ctrl-C, a prompt error, or a final refusal happens before the
+transaction is committed, so no config or secret file is created or modified. Summaries,
+diagnostics, and errors never print secret values.
 
 ## Live reload versus restart
 

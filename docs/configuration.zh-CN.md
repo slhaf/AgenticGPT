@@ -15,6 +15,51 @@ agentic-gpt config show
 
 [`config.example.json`](../config.example.json) 是严格的 v0.9 superset 示例：以 Standalone 为优先入口，不包含可用凭据，示例下游 MCP server 全部保持 disabled，同时保留 Hub 模式需要的可选字段。
 
+## 初始化向导行为
+
+只有当 stdin、stdout、stderr 全部是终端时，`agentic-gpt config init` 才会启动交互式向导。
+使用管道、重定向的流，或指定 `--non-interactive` 时，命令始终走不提示的路径，不会等待
+输入。默认模式是 `standalone`，默认配置档是 `normal`。
+
+模式与配置档是两个独立选择：
+
+- `--mode standalone|hub|local` 选择运行时连接方式与配置形状。
+- `--profile normal|room` 选择能力/工具面。Normal 暴露 24 个工具，Room 暴露 36 个工具；
+  配置档不会把 Local runtime 变成 Hub runtime。
+
+脚本需要确定性结果时，请使用以下实际 CLI 语法，并提供不应保留占位符的值：
+
+```bash
+agentic-gpt config init --non-interactive
+agentic-gpt config init --mode local --profile normal --non-interactive
+agentic-gpt config init \
+  --mode standalone \
+  --profile room \
+  --tunnel-id tunnel_<assigned-id> \
+  --tunnel-api-key file:"$HOME/.agentic_gpt/secrets/tunnel-api-key" \
+  --non-interactive
+```
+
+不提供值时，非交互式 Standalone + Normal 模板使用安全占位符，例如 `tunnel_replace-me`
+以及 Agentic home 下的 `file:` 引用。命令会报告替换 tunnel ID、配置所引用密钥等待处理
+操作；不会自动创建或配置密钥材料。Hub 缺少值时同样会报告待配置的 Hub URL 与代理密钥。
+`--agent-secret` 会暴露在 shell 历史和本地进程检查中，因此优先使用交互式隐藏输入。
+使用 `file:` 或 `env:` 引用可以避免把 tunnel secret 放进命令行；明文 tunnel API key
+会被拒绝。
+
+向导先询问所选模式需要的值，然后提供可选设置菜单。身份/显示名称、工作区/路径策略、
+确认方式/语言、限制和沙箱始终可选。只有 Room 配置档会出现 Room 设置；只有 Standalone
+模式会出现 tunnel-client 覆盖和 Hub reporting。Hub 与 Local 模式不会显示这些 tunnel
+部分。不选可选部分时会保留模板默认值。
+
+`config init --language auto|zh-CN|en` 选择 CLI 界面语言。使用 `auto` 时依次检查
+`LC_ALL`、`LC_MESSAGES`、`LANG`，都没有匹配时使用 English。显式的 `zh-CN` 或 `en`
+优先于环境变量。这个界面选择与持久化的 `confirmationLanguage` 不同；后者控制 runtime
+发出的确认提示语言，可在可选向导部分或通过 `config set` 设置。
+
+首次向导刻意不包含 MCP server 集合与命令策略集合。初始化后分别使用 `config mcp`、
+`config allow`、`config confirm`、`config deny` 配置它们（路径根使用 `config path`）。
+
 ## 各 runtime 必需项
 
 | 配置组 | Standalone | Local Unix MCP | 连接 Hub 的 Agent |
@@ -217,7 +262,27 @@ Server id 最长 64 字节，只使用字母、数字、`.`、`_`、`-`。`strea
 
 ## CLI 可管理字段
 
-`agentic-gpt config set` 支持常用 scalar：
+`config set` 使用受控 registry，并不是通用 JSONPath 编辑器。使用当前语言列出 registry：
+
+```text
+agentic-gpt config keys [--section <SECTION>] [--json]
+```
+
+文本形式按 `identity`、`hub`、`confirmation`、`sandbox`、`limits`、`skills`、`room`、
+`tunnel` 分组；`--section` 只显示其中一个分组。`--json` 返回机器可读的类型、是否可为
+null、示例、双语说明和别名元数据（例如 `workerUrl` 是 `hubUrl` 的别名）。`config set`
+只接受 registry 中的键；结构化 policy 与 MCP 集合应使用专用命令。
+
+注册键后的值是一个 shell 参数。因此 JSON 列表必须加引号；`room.notebookRoot` 可为 null，
+使用字面量 JSON 值 `null` 可以清除它。
+
+```bash
+agentic-gpt config set sandbox.requiredRuntimePaths '["/usr","/opt/runtime"]'
+agentic-gpt config set skills.allowedHosts '["skills.example.com"]'
+agentic-gpt config set room.notebookRoot null
+```
+
+registry 包含以下常用 scalar：
 
 - `agentId`、`agentSecret`、`hubUrl`、`hubTransport`、`workspaceRoot`
 - `confirmationProvider`、`confirmationLanguage`、`sandbox.enabled`
@@ -227,6 +292,15 @@ Server id 最长 64 字节，只使用字母、数字、`.`、`_`、`-`。`strea
 - 文档列出的 `skills.*` scalar/list 字段
 
 结构化策略与 MCP 修改使用 `config allow/confirm/deny`、`config path`、`config mcp`。复杂 JSON 也可在进程停止时直接编辑，随后执行 `agentic-gpt config show` 与 smoke test。
+
+## 密钥文件与事务写入
+
+Tunnel secret 必须写成 `file:PATH` 或 `env:NAME` 引用；`file:` 路径可以是绝对路径或使用
+常规 home 展开，环境变量名必须是合法 shell 变量名。向导选择立即写入文件时，会以 `0700`
+创建父目录、以 `0600` 创建密钥文件，先写临时文件再原子重命名。如果之后的配置写入失败，
+会删除新建的密钥，或恢复原密钥的字节内容与权限。Escape、Ctrl-C、提示错误或最终拒绝都
+发生在事务提交之前，因此不会创建或修改配置文件或密钥文件。summary、诊断与错误不会输出
+密钥值。
 
 ## 热加载与重启边界
 
