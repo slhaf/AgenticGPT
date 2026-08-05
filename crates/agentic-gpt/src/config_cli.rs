@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Result};
 use clap::Subcommand;
@@ -9,8 +9,10 @@ use crate::{
     config::{
         self, normalize_confirmation_language, write_config_with_backup, Config, ReportingDetail,
     },
+    config_templates::{self, InitInput, InitSummary, RuntimeMode, SecretValue},
     mcp::{self, McpConfigCommand},
     policy::{self, PolicyDecision},
+    WorkerProfile,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -958,9 +960,76 @@ fn set_tunnel_hub_reporting_detail(config: &mut Config, value: &str) -> Result<(
     Ok(())
 }
 
+#[derive(clap::Args, Clone, Default)]
+pub(crate) struct ConfigInitArgs {
+    #[arg(long, value_enum)]
+    pub(crate) mode: Option<RuntimeMode>,
+    #[arg(long, value_enum)]
+    pub(crate) profile: Option<WorkerProfile>,
+    #[arg(long)]
+    pub(crate) non_interactive: bool,
+    #[arg(long)]
+    pub(crate) tunnel_id: Option<String>,
+    #[arg(long)]
+    pub(crate) tunnel_api_key: Option<String>,
+    #[arg(long)]
+    pub(crate) hub_url: Option<String>,
+    #[arg(long, value_parser = ["websocket", "sse"])]
+    pub(crate) hub_transport: Option<String>,
+    #[arg(long)]
+    pub(crate) agent_id: Option<String>,
+    #[arg(
+        long,
+        help = "Agent secret (visible to local process inspection and shell history; interactive hidden input is preferred)"
+    )]
+    pub(crate) agent_secret: Option<String>,
+}
+
+pub(crate) fn init_non_interactive(
+    config_path: &Path,
+    args: &ConfigInitArgs,
+    language: UiLanguage,
+) -> Result<InitSummary> {
+    let mut input = InitInput::non_interactive_defaults(language);
+    input.mode = args.mode.unwrap_or(input.mode);
+    input.profile = args.profile.unwrap_or(input.profile);
+    input.tunnel_id = args.tunnel_id.clone();
+    input.tunnel_api_key = args.tunnel_api_key.clone();
+    input.hub_url = args.hub_url.clone();
+    input.hub_transport = args.hub_transport.clone();
+    input.agent_id = args.agent_id.clone();
+    input.agent_secret = args
+        .agent_secret
+        .as_ref()
+        .map(|value| SecretValue::new(value.clone()));
+
+    let built = config_templates::build_config(input)?;
+    write_config_with_backup(config_path, &built.config)?;
+    Ok(InitSummary {
+        mode: built.mode,
+        profile: built.profile,
+        config_path: config_path.to_path_buf(),
+        pending: built.pending,
+    })
+}
+
+fn handle_init(config_path: &Path, args: ConfigInitArgs, language: UiLanguage) -> Result<()> {
+    // The interactive wizard will be selected here in a later task. Task 5 is deterministic.
+    let summary = init_non_interactive(config_path, &args, language)?;
+    println!(
+        "{} {}",
+        cli_i18n::text(language).initialized,
+        summary.config_path.display()
+    );
+    for action in summary.pending {
+        eprintln!("{}", cli_i18n::pending_action_text(action, language));
+    }
+    Ok(())
+}
+
 #[derive(Subcommand)]
 pub(crate) enum ConfigCommand {
-    Init,
+    Init(ConfigInitArgs),
     Show,
     Keys {
         #[arg(long, value_enum)]
@@ -1037,12 +1106,9 @@ pub(crate) enum PathRootKind {
 }
 
 pub(crate) async fn handle_config(config_path: PathBuf, command: ConfigCommand) -> Result<()> {
+    let language = cli_i18n::process_language();
     match command {
-        ConfigCommand::Init => {
-            let config = Config::default_config()?;
-            write_config_with_backup(&config_path, &config)?;
-            println!("initialized {}", config_path.display());
-        }
+        ConfigCommand::Init(args) => handle_init(&config_path, args, language)?,
         ConfigCommand::Show => {
             let config = Config::load(&config_path)?;
             println!("{}", serde_json::to_string_pretty(&config)?);

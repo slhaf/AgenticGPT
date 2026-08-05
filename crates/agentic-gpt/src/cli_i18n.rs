@@ -1,5 +1,7 @@
 use std::ffi::{OsStr, OsString};
 
+use crate::config_templates::PendingAction;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
 pub(crate) enum LanguageChoice {
     Auto,
@@ -114,6 +116,10 @@ pub(crate) struct CliText {
     pub version_flag: &'static str,
     pub cancelled: &'static str,
     pub initialized: &'static str,
+    pub replace_tunnel_id: &'static str,
+    pub provision_tunnel_secret: &'static str,
+    pub configure_hub_url: &'static str,
+    pub replace_agent_secret: &'static str,
     pub optional_settings_prompt: &'static str,
     pub safe_defaults_option: &'static str,
     pub choose_sections_option: &'static str,
@@ -133,6 +139,10 @@ pub(crate) static ZH_CN_TEXT: CliText = CliText {
     version_flag: "显示版本信息",
     cancelled: "已取消。",
     initialized: "配置已初始化。",
+    replace_tunnel_id: "下一步：替换 tunnel ID。",
+    provision_tunnel_secret: "下一步：配置 tunnel API 密钥引用。",
+    configure_hub_url: "下一步：配置 Hub URL。",
+    replace_agent_secret: "下一步：替换代理密钥。",
     optional_settings_prompt: "是否配置可选设置？",
     safe_defaults_option: "使用安全默认值",
     choose_sections_option: "选择要配置的部分",
@@ -152,6 +162,10 @@ pub(crate) static EN_TEXT: CliText = CliText {
     version_flag: "Print version information",
     cancelled: "Cancelled.",
     initialized: "Configuration initialized.",
+    replace_tunnel_id: "Next step: replace tunnel ID.",
+    provision_tunnel_secret: "Next step: provision the tunnel API secret reference.",
+    configure_hub_url: "Next step: configure the Hub URL.",
+    replace_agent_secret: "Next step: replace the agent secret.",
     optional_settings_prompt: "Configure optional settings?",
     safe_defaults_option: "Use safe defaults",
     choose_sections_option: "Choose sections to configure",
@@ -161,6 +175,16 @@ pub(crate) fn text(language: UiLanguage) -> &'static CliText {
     match language {
         UiLanguage::ZhCn => &ZH_CN_TEXT,
         UiLanguage::En => &EN_TEXT,
+    }
+}
+
+pub(crate) fn pending_action_text(action: PendingAction, language: UiLanguage) -> &'static str {
+    let catalog = text(language);
+    match action {
+        PendingAction::ReplaceTunnelId => catalog.replace_tunnel_id,
+        PendingAction::ProvisionTunnelSecret => catalog.provision_tunnel_secret,
+        PendingAction::ConfigureHubUrl => catalog.configure_hub_url,
+        PendingAction::ReplaceAgentSecret => catalog.replace_agent_secret,
     }
 }
 
@@ -239,6 +263,10 @@ mod tests {
                 catalog.version_flag,
                 catalog.cancelled,
                 catalog.initialized,
+                catalog.replace_tunnel_id,
+                catalog.provision_tunnel_secret,
+                catalog.configure_hub_url,
+                catalog.replace_agent_secret,
                 catalog.optional_settings_prompt,
                 catalog.safe_defaults_option,
                 catalog.choose_sections_option,

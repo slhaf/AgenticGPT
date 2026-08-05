@@ -667,13 +667,6 @@ impl Config {
         self.validate_mcp_servers()
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "The upcoming explicit initializer uses this; it is intentionally not runtime startup yet."
-        )
-    )]
     pub(crate) fn validate_hub(&self) -> Result<()> {
         self.validate_local()?;
         let url = reqwest::Url::parse(&self.hub_url).map_err(|_| anyhow!("hub_url_invalid"))?;
