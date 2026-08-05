@@ -1014,8 +1014,22 @@ pub(crate) fn init_non_interactive(
 }
 
 fn handle_init(config_path: &Path, args: ConfigInitArgs, language: UiLanguage) -> Result<()> {
-    // The interactive wizard will be selected here in a later task. Task 5 is deterministic.
-    let summary = init_non_interactive(config_path, &args, language)?;
+    let summary = if crate::config_wizard::process_should_use_interactive_init(args.non_interactive)
+    {
+        let mut backend = crate::config_wizard::InquirePromptBackend::new(language);
+        let outcome =
+            crate::config_wizard::run_wizard(&mut backend, args, language).map_err(|error| {
+                if error.to_string() == "config_init_cancelled" {
+                    anyhow!(cli_i18n::text(language).cancelled)
+                } else {
+                    error
+                }
+            })?;
+        crate::config_wizard::commit_wizard_outcome(config_path, outcome)?
+    } else {
+        init_non_interactive(config_path, &args, language)?
+    };
+    let _ = (summary.mode, summary.profile);
     println!(
         "{} {}",
         cli_i18n::text(language).initialized,

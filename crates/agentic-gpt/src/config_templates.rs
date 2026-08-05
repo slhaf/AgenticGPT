@@ -122,9 +122,6 @@ pub(crate) struct InitBuild {
     pub(crate) pending: Vec<PendingAction>,
 }
 
-// These fields are part of the initializer handoff and will be consumed by the
-// interactive summary in the next task.
-#[allow(dead_code)]
 pub(crate) struct InitSummary {
     pub(crate) mode: RuntimeMode,
     pub(crate) profile: WorkerProfile,
