@@ -669,13 +669,8 @@ impl Config {
 
     pub(crate) fn validate_hub(&self) -> Result<()> {
         self.validate_local()?;
-        let url = reqwest::Url::parse(&self.hub_url).map_err(|_| anyhow!("hub_url_invalid"))?;
-        if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
-            return Err(anyhow!("hub_url_invalid"));
-        }
-        if !matches!(self.hub_transport.as_str(), "websocket" | "sse") {
-            return Err(anyhow!("hub_transport_invalid"));
-        }
+        validate_hub_url_shape(&self.hub_url)?;
+        validate_hub_transport(&self.hub_transport)?;
         if self.agent_id.trim().is_empty() {
             return Err(anyhow!("agent_id_required"));
         }
@@ -713,6 +708,21 @@ impl Config {
         }
         Ok(())
     }
+}
+
+pub(crate) fn validate_hub_url_shape(value: &str) -> Result<()> {
+    let url = reqwest::Url::parse(value).map_err(|_| anyhow!("hub_url_invalid"))?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return Err(anyhow!("hub_url_invalid"));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_hub_transport(value: &str) -> Result<()> {
+    if !matches!(value, "websocket" | "sse") {
+        return Err(anyhow!("hub_transport_invalid"));
+    }
+    Ok(())
 }
 
 fn workspace_root_summary(workspace_root: &Path) -> String {
@@ -1272,5 +1282,28 @@ mod tests {
         assert!(config.validate_standalone().is_ok());
         config.tunnel.as_mut().unwrap().api_key = "secret".to_string();
         assert!(config.validate_standalone().is_err());
+    }
+
+    #[test]
+    fn hub_validation_rejects_invalid_url_and_transport_with_stable_errors() {
+        for (url, transport, expected) in [
+            ("ftp://hub.example.com", "websocket", "hub_url_invalid"),
+            (
+                "https://hub.example.com",
+                "polling",
+                "hub_transport_invalid",
+            ),
+        ] {
+            let mut config = Config::default_config().unwrap();
+            config.hub_url = url.to_string();
+            config.hub_transport = transport.to_string();
+            config.agent_secret = "configured-secret".to_string();
+            let error = config.validate_hub().unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                expected,
+                "Hub validation error code changed"
+            );
+        }
     }
 }

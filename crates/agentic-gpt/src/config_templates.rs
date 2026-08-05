@@ -5,8 +5,9 @@ use anyhow::{anyhow, Result};
 
 use crate::cli_i18n::UiLanguage;
 use crate::config::{
-    default_path_policy, Config, ConfirmationProviderConfig, HubReportingConfig, LimitsConfig,
-    PathPolicyConfig, RoomConfig, SandboxConfig, TunnelClientConfig, TunnelConfig,
+    default_path_policy, validate_hub_transport, validate_hub_url_shape, Config,
+    ConfirmationProviderConfig, HubReportingConfig, LimitsConfig, PathPolicyConfig, RoomConfig,
+    SandboxConfig, TunnelClientConfig, TunnelConfig,
 };
 use crate::utils::agentic_home;
 use crate::WorkerProfile;
@@ -313,21 +314,6 @@ fn push_pending(pending: &mut Vec<PendingAction>, action: PendingAction) {
     }
 }
 
-fn validate_hub_url_shape(value: &str) -> Result<()> {
-    let url = reqwest::Url::parse(value).map_err(|_| anyhow!("hub_url_invalid"))?;
-    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
-        return Err(anyhow!("hub_url_invalid"));
-    }
-    Ok(())
-}
-
-fn validate_hub_transport(value: &str) -> Result<()> {
-    if !matches!(value, "websocket" | "sse") {
-        return Err(anyhow!("hub_transport_invalid"));
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -487,5 +473,31 @@ mod tests {
             Err(error) => error,
         };
         assert_eq!(error.to_string(), "room_config_requires_room_profile");
+    }
+
+    #[test]
+    fn partial_hub_template_rejects_invalid_url_and_transport_with_stable_errors() {
+        for (url, transport, expected) in [
+            ("ftp://hub.example.com", "websocket", "hub_url_invalid"),
+            (
+                "https://hub.example.com",
+                "polling",
+                "hub_transport_invalid",
+            ),
+        ] {
+            let mut input = InitInput::non_interactive_defaults(UiLanguage::En);
+            input.mode = RuntimeMode::Hub;
+            input.hub_url = Some(url.to_string());
+            input.hub_transport = Some(transport.to_string());
+            let error = match build_config(input) {
+                Ok(_) => panic!("partial Hub template accepted invalid input"),
+                Err(error) => error,
+            };
+            assert_eq!(
+                error.to_string(),
+                expected,
+                "Hub template error code changed"
+            );
+        }
     }
 }
