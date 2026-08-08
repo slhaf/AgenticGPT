@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use ratatui::{
-    layout::{Constraint, Layout},
+    layout::{Constraint, Layout, Margin, Rect},
     text::{Line, Span},
     widgets::Paragraph,
     Frame,
@@ -15,9 +15,12 @@ use crate::config_templates::{
     InitSummary, OptionalSection, PendingAction, RuntimeMode, TunnelSecretSource,
 };
 use crate::tui::{
-    render_action_button, render_footer, render_header, render_inline_error, render_radio_row,
-    render_text_input_with_cursor, Theme,
+    action_line, inline_error_line, labeled_heading_line, render_action_button,
+    render_contextual_footer, render_footer, render_header, render_horizontal_rule,
+    render_inspector, render_surface, render_surface_header, render_surface_text_input_with_cursor,
+    surface_choice_line, surface_choice_value_line, surface_status_line, Theme,
 };
+use crate::WorkerProfile;
 
 use super::{ConfigPage, SystemError, TuiState};
 
@@ -134,89 +137,254 @@ fn render_basic(
     errors: &HashMap<SetupField, String>,
     progress: (usize, usize),
 ) {
-    let [header, body, actions, footer] = Layout::vertical([
-        Constraint::Length(2),
-        Constraint::Min(4),
-        Constraint::Length(2),
+    let full = frame.area();
+    let content = if full.width >= 60 && full.height >= 16 {
+        full.inner(Margin {
+            horizontal: 2,
+            vertical: 1,
+        })
+    } else {
+        full
+    };
+    let [header, top_rule, body, bottom_rule, footer] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(10),
+        Constraint::Length(1),
         Constraint::Length(1),
     ])
-    .areas(frame.area());
-    render_header(
+    .areas(content);
+    render_surface_header(
         frame,
         header,
         t(language, "AgenticGPT config init", "AgenticGPT 配置初始化"),
         &format!("{} / {}", progress.0, progress.1),
         theme,
     );
-    let mode = session.selected_mode();
-    let profile = session.selected_profile();
-    let [mode_row, mode_hint, profile_row, profile_hint, error_row] = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
+    render_horizontal_rule(frame, top_rule, theme);
+
+    let [left, _, right] = Layout::horizontal([
+        Constraint::Percentage(43),
+        Constraint::Length(2),
+        Constraint::Min(24),
     ])
     .areas(body);
-    render_radio_row(
-        frame,
-        mode_row,
-        &format!("{}  {mode:?}", t(language, "Runtime mode", "运行模式")),
-        true,
-        state.focus == 0,
-        theme,
-    );
-    frame.render_widget(
-        ratatui::widgets::Paragraph::new(t(
-            language,
-            "  Choices: Standalone / Hub / Local",
-            "  可选：Standalone / Hub / Local",
-        ))
-        .style(theme.dim),
-        mode_hint,
-    );
-    render_radio_row(
-        frame,
-        profile_row,
-        &format!(
-            "{}       {}",
-            t(language, "Profile", "能力配置"),
-            format!("{profile:?}").to_lowercase()
-        ),
-        true,
-        state.focus == 1,
-        theme,
-    );
-    frame.render_widget(
-        ratatui::widgets::Paragraph::new(t(
-            language,
-            "  Choices: normal / Room",
-            "  可选：normal / Room",
-        ))
-        .style(theme.dim),
-        profile_hint,
-    );
-    if let Some(error) = errors.get(&SetupField::Mode) {
-        let message = localized_error(error, language);
-        render_inline_error(frame, error_row, &message, theme);
-    }
-    render_action_button(
-        frame,
-        actions,
-        t(language, "Next", "下一步"),
-        state.focus >= 2,
-        theme,
-    );
-    render_footer(
+    render_basic_controls(frame, left, session, state, language, theme, errors);
+    render_surface(frame, right, theme);
+    let inspector = right.inner(Margin {
+        horizontal: 2,
+        vertical: 1,
+    });
+    let (title, body) = basic_inspector_copy(state.focus, language);
+    render_inspector(frame, inspector, title, body, theme);
+
+    render_horizontal_rule(frame, bottom_rule, theme);
+    render_contextual_footer(
         frame,
         footer,
-        t(
-            language,
-            "Enter choose · Tab move · Ctrl+C cancel",
-            "Enter 选择 · Tab 移动 · Ctrl+C 取消",
-        ),
+        &[
+            ("↑↓ j/k", t(language, "move", "移动")),
+            ("Enter/l", t(language, "choose", "选择")),
+            ("Esc/h", t(language, "back", "返回")),
+            ("Ctrl+C", t(language, "cancel", "取消")),
+        ],
         theme,
     );
+}
+
+const BASIC_MODE_FOCUS_COUNT: usize = 3;
+const BASIC_PROFILE_FOCUS_START: usize = BASIC_MODE_FOCUS_COUNT;
+const BASIC_PROFILE_FOCUS_COUNT: usize = 2;
+const BASIC_ROOM_FOCUS: usize = BASIC_PROFILE_FOCUS_START + 1;
+pub(super) const BASIC_NEXT_FOCUS: usize = BASIC_PROFILE_FOCUS_START + BASIC_PROFILE_FOCUS_COUNT;
+
+pub(super) fn basic_focus_len() -> usize {
+    BASIC_NEXT_FOCUS + 1
+}
+
+pub(super) fn basic_focus_field(focus: usize) -> Option<SetupField> {
+    match focus {
+        0..BASIC_MODE_FOCUS_COUNT => Some(SetupField::Mode),
+        BASIC_PROFILE_FOCUS_START..BASIC_NEXT_FOCUS => Some(SetupField::Profile),
+        _ => None,
+    }
+}
+
+pub(super) fn basic_mode_for_focus(focus: usize) -> Option<RuntimeMode> {
+    match focus {
+        0 => Some(RuntimeMode::Standalone),
+        1 => Some(RuntimeMode::Hub),
+        2 => Some(RuntimeMode::Local),
+        _ => None,
+    }
+}
+
+pub(super) fn basic_profile_for_focus(focus: usize) -> Option<WorkerProfile> {
+    match focus {
+        BASIC_PROFILE_FOCUS_START => Some(WorkerProfile::Normal),
+        BASIC_ROOM_FOCUS => Some(WorkerProfile::Room),
+        _ => None,
+    }
+}
+
+fn render_basic_controls(
+    frame: &mut Frame,
+    area: ratatui::layout::Rect,
+    session: &SetupSession,
+    state: &TuiState,
+    language: UiLanguage,
+    theme: &Theme,
+    errors: &HashMap<SetupField, String>,
+) {
+    let mut lines = vec![labeled_heading_line(
+        t(language, "Runtime mode", "运行模式"),
+        area.width,
+        theme,
+    )];
+    lines.push(Line::raw(""));
+    for (index, (mode, label)) in [
+        (
+            RuntimeMode::Standalone,
+            t(language, "Standalone", "Standalone"),
+        ),
+        (RuntimeMode::Hub, t(language, "Hub", "Hub")),
+        (RuntimeMode::Local, t(language, "Local", "Local")),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        lines.push(surface_choice_line(
+            label,
+            session.selected_mode() == mode,
+            state.focus == index,
+            theme,
+        ));
+    }
+
+    lines.push(Line::raw(""));
+    lines.push(labeled_heading_line(
+        t(language, "Profile", "能力配置"),
+        area.width,
+        theme,
+    ));
+    lines.push(Line::raw(""));
+    for (index, (profile, label)) in [
+        (WorkerProfile::Normal, t(language, "Normal", "Normal")),
+        (WorkerProfile::Room, t(language, "Room", "Room")),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        lines.push(surface_choice_line(
+            label,
+            session.selected_profile() == profile,
+            state.focus == BASIC_PROFILE_FOCUS_START + index,
+            theme,
+        ));
+    }
+
+    if let Some(error) = errors.get(&SetupField::Mode) {
+        lines.push(inline_error_line(&localized_error(error, language), theme));
+    }
+    if let Some(error) = errors.get(&SetupField::Profile) {
+        lines.push(inline_error_line(&localized_error(error, language), theme));
+    }
+
+    let target_next_y = area.height.saturating_sub(1) as usize;
+    if lines.len() > target_next_y {
+        lines.truncate(target_next_y);
+    } else {
+        lines.extend((0..target_next_y.saturating_sub(lines.len())).map(|_| Line::raw("")));
+    }
+    lines.push(action_line(
+        t(language, "Next", "下一步"),
+        state.focus == BASIC_NEXT_FOCUS,
+        theme,
+    ));
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+fn basic_inspector_copy(
+    focus: usize,
+    language: UiLanguage,
+) -> (&'static str, &'static [&'static str]) {
+    match focus {
+        0 => (
+            t(language, "Standalone", "Standalone"),
+            match language {
+                UiLanguage::En => &[
+                    "Agent runs independently and exposes capabilities through the Tunnel.",
+                    "Suitable for a resident Agent with remote access.",
+                ],
+                UiLanguage::ZhCn => &[
+                    "Agent 独立运行，并通过 Tunnel 暴露能力。",
+                    "适合：单机常驻 Agent 与远程接入。",
+                ],
+            },
+        ),
+        1 => (
+            t(language, "Hub", "Hub"),
+            match language {
+                UiLanguage::En => &[
+                    "Connect to a remote AgenticGPT Hub for connection management and dispatch.",
+                    "Suitable for centrally managing multiple Agents.",
+                ],
+                UiLanguage::ZhCn => &[
+                    "连接远程 AgenticGPT Hub，由 Hub 管理连接与调度。",
+                    "适合：集中管理多个 Agent。",
+                ],
+            },
+        ),
+        2 => (
+            t(language, "Local", "Local"),
+            match language {
+                UiLanguage::En => &[
+                    "Provide MCP capabilities locally without Hub or Tunnel.",
+                    "Suitable for local development and personal use.",
+                ],
+                UiLanguage::ZhCn => &[
+                    "仅在本机提供 MCP 能力，不连接 Hub 或 Tunnel。",
+                    "适合：本地开发与个人使用。",
+                ],
+            },
+        ),
+        3 => (
+            t(language, "Normal", "Normal"),
+            match language {
+                UiLanguage::En => &[
+                    "Enable the general Agent capability set.",
+                    "Keep the configuration and runtime surface compact.",
+                ],
+                UiLanguage::ZhCn => &["启用通用 Agent 能力集。", "保持配置和运行面最精简。"],
+            },
+        ),
+        4 => (
+            t(language, "Room", "Room"),
+            match language {
+                UiLanguage::En => &[
+                    "Enable Room capabilities on top of the Normal profile.",
+                    "Includes Diary, Notebook, and other long-lived context features.",
+                ],
+                UiLanguage::ZhCn => &[
+                    "在 Normal 基础上启用 Room 能力。",
+                    "包括 Diary、Notebook 等长期上下文功能。",
+                ],
+            },
+        ),
+        _ => (
+            t(language, "Next", "下一步"),
+            match language {
+                UiLanguage::En => &[
+                    "Confirm the committed choices and continue to connection settings.",
+                    "All values remain in memory until the final commit.",
+                ],
+                UiLanguage::ZhCn => &[
+                    "确认已提交的选择并进入连接设置。",
+                    "所有值仍只保存在内存中。",
+                ],
+            },
+        ),
+    }
 }
 
 fn render_connection(
@@ -228,90 +396,290 @@ fn render_connection(
     errors: &HashMap<SetupField, String>,
     progress: (usize, usize),
 ) {
-    let [header, body, actions, footer] = Layout::vertical([
-        Constraint::Length(2),
-        Constraint::Min(6),
-        Constraint::Length(2),
-        Constraint::Length(1),
-    ])
-    .areas(frame.area());
-    render_header(
+    let [header, top_rule, body, bottom_rule, footer] = surface_shell_areas(frame.area());
+    render_surface_header(
         frame,
         header,
-        t(language, "Connection settings", "连接设置"),
+        t(language, "AgenticGPT config init", "AgenticGPT 配置初始化"),
         &format!("{} / {}", progress.0, progress.1),
         theme,
     );
+    render_horizontal_rule(frame, top_rule, theme);
+    let [left, _, right] = surface_columns(body);
+
     let fields = connection_fields_for_session(session);
-    let constraints = fields
-        .iter()
-        .flat_map(|field| {
-            std::iter::once(Constraint::Length(1))
-                .chain(errors.contains_key(field).then_some(Constraint::Length(1)))
-        })
-        .chain(std::iter::once(Constraint::Min(1)))
-        .collect::<Vec<_>>();
-    let rows = Layout::vertical(constraints).split(body);
-    let mut row_index = 0;
+    let mut cursor = left.y;
+    render_surface_heading(
+        frame,
+        left,
+        &mut cursor,
+        t(language, "Connection", "连接"),
+        theme,
+    );
+    render_surface_blank(left, &mut cursor, frame);
     for (index, field) in fields.iter().enumerate() {
         let focused = state.focus == index;
         let confirmed_value = connection_value(session, *field);
         let value = confirmed_value.as_deref().unwrap_or_default();
-        if matches!(
-            field,
-            SetupField::TunnelSecretSource | SetupField::ProvisionTunnelSecret
-        ) {
-            render_radio_row(
-                frame,
-                rows[row_index],
-                &connection_label(*field, Some(value), language),
-                match field {
-                    SetupField::TunnelSecretSource => true,
-                    SetupField::ProvisionTunnelSecret => value == "true",
-                    _ => false,
-                },
-                focused,
-                theme,
-            );
-        } else {
-            render_text_input_with_cursor(
-                frame,
-                rows[row_index],
-                &connection_label(*field, Some(value), language),
-                current_input_value(state, *field, value),
-                focused,
-                matches!(
-                    field,
-                    SetupField::TunnelSecretValue | SetupField::AgentSecret
-                ),
-                editing_cursor(state, *field),
-                theme,
-            );
+        let label = connection_label(*field, None, language);
+        if let Some(row) = next_surface_row(left, &mut cursor) {
+            if *field == SetupField::ProvisionTunnelSecret {
+                frame.render_widget(
+                    Paragraph::new(surface_choice_value_line(
+                        &label,
+                        if value == "true" {
+                            t(language, "on", "开")
+                        } else {
+                            t(language, "off", "关")
+                        },
+                        value == "true",
+                        focused,
+                        theme,
+                    )),
+                    row,
+                );
+            } else if *field == SetupField::TunnelSecretSource {
+                frame.render_widget(
+                    Paragraph::new(surface_choice_value_line(
+                        &label, value, true, focused, theme,
+                    )),
+                    row,
+                );
+            } else {
+                render_surface_text_input_with_cursor(
+                    frame,
+                    row,
+                    &label,
+                    current_input_value(state, *field, value),
+                    focused,
+                    matches!(
+                        field,
+                        SetupField::TunnelSecretValue | SetupField::AgentSecret
+                    ),
+                    editing_cursor(state, *field),
+                    theme,
+                );
+            }
         }
-        row_index += 1;
         if let Some(error) = errors.get(field) {
-            let message = localized_error(error, language);
-            render_inline_error(frame, rows[row_index], &message, theme);
-            row_index += 1;
+            if let Some(row) = next_surface_row(left, &mut cursor) {
+                let message = localized_error(error, language);
+                frame.render_widget(Paragraph::new(inline_error_line(&message, theme)), row);
+            }
         }
     }
-    render_action_button(
+    render_surface_action(
         frame,
-        actions,
+        left,
         t(language, "Next", "下一步"),
         state.focus >= fields.len(),
         theme,
     );
-    render_footer(
+
+    if right.width > 0 {
+        render_surface(frame, right, theme);
+        let inspector = right.inner(Margin {
+            horizontal: 2,
+            vertical: 1,
+        });
+        let field = fields.get(state.focus).copied();
+        let title = field
+            .map(|field| connection_label(field, None, language))
+            .unwrap_or_else(|| t(language, "Next", "下一步").to_string());
+        let body = connection_inspector_body(field, language);
+        render_inspector(frame, inspector, &title, body, theme);
+    }
+    render_horizontal_rule(frame, bottom_rule, theme);
+    render_surface_footer(
         frame,
         footer,
-        t(
-            language,
-            "Enter edit · Esc back · Ctrl+C cancel",
-            "Enter 编辑 · Esc 返回 · Ctrl+C 取消",
-        ),
+        state.editing.is_some(),
+        state.focus >= fields.len(),
+        language,
         theme,
     );
+}
+
+fn surface_shell_areas(area: Rect) -> [Rect; 5] {
+    let content = if area.width >= 60 && area.height >= 16 {
+        area.inner(Margin {
+            horizontal: 2,
+            vertical: 1,
+        })
+    } else {
+        area
+    };
+    Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(8),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(content)
+}
+
+fn surface_columns(body: Rect) -> [Rect; 3] {
+    if body.width < 66 {
+        [body, Rect::default(), Rect::default()]
+    } else {
+        Layout::horizontal([
+            Constraint::Min(40),
+            Constraint::Length(2),
+            Constraint::Min(24),
+        ])
+        .areas(body)
+    }
+}
+
+fn next_surface_row(area: Rect, cursor: &mut u16) -> Option<Rect> {
+    let action_y = area.y + area.height.saturating_sub(1);
+    if *cursor >= action_y {
+        return None;
+    }
+    let row = Rect {
+        x: area.x,
+        y: *cursor,
+        width: area.width,
+        height: 1,
+    };
+    *cursor = (*cursor).saturating_add(1);
+    Some(row)
+}
+
+fn render_surface_heading(
+    frame: &mut Frame,
+    area: Rect,
+    cursor: &mut u16,
+    label: &str,
+    theme: &Theme,
+) {
+    if let Some(row) = next_surface_row(area, cursor) {
+        frame.render_widget(
+            Paragraph::new(labeled_heading_line(label, area.width, theme)),
+            row,
+        );
+    }
+}
+
+fn render_surface_blank(area: Rect, cursor: &mut u16, frame: &mut Frame) {
+    if let Some(row) = next_surface_row(area, cursor) {
+        frame.render_widget(Paragraph::new(""), row);
+    }
+}
+
+fn render_surface_action(frame: &mut Frame, area: Rect, label: &str, focused: bool, theme: &Theme) {
+    let row = Rect {
+        x: area.x,
+        y: area.y + area.height.saturating_sub(1),
+        width: area.width,
+        height: 1,
+    };
+    frame.render_widget(Paragraph::new(action_line(label, focused, theme)), row);
+}
+
+fn render_surface_footer(
+    frame: &mut Frame,
+    area: Rect,
+    editing: bool,
+    action_focused: bool,
+    language: UiLanguage,
+    theme: &Theme,
+) {
+    let hints: Vec<(&str, &str)> = if editing {
+        vec![
+            ("Enter", t(language, "confirm", "确认")),
+            ("Esc", t(language, "discard", "放弃")),
+            ("Ctrl+C", t(language, "cancel", "取消")),
+        ]
+    } else if action_focused {
+        vec![
+            ("Enter/l", t(language, "continue", "继续")),
+            ("Esc/h", t(language, "back", "返回")),
+            ("Ctrl+C", t(language, "cancel", "取消")),
+        ]
+    } else {
+        vec![
+            ("↑↓ j/k", t(language, "move", "移动")),
+            ("Enter/l", t(language, "edit", "编辑")),
+            ("Esc/h", t(language, "back", "返回")),
+            ("Ctrl+C", t(language, "cancel", "取消")),
+        ]
+    };
+    render_contextual_footer(frame, area, &hints, theme);
+}
+
+fn connection_inspector_body(
+    field: Option<SetupField>,
+    language: UiLanguage,
+) -> &'static [&'static str] {
+    match field {
+        Some(SetupField::TunnelId) => match language {
+            UiLanguage::En => &[
+                "Stable identifier used by the Tunnel.",
+                "Keep it short and reusable.",
+            ],
+            UiLanguage::ZhCn => &["Tunnel 使用的稳定标识。", "建议保持简短并长期复用。"],
+        },
+        Some(SetupField::TunnelSecretSource) => match language {
+            UiLanguage::En => &[
+                "Choose a file or environment reference.",
+                "Secret contents stay masked.",
+            ],
+            UiLanguage::ZhCn => &["选择文件或环境变量引用。", "密钥内容始终保持隐藏。"],
+        },
+        Some(SetupField::TunnelSecretPath | SetupField::TunnelSecretEnvironment) => {
+            match language {
+                UiLanguage::En => &[
+                    "Only the reference is shown here.",
+                    "The secret itself is never rendered.",
+                ],
+                UiLanguage::ZhCn => &["这里仅显示引用位置。", "密钥本身不会被渲染。"],
+            }
+        }
+        Some(SetupField::ProvisionTunnelSecret | SetupField::TunnelSecretValue) => match language {
+            UiLanguage::En => &[
+                "Provisioning is staged until final write.",
+                "Input remains masked while editing.",
+            ],
+            UiLanguage::ZhCn => &["写入动作会暂存到最终提交。", "编辑时输入始终隐藏。"],
+        },
+        Some(SetupField::HubUrl) => match language {
+            UiLanguage::En => &[
+                "Remote Hub endpoint used for dispatch.",
+                "Validation runs before leaving this page.",
+            ],
+            UiLanguage::ZhCn => &["用于调度的远程 Hub 地址。", "离开页面前会执行验证。"],
+        },
+        Some(SetupField::HubTransport) => match language {
+            UiLanguage::En => &[
+                "Transport used to reach the Hub.",
+                "Keep the existing setup semantics.",
+            ],
+            UiLanguage::ZhCn => &["访问 Hub 所使用的传输方式。", "保持现有配置语义。"],
+        },
+        Some(SetupField::AgentId) => match language {
+            UiLanguage::En => &[
+                "Stable identity presented to the Hub.",
+                "It is safe to edit before commit.",
+            ],
+            UiLanguage::ZhCn => &["向 Hub 呈现的稳定身份。", "提交前可以安全编辑。"],
+        },
+        Some(SetupField::AgentSecret) => match language {
+            UiLanguage::En => &[
+                "Credential for Hub authentication.",
+                "The value is never displayed.",
+            ],
+            UiLanguage::ZhCn => &["用于 Hub 身份验证的凭据。", "值不会显示出来。"],
+        },
+        _ => match language {
+            UiLanguage::En => &[
+                "Selections are staged in memory.",
+                "Validation remains authoritative.",
+            ],
+            UiLanguage::ZhCn => &["选择会暂存在内存中。", "验证逻辑保持不变。"],
+        },
+    }
 }
 
 pub(super) fn connection_fields_for_session(session: &SetupSession) -> Vec<SetupField> {
@@ -342,14 +710,10 @@ pub(super) fn connection_fields_for_session(session: &SetupSession) -> Vec<Setup
     }
 }
 
-fn connection_label(field: SetupField, value: Option<&str>, language: UiLanguage) -> String {
+fn connection_label(field: SetupField, _value: Option<&str>, language: UiLanguage) -> String {
     match field {
         SetupField::TunnelId => t(language, "Tunnel ID", "隧道 ID").to_string(),
-        SetupField::TunnelSecretSource => format!(
-            "{}: {}",
-            t(language, "Secret source", "密钥来源"),
-            value.unwrap_or("file")
-        ),
+        SetupField::TunnelSecretSource => t(language, "Secret source", "密钥来源").to_string(),
         SetupField::TunnelSecretPath => t(language, "Secret file", "密钥文件").to_string(),
         SetupField::TunnelSecretEnvironment => {
             t(language, "Secret environment", "密钥环境变量").to_string()
@@ -405,62 +769,72 @@ fn render_optional_center(
     theme: &Theme,
     progress: (usize, usize),
 ) {
-    let [header, body, actions, footer] = Layout::vertical([
-        Constraint::Length(2),
-        Constraint::Min(8),
-        Constraint::Length(2),
-        Constraint::Length(1),
-    ])
-    .areas(frame.area());
-    render_header(
+    let [header, top_rule, body, bottom_rule, footer] = surface_shell_areas(frame.area());
+    render_surface_header(
         frame,
         header,
-        t(language, "Optional settings", "可选配置"),
+        t(language, "AgenticGPT config init", "AgenticGPT 配置初始化"),
         &format!("{} / {}", progress.0, progress.1),
         theme,
     );
+    render_horizontal_rule(frame, top_rule, theme);
+    let [left, _, right] = surface_columns(body);
 
     let sections = all_optional_sections();
-    let rows =
-        Layout::vertical(std::iter::repeat_n(Constraint::Length(1), sections.len())).split(body);
     let focusable = session.available_optional_sections();
-    for (index, section) in sections.iter().enumerate() {
-        let status = session.section_status(*section);
-        let applicable_index = focusable.iter().position(|candidate| candidate == section);
-        let focused = applicable_index == Some(state.focus);
-        let style = match status {
-            SectionStatus::NotApplicable => theme.disabled,
-            _ if focused => theme.focus,
-            _ => theme.normal,
-        };
-        let prefix = if focused { "› " } else { "  " };
-        frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(prefix, style),
-                Span::styled(section_label(*section, language), style),
-                Span::styled(
-                    format!("  [{}]", section_status_label(status, language)),
-                    style,
-                ),
-            ])),
-            rows[index],
-        );
-    }
-    render_action_button(
+    let mut cursor = left.y;
+    render_surface_heading(
         frame,
-        actions,
+        left,
+        &mut cursor,
+        t(language, "Optional settings", "可选配置"),
+        theme,
+    );
+    render_surface_blank(left, &mut cursor, frame);
+    for section in sections {
+        let status = session.section_status(section);
+        let applicable_index = focusable.iter().position(|candidate| *candidate == section);
+        let focused = applicable_index == Some(state.focus);
+        if let Some(row) = next_surface_row(left, &mut cursor) {
+            frame.render_widget(
+                Paragraph::new(surface_status_line(
+                    section_label(section, language),
+                    section_status_label(status, language),
+                    focused,
+                    status == SectionStatus::NotApplicable,
+                    theme,
+                )),
+                row,
+            );
+        }
+    }
+    render_surface_action(
+        frame,
+        left,
         t(language, "Finish and continue", "完成并继续"),
         state.focus >= focusable.len(),
         theme,
     );
-    render_footer(
+    if right.width > 0 {
+        render_surface(frame, right, theme);
+        let inspector = right.inner(Margin {
+            horizontal: 2,
+            vertical: 1,
+        });
+        let section = focusable.get(state.focus).copied();
+        let title = section
+            .map(|section| section_label(section, language))
+            .unwrap_or_else(|| t(language, "Optional settings", "可选配置"));
+        let body = optional_center_inspector_body(section, language);
+        render_inspector(frame, inspector, title, body, theme);
+    }
+    render_horizontal_rule(frame, bottom_rule, theme);
+    render_surface_footer(
         frame,
         footer,
-        t(
-            language,
-            "Enter open/save · Tab move · Esc back · Ctrl+C cancel",
-            "Enter 打开/保存 · Tab 移动 · Esc 返回 · Ctrl+C 取消",
-        ),
+        false,
+        state.focus >= focusable.len(),
+        language,
         theme,
     );
 }
@@ -477,87 +851,211 @@ fn render_optional_form(
     section_draft: Option<&OptionalSectionDraft>,
     progress: (usize, usize),
 ) {
-    let [header, body, actions, footer] = Layout::vertical([
-        Constraint::Length(2),
-        Constraint::Min(4),
-        Constraint::Length(2),
-        Constraint::Length(1),
-    ])
-    .areas(frame.area());
-    render_header(
+    let [header, top_rule, body, bottom_rule, footer] = surface_shell_areas(frame.area());
+    render_surface_header(
         frame,
         header,
-        &format!(
-            "{} {}",
-            section_label(section, language),
-            t(language, "settings", "配置")
-        ),
+        t(language, "AgenticGPT config init", "AgenticGPT 配置初始化"),
         &format!("{} / {}", progress.0, progress.1),
         theme,
     );
+    render_horizontal_rule(frame, top_rule, theme);
+    let [left, _, right] = surface_columns(body);
 
     let fallback = session.optional_draft(section);
     let draft = section_draft.unwrap_or(&fallback);
     let fields = optional_fields(section);
-    let constraints = fields
-        .iter()
-        .flat_map(|field| {
-            std::iter::once(Constraint::Length(1))
-                .chain(errors.contains_key(field).then_some(Constraint::Length(1)))
-        })
-        .chain(std::iter::once(Constraint::Min(1)))
-        .collect::<Vec<_>>();
-    let rows = Layout::vertical(constraints).split(body);
-    let mut row_index = 0;
+    let mut cursor = left.y;
+    let section_heading = format!(
+        "{} {}",
+        section_label(section, language),
+        t(language, "settings", "配置")
+    );
+    render_surface_heading(frame, left, &mut cursor, &section_heading, theme);
+    render_surface_blank(left, &mut cursor, frame);
     for (index, field) in fields.iter().enumerate() {
+        if let Some(subheading) = optional_subheading(section, *field, language) {
+            render_surface_heading(frame, left, &mut cursor, subheading, theme);
+        }
         let value = optional_field_value(draft, *field);
         let value = current_input_value(state, *field, &value);
         let focused = state.focus == index;
-        if optional_field_is_toggle(*field) {
-            render_radio_row(
-                frame,
-                rows[row_index],
-                &format!("{}  {}", optional_field_label(*field, language), value),
-                value == "true",
-                focused,
-                theme,
-            );
-        } else {
-            render_text_input_with_cursor(
-                frame,
-                rows[row_index],
-                optional_field_label(*field, language),
-                value,
-                focused,
-                false,
-                editing_cursor(state, *field),
-                theme,
-            );
+        if let Some(row) = next_surface_row(left, &mut cursor) {
+            if *field == SetupField::MaxActiveJobs {
+                let display = if value == "auto" {
+                    t(language, "Auto", "自动").to_string()
+                } else {
+                    format!("{}: {value}", t(language, "Custom", "自定义"))
+                };
+                frame.render_widget(
+                    Paragraph::new(surface_choice_value_line(
+                        optional_field_label(*field, language),
+                        &display,
+                        value == "auto",
+                        focused,
+                        theme,
+                    )),
+                    row,
+                );
+            } else if optional_field_is_toggle(*field) {
+                frame.render_widget(
+                    Paragraph::new(surface_choice_value_line(
+                        optional_field_label(*field, language),
+                        if value == "true" {
+                            t(language, "on", "开")
+                        } else {
+                            t(language, "off", "关")
+                        },
+                        value == "true",
+                        focused,
+                        theme,
+                    )),
+                    row,
+                );
+            } else {
+                render_surface_text_input_with_cursor(
+                    frame,
+                    row,
+                    optional_field_label(*field, language),
+                    value,
+                    focused,
+                    false,
+                    editing_cursor(state, *field),
+                    theme,
+                );
+            }
         }
-        row_index += 1;
         if let Some(error) = errors.get(field) {
-            let message = localized_error(error, language);
-            render_inline_error(frame, rows[row_index], &message, theme);
-            row_index += 1;
+            if let Some(row) = next_surface_row(left, &mut cursor) {
+                let message = localized_error(error, language);
+                frame.render_widget(Paragraph::new(inline_error_line(&message, theme)), row);
+            }
         }
     }
-    render_action_button(
+    render_surface_action(
         frame,
-        actions,
+        left,
         t(language, "Save and return", "保存并返回"),
         state.focus >= fields.len(),
         theme,
     );
-    render_footer(
+    if right.width > 0 {
+        render_surface(frame, right, theme);
+        let inspector = right.inner(Margin {
+            horizontal: 2,
+            vertical: 1,
+        });
+        let field = fields.get(state.focus).copied();
+        let title = field
+            .map(|field| optional_field_label(field, language))
+            .unwrap_or_else(|| section_label(section, language));
+        let inspector_body = optional_form_inspector_body(section, field, language);
+        render_inspector(frame, inspector, title, inspector_body, theme);
+    }
+    render_horizontal_rule(frame, bottom_rule, theme);
+    render_surface_footer(
         frame,
         footer,
-        t(
-            language,
-            "Enter edit/toggle · Esc discard · Ctrl+C cancel",
-            "Enter 编辑/切换 · Esc 放弃 · Ctrl+C 取消",
-        ),
+        state.editing.is_some(),
+        state.focus >= fields.len(),
+        language,
         theme,
     );
+}
+
+fn optional_center_inspector_body(
+    section: Option<OptionalSection>,
+    language: UiLanguage,
+) -> &'static [&'static str] {
+    match section {
+        Some(section) => match language {
+            UiLanguage::En => match section {
+                OptionalSection::Identity => &["Set a stable display name for this agent."],
+                OptionalSection::Workspace => &["Keep path policy values explicit and reviewable."],
+                OptionalSection::Confirmation => {
+                    &["Choose the confirmation provider and language."]
+                }
+                OptionalSection::Limits => &["Tune concurrency and search limits."],
+                OptionalSection::Sandbox => &["Control sandbox execution and runtime paths."],
+                OptionalSection::Room => &["Configure long-lived Room context."],
+                OptionalSection::TunnelClient => &["Configure the managed Tunnel client."],
+                OptionalSection::HubReporting => &["Choose Hub reporting behavior."],
+            },
+            UiLanguage::ZhCn => match section {
+                OptionalSection::Identity => &["为 Agent 设置稳定的显示名称。"],
+                OptionalSection::Workspace => &["路径策略保持明确且可复核。"],
+                OptionalSection::Confirmation => &["选择确认提供方和语言。"],
+                OptionalSection::Limits => &["调整并发和搜索限制。"],
+                OptionalSection::Sandbox => &["控制沙箱执行和运行时路径。"],
+                OptionalSection::Room => &["配置长期 Room 上下文。"],
+                OptionalSection::TunnelClient => &["配置托管的 Tunnel 客户端。"],
+                OptionalSection::HubReporting => &["选择 Hub 报告行为。"],
+            },
+        },
+        None => match language {
+            UiLanguage::En => &["Select an applicable section to configure."],
+            UiLanguage::ZhCn => &["选择一个适用的配置区块。"],
+        },
+    }
+}
+
+fn optional_subheading(
+    section: OptionalSection,
+    field: SetupField,
+    language: UiLanguage,
+) -> Option<&'static str> {
+    match section {
+        OptionalSection::Limits if field == SetupField::MaxConcurrentTasks => {
+            Some(t(language, "Task concurrency", "任务并发"))
+        }
+        OptionalSection::Limits if field == SetupField::MaxFileSearchContextLines => {
+            Some(t(language, "Search", "搜索"))
+        }
+        _ => None,
+    }
+}
+
+fn optional_form_inspector_body(
+    section: OptionalSection,
+    field: Option<SetupField>,
+    language: UiLanguage,
+) -> &'static [&'static str] {
+    match field {
+        Some(field) => match language {
+            UiLanguage::En => match field {
+                SetupField::DisplayName => &["A human-readable identity for this agent."],
+                SetupField::MaxConcurrentTasks | SetupField::MaxActiveJobs => {
+                    &["Numeric limits are validated before save."]
+                }
+                SetupField::MaxFileSearchContextLines => &["Controls search context size."],
+                SetupField::SandboxEnabled
+                | SetupField::TunnelAutoDownload
+                | SetupField::HubReportingEnabled => &["Toggle the staged value with Enter or l."],
+                _ => &["Edit the staged value; validation remains authoritative."],
+            },
+            UiLanguage::ZhCn => match field {
+                SetupField::DisplayName => &["用于标识 Agent 的可读名称。"],
+                SetupField::MaxConcurrentTasks | SetupField::MaxActiveJobs => {
+                    &["保存前会验证数值限制。"]
+                }
+                SetupField::MaxFileSearchContextLines => &["控制搜索上下文大小。"],
+                SetupField::SandboxEnabled
+                | SetupField::TunnelAutoDownload
+                | SetupField::HubReportingEnabled => &["按 Enter 或 l 切换暂存值。"],
+                _ => &["编辑暂存值；验证逻辑保持不变。"],
+            },
+        },
+        None => match language {
+            UiLanguage::En => match section {
+                OptionalSection::Limits => &["Numeric and Auto/Custom-style values remain staged."],
+                _ => &["Values remain staged until this section is saved."],
+            },
+            UiLanguage::ZhCn => match section {
+                OptionalSection::Limits => &["数值和 Auto/Custom 风格的值会暂存。"],
+                _ => &["值会暂存到保存此区块为止。"],
+            },
+        },
+    }
 }
 
 fn current_input_value<'a>(state: &'a TuiState, field: SetupField, confirmed: &'a str) -> &'a str {
@@ -1212,9 +1710,14 @@ mod tests {
         assert!(rendered.contains("Standalone"));
         assert!(rendered.contains("Hub"));
         assert!(rendered.contains("Local"));
-        assert!(rendered.contains("normal"));
+        assert!(rendered.contains("Normal"));
         assert!(rendered.contains("Room"));
         assert!(rendered.contains("Ctrl+C"));
+        assert!(rendered.contains("── Runtime mode"));
+        assert!(rendered.contains("── Profile"));
+        assert!(rendered.contains("❯"));
+        assert!(rendered.contains(""));
+        assert!(rendered.contains("Suitable for a resident Agent"));
     }
 
     #[test]

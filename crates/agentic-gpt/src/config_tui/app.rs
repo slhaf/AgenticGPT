@@ -161,9 +161,7 @@ impl ConfigTuiApp {
 
     pub(crate) fn focused_field(&self) -> Option<SetupField> {
         match self.state.page {
-            ConfigPage::Basic => [SetupField::Mode, SetupField::Profile]
-                .get(self.state.focus)
-                .copied(),
+            ConfigPage::Basic => pages::basic_focus_field(self.state.focus),
             ConfigPage::Connection => pages::connection_fields_for_session(self.session())
                 .get(self.state.focus)
                 .copied(),
@@ -339,6 +337,24 @@ impl ConfigTuiApp {
             KeyCode::BackTab => self.handle_action(TuiAction::MovePrevious),
             KeyCode::Down | KeyCode::Right => self.handle_action(TuiAction::MoveNext),
             KeyCode::Up | KeyCode::Left => self.handle_action(TuiAction::MovePrevious),
+            KeyCode::Char('j') if self.state.page != ConfigPage::Review => {
+                self.handle_action(TuiAction::MoveNext)
+            }
+            KeyCode::Char('k') if self.state.page != ConfigPage::Review => {
+                self.handle_action(TuiAction::MovePrevious)
+            }
+            KeyCode::Char('l') if self.state.page != ConfigPage::Review => {
+                if matches!(self.state.page, ConfigPage::OptionalCenter)
+                    || self.focused_field().is_some()
+                {
+                    self.handle_action(TuiAction::Activate)
+                } else {
+                    self.handle_action(TuiAction::Next)
+                }
+            }
+            KeyCode::Char('h') if self.state.page != ConfigPage::Review => {
+                self.handle_action(TuiAction::Back)
+            }
             _ => Ok(()),
         }
     }
@@ -412,22 +428,16 @@ impl ConfigTuiApp {
         }
         match field {
             SetupField::Mode => {
-                let next = match self.session().selected_mode() {
-                    RuntimeMode::Standalone => RuntimeMode::Hub,
-                    RuntimeMode::Hub => RuntimeMode::Local,
-                    RuntimeMode::Local => RuntimeMode::Standalone,
-                };
-                self.session_mut().set_mode(next);
-                self.navigation.set_mode(next);
-                self.state.focus = 0;
-                self.sync_page();
+                if let Some(mode) = pages::basic_mode_for_focus(self.state.focus) {
+                    self.session_mut().set_mode(mode);
+                    self.navigation.set_mode(mode);
+                    self.sync_page();
+                }
             }
             SetupField::Profile => {
-                let next = match self.session().selected_profile() {
-                    WorkerProfile::Normal => WorkerProfile::Room,
-                    WorkerProfile::Room => WorkerProfile::Normal,
-                };
-                self.session_mut().set_profile(next);
+                if let Some(profile) = pages::basic_profile_for_focus(self.state.focus) {
+                    self.session_mut().set_profile(profile);
+                }
             }
             SetupField::TunnelSecretSource => {
                 let draft = self.session_mut().standalone_mut();
@@ -500,7 +510,7 @@ impl ConfigTuiApp {
 
     fn move_focus(&mut self, direction: isize) {
         let length = match self.state.page {
-            ConfigPage::Basic => 3,
+            ConfigPage::Basic => pages::basic_focus_len(),
             ConfigPage::Connection => {
                 pages::connection_fields_for_session(self.session()).len() + 1
             }
@@ -518,9 +528,11 @@ impl ConfigTuiApp {
 
     fn field_index(&self, field: SetupField) -> Option<usize> {
         match self.state.page {
-            ConfigPage::Basic => [SetupField::Mode, SetupField::Profile]
-                .iter()
-                .position(|candidate| *candidate == field),
+            ConfigPage::Basic => match field {
+                SetupField::Mode => Some(0),
+                SetupField::Profile => Some(3),
+                _ => None,
+            },
             ConfigPage::Connection => pages::connection_fields_for_session(self.session())
                 .iter()
                 .position(|candidate| *candidate == field),
@@ -1294,6 +1306,70 @@ mod tests {
     }
 
     #[test]
+    fn basic_selection_commits_only_on_activation_and_vim_aliases_are_mode_aware() {
+        let mut app = app(RuntimeMode::Standalone);
+        assert_eq!(app.session().selected_mode(), RuntimeMode::Standalone);
+
+        app.handle_event(TerminalEvent::Key(KeyEvent::new(
+            KeyCode::Char('j'),
+            KeyModifiers::NONE,
+        )))
+        .unwrap();
+        assert_eq!(app.state().focus, 1);
+        assert_eq!(app.session().selected_mode(), RuntimeMode::Standalone);
+
+        app.handle_event(TerminalEvent::Key(KeyEvent::new(
+            KeyCode::Char('l'),
+            KeyModifiers::NONE,
+        )))
+        .unwrap();
+        assert_eq!(app.session().selected_mode(), RuntimeMode::Hub);
+        assert_eq!(app.page(), ConfigPage::Basic);
+
+        app.handle_event(TerminalEvent::Key(KeyEvent::new(
+            KeyCode::Char('k'),
+            KeyModifiers::NONE,
+        )))
+        .unwrap();
+        assert_eq!(app.state().focus, 0);
+        app.handle_event(TerminalEvent::Key(KeyEvent::new(
+            KeyCode::Char('h'),
+            KeyModifiers::NONE,
+        )))
+        .unwrap();
+        assert_eq!(app.page(), ConfigPage::Basic);
+
+        assert_eq!(app.session().selected_profile(), WorkerProfile::Normal);
+        app.state.focus = 4;
+        app.handle_event(TerminalEvent::Key(KeyEvent::new(
+            KeyCode::Char('l'),
+            KeyModifiers::NONE,
+        )))
+        .unwrap();
+        assert_eq!(app.session().selected_profile(), WorkerProfile::Room);
+
+        app.state.focus = 5;
+        app.handle_event(TerminalEvent::Key(KeyEvent::new(
+            KeyCode::Char('l'),
+            KeyModifiers::NONE,
+        )))
+        .unwrap();
+        assert_eq!(app.page(), ConfigPage::Connection);
+
+        app.focus_field(crate::config_setup::SetupField::TunnelId);
+        app.handle_action(TuiAction::Activate).unwrap();
+        for character in ['h', 'j', 'k', 'l'] {
+            app.handle_event(TerminalEvent::Key(KeyEvent::new(
+                KeyCode::Char(character),
+                KeyModifiers::NONE,
+            )))
+            .unwrap();
+        }
+        assert!(app.editing().unwrap().buffer.ends_with("hjkl"));
+        assert_eq!(app.page(), ConfigPage::Connection);
+    }
+
+    #[test]
     fn enter_event_opens_optional_sections_and_activates_finish_action() {
         let mut app = app(RuntimeMode::Standalone);
         app.handle_action(TuiAction::Next).unwrap();
@@ -1383,7 +1459,8 @@ mod tests {
         );
         assert!(!app.session().standalone().provision_secret_now);
         let rendered = rendered(&app);
-        assert!(rendered.contains("● Secret source: env"));
+        assert!(rendered.contains("Secret source"));
+        assert!(rendered.contains(""));
     }
 
     #[test]
