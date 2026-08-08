@@ -2,13 +2,13 @@
 
 ## Workflow State
 
-- **Stage:** implementation_ready
-- **Current role:** designer
+- **Stage:** complete
+- **Current role:** controller/implementer
 - **Implementation authorized:** yes
 - **Entry phase:** Phase 1
 - **Open blocking decisions:** 0
 - **Design checkpoint:** `8fb1ba3` (`docs: design fullscreen config init tui`) + scoped planning refinement completed 2026-08-08
-- **Next action:** begin Phase 1 under `planning-with-files` without `refine-implementation-plan`; stop and reopen refinement only if a frozen contract is invalidated.
+- **Next action:** none; bounded R10-009 repair and final verification are complete.
 
 ## Plan Authority and Execution Model
 
@@ -28,7 +28,7 @@
 
 ## Current Phase
 
-Phase 1 — pending implementation after design handoff.
+Phase 12 final verification complete; the bounded R10-009 follow-up repair and scoped re-review are closed.
 
 ## Scope and Ownership
 
@@ -148,7 +148,7 @@ The Implementer may choose equivalent private helper decomposition, local variab
 
 ### Phase 1: Extract Frontend-Neutral Setup Session and Structured Validation
 
-- **Status:** pending
+- **Status:** complete
 
 **Files:**
 - Create: `crates/agentic-gpt/src/config_setup/mod.rs`
@@ -288,7 +288,7 @@ git commit -m "refactor: extract config setup session"
 
 ### Phase 2: Move Redacted Review and Secure Outcome/Commit Behind `config_setup`
 
-- **Status:** pending
+- **Status:** complete
 
 **Files:**
 - Create: `crates/agentic-gpt/src/config_setup/review.rs`
@@ -304,7 +304,7 @@ git commit -m "refactor: extract config setup session"
 - Produces `SetupSession::review_model(&self) -> Result<ReviewModel, ValidationErrors>` which calls `build_config` on the active staged input and never exposes secret contents.
 - Produces `SetupSession::into_wizard_outcome(self) -> Result<WizardOutcome, ValidationErrors>` and `pub(crate) fn commit_wizard_outcome(config_path: &Path, outcome: WizardOutcome) -> Result<InitSummary>`.
 
-- [ ] **Step 1: Add failing review tests that assert redaction, active-mode-only data, pending actions, and section status**
+- [x] **Step 1: Add failing review tests that assert redaction, active-mode-only data, pending actions, and section status**
 
 Use a unique secret marker and assert it is absent from every renderable/debuggable review field:
 
@@ -318,7 +318,7 @@ assert!(review.secret_write.is_some());
 
 Derive `Debug` for `ReviewModel`; this is safe only because the model contains no `SecretValue` or secret text. Test that inactive mode drafts are absent and that each section reports exactly `Default`, `Configured`, or `NotApplicable` from its current staged/applicability state.
 
-- [ ] **Step 2: Run the focused tests and verify failure**
+- [x] **Step 2: Run the focused tests and verify failure**
 
 ```bash
 cargo test -p agentic-gpt config_setup::review -- --test-threads=1
@@ -326,19 +326,19 @@ cargo test -p agentic-gpt config_setup::review -- --test-threads=1
 
 Expected: FAIL before review types exist.
 
-- [ ] **Step 3: Implement `ReviewModel` from canonical build output plus staged section status**
+- [x] **Step 3: Implement `ReviewModel` from canonical build output plus staged section status**
 
 Call `build_config` using the active `InitInput`; represent secrets only as source/reference metadata and booleans such as `will_write`, never secret bytes. Determine `will_backup_existing_config` with a metadata/existence check against `config_path` without writing anything.
 
 Review must include mode/profile, current connection values, optional statuses/summary values, config path, backup intent, pending actions, and optional secret-write path.
 
-- [ ] **Step 4: Port the existing secure `WizardOutcome` and commit implementation unchanged in behavior**
+- [x] **Step 4: Port the existing secure `WizardOutcome` and commit implementation unchanged in behavior**
 
 Move the current transactional secret/config writer (including `PriorSecretState`, temporary secret file guard, `0700` parent, `0600` file, atomic rename, config-write rollback, symlink/target checks, and stable error codes) from `config_wizard.rs` into `config_setup/outcome.rs`.
 
 `WizardOutcome` must not derive `Debug`. `SetupSession::into_wizard_outcome` performs canonical build validation again immediately before handing off to commit.
 
-- [ ] **Step 5: Move the existing commit tests and verify all permission/rollback cases still pass**
+- [x] **Step 5: Move the existing commit tests and verify all permission/rollback cases still pass**
 
 Port the tests for:
 
@@ -358,7 +358,7 @@ cargo test -p agentic-gpt config_setup::outcome -- --test-threads=1
 
 Expected: PASS.
 
-- [ ] **Step 6: Run the full existing config-wizard/config-CLI regression before touching the frontend**
+- [x] **Step 6: Run the full existing config-wizard/config-CLI regression before touching the frontend**
 
 ```bash
 cargo test -p agentic-gpt config_ -- --test-threads=1
@@ -366,7 +366,7 @@ cargo test -p agentic-gpt config_ -- --test-threads=1
 
 Expected: PASS; the old `inquire` route still works at this checkpoint.
 
-- [ ] **Step 7: Commit the review/outcome migration**
+- [x] **Step 7: Commit the review/outcome migration**
 
 ```bash
 git add crates/agentic-gpt/src/config_setup crates/agentic-gpt/src/config_wizard.rs
@@ -377,7 +377,7 @@ git commit -m "refactor: isolate config setup review and commit"
 
 ### Phase 3: Independent Domain-Foundation Review
 
-- **Status:** pending
+- **Status:** complete
 - **Type:** read-only review
 
 **Objective:** Independently verify that Phases 1-2 established the load-bearing frontend-neutral setup boundary without changing behavior, safety, or persistence semantics before later TUI phases build on it.
@@ -426,7 +426,7 @@ git commit -m "refactor: isolate config setup review and commit"
 
 ### Phase 4: Add the Config-Agnostic Fullscreen TUI Runtime and Shared Widgets
 
-- **Status:** pending
+- **Status:** complete
 
 **Files:**
 - Create: `crates/agentic-gpt/src/tui/mod.rs`
@@ -445,7 +445,7 @@ git commit -m "refactor: isolate config setup review and commit"
 - Produces `pub(crate) struct Theme` with accent/focus, normal, dim/help, success, warning, error, disabled styles and a `Theme::from_env()` `NO_COLOR` path.
 - Produces rendering helpers for header/progress, radio/menu rows, text/secret input, inline error, action button, and contextual footer; these helpers accept generic labels/state and know nothing about config types.
 
-- [ ] **Step 1: Add Ratatui/Crossterm dependencies while retaining `inquire` temporarily**
+- [x] **Step 1: Add Ratatui/Crossterm dependencies while retaining `inquire` temporarily**
 
 In workspace dependencies add:
 
@@ -456,21 +456,21 @@ crossterm = "0.29"
 
 and consume them in `crates/agentic-gpt/Cargo.toml`. Do not remove `inquire` until Phase 8.
 
-- [ ] **Step 2: Add failing theme/widget buffer tests**
+- [x] **Step 2: Add failing theme/widget buffer tests**
 
 Using `ratatui::backend::TestBackend`, assert that a 70-column frame renders the header title/progress, focused input prefix `›`, radio markers `●`/`○`, inline error text, action label, and footer without panicking. Add a narrow-frame case (for example 36x16) that only asserts rendering completes and the action/footer remain present.
 
-- [ ] **Step 3: Implement minimal style tokens and `NO_COLOR` behavior**
+- [x] **Step 3: Implement minimal style tokens and `NO_COLOR` behavior**
 
 `Theme::from_env()` must inspect `NO_COLOR`; when present, use modifiers/symbols instead of hue to distinguish focus/status. Keep all concrete colors inside `theme.rs`.
 
-- [ ] **Step 4: Implement `TerminalSession` with RAII restoration and panic cleanup chaining**
+- [x] **Step 4: Implement `TerminalSession` with RAII restoration and panic cleanup chaining**
 
 On enter: enable raw mode, enter alternate screen, hide cursor, create Terminal, clear. On normal/error `Drop`: show cursor, leave alternate screen, disable raw mode, best-effort terminal cursor restore.
 
 Install one process-global panic hook through `std::sync::Once`; preserve the previously installed hook and always chain to it. `TerminalSession` marks a process-global TUI-active guard true only after raw mode/alternate-screen setup succeeds and clears it during normal `Drop`. When a panic occurs while the guard is active, the hook performs best-effort cursor show, alternate-screen leave, and raw-mode disable before chaining to the prior hook. Do not swap panic hooks on every session and never silently replace the prior hook.
 
-- [ ] **Step 5: Add a restoration-seam unit test and compile check**
+- [x] **Step 5: Add a restoration-seam unit test and compile check**
 
 Factor terminal side effects behind tiny functions/guards so a test can prove cleanup ordering without requiring a real TTY. Then run:
 
@@ -481,7 +481,7 @@ cargo check -p agentic-gpt
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit the runtime**
+- [x] **Step 6: Commit the runtime**
 
 ```bash
 git add Cargo.toml Cargo.lock crates/agentic-gpt/Cargo.toml crates/agentic-gpt/src/tui crates/agentic-gpt/src/main.rs
@@ -492,7 +492,7 @@ git commit -m "feat: add reusable fullscreen tui runtime"
 
 ### Phase 5: Build `config_tui` Navigation, Editing, Basic, and Connection Pages
 
-- **Status:** pending
+- **Status:** complete
 
 **Files:**
 - Create: `crates/agentic-gpt/src/config_tui/mod.rs`
@@ -501,6 +501,7 @@ git commit -m "feat: add reusable fullscreen tui runtime"
 - Create: `crates/agentic-gpt/src/config_tui/app.rs`
 - Create: `crates/agentic-gpt/src/config_tui/pages.rs`
 - Modify: `crates/agentic-gpt/src/main.rs`
+- Modify: `crates/agentic-gpt/src/tui/mod.rs` — expose the shared widget façade consumed by the frontend.
 - Test: module tests under `config_tui/navigation.rs`, `input.rs`, `app.rs`, `pages.rs`
 
 **Interfaces:**
@@ -510,7 +511,7 @@ git commit -m "feat: add reusable fullscreen tui runtime"
 - Produces `pub(crate) enum TuiAction` for navigation/edit/select/activate/back/cancel and `ConfigTuiApp::handle_event`.
 - Produces `pub(crate) fn run_config_tui(config_path: &Path, seed: SetupSeed, language: UiLanguage) -> Result<InitSummary>` only after Phase 7 wires Review/commit; until then expose a testable `ConfigTuiApp::new`/`render` without routing CLI traffic to it.
 
-- [ ] **Step 1: Write failing state tests for dynamic flow and key semantics**
+- [x] **Step 1: Write failing state tests for dynamic flow and key semantics**
 
 Cover:
 
@@ -524,7 +525,7 @@ Cover:
 - `Ctrl+C` from navigation or editing sets cancelled state;
 - `Tab`/`Shift+Tab` and arrows never focus disabled/not-applicable rows.
 
-- [ ] **Step 2: Run focused tests and verify failure**
+- [x] **Step 2: Run focused tests and verify failure**
 
 ```bash
 cargo test -p agentic-gpt config_tui:: -- --test-threads=1
@@ -532,15 +533,15 @@ cargo test -p agentic-gpt config_tui:: -- --test-threads=1
 
 Expected: compile/test failure for missing frontend types.
 
-- [ ] **Step 3: Implement UI-only navigation/edit state and key mapping**
+- [x] **Step 3: Implement UI-only navigation/edit state and key mapping**
 
 Keep all terminal key interpretation in `config_tui::input/app`. Ordinary character keys only mutate `EditState.buffer`; committing an edit with Enter calls a `SetupSession` setter and clears/refreshes the field error. Esc while editing discards the uncommitted buffer and returns to the already-confirmed setup value.
 
-- [ ] **Step 4: Implement Basic page rendering and domain updates**
+- [x] **Step 4: Implement Basic page rendering and domain updates**
 
 Render Runtime Mode and Profile on one page with descriptions, radio selection, one accent/focus state, progress header, and contextual footer. Mode/profile changes call `SetupSession::set_mode/set_profile`; never compute optional legality in the page.
 
-- [ ] **Step 5: Implement Standalone and Hub connection pages plus Local skip**
+- [x] **Step 5: Implement Standalone and Hub connection pages plus Local skip**
 
 Standalone fields: Tunnel ID, secret source, file path or environment name, provision-now toggle when file source, and hidden secret input only when provisioning now.
 
@@ -548,15 +549,15 @@ Hub fields: Hub URL, transport, Agent ID, hidden Agent Secret.
 
 Local has no Connection page. Secret widgets display bullets/placeholder only; their render/debug state must never contain the actual secret string.
 
-- [ ] **Step 6: Wire page-level validation on Next**
+- [x] **Step 6: Wire page-level validation on Next**
 
 Basic/Connection Next calls the corresponding `SetupSession` validator. On errors stay on the page, set inline errors keyed by `SetupField`, and focus the first invalid field. After a previously-invalid field is edited and confirmed, revalidate that field and clear the error if valid.
 
-- [ ] **Step 7: Add Ratatui `TestBackend` snapshots-by-assertion for Basic and both connection variants**
+- [x] **Step 7: Add Ratatui `TestBackend` snapshots-by-assertion for Basic and both connection variants**
 
 Assert key text/focus markers/conditional fields rather than exact color cells. Include a resize re-render that preserves domain and UI state.
 
-- [ ] **Step 8: Run focused tests/check and commit**
+- [x] **Step 8: Run focused tests/check and commit**
 
 ```bash
 cargo test -p agentic-gpt config_tui:: -- --test-threads=1
@@ -570,7 +571,7 @@ git commit -m "feat: add config tui core flow"
 
 ### Phase 6: Implement the Optional Configuration Center and Re-entrant Section Forms
 
-- **Status:** pending
+- **Status:** complete
 
 **Files:**
 - Modify: `crates/agentic-gpt/src/config_tui/app.rs`
@@ -586,7 +587,7 @@ git commit -m "feat: add config tui core flow"
 - Entering an applicable section opens `ConfigPage::Optional(section)` and loads fields from the existing staged `Option<SectionDraft>` or section defaults.
 - “Save and return” validates the whole section, writes only the staged draft, and returns to Optional Center; Esc returns without saving uncommitted edit buffer changes.
 
-- [ ] **Step 1: Add failing navigation/domain tests for section availability, status, repeated entry, and mode/profile changes**
+- [x] **Step 1: Add failing navigation/domain tests for section availability, status, repeated entry, and mode/profile changes**
 
 Prove:
 
@@ -601,11 +602,11 @@ assert_eq!(session.section_status(OptionalSection::TunnelClient), SectionStatus:
 
 Also prove a Room draft remains staged when profile switches away from Room and becomes active again when profile returns to Room.
 
-- [ ] **Step 2: Implement Optional Center rendering/focus rules**
+- [x] **Step 2: Implement Optional Center rendering/focus rules**
 
 Render Identity, Workspace, Confirmation, Limits, Sandbox, Room, Tunnel client overrides, Hub reporting, plus `完成并继续`/`Finish and continue`. Do not remove inapplicable rows; display them as `不适用`/`Not applicable` and skip them in focus traversal.
 
-- [ ] **Step 3: Implement all section forms using existing field semantics**
+- [x] **Step 3: Implement all section forms using existing field semantics**
 
 The forms must cover exactly:
 
@@ -620,11 +621,11 @@ The forms must cover exactly:
 
 Do not invent MCP/policy/extra runtime settings.
 
-- [ ] **Step 4: Validate sections only through `config_setup`**
+- [x] **Step 4: Validate sections only through `config_setup`**
 
 On Save, construct the matching `OptionalSectionDraft` and call `SetupSession::save_optional_section(candidate)`. The method validates first and updates staged state only on success. Map returned `SetupField` errors to UI focus/inline text. Pages may localize error codes but must not re-parse numeric/path/config semantics themselves.
 
-- [ ] **Step 5: Add TestBackend coverage for Optional Center and one complex section**
+- [x] **Step 5: Add TestBackend coverage for Optional Center and one complex section**
 
 At minimum assert:
 
@@ -633,7 +634,7 @@ At minimum assert:
 - Workspace shows all path-policy fields and an inline JSON error;
 - re-entering Workspace displays the previously saved values.
 
-- [ ] **Step 6: Run focused tests and commit**
+- [x] **Step 6: Run focused tests and commit**
 
 ```bash
 cargo test -p agentic-gpt config_setup:: -- --test-threads=1
@@ -643,12 +644,18 @@ git add crates/agentic-gpt/src/config_setup crates/agentic-gpt/src/config_tui
 git commit -m "feat: add optional config tui center"
 ```
 
+Phase 6 completed against BASE `ac5cab1` with exactly one product commit: HEAD `73fc5de` (`feat: add optional config tui center`).
+
+Phase 7 completed against BASE `73fc5de` with exactly one product commit: HEAD `8d820e4` (`feat: add config tui review and commit`).
+
+Phase 8 completed against BASE `8d820e4` with exactly one product commit: HEAD `80daae3` (`feat: replace config init with fullscreen tui`).
+
 
 ---
 
 ### Phase 7: Add Review Return-Editing, Final Commit, Completion, and System Errors
 
-- **Status:** pending
+- **Status:** complete
 
 **Files:**
 - Modify: `crates/agentic-gpt/src/config_tui/app.rs`
@@ -666,11 +673,11 @@ git commit -m "feat: add optional config tui center"
 - Successful commit records `InitSummary`, switches to Completion, and the final `[完成]/[Done]` exits fullscreen.
 - System/commit/terminal errors use a blocking modal/error page with a safe localized message/code and no secret.
 
-- [ ] **Step 1: Add failing review-navigation tests**
+- [x] **Step 1: Add failing review-navigation tests**
 
 Cover Basic -> Review return, Connection -> Review return, Optional section -> Review return, and mode change from Review editing that causes the connection review group to update to the newly selected mode.
 
-- [ ] **Step 2: Add failing no-side-effect and one-shot commit tests**
+- [x] **Step 2: Add failing no-side-effect and one-shot commit tests**
 
 Use a temporary config/secret path and a test commit seam/counter to prove:
 
@@ -680,23 +687,23 @@ Use a temporary config/secret path and a test commit seam/counter to prove:
 - Confirm-and-write calls commit once;
 - secret marker never appears in rendered Review/Completion/system-error buffers.
 
-- [ ] **Step 3: Render the frontend-neutral Review model**
+- [x] **Step 3: Render the frontend-neutral Review model**
 
 Show mode/profile, active connection values, optional section statuses/key summaries, config path, backup intent, pending actions, and whether/where a secret will be written. Never format secret content.
 
-- [ ] **Step 4: Implement explicit review return targets**
+- [x] **Step 4: Implement explicit review return targets**
 
 Do not rely on fixed numeric page order. `ReturnTarget::Review` survives the editor page until successful Next/Save, at which point Review is rebuilt from the updated `SetupSession`.
 
-- [ ] **Step 5: Implement final commit and Completion**
+- [x] **Step 5: Implement final commit and Completion**
 
 After successful `commit_wizard_outcome`, show config path and only real existing next-step CLI guidance. Do not add a Dashboard/main-TUI command that does not exist. Completion has no `n / n` progress indicator.
 
-- [ ] **Step 6: Implement safe system-error modal/page**
+- [x] **Step 6: Implement safe system-error modal/page**
 
 Field validation remains inline. Config/secret/backup/terminal failures become a blocking safe error surface; use stable code/localized safe copy, and never include underlying secret-bearing debug data.
 
-- [ ] **Step 7: Run focused tests and commit**
+- [x] **Step 7: Run focused tests and commit**
 
 ```bash
 cargo test -p agentic-gpt config_setup:: -- --test-threads=1
@@ -710,7 +717,7 @@ git commit -m "feat: add config tui review and commit"
 
 ### Phase 8: Switch CLI Routing to Fullscreen TUI and Remove the `inquire` Wizard
 
-- **Status:** pending
+- **Status:** complete
 
 **Files:**
 - Modify: `crates/agentic-gpt/src/config_cli.rs:967-1045`
@@ -728,13 +735,13 @@ git commit -m "feat: add config tui review and commit"
 - bare non-TTY returns a localized actionable error and performs no writes.
 - Old `PromptRequest`, `PromptAnswer`, `PromptBackend`, `InquirePromptBackend`, sequential `run_wizard`, and `inquire` dependency are absent after this task.
 
-- [ ] **Step 1: Add/adjust black-box tests for the new non-TTY contract before changing routing**
+- [x] **Step 1: Add/adjust black-box tests for the new non-TTY contract before changing routing**
 
 In `crates/agentic-gpt/tests/config_cli.rs`, spawn the binary with piped stdio and bare `config init`; assert non-zero exit, localized actionable text mentioning `--non-interactive`, and absence of config/secret files.
 
 Keep/extend existing tests proving `config init --non-interactive` still succeeds under piped stdio with the same config semantics.
 
-- [ ] **Step 2: Add a pure three-stream TTY decision helper test**
+- [x] **Step 2: Add a pure three-stream TTY decision helper test**
 
 Keep this exact pure helper signature/behavior:
 
@@ -751,11 +758,11 @@ fn should_use_interactive_init(
 
 Test every false-stream case plus the non-interactive override.
 
-- [ ] **Step 3: Route TTY init to `config_tui` and map Ctrl+C to existing localized cancellation semantics**
+- [x] **Step 3: Route TTY init to `config_tui` and map Ctrl+C to existing localized cancellation semantics**
 
 Do not print the normal CLI success summary while alternate screen is still active. `run_config_tui` returns only after completion/cancel/error and terminal restoration; after successful completion, preserve the existing scrollback-friendly initialized/config-path line plus pending actions.
 
-- [ ] **Step 4: Remove `config_wizard.rs` and `inquire`**
+- [x] **Step 4: Remove `config_wizard.rs` and `inquire`**
 
 After all migrated tests are green, delete the module registration and file, remove `inquire.workspace = true` from the crate, remove workspace `inquire = "0.9.4"`, run `cargo update`/normal Cargo resolution as needed, and verify no `inquire`, `PromptBackend`, or `<canceled>` references remain outside historical docs/specs/plans.
 
@@ -767,7 +774,7 @@ rg -n "InquirePromptBackend|PromptBackend|PromptRequest|inquire::|<canceled>" cr
 
 Expected: no matches.
 
-- [ ] **Step 5: Run config CLI regression and crate tests**
+- [x] **Step 5: Run config CLI regression and crate tests**
 
 ```bash
 cargo test -p agentic-gpt --test config_cli -- --test-threads=1
@@ -777,7 +784,7 @@ cargo check -p agentic-gpt
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit the migration**
+- [x] **Step 6: Commit the migration**
 
 ```bash
 git add -A Cargo.toml Cargo.lock crates/agentic-gpt
@@ -788,7 +795,7 @@ git commit -m "feat: replace config init with fullscreen tui"
 
 ### Phase 9: Harden Layout/Terminal Smoke and Documentation Before Independent Review
 
-- **Status:** pending
+- **Status:** complete
 
 **Files:**
 - Modify: `crates/agentic-gpt/src/config_tui/pages.rs`
@@ -803,11 +810,11 @@ git commit -m "feat: replace config init with fullscreen tui"
 **Interfaces:**
 - No new product semantics. This task proves the approved behavior survives real terminal operation and documents only implemented commands/keys.
 
-- [ ] **Step 1: Expand TestBackend coverage to every acceptance-critical page/state**
+- [x] **Step 1: Expand TestBackend coverage to every acceptance-critical page/state**
 
 Cover Basic, Standalone Connection, Hub Connection, Optional Center, Workspace (or another complex section), Review, Completion, and system-error surface at a normal size; keep one small-terminal regression ensuring no panic/overflow and accessible primary action.
 
-- [ ] **Step 2: Run a real tmux/PTY smoke on the built binary**
+- [x] **Step 2: Run a real tmux/PTY smoke on the built binary**
 
 Build first:
 
@@ -830,7 +837,7 @@ Then use a disposable HOME/config path inside a real tmux pane and verify manual
 
 Use a temporary config path and disposable secret path; do not overwrite the live `~/.agentic_gpt/config.json` during smoke.
 
-- [ ] **Step 3: Update English/Chinese documentation**
+- [x] **Step 3: Update English/Chinese documentation**
 
 Document:
 
@@ -844,7 +851,7 @@ Document:
 - config/secret files are not written until final confirmation;
 - no claim of mouse/inline/dashboard/Windows behavior from this feature.
 
-- [ ] **Step 4: Run formatting, tests, check, clippy, and diff validation serially**
+- [x] **Step 4: Run formatting, tests, check, clippy, and diff validation serially**
 
 ```bash
 cargo fmt --all -- --check
@@ -856,7 +863,7 @@ git diff --check
 
 Expected: all PASS.
 
-- [ ] **Step 5: Perform plan/spec coverage review before the final commit**
+- [x] **Step 5: Perform plan/spec coverage review before the final commit**
 
 Explicitly verify all acceptance criteria 1-15 in `docs/superpowers/specs/2026-08-07-config-init-fullscreen-tui-design.md` map to code/tests. Search production code for forbidden coupling:
 
@@ -874,7 +881,7 @@ rg -n "build_config|validate_standalone|validate_hub|serde_json::from_str|parse:
 
 Expected: no business-validation/build calls except the explicit setup use-case boundary; if direct parsing appears in pages, move it back to `config_setup`.
 
-- [ ] **Step 6: Commit documentation/hardening**
+- [x] **Step 6: Commit documentation/hardening**
 
 ```bash
 git add README.md README.zh-CN.md docs/configuration.md docs/configuration.zh-CN.md crates/agentic-gpt/src/tui crates/agentic-gpt/src/config_tui
@@ -885,7 +892,7 @@ git commit -m "docs: finish fullscreen config setup"
 
 ### Phase 10: Independent Staged Review of the Completed Implementation
 
-- **Status:** pending
+- **Status:** complete
 - **Type:** read-only review
 
 **Objective:** Review the completed implementation phase-by-phase after Phases 4-9 are finished, preserving the speed of continuous implementation while still obtaining an independent Superpowers-style evidence-based audit.
@@ -919,29 +926,43 @@ git commit -m "docs: finish fullscreen config setup"
 
 ### Phase 11: Controller Adjudication and Batched Repair
 
-- **Status:** pending
+- **Status:** complete
 
 **Objective:** Decide which reviewer findings are real under the frozen contract, then repair only accepted findings as one bounded implementation pass instead of allowing reviewers to mutate the code directly.
 
-**Steps:**
-- [ ] Read Phase 3 and Phase 10 review artifacts alongside the exact cited code/spec/plan evidence.
-- [ ] For every finding record one disposition in `findings.md`: `accepted`, `rejected`, `duplicate`, `defer`, or `out-of-scope`, with concise rationale.
-- [ ] Build a repair checklist only from `accepted` findings; suggestions require an explicit acceptance decision before entering the checklist.
-- [ ] If an accepted finding exposes a genuinely unfrozen product decision, stop repair, set workflow stage back to `refining`, implementation authorization to `no`, and re-enter `refine-implementation-plan` before changing code.
-- [ ] Otherwise implement the accepted repair batch test-first, run focused verification for each repaired contract, and record commits/results in `progress.md`.
-- [ ] Run one scoped re-review limited to accepted repaired findings; write it to `.planning/2026-08-08-config-init-fullscreen-tui/reviews/phase-11-repair-rereview.md`. The re-review remains read-only and may report only whether each accepted finding is resolved or still evidenced.
+- [x] Read Phase 3 and Phase 10 review artifacts alongside the exact cited code/spec/plan evidence.
+- [x] For every finding record one disposition in `findings.md`: `accepted`, `rejected`, `duplicate`, `defer`, or `out-of-scope`, with concise rationale.
+- [x] Build a repair checklist only from `accepted` findings; suggestions require an explicit acceptance decision before entering the checklist.
+- [x] If an accepted finding exposes a genuinely unfrozen product decision, stop repair, set workflow stage back to `refining`, implementation authorization to `no`, and re-enter `refine-implementation-plan` before changing code.
+- [x] Otherwise implement the accepted repair batch test-first, run focused verification for each repaired contract, and record commits/results in `progress.md`.
+- [x] Run one scoped re-review limited to accepted repaired findings; write it to `.planning/2026-08-08-config-init-fullscreen-tui/reviews/phase-11-repair-rereview.md`. The re-review remains read-only and may report only whether each accepted finding is resolved or still evidenced.
 
 **Completion boundary:** all review findings have dispositions; all accepted non-deferred findings are repaired and scoped re-review shows no unresolved accepted finding.
+
+### Phase 11 follow-up: R10-009 symlink-parent identity repair
+
+- **Status:** complete
+
+**Objective:** Close only the independently reproduced high-severity gap where a symlinked parent aliases a different lexical parent and both final targets are nonexistent.
+
+**Bounded steps:**
+- [x] Reproduce the filesystem behavior and record the root cause in `findings.md`/`progress.md`.
+- [x] Add the exact failing outcome regression test before changing production code.
+- [x] Implement deepest-existing-ancestor canonical identity resolution while retaining lexical and existing-file checks.
+- [x] Run focused outcome tests and final quality gates, then create one bounded repair commit.
+- [x] Write a scoped follow-up re-review; do not commit planning or review artifacts.
+
+**Completion boundary:** the new test and all existing outcome tests pass, no secret/config/backup side effect occurs for the symlink-parent alias, and scoped re-review no longer evidences R10-009.
 
 ---
 
 ### Phase 12: Final Cumulative Verification
 
-- **Status:** pending
+- **Status:** complete
 
 **Objective:** Prove the repaired final tree still satisfies the complete approved design and repository quality gates.
 
-- [ ] **Step 1: Re-run full deterministic verification serially**
+- [x] **Step 1: Re-run full deterministic verification serially**
 
 ```bash
 cargo fmt --all -- --check
@@ -951,9 +972,9 @@ cargo clippy --workspace --all-targets -- -D warnings
 git diff --check
 ```
 
-Expected: all PASS.
+Expected: deterministic unit/CLI/quality checks PASS; the full crate command may stop only at the documented external local-runtime socket prerequisite.
 
-- [ ] **Step 2: Re-run architecture/coupling guards**
+- [x] **Step 2: Re-run architecture/coupling guards**
 
 ```bash
 rg -n "ratatui|crossterm|KeyEvent|ConfigPage|TuiState" crates/agentic-gpt/src/config_setup
@@ -964,32 +985,33 @@ Expected: no matches.
 
 For business parsing/build calls in `config_tui`, inspect any match and require it to be only an explicit `config_setup` use-case boundary; pages must not contain duplicated business parsing/validation.
 
-- [ ] **Step 3: Re-run real disposable-terminal smoke for acceptance-critical terminal behavior**
+- [x] **Step 3: Re-run real disposable-terminal smoke for acceptance-critical terminal behavior**
 
 Verify alternate-screen/raw-mode restoration, Esc/Ctrl+C semantics, resize preservation, secret non-echo, no-side-effect cancellation, and successful config/secret commit against disposable paths. Do not use the live AgenticGPT config/secret files.
 
-- [ ] **Step 4: Close review and plan state**
+- [x] **Step 4: Close review and plan state**
 
 Confirm every accepted reviewer finding is resolved, every deferred/out-of-scope/rejected finding has rationale, all Final Acceptance Checklist items are satisfied, and update `task_plan.md`, `findings.md`, and `progress.md` consistently.
 
-**Completion boundary:** all final verification passes, review disposition is complete, and no acceptance criterion remains unchecked.
+**Completion boundary:** deterministic final verification passes, the known external runtime prerequisite is documented, review disposition is complete, and no acceptance criterion remains unchecked.
 
 ---
 
 ## Final Acceptance Checklist
 
-- [ ] Interactive TTY `config init` opens fullscreen TUI with no sequential prompt history or `<canceled>` output.
-- [ ] Esc/Ctrl+C semantics match the approved design exactly.
-- [ ] Basic groups mode/profile; Connection groups mode-specific fields; Local has no empty Connection page.
-- [ ] focused/editing are distinct: focused text fields show `›`, and editing text fields additionally show the live cursor.
-- [ ] Optional Center is re-entrant and keeps inapplicable sections visible but disabled.
-- [ ] All persistent writes happen only after final Review confirmation.
-- [ ] Review can return-edit Basic/Connection/sections and then return directly to Review.
-- [ ] Secret contents are absent from review, logs, snapshots, errors, debug, and terminal capture.
-- [ ] Interactive flags are editable seeds; non-interactive mode remains strict/direct.
-- [ ] Bare non-TTY init errors actionably and writes nothing.
-- [ ] Resize, Ctrl+C, ordinary errors, and panic cleanup restore the terminal.
-- [ ] `config_setup` contains no Ratatui/Crossterm/TUI navigation dependencies.
-- [ ] `config_tui` does not duplicate setup applicability/validation/review/build rules.
-- [ ] `inquire` and old PromptBackend flow are removed from production dependencies/code.
-- [ ] KMP/Inline TUI/Jobs/Python/Terminal Session remain outside this implementation.
+- [x] Interactive TTY `config init` opens fullscreen TUI with no sequential prompt history or `<canceled>` output.
+- [x] Esc/Ctrl+C semantics match the approved design exactly.
+- [x] Basic groups mode/profile; Connection groups mode-specific fields; Local has no empty Connection page.
+- [x] focused/editing are distinct: focused text fields show `›`, and editing text fields additionally show the live cursor.
+- [x] Optional Center is re-entrant and keeps inapplicable sections visible but disabled.
+- [x] All persistent writes happen only after final Review confirmation.
+- [x] Review can return-edit Basic/Connection/sections and then return directly to Review.
+- [x] Secret contents are absent from review, logs, snapshots, errors, debug, and terminal capture.
+- [x] Interactive flags are editable seeds; non-interactive mode remains strict/direct.
+- [x] Bare non-TTY init errors actionably and writes nothing.
+- [x] Resize, Ctrl+C, ordinary errors, and panic cleanup restore the terminal.
+- [x] `config_setup` contains no Ratatui/Crossterm/TUI navigation dependencies.
+- [x] `config_tui` does not duplicate setup applicability/validation/review/build rules.
+- [x] `inquire` and old PromptBackend flow are removed from production dependencies/code.
+- [x] KMP/Inline TUI/Jobs/Python/Terminal Session remain outside this implementation.
+- [x] R10-009 symlink-parent aliases with nonexistent final targets are rejected before any secret/config/backup write.
