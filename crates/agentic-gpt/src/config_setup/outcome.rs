@@ -175,10 +175,33 @@ fn paths_refer_to_same_file(left: &Path, right: &Path) -> Result<bool> {
     if left == right {
         return Ok(true);
     }
-    Ok(match (fs::canonicalize(&left), fs::canonicalize(&right)) {
-        (Ok(left), Ok(right)) => left == right,
-        _ => false,
-    })
+    Ok(canonicalize_with_existing_ancestor(&left)? == canonicalize_with_existing_ancestor(&right)?)
+}
+
+fn canonicalize_with_existing_ancestor(path: &Path) -> Result<PathBuf> {
+    let mut candidate = path.to_path_buf();
+    let mut missing_components = Vec::new();
+    loop {
+        match fs::canonicalize(&candidate) {
+            Ok(mut canonical) => {
+                for component in missing_components.iter().rev() {
+                    canonical.push(component);
+                }
+                return Ok(canonical);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let Some(file_name) = candidate.file_name() else {
+                    return Ok(path.to_path_buf());
+                };
+                missing_components.push(file_name.to_os_string());
+                let Some(parent) = candidate.parent() else {
+                    return Ok(path.to_path_buf());
+                };
+                candidate = parent.to_path_buf();
+            }
+            Err(_) => return Ok(path.to_path_buf()),
+        }
+    }
 }
 
 fn lexical_absolute(path: &Path) -> Result<PathBuf> {
@@ -316,6 +339,7 @@ mod tests {
     use crate::config_setup::{SetupSeed, SetupSession};
     use crate::config_templates::{RuntimeMode, SecretValue};
     use crate::WorkerProfile;
+    use std::os::unix::fs::symlink;
     use std::os::unix::fs::PermissionsExt;
 
     fn fresh_root(label: &str) -> PathBuf {
@@ -481,6 +505,46 @@ mod tests {
                     })
                     .unwrap_or(true)
             }));
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn symlink_parent_alias_to_nonexistent_target_is_rejected_before_secret_write() {
+        let root = fresh_root("symlink-parent-alias");
+        let real = root.join("real");
+        let alias = root.join("alias");
+        fs::create_dir_all(&real).unwrap();
+        symlink("real", &alias).unwrap();
+
+        let config_path = alias.join("config.json");
+        let secret_path = real.join("config.json");
+        let marker = "symlink-parent-secret-marker";
+        let error = match commit_wizard_outcome(
+            &config_path,
+            outcome_with_secret(&config_path, &secret_path, marker),
+        ) {
+            Ok(_) => panic!("symlink-parent alias unexpectedly succeeded"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.to_string(), "config_init_secret_path_invalid");
+        assert!(!config_path.exists());
+        assert!(!secret_path.exists());
+        let backup_dir = real.join("backups");
+        if backup_dir.exists() {
+            assert!(fs::read_dir(&backup_dir)
+                .unwrap()
+                .filter_map(|entry| entry.ok())
+                .all(|entry| {
+                    fs::read(entry.path())
+                        .map(|bytes| {
+                            !bytes
+                                .windows(marker.len())
+                                .any(|window| window == marker.as_bytes())
+                        })
+                        .unwrap_or(true)
+                }));
         }
         let _ = fs::remove_dir_all(root);
     }
