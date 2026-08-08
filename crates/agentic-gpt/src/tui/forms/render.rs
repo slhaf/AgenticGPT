@@ -235,7 +235,9 @@ pub(crate) fn long_form_input_value_line(
         inner_width,
     );
     let content_width = UnicodeWidthStr::width(content.as_str());
-    let padding = " ".repeat(inner_width.saturating_sub(content_width));
+    let remaining = inner_width.saturating_sub(content_width);
+    let left_padding = " ".repeat((remaining + 1) / 2);
+    let right_padding = " ".repeat(remaining / 2);
     let value_style = if editing {
         theme.emphasis.add_modifier(Modifier::BOLD)
     } else if is_default {
@@ -247,8 +249,9 @@ pub(crate) fn long_form_input_value_line(
         Span::raw("  "),
         focus_span(focused, theme),
         Span::styled("[", theme.structure),
+        Span::styled(left_padding, value_style),
         Span::styled(content, value_style),
-        Span::styled(padding, value_style),
+        Span::styled(right_padding, value_style),
         Span::styled("]", theme.structure),
     ])
 }
@@ -471,6 +474,31 @@ mod tests {
             .unwrap();
         let editing = row_text(&terminal, 1, 42);
         assert!(editing.contains("a█bc"));
+    }
+
+    #[test]
+    fn short_long_form_values_are_centered_inside_the_input() {
+        let backend = TestBackend::new(42, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let theme = Theme::from_env();
+        terminal
+            .draw(|frame| {
+                render_long_form_input(
+                    frame,
+                    Rect::new(0, 0, 42, 2),
+                    "Bubblewrap path",
+                    "bwrap",
+                    true,
+                    false,
+                    None,
+                    false,
+                    false,
+                    &theme,
+                );
+            })
+            .unwrap();
+        let value = row_text(&terminal, 1, 42);
+        assert!(value.contains("[  bwrap ]"));
     }
 
     #[test]
