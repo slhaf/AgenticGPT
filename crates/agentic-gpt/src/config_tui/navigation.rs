@@ -21,10 +21,12 @@ pub(crate) struct Navigation {
     mode: RuntimeMode,
     flow: Vec<ConfigPage>,
     index: usize,
+    #[allow(dead_code)]
     return_target: ReturnTarget,
 }
 
 impl Navigation {
+    #[allow(dead_code)]
     pub(crate) fn new(mode: RuntimeMode) -> Self {
         Self {
             mode,
@@ -34,10 +36,12 @@ impl Navigation {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn mode(&self) -> RuntimeMode {
         self.mode
     }
 
+    #[allow(dead_code)]
     pub(crate) fn flow(&self) -> Vec<ConfigPage> {
         self.flow.clone()
     }
@@ -79,10 +83,12 @@ impl Navigation {
             .unwrap_or(0);
     }
 
+    #[allow(dead_code)]
     pub(crate) fn set_return_target(&mut self, target: ReturnTarget) {
         self.return_target = target;
     }
 
+    #[allow(dead_code)]
     pub(crate) fn return_target(&self) -> ReturnTarget {
         self.return_target
     }

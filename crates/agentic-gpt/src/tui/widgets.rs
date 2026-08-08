@@ -43,6 +43,7 @@ pub(crate) fn render_radio_row(
     frame.render_widget(Paragraph::new(line), area);
 }
 
+#[allow(dead_code)]
 pub(crate) fn render_text_input(
     frame: &mut Frame,
     area: Rect,
@@ -52,18 +53,51 @@ pub(crate) fn render_text_input(
     secret: bool,
     theme: &Theme,
 ) {
+    render_text_input_with_cursor(frame, area, label, value, focused, secret, None, theme);
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn render_text_input_with_cursor(
+    frame: &mut Frame,
+    area: Rect,
+    label: &str,
+    value: &str,
+    focused: bool,
+    secret: bool,
+    cursor: Option<usize>,
+    theme: &Theme,
+) {
     let prefix = if focused { "› " } else { "  " };
     let style = if focused { theme.focus } else { theme.normal };
-    let displayed = if secret {
-        "•".repeat(value.chars().count().max(1))
+    let masked = if secret {
+        "•".repeat(value.chars().count())
     } else {
         value.to_string()
     };
-    let line = Line::from(vec![
+    let mut spans = vec![
         Span::styled(prefix, style),
         Span::styled(format!("{label}: "), theme.dim),
-        Span::styled(displayed, style),
-    ]);
+    ];
+    if let Some(cursor) = cursor {
+        let cursor = cursor.min(masked.chars().count());
+        let before = masked.chars().take(cursor).collect::<String>();
+        let after = masked.chars().skip(cursor).collect::<String>();
+        if !before.is_empty() {
+            spans.push(Span::styled(before, style));
+        }
+        spans.push(Span::styled("█", style));
+        if !after.is_empty() {
+            spans.push(Span::styled(after, style));
+        }
+    } else {
+        let displayed = if masked.is_empty() {
+            "•".to_string()
+        } else {
+            masked
+        };
+        spans.push(Span::styled(displayed, style));
+    }
+    let line = Line::from(spans);
     frame.render_widget(Paragraph::new(line), area);
 }
 
@@ -184,5 +218,60 @@ mod tests {
             .collect();
         assert!(content.contains("Write"));
         assert!(content.contains("Ctrl+C"));
+    }
+
+    #[test]
+    fn text_input_renders_live_cursor_without_revealing_secret_text() {
+        let backend = TestBackend::new(50, 4);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let theme = Theme::from_env();
+        terminal
+            .draw(|frame| {
+                super::render_text_input_with_cursor(
+                    frame,
+                    frame.area(),
+                    "Tunnel ID",
+                    "abc",
+                    true,
+                    false,
+                    Some(1),
+                    &theme,
+                );
+            })
+            .unwrap();
+        let content: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(content.contains("a█bc"));
+
+        let backend = TestBackend::new(50, 4);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                super::render_text_input_with_cursor(
+                    frame,
+                    frame.area(),
+                    "Secret",
+                    "hidden-secret",
+                    true,
+                    true,
+                    Some(3),
+                    &theme,
+                );
+            })
+            .unwrap();
+        let content: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(content.contains("•••█•••••••••"));
+        assert!(!content.contains("hidden-secret"));
     }
 }

@@ -18,7 +18,7 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 
 pub(crate) enum TerminalEvent {
     Key(KeyEvent),
-    Resize(u16, u16),
+    Resize,
     Tick,
 }
 
@@ -70,7 +70,7 @@ impl TerminalSession {
         }
         Ok(match event::read()? {
             Event::Key(key) => TerminalEvent::Key(key),
-            Event::Resize(width, height) => TerminalEvent::Resize(width, height),
+            Event::Resize(_, _) => TerminalEvent::Resize,
             _ => TerminalEvent::Tick,
         })
     }

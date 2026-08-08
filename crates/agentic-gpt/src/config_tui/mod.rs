@@ -11,9 +11,10 @@ use crate::cli_i18n::UiLanguage;
 use crate::config_setup::{SetupSeed, SetupSession};
 use crate::tui::TerminalSession;
 
-pub(crate) use app::{Committer, ConfigTuiApp, SystemError, TuiAction, TuiState};
-pub(crate) use input::EditState;
-pub(crate) use navigation::{ConfigPage, Navigation, ReturnTarget};
+#[cfg(test)]
+pub(crate) use app::{Committer, TuiAction};
+pub(crate) use app::{ConfigTuiApp, SystemError, TuiState};
+pub(crate) use navigation::ConfigPage;
 
 pub(crate) fn run_config_tui(
     config_path: &Path,

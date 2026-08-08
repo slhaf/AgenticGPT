@@ -14,11 +14,12 @@ use crate::config_setup::{
 use crate::config_templates::{InitSummary, OptionalSection, RuntimeMode, TunnelSecretSource};
 use crate::tui::{
     render_action_button, render_footer, render_header, render_inline_error, render_radio_row,
-    render_text_input, Theme,
+    render_text_input_with_cursor, Theme,
 };
 
 use super::{ConfigPage, SystemError, TuiState};
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn render(
     frame: &mut Frame,
     page: ConfigPage,
@@ -146,7 +147,8 @@ fn render_connection(
     let rows = Layout::vertical(constraints).split(body);
     for (index, field) in fields.iter().enumerate() {
         let focused = state.focus == index;
-        let value = connection_value(session, *field);
+        let confirmed_value = connection_value(session, *field);
+        let value = confirmed_value.as_deref().unwrap_or_default();
         if matches!(
             field,
             SetupField::TunnelSecretSource | SetupField::ProvisionTunnelSecret
@@ -154,22 +156,23 @@ fn render_connection(
             render_radio_row(
                 frame,
                 rows[index],
-                &connection_label(*field, value.as_deref()),
-                value.as_deref() == Some("true"),
+                &connection_label(*field, Some(value)),
+                value == "true",
                 focused,
                 theme,
             );
         } else {
-            render_text_input(
+            render_text_input_with_cursor(
                 frame,
                 rows[index],
-                &connection_label(*field, value.as_deref()),
-                value.as_deref().unwrap_or_default(),
+                &connection_label(*field, Some(value)),
+                current_input_value(state, *field, value),
                 focused,
                 matches!(
                     field,
                     SetupField::TunnelSecretValue | SetupField::AgentSecret
                 ),
+                editing_cursor(state, *field),
                 theme,
             );
         }
@@ -326,6 +329,7 @@ fn render_optional_center(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_optional_form(
     frame: &mut Frame,
     section: OptionalSection,
@@ -360,6 +364,7 @@ fn render_optional_form(
     let rows = Layout::vertical(constraints).split(body);
     for (index, field) in fields.iter().enumerate() {
         let value = optional_field_value(draft, *field);
+        let value = current_input_value(state, *field, &value);
         let focused = state.focus == index;
         if optional_field_is_toggle(*field) {
             render_radio_row(
@@ -371,13 +376,14 @@ fn render_optional_form(
                 theme,
             );
         } else {
-            render_text_input(
+            render_text_input_with_cursor(
                 frame,
                 rows[index],
                 optional_field_label(*field),
-                &value,
+                value,
                 focused,
                 false,
+                editing_cursor(state, *field),
                 theme,
             );
         }
@@ -398,6 +404,23 @@ fn render_optional_form(
         "Enter edit/toggle · Esc discard · Ctrl+C cancel",
         theme,
     );
+}
+
+fn current_input_value<'a>(state: &'a TuiState, field: SetupField, confirmed: &'a str) -> &'a str {
+    state
+        .editing
+        .as_ref()
+        .filter(|editing| editing.field == field)
+        .map(|editing| editing.buffer.as_str())
+        .unwrap_or(confirmed)
+}
+
+fn editing_cursor(state: &TuiState, field: SetupField) -> Option<usize> {
+    state
+        .editing
+        .as_ref()
+        .filter(|editing| editing.field == field)
+        .map(|editing| editing.cursor)
 }
 
 fn all_optional_sections() -> [OptionalSection; 8] {
@@ -875,6 +898,7 @@ mod tests {
     use crate::cli_i18n::UiLanguage;
     use crate::config_setup::{SetupSeed, SetupSession};
     use crate::config_templates::RuntimeMode;
+    use crate::config_tui::TuiAction;
     use crate::WorkerProfile;
 
     use super::super::{ConfigPage, ConfigTuiApp};
@@ -1056,5 +1080,51 @@ mod tests {
         app.handle_action(super::super::TuiAction::Activate)
             .unwrap();
         assert!(content(&app, 70, 20).contains("Secret value"));
+    }
+
+    #[test]
+    fn critical_pages_keep_primary_actions_in_a_small_terminal() {
+        for mode in [
+            RuntimeMode::Standalone,
+            RuntimeMode::Hub,
+            RuntimeMode::Local,
+        ] {
+            let mut app = ConfigTuiApp::new(SetupSession::new(
+                SetupSeed {
+                    mode: Some(mode),
+                    profile: Some(WorkerProfile::Normal),
+                    tunnel_id: Some("small-terminal-tunnel".into()),
+                    tunnel_api_key: Some("file:/tmp/small-terminal-secret".into()),
+                    agent_secret: Some(crate::config_templates::SecretValue::new(
+                        "small-terminal-agent-secret",
+                    )),
+                    ..SetupSeed::default()
+                },
+                UiLanguage::En,
+                "/tmp/config-tui-small-terminal.json".into(),
+            ));
+
+            let basic = content(&app, 36, 12);
+            assert!(basic.contains("Next"), "basic action missing for {mode:?}");
+
+            app.handle_action(TuiAction::Next).unwrap();
+            if app.page() == ConfigPage::Connection {
+                let connection = content(&app, 36, 12);
+                assert!(
+                    connection.contains("Next"),
+                    "connection action missing for {mode:?}"
+                );
+                app.handle_action(TuiAction::Next).unwrap();
+            }
+
+            assert_eq!(app.page(), ConfigPage::OptionalCenter);
+            let optional = content(&app, 36, 12);
+            assert!(optional.contains("Finish and continue"));
+            app.handle_action(TuiAction::Next).unwrap();
+
+            assert_eq!(app.page(), ConfigPage::Review);
+            let review = content(&app, 36, 12);
+            assert!(review.contains("Confirm and write"));
+        }
     }
 }

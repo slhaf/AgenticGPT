@@ -119,6 +119,7 @@ use super::validation::{ValidationError, ValidationErrors};
 pub(crate) enum ReviewTarget {
     Basic,
     Connection,
+    #[allow(dead_code)]
     OptionalCenter,
     OptionalSection(OptionalSection),
 }

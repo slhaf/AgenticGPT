@@ -15,12 +15,13 @@ agentic-gpt config show
 
 [`config.example.json`](../config.example.json) is a strict v0.9 superset example. It is Standalone-first, contains no usable credentials, keeps all example downstream MCP servers disabled, and includes optional Hub fields for deployments that need them.
 
-## Initializer behavior
+## Fullscreen initializer behavior
 
-`agentic-gpt config init` is an interactive wizard only when stdin, stdout, and stderr are all
-terminals. A pipe, redirected stream, or `--non-interactive` always takes the non-interactive
-path and never waits for input. The default mode is `standalone` and the default profile is
-`normal`.
+`agentic-gpt config init` opens the keyboard-driven fullscreen setup UI only when stdin, stdout,
+and stderr are all terminals. A pipe or redirected stream is not an implicit fallback: bare
+non-TTY init returns a localized, actionable error and writes nothing. Use
+`config init --non-interactive` for scripts, CI, redirected output, or any other automation. The
+default mode is `standalone` and the default profile is `normal`.
 
 Mode and profile are independent choices:
 
@@ -51,19 +52,28 @@ and local process inspection, so hidden interactive input is preferred. A `file:
 reference avoids putting a tunnel secret in the command line; plaintext tunnel API keys are
 rejected.
 
-The wizard asks for required values for the selected mode, then offers an optional-settings
-menu. Identity/display name, workspace/path policy, confirmation/language, limits, and sandbox
-are always available. Room settings are offered only for the Room profile. Tunnel-client
-overrides and Hub reporting are offered only for Standalone mode. Hub and Local modes do not
-show those tunnel sections. Selecting no optional sections keeps the template defaults.
+The fullscreen flow is Basic → Connection (except for Local) → Optional settings → Review →
+Completion. The command-line flags seed editable fields in interactive mode; they do not lock the
+values or skip the pages. Identity/display name, workspace/path policy, confirmation/language,
+limits, and sandbox are always available. Room settings are offered only for the Room profile.
+Tunnel-client overrides and Hub reporting are offered only for Standalone mode. Hub and Local modes
+do not show those tunnel sections. Optional sections can be revisited, and selecting none keeps
+the template defaults.
+
+The UI uses keyboard navigation: Tab/Shift+Tab and the arrow keys move focus, Enter edits or
+activates the focused item, Esc backs out (and is a no-op on the root Basic page), and Ctrl+C
+cancels the setup. Editing Esc only leaves editing; it does not cancel the setup. Review is
+redacted, can jump back to Basic, Connection, or an optional section, and does not write config,
+backup, or secret files until final confirmation. This feature documents the fullscreen keyboard
+flow only; mouse, inline, dashboard, and Windows behavior are outside its contract.
 
 `config init --language auto|zh-CN|en` selects the CLI interface language. With `auto`, locale
 variables are checked in this order: `LC_ALL`, then `LC_MESSAGES`, then `LANG`, then English.
 An explicit `zh-CN` or `en` wins over the environment. This interface choice is separate from
 the persisted `confirmationLanguage`, which controls the language of confirmation prompts sent
-by the runtime and can be set through the optional wizard section or `config set`.
+by the runtime and can be set through the optional configuration section or `config set`.
 
-The wizard's first-run scope deliberately excludes MCP server collections and command-policy
+The first-run setup scope deliberately excludes MCP server collections and command-policy
 collections. Configure those after initialization with `config mcp` and `config allow`,
 `config confirm`, or `config deny` (and use `config path` for path roots).
 
@@ -306,8 +316,9 @@ Use `config allow/confirm/deny`, `config path`, and `config mcp` for structured 
 
 Tunnel secrets must be referenced as `file:PATH` or `env:NAME`; the `file:` path may be absolute
 or use the usual home expansion, while an environment name must be a valid shell variable name.
-The wizard's optional file writer creates the parent directory with mode `0700` and the secret
-file with mode `0600`, writes through a temporary file, and atomically renames it into place.
+The fullscreen setup's optional file writer creates the parent directory with mode `0700` and the
+secret file with mode `0600`, writes through a temporary file, and atomically renames it into
+place.
 If the subsequent config write fails, it removes a newly-created secret or restores the prior
 secret bytes and mode. Escape, Ctrl-C, a prompt error, or a final refusal happens before the
 transaction is committed, so no config or secret file is created or modified. Summaries,

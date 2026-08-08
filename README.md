@@ -104,10 +104,11 @@ Source builds, CI, and release publishing are documented in [`docs/development.m
 
 ### 1. Initialize the local configuration
 
-On a terminal, `agentic-gpt config init` starts the interactive wizard. Its defaults are
-Standalone mode and the Normal capability profile. The wizard is selected only when stdin,
-stdout, and stderr are all terminals; a pipe, redirected stream, or `--non-interactive` uses
-the deterministic builder without prompting.
+On a terminal, `agentic-gpt config init` opens the keyboard-driven fullscreen setup UI. Its
+defaults are Standalone mode and the Normal capability profile. Fullscreen mode requires stdin,
+stdout, and stderr to all be terminals; a pipe or redirected stream returns an actionable error
+and writes nothing. Scripts and CI must choose the deterministic builder explicitly with
+`--non-interactive`.
 
 ```bash
 agentic-gpt config init
@@ -131,9 +132,15 @@ agentic-gpt config init \
 The first command writes safe Standalone + Normal placeholders and reports the tunnel ID and
 secret-reference actions still pending; it does not provision a secret automatically. `--mode`
 selects the runtime transport (Standalone, Hub, or Local), while `--profile` selects the tool
-surface (Normal or Room). `--agent-secret` is visible to shell history and local process
-inspection; prefer the wizard's hidden interactive input. For tunnel API keys, use a
-`file:`/`env:` reference.
+surface (Normal or Room). In fullscreen mode these flags seed editable fields rather than
+locking them. The flow is Basic → Connection (except Local) → Optional settings → Review →
+Completion; optional sections can be revisited, and Review redacts secret values and can jump
+back to an earlier section. Tab/Shift+Tab and arrow keys move focus, Enter edits or activates,
+Esc backs out (and is a no-op on the root Basic page), and Ctrl+C cancels. In fullscreen mode, no
+config, backup, or secret file is written until final Review confirmation. `--agent-secret` is visible to shell
+history and local process inspection; prefer hidden input in the fullscreen UI. For tunnel API
+keys, use a `file:`/`env:` reference. This feature documents keyboard fullscreen setup only; it
+does not promise mouse, inline, dashboard, or Windows behavior.
 
 The default config path is `~/.agentic_gpt/config.json`. Review [`config.example.json`](config.example.json) and [`docs/configuration.md`](docs/configuration.md) before exposing write roots or enabling MCP servers.
 Use `agentic-gpt config keys [--section <SECTION>] [--json]` to inspect the controlled `config set` registry.

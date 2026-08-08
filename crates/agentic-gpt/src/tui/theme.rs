@@ -6,6 +6,7 @@ pub(crate) struct Theme {
     pub(crate) focus: Style,
     pub(crate) normal: Style,
     pub(crate) dim: Style,
+    #[allow(dead_code)]
     pub(crate) success: Style,
     pub(crate) warning: Style,
     pub(crate) error: Style,

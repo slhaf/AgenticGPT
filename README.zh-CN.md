@@ -103,9 +103,10 @@ install -m 0755 agentic-gpt-hub ~/.local/bin/
 
 ### 1. 初始化本地配置
 
-在终端中运行 `agentic-gpt config init` 会启动交互式向导，默认选择 Standalone 模式和
-Normal 能力配置。只有当 stdin、stdout、stderr 全部都是终端时才会进入向导；管道、重定向
-的流，或显式指定 `--non-interactive` 时，会使用不提示的确定性构建流程。
+在终端中运行 `agentic-gpt config init` 会打开键盘驱动的全屏配置界面，默认选择 Standalone
+模式和 Normal 能力配置。全屏模式要求 stdin、stdout、stderr 全部是终端；管道或重定向的流
+会返回可操作的错误且不会写入文件。脚本与 CI 必须显式使用 `--non-interactive` 选择确定性
+构建流程。
 
 ```bash
 agentic-gpt config init
@@ -128,8 +129,14 @@ agentic-gpt config init \
 
 第一条命令会写入安全的 Standalone + Normal 占位配置，并报告仍待处理的 tunnel ID 与密钥
 引用步骤；它不会自动配置密钥。`--mode` 选择运行时传输方式（Standalone、Hub 或 Local），
-`--profile` 选择工具能力面（Normal 或 Room）。`--agent-secret` 会暴露在 shell 历史和本地
-进程检查中；优先使用向导的隐藏交互输入。Tunnel API key 请使用 `file:`/`env:` 引用。
+`--profile` 选择工具能力面（Normal 或 Room）。在全屏模式中，这些 flag 只是可编辑的预填
+值，不会锁定字段。流程为 Basic → Connection（Local 除外）→ Optional settings → Review →
+Completion；可选 section 可以反复进入，Review 会隐藏密钥值并可跳回之前的 section 编辑。
+Tab/Shift+Tab 与方向键移动焦点，Enter 编辑或触发操作，Esc 返回（在根 Basic 页面是 no-op），
+Ctrl+C 取消。全屏流程在 Review 确认前不会写入配置、备份或密钥文件。`--agent-secret` 会暴露在
+shell 历史和本地进程检查中；全屏界面中输入时会隐藏它。Tunnel API key 请使用
+`file:`/`env:` 引用。本功能只承诺键盘全屏配置流程，不承诺鼠标、inline、dashboard 或
+Windows 行为。
 
 默认配置路径为 `~/.agentic_gpt/config.json`。开放写入根或启用 MCP server 前，请先检查 [`config.example.json`](config.example.json) 与 [`docs/configuration.zh-CN.md`](docs/configuration.zh-CN.md)。
 使用 `agentic-gpt config keys [--section <SECTION>] [--json]` 可以查看受控的 `config set` registry。

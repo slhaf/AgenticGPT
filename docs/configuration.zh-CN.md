@@ -15,11 +15,12 @@ agentic-gpt config show
 
 [`config.example.json`](../config.example.json) 是严格的 v0.9 superset 示例：以 Standalone 为优先入口，不包含可用凭据，示例下游 MCP server 全部保持 disabled，同时保留 Hub 模式需要的可选字段。
 
-## 初始化向导行为
+## 全屏初始化行为
 
-只有当 stdin、stdout、stderr 全部是终端时，`agentic-gpt config init` 才会启动交互式向导。
-使用管道、重定向的流，或指定 `--non-interactive` 时，命令始终走不提示的路径，不会等待
-输入。默认模式是 `standalone`，默认配置档是 `normal`。
+只有当 stdin、stdout、stderr 全部是终端时，`agentic-gpt config init` 才会打开键盘驱动的
+全屏配置界面。管道或重定向的流不会隐式回退：裸跑的非 TTY 初始化会返回本地化的可操作
+错误且不会写入文件。脚本、CI、重定向输出或其他自动化场景请使用
+`config init --non-interactive`。默认模式是 `standalone`，默认配置档是 `normal`。
 
 模式与配置档是两个独立选择：
 
@@ -47,17 +48,24 @@ agentic-gpt config init \
 使用 `file:` 或 `env:` 引用可以避免把 tunnel secret 放进命令行；明文 tunnel API key
 会被拒绝。
 
-向导先询问所选模式需要的值，然后提供可选设置菜单。身份/显示名称、工作区/路径策略、
-确认方式/语言、限制和沙箱始终可选。只有 Room 配置档会出现 Room 设置；只有 Standalone
-模式会出现 tunnel-client 覆盖和 Hub reporting。Hub 与 Local 模式不会显示这些 tunnel
-部分。不选可选部分时会保留模板默认值。
+全屏流程为 Basic → Connection（Local 除外）→ Optional settings → Review → Completion。
+交互模式下的命令行 flag 只是可编辑的预填值，不会锁定字段或跳过页面。身份/显示名称、
+工作区/路径策略、确认方式/语言、限制和沙箱始终可选。只有 Room 配置档会出现 Room 设置；
+只有 Standalone 模式会出现 tunnel-client 覆盖和 Hub reporting。Hub 与 Local 模式不会显示
+这些 tunnel 部分。不选可选部分时会保留模板默认值。
+
+界面使用键盘导航：Tab/Shift+Tab 与方向键移动焦点，Enter 编辑或触发当前操作，Esc 返回
+（根 Basic 页面是 no-op），Ctrl+C 取消初始化。编辑态按 Esc 只结束编辑，不会取消初始化。
+Review 会隐藏密钥，可跳回 Basic、Connection 或可选 section 编辑；最终确认前不会写入配置、
+备份或密钥文件。本功能只承诺键盘全屏流程；鼠标、inline、dashboard 与 Windows 行为不在
+本功能契约内。
 
 `config init --language auto|zh-CN|en` 选择 CLI 界面语言。使用 `auto` 时依次检查
 `LC_ALL`、`LC_MESSAGES`、`LANG`，都没有匹配时使用 English。显式的 `zh-CN` 或 `en`
 优先于环境变量。这个界面选择与持久化的 `confirmationLanguage` 不同；后者控制 runtime
-发出的确认提示语言，可在可选向导部分或通过 `config set` 设置。
+发出的确认提示语言，可在可选配置 section 或通过 `config set` 设置。
 
-首次向导刻意不包含 MCP server 集合与命令策略集合。初始化后分别使用 `config mcp`、
+首次配置刻意不包含 MCP server 集合与命令策略集合。初始化后分别使用 `config mcp`、
 `config allow`、`config confirm`、`config deny` 配置它们（路径根使用 `config path`）。
 
 ## 各 runtime 必需项
@@ -296,7 +304,7 @@ registry 包含以下常用 scalar：
 ## 密钥文件与事务写入
 
 Tunnel secret 必须写成 `file:PATH` 或 `env:NAME` 引用；`file:` 路径可以是绝对路径或使用
-常规 home 展开，环境变量名必须是合法 shell 变量名。向导选择立即写入文件时，会以 `0700`
+常规 home 展开，环境变量名必须是合法 shell 变量名。全屏配置在最终确认时选择写入文件，会以 `0700`
 创建父目录、以 `0600` 创建密钥文件，先写临时文件再原子重命名。如果之后的配置写入失败，
 会删除新建的密钥，或恢复原密钥的字节内容与权限。Escape、Ctrl-C、提示错误或最终拒绝都
 发生在事务提交之前，因此不会创建或修改配置文件或密钥文件。summary、诊断与错误不会输出

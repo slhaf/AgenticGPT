@@ -22,7 +22,9 @@ pub(crate) struct TuiState {
     pub(crate) return_target: ReturnTarget,
     pub(crate) focus: usize,
     pub(crate) editing: Option<EditState>,
+    #[allow(dead_code)]
     pub(crate) scroll: u16,
+    #[allow(dead_code)]
     pub(crate) modal: Option<String>,
     pub(crate) cancelled: bool,
     pub(crate) committed_summary: Option<InitSummary>,
@@ -60,7 +62,9 @@ pub(crate) enum TuiAction {
     CursorRight,
     MoveNext,
     MovePrevious,
+    #[allow(dead_code)]
     SetMode(RuntimeMode),
+    #[allow(dead_code)]
     SetProfile(WorkerProfile),
 }
 
@@ -109,6 +113,7 @@ impl ConfigTuiApp {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn page(&self) -> ConfigPage {
         self.state.page
     }
@@ -129,10 +134,12 @@ impl ConfigTuiApp {
             .expect("setup session is unavailable after commit")
     }
 
+    #[allow(dead_code)]
     pub(crate) fn editing(&self) -> Option<&EditState> {
         self.state.editing.as_ref()
     }
 
+    #[allow(dead_code)]
     pub(crate) fn review_model(&self) -> Option<&ReviewModel> {
         self.review.as_ref()
     }
@@ -168,8 +175,9 @@ impl ConfigTuiApp {
     }
 
     pub(crate) fn handle_event(&mut self, event: TerminalEvent) -> Result<()> {
-        if let TerminalEvent::Key(key) = event {
-            self.handle_key(key)?;
+        match event {
+            TerminalEvent::Key(key) => self.handle_key(key)?,
+            TerminalEvent::Resize | TerminalEvent::Tick => {}
         }
         Ok(())
     }
@@ -181,9 +189,10 @@ impl ConfigTuiApp {
                     self.commit_edit();
                 } else if matches!(self.state.page, ConfigPage::Optional(_)) {
                     self.save_optional_section();
-                } else if self.state.page == ConfigPage::Completion {
-                    self.state.finished = true;
-                } else if self.state.page == ConfigPage::SystemError {
+                } else if matches!(
+                    self.state.page,
+                    ConfigPage::Completion | ConfigPage::SystemError
+                ) {
                     self.state.finished = true;
                 } else {
                     self.next_page();
@@ -201,9 +210,10 @@ impl ConfigTuiApp {
                     self.return_to_review();
                 } else if self.state.page == ConfigPage::Review {
                     // Review is the wizard root after the staged flow; Esc is a no-op.
-                } else if self.state.page == ConfigPage::Completion {
-                    self.state.finished = true;
-                } else if self.state.page == ConfigPage::SystemError {
+                } else if matches!(
+                    self.state.page,
+                    ConfigPage::Completion | ConfigPage::SystemError
+                ) {
                     self.state.finished = true;
                 } else if self.navigation.back() {
                     self.sync_page();
@@ -224,9 +234,10 @@ impl ConfigTuiApp {
                     self.commit_edit();
                 } else if self.state.page == ConfigPage::Review {
                     self.activate_review_focus();
-                } else if self.state.page == ConfigPage::Completion {
-                    self.state.finished = true;
-                } else if self.state.page == ConfigPage::SystemError {
+                } else if matches!(
+                    self.state.page,
+                    ConfigPage::Completion | ConfigPage::SystemError
+                ) {
                     self.state.finished = true;
                 } else {
                     self.activate_focus();
@@ -310,9 +321,11 @@ impl ConfigTuiApp {
         match key.code {
             KeyCode::Esc => self.handle_action(TuiAction::Back),
             KeyCode::Enter => {
-                if self.state.page == ConfigPage::Review {
-                    self.handle_action(TuiAction::Activate)
-                } else if self.focused_field().is_some() {
+                if matches!(
+                    self.state.page,
+                    ConfigPage::OptionalCenter | ConfigPage::Review
+                ) || self.focused_field().is_some()
+                {
                     self.handle_action(TuiAction::Activate)
                 } else {
                     self.handle_action(TuiAction::Next)
@@ -365,11 +378,10 @@ impl ConfigTuiApp {
                 }
                 Err(errors) => self.route_validation_errors(errors),
             },
-            ConfigPage::Review => {
-                if self.state.focus >= self.review_group_count() {
-                    self.confirm_and_write();
-                }
+            ConfigPage::Review if self.state.focus >= self.review_group_count() => {
+                self.confirm_and_write();
             }
+            ConfigPage::Review => {}
             _ => {}
         }
     }
@@ -1027,7 +1039,7 @@ mod tests {
         assert_eq!(basic.page(), ConfigPage::Basic);
         assert_eq!(
             basic.state.return_target,
-            super::super::ReturnTarget::Review
+            super::super::navigation::ReturnTarget::Review
         );
         basic
             .handle_action(TuiAction::SetMode(RuntimeMode::Hub))
@@ -1162,6 +1174,10 @@ mod tests {
         assert!(!rendered(&committed).contains(marker));
         committed.state.focus = committed.review_group_count();
         committed.handle_action(TuiAction::Next).unwrap();
+        let completion = rendered(&committed);
+        assert!(completion.contains("AgenticGPT initialization complete"));
+        assert!(completion.contains("phase-seven-review.json"));
+        assert!(completion.contains("Done"));
         assert!(!rendered(&committed).contains(marker));
 
         let calls = Rc::new(Cell::new(0));
@@ -1186,7 +1202,10 @@ mod tests {
         failed.state.focus = failed.review_group_count();
         failed.handle_action(TuiAction::Next).unwrap();
         assert_eq!(failed.page(), ConfigPage::SystemError);
-        assert!(!rendered(&failed).contains(marker));
+        let error = rendered(&failed);
+        assert!(error.contains("Initialization error"));
+        assert!(error.contains("Exit"));
+        assert!(!error.contains(marker));
     }
 
     #[test]
@@ -1254,6 +1273,33 @@ mod tests {
     }
 
     #[test]
+    fn enter_event_opens_optional_sections_and_activates_finish_action() {
+        let mut app = app(RuntimeMode::Standalone);
+        app.handle_action(TuiAction::Next).unwrap();
+        app.handle_action(TuiAction::Next).unwrap();
+        assert_eq!(app.page(), ConfigPage::OptionalCenter);
+
+        app.handle_event(TerminalEvent::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )))
+        .unwrap();
+        assert_eq!(
+            app.page(),
+            ConfigPage::Optional(crate::config_templates::OptionalSection::Identity)
+        );
+
+        app.handle_action(TuiAction::Back).unwrap();
+        app.state.focus = app.session().available_optional_sections().len();
+        app.handle_event(TerminalEvent::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )))
+        .unwrap();
+        assert_eq!(app.page(), ConfigPage::Review);
+    }
+
+    #[test]
     fn editing_enter_seeds_confirmed_value_and_escape_discards_buffer() {
         let mut app = app(RuntimeMode::Standalone);
         app.handle_action(TuiAction::Next).unwrap();
@@ -1264,6 +1310,27 @@ mod tests {
         app.handle_action(TuiAction::Back).unwrap();
         assert!(app.editing().is_none());
         assert_eq!(app.session().standalone().tunnel_id, "staged-tunnel");
+    }
+
+    #[test]
+    fn editing_render_shows_live_buffer_and_cursor() {
+        let mut standalone = app(RuntimeMode::Standalone);
+        standalone.handle_action(TuiAction::Next).unwrap();
+        standalone.focus_field(crate::config_setup::SetupField::TunnelId);
+        standalone.handle_action(TuiAction::Activate).unwrap();
+        standalone.handle_action(TuiAction::Text('X')).unwrap();
+        let standalone_rendered = rendered(&standalone);
+        assert!(standalone_rendered.contains("staged-tunnelX"));
+        assert!(standalone_rendered.contains('█'));
+
+        let mut hub = app(RuntimeMode::Hub);
+        hub.handle_action(TuiAction::Next).unwrap();
+        hub.focus_field(crate::config_setup::SetupField::AgentSecret);
+        hub.handle_action(TuiAction::Activate).unwrap();
+        hub.handle_action(TuiAction::Text('x')).unwrap();
+        let hub_rendered = rendered(&hub);
+        assert!(hub_rendered.contains('█'));
+        assert!(!hub_rendered.contains("hub-secret-marker"));
     }
 
     #[test]
