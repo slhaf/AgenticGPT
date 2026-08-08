@@ -1,3 +1,4 @@
+pub(crate) mod forms;
 mod runtime;
 mod theme;
 mod widgets;
