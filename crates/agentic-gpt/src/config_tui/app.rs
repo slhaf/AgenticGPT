@@ -9,7 +9,7 @@ use crate::config_setup::{
     commit_wizard_outcome, OptionalSectionDraft, ReviewModel, SetupField, SetupSession,
     ValidationErrors, WizardOutcome,
 };
-use crate::config_templates::{InitSummary, RuntimeMode, SecretValue};
+use crate::config_templates::{InitSummary, RuntimeMode, SecretValue, TunnelSecretSource};
 use crate::tui::{TerminalEvent, Theme};
 use crate::WorkerProfile;
 
@@ -162,9 +162,9 @@ impl ConfigTuiApp {
     pub(crate) fn focused_field(&self) -> Option<SetupField> {
         match self.state.page {
             ConfigPage::Basic => pages::basic_focus_field(self.state.focus),
-            ConfigPage::Connection => pages::connection_fields_for_session(self.session())
-                .get(self.state.focus)
-                .copied(),
+            ConfigPage::Connection => {
+                pages::connection_focus_field(self.session(), self.state.focus)
+            }
             ConfigPage::Optional(section) => pages::optional_fields(section)
                 .get(self.state.focus)
                 .copied(),
@@ -411,6 +411,20 @@ impl ConfigTuiApp {
             self.activate_optional_center();
             return;
         }
+        if self.state.page == ConfigPage::Connection {
+            if let Some(source) =
+                pages::connection_secret_source_for_focus(self.session(), self.state.focus)
+            {
+                let draft = self.session_mut().standalone_mut();
+                if source == TunnelSecretSource::Environment {
+                    draft.provision_secret_now = false;
+                    draft.secret_value = None;
+                }
+                draft.secret_source = source;
+                self.field_errors.remove(&SetupField::TunnelSecretSource);
+                return;
+            }
+        }
         let Some(field) = self.focused_field() else {
             return;
         };
@@ -438,20 +452,6 @@ impl ConfigTuiApp {
                 if let Some(profile) = pages::basic_profile_for_focus(self.state.focus) {
                     self.session_mut().set_profile(profile);
                 }
-            }
-            SetupField::TunnelSecretSource => {
-                let draft = self.session_mut().standalone_mut();
-                draft.secret_source = match draft.secret_source {
-                    crate::config_templates::TunnelSecretSource::File => {
-                        draft.provision_secret_now = false;
-                        draft.secret_value = None;
-                        crate::config_templates::TunnelSecretSource::Environment
-                    }
-                    crate::config_templates::TunnelSecretSource::Environment => {
-                        crate::config_templates::TunnelSecretSource::File
-                    }
-                };
-                self.field_errors.clear();
             }
             SetupField::ProvisionTunnelSecret => {
                 let draft = self.session_mut().standalone_mut();
@@ -511,9 +511,7 @@ impl ConfigTuiApp {
     fn move_focus(&mut self, direction: isize) {
         let length = match self.state.page {
             ConfigPage::Basic => pages::basic_focus_len(),
-            ConfigPage::Connection => {
-                pages::connection_fields_for_session(self.session()).len() + 1
-            }
+            ConfigPage::Connection => pages::connection_focus_len(self.session()),
             ConfigPage::OptionalCenter => self.session().available_optional_sections().len() + 1,
             ConfigPage::Optional(section) => pages::optional_fields(section).len() + 1,
             ConfigPage::Review => self.review_group_count() + 1,
@@ -533,9 +531,7 @@ impl ConfigTuiApp {
                 SetupField::Profile => Some(3),
                 _ => None,
             },
-            ConfigPage::Connection => pages::connection_fields_for_session(self.session())
-                .iter()
-                .position(|candidate| *candidate == field),
+            ConfigPage::Connection => pages::connection_field_index(self.session(), field),
             ConfigPage::Optional(section) => pages::optional_fields(section)
                 .iter()
                 .position(|candidate| *candidate == field),
@@ -1273,7 +1269,7 @@ mod tests {
         app.handle_action(TuiAction::Next).unwrap();
         assert_eq!(app.state().focus, 0);
         app.handle_action(TuiAction::MovePrevious).unwrap();
-        assert_eq!(app.state().focus, 4);
+        assert_eq!(app.state().focus, 5);
         app.handle_action(TuiAction::MoveNext).unwrap();
         assert_eq!(app.state().focus, 0);
     }
@@ -1444,7 +1440,7 @@ mod tests {
     }
 
     #[test]
-    fn standalone_source_toggle_keeps_visible_selection_and_clears_file_only_provision() {
+    fn standalone_source_choices_commit_only_on_activation_and_clear_file_only_provision() {
         let mut app = app(RuntimeMode::Standalone);
         app.handle_action(TuiAction::Next).unwrap();
         app.focus_field(crate::config_setup::SetupField::ProvisionTunnelSecret);
@@ -1452,6 +1448,15 @@ mod tests {
         assert!(app.session().standalone().provision_secret_now);
 
         app.focus_field(crate::config_setup::SetupField::TunnelSecretSource);
+        assert_eq!(
+            app.session().standalone().secret_source,
+            crate::config_templates::TunnelSecretSource::File
+        );
+        app.handle_action(TuiAction::MoveNext).unwrap();
+        assert_eq!(
+            app.session().standalone().secret_source,
+            crate::config_templates::TunnelSecretSource::File
+        );
         app.handle_action(TuiAction::Activate).unwrap();
         assert_eq!(
             app.session().standalone().secret_source,
@@ -1460,6 +1465,8 @@ mod tests {
         assert!(!app.session().standalone().provision_secret_now);
         let rendered = rendered(&app);
         assert!(rendered.contains("Secret source"));
+        assert!(rendered.contains("file"));
+        assert!(rendered.contains("env"));
         assert!(rendered.contains(""));
     }
 

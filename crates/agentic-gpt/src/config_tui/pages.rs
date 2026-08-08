@@ -14,6 +14,9 @@ use crate::config_setup::{
 use crate::config_templates::{
     InitSummary, OptionalSection, PendingAction, RuntimeMode, TunnelSecretSource,
 };
+use crate::tui::forms::{
+    boolean_row_line, choice_row_line, render_long_form_input, subsection_heading_line,
+};
 use crate::tui::{
     action_line, inline_error_line, labeled_heading_line, render_action_button,
     render_contextual_footer, render_footer, render_header, render_horizontal_rule,
@@ -407,7 +410,7 @@ fn render_connection(
     render_horizontal_rule(frame, top_rule, theme);
     let [left, _, right] = surface_columns(body);
 
-    let fields = connection_fields_for_session(session);
+    let items = connection_focus_items(session);
     let mut cursor = left.y;
     render_surface_heading(
         frame,
@@ -417,85 +420,191 @@ fn render_connection(
         theme,
     );
     render_surface_blank(left, &mut cursor, frame);
-    for (index, field) in fields.iter().enumerate() {
-        let focused = state.focus == index;
-        let confirmed_value = connection_value(session, *field);
-        let value = confirmed_value.as_deref().unwrap_or_default();
-        let label = connection_label(*field, None, language);
-        if let Some(row) = next_surface_row(left, &mut cursor) {
-            if *field == SetupField::ProvisionTunnelSecret {
-                frame.render_widget(
-                    Paragraph::new(surface_choice_value_line(
+
+    let mut index = 0usize;
+    while index < items.len() {
+        match items[index] {
+            ConnectionFocusItem::SecretSource(TunnelSecretSource::File) => {
+                if let Some(row) = next_surface_row(left, &mut cursor) {
+                    frame.render_widget(
+                        Paragraph::new(subsection_heading_line(
+                            &connection_label(SetupField::TunnelSecretSource, None, language),
+                            theme,
+                        )),
+                        row,
+                    );
+                }
+                for (offset, (source, label)) in [
+                    (TunnelSecretSource::File, "file"),
+                    (TunnelSecretSource::Environment, "env"),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    if let Some(row) = next_surface_row(left, &mut cursor) {
+                        frame.render_widget(
+                            Paragraph::new(choice_row_line(
+                                label,
+                                state.focus == index + offset,
+                                session.standalone().secret_source == source,
+                                12,
+                                theme,
+                            )),
+                            row,
+                        );
+                    }
+                }
+                if let Some(error) = errors.get(&SetupField::TunnelSecretSource) {
+                    if let Some(row) = next_surface_row(left, &mut cursor) {
+                        frame.render_widget(
+                            Paragraph::new(inline_error_line(
+                                &localized_error(error, language),
+                                theme,
+                            )),
+                            row,
+                        );
+                    }
+                }
+                render_surface_blank(left, &mut cursor, frame);
+                index += 2;
+                continue;
+            }
+            ConnectionFocusItem::SecretSource(TunnelSecretSource::Environment) => {
+                index += 1;
+                continue;
+            }
+            ConnectionFocusItem::Field(field) => {
+                let focused = state.focus == index;
+                let confirmed_value = connection_value(session, field);
+                let value = confirmed_value.as_deref().unwrap_or_default();
+                let label = connection_label(field, None, language);
+                if field == SetupField::ProvisionTunnelSecret {
+                    if let Some(row) = next_surface_row(left, &mut cursor) {
+                        frame.render_widget(
+                            Paragraph::new(boolean_row_line(
+                                &label,
+                                if value == "true" {
+                                    t(language, "on", "开")
+                                } else {
+                                    t(language, "off", "关")
+                                },
+                                focused,
+                                24,
+                                theme,
+                            )),
+                            row,
+                        );
+                    }
+                } else if let Some(field_area) = next_surface_rows(left, &mut cursor, 2) {
+                    let edit_cursor = editing_cursor(state, field);
+                    render_long_form_input(
+                        frame,
+                        field_area,
                         &label,
-                        if value == "true" {
-                            t(language, "on", "开")
-                        } else {
-                            t(language, "off", "关")
-                        },
-                        value == "true",
+                        current_input_value(state, field, value),
                         focused,
+                        edit_cursor.is_some(),
+                        edit_cursor,
+                        matches!(
+                            field,
+                            SetupField::TunnelSecretValue | SetupField::AgentSecret
+                        ),
+                        false,
                         theme,
-                    )),
-                    row,
-                );
-            } else if *field == SetupField::TunnelSecretSource {
-                frame.render_widget(
-                    Paragraph::new(surface_choice_value_line(
-                        &label, value, true, focused, theme,
-                    )),
-                    row,
-                );
-            } else {
-                render_surface_text_input_with_cursor(
-                    frame,
-                    row,
-                    &label,
-                    current_input_value(state, *field, value),
-                    focused,
-                    matches!(
-                        field,
-                        SetupField::TunnelSecretValue | SetupField::AgentSecret
-                    ),
-                    editing_cursor(state, *field),
-                    theme,
-                );
+                    );
+                }
+                if let Some(error) = errors.get(&field) {
+                    if let Some(row) = next_surface_row(left, &mut cursor) {
+                        frame.render_widget(
+                            Paragraph::new(inline_error_line(
+                                &localized_error(error, language),
+                                theme,
+                            )),
+                            row,
+                        );
+                    }
+                }
             }
         }
-        if let Some(error) = errors.get(field) {
-            if let Some(row) = next_surface_row(left, &mut cursor) {
-                let message = localized_error(error, language);
-                frame.render_widget(Paragraph::new(inline_error_line(&message, theme)), row);
-            }
-        }
+        index += 1;
     }
+
     render_surface_action(
         frame,
         left,
         t(language, "Next", "下一步"),
-        state.focus >= fields.len(),
+        state.focus >= items.len(),
         theme,
     );
 
+    let field = connection_focus_field(session, state.focus);
     if right.width > 0 {
         render_surface(frame, right, theme);
         let inspector = right.inner(Margin {
             horizontal: 2,
             vertical: 1,
         });
-        let field = fields.get(state.focus).copied();
         let title = field
             .map(|field| connection_label(field, None, language))
             .unwrap_or_else(|| t(language, "Next", "下一步").to_string());
-        let body = connection_inspector_body(field, language);
-        render_inspector(frame, inspector, &title, body, theme);
+        let inspector_body = connection_inspector_body(field, language);
+        render_inspector(frame, inspector, &title, inspector_body, theme);
     }
     render_horizontal_rule(frame, bottom_rule, theme);
-    render_surface_footer(
+    render_connection_footer(
         frame,
         footer,
-        state.editing.is_some(),
-        state.focus >= fields.len(),
+        state,
+        session,
+        field,
+        state.focus >= items.len(),
         language,
+        theme,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_connection_footer(
+    frame: &mut Frame,
+    area: Rect,
+    state: &TuiState,
+    session: &SetupSession,
+    field: Option<SetupField>,
+    action_focused: bool,
+    language: UiLanguage,
+    theme: &Theme,
+) {
+    if state.editing.is_some() {
+        render_contextual_footer(
+            frame,
+            area,
+            &[
+                ("Enter", t(language, "confirm", "确认")),
+                ("Esc", t(language, "discard", "放弃")),
+                ("Ctrl+C", t(language, "cancel", "取消")),
+            ],
+            theme,
+        );
+        return;
+    }
+    let action = if action_focused {
+        t(language, "continue", "继续")
+    } else if connection_secret_source_for_focus(session, state.focus).is_some() {
+        t(language, "choose", "选择")
+    } else if field == Some(SetupField::ProvisionTunnelSecret) {
+        t(language, "toggle", "切换")
+    } else {
+        t(language, "edit", "编辑")
+    };
+    render_contextual_footer(
+        frame,
+        area,
+        &[
+            ("↑↓ j/k", t(language, "move", "移动")),
+            ("Enter/l", action),
+            ("Esc/h", t(language, "back", "返回")),
+            ("Ctrl+C", t(language, "cancel", "取消")),
+        ],
         theme,
     );
 }
@@ -533,18 +642,22 @@ fn surface_columns(body: Rect) -> [Rect; 3] {
 }
 
 fn next_surface_row(area: Rect, cursor: &mut u16) -> Option<Rect> {
+    next_surface_rows(area, cursor, 1)
+}
+
+fn next_surface_rows(area: Rect, cursor: &mut u16, height: u16) -> Option<Rect> {
     let action_y = area.y + area.height.saturating_sub(1);
-    if *cursor >= action_y {
+    if height == 0 || cursor.saturating_add(height) > action_y {
         return None;
     }
-    let row = Rect {
+    let rows = Rect {
         x: area.x,
         y: *cursor,
         width: area.width,
-        height: 1,
+        height,
     };
-    *cursor = (*cursor).saturating_add(1);
-    Some(row)
+    *cursor = cursor.saturating_add(height);
+    Some(rows)
 }
 
 fn render_surface_heading(
@@ -682,32 +795,87 @@ fn connection_inspector_body(
     }
 }
 
-pub(super) fn connection_fields_for_session(session: &SetupSession) -> Vec<SetupField> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ConnectionFocusItem {
+    Field(SetupField),
+    SecretSource(TunnelSecretSource),
+}
+
+impl ConnectionFocusItem {
+    fn field(self) -> SetupField {
+        match self {
+            Self::Field(field) => field,
+            Self::SecretSource(_) => SetupField::TunnelSecretSource,
+        }
+    }
+}
+
+pub(super) fn connection_focus_items(session: &SetupSession) -> Vec<ConnectionFocusItem> {
     match session.selected_mode() {
         RuntimeMode::Standalone => {
-            let mut fields = vec![SetupField::TunnelId, SetupField::TunnelSecretSource];
+            let mut items = vec![
+                ConnectionFocusItem::Field(SetupField::TunnelId),
+                ConnectionFocusItem::SecretSource(TunnelSecretSource::File),
+                ConnectionFocusItem::SecretSource(TunnelSecretSource::Environment),
+            ];
             match session.standalone().secret_source {
                 TunnelSecretSource::File => {
-                    fields.push(SetupField::TunnelSecretPath);
-                    fields.push(SetupField::ProvisionTunnelSecret);
+                    items.push(ConnectionFocusItem::Field(SetupField::TunnelSecretPath));
+                    items.push(ConnectionFocusItem::Field(
+                        SetupField::ProvisionTunnelSecret,
+                    ));
                     if session.standalone().provision_secret_now {
-                        fields.push(SetupField::TunnelSecretValue);
+                        items.push(ConnectionFocusItem::Field(SetupField::TunnelSecretValue));
                     }
                 }
                 TunnelSecretSource::Environment => {
-                    fields.push(SetupField::TunnelSecretEnvironment);
+                    items.push(ConnectionFocusItem::Field(
+                        SetupField::TunnelSecretEnvironment,
+                    ));
                 }
             }
-            fields
+            items
         }
         RuntimeMode::Hub => vec![
-            SetupField::HubUrl,
-            SetupField::HubTransport,
-            SetupField::AgentId,
-            SetupField::AgentSecret,
+            ConnectionFocusItem::Field(SetupField::HubUrl),
+            ConnectionFocusItem::Field(SetupField::HubTransport),
+            ConnectionFocusItem::Field(SetupField::AgentId),
+            ConnectionFocusItem::Field(SetupField::AgentSecret),
         ],
         RuntimeMode::Local => Vec::new(),
     }
+}
+
+pub(super) fn connection_focus_len(session: &SetupSession) -> usize {
+    connection_focus_items(session).len() + 1
+}
+
+pub(super) fn connection_focus_field(session: &SetupSession, focus: usize) -> Option<SetupField> {
+    connection_focus_items(session)
+        .get(focus)
+        .copied()
+        .map(ConnectionFocusItem::field)
+}
+
+pub(super) fn connection_secret_source_for_focus(
+    session: &SetupSession,
+    focus: usize,
+) -> Option<TunnelSecretSource> {
+    match connection_focus_items(session).get(focus).copied() {
+        Some(ConnectionFocusItem::SecretSource(source)) => Some(source),
+        _ => None,
+    }
+}
+
+pub(super) fn connection_field_index(session: &SetupSession, field: SetupField) -> Option<usize> {
+    let items = connection_focus_items(session);
+    if field == SetupField::TunnelSecretSource {
+        let selected = session.standalone().secret_source;
+        return items.iter().position(
+            |item| matches!(item, ConnectionFocusItem::SecretSource(source) if *source == selected),
+        );
+    }
+    items.iter().position(|item| item.field() == field)
 }
 
 fn connection_label(field: SetupField, _value: Option<&str>, language: UiLanguage) -> String {
@@ -1848,6 +2016,28 @@ mod tests {
         ));
         local.handle_action(super::super::TuiAction::Next).unwrap();
         assert_ne!(local.page(), ConfigPage::Connection);
+    }
+
+    #[test]
+    fn standalone_connection_renders_source_as_choices_and_boolean_without_marker() {
+        let mut app = ConfigTuiApp::new(SetupSession::new(
+            SetupSeed {
+                mode: Some(RuntimeMode::Standalone),
+                ..SetupSeed::default()
+            },
+            UiLanguage::En,
+            "/tmp/config-tui-render.json".into(),
+        ));
+        app.handle_action(super::super::TuiAction::Next).unwrap();
+        app.session_mut().standalone_mut().secret_path.clear();
+        let rendered = content(&app, 90, 28);
+        assert!(rendered.contains("Secret source"));
+        assert!(rendered.contains("file"));
+        assert!(rendered.contains("env"));
+        assert_eq!(rendered.matches('').count(), 1);
+        assert!(rendered.contains("Provision secret now"));
+        assert!(rendered.contains("off"));
+        assert!(!rendered.contains('•'));
     }
 
     #[test]
