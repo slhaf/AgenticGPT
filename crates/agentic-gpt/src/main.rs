@@ -27,6 +27,7 @@ mod stdio_server;
 mod supervisor;
 mod tmux;
 mod transport_ledger;
+mod tui;
 mod tunnel_distribution;
 mod utils;
 
