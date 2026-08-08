@@ -35,8 +35,10 @@ impl TerminalSession {
         install_panic_hook();
         let mut stdout = io::stdout();
         enable_raw_mode().map_err(|error| anyhow!("tui_raw_mode: {error}"))?;
+        TUI_ACTIVE.store(true, Ordering::SeqCst);
         if let Err(error) = execute!(stdout, EnterAlternateScreen, Hide) {
-            let _ = disable_raw_mode();
+            restore_primitives();
+            TUI_ACTIVE.store(false, Ordering::SeqCst);
             return Err(anyhow!("tui_enter_screen: {error}"));
         }
 
@@ -45,15 +47,16 @@ impl TerminalSession {
             Ok(terminal) => terminal,
             Err(error) => {
                 restore_primitives();
+                TUI_ACTIVE.store(false, Ordering::SeqCst);
                 return Err(anyhow!("tui_terminal_init: {error}"));
             }
         };
         if let Err(error) = terminal.clear() {
             restore_terminal(&mut terminal);
+            TUI_ACTIVE.store(false, Ordering::SeqCst);
             return Err(anyhow!("tui_clear: {error}"));
         }
 
-        TUI_ACTIVE.store(true, Ordering::SeqCst);
         Ok(Self {
             terminal,
             active: true,

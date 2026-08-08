@@ -11,7 +11,9 @@ use crate::cli_i18n::UiLanguage;
 use crate::config_setup::{
     OptionalSectionDraft, ReviewModel, ReviewTarget, SectionStatus, SetupField, SetupSession,
 };
-use crate::config_templates::{InitSummary, OptionalSection, RuntimeMode, TunnelSecretSource};
+use crate::config_templates::{
+    InitSummary, OptionalSection, PendingAction, RuntimeMode, TunnelSecretSource,
+};
 use crate::tui::{
     render_action_button, render_footer, render_header, render_inline_error, render_radio_row,
     render_text_input_with_cursor, Theme,
@@ -19,12 +21,59 @@ use crate::tui::{
 
 use super::{ConfigPage, SystemError, TuiState};
 
+fn t(language: UiLanguage, en: &'static str, zh: &'static str) -> &'static str {
+    match language {
+        UiLanguage::En => en,
+        UiLanguage::ZhCn => zh,
+    }
+}
+
+fn localized_error(code: &str, language: UiLanguage) -> String {
+    let key = code.split(':').next().unwrap_or(code).trim();
+    let (en, zh) = match key {
+        "config_init_required_value_missing" => ("Required value is missing.", "必填项不能为空。"),
+        "config_init_secret_empty" => ("Secret must not be empty.", "密钥不能为空。"),
+        "config_init_secret_path_invalid" => ("Secret path is invalid.", "密钥路径无效。"),
+        "config_init_secret_source_invalid" => ("Secret source is invalid.", "密钥来源无效。"),
+        "config_init_number_invalid" => ("Enter a valid number.", "请输入有效数字。"),
+        "config_init_path_policy_write_roots_invalid" => (
+            "Write roots must be a JSON array.",
+            "写入根目录必须是 JSON 数组。",
+        ),
+        "config_init_path_policy_read_only_roots_invalid" => (
+            "Read-only roots must be a JSON array.",
+            "只读根目录必须是 JSON 数组。",
+        ),
+        "config_init_path_policy_deny_roots_invalid" => (
+            "Deny roots must be a JSON array.",
+            "拒绝根目录必须是 JSON 数组。",
+        ),
+        "config_init_runtime_paths_invalid" => (
+            "Required runtime paths must be a JSON array.",
+            "运行时路径必须是 JSON 数组。",
+        ),
+        "config_init_confirmation_provider_invalid" => {
+            ("Confirmation provider is invalid.", "确认提供方无效。")
+        }
+        "config_init_reporting_detail_invalid" => {
+            ("Reporting detail is invalid.", "报告详细程度无效。")
+        }
+        "config_init_optional_section_invalid" => {
+            ("Optional section is invalid.", "可选配置区块无效。")
+        }
+        "config_init_build_invalid" => ("Configuration could not be built.", "配置无法生成。"),
+        _ => ("Input is invalid.", "输入值无效。"),
+    };
+    t(language, en, zh).to_string()
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn render(
     frame: &mut Frame,
     page: ConfigPage,
     session: &SetupSession,
     state: &TuiState,
+    language: UiLanguage,
     theme: &Theme,
     errors: &HashMap<SetupField, String>,
     section_draft: Option<&OptionalSectionDraft>,
@@ -32,16 +81,19 @@ pub(super) fn render(
     progress: (usize, usize),
 ) {
     match page {
-        ConfigPage::Basic => render_basic(frame, session, state, theme, errors, progress),
-        ConfigPage::Connection => render_connection(frame, session, state, theme, errors, progress),
+        ConfigPage::Basic => render_basic(frame, session, state, language, theme, errors, progress),
+        ConfigPage::Connection => {
+            render_connection(frame, session, state, language, theme, errors, progress)
+        }
         ConfigPage::OptionalCenter => {
-            render_optional_center(frame, session, state, theme, progress)
+            render_optional_center(frame, session, state, language, theme, progress)
         }
         ConfigPage::Optional(section) => render_optional_form(
             frame,
             section,
             session,
             state,
+            language,
             theme,
             errors,
             section_draft,
@@ -49,13 +101,27 @@ pub(super) fn render(
         ),
         ConfigPage::Review => {
             if let Some(review) = review {
-                render_review(frame, review, state, theme, progress)
+                render_review(frame, review, state, language, theme, progress)
             } else {
-                render_placeholder(frame, "Review", state, theme, progress)
+                render_placeholder(
+                    frame,
+                    t(language, "Review", "检查与写入"),
+                    state,
+                    language,
+                    theme,
+                    progress,
+                )
             }
         }
-        ConfigPage::Completion => render_placeholder(frame, "Done", state, theme, progress),
-        ConfigPage::SystemError => render_placeholder(frame, "Error", state, theme, progress),
+        ConfigPage::Completion => render_placeholder(
+            frame,
+            t(language, "Done", "完成"),
+            state,
+            language,
+            theme,
+            progress,
+        ),
+        ConfigPage::SystemError => render_system_error(frame, None, language, theme),
     }
 }
 
@@ -63,6 +129,7 @@ fn render_basic(
     frame: &mut Frame,
     session: &SetupSession,
     state: &TuiState,
+    language: UiLanguage,
     theme: &Theme,
     errors: &HashMap<SetupField, String>,
     progress: (usize, usize),
@@ -77,13 +144,15 @@ fn render_basic(
     render_header(
         frame,
         header,
-        "AgenticGPT config init",
+        t(language, "AgenticGPT config init", "AgenticGPT 配置初始化"),
         &format!("{} / {}", progress.0, progress.1),
         theme,
     );
     let mode = session.selected_mode();
     let profile = session.selected_profile();
-    let [mode_row, profile_row, error_row] = Layout::vertical([
+    let [mode_row, mode_hint, profile_row, profile_hint, error_row] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
@@ -92,27 +161,60 @@ fn render_basic(
     render_radio_row(
         frame,
         mode_row,
-        &format!("Runtime mode  {mode:?}"),
+        &format!("{}  {mode:?}", t(language, "Runtime mode", "运行模式")),
         true,
         state.focus == 0,
         theme,
     );
+    frame.render_widget(
+        ratatui::widgets::Paragraph::new(t(
+            language,
+            "  Choices: Standalone / Hub / Local",
+            "  可选：Standalone / Hub / Local",
+        ))
+        .style(theme.dim),
+        mode_hint,
+    );
     render_radio_row(
         frame,
         profile_row,
-        &format!("Profile       {}", format!("{profile:?}").to_lowercase()),
+        &format!(
+            "{}       {}",
+            t(language, "Profile", "能力配置"),
+            format!("{profile:?}").to_lowercase()
+        ),
         true,
         state.focus == 1,
         theme,
     );
+    frame.render_widget(
+        ratatui::widgets::Paragraph::new(t(
+            language,
+            "  Choices: normal / Room",
+            "  可选：normal / Room",
+        ))
+        .style(theme.dim),
+        profile_hint,
+    );
     if let Some(error) = errors.get(&SetupField::Mode) {
-        render_inline_error(frame, error_row, error, theme);
+        let message = localized_error(error, language);
+        render_inline_error(frame, error_row, &message, theme);
     }
-    render_action_button(frame, actions, "Next", state.focus >= 2, theme);
+    render_action_button(
+        frame,
+        actions,
+        t(language, "Next", "下一步"),
+        state.focus >= 2,
+        theme,
+    );
     render_footer(
         frame,
         footer,
-        "Enter confirm · Tab move · Ctrl+C cancel",
+        t(
+            language,
+            "Enter choose · Tab move · Ctrl+C cancel",
+            "Enter 选择 · Tab 移动 · Ctrl+C 取消",
+        ),
         theme,
     );
 }
@@ -121,6 +223,7 @@ fn render_connection(
     frame: &mut Frame,
     session: &SetupSession,
     state: &TuiState,
+    language: UiLanguage,
     theme: &Theme,
     errors: &HashMap<SetupField, String>,
     progress: (usize, usize),
@@ -135,16 +238,21 @@ fn render_connection(
     render_header(
         frame,
         header,
-        "Connection settings",
+        t(language, "Connection settings", "连接设置"),
         &format!("{} / {}", progress.0, progress.1),
         theme,
     );
     let fields = connection_fields_for_session(session);
-    let row_height = 1u16;
-    let constraints = std::iter::repeat_n(Constraint::Length(row_height), fields.len())
+    let constraints = fields
+        .iter()
+        .flat_map(|field| {
+            std::iter::once(Constraint::Length(1))
+                .chain(errors.contains_key(field).then_some(Constraint::Length(1)))
+        })
         .chain(std::iter::once(Constraint::Min(1)))
         .collect::<Vec<_>>();
     let rows = Layout::vertical(constraints).split(body);
+    let mut row_index = 0;
     for (index, field) in fields.iter().enumerate() {
         let focused = state.focus == index;
         let confirmed_value = connection_value(session, *field);
@@ -155,17 +263,21 @@ fn render_connection(
         ) {
             render_radio_row(
                 frame,
-                rows[index],
-                &connection_label(*field, Some(value)),
-                value == "true",
+                rows[row_index],
+                &connection_label(*field, Some(value), language),
+                match field {
+                    SetupField::TunnelSecretSource => true,
+                    SetupField::ProvisionTunnelSecret => value == "true",
+                    _ => false,
+                },
                 focused,
                 theme,
             );
         } else {
             render_text_input_with_cursor(
                 frame,
-                rows[index],
-                &connection_label(*field, Some(value)),
+                rows[row_index],
+                &connection_label(*field, Some(value), language),
                 current_input_value(state, *field, value),
                 focused,
                 matches!(
@@ -176,15 +288,28 @@ fn render_connection(
                 theme,
             );
         }
+        row_index += 1;
+        if let Some(error) = errors.get(field) {
+            let message = localized_error(error, language);
+            render_inline_error(frame, rows[row_index], &message, theme);
+            row_index += 1;
+        }
     }
-    if let Some((_, error)) = errors.iter().next() {
-        render_inline_error(frame, *rows.last().unwrap_or(&body), error, theme);
-    }
-    render_action_button(frame, actions, "Next", state.focus >= fields.len(), theme);
+    render_action_button(
+        frame,
+        actions,
+        t(language, "Next", "下一步"),
+        state.focus >= fields.len(),
+        theme,
+    );
     render_footer(
         frame,
         footer,
-        "Enter edit · Esc back · Ctrl+C cancel",
+        t(
+            language,
+            "Enter edit · Esc back · Ctrl+C cancel",
+            "Enter 编辑 · Esc 返回 · Ctrl+C 取消",
+        ),
         theme,
     );
 }
@@ -217,18 +342,26 @@ pub(super) fn connection_fields_for_session(session: &SetupSession) -> Vec<Setup
     }
 }
 
-fn connection_label(field: SetupField, value: Option<&str>) -> String {
+fn connection_label(field: SetupField, value: Option<&str>, language: UiLanguage) -> String {
     match field {
-        SetupField::TunnelId => "Tunnel ID".to_string(),
-        SetupField::TunnelSecretSource => format!("Secret source: {}", value.unwrap_or("file")),
-        SetupField::TunnelSecretPath => "Secret file".to_string(),
-        SetupField::TunnelSecretEnvironment => "Secret environment".to_string(),
-        SetupField::ProvisionTunnelSecret => "Provision secret now".to_string(),
-        SetupField::TunnelSecretValue => "Secret value".to_string(),
-        SetupField::HubUrl => "Hub URL".to_string(),
-        SetupField::HubTransport => "Transport".to_string(),
-        SetupField::AgentId => "Agent ID".to_string(),
-        SetupField::AgentSecret => "Agent Secret".to_string(),
+        SetupField::TunnelId => t(language, "Tunnel ID", "隧道 ID").to_string(),
+        SetupField::TunnelSecretSource => format!(
+            "{}: {}",
+            t(language, "Secret source", "密钥来源"),
+            value.unwrap_or("file")
+        ),
+        SetupField::TunnelSecretPath => t(language, "Secret file", "密钥文件").to_string(),
+        SetupField::TunnelSecretEnvironment => {
+            t(language, "Secret environment", "密钥环境变量").to_string()
+        }
+        SetupField::ProvisionTunnelSecret => {
+            t(language, "Provision secret now", "立即写入密钥").to_string()
+        }
+        SetupField::TunnelSecretValue => t(language, "Secret value", "密钥值").to_string(),
+        SetupField::HubUrl => t(language, "Hub URL", "Hub 地址").to_string(),
+        SetupField::HubTransport => t(language, "Transport", "传输方式").to_string(),
+        SetupField::AgentId => t(language, "Agent ID", "代理 ID").to_string(),
+        SetupField::AgentSecret => t(language, "Agent Secret", "代理密钥").to_string(),
         _ => format!("{field:?}"),
     }
 }
@@ -268,6 +401,7 @@ fn render_optional_center(
     frame: &mut Frame,
     session: &SetupSession,
     state: &TuiState,
+    language: UiLanguage,
     theme: &Theme,
     progress: (usize, usize),
 ) {
@@ -281,7 +415,7 @@ fn render_optional_center(
     render_header(
         frame,
         header,
-        "Optional settings",
+        t(language, "Optional settings", "可选配置"),
         &format!("{} / {}", progress.0, progress.1),
         theme,
     );
@@ -300,16 +434,14 @@ fn render_optional_center(
             _ => theme.normal,
         };
         let prefix = if focused { "› " } else { "  " };
-        let status_label = match status {
-            SectionStatus::Default => "Default",
-            SectionStatus::Configured => "Configured",
-            SectionStatus::NotApplicable => "Not applicable",
-        };
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(prefix, style),
-                Span::styled(section_label(*section), style),
-                Span::styled(format!("  [{status_label}]"), style),
+                Span::styled(section_label(*section, language), style),
+                Span::styled(
+                    format!("  [{}]", section_status_label(status, language)),
+                    style,
+                ),
             ])),
             rows[index],
         );
@@ -317,14 +449,18 @@ fn render_optional_center(
     render_action_button(
         frame,
         actions,
-        "Finish and continue",
+        t(language, "Finish and continue", "完成并继续"),
         state.focus >= focusable.len(),
         theme,
     );
     render_footer(
         frame,
         footer,
-        "Enter open/save · Tab move · Esc back · Ctrl+C cancel",
+        t(
+            language,
+            "Enter open/save · Tab move · Esc back · Ctrl+C cancel",
+            "Enter 打开/保存 · Tab 移动 · Esc 返回 · Ctrl+C 取消",
+        ),
         theme,
     );
 }
@@ -335,6 +471,7 @@ fn render_optional_form(
     section: OptionalSection,
     session: &SetupSession,
     state: &TuiState,
+    language: UiLanguage,
     theme: &Theme,
     errors: &HashMap<SetupField, String>,
     section_draft: Option<&OptionalSectionDraft>,
@@ -350,7 +487,11 @@ fn render_optional_form(
     render_header(
         frame,
         header,
-        &format!("{} settings", section_label(section)),
+        &format!(
+            "{} {}",
+            section_label(section, language),
+            t(language, "settings", "配置")
+        ),
         &format!("{} / {}", progress.0, progress.1),
         theme,
     );
@@ -358,10 +499,16 @@ fn render_optional_form(
     let fallback = session.optional_draft(section);
     let draft = section_draft.unwrap_or(&fallback);
     let fields = optional_fields(section);
-    let constraints = std::iter::repeat_n(Constraint::Length(1), fields.len())
+    let constraints = fields
+        .iter()
+        .flat_map(|field| {
+            std::iter::once(Constraint::Length(1))
+                .chain(errors.contains_key(field).then_some(Constraint::Length(1)))
+        })
         .chain(std::iter::once(Constraint::Min(1)))
         .collect::<Vec<_>>();
     let rows = Layout::vertical(constraints).split(body);
+    let mut row_index = 0;
     for (index, field) in fields.iter().enumerate() {
         let value = optional_field_value(draft, *field);
         let value = current_input_value(state, *field, &value);
@@ -369,8 +516,8 @@ fn render_optional_form(
         if optional_field_is_toggle(*field) {
             render_radio_row(
                 frame,
-                rows[index],
-                &format!("{}  {}", optional_field_label(*field), value),
+                rows[row_index],
+                &format!("{}  {}", optional_field_label(*field, language), value),
                 value == "true",
                 focused,
                 theme,
@@ -378,8 +525,8 @@ fn render_optional_form(
         } else {
             render_text_input_with_cursor(
                 frame,
-                rows[index],
-                optional_field_label(*field),
+                rows[row_index],
+                optional_field_label(*field, language),
                 value,
                 focused,
                 false,
@@ -387,21 +534,28 @@ fn render_optional_form(
                 theme,
             );
         }
-    }
-    if let Some((_, error)) = errors.iter().next() {
-        render_inline_error(frame, *rows.last().unwrap_or(&body), error, theme);
+        row_index += 1;
+        if let Some(error) = errors.get(field) {
+            let message = localized_error(error, language);
+            render_inline_error(frame, rows[row_index], &message, theme);
+            row_index += 1;
+        }
     }
     render_action_button(
         frame,
         actions,
-        "Save and return",
+        t(language, "Save and return", "保存并返回"),
         state.focus >= fields.len(),
         theme,
     );
     render_footer(
         frame,
         footer,
-        "Enter edit/toggle · Esc discard · Ctrl+C cancel",
+        t(
+            language,
+            "Enter edit/toggle · Esc discard · Ctrl+C cancel",
+            "Enter 编辑/切换 · Esc 放弃 · Ctrl+C 取消",
+        ),
         theme,
     );
 }
@@ -481,46 +635,52 @@ pub(super) fn optional_fields(section: OptionalSection) -> Vec<SetupField> {
     }
 }
 
-fn section_label(section: OptionalSection) -> &'static str {
+fn section_label(section: OptionalSection, language: UiLanguage) -> &'static str {
     match section {
-        OptionalSection::Identity => "Identity",
-        OptionalSection::Workspace => "Workspace",
-        OptionalSection::Confirmation => "Confirmation",
-        OptionalSection::Limits => "Limits",
-        OptionalSection::Sandbox => "Sandbox",
-        OptionalSection::Room => "Room",
-        OptionalSection::TunnelClient => "Tunnel client",
-        OptionalSection::HubReporting => "Hub reporting",
+        OptionalSection::Identity => t(language, "Identity", "身份"),
+        OptionalSection::Workspace => t(language, "Workspace", "工作区"),
+        OptionalSection::Confirmation => t(language, "Confirmation", "确认"),
+        OptionalSection::Limits => t(language, "Limits", "限制"),
+        OptionalSection::Sandbox => t(language, "Sandbox", "沙箱"),
+        OptionalSection::Room => t(language, "Room", "Room"),
+        OptionalSection::TunnelClient => t(language, "Tunnel client", "隧道客户端"),
+        OptionalSection::HubReporting => t(language, "Hub reporting", "Hub 报告"),
     }
 }
 
-fn optional_field_label(field: SetupField) -> &'static str {
+fn optional_field_label(field: SetupField, language: UiLanguage) -> &'static str {
     match field {
-        SetupField::DisplayName => "Display name",
-        SetupField::WorkspaceRoot => "Workspace root",
-        SetupField::WriteRoots => "Write roots (JSON)",
-        SetupField::ReadOnlyRoots => "Read-only roots (JSON)",
-        SetupField::DenyRoots => "Deny roots (JSON)",
-        SetupField::ConfirmationProvider => "Provider",
-        SetupField::ConfirmationLanguage => "Language",
-        SetupField::MaxConcurrentTasks => "Max concurrent tasks",
-        SetupField::MaxActiveJobs => "Max active jobs",
-        SetupField::MaxFileSearchContextLines => "File-search context lines",
-        SetupField::SandboxEnabled => "Sandbox enabled",
-        SetupField::BubblewrapPath => "Bubblewrap path",
-        SetupField::RequiredRuntimePaths => "Required runtime paths (JSON)",
-        SetupField::RoomTimezone => "Timezone",
-        SetupField::DiaryBoundaryHour => "Diary boundary hour",
-        SetupField::NotebookRoot => "Notebook root",
-        SetupField::TunnelClientVersion => "Client version",
-        SetupField::TunnelCacheDir => "Cache directory",
-        SetupField::TunnelAutoDownload => "Auto-download",
-        SetupField::TunnelExecutable => "Executable",
-        SetupField::TunnelDownloadUrl => "Download URL",
-        SetupField::TunnelSha256 => "SHA-256",
-        SetupField::HubReportingEnabled => "Reporting enabled",
-        SetupField::HubReportingDetail => "Reporting detail",
-        _ => "Value",
+        SetupField::DisplayName => t(language, "Display name", "显示名称"),
+        SetupField::WorkspaceRoot => t(language, "Workspace root", "工作区根目录"),
+        SetupField::WriteRoots => t(language, "Write roots (JSON)", "写入根目录（JSON）"),
+        SetupField::ReadOnlyRoots => t(language, "Read-only roots (JSON)", "只读根目录（JSON）"),
+        SetupField::DenyRoots => t(language, "Deny roots (JSON)", "拒绝根目录（JSON）"),
+        SetupField::ConfirmationProvider => t(language, "Provider", "提供方"),
+        SetupField::ConfirmationLanguage => t(language, "Language", "语言"),
+        SetupField::MaxConcurrentTasks => t(language, "Max concurrent tasks", "最大并发任务"),
+        SetupField::MaxActiveJobs => t(language, "Max active jobs", "最大活动作业"),
+        SetupField::MaxFileSearchContextLines => {
+            t(language, "File-search context lines", "文件搜索上下文行数")
+        }
+        SetupField::SandboxEnabled => t(language, "Sandbox enabled", "启用沙箱"),
+        SetupField::BubblewrapPath => t(language, "Bubblewrap path", "Bubblewrap 路径"),
+        SetupField::RequiredRuntimePaths => t(
+            language,
+            "Required runtime paths (JSON)",
+            "必需运行时路径（JSON）",
+        ),
+        SetupField::RoomTimezone => t(language, "Timezone", "时区"),
+        SetupField::DiaryBoundaryHour => t(language, "Diary boundary hour", "日记边界小时"),
+        SetupField::NotebookRoot => t(language, "Notebook root", "笔记本根目录"),
+        SetupField::TunnelClientVersion => t(language, "Client version", "客户端版本"),
+        SetupField::TunnelCacheDir => t(language, "Cache directory", "缓存目录"),
+        SetupField::TunnelAutoDownload => t(language, "Auto-download", "自动下载"),
+        SetupField::TunnelExecutable => t(language, "Executable", "可执行文件"),
+        SetupField::TunnelDownloadUrl => t(language, "Download URL", "下载地址"),
+        SetupField::TunnelSha256 => t(language, "SHA-256", "SHA-256"),
+        SetupField::HubReportingEnabled => t(language, "Reporting enabled", "启用报告"),
+        SetupField::HubReportingDetail => t(language, "Reporting detail", "报告详细程度"),
+        _ => t(language, "Value", "值"),
     }
 }
 
@@ -662,6 +822,7 @@ fn render_review(
     frame: &mut Frame,
     review: &ReviewModel,
     state: &TuiState,
+    language: UiLanguage,
     theme: &Theme,
     progress: (usize, usize),
 ) {
@@ -675,7 +836,7 @@ fn render_review(
     render_header(
         frame,
         header,
-        "Review and write",
+        t(language, "Review and write", "检查并写入"),
         &format!("{} / {}", progress.0, progress.1),
         theme,
     );
@@ -684,17 +845,21 @@ fn render_review(
     let mut lines = vec![
         Line::from(vec![
             Span::raw("  "),
-            Span::styled("Config path: ", theme.dim),
+            Span::styled(t(language, "Config path: ", "配置路径："), theme.dim),
             Span::styled(review.config_path.display().to_string(), theme.normal),
         ]),
         Line::from(vec![
             Span::raw("  "),
-            Span::styled("Backup: ", theme.dim),
+            Span::styled(t(language, "Backup: ", "备份："), theme.dim),
             Span::styled(
                 if review.will_backup_existing_config {
-                    "existing config will be backed up"
+                    t(
+                        language,
+                        "existing config will be backed up",
+                        "将备份现有配置",
+                    )
                 } else {
-                    "no existing config"
+                    t(language, "no existing config", "没有现有配置")
                 },
                 theme.normal,
             ),
@@ -703,58 +868,82 @@ fn render_review(
     if let Some(secret) = &review.secret_write {
         lines.push(Line::from(vec![
             Span::raw("  "),
-            Span::styled("Secret write: ", theme.dim),
+            Span::styled(t(language, "Secret write: ", "密钥写入："), theme.dim),
             Span::styled(
-                format!("yes ({}) · value hidden", secret.path.display()),
+                format!(
+                    "{} ({}) · {}",
+                    t(language, "yes", "是"),
+                    secret.path.display(),
+                    t(language, "value hidden", "值已隐藏")
+                ),
                 theme.normal,
             ),
         ]));
     } else {
         lines.push(Line::from(vec![
             Span::raw("  "),
-            Span::styled("Secret write: ", theme.dim),
-            Span::styled("no", theme.normal),
+            Span::styled(t(language, "Secret write: ", "密钥写入："), theme.dim),
+            Span::styled(t(language, "no", "否"), theme.normal),
         ]));
     }
     for action in &review.pending_actions {
         lines.push(Line::from(vec![
             Span::raw("  "),
-            Span::styled("Pending action: ", theme.dim),
-            Span::styled(format!("{action:?}"), theme.warning),
+            Span::styled(t(language, "Pending action: ", "待处理动作："), theme.dim),
+            Span::styled(pending_action_label(*action, language), theme.warning),
         ]));
     }
+    let mut group_line_indices = Vec::with_capacity(groups.len());
     for (index, group) in groups.iter().enumerate() {
+        group_line_indices.push(lines.len());
         let focused = state.focus == index;
         let style = if focused { theme.focus } else { theme.normal };
         let prefix = if focused { "› " } else { "  " };
         lines.push(Line::from(vec![
             Span::styled(prefix, style),
-            Span::styled(review_target_label(group.target), style),
+            Span::styled(review_target_label(group.target, language), style),
             Span::styled(
-                format!("  [{}]", section_status_label(group.status)),
+                format!("  [{}]", section_status_label(group.status, language)),
                 theme.dim,
             ),
         ]));
         for item in &group.items {
             lines.push(Line::from(vec![
                 Span::raw("    "),
-                Span::styled(format!("{}: ", item.label_key), theme.dim),
+                Span::styled(
+                    format!("{}: ", review_item_label(item.label_key, language)),
+                    theme.dim,
+                ),
                 Span::styled(&item.value, theme.normal),
             ]));
         }
     }
-    frame.render_widget(Paragraph::new(lines), body);
+    let focused_line = group_line_indices
+        .get(state.focus)
+        .copied()
+        .unwrap_or_else(|| lines.len().saturating_sub(1));
+    let body_height = usize::from(body.height);
+    let max_scroll = lines.len().saturating_sub(body_height);
+    let scroll = focused_line
+        .saturating_sub(body_height / 2)
+        .min(max_scroll)
+        .min(usize::from(u16::MAX)) as u16;
+    frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), body);
     render_action_button(
         frame,
         actions,
-        "Confirm and write",
+        t(language, "Confirm and write", "确认并写入"),
         state.focus >= groups.len(),
         theme,
     );
     render_footer(
         frame,
         footer,
-        "Enter open/edit · Tab move · Esc back · Ctrl+C cancel",
+        t(
+            language,
+            "Enter open/edit · Tab move · Esc back · Ctrl+C cancel",
+            "Enter 打开/编辑 · Tab 移动 · Esc 返回 · Ctrl+C 取消",
+        ),
         theme,
     );
 }
@@ -773,20 +962,73 @@ fn review_groups(review: &ReviewModel) -> Vec<&crate::config_setup::ReviewGroup>
     groups
 }
 
-fn review_target_label(target: ReviewTarget) -> &'static str {
+fn review_target_label(target: ReviewTarget, language: UiLanguage) -> &'static str {
     match target {
-        ReviewTarget::Basic => "Basic settings",
-        ReviewTarget::Connection => "Connection settings",
-        ReviewTarget::OptionalCenter => "Optional settings",
-        ReviewTarget::OptionalSection(section) => section_label(section),
+        ReviewTarget::Basic => t(language, "Basic settings", "基础设置"),
+        ReviewTarget::Connection => t(language, "Connection settings", "连接设置"),
+        ReviewTarget::OptionalCenter => t(language, "Optional settings", "可选配置"),
+        ReviewTarget::OptionalSection(section) => section_label(section, language),
     }
 }
 
-fn section_status_label(status: SectionStatus) -> &'static str {
+fn section_status_label(status: SectionStatus, language: UiLanguage) -> &'static str {
     match status {
-        SectionStatus::Default => "Default",
-        SectionStatus::Configured => "Configured",
-        SectionStatus::NotApplicable => "Not applicable",
+        SectionStatus::Default => t(language, "Default", "默认"),
+        SectionStatus::Configured => t(language, "Configured", "已配置"),
+        SectionStatus::NotApplicable => t(language, "Not applicable", "不适用"),
+    }
+}
+
+fn pending_action_label(action: PendingAction, language: UiLanguage) -> &'static str {
+    match action {
+        PendingAction::ReplaceTunnelId => t(language, "Replace tunnel ID", "替换隧道 ID"),
+        PendingAction::ProvisionTunnelSecret => {
+            t(language, "Provision tunnel secret", "写入隧道密钥")
+        }
+        PendingAction::ConfigureHubUrl => t(language, "Configure Hub URL", "配置 Hub 地址"),
+        PendingAction::ReplaceAgentSecret => t(language, "Replace agent secret", "替换代理密钥"),
+    }
+}
+
+fn review_item_label(label_key: &str, language: UiLanguage) -> &'static str {
+    match label_key {
+        "mode" => t(language, "Mode", "模式"),
+        "profile" => t(language, "Profile", "能力配置"),
+        "tunnel_id" => t(language, "Tunnel ID", "隧道 ID"),
+        "tunnel_secret_source" => t(language, "Secret source", "密钥来源"),
+        "tunnel_secret_reference" => t(language, "Secret reference", "密钥引用"),
+        "hub_url" => t(language, "Hub URL", "Hub 地址"),
+        "hub_transport" => t(language, "Hub transport", "Hub 传输方式"),
+        "agent_id" => t(language, "Agent ID", "代理 ID"),
+        "agent_secret" => t(language, "Agent secret", "代理密钥"),
+        "connection" => t(language, "Connection", "连接"),
+        "display_name" => t(language, "Display name", "显示名称"),
+        "workspace_root" => t(language, "Workspace root", "工作区根目录"),
+        "write_roots" => t(language, "Write roots", "写入根目录"),
+        "read_only_roots" => t(language, "Read-only roots", "只读根目录"),
+        "deny_roots" => t(language, "Deny roots", "拒绝根目录"),
+        "confirmation_provider" => t(language, "Provider", "提供方"),
+        "confirmation_language" => t(language, "Language", "语言"),
+        "max_concurrent_tasks" => t(language, "Max concurrent tasks", "最大并发任务"),
+        "max_active_jobs" => t(language, "Max active jobs", "最大活动作业"),
+        "max_file_search_context_lines" => {
+            t(language, "File-search context lines", "文件搜索上下文行数")
+        }
+        "sandbox_enabled" => t(language, "Sandbox enabled", "启用沙箱"),
+        "bubblewrap_path" => t(language, "Bubblewrap path", "Bubblewrap 路径"),
+        "required_runtime_paths" => t(language, "Required runtime paths", "必需运行时路径"),
+        "room_timezone" => t(language, "Timezone", "时区"),
+        "diary_boundary_hour" => t(language, "Diary boundary hour", "日记边界小时"),
+        "notebook_root" => t(language, "Notebook root", "笔记本根目录"),
+        "tunnel_client_version" => t(language, "Client version", "客户端版本"),
+        "tunnel_cache_dir" => t(language, "Cache directory", "缓存目录"),
+        "tunnel_auto_download" => t(language, "Auto-download", "自动下载"),
+        "tunnel_executable" => t(language, "Executable", "可执行文件"),
+        "tunnel_download_url" => t(language, "Download URL", "下载地址"),
+        "tunnel_sha256" => t(language, "SHA-256", "SHA-256"),
+        "hub_reporting_enabled" => t(language, "Reporting enabled", "启用报告"),
+        "hub_reporting_detail" => t(language, "Reporting detail", "报告详细程度"),
+        _ => t(language, "Value", "值"),
     }
 }
 
@@ -819,7 +1061,7 @@ pub(super) fn render_completion(
     frame.render_widget(
         Paragraph::new(vec![
             Line::from(vec![
-                Span::styled("Config: ", theme.dim),
+                Span::styled(t(language, "Config: ", "配置："), theme.dim),
                 Span::styled(path, theme.normal),
             ]),
             Line::from(guidance),
@@ -831,10 +1073,20 @@ pub(super) fn render_completion(
         UiLanguage::En => "Done",
     };
     render_action_button(frame, actions, action, true, theme);
-    render_footer(frame, footer, "Enter exit", theme);
+    render_footer(
+        frame,
+        footer,
+        t(language, "Enter exit", "Enter 退出"),
+        theme,
+    );
 }
 
-pub(super) fn render_system_error(frame: &mut Frame, error: Option<&SystemError>, theme: &Theme) {
+pub(super) fn render_system_error(
+    frame: &mut Frame,
+    error: Option<&SystemError>,
+    language: UiLanguage,
+    theme: &Theme,
+) {
     let [header, body, actions, footer] = Layout::vertical([
         Constraint::Length(2),
         Constraint::Min(4),
@@ -842,28 +1094,45 @@ pub(super) fn render_system_error(frame: &mut Frame, error: Option<&SystemError>
         Constraint::Length(1),
     ])
     .areas(frame.area());
-    render_header(frame, header, "Initialization error", "", theme);
-    let (code, message) = error
-        .map(|error| (error.code, error.message))
-        .unwrap_or(("config_init_system_error", "Initialization failed."));
+    render_header(
+        frame,
+        header,
+        t(language, "Initialization error", "初始化错误"),
+        "",
+        theme,
+    );
+    let (code, message) = error.map(|error| (error.code, error.message)).unwrap_or((
+        "config_init_system_error",
+        t(language, "Initialization failed.", "初始化失败。"),
+    ));
     frame.render_widget(
         Paragraph::new(vec![
             Line::from(vec![
-                Span::styled("Code: ", theme.dim),
+                Span::styled(t(language, "Code: ", "代码："), theme.dim),
                 Span::styled(code, theme.error),
             ]),
             Line::from(Span::styled(message, theme.error)),
         ]),
         body,
     );
-    render_action_button(frame, actions, "Exit", true, theme);
-    render_footer(frame, footer, "Enter/Esc exit · Ctrl+C cancel", theme);
+    render_action_button(frame, actions, t(language, "Exit", "退出"), true, theme);
+    render_footer(
+        frame,
+        footer,
+        t(
+            language,
+            "Enter/Esc exit · Ctrl+C cancel",
+            "Enter/Esc 退出 · Ctrl+C 取消",
+        ),
+        theme,
+    );
 }
 
 fn render_placeholder(
     frame: &mut Frame,
     title: &str,
     state: &TuiState,
+    language: UiLanguage,
     theme: &Theme,
     progress: (usize, usize),
 ) {
@@ -882,12 +1151,24 @@ fn render_placeholder(
     );
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled("Next phase: ", theme.dim),
-            Span::styled("staged navigation surface", theme.normal),
+            Span::styled(t(language, "Next phase: ", "下一阶段："), theme.dim),
+            Span::styled(
+                t(language, "staged navigation surface", "分阶段导航界面"),
+                theme.normal,
+            ),
         ])),
         body,
     );
-    render_footer(frame, footer, "Esc back · Ctrl+C cancel", theme);
+    render_footer(
+        frame,
+        footer,
+        t(
+            language,
+            "Esc back · Ctrl+C cancel",
+            "Esc 返回 · Ctrl+C 取消",
+        ),
+        theme,
+    );
     let _ = state;
 }
 
@@ -929,7 +1210,10 @@ mod tests {
         let rendered = content(&app, 70, 20);
         assert!(rendered.contains("Runtime mode"));
         assert!(rendered.contains("Standalone"));
+        assert!(rendered.contains("Hub"));
+        assert!(rendered.contains("Local"));
         assert!(rendered.contains("normal"));
+        assert!(rendered.contains("Room"));
         assert!(rendered.contains("Ctrl+C"));
     }
 

@@ -280,9 +280,12 @@ impl ConfigTuiApp {
                 self.language,
                 &self.theme,
             ),
-            ConfigPage::SystemError => {
-                pages::render_system_error(frame, self.state.system_error.as_ref(), &self.theme)
-            }
+            ConfigPage::SystemError => pages::render_system_error(
+                frame,
+                self.state.system_error.as_ref(),
+                self.language,
+                &self.theme,
+            ),
             _ => {
                 let Some(session) = self.session.as_ref() else {
                     return;
@@ -292,6 +295,7 @@ impl ConfigTuiApp {
                     self.state.page,
                     session,
                     &self.state,
+                    self.language,
                     &self.theme,
                     &self.field_errors,
                     self.section_draft.as_ref(),
@@ -429,12 +433,15 @@ impl ConfigTuiApp {
                 let draft = self.session_mut().standalone_mut();
                 draft.secret_source = match draft.secret_source {
                     crate::config_templates::TunnelSecretSource::File => {
+                        draft.provision_secret_now = false;
+                        draft.secret_value = None;
                         crate::config_templates::TunnelSecretSource::Environment
                     }
                     crate::config_templates::TunnelSecretSource::Environment => {
                         crate::config_templates::TunnelSecretSource::File
                     }
                 };
+                self.field_errors.clear();
             }
             SetupField::ProvisionTunnelSecret => {
                 let draft = self.session_mut().standalone_mut();
@@ -733,7 +740,11 @@ impl ConfigTuiApp {
 
     fn set_system_error(&mut self, error: &anyhow::Error) {
         let error_text = error.to_string();
-        let code = error_text.split(':').next().unwrap_or_default();
+        let code = if error_text.contains("config_init_secret_rollback_failed") {
+            "config_init_secret_rollback_failed"
+        } else {
+            error_text.split(':').next().unwrap_or_default()
+        };
         let code = match code {
             "config_init_secret_path_invalid" => "config_init_secret_path_invalid",
             "config_init_secret_parent_invalid" => "config_init_secret_parent_invalid",
@@ -745,7 +756,11 @@ impl ConfigTuiApp {
         self.set_system_error_code(code);
     }
 
-    fn set_system_error_code(&mut self, code: &'static str) {
+    pub(crate) fn set_runtime_error(&mut self) {
+        self.set_system_error_code("config_init_terminal_error");
+    }
+
+    pub(crate) fn set_system_error_code(&mut self, code: &'static str) {
         self.state.system_error = Some(SystemError {
             code,
             message: system_error_message(code, self.language),
@@ -830,6 +845,9 @@ fn system_error_message(code: &'static str, language: UiLanguage) -> &'static st
         ("config_init_secret_rollback_failed", UiLanguage::ZhCn) => {
             "回滚失败，请检查配置与密钥文件。"
         }
+        ("config_init_terminal_error", UiLanguage::ZhCn) => {
+            "终端初始化或刷新失败，请重试配置初始化。"
+        }
         ("config_init_secret_path_invalid", UiLanguage::En) => {
             "The secret path is invalid; configuration was not written."
         }
@@ -844,6 +862,9 @@ fn system_error_message(code: &'static str, language: UiLanguage) -> &'static st
         }
         ("config_init_secret_rollback_failed", UiLanguage::En) => {
             "Rollback failed; inspect the configuration and secret files."
+        }
+        ("config_init_terminal_error", UiLanguage::En) => {
+            "Terminal setup or refresh failed; please retry configuration initialization."
         }
         (_, UiLanguage::ZhCn) => "初始化失败，未写入配置。",
         (_, UiLanguage::En) => "Initialization failed; configuration was not written.",
@@ -1344,5 +1365,78 @@ mod tests {
         editing_app.handle_action(TuiAction::Activate).unwrap();
         editing_app.handle_action(TuiAction::Cancel).unwrap();
         assert!(editing_app.state().cancelled);
+    }
+
+    #[test]
+    fn standalone_source_toggle_keeps_visible_selection_and_clears_file_only_provision() {
+        let mut app = app(RuntimeMode::Standalone);
+        app.handle_action(TuiAction::Next).unwrap();
+        app.focus_field(crate::config_setup::SetupField::ProvisionTunnelSecret);
+        app.handle_action(TuiAction::Activate).unwrap();
+        assert!(app.session().standalone().provision_secret_now);
+
+        app.focus_field(crate::config_setup::SetupField::TunnelSecretSource);
+        app.handle_action(TuiAction::Activate).unwrap();
+        assert_eq!(
+            app.session().standalone().secret_source,
+            crate::config_templates::TunnelSecretSource::Environment
+        );
+        assert!(!app.session().standalone().provision_secret_now);
+        let rendered = rendered(&app);
+        assert!(rendered.contains("● Secret source: env"));
+    }
+
+    #[test]
+    fn rollback_failure_keeps_the_specific_safe_system_error_code() {
+        let mut app = app(RuntimeMode::Standalone);
+        app.set_system_error(&anyhow!(
+            "config_init_config_write_failed: config_init_secret_rollback_failed"
+        ));
+        assert_eq!(
+            app.state().system_error.as_ref().unwrap().code,
+            "config_init_secret_rollback_failed"
+        );
+    }
+
+    #[test]
+    fn validation_error_is_rendered_near_the_first_focused_field() {
+        let mut app = app(RuntimeMode::Standalone);
+        app.handle_action(TuiAction::Next).unwrap();
+        app.session_mut().standalone_mut().tunnel_id.clear();
+        app.session_mut().standalone_mut().secret_path.clear();
+        app.handle_action(TuiAction::Next).unwrap();
+        let rendered = rendered(&app);
+        let tunnel_id = rendered.find("Tunnel ID").unwrap();
+        let required = rendered.find("Required").unwrap();
+        assert!(tunnel_id < required);
+        assert_eq!(
+            app.focused_field(),
+            Some(crate::config_setup::SetupField::TunnelId)
+        );
+    }
+
+    #[test]
+    fn review_focus_scrolls_lower_groups_into_view() {
+        let mut app = review_app(RuntimeMode::Standalone);
+        app.state.focus = app.review_group_count() - 1;
+        let rendered = rendered(&app);
+        assert!(rendered.contains("Hub reporting"));
+        assert!(rendered.contains("› Hub reporting"));
+    }
+
+    #[test]
+    fn chinese_language_renders_the_setup_surface_in_chinese() {
+        let app = ConfigTuiApp::new(SetupSession::new(
+            SetupSeed {
+                mode: Some(RuntimeMode::Standalone),
+                ..SetupSeed::default()
+            },
+            UiLanguage::ZhCn,
+            "/tmp/config-tui-zh.json".into(),
+        ));
+        let rendered = rendered(&app);
+        assert!(rendered.contains("AgenticGPT 配"));
+        assert!(rendered.contains("运 行"));
+        assert!(!rendered.contains("AgenticGPT config init"));
     }
 }

@@ -99,6 +99,70 @@ mod tests {
             super::super::model::SectionStatus::Configured
         );
     }
+
+    #[test]
+    fn review_preserves_pending_actions_and_redacted_standalone_reference() {
+        let default_secret = crate::utils::agentic_home()
+            .unwrap()
+            .join("secrets/tunnel-api-key");
+        let deferred = SetupSession::new(
+            SetupSeed {
+                mode: Some(RuntimeMode::Standalone),
+                tunnel_id: None,
+                tunnel_api_key: Some(format!("file:{}", default_secret.display())),
+                ..SetupSeed::default()
+            },
+            UiLanguage::En,
+            PathBuf::from("/tmp/review-config.json"),
+        );
+        let deferred_review = deferred.review_model().unwrap();
+        assert!(deferred_review
+            .pending_actions
+            .contains(&PendingAction::ReplaceTunnelId));
+        assert!(deferred_review
+            .pending_actions
+            .contains(&PendingAction::ProvisionTunnelSecret));
+        assert!(deferred_review.secret_write.is_none());
+        assert!(deferred_review.connection.items.iter().any(|item| {
+            item.label_key == "tunnel_secret_reference"
+                && item.value == format!("file:{}", default_secret.display())
+        }));
+
+        let mut immediate = SetupSession::new(
+            SetupSeed {
+                mode: Some(RuntimeMode::Standalone),
+                tunnel_api_key: Some("file:/tmp/immediate-tunnel-secret".into()),
+                ..SetupSeed::default()
+            },
+            UiLanguage::En,
+            PathBuf::from("/tmp/review-config.json"),
+        );
+        immediate.standalone_mut().provision_secret_now = true;
+        immediate.standalone_mut().secret_value = Some(SecretValue::new("review-secret"));
+        let immediate_review = immediate.review_model().unwrap();
+        assert!(!immediate_review
+            .pending_actions
+            .contains(&PendingAction::ProvisionTunnelSecret));
+        assert!(immediate_review.secret_write.is_some());
+
+        let hub = SetupSession::new(
+            SetupSeed {
+                mode: Some(RuntimeMode::Hub),
+                hub_url: Some("https://hub.replace-me".into()),
+                agent_secret: Some(SecretValue::new("change-me")),
+                ..SetupSeed::default()
+            },
+            UiLanguage::En,
+            PathBuf::from("/tmp/review-config.json"),
+        );
+        let hub_review = hub.review_model().unwrap();
+        assert!(hub_review
+            .pending_actions
+            .contains(&PendingAction::ConfigureHubUrl));
+        assert!(hub_review
+            .pending_actions
+            .contains(&PendingAction::ReplaceAgentSecret));
+    }
 }
 
 use std::path::PathBuf;
@@ -252,6 +316,10 @@ fn connection_group(session: &SetupSession, built: &InitBuild) -> ReviewGroup {
                     TunnelSecretSource::Environment => "env".to_string(),
                 },
             });
+            items.push(ReviewItem {
+                label_key: "tunnel_secret_reference",
+                value: tunnel_secret_reference(draft),
+            });
         }
         RuntimeMode::Hub => {
             let draft = session.hub();
@@ -283,6 +351,27 @@ fn connection_group(session: &SetupSession, built: &InitBuild) -> ReviewGroup {
         target: ReviewTarget::Connection,
         status: SectionStatus::Configured,
         items,
+    }
+}
+
+fn tunnel_secret_reference(draft: &super::model::StandaloneDraft) -> String {
+    match draft.secret_source {
+        TunnelSecretSource::File => format!(
+            "file:{}",
+            draft
+                .secret_path
+                .trim()
+                .strip_prefix("file:")
+                .unwrap_or_else(|| draft.secret_path.trim())
+        ),
+        TunnelSecretSource::Environment => format!(
+            "env:{}",
+            draft
+                .secret_environment
+                .trim()
+                .strip_prefix("env:")
+                .unwrap_or_else(|| draft.secret_environment.trim())
+        ),
     }
 }
 

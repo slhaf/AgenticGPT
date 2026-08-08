@@ -133,8 +133,11 @@ pub(crate) fn commit_wizard_outcome(
         return Ok(summary);
     };
 
+    if paths_refer_to_same_file(config_path, &plan.path)? {
+        return Err(anyhow!("config_init_secret_path_invalid"));
+    }
     let (target, parent, prior) = validate_and_capture_secret_target(&plan.path)?;
-    if target == config_path {
+    if paths_refer_to_same_file(config_path, &target)? {
         return Err(anyhow!("config_init_secret_path_invalid"));
     }
     fs::create_dir_all(&parent).map_err(|_| anyhow!("config_init_secret_parent_invalid"))?;
@@ -164,6 +167,39 @@ pub(crate) fn commit_wizard_outcome(
     }
 
     Ok(summary)
+}
+
+fn paths_refer_to_same_file(left: &Path, right: &Path) -> Result<bool> {
+    let left = lexical_absolute(&crate::exec::expand_pathbuf(left)?)?;
+    let right = lexical_absolute(&crate::exec::expand_pathbuf(right)?)?;
+    if left == right {
+        return Ok(true);
+    }
+    Ok(match (fs::canonicalize(&left), fs::canonicalize(&right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    })
+}
+
+fn lexical_absolute(path: &Path) -> Result<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::RootDir | Component::Prefix(_) | Component::Normal(_) => {
+                normalized.push(component.as_os_str());
+            }
+        }
+    }
+    Ok(normalized)
 }
 
 fn validate_and_capture_secret_target(path: &Path) -> Result<(PathBuf, PathBuf, PriorSecretState)> {
@@ -413,6 +449,39 @@ mod tests {
         assert!(outcome.secret_write.is_none());
         commit_wizard_outcome(&config_path, outcome).unwrap();
         assert!(config_path.exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn aliased_config_and_secret_paths_are_rejected_before_secret_write() {
+        let root = fresh_root("alias-collision");
+        let config_path = root.join(".").join("config.json");
+        let secret_path = root.join("config.json");
+        fs::write(&config_path, b"existing-config").unwrap();
+        let outcome = outcome_with_secret(&config_path, &secret_path, "alias-secret-marker");
+
+        let error = match commit_wizard_outcome(&config_path, outcome) {
+            Ok(_) => panic!("aliased config/secret target unexpectedly succeeded"),
+            Err(error) => error,
+        };
+        assert_eq!(error.to_string(), "config_init_secret_path_invalid");
+        assert_eq!(fs::read(&secret_path).unwrap(), b"existing-config");
+        let backup_dir = root.join("backups");
+        if backup_dir.exists() {
+            let backups = fs::read_dir(backup_dir)
+                .unwrap()
+                .filter_map(|entry| entry.ok())
+                .collect::<Vec<_>>();
+            assert!(backups.iter().all(|entry| {
+                fs::read(entry.path())
+                    .map(|bytes| {
+                        !bytes
+                            .windows("alias-secret-marker".len())
+                            .any(|window| window == b"alias-secret-marker")
+                    })
+                    .unwrap_or(true)
+            }));
+        }
         let _ = fs::remove_dir_all(root);
     }
 

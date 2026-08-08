@@ -23,10 +23,20 @@ pub(crate) fn run_config_tui(
 ) -> Result<crate::config_templates::InitSummary> {
     let session = SetupSession::new(seed, language, config_path.to_path_buf());
     let mut app = ConfigTuiApp::new(session);
-    let mut terminal = TerminalSession::enter()?;
+    let mut terminal = match TerminalSession::enter() {
+        Ok(terminal) => terminal,
+        Err(_) => return Err(anyhow!(terminal_error_message(language))),
+    };
 
     loop {
-        terminal.terminal_mut().draw(|frame| app.render(frame))?;
+        if terminal
+            .terminal_mut()
+            .draw(|frame| app.render(frame))
+            .is_err()
+        {
+            app.set_runtime_error();
+            return Err(anyhow!(terminal_error_message(language)));
+        }
         if app.state().cancelled {
             return Err(anyhow!("config_init_cancelled"));
         }
@@ -38,7 +48,27 @@ pub(crate) fn run_config_tui(
                 .take_committed_summary()
                 .ok_or_else(|| anyhow!("config_init_cancelled"));
         }
-        let event = terminal.next_event(Duration::from_millis(100))?;
-        app.handle_event(event)?;
+        let event = match terminal.next_event(Duration::from_millis(100)) {
+            Ok(event) => event,
+            Err(_) => {
+                app.set_runtime_error();
+                let _ = terminal.terminal_mut().draw(|frame| app.render(frame));
+                return Err(anyhow!(terminal_error_message(language)));
+            }
+        };
+        if app.handle_event(event).is_err() {
+            app.set_runtime_error();
+            let _ = terminal.terminal_mut().draw(|frame| app.render(frame));
+            return Err(anyhow!(terminal_error_message(language)));
+        }
+    }
+}
+
+fn terminal_error_message(language: UiLanguage) -> &'static str {
+    match language {
+        UiLanguage::ZhCn => "终端初始化或刷新失败，请重试配置初始化。",
+        UiLanguage::En => {
+            "Terminal setup or refresh failed; please retry configuration initialization."
+        }
     }
 }
