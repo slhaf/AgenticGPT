@@ -9,6 +9,7 @@ use crate::{
     config::{
         self, normalize_confirmation_language, write_config_with_backup, Config, ReportingDetail,
     },
+    config_setup::SetupSeed,
     config_templates::{self, InitInput, InitSummary, RuntimeMode, SecretValue},
     mcp::{self, McpConfigCommand},
     policy::{self, PolicyDecision},
@@ -1016,6 +1017,22 @@ pub(crate) fn init_non_interactive(
     })
 }
 
+pub(crate) fn setup_seed_from_args(args: &ConfigInitArgs) -> SetupSeed {
+    SetupSeed {
+        mode: args.mode,
+        profile: args.profile,
+        tunnel_id: args.tunnel_id.clone(),
+        tunnel_api_key: args.tunnel_api_key.clone(),
+        hub_url: args.hub_url.clone(),
+        hub_transport: args.hub_transport.clone(),
+        agent_id: args.agent_id.clone(),
+        agent_secret: args
+            .agent_secret
+            .as_ref()
+            .map(|value| SecretValue::new(value.clone())),
+    }
+}
+
 fn handle_init(config_path: &Path, args: ConfigInitArgs, language: UiLanguage) -> Result<()> {
     let summary = if crate::config_wizard::process_should_use_interactive_init(args.non_interactive)
     {
@@ -1205,5 +1222,32 @@ mod tests {
             assert!(!spec.description.zh_cn.is_empty());
             assert!(!spec.example.is_empty());
         }
+    }
+
+    #[test]
+    fn setup_seed_conversion_preserves_editable_flags_and_redacts_agent_secret() {
+        let marker = "setup-seed-secret-marker";
+        let args = ConfigInitArgs {
+            mode: Some(RuntimeMode::Hub),
+            profile: Some(WorkerProfile::Room),
+            tunnel_id: Some("seed-tunnel".to_string()),
+            tunnel_api_key: Some("env:TUNNEL_KEY".to_string()),
+            hub_url: Some("https://hub.example.com".to_string()),
+            hub_transport: Some("sse".to_string()),
+            agent_id: Some("desk".to_string()),
+            agent_secret: Some(marker.to_string()),
+            ..ConfigInitArgs::default()
+        };
+
+        let seed = setup_seed_from_args(&args);
+        assert_eq!(seed.mode, args.mode);
+        assert_eq!(seed.profile, args.profile);
+        assert_eq!(seed.tunnel_id.as_deref(), Some("seed-tunnel"));
+        assert_eq!(seed.tunnel_api_key.as_deref(), Some("env:TUNNEL_KEY"));
+        assert_eq!(seed.hub_url.as_deref(), Some("https://hub.example.com"));
+        assert_eq!(seed.hub_transport.as_deref(), Some("sse"));
+        assert_eq!(seed.agent_id.as_deref(), Some("desk"));
+        assert_eq!(seed.agent_secret.as_ref().unwrap().expose(), marker);
+        assert!(!format!("{seed:?}").contains(marker));
     }
 }

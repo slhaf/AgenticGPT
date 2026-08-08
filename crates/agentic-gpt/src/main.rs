@@ -4,6 +4,7 @@ mod bootstrap;
 mod cli_i18n;
 mod config;
 mod config_cli;
+mod config_setup;
 mod config_templates;
 mod config_wizard;
 mod confirmation;

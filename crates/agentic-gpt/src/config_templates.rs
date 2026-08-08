@@ -273,7 +273,7 @@ pub(crate) fn build_config(input: InitInput) -> Result<InitBuild> {
     })
 }
 
-fn optional_section_is_legal(
+pub(crate) fn optional_section_is_legal(
     section: OptionalSection,
     mode: RuntimeMode,
     profile: WorkerProfile,
