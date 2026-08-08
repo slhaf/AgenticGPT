@@ -94,6 +94,27 @@ Migrate the remaining Optional forms to the frozen grammar:
 
 **Commit:** only if hardening requires code/test cleanup; otherwise Phase 4 is the final implementation commit.
 
+## Execution status
+
+- Phase 1 complete: `5afa1ea feat(tui): add reusable form primitives`.
+- Phase 2 complete: `9873774 refactor(config-tui): use form kit for connection`.
+- Phase 3 complete: `226b817 feat(config-tui): add workspace path list editing`.
+- Phase 4 complete: `4618efb refactor(config-tui): align optional forms with form kit`.
+- Phase 5 automated hardening complete; human visual acceptance remains pending.
+
+Automated Phase 5 evidence:
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo check -p agentic-gpt`: pass, no warnings.
+- `cargo test -p agentic-gpt config_tui:: --bin agentic-gpt -- --test-threads=1`: 40 passed.
+- `cargo test -p agentic-gpt tui:: --bin agentic-gpt -- --test-threads=1`: 54 passed.
+- `NO_COLOR=1 cargo test -p agentic-gpt tui:: --bin agentic-gpt -- --test-threads=1`: 54 passed.
+- `cargo test -p agentic-gpt --bin agentic-gpt -- --test-threads=1`: 336 passed.
+- `git diff --check`: pass.
+- `config_setup`, Review, Completion, and SystemError contracts remain untouched by the form-kit migration.
+
+Phase 5 adds regression coverage for inline Auto/Custom focus/selection/editing semantics and for keeping the primary action visible across all applicable Optional forms in a narrow terminal.
+
 ## Commit convention
 
 Every plan/phase commit uses the repository author and adds:

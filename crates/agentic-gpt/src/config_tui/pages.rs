@@ -3195,6 +3195,34 @@ mod tests {
     }
 
     #[test]
+    fn every_optional_form_keeps_primary_action_in_a_narrow_terminal() {
+        for section_index in 0..7 {
+            let mut app = ConfigTuiApp::new(SetupSession::new(
+                SetupSeed {
+                    mode: Some(RuntimeMode::Standalone),
+                    profile: Some(WorkerProfile::Normal),
+                    ..SetupSeed::default()
+                },
+                UiLanguage::En,
+                "/tmp/config-tui-narrow-optional.json".into(),
+            ));
+            app.handle_action(TuiAction::Next).unwrap();
+            app.handle_action(TuiAction::Next).unwrap();
+            assert_eq!(app.page(), ConfigPage::OptionalCenter);
+            for _ in 0..section_index {
+                app.handle_action(TuiAction::MoveNext).unwrap();
+            }
+            app.handle_action(TuiAction::Activate).unwrap();
+            assert!(matches!(app.page(), ConfigPage::Optional(_)));
+            let rendered = content(&app, 48, 14);
+            assert!(
+                rendered.contains("Save and return"),
+                "optional action missing at center index {section_index}"
+            );
+        }
+    }
+
+    #[test]
     fn critical_pages_keep_primary_actions_in_a_small_terminal() {
         for mode in [
             RuntimeMode::Standalone,

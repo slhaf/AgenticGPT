@@ -495,6 +495,65 @@ mod tests {
     }
 
     #[test]
+    fn inline_choice_input_keeps_focus_selection_and_edit_cursor_distinct() {
+        let backend = TestBackend::new(50, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let theme = Theme::from_env();
+        terminal
+            .draw(|frame| {
+                frame.render_widget(
+                    Paragraph::new(choice_input_row_line(
+                        "Custom",
+                        "12",
+                        true,
+                        false,
+                        true,
+                        Some(1),
+                        14,
+                        8,
+                        &theme,
+                    )),
+                    Rect::new(0, 0, 50, 1),
+                );
+                frame.render_widget(
+                    Paragraph::new(choice_input_row_line(
+                        "Custom", "12", false, true, false, None, 14, 8, &theme,
+                    )),
+                    Rect::new(0, 1, 50, 1),
+                );
+                frame.render_widget(
+                    Paragraph::new(input_row_line(
+                        "Max concurrent",
+                        "2",
+                        true,
+                        false,
+                        None,
+                        18,
+                        8,
+                        &theme,
+                    )),
+                    Rect::new(0, 2, 50, 1),
+                );
+            })
+            .unwrap();
+
+        let editing = row_text(&terminal, 0, 50);
+        assert!(editing.contains('❯'));
+        assert!(!editing.contains(''));
+        assert!(editing.contains("1█2"));
+
+        let selected = row_text(&terminal, 1, 50);
+        assert!(!selected.contains('❯'));
+        assert!(selected.contains(''));
+        assert!(selected.contains("[12"));
+
+        let numeric = row_text(&terminal, 2, 50);
+        assert!(numeric.contains('❯'));
+        assert!(!numeric.contains(''));
+        assert!(numeric.contains("[2"));
+    }
+
+    #[test]
     fn long_form_width_uses_terminal_cells_for_cjk() {
         let backend = TestBackend::new(28, 3);
         let mut terminal = Terminal::new(backend).unwrap();
