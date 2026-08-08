@@ -23,6 +23,7 @@ pub(crate) struct TuiState {
     pub(crate) focus: usize,
     pub(crate) editing: Option<EditState>,
     pub(crate) list_edit: Option<ListEditTarget>,
+    pub(crate) max_active_custom: String,
     #[allow(dead_code)]
     pub(crate) scroll: u16,
     #[allow(dead_code)]
@@ -108,6 +109,7 @@ impl ConfigTuiApp {
                 focus: 0,
                 editing: None,
                 list_edit: None,
+                max_active_custom: "12".to_string(),
                 scroll: 0,
                 modal: None,
                 cancelled: false,
@@ -176,13 +178,10 @@ impl ConfigTuiApp {
             ConfigPage::Connection => {
                 pages::connection_focus_field(self.session(), self.state.focus)
             }
-            ConfigPage::Optional(crate::config_templates::OptionalSection::Workspace) => self
+            ConfigPage::Optional(section) => self
                 .section_draft
                 .as_ref()
-                .and_then(|draft| pages::workspace_focus_field(draft, self.state.focus)),
-            ConfigPage::Optional(section) => pages::optional_fields(section)
-                .get(self.state.focus)
-                .copied(),
+                .and_then(|draft| pages::optional_focus_field(section, draft, self.state.focus)),
             _ => None,
         }
     }
@@ -259,7 +258,13 @@ impl ConfigTuiApp {
                 }
             }
             TuiAction::Text(character) => {
-                self.with_edit(|edit| apply_text_key(edit, KeyCode::Char(character)));
+                let accepts_character =
+                    self.state.editing.as_ref().is_none_or(|edit| {
+                        !numeric_field(edit.field) || character.is_ascii_digit()
+                    });
+                if accepts_character {
+                    self.with_edit(|edit| apply_text_key(edit, KeyCode::Char(character)));
+                }
             }
             TuiAction::Backspace => {
                 self.with_edit(|edit| apply_text_key(edit, KeyCode::Backspace));
@@ -275,8 +280,8 @@ impl ConfigTuiApp {
             }
             TuiAction::MoveNext => self.move_focus(1),
             TuiAction::MovePrevious => self.move_focus(-1),
-            TuiAction::AddListItem => self.add_workspace_list_item(),
-            TuiAction::RemoveListItem => self.remove_workspace_list_item(),
+            TuiAction::AddListItem => self.add_optional_list_item(),
+            TuiAction::RemoveListItem => self.remove_optional_list_item(),
             TuiAction::SetMode(mode) => {
                 self.session_mut().set_mode(mode);
                 self.navigation.set_mode(mode);
@@ -356,20 +361,10 @@ impl ConfigTuiApp {
             KeyCode::BackTab => self.handle_action(TuiAction::MovePrevious),
             KeyCode::Down | KeyCode::Right => self.handle_action(TuiAction::MoveNext),
             KeyCode::Up | KeyCode::Left => self.handle_action(TuiAction::MovePrevious),
-            KeyCode::Char('a')
-                if matches!(
-                    self.state.page,
-                    ConfigPage::Optional(crate::config_templates::OptionalSection::Workspace)
-                ) =>
-            {
+            KeyCode::Char('a') if matches!(self.state.page, ConfigPage::Optional(_)) => {
                 self.handle_action(TuiAction::AddListItem)
             }
-            KeyCode::Char('d')
-                if matches!(
-                    self.state.page,
-                    ConfigPage::Optional(crate::config_templates::OptionalSection::Workspace)
-                ) =>
-            {
+            KeyCode::Char('d') if matches!(self.state.page, ConfigPage::Optional(_)) => {
                 self.handle_action(TuiAction::RemoveListItem)
             }
             KeyCode::Char('j') if self.state.page != ConfigPage::Review => {
@@ -460,23 +455,37 @@ impl ConfigTuiApp {
                 return;
             }
         }
-        if matches!(
-            self.state.page,
-            ConfigPage::Optional(crate::config_templates::OptionalSection::Workspace)
-        ) {
-            if let Some((field, index)) = self.workspace_path_target() {
+        if let ConfigPage::Optional(section) = self.state.page {
+            if let Some((field, index)) = self.optional_list_target() {
                 if let Some(index) = index {
-                    self.begin_workspace_list_edit(field, index);
+                    self.begin_optional_list_edit(field, index);
                 } else {
-                    self.add_workspace_list_item();
+                    self.add_optional_list_item();
                 }
                 return;
             }
-        }
-        let Some(field) = self.focused_field() else {
-            return;
-        };
-        if matches!(self.state.page, ConfigPage::Optional(_)) {
+            let choice = self.section_draft.as_ref().and_then(|draft| {
+                pages::optional_choice_for_focus(section, draft, self.state.focus)
+            });
+            if let Some((field, choice)) = choice {
+                if field == SetupField::MaxActiveJobs && choice == "custom" {
+                    let custom = self.state.max_active_custom.clone();
+                    if let Some(draft) = self.section_draft.as_mut() {
+                        pages::set_optional_field(draft, field, custom.clone());
+                    }
+                    self.state.editing = Some(EditState::new(field, custom));
+                } else {
+                    if let Some(draft) = self.section_draft.as_mut() {
+                        pages::set_optional_field(draft, field, choice.to_string());
+                    }
+                    self.validate_section_draft();
+                }
+                return;
+            }
+
+            let Some(field) = self.focused_field() else {
+                return;
+            };
             if pages::optional_field_is_toggle(field) {
                 if let Some(draft) = self.section_draft.as_mut() {
                     pages::toggle_optional_field(draft, field);
@@ -488,6 +497,9 @@ impl ConfigTuiApp {
             }
             return;
         }
+        let Some(field) = self.focused_field() else {
+            return;
+        };
         match field {
             SetupField::Mode => {
                 if let Some(mode) = pages::basic_mode_for_focus(self.state.focus) {
@@ -520,14 +532,14 @@ impl ConfigTuiApp {
         let value = edit.buffer;
         if let Some(target) = self.state.list_edit.take() {
             let updated = self.section_draft.as_mut().is_some_and(|draft| {
-                let Ok(mut list) = pages::workspace_list_state(draft, target.field) else {
+                let Ok(mut list) = pages::optional_list_state(draft, target.field) else {
                     return false;
                 };
                 list.set_focus(target.index);
                 if !list.set_focused(value) {
                     return false;
                 }
-                pages::set_workspace_list_state(draft, target.field, &list)
+                pages::set_optional_list_state(draft, target.field, &list)
             });
             if updated {
                 self.validate_section_draft();
@@ -535,6 +547,9 @@ impl ConfigTuiApp {
             return;
         }
         if matches!(self.state.page, ConfigPage::Optional(_)) {
+            if field == SetupField::MaxActiveJobs && value.parse::<usize>().is_ok() {
+                self.state.max_active_custom = value.clone();
+            }
             if let Some(draft) = self.section_draft.as_mut() {
                 pages::set_optional_field(draft, field, value);
             }
@@ -572,15 +587,23 @@ impl ConfigTuiApp {
         }
     }
 
-    fn workspace_path_target(&self) -> Option<(SetupField, Option<usize>)> {
-        self.section_draft
-            .as_ref()
-            .and_then(|draft| pages::workspace_path_target(draft, self.state.focus))
+    fn current_optional_section(&self) -> Option<crate::config_templates::OptionalSection> {
+        match self.state.page {
+            ConfigPage::Optional(section) => Some(section),
+            _ => None,
+        }
     }
 
-    fn begin_workspace_list_edit(&mut self, field: SetupField, index: usize) {
+    fn optional_list_target(&self) -> Option<(SetupField, Option<usize>)> {
+        let section = self.current_optional_section()?;
+        self.section_draft
+            .as_ref()
+            .and_then(|draft| pages::optional_list_target(section, draft, self.state.focus))
+    }
+
+    fn begin_optional_list_edit(&mut self, field: SetupField, index: usize) {
         let value = self.section_draft.as_ref().and_then(|draft| {
-            let mut list = pages::workspace_list_state(draft, field).ok()?;
+            let mut list = pages::optional_list_state(draft, field).ok()?;
             list.set_focus(index);
             list.focused().map(str::to_string)
         });
@@ -596,24 +619,27 @@ impl ConfigTuiApp {
         self.state.editing = Some(EditState::new(field, value));
     }
 
-    fn add_workspace_list_item(&mut self) {
-        let Some((field, current_index)) = self.workspace_path_target() else {
+    fn add_optional_list_item(&mut self) {
+        let Some(section) = self.current_optional_section() else {
+            return;
+        };
+        let Some((field, current_index)) = self.optional_list_target() else {
             return;
         };
         let new_index = self.section_draft.as_mut().and_then(|draft| {
-            let mut list = pages::workspace_list_state(draft, field).ok()?;
+            let mut list = pages::optional_list_state(draft, field).ok()?;
             if let Some(index) = current_index {
                 list.set_focus(index);
             }
             let new_index = list.add_after_focused();
-            pages::set_workspace_list_state(draft, field, &list).then_some(new_index)
+            pages::set_optional_list_state(draft, field, &list).then_some(new_index)
         });
         let Some(new_index) = new_index else {
             self.validate_section_draft();
             return;
         };
         if let Some(draft) = self.section_draft.as_ref() {
-            self.state.focus = pages::workspace_item_focus_index(draft, field, new_index)
+            self.state.focus = pages::optional_item_focus_index(section, draft, field, new_index)
                 .unwrap_or(self.state.focus);
         }
         self.state.list_edit = Some(ListEditTarget {
@@ -624,16 +650,19 @@ impl ConfigTuiApp {
         self.state.editing = Some(EditState::new(field, ""));
     }
 
-    fn remove_workspace_list_item(&mut self) {
-        let Some((field, Some(index))) = self.workspace_path_target() else {
+    fn remove_optional_list_item(&mut self) {
+        let Some(section) = self.current_optional_section() else {
+            return;
+        };
+        let Some((field, Some(index))) = self.optional_list_target() else {
             return;
         };
         let next_item = self.section_draft.as_mut().and_then(|draft| {
-            let mut list = pages::workspace_list_state(draft, field).ok()?;
+            let mut list = pages::optional_list_state(draft, field).ok()?;
             list.set_focus(index);
             list.delete_focused()?;
             let next_item = (!list.is_empty()).then_some(list.focus());
-            pages::set_workspace_list_state(draft, field, &list).then_some(next_item)
+            pages::set_optional_list_state(draft, field, &list).then_some(next_item)
         });
         let Some(next_item) = next_item else {
             self.validate_section_draft();
@@ -641,8 +670,8 @@ impl ConfigTuiApp {
         };
         if let Some(draft) = self.section_draft.as_ref() {
             self.state.focus = next_item
-                .and_then(|index| pages::workspace_item_focus_index(draft, field, index))
-                .or_else(|| pages::workspace_field_index(draft, field))
+                .and_then(|index| pages::optional_item_focus_index(section, draft, field, index))
+                .or_else(|| pages::optional_field_index(section, draft, field))
                 .unwrap_or(self.state.focus);
         }
         self.validate_section_draft();
@@ -656,17 +685,22 @@ impl ConfigTuiApp {
         if !target.created {
             return;
         }
+        let Some(section) = self.current_optional_section() else {
+            return;
+        };
         let next_item = self.section_draft.as_mut().and_then(|draft| {
-            let mut list = pages::workspace_list_state(draft, target.field).ok()?;
+            let mut list = pages::optional_list_state(draft, target.field).ok()?;
             list.set_focus(target.index);
             list.delete_focused()?;
             let next_item = (!list.is_empty()).then_some(list.focus());
-            pages::set_workspace_list_state(draft, target.field, &list).then_some(next_item)
+            pages::set_optional_list_state(draft, target.field, &list).then_some(next_item)
         });
         if let (Some(next_item), Some(draft)) = (next_item, self.section_draft.as_ref()) {
             self.state.focus = next_item
-                .and_then(|index| pages::workspace_item_focus_index(draft, target.field, index))
-                .or_else(|| pages::workspace_field_index(draft, target.field))
+                .and_then(|index| {
+                    pages::optional_item_focus_index(section, draft, target.field, index)
+                })
+                .or_else(|| pages::optional_field_index(section, draft, target.field))
                 .unwrap_or(self.state.focus);
         }
         self.validate_section_draft();
@@ -677,12 +711,11 @@ impl ConfigTuiApp {
             ConfigPage::Basic => pages::basic_focus_len(),
             ConfigPage::Connection => pages::connection_focus_len(self.session()),
             ConfigPage::OptionalCenter => self.session().available_optional_sections().len() + 1,
-            ConfigPage::Optional(crate::config_templates::OptionalSection::Workspace) => self
+            ConfigPage::Optional(section) => self
                 .section_draft
                 .as_ref()
-                .map(pages::workspace_focus_len)
+                .map(|draft| pages::optional_focus_len(section, draft))
                 .unwrap_or(1),
-            ConfigPage::Optional(section) => pages::optional_fields(section).len() + 1,
             ConfigPage::Review => self.review_group_count() + 1,
             _ => 1,
         };
@@ -701,13 +734,10 @@ impl ConfigTuiApp {
                 _ => None,
             },
             ConfigPage::Connection => pages::connection_field_index(self.session(), field),
-            ConfigPage::Optional(crate::config_templates::OptionalSection::Workspace) => self
+            ConfigPage::Optional(section) => self
                 .section_draft
                 .as_ref()
-                .and_then(|draft| pages::workspace_field_index(draft, field)),
-            ConfigPage::Optional(section) => pages::optional_fields(section)
-                .iter()
-                .position(|candidate| *candidate == field),
+                .and_then(|draft| pages::optional_field_index(section, draft, field)),
             _ => None,
         }
     }
@@ -730,9 +760,12 @@ impl ConfigTuiApp {
     fn activate_optional_center(&mut self) {
         let sections = self.session().available_optional_sections();
         if let Some(section) = sections.get(self.state.focus).copied() {
-            self.section_draft = Some(self.session().optional_draft(section));
+            let draft = self.session().optional_draft(section);
+            self.sync_optional_ui_state(&draft);
+            self.section_draft = Some(draft);
             self.field_errors.clear();
             self.state.editing = None;
+            self.state.list_edit = None;
             self.state.page = ConfigPage::Optional(section);
             self.state.return_target = ReturnTarget::MainFlow;
             self.state.focus = 0;
@@ -741,11 +774,21 @@ impl ConfigTuiApp {
         }
     }
 
+    fn sync_optional_ui_state(&mut self, draft: &OptionalSectionDraft) {
+        if let OptionalSectionDraft::Limits(limits) = draft {
+            let custom = limits.max_active_jobs.trim();
+            if custom != "auto" && custom.parse::<usize>().is_ok() {
+                self.state.max_active_custom = custom.to_string();
+            }
+        }
+    }
+
     fn leave_optional_section(&mut self) {
         let return_target = self.state.return_target;
         self.section_draft = None;
         self.field_errors.clear();
         self.state.editing = None;
+        self.state.list_edit = None;
         self.state.focus = 0;
         if return_target == ReturnTarget::Review {
             self.return_to_review();
@@ -811,7 +854,10 @@ impl ConfigTuiApp {
                 }
             }
             ReturnTargetKind::Optional(section) => {
-                self.section_draft = Some(self.session().optional_draft(section));
+                let draft = self.session().optional_draft(section);
+                self.sync_optional_ui_state(&draft);
+                self.section_draft = Some(draft);
+                self.state.list_edit = None;
                 self.state.page = ConfigPage::Optional(section);
                 self.state.focus = 0;
             }
@@ -821,6 +867,7 @@ impl ConfigTuiApp {
     fn return_to_review(&mut self) {
         self.section_draft = None;
         self.state.editing = None;
+        self.state.list_edit = None;
         self.field_errors.clear();
         self.state.return_target = ReturnTarget::MainFlow;
         self.navigation.go_to(ConfigPage::Review);
@@ -949,8 +996,19 @@ impl ConfigTuiApp {
         self.state.page = ConfigPage::SystemError;
         self.state.focus = 0;
         self.state.editing = None;
+        self.state.list_edit = None;
         self.section_draft = None;
     }
+}
+
+fn numeric_field(field: SetupField) -> bool {
+    matches!(
+        field,
+        SetupField::MaxConcurrentTasks
+            | SetupField::MaxActiveJobs
+            | SetupField::MaxFileSearchContextLines
+            | SetupField::DiaryBoundaryHour
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -1208,6 +1266,152 @@ mod tests {
         app.focus_field(crate::config_setup::SetupField::DisplayName);
         app.handle_action(TuiAction::Activate).unwrap();
         assert_eq!(app.editing().unwrap().buffer, "AgenticGPT agent!");
+    }
+
+    #[test]
+    fn confirmation_choices_move_focus_without_committing_until_activation() {
+        let mut app = optional_center_app();
+        app.state.focus = 2;
+        app.handle_action(TuiAction::Activate).unwrap();
+        assert_eq!(
+            app.page(),
+            ConfigPage::Optional(crate::config_templates::OptionalSection::Confirmation)
+        );
+        let provider = |app: &ConfigTuiApp| match app.section_draft.as_ref().unwrap() {
+            crate::config_setup::OptionalSectionDraft::Confirmation(draft) => {
+                draft.provider.clone()
+            }
+            _ => unreachable!(),
+        };
+        assert_eq!(provider(&app), "default");
+        app.handle_action(TuiAction::MoveNext).unwrap();
+        assert_eq!(provider(&app), "default");
+        app.handle_action(TuiAction::Activate).unwrap();
+        assert_eq!(provider(&app), "freedesktop");
+        let rendered = rendered(&app);
+        assert!(rendered.contains("Provider"));
+        assert!(rendered.contains("freedesktop"));
+        assert!(rendered.contains("ntfy"));
+    }
+
+    #[test]
+    fn limits_auto_custom_matches_demo_and_numeric_edit_rejects_letters() {
+        let mut app = optional_center_app();
+        app.state.focus = 3;
+        app.handle_action(TuiAction::Activate).unwrap();
+        assert_eq!(
+            app.page(),
+            ConfigPage::Optional(crate::config_templates::OptionalSection::Limits)
+        );
+        let max_active = |app: &ConfigTuiApp| match app.section_draft.as_ref().unwrap() {
+            crate::config_setup::OptionalSectionDraft::Limits(draft) => {
+                draft.max_active_jobs.clone()
+            }
+            _ => unreachable!(),
+        };
+        assert_eq!(max_active(&app), "auto");
+
+        app.focus_field(crate::config_setup::SetupField::MaxActiveJobs);
+        app.handle_action(TuiAction::MoveNext).unwrap();
+        assert_eq!(max_active(&app), "auto");
+        app.handle_action(TuiAction::Activate).unwrap();
+        assert_eq!(max_active(&app), "12");
+        assert_eq!(app.editing().unwrap().buffer, "12");
+        app.handle_action(TuiAction::Backspace).unwrap();
+        app.handle_action(TuiAction::Backspace).unwrap();
+        app.handle_action(TuiAction::Text('x')).unwrap();
+        assert_eq!(app.editing().unwrap().buffer, "");
+        app.handle_action(TuiAction::Text('7')).unwrap();
+        app.handle_action(TuiAction::Activate).unwrap();
+        assert_eq!(max_active(&app), "7");
+        assert_eq!(app.state.max_active_custom, "7");
+
+        app.handle_action(TuiAction::MovePrevious).unwrap();
+        app.handle_action(TuiAction::Activate).unwrap();
+        assert_eq!(max_active(&app), "auto");
+        app.handle_action(TuiAction::MoveNext).unwrap();
+        app.handle_action(TuiAction::Activate).unwrap();
+        assert_eq!(app.editing().unwrap().buffer, "7");
+    }
+
+    #[test]
+    fn sandbox_boolean_and_runtime_paths_use_form_semantics_without_json_ui() {
+        let mut app = optional_center_app();
+        app.state.focus = 4;
+        app.handle_action(TuiAction::Activate).unwrap();
+        assert_eq!(
+            app.page(),
+            ConfigPage::Optional(crate::config_templates::OptionalSection::Sandbox)
+        );
+        app.focus_field(crate::config_setup::SetupField::SandboxEnabled);
+        app.handle_action(TuiAction::Activate).unwrap();
+        let enabled = match app.section_draft.as_ref().unwrap() {
+            crate::config_setup::OptionalSectionDraft::Sandbox(draft) => draft.enabled,
+            _ => unreachable!(),
+        };
+        assert!(enabled);
+
+        app.focus_field(crate::config_setup::SetupField::RequiredRuntimePaths);
+        app.handle_action(TuiAction::AddListItem).unwrap();
+        for character in "/custom/runtime".chars() {
+            app.handle_action(TuiAction::Text(character)).unwrap();
+        }
+        app.handle_action(TuiAction::Activate).unwrap();
+        let paths = match app.section_draft.as_ref().unwrap() {
+            crate::config_setup::OptionalSectionDraft::Sandbox(draft) => {
+                serde_json::from_str::<Vec<String>>(&draft.required_runtime_paths).unwrap()
+            }
+            _ => unreachable!(),
+        };
+        assert!(paths.iter().any(|path| path == "/custom/runtime"));
+        let rendered = rendered(&app);
+        assert!(rendered.contains("Required runtime paths"));
+        assert!(!rendered.contains("(JSON)"));
+        assert!(!rendered.contains(''));
+    }
+
+    #[test]
+    fn tunnel_client_uses_real_defaults_and_empty_inputs_without_placeholders() {
+        let mut app = optional_center_app();
+        app.state.focus = 5;
+        app.handle_action(TuiAction::Activate).unwrap();
+        assert_eq!(
+            app.page(),
+            ConfigPage::Optional(crate::config_templates::OptionalSection::TunnelClient)
+        );
+        let rendered = rendered(&app);
+        assert!(rendered.contains("Client version"));
+        assert!(rendered.contains("~/.agentic_gpt/cache/tunnel-client"));
+        assert!(rendered.contains("Auto-download"));
+        assert!(rendered.contains("on"));
+        assert!(rendered.contains("[        ]"));
+        assert!(!rendered.contains('•'));
+        assert!(!rendered.contains(''));
+    }
+
+    #[test]
+    fn hub_reporting_detail_is_a_committed_choice_not_a_cycle_row() {
+        let mut app = optional_center_app();
+        app.state.focus = 6;
+        app.handle_action(TuiAction::Activate).unwrap();
+        assert_eq!(
+            app.page(),
+            ConfigPage::Optional(crate::config_templates::OptionalSection::HubReporting)
+        );
+        let detail = |app: &ConfigTuiApp| match app.section_draft.as_ref().unwrap() {
+            crate::config_setup::OptionalSectionDraft::HubReporting(draft) => draft.detail.clone(),
+            _ => unreachable!(),
+        };
+        assert_eq!(detail(&app), "metadata");
+        app.focus_field(crate::config_setup::SetupField::HubReportingDetail);
+        app.handle_action(TuiAction::MoveNext).unwrap();
+        assert_eq!(detail(&app), "metadata");
+        app.handle_action(TuiAction::Activate).unwrap();
+        assert_eq!(detail(&app), "full");
+        let rendered = rendered(&app);
+        assert!(rendered.contains("metadata"));
+        assert!(rendered.contains("full"));
+        assert_eq!(rendered.matches('').count(), 1);
     }
 
     #[test]

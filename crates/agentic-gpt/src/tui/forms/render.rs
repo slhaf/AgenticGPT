@@ -65,6 +65,99 @@ pub(crate) fn boolean_row_line(
     ])
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn input_row_line(
+    label: &str,
+    value: &str,
+    focused: bool,
+    editing: bool,
+    cursor: Option<usize>,
+    label_width: usize,
+    input_width: usize,
+    theme: &Theme,
+) -> Line<'static> {
+    let padding = " ".repeat(label_width.saturating_sub(UnicodeWidthStr::width(label)));
+    let mut spans = vec![
+        Span::raw("  "),
+        focus_span(focused, theme),
+        Span::raw(label.to_string()),
+        Span::raw(padding),
+        Span::raw("  "),
+    ];
+    spans.extend(inline_input_spans(
+        value,
+        editing,
+        cursor,
+        input_width,
+        theme,
+    ));
+    Line::from(spans)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn choice_input_row_line(
+    label: &str,
+    value: &str,
+    focused: bool,
+    selected: bool,
+    editing: bool,
+    cursor: Option<usize>,
+    label_width: usize,
+    input_width: usize,
+    theme: &Theme,
+) -> Line<'static> {
+    let padding = " ".repeat(label_width.saturating_sub(UnicodeWidthStr::width(label)));
+    let mut spans = vec![
+        Span::raw("  "),
+        focus_span(focused, theme),
+        Span::raw(label.to_string()),
+        Span::raw(padding),
+        if selected {
+            Span::styled("", theme.selected)
+        } else {
+            Span::raw(" ")
+        },
+        Span::raw("  "),
+    ];
+    spans.extend(inline_input_spans(
+        value,
+        editing,
+        cursor,
+        input_width,
+        theme,
+    ));
+    Line::from(spans)
+}
+
+fn inline_input_spans(
+    value: &str,
+    editing: bool,
+    cursor: Option<usize>,
+    width: usize,
+    theme: &Theme,
+) -> Vec<Span<'static>> {
+    let width = width.max(1);
+    let content = input_content(
+        value,
+        editing,
+        cursor.unwrap_or(value.chars().count()),
+        width,
+    );
+    let used = UnicodeWidthStr::width(content.as_str());
+    let padding = " ".repeat(width.saturating_sub(used));
+    let style = if editing {
+        theme.emphasis.add_modifier(Modifier::BOLD)
+    } else {
+        theme.emphasis
+    };
+    vec![
+        Span::styled("[", theme.structure),
+        Span::styled(content, style),
+        Span::styled(padding, style),
+        Span::styled("]", theme.structure),
+    ]
+}
+
 pub(crate) fn list_item_line(value: &str, focused: bool, theme: &Theme) -> Line<'static> {
     Line::from(vec![
         Span::raw("  "),

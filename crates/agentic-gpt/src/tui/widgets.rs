@@ -90,42 +90,6 @@ pub(crate) fn surface_choice_line(
     ])
 }
 
-pub(crate) fn surface_choice_value_line(
-    label: &str,
-    value: &str,
-    selected: bool,
-    focused: bool,
-    theme: &Theme,
-) -> Line<'static> {
-    let pointer = if focused {
-        Span::styled("❯ ", theme.pointer)
-    } else {
-        Span::raw("  ")
-    };
-    let label_width = 24usize;
-    let padding = " ".repeat(label_width.saturating_sub(label.chars().count()));
-    let marker = if selected {
-        Span::styled("", theme.selected)
-    } else {
-        Span::raw(" ")
-    };
-    Line::from(vec![
-        Span::raw("  "),
-        pointer,
-        Span::raw(label.to_string()),
-        Span::raw(padding),
-        marker,
-        Span::styled(
-            format!("  {value}"),
-            if focused {
-                theme.emphasis
-            } else {
-                theme.normal
-            },
-        ),
-    ])
-}
-
 pub(crate) fn surface_status_line(
     label: &str,
     status: &str,
@@ -294,66 +258,6 @@ pub(crate) fn render_text_input_with_cursor(
     }
     let line = Line::from(spans);
     frame.render_widget(Paragraph::new(line), area);
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn render_surface_text_input_with_cursor(
-    frame: &mut Frame,
-    area: Rect,
-    label: &str,
-    value: &str,
-    focused: bool,
-    secret: bool,
-    cursor: Option<usize>,
-    theme: &Theme,
-) {
-    let pointer = if focused {
-        Span::styled("❯ ", theme.pointer)
-    } else {
-        Span::raw("  ")
-    };
-    let style = if focused {
-        theme.emphasis
-    } else {
-        theme.normal
-    };
-    let masked = if secret {
-        "•".repeat(value.chars().count())
-    } else {
-        value.to_string()
-    };
-    let mut spans = vec![
-        Span::raw("  "),
-        pointer,
-        Span::styled(format!("{label}: "), theme.muted),
-        Span::styled("[", theme.structure),
-    ];
-    if let Some(cursor) = cursor {
-        let cursor = cursor.min(masked.chars().count());
-        let before = masked.chars().take(cursor).collect::<String>();
-        let after = masked.chars().skip(cursor).collect::<String>();
-        if !before.is_empty() {
-            spans.push(Span::styled(before, style));
-        }
-        spans.push(Span::styled(
-            "█",
-            if focused { theme.pointer } else { style },
-        ));
-        if !after.is_empty() {
-            spans.push(Span::styled(after, style));
-        }
-    } else {
-        spans.push(Span::styled(
-            if masked.is_empty() {
-                "•".to_string()
-            } else {
-                masked
-            },
-            style,
-        ));
-    }
-    spans.push(Span::styled("]", theme.structure));
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 #[allow(dead_code)]

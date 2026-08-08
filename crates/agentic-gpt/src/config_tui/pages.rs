@@ -15,14 +15,15 @@ use crate::config_templates::{
     InitSummary, OptionalSection, PendingAction, RuntimeMode, TunnelSecretSource,
 };
 use crate::tui::forms::{
-    boolean_row_line, choice_row_line, editable_list_item_line, long_form_input_value_line,
-    render_long_form_input, subsection_heading_line, EditableListState,
+    boolean_row_line, choice_input_row_line, choice_row_line, editable_list_item_line,
+    input_row_line, long_form_input_value_line, render_long_form_input, subsection_heading_line,
+    EditableListState,
 };
 use crate::tui::{
     action_line, inline_error_line, labeled_heading_line, render_action_button,
     render_contextual_footer, render_footer, render_header, render_horizontal_rule,
-    render_inspector, render_surface, render_surface_header, render_surface_text_input_with_cursor,
-    surface_choice_line, surface_choice_value_line, surface_status_line, Theme,
+    render_inspector, render_surface, render_surface_header, surface_choice_line,
+    surface_status_line, Theme,
 };
 use crate::WorkerProfile;
 
@@ -1047,88 +1048,237 @@ fn render_optional_form(
 
     let fallback = session.optional_draft(section);
     let draft = section_draft.unwrap_or(&fallback);
-    let fields = optional_fields(section);
-    let mut cursor = left.y;
+    let focus_items = optional_focus_items(section, draft);
+    let action_focused = state.focus >= focus_items.len();
     let section_heading = format!(
         "{} {}",
         section_label(section, language),
         t(language, "settings", "配置")
     );
-    render_surface_heading(frame, left, &mut cursor, &section_heading, theme);
-    render_surface_blank(left, &mut cursor, frame);
-    for (index, field) in fields.iter().enumerate() {
-        if let Some(subheading) = optional_subheading(section, *field, language) {
-            render_surface_heading(frame, left, &mut cursor, subheading, theme);
+    let mut lines = vec![
+        labeled_heading_line(&section_heading, left.width, theme),
+        Line::raw(""),
+    ];
+    let mut focused_line = 0usize;
+
+    match section {
+        OptionalSection::Identity => push_long_form_field(
+            &mut lines,
+            &mut focused_line,
+            section,
+            draft,
+            state,
+            SetupField::DisplayName,
+            language,
+            theme,
+            errors,
+            left.width,
+        ),
+        OptionalSection::Confirmation => {
+            push_choice_group(
+                &mut lines,
+                &mut focused_line,
+                section,
+                draft,
+                state,
+                SetupField::ConfirmationProvider,
+                t(language, "Provider", "提供方"),
+                &[
+                    ("default", t(language, "Default", "默认")),
+                    ("freedesktop", "freedesktop"),
+                    ("ntfy", "ntfy"),
+                    ("none", t(language, "None", "无")),
+                ],
+                theme,
+                errors,
+                language,
+            );
+            push_choice_group(
+                &mut lines,
+                &mut focused_line,
+                section,
+                draft,
+                state,
+                SetupField::ConfirmationLanguage,
+                t(language, "Language", "语言"),
+                &[("zh-CN", "zh-CN"), ("en", "en")],
+                theme,
+                errors,
+                language,
+            );
         }
-        let value = optional_field_value(draft, *field);
-        let value = current_input_value(state, *field, &value);
-        let focused = state.focus == index;
-        if let Some(row) = next_surface_row(left, &mut cursor) {
-            if *field == SetupField::MaxActiveJobs {
-                let display = if value == "auto" {
-                    t(language, "Auto", "自动").to_string()
-                } else {
-                    format!("{}: {value}", t(language, "Custom", "自定义"))
-                };
-                frame.render_widget(
-                    Paragraph::new(surface_choice_value_line(
-                        optional_field_label(*field, language),
-                        &display,
-                        value == "auto",
-                        focused,
-                        theme,
-                    )),
-                    row,
-                );
-            } else if optional_field_is_toggle(*field) {
-                frame.render_widget(
-                    Paragraph::new(surface_choice_value_line(
-                        optional_field_label(*field, language),
-                        if value == "true" {
-                            t(language, "on", "开")
-                        } else {
-                            t(language, "off", "关")
-                        },
-                        value == "true",
-                        focused,
-                        theme,
-                    )),
-                    row,
-                );
-            } else {
-                render_surface_text_input_with_cursor(
-                    frame,
-                    row,
-                    optional_field_label(*field, language),
-                    value,
-                    focused,
-                    false,
-                    editing_cursor(state, *field),
+        OptionalSection::Limits => push_limits_form(
+            &mut lines,
+            &mut focused_line,
+            draft,
+            state,
+            language,
+            theme,
+            errors,
+        ),
+        OptionalSection::Sandbox => {
+            push_boolean_field(
+                &mut lines,
+                &mut focused_line,
+                section,
+                draft,
+                state,
+                SetupField::SandboxEnabled,
+                language,
+                theme,
+                errors,
+            );
+            push_long_form_field(
+                &mut lines,
+                &mut focused_line,
+                section,
+                draft,
+                state,
+                SetupField::BubblewrapPath,
+                language,
+                theme,
+                errors,
+                left.width,
+            );
+            push_list_field(
+                &mut lines,
+                &mut focused_line,
+                section,
+                draft,
+                state,
+                SetupField::RequiredRuntimePaths,
+                language,
+                theme,
+                errors,
+                left.width,
+            );
+        }
+        OptionalSection::Room => {
+            for field in [
+                SetupField::RoomTimezone,
+                SetupField::DiaryBoundaryHour,
+                SetupField::NotebookRoot,
+            ] {
+                push_long_form_field(
+                    &mut lines,
+                    &mut focused_line,
+                    section,
+                    draft,
+                    state,
+                    field,
+                    language,
                     theme,
+                    errors,
+                    left.width,
                 );
             }
         }
-        if let Some(error) = errors.get(field) {
-            if let Some(row) = next_surface_row(left, &mut cursor) {
-                let message = localized_error(error, language);
-                frame.render_widget(Paragraph::new(inline_error_line(&message, theme)), row);
+        OptionalSection::TunnelClient => {
+            for field in [SetupField::TunnelClientVersion, SetupField::TunnelCacheDir] {
+                push_long_form_field(
+                    &mut lines,
+                    &mut focused_line,
+                    section,
+                    draft,
+                    state,
+                    field,
+                    language,
+                    theme,
+                    errors,
+                    left.width,
+                );
+            }
+            push_boolean_field(
+                &mut lines,
+                &mut focused_line,
+                section,
+                draft,
+                state,
+                SetupField::TunnelAutoDownload,
+                language,
+                theme,
+                errors,
+            );
+            for field in [
+                SetupField::TunnelExecutable,
+                SetupField::TunnelDownloadUrl,
+                SetupField::TunnelSha256,
+            ] {
+                push_long_form_field(
+                    &mut lines,
+                    &mut focused_line,
+                    section,
+                    draft,
+                    state,
+                    field,
+                    language,
+                    theme,
+                    errors,
+                    left.width,
+                );
             }
         }
+        OptionalSection::HubReporting => {
+            push_boolean_field(
+                &mut lines,
+                &mut focused_line,
+                section,
+                draft,
+                state,
+                SetupField::HubReportingEnabled,
+                language,
+                theme,
+                errors,
+            );
+            push_choice_group(
+                &mut lines,
+                &mut focused_line,
+                section,
+                draft,
+                state,
+                SetupField::HubReportingDetail,
+                t(language, "Reporting detail", "报告详细程度"),
+                &[("metadata", "metadata"), ("full", "full")],
+                theme,
+                errors,
+                language,
+            );
+        }
+        OptionalSection::Workspace => unreachable!("workspace has a dedicated renderer"),
     }
+
+    let content_height = left.height.saturating_sub(1);
+    let content_area = Rect {
+        x: left.x,
+        y: left.y,
+        width: left.width,
+        height: content_height,
+    };
+    let visible = usize::from(content_height);
+    let max_scroll = lines.len().saturating_sub(visible);
+    if action_focused {
+        focused_line = lines.len().saturating_sub(1);
+    }
+    let scroll = focused_line
+        .saturating_sub(visible.saturating_sub(1) / 2)
+        .min(max_scroll)
+        .min(usize::from(u16::MAX)) as u16;
+    frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), content_area);
     render_surface_action(
         frame,
         left,
         t(language, "Save and return", "保存并返回"),
-        state.focus >= fields.len(),
+        action_focused,
         theme,
     );
+
+    let field = optional_focus_field(section, draft, state.focus);
     if right.width > 0 {
         render_surface(frame, right, theme);
         let inspector = right.inner(Margin {
             horizontal: 2,
             vertical: 1,
         });
-        let field = fields.get(state.focus).copied();
         let title = field
             .map(|field| optional_field_label(field, language))
             .unwrap_or_else(|| section_label(section, language));
@@ -1136,12 +1286,466 @@ fn render_optional_form(
         render_inspector(frame, inspector, title, inspector_body, theme);
     }
     render_horizontal_rule(frame, bottom_rule, theme);
-    render_surface_footer(
+    render_optional_form_footer(
         frame,
         footer,
-        state.editing.is_some(),
-        state.focus >= fields.len(),
+        section,
+        draft,
+        state,
+        action_focused,
         language,
+        theme,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_long_form_field(
+    lines: &mut Vec<Line<'static>>,
+    focused_line: &mut usize,
+    section: OptionalSection,
+    draft: &OptionalSectionDraft,
+    state: &TuiState,
+    field: SetupField,
+    language: UiLanguage,
+    theme: &Theme,
+    errors: &HashMap<SetupField, String>,
+    width: u16,
+) {
+    lines.push(subsection_heading_line(
+        optional_field_label(field, language),
+        theme,
+    ));
+    let focus = optional_field_index(section, draft, field).unwrap_or(usize::MAX);
+    let focused = state.focus == focus;
+    if focused {
+        *focused_line = lines.len();
+    }
+    let confirmed = optional_field_value(draft, field);
+    let cursor = editing_cursor(state, field);
+    lines.push(long_form_input_value_line(
+        current_input_value(state, field, &confirmed),
+        focused,
+        cursor.is_some(),
+        cursor,
+        false,
+        false,
+        width,
+        theme,
+    ));
+    push_optional_error(lines, errors, field, language, theme);
+    lines.push(Line::raw(""));
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_boolean_field(
+    lines: &mut Vec<Line<'static>>,
+    focused_line: &mut usize,
+    section: OptionalSection,
+    draft: &OptionalSectionDraft,
+    state: &TuiState,
+    field: SetupField,
+    language: UiLanguage,
+    theme: &Theme,
+    errors: &HashMap<SetupField, String>,
+) {
+    let focus = optional_field_index(section, draft, field).unwrap_or(usize::MAX);
+    let focused = state.focus == focus;
+    if focused {
+        *focused_line = lines.len();
+    }
+    let value = optional_field_value(draft, field);
+    lines.push(boolean_row_line(
+        optional_field_label(field, language),
+        if value == "true" {
+            t(language, "on", "开")
+        } else {
+            t(language, "off", "关")
+        },
+        focused,
+        24,
+        theme,
+    ));
+    push_optional_error(lines, errors, field, language, theme);
+    lines.push(Line::raw(""));
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_choice_group(
+    lines: &mut Vec<Line<'static>>,
+    focused_line: &mut usize,
+    section: OptionalSection,
+    draft: &OptionalSectionDraft,
+    state: &TuiState,
+    field: SetupField,
+    heading: &str,
+    choices: &[(&str, &str)],
+    theme: &Theme,
+    errors: &HashMap<SetupField, String>,
+    language: UiLanguage,
+) {
+    lines.push(subsection_heading_line(heading, theme));
+    for (value, label) in choices {
+        let focus = optional_choice_index(section, draft, field, value).unwrap_or(usize::MAX);
+        let focused = state.focus == focus;
+        if focused {
+            *focused_line = lines.len();
+        }
+        lines.push(choice_row_line(
+            label,
+            focused,
+            optional_choice_selected(draft, field, value),
+            18,
+            theme,
+        ));
+    }
+    push_optional_error(lines, errors, field, language, theme);
+    lines.push(Line::raw(""));
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_list_field(
+    lines: &mut Vec<Line<'static>>,
+    focused_line: &mut usize,
+    section: OptionalSection,
+    draft: &OptionalSectionDraft,
+    state: &TuiState,
+    field: SetupField,
+    language: UiLanguage,
+    theme: &Theme,
+    errors: &HashMap<SetupField, String>,
+    width: u16,
+) {
+    lines.push(subsection_heading_line(
+        optional_field_label(field, language),
+        theme,
+    ));
+    let targets = optional_focus_items(section, draft)
+        .iter()
+        .enumerate()
+        .filter_map(|(focus, item)| match item {
+            OptionalFocusItem::List {
+                field: candidate,
+                index,
+            } if *candidate == field => Some((focus, *index)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    match optional_list_state(draft, field) {
+        Ok(list) if !list.is_empty() => {
+            for (focus, index) in targets {
+                let Some(index) = index else {
+                    continue;
+                };
+                let focused = state.focus == focus;
+                if focused {
+                    *focused_line = lines.len();
+                }
+                let editing = state
+                    .list_edit
+                    .as_ref()
+                    .is_some_and(|target| target.field == field && target.index == index);
+                let value = if editing {
+                    state
+                        .editing
+                        .as_ref()
+                        .map(|edit| edit.buffer.as_str())
+                        .unwrap_or_default()
+                } else {
+                    list.items()
+                        .get(index)
+                        .map(String::as_str)
+                        .unwrap_or_default()
+                };
+                lines.push(editable_list_item_line(
+                    value,
+                    focused,
+                    editing,
+                    editing
+                        .then(|| state.editing.as_ref().map(|edit| edit.cursor))
+                        .flatten(),
+                    width,
+                    theme,
+                ));
+            }
+        }
+        _ => {
+            let focus = targets
+                .first()
+                .map(|(focus, _)| *focus)
+                .unwrap_or(usize::MAX);
+            let focused = state.focus == focus;
+            if focused {
+                *focused_line = lines.len();
+            }
+            lines.push(editable_list_item_line(
+                "", focused, false, None, width, theme,
+            ));
+        }
+    }
+    push_optional_error(lines, errors, field, language, theme);
+    lines.push(Line::raw(""));
+}
+
+fn push_limits_form(
+    lines: &mut Vec<Line<'static>>,
+    focused_line: &mut usize,
+    draft: &OptionalSectionDraft,
+    state: &TuiState,
+    language: UiLanguage,
+    theme: &Theme,
+    errors: &HashMap<SetupField, String>,
+) {
+    let section = OptionalSection::Limits;
+    lines.push(subsection_heading_line(
+        t(language, "Task concurrency", "任务并发"),
+        theme,
+    ));
+    let max_focus =
+        optional_field_index(section, draft, SetupField::MaxConcurrentTasks).unwrap_or(usize::MAX);
+    let max_focused = state.focus == max_focus;
+    if max_focused {
+        *focused_line = lines.len();
+    }
+    let max_value = optional_field_value(draft, SetupField::MaxConcurrentTasks);
+    let max_cursor = editing_cursor(state, SetupField::MaxConcurrentTasks);
+    lines.push(input_row_line(
+        optional_field_label(SetupField::MaxConcurrentTasks, language),
+        current_input_value(state, SetupField::MaxConcurrentTasks, &max_value),
+        max_focused,
+        max_cursor.is_some(),
+        max_cursor,
+        22,
+        8,
+        theme,
+    ));
+    push_optional_error(
+        lines,
+        errors,
+        SetupField::MaxConcurrentTasks,
+        language,
+        theme,
+    );
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(
+        format!(
+            "  {}",
+            optional_field_label(SetupField::MaxActiveJobs, language)
+        ),
+        theme.muted,
+    ));
+
+    let auto_focus = optional_choice_index(section, draft, SetupField::MaxActiveJobs, "auto")
+        .unwrap_or(usize::MAX);
+    let auto_focused = state.focus == auto_focus;
+    if auto_focused {
+        *focused_line = lines.len();
+    }
+    lines.push(choice_row_line(
+        t(language, "Auto", "自动"),
+        auto_focused,
+        optional_choice_selected(draft, SetupField::MaxActiveJobs, "auto"),
+        14,
+        theme,
+    ));
+
+    let custom_focus = optional_choice_index(section, draft, SetupField::MaxActiveJobs, "custom")
+        .unwrap_or(usize::MAX);
+    let custom_focused = state.focus == custom_focus;
+    if custom_focused {
+        *focused_line = lines.len();
+    }
+    let custom_cursor = editing_cursor(state, SetupField::MaxActiveJobs);
+    let configured = optional_field_value(draft, SetupField::MaxActiveJobs);
+    let custom_value = if custom_cursor.is_some() {
+        state
+            .editing
+            .as_ref()
+            .map(|edit| edit.buffer.as_str())
+            .unwrap_or(state.max_active_custom.as_str())
+    } else if configured != "auto" {
+        configured.as_str()
+    } else {
+        state.max_active_custom.as_str()
+    };
+    lines.push(choice_input_row_line(
+        t(language, "Custom", "自定义"),
+        custom_value,
+        custom_focused,
+        optional_choice_selected(draft, SetupField::MaxActiveJobs, "custom"),
+        custom_cursor.is_some(),
+        custom_cursor,
+        14,
+        8,
+        theme,
+    ));
+    push_optional_error(lines, errors, SetupField::MaxActiveJobs, language, theme);
+    lines.push(Line::raw(""));
+
+    lines.push(subsection_heading_line(
+        t(language, "Search", "搜索"),
+        theme,
+    ));
+    let context_focus = optional_field_index(section, draft, SetupField::MaxFileSearchContextLines)
+        .unwrap_or(usize::MAX);
+    let context_focused = state.focus == context_focus;
+    if context_focused {
+        *focused_line = lines.len();
+    }
+    let context_value = optional_field_value(draft, SetupField::MaxFileSearchContextLines);
+    let context_cursor = editing_cursor(state, SetupField::MaxFileSearchContextLines);
+    lines.push(input_row_line(
+        t(language, "Context lines", "上下文行数"),
+        current_input_value(state, SetupField::MaxFileSearchContextLines, &context_value),
+        context_focused,
+        context_cursor.is_some(),
+        context_cursor,
+        22,
+        8,
+        theme,
+    ));
+    push_optional_error(
+        lines,
+        errors,
+        SetupField::MaxFileSearchContextLines,
+        language,
+        theme,
+    );
+    lines.push(Line::raw(""));
+}
+
+fn push_optional_error(
+    lines: &mut Vec<Line<'static>>,
+    errors: &HashMap<SetupField, String>,
+    field: SetupField,
+    language: UiLanguage,
+    theme: &Theme,
+) {
+    if let Some(error) = errors.get(&field) {
+        lines.push(inline_error_line(&localized_error(error, language), theme));
+    }
+}
+
+fn optional_choice_index(
+    section: OptionalSection,
+    draft: &OptionalSectionDraft,
+    field: SetupField,
+    value: &str,
+) -> Option<usize> {
+    optional_focus_items(section, draft)
+        .iter()
+        .position(|item| {
+            matches!(
+                item,
+                OptionalFocusItem::Choice {
+                    field: candidate,
+                    value: candidate_value,
+                } if *candidate == field && *candidate_value == value
+            )
+        })
+}
+
+fn optional_choice_selected(draft: &OptionalSectionDraft, field: SetupField, choice: &str) -> bool {
+    let value = optional_field_value(draft, field);
+    match field {
+        SetupField::ConfirmationProvider => match choice {
+            "default" => matches!(
+                value.trim(),
+                "default" | "freedesktop-then-hub" | "freedesktopThenHub" | "freedesktop-then-ntfy"
+            ),
+            "freedesktop" => value.trim() == "freedesktop",
+            "ntfy" => matches!(value.trim(), "ntfy" | "hub"),
+            "none" => value.trim() == "none",
+            _ => false,
+        },
+        SetupField::ConfirmationLanguage => {
+            crate::config::normalize_confirmation_language(&value) == choice
+        }
+        SetupField::MaxActiveJobs => match choice {
+            "auto" => value.trim() == "auto",
+            "custom" => value.trim() != "auto",
+            _ => false,
+        },
+        SetupField::HubReportingDetail => value.trim() == choice,
+        _ => value.trim() == choice,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_optional_form_footer(
+    frame: &mut Frame,
+    area: Rect,
+    section: OptionalSection,
+    draft: &OptionalSectionDraft,
+    state: &TuiState,
+    action_focused: bool,
+    language: UiLanguage,
+    theme: &Theme,
+) {
+    if state.editing.is_some() {
+        render_contextual_footer(
+            frame,
+            area,
+            &[
+                ("Enter", t(language, "confirm", "确认")),
+                ("Esc", t(language, "discard", "放弃")),
+                ("Ctrl+C", t(language, "cancel", "取消")),
+            ],
+            theme,
+        );
+        return;
+    }
+    if action_focused {
+        render_contextual_footer(
+            frame,
+            area,
+            &[
+                ("Enter/l", t(language, "continue", "继续")),
+                ("Esc/h", t(language, "back", "返回")),
+                ("Ctrl+C", t(language, "cancel", "取消")),
+            ],
+            theme,
+        );
+        return;
+    }
+    if let Some((_, index)) = optional_list_target(section, draft, state.focus) {
+        render_contextual_footer(
+            frame,
+            area,
+            &[
+                ("↑↓ j/k", t(language, "move", "移动")),
+                (
+                    "Enter/l",
+                    if index.is_some() {
+                        t(language, "edit", "编辑")
+                    } else {
+                        t(language, "add", "新增")
+                    },
+                ),
+                ("a", t(language, "add", "新增")),
+                ("d", t(language, "delete", "删除")),
+                ("Esc/h", t(language, "back", "返回")),
+            ],
+            theme,
+        );
+        return;
+    }
+    let field = optional_focus_field(section, draft, state.focus);
+    let action = if optional_choice_for_focus(section, draft, state.focus).is_some() {
+        t(language, "choose", "选择")
+    } else if field.is_some_and(optional_field_is_toggle) {
+        t(language, "toggle", "切换")
+    } else {
+        t(language, "edit", "编辑")
+    };
+    render_contextual_footer(
+        frame,
+        area,
+        &[
+            ("↑↓ j/k", t(language, "move", "移动")),
+            ("Enter/l", action),
+            ("Esc/h", t(language, "back", "返回")),
+            ("Ctrl+C", t(language, "cancel", "取消")),
+        ],
         theme,
     );
 }
@@ -1190,26 +1794,6 @@ pub(super) fn workspace_list_state(
         .map_err(|_| ())
 }
 
-pub(super) fn set_workspace_list_state(
-    draft: &mut OptionalSectionDraft,
-    field: SetupField,
-    state: &EditableListState,
-) -> bool {
-    let OptionalSectionDraft::Workspace(workspace) = draft else {
-        return false;
-    };
-    let Ok(serialized) = serde_json::to_string(state.items()) else {
-        return false;
-    };
-    match field {
-        SetupField::WriteRoots => workspace.write_roots = serialized,
-        SetupField::ReadOnlyRoots => workspace.read_only_roots = serialized,
-        SetupField::DenyRoots => workspace.deny_roots = serialized,
-        _ => return false,
-    }
-    true
-}
-
 pub(super) fn workspace_focus_items(draft: &OptionalSectionDraft) -> Vec<WorkspaceFocusItem> {
     let mut items = vec![WorkspaceFocusItem::Root];
     for field in workspace_list_fields() {
@@ -1226,10 +1810,6 @@ pub(super) fn workspace_focus_items(draft: &OptionalSectionDraft) -> Vec<Workspa
         }
     }
     items
-}
-
-pub(super) fn workspace_focus_len(draft: &OptionalSectionDraft) -> usize {
-    workspace_focus_items(draft).len() + 1
 }
 
 pub(super) fn workspace_focus_field(
@@ -1252,29 +1832,226 @@ pub(super) fn workspace_path_target(
     }
 }
 
-pub(super) fn workspace_field_index(
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum OptionalFocusItem {
+    Field(SetupField),
+    Choice {
+        field: SetupField,
+        value: &'static str,
+    },
+    List {
+        field: SetupField,
+        index: Option<usize>,
+    },
+}
+
+impl OptionalFocusItem {
+    fn field(self) -> SetupField {
+        match self {
+            Self::Field(field) | Self::Choice { field, .. } | Self::List { field, .. } => field,
+        }
+    }
+}
+
+pub(super) fn optional_list_state(
+    draft: &OptionalSectionDraft,
+    field: SetupField,
+) -> Result<EditableListState, ()> {
+    let raw = match (draft, field) {
+        (OptionalSectionDraft::Workspace(value), SetupField::WriteRoots) => &value.write_roots,
+        (OptionalSectionDraft::Workspace(value), SetupField::ReadOnlyRoots) => {
+            &value.read_only_roots
+        }
+        (OptionalSectionDraft::Workspace(value), SetupField::DenyRoots) => &value.deny_roots,
+        (OptionalSectionDraft::Sandbox(value), SetupField::RequiredRuntimePaths) => {
+            &value.required_runtime_paths
+        }
+        _ => return Err(()),
+    };
+    serde_json::from_str::<Vec<String>>(raw)
+        .map(EditableListState::new)
+        .map_err(|_| ())
+}
+
+pub(super) fn set_optional_list_state(
+    draft: &mut OptionalSectionDraft,
+    field: SetupField,
+    state: &EditableListState,
+) -> bool {
+    let Ok(serialized) = serde_json::to_string(state.items()) else {
+        return false;
+    };
+    match (draft, field) {
+        (OptionalSectionDraft::Workspace(value), SetupField::WriteRoots) => {
+            value.write_roots = serialized
+        }
+        (OptionalSectionDraft::Workspace(value), SetupField::ReadOnlyRoots) => {
+            value.read_only_roots = serialized
+        }
+        (OptionalSectionDraft::Workspace(value), SetupField::DenyRoots) => {
+            value.deny_roots = serialized
+        }
+        (OptionalSectionDraft::Sandbox(value), SetupField::RequiredRuntimePaths) => {
+            value.required_runtime_paths = serialized
+        }
+        _ => return false,
+    }
+    true
+}
+
+fn list_focus_items(field: SetupField, draft: &OptionalSectionDraft) -> Vec<OptionalFocusItem> {
+    match optional_list_state(draft, field) {
+        Ok(state) if !state.is_empty() => (0..state.items().len())
+            .map(|index| OptionalFocusItem::List {
+                field,
+                index: Some(index),
+            })
+            .collect(),
+        _ => vec![OptionalFocusItem::List { field, index: None }],
+    }
+}
+
+pub(super) fn optional_focus_items(
+    section: OptionalSection,
+    draft: &OptionalSectionDraft,
+) -> Vec<OptionalFocusItem> {
+    match section {
+        OptionalSection::Identity => vec![OptionalFocusItem::Field(SetupField::DisplayName)],
+        OptionalSection::Workspace => workspace_focus_items(draft)
+            .into_iter()
+            .map(|item| match item {
+                WorkspaceFocusItem::Root => OptionalFocusItem::Field(SetupField::WorkspaceRoot),
+                WorkspaceFocusItem::Path { field, index } => {
+                    OptionalFocusItem::List { field, index }
+                }
+            })
+            .collect(),
+        OptionalSection::Confirmation => ["default", "freedesktop", "ntfy", "none"]
+            .into_iter()
+            .map(|value| OptionalFocusItem::Choice {
+                field: SetupField::ConfirmationProvider,
+                value,
+            })
+            .chain(
+                ["zh-CN", "en"]
+                    .into_iter()
+                    .map(|value| OptionalFocusItem::Choice {
+                        field: SetupField::ConfirmationLanguage,
+                        value,
+                    }),
+            )
+            .collect(),
+        OptionalSection::Limits => vec![
+            OptionalFocusItem::Field(SetupField::MaxConcurrentTasks),
+            OptionalFocusItem::Choice {
+                field: SetupField::MaxActiveJobs,
+                value: "auto",
+            },
+            OptionalFocusItem::Choice {
+                field: SetupField::MaxActiveJobs,
+                value: "custom",
+            },
+            OptionalFocusItem::Field(SetupField::MaxFileSearchContextLines),
+        ],
+        OptionalSection::Sandbox => {
+            let mut items = vec![
+                OptionalFocusItem::Field(SetupField::SandboxEnabled),
+                OptionalFocusItem::Field(SetupField::BubblewrapPath),
+            ];
+            items.extend(list_focus_items(SetupField::RequiredRuntimePaths, draft));
+            items
+        }
+        OptionalSection::Room => vec![
+            OptionalFocusItem::Field(SetupField::RoomTimezone),
+            OptionalFocusItem::Field(SetupField::DiaryBoundaryHour),
+            OptionalFocusItem::Field(SetupField::NotebookRoot),
+        ],
+        OptionalSection::TunnelClient => vec![
+            OptionalFocusItem::Field(SetupField::TunnelClientVersion),
+            OptionalFocusItem::Field(SetupField::TunnelCacheDir),
+            OptionalFocusItem::Field(SetupField::TunnelAutoDownload),
+            OptionalFocusItem::Field(SetupField::TunnelExecutable),
+            OptionalFocusItem::Field(SetupField::TunnelDownloadUrl),
+            OptionalFocusItem::Field(SetupField::TunnelSha256),
+        ],
+        OptionalSection::HubReporting => vec![
+            OptionalFocusItem::Field(SetupField::HubReportingEnabled),
+            OptionalFocusItem::Choice {
+                field: SetupField::HubReportingDetail,
+                value: "metadata",
+            },
+            OptionalFocusItem::Choice {
+                field: SetupField::HubReportingDetail,
+                value: "full",
+            },
+        ],
+    }
+}
+
+pub(super) fn optional_focus_len(section: OptionalSection, draft: &OptionalSectionDraft) -> usize {
+    optional_focus_items(section, draft).len() + 1
+}
+
+pub(super) fn optional_focus_field(
+    section: OptionalSection,
+    draft: &OptionalSectionDraft,
+    focus: usize,
+) -> Option<SetupField> {
+    optional_focus_items(section, draft)
+        .get(focus)
+        .copied()
+        .map(OptionalFocusItem::field)
+}
+
+pub(super) fn optional_choice_for_focus(
+    section: OptionalSection,
+    draft: &OptionalSectionDraft,
+    focus: usize,
+) -> Option<(SetupField, &'static str)> {
+    match optional_focus_items(section, draft).get(focus).copied() {
+        Some(OptionalFocusItem::Choice { field, value }) => Some((field, value)),
+        _ => None,
+    }
+}
+
+pub(super) fn optional_list_target(
+    section: OptionalSection,
+    draft: &OptionalSectionDraft,
+    focus: usize,
+) -> Option<(SetupField, Option<usize>)> {
+    match optional_focus_items(section, draft).get(focus).copied() {
+        Some(OptionalFocusItem::List { field, index }) => Some((field, index)),
+        _ => None,
+    }
+}
+
+pub(super) fn optional_field_index(
+    section: OptionalSection,
     draft: &OptionalSectionDraft,
     field: SetupField,
 ) -> Option<usize> {
-    workspace_focus_items(draft)
+    optional_focus_items(section, draft)
         .iter()
         .position(|item| item.field() == field)
 }
 
-pub(super) fn workspace_item_focus_index(
+pub(super) fn optional_item_focus_index(
+    section: OptionalSection,
     draft: &OptionalSectionDraft,
     field: SetupField,
     item_index: usize,
 ) -> Option<usize> {
-    workspace_focus_items(draft).iter().position(|item| {
-        matches!(
-            item,
-            WorkspaceFocusItem::Path {
-                field: candidate,
-                index: Some(index)
-            } if *candidate == field && *index == item_index
-        )
-    })
+    optional_focus_items(section, draft)
+        .iter()
+        .position(|item| {
+            matches!(
+                item,
+                OptionalFocusItem::List {
+                    field: candidate,
+                    index: Some(index)
+                } if *candidate == field && *index == item_index
+            )
+        })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1583,22 +2360,6 @@ fn optional_center_inspector_body(
     }
 }
 
-fn optional_subheading(
-    section: OptionalSection,
-    field: SetupField,
-    language: UiLanguage,
-) -> Option<&'static str> {
-    match section {
-        OptionalSection::Limits if field == SetupField::MaxConcurrentTasks => {
-            Some(t(language, "Task concurrency", "任务并发"))
-        }
-        OptionalSection::Limits if field == SetupField::MaxFileSearchContextLines => {
-            Some(t(language, "Search", "搜索"))
-        }
-        _ => None,
-    }
-}
-
 fn optional_form_inspector_body(
     section: OptionalSection,
     field: Option<SetupField>,
@@ -1672,51 +2433,6 @@ fn all_optional_sections() -> [OptionalSection; 8] {
     ]
 }
 
-pub(super) fn optional_fields(section: OptionalSection) -> Vec<SetupField> {
-    match section {
-        OptionalSection::Identity => vec![SetupField::DisplayName],
-        OptionalSection::Workspace => vec![
-            SetupField::WorkspaceRoot,
-            SetupField::WriteRoots,
-            SetupField::ReadOnlyRoots,
-            SetupField::DenyRoots,
-        ],
-        OptionalSection::Confirmation => {
-            vec![
-                SetupField::ConfirmationProvider,
-                SetupField::ConfirmationLanguage,
-            ]
-        }
-        OptionalSection::Limits => vec![
-            SetupField::MaxConcurrentTasks,
-            SetupField::MaxActiveJobs,
-            SetupField::MaxFileSearchContextLines,
-        ],
-        OptionalSection::Sandbox => vec![
-            SetupField::SandboxEnabled,
-            SetupField::BubblewrapPath,
-            SetupField::RequiredRuntimePaths,
-        ],
-        OptionalSection::Room => vec![
-            SetupField::RoomTimezone,
-            SetupField::DiaryBoundaryHour,
-            SetupField::NotebookRoot,
-        ],
-        OptionalSection::TunnelClient => vec![
-            SetupField::TunnelClientVersion,
-            SetupField::TunnelCacheDir,
-            SetupField::TunnelAutoDownload,
-            SetupField::TunnelExecutable,
-            SetupField::TunnelDownloadUrl,
-            SetupField::TunnelSha256,
-        ],
-        OptionalSection::HubReporting => vec![
-            SetupField::HubReportingEnabled,
-            SetupField::HubReportingDetail,
-        ],
-    }
-}
-
 fn section_label(section: OptionalSection, language: UiLanguage) -> &'static str {
     match section {
         OptionalSection::Identity => t(language, "Identity", "身份"),
@@ -1746,11 +2462,7 @@ fn optional_field_label(field: SetupField, language: UiLanguage) -> &'static str
         }
         SetupField::SandboxEnabled => t(language, "Sandbox enabled", "启用沙箱"),
         SetupField::BubblewrapPath => t(language, "Bubblewrap path", "Bubblewrap 路径"),
-        SetupField::RequiredRuntimePaths => t(
-            language,
-            "Required runtime paths (JSON)",
-            "必需运行时路径（JSON）",
-        ),
+        SetupField::RequiredRuntimePaths => t(language, "Required runtime paths", "必需运行时路径"),
         SetupField::RoomTimezone => t(language, "Timezone", "时区"),
         SetupField::DiaryBoundaryHour => t(language, "Diary boundary hour", "日记边界小时"),
         SetupField::NotebookRoot => t(language, "Notebook root", "笔记本根目录"),
