@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    io::IsTerminal,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{anyhow, Result};
 use clap::Subcommand;
@@ -1033,21 +1036,47 @@ pub(crate) fn setup_seed_from_args(args: &ConfigInitArgs) -> SetupSeed {
     }
 }
 
+pub(crate) fn should_use_interactive_init(
+    non_interactive: bool,
+    stdin_is_terminal: bool,
+    stdout_is_terminal: bool,
+    stderr_is_terminal: bool,
+) -> bool {
+    !non_interactive && stdin_is_terminal && stdout_is_terminal && stderr_is_terminal
+}
+
+fn process_should_use_interactive_init(non_interactive: bool) -> bool {
+    should_use_interactive_init(
+        non_interactive,
+        std::io::stdin().is_terminal(),
+        std::io::stdout().is_terminal(),
+        std::io::stderr().is_terminal(),
+    )
+}
+
+fn interactive_init_required_message(language: UiLanguage) -> &'static str {
+    match language {
+        UiLanguage::En => {
+            "Interactive config init requires a TTY; re-run with --non-interactive for piped or scripted use."
+        }
+        UiLanguage::ZhCn => "交互式配置初始化需要 TTY；管道或脚本场景请使用 --non-interactive。",
+    }
+}
+
 fn handle_init(config_path: &Path, args: ConfigInitArgs, language: UiLanguage) -> Result<()> {
-    let summary = if crate::config_wizard::process_should_use_interactive_init(args.non_interactive)
-    {
-        let mut backend = crate::config_wizard::InquirePromptBackend::new(language);
-        let outcome =
-            crate::config_wizard::run_wizard(&mut backend, args, language).map_err(|error| {
+    let summary = if args.non_interactive {
+        init_non_interactive(config_path, &args, language)?
+    } else if process_should_use_interactive_init(args.non_interactive) {
+        crate::config_tui::run_config_tui(config_path, setup_seed_from_args(&args), language)
+            .map_err(|error| {
                 if error.to_string() == "config_init_cancelled" {
                     anyhow!(cli_i18n::text(language).cancelled)
                 } else {
                     error
                 }
-            })?;
-        crate::config_wizard::commit_wizard_outcome(config_path, outcome)?
+            })?
     } else {
-        init_non_interactive(config_path, &args, language)?
+        return Err(anyhow!(interactive_init_required_message(language)));
     };
     let _ = (summary.mode, summary.profile);
     println!(
@@ -1182,6 +1211,26 @@ fn tunnel_config(config: &mut Config) -> &mut config::TunnelConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn interactive_init_requires_all_three_terminals_and_no_non_interactive_flag() {
+        let cases = [
+            (true, true, true, true, false),
+            (false, false, true, true, false),
+            (false, true, false, true, false),
+            (false, true, true, false, false),
+            (false, false, false, false, false),
+            (false, true, true, true, true),
+        ];
+
+        for (non_interactive, stdin, stdout, stderr, expected) in cases {
+            assert_eq!(
+                should_use_interactive_init(non_interactive, stdin, stdout, stderr),
+                expected,
+                "unexpected interactive-init decision"
+            );
+        }
+    }
 
     #[test]
     fn registry_applies_new_scalar_and_list_keys() {

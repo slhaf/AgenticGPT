@@ -93,7 +93,13 @@ fn run_smoke(
     let agent_id = format!("standalone-e2e-{}", Uuid::new_v4().simple());
 
     let init = Command::new(&binary)
-        .args(["config", "--config", config_path.to_str().unwrap(), "init"])
+        .args([
+            "config",
+            "--config",
+            config_path.to_str().unwrap(),
+            "init",
+            "--non-interactive",
+        ])
         .output()
         .map_err(|error| format!("config init failed to spawn: {error}"))?;
     if !init.status.success() {
@@ -261,7 +267,13 @@ fn run_stdio_resume(root: &Path) -> Result<(), String> {
     let config_path = root.join("config.json");
     let workspace = root.join("workspace");
     let init = Command::new(&binary)
-        .args(["config", "--config", config_path.to_str().unwrap(), "init"])
+        .args([
+            "config",
+            "--config",
+            config_path.to_str().unwrap(),
+            "init",
+            "--non-interactive",
+        ])
         .output()
         .map_err(|error| format!("config init failed to spawn: {error}"))?;
     if !init.status.success() {
@@ -394,7 +406,13 @@ fn run_live_reload(root: &Path) -> Result<(), String> {
     let config_path = root.join("config.json");
     let workspace = root.join("workspace");
     let init = Command::new(&binary)
-        .args(["config", "--config", config_path.to_str().unwrap(), "init"])
+        .args([
+            "config",
+            "--config",
+            config_path.to_str().unwrap(),
+            "init",
+            "--non-interactive",
+        ])
         .output()
         .map_err(|error| format!("config init failed to spawn: {error}"))?;
     if !init.status.success() {

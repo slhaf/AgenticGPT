@@ -266,7 +266,7 @@ fn config_init_set_and_show_round_trip() {
     let init = Command::new(&binary)
         .args(["config", "--config"])
         .arg(&config)
-        .arg("init")
+        .args(["init", "--non-interactive"])
         .output()
         .unwrap();
     assert!(init.status.success(), "config init command failed");
@@ -318,7 +318,7 @@ fn config_set_rejects_file_search_context_bound_without_writing() {
     let init = Command::new(&binary)
         .args(["config", "--config"])
         .arg(&config)
-        .arg("init")
+        .args(["init", "--non-interactive"])
         .output()
         .unwrap();
     assert!(init.status.success(), "config init command failed");
@@ -339,24 +339,39 @@ fn config_set_rejects_file_search_context_bound_without_writing() {
 }
 
 #[test]
-fn non_tty_init_defaults_to_standalone_normal_without_blocking() {
-    let root = temp_root("non-tty-default-init");
-    fs::create_dir_all(&root).unwrap();
-    let config = root.join("config.json");
-    let output = Command::new(binary_path())
-        .args(["--language", "en", "config", "--config"])
-        .arg(&config)
-        .arg("init")
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "non-TTY default init failed");
-    let value: Value = serde_json::from_slice(&fs::read(&config).unwrap()).unwrap();
-    assert_eq!(value["tunnel"]["tunnelId"], "tunnel_replace-me");
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("replace tunnel ID"),
-        "non-TTY default init did not report the pending tunnel action"
-    );
-    let _ = fs::remove_dir_all(root);
+fn bare_non_tty_init_requires_explicit_non_interactive_mode() {
+    for (language, marker) in [
+        ("en", "Interactive config init"),
+        ("zh-CN", "交互式配置初始化"),
+    ] {
+        let root = temp_root(&format!("non-tty-default-init-{language}"));
+        fs::create_dir_all(&root).unwrap();
+        let config = root.join("config.json");
+        let output = Command::new(binary_path())
+            .args(["--language", language, "config", "--config"])
+            .arg(&config)
+            .arg("init")
+            .output()
+            .unwrap();
+        assert!(
+            !output.status.success(),
+            "bare non-TTY init unexpectedly wrote config for {language}"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(marker),
+            "bare non-TTY error was not localized for {language}: {stderr}"
+        );
+        assert!(
+            stderr.contains("--non-interactive"),
+            "bare non-TTY error did not explain the automation flag for {language}: {stderr}"
+        );
+        assert!(
+            !config.exists(),
+            "bare non-TTY init wrote a config for {language}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
 }
 
 #[test]

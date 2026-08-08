@@ -25,7 +25,7 @@ fn run_local_e2e(root: &Path) -> Result<(), String> {
     command(&binary)
         .args(["config", "--config"])
         .arg(&config_path)
-        .arg("init")
+        .args(["init", "--non-interactive"])
         .output()
         .map_err(|error| error.to_string())?
         .status

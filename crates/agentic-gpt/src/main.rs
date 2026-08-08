@@ -7,7 +7,6 @@ mod config_cli;
 mod config_setup;
 mod config_templates;
 mod config_tui;
-mod config_wizard;
 mod confirmation;
 mod diary;
 mod exec;
