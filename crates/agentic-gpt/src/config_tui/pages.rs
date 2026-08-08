@@ -7,14 +7,17 @@ use ratatui::{
     Frame,
 };
 
-use crate::config_setup::{OptionalSectionDraft, SectionStatus, SetupField, SetupSession};
-use crate::config_templates::{OptionalSection, RuntimeMode, TunnelSecretSource};
+use crate::cli_i18n::UiLanguage;
+use crate::config_setup::{
+    OptionalSectionDraft, ReviewModel, ReviewTarget, SectionStatus, SetupField, SetupSession,
+};
+use crate::config_templates::{InitSummary, OptionalSection, RuntimeMode, TunnelSecretSource};
 use crate::tui::{
     render_action_button, render_footer, render_header, render_inline_error, render_radio_row,
     render_text_input, Theme,
 };
 
-use super::{ConfigPage, TuiState};
+use super::{ConfigPage, SystemError, TuiState};
 
 pub(super) fn render(
     frame: &mut Frame,
@@ -24,6 +27,7 @@ pub(super) fn render(
     theme: &Theme,
     errors: &HashMap<SetupField, String>,
     section_draft: Option<&OptionalSectionDraft>,
+    review: Option<&ReviewModel>,
     progress: (usize, usize),
 ) {
     match page {
@@ -42,8 +46,15 @@ pub(super) fn render(
             section_draft,
             progress,
         ),
-        ConfigPage::Review => render_placeholder(frame, "Review", state, theme, progress),
+        ConfigPage::Review => {
+            if let Some(review) = review {
+                render_review(frame, review, state, theme, progress)
+            } else {
+                render_placeholder(frame, "Review", state, theme, progress)
+            }
+        }
         ConfigPage::Completion => render_placeholder(frame, "Done", state, theme, progress),
+        ConfigPage::SystemError => render_placeholder(frame, "Error", state, theme, progress),
     }
 }
 
@@ -622,6 +633,208 @@ pub(super) fn toggle_optional_field(draft: &mut OptionalSectionDraft, field: Set
         }
         _ => {}
     }
+}
+
+fn render_review(
+    frame: &mut Frame,
+    review: &ReviewModel,
+    state: &TuiState,
+    theme: &Theme,
+    progress: (usize, usize),
+) {
+    let [header, body, actions, footer] = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Min(8),
+        Constraint::Length(2),
+        Constraint::Length(1),
+    ])
+    .areas(frame.area());
+    render_header(
+        frame,
+        header,
+        "Review and write",
+        &format!("{} / {}", progress.0, progress.1),
+        theme,
+    );
+
+    let groups = review_groups(review);
+    let mut lines = vec![
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled("Config path: ", theme.dim),
+            Span::styled(review.config_path.display().to_string(), theme.normal),
+        ]),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled("Backup: ", theme.dim),
+            Span::styled(
+                if review.will_backup_existing_config {
+                    "existing config will be backed up"
+                } else {
+                    "no existing config"
+                },
+                theme.normal,
+            ),
+        ]),
+    ];
+    if let Some(secret) = &review.secret_write {
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled("Secret write: ", theme.dim),
+            Span::styled(
+                format!("yes ({}) · value hidden", secret.path.display()),
+                theme.normal,
+            ),
+        ]));
+    } else {
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled("Secret write: ", theme.dim),
+            Span::styled("no", theme.normal),
+        ]));
+    }
+    for action in &review.pending_actions {
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled("Pending action: ", theme.dim),
+            Span::styled(format!("{action:?}"), theme.warning),
+        ]));
+    }
+    for (index, group) in groups.iter().enumerate() {
+        let focused = state.focus == index;
+        let style = if focused { theme.focus } else { theme.normal };
+        let prefix = if focused { "› " } else { "  " };
+        lines.push(Line::from(vec![
+            Span::styled(prefix, style),
+            Span::styled(review_target_label(group.target), style),
+            Span::styled(
+                format!("  [{}]", section_status_label(group.status)),
+                theme.dim,
+            ),
+        ]));
+        for item in &group.items {
+            lines.push(Line::from(vec![
+                Span::raw("    "),
+                Span::styled(format!("{}: ", item.label_key), theme.dim),
+                Span::styled(&item.value, theme.normal),
+            ]));
+        }
+    }
+    frame.render_widget(Paragraph::new(lines), body);
+    render_action_button(
+        frame,
+        actions,
+        "Confirm and write",
+        state.focus >= groups.len(),
+        theme,
+    );
+    render_footer(
+        frame,
+        footer,
+        "Enter open/edit · Tab move · Esc back · Ctrl+C cancel",
+        theme,
+    );
+}
+
+fn review_groups(review: &ReviewModel) -> Vec<&crate::config_setup::ReviewGroup> {
+    let mut groups = vec![&review.basic];
+    if review.mode != RuntimeMode::Local {
+        groups.push(&review.connection);
+    }
+    groups.extend(
+        review
+            .optional_sections
+            .iter()
+            .filter(|group| group.status != SectionStatus::NotApplicable),
+    );
+    groups
+}
+
+fn review_target_label(target: ReviewTarget) -> &'static str {
+    match target {
+        ReviewTarget::Basic => "Basic settings",
+        ReviewTarget::Connection => "Connection settings",
+        ReviewTarget::OptionalCenter => "Optional settings",
+        ReviewTarget::OptionalSection(section) => section_label(section),
+    }
+}
+
+fn section_status_label(status: SectionStatus) -> &'static str {
+    match status {
+        SectionStatus::Default => "Default",
+        SectionStatus::Configured => "Configured",
+        SectionStatus::NotApplicable => "Not applicable",
+    }
+}
+
+pub(super) fn render_completion(
+    frame: &mut Frame,
+    summary: Option<&InitSummary>,
+    _finished: bool,
+    language: UiLanguage,
+    theme: &Theme,
+) {
+    let [header, body, actions, footer] = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Min(4),
+        Constraint::Length(2),
+        Constraint::Length(1),
+    ])
+    .areas(frame.area());
+    let title = match language {
+        UiLanguage::ZhCn => "AgenticGPT 初始化完成",
+        UiLanguage::En => "AgenticGPT initialization complete",
+    };
+    render_header(frame, header, title, "", theme);
+    let path = summary
+        .map(|summary| summary.config_path.display().to_string())
+        .unwrap_or_else(|| "(unknown)".to_string());
+    let guidance = match language {
+        UiLanguage::ZhCn => "下一步：运行 agentic-gpt config show 查看配置。",
+        UiLanguage::En => "Next: run `agentic-gpt config show` to inspect the configuration.",
+    };
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(vec![
+                Span::styled("Config: ", theme.dim),
+                Span::styled(path, theme.normal),
+            ]),
+            Line::from(guidance),
+        ]),
+        body,
+    );
+    let action = match language {
+        UiLanguage::ZhCn => "完成",
+        UiLanguage::En => "Done",
+    };
+    render_action_button(frame, actions, action, true, theme);
+    render_footer(frame, footer, "Enter exit", theme);
+}
+
+pub(super) fn render_system_error(frame: &mut Frame, error: Option<&SystemError>, theme: &Theme) {
+    let [header, body, actions, footer] = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Min(4),
+        Constraint::Length(2),
+        Constraint::Length(1),
+    ])
+    .areas(frame.area());
+    render_header(frame, header, "Initialization error", "", theme);
+    let (code, message) = error
+        .map(|error| (error.code, error.message))
+        .unwrap_or(("config_init_system_error", "Initialization failed."));
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(vec![
+                Span::styled("Code: ", theme.dim),
+                Span::styled(code, theme.error),
+            ]),
+            Line::from(Span::styled(message, theme.error)),
+        ]),
+        body,
+    );
+    render_action_button(frame, actions, "Exit", true, theme);
+    render_footer(frame, footer, "Enter/Esc exit · Ctrl+C cancel", theme);
 }
 
 fn render_placeholder(

@@ -3,7 +3,7 @@ mod tests {
     use std::path::PathBuf;
 
     use crate::cli_i18n::UiLanguage;
-    use crate::config_templates::{OptionalSection, RuntimeMode, SecretValue};
+    use crate::config_templates::{OptionalSection, PendingAction, RuntimeMode, SecretValue};
     use crate::WorkerProfile;
 
     use super::super::model::{SetupSeed, SetupSession};
@@ -15,7 +15,7 @@ mod tests {
             SetupSeed {
                 mode: Some(RuntimeMode::Standalone),
                 profile: Some(WorkerProfile::Normal),
-                tunnel_id: Some("tunnel-review".to_string()),
+                tunnel_id: None,
                 tunnel_api_key: Some("file:/tmp/review-secret".to_string()),
                 hub_url: Some("https://inactive-hub.example.com".to_string()),
                 hub_transport: Some("sse".to_string()),
@@ -34,6 +34,13 @@ mod tests {
         assert!(!rendered.contains("inactive-hub-secret"));
         assert!(review.secret_write.is_some());
         assert_eq!(review.mode, RuntimeMode::Standalone);
+        assert_eq!(
+            review.basic.target,
+            super::super::review::ReviewTarget::Basic
+        );
+        assert!(review
+            .pending_actions
+            .contains(&PendingAction::ReplaceTunnelId));
         assert!(review
             .connection
             .items
@@ -139,6 +146,7 @@ pub(crate) struct ReviewSecretWrite {
 pub(crate) struct ReviewModel {
     pub(crate) mode: RuntimeMode,
     pub(crate) profile: WorkerProfile,
+    pub(crate) basic: ReviewGroup,
     pub(crate) connection: ReviewGroup,
     pub(crate) optional_sections: Vec<ReviewGroup>,
     pub(crate) config_path: PathBuf,
@@ -156,6 +164,7 @@ pub(super) fn build_review_model(session: &SetupSession) -> Result<ReviewModel, 
         }]
     })?;
 
+    let basic = basic_group(&built);
     let connection = connection_group(session, &built);
     let optional_sections = [
         OptionalSection::Identity,
@@ -196,6 +205,7 @@ pub(super) fn build_review_model(session: &SetupSession) -> Result<ReviewModel, 
     Ok(ReviewModel {
         mode: session.selected_mode(),
         profile: session.selected_profile(),
+        basic,
         connection,
         optional_sections,
         config_path: session.config_path().to_path_buf(),
@@ -203,6 +213,23 @@ pub(super) fn build_review_model(session: &SetupSession) -> Result<ReviewModel, 
         pending_actions,
         secret_write,
     })
+}
+
+fn basic_group(built: &InitBuild) -> ReviewGroup {
+    ReviewGroup {
+        target: ReviewTarget::Basic,
+        status: SectionStatus::Configured,
+        items: vec![
+            ReviewItem {
+                label_key: "mode",
+                value: format!("{:?}", built.mode),
+            },
+            ReviewItem {
+                label_key: "profile",
+                value: format!("{:?}", built.profile).to_lowercase(),
+            },
+        ],
+    }
 }
 
 fn connection_group(session: &SetupSession, built: &InitBuild) -> ReviewGroup {

@@ -8,6 +8,7 @@ pub(crate) enum ConfigPage {
     Optional(OptionalSection),
     Review,
     Completion,
+    SystemError,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

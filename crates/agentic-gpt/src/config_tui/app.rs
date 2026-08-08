@@ -1,10 +1,14 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, path::Path};
 
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 
-use crate::config_setup::{OptionalSectionDraft, SetupField, SetupSession, ValidationErrors};
+use crate::cli_i18n::UiLanguage;
+use crate::config_setup::{
+    commit_wizard_outcome, OptionalSectionDraft, ReviewModel, SetupField, SetupSession,
+    ValidationErrors, WizardOutcome,
+};
 use crate::config_templates::{InitSummary, RuntimeMode, SecretValue};
 use crate::tui::{TerminalEvent, Theme};
 use crate::WorkerProfile;
@@ -22,6 +26,26 @@ pub(crate) struct TuiState {
     pub(crate) modal: Option<String>,
     pub(crate) cancelled: bool,
     pub(crate) committed_summary: Option<InitSummary>,
+    pub(crate) finished: bool,
+    pub(crate) system_error: Option<SystemError>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SystemError {
+    pub(crate) code: &'static str,
+    pub(crate) message: &'static str,
+}
+
+pub(crate) trait Committer {
+    fn commit(&mut self, config_path: &Path, outcome: WizardOutcome) -> Result<InitSummary>;
+}
+
+struct ProductionCommitter;
+
+impl Committer for ProductionCommitter {
+    fn commit(&mut self, config_path: &Path, outcome: WizardOutcome) -> Result<InitSummary> {
+        commit_wizard_outcome(config_path, outcome)
+    }
 }
 
 pub(crate) enum TuiAction {
@@ -41,20 +65,28 @@ pub(crate) enum TuiAction {
 }
 
 pub(crate) struct ConfigTuiApp {
-    session: SetupSession,
+    session: Option<SetupSession>,
     navigation: Navigation,
     state: TuiState,
     theme: Theme,
     field_errors: HashMap<SetupField, String>,
     section_draft: Option<OptionalSectionDraft>,
+    review: Option<ReviewModel>,
+    language: UiLanguage,
+    committer: Box<dyn Committer>,
 }
 
 impl ConfigTuiApp {
     pub(crate) fn new(session: SetupSession) -> Self {
+        Self::with_committer(session, Box::new(ProductionCommitter))
+    }
+
+    pub(crate) fn with_committer(session: SetupSession, committer: Box<dyn Committer>) -> Self {
         let navigation = Navigation::new(session.selected_mode());
         let page = navigation.current();
+        let language = session.language();
         Self {
-            session,
+            session: Some(session),
             navigation,
             state: TuiState {
                 page,
@@ -65,10 +97,15 @@ impl ConfigTuiApp {
                 modal: None,
                 cancelled: false,
                 committed_summary: None,
+                finished: false,
+                system_error: None,
             },
             theme: Theme::from_env(),
             field_errors: HashMap::new(),
             section_draft: None,
+            review: None,
+            language,
+            committer,
         }
     }
 
@@ -81,15 +118,34 @@ impl ConfigTuiApp {
     }
 
     pub(crate) fn session(&self) -> &SetupSession {
-        &self.session
+        self.session
+            .as_ref()
+            .expect("setup session is unavailable after commit")
     }
 
     pub(crate) fn session_mut(&mut self) -> &mut SetupSession {
-        &mut self.session
+        self.session
+            .as_mut()
+            .expect("setup session is unavailable after commit")
     }
 
     pub(crate) fn editing(&self) -> Option<&EditState> {
         self.state.editing.as_ref()
+    }
+
+    pub(crate) fn review_model(&self) -> Option<&ReviewModel> {
+        self.review.as_ref()
+    }
+
+    pub(crate) fn review_group_count(&self) -> usize {
+        self.review
+            .as_ref()
+            .map(review_group_count)
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn take_committed_summary(&mut self) -> Option<InitSummary> {
+        self.state.committed_summary.take()
     }
 
     pub(crate) fn focus_field(&mut self, field: SetupField) {
@@ -101,7 +157,7 @@ impl ConfigTuiApp {
             ConfigPage::Basic => [SetupField::Mode, SetupField::Profile]
                 .get(self.state.focus)
                 .copied(),
-            ConfigPage::Connection => pages::connection_fields_for_session(&self.session)
+            ConfigPage::Connection => pages::connection_fields_for_session(self.session())
                 .get(self.state.focus)
                 .copied(),
             ConfigPage::Optional(section) => pages::optional_fields(section)
@@ -125,6 +181,10 @@ impl ConfigTuiApp {
                     self.commit_edit();
                 } else if matches!(self.state.page, ConfigPage::Optional(_)) {
                     self.save_optional_section();
+                } else if self.state.page == ConfigPage::Completion {
+                    self.state.finished = true;
+                } else if self.state.page == ConfigPage::SystemError {
+                    self.state.finished = true;
                 } else {
                     self.next_page();
                 }
@@ -135,18 +195,39 @@ impl ConfigTuiApp {
                 }
                 if matches!(self.state.page, ConfigPage::Optional(_)) {
                     self.leave_optional_section();
+                } else if self.state.return_target == ReturnTarget::Review
+                    && matches!(self.state.page, ConfigPage::Basic | ConfigPage::Connection)
+                {
+                    self.return_to_review();
+                } else if self.state.page == ConfigPage::Review {
+                    // Review is the wizard root after the staged flow; Esc is a no-op.
+                } else if self.state.page == ConfigPage::Completion {
+                    self.state.finished = true;
+                } else if self.state.page == ConfigPage::SystemError {
+                    self.state.finished = true;
                 } else if self.navigation.back() {
                     self.sync_page();
                 }
             }
             TuiAction::Cancel => {
-                self.state.cancelled = true;
-                self.state.editing = None;
-                self.section_draft = None;
+                if self.state.page == ConfigPage::Completion {
+                    self.state.finished = true;
+                } else {
+                    self.state.cancelled = true;
+                    self.state.editing = None;
+                    self.section_draft = None;
+                    self.review = None;
+                }
             }
             TuiAction::Activate => {
                 if self.state.editing.is_some() {
                     self.commit_edit();
+                } else if self.state.page == ConfigPage::Review {
+                    self.activate_review_focus();
+                } else if self.state.page == ConfigPage::Completion {
+                    self.state.finished = true;
+                } else if self.state.page == ConfigPage::SystemError {
+                    self.state.finished = true;
                 } else {
                     self.activate_focus();
                 }
@@ -169,27 +250,45 @@ impl ConfigTuiApp {
             TuiAction::MoveNext => self.move_focus(1),
             TuiAction::MovePrevious => self.move_focus(-1),
             TuiAction::SetMode(mode) => {
-                self.session.set_mode(mode);
+                self.session_mut().set_mode(mode);
                 self.navigation.set_mode(mode);
                 self.state.focus = 0;
                 self.sync_page();
             }
-            TuiAction::SetProfile(profile) => self.session.set_profile(profile),
+            TuiAction::SetProfile(profile) => self.session_mut().set_profile(profile),
         }
         Ok(())
     }
 
     pub(crate) fn render(&self, frame: &mut Frame) {
-        pages::render(
-            frame,
-            self.state.page,
-            &self.session,
-            &self.state,
-            &self.theme,
-            &self.field_errors,
-            self.section_draft.as_ref(),
-            self.navigation.progress(),
-        );
+        match self.state.page {
+            ConfigPage::Completion => pages::render_completion(
+                frame,
+                self.state.committed_summary.as_ref(),
+                self.state.finished,
+                self.language,
+                &self.theme,
+            ),
+            ConfigPage::SystemError => {
+                pages::render_system_error(frame, self.state.system_error.as_ref(), &self.theme)
+            }
+            _ => {
+                let Some(session) = self.session.as_ref() else {
+                    return;
+                };
+                pages::render(
+                    frame,
+                    self.state.page,
+                    session,
+                    &self.state,
+                    &self.theme,
+                    &self.field_errors,
+                    self.section_draft.as_ref(),
+                    self.review.as_ref(),
+                    self.navigation.progress(),
+                );
+            }
+        }
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
@@ -211,7 +310,9 @@ impl ConfigTuiApp {
         match key.code {
             KeyCode::Esc => self.handle_action(TuiAction::Back),
             KeyCode::Enter => {
-                if self.focused_field().is_some() {
+                if self.state.page == ConfigPage::Review {
+                    self.handle_action(TuiAction::Activate)
+                } else if self.focused_field().is_some() {
                     self.handle_action(TuiAction::Activate)
                 } else {
                     self.handle_action(TuiAction::Next)
@@ -226,19 +327,50 @@ impl ConfigTuiApp {
     }
 
     fn next_page(&mut self) {
-        let validation = match self.state.page {
-            ConfigPage::Basic => self.session.validate_basic(),
-            ConfigPage::Connection => self.session.validate_connection(),
-            _ => Ok(()),
-        };
-        if let Err(errors) = validation {
-            self.record_errors(errors);
-            return;
-        }
-        self.field_errors.clear();
-        if self.navigation.advance() {
-            self.state.focus = 0;
-            self.sync_page();
+        match self.state.page {
+            ConfigPage::Basic => {
+                if let Err(errors) = self.session().validate_basic() {
+                    self.record_errors(errors);
+                    return;
+                }
+                self.field_errors.clear();
+                if self.state.return_target == ReturnTarget::Review {
+                    self.return_to_review();
+                } else if self.navigation.advance() {
+                    self.state.focus = 0;
+                    self.sync_page();
+                }
+            }
+            ConfigPage::Connection => {
+                if let Err(errors) = self.session().validate_connection() {
+                    self.record_errors(errors);
+                    return;
+                }
+                self.field_errors.clear();
+                if self.state.return_target == ReturnTarget::Review {
+                    self.return_to_review();
+                } else if self.navigation.advance() {
+                    self.state.focus = 0;
+                    self.sync_page();
+                }
+            }
+            ConfigPage::OptionalCenter => match self.session().review_model() {
+                Ok(review) => {
+                    self.review = Some(review);
+                    self.field_errors.clear();
+                    if self.navigation.advance() {
+                        self.state.focus = 0;
+                        self.sync_page();
+                    }
+                }
+                Err(errors) => self.route_validation_errors(errors),
+            },
+            ConfigPage::Review => {
+                if self.state.focus >= self.review_group_count() {
+                    self.confirm_and_write();
+                }
+            }
+            _ => {}
         }
     }
 
@@ -264,25 +396,25 @@ impl ConfigTuiApp {
         }
         match field {
             SetupField::Mode => {
-                let next = match self.session.selected_mode() {
+                let next = match self.session().selected_mode() {
                     RuntimeMode::Standalone => RuntimeMode::Hub,
                     RuntimeMode::Hub => RuntimeMode::Local,
                     RuntimeMode::Local => RuntimeMode::Standalone,
                 };
-                self.session.set_mode(next);
+                self.session_mut().set_mode(next);
                 self.navigation.set_mode(next);
                 self.state.focus = 0;
                 self.sync_page();
             }
             SetupField::Profile => {
-                let next = match self.session.selected_profile() {
+                let next = match self.session().selected_profile() {
                     WorkerProfile::Normal => WorkerProfile::Room,
                     WorkerProfile::Room => WorkerProfile::Normal,
                 };
-                self.session.set_profile(next);
+                self.session_mut().set_profile(next);
             }
             SetupField::TunnelSecretSource => {
-                let draft = self.session.standalone_mut();
+                let draft = self.session_mut().standalone_mut();
                 draft.secret_source = match draft.secret_source {
                     crate::config_templates::TunnelSecretSource::File => {
                         crate::config_templates::TunnelSecretSource::Environment
@@ -293,11 +425,11 @@ impl ConfigTuiApp {
                 };
             }
             SetupField::ProvisionTunnelSecret => {
-                let draft = self.session.standalone_mut();
+                let draft = self.session_mut().standalone_mut();
                 draft.provision_secret_now = !draft.provision_secret_now;
             }
             _ => {
-                let value = pages::connection_value(&self.session, field).unwrap_or_default();
+                let value = pages::connection_value(self.session(), field).unwrap_or_default();
                 self.state.editing = Some(EditState::new(field, value));
             }
         }
@@ -317,23 +449,23 @@ impl ConfigTuiApp {
             return;
         }
         match field {
-            SetupField::TunnelId => self.session.standalone_mut().tunnel_id = value,
-            SetupField::TunnelSecretPath => self.session.standalone_mut().secret_path = value,
+            SetupField::TunnelId => self.session_mut().standalone_mut().tunnel_id = value,
+            SetupField::TunnelSecretPath => self.session_mut().standalone_mut().secret_path = value,
             SetupField::TunnelSecretEnvironment => {
-                self.session.standalone_mut().secret_environment = value
+                self.session_mut().standalone_mut().secret_environment = value
             }
             SetupField::TunnelSecretValue => {
-                self.session.standalone_mut().secret_value = Some(SecretValue::new(value))
+                self.session_mut().standalone_mut().secret_value = Some(SecretValue::new(value))
             }
-            SetupField::HubUrl => self.session.hub_mut().hub_url = value,
-            SetupField::HubTransport => self.session.hub_mut().hub_transport = value,
-            SetupField::AgentId => self.session.hub_mut().agent_id = value,
+            SetupField::HubUrl => self.session_mut().hub_mut().hub_url = value,
+            SetupField::HubTransport => self.session_mut().hub_mut().hub_transport = value,
+            SetupField::AgentId => self.session_mut().hub_mut().agent_id = value,
             SetupField::AgentSecret => {
-                self.session.hub_mut().agent_secret = Some(SecretValue::new(value))
+                self.session_mut().hub_mut().agent_secret = Some(SecretValue::new(value))
             }
             _ => {}
         }
-        match self.session.validate_field(field) {
+        match self.session().validate_field(field) {
             Ok(()) => {
                 self.field_errors.remove(&field);
             }
@@ -350,9 +482,12 @@ impl ConfigTuiApp {
     fn move_focus(&mut self, direction: isize) {
         let length = match self.state.page {
             ConfigPage::Basic => 3,
-            ConfigPage::Connection => pages::connection_fields_for_session(&self.session).len() + 1,
-            ConfigPage::OptionalCenter => self.session.available_optional_sections().len() + 1,
+            ConfigPage::Connection => {
+                pages::connection_fields_for_session(self.session()).len() + 1
+            }
+            ConfigPage::OptionalCenter => self.session().available_optional_sections().len() + 1,
             ConfigPage::Optional(section) => pages::optional_fields(section).len() + 1,
+            ConfigPage::Review => self.review_group_count() + 1,
             _ => 1,
         };
         if length == 0 {
@@ -367,7 +502,7 @@ impl ConfigTuiApp {
             ConfigPage::Basic => [SetupField::Mode, SetupField::Profile]
                 .iter()
                 .position(|candidate| *candidate == field),
-            ConfigPage::Connection => pages::connection_fields_for_session(&self.session)
+            ConfigPage::Connection => pages::connection_fields_for_session(self.session())
                 .iter()
                 .position(|candidate| *candidate == field),
             ConfigPage::Optional(section) => pages::optional_fields(section)
@@ -393,9 +528,9 @@ impl ConfigTuiApp {
     }
 
     fn activate_optional_center(&mut self) {
-        let sections = self.session.available_optional_sections();
+        let sections = self.session().available_optional_sections();
         if let Some(section) = sections.get(self.state.focus).copied() {
-            self.section_draft = Some(self.session.optional_draft(section));
+            self.section_draft = Some(self.session().optional_draft(section));
             self.field_errors.clear();
             self.state.editing = None;
             self.state.page = ConfigPage::Optional(section);
@@ -407,11 +542,17 @@ impl ConfigTuiApp {
     }
 
     fn leave_optional_section(&mut self) {
+        let return_target = self.state.return_target;
         self.section_draft = None;
         self.field_errors.clear();
         self.state.editing = None;
         self.state.focus = 0;
-        self.sync_page();
+        if return_target == ReturnTarget::Review {
+            self.return_to_review();
+        } else {
+            self.state.return_target = ReturnTarget::MainFlow;
+            self.sync_page();
+        }
     }
 
     fn save_optional_section(&mut self) {
@@ -419,11 +560,11 @@ impl ConfigTuiApp {
             self.leave_optional_section();
             return;
         };
-        if let Err(errors) = self.session.validate_optional_draft(&draft) {
+        if let Err(errors) = self.session().validate_optional_draft(&draft) {
             self.record_errors(errors);
             return;
         }
-        if let Err(errors) = self.session.save_optional_section(draft) {
+        if let Err(errors) = self.session_mut().save_optional_section(draft) {
             self.record_errors(errors);
             return;
         }
@@ -434,26 +575,286 @@ impl ConfigTuiApp {
         let Some(draft) = self.section_draft.as_ref() else {
             return;
         };
-        match self.session.validate_optional_draft(draft) {
+        match self.session().validate_optional_draft(draft) {
             Ok(()) => self.field_errors.clear(),
             Err(errors) => self.record_errors(errors),
         }
+    }
+
+    fn activate_review_focus(&mut self) {
+        let Some(review) = self.review.as_ref() else {
+            self.refresh_review();
+            return;
+        };
+        let targets = review_targets(review);
+        if let Some(target) = targets.get(self.state.focus).copied() {
+            self.open_review_target(target);
+        } else {
+            self.confirm_and_write();
+        }
+    }
+
+    fn open_review_target(&mut self, target: ReturnTargetKind) {
+        self.state.return_target = ReturnTarget::Review;
+        self.state.editing = None;
+        self.field_errors.clear();
+        match target {
+            ReturnTargetKind::Basic => {
+                self.navigation.go_to(ConfigPage::Basic);
+                self.state.page = ConfigPage::Basic;
+                self.state.focus = 0;
+            }
+            ReturnTargetKind::Connection => {
+                if self.navigation.go_to(ConfigPage::Connection) {
+                    self.state.page = ConfigPage::Connection;
+                    self.state.focus = 0;
+                }
+            }
+            ReturnTargetKind::Optional(section) => {
+                self.section_draft = Some(self.session().optional_draft(section));
+                self.state.page = ConfigPage::Optional(section);
+                self.state.focus = 0;
+            }
+        }
+    }
+
+    fn return_to_review(&mut self) {
+        self.section_draft = None;
+        self.state.editing = None;
+        self.field_errors.clear();
+        self.state.return_target = ReturnTarget::MainFlow;
+        self.navigation.go_to(ConfigPage::Review);
+        self.state.focus = 0;
+        self.refresh_review();
+    }
+
+    fn refresh_review(&mut self) {
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        match session.review_model() {
+            Ok(review) => {
+                self.review = Some(review);
+                self.state.page = ConfigPage::Review;
+            }
+            Err(errors) => self.route_validation_errors(errors),
+        }
+    }
+
+    fn route_validation_errors(&mut self, errors: ValidationErrors) {
+        let field = errors.first().map(|error| error.field);
+        self.record_errors(errors);
+        let Some(field) = field else {
+            return;
+        };
+        match field {
+            SetupField::Mode | SetupField::Profile => {
+                self.navigation.go_to(ConfigPage::Basic);
+                self.state.page = ConfigPage::Basic;
+                self.state.focus = self.field_index(field).unwrap_or(0);
+            }
+            SetupField::TunnelId
+            | SetupField::TunnelSecretSource
+            | SetupField::TunnelSecretPath
+            | SetupField::TunnelSecretEnvironment
+            | SetupField::ProvisionTunnelSecret
+            | SetupField::TunnelSecretValue
+            | SetupField::HubUrl
+            | SetupField::HubTransport
+            | SetupField::AgentId
+            | SetupField::AgentSecret => {
+                if self.navigation.go_to(ConfigPage::Connection) {
+                    self.state.page = ConfigPage::Connection;
+                    self.state.focus = self.field_index(field).unwrap_or(0);
+                }
+            }
+            _ => {
+                let section = optional_section_for_field(field);
+                self.section_draft = Some(self.session().optional_draft(section));
+                self.state.page = ConfigPage::Optional(section);
+                self.state.return_target = ReturnTarget::MainFlow;
+                self.state.focus = self.field_index(field).unwrap_or(0);
+            }
+        }
+    }
+
+    fn confirm_and_write(&mut self) {
+        if self.state.page != ConfigPage::Review || self.state.finished {
+            return;
+        }
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        let config_path = session.config_path().to_path_buf();
+        if let Err(errors) = session.validate_for_review() {
+            self.route_validation_errors(errors);
+            return;
+        }
+        let session = self.session.take().expect("session was checked above");
+        let outcome = match session.into_wizard_outcome() {
+            Ok(outcome) => outcome,
+            Err(errors) => {
+                self.route_validation_errors_after_session_loss(errors);
+                return;
+            }
+        };
+        match self.committer.commit(&config_path, outcome) {
+            Ok(summary) => {
+                self.state.committed_summary = Some(summary);
+                self.state.page = ConfigPage::Completion;
+                self.state.focus = 0;
+                self.state.return_target = ReturnTarget::MainFlow;
+                self.review = None;
+            }
+            Err(error) => self.set_system_error(&error),
+        }
+    }
+
+    fn route_validation_errors_after_session_loss(&mut self, errors: ValidationErrors) {
+        self.field_errors.clear();
+        if let Some(error) = errors.first() {
+            self.field_errors
+                .insert(error.field, error.code.to_string());
+        }
+        self.set_system_error_code("config_init_build_invalid");
+    }
+
+    fn set_system_error(&mut self, error: &anyhow::Error) {
+        let error_text = error.to_string();
+        let code = error_text.split(':').next().unwrap_or_default();
+        let code = match code {
+            "config_init_secret_path_invalid" => "config_init_secret_path_invalid",
+            "config_init_secret_parent_invalid" => "config_init_secret_parent_invalid",
+            "config_init_secret_write_failed" => "config_init_secret_write_failed",
+            "config_init_config_write_failed" => "config_init_config_write_failed",
+            "config_init_secret_rollback_failed" => "config_init_secret_rollback_failed",
+            _ => "config_init_system_error",
+        };
+        self.set_system_error_code(code);
+    }
+
+    fn set_system_error_code(&mut self, code: &'static str) {
+        self.state.system_error = Some(SystemError {
+            code,
+            message: system_error_message(code, self.language),
+        });
+        self.state.page = ConfigPage::SystemError;
+        self.state.focus = 0;
+        self.state.editing = None;
+        self.section_draft = None;
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ReturnTargetKind {
+    Basic,
+    Connection,
+    Optional(crate::config_templates::OptionalSection),
+}
+
+fn review_group_count(review: &ReviewModel) -> usize {
+    review_targets(review).len()
+}
+
+fn review_targets(review: &ReviewModel) -> Vec<ReturnTargetKind> {
+    let mut targets = vec![ReturnTargetKind::Basic];
+    if review.mode != RuntimeMode::Local {
+        targets.push(ReturnTargetKind::Connection);
+    }
+    targets.extend(
+        review
+            .optional_sections
+            .iter()
+            .filter_map(|group| match group.target {
+                crate::config_setup::ReviewTarget::OptionalSection(section)
+                    if group.status != crate::config_setup::SectionStatus::NotApplicable =>
+                {
+                    Some(ReturnTargetKind::Optional(section))
+                }
+                _ => None,
+            }),
+    );
+    targets
+}
+
+fn optional_section_for_field(field: SetupField) -> crate::config_templates::OptionalSection {
+    match field {
+        SetupField::DisplayName => crate::config_templates::OptionalSection::Identity,
+        SetupField::WorkspaceRoot
+        | SetupField::WriteRoots
+        | SetupField::ReadOnlyRoots
+        | SetupField::DenyRoots => crate::config_templates::OptionalSection::Workspace,
+        SetupField::ConfirmationProvider | SetupField::ConfirmationLanguage => {
+            crate::config_templates::OptionalSection::Confirmation
+        }
+        SetupField::MaxConcurrentTasks
+        | SetupField::MaxActiveJobs
+        | SetupField::MaxFileSearchContextLines => crate::config_templates::OptionalSection::Limits,
+        SetupField::SandboxEnabled
+        | SetupField::BubblewrapPath
+        | SetupField::RequiredRuntimePaths => crate::config_templates::OptionalSection::Sandbox,
+        SetupField::RoomTimezone | SetupField::DiaryBoundaryHour | SetupField::NotebookRoot => {
+            crate::config_templates::OptionalSection::Room
+        }
+        SetupField::TunnelClientVersion
+        | SetupField::TunnelCacheDir
+        | SetupField::TunnelAutoDownload
+        | SetupField::TunnelExecutable
+        | SetupField::TunnelDownloadUrl
+        | SetupField::TunnelSha256 => crate::config_templates::OptionalSection::TunnelClient,
+        SetupField::HubReportingEnabled | SetupField::HubReportingDetail => {
+            crate::config_templates::OptionalSection::HubReporting
+        }
+        _ => crate::config_templates::OptionalSection::Identity,
+    }
+}
+
+fn system_error_message(code: &'static str, language: UiLanguage) -> &'static str {
+    match (code, language) {
+        ("config_init_secret_path_invalid", UiLanguage::ZhCn) => "密钥路径无效，未写入配置。",
+        ("config_init_secret_parent_invalid", UiLanguage::ZhCn) => "密钥目录不可用，未写入配置。",
+        ("config_init_secret_write_failed", UiLanguage::ZhCn) => "密钥写入失败，未完成初始化。",
+        ("config_init_config_write_failed", UiLanguage::ZhCn) => "配置写入失败，未完成初始化。",
+        ("config_init_secret_rollback_failed", UiLanguage::ZhCn) => {
+            "回滚失败，请检查配置与密钥文件。"
+        }
+        ("config_init_secret_path_invalid", UiLanguage::En) => {
+            "The secret path is invalid; configuration was not written."
+        }
+        ("config_init_secret_parent_invalid", UiLanguage::En) => {
+            "The secret directory is unavailable; configuration was not written."
+        }
+        ("config_init_secret_write_failed", UiLanguage::En) => {
+            "The secret write failed; initialization did not complete."
+        }
+        ("config_init_config_write_failed", UiLanguage::En) => {
+            "The configuration write failed; initialization did not complete."
+        }
+        ("config_init_secret_rollback_failed", UiLanguage::En) => {
+            "Rollback failed; inspect the configuration and secret files."
+        }
+        (_, UiLanguage::ZhCn) => "初始化失败，未写入配置。",
+        (_, UiLanguage::En) => "Initialization failed; configuration was not written.",
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
     use std::path::PathBuf;
+    use std::rc::Rc;
 
+    use anyhow::anyhow;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::{backend::TestBackend, Terminal};
 
     use crate::cli_i18n::UiLanguage;
-    use crate::config_setup::{SetupSeed, SetupSession};
-    use crate::config_templates::{RuntimeMode, SecretValue};
+    use crate::config_setup::{SetupSeed, SetupSession, WizardOutcome};
+    use crate::config_templates::{InitSummary, RuntimeMode, SecretValue};
     use crate::tui::TerminalEvent;
     use crate::WorkerProfile;
 
-    use super::super::{ConfigPage, ConfigTuiApp, TuiAction};
+    use super::super::{Committer, ConfigPage, ConfigTuiApp, TuiAction};
 
     fn app(mode: RuntimeMode) -> ConfigTuiApp {
         ConfigTuiApp::new(SetupSession::new(
@@ -502,6 +903,51 @@ mod tests {
         app.handle_action(TuiAction::Next).unwrap();
         assert_eq!(app.page(), ConfigPage::OptionalCenter);
         app
+    }
+
+    fn review_app(mode: RuntimeMode) -> ConfigTuiApp {
+        let mut app = app(mode);
+        while app.page() != ConfigPage::Review {
+            app.handle_action(TuiAction::Next).unwrap();
+        }
+        app
+    }
+
+    fn rendered(app: &ConfigTuiApp) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(90, 28)).unwrap();
+        terminal.draw(|frame| app.render(frame)).unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    struct CountingCommitter {
+        calls: Rc<Cell<usize>>,
+        failure: Option<String>,
+    }
+
+    impl Committer for CountingCommitter {
+        fn commit(
+            &mut self,
+            config_path: &std::path::Path,
+            outcome: WizardOutcome,
+        ) -> anyhow::Result<InitSummary> {
+            self.calls.set(self.calls.get() + 1);
+            if let Some(message) = &self.failure {
+                return Err(anyhow!(message.clone()));
+            }
+            let build = outcome.build;
+            Ok(InitSummary {
+                mode: build.mode,
+                profile: build.profile,
+                config_path: config_path.to_path_buf(),
+                pending: build.pending,
+            })
+        }
     }
 
     #[test]
@@ -571,6 +1017,176 @@ mod tests {
         assert!(app.session().optional_drafts().workspace.is_none());
         app.handle_action(TuiAction::Back).unwrap();
         assert_eq!(app.page(), ConfigPage::OptionalCenter);
+    }
+
+    #[test]
+    fn review_return_targets_rebuild_the_review_model() {
+        let mut basic = review_app(RuntimeMode::Standalone);
+        basic.state.focus = 0;
+        basic.handle_action(TuiAction::Activate).unwrap();
+        assert_eq!(basic.page(), ConfigPage::Basic);
+        assert_eq!(
+            basic.state.return_target,
+            super::super::ReturnTarget::Review
+        );
+        basic
+            .handle_action(TuiAction::SetMode(RuntimeMode::Hub))
+            .unwrap();
+        basic.handle_action(TuiAction::Next).unwrap();
+        assert_eq!(basic.page(), ConfigPage::Review);
+        assert_eq!(basic.review_model().unwrap().mode, RuntimeMode::Hub);
+        assert!(basic
+            .review_model()
+            .unwrap()
+            .connection
+            .items
+            .iter()
+            .any(|item| item.label_key == "hub_url"));
+
+        let mut connection = review_app(RuntimeMode::Standalone);
+        connection.state.focus = 1;
+        connection.handle_action(TuiAction::Activate).unwrap();
+        assert_eq!(connection.page(), ConfigPage::Connection);
+        connection.handle_action(TuiAction::Next).unwrap();
+        assert_eq!(connection.page(), ConfigPage::Review);
+
+        let mut optional = review_app(RuntimeMode::Standalone);
+        optional.state.focus = 2;
+        optional.handle_action(TuiAction::Activate).unwrap();
+        assert_eq!(
+            optional.page(),
+            ConfigPage::Optional(crate::config_templates::OptionalSection::Identity)
+        );
+        optional.handle_action(TuiAction::Next).unwrap();
+        assert_eq!(optional.page(), ConfigPage::Review);
+
+        let mut escape = review_app(RuntimeMode::Standalone);
+        escape.state.focus = 0;
+        escape.handle_action(TuiAction::Activate).unwrap();
+        assert_eq!(escape.page(), ConfigPage::Basic);
+        escape.handle_action(TuiAction::Back).unwrap();
+        assert_eq!(escape.page(), ConfigPage::Review);
+    }
+
+    #[test]
+    fn review_cancel_has_no_side_effect_and_confirm_commits_once() {
+        let root =
+            std::env::temp_dir().join(format!("agentic-gpt-review-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let config_path = root.join("config.json");
+        let secret_path = root.join("secret");
+
+        let calls = Rc::new(Cell::new(0));
+        let mut cancelled = ConfigTuiApp::with_committer(
+            SetupSession::new(
+                SetupSeed {
+                    mode: Some(RuntimeMode::Standalone),
+                    tunnel_api_key: Some(format!("file:{}", secret_path.display())),
+                    ..SetupSeed::default()
+                },
+                UiLanguage::En,
+                config_path.clone(),
+            ),
+            Box::new(CountingCommitter {
+                calls: calls.clone(),
+                failure: None,
+            }),
+        );
+        while cancelled.page() != ConfigPage::Review {
+            cancelled.handle_action(TuiAction::Next).unwrap();
+        }
+        cancelled.handle_action(TuiAction::Cancel).unwrap();
+        assert_eq!(calls.get(), 0);
+        assert!(!config_path.exists());
+        assert!(!secret_path.exists());
+
+        let calls = Rc::new(Cell::new(0));
+        let mut committed = ConfigTuiApp::with_committer(
+            SetupSession::new(
+                SetupSeed {
+                    mode: Some(RuntimeMode::Standalone),
+                    tunnel_api_key: Some(format!("file:{}", secret_path.display())),
+                    ..SetupSeed::default()
+                },
+                UiLanguage::En,
+                config_path.clone(),
+            ),
+            Box::new(CountingCommitter {
+                calls: calls.clone(),
+                failure: None,
+            }),
+        );
+        while committed.page() != ConfigPage::Review {
+            committed.handle_action(TuiAction::Next).unwrap();
+        }
+        committed.state.focus = committed.review_group_count();
+        committed.handle_action(TuiAction::Next).unwrap();
+        assert_eq!(calls.get(), 1);
+        assert_eq!(committed.page(), ConfigPage::Completion);
+        committed.handle_action(TuiAction::Next).unwrap();
+        assert_eq!(calls.get(), 1);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn review_completion_and_system_error_render_without_secret_markers() {
+        let marker = "phase-seven-secret-marker";
+        let calls = Rc::new(Cell::new(0));
+        let mut committed = ConfigTuiApp::with_committer(
+            SetupSession::new(
+                SetupSeed {
+                    mode: Some(RuntimeMode::Standalone),
+                    tunnel_api_key: Some("file:/tmp/phase-seven-secret".into()),
+                    ..SetupSeed::default()
+                },
+                UiLanguage::En,
+                "/tmp/phase-seven-review.json".into(),
+            ),
+            Box::new(CountingCommitter {
+                calls: calls.clone(),
+                failure: None,
+            }),
+        );
+        committed
+            .session_mut()
+            .standalone_mut()
+            .provision_secret_now = true;
+        committed.session_mut().standalone_mut().secret_value = Some(SecretValue::new(marker));
+        while committed.page() != ConfigPage::Review {
+            committed.handle_action(TuiAction::Next).unwrap();
+        }
+        assert!(rendered(&committed).contains("Review and write"));
+        assert!(rendered(&committed).contains("Config path"));
+        assert!(!rendered(&committed).contains(marker));
+        committed.state.focus = committed.review_group_count();
+        committed.handle_action(TuiAction::Next).unwrap();
+        assert!(!rendered(&committed).contains(marker));
+
+        let calls = Rc::new(Cell::new(0));
+        let mut failed = ConfigTuiApp::with_committer(
+            SetupSession::new(
+                SetupSeed {
+                    mode: Some(RuntimeMode::Standalone),
+                    tunnel_api_key: Some("file:/tmp/phase-seven-secret".into()),
+                    ..SetupSeed::default()
+                },
+                UiLanguage::En,
+                "/tmp/phase-seven-error.json".into(),
+            ),
+            Box::new(CountingCommitter {
+                calls,
+                failure: Some(format!("write failed: {marker}")),
+            }),
+        );
+        while failed.page() != ConfigPage::Review {
+            failed.handle_action(TuiAction::Next).unwrap();
+        }
+        failed.state.focus = failed.review_group_count();
+        failed.handle_action(TuiAction::Next).unwrap();
+        assert_eq!(failed.page(), ConfigPage::SystemError);
+        assert!(!rendered(&failed).contains(marker));
     }
 
     #[test]
