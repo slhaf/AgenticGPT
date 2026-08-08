@@ -23,6 +23,11 @@ impl EditableListState {
         self.focus
     }
 
+    pub(crate) fn set_focus(&mut self, index: usize) {
+        self.focus = index;
+        self.normalize_focus();
+    }
+
     pub(crate) fn focused(&self) -> Option<&str> {
         self.items.get(self.focus).map(String::as_str)
     }
@@ -86,7 +91,8 @@ mod tests {
         let mut state = EditableListState::new(vec!["/one".into(), "/two".into()]);
         assert_eq!(state.focused(), Some("/one"));
 
-        state.move_next();
+        state.set_focus(99);
+        assert_eq!(state.focus(), 1);
         assert_eq!(state.focused(), Some("/two"));
 
         let added = state.add_after_focused();

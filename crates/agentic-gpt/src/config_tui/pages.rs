@@ -15,7 +15,8 @@ use crate::config_templates::{
     InitSummary, OptionalSection, PendingAction, RuntimeMode, TunnelSecretSource,
 };
 use crate::tui::forms::{
-    boolean_row_line, choice_row_line, render_long_form_input, subsection_heading_line,
+    boolean_row_line, choice_row_line, editable_list_item_line, long_form_input_value_line,
+    render_long_form_input, subsection_heading_line, EditableListState,
 };
 use crate::tui::{
     action_line, inline_error_line, labeled_heading_line, render_action_button,
@@ -1019,6 +1020,20 @@ fn render_optional_form(
     section_draft: Option<&OptionalSectionDraft>,
     progress: (usize, usize),
 ) {
+    if section == OptionalSection::Workspace {
+        render_workspace_form(
+            frame,
+            session,
+            state,
+            language,
+            theme,
+            errors,
+            section_draft,
+            progress,
+        );
+        return;
+    }
+
     let [header, top_rule, body, bottom_rule, footer] = surface_shell_areas(frame.area());
     render_surface_header(
         frame,
@@ -1127,6 +1142,407 @@ fn render_optional_form(
         state.editing.is_some(),
         state.focus >= fields.len(),
         language,
+        theme,
+    );
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum WorkspaceFocusItem {
+    Root,
+    Path {
+        field: SetupField,
+        index: Option<usize>,
+    },
+}
+
+impl WorkspaceFocusItem {
+    fn field(self) -> SetupField {
+        match self {
+            Self::Root => SetupField::WorkspaceRoot,
+            Self::Path { field, .. } => field,
+        }
+    }
+}
+
+fn workspace_list_fields() -> [SetupField; 3] {
+    [
+        SetupField::WriteRoots,
+        SetupField::ReadOnlyRoots,
+        SetupField::DenyRoots,
+    ]
+}
+
+pub(super) fn workspace_list_state(
+    draft: &OptionalSectionDraft,
+    field: SetupField,
+) -> Result<EditableListState, ()> {
+    let OptionalSectionDraft::Workspace(workspace) = draft else {
+        return Err(());
+    };
+    let raw = match field {
+        SetupField::WriteRoots => &workspace.write_roots,
+        SetupField::ReadOnlyRoots => &workspace.read_only_roots,
+        SetupField::DenyRoots => &workspace.deny_roots,
+        _ => return Err(()),
+    };
+    serde_json::from_str::<Vec<String>>(raw)
+        .map(EditableListState::new)
+        .map_err(|_| ())
+}
+
+pub(super) fn set_workspace_list_state(
+    draft: &mut OptionalSectionDraft,
+    field: SetupField,
+    state: &EditableListState,
+) -> bool {
+    let OptionalSectionDraft::Workspace(workspace) = draft else {
+        return false;
+    };
+    let Ok(serialized) = serde_json::to_string(state.items()) else {
+        return false;
+    };
+    match field {
+        SetupField::WriteRoots => workspace.write_roots = serialized,
+        SetupField::ReadOnlyRoots => workspace.read_only_roots = serialized,
+        SetupField::DenyRoots => workspace.deny_roots = serialized,
+        _ => return false,
+    }
+    true
+}
+
+pub(super) fn workspace_focus_items(draft: &OptionalSectionDraft) -> Vec<WorkspaceFocusItem> {
+    let mut items = vec![WorkspaceFocusItem::Root];
+    for field in workspace_list_fields() {
+        match workspace_list_state(draft, field) {
+            Ok(state) if !state.is_empty() => {
+                items.extend(
+                    (0..state.items().len()).map(|index| WorkspaceFocusItem::Path {
+                        field,
+                        index: Some(index),
+                    }),
+                );
+            }
+            _ => items.push(WorkspaceFocusItem::Path { field, index: None }),
+        }
+    }
+    items
+}
+
+pub(super) fn workspace_focus_len(draft: &OptionalSectionDraft) -> usize {
+    workspace_focus_items(draft).len() + 1
+}
+
+pub(super) fn workspace_focus_field(
+    draft: &OptionalSectionDraft,
+    focus: usize,
+) -> Option<SetupField> {
+    workspace_focus_items(draft)
+        .get(focus)
+        .copied()
+        .map(WorkspaceFocusItem::field)
+}
+
+pub(super) fn workspace_path_target(
+    draft: &OptionalSectionDraft,
+    focus: usize,
+) -> Option<(SetupField, Option<usize>)> {
+    match workspace_focus_items(draft).get(focus).copied() {
+        Some(WorkspaceFocusItem::Path { field, index }) => Some((field, index)),
+        _ => None,
+    }
+}
+
+pub(super) fn workspace_field_index(
+    draft: &OptionalSectionDraft,
+    field: SetupField,
+) -> Option<usize> {
+    workspace_focus_items(draft)
+        .iter()
+        .position(|item| item.field() == field)
+}
+
+pub(super) fn workspace_item_focus_index(
+    draft: &OptionalSectionDraft,
+    field: SetupField,
+    item_index: usize,
+) -> Option<usize> {
+    workspace_focus_items(draft).iter().position(|item| {
+        matches!(
+            item,
+            WorkspaceFocusItem::Path {
+                field: candidate,
+                index: Some(index)
+            } if *candidate == field && *index == item_index
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_workspace_form(
+    frame: &mut Frame,
+    session: &SetupSession,
+    state: &TuiState,
+    language: UiLanguage,
+    theme: &Theme,
+    errors: &HashMap<SetupField, String>,
+    section_draft: Option<&OptionalSectionDraft>,
+    progress: (usize, usize),
+) {
+    let [header, top_rule, body, bottom_rule, footer] = surface_shell_areas(frame.area());
+    render_surface_header(
+        frame,
+        header,
+        t(language, "AgenticGPT config init", "AgenticGPT 配置初始化"),
+        &format!("{} / {}", progress.0, progress.1),
+        theme,
+    );
+    render_horizontal_rule(frame, top_rule, theme);
+    let [left, _, right] = surface_columns(body);
+
+    let fallback = session.optional_draft(OptionalSection::Workspace);
+    let draft = section_draft.unwrap_or(&fallback);
+    let focus_items = workspace_focus_items(draft);
+    let action_focused = state.focus >= focus_items.len();
+    let mut lines = vec![
+        labeled_heading_line(
+            t(language, "Workspace settings", "工作区配置"),
+            left.width,
+            theme,
+        ),
+        Line::raw(""),
+    ];
+    let mut focused_line = 0usize;
+
+    lines.push(subsection_heading_line(
+        optional_field_label(SetupField::WorkspaceRoot, language),
+        theme,
+    ));
+    let root_focused = state.focus == 0;
+    if root_focused {
+        focused_line = lines.len();
+    }
+    let root_value = optional_field_value(draft, SetupField::WorkspaceRoot);
+    lines.push(long_form_input_value_line(
+        current_input_value(state, SetupField::WorkspaceRoot, &root_value),
+        root_focused,
+        editing_cursor(state, SetupField::WorkspaceRoot).is_some(),
+        editing_cursor(state, SetupField::WorkspaceRoot),
+        false,
+        false,
+        left.width,
+        theme,
+    ));
+    if let Some(error) = errors.get(&SetupField::WorkspaceRoot) {
+        lines.push(inline_error_line(&localized_error(error, language), theme));
+    }
+    lines.push(Line::raw(""));
+
+    for field in workspace_list_fields() {
+        lines.push(subsection_heading_line(
+            optional_field_label(field, language),
+            theme,
+        ));
+        let targets = focus_items
+            .iter()
+            .enumerate()
+            .filter_map(|(focus, item)| match item {
+                WorkspaceFocusItem::Path {
+                    field: candidate,
+                    index,
+                } if *candidate == field => Some((focus, *index)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        match workspace_list_state(draft, field) {
+            Ok(list) if !list.is_empty() => {
+                for (focus, index) in targets {
+                    let Some(index) = index else {
+                        continue;
+                    };
+                    let focused = state.focus == focus;
+                    if focused {
+                        focused_line = lines.len();
+                    }
+                    let list_editing = state
+                        .list_edit
+                        .as_ref()
+                        .is_some_and(|target| target.field == field && target.index == index);
+                    let value = if list_editing {
+                        state
+                            .editing
+                            .as_ref()
+                            .map(|editing| editing.buffer.as_str())
+                            .unwrap_or_default()
+                    } else {
+                        list.items()
+                            .get(index)
+                            .map(String::as_str)
+                            .unwrap_or_default()
+                    };
+                    lines.push(editable_list_item_line(
+                        value,
+                        focused,
+                        list_editing,
+                        if list_editing {
+                            state.editing.as_ref().map(|editing| editing.cursor)
+                        } else {
+                            None
+                        },
+                        left.width,
+                        theme,
+                    ));
+                }
+            }
+            Ok(_) => {
+                let focus = targets.first().map(|(focus, _)| *focus).unwrap_or_default();
+                let focused = state.focus == focus;
+                if focused {
+                    focused_line = lines.len();
+                }
+                lines.push(editable_list_item_line(
+                    "", focused, false, None, left.width, theme,
+                ));
+            }
+            Err(()) => {
+                let focus = targets.first().map(|(focus, _)| *focus).unwrap_or_default();
+                let focused = state.focus == focus;
+                if focused {
+                    focused_line = lines.len();
+                }
+                lines.push(editable_list_item_line(
+                    "", focused, false, None, left.width, theme,
+                ));
+                let code = errors
+                    .get(&field)
+                    .map(String::as_str)
+                    .unwrap_or(match field {
+                        SetupField::WriteRoots => "config_init_path_policy_write_roots_invalid",
+                        SetupField::ReadOnlyRoots => {
+                            "config_init_path_policy_read_only_roots_invalid"
+                        }
+                        SetupField::DenyRoots => "config_init_path_policy_deny_roots_invalid",
+                        _ => "config_init_optional_section_invalid",
+                    });
+                lines.push(inline_error_line(&localized_error(code, language), theme));
+            }
+        }
+        if let Some(error) = errors.get(&field) {
+            if workspace_list_state(draft, field).is_ok() {
+                lines.push(inline_error_line(&localized_error(error, language), theme));
+            }
+        }
+        lines.push(Line::raw(""));
+    }
+
+    let content_height = left.height.saturating_sub(1);
+    let content_area = Rect {
+        x: left.x,
+        y: left.y,
+        width: left.width,
+        height: content_height,
+    };
+    let visible = usize::from(content_height);
+    let max_scroll = lines.len().saturating_sub(visible);
+    if action_focused {
+        focused_line = lines.len().saturating_sub(1);
+    }
+    let scroll = focused_line
+        .saturating_sub(visible.saturating_sub(1) / 2)
+        .min(max_scroll)
+        .min(usize::from(u16::MAX)) as u16;
+    frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), content_area);
+    render_surface_action(
+        frame,
+        left,
+        t(language, "Save and return", "保存并返回"),
+        action_focused,
+        theme,
+    );
+
+    let field = workspace_focus_field(draft, state.focus);
+    if right.width > 0 {
+        render_surface(frame, right, theme);
+        let inspector = right.inner(Margin {
+            horizontal: 2,
+            vertical: 1,
+        });
+        let title = field
+            .map(|field| optional_field_label(field, language))
+            .unwrap_or_else(|| section_label(OptionalSection::Workspace, language));
+        let inspector_body =
+            optional_form_inspector_body(OptionalSection::Workspace, field, language);
+        render_inspector(frame, inspector, title, inspector_body, theme);
+    }
+    render_horizontal_rule(frame, bottom_rule, theme);
+    render_workspace_footer(frame, footer, state, draft, action_focused, language, theme);
+}
+
+fn render_workspace_footer(
+    frame: &mut Frame,
+    area: Rect,
+    state: &TuiState,
+    draft: &OptionalSectionDraft,
+    action_focused: bool,
+    language: UiLanguage,
+    theme: &Theme,
+) {
+    if state.editing.is_some() {
+        render_contextual_footer(
+            frame,
+            area,
+            &[
+                ("Enter", t(language, "confirm", "确认")),
+                ("Esc", t(language, "discard", "放弃")),
+                ("Ctrl+C", t(language, "cancel", "取消")),
+            ],
+            theme,
+        );
+        return;
+    }
+    if action_focused {
+        render_contextual_footer(
+            frame,
+            area,
+            &[
+                ("Enter/l", t(language, "continue", "继续")),
+                ("Esc/h", t(language, "back", "返回")),
+                ("Ctrl+C", t(language, "cancel", "取消")),
+            ],
+            theme,
+        );
+        return;
+    }
+    if let Some((_, index)) = workspace_path_target(draft, state.focus) {
+        render_contextual_footer(
+            frame,
+            area,
+            &[
+                ("↑↓ j/k", t(language, "move", "移动")),
+                (
+                    "Enter/l",
+                    if index.is_some() {
+                        t(language, "edit", "编辑")
+                    } else {
+                        t(language, "add", "新增")
+                    },
+                ),
+                ("a", t(language, "add", "新增")),
+                ("d", t(language, "delete", "删除")),
+                ("Esc/h", t(language, "back", "返回")),
+            ],
+            theme,
+        );
+        return;
+    }
+    render_contextual_footer(
+        frame,
+        area,
+        &[
+            ("↑↓ j/k", t(language, "move", "移动")),
+            ("Enter/l", t(language, "edit", "编辑")),
+            ("Esc/h", t(language, "back", "返回")),
+            ("Ctrl+C", t(language, "cancel", "取消")),
+        ],
         theme,
     );
 }
@@ -1318,9 +1734,9 @@ fn optional_field_label(field: SetupField, language: UiLanguage) -> &'static str
     match field {
         SetupField::DisplayName => t(language, "Display name", "显示名称"),
         SetupField::WorkspaceRoot => t(language, "Workspace root", "工作区根目录"),
-        SetupField::WriteRoots => t(language, "Write roots (JSON)", "写入根目录（JSON）"),
-        SetupField::ReadOnlyRoots => t(language, "Read-only roots (JSON)", "只读根目录（JSON）"),
-        SetupField::DenyRoots => t(language, "Deny roots (JSON)", "拒绝根目录（JSON）"),
+        SetupField::WriteRoots => t(language, "Write roots", "写入根目录"),
+        SetupField::ReadOnlyRoots => t(language, "Read-only roots", "只读根目录"),
+        SetupField::DenyRoots => t(language, "Deny roots", "拒绝根目录"),
         SetupField::ConfirmationProvider => t(language, "Provider", "提供方"),
         SetupField::ConfirmationLanguage => t(language, "Language", "语言"),
         SetupField::MaxConcurrentTasks => t(language, "Max concurrent tasks", "最大并发任务"),
@@ -1964,7 +2380,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_form_shows_path_policy_fields() {
+    fn workspace_form_renders_paths_as_scrollable_items_without_json() {
         let mut app = ConfigTuiApp::new(SetupSession::new(
             SetupSeed {
                 mode: Some(RuntimeMode::Standalone),
@@ -1983,9 +2399,16 @@ mod tests {
         assert!(rendered.contains("Workspace settings"));
         assert!(rendered.contains("Workspace root"));
         assert!(rendered.contains("Write roots"));
-        assert!(rendered.contains("Read-only roots"));
-        assert!(rendered.contains("Deny roots"));
+        assert!(rendered.contains("~/Documents"));
         assert!(rendered.contains("Save and return"));
+        assert!(!rendered.contains("(JSON)"));
+        assert!(!rendered.contains("[\"./workspace\""));
+
+        app.focus_field(crate::config_setup::SetupField::DenyRoots);
+        let scrolled = content(&app, 100, 20);
+        assert!(scrolled.contains("Deny roots"));
+        assert!(scrolled.contains("~/.ssh"));
+        assert!(scrolled.contains("Save and return"));
     }
 
     #[test]

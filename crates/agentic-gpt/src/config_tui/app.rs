@@ -22,6 +22,7 @@ pub(crate) struct TuiState {
     pub(crate) return_target: ReturnTarget,
     pub(crate) focus: usize,
     pub(crate) editing: Option<EditState>,
+    pub(crate) list_edit: Option<ListEditTarget>,
     #[allow(dead_code)]
     pub(crate) scroll: u16,
     #[allow(dead_code)]
@@ -30,6 +31,13 @@ pub(crate) struct TuiState {
     pub(crate) committed_summary: Option<InitSummary>,
     pub(crate) finished: bool,
     pub(crate) system_error: Option<SystemError>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ListEditTarget {
+    pub(crate) field: SetupField,
+    pub(crate) index: usize,
+    pub(crate) created: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -62,6 +70,8 @@ pub(crate) enum TuiAction {
     CursorRight,
     MoveNext,
     MovePrevious,
+    AddListItem,
+    RemoveListItem,
     #[allow(dead_code)]
     SetMode(RuntimeMode),
     #[allow(dead_code)]
@@ -97,6 +107,7 @@ impl ConfigTuiApp {
                 return_target: ReturnTarget::MainFlow,
                 focus: 0,
                 editing: None,
+                list_edit: None,
                 scroll: 0,
                 modal: None,
                 cancelled: false,
@@ -165,6 +176,10 @@ impl ConfigTuiApp {
             ConfigPage::Connection => {
                 pages::connection_focus_field(self.session(), self.state.focus)
             }
+            ConfigPage::Optional(crate::config_templates::OptionalSection::Workspace) => self
+                .section_draft
+                .as_ref()
+                .and_then(|draft| pages::workspace_focus_field(draft, self.state.focus)),
             ConfigPage::Optional(section) => pages::optional_fields(section)
                 .get(self.state.focus)
                 .copied(),
@@ -197,7 +212,8 @@ impl ConfigTuiApp {
                 }
             }
             TuiAction::Back => {
-                if self.state.editing.take().is_some() {
+                if self.state.editing.is_some() {
+                    self.cancel_edit();
                     return Ok(());
                 }
                 if matches!(self.state.page, ConfigPage::Optional(_)) {
@@ -223,6 +239,7 @@ impl ConfigTuiApp {
                 } else {
                     self.state.cancelled = true;
                     self.state.editing = None;
+                    self.state.list_edit = None;
                     self.section_draft = None;
                     self.review = None;
                 }
@@ -258,6 +275,8 @@ impl ConfigTuiApp {
             }
             TuiAction::MoveNext => self.move_focus(1),
             TuiAction::MovePrevious => self.move_focus(-1),
+            TuiAction::AddListItem => self.add_workspace_list_item(),
+            TuiAction::RemoveListItem => self.remove_workspace_list_item(),
             TuiAction::SetMode(mode) => {
                 self.session_mut().set_mode(mode);
                 self.navigation.set_mode(mode);
@@ -337,6 +356,22 @@ impl ConfigTuiApp {
             KeyCode::BackTab => self.handle_action(TuiAction::MovePrevious),
             KeyCode::Down | KeyCode::Right => self.handle_action(TuiAction::MoveNext),
             KeyCode::Up | KeyCode::Left => self.handle_action(TuiAction::MovePrevious),
+            KeyCode::Char('a')
+                if matches!(
+                    self.state.page,
+                    ConfigPage::Optional(crate::config_templates::OptionalSection::Workspace)
+                ) =>
+            {
+                self.handle_action(TuiAction::AddListItem)
+            }
+            KeyCode::Char('d')
+                if matches!(
+                    self.state.page,
+                    ConfigPage::Optional(crate::config_templates::OptionalSection::Workspace)
+                ) =>
+            {
+                self.handle_action(TuiAction::RemoveListItem)
+            }
             KeyCode::Char('j') if self.state.page != ConfigPage::Review => {
                 self.handle_action(TuiAction::MoveNext)
             }
@@ -425,6 +460,19 @@ impl ConfigTuiApp {
                 return;
             }
         }
+        if matches!(
+            self.state.page,
+            ConfigPage::Optional(crate::config_templates::OptionalSection::Workspace)
+        ) {
+            if let Some((field, index)) = self.workspace_path_target() {
+                if let Some(index) = index {
+                    self.begin_workspace_list_edit(field, index);
+                } else {
+                    self.add_workspace_list_item();
+                }
+                return;
+            }
+        }
         let Some(field) = self.focused_field() else {
             return;
         };
@@ -470,6 +518,22 @@ impl ConfigTuiApp {
         };
         let field = edit.field;
         let value = edit.buffer;
+        if let Some(target) = self.state.list_edit.take() {
+            let updated = self.section_draft.as_mut().is_some_and(|draft| {
+                let Ok(mut list) = pages::workspace_list_state(draft, target.field) else {
+                    return false;
+                };
+                list.set_focus(target.index);
+                if !list.set_focused(value) {
+                    return false;
+                }
+                pages::set_workspace_list_state(draft, target.field, &list)
+            });
+            if updated {
+                self.validate_section_draft();
+            }
+            return;
+        }
         if matches!(self.state.page, ConfigPage::Optional(_)) {
             if let Some(draft) = self.section_draft.as_mut() {
                 pages::set_optional_field(draft, field, value);
@@ -508,11 +572,116 @@ impl ConfigTuiApp {
         }
     }
 
+    fn workspace_path_target(&self) -> Option<(SetupField, Option<usize>)> {
+        self.section_draft
+            .as_ref()
+            .and_then(|draft| pages::workspace_path_target(draft, self.state.focus))
+    }
+
+    fn begin_workspace_list_edit(&mut self, field: SetupField, index: usize) {
+        let value = self.section_draft.as_ref().and_then(|draft| {
+            let mut list = pages::workspace_list_state(draft, field).ok()?;
+            list.set_focus(index);
+            list.focused().map(str::to_string)
+        });
+        let Some(value) = value else {
+            self.validate_section_draft();
+            return;
+        };
+        self.state.list_edit = Some(ListEditTarget {
+            field,
+            index,
+            created: false,
+        });
+        self.state.editing = Some(EditState::new(field, value));
+    }
+
+    fn add_workspace_list_item(&mut self) {
+        let Some((field, current_index)) = self.workspace_path_target() else {
+            return;
+        };
+        let new_index = self.section_draft.as_mut().and_then(|draft| {
+            let mut list = pages::workspace_list_state(draft, field).ok()?;
+            if let Some(index) = current_index {
+                list.set_focus(index);
+            }
+            let new_index = list.add_after_focused();
+            pages::set_workspace_list_state(draft, field, &list).then_some(new_index)
+        });
+        let Some(new_index) = new_index else {
+            self.validate_section_draft();
+            return;
+        };
+        if let Some(draft) = self.section_draft.as_ref() {
+            self.state.focus = pages::workspace_item_focus_index(draft, field, new_index)
+                .unwrap_or(self.state.focus);
+        }
+        self.state.list_edit = Some(ListEditTarget {
+            field,
+            index: new_index,
+            created: true,
+        });
+        self.state.editing = Some(EditState::new(field, ""));
+    }
+
+    fn remove_workspace_list_item(&mut self) {
+        let Some((field, Some(index))) = self.workspace_path_target() else {
+            return;
+        };
+        let next_item = self.section_draft.as_mut().and_then(|draft| {
+            let mut list = pages::workspace_list_state(draft, field).ok()?;
+            list.set_focus(index);
+            list.delete_focused()?;
+            let next_item = (!list.is_empty()).then_some(list.focus());
+            pages::set_workspace_list_state(draft, field, &list).then_some(next_item)
+        });
+        let Some(next_item) = next_item else {
+            self.validate_section_draft();
+            return;
+        };
+        if let Some(draft) = self.section_draft.as_ref() {
+            self.state.focus = next_item
+                .and_then(|index| pages::workspace_item_focus_index(draft, field, index))
+                .or_else(|| pages::workspace_field_index(draft, field))
+                .unwrap_or(self.state.focus);
+        }
+        self.validate_section_draft();
+    }
+
+    fn cancel_edit(&mut self) {
+        self.state.editing = None;
+        let Some(target) = self.state.list_edit.take() else {
+            return;
+        };
+        if !target.created {
+            return;
+        }
+        let next_item = self.section_draft.as_mut().and_then(|draft| {
+            let mut list = pages::workspace_list_state(draft, target.field).ok()?;
+            list.set_focus(target.index);
+            list.delete_focused()?;
+            let next_item = (!list.is_empty()).then_some(list.focus());
+            pages::set_workspace_list_state(draft, target.field, &list).then_some(next_item)
+        });
+        if let (Some(next_item), Some(draft)) = (next_item, self.section_draft.as_ref()) {
+            self.state.focus = next_item
+                .and_then(|index| pages::workspace_item_focus_index(draft, target.field, index))
+                .or_else(|| pages::workspace_field_index(draft, target.field))
+                .unwrap_or(self.state.focus);
+        }
+        self.validate_section_draft();
+    }
+
     fn move_focus(&mut self, direction: isize) {
         let length = match self.state.page {
             ConfigPage::Basic => pages::basic_focus_len(),
             ConfigPage::Connection => pages::connection_focus_len(self.session()),
             ConfigPage::OptionalCenter => self.session().available_optional_sections().len() + 1,
+            ConfigPage::Optional(crate::config_templates::OptionalSection::Workspace) => self
+                .section_draft
+                .as_ref()
+                .map(pages::workspace_focus_len)
+                .unwrap_or(1),
             ConfigPage::Optional(section) => pages::optional_fields(section).len() + 1,
             ConfigPage::Review => self.review_group_count() + 1,
             _ => 1,
@@ -532,6 +701,10 @@ impl ConfigTuiApp {
                 _ => None,
             },
             ConfigPage::Connection => pages::connection_field_index(self.session(), field),
+            ConfigPage::Optional(crate::config_templates::OptionalSection::Workspace) => self
+                .section_draft
+                .as_ref()
+                .and_then(|draft| pages::workspace_field_index(draft, field)),
             ConfigPage::Optional(section) => pages::optional_fields(section)
                 .iter()
                 .position(|candidate| *candidate == field),
@@ -1038,7 +1211,7 @@ mod tests {
     }
 
     #[test]
-    fn optional_workspace_validation_stays_staged_until_save() {
+    fn workspace_list_edits_stay_staged_until_section_save() {
         let mut app = optional_center_app();
         app.handle_action(TuiAction::MoveNext).unwrap();
         app.handle_action(TuiAction::Activate).unwrap();
@@ -1048,16 +1221,86 @@ mod tests {
         );
         app.focus_field(crate::config_setup::SetupField::WriteRoots);
         app.handle_action(TuiAction::Activate).unwrap();
+        let original = app.editing().unwrap().buffer.clone();
         app.handle_action(TuiAction::Text('x')).unwrap();
         app.handle_action(TuiAction::Activate).unwrap();
-        app.handle_action(TuiAction::Next).unwrap();
-        assert_eq!(
-            app.page(),
-            ConfigPage::Optional(crate::config_templates::OptionalSection::Workspace)
-        );
         assert!(app.session().optional_drafts().workspace.is_none());
-        app.handle_action(TuiAction::Back).unwrap();
+        let staged = match app.section_draft.as_ref().unwrap() {
+            crate::config_setup::OptionalSectionDraft::Workspace(draft) => {
+                serde_json::from_str::<Vec<String>>(&draft.write_roots).unwrap()
+            }
+            _ => unreachable!(),
+        };
+        assert_eq!(staged[0], format!("{original}x"));
+
+        app.handle_action(TuiAction::Next).unwrap();
         assert_eq!(app.page(), ConfigPage::OptionalCenter);
+        let saved = app.session().optional_drafts().workspace.as_ref().unwrap();
+        let saved_roots = serde_json::from_str::<Vec<String>>(&saved.write_roots).unwrap();
+        assert_eq!(saved_roots[0], format!("{original}x"));
+    }
+
+    #[test]
+    fn workspace_list_add_delete_and_cancel_are_item_scoped() {
+        let mut app = optional_center_app();
+        app.handle_action(TuiAction::MoveNext).unwrap();
+        app.handle_action(TuiAction::Activate).unwrap();
+        app.focus_field(crate::config_setup::SetupField::WriteRoots);
+
+        let list_len = |app: &ConfigTuiApp| match app.section_draft.as_ref().unwrap() {
+            crate::config_setup::OptionalSectionDraft::Workspace(draft) => {
+                serde_json::from_str::<Vec<String>>(&draft.write_roots)
+                    .unwrap()
+                    .len()
+            }
+            _ => unreachable!(),
+        };
+        let original_len = list_len(&app);
+
+        app.handle_action(TuiAction::AddListItem).unwrap();
+        assert_eq!(list_len(&app), original_len + 1);
+        assert!(app.editing().is_some());
+        for character in "added/path".chars() {
+            app.handle_action(TuiAction::Text(character)).unwrap();
+        }
+        app.handle_action(TuiAction::Activate).unwrap();
+        assert!(app.editing().is_none());
+        assert_eq!(list_len(&app), original_len + 1);
+
+        app.handle_action(TuiAction::RemoveListItem).unwrap();
+        assert_eq!(list_len(&app), original_len);
+
+        app.handle_action(TuiAction::AddListItem).unwrap();
+        assert_eq!(list_len(&app), original_len + 1);
+        app.handle_action(TuiAction::Back).unwrap();
+        assert!(app.editing().is_none());
+        assert_eq!(list_len(&app), original_len);
+    }
+
+    #[test]
+    fn malformed_workspace_list_surfaces_validation_without_overwrite() {
+        let mut app = optional_center_app();
+        app.handle_action(TuiAction::MoveNext).unwrap();
+        app.handle_action(TuiAction::Activate).unwrap();
+        if let Some(crate::config_setup::OptionalSectionDraft::Workspace(draft)) =
+            app.section_draft.as_mut()
+        {
+            draft.write_roots = "not-json".to_string();
+        }
+        app.focus_field(crate::config_setup::SetupField::WriteRoots);
+        app.handle_action(TuiAction::AddListItem).unwrap();
+        assert!(app.editing().is_none());
+        assert_eq!(
+            app.field_errors
+                .get(&crate::config_setup::SetupField::WriteRoots)
+                .map(String::as_str),
+            Some("config_init_path_policy_write_roots_invalid")
+        );
+        let raw = match app.section_draft.as_ref().unwrap() {
+            crate::config_setup::OptionalSectionDraft::Workspace(draft) => &draft.write_roots,
+            _ => unreachable!(),
+        };
+        assert_eq!(raw, "not-json");
     }
 
     #[test]

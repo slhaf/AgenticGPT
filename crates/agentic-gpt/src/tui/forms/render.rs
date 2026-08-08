@@ -73,6 +73,78 @@ pub(crate) fn list_item_line(value: &str, focused: bool, theme: &Theme) -> Line<
     ])
 }
 
+pub(crate) fn editable_list_item_line(
+    value: &str,
+    focused: bool,
+    editing: bool,
+    cursor: Option<usize>,
+    area_width: u16,
+    theme: &Theme,
+) -> Line<'static> {
+    if !editing {
+        return list_item_line(value, focused, theme);
+    }
+    let inner_width = input_inner_width(value, area_width, true);
+    let content = input_content(
+        value,
+        true,
+        cursor.unwrap_or(value.chars().count()),
+        inner_width,
+    );
+    let content_width = UnicodeWidthStr::width(content.as_str());
+    let padding = " ".repeat(inner_width.saturating_sub(content_width));
+    Line::from(vec![
+        Span::raw("  "),
+        focus_span(focused, theme),
+        Span::styled("[", theme.structure),
+        Span::styled(content, theme.emphasis.add_modifier(Modifier::BOLD)),
+        Span::styled(padding, theme.emphasis.add_modifier(Modifier::BOLD)),
+        Span::styled("]", theme.structure),
+    ])
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn long_form_input_value_line(
+    value: &str,
+    focused: bool,
+    editing: bool,
+    cursor: Option<usize>,
+    secret: bool,
+    is_default: bool,
+    area_width: u16,
+    theme: &Theme,
+) -> Line<'static> {
+    let display_value = if secret {
+        "•".repeat(value.chars().count())
+    } else {
+        value.to_string()
+    };
+    let inner_width = input_inner_width(&display_value, area_width, editing);
+    let content = input_content(
+        &display_value,
+        editing,
+        cursor.unwrap_or(display_value.chars().count()),
+        inner_width,
+    );
+    let content_width = UnicodeWidthStr::width(content.as_str());
+    let padding = " ".repeat(inner_width.saturating_sub(content_width));
+    let value_style = if editing {
+        theme.emphasis.add_modifier(Modifier::BOLD)
+    } else if is_default {
+        theme.muted.add_modifier(Modifier::DIM)
+    } else {
+        theme.emphasis
+    };
+    Line::from(vec![
+        Span::raw("  "),
+        focus_span(focused, theme),
+        Span::styled("[", theme.structure),
+        Span::styled(content, value_style),
+        Span::styled(padding, value_style),
+        Span::styled("]", theme.structure),
+    ])
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_long_form_input(
     frame: &mut Frame,
@@ -103,37 +175,10 @@ pub(crate) fn render_long_form_input(
         return;
     }
 
-    let display_value = if secret {
-        "•".repeat(value.chars().count())
-    } else {
-        value.to_string()
-    };
-    let inner_width = input_inner_width(&display_value, area.width, editing);
-    let content = input_content(
-        &display_value,
-        editing,
-        cursor.unwrap_or(display_value.chars().count()),
-        inner_width,
-    );
-    let content_width = UnicodeWidthStr::width(content.as_str());
-    let padding = " ".repeat(inner_width.saturating_sub(content_width));
-    let value_style = if editing {
-        theme.emphasis.add_modifier(Modifier::BOLD)
-    } else if is_default {
-        theme.muted.add_modifier(Modifier::DIM)
-    } else {
-        theme.emphasis
-    };
-    let line = Line::from(vec![
-        Span::raw("  "),
-        focus_span(focused, theme),
-        Span::styled("[", theme.structure),
-        Span::styled(content, value_style),
-        Span::styled(padding, value_style),
-        Span::styled("]", theme.structure),
-    ]);
     frame.render_widget(
-        Paragraph::new(line),
+        Paragraph::new(long_form_input_value_line(
+            value, focused, editing, cursor, secret, is_default, area.width, theme,
+        )),
         Rect {
             x: area.x,
             y: area.y + 1,
