@@ -115,6 +115,24 @@ Automated Phase 5 evidence:
 
 Phase 5 adds regression coverage for inline Auto/Custom focus/selection/editing semantics and for keeping the primary action visible across all applicable Optional forms in a narrow terminal.
 
+### Human-pass follow-up
+
+The first human visual pass identified four polish issues and they were addressed without changing `config_setup` contracts:
+
+- Optional sections keep an entry snapshot. An unchanged section uses `Return` / `返回` and leaves a default section at `Default`; a changed section uses `Save and return` / `保存并返回`.
+- Returning to Optional Center restores the entry that opened the section instead of resetting focus to the first row.
+- Optional forms use a fixed bottom action dock separated from the scrolling body by a light structural rule, so long lists cannot visually absorb the primary action.
+- Numeric controls use compact five-cell centered inputs; Limits Auto/Custom columns are aligned, and other numeric long-form fields use the same centered numeric grammar where applicable.
+
+Follow-up verification:
+
+- `cargo check -p agentic-gpt`: pass.
+- `cargo test -p agentic-gpt config_tui:: --bin agentic-gpt -- --test-threads=1`: 40 passed.
+- `cargo test -p agentic-gpt tui:: --bin agentic-gpt -- --test-threads=1`: 54 passed.
+- `NO_COLOR=1 cargo test -p agentic-gpt tui:: --bin agentic-gpt -- --test-threads=1`: 54 passed.
+- `cargo test -p agentic-gpt --bin agentic-gpt -- --test-threads=1`: 336 passed.
+- `git diff --check`: pass.
+
 ## Commit convention
 
 Every plan/phase commit uses the repository author and adds:

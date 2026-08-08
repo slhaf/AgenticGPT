@@ -144,7 +144,9 @@ fn inline_input_spans(
         width,
     );
     let used = UnicodeWidthStr::width(content.as_str());
-    let padding = " ".repeat(width.saturating_sub(used));
+    let remaining = width.saturating_sub(used);
+    let left_padding = " ".repeat((remaining + 1) / 2);
+    let right_padding = " ".repeat(remaining / 2);
     let style = if editing {
         theme.emphasis.add_modifier(Modifier::BOLD)
     } else {
@@ -152,10 +154,23 @@ fn inline_input_spans(
     };
     vec![
         Span::styled("[", theme.structure),
+        Span::styled(left_padding, style),
         Span::styled(content, style),
-        Span::styled(padding, style),
+        Span::styled(right_padding, style),
         Span::styled("]", theme.structure),
     ]
+}
+
+pub(crate) fn numeric_input_value_line(
+    value: &str,
+    focused: bool,
+    editing: bool,
+    cursor: Option<usize>,
+    theme: &Theme,
+) -> Line<'static> {
+    let mut spans = vec![Span::raw("  "), focus_span(focused, theme)];
+    spans.extend(inline_input_spans(value, editing, cursor, 5, theme));
+    Line::from(spans)
 }
 
 pub(crate) fn list_item_line(value: &str, focused: bool, theme: &Theme) -> Line<'static> {
@@ -509,15 +524,15 @@ mod tests {
                         false,
                         true,
                         Some(1),
-                        14,
-                        8,
+                        21,
+                        5,
                         &theme,
                     )),
                     Rect::new(0, 0, 50, 1),
                 );
                 frame.render_widget(
                     Paragraph::new(choice_input_row_line(
-                        "Custom", "12", false, true, false, None, 14, 8, &theme,
+                        "Custom", "12", false, true, false, None, 21, 5, &theme,
                     )),
                     Rect::new(0, 1, 50, 1),
                 );
@@ -528,8 +543,8 @@ mod tests {
                         true,
                         false,
                         None,
-                        18,
-                        8,
+                        22,
+                        5,
                         &theme,
                     )),
                     Rect::new(0, 2, 50, 1),
@@ -540,17 +555,17 @@ mod tests {
         let editing = row_text(&terminal, 0, 50);
         assert!(editing.contains('❯'));
         assert!(!editing.contains(''));
-        assert!(editing.contains("1█2"));
+        assert!(editing.contains("[ 1█2 ]"));
 
         let selected = row_text(&terminal, 1, 50);
         assert!(!selected.contains('❯'));
         assert!(selected.contains(''));
-        assert!(selected.contains("[12"));
+        assert!(selected.contains("[  12 ]"));
 
         let numeric = row_text(&terminal, 2, 50);
         assert!(numeric.contains('❯'));
         assert!(!numeric.contains(''));
-        assert!(numeric.contains("[2"));
+        assert!(numeric.contains("[  2  ]"));
     }
 
     #[test]

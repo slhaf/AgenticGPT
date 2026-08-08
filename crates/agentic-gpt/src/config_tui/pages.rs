@@ -16,8 +16,8 @@ use crate::config_templates::{
 };
 use crate::tui::forms::{
     boolean_row_line, choice_input_row_line, choice_row_line, editable_list_item_line,
-    input_row_line, long_form_input_value_line, render_long_form_input, subsection_heading_line,
-    EditableListState,
+    input_row_line, long_form_input_value_line, numeric_input_value_line, render_long_form_input,
+    subsection_heading_line, EditableListState,
 };
 use crate::tui::{
     action_line, inline_error_line, labeled_heading_line, render_action_button,
@@ -85,6 +85,7 @@ pub(super) fn render(
     theme: &Theme,
     errors: &HashMap<SetupField, String>,
     section_draft: Option<&OptionalSectionDraft>,
+    section_dirty: bool,
     review: Option<&ReviewModel>,
     progress: (usize, usize),
 ) {
@@ -105,6 +106,7 @@ pub(super) fn render(
             theme,
             errors,
             section_draft,
+            section_dirty,
             progress,
         ),
         ConfigPage::Review => {
@@ -693,6 +695,41 @@ fn render_surface_action(frame: &mut Frame, area: Rect, label: &str, focused: bo
     frame.render_widget(Paragraph::new(action_line(label, focused, theme)), row);
 }
 
+fn render_surface_action_dock(
+    frame: &mut Frame,
+    area: Rect,
+    label: &str,
+    focused: bool,
+    theme: &Theme,
+) {
+    if area.height < 2 {
+        render_surface_action(frame, area, label, focused, theme);
+        return;
+    }
+    let separator = Rect {
+        x: area.x,
+        y: area.y + area.height.saturating_sub(2),
+        width: area.width,
+        height: 1,
+    };
+    let action = Rect {
+        x: area.x,
+        y: area.y + area.height.saturating_sub(1),
+        width: area.width,
+        height: 1,
+    };
+    render_horizontal_rule(frame, separator, theme);
+    frame.render_widget(Paragraph::new(action_line(label, focused, theme)), action);
+}
+
+fn optional_action_label(dirty: bool, language: UiLanguage) -> &'static str {
+    if dirty {
+        t(language, "Save and return", "保存并返回")
+    } else {
+        t(language, "Return", "返回")
+    }
+}
+
 fn render_surface_footer(
     frame: &mut Frame,
     area: Rect,
@@ -1019,6 +1056,7 @@ fn render_optional_form(
     theme: &Theme,
     errors: &HashMap<SetupField, String>,
     section_draft: Option<&OptionalSectionDraft>,
+    section_dirty: bool,
     progress: (usize, usize),
 ) {
     if section == OptionalSection::Workspace {
@@ -1030,6 +1068,7 @@ fn render_optional_form(
             theme,
             errors,
             section_draft,
+            section_dirty,
             progress,
         );
         return;
@@ -1247,7 +1286,7 @@ fn render_optional_form(
         OptionalSection::Workspace => unreachable!("workspace has a dedicated renderer"),
     }
 
-    let content_height = left.height.saturating_sub(1);
+    let content_height = left.height.saturating_sub(2);
     let content_area = Rect {
         x: left.x,
         y: left.y,
@@ -1264,10 +1303,10 @@ fn render_optional_form(
         .min(max_scroll)
         .min(usize::from(u16::MAX)) as u16;
     frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), content_area);
-    render_surface_action(
+    render_surface_action_dock(
         frame,
         left,
-        t(language, "Save and return", "保存并返回"),
+        optional_action_label(section_dirty, language),
         action_focused,
         theme,
     );
@@ -1322,16 +1361,27 @@ fn push_long_form_field(
     }
     let confirmed = optional_field_value(draft, field);
     let cursor = editing_cursor(state, field);
-    lines.push(long_form_input_value_line(
-        current_input_value(state, field, &confirmed),
-        focused,
-        cursor.is_some(),
-        cursor,
-        false,
-        false,
-        width,
-        theme,
-    ));
+    let current = current_input_value(state, field, &confirmed);
+    if field == SetupField::DiaryBoundaryHour {
+        lines.push(numeric_input_value_line(
+            current,
+            focused,
+            cursor.is_some(),
+            cursor,
+            theme,
+        ));
+    } else {
+        lines.push(long_form_input_value_line(
+            current,
+            focused,
+            cursor.is_some(),
+            cursor,
+            false,
+            false,
+            width,
+            theme,
+        ));
+    }
     push_optional_error(lines, errors, field, language, theme);
     lines.push(Line::raw(""));
 }
@@ -1515,7 +1565,7 @@ fn push_limits_form(
         max_cursor.is_some(),
         max_cursor,
         22,
-        8,
+        5,
         theme,
     ));
     push_optional_error(
@@ -1544,7 +1594,7 @@ fn push_limits_form(
         t(language, "Auto", "自动"),
         auto_focused,
         optional_choice_selected(draft, SetupField::MaxActiveJobs, "auto"),
-        14,
+        21,
         theme,
     ));
 
@@ -1574,8 +1624,8 @@ fn push_limits_form(
         optional_choice_selected(draft, SetupField::MaxActiveJobs, "custom"),
         custom_cursor.is_some(),
         custom_cursor,
-        14,
-        8,
+        21,
+        5,
         theme,
     ));
     push_optional_error(lines, errors, SetupField::MaxActiveJobs, language, theme);
@@ -1600,7 +1650,7 @@ fn push_limits_form(
         context_cursor.is_some(),
         context_cursor,
         22,
-        8,
+        5,
         theme,
     ));
     push_optional_error(
@@ -2063,6 +2113,7 @@ fn render_workspace_form(
     theme: &Theme,
     errors: &HashMap<SetupField, String>,
     section_draft: Option<&OptionalSectionDraft>,
+    section_dirty: bool,
     progress: (usize, usize),
 ) {
     let [header, top_rule, body, bottom_rule, footer] = surface_shell_areas(frame.area());
@@ -2211,7 +2262,7 @@ fn render_workspace_form(
         lines.push(Line::raw(""));
     }
 
-    let content_height = left.height.saturating_sub(1);
+    let content_height = left.height.saturating_sub(2);
     let content_area = Rect {
         x: left.x,
         y: left.y,
@@ -2228,10 +2279,10 @@ fn render_workspace_form(
         .min(max_scroll)
         .min(usize::from(u16::MAX)) as u16;
     frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), content_area);
-    render_surface_action(
+    render_surface_action_dock(
         frame,
         left,
-        t(language, "Save and return", "保存并返回"),
+        optional_action_label(section_dirty, language),
         action_focused,
         theme,
     );
@@ -3112,7 +3163,7 @@ mod tests {
         assert!(rendered.contains("Workspace root"));
         assert!(rendered.contains("Write roots"));
         assert!(rendered.contains("~/Documents"));
-        assert!(rendered.contains("Save and return"));
+        assert!(rendered.contains("Return"));
         assert!(!rendered.contains("(JSON)"));
         assert!(!rendered.contains("[\"./workspace\""));
 
@@ -3120,7 +3171,7 @@ mod tests {
         let scrolled = content(&app, 100, 20);
         assert!(scrolled.contains("Deny roots"));
         assert!(scrolled.contains("~/.ssh"));
-        assert!(scrolled.contains("Save and return"));
+        assert!(scrolled.contains("Return"));
     }
 
     #[test]
@@ -3216,7 +3267,7 @@ mod tests {
             assert!(matches!(app.page(), ConfigPage::Optional(_)));
             let rendered = content(&app, 48, 14);
             assert!(
-                rendered.contains("Save and return"),
+                rendered.contains("Return"),
                 "optional action missing at center index {section_index}"
             );
         }

@@ -24,6 +24,7 @@ pub(crate) struct TuiState {
     pub(crate) editing: Option<EditState>,
     pub(crate) list_edit: Option<ListEditTarget>,
     pub(crate) max_active_custom: String,
+    pub(crate) optional_center_focus: usize,
     #[allow(dead_code)]
     pub(crate) scroll: u16,
     #[allow(dead_code)]
@@ -86,6 +87,7 @@ pub(crate) struct ConfigTuiApp {
     theme: Theme,
     field_errors: HashMap<SetupField, String>,
     section_draft: Option<OptionalSectionDraft>,
+    section_original: Option<OptionalSectionDraft>,
     review: Option<ReviewModel>,
     language: UiLanguage,
     committer: Box<dyn Committer>,
@@ -110,6 +112,7 @@ impl ConfigTuiApp {
                 editing: None,
                 list_edit: None,
                 max_active_custom: "12".to_string(),
+                optional_center_focus: 0,
                 scroll: 0,
                 modal: None,
                 cancelled: false,
@@ -120,6 +123,7 @@ impl ConfigTuiApp {
             theme: Theme::from_env(),
             field_errors: HashMap::new(),
             section_draft: None,
+            section_original: None,
             review: None,
             language,
             committer,
@@ -240,6 +244,7 @@ impl ConfigTuiApp {
                     self.state.editing = None;
                     self.state.list_edit = None;
                     self.section_draft = None;
+                    self.section_original = None;
                     self.review = None;
                 }
             }
@@ -321,6 +326,7 @@ impl ConfigTuiApp {
                     &self.theme,
                     &self.field_errors,
                     self.section_draft.as_ref(),
+                    self.section_is_dirty(),
                     self.review.as_ref(),
                     self.navigation.progress(),
                 );
@@ -760,8 +766,10 @@ impl ConfigTuiApp {
     fn activate_optional_center(&mut self) {
         let sections = self.session().available_optional_sections();
         if let Some(section) = sections.get(self.state.focus).copied() {
+            self.state.optional_center_focus = self.state.focus;
             let draft = self.session().optional_draft(section);
             self.sync_optional_ui_state(&draft);
+            self.section_original = Some(draft.clone());
             self.section_draft = Some(draft);
             self.field_errors.clear();
             self.state.editing = None;
@@ -785,7 +793,9 @@ impl ConfigTuiApp {
 
     fn leave_optional_section(&mut self) {
         let return_target = self.state.return_target;
+        let optional_center_focus = self.state.optional_center_focus;
         self.section_draft = None;
+        self.section_original = None;
         self.field_errors.clear();
         self.state.editing = None;
         self.state.list_edit = None;
@@ -795,7 +805,15 @@ impl ConfigTuiApp {
         } else {
             self.state.return_target = ReturnTarget::MainFlow;
             self.sync_page();
+            if self.state.page == ConfigPage::OptionalCenter {
+                let max_focus = self.session().available_optional_sections().len();
+                self.state.focus = optional_center_focus.min(max_focus);
+            }
         }
+    }
+
+    fn section_is_dirty(&self) -> bool {
+        self.section_draft != self.section_original
     }
 
     fn save_optional_section(&mut self) {
@@ -803,6 +821,10 @@ impl ConfigTuiApp {
             self.leave_optional_section();
             return;
         };
+        if !self.section_is_dirty() {
+            self.leave_optional_section();
+            return;
+        }
         if let Err(errors) = self.session().validate_optional_draft(&draft) {
             self.record_errors(errors);
             return;
@@ -856,6 +878,7 @@ impl ConfigTuiApp {
             ReturnTargetKind::Optional(section) => {
                 let draft = self.session().optional_draft(section);
                 self.sync_optional_ui_state(&draft);
+                self.section_original = Some(draft.clone());
                 self.section_draft = Some(draft);
                 self.state.list_edit = None;
                 self.state.page = ConfigPage::Optional(section);
@@ -866,6 +889,7 @@ impl ConfigTuiApp {
 
     fn return_to_review(&mut self) {
         self.section_draft = None;
+        self.section_original = None;
         self.state.editing = None;
         self.state.list_edit = None;
         self.field_errors.clear();
@@ -917,7 +941,9 @@ impl ConfigTuiApp {
             }
             _ => {
                 let section = optional_section_for_field(field);
-                self.section_draft = Some(self.session().optional_draft(section));
+                let draft = self.session().optional_draft(section);
+                self.section_original = Some(draft.clone());
+                self.section_draft = Some(draft);
                 self.state.page = ConfigPage::Optional(section);
                 self.state.return_target = ReturnTarget::MainFlow;
                 self.state.focus = self.field_index(field).unwrap_or(0);
@@ -998,6 +1024,7 @@ impl ConfigTuiApp {
         self.state.editing = None;
         self.state.list_edit = None;
         self.section_draft = None;
+        self.section_original = None;
     }
 }
 
@@ -1236,8 +1263,16 @@ mod tests {
             app.page(),
             ConfigPage::Optional(crate::config_templates::OptionalSection::TunnelClient)
         );
-        app.handle_action(TuiAction::Back).unwrap();
+        assert!(rendered(&app).contains("Return"));
+        app.handle_action(TuiAction::Next).unwrap();
         assert_eq!(app.page(), ConfigPage::OptionalCenter);
+        assert_eq!(app.state().focus, 5);
+        assert!(app.session().optional_drafts().tunnel_client.is_none());
+        assert_eq!(
+            app.session()
+                .section_status(crate::config_templates::OptionalSection::TunnelClient),
+            crate::config_setup::SectionStatus::Default
+        );
 
         app.state.focus = 0;
         app.handle_action(TuiAction::Activate).unwrap();
@@ -1249,6 +1284,7 @@ mod tests {
         app.handle_action(TuiAction::Activate).unwrap();
         app.handle_action(TuiAction::Text('!')).unwrap();
         app.handle_action(TuiAction::Activate).unwrap();
+        assert!(rendered(&app).contains("Save and return"));
         app.handle_action(TuiAction::Next).unwrap();
         assert_eq!(app.page(), ConfigPage::OptionalCenter);
         assert_eq!(
