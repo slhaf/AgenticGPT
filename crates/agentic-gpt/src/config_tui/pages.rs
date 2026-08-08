@@ -7,8 +7,8 @@ use ratatui::{
     Frame,
 };
 
-use crate::config_setup::{SetupField, SetupSession};
-use crate::config_templates::{RuntimeMode, TunnelSecretSource};
+use crate::config_setup::{OptionalSectionDraft, SectionStatus, SetupField, SetupSession};
+use crate::config_templates::{OptionalSection, RuntimeMode, TunnelSecretSource};
 use crate::tui::{
     render_action_button, render_footer, render_header, render_inline_error, render_radio_row,
     render_text_input, Theme,
@@ -23,17 +23,25 @@ pub(super) fn render(
     state: &TuiState,
     theme: &Theme,
     errors: &HashMap<SetupField, String>,
+    section_draft: Option<&OptionalSectionDraft>,
     progress: (usize, usize),
 ) {
     match page {
         ConfigPage::Basic => render_basic(frame, session, state, theme, errors, progress),
         ConfigPage::Connection => render_connection(frame, session, state, theme, errors, progress),
         ConfigPage::OptionalCenter => {
-            render_placeholder(frame, "Optional settings", state, theme, progress)
+            render_optional_center(frame, session, state, theme, progress)
         }
-        ConfigPage::Optional(_) => {
-            render_placeholder(frame, "Optional section", state, theme, progress)
-        }
+        ConfigPage::Optional(section) => render_optional_form(
+            frame,
+            section,
+            session,
+            state,
+            theme,
+            errors,
+            section_draft,
+            progress,
+        ),
         ConfigPage::Review => render_placeholder(frame, "Review", state, theme, progress),
         ConfigPage::Completion => render_placeholder(frame, "Done", state, theme, progress),
     }
@@ -242,6 +250,380 @@ pub(super) fn connection_value(session: &SetupSession, field: SetupField) -> Opt
     }
 }
 
+fn render_optional_center(
+    frame: &mut Frame,
+    session: &SetupSession,
+    state: &TuiState,
+    theme: &Theme,
+    progress: (usize, usize),
+) {
+    let [header, body, actions, footer] = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Min(8),
+        Constraint::Length(2),
+        Constraint::Length(1),
+    ])
+    .areas(frame.area());
+    render_header(
+        frame,
+        header,
+        "Optional settings",
+        &format!("{} / {}", progress.0, progress.1),
+        theme,
+    );
+
+    let sections = all_optional_sections();
+    let rows =
+        Layout::vertical(std::iter::repeat_n(Constraint::Length(1), sections.len())).split(body);
+    let focusable = session.available_optional_sections();
+    for (index, section) in sections.iter().enumerate() {
+        let status = session.section_status(*section);
+        let applicable_index = focusable.iter().position(|candidate| candidate == section);
+        let focused = applicable_index == Some(state.focus);
+        let style = match status {
+            SectionStatus::NotApplicable => theme.disabled,
+            _ if focused => theme.focus,
+            _ => theme.normal,
+        };
+        let prefix = if focused { "› " } else { "  " };
+        let status_label = match status {
+            SectionStatus::Default => "Default",
+            SectionStatus::Configured => "Configured",
+            SectionStatus::NotApplicable => "Not applicable",
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(prefix, style),
+                Span::styled(section_label(*section), style),
+                Span::styled(format!("  [{status_label}]"), style),
+            ])),
+            rows[index],
+        );
+    }
+    render_action_button(
+        frame,
+        actions,
+        "Finish and continue",
+        state.focus >= focusable.len(),
+        theme,
+    );
+    render_footer(
+        frame,
+        footer,
+        "Enter open/save · Tab move · Esc back · Ctrl+C cancel",
+        theme,
+    );
+}
+
+fn render_optional_form(
+    frame: &mut Frame,
+    section: OptionalSection,
+    session: &SetupSession,
+    state: &TuiState,
+    theme: &Theme,
+    errors: &HashMap<SetupField, String>,
+    section_draft: Option<&OptionalSectionDraft>,
+    progress: (usize, usize),
+) {
+    let [header, body, actions, footer] = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Min(4),
+        Constraint::Length(2),
+        Constraint::Length(1),
+    ])
+    .areas(frame.area());
+    render_header(
+        frame,
+        header,
+        &format!("{} settings", section_label(section)),
+        &format!("{} / {}", progress.0, progress.1),
+        theme,
+    );
+
+    let fallback = session.optional_draft(section);
+    let draft = section_draft.unwrap_or(&fallback);
+    let fields = optional_fields(section);
+    let constraints = std::iter::repeat_n(Constraint::Length(1), fields.len())
+        .chain(std::iter::once(Constraint::Min(1)))
+        .collect::<Vec<_>>();
+    let rows = Layout::vertical(constraints).split(body);
+    for (index, field) in fields.iter().enumerate() {
+        let value = optional_field_value(draft, *field);
+        let focused = state.focus == index;
+        if optional_field_is_toggle(*field) {
+            render_radio_row(
+                frame,
+                rows[index],
+                &format!("{}  {}", optional_field_label(*field), value),
+                value == "true",
+                focused,
+                theme,
+            );
+        } else {
+            render_text_input(
+                frame,
+                rows[index],
+                optional_field_label(*field),
+                &value,
+                focused,
+                false,
+                theme,
+            );
+        }
+    }
+    if let Some((_, error)) = errors.iter().next() {
+        render_inline_error(frame, *rows.last().unwrap_or(&body), error, theme);
+    }
+    render_action_button(
+        frame,
+        actions,
+        "Save and return",
+        state.focus >= fields.len(),
+        theme,
+    );
+    render_footer(
+        frame,
+        footer,
+        "Enter edit/toggle · Esc discard · Ctrl+C cancel",
+        theme,
+    );
+}
+
+fn all_optional_sections() -> [OptionalSection; 8] {
+    [
+        OptionalSection::Identity,
+        OptionalSection::Workspace,
+        OptionalSection::Confirmation,
+        OptionalSection::Limits,
+        OptionalSection::Sandbox,
+        OptionalSection::Room,
+        OptionalSection::TunnelClient,
+        OptionalSection::HubReporting,
+    ]
+}
+
+pub(super) fn optional_fields(section: OptionalSection) -> Vec<SetupField> {
+    match section {
+        OptionalSection::Identity => vec![SetupField::DisplayName],
+        OptionalSection::Workspace => vec![
+            SetupField::WorkspaceRoot,
+            SetupField::WriteRoots,
+            SetupField::ReadOnlyRoots,
+            SetupField::DenyRoots,
+        ],
+        OptionalSection::Confirmation => {
+            vec![
+                SetupField::ConfirmationProvider,
+                SetupField::ConfirmationLanguage,
+            ]
+        }
+        OptionalSection::Limits => vec![
+            SetupField::MaxConcurrentTasks,
+            SetupField::MaxActiveJobs,
+            SetupField::MaxFileSearchContextLines,
+        ],
+        OptionalSection::Sandbox => vec![
+            SetupField::SandboxEnabled,
+            SetupField::BubblewrapPath,
+            SetupField::RequiredRuntimePaths,
+        ],
+        OptionalSection::Room => vec![
+            SetupField::RoomTimezone,
+            SetupField::DiaryBoundaryHour,
+            SetupField::NotebookRoot,
+        ],
+        OptionalSection::TunnelClient => vec![
+            SetupField::TunnelClientVersion,
+            SetupField::TunnelCacheDir,
+            SetupField::TunnelAutoDownload,
+            SetupField::TunnelExecutable,
+            SetupField::TunnelDownloadUrl,
+            SetupField::TunnelSha256,
+        ],
+        OptionalSection::HubReporting => vec![
+            SetupField::HubReportingEnabled,
+            SetupField::HubReportingDetail,
+        ],
+    }
+}
+
+fn section_label(section: OptionalSection) -> &'static str {
+    match section {
+        OptionalSection::Identity => "Identity",
+        OptionalSection::Workspace => "Workspace",
+        OptionalSection::Confirmation => "Confirmation",
+        OptionalSection::Limits => "Limits",
+        OptionalSection::Sandbox => "Sandbox",
+        OptionalSection::Room => "Room",
+        OptionalSection::TunnelClient => "Tunnel client",
+        OptionalSection::HubReporting => "Hub reporting",
+    }
+}
+
+fn optional_field_label(field: SetupField) -> &'static str {
+    match field {
+        SetupField::DisplayName => "Display name",
+        SetupField::WorkspaceRoot => "Workspace root",
+        SetupField::WriteRoots => "Write roots (JSON)",
+        SetupField::ReadOnlyRoots => "Read-only roots (JSON)",
+        SetupField::DenyRoots => "Deny roots (JSON)",
+        SetupField::ConfirmationProvider => "Provider",
+        SetupField::ConfirmationLanguage => "Language",
+        SetupField::MaxConcurrentTasks => "Max concurrent tasks",
+        SetupField::MaxActiveJobs => "Max active jobs",
+        SetupField::MaxFileSearchContextLines => "File-search context lines",
+        SetupField::SandboxEnabled => "Sandbox enabled",
+        SetupField::BubblewrapPath => "Bubblewrap path",
+        SetupField::RequiredRuntimePaths => "Required runtime paths (JSON)",
+        SetupField::RoomTimezone => "Timezone",
+        SetupField::DiaryBoundaryHour => "Diary boundary hour",
+        SetupField::NotebookRoot => "Notebook root",
+        SetupField::TunnelClientVersion => "Client version",
+        SetupField::TunnelCacheDir => "Cache directory",
+        SetupField::TunnelAutoDownload => "Auto-download",
+        SetupField::TunnelExecutable => "Executable",
+        SetupField::TunnelDownloadUrl => "Download URL",
+        SetupField::TunnelSha256 => "SHA-256",
+        SetupField::HubReportingEnabled => "Reporting enabled",
+        SetupField::HubReportingDetail => "Reporting detail",
+        _ => "Value",
+    }
+}
+
+pub(super) fn optional_field_is_toggle(field: SetupField) -> bool {
+    matches!(
+        field,
+        SetupField::SandboxEnabled
+            | SetupField::TunnelAutoDownload
+            | SetupField::HubReportingEnabled
+    )
+}
+
+pub(super) fn optional_field_value(draft: &OptionalSectionDraft, field: SetupField) -> String {
+    match draft {
+        OptionalSectionDraft::Identity(value) => match field {
+            SetupField::DisplayName => value.display_name.clone(),
+            _ => String::new(),
+        },
+        OptionalSectionDraft::Workspace(value) => match field {
+            SetupField::WorkspaceRoot => value.workspace_root.clone(),
+            SetupField::WriteRoots => value.write_roots.clone(),
+            SetupField::ReadOnlyRoots => value.read_only_roots.clone(),
+            SetupField::DenyRoots => value.deny_roots.clone(),
+            _ => String::new(),
+        },
+        OptionalSectionDraft::Confirmation(value) => match field {
+            SetupField::ConfirmationProvider => value.provider.clone(),
+            SetupField::ConfirmationLanguage => value.language.clone(),
+            _ => String::new(),
+        },
+        OptionalSectionDraft::Limits(value) => match field {
+            SetupField::MaxConcurrentTasks => value.max_concurrent_tasks.clone(),
+            SetupField::MaxActiveJobs => value.max_active_jobs.clone(),
+            SetupField::MaxFileSearchContextLines => value.max_file_search_context_lines.clone(),
+            _ => String::new(),
+        },
+        OptionalSectionDraft::Sandbox(value) => match field {
+            SetupField::SandboxEnabled => value.enabled.to_string(),
+            SetupField::BubblewrapPath => value.bubblewrap_path.clone(),
+            SetupField::RequiredRuntimePaths => value.required_runtime_paths.clone(),
+            _ => String::new(),
+        },
+        OptionalSectionDraft::Room(value) => match field {
+            SetupField::RoomTimezone => value.timezone.clone(),
+            SetupField::DiaryBoundaryHour => value.diary_boundary_hour.clone(),
+            SetupField::NotebookRoot => value.notebook_root.clone(),
+            _ => String::new(),
+        },
+        OptionalSectionDraft::TunnelClient(value) => match field {
+            SetupField::TunnelClientVersion => value.version.clone(),
+            SetupField::TunnelCacheDir => value.cache_dir.clone(),
+            SetupField::TunnelAutoDownload => value.auto_download.to_string(),
+            SetupField::TunnelExecutable => value.executable.clone(),
+            SetupField::TunnelDownloadUrl => value.download_url.clone(),
+            SetupField::TunnelSha256 => value.sha256.clone(),
+            _ => String::new(),
+        },
+        OptionalSectionDraft::HubReporting(value) => match field {
+            SetupField::HubReportingEnabled => value.enabled.to_string(),
+            SetupField::HubReportingDetail => value.detail.clone(),
+            _ => String::new(),
+        },
+    }
+}
+
+pub(super) fn set_optional_field(
+    draft: &mut OptionalSectionDraft,
+    field: SetupField,
+    value: String,
+) {
+    match draft {
+        OptionalSectionDraft::Identity(draft) if field == SetupField::DisplayName => {
+            draft.display_name = value
+        }
+        OptionalSectionDraft::Workspace(draft) => match field {
+            SetupField::WorkspaceRoot => draft.workspace_root = value,
+            SetupField::WriteRoots => draft.write_roots = value,
+            SetupField::ReadOnlyRoots => draft.read_only_roots = value,
+            SetupField::DenyRoots => draft.deny_roots = value,
+            _ => {}
+        },
+        OptionalSectionDraft::Confirmation(draft) => match field {
+            SetupField::ConfirmationProvider => draft.provider = value,
+            SetupField::ConfirmationLanguage => draft.language = value,
+            _ => {}
+        },
+        OptionalSectionDraft::Limits(draft) => match field {
+            SetupField::MaxConcurrentTasks => draft.max_concurrent_tasks = value,
+            SetupField::MaxActiveJobs => draft.max_active_jobs = value,
+            SetupField::MaxFileSearchContextLines => draft.max_file_search_context_lines = value,
+            _ => {}
+        },
+        OptionalSectionDraft::Sandbox(draft) => match field {
+            SetupField::BubblewrapPath => draft.bubblewrap_path = value,
+            SetupField::RequiredRuntimePaths => draft.required_runtime_paths = value,
+            SetupField::SandboxEnabled => draft.enabled = value == "true",
+            _ => {}
+        },
+        OptionalSectionDraft::Room(draft) => match field {
+            SetupField::RoomTimezone => draft.timezone = value,
+            SetupField::DiaryBoundaryHour => draft.diary_boundary_hour = value,
+            SetupField::NotebookRoot => draft.notebook_root = value,
+            _ => {}
+        },
+        OptionalSectionDraft::TunnelClient(draft) => match field {
+            SetupField::TunnelClientVersion => draft.version = value,
+            SetupField::TunnelCacheDir => draft.cache_dir = value,
+            SetupField::TunnelAutoDownload => draft.auto_download = value == "true",
+            SetupField::TunnelExecutable => draft.executable = value,
+            SetupField::TunnelDownloadUrl => draft.download_url = value,
+            SetupField::TunnelSha256 => draft.sha256 = value,
+            _ => {}
+        },
+        OptionalSectionDraft::HubReporting(draft) => match field {
+            SetupField::HubReportingEnabled => draft.enabled = value == "true",
+            SetupField::HubReportingDetail => draft.detail = value,
+            _ => {}
+        },
+        _ => {}
+    }
+}
+
+pub(super) fn toggle_optional_field(draft: &mut OptionalSectionDraft, field: SetupField) {
+    match draft {
+        OptionalSectionDraft::Sandbox(draft) if field == SetupField::SandboxEnabled => {
+            draft.enabled = !draft.enabled
+        }
+        OptionalSectionDraft::TunnelClient(draft) if field == SetupField::TunnelAutoDownload => {
+            draft.auto_download = !draft.auto_download
+        }
+        OptionalSectionDraft::HubReporting(draft) if field == SetupField::HubReportingEnabled => {
+            draft.enabled = !draft.enabled
+        }
+        _ => {}
+    }
+}
+
 fn render_placeholder(
     frame: &mut Frame,
     title: &str,
@@ -366,6 +748,52 @@ mod tests {
         assert!(narrow.contains("resize-staged-tunnel"));
         assert_eq!(app.page(), ConfigPage::Connection);
         assert_eq!(app.session().standalone().tunnel_id, "resize-staged-tunnel");
+    }
+
+    #[test]
+    fn optional_center_shows_all_sections_and_not_applicable_status() {
+        let mut app = ConfigTuiApp::new(SetupSession::new(
+            SetupSeed {
+                mode: Some(RuntimeMode::Standalone),
+                ..SetupSeed::default()
+            },
+            UiLanguage::En,
+            "/tmp/config-tui-render.json".into(),
+        ));
+        app.handle_action(super::super::TuiAction::Next).unwrap();
+        app.handle_action(super::super::TuiAction::Next).unwrap();
+        let rendered = content(&app, 90, 20);
+        assert!(rendered.contains("Optional settings"));
+        assert!(rendered.contains("Identity"));
+        assert!(rendered.contains("Workspace"));
+        assert!(rendered.contains("Room  [Not applicable]"));
+        assert!(rendered.contains("Tunnel client"));
+        assert!(rendered.contains("Finish and continue"));
+    }
+
+    #[test]
+    fn workspace_form_shows_path_policy_fields() {
+        let mut app = ConfigTuiApp::new(SetupSession::new(
+            SetupSeed {
+                mode: Some(RuntimeMode::Standalone),
+                ..SetupSeed::default()
+            },
+            UiLanguage::En,
+            "/tmp/config-tui-render.json".into(),
+        ));
+        app.handle_action(super::super::TuiAction::Next).unwrap();
+        app.handle_action(super::super::TuiAction::Next).unwrap();
+        app.handle_action(super::super::TuiAction::MoveNext)
+            .unwrap();
+        app.handle_action(super::super::TuiAction::Activate)
+            .unwrap();
+        let rendered = content(&app, 100, 20);
+        assert!(rendered.contains("Workspace settings"));
+        assert!(rendered.contains("Workspace root"));
+        assert!(rendered.contains("Write roots"));
+        assert!(rendered.contains("Read-only roots"));
+        assert!(rendered.contains("Deny roots"));
+        assert!(rendered.contains("Save and return"));
     }
 
     #[test]

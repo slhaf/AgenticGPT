@@ -398,6 +398,15 @@ pub(super) fn save_optional_section(
     session: &mut SetupSession,
     draft: OptionalSectionDraft,
 ) -> Result<(), ValidationErrors> {
+    validate_optional_draft(session, &draft)?;
+    session.replace_optional(draft);
+    Ok(())
+}
+
+pub(super) fn validate_optional_draft(
+    session: &SetupSession,
+    draft: &OptionalSectionDraft,
+) -> Result<(), ValidationErrors> {
     let section = draft.section();
     if !section_is_legal(section, session.selected_mode(), session.selected_profile()) {
         return Err(vec![error(
@@ -405,9 +414,8 @@ pub(super) fn save_optional_section(
             "config_init_optional_section_invalid",
         )]);
     }
-    let errors = validate_optional(section, &draft);
+    let errors = validate_optional(section, draft);
     if errors.is_empty() {
-        session.replace_optional(draft);
         Ok(())
     } else {
         Err(errors)

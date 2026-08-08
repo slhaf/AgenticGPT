@@ -4,7 +4,7 @@ use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 
-use crate::config_setup::{SetupField, SetupSession, ValidationErrors};
+use crate::config_setup::{OptionalSectionDraft, SetupField, SetupSession, ValidationErrors};
 use crate::config_templates::{InitSummary, RuntimeMode, SecretValue};
 use crate::tui::{TerminalEvent, Theme};
 use crate::WorkerProfile;
@@ -46,6 +46,7 @@ pub(crate) struct ConfigTuiApp {
     state: TuiState,
     theme: Theme,
     field_errors: HashMap<SetupField, String>,
+    section_draft: Option<OptionalSectionDraft>,
 }
 
 impl ConfigTuiApp {
@@ -67,6 +68,7 @@ impl ConfigTuiApp {
             },
             theme: Theme::from_env(),
             field_errors: HashMap::new(),
+            section_draft: None,
         }
     }
 
@@ -102,6 +104,9 @@ impl ConfigTuiApp {
             ConfigPage::Connection => pages::connection_fields_for_session(&self.session)
                 .get(self.state.focus)
                 .copied(),
+            ConfigPage::Optional(section) => pages::optional_fields(section)
+                .get(self.state.focus)
+                .copied(),
             _ => None,
         }
     }
@@ -118,6 +123,8 @@ impl ConfigTuiApp {
             TuiAction::Next => {
                 if self.state.editing.is_some() {
                     self.commit_edit();
+                } else if matches!(self.state.page, ConfigPage::Optional(_)) {
+                    self.save_optional_section();
                 } else {
                     self.next_page();
                 }
@@ -126,13 +133,16 @@ impl ConfigTuiApp {
                 if self.state.editing.take().is_some() {
                     return Ok(());
                 }
-                if self.navigation.back() {
+                if matches!(self.state.page, ConfigPage::Optional(_)) {
+                    self.leave_optional_section();
+                } else if self.navigation.back() {
                     self.sync_page();
                 }
             }
             TuiAction::Cancel => {
                 self.state.cancelled = true;
                 self.state.editing = None;
+                self.section_draft = None;
             }
             TuiAction::Activate => {
                 if self.state.editing.is_some() {
@@ -177,6 +187,7 @@ impl ConfigTuiApp {
             &self.state,
             &self.theme,
             &self.field_errors,
+            self.section_draft.as_ref(),
             self.navigation.progress(),
         );
     }
@@ -232,9 +243,25 @@ impl ConfigTuiApp {
     }
 
     fn activate_focus(&mut self) {
+        if self.state.page == ConfigPage::OptionalCenter {
+            self.activate_optional_center();
+            return;
+        }
         let Some(field) = self.focused_field() else {
             return;
         };
+        if matches!(self.state.page, ConfigPage::Optional(_)) {
+            if pages::optional_field_is_toggle(field) {
+                if let Some(draft) = self.section_draft.as_mut() {
+                    pages::toggle_optional_field(draft, field);
+                    self.validate_section_draft();
+                }
+            } else if let Some(draft) = self.section_draft.as_ref() {
+                let value = pages::optional_field_value(draft, field);
+                self.state.editing = Some(EditState::new(field, value));
+            }
+            return;
+        }
         match field {
             SetupField::Mode => {
                 let next = match self.session.selected_mode() {
@@ -282,6 +309,13 @@ impl ConfigTuiApp {
         };
         let field = edit.field;
         let value = edit.buffer;
+        if matches!(self.state.page, ConfigPage::Optional(_)) {
+            if let Some(draft) = self.section_draft.as_mut() {
+                pages::set_optional_field(draft, field, value);
+            }
+            self.validate_section_draft();
+            return;
+        }
         match field {
             SetupField::TunnelId => self.session.standalone_mut().tunnel_id = value,
             SetupField::TunnelSecretPath => self.session.standalone_mut().secret_path = value,
@@ -317,6 +351,8 @@ impl ConfigTuiApp {
         let length = match self.state.page {
             ConfigPage::Basic => 3,
             ConfigPage::Connection => pages::connection_fields_for_session(&self.session).len() + 1,
+            ConfigPage::OptionalCenter => self.session.available_optional_sections().len() + 1,
+            ConfigPage::Optional(section) => pages::optional_fields(section).len() + 1,
             _ => 1,
         };
         if length == 0 {
@@ -332,6 +368,9 @@ impl ConfigTuiApp {
                 .iter()
                 .position(|candidate| *candidate == field),
             ConfigPage::Connection => pages::connection_fields_for_session(&self.session)
+                .iter()
+                .position(|candidate| *candidate == field),
+            ConfigPage::Optional(section) => pages::optional_fields(section)
                 .iter()
                 .position(|candidate| *candidate == field),
             _ => None,
@@ -351,6 +390,54 @@ impl ConfigTuiApp {
 
     fn sync_page(&mut self) {
         self.state.page = self.navigation.current();
+    }
+
+    fn activate_optional_center(&mut self) {
+        let sections = self.session.available_optional_sections();
+        if let Some(section) = sections.get(self.state.focus).copied() {
+            self.section_draft = Some(self.session.optional_draft(section));
+            self.field_errors.clear();
+            self.state.editing = None;
+            self.state.page = ConfigPage::Optional(section);
+            self.state.return_target = ReturnTarget::MainFlow;
+            self.state.focus = 0;
+        } else {
+            self.next_page();
+        }
+    }
+
+    fn leave_optional_section(&mut self) {
+        self.section_draft = None;
+        self.field_errors.clear();
+        self.state.editing = None;
+        self.state.focus = 0;
+        self.sync_page();
+    }
+
+    fn save_optional_section(&mut self) {
+        let Some(draft) = self.section_draft.as_ref().cloned() else {
+            self.leave_optional_section();
+            return;
+        };
+        if let Err(errors) = self.session.validate_optional_draft(&draft) {
+            self.record_errors(errors);
+            return;
+        }
+        if let Err(errors) = self.session.save_optional_section(draft) {
+            self.record_errors(errors);
+            return;
+        }
+        self.leave_optional_section();
+    }
+
+    fn validate_section_draft(&mut self) {
+        let Some(draft) = self.section_draft.as_ref() else {
+            return;
+        };
+        match self.session.validate_optional_draft(draft) {
+            Ok(()) => self.field_errors.clear(),
+            Err(errors) => self.record_errors(errors),
+        }
     }
 }
 
@@ -407,6 +494,83 @@ mod tests {
         assert_eq!(local.page(), ConfigPage::OptionalCenter);
         local.handle_action(TuiAction::Next).unwrap();
         assert_eq!(local.page(), ConfigPage::Review);
+    }
+
+    fn optional_center_app() -> ConfigTuiApp {
+        let mut app = app(RuntimeMode::Standalone);
+        app.handle_action(TuiAction::Next).unwrap();
+        app.handle_action(TuiAction::Next).unwrap();
+        assert_eq!(app.page(), ConfigPage::OptionalCenter);
+        app
+    }
+
+    #[test]
+    fn optional_center_skips_not_applicable_rows_and_reenters_saved_sections() {
+        let mut app = optional_center_app();
+        app.handle_action(TuiAction::MoveNext).unwrap();
+        app.handle_action(TuiAction::MoveNext).unwrap();
+        app.handle_action(TuiAction::MoveNext).unwrap();
+        app.handle_action(TuiAction::MoveNext).unwrap();
+        app.handle_action(TuiAction::MoveNext).unwrap();
+        assert_eq!(app.state().focus, 5);
+        app.handle_action(TuiAction::Activate).unwrap();
+        assert_eq!(
+            app.page(),
+            ConfigPage::Optional(crate::config_templates::OptionalSection::TunnelClient)
+        );
+        app.handle_action(TuiAction::Back).unwrap();
+        assert_eq!(app.page(), ConfigPage::OptionalCenter);
+
+        app.state.focus = 0;
+        app.handle_action(TuiAction::Activate).unwrap();
+        assert_eq!(
+            app.page(),
+            ConfigPage::Optional(crate::config_templates::OptionalSection::Identity)
+        );
+        app.focus_field(crate::config_setup::SetupField::DisplayName);
+        app.handle_action(TuiAction::Activate).unwrap();
+        app.handle_action(TuiAction::Text('!')).unwrap();
+        app.handle_action(TuiAction::Activate).unwrap();
+        app.handle_action(TuiAction::Next).unwrap();
+        assert_eq!(app.page(), ConfigPage::OptionalCenter);
+        assert_eq!(
+            app.session()
+                .optional_drafts()
+                .identity
+                .as_ref()
+                .unwrap()
+                .display_name,
+            "AgenticGPT agent!"
+        );
+
+        app.state.focus = 0;
+        app.handle_action(TuiAction::Activate).unwrap();
+        app.focus_field(crate::config_setup::SetupField::DisplayName);
+        app.handle_action(TuiAction::Activate).unwrap();
+        assert_eq!(app.editing().unwrap().buffer, "AgenticGPT agent!");
+    }
+
+    #[test]
+    fn optional_workspace_validation_stays_staged_until_save() {
+        let mut app = optional_center_app();
+        app.handle_action(TuiAction::MoveNext).unwrap();
+        app.handle_action(TuiAction::Activate).unwrap();
+        assert_eq!(
+            app.page(),
+            ConfigPage::Optional(crate::config_templates::OptionalSection::Workspace)
+        );
+        app.focus_field(crate::config_setup::SetupField::WriteRoots);
+        app.handle_action(TuiAction::Activate).unwrap();
+        app.handle_action(TuiAction::Text('x')).unwrap();
+        app.handle_action(TuiAction::Activate).unwrap();
+        app.handle_action(TuiAction::Next).unwrap();
+        assert_eq!(
+            app.page(),
+            ConfigPage::Optional(crate::config_templates::OptionalSection::Workspace)
+        );
+        assert!(app.session().optional_drafts().workspace.is_none());
+        app.handle_action(TuiAction::Back).unwrap();
+        assert_eq!(app.page(), ConfigPage::OptionalCenter);
     }
 
     #[test]

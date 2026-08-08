@@ -355,6 +355,13 @@ impl SetupSession {
         validation::save_optional_section(self, draft)
     }
 
+    pub(crate) fn validate_optional_draft(
+        &self,
+        draft: &OptionalSectionDraft,
+    ) -> Result<(), validation::ValidationErrors> {
+        validation::validate_optional_draft(self, draft)
+    }
+
     pub(crate) fn validate_for_review(&self) -> Result<(), validation::ValidationErrors> {
         validation::validate_for_review(self)
     }
@@ -533,7 +540,7 @@ mod tests {
     use std::path::PathBuf;
 
     use crate::cli_i18n::UiLanguage;
-    use crate::config_templates::{RuntimeMode, SecretValue, TunnelSecretSource};
+    use crate::config_templates::{OptionalSection, RuntimeMode, SecretValue, TunnelSecretSource};
     use crate::WorkerProfile;
 
     use super::*;
@@ -623,5 +630,77 @@ mod tests {
         let errors = session.validate_connection().unwrap_err();
         assert_eq!(errors[0].field, SetupField::TunnelSecretPath);
         assert_eq!(errors[0].code, "config_init_secret_path_invalid");
+    }
+
+    #[test]
+    fn optional_status_and_drafts_survive_mode_and_profile_changes() {
+        let mut session = SetupSession::new(
+            SetupSeed {
+                mode: Some(RuntimeMode::Standalone),
+                profile: Some(WorkerProfile::Normal),
+                ..SetupSeed::default()
+            },
+            UiLanguage::En,
+            PathBuf::from("/tmp/config.json"),
+        );
+
+        assert_eq!(
+            session.section_status(OptionalSection::Identity),
+            SectionStatus::Default
+        );
+        session
+            .save_optional_section(OptionalSectionDraft::Identity(IdentityDraft {
+                display_name: "Configured agent".into(),
+            }))
+            .unwrap();
+        assert_eq!(
+            session.section_status(OptionalSection::Identity),
+            SectionStatus::Configured
+        );
+
+        session
+            .save_optional_section(OptionalSectionDraft::TunnelClient(TunnelClientDraft {
+                version: "1.2.3".into(),
+                cache_dir: "/tmp/tunnel-cache".into(),
+                auto_download: true,
+                executable: String::new(),
+                download_url: String::new(),
+                sha256: String::new(),
+            }))
+            .unwrap();
+        session.set_mode(RuntimeMode::Local);
+        assert_eq!(
+            session.section_status(OptionalSection::TunnelClient),
+            SectionStatus::NotApplicable
+        );
+        session.set_mode(RuntimeMode::Standalone);
+        assert_eq!(
+            session.section_status(OptionalSection::TunnelClient),
+            SectionStatus::Configured
+        );
+        assert!(matches!(
+            session.optional_draft(OptionalSection::TunnelClient),
+            OptionalSectionDraft::TunnelClient(TunnelClientDraft { ref version, .. })
+                if version == "1.2.3"
+        ));
+
+        session.set_profile(WorkerProfile::Room);
+        session
+            .save_optional_section(OptionalSectionDraft::Room(RoomDraft {
+                timezone: "UTC".into(),
+                diary_boundary_hour: "4".into(),
+                notebook_root: String::new(),
+            }))
+            .unwrap();
+        session.set_profile(WorkerProfile::Normal);
+        assert_eq!(
+            session.section_status(OptionalSection::Room),
+            SectionStatus::NotApplicable
+        );
+        session.set_profile(WorkerProfile::Room);
+        assert_eq!(
+            session.section_status(OptionalSection::Room),
+            SectionStatus::Configured
+        );
     }
 }
