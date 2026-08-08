@@ -19,6 +19,7 @@ use crate::config::{
     TunnelClientConfig,
 };
 use crate::config_cli::ConfigInitArgs;
+pub(crate) use crate::config_setup::{commit_wizard_outcome, WizardOutcome};
 use crate::config_templates::{
     build_config, InitBuild, InitInput, InitSummary, OptionalSection, PendingAction, RuntimeMode,
     SecretValue, SecretWritePlan, TunnelSecretSource,
@@ -389,13 +390,6 @@ pub(crate) enum PromptId {
     ConfigureOptionalSections,
     WriteSecretNow,
     ConfirmWrite,
-}
-
-// This type intentionally has no Debug implementation: it owns the in-memory write plan.
-pub(crate) struct WizardOutcome {
-    pub(crate) build: InitBuild,
-    pub(crate) secret_write: Option<SecretWritePlan>,
-    pub(crate) summary: String,
 }
 
 const DEFAULT_TUNNEL_ID: &str = "tunnel_replace-me";
@@ -1349,10 +1343,7 @@ static SECRET_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 const SECRET_TEMP_ATTEMPTS: usize = 128;
 
-pub(crate) fn commit_wizard_outcome(
-    config_path: &Path,
-    outcome: WizardOutcome,
-) -> Result<InitSummary> {
+fn legacy_commit_wizard_outcome(config_path: &Path, outcome: WizardOutcome) -> Result<InitSummary> {
     let WizardOutcome {
         build,
         secret_write,
