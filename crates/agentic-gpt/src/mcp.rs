@@ -1853,13 +1853,8 @@ mod tests {
     async fn managed_mcp_cancel_while_waiting_for_hub_confirmation_cleans_pending_sender() {
         let (state, root) = managed_test_state(1).await;
         state.temporary_mcp_allows.lock().await.clear();
-        state
-            .config
-            .write()
-            .await
-            .confirmation_provider
-            .set_legacy("hub")
-            .unwrap();
+        state.config.write().await.confirmation_provider =
+            crate::config::ConfirmationProviderConfig::from_legacy("hub").unwrap();
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
         *state.hub_sender.lock().await = Some(sender);
         let fake = FakeMcpServer::new(FakeBehavior::Fast);
@@ -2498,13 +2493,8 @@ mod tests {
     async fn mcp_batch_single_server_uses_one_confirmation_and_can_grant_temporary_allow() {
         let (state, root) = managed_test_state(10).await;
         state.temporary_mcp_allows.lock().await.clear();
-        state
-            .config
-            .write()
-            .await
-            .confirmation_provider
-            .set_legacy("hub")
-            .unwrap();
+        state.config.write().await.confirmation_provider =
+            crate::config::ConfirmationProviderConfig::from_legacy("hub").unwrap();
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
         *state.hub_sender.lock().await = Some(sender);
         let fake = FakeMcpServer::new(FakeBehavior::Fast);
@@ -2580,13 +2570,8 @@ mod tests {
         let (state, root) = managed_test_state(10).await;
         state.temporary_mcp_allows.lock().await.clear();
         add_fake_server(&state, "second", false).await;
-        state
-            .config
-            .write()
-            .await
-            .confirmation_provider
-            .set_legacy("hub")
-            .unwrap();
+        state.config.write().await.confirmation_provider =
+            crate::config::ConfirmationProviderConfig::from_legacy("hub").unwrap();
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
         *state.hub_sender.lock().await = Some(sender);
         let first = FakeMcpServer::new(FakeBehavior::Fast);
@@ -2671,13 +2656,8 @@ mod tests {
     async fn mcp_batch_child_cancel_during_aggregate_confirmation_cancels_all_before_start() {
         let (state, root) = managed_test_state(10).await;
         state.temporary_mcp_allows.lock().await.clear();
-        state
-            .config
-            .write()
-            .await
-            .confirmation_provider
-            .set_legacy("hub")
-            .unwrap();
+        state.config.write().await.confirmation_provider =
+            crate::config::ConfirmationProviderConfig::from_legacy("hub").unwrap();
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
         *state.hub_sender.lock().await = Some(sender);
         let fake = FakeMcpServer::new(FakeBehavior::Fast);

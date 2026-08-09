@@ -240,7 +240,7 @@ fn room_agent_required_error() -> serde_json::Value {
     serde_json::json!({
         "error": {
             "code": "room_agent_required",
-            "message": "room commands require run-as-room"
+            "message": "room commands require profile=room in config"
         }
     })
 }

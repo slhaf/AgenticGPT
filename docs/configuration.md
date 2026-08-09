@@ -6,6 +6,11 @@ Agentic GPT uses one local JSON configuration for Standalone, Local Unix MCP, an
 ~/.agentic_gpt/config.json
 ```
 
+The durable file is a sparse Config v2 projection. It always contains the authoritative top-level
+`mode` (`standalone`, `hub`, or `local`) and `profile` (`normal` or `room`); omitted values are
+reconstructed from effective defaults. `config show` displays the fully materialized effective
+configuration, while Agentic-managed writes keep the file sparse.
+
 Start from:
 
 ```bash
@@ -13,7 +18,9 @@ agentic-gpt config init
 agentic-gpt config show
 ```
 
-[`config.example.json`](../config.example.json) is a strict v0.9 superset example. It is Standalone-first, contains no usable credentials, keeps all example downstream MCP servers disabled, and includes optional Hub fields for deployments that need them.
+[`config.example.json`](../config.example.json) is a sparse Config v2 example. It is
+Standalone-first, contains no usable credentials, keeps all example downstream MCP servers
+disabled, and includes only meaningful Hub fields for deployments that need them.
 
 ## Fullscreen initializer behavior
 
@@ -83,18 +90,18 @@ collections. Configure those after initialization with `config mcp` and `config 
 | --- | --- | --- | --- |
 | Common identity/workspace/policy | Required | Required | Required |
 | `tunnel` | Required | Ignored | Ignored |
-| `hubUrl`, `hubTransport`, `agentSecret` | Used only for optional Hub reporting/ntfy relay | Ignored | Required |
+| `hub` (`url`, `transport`, `agentSecret`) | Used only for optional Hub reporting/ntfy relay | Ignored | Required |
 | Public Hub/VPS | Not required | Not required | Required |
-| Startup command | `run-as-standalone` | `run-as-local` | `run` / `run-as-room` |
+| Startup command | `agentic-gpt run` | `agentic-gpt run` | `agentic-gpt run` |
 
-The JSON type still contains Hub fields in every mode because one config can be moved between runtime shapes. Standalone and Local execution do not put Hub in the command path. In Standalone, Hub fields matter only when `tunnel.hubReporting.enabled` or Hub-backed `ntfy` confirmation is used.
+The JSON type still contains a nested `hub` section in every mode because one config can be moved between runtime shapes. Standalone and Local execution do not put Hub in the command path. In Standalone, Hub fields matter only when `tunnel.hubReporting.enabled` or Hub-backed `ntfy` confirmation is used. Inactive sections are preserved when explicitly configured.
 
 ## Standalone-first setup
 
 ```bash
 agentic-gpt config init
 agentic-gpt config set agentId laptop
-agentic-gpt config set confirmationProvider freedesktop
+agentic-gpt config set confirmationProvider.channels '["freedesktop"]'
 
 install -d -m 700 "$HOME/.agentic_gpt/secrets"
 touch "$HOME/.agentic_gpt/secrets/tunnel-api-key"
@@ -107,15 +114,17 @@ unset AGENTIC_TUNNEL_API_KEY
 agentic-gpt config set tunnel.tunnelId tunnel_<assigned-id>
 agentic-gpt config set tunnel.apiKey file:"$HOME/.agentic_gpt/secrets/tunnel-api-key"
 agentic-gpt config set tunnel.client.autoDownload true
-agentic-gpt run-as-standalone --profile normal
+agentic-gpt run
 ```
 
-Use `--profile room` for the Room surface.
+Set `profile` to `room` for the Room surface (for example, `agentic-gpt config set profile room`).
 
 ## Top-level fields
 
 | Field | Purpose |
 | --- | --- |
+| `mode` | Authoritative runtime dispatch: `standalone`, `hub`, or `local`. |
+| `profile` | Authoritative capability surface: `normal` or `room`. |
 | `agentId` | Stable local identity. It also determines the private runtime/socket path. |
 | `displayName` | Human-readable machine label used in summaries/reporting. |
 | `workspaceRoot` | Main writable workspace and location of `.agentic-gpt-audit.jsonl`. |
@@ -130,7 +139,7 @@ Use `--profile room` for the Room surface.
 | `skills` | Skill package/install limits and network policy. |
 | `room` | Room timezone, diary boundary, and optional notebook root. |
 | `tunnel` | Standalone tunnel-client source, secret reference, and optional reporting. |
-| `hubUrl`, `hubTransport`, `agentSecret` | Centralized Hub connection or optional standalone Hub reporting/ntfy relay. |
+| `hub` | Centralized Hub connection or optional standalone Hub reporting/ntfy relay. |
 
 Unknown top-level fields are preserved by load/write round trips. Nested strict objects such as `limits` reject removed v0.8 fields.
 
@@ -180,14 +189,16 @@ Hub mode requires:
 
 ```json
 {
-  "hubUrl": "https://agentic-gpt.example.com",
-  "hubTransport": "websocket",
-  "agentId": "laptop",
-  "agentSecret": "<agent-secret>"
+  "hub": {
+    "url": "https://agentic-gpt.example.com",
+    "transport": "websocket",
+    "agentSecret": "<agent-secret>"
+  },
+  "agentId": "laptop"
 }
 ```
 
-`hubTransport` accepts `websocket` or `sse`. `workerUrl` remains a read/set alias for `hubUrl`, but Agentic writes the canonical field.
+`hub.transport` accepts `websocket` or `sse`. Legacy top-level `hubUrl`, `hubTransport`, `workerUrl`, and `agentSecret` are recognized only by the explicit `config import` flow; normal v2 load rejects them.
 
 Hub credentials are separate from the Standalone tunnel API key. Do not reuse them.
 
@@ -288,10 +299,9 @@ current locale with:
 agentic-gpt config keys [--section <SECTION>] [--json]
 ```
 
-The text form groups keys by `identity`, `hub`, `confirmation`, `sandbox`, `limits`, `skills`,
+The text form groups keys by `runtime`, `identity`, `hub`, `confirmation`, `sandbox`, `limits`, `skills`,
 `room`, and `tunnel`; `--section` filters to one of those names. `--json` returns machine-readable
-metadata including the value type, nullability, example, bilingual descriptions, and aliases
-(for example, `workerUrl` is an alias of `hubUrl`). Only keys in this registry are accepted by
+metadata including the value type, nullability, example, bilingual descriptions, and aliases. Only keys in this registry are accepted by
 `config set`; structured policy and MCP collections use their dedicated commands.
 
 The value is one shell argument after the registered key. JSON list values therefore need shell
@@ -305,8 +315,8 @@ agentic-gpt config set room.notebookRoot null
 
 The registry includes common scalar values such as:
 
-- `agentId`, `agentSecret`, `hubUrl`, `hubTransport`, `workspaceRoot`
-- `confirmationProvider`, `confirmationLanguage`, `sandbox.enabled`
+- `mode`, `profile`, `agentId`, `hub.url`, `hub.transport`, `hub.agentSecret`, `workspaceRoot`
+- `confirmationProvider.channels`, `confirmationLanguage`, `sandbox.enabled`
 - `tunnel.tunnelId`, `tunnel.apiKey`
 - all `tunnel.client.*` and `tunnel.hubReporting.*` fields
 - `room.notebookRoot`, `room.timezone`, `room.diaryDayBoundaryHour`
@@ -326,6 +336,16 @@ secret bytes and mode. Escape, Ctrl-C, a prompt error, or a final refusal happen
 transaction is committed, so no config or secret file is created or modified. Summaries,
 diagnostics, and errors never print secret values.
 
+## Explicit import migration
+
+Normal `Config::load()` is strict v2 and does not infer missing selectors or silently accept the old
+Hub shape. Use `agentic-gpt config import --config PATH [SOURCE]` to migrate old or external JSON
+(`--config` may be omitted for the default config path). If SOURCE is omitted, the selected
+`--config` path is imported. The flow seeds the normal interactive Config
+Init TUI, carries forward recognized fields without editors (including MCP servers, policy, path
+policy, limits, inactive hub/tunnel/room data, and safe unknown flattened fields), reports fields
+that cannot be imported, and writes through the normal backup/secret transaction.
+
 ## Live reload versus restart
 
 Standalone and Local workers poll the config and atomically apply a valid live subset. Invalid candidates keep the last valid state.
@@ -334,9 +354,9 @@ Standalone and Local workers poll the config and atomically apply a valid live s
 | --- | --- |
 | `policy`, `pathPolicy`, `limits`, `mcpServers` | Live reload for new admissions/calls |
 | Already-admitted Jobs and already-created downstream calls | Keep their original decision/config |
-| `agentId`, `workspaceRoot`, profile | Restart required |
+| `mode`, `profile`, `agentId`, `workspaceRoot` | Restart required |
 | `tunnel.*` client identity/source/secret | Restart required |
-| `hubUrl`, `hubTransport`, `agentSecret`, reporting mode | Restart required for the related connection |
+| `hub`, reporting mode | Restart required for the related connection |
 | Skill install concurrency/startup-owned settings | Restart required |
 
 The Standalone supervisor emits `restart_required` when a startup identity field changes. Do not assume editing the file switched the existing child tree.

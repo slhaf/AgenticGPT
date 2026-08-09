@@ -41,6 +41,27 @@ pub(crate) fn choice_row_line(
     ])
 }
 
+pub(crate) fn ordered_multi_select_row_line(
+    label: &str,
+    focused: bool,
+    selection_rank: Option<usize>,
+    label_width: usize,
+    theme: &Theme,
+) -> Line<'static> {
+    let padding = " ".repeat(label_width.saturating_sub(UnicodeWidthStr::width(label)));
+    let selected = selection_rank.map_or_else(
+        || Span::raw("   "),
+        |rank| Span::styled(format!(" {}", rank + 1), theme.selected),
+    );
+    Line::from(vec![
+        Span::raw("  "),
+        focus_span(focused, theme),
+        Span::raw(label.to_string()),
+        Span::raw(padding),
+        selected,
+    ])
+}
+
 pub(crate) fn value_row_line(
     label: &str,
     value: &str,

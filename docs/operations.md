@@ -19,11 +19,12 @@ PY
 
 ## Local/Standalone smoke test (primary)
 
-Use `run-as-local` when tunnel credentials are unavailable; use `run-as-standalone` to validate the full recommended path.
+Set `mode=local` when tunnel credentials are unavailable; use `mode=standalone` to validate the full recommended path. Both start with `agentic-gpt run`.
 
 ```bash
 agentic-gpt --version
-agentic-gpt run-as-local --profile normal
+agentic-gpt config init --mode local --profile normal --non-interactive
+agentic-gpt run
 ```
 
 From another shell:
@@ -65,7 +66,7 @@ Expected JSON includes `service`, `version`, `remoteConfirmation`, `agents`, `co
 
 1. Confirm `agentic-gpt --version` is the intended release.
 2. Confirm the tunnel secret is a protected `file:` or `env:` reference.
-3. Confirm `run-as-standalone` reaches readiness and stays stable beyond the restart-budget reset interval.
+3. Confirm `agentic-gpt run` with `mode=standalone` reaches readiness and stays stable beyond the restart-budget reset interval.
 4. Call `agent.info` through both ChatGPT tunnel and Local Unix MCP.
 5. Run one harmless process Job and inspect it through `job.get`.
 6. Restart one Agent and verify other machine connectors remain usable.

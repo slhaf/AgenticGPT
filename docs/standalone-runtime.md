@@ -22,15 +22,16 @@ Hub mode (centralized):
 ChatGPT -> HTTPS Hub -> WebSocket/SSE -> agentic-gpt -> local policy/services
 ```
 
-The tunnel entrypoint is `agentic-gpt run-as-standalone`. Agentic resolves and
+The tunnel runtime is started with `agentic-gpt run` when the config has `mode=standalone`.
+Agentic resolves and
 verifies the tunnel client, runs its `doctor --json` preflight, creates the
 worker command, supervises the tunnel/worker process tree, and keeps the
 worker's stdout reserved for MCP framing. That same worker also publishes an
 owner-only Unix MCP socket for local integration. Do not start the hidden
 `stdio-worker` command directly.
 
-For development without tunnel configuration or Hub reporting, use
-`agentic-gpt run-as-local`. It loads the same Normal/Room capability profile,
+For development without tunnel configuration or Hub reporting, set `mode=local` and use
+`agentic-gpt run`. It loads the same Normal/Room capability profile,
 policy, path policy, confirmation, audit, live config, and managed execution
 state, but serves only the Unix MCP ingress.
 
@@ -38,12 +39,12 @@ state, but serves only the Unix MCP ingress.
 
 | Command | Command transport | Capability profile | Hub connection |
 | --- | --- | --- | --- |
-| `agentic-gpt run-as-standalone` | Tunnel stdio + local Unix MCP | Normal | disabled by default; reporting-only when enabled |
-| `agentic-gpt run-as-standalone --profile room` | Tunnel stdio + local Unix MCP | Room | disabled by default; reporting-only when enabled |
-| `agentic-gpt run-as-local` | Local Unix MCP | Normal | disabled |
-| `agentic-gpt run-as-local --profile room` | Local Unix MCP | Room | disabled |
-| `agentic-gpt run` | Hub | Normal | command-capable |
-| `agentic-gpt run-as-room` | Hub | Room | command-capable |
+| `agentic-gpt run` (`mode=standalone`, `profile=normal`) | Tunnel stdio + local Unix MCP | Normal | disabled by default; reporting-only when enabled |
+| `agentic-gpt run` (`mode=standalone`, `profile=room`) | Tunnel stdio + local Unix MCP | Room | disabled by default; reporting-only when enabled |
+| `agentic-gpt run` (`mode=local`, `profile=normal`) | Local Unix MCP | Normal | disabled |
+| `agentic-gpt run` (`mode=local`, `profile=room`) | Local Unix MCP | Room | disabled |
+| `agentic-gpt run` (`mode=hub`, `profile=normal`) | Hub | Normal | command-capable |
+| `agentic-gpt run` (`mode=hub`, `profile=room`) | Hub | Room | command-capable |
 
 Transport does not change local policy. Tunnel and local Unix ingress use the
 same policy boundaries for a profile; Room adds diary and notebook, while
@@ -397,8 +398,8 @@ official artifacts cannot collide. The default cache is
 
 Reporting is disabled by default and is independent of Tunnel command
 execution. Enable it only when the local config already has the Hub identity
-needed for an Agent connection (`hubUrl`, `hubTransport`, `agentId`, and
-`agentSecret`):
+needed for an Agent connection (`hub.url`, `hub.transport`, `agentId`, and
+`hub.agentSecret`):
 
 ```bash
 agentic-gpt config set tunnel.hubReporting.enabled true

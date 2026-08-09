@@ -87,7 +87,7 @@ Custom GPT 必须替换为 v0.9 的 [`openapi/hub.yaml`](../openapi/hub.yaml)，
 1. 停止该机器的 v0.8 runtime。
 2. 迁移本地配置。
 3. 替换 `agentic-gpt` 为 v0.9。
-4. 启动 `run-as-standalone` 或 `run-as-local`。
+4. 在 Config v2 中设置所需的 `mode`/`profile`，然后启动 `agentic-gpt run`。
 5. 验证本地 socket 与工具 surface。
 6. 必要时重新连接或重试对应的 ChatGPT tunnel。
 

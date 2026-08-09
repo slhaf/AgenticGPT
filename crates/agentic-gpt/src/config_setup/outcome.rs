@@ -477,6 +477,47 @@ mod tests {
     }
 
     #[test]
+    fn imported_config_commit_uses_backup_and_writes_nested_hub_schema() {
+        let root = fresh_root("import-backup");
+        let config_path = root.join("config.json");
+        let old = serde_json::json!({
+            "mode": "local",
+            "profile": "normal",
+            "hubUrl": "https://legacy.example.com",
+            "hubTransport": "sse",
+            "agentSecret": "legacy-secret",
+            "futureField": {"keep": true}
+        });
+        let old_bytes = serde_json::to_vec_pretty(&old).unwrap();
+        fs::write(&config_path, &old_bytes).unwrap();
+        let imported = crate::config::Config::import(&config_path).unwrap();
+        let session = SetupSession::new(
+            SetupSeed {
+                mode: Some(RuntimeMode::Local),
+                profile: Some(WorkerProfile::Normal),
+                imported_base: Some(imported.config),
+                ..SetupSeed::default()
+            },
+            UiLanguage::En,
+            config_path.clone(),
+        );
+        commit_wizard_outcome(&config_path, session.into_wizard_outcome().unwrap()).unwrap();
+
+        let written: serde_json::Value =
+            serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
+        assert_eq!(written["hub"]["url"], "https://legacy.example.com");
+        assert_eq!(written["hub"]["transport"], "sse");
+        assert_eq!(written["futureField"]["keep"], true);
+        let backups = fs::read_dir(root.join("backups"))
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .collect::<Vec<_>>();
+        assert_eq!(backups.len(), 1);
+        assert_eq!(fs::read(backups[0].path()).unwrap(), old_bytes);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn aliased_config_and_secret_paths_are_rejected_before_secret_write() {
         let root = fresh_root("alias-collision");
         let config_path = root.join(".").join("config.json");

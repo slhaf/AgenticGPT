@@ -9,26 +9,72 @@ use agentic_gpt_protocol::{
 use anyhow::{anyhow, Result};
 use chrono::Utc;
 use serde::de::{self, Visitor};
-use serde::{ser::SerializeStruct, Deserialize, Deserializer, Serialize, Serializer};
+use serde::{
+    ser::{SerializeMap, SerializeStruct},
+    Deserialize, Deserializer, Serialize, Serializer,
+};
+use serde_json::Value;
 use std::fmt;
 
 use crate::mcp::McpServerConfig;
 use crate::policy::{builtin_rules, paths_match, PolicyDecision};
 use crate::state::CapabilityProfile;
-use crate::utils::{
-    agentic_home, ensure_parent, hostname_fallback, log_warn, DEFAULT_BACKUP_LIMIT,
-};
+use crate::utils::{agentic_home, ensure_parent, hostname_fallback, DEFAULT_BACKUP_LIMIT};
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum RuntimeMode {
+    Standalone,
+    Hub,
+    Local,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum WorkerProfile {
+    Normal,
+    Room,
+}
+
+impl WorkerProfile {
+    pub(crate) fn capability_profile(self) -> CapabilityProfile {
+        match self {
+            Self::Normal => CapabilityProfile::Normal,
+            Self::Room => CapabilityProfile::Room,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct HubConfig {
+    pub(crate) url: String,
+    #[serde(default = "default_hub_transport")]
+    pub(crate) transport: String,
+    pub(crate) agent_secret: String,
+    #[serde(flatten)]
+    pub(crate) extra: BTreeMap<String, Value>,
+}
+
+impl Default for HubConfig {
+    fn default() -> Self {
+        Self {
+            url: "http://localhost:8787".to_string(),
+            transport: default_hub_transport(),
+            agent_secret: "change-me".to_string(),
+            extra: BTreeMap::new(),
+        }
+    }
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Config {
+    pub(crate) mode: RuntimeMode,
+    pub(crate) profile: WorkerProfile,
     pub(crate) agent_id: String,
     pub(crate) display_name: String,
-    #[serde(alias = "workerUrl")]
-    pub(crate) hub_url: String,
-    #[serde(default = "default_hub_transport")]
-    pub(crate) hub_transport: String,
-    pub(crate) agent_secret: String,
+    pub(crate) hub: HubConfig,
     pub(crate) workspace_root: PathBuf,
     pub(crate) backup_limit: usize,
     pub(crate) confirmation_provider: ConfirmationProviderConfig,
@@ -62,6 +108,14 @@ impl ConfirmationChannel {
         match self {
             Self::Freedesktop => "freedesktop",
             Self::Ntfy => "ntfy",
+        }
+    }
+
+    pub(crate) fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "freedesktop" => Ok(Self::Freedesktop),
+            "ntfy" => Ok(Self::Ntfy),
+            other => Err(format!("unknown confirmation channel: {other}")),
         }
     }
 }
@@ -101,25 +155,32 @@ impl ConfirmationProviderConfig {
         Ok(Self { channels })
     }
 
-    pub(crate) fn set_legacy(&mut self, value: &str) -> Result<(), String> {
-        self.channels = Self::from_legacy(value)?.channels;
-        Ok(())
+    pub(crate) fn from_channel_names<'a>(
+        names: impl IntoIterator<Item = &'a str>,
+    ) -> Result<Self, String> {
+        let channels = names
+            .into_iter()
+            .map(ConfirmationChannel::parse)
+            .collect::<Result<Vec<_>, _>>()?;
+        Self::from_channels(channels)
     }
 
-    pub(crate) fn display_label(&self) -> String {
-        match self.channels.as_slice() {
-            [] => "none".to_string(),
-            [ConfirmationChannel::Freedesktop] => "freedesktop".to_string(),
-            [ConfirmationChannel::Ntfy] => "ntfy".to_string(),
-            [ConfirmationChannel::Freedesktop, ConfirmationChannel::Ntfy] => {
-                "freedesktop-then-ntfy".to_string()
-            }
-            _ => self
-                .channels
-                .iter()
-                .map(|channel| channel.as_str())
-                .collect::<Vec<_>>()
-                .join("-then-"),
+    pub(crate) fn channel_names(&self) -> Vec<&'static str> {
+        self.channels
+            .iter()
+            .map(|channel| channel.as_str())
+            .collect()
+    }
+
+    pub(crate) fn channels_json(&self) -> String {
+        serde_json::to_string(&self.channel_names()).expect("confirmation channel names serialize")
+    }
+
+    pub(crate) fn fallback_label(&self) -> String {
+        if self.channels.is_empty() {
+            "none".to_string()
+        } else {
+            self.channel_names().join(" → ")
         }
     }
 }
@@ -149,38 +210,26 @@ impl<'de> Deserialize<'de> for ConfirmationProviderConfig {
         let object = value
             .as_object()
             .ok_or_else(|| de::Error::custom("confirmationProvider must be an object"))?;
-        if let Some(channels) = object.get("channels") {
-            let values = channels.as_array().ok_or_else(|| {
-                de::Error::custom("confirmationProvider.channels must be an array")
-            })?;
-            let mut parsed = Vec::with_capacity(values.len());
-            for value in values {
-                let name = value.as_str().ok_or_else(|| {
-                    de::Error::custom("confirmationProvider.channels entries must be strings")
-                })?;
-                let channel = match name {
-                    "freedesktop" => ConfirmationChannel::Freedesktop,
-                    "ntfy" => ConfirmationChannel::Ntfy,
-                    other => {
-                        return Err(de::Error::custom(format!(
-                            "unknown confirmation channel: {other}"
-                        )))
-                    }
-                };
-                if parsed.contains(&channel) {
-                    return Err(de::Error::custom("duplicate confirmation channel"));
-                }
-                parsed.push(channel);
-            }
-            return Self::from_channels(parsed).map_err(de::Error::custom);
+        if object.contains_key("provider") {
+            return Err(de::Error::custom(
+                "confirmationProvider.provider is legacy; run config import",
+            ));
         }
-        let provider = object
-            .get("provider")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| {
-                de::Error::custom("confirmationProvider requires channels or legacy provider")
-            })?;
-        Self::from_legacy(provider).map_err(de::Error::custom)
+        let channels = object
+            .get("channels")
+            .ok_or_else(|| de::Error::custom("confirmationProvider.channels is required"))?;
+        let values = channels
+            .as_array()
+            .ok_or_else(|| de::Error::custom("confirmationProvider.channels must be an array"))?;
+        let names = values
+            .iter()
+            .map(|value| {
+                value.as_str().ok_or_else(|| {
+                    de::Error::custom("confirmationProvider.channels entries must be strings")
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Self::from_channel_names(names).map_err(de::Error::custom)
     }
 }
 
@@ -192,7 +241,7 @@ pub(crate) struct SandboxConfig {
     pub(crate) required_runtime_paths: Vec<PathBuf>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PathPolicyConfig {
     #[serde(default)]
@@ -515,11 +564,11 @@ impl Config {
     pub(crate) fn default_config() -> Result<Self> {
         let base = agentic_home()?;
         Ok(Self {
+            mode: RuntimeMode::Standalone,
+            profile: WorkerProfile::Normal,
             agent_id: "laptop".to_string(),
             display_name: hostname_fallback(),
-            hub_url: "http://localhost:8787".to_string(),
-            hub_transport: default_hub_transport(),
-            agent_secret: "change-me".to_string(),
+            hub: HubConfig::default(),
             workspace_root: base.join("workspace"),
             backup_limit: DEFAULT_BACKUP_LIMIT,
             confirmation_provider: ConfirmationProviderConfig {
@@ -554,26 +603,68 @@ impl Config {
 
     pub(crate) fn load(path: &Path) -> Result<Self> {
         let text = fs::read_to_string(path)?;
-        let value: serde_json::Value = serde_json::from_str(&text)?;
-        let has_path_policy = value.get("pathPolicy").is_some();
-        let has_top_level_skills = value.get("skills").is_some();
-        let legacy_skills = value
+        let value: Value = serde_json::from_str(&text)?;
+        let object = value
+            .as_object()
+            .ok_or_else(|| anyhow!("config_json_object_required"))?;
+        if !object.contains_key("mode") || !object.contains_key("profile") {
+            return Err(anyhow!(
+                "config_requires_mode_profile: run config import to migrate, or config init to reinitialize"
+            ));
+        }
+        if ["hubUrl", "hubTransport", "agentSecret", "workerUrl"]
+            .iter()
+            .any(|key| object.contains_key(*key))
+        {
+            return Err(anyhow!("config_requires_nested_hub: run config import"));
+        }
+        if object
+            .get("confirmationProvider")
+            .and_then(Value::as_object)
+            .is_some_and(|provider| provider.contains_key("provider"))
+        {
+            return Err(anyhow!(
+                "config_requires_confirmation_channels: run config import"
+            ));
+        }
+        if object
             .get("room")
-            .and_then(|room| room.get("skills"))
-            .cloned();
-        let mut config: Self = serde_json::from_value(value)?;
+            .and_then(Value::as_object)
+            .is_some_and(|room| room.contains_key("skills"))
+        {
+            return Err(anyhow!(
+                "config_requires_top_level_skills: run config import"
+            ));
+        }
+        let mode = serde_json::from_value::<RuntimeMode>(
+            object.get("mode").cloned().expect("mode was checked"),
+        )
+        .map_err(|_| anyhow!("config_mode_invalid"))?;
+        let profile = serde_json::from_value::<WorkerProfile>(
+            object.get("profile").cloned().expect("profile was checked"),
+        )
+        .map_err(|_| anyhow!("config_profile_invalid"))?;
+        let has_path_policy = object.contains_key("pathPolicy");
+        let defaults = Self::default_config()?;
+        let workspace_root = object
+            .get("workspaceRoot")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok())
+            .unwrap_or_else(|| defaults.workspace_root.clone());
+        let mut defaults = defaults;
+        defaults.mode = mode;
+        defaults.profile = profile;
+        defaults.path_policy = default_path_policy(&workspace_root);
+        if object.get("tunnel").is_some_and(Value::is_object) {
+            defaults.tunnel = Some(TunnelConfig::default());
+        } else {
+            defaults.tunnel = None;
+        }
+        let mut effective = serde_json::to_value(defaults)?;
+        merge_json_values(&mut effective, value);
+        let mut config: Self = serde_json::from_value(effective)?;
         if !has_path_policy {
             config.path_policy = default_path_policy(&config.workspace_root);
-        }
-        if has_top_level_skills {
-            if legacy_skills.is_some() {
-                log_warn(
-                    "both skills and legacy room.skills are configured; top-level skills wins"
-                        .to_string(),
-                );
-            }
-        } else if let Some(legacy_skills) = legacy_skills {
-            config.skills = serde_json::from_value(legacy_skills)?;
         }
         config.room.skills = config.skills.clone();
         Ok(config)
@@ -585,6 +676,194 @@ impl Config {
         } else {
             Self::default_config()
         }
+    }
+
+    /// Best-effort migration reader used only by `config import`.
+    ///
+    /// Runtime loading deliberately stays strict: this function is the explicit
+    /// boundary where old top-level Hub fields, missing selectors, and malformed
+    /// recognized fields may be dealt with and reported to the user.
+    pub(crate) fn import(path: &Path) -> Result<ConfigImport> {
+        let text = fs::read_to_string(path)
+            .map_err(|error| anyhow!("config_import_source_read_failed: {error}"))?;
+        let value: Value = serde_json::from_str(&text)
+            .map_err(|error| anyhow!("config_import_json_invalid: {error}"))?;
+        let mut object = value
+            .as_object()
+            .cloned()
+            .ok_or_else(|| anyhow!("config_import_json_object_required"))?;
+        let mut warnings = Vec::new();
+
+        let import_defaults = Self::default_config()?;
+        let mode = match object.get("mode").cloned() {
+            Some(value) => match serde_json::from_value::<RuntimeMode>(value) {
+                Ok(mode) => mode,
+                Err(_) => {
+                    warnings.push("mode (invalid value; using init default)".to_string());
+                    import_defaults.mode
+                }
+            },
+            None => import_defaults.mode,
+        };
+        let profile = match object.get("profile").cloned() {
+            Some(value) => match serde_json::from_value::<WorkerProfile>(value) {
+                Ok(profile) => profile,
+                Err(_) => {
+                    warnings.push("profile (invalid value; using init default)".to_string());
+                    import_defaults.profile
+                }
+            },
+            None => import_defaults.profile,
+        };
+
+        let mut hub = match object.remove("hub") {
+            Some(Value::Object(hub)) => hub,
+            Some(_) => {
+                warnings.push("hub (expected an object; defaulted during import)".to_string());
+                serde_json::Map::new()
+            }
+            None => serde_json::Map::new(),
+        };
+        for (legacy_key, nested_key) in [
+            ("hubUrl", "url"),
+            ("workerUrl", "url"),
+            ("hubTransport", "transport"),
+            ("agentSecret", "agentSecret"),
+        ] {
+            if let Some(value) = object.remove(legacy_key) {
+                if hub.contains_key(nested_key) {
+                    warnings.push(format!(
+                        "{legacy_key} (ignored because hub.{nested_key} is also present)"
+                    ));
+                } else {
+                    hub.insert(nested_key.to_string(), value);
+                }
+            }
+        }
+        if !hub.is_empty() {
+            object.insert("hub".to_string(), Value::Object(hub));
+        }
+
+        if let Some(value) = object.remove("confirmationProvider") {
+            match value {
+                Value::Object(mut provider) => {
+                    if let Some(legacy) = provider.remove("provider") {
+                        if provider.contains_key("channels") {
+                            warnings.push(
+                                "confirmationProvider.provider (ignored because channels is also present)"
+                                    .to_string(),
+                            );
+                            object.insert(
+                                "confirmationProvider".to_string(),
+                                Value::Object(provider),
+                            );
+                        } else if let Some(name) = legacy.as_str() {
+                            match ConfirmationProviderConfig::from_legacy(name) {
+                                Ok(canonical) => {
+                                    object.insert(
+                                        "confirmationProvider".to_string(),
+                                        serde_json::to_value(canonical)?,
+                                    );
+                                }
+                                Err(_) => warnings.push(
+                                    "confirmationProvider.provider (invalid legacy value; retained init default)"
+                                        .to_string(),
+                                ),
+                            }
+                        } else {
+                            warnings.push(
+                                "confirmationProvider.provider (expected a string; retained init default)"
+                                    .to_string(),
+                            );
+                        }
+                    } else {
+                        object.insert("confirmationProvider".to_string(), Value::Object(provider));
+                    }
+                }
+                other => {
+                    object.insert("confirmationProvider".to_string(), other);
+                }
+            }
+        }
+
+        let legacy_room_skills = object
+            .get_mut("room")
+            .and_then(Value::as_object_mut)
+            .and_then(|room| room.remove("skills"));
+        if let Some(legacy_skills) = legacy_room_skills {
+            if object.contains_key("skills") {
+                warnings.push(
+                    "room.skills (ignored because top-level skills is also present)".to_string(),
+                );
+            } else {
+                object.insert("skills".to_string(), legacy_skills);
+            }
+        }
+
+        object.insert("mode".to_string(), serde_json::to_value(mode)?);
+        object.insert("profile".to_string(), serde_json::to_value(profile)?);
+
+        if let Some(Value::Object(tunnel)) = object.get_mut("tunnel") {
+            let invalid_api_key = tunnel.get("apiKey").is_some_and(|value| {
+                value
+                    .as_str()
+                    .is_none_or(|reference| validate_secret_reference(reference).is_err())
+            });
+            if invalid_api_key {
+                warnings.push(
+                    "tunnel.apiKey (invalid secret reference; use file:PATH or env:NAME; cleared for import)"
+                        .to_string(),
+                );
+                tunnel.insert("apiKey".to_string(), Value::String(String::new()));
+            }
+        }
+
+        let known = [
+            "mode",
+            "profile",
+            "agentId",
+            "displayName",
+            "hub",
+            "workspaceRoot",
+            "backupLimit",
+            "confirmationProvider",
+            "confirmationLanguage",
+            "sandbox",
+            "mcpServers",
+            "pathPolicy",
+            "policy",
+            "limits",
+            "skills",
+            "room",
+            "tunnel",
+        ];
+        let original = object.clone();
+        for key in known
+            .iter()
+            .copied()
+            .filter(|key| *key != "mode" && *key != "profile")
+        {
+            if !object.contains_key(key) {
+                continue;
+            }
+            let mut candidate = original.clone();
+            for other in known.iter().copied() {
+                if other != key && other != "mode" && other != "profile" {
+                    candidate.remove(other);
+                }
+            }
+            if materialize_import_value(&Value::Object(candidate)).is_err() {
+                warnings.push(format!(
+                    "{key} (could not be imported; retained default instead)"
+                ));
+                object.remove(key);
+            }
+        }
+
+        let normalized = Value::Object(object);
+        let config = materialize_import_value(&normalized)
+            .map_err(|error| anyhow!("config_import_no_usable_fields: {error}"))?;
+        Ok(ConfigImport { config, warnings })
     }
 
     pub(crate) fn ensure_workspace(&self) -> Result<()> {
@@ -641,7 +920,7 @@ impl Config {
                     )),
                 },
             },
-            confirmation_provider: self.confirmation_provider.display_label(),
+            confirmation_provider: self.confirmation_provider.fallback_label(),
             tunnel: self.tunnel.as_ref().map(|tunnel| SafeTunnelSummary {
                 configured: true,
                 tunnel_id: (!tunnel.tunnel_id.trim().is_empty()).then(|| tunnel.tunnel_id.clone()),
@@ -669,12 +948,12 @@ impl Config {
 
     pub(crate) fn validate_hub(&self) -> Result<()> {
         self.validate_local()?;
-        validate_hub_url_shape(&self.hub_url)?;
-        validate_hub_transport(&self.hub_transport)?;
+        validate_hub_url_shape(&self.hub.url)?;
+        validate_hub_transport(&self.hub.transport)?;
         if self.agent_id.trim().is_empty() {
             return Err(anyhow!("agent_id_required"));
         }
-        if self.agent_secret.trim().is_empty() || self.agent_secret == "change-me" {
+        if self.hub.agent_secret.trim().is_empty() || self.hub.agent_secret == "change-me" {
             return Err(anyhow!("agent_secret_required"));
         }
         Ok(())
@@ -708,6 +987,176 @@ impl Config {
         }
         Ok(())
     }
+}
+
+#[derive(Debug)]
+pub(crate) struct ConfigImport {
+    pub(crate) config: Config,
+    pub(crate) warnings: Vec<String>,
+}
+
+fn materialize_import_value(value: &Value) -> Result<Config> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| anyhow!("config_import_json_object_required"))?;
+    let mut defaults = Config::default_config()?;
+    let mode = serde_json::from_value::<RuntimeMode>(
+        object
+            .get("mode")
+            .cloned()
+            .ok_or_else(|| anyhow!("config_import_mode_missing"))?,
+    )?;
+    let profile = serde_json::from_value::<WorkerProfile>(
+        object
+            .get("profile")
+            .cloned()
+            .ok_or_else(|| anyhow!("config_import_profile_missing"))?,
+    )?;
+    defaults.mode = mode;
+    defaults.profile = profile;
+    let workspace_root = object
+        .get("workspaceRoot")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_else(|| defaults.workspace_root.clone());
+    defaults.path_policy = default_path_policy(&workspace_root);
+    defaults.tunnel = object
+        .get("tunnel")
+        .is_some_and(Value::is_object)
+        .then(TunnelConfig::default);
+    let mut effective = serde_json::to_value(defaults)?;
+    merge_json_values(&mut effective, value.clone());
+    let mut config: Config = serde_json::from_value(effective)?;
+    if !object.contains_key("pathPolicy") {
+        config.path_policy = default_path_policy(&config.workspace_root);
+    }
+    config.room.skills = config.skills.clone();
+    Ok(config)
+}
+
+fn merge_json_values(base: &mut Value, overlay: Value) {
+    match (base, overlay) {
+        (Value::Object(base), Value::Object(overlay)) => {
+            for (key, value) in overlay {
+                if let Some(existing) = base.get_mut(&key) {
+                    merge_json_values(existing, value);
+                } else {
+                    base.insert(key, value);
+                }
+            }
+        }
+        (base, overlay) => *base = overlay,
+    }
+}
+
+fn sparse_defaults(config: &Config) -> Result<Config> {
+    let mut defaults = Config::default_config()?;
+    defaults.mode = config.mode;
+    defaults.profile = config.profile;
+    defaults.path_policy = default_path_policy(&config.workspace_root);
+    // Sparse persistence is independent of the currently active runtime mode.
+    // If a tunnel section is configured, compare it against tunnel defaults so
+    // inactive-but-saved tunnel settings stay sparse instead of materializing
+    // reconstructable client/reporting defaults.
+    defaults.tunnel = config.tunnel.as_ref().map(|_| TunnelConfig::default());
+    Ok(defaults)
+}
+
+fn prune_sparse_value(value: &mut Value, defaults: &Value, root: bool) {
+    let (Value::Object(value), Value::Object(defaults)) = (value, defaults) else {
+        return;
+    };
+    let keys = value.keys().cloned().collect::<Vec<_>>();
+    for key in keys {
+        if root && matches!(key.as_str(), "mode" | "profile") {
+            continue;
+        }
+        let Some(current) = value.get(&key) else {
+            continue;
+        };
+        let Some(default) = defaults.get(&key) else {
+            // Unknown flattened fields are deliberately retained, including empty
+            // objects and nulls, so future fields survive a current-version write.
+            continue;
+        };
+        if current == default {
+            value.remove(&key);
+            continue;
+        }
+        if current.is_object() && default.is_object() {
+            if let Some(current) = value.get_mut(&key) {
+                prune_sparse_value(current, default, false);
+            }
+            if value
+                .get(&key)
+                .and_then(Value::as_object)
+                .is_some_and(|object| object.is_empty())
+            {
+                value.remove(&key);
+            }
+        }
+    }
+}
+
+pub(crate) fn sparse_config_value(config: &Config, redact_secrets: bool) -> Result<Value> {
+    let defaults = sparse_defaults(config)?;
+    let defaults_value = serde_json::to_value(defaults)?;
+    let mut value = serde_json::to_value(config)?;
+    value
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("config_projection_object_required"))?;
+    prune_sparse_value(&mut value, &defaults_value, true);
+
+    if redact_secrets {
+        if let Some(secret) = value
+            .as_object_mut()
+            .and_then(|object| object.get_mut("hub"))
+            .and_then(Value::as_object_mut)
+            .and_then(|hub| hub.get_mut("agentSecret"))
+        {
+            *secret = Value::String("[REDACTED]".to_string());
+        }
+    }
+    Ok(value)
+}
+
+struct OrderedConfigRoot<'a>(&'a Value);
+
+impl Serialize for OrderedConfigRoot<'_> {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let object = self
+            .0
+            .as_object()
+            .ok_or_else(|| serde::ser::Error::custom("config_projection_object_required"))?;
+        let mut map = serializer.serialize_map(Some(object.len()))?;
+        for key in ["agentId", "displayName", "mode", "profile"] {
+            if let Some(value) = object.get(key) {
+                map.serialize_entry(key, value)?;
+            }
+        }
+        for (key, value) in object {
+            if !matches!(key.as_str(), "agentId" | "displayName" | "mode" | "profile") {
+                map.serialize_entry(key, value)?;
+            }
+        }
+        map.end()
+    }
+}
+
+fn ordered_config_value_json(value: &Value) -> Result<String> {
+    Ok(serde_json::to_string_pretty(&OrderedConfigRoot(value))?)
+}
+
+pub(crate) fn ordered_config_json(config: &Config) -> Result<String> {
+    ordered_config_value_json(&serde_json::to_value(config)?)
+}
+
+pub(crate) fn sparse_config_json(config: &Config, redact_secrets: bool) -> Result<String> {
+    let value = sparse_config_value(config, redact_secrets)?;
+    ordered_config_value_json(&value)
 }
 
 pub(crate) fn validate_hub_url_shape(value: &str) -> Result<()> {
@@ -994,6 +1443,7 @@ pub(crate) fn default_path_policy(workspace_root: &Path) -> PathPolicyConfig {
 }
 
 pub(crate) fn write_config_with_backup(path: &Path, config: &Config) -> Result<()> {
+    let serialized = sparse_config_json(config, false)?;
     ensure_parent(path)?;
     if path.exists() {
         let backup_dir = path.parent().unwrap().join("backups");
@@ -1002,7 +1452,7 @@ pub(crate) fn write_config_with_backup(path: &Path, config: &Config) -> Result<(
         fs::copy(path, backup)?;
         prune_backups(&backup_dir, config.backup_limit)?;
     }
-    fs::write(path, serde_json::to_string_pretty(config)?)?;
+    fs::write(path, serialized)?;
     Ok(())
 }
 
@@ -1035,9 +1485,13 @@ mod tests {
     fn checked_in_v09_config_example_is_strict_and_safe_to_copy() {
         let source = include_str!("../../../config.example.json");
         let value: serde_json::Value = serde_json::from_str(source).unwrap();
-        let config: Config = serde_json::from_value(value.clone()).unwrap();
+        let path = temp_config_path();
+        fs::write(&path, source).unwrap();
+        let config = Config::load(&path).unwrap();
         config.validate_mcp_servers().unwrap();
         config.validate_standalone().unwrap();
+        assert_eq!(config.mode, RuntimeMode::Standalone);
+        assert_eq!(config.profile, WorkerProfile::Normal);
         assert_eq!(config.agent_id, "laptop");
         assert_eq!(config.limits.max_active_jobs, MaxActiveJobs::Auto);
         assert_eq!(
@@ -1046,16 +1500,18 @@ mod tests {
         );
         assert_eq!(config.mcp_servers.len(), 2);
         assert!(config.mcp_servers.values().all(|server| !server.enabled));
-        assert_eq!(value["agentSecret"], "change-me-before-use");
+        assert_eq!(value["hub"]["agentSecret"], "change-me-before-use");
         assert_eq!(value["tunnel"]["tunnelId"], "tunnel_replace-me");
         assert!(value["tunnel"]["apiKey"]
             .as_str()
             .is_some_and(|reference| reference.starts_with("file:")));
-        assert_eq!(value["tunnel"]["hubReporting"]["enabled"], false);
+        assert!(value["tunnel"].get("hubReporting").is_none());
+        assert!(!config.tunnel.as_ref().unwrap().hub_reporting.enabled);
         assert!(value["limits"].get("maxActiveSessions").is_none());
         assert!(value["limits"].get("sessionIdleTimeoutSecs").is_none());
         assert!(!source.contains("AGENTIC_GPT_API_KEY="));
         assert!(!source.contains("integration-secret"));
+        let _ = fs::remove_file(path);
     }
 
     #[test]
@@ -1155,23 +1611,11 @@ mod tests {
     }
 
     #[test]
-    fn confirmation_provider_accepts_legacy_aliases_and_canonicalizes() {
-        for (legacy, expected) in [
-            ("none", json!([])),
-            ("freedesktop", json!(["freedesktop"])),
-            ("hub", json!(["ntfy"])),
-            ("ntfy", json!(["ntfy"])),
-            ("freedesktop-then-hub", json!(["freedesktop", "ntfy"])),
-            ("freedesktopThenHub", json!(["freedesktop", "ntfy"])),
-            ("freedesktop-then-ntfy", json!(["freedesktop", "ntfy"])),
-            ("default", json!(["freedesktop", "ntfy"])),
-        ] {
-            let parsed = serde_json::from_value::<ConfirmationProviderConfig>(json!({
-                "provider": legacy
-            }))
-            .unwrap();
-            assert_eq!(serde_json::to_value(parsed).unwrap()["channels"], expected);
-        }
+    fn confirmation_provider_disk_shape_rejects_legacy_provider() {
+        assert!(serde_json::from_value::<ConfirmationProviderConfig>(json!({
+            "provider": "none"
+        }))
+        .is_err());
     }
 
     #[test]
@@ -1187,11 +1631,11 @@ mod tests {
     }
 
     #[test]
-    fn confirmation_provider_display_label_is_truthful() {
-        let mut provider = ConfirmationProviderConfig::from_legacy("hub").unwrap();
-        assert_eq!(provider.display_label(), "ntfy");
-        provider.set_legacy("freedesktop-then-hub").unwrap();
-        assert_eq!(provider.display_label(), "freedesktop-then-ntfy");
+    fn legacy_confirmation_labels_map_to_canonical_fallback_order() {
+        let provider = ConfirmationProviderConfig::from_legacy("hub").unwrap();
+        assert_eq!(provider.fallback_label(), "ntfy");
+        let provider = ConfirmationProviderConfig::from_legacy("freedesktop-then-hub").unwrap();
+        assert_eq!(provider.fallback_label(), "freedesktop → ntfy");
     }
 
     #[test]
@@ -1211,34 +1655,33 @@ mod tests {
     }
 
     #[test]
-    fn legacy_skills_are_loaded_and_written_at_top_level() {
+    fn strict_load_rejects_legacy_room_skills() {
         let path = temp_config_path();
         let mut value = serde_json::to_value(Config::default_config().unwrap()).unwrap();
-        value["futureField"] = json!({ "preserve": true });
         value["room"]["skills"] = json!({ "maxFiles": 7, "allowedHosts": ["example.test"] });
         value.as_object_mut().unwrap().remove("skills");
         fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
 
-        let config = Config::load(&path).unwrap();
-        assert_eq!(config.skills.max_files, 7);
-        assert_eq!(config.skills.allowed_hosts, vec!["example.test"]);
-        let written = serde_json::to_value(config).unwrap();
-        assert_eq!(written["skills"]["maxFiles"], 7);
-        assert!(written["room"].get("skills").is_none());
-        assert_eq!(written["futureField"]["preserve"], true);
+        let error = Config::load(&path).unwrap_err().to_string();
+        assert!(error.contains("config_requires_top_level_skills"));
+        assert!(error.contains("config import"));
         let _ = fs::remove_file(path);
     }
 
     #[test]
-    fn top_level_skills_win_over_legacy_values() {
+    fn explicit_import_prefers_top_level_skills_over_legacy_room_skills() {
         let path = temp_config_path();
         let mut value = serde_json::to_value(Config::default_config().unwrap()).unwrap();
         value["skills"]["maxFiles"] = json!(11);
         value["room"]["skills"] = json!({ "maxFiles": 3 });
         fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
 
-        let config = Config::load(&path).unwrap();
-        assert_eq!(config.skills.max_files, 11);
+        let imported = Config::import(&path).unwrap();
+        assert_eq!(imported.config.skills.max_files, 11);
+        assert!(imported
+            .warnings
+            .iter()
+            .any(|warning| warning.starts_with("room.skills ")));
         let _ = fs::remove_file(path);
     }
 
@@ -1285,6 +1728,342 @@ mod tests {
     }
 
     #[test]
+    fn sparse_projection_always_keeps_selectors_and_omits_reconstructable_defaults() {
+        let mut config = Config::default_config().unwrap();
+        config.mode = RuntimeMode::Local;
+        config.profile = WorkerProfile::Normal;
+
+        let value = sparse_config_value(&config, false).unwrap();
+        assert_eq!(value["mode"], json!("local"));
+        assert_eq!(value["profile"], json!("normal"));
+        for key in [
+            "agentId",
+            "displayName",
+            "hub",
+            "workspaceRoot",
+            "pathPolicy",
+            "policy",
+            "limits",
+            "skills",
+            "room",
+            "tunnel",
+        ] {
+            assert!(
+                value.get(key).is_none(),
+                "default field was retained: {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn sparse_projection_preserves_custom_workspace_root_but_reconstructs_its_path_defaults() {
+        let mut config = Config::default_config().unwrap();
+        config.mode = RuntimeMode::Local;
+        config.workspace_root = temp_config_path().with_extension("workspace");
+        config.path_policy = default_path_policy(&config.workspace_root);
+
+        let value = sparse_config_value(&config, false).unwrap();
+        assert_eq!(
+            value["workspaceRoot"],
+            serde_json::to_value(&config.workspace_root).unwrap()
+        );
+        assert!(value.get("pathPolicy").is_none());
+
+        let path = temp_config_path();
+        fs::write(&path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+        let loaded = Config::load(&path).unwrap();
+        assert_eq!(loaded.workspace_root, config.workspace_root);
+        assert_eq!(loaded.path_policy, config.path_policy);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn sparse_projection_keeps_inactive_sections_and_redacts_config_secrets() {
+        let mut config = Config::default_config().unwrap();
+        config.mode = RuntimeMode::Hub;
+        config.profile = WorkerProfile::Room;
+        config.hub.agent_secret = "hub-secret-marker".to_string();
+        config.tunnel = Some(TunnelConfig {
+            tunnel_id: "illegal-tunnel".to_string(),
+            api_key: "file:/tmp/tunnel-secret".to_string(),
+            ..TunnelConfig::default()
+        });
+
+        let value = sparse_config_value(&config, true).unwrap();
+        assert!(value.get("tunnel").is_some());
+        assert_eq!(value["hub"]["agentSecret"], json!("[REDACTED]"));
+        assert_eq!(value["tunnel"]["apiKey"], json!("file:/tmp/tunnel-secret"));
+        assert!(!serde_json::to_string(&value)
+            .unwrap()
+            .contains("hub-secret-marker"));
+    }
+
+    #[test]
+    fn sparse_load_reconstructs_workspace_dependent_path_policy_and_unknown_fields() {
+        let root = temp_config_path();
+        let workspace = root.with_extension("workspace");
+        let expected = default_path_policy(&workspace);
+        let value = json!({
+            "mode": "local",
+            "profile": "normal",
+            "workspaceRoot": workspace,
+            "futureField": {"enabled": true}
+        });
+        fs::write(&root, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+
+        let loaded = Config::load(&root).unwrap();
+        assert_eq!(loaded.mode, RuntimeMode::Local);
+        assert_eq!(loaded.profile, WorkerProfile::Normal);
+        assert_eq!(loaded.workspace_root, workspace);
+        assert_eq!(loaded.path_policy, expected);
+        assert_eq!(loaded.extra["futureField"], json!({"enabled": true}));
+        let _ = fs::remove_file(root);
+    }
+
+    #[test]
+    fn sparse_load_preserves_inactive_mode_and_profile_sections() {
+        let root = temp_config_path();
+        let value = json!({
+            "mode": "local",
+            "profile": "normal",
+            "tunnel": {"tunnelId": "stale"},
+            "room": {"timezone": "UTC", "diaryDayBoundaryHour": 1}
+        });
+        fs::write(&root, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+
+        let loaded = Config::load(&root).unwrap();
+        assert_eq!(
+            loaded
+                .tunnel
+                .as_ref()
+                .map(|tunnel| tunnel.tunnel_id.as_str()),
+            Some("stale")
+        );
+        assert_eq!(loaded.room.timezone, "UTC");
+        assert_eq!(loaded.room.diary_day_boundary_hour, 1);
+        let _ = fs::remove_file(root);
+    }
+
+    #[test]
+    fn sparse_projection_preserves_explicit_inactive_hub_tunnel_and_room_data() {
+        let mut config = Config::default_config().unwrap();
+        config.mode = RuntimeMode::Local;
+        config.profile = WorkerProfile::Normal;
+        config.hub.url = "https://inactive-hub.example.com".to_string();
+        config.hub.transport = "sse".to_string();
+        config.hub.agent_secret = "inactive-hub-secret".to_string();
+        config.tunnel = Some(TunnelConfig {
+            tunnel_id: "inactive-tunnel".to_string(),
+            api_key: "env:INACTIVE_TUNNEL_KEY".to_string(),
+            ..TunnelConfig::default()
+        });
+        config.room.timezone = "UTC".to_string();
+        config.extra.insert("futureField".to_string(), json!(true));
+
+        let value = sparse_config_value(&config, false).unwrap();
+        assert_eq!(
+            value["hub"]["url"],
+            json!("https://inactive-hub.example.com")
+        );
+        assert_eq!(value["tunnel"]["tunnelId"], json!("inactive-tunnel"));
+        assert_eq!(value["tunnel"]["apiKey"], json!("env:INACTIVE_TUNNEL_KEY"));
+        assert!(value["tunnel"].get("client").is_none());
+        assert!(value["tunnel"].get("hubReporting").is_none());
+        assert_eq!(value["room"]["timezone"], json!("UTC"));
+        assert_eq!(value["futureField"], json!(true));
+
+        let root = temp_config_path();
+        fs::write(&root, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+        let loaded = Config::load(&root).unwrap();
+        assert_eq!(loaded.hub.url, config.hub.url);
+        assert_eq!(loaded.tunnel.unwrap().tunnel_id, "inactive-tunnel");
+        assert_eq!(loaded.room.timezone, "UTC");
+        let _ = fs::remove_file(root);
+    }
+
+    #[test]
+    fn strict_load_rejects_legacy_confirmation_provider_shape() {
+        let root = temp_config_path();
+        let value = json!({
+            "mode": "local",
+            "profile": "normal",
+            "confirmationProvider": {"provider": "none"}
+        });
+        fs::write(&root, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+
+        let error = Config::load(&root).unwrap_err().to_string();
+        assert!(error.contains("config_requires_confirmation_channels"));
+        assert!(error.contains("config import"));
+        let _ = fs::remove_file(root);
+    }
+
+    #[test]
+    fn loading_a_legacy_file_without_selectors_returns_migration_error() {
+        let root = temp_config_path();
+        let mut value = serde_json::to_value(Config::default_config().unwrap()).unwrap();
+        value.as_object_mut().unwrap().remove("mode");
+        value.as_object_mut().unwrap().remove("profile");
+        fs::write(&root, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+
+        let error = Config::load(&root).unwrap_err().to_string();
+        assert!(error.contains("config_requires_mode_profile"));
+        assert!(error.contains("config import"));
+        assert!(error.contains("config init"));
+        let _ = fs::remove_file(root);
+    }
+
+    #[test]
+    fn strict_load_rejects_legacy_top_level_hub_fields_even_with_selectors() {
+        let root = temp_config_path();
+        let value = json!({
+            "mode": "hub",
+            "profile": "normal",
+            "hubUrl": "https://legacy.example.com",
+            "hubTransport": "sse",
+            "agentSecret": "legacy-secret"
+        });
+        fs::write(&root, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+
+        let error = Config::load(&root).unwrap_err().to_string();
+        assert!(error.contains("config_requires_nested_hub"));
+        assert!(error.contains("run config import"));
+        let _ = fs::remove_file(root);
+    }
+
+    #[test]
+    fn explicit_import_maps_legacy_hub_and_preserves_recognized_and_unknown_fields() {
+        let root = temp_config_path();
+        let value = json!({
+            "displayName": "imported-agent",
+            "hubUrl": "https://legacy.example.com",
+            "hubTransport": "sse",
+            "agentSecret": "legacy-secret",
+            "confirmationProvider": {"provider": "none"},
+            "tunnel": {
+                "tunnelId": "tunnel-imported",
+                "apiKey": "env:IMPORTED_TUNNEL_KEY"
+            },
+            "limits": {
+                "maxConcurrentTasks": 7,
+                "maxActiveJobs": 4
+            },
+            "mcpServers": {
+                "imported": {
+                    "enabled": true,
+                    "transport": "stdio",
+                    "url": "node ./server.mjs"
+                }
+            },
+            "policy": {
+                "allow": [{"program": "git", "argsPrefix": ["status"]}],
+                "confirm": [],
+                "deny": []
+            },
+            "room": {
+                "timezone": "UTC",
+                "diaryDayBoundaryHour": 3,
+                "skills": {"maxFiles": 7, "allowedHosts": ["example.test"]}
+            },
+            "futureField": {"preserve": true}
+        });
+        fs::write(&root, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+
+        let imported = Config::import(&root).unwrap();
+        assert!(
+            imported.warnings.is_empty(),
+            "unexpected warnings: {:?}",
+            imported.warnings
+        );
+        assert_eq!(imported.config.mode, RuntimeMode::Standalone);
+        assert_eq!(imported.config.profile, WorkerProfile::Normal);
+        assert!(imported.config.confirmation_provider.channels.is_empty());
+        assert_eq!(imported.config.skills.max_files, 7);
+        assert_eq!(imported.config.skills.allowed_hosts, vec!["example.test"]);
+        assert_eq!(imported.config.hub.url, "https://legacy.example.com");
+        assert_eq!(imported.config.hub.transport, "sse");
+        assert_eq!(imported.config.hub.agent_secret, "legacy-secret");
+        assert_eq!(
+            imported.config.tunnel.as_ref().unwrap().tunnel_id,
+            "tunnel-imported"
+        );
+        assert_eq!(imported.config.limits.max_concurrent_tasks, 7);
+        assert_eq!(imported.config.mcp_servers.len(), 1);
+        assert_eq!(imported.config.policy.allow[0].program, "git");
+        assert_eq!(imported.config.room.timezone, "UTC");
+        assert_eq!(
+            imported.config.extra["futureField"],
+            json!({"preserve": true})
+        );
+        let _ = fs::remove_file(root);
+    }
+
+    #[test]
+    fn explicit_import_reports_unimportable_recognized_fields_and_keeps_other_values() {
+        let root = temp_config_path();
+        let value = json!({
+            "displayName": "still-imported",
+            "limits": {"maxActiveSessions": 4},
+            "futureField": "preserve-me"
+        });
+        fs::write(&root, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+
+        let imported = Config::import(&root).unwrap();
+        assert!(imported
+            .warnings
+            .iter()
+            .any(|warning| warning.starts_with("limits ")));
+        assert_eq!(imported.config.display_name, "still-imported");
+        assert_eq!(imported.config.extra["futureField"], json!("preserve-me"));
+        assert_eq!(imported.config.limits.max_concurrent_tasks, 2);
+        let _ = fs::remove_file(root);
+    }
+
+    #[test]
+    fn explicit_import_clears_plaintext_tunnel_secret_and_reports_it() {
+        let root = temp_config_path();
+        let value = json!({
+            "mode": "standalone",
+            "profile": "normal",
+            "tunnel": {
+                "tunnelId": "imported-tunnel",
+                "apiKey": "plaintext-secret-marker"
+            },
+            "displayName": "still-imported"
+        });
+        fs::write(&root, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+
+        let imported = Config::import(&root).unwrap();
+        assert!(imported
+            .warnings
+            .iter()
+            .any(|warning| warning.starts_with("tunnel.apiKey ")));
+        assert_eq!(imported.config.display_name, "still-imported");
+        assert_eq!(imported.config.tunnel.as_ref().unwrap().api_key, "");
+        assert!(!serde_json::to_string(&imported.config)
+            .unwrap()
+            .contains("plaintext-secret-marker"));
+        let _ = fs::remove_file(root);
+    }
+
+    #[test]
+    fn durable_writer_uses_sparse_projection_and_preserves_unknown_fields() {
+        let path = temp_config_path();
+        let mut config = Config::default_config().unwrap();
+        config.mode = RuntimeMode::Local;
+        config.profile = WorkerProfile::Normal;
+        config.extra.insert("futureField".to_string(), json!(true));
+
+        write_config_with_backup(&path, &config).unwrap();
+        let value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(value["mode"], json!("local"));
+        assert_eq!(value["profile"], json!("normal"));
+        assert_eq!(value["futureField"], json!(true));
+        assert!(value.get("limits").is_none());
+        assert!(value.get("pathPolicy").is_none());
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn hub_validation_rejects_invalid_url_and_transport_with_stable_errors() {
         for (url, transport, expected) in [
             ("ftp://hub.example.com", "websocket", "hub_url_invalid"),
@@ -1295,9 +2074,9 @@ mod tests {
             ),
         ] {
             let mut config = Config::default_config().unwrap();
-            config.hub_url = url.to_string();
-            config.hub_transport = transport.to_string();
-            config.agent_secret = "configured-secret".to_string();
+            config.hub.url = url.to_string();
+            config.hub.transport = transport.to_string();
+            config.hub.agent_secret = "configured-secret".to_string();
             let error = config.validate_hub().unwrap_err();
             assert_eq!(
                 error.to_string(),

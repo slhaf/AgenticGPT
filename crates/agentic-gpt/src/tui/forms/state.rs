@@ -1,3 +1,73 @@
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct OrderedMultiSelectState {
+    options: Vec<String>,
+    selected: Vec<String>,
+    focus: usize,
+}
+
+impl OrderedMultiSelectState {
+    pub(crate) fn new(options: Vec<String>, selected: Vec<String>) -> Self {
+        let mut normalized = Vec::new();
+        for value in selected {
+            if options.iter().any(|option| option == &value) && !normalized.contains(&value) {
+                normalized.push(value);
+            }
+        }
+        Self {
+            options,
+            selected: normalized,
+            focus: 0,
+        }
+    }
+
+    pub(crate) fn options(&self) -> &[String] {
+        &self.options
+    }
+
+    pub(crate) fn selected(&self) -> &[String] {
+        &self.selected
+    }
+
+    pub(crate) fn set_focus(&mut self, index: usize) {
+        self.focus = index.min(self.options.len().saturating_sub(1));
+    }
+
+    pub(crate) fn focused(&self) -> Option<&str> {
+        self.options.get(self.focus).map(String::as_str)
+    }
+
+    pub(crate) fn selection_rank(&self, value: &str) -> Option<usize> {
+        self.selected.iter().position(|selected| selected == value)
+    }
+
+    pub(crate) fn toggle_focused(&mut self) -> bool {
+        let Some(value) = self.focused().map(str::to_string) else {
+            return false;
+        };
+        if let Some(index) = self.selection_rank(&value) {
+            self.selected.remove(index);
+        } else {
+            self.selected.push(value);
+        }
+        true
+    }
+
+    pub(crate) fn move_focused_selection(&mut self, direction: isize) -> bool {
+        let Some(value) = self.focused() else {
+            return false;
+        };
+        let Some(index) = self.selection_rank(value) else {
+            return false;
+        };
+        let target = index as isize + direction;
+        if target < 0 || target >= self.selected.len() as isize {
+            return false;
+        }
+        self.selected.swap(index, target as usize);
+        true
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct EditableListState {
     items: Vec<String>,

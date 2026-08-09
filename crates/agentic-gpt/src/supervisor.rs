@@ -20,7 +20,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
 use uuid::Uuid;
 
-use crate::config::{validate_secret_reference, Config};
+use crate::config::{validate_secret_reference, Config, RuntimeMode};
 use crate::instance_lock::InstanceLock;
 use crate::state::CapabilityProfile;
 use crate::tunnel_distribution::ResolvedTunnelClient;
@@ -41,18 +41,21 @@ const BACKOFFS: [Duration; MAX_RESTART_ATTEMPTS] = [
     Duration::from_secs(16),
 ];
 
-pub(crate) async fn run(config_path: PathBuf, profile: CapabilityProfile) -> Result<()> {
+pub(crate) async fn run(config_path: PathBuf) -> Result<()> {
     log_info(format!(
-        "standalone supervisor starting; profile={}; config={}",
-        profile.label(),
+        "standalone supervisor starting; config={}",
         config_path.display()
     ));
+    if !config_path.exists() {
+        return Err(anyhow!("config_missing: run config init first"));
+    }
     ensure_parent(&config_path)?;
     let _instance_lock = InstanceLock::acquire(&config_path, ".run.lock", "agent")?;
-    if !config_path.exists() {
-        crate::config::write_config_with_backup(&config_path, &Config::default_config()?)?;
-    }
     let config = Config::load(&config_path)?;
+    if config.mode != RuntimeMode::Standalone {
+        return Err(anyhow!("runtime_mode_not_standalone"));
+    }
+    let profile = config.profile.capability_profile();
     config.validate_standalone()?;
     config.ensure_workspace()?;
     if let Err(error) = crate::tmux::ensure_default_session(&config.workspace_root).await {
@@ -195,10 +198,10 @@ impl StartupIdentity {
             .ok_or_else(|| anyhow!("tunnel_config_required"))?;
         Ok(Self {
             agent_id: config.agent_id.clone(),
-            agent_secret: config.agent_secret.clone(),
+            agent_secret: config.hub.agent_secret.clone(),
             workspace_root: config.workspace_root.clone(),
-            hub_url: config.hub_url.clone(),
-            hub_transport: config.hub_transport.clone(),
+            hub_url: config.hub.url.clone(),
+            hub_transport: config.hub.transport.clone(),
             hub_reporting_enabled: tunnel.hub_reporting.enabled,
             hub_reporting_detail: tunnel.hub_reporting.detail,
             skill_max_concurrent_installs: config.skills.max_concurrent_installs,
@@ -278,6 +281,14 @@ async fn watch_startup_identity(config_path: PathBuf, runtime_identity: StartupI
                 continue;
             }
         };
+        if config.mode != RuntimeMode::Standalone
+            || config.profile.capability_profile() != runtime_identity.profile
+        {
+            if state.warn_once_for(version) {
+                log_warn("restart_required: standalone runtime mode/profile changed".to_owned());
+            }
+            continue;
+        }
         if let Err(error) = config.validate_standalone() {
             if state.warn_once_for(version) {
                 log_warn(format!(

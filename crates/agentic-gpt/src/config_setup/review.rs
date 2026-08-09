@@ -19,6 +19,7 @@ mod tests {
             SetupSeed {
                 mode: Some(RuntimeMode::Standalone),
                 profile: Some(WorkerProfile::Normal),
+                imported_base: None,
                 tunnel_id: Some("review-tunnel".to_string()),
                 tunnel_api_key: Some("file:/tmp/review-secret".to_string()),
                 hub_url: Some("https://inactive-hub.example.com".to_string()),
@@ -258,6 +259,7 @@ pub(crate) enum ReviewEditorKind {
     Text,
     Secret,
     Choice,
+    MultiSelect,
     List,
     Compound,
     AutoCustom,
@@ -324,7 +326,6 @@ impl ReviewItem {
             Some(SetupField::Profile) => &["normal", "room"],
             Some(SetupField::TunnelSecretSource) => &["file", "env"],
             Some(SetupField::HubTransport) => &["websocket", "sse"],
-            Some(SetupField::ConfirmationProvider) => &["default", "freedesktop", "ntfy", "none"],
             Some(SetupField::ConfirmationLanguage) => &["zh-CN", "en"],
             Some(
                 SetupField::ProvisionTunnelSecret
@@ -631,6 +632,14 @@ fn optional_group(session: &SetupSession, section: OptionalSection) -> ReviewGro
     }
 }
 
+fn confirmation_channels_summary(raw: &str) -> String {
+    match serde_json::from_str::<Vec<String>>(raw) {
+        Ok(channels) if channels.is_empty() => "none".to_string(),
+        Ok(channels) => channels.join(" → "),
+        Err(_) => raw.to_string(),
+    }
+}
+
 fn optional_items(draft: OptionalSectionDraft) -> Vec<ReviewItem> {
     match draft {
         OptionalSectionDraft::Identity(IdentityDraft { display_name }) => vec![ReviewItem::field(
@@ -670,12 +679,12 @@ fn optional_items(draft: OptionalSectionDraft) -> Vec<ReviewItem> {
                 ReviewEditorKind::List,
             ),
         ],
-        OptionalSectionDraft::Confirmation(ConfirmationDraft { provider, language }) => vec![
+        OptionalSectionDraft::Confirmation(ConfirmationDraft { channels, language }) => vec![
             ReviewItem::field(
-                SetupField::ConfirmationProvider,
-                "confirmation_provider",
-                provider,
-                ReviewEditorKind::Choice,
+                SetupField::ConfirmationChannels,
+                "confirmation_channels",
+                confirmation_channels_summary(&channels),
+                ReviewEditorKind::MultiSelect,
             ),
             ReviewItem::field(
                 SetupField::ConfirmationLanguage,

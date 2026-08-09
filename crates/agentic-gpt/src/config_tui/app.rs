@@ -502,6 +502,18 @@ impl ConfigTuiApp {
                     self.handle_action(TuiAction::Next)
                 }
             }
+            KeyCode::Char(' ') if self.multi_select_active() => {
+                self.toggle_multi_select();
+                Ok(())
+            }
+            KeyCode::Char('J') if self.multi_select_active() => {
+                self.move_multi_select_priority(1);
+                Ok(())
+            }
+            KeyCode::Char('K') if self.multi_select_active() => {
+                self.move_multi_select_priority(-1);
+                Ok(())
+            }
             KeyCode::Tab => self.handle_action(TuiAction::MoveNext),
             KeyCode::BackTab => self.handle_action(TuiAction::MovePrevious),
             KeyCode::Down | KeyCode::Right => self.handle_action(TuiAction::MoveNext),
@@ -655,6 +667,12 @@ impl ConfigTuiApp {
                     }
                     None => {}
                 }
+                return;
+            }
+            if self.section_draft.as_ref().is_some_and(|draft| {
+                pages::optional_multi_select_for_focus(section, draft, self.state.focus).is_some()
+            }) {
+                self.mutate_optional_multi_select(section, None);
                 return;
             }
             if let Some((field, index)) = self.optional_list_target() {
@@ -915,6 +933,117 @@ impl ConfigTuiApp {
         };
     }
 
+    fn multi_select_active(&self) -> bool {
+        match self.state.page {
+            ConfigPage::Optional(section) => self.section_draft.as_ref().is_some_and(|draft| {
+                pages::optional_multi_select_for_focus(section, draft, self.state.focus).is_some()
+            }),
+            ConfigPage::Review => {
+                self.review_complex_open()
+                    && self.review_current_editor() == Some(ReviewEditorKind::MultiSelect)
+            }
+            _ => false,
+        }
+    }
+
+    fn toggle_multi_select(&mut self) {
+        match self.state.page {
+            ConfigPage::Optional(section) => self.mutate_optional_multi_select(section, None),
+            ConfigPage::Review => self.mutate_review_multi_select(None),
+            _ => {}
+        }
+    }
+
+    fn move_multi_select_priority(&mut self, direction: isize) {
+        match self.state.page {
+            ConfigPage::Optional(section) => {
+                self.mutate_optional_multi_select(section, Some(direction))
+            }
+            ConfigPage::Review => self.mutate_review_multi_select(Some(direction)),
+            _ => {}
+        }
+    }
+
+    fn mutate_optional_multi_select(
+        &mut self,
+        section: crate::config_templates::OptionalSection,
+        reorder: Option<isize>,
+    ) {
+        let Some((field, value)) = self.section_draft.as_ref().and_then(|draft| {
+            pages::optional_multi_select_for_focus(section, draft, self.state.focus)
+        }) else {
+            return;
+        };
+        let Some(draft) = self.section_draft.as_mut() else {
+            return;
+        };
+        let Ok(mut selection) = pages::optional_multi_select_state(draft, field) else {
+            return;
+        };
+        let Some(index) = selection
+            .options()
+            .iter()
+            .position(|option| option == value)
+        else {
+            return;
+        };
+        selection.set_focus(index);
+        let changed = match reorder {
+            Some(direction) => selection.move_focused_selection(direction),
+            None => selection.toggle_focused(),
+        };
+        if changed && pages::set_optional_multi_select_state(draft, field, &selection) {
+            self.validate_section_draft();
+        }
+    }
+
+    fn mutate_review_multi_select(&mut self, reorder: Option<isize>) {
+        if self.review_current_editor() != Some(ReviewEditorKind::MultiSelect) {
+            return;
+        }
+        let Some((_, item)) = self
+            .review
+            .as_ref()
+            .and_then(|review| review.row(self.state.focus))
+        else {
+            return;
+        };
+        let Some(field) = item.field else {
+            return;
+        };
+        let Some(mut draft) = self.section_draft.as_ref().cloned() else {
+            return;
+        };
+        let Ok(mut selection) = pages::optional_multi_select_state(&draft, field) else {
+            return;
+        };
+        selection.set_focus(self.state.review_subfocus);
+        let changed = match reorder {
+            Some(direction) => selection.move_focused_selection(direction),
+            None => selection.toggle_focused(),
+        };
+        if !changed || !pages::set_optional_multi_select_state(&mut draft, field, &selection) {
+            return;
+        }
+        match self
+            .session_mut()
+            .save_optional_section_for_review(draft.clone())
+        {
+            Ok(()) => {
+                self.section_draft = Some(draft);
+                self.field_errors.clear();
+                let anchor = self.review_focus_anchor;
+                self.refresh_review();
+                if self.state.page == ConfigPage::Review {
+                    self.state.focus = anchor
+                        .and_then(|key| self.review.as_ref()?.find_row(key))
+                        .unwrap_or(self.state.focus);
+                }
+            }
+            Err(errors) => self.record_errors(errors),
+        }
+    }
+
     fn review_complex_open(&self) -> bool {
         self.state.page == ConfigPage::Review
             && self.section_draft.is_some()
@@ -922,7 +1051,8 @@ impl ConfigTuiApp {
                 || matches!(
                     self.review_current_editor(),
                     Some(
-                        ReviewEditorKind::List
+                        ReviewEditorKind::MultiSelect
+                            | ReviewEditorKind::List
                             | ReviewEditorKind::Compound
                             | ReviewEditorKind::AutoCustom
                     )
@@ -931,6 +1061,13 @@ impl ConfigTuiApp {
 
     fn review_complex_focus_len(&self) -> usize {
         match self.review_current_editor() {
+            Some(ReviewEditorKind::MultiSelect) => self
+                .review
+                .as_ref()
+                .and_then(|review| review.row(self.state.focus))
+                .and_then(|(_, item)| item.field)
+                .map(|field| pages::multi_select_options(field).len())
+                .unwrap_or(0),
             Some(ReviewEditorKind::List) => {
                 let Some(field) = self.current_review_list_field() else {
                     return 0;
@@ -965,6 +1102,7 @@ impl ConfigTuiApp {
 
     fn activate_review_complex_focus(&mut self) {
         match self.review_current_editor() {
+            Some(ReviewEditorKind::MultiSelect) => self.mutate_review_multi_select(None),
             Some(ReviewEditorKind::List) => {
                 let Some(field) = self.current_review_list_field() else {
                     return;
@@ -2109,7 +2247,7 @@ impl ConfigTuiApp {
                     self.state.editing = Some(EditState::new(field, value));
                 }
             }
-            ReviewEditorKind::List => {
+            ReviewEditorKind::MultiSelect | ReviewEditorKind::List => {
                 let ReviewTarget::OptionalSection(section) = group_target else {
                     return;
                 };
@@ -2372,7 +2510,7 @@ fn optional_section_for_field(field: SetupField) -> crate::config_templates::Opt
         | SetupField::WriteRoots
         | SetupField::ReadOnlyRoots
         | SetupField::DenyRoots => crate::config_templates::OptionalSection::Workspace,
-        SetupField::ConfirmationProvider | SetupField::ConfirmationLanguage => {
+        SetupField::ConfirmationChannels | SetupField::ConfirmationLanguage => {
             crate::config_templates::OptionalSection::Confirmation
         }
         SetupField::MaxConcurrentTasks

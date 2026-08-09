@@ -34,7 +34,7 @@ mod utils;
 use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
 use cli_i18n::LanguageChoice;
-use config::{write_config_with_backup, Config};
+use config::Config;
 use config_cli::ConfigCommand;
 #[cfg(test)]
 use policy::PolicyDecision;
@@ -48,6 +48,8 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::{sleep, Duration};
 use utils::{config_path, ensure_parent, log_info, log_warn};
+
+pub(crate) use config::{RuntimeMode, WorkerProfile};
 
 #[derive(Parser)]
 #[command(name = "agentic-gpt")]
@@ -66,22 +68,6 @@ enum Commands {
         #[arg(long)]
         config: Option<PathBuf>,
     },
-    RunAsRoom {
-        #[arg(long)]
-        config: Option<PathBuf>,
-    },
-    RunAsStandalone {
-        #[arg(long)]
-        config: Option<PathBuf>,
-        #[arg(long, value_enum, default_value_t = WorkerProfile::Normal)]
-        profile: WorkerProfile,
-    },
-    RunAsLocal {
-        #[arg(long)]
-        config: Option<PathBuf>,
-        #[arg(long, value_enum, default_value_t = WorkerProfile::Normal)]
-        profile: WorkerProfile,
-    },
     Local {
         #[arg(long, global = true)]
         config: Option<PathBuf>,
@@ -98,7 +84,7 @@ enum Commands {
         supervisor_token: Option<String>,
     },
     Config {
-        #[arg(long)]
+        #[arg(long, global = true)]
         config: Option<PathBuf>,
         #[command(subcommand)]
         command: ConfigCommand,
@@ -109,21 +95,6 @@ enum Commands {
         #[command(subcommand)]
         command: TmuxCommand,
     },
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
-enum WorkerProfile {
-    Normal,
-    Room,
-}
-
-impl WorkerProfile {
-    fn capability_profile(self) -> CapabilityProfile {
-        match self {
-            Self::Normal => CapabilityProfile::Normal,
-            Self::Room => CapabilityProfile::Room,
-        }
-    }
 }
 
 #[derive(Subcommand)]
@@ -165,26 +136,7 @@ async fn main() -> Result<()> {
         Err(error) => cli_i18n::exit_with_cli_error(error, language),
     };
     match cli.command {
-        Commands::Run { config } => {
-            run(
-                config_path(config),
-                RuntimeModel::hub(CapabilityProfile::Normal),
-            )
-            .await
-        }
-        Commands::RunAsRoom { config } => {
-            run(
-                config_path(config),
-                RuntimeModel::hub(CapabilityProfile::Room),
-            )
-            .await
-        }
-        Commands::RunAsStandalone { config, profile } => {
-            supervisor::run(config_path(config), profile.capability_profile()).await
-        }
-        Commands::RunAsLocal { config, profile } => {
-            run_as_local(config_path(config), profile.capability_profile()).await
-        }
+        Commands::Run { config } => run(config_path(config)).await,
         Commands::Local { config, command } => handle_local(config_path(config), command).await,
         Commands::StdioWorker {
             config,
@@ -198,29 +150,41 @@ async fn main() -> Result<()> {
     }
 }
 
-async fn run(config_path: PathBuf, runtime: RuntimeModel) -> Result<()> {
+async fn run(config_path: PathBuf) -> Result<()> {
+    if !config_path.exists() {
+        return Err(anyhow!("config_missing: run config init first"));
+    }
+    let config = Config::load(&config_path)?;
+    match config.mode {
+        RuntimeMode::Hub => run_hub(config_path).await,
+        RuntimeMode::Standalone => supervisor::run(config_path).await,
+        RuntimeMode::Local => run_local(config_path).await,
+    }
+}
+
+async fn run_hub(config_path: PathBuf) -> Result<()> {
+    ensure_parent(&config_path)?;
+    let _instance_lock = instance_lock::InstanceLock::acquire(&config_path, ".run.lock", "agent")?;
+    let initial = Config::load(&config_path)?;
+    if initial.mode != RuntimeMode::Hub {
+        return Err(anyhow!("runtime_mode_changed_before_start"));
+    }
+    let runtime = RuntimeModel::hub(initial.profile.capability_profile());
     log_info(format!(
         "agentic-gpt starting; runtime={}; hubMode={}; config={}",
         runtime.label(),
         runtime.hub_mode.label(),
         config_path.display(),
     ));
-    ensure_parent(&config_path)?;
-    let _instance_lock = instance_lock::InstanceLock::acquire(&config_path, ".run.lock", "agent")?;
-    if !config_path.exists() {
-        write_config_with_backup(&config_path, &Config::default_config()?)?;
-        log_info("default config created".to_string());
-    }
-    let initial = Config::load(&config_path)?;
-    initial.validate_mcp_servers()?;
+    initial.validate_hub()?;
     initial.ensure_workspace()?;
     if let Err(error) = tmux::ensure_default_session(&initial.workspace_root).await {
         log_warn(format!("default tmux session unavailable: {error}"));
     }
     log_info(format!(
-        "config loaded; agentId={}; hubUrl={}; workspaceRoot={}; sandbox={}; {}",
+        "config loaded; agentId={}; hub.url={}; workspaceRoot={}; sandbox={}; {}",
         initial.agent_id,
-        initial.hub_url,
+        initial.hub.url,
         initial.workspace_root.display(),
         if initial.sandbox.enabled {
             "enabled"
@@ -243,6 +207,9 @@ async fn run_stdio_worker(
     supervisor::authorize_worker(supervisor_token.as_deref())?;
     let supervised = supervisor_token.is_some();
     let config = Config::load(&config_path)?;
+    if config.mode != RuntimeMode::Standalone || config.profile.capability_profile() != profile {
+        return Err(anyhow!("stdio_worker_config_mismatch"));
+    }
     config.validate_standalone()?;
     config.ensure_workspace()?;
     log_info(format!(
@@ -327,19 +294,19 @@ fn build_app_state(
     }
 }
 
-async fn run_as_local(config_path: PathBuf, profile: CapabilityProfile) -> Result<()> {
+async fn run_local(config_path: PathBuf) -> Result<()> {
+    ensure_parent(&config_path)?;
+    let _instance_lock = instance_lock::InstanceLock::acquire(&config_path, ".run.lock", "agent")?;
+    let config = Config::load(&config_path)?;
+    if config.mode != RuntimeMode::Local {
+        return Err(anyhow!("runtime_mode_changed_before_start"));
+    }
+    let profile = config.profile.capability_profile();
     log_info(format!(
         "local agent starting; profile={}; config={}",
         profile.label(),
         config_path.display()
     ));
-    ensure_parent(&config_path)?;
-    let _instance_lock = instance_lock::InstanceLock::acquire(&config_path, ".run.lock", "agent")?;
-    if !config_path.exists() {
-        write_config_with_backup(&config_path, &Config::default_config()?)?;
-        log_info("default config created".to_string());
-    }
-    let config = Config::load(&config_path)?;
     config.validate_local()?;
     config.ensure_workspace()?;
     if let Err(error) = tmux::ensure_default_session(&config.workspace_root).await {
@@ -473,6 +440,13 @@ async fn watch_config(state: AppState) {
                 Ok(config)
             }) {
                 Ok(config) => {
+                    if !config_matches_runtime(&config, state.runtime) {
+                        log_warn(
+                            "config reload rejected; mode/profile change requires restart"
+                                .to_string(),
+                        );
+                        continue;
+                    }
                     let _ = config.ensure_workspace();
                     log_info(format!(
                         "config reloaded; agentId={}; workspaceRoot={}; sandbox={}; {}; mcpServers={}",
@@ -495,6 +469,15 @@ async fn watch_config(state: AppState) {
             }
         }
     }
+}
+
+fn config_matches_runtime(config: &Config, runtime: RuntimeModel) -> bool {
+    let mode = match runtime.transport {
+        crate::state::Transport::Hub => RuntimeMode::Hub,
+        crate::state::Transport::TunnelStdio => RuntimeMode::Standalone,
+        crate::state::Transport::LocalUnix => RuntimeMode::Local,
+    };
+    config.mode == mode && config.profile.capability_profile() == runtime.profile
 }
 
 async fn watch_standalone_live_config(state: AppState, supervised: bool) {
@@ -542,12 +525,15 @@ async fn reload_standalone_live_config_once(
     state: &AppState,
 ) -> Result<config::ResolvedMaxActiveJobs> {
     let candidate = Config::load(&state.config_path)?;
+    let mut live = state.config.write().await;
+    if !config_matches_runtime(&candidate, state.runtime) {
+        return Err(anyhow!("runtime_selector_changed_restart_required"));
+    }
     match state.runtime.transport {
         crate::state::Transport::TunnelStdio => candidate.validate_standalone()?,
         crate::state::Transport::LocalUnix => candidate.validate_local()?,
         crate::state::Transport::Hub => candidate.validate_mcp_servers()?,
     }
-    let mut live = state.config.write().await;
     Ok(apply_standalone_live_subset(&mut live, candidate))
 }
 
@@ -628,24 +614,10 @@ mod tests {
     }
 
     #[test]
-    fn standalone_cli_defaults_to_normal_profile_and_accepts_room() {
-        let cli = Cli::try_parse_from(["agentic-gpt", "run-as-standalone"]).unwrap();
-        assert!(matches!(
-            cli.command,
-            Commands::RunAsStandalone {
-                profile: WorkerProfile::Normal,
-                ..
-            }
-        ));
-        let cli =
-            Cli::try_parse_from(["agentic-gpt", "run-as-standalone", "--profile", "room"]).unwrap();
-        assert!(matches!(
-            cli.command,
-            Commands::RunAsStandalone {
-                profile: WorkerProfile::Room,
-                ..
-            }
-        ));
+    fn public_run_has_only_a_config_path_and_no_profile_override() {
+        let cli = Cli::try_parse_from(["agentic-gpt", "run"]).unwrap();
+        assert!(matches!(cli.command, Commands::Run { config: None }));
+        assert!(Cli::try_parse_from(["agentic-gpt", "run", "--profile", "room"]).is_err());
     }
 
     #[test]
@@ -732,7 +704,7 @@ mod tests {
         assert_eq!(value["error"]["code"], "room_agent_required");
         assert_eq!(
             value["error"]["message"],
-            "room commands require run-as-room"
+            "room commands require profile=room in config"
         );
     }
 
@@ -1493,7 +1465,7 @@ mod tests {
     }
 
     #[test]
-    fn load_partial_path_policy_defaults_missing_lists_to_empty() {
+    fn load_partial_path_policy_uses_workspace_derived_defaults_for_missing_lists() {
         let root = unique_temp_dir("partial-config");
         let config_path = root.join("config.json");
         let mut value = serde_json::to_value(Config::default_config().unwrap()).unwrap();
@@ -1504,8 +1476,9 @@ mod tests {
 
         let loaded = Config::load(&config_path).unwrap();
         assert_eq!(loaded.path_policy.write_roots.len(), 1);
-        assert!(loaded.path_policy.read_only_roots.is_empty());
-        assert!(loaded.path_policy.deny_roots.is_empty());
+        let defaults = crate::config::default_path_policy(&loaded.workspace_root);
+        assert_eq!(loaded.path_policy.read_only_roots, defaults.read_only_roots);
+        assert_eq!(loaded.path_policy.deny_roots, defaults.deny_roots);
     }
 
     #[test]
@@ -1677,6 +1650,7 @@ mod tests {
         fs::create_dir_all(&workspace).unwrap();
         let (mut state, _rx) = command_test_state(CapabilityProfile::Normal, workspace.clone());
         state.config_path = config_path.clone();
+        state.runtime = RuntimeModel::tunnel(CapabilityProfile::Normal, false);
 
         let mut initial = state.config.read().await.clone();
         initial.workspace_root = workspace;

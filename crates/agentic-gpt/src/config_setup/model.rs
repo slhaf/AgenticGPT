@@ -2,7 +2,7 @@ use std::fmt;
 use std::path::PathBuf;
 
 use crate::cli_i18n::UiLanguage;
-use crate::config::default_path_policy;
+use crate::config::{default_path_policy, sparse_config_json, Config};
 use crate::config_templates::{
     build_config, InitInput, OptionalSection, RuntimeMode, SecretValue, TunnelSecretSource,
 };
@@ -38,7 +38,7 @@ pub(crate) enum SetupField {
     WriteRoots,
     ReadOnlyRoots,
     DenyRoots,
-    ConfirmationProvider,
+    ConfirmationChannels,
     ConfirmationLanguage,
     MaxConcurrentTasks,
     MaxActiveJobs,
@@ -74,6 +74,7 @@ pub(crate) enum SectionStatus {
 pub(crate) struct SetupSeed {
     pub(crate) mode: Option<RuntimeMode>,
     pub(crate) profile: Option<WorkerProfile>,
+    pub(crate) imported_base: Option<Config>,
     pub(crate) tunnel_id: Option<String>,
     pub(crate) tunnel_api_key: Option<String>,
     pub(crate) hub_url: Option<String>,
@@ -88,6 +89,10 @@ impl fmt::Debug for SetupSeed {
             .debug_struct("SetupSeed")
             .field("mode", &self.mode)
             .field("profile", &self.profile)
+            .field(
+                "imported_base",
+                &self.imported_base.as_ref().map(|_| "[REDACTED_BASE]"),
+            )
             .field("tunnel_id", &self.tunnel_id)
             .field(
                 "tunnel_api_key",
@@ -137,7 +142,7 @@ pub(crate) struct WorkspaceDraft {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ConfirmationDraft {
-    pub(crate) provider: String,
+    pub(crate) channels: String,
     pub(crate) language: String,
 }
 
@@ -236,6 +241,7 @@ impl OptionalSectionDraft {
 pub(crate) struct SetupSession {
     selected_mode: RuntimeMode,
     selected_profile: WorkerProfile,
+    imported_base: Option<Config>,
     standalone: StandaloneDraft,
     hub: HubDraft,
     optional: OptionalDrafts,
@@ -261,26 +267,56 @@ impl fmt::Debug for SetupSession {
 
 impl SetupSession {
     pub(crate) fn new(seed: SetupSeed, language: UiLanguage, config_path: PathBuf) -> Self {
-        let selected_mode = seed.mode.unwrap_or(RuntimeMode::Standalone);
-        let selected_profile = seed.profile.unwrap_or(WorkerProfile::Normal);
-        let (standalone, tunnel_seed_error) =
-            StandaloneDraft::from_seed(seed.tunnel_id, seed.tunnel_api_key);
+        let imported_base = seed.imported_base;
+        let selected_mode = seed
+            .mode
+            .or_else(|| imported_base.as_ref().map(|config| config.mode))
+            .unwrap_or(RuntimeMode::Standalone);
+        let selected_profile = seed
+            .profile
+            .or_else(|| imported_base.as_ref().map(|config| config.profile))
+            .unwrap_or(WorkerProfile::Normal);
+        let imported_tunnel_id = imported_base
+            .as_ref()
+            .and_then(|config| config.tunnel.as_ref())
+            .map(|tunnel| tunnel.tunnel_id.clone());
+        let imported_tunnel_api_key = imported_base
+            .as_ref()
+            .and_then(|config| config.tunnel.as_ref())
+            .map(|tunnel| tunnel.api_key.clone());
+        let (standalone, tunnel_seed_error) = StandaloneDraft::from_seed(
+            seed.tunnel_id.or(imported_tunnel_id),
+            seed.tunnel_api_key.or(imported_tunnel_api_key),
+        );
+        let imported_hub = imported_base.as_ref().map(|config| &config.hub);
         let hub = HubDraft {
-            hub_url: seed.hub_url.unwrap_or_else(|| DEFAULT_HUB_URL.to_string()),
+            hub_url: seed
+                .hub_url
+                .or_else(|| imported_hub.map(|hub| hub.url.clone()))
+                .unwrap_or_else(|| DEFAULT_HUB_URL.to_string()),
             hub_transport: seed
                 .hub_transport
+                .or_else(|| imported_hub.map(|hub| hub.transport.clone()))
                 .unwrap_or_else(|| DEFAULT_HUB_TRANSPORT.to_string()),
             agent_id: seed
                 .agent_id
+                .or_else(|| imported_base.as_ref().map(|config| config.agent_id.clone()))
                 .unwrap_or_else(|| DEFAULT_AGENT_ID.to_string()),
-            agent_secret: seed.agent_secret,
+            agent_secret: seed
+                .agent_secret
+                .or_else(|| imported_hub.map(|hub| SecretValue::new(hub.agent_secret.clone()))),
         };
+        let optional = imported_base
+            .as_ref()
+            .map(|config| optional_drafts_from_config(config))
+            .unwrap_or_default();
         Self {
             selected_mode,
             selected_profile,
+            imported_base,
             standalone,
             hub,
-            optional: OptionalDrafts::default(),
+            optional,
             language,
             config_path,
             tunnel_seed_error,
@@ -293,6 +329,10 @@ impl SetupSession {
 
     pub(crate) fn selected_profile(&self) -> WorkerProfile {
         self.selected_profile
+    }
+
+    pub(crate) fn imported_base(&self) -> Option<&Config> {
+        self.imported_base.as_ref()
     }
 
     pub(crate) fn language(&self) -> UiLanguage {
@@ -402,9 +442,8 @@ impl SetupSession {
         let input = self
             .build_active_input()
             .map_err(|_| anyhow::anyhow!("config_init_preview_invalid"))?;
-        let mut built = build_config(input)?;
-        built.config.agent_secret = "[REDACTED]".to_string();
-        Ok(serde_json::to_string_pretty(&built.config)?)
+        let built = build_config(input)?;
+        Ok(sparse_config_json(&built.config, true)?)
     }
 
     pub(super) fn tunnel_seed_error(&self) -> Option<&'static str> {
@@ -538,7 +577,7 @@ pub(crate) fn default_optional_draft(
             })
         }
         OptionalSection::Confirmation => OptionalSectionDraft::Confirmation(ConfirmationDraft {
-            provider: "default".to_string(),
+            channels: r#"["freedesktop","ntfy"]"#.to_string(),
             language: match language {
                 UiLanguage::En => "en".to_string(),
                 UiLanguage::ZhCn => "zh-CN".to_string(),
@@ -579,11 +618,80 @@ fn serialize_paths(paths: &[PathBuf]) -> String {
     serde_json::to_string(paths).unwrap_or_else(|_| "[]".to_string())
 }
 
+fn optional_drafts_from_config(config: &Config) -> OptionalDrafts {
+    let tunnel = config.tunnel.as_ref();
+    OptionalDrafts {
+        identity: Some(IdentityDraft {
+            display_name: config.display_name.clone(),
+        }),
+        workspace: Some(WorkspaceDraft {
+            workspace_root: config.workspace_root.to_string_lossy().into_owned(),
+            write_roots: serialize_paths(&config.path_policy.write_roots),
+            read_only_roots: serialize_paths(&config.path_policy.read_only_roots),
+            deny_roots: serialize_paths(&config.path_policy.deny_roots),
+        }),
+        confirmation: Some(ConfirmationDraft {
+            channels: config.confirmation_provider.channels_json(),
+            language: config.confirmation_language.clone(),
+        }),
+        limits: Some(LimitsDraft {
+            max_concurrent_tasks: config.limits.max_concurrent_tasks.to_string(),
+            max_active_jobs: config.limits.max_active_jobs.configured_label(),
+            max_file_search_context_lines: config.limits.max_file_search_context_lines.to_string(),
+        }),
+        sandbox: Some(SandboxDraft {
+            enabled: config.sandbox.enabled,
+            bubblewrap_path: config.sandbox.bubblewrap_path.clone(),
+            required_runtime_paths: serialize_paths(&config.sandbox.required_runtime_paths),
+        }),
+        mcp_servers: Some(McpServersDraft {
+            servers: config
+                .mcp_servers
+                .iter()
+                .map(|(id, server)| McpServerDraft {
+                    id: id.clone(),
+                    enabled: server.enabled,
+                    transport: server.transport.clone(),
+                    endpoint: server.url.clone().unwrap_or_default(),
+                })
+                .collect(),
+        }),
+        room: Some(RoomDraft {
+            timezone: config.room.timezone.clone(),
+            diary_boundary_hour: config.room.diary_day_boundary_hour.to_string(),
+            notebook_root: config
+                .room
+                .notebook_root
+                .as_ref()
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        }),
+        tunnel_client: tunnel.map(|tunnel| TunnelClientDraft {
+            version: tunnel.client.version.clone().unwrap_or_default(),
+            cache_dir: tunnel.client.cache_dir.to_string_lossy().into_owned(),
+            auto_download: tunnel.client.auto_download,
+            executable: tunnel
+                .client
+                .executable
+                .as_ref()
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            download_url: tunnel.client.download_url.clone().unwrap_or_default(),
+            sha256: tunnel.client.sha256.clone().unwrap_or_default(),
+        }),
+        hub_reporting: tunnel.map(|tunnel| HubReportingDraft {
+            enabled: tunnel.hub_reporting.enabled,
+            detail: tunnel.hub_reporting.detail.to_string(),
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 
     use crate::cli_i18n::UiLanguage;
+    use crate::config::sparse_config_value;
     use crate::config_templates::{OptionalSection, RuntimeMode, SecretValue, TunnelSecretSource};
     use crate::WorkerProfile;
 
@@ -657,6 +765,84 @@ mod tests {
         );
         assert!(format!("{:?}", hub_session.hub()).contains("REDACTED"));
         assert!(!format!("{:?}", hub_session.hub()).contains("hub-secret-marker"));
+    }
+
+    #[test]
+    fn preview_is_the_redacted_sparse_projection_without_transaction_secret_material() {
+        let config_path = PathBuf::from("/tmp/config-preview.json");
+        let secret_marker = "transaction-only-tunnel-secret";
+        let secret_path = PathBuf::from("/tmp/preview-tunnel-secret");
+        let mut session = SetupSession::new(
+            SetupSeed {
+                mode: Some(RuntimeMode::Standalone),
+                profile: Some(WorkerProfile::Room),
+                tunnel_id: Some("tunnel-preview".to_string()),
+                tunnel_api_key: Some(format!("file:{}", secret_path.display())),
+                ..SetupSeed::default()
+            },
+            UiLanguage::En,
+            config_path,
+        );
+        session.standalone_mut().provision_secret_now = true;
+        session.standalone_mut().secret_value = Some(SecretValue::new(secret_marker));
+
+        let preview: serde_json::Value =
+            serde_json::from_str(&session.redacted_config_json().unwrap()).unwrap();
+        let built = build_config(session.build_active_input().unwrap()).unwrap();
+        assert_eq!(preview, sparse_config_value(&built.config, true).unwrap());
+        assert_eq!(
+            preview["tunnel"]["apiKey"],
+            format!("file:{}", secret_path.display())
+        );
+        assert!(!serde_json::to_string(&preview)
+            .unwrap()
+            .contains(secret_marker));
+    }
+
+    #[test]
+    fn imported_base_seeds_reviewable_fields_without_requiring_an_editor_for_every_field() {
+        let mut base = crate::config::Config::default_config().unwrap();
+        base.mode = RuntimeMode::Local;
+        base.display_name = "imported-display".to_string();
+        base.limits.max_concurrent_tasks = 8;
+        base.mcp_servers.insert(
+            "imported".to_string(),
+            crate::mcp::McpServerConfig {
+                enabled: true,
+                transport: "stdio".to_string(),
+                url: Some("node ./server.mjs".to_string()),
+            },
+        );
+        base.extra
+            .insert("futureField".to_string(), serde_json::json!(true));
+        let session = SetupSession::new(
+            SetupSeed {
+                imported_base: Some(base),
+                mode: Some(RuntimeMode::Local),
+                profile: Some(WorkerProfile::Normal),
+                ..SetupSeed::default()
+            },
+            UiLanguage::En,
+            PathBuf::from("/tmp/imported-review.json"),
+        );
+
+        match session.optional_draft(OptionalSection::Identity) {
+            OptionalSectionDraft::Identity(draft) => {
+                assert_eq!(draft.display_name, "imported-display")
+            }
+            other => panic!("unexpected draft: {other:?}"),
+        }
+        match session.optional_draft(OptionalSection::Limits) {
+            OptionalSectionDraft::Limits(draft) => assert_eq!(draft.max_concurrent_tasks, "8"),
+            other => panic!("unexpected draft: {other:?}"),
+        }
+        match session.optional_draft(OptionalSection::McpServers) {
+            OptionalSectionDraft::McpServers(draft) => assert_eq!(draft.servers.len(), 1),
+            other => panic!("unexpected draft: {other:?}"),
+        }
+        let preview = session.redacted_config_json().unwrap();
+        assert!(preview.contains("futureField"));
+        assert!(preview.contains("maxConcurrentTasks"));
     }
 
     #[test]

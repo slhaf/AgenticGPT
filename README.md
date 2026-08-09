@@ -41,9 +41,9 @@ Hub mode remains useful when you need one public endpoint for many agents, Custo
 
 | Runtime | Best for | Public server | Failure scope | Entrypoint |
 | --- | --- | --- | --- | --- |
-| **Secure MCP Tunnel / Standalone** | Recommended direct deployment | Not required | One tunnel/agent | `agentic-gpt run-as-standalone` |
+| **Secure MCP Tunnel / Standalone** | Recommended direct deployment | Not required | One tunnel/agent | `agentic-gpt run` (config `mode=standalone`) |
 | **Hub + Local Agents** | Central routing, Actions, shared history/reporting | Required | Hub is shared | `agentic-gpt-hub serve` + `agentic-gpt run` |
-| **Local Unix MCP** | Development, smoke tests, local automation | Not required | One local worker | `agentic-gpt run-as-local` |
+| **Local Unix MCP** | Development, smoke tests, local automation | Not required | One local worker | `agentic-gpt run` (config `mode=local`) |
 
 ## Features
 
@@ -113,7 +113,7 @@ and writes nothing. Scripts and CI must choose the deterministic builder explici
 ```bash
 agentic-gpt config init
 agentic-gpt config set agentId laptop
-agentic-gpt config set confirmationProvider freedesktop
+agentic-gpt config set confirmationProvider.channels '["freedesktop"]'
 ```
 
 For scripts, pass every value that must be deterministic and add `--non-interactive`:
@@ -163,13 +163,15 @@ agentic-gpt config set tunnel.client.autoDownload true
 
 `tunnel.apiKey` accepts only `file:PATH` or `env:NAME`; plaintext secrets are rejected.
 
-### 3. Start the standalone worker
+### 3. Start the configured runtime
 
 ```bash
-agentic-gpt run-as-standalone --profile normal
+agentic-gpt run
 ```
 
-Use `--profile room` for the 36-tool Room surface. The same worker also exposes an owner-only Unix MCP socket for local inspection:
+The config file’s `mode` and `profile` select Standalone/Hub/Local and Normal/Room; for example, use
+`agentic-gpt config set profile room` before starting for the 36-tool Room surface. The same worker
+also exposes an owner-only Unix MCP socket for local inspection:
 
 ```bash
 agentic-gpt local list-tools
@@ -185,7 +187,8 @@ Complete tunnel-client trust, cache, recovery, reporting, and service-manager gu
 No tunnel credentials are needed:
 
 ```bash
-agentic-gpt run-as-local --profile normal
+agentic-gpt config init --mode local --profile normal --non-interactive
+agentic-gpt run
 agentic-gpt local list-tools
 agentic-gpt local call agent.info --arguments '{}'
 ```
@@ -214,14 +217,19 @@ Put Caddy or Nginx in front of the Hub and expose it over HTTPS. Hub state defau
 
 ```bash
 agentic-gpt config init
-agentic-gpt config set hubUrl https://agentic-gpt.example.com
-agentic-gpt config set hubTransport websocket
+agentic-gpt config set hub.url https://agentic-gpt.example.com
+agentic-gpt config set hub.transport websocket
 agentic-gpt config set agentId laptop
-agentic-gpt config set agentSecret '<agent-secret>'
+agentic-gpt config set hub.agentSecret '<agent-secret>'
 agentic-gpt run
 ```
 
-Use `agentic-gpt run-as-room` for the Room profile. `hubTransport` may be `websocket` or `sse`.
+Set `profile` to `room` before `agentic-gpt run` for the Room profile. `hub.transport` may be `websocket` or `sse`.
+
+For an existing v0.9 or external JSON file, use the explicit migration flow:
+`agentic-gpt config import --config PATH [SOURCE]` (omit `--config` for the default path). If
+`SOURCE` is omitted, the selected config path is imported. It seeds the normal Config Init TUI and
+writes the current nested Hub schema with the usual backup transaction.
 
 ### 3. Connect ChatGPT to the Hub
 
@@ -242,7 +250,7 @@ Hub-native and forwarded execution use the same managed Job envelopes. Active wo
 ## Confirmation, command policy, and path policy
 
 ```bash
-agentic-gpt config set confirmationProvider freedesktop
+agentic-gpt config set confirmationProvider.channels '["freedesktop"]'
 agentic-gpt config set confirmationLanguage zh-CN
 
 agentic-gpt config allow add bash

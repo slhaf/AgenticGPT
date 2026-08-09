@@ -212,7 +212,7 @@ Local agents connect to:
 GET /v1/agents/{agentId}/connect
 ```
 
-WebSocket is the default local-agent transport. Local agents may opt into the HTTP/SSE transport with `hubTransport: "sse"` for environments where outbound HTTP/SSE is more stable than WebSocket.
+WebSocket is the default local-agent transport. Local agents may opt into the HTTP/SSE transport with `hub.transport: "sse"` for environments where outbound HTTP/SSE is more stable than WebSocket.
 
 SSE endpoints are agent-private and use the same `x-agent-secret` authentication as WebSocket:
 

@@ -114,6 +114,8 @@ fn run_smoke(
     let mut config: Value =
         serde_json::from_str(&fs::read_to_string(&config_path).map_err(|error| error.to_string())?)
             .map_err(|error| error.to_string())?;
+    config["mode"] = Value::String("standalone".to_string());
+    config["profile"] = Value::String(profile.to_string());
     config["agentId"] = Value::String(agent_id.clone());
     config["workspaceRoot"] = Value::String(workspace.to_string_lossy().into_owned());
     config["pathPolicy"]["writeRoots"] = json!([workspace.to_string_lossy()]);
@@ -149,13 +151,7 @@ fn run_smoke(
 
     let mut supervisor_command = Command::new(&binary);
     supervisor_command
-        .args([
-            "run-as-standalone",
-            "--config",
-            config_path.to_str().unwrap(),
-            "--profile",
-            profile,
-        ])
+        .args(["run", "--config", config_path.to_str().unwrap()])
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
     if journal_mode {

@@ -41,9 +41,9 @@ ChatGPT Actions 或 Apps MCP
 
 | 模式 | 适用场景 | 是否需要公开服务器 | 故障范围 | 启动入口 |
 | --- | --- | --- | --- | --- |
-| **Secure MCP Tunnel / Standalone** | 推荐的直接部署 | 不需要 | 单个 tunnel/Agent | `agentic-gpt run-as-standalone` |
+| **Secure MCP Tunnel / Standalone** | 推荐的直接部署 | 不需要 | 单个 tunnel/Agent | `agentic-gpt run`（配置 `mode=standalone`） |
 | **Hub + Local Agent** | 集中路由、Actions、共享历史/报告 | 需要 | Hub 是共享依赖 | `agentic-gpt-hub serve` + `agentic-gpt run` |
-| **Local Unix MCP** | 开发、smoke test、本地自动化 | 不需要 | 单个本地 worker | `agentic-gpt run-as-local` |
+| **Local Unix MCP** | 开发、smoke test、本地自动化 | 不需要 | 单个本地 worker | `agentic-gpt run`（配置 `mode=local`） |
 
 ## v0.9 主要能力
 
@@ -111,7 +111,7 @@ install -m 0755 agentic-gpt-hub ~/.local/bin/
 ```bash
 agentic-gpt config init
 agentic-gpt config set agentId laptop
-agentic-gpt config set confirmationProvider freedesktop
+agentic-gpt config set confirmationProvider.channels '["freedesktop"]'
 ```
 
 脚本中请显式提供需要确定的值，并加上 `--non-interactive`：
@@ -159,13 +159,15 @@ agentic-gpt config set tunnel.client.autoDownload true
 
 `tunnel.apiKey` 只接受 `file:PATH` 或 `env:NAME`；明文 secret 会被拒绝。
 
-### 3. 启动 Standalone worker
+### 3. 启动配置的运行时
 
 ```bash
-agentic-gpt run-as-standalone --profile normal
+agentic-gpt run
 ```
 
-Room 的 36 工具 surface 使用 `--profile room`。同一 worker 还会提供 owner-only Unix MCP socket，便于本机检查：
+配置文件中的 `mode` 和 `profile` 选择 Standalone/Hub/Local 与 Normal/Room；例如启动前执行
+`agentic-gpt config set profile room` 可使用 Room 的 36 个工具。同一 worker 还会提供
+owner-only Unix MCP socket，便于本机检查：
 
 ```bash
 agentic-gpt local list-tools
@@ -181,7 +183,8 @@ Tunnel-client 信任、缓存、恢复、报告和 service manager 说明见 [`d
 不需要 tunnel 凭据：
 
 ```bash
-agentic-gpt run-as-local --profile normal
+agentic-gpt config init --mode local --profile normal --non-interactive
+agentic-gpt run
 agentic-gpt local list-tools
 agentic-gpt local call agent.info --arguments '{}'
 ```
@@ -210,14 +213,19 @@ AGENTIC_GPT_API_KEY='<high-entropy-api-key>' \
 
 ```bash
 agentic-gpt config init
-agentic-gpt config set hubUrl https://agentic-gpt.example.com
-agentic-gpt config set hubTransport websocket
+agentic-gpt config set hub.url https://agentic-gpt.example.com
+agentic-gpt config set hub.transport websocket
 agentic-gpt config set agentId laptop
-agentic-gpt config set agentSecret '<agent-secret>'
+agentic-gpt config set hub.agentSecret '<agent-secret>'
 agentic-gpt run
 ```
 
-Room profile 使用 `agentic-gpt run-as-room`。`hubTransport` 可设为 `websocket` 或 `sse`。
+将 `profile` 设为 `room` 后使用 `agentic-gpt run` 启动 Room profile。`hub.transport` 可设为 `websocket` 或 `sse`。
+
+对于现有 v0.9 或外部 JSON，请显式使用迁移流程：
+`agentic-gpt config import --config PATH [SOURCE]`（使用默认路径时可省略 `--config`）。省略
+`SOURCE` 时会导入所选配置路径。它会把值作为普通 Config Init TUI 的种子，并通过标准备份事务
+写入当前的嵌套 Hub schema。
 
 ### 3. 将 ChatGPT 连接到 Hub
 
@@ -238,7 +246,7 @@ Hub 原生工具和转发执行使用相同的 Managed Job envelope；运行中�
 ## 确认、命令策略与路径策略
 
 ```bash
-agentic-gpt config set confirmationProvider freedesktop
+agentic-gpt config set confirmationProvider.channels '["freedesktop"]'
 agentic-gpt config set confirmationLanguage zh-CN
 
 agentic-gpt config allow add bash

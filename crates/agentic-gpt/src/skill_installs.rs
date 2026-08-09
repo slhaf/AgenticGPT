@@ -1826,7 +1826,8 @@ mod tests {
             std::env::temp_dir().join(format!("agentic-install-{}", Uuid::new_v4().simple()));
         let mut config = Config::default_config().unwrap();
         config.workspace_root = root;
-        config.confirmation_provider.set_legacy("none").unwrap();
+        config.confirmation_provider =
+            crate::config::ConfirmationProviderConfig::from_legacy("none").unwrap();
         AppState {
             config_path: PathBuf::from("test-config.json"),
             config: Arc::new(RwLock::new(config)),

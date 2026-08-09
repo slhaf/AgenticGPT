@@ -1,42 +1,20 @@
 {
-  "agentId": "laptop",
   "displayName": "agentic-gpt-linux",
+  "mode": "standalone",
+  "profile": "normal",
   "tunnel": {
     "tunnelId": "tunnel_replace-me",
-    "apiKey": "file:/home/your-user/.agentic_gpt/secrets/tunnel-api-key",
-    "client": {
-      "version": null,
-      "cacheDir": "~/.agentic_gpt/cache/tunnel-client",
-      "autoDownload": true,
-      "executable": null,
-      "downloadUrl": null,
-      "sha256": null
-    },
-    "hubReporting": {
-      "enabled": false,
-      "detail": "metadata"
-    }
+    "apiKey": "file:/home/your-user/.agentic_gpt/secrets/tunnel-api-key"
   },
-  "hubUrl": "https://agentic-gpt.example.com",
-  "hubTransport": "websocket",
-  "agentSecret": "change-me-before-use",
+  "hub": {
+    "url": "https://agentic-gpt.example.com",
+    "transport": "websocket",
+    "agentSecret": "change-me-before-use"
+  },
   "workspaceRoot": "/home/your-user/.agentic_gpt/workspace",
-  "backupLimit": 5,
   "confirmationProvider": {
     "channels": [
       "freedesktop"
-    ]
-  },
-  "confirmationLanguage": "zh-CN",
-  "sandbox": {
-    "enabled": false,
-    "bubblewrapPath": "bwrap",
-    "requiredRuntimePaths": [
-      "/usr",
-      "/bin",
-      "/lib",
-      "/lib64",
-      "/etc/ssl"
     ]
   },
   "mcpServers": {
@@ -59,17 +37,6 @@
       "~/Projects",
       "/tmp"
     ],
-    "readOnlyRoots": [
-      "~/.cache",
-      "~/.local/share",
-      "/etc/os-release",
-      "/proc/meminfo",
-      "/proc/cpuinfo",
-      "/proc/loadavg",
-      "/proc/uptime",
-      "/sys/class/power_supply",
-      "/sys/class/thermal"
-    ],
     "denyRoots": [
       "~/.ssh",
       "~/.gnupg",
@@ -87,35 +54,5 @@
       "~/.config/gcloud",
       "~/.config/gh"
     ]
-  },
-  "policy": {
-    "allow": [],
-    "confirm": [],
-    "deny": []
-  },
-  "limits": {
-    "maxConcurrentTasks": 2,
-    "maxActiveJobs": "auto",
-    "maxFileSearchContextLines": 5
-  },
-  "skills": {
-    "maxFiles": 256,
-    "maxFileBytes": 10485760,
-    "maxPackageBytes": 52428800,
-    "maxSkillMdBytes": 262144,
-    "maxInlineBytes": 2097152,
-    "connectTimeoutSecs": 10,
-    "requestTimeoutSecs": 120,
-    "idleTimeoutSecs": 30,
-    "maxRedirects": 5,
-    "maxConcurrentInstalls": 2,
-    "maxParallelDownloads": 4,
-    "maxAttempts": 3,
-    "totalDeadlineSecs": 600,
-    "allowedHosts": []
-  },
-  "room": {
-    "timezone": "Asia/Shanghai",
-    "diaryDayBoundaryHour": 5
   }
 }

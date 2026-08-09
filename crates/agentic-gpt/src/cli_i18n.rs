@@ -136,23 +136,8 @@ const COMMAND_CATALOG: &[CatalogEntry] = &[
     ),
     CatalogEntry::new(
         "run",
-        "Run the Agentic GPT hub agent",
-        "运行 Agentic GPT Hub 代理",
-    ),
-    CatalogEntry::new(
-        "run-as-room",
-        "Run a room-profile hub agent",
-        "运行 Room 配置的 Hub 代理",
-    ),
-    CatalogEntry::new(
-        "run-as-standalone",
-        "Run the standalone supervised agent",
-        "运行受监督的独立代理",
-    ),
-    CatalogEntry::new(
-        "run-as-local",
-        "Run the local agent without a Hub",
-        "运行不连接 Hub 的本地代理",
+        "Run the configured Agentic GPT agent",
+        "运行配置的 Agentic GPT 代理",
     ),
     CatalogEntry::new(
         "local",
@@ -180,6 +165,11 @@ const COMMAND_CATALOG: &[CatalogEntry] = &[
         "管理 Agentic GPT 配置",
     ),
     CatalogEntry::new("config.init", "Initialize configuration", "初始化配置文件"),
+    CatalogEntry::new(
+        "config.import",
+        "Import legacy or external configuration",
+        "导入旧版或外部配置",
+    ),
     CatalogEntry::new(
         "config.show",
         "Show the current configuration",
@@ -331,23 +321,6 @@ const ARG_CATALOG: &[CatalogEntry] = &[
     CatalogEntry::new(".language", "Select the interface language", "选择界面语言"),
     CatalogEntry::new(".config", "Configuration file to use", "要使用的配置文件"),
     CatalogEntry::new("run.config", "Configuration file to use", "要使用的配置文件"),
-    CatalogEntry::new("run-as-room.config", "Configuration file to use", "要使用的配置文件"),
-    CatalogEntry::new(
-        "run-as-standalone.config",
-        "Configuration file to use",
-        "要使用的配置文件",
-    ),
-    CatalogEntry::new(
-        "run-as-standalone.profile",
-        "Capability profile for the worker",
-        "工作进程的能力配置",
-    ),
-    CatalogEntry::new("run-as-local.config", "Configuration file to use", "要使用的配置文件"),
-    CatalogEntry::new(
-        "run-as-local.profile",
-        "Capability profile for the local agent",
-        "本地代理的能力配置",
-    ),
     CatalogEntry::new("local.config", "Configuration file to use", "要使用的配置文件"),
     CatalogEntry::new("local.call.tool", "Name of the tool to call", "要调用的工具名称"),
     CatalogEntry::new("local.call.arguments", "JSON arguments for the tool", "工具的 JSON 参数"),
@@ -388,6 +361,11 @@ const ARG_CATALOG: &[CatalogEntry] = &[
         "config.init.agent_secret",
         "Agent secret (visible to local process inspection and shell history; interactive hidden input is preferred)",
         "代理密钥（会暴露给本地进程检查和 shell 历史；建议使用交互式隐藏输入）",
+    ),
+    CatalogEntry::new(
+        "config.import.source",
+        "Legacy or external JSON source",
+        "旧版或外部 JSON 来源",
     ),
     CatalogEntry::new("config.keys.section", "Filter keys by section", "按部分筛选配置键"),
     CatalogEntry::new("config.keys.json", "Print machine-readable JSON", "输出机器可读的 JSON"),

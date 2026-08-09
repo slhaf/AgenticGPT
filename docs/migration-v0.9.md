@@ -89,7 +89,7 @@ Each machine can be upgraded independently:
 1. Stop its v0.8 runtime.
 2. Migrate its local config.
 3. Replace `agentic-gpt` with v0.9.
-4. Start `run-as-standalone` or `run-as-local`.
+4. Set the desired `mode`/`profile` in Config v2 and start `agentic-gpt run`.
 5. Verify the local socket and tool surface.
 6. Reconnect or retry the corresponding ChatGPT tunnel if needed.
 

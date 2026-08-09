@@ -125,6 +125,7 @@ mod tests {
             SetupSeed {
                 mode: Some(RuntimeMode::Hub),
                 profile: Some(WorkerProfile::Normal),
+                imported_base: None,
                 tunnel_id: Some("tunnel-staged".to_string()),
                 tunnel_api_key: Some("file:/tmp/staged-tunnel-secret".to_string()),
                 hub_url: Some("https://hub.example.com".to_string()),
@@ -352,7 +353,7 @@ pub(super) fn validate_field(
             OptionalSection::Workspace,
             &session.optional_draft(OptionalSection::Workspace),
         ),
-        SetupField::ConfirmationProvider | SetupField::ConfirmationLanguage => validate_optional(
+        SetupField::ConfirmationChannels | SetupField::ConfirmationLanguage => validate_optional(
             OptionalSection::Confirmation,
             &session.optional_draft(OptionalSection::Confirmation),
         ),
@@ -470,18 +471,10 @@ fn validate_optional(section: OptionalSection, draft: &OptionalSectionDraft) -> 
             );
         }
         (OptionalSection::Confirmation, OptionalSectionDraft::Confirmation(value)) => {
-            required(
-                &value.provider,
-                SetupField::ConfirmationProvider,
-                "confirmation_provider",
-                &mut errors,
-            );
-            if !value.provider.trim().is_empty()
-                && ConfirmationProviderConfig::from_legacy(value.provider.trim()).is_err()
-            {
+            if parse_confirmation_channels(&value.channels).is_err() {
                 errors.push(error(
-                    SetupField::ConfirmationProvider,
-                    "config_init_confirmation_provider_invalid",
+                    SetupField::ConfirmationChannels,
+                    "config_init_confirmation_channels_invalid",
                 ));
             }
             required(
@@ -625,9 +618,6 @@ fn required(value: &str, field: SetupField, key: &'static str, errors: &mut Vali
             match key {
                 "display_name" => "config_init_required_value_missing: display_name",
                 "workspace_root" => "config_init_required_value_missing: workspace_root",
-                "confirmation_provider" => {
-                    "config_init_required_value_missing: confirmation_provider"
-                }
                 "confirmation_language" => {
                     "config_init_required_value_missing: confirmation_language"
                 }
@@ -637,6 +627,11 @@ fn required(value: &str, field: SetupField, key: &'static str, errors: &mut Vali
             },
         ));
     }
+}
+
+fn parse_confirmation_channels(value: &str) -> Result<ConfirmationProviderConfig, ()> {
+    let names = serde_json::from_str::<Vec<String>>(value.trim()).map_err(|_| ())?;
+    ConfirmationProviderConfig::from_channel_names(names.iter().map(String::as_str)).map_err(|_| ())
 }
 
 fn parse_path_list(
@@ -772,6 +767,7 @@ pub(super) fn build_active_input_unchecked(
     let mut input = InitInput::non_interactive_defaults(session.language());
     input.mode = session.selected_mode();
     input.profile = session.selected_profile();
+    input.imported_base = session.imported_base().cloned();
 
     match session.selected_mode() {
         RuntimeMode::Standalone => {
@@ -846,14 +842,13 @@ fn apply_optional_draft(
             input.path_policy = Some(path_policy);
         }
         (OptionalSection::Confirmation, OptionalSectionDraft::Confirmation(value)) => {
-            input.confirmation_provider = Some(
-                ConfirmationProviderConfig::from_legacy(value.provider.trim()).map_err(|_| {
+            input.confirmation_provider =
+                Some(parse_confirmation_channels(&value.channels).map_err(|_| {
                     vec![error(
-                        SetupField::ConfirmationProvider,
-                        "config_init_confirmation_provider_invalid",
+                        SetupField::ConfirmationChannels,
+                        "config_init_confirmation_channels_invalid",
                     )]
-                })?,
-            );
+                })?);
             input.confirmation_language = Some(value.language.trim().to_string());
         }
         (OptionalSection::Limits, OptionalSectionDraft::Limits(value)) => {
@@ -1016,7 +1011,7 @@ fn first_field(section: OptionalSection) -> SetupField {
     match section {
         OptionalSection::Identity => SetupField::DisplayName,
         OptionalSection::Workspace => SetupField::WorkspaceRoot,
-        OptionalSection::Confirmation => SetupField::ConfirmationProvider,
+        OptionalSection::Confirmation => SetupField::ConfirmationChannels,
         OptionalSection::Limits => SetupField::MaxConcurrentTasks,
         OptionalSection::Sandbox => SetupField::SandboxEnabled,
         OptionalSection::McpServers => SetupField::McpServerId,

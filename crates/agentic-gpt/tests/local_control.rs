@@ -38,6 +38,8 @@ fn run_local_e2e(root: &Path) -> Result<(), String> {
         serde_json::from_slice(&fs::read(&config_path).map_err(|error| error.to_string())?)
             .map_err(|error| error.to_string())?;
     config["agentId"] = json!(agent_id);
+    config["mode"] = json!("local");
+    config["profile"] = json!("normal");
     config["displayName"] = json!("Local E2E");
     config["workspaceRoot"] = json!(workspace);
     config["tunnel"] = Value::Null;
@@ -65,9 +67,8 @@ fn run_local_e2e(root: &Path) -> Result<(), String> {
         .join(&agent_id)
         .join("mcp.sock");
     let mut server = command(&binary)
-        .args(["run-as-local", "--config"])
+        .args(["run", "--config"])
         .arg(&config_path)
-        .args(["--profile", "normal"])
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
@@ -240,9 +241,8 @@ fn run_local_e2e(root: &Path) -> Result<(), String> {
     }
 
     let second = command(&binary)
-        .args(["run-as-local", "--config"])
+        .args(["run", "--config"])
         .arg(&config_path)
-        .args(["--profile", "normal"])
         .output()
         .map_err(|error| error.to_string())?;
     if second.status.success()

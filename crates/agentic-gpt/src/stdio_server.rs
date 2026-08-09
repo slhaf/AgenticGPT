@@ -3783,7 +3783,8 @@ mod tests {
         let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
         {
             let mut config = server.state.config.write().await;
-            config.confirmation_provider.set_legacy("hub").unwrap();
+            config.confirmation_provider =
+                crate::config::ConfirmationProviderConfig::from_legacy("hub").unwrap();
         }
         let (sender, mut receiver) = mpsc::unbounded_channel();
         *server.state.hub_sender.lock().await = Some(sender);
@@ -3840,7 +3841,8 @@ mod tests {
         let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
         {
             let mut config = server.state.config.write().await;
-            config.confirmation_provider.set_legacy("hub").unwrap();
+            config.confirmation_provider =
+                crate::config::ConfirmationProviderConfig::from_legacy("hub").unwrap();
         }
         let (sender, mut receiver) = mpsc::unbounded_channel();
         *server.state.hub_sender.lock().await = Some(sender);
@@ -4587,7 +4589,8 @@ mod tests {
         let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
         {
             let mut config = server.state.config.write().await;
-            config.confirmation_provider.set_legacy("hub").unwrap();
+            config.confirmation_provider =
+                crate::config::ConfirmationProviderConfig::from_legacy("hub").unwrap();
         }
         let workspace = server.state.config.read().await.workspace_root.clone();
         let conflict_path = workspace.join("a-batch-race.txt");

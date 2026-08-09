@@ -1879,7 +1879,8 @@ mod tests {
         let mut config = Config::default_config().unwrap();
         config.workspace_root = workspace.clone();
         config.limits.max_active_jobs = crate::config::MaxActiveJobs::Explicit(max_active_jobs);
-        config.confirmation_provider.set_legacy("none").unwrap();
+        config.confirmation_provider =
+            crate::config::ConfirmationProviderConfig::from_legacy("none").unwrap();
         let state = AppState {
             config_path: root.join("config.json"),
             config: Arc::new(RwLock::new(config)),

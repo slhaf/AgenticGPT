@@ -6,6 +6,10 @@ Agentic GPT 的 Standalone、Local Unix MCP 与连接 Hub 的 Agent 共用一份
 ~/.agentic_gpt/config.json
 ```
 
+磁盘文件是稀疏的 Config v2 投影，始终包含权威的顶层 `mode`（`standalone`、`hub` 或
+`local`）和 `profile`（`normal` 或 `room`）；省略的值会从有效默认值重建。`config show`
+显示完整的有效配置，而 Agentic 管理的写入会保持文件稀疏。
+
 从以下命令开始：
 
 ```bash
@@ -13,7 +17,7 @@ agentic-gpt config init
 agentic-gpt config show
 ```
 
-[`config.example.json`](../config.example.json) 是严格的 v0.9 superset 示例：以 Standalone 为优先入口，不包含可用凭据，示例下游 MCP server 全部保持 disabled，同时保留 Hub 模式需要的可选字段。
+[`config.example.json`](../config.example.json) 是稀疏的 Config v2 示例：以 Standalone 为优先入口，不包含可用凭据，示例下游 MCP server 全部保持 disabled，同时只保留 Hub 模式需要的有意义字段。
 
 ## 全屏初始化行为
 
@@ -74,18 +78,18 @@ Review 会隐藏密钥，可跳回 Basic、Connection 或可选 section 编辑�
 | --- | --- | --- | --- |
 | 公共 identity/workspace/policy | 必需 | 必需 | 必需 |
 | `tunnel` | 必需 | 忽略 | 忽略 |
-| `hubUrl`、`hubTransport`、`agentSecret` | 仅可选 Hub reporting/ntfy relay 使用 | 忽略 | 必需 |
+| `hub`（`url`、`transport`、`agentSecret`） | 仅可选 Hub reporting/ntfy relay 使用 | 忽略 | 必需 |
 | 公开 Hub/VPS | 不需要 | 不需要 | 需要 |
-| 启动命令 | `run-as-standalone` | `run-as-local` | `run` / `run-as-room` |
+| 启动命令 | `agentic-gpt run` | `agentic-gpt run` | `agentic-gpt run` |
 
-所有模式的 JSON 类型仍保留 Hub 字段，便于同一配置在不同 runtime 之间切换。Standalone 与 Local 的命令链路不经过 Hub。Standalone 只有在启用 `tunnel.hubReporting.enabled` 或使用 Hub-backed `ntfy` 确认时才会使用 Hub 字段。
+所有模式的 JSON 类型仍保留嵌套 `hub` section，便于同一配置在不同 runtime 之间切换。Standalone 与 Local 的命令链路不经过 Hub。Standalone 只有在启用 `tunnel.hubReporting.enabled` 或使用 Hub-backed `ntfy` 确认时才会使用 Hub 字段；显式配置的非活动 section 会保留。
 
 ## Standalone-first 配置
 
 ```bash
 agentic-gpt config init
 agentic-gpt config set agentId laptop
-agentic-gpt config set confirmationProvider freedesktop
+agentic-gpt config set confirmationProvider.channels '["freedesktop"]'
 
 install -d -m 700 "$HOME/.agentic_gpt/secrets"
 touch "$HOME/.agentic_gpt/secrets/tunnel-api-key"
@@ -98,15 +102,17 @@ unset AGENTIC_TUNNEL_API_KEY
 agentic-gpt config set tunnel.tunnelId tunnel_<assigned-id>
 agentic-gpt config set tunnel.apiKey file:"$HOME/.agentic_gpt/secrets/tunnel-api-key"
 agentic-gpt config set tunnel.client.autoDownload true
-agentic-gpt run-as-standalone --profile normal
+agentic-gpt run
 ```
 
-Room surface 使用 `--profile room`。
+将 `profile` 设为 `room` 即可使用 Room surface（例如 `agentic-gpt config set profile room`）。
 
 ## 顶层字段
 
 | 字段 | 用途 |
 | --- | --- |
+| `mode` | 权威运行时分派：`standalone`、`hub` 或 `local`。 |
+| `profile` | 权威能力 surface：`normal` 或 `room`。 |
 | `agentId` | 稳定本地 identity，也用于派生私有 runtime/socket 路径。 |
 | `displayName` | summary/reporting 中的人类可读机器名称。 |
 | `workspaceRoot` | 主可写工作区，也是 `.agentic-gpt-audit.jsonl` 所在位置。 |
@@ -121,7 +127,7 @@ Room surface 使用 `--profile room`。
 | `skills` | Skill package/install 限制与网络策略。 |
 | `room` | Room 时区、日记日界线和可选 notebook root。 |
 | `tunnel` | Standalone tunnel-client 来源、secret 引用与可选 reporting。 |
-| `hubUrl`、`hubTransport`、`agentSecret` | 集中式 Hub 连接，或 Standalone 的可选 Hub reporting/ntfy relay。 |
+| `hub` | 集中式 Hub 连接，或 Standalone 的可选 Hub reporting/ntfy relay。 |
 
 未知顶层字段会在 load/write round trip 中保留。`limits` 等严格嵌套对象会拒绝已经删除的 v0.8 字段。
 
@@ -171,14 +177,16 @@ Hub 模式需要：
 
 ```json
 {
-  "hubUrl": "https://agentic-gpt.example.com",
-  "hubTransport": "websocket",
-  "agentId": "laptop",
-  "agentSecret": "<agent-secret>"
+  "hub": {
+    "url": "https://agentic-gpt.example.com",
+    "transport": "websocket",
+    "agentSecret": "<agent-secret>"
+  },
+  "agentId": "laptop"
 }
 ```
 
-`hubTransport` 可为 `websocket` 或 `sse`。`workerUrl` 仍可作为 `hubUrl` 的读取/设置 alias，但写回时使用规范字段。
+`hub.transport` 可为 `websocket` 或 `sse`。旧的顶层 `hubUrl`、`hubTransport`、`workerUrl`、`agentSecret` 仅由显式 `config import` 识别；普通 v2 load 会拒绝它们。
 
 Hub credential 与 Standalone tunnel API key 是两套独立凭据，不要复用。
 
@@ -278,9 +286,9 @@ Server id 最长 64 字节，只使用字母、数字、`.`、`_`、`-`。`strea
 agentic-gpt config keys [--section <SECTION>] [--json]
 ```
 
-文本形式按 `identity`、`hub`、`confirmation`、`sandbox`、`limits`、`skills`、`room`、
+文本形式按 `runtime`、`identity`、`hub`、`confirmation`、`sandbox`、`limits`、`skills`、`room`、
 `tunnel` 分组；`--section` 只显示其中一个分组。`--json` 返回机器可读的类型、是否可为
-null、示例、双语说明和别名元数据（例如 `workerUrl` 是 `hubUrl` 的别名）。`config set`
+null、示例、双语说明和别名元数据。`config set`
 只接受 registry 中的键；结构化 policy 与 MCP 集合应使用专用命令。
 
 注册键后的值是一个 shell 参数。因此 JSON 列表必须加引号；`room.notebookRoot` 可为 null，
@@ -294,8 +302,8 @@ agentic-gpt config set room.notebookRoot null
 
 registry 包含以下常用 scalar：
 
-- `agentId`、`agentSecret`、`hubUrl`、`hubTransport`、`workspaceRoot`
-- `confirmationProvider`、`confirmationLanguage`、`sandbox.enabled`
+- `mode`、`profile`、`agentId`、`hub.url`、`hub.transport`、`hub.agentSecret`、`workspaceRoot`
+- `confirmationProvider.channels`、`confirmationLanguage`、`sandbox.enabled`
 - `tunnel.tunnelId`、`tunnel.apiKey`
 - 全部 `tunnel.client.*` 与 `tunnel.hubReporting.*`
 - `room.notebookRoot`、`room.timezone`、`room.diaryDayBoundaryHour`
@@ -312,6 +320,15 @@ Tunnel secret 必须写成 `file:PATH` 或 `env:NAME` 引用；`file:` 路径可
 发生在事务提交之前，因此不会创建或修改配置文件或密钥文件。summary、诊断与错误不会输出
 密钥值。
 
+## 显式 import 迁移
+
+普通 `Config::load()` 严格要求 v2，不会推断缺失的 selector，也不会静默接受旧的 Hub 形状。
+请使用 `agentic-gpt config import --config PATH [SOURCE]` 迁移旧版或外部 JSON（`--config`
+可省略，此时使用默认配置路径）；省略 SOURCE 时会导入所选 `--config` 路径。该流程进入普通
+交互式 Config Init TUI，保留没有编辑器的已识别字段（包括
+MCP server、policy、path policy、limits、非活动 hub/tunnel/room 数据以及安全的未知扁平字段），
+明确报告无法导入的字段，并通过标准备份/密钥事务写入。
+
 ## 热加载与重启边界
 
 Standalone 与 Local worker 会轮询配置，并原子应用通过验证的 live subset。无效候选会保留上一份有效状态。
@@ -320,9 +337,9 @@ Standalone 与 Local worker 会轮询配置，并原子应用通过验证的 liv
 | --- | --- |
 | `policy`、`pathPolicy`、`limits`、`mcpServers` | 对新 admission/call 热加载 |
 | 已接纳 Job 与已创建下游调用 | 保留原决策/配置 |
-| `agentId`、`workspaceRoot`、profile | 需要重启 |
+| `mode`、`profile`、`agentId`、`workspaceRoot` | 需要重启 |
 | `tunnel.*` client identity/source/secret | 需要重启 |
-| `hubUrl`、`hubTransport`、`agentSecret`、reporting mode | 对相关连接需要重启 |
+| `hub`、reporting mode | 对相关连接需要重启 |
 | Skill install 并发等 startup-owned 设置 | 需要重启 |
 
 Standalone supervisor 检测到 startup identity 变化时会输出 `restart_required`。不要把“文件已修改”误认为现有子进程树已经切换。

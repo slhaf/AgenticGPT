@@ -34,7 +34,7 @@ pub(crate) async fn connect_loop(state: AppState) -> Result<()> {
     }
     loop {
         let config = state.config.read().await.clone();
-        if config.hub_transport == "sse" {
+        if config.hub.transport == "sse" {
             match connect_sse(state.clone(), config).await {
                 Err(error) => log_warn(format!("sse connection failed: {error}")),
                 Ok(()) => log_warn("sse connection closed".to_string()),
@@ -46,7 +46,7 @@ pub(crate) async fn connect_loop(state: AppState) -> Result<()> {
         }
         let url = format!(
             "{}/v1/agents/{}/connect",
-            config.hub_url.trim_end_matches('/'),
+            config.hub.url.trim_end_matches('/'),
             config.agent_id
         )
         .replace("http://", "ws://")
@@ -54,9 +54,9 @@ pub(crate) async fn connect_loop(state: AppState) -> Result<()> {
         let mut request = url.into_client_request()?;
         request
             .headers_mut()
-            .insert("x-agent-secret", config.agent_secret.parse()?);
+            .insert("x-agent-secret", config.hub.agent_secret.parse()?);
 
-        let proxy = proxy_url(&config.hub_url);
+        let proxy = proxy_url(&config.hub.url);
         log_info(format!(
             "connecting to hub; agentId={}; proxy={}",
             config.agent_id,
@@ -194,7 +194,7 @@ async fn connect_reporting_loop(state: AppState) -> Result<()> {
         if !enabled {
             return Ok(());
         }
-        let result = if config.hub_transport == "sse" {
+        let result = if config.hub.transport == "sse" {
             connect_reporting_sse(state.clone(), config).await
         } else {
             connect_reporting_websocket(state.clone(), config).await
@@ -213,7 +213,7 @@ async fn connect_reporting_loop(state: AppState) -> Result<()> {
 async fn connect_reporting_websocket(state: AppState, config: Config) -> Result<()> {
     let url = format!(
         "{}/v1/agents/{}/connect",
-        config.hub_url.trim_end_matches('/'),
+        config.hub.url.trim_end_matches('/'),
         config.agent_id
     )
     .replace("http://", "ws://")
@@ -221,8 +221,8 @@ async fn connect_reporting_websocket(state: AppState, config: Config) -> Result<
     let mut request = url.into_client_request()?;
     request
         .headers_mut()
-        .insert("x-agent-secret", config.agent_secret.parse()?);
-    let proxy = proxy_url(&config.hub_url);
+        .insert("x-agent-secret", config.hub.agent_secret.parse()?);
+    let proxy = proxy_url(&config.hub.url);
     let (stream, _) = timeout(
         Duration::from_secs(CONNECT_TIMEOUT_SECS),
         connect_hub(request, proxy),
@@ -298,7 +298,7 @@ async fn connect_reporting_websocket(state: AppState, config: Config) -> Result<
 
 async fn connect_reporting_sse(state: AppState, config: Config) -> Result<()> {
     let connection_id = format!("conn_{}", Uuid::new_v4().simple());
-    let base = config.hub_url.trim_end_matches('/');
+    let base = config.hub.url.trim_end_matches('/');
     let events_url = format!(
         "{}/v1/agents/{}/events?connectionId={}",
         base, config.agent_id, connection_id
@@ -313,7 +313,7 @@ async fn connect_reporting_sse(state: AppState, config: Config) -> Result<()> {
         .map_err(|error| anyhow!("{error}"))?;
     let response = client
         .get(events_url)
-        .header("x-agent-secret", &config.agent_secret)
+        .header("x-agent-secret", &config.hub.agent_secret)
         .send()
         .await
         .map_err(|error| anyhow!("{error}"))?;
@@ -329,7 +329,7 @@ async fn connect_reporting_sse(state: AppState, config: Config) -> Result<()> {
     *state.reporting_sender.lock().await = Some(event_tx.clone());
     let post_client = client.clone();
     let post_url = messages_url.clone();
-    let post_secret = config.agent_secret.clone();
+    let post_secret = config.hub.agent_secret.clone();
     let writer = tokio::spawn(async move {
         loop {
             let message = tokio::select! {
@@ -642,7 +642,7 @@ fn bounded_reason(value: &str) -> String {
 
 async fn connect_sse(state: AppState, config: Config) -> Result<()> {
     let connection_id = format!("conn_{}", Uuid::new_v4().simple());
-    let base = config.hub_url.trim_end_matches('/');
+    let base = config.hub.url.trim_end_matches('/');
     let events_url = format!(
         "{}/v1/agents/{}/events?connectionId={}",
         base, config.agent_id, connection_id
@@ -661,7 +661,7 @@ async fn connect_sse(state: AppState, config: Config) -> Result<()> {
         .map_err(|error| anyhow!("{error}"))?;
     let response = client
         .get(events_url)
-        .header("x-agent-secret", &config.agent_secret)
+        .header("x-agent-secret", &config.hub.agent_secret)
         .send()
         .await
         .map_err(|error| anyhow!("{error}"))?;
@@ -673,7 +673,7 @@ async fn connect_sse(state: AppState, config: Config) -> Result<()> {
     let (tx, mut rx) = mpsc::unbounded_channel::<AgentMessage>();
     *state.hub_sender.lock().await = Some(tx.clone());
     let post_client = client.clone();
-    let agent_secret = config.agent_secret.clone();
+    let agent_secret = config.hub.agent_secret.clone();
     let writer = tokio::spawn(async move {
         while let Some(message) = rx.recv().await {
             let mut delay = Duration::from_millis(250);
@@ -1145,7 +1145,7 @@ pub(crate) fn room_agent_required_error() -> serde_json::Value {
     serde_json::json!({
         "error": {
             "code": "room_agent_required",
-            "message": "room commands require run-as-room"
+            "message": "room commands require profile=room in config"
         }
     })
 }

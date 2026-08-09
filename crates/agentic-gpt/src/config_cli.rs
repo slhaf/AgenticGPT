@@ -10,7 +10,8 @@ use serde::Serialize;
 use crate::{
     cli_i18n::{self, UiLanguage},
     config::{
-        self, normalize_confirmation_language, write_config_with_backup, Config, ReportingDetail,
+        self, normalize_confirmation_language, ordered_config_json, write_config_with_backup,
+        Config, ReportingDetail,
     },
     config_setup::SetupSeed,
     config_templates::{self, InitInput, InitSummary, RuntimeMode, SecretValue},
@@ -30,10 +31,12 @@ pub(crate) enum ConfigValueKind {
     JsonPathArray,
     NullableString,
     NullablePath,
-    ConfirmationProvider,
+    ConfirmationChannels,
     Language,
     HubTransport,
     ReportingDetail,
+    RuntimeMode,
+    WorkerProfile,
 }
 
 impl ConfigValueKind {
@@ -48,16 +51,31 @@ impl ConfigValueKind {
             Self::JsonPathArray => "json-path-array",
             Self::NullableString => "nullable-string",
             Self::NullablePath => "nullable-path",
-            Self::ConfirmationProvider => "confirmation-provider",
+            Self::ConfirmationChannels => "ordered-string-array",
             Self::Language => "language",
             Self::HubTransport => "hub-transport",
             Self::ReportingDetail => "reporting-detail",
+            Self::RuntimeMode => "runtime-mode",
+            Self::WorkerProfile => "worker-profile",
+        }
+    }
+
+    fn choices(self) -> Option<&'static [&'static str]> {
+        match self {
+            Self::Boolean => Some(&["true", "false"]),
+            Self::ConfirmationChannels => Some(&["freedesktop", "ntfy"]),
+            Self::HubTransport => Some(&["websocket", "sse"]),
+            Self::ReportingDetail => Some(&["metadata", "full"]),
+            Self::RuntimeMode => Some(&["standalone", "hub", "local"]),
+            Self::WorkerProfile => Some(&["normal", "room"]),
+            _ => None,
         }
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
 pub(crate) enum ConfigSection {
+    Runtime,
     Identity,
     Hub,
     Confirmation,
@@ -71,6 +89,7 @@ pub(crate) enum ConfigSection {
 impl ConfigSection {
     fn as_str(self) -> &'static str {
         match self {
+            Self::Runtime => "runtime",
             Self::Identity => "identity",
             Self::Hub => "hub",
             Self::Confirmation => "confirmation",
@@ -84,6 +103,8 @@ impl ConfigSection {
 
     fn label(self, language: UiLanguage) -> &'static str {
         match (self, language) {
+            (Self::Runtime, UiLanguage::En) => "Runtime",
+            (Self::Runtime, UiLanguage::ZhCn) => "运行时",
             (Self::Identity, UiLanguage::En) => "Identity",
             (Self::Identity, UiLanguage::ZhCn) => "身份",
             (Self::Hub, UiLanguage::En) => "Hub",
@@ -155,6 +176,26 @@ macro_rules! config_key {
 
 pub(crate) static CONFIG_KEYS: &[ConfigKeySpec] = &[
     config_key!(
+        "mode",
+        Runtime,
+        RuntimeMode,
+        false,
+        "Runtime mode selected by the configuration.",
+        "由配置选择的运行模式。",
+        "standalone",
+        set_mode
+    ),
+    config_key!(
+        "profile",
+        Runtime,
+        WorkerProfile,
+        false,
+        "Capability profile selected by the configuration.",
+        "由配置选择的能力配置。",
+        "normal",
+        set_profile
+    ),
+    config_key!(
         "agentId",
         Identity,
         String,
@@ -175,16 +216,6 @@ pub(crate) static CONFIG_KEYS: &[ConfigKeySpec] = &[
         set_display_name
     ),
     config_key!(
-        "agentSecret",
-        Identity,
-        String,
-        false,
-        "Agent authentication secret or reference.",
-        "代理认证密钥或密钥引用。",
-        "env:AGENT_SECRET",
-        set_agent_secret
-    ),
-    config_key!(
         "workspaceRoot",
         Identity,
         Path,
@@ -195,7 +226,7 @@ pub(crate) static CONFIG_KEYS: &[ConfigKeySpec] = &[
         set_workspace_root
     ),
     config_key!(
-        "hubUrl",
+        "hub.url",
         Hub,
         String,
         false,
@@ -205,18 +236,7 @@ pub(crate) static CONFIG_KEYS: &[ConfigKeySpec] = &[
         set_hub_url
     ),
     config_key!(
-        "workerUrl",
-        Hub,
-        String,
-        false,
-        "Legacy alias for hubUrl.",
-        "hubUrl 的旧别名。",
-        "http://localhost:8787",
-        set_hub_url,
-        "hubUrl"
-    ),
-    config_key!(
-        "hubTransport",
+        "hub.transport",
         Hub,
         HubTransport,
         false,
@@ -226,14 +246,24 @@ pub(crate) static CONFIG_KEYS: &[ConfigKeySpec] = &[
         set_hub_transport
     ),
     config_key!(
-        "confirmationProvider",
-        Confirmation,
-        ConfirmationProvider,
+        "hub.agentSecret",
+        Hub,
+        String,
         false,
-        "Confirmation channels: none, freedesktop, ntfy, or default.",
-        "确认通道：none、freedesktop、ntfy 或 default。",
-        "default",
-        set_confirmation_provider
+        "Agent authentication secret or reference.",
+        "代理认证密钥或密钥引用。",
+        "env:AGENT_SECRET",
+        set_agent_secret
+    ),
+    config_key!(
+        "confirmationProvider.channels",
+        Confirmation,
+        ConfirmationChannels,
+        false,
+        "Ordered confirmation fallback channels; the first available channel handles the request.",
+        "有序确认降级通道；按列表顺序尝试，首个可用通道处理请求。",
+        r#"["freedesktop","ntfy"]"#,
+        set_confirmation_channels
     ),
     config_key!(
         "confirmationLanguage",
@@ -607,6 +637,8 @@ struct ConfigKeyOutput {
     #[serde(rename = "type")]
     kind: &'static str,
     nullable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    choices: Option<&'static [&'static str]>,
     example: &'static str,
     description: ConfigDescriptionOutput,
     #[serde(rename = "aliasOf", skip_serializing_if = "Option::is_none")]
@@ -620,7 +652,8 @@ struct ConfigDescriptionOutput {
     zh_cn: &'static str,
 }
 
-const CONFIG_SECTION_ORDER: [ConfigSection; 8] = [
+const CONFIG_SECTION_ORDER: [ConfigSection; 9] = [
+    ConfigSection::Runtime,
     ConfigSection::Identity,
     ConfigSection::Hub,
     ConfigSection::Confirmation,
@@ -646,6 +679,7 @@ fn print_config_keys(
                     section: spec.section.as_str(),
                     kind: spec.kind.as_str(),
                     nullable: spec.nullable,
+                    choices: spec.kind.choices(),
                     example: spec.example,
                     description: ConfigDescriptionOutput {
                         en: spec.description.en,
@@ -679,19 +713,25 @@ fn print_config_keys(
                     UiLanguage::ZhCn => format!("；{canonical} 的别名"),
                 })
                 .unwrap_or_default();
-            let example_label = match language {
-                UiLanguage::En => "example",
-                UiLanguage::ZhCn => "示例",
+            let (description_label, example_label) = match language {
+                UiLanguage::En => ("description", "example"),
+                UiLanguage::ZhCn => ("说明", "示例"),
             };
+            println!("  {} [{}]{}", spec.key, spec.kind.as_str(), alias);
             println!(
-                "  {} [{}]{} — {} ({}: {})",
-                spec.key,
-                spec.kind.as_str(),
-                alias,
-                localized_description(spec, language),
-                example_label,
-                spec.example
+                "    ├─ {description_label}: {}",
+                localized_description(spec, language)
             );
+            if let Some(choices) = spec.kind.choices() {
+                let choices_label = match language {
+                    UiLanguage::En => "choices",
+                    UiLanguage::ZhCn => "可选值",
+                };
+                println!("    ├─ {example_label}: {}", spec.example);
+                println!("    └─ {choices_label}: {}", choices.join(" | "));
+            } else {
+                println!("    └─ {example_label}: {}", spec.example);
+            }
         }
     }
     Ok(())
@@ -702,6 +742,25 @@ fn localized_description(spec: &ConfigKeySpec, language: UiLanguage) -> &'static
         UiLanguage::En => spec.description.en,
         UiLanguage::ZhCn => spec.description.zh_cn,
     }
+}
+
+fn set_mode(config: &mut Config, value: &str) -> Result<()> {
+    config.mode = match value.to_ascii_lowercase().as_str() {
+        "standalone" => RuntimeMode::Standalone,
+        "hub" => RuntimeMode::Hub,
+        "local" => RuntimeMode::Local,
+        _ => return Err(anyhow!("mode must be standalone, hub, or local")),
+    };
+    Ok(())
+}
+
+fn set_profile(config: &mut Config, value: &str) -> Result<()> {
+    config.profile = match value.to_ascii_lowercase().as_str() {
+        "normal" => WorkerProfile::Normal,
+        "room" => WorkerProfile::Room,
+        _ => return Err(anyhow!("profile must be normal or room")),
+    };
+    Ok(())
 }
 
 fn set_agent_id(config: &mut Config, value: &str) -> Result<()> {
@@ -715,7 +774,7 @@ fn set_display_name(config: &mut Config, value: &str) -> Result<()> {
 }
 
 fn set_agent_secret(config: &mut Config, value: &str) -> Result<()> {
-    config.agent_secret = value.to_string();
+    config.hub.agent_secret = value.to_string();
     Ok(())
 }
 
@@ -732,24 +791,25 @@ fn set_workspace_root(config: &mut Config, value: &str) -> Result<()> {
 }
 
 fn set_hub_url(config: &mut Config, value: &str) -> Result<()> {
-    config.hub_url = value.to_string();
+    config.hub.url = value.to_string();
     Ok(())
 }
 
 fn set_hub_transport(config: &mut Config, value: &str) -> Result<()> {
     let normalized = value.to_lowercase();
     if normalized != "websocket" && normalized != "sse" {
-        return Err(anyhow!("hubTransport must be websocket or sse"));
+        return Err(anyhow!("hub.transport must be websocket or sse"));
     }
-    config.hub_transport = normalized;
+    config.hub.transport = normalized;
     Ok(())
 }
 
-fn set_confirmation_provider(config: &mut Config, value: &str) -> Result<()> {
-    config
-        .confirmation_provider
-        .set_legacy(value)
-        .map_err(|error| anyhow!(error))?;
+fn set_confirmation_channels(config: &mut Config, value: &str) -> Result<()> {
+    let names = serde_json::from_str::<Vec<String>>(value)
+        .map_err(|_| anyhow!("confirmationProvider.channels must be a JSON string array"))?;
+    config.confirmation_provider =
+        config::ConfirmationProviderConfig::from_channel_names(names.iter().map(String::as_str))
+            .map_err(|error| anyhow!(error))?;
     Ok(())
 }
 
@@ -992,6 +1052,13 @@ pub(crate) struct ConfigInitArgs {
     pub(crate) agent_secret: Option<String>,
 }
 
+#[derive(clap::Args, Clone, Default)]
+pub(crate) struct ConfigImportArgs {
+    /// Legacy or external JSON source. If omitted, import the selected --config path.
+    #[arg(value_name = "SOURCE")]
+    pub(crate) source: Option<PathBuf>,
+}
+
 pub(crate) fn init_non_interactive(
     config_path: &Path,
     args: &ConfigInitArgs,
@@ -1024,6 +1091,7 @@ pub(crate) fn setup_seed_from_args(args: &ConfigInitArgs) -> SetupSeed {
     SetupSeed {
         mode: args.mode,
         profile: args.profile,
+        imported_base: None,
         tunnel_id: args.tunnel_id.clone(),
         tunnel_api_key: args.tunnel_api_key.clone(),
         hub_url: args.hub_url.clone(),
@@ -1093,9 +1161,42 @@ fn handle_init(config_path: &Path, args: ConfigInitArgs, language: UiLanguage) -
     Ok(())
 }
 
+fn handle_import(config_path: &Path, args: ConfigImportArgs, language: UiLanguage) -> Result<()> {
+    let source_path = args.source.unwrap_or_else(|| config_path.to_path_buf());
+    let imported = Config::import(&source_path)?;
+    for warning in &imported.warnings {
+        eprintln!("config import: field {warning}");
+    }
+    if !process_should_use_interactive_init(false) {
+        return Err(anyhow!(interactive_init_required_message(language)));
+    }
+    let seed = SetupSeed {
+        mode: Some(imported.config.mode),
+        profile: Some(imported.config.profile),
+        imported_base: Some(imported.config),
+        ..SetupSeed::default()
+    };
+    match crate::config_tui::run_config_tui(config_path, seed, language) {
+        Ok(summary) => {
+            println!(
+                "{} {}",
+                cli_i18n::text(language).initialized,
+                summary.config_path.display()
+            );
+            Ok(())
+        }
+        Err(error) if error.to_string() == "config_init_cancelled" => {
+            println!("{}", cli_i18n::text(language).cancelled);
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
 #[derive(Subcommand)]
 pub(crate) enum ConfigCommand {
     Init(ConfigInitArgs),
+    Import(ConfigImportArgs),
     Show,
     Keys {
         #[arg(long, value_enum)]
@@ -1178,9 +1279,10 @@ pub(crate) async fn handle_config(
 ) -> Result<()> {
     match command {
         ConfigCommand::Init(args) => handle_init(&config_path, args, language)?,
+        ConfigCommand::Import(args) => handle_import(&config_path, args, language)?,
         ConfigCommand::Show => {
             let config = Config::load(&config_path)?;
-            println!("{}", serde_json::to_string_pretty(&config)?);
+            println!("{}", ordered_config_json(&config)?);
         }
         ConfigCommand::Keys { section, json } => {
             print_config_keys(section, json, language)?;

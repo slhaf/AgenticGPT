@@ -34,7 +34,7 @@ fn config_help_is_fully_localized_without_changing_tokens() {
     assert!(en.contains("Commands:"));
     assert!(en.contains("Initialize configuration"));
     for token in [
-        "init", "show", "set", "keys", "allow", "confirm", "deny", "path", "mcp",
+        "init", "import", "show", "set", "keys", "allow", "confirm", "deny", "path", "mcp",
     ] {
         assert!(zh.contains(token), "Chinese help omitted token {token}");
         assert!(en.contains(token), "English help omitted token {token}");
@@ -46,13 +46,11 @@ fn every_visible_command_has_help() {
     let command_paths: &[&[&str]] = &[
         &["--help"],
         &["run", "--help"],
-        &["run-as-room", "--help"],
-        &["run-as-standalone", "--help"],
-        &["run-as-local", "--help"],
         &["local", "--help"],
         &["local", "call", "--help"],
         &["config", "--help"],
         &["config", "init", "--help"],
+        &["config", "import", "--help"],
         &["config", "show", "--help"],
         &["config", "set", "--help"],
         &["config", "keys", "--help"],
@@ -266,7 +264,7 @@ fn config_init_set_and_show_round_trip() {
     let init = Command::new(&binary)
         .args(["config", "--config"])
         .arg(&config)
-        .args(["init", "--non-interactive"])
+        .args(["init", "--profile", "room", "--non-interactive"])
         .output()
         .unwrap();
     assert!(init.status.success(), "config init command failed");
@@ -279,6 +277,11 @@ fn config_init_set_and_show_round_trip() {
         .unwrap();
     assert!(set.status.success(), "config set command failed");
 
+    let disk: Value = serde_json::from_slice(&fs::read(&config).unwrap()).unwrap();
+    assert_eq!(disk["mode"], "standalone");
+    assert_eq!(disk["profile"], "room");
+    assert!(disk.get("limits").is_none());
+
     let show = Command::new(&binary)
         .args(["config", "--config"])
         .arg(&config)
@@ -287,6 +290,9 @@ fn config_init_set_and_show_round_trip() {
         .unwrap();
     assert!(show.status.success(), "config show command failed");
     let value: Value = serde_json::from_slice(&show.stdout).unwrap();
+    assert_eq!(value["mode"], "standalone");
+    assert_eq!(value["profile"], "room");
+    assert_eq!(value["limits"]["maxConcurrentTasks"], 2);
     assert_eq!(value["room"]["timezone"], "Asia/Tokyo");
 
     let _ = fs::remove_dir_all(root);
@@ -301,11 +307,31 @@ fn config_keys_json_lists_registry() {
         .unwrap();
     assert!(keys.status.success(), "config keys command failed");
     let value: Value = serde_json::from_slice(&keys.stdout).unwrap();
-    assert!(value["keys"]
-        .as_array()
-        .unwrap()
+    let entries = value["keys"].as_array().unwrap();
+    assert!(entries
         .iter()
         .any(|entry| { entry["key"] == "limits.maxActiveJobs" }));
+    let mode = entries.iter().find(|entry| entry["key"] == "mode").unwrap();
+    assert_eq!(
+        mode["choices"],
+        serde_json::json!(["standalone", "hub", "local"])
+    );
+    let confirmation = entries
+        .iter()
+        .find(|entry| entry["key"] == "confirmationProvider.channels")
+        .unwrap();
+    assert_eq!(
+        confirmation["choices"],
+        serde_json::json!(["freedesktop", "ntfy"])
+    );
+    assert!(!entries
+        .iter()
+        .any(|entry| entry["key"] == "confirmationProvider"));
+    let sandbox = entries
+        .iter()
+        .find(|entry| entry["key"] == "sandbox.enabled")
+        .unwrap();
+    assert_eq!(sandbox["choices"], serde_json::json!(["true", "false"]));
 }
 
 #[test]
@@ -501,11 +527,11 @@ fn explicit_hub_init_writes_supplied_connection_fields() {
         "hub init command failed (child output redacted)"
     );
     let value: Value = serde_json::from_slice(&fs::read(&config).unwrap()).unwrap();
-    assert_eq!(value["hubUrl"], "https://hub.example.com");
-    assert_eq!(value["hubTransport"], "sse");
+    assert_eq!(value["hub"]["url"], "https://hub.example.com");
+    assert_eq!(value["hub"]["transport"], "sse");
     assert_eq!(value["agentId"], "desk");
     assert!(
-        value
+        value["hub"]
             .get("agentSecret")
             .and_then(Value::as_str)
             .is_some_and(|value| value == secret),
@@ -519,5 +545,26 @@ fn explicit_hub_init_writes_supplied_connection_fields() {
         !String::from_utf8_lossy(&output.stderr).contains(secret),
         "hub init stderr leaked agent secret"
     );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn run_without_config_reports_init_first_and_does_not_create_a_file() {
+    let root = temp_root("run-missing-config");
+    fs::create_dir_all(&root).unwrap();
+    let config = root.join("missing.json");
+    let output = Command::new(binary_path())
+        .args(["--language", "en", "run", "--config"])
+        .arg(&config)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(combined.contains("run config init first"), "{combined}");
+    assert!(!config.exists(), "run wrote a partial config");
     let _ = fs::remove_dir_all(root);
 }

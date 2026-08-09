@@ -8,22 +8,16 @@ use crate::cli_i18n::UiLanguage;
 use crate::config::{
     default_path_policy, validate_hub_transport, validate_hub_url_shape, Config,
     ConfirmationProviderConfig, HubReportingConfig, LimitsConfig, PathPolicyConfig, RoomConfig,
-    SandboxConfig, TunnelClientConfig, TunnelConfig,
+    SandboxConfig, TunnelClientConfig, TunnelConfig, WorkerProfile,
 };
 use crate::mcp::McpServerConfig;
 use crate::utils::agentic_home;
-use crate::WorkerProfile;
 
 const STANDALONE_TUNNEL_ID_PLACEHOLDER: &str = "tunnel_replace-me";
 const HUB_URL_PLACEHOLDER: &str = "https://hub.replace-me";
 const HUB_AGENT_SECRET_PLACEHOLDER: &str = "change-me";
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
-pub(crate) enum RuntimeMode {
-    Standalone,
-    Hub,
-    Local,
-}
+pub(crate) use crate::config::RuntimeMode;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) enum OptionalSection {
@@ -73,6 +67,7 @@ impl fmt::Debug for SecretValue {
 pub(crate) struct InitInput {
     pub(crate) mode: RuntimeMode,
     pub(crate) profile: WorkerProfile,
+    pub(crate) imported_base: Option<Config>,
     pub(crate) ui_language: UiLanguage,
     pub(crate) tunnel_id: Option<String>,
     pub(crate) tunnel_api_key: Option<String>,
@@ -98,6 +93,7 @@ impl InitInput {
         Self {
             mode: RuntimeMode::Standalone,
             profile: WorkerProfile::Normal,
+            imported_base: None,
             ui_language: language,
             tunnel_id: None,
             tunnel_api_key: None,
@@ -153,6 +149,7 @@ pub(crate) fn build_config(input: InitInput) -> Result<InitBuild> {
     let InitInput {
         mode,
         profile,
+        imported_base,
         ui_language,
         tunnel_id,
         tunnel_api_key,
@@ -177,11 +174,18 @@ pub(crate) fn build_config(input: InitInput) -> Result<InitBuild> {
         return Err(anyhow!("room_config_requires_room_profile"));
     }
 
-    let mut config = Config::default_config()?;
-    config.confirmation_language = confirmation_language.unwrap_or_else(|| match ui_language {
-        UiLanguage::ZhCn => "zh-CN".to_string(),
-        UiLanguage::En => "en".to_string(),
-    });
+    let has_imported_base = imported_base.is_some();
+    let mut config = imported_base.unwrap_or(Config::default_config()?);
+    config.mode = mode;
+    config.profile = profile;
+    if let Some(confirmation_language) = confirmation_language {
+        config.confirmation_language = confirmation_language;
+    } else if !has_imported_base {
+        config.confirmation_language = match ui_language {
+            UiLanguage::ZhCn => "zh-CN".to_string(),
+            UiLanguage::En => "en".to_string(),
+        };
+    }
 
     if let Some(display_name) = display_name {
         config.display_name = display_name;
@@ -206,8 +210,14 @@ pub(crate) fn build_config(input: InitInput) -> Result<InitBuild> {
         config.sandbox = sandbox;
     }
     if let Some(room) = room {
-        config.skills = room.skills.clone();
+        let imported_skills = config.skills.clone();
         config.room = room;
+        if has_imported_base {
+            config.skills = imported_skills.clone();
+            config.room.skills = imported_skills;
+        } else {
+            config.skills = config.room.skills.clone();
+        }
     }
     if let Some(mcp_servers) = mcp_servers {
         config.mcp_servers = mcp_servers;
@@ -236,31 +246,31 @@ pub(crate) fn build_config(input: InitInput) -> Result<InitBuild> {
             config.validate_standalone()?;
         }
         RuntimeMode::Hub => {
-            config.hub_url = match hub_url {
+            config.hub.url = match hub_url {
                 Some(value) if !value.trim().is_empty() => value,
                 _ => {
                     push_pending(&mut pending, PendingAction::ConfigureHubUrl);
                     HUB_URL_PLACEHOLDER.to_string()
                 }
             };
-            if config.hub_url == HUB_URL_PLACEHOLDER {
+            if config.hub.url == HUB_URL_PLACEHOLDER {
                 push_pending(&mut pending, PendingAction::ConfigureHubUrl);
             }
-            config.hub_transport = hub_transport.unwrap_or_else(|| config.hub_transport.clone());
+            config.hub.transport = hub_transport.unwrap_or_else(|| config.hub.transport.clone());
             config.agent_id = agent_id.unwrap_or_else(|| config.agent_id.clone());
-            config.agent_secret = match agent_secret {
+            config.hub.agent_secret = match agent_secret {
                 Some(value) if !value.expose().trim().is_empty() => value.expose().to_string(),
                 _ => HUB_AGENT_SECRET_PLACEHOLDER.to_string(),
             };
-            if config.agent_secret.trim().is_empty()
-                || config.agent_secret == HUB_AGENT_SECRET_PLACEHOLDER
+            if config.hub.agent_secret.trim().is_empty()
+                || config.hub.agent_secret == HUB_AGENT_SECRET_PLACEHOLDER
             {
                 push_pending(&mut pending, PendingAction::ReplaceAgentSecret);
             }
 
             config.validate_mcp_servers()?;
-            validate_hub_url_shape(&config.hub_url)?;
-            validate_hub_transport(&config.hub_transport)?;
+            validate_hub_url_shape(&config.hub.url)?;
+            validate_hub_transport(&config.hub.transport)?;
             if config.agent_id.trim().is_empty() {
                 return Err(anyhow!("agent_id_required"));
             }
@@ -268,10 +278,7 @@ pub(crate) fn build_config(input: InitInput) -> Result<InitBuild> {
                 config.validate_hub()?;
             }
         }
-        RuntimeMode::Local => {
-            config.tunnel = None;
-            config.validate_local()?;
-        }
+        RuntimeMode::Local => config.validate_local()?,
     }
 
     Ok(InitBuild {
@@ -424,6 +431,46 @@ mod tests {
 
         let built = build_config(input).unwrap();
         assert!(built.config.tunnel.is_none());
+    }
+
+    #[test]
+    fn imported_base_survives_tui_managed_field_overlay() {
+        let mut base = Config::default_config().unwrap();
+        base.mode = RuntimeMode::Local;
+        base.profile = WorkerProfile::Normal;
+        base.display_name = "imported-display".to_string();
+        base.hub.url = "https://inactive-hub.example.com".to_string();
+        base.tunnel = Some(TunnelConfig {
+            tunnel_id: "inactive-tunnel".to_string(),
+            api_key: "env:IMPORTED_TUNNEL_KEY".to_string(),
+            ..TunnelConfig::default()
+        });
+        base.room.timezone = "UTC".to_string();
+        base.limits.max_concurrent_tasks = 9;
+        base.extra
+            .insert("futureField".to_string(), serde_json::json!(true));
+        base.mcp_servers.insert(
+            "imported".to_string(),
+            crate::mcp::McpServerConfig {
+                enabled: true,
+                transport: "stdio".to_string(),
+                url: Some("node ./server.mjs".to_string()),
+            },
+        );
+
+        let mut input = InitInput::non_interactive_defaults(UiLanguage::En);
+        input.mode = RuntimeMode::Local;
+        input.profile = WorkerProfile::Normal;
+        input.imported_base = Some(base);
+        let built = build_config(input).unwrap();
+
+        assert_eq!(built.config.display_name, "imported-display");
+        assert_eq!(built.config.hub.url, "https://inactive-hub.example.com");
+        assert_eq!(built.config.tunnel.unwrap().tunnel_id, "inactive-tunnel");
+        assert_eq!(built.config.room.timezone, "UTC");
+        assert_eq!(built.config.limits.max_concurrent_tasks, 9);
+        assert_eq!(built.config.mcp_servers.len(), 1);
+        assert_eq!(built.config.extra["futureField"], serde_json::json!(true));
     }
 
     #[test]

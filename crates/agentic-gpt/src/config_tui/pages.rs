@@ -18,7 +18,8 @@ use crate::config_templates::{OptionalSection, RuntimeMode, TunnelSecretSource};
 use crate::tui::forms::{
     boolean_row_line, choice_input_row_line, choice_row_line, editable_list_item_line,
     inline_input_spans, input_row_line, long_form_input_value_line, numeric_input_value_line,
-    subsection_heading_line, value_row_line, EditableListState,
+    ordered_multi_select_row_line, subsection_heading_line, value_row_line, EditableListState,
+    OrderedMultiSelectState,
 };
 use crate::tui::{
     action_line, inline_error_line, labeled_heading_line, render_action_button,
@@ -61,9 +62,10 @@ fn localized_error(code: &str, language: UiLanguage) -> String {
             "Required runtime paths must be a JSON array.",
             "运行时路径必须是 JSON 数组。",
         ),
-        "config_init_confirmation_provider_invalid" => {
-            ("Confirmation provider is invalid.", "确认提供方无效。")
-        }
+        "config_init_confirmation_channels_invalid" => (
+            "Confirmation channels must be an ordered list of supported channels without duplicates.",
+            "确认通道必须是受支持且不重复的有序列表。",
+        ),
         "config_init_reporting_detail_invalid" => {
             ("Reporting detail is invalid.", "报告详细程度无效。")
         }
@@ -1191,20 +1193,14 @@ fn render_optional_form(
             left.width,
         ),
         OptionalSection::Confirmation => {
-            push_choice_group(
+            push_ordered_multi_select_group(
                 &mut lines,
                 &mut focused_line,
                 section,
                 draft,
                 state,
-                SetupField::ConfirmationProvider,
-                t(language, "Provider", "提供方"),
-                &[
-                    ("default", t(language, "Default", "默认")),
-                    ("freedesktop", "freedesktop"),
-                    ("ntfy", "ntfy"),
-                    ("none", t(language, "None", "无")),
-                ],
+                SetupField::ConfirmationChannels,
+                t(language, "Fallback channels", "降级通道"),
                 theme,
                 errors,
                 language,
@@ -1557,6 +1553,46 @@ fn push_choice_group(
             label,
             focused,
             optional_choice_selected(draft, field, value),
+            18,
+            theme,
+        ));
+    }
+    push_optional_error(lines, errors, field, language, theme);
+    lines.push(Line::raw(""));
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_ordered_multi_select_group(
+    lines: &mut Vec<Line<'static>>,
+    focused_line: &mut usize,
+    section: OptionalSection,
+    draft: &OptionalSectionDraft,
+    state: &TuiState,
+    field: SetupField,
+    heading: &str,
+    theme: &Theme,
+    errors: &HashMap<SetupField, String>,
+    language: UiLanguage,
+) {
+    lines.push(subsection_heading_line(heading, theme));
+    let Ok(selection) = optional_multi_select_state(draft, field) else {
+        push_optional_error(lines, errors, field, language, theme);
+        lines.push(Line::raw(""));
+        return;
+    };
+    let focus_items = optional_focus_items(section, draft);
+    for option in selection.options() {
+        let focus = focus_items.iter().position(|item| {
+            matches!(item, OptionalFocusItem::MultiSelect { field: candidate, value } if *candidate == field && *value == option.as_str())
+        });
+        let focused = focus == Some(state.focus);
+        if focused {
+            *focused_line = lines.len();
+        }
+        lines.push(ordered_multi_select_row_line(
+            option,
+            focused,
+            selection.selection_rank(option),
             18,
             theme,
         ));
@@ -1973,16 +2009,6 @@ fn optional_choice_index(
 fn optional_choice_selected(draft: &OptionalSectionDraft, field: SetupField, choice: &str) -> bool {
     let value = optional_field_value(draft, field);
     match field {
-        SetupField::ConfirmationProvider => match choice {
-            "default" => matches!(
-                value.trim(),
-                "default" | "freedesktop-then-hub" | "freedesktopThenHub" | "freedesktop-then-ntfy"
-            ),
-            "freedesktop" => value.trim() == "freedesktop",
-            "ntfy" => matches!(value.trim(), "ntfy" | "hub"),
-            "none" => value.trim() == "none",
-            _ => false,
-        },
         SetupField::ConfirmationLanguage => {
             crate::config::normalize_confirmation_language(&value) == choice
         }
@@ -2055,6 +2081,21 @@ fn render_optional_form_footer(
             render_contextual_footer(frame, area, &bindings, theme);
             return;
         }
+    }
+    if optional_multi_select_for_focus(section, draft, state.focus).is_some() {
+        render_contextual_footer(
+            frame,
+            area,
+            &[
+                ("↑↓ j/k", t(language, "move", "移动")),
+                ("Enter/Space", t(language, "select / clear", "选择 / 取消")),
+                ("J/K", t(language, "change priority", "调整优先级")),
+                ("Esc/h", t(language, "back", "返回")),
+                ("Ctrl+C", t(language, "cancel", "取消")),
+            ],
+            theme,
+        );
+        return;
     }
     if let Some((_, index)) = optional_list_target(section, draft, state.focus) {
         render_contextual_footer(
@@ -2188,6 +2229,10 @@ pub(super) enum OptionalFocusItem {
         field: SetupField,
         value: &'static str,
     },
+    MultiSelect {
+        field: SetupField,
+        value: &'static str,
+    },
     List {
         field: SetupField,
         index: Option<usize>,
@@ -2204,6 +2249,7 @@ impl OptionalFocusItem {
         match self {
             Self::Field(field)
             | Self::Choice { field, .. }
+            | Self::MultiSelect { field, .. }
             | Self::List { field, .. }
             | Self::McpField { field, .. } => field,
             Self::McpAdd => SetupField::McpServerId,
@@ -2215,6 +2261,50 @@ impl OptionalFocusItem {
 pub(super) enum McpFocusTarget {
     Add,
     Field { index: usize, field: SetupField },
+}
+
+pub(super) fn multi_select_options(field: SetupField) -> &'static [&'static str] {
+    match field {
+        SetupField::ConfirmationChannels => &["freedesktop", "ntfy"],
+        _ => &[],
+    }
+}
+
+pub(super) fn optional_multi_select_state(
+    draft: &OptionalSectionDraft,
+    field: SetupField,
+) -> Result<OrderedMultiSelectState, ()> {
+    let raw = match (draft, field) {
+        (OptionalSectionDraft::Confirmation(value), SetupField::ConfirmationChannels) => {
+            &value.channels
+        }
+        _ => return Err(()),
+    };
+    let selected = serde_json::from_str::<Vec<String>>(raw).map_err(|_| ())?;
+    Ok(OrderedMultiSelectState::new(
+        multi_select_options(field)
+            .iter()
+            .map(|value| (*value).to_string())
+            .collect(),
+        selected,
+    ))
+}
+
+pub(super) fn set_optional_multi_select_state(
+    draft: &mut OptionalSectionDraft,
+    field: SetupField,
+    state: &OrderedMultiSelectState,
+) -> bool {
+    let Ok(serialized) = serde_json::to_string(state.selected()) else {
+        return false;
+    };
+    match (draft, field) {
+        (OptionalSectionDraft::Confirmation(value), SetupField::ConfirmationChannels) => {
+            value.channels = serialized;
+            true
+        }
+        _ => false,
+    }
 }
 
 pub(super) fn optional_list_state(
@@ -2290,10 +2380,11 @@ pub(super) fn optional_focus_items(
                 }
             })
             .collect(),
-        OptionalSection::Confirmation => ["default", "freedesktop", "ntfy", "none"]
-            .into_iter()
-            .map(|value| OptionalFocusItem::Choice {
-                field: SetupField::ConfirmationProvider,
+        OptionalSection::Confirmation => multi_select_options(SetupField::ConfirmationChannels)
+            .iter()
+            .copied()
+            .map(|value| OptionalFocusItem::MultiSelect {
+                field: SetupField::ConfirmationChannels,
                 value,
             })
             .chain(
@@ -2548,6 +2639,17 @@ pub(super) fn optional_choice_for_focus(
 ) -> Option<(SetupField, &'static str)> {
     match optional_focus_items(section, draft).get(focus).copied() {
         Some(OptionalFocusItem::Choice { field, value }) => Some((field, value)),
+        _ => None,
+    }
+}
+
+pub(super) fn optional_multi_select_for_focus(
+    section: OptionalSection,
+    draft: &OptionalSectionDraft,
+    focus: usize,
+) -> Option<(SetupField, &'static str)> {
+    match optional_focus_items(section, draft).get(focus).copied() {
+        Some(OptionalFocusItem::MultiSelect { field, value }) => Some((field, value)),
         _ => None,
     }
 }
@@ -3025,14 +3127,11 @@ fn optional_form_inspector_body(
                     "Access priority:",
                     "• deny overrides write and read-only",
                 ],
-                SetupField::ConfirmationProvider => &[
-                    "Choose where confirmation requests are delivered.",
+                SetupField::ConfirmationChannels => &[
+                    "Choose confirmation fallback channels.",
+                    "Selected order is the fallback order: the first available channel handles the request.",
                     "",
-                    "Choices:",
-                    "• default: freedesktop → ntfy",
-                    "• freedesktop: desktop notification only",
-                    "• ntfy: ntfy only",
-                    "• none: no confirmation channel; required confirmations fail",
+                    "An empty selection means required confirmations cannot be delivered.",
                 ],
                 SetupField::ConfirmationLanguage => &[
                     "Language used when confirmation requests are presented to the user.",
@@ -3194,14 +3293,11 @@ fn optional_form_inspector_body(
                     "权限优先级：",
                     "• deny 覆盖 write 和 read-only",
                 ],
-                SetupField::ConfirmationProvider => &[
-                    "选择确认请求的投递通道。",
+                SetupField::ConfirmationChannels => &[
+                    "选择确认请求的降级通道。",
+                    "选中顺序就是降级顺序：按顺序尝试，首个可用通道处理请求。",
                     "",
-                    "可选项：",
-                    "• default：freedesktop → ntfy",
-                    "• freedesktop：仅桌面通知",
-                    "• ntfy：仅 ntfy",
-                    "• none：没有确认通道；需要确认的操作会失败",
+                    "全部取消表示需要确认的操作无法投递确认。",
                 ],
                 SetupField::ConfirmationLanguage => &[
                     "向用户展示确认请求时使用的语言。",
@@ -3385,7 +3481,7 @@ fn optional_field_label(field: SetupField, language: UiLanguage) -> &'static str
         SetupField::WriteRoots => t(language, "Write roots", "写入根目录"),
         SetupField::ReadOnlyRoots => t(language, "Read-only roots", "只读根目录"),
         SetupField::DenyRoots => t(language, "Deny roots", "拒绝根目录"),
-        SetupField::ConfirmationProvider => t(language, "Provider", "提供方"),
+        SetupField::ConfirmationChannels => t(language, "Fallback channels", "降级通道"),
         SetupField::ConfirmationLanguage => t(language, "Language", "语言"),
         SetupField::MaxConcurrentTasks => t(language, "Max concurrent tasks", "最大并发任务"),
         SetupField::MaxActiveJobs => t(language, "Max active jobs", "最大活动作业"),
@@ -3437,7 +3533,7 @@ pub(super) fn optional_field_value(draft: &OptionalSectionDraft, field: SetupFie
             _ => String::new(),
         },
         OptionalSectionDraft::Confirmation(value) => match field {
-            SetupField::ConfirmationProvider => value.provider.clone(),
+            SetupField::ConfirmationChannels => value.channels.clone(),
             SetupField::ConfirmationLanguage => value.language.clone(),
             _ => String::new(),
         },
@@ -3494,7 +3590,7 @@ pub(super) fn set_optional_field(
             _ => {}
         },
         OptionalSectionDraft::Confirmation(draft) => match field {
-            SetupField::ConfirmationProvider => draft.provider = value,
+            SetupField::ConfirmationChannels => draft.channels = value,
             SetupField::ConfirmationLanguage => draft.language = value,
             _ => {}
         },
@@ -3664,7 +3760,8 @@ fn render_review(
                 && section_draft.is_some()
                 && matches!(
                     item.editor,
-                    ReviewEditorKind::List
+                    ReviewEditorKind::MultiSelect
+                        | ReviewEditorKind::List
                         | ReviewEditorKind::Compound
                         | ReviewEditorKind::AutoCustom
                 );
@@ -3743,7 +3840,8 @@ fn render_review(
                 }
                 if !matches!(
                     item.editor,
-                    ReviewEditorKind::List
+                    ReviewEditorKind::MultiSelect
+                        | ReviewEditorKind::List
                         | ReviewEditorKind::Compound
                         | ReviewEditorKind::AutoCustom
                 ) {
@@ -3758,7 +3856,8 @@ fn render_review(
                 && section_draft.is_some()
                 && matches!(
                     item.editor,
-                    ReviewEditorKind::List
+                    ReviewEditorKind::MultiSelect
+                        | ReviewEditorKind::List
                         | ReviewEditorKind::Compound
                         | ReviewEditorKind::AutoCustom
                 )
@@ -3886,6 +3985,13 @@ fn render_review(
         }
     } else if section_draft.is_some() {
         match review.row(state.focus).map(|(_, item)| item.editor) {
+            Some(ReviewEditorKind::MultiSelect) => vec![
+                ("↑↓ j/k", t(language, "move", "移动")),
+                ("Enter/Space", t(language, "select / clear", "选择 / 取消")),
+                ("J/K", t(language, "change priority", "调整优先级")),
+                ("Esc", t(language, "back", "返回")),
+                ("Ctrl+C", t(language, "cancel", "取消")),
+            ],
             Some(ReviewEditorKind::List) => vec![
                 ("↑↓ j/k", t(language, "move", "移动")),
                 ("Enter", t(language, "edit", "编辑")),
@@ -4020,6 +4126,28 @@ fn review_complex_lines(
         return Vec::new();
     };
     match item.editor {
+        ReviewEditorKind::MultiSelect => {
+            let Some(field) = item.field else {
+                return Vec::new();
+            };
+            let Ok(selection) = optional_multi_select_state(draft, field) else {
+                return Vec::new();
+            };
+            let mut lines = Vec::new();
+            for (index, option) in selection.options().iter().enumerate() {
+                lines.push(ordered_multi_select_row_line(
+                    option,
+                    state.review_subfocus == index,
+                    selection.selection_rank(option),
+                    18,
+                    theme,
+                ));
+            }
+            if let Some(error) = errors.get(&field) {
+                lines.push(inline_error_line(&localized_error(error, language), theme));
+            }
+            lines
+        }
         ReviewEditorKind::List => {
             let Some(field) = item.field else {
                 return Vec::new();
@@ -4283,7 +4411,7 @@ fn review_item_label(label_key: &str, language: UiLanguage) -> &'static str {
         "write_roots" => t(language, "Write roots", "写入根目录"),
         "read_only_roots" => t(language, "Read-only roots", "只读根目录"),
         "deny_roots" => t(language, "Deny roots", "拒绝根目录"),
-        "confirmation_provider" => t(language, "Provider", "提供方"),
+        "confirmation_channels" => t(language, "Fallback channels", "降级通道"),
         "confirmation_language" => t(language, "Language", "语言"),
         "max_concurrent_tasks" => t(language, "Max concurrent tasks", "最大并发任务"),
         "max_active_jobs" => t(language, "Max active jobs", "最大活动作业"),

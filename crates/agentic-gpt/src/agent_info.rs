@@ -364,20 +364,14 @@ fn live_subset(config: &Config) -> Value {
 
 fn restart_fields(effective: &Config, disk: &Config) -> Vec<String> {
     let pairs = [
+        ("mode", effective.mode != disk.mode),
+        ("profile", effective.profile != disk.profile),
         ("agentId", json!(effective.agent_id) != json!(disk.agent_id)),
         (
             "displayName",
             json!(effective.display_name) != json!(disk.display_name),
         ),
-        ("hubUrl", json!(effective.hub_url) != json!(disk.hub_url)),
-        (
-            "hubTransport",
-            json!(effective.hub_transport) != json!(disk.hub_transport),
-        ),
-        (
-            "agentSecret",
-            json!(effective.agent_secret) != json!(disk.agent_secret),
-        ),
+        ("hub", json!(effective.hub) != json!(disk.hub)),
         (
             "workspaceRoot",
             json!(effective.workspace_root) != json!(disk.workspace_root),
@@ -497,7 +491,9 @@ mod tests {
             "agent-info-config-{}.json",
             uuid::Uuid::new_v4().simple()
         ));
-        let disk = app.config.read().await.clone();
+        let mut disk = app.config.read().await.clone();
+        disk.mode = crate::config::RuntimeMode::Hub;
+        disk.profile = crate::config::WorkerProfile::Room;
         fs::write(&disk_path, serde_json::to_string_pretty(&disk).unwrap()).unwrap();
         app.config_path = disk_path.clone();
         app.runtime = crate::state::RuntimeModel::hub(CapabilityProfile::Normal);
@@ -512,6 +508,16 @@ mod tests {
             .unwrap()
             .iter()
             .any(|field| field == "displayName"));
+        assert!(value["config"]["restartRequiredFields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|field| field == "mode"));
+        assert!(value["config"]["restartRequiredFields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|field| field == "profile"));
         assert_eq!(value["confirmation"]["providers"][1]["available"], true);
         assert_eq!(
             value["confirmation"]["providers"][1]["deliveryHealth"],
