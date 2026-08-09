@@ -476,7 +476,7 @@ impl OptionalDrafts {
     }
 }
 
-pub(super) fn default_optional_draft(
+pub(crate) fn default_optional_draft(
     language: UiLanguage,
     section: OptionalSection,
 ) -> OptionalSectionDraft {

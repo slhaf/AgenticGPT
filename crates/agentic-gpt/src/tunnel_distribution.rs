@@ -20,7 +20,7 @@ use zip::ZipArchive;
 
 use crate::config::{Config, TunnelClientConfig};
 
-const PINNED_VERSION: &str = "0.0.10";
+pub(crate) const PINNED_VERSION: &str = "0.0.10";
 const MAX_ARCHIVE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_EXTRACTED_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRIES: usize = 32;

@@ -1,4 +1,6 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, path::PathBuf};
+
+use unicode_width::UnicodeWidthStr;
 
 use ratatui::{
     layout::{Constraint, Layout, Margin, Rect},
@@ -9,7 +11,8 @@ use ratatui::{
 
 use crate::cli_i18n::UiLanguage;
 use crate::config_setup::{
-    OptionalSectionDraft, ReviewModel, ReviewTarget, SectionStatus, SetupField, SetupSession,
+    default_optional_draft, OptionalSectionDraft, ReviewModel, ReviewTarget, SectionStatus,
+    SetupField, SetupSession,
 };
 use crate::config_templates::{
     InitSummary, OptionalSection, PendingAction, RuntimeMode, TunnelSecretSource,
@@ -413,6 +416,7 @@ fn render_connection(
     );
     render_horizontal_rule(frame, top_rule, theme);
     let [left, _, right] = surface_columns(body);
+    let relaxed_field_spacing = left.height >= 18;
 
     let items = connection_focus_items(session);
     let mut cursor = left.y;
@@ -527,6 +531,17 @@ fn render_connection(
                             row,
                         );
                     }
+                }
+                if relaxed_field_spacing
+                    && matches!(
+                        field,
+                        SetupField::TunnelId
+                            | SetupField::TunnelSecretPath
+                            | SetupField::TunnelSecretEnvironment
+                            | SetupField::ProvisionTunnelSecret
+                    )
+                {
+                    render_surface_blank(left, &mut cursor, frame);
                 }
             }
         }
@@ -988,6 +1003,11 @@ fn render_optional_center(
     let [left, _, right] = surface_columns(body);
 
     let sections = all_optional_sections();
+    let status_label_width = sections
+        .iter()
+        .map(|section| UnicodeWidthStr::width(section_label(*section, language)))
+        .max()
+        .unwrap_or(0);
     let focusable = session.available_optional_sections();
     let mut cursor = left.y;
     render_surface_heading(
@@ -1002,10 +1022,15 @@ fn render_optional_center(
         let status = session.section_status(section);
         let applicable_index = focusable.iter().position(|candidate| *candidate == section);
         let focused = applicable_index == Some(state.focus);
+        let label = section_label(section, language);
+        let padded_label = format!(
+            "{label}{}",
+            " ".repeat(status_label_width.saturating_sub(UnicodeWidthStr::width(label)))
+        );
         if let Some(row) = next_surface_row(left, &mut cursor) {
             frame.render_widget(
                 Paragraph::new(surface_status_line(
-                    section_label(section, language),
+                    &padded_label,
                     section_status_label(status, language),
                     focused,
                     status == SectionStatus::NotApplicable,
@@ -1104,6 +1129,7 @@ fn render_optional_form(
         OptionalSection::Identity => push_long_form_field(
             &mut lines,
             &mut focused_line,
+            session,
             section,
             draft,
             state,
@@ -1170,6 +1196,7 @@ fn render_optional_form(
             push_long_form_field(
                 &mut lines,
                 &mut focused_line,
+                session,
                 section,
                 draft,
                 state,
@@ -1201,6 +1228,7 @@ fn render_optional_form(
                 push_long_form_field(
                     &mut lines,
                     &mut focused_line,
+                    session,
                     section,
                     draft,
                     state,
@@ -1217,6 +1245,7 @@ fn render_optional_form(
                 push_long_form_field(
                     &mut lines,
                     &mut focused_line,
+                    session,
                     section,
                     draft,
                     state,
@@ -1246,6 +1275,7 @@ fn render_optional_form(
                 push_long_form_field(
                     &mut lines,
                     &mut focused_line,
+                    session,
                     section,
                     draft,
                     state,
@@ -1341,6 +1371,7 @@ fn render_optional_form(
 fn push_long_form_field(
     lines: &mut Vec<Line<'static>>,
     focused_line: &mut usize,
+    session: &SetupSession,
     section: OptionalSection,
     draft: &OptionalSectionDraft,
     state: &TuiState,
@@ -1360,8 +1391,29 @@ fn push_long_form_field(
         *focused_line = lines.len();
     }
     let confirmed = optional_field_value(draft, field);
+    let default_draft = default_optional_draft(language, section);
+    let default_value = optional_field_value(&default_draft, field);
+    let is_default = confirmed == default_value;
     let cursor = editing_cursor(state, field);
     let current = current_input_value(state, field, &confirmed);
+    let display_value = if cursor.is_none() && is_default && confirmed.is_empty() {
+        match field {
+            SetupField::NotebookRoot => {
+                let workspace = session.optional_draft(OptionalSection::Workspace);
+                let workspace_root = optional_field_value(&workspace, SetupField::WorkspaceRoot);
+                PathBuf::from(workspace_root)
+                    .join("notebook")
+                    .to_string_lossy()
+                    .into_owned()
+            }
+            SetupField::TunnelClientVersion => {
+                crate::tunnel_distribution::PINNED_VERSION.to_string()
+            }
+            _ => current.to_string(),
+        }
+    } else {
+        current.to_string()
+    };
     if field == SetupField::DiaryBoundaryHour {
         lines.push(numeric_input_value_line(
             current,
@@ -1372,12 +1424,12 @@ fn push_long_form_field(
         ));
     } else {
         lines.push(long_form_input_value_line(
-            current,
+            &display_value,
             focused,
             cursor.is_some(),
             cursor,
             false,
-            false,
+            is_default,
             width,
             theme,
         ));
@@ -2150,13 +2202,15 @@ fn render_workspace_form(
         focused_line = lines.len();
     }
     let root_value = optional_field_value(draft, SetupField::WorkspaceRoot);
+    let default_workspace = default_optional_draft(language, OptionalSection::Workspace);
+    let default_root = optional_field_value(&default_workspace, SetupField::WorkspaceRoot);
     lines.push(long_form_input_value_line(
         current_input_value(state, SetupField::WorkspaceRoot, &root_value),
         root_focused,
         editing_cursor(state, SetupField::WorkspaceRoot).is_some(),
         editing_cursor(state, SetupField::WorkspaceRoot),
         false,
-        false,
+        root_value == default_root,
         left.width,
         theme,
     ));
@@ -3137,7 +3191,8 @@ mod tests {
         assert!(rendered.contains("Optional settings"));
         assert!(rendered.contains("Identity"));
         assert!(rendered.contains("Workspace"));
-        assert!(rendered.contains("Room  [Not applicable]"));
+        assert!(rendered.contains("Room"));
+        assert!(rendered.contains("[Not applicable]"));
         assert!(rendered.contains("Tunnel client"));
         assert!(rendered.contains("Finish and continue"));
     }
