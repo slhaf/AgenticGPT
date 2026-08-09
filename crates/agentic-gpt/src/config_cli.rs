@@ -290,8 +290,8 @@ pub(crate) static CONFIG_KEYS: &[ConfigKeySpec] = &[
         Limits,
         NonNegativeInteger,
         false,
-        "Maximum number of concurrent task workers.",
-        "并发任务工作线程的最大数量。",
+        "Maximum concurrently running child Jobs within one process.batch call.",
+        "单次 process.batch 中同时运行的子 Job 最大数量。",
         "4",
         set_max_concurrent_tasks
     ),

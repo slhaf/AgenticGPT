@@ -932,6 +932,8 @@ pub(crate) async fn start_prepared_managed_batch(
     let config = state.config.read().await.clone();
     let requested = specs.len();
     let limit = resolved_job_limit(&config);
+    let batch_concurrency = config.limits.max_concurrent_tasks.max(1).min(requested);
+    let batch_slots = Arc::new(Semaphore::new(batch_concurrency));
     let mut registered = Vec::with_capacity(requested);
     {
         let mut jobs = state.jobs.lock().await;
@@ -950,7 +952,7 @@ pub(crate) async fn start_prepared_managed_batch(
                 &spec.request,
                 job_id,
                 JobKind::Process,
-                JobState::Starting,
+                JobState::Queued,
                 now,
                 None,
             );
@@ -995,17 +997,28 @@ pub(crate) async fn start_prepared_managed_batch(
     }
     let mut infos = Vec::with_capacity(registered.len());
     for (spec, info, stdout, stderr, cancel_requested) in registered {
-        tokio::spawn(run_async_job(
-            state.clone(),
-            info.job_id.clone(),
-            spec.request,
-            stdout,
-            stderr,
-            cancel_requested,
-            Some((spec.working_directory, spec.decision)),
-            spec.confirmation_result,
-        ));
-        tokio::spawn(monitor_job(state.clone(), info.job_id.clone()));
+        let runner_state = state.clone();
+        let runner_job_id = info.job_id.clone();
+        let runner_slots = batch_slots.clone();
+        tokio::spawn(async move {
+            let permit = runner_slots
+                .acquire_owned()
+                .await
+                .expect("batch semaphore remains open");
+            set_job_state(&runner_state, &runner_job_id, JobState::Starting).await;
+            run_async_job(
+                runner_state.clone(),
+                runner_job_id.clone(),
+                spec.request,
+                stdout,
+                stderr,
+                cancel_requested,
+                Some((spec.working_directory, spec.decision)),
+                spec.confirmation_result,
+            )
+            .await;
+            monitor_job(runner_state, runner_job_id, Some(permit)).await;
+        });
         infos.push(info);
     }
     Ok(infos)
@@ -1108,7 +1121,7 @@ async fn start_process_job_inner(
         prepared,
         None,
     ));
-    tokio::spawn(monitor_job(state, job_id));
+    tokio::spawn(monitor_job(state, job_id, None));
     info
 }
 
@@ -1319,7 +1332,7 @@ async fn read_tail<R: AsyncRead + Unpin>(
     Ok(())
 }
 
-async fn monitor_job(state: AppState, job_id: String) {
+async fn monitor_job(state: AppState, job_id: String, _batch_permit: Option<OwnedSemaphorePermit>) {
     loop {
         sleep(std::time::Duration::from_millis(50)).await;
         let Some(info) = get_job_now(&state, &job_id).await else {
@@ -1917,6 +1930,73 @@ mod tests {
         let second = wait_terminal(&state, second).await;
         assert_eq!(second.state, JobState::Completed);
         assert_eq!(second.stdout_tail, "done");
+    }
+
+    #[tokio::test]
+    async fn process_batch_respects_max_concurrent_tasks_without_blocking_batch_return() {
+        let (state, workspace) = test_state(4).await;
+        state.config.write().await.limits.max_concurrent_tasks = 1;
+        let request = BatchExecRequest {
+            agent_id: "test-agent".to_string(),
+            elements: vec![
+                agentic_gpt_protocol::ExecElement {
+                    program: "sleep".to_string(),
+                    args: vec!["2".to_string()],
+                    working_directory: None,
+                },
+                agentic_gpt_protocol::ExecElement {
+                    program: "sleep".to_string(),
+                    args: vec!["2".to_string()],
+                    working_directory: None,
+                },
+            ],
+            need_confirm: false,
+            confirm_method: None,
+            working_directory: Some(workspace.to_string_lossy().to_string()),
+            wait_seconds: Some(0),
+        };
+
+        let batch = start_process_batch(
+            state.clone(),
+            request,
+            "test:process.batch".to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(batch.status, "running");
+        assert!(!batch.completed_inline);
+        assert_eq!(batch.jobs.len(), 2);
+
+        let mut states = Vec::new();
+        for _ in 0..100 {
+            states = Vec::with_capacity(batch.jobs.len());
+            for job in &batch.jobs {
+                states.push(get_job(&state, &job.job_id, 0).await.unwrap().state);
+            }
+            if states.iter().any(|state| *state == JobState::Running) {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            states
+                .iter()
+                .filter(|state| **state == JobState::Running)
+                .count(),
+            1
+        );
+        assert_eq!(
+            states
+                .iter()
+                .filter(|state| **state == JobState::Queued)
+                .count(),
+            1
+        );
+
+        for job in &batch.jobs {
+            let _ = cancel_job(&state, &job.job_id).await;
+        }
     }
 
     #[tokio::test]
