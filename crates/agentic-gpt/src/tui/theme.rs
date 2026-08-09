@@ -14,7 +14,6 @@ pub(crate) struct Theme {
     pub(crate) surface: Style,
     #[allow(dead_code)]
     pub(crate) success: Style,
-    pub(crate) warning: Style,
     pub(crate) error: Style,
     pub(crate) disabled: Style,
 }
@@ -48,9 +47,6 @@ impl Theme {
                 success: Style::default()
                     .fg(Color::Green)
                     .add_modifier(Modifier::BOLD),
-                warning: Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
                 error: Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                 disabled: Style::default()
                     .fg(Color::DarkGray)
@@ -72,7 +68,6 @@ impl Theme {
             muted: Style::default().add_modifier(Modifier::DIM),
             surface: Style::default(),
             success: Style::default().add_modifier(Modifier::BOLD),
-            warning: Style::default().add_modifier(Modifier::UNDERLINED),
             error: Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
             disabled: Style::default().add_modifier(Modifier::DIM | Modifier::CROSSED_OUT),
         }

@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use crate::cli_i18n::UiLanguage;
 use crate::config::default_path_policy;
 use crate::config_templates::{
-    InitInput, OptionalSection, RuntimeMode, SecretValue, TunnelSecretSource,
+    build_config, InitInput, OptionalSection, RuntimeMode, SecretValue, TunnelSecretSource,
 };
 use crate::WorkerProfile;
 
@@ -381,12 +381,30 @@ impl SetupSession {
         validation::validate_optional_draft(self, draft)
     }
 
+    pub(crate) fn save_optional_section_for_review(
+        &mut self,
+        draft: OptionalSectionDraft,
+    ) -> Result<(), validation::ValidationErrors> {
+        validation::validate_optional_draft(self, &draft)?;
+        self.optional.set(draft);
+        Ok(())
+    }
+
     pub(crate) fn validate_for_review(&self) -> Result<(), validation::ValidationErrors> {
         validation::validate_for_review(self)
     }
 
     pub(crate) fn build_active_input(&self) -> Result<InitInput, validation::ValidationErrors> {
         validation::build_active_input(self)
+    }
+
+    pub(crate) fn redacted_config_json(&self) -> anyhow::Result<String> {
+        let input = self
+            .build_active_input()
+            .map_err(|_| anyhow::anyhow!("config_init_preview_invalid"))?;
+        let mut built = build_config(input)?;
+        built.config.agent_secret = "[REDACTED]".to_string();
+        Ok(serde_json::to_string_pretty(&built.config)?)
     }
 
     pub(super) fn tunnel_seed_error(&self) -> Option<&'static str> {

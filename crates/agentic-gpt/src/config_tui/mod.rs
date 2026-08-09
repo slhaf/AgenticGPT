@@ -61,6 +61,14 @@ pub(crate) fn run_config_tui(
             let _ = terminal.terminal_mut().draw(|frame| app.render(frame));
             return Err(anyhow!(terminal_error_message(language)));
         }
+        if app.state().finished {
+            if let Some(error) = app.state().system_error.as_ref() {
+                return Err(anyhow!(error.code));
+            }
+            return app
+                .take_committed_summary()
+                .ok_or_else(|| anyhow!("config_init_cancelled"));
+        }
     }
 }
 

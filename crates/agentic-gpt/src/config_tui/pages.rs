@@ -11,16 +11,14 @@ use ratatui::{
 
 use crate::cli_i18n::UiLanguage;
 use crate::config_setup::{
-    default_optional_draft, McpServerDraft, OptionalSectionDraft, ReviewModel, ReviewTarget,
-    SectionStatus, SetupField, SetupSession,
+    default_optional_draft, McpServerDraft, OptionalSectionDraft, ReviewEditorKind, ReviewGroup,
+    ReviewItem, ReviewModel, ReviewTarget, SectionStatus, SetupField, SetupSession,
 };
-use crate::config_templates::{
-    InitSummary, OptionalSection, PendingAction, RuntimeMode, TunnelSecretSource,
-};
+use crate::config_templates::{OptionalSection, RuntimeMode, TunnelSecretSource};
 use crate::tui::forms::{
     boolean_row_line, choice_input_row_line, choice_row_line, editable_list_item_line,
-    input_row_line, long_form_input_value_line, numeric_input_value_line, subsection_heading_line,
-    value_row_line, EditableListState,
+    inline_input_spans, input_row_line, long_form_input_value_line, numeric_input_value_line,
+    subsection_heading_line, value_row_line, EditableListState,
 };
 use crate::tui::{
     action_line, inline_error_line, labeled_heading_line, render_action_button,
@@ -126,7 +124,17 @@ pub(super) fn render(
         ),
         ConfigPage::Review => {
             if let Some(review) = review {
-                render_review(frame, review, state, language, theme, progress)
+                render_review(
+                    frame,
+                    review,
+                    session,
+                    state,
+                    language,
+                    theme,
+                    errors,
+                    section_draft,
+                    progress,
+                )
             } else {
                 render_placeholder(
                     frame,
@@ -138,14 +146,6 @@ pub(super) fn render(
                 )
             }
         }
-        ConfigPage::Completion => render_placeholder(
-            frame,
-            t(language, "Done", "完成"),
-            state,
-            language,
-            theme,
-            progress,
-        ),
         ConfigPage::SystemError => render_system_error(frame, None, language, theme),
     }
 }
@@ -1011,19 +1011,25 @@ pub(super) fn connection_value(session: &SetupSession, field: SetupField) -> Opt
         SetupField::ProvisionTunnelSecret => {
             Some(session.standalone().provision_secret_now.to_string())
         }
-        SetupField::TunnelSecretValue => session
-            .standalone()
-            .secret_value
-            .as_ref()
-            .map(|secret| secret.expose().to_string()),
+        SetupField::TunnelSecretValue => Some(
+            session
+                .standalone()
+                .secret_value
+                .as_ref()
+                .map(|secret| secret.expose().to_string())
+                .unwrap_or_default(),
+        ),
         SetupField::HubUrl => Some(session.hub().hub_url.clone()),
         SetupField::HubTransport => Some(session.hub().hub_transport.clone()),
         SetupField::AgentId => Some(session.hub().agent_id.clone()),
-        SetupField::AgentSecret => session
-            .hub()
-            .agent_secret
-            .as_ref()
-            .map(|secret| secret.expose().to_string()),
+        SetupField::AgentSecret => Some(
+            session
+                .hub()
+                .agent_secret
+                .as_ref()
+                .map(|secret| secret.expose().to_string())
+                .unwrap_or_default(),
+        ),
         _ => None,
     }
 }
@@ -1849,12 +1855,9 @@ fn push_limits_form(
         theme,
     );
     lines.push(Line::raw(""));
-    lines.push(Line::styled(
-        format!(
-            "  {}",
-            optional_field_label(SetupField::MaxActiveJobs, language)
-        ),
-        theme.muted,
+    lines.push(subsection_heading_line(
+        optional_field_label(SetupField::MaxActiveJobs, language),
+        theme,
     ));
 
     let auto_focus = optional_choice_index(section, draft, SetupField::MaxActiveJobs, "auto")
@@ -1905,7 +1908,7 @@ fn push_limits_form(
     lines.push(Line::raw(""));
 
     lines.push(subsection_heading_line(
-        t(language, "Search", "搜索"),
+        t(language, "File search", "文件搜索"),
         theme,
     ));
     let context_focus = optional_field_index(section, draft, SetupField::MaxFileSearchContextLines)
@@ -3032,8 +3035,8 @@ fn optional_form_inspector_body(
                     "• none: no confirmation channel; required confirmations fail",
                 ],
                 SetupField::ConfirmationLanguage => &[
-                    "Language used in confirmation requests.",
-                    "If this section stays Default, final config uses the current Config TUI language.",
+                    "Language used when confirmation requests are presented to the user.",
+                    "If this section stays Default, final config follows the current Config TUI interface language.",
                 ],
                 SetupField::MaxConcurrentTasks => &[
                     "Maximum number of child Process Jobs from one batch that may run at once.",
@@ -3046,7 +3049,7 @@ fn optional_form_inspector_body(
                     "Default: auto.",
                     "",
                     "Auto behavior:",
-                    "• ceil(available parallelism × 1.5)",
+                    "• ceil(available CPU core count × 1.5)",
                     "• clamped to 6–24",
                     "• explicit 0 rejects new Jobs",
                 ],
@@ -3201,8 +3204,8 @@ fn optional_form_inspector_body(
                     "• none：没有确认通道；需要确认的操作会失败",
                 ],
                 SetupField::ConfirmationLanguage => &[
-                    "确认请求使用的语言。",
-                    "如果此区块保持 Default，最终配置会使用当前 Config TUI 的界面语言。",
+                    "向用户展示确认请求时使用的语言。",
+                    "如果此区块保持 Default，最终配置会跟随当前 Config TUI 的界面语言。",
                 ],
                 SetupField::MaxConcurrentTasks => &[
                     "单个 Process 批处理中，同时运行的子 Job 数上限。",
@@ -3215,7 +3218,7 @@ fn optional_form_inspector_body(
                     "默认 auto。",
                     "",
                     "Auto 行为：",
-                    "• ceil(可用并行度 × 1.5)",
+                    "• ceil(可用 CPU 核心数量 × 1.5)",
                     "• 结果限制在 6–24",
                     "• 显式设为 0 会拒绝新的 Job",
                 ],
@@ -3549,145 +3552,680 @@ pub(super) fn toggle_optional_field(draft: &mut OptionalSectionDraft, field: Set
 fn render_review(
     frame: &mut Frame,
     review: &ReviewModel,
+    _session: &SetupSession,
     state: &TuiState,
     language: UiLanguage,
     theme: &Theme,
+    errors: &HashMap<SetupField, String>,
+    section_draft: Option<&OptionalSectionDraft>,
     progress: (usize, usize),
 ) {
-    let [header, body, actions, footer] = Layout::vertical([
-        Constraint::Length(2),
-        Constraint::Min(8),
-        Constraint::Length(2),
-        Constraint::Length(1),
-    ])
-    .areas(frame.area());
-    render_header(
+    let [header, top_rule, body, bottom_rule, footer] = surface_shell_areas(frame.area());
+    render_surface_header(
         frame,
         header,
         t(language, "Review and write", "检查并写入"),
         &format!("{} / {}", progress.0, progress.1),
         theme,
     );
+    render_horizontal_rule(frame, top_rule, theme);
+    let [left, _, right] = surface_columns(body);
 
-    let groups = review_groups(review);
-    let mut lines = vec![
-        Line::from(vec![
+    let row_count = review.row_count();
+    let action_focused = state.focus >= row_count;
+    let groups = review.groups();
+    let label_width = groups
+        .iter()
+        .flat_map(|group| group.items.iter())
+        .map(|item| UnicodeWidthStr::width(review_item_label(item.label_key, language)))
+        .max()
+        .unwrap_or(0)
+        .min(24);
+
+    let mut lines = vec![Line::from(vec![
+        Span::raw("  "),
+        Span::styled(t(language, "Config path: ", "配置路径："), theme.dim),
+        Span::styled(review.config_path.display().to_string(), theme.normal),
+    ])];
+    if review.will_backup_existing_config {
+        let backup_path = review
+            .config_path
+            .parent()
+            .map(|parent| parent.join("backups").join("config.<timestamp>.json"))
+            .unwrap_or_else(|| PathBuf::from("backups/config.<timestamp>.json"));
+        lines.push(Line::from(vec![
             Span::raw("  "),
-            Span::styled(t(language, "Config path: ", "配置路径："), theme.dim),
-            Span::styled(review.config_path.display().to_string(), theme.normal),
-        ]),
-        Line::from(vec![
+            Span::styled(t(language, "Backup path: ", "备份路径："), theme.dim),
+            Span::styled(backup_path.display().to_string(), theme.normal),
+        ]));
+    }
+    if state.review_search_active || !state.review_search.is_empty() {
+        lines.push(Line::from(vec![
             Span::raw("  "),
-            Span::styled(t(language, "Backup: ", "备份："), theme.dim),
+            Span::styled(t(language, "Search: ", "搜索："), theme.dim),
+            Span::styled(format!("/{}", state.review_search), theme.emphasis),
+        ]));
+    }
+    lines.push(Line::raw(""));
+
+    const REVIEW_MIN_VALUE_WIDTH: usize = 14;
+    let max_value_width = usize::from(left.width)
+        .saturating_sub(label_width + 8)
+        .clamp(8, 36);
+    let min_value_width = REVIEW_MIN_VALUE_WIDTH.min(max_value_width);
+
+    let mut row_line_indices = Vec::with_capacity(row_count);
+    let mut mcp_create_line = None;
+    let mut row_index = 0usize;
+    for group in groups {
+        let visible_status = match (group.target, section_draft) {
+            (ReviewTarget::OptionalSection(section), Some(draft)) if draft.section() == section => {
+                if *draft == default_optional_draft(language, section) {
+                    SectionStatus::Default
+                } else {
+                    SectionStatus::Configured
+                }
+            }
+            _ => group.status,
+        };
+        lines.push(Line::from(vec![
+            Span::styled("◆ ", theme.emphasis),
+            Span::styled(review_target_label(group.target, language), theme.emphasis),
             Span::styled(
-                if review.will_backup_existing_config {
-                    t(
-                        language,
-                        "existing config will be backed up",
-                        "将备份现有配置",
+                format!("  [{}]", section_status_label(visible_status, language)),
+                theme.muted,
+            ),
+        ]));
+        if state.review_mcp_create
+            && group.target == ReviewTarget::OptionalSection(OptionalSection::McpServers)
+            && section_draft.is_some()
+        {
+            mcp_create_line = Some(lines.len());
+            let synthetic = ReviewItem {
+                field: None,
+                label_key: "mcp_server",
+                value: String::new(),
+                editor: ReviewEditorKind::Compound,
+                target: crate::config_setup::ReviewItemTarget::Static,
+            };
+            lines.extend(review_complex_lines(
+                &synthetic,
+                state,
+                section_draft,
+                errors,
+                language,
+                left.width,
+                theme,
+            ));
+        }
+        for item in &group.items {
+            let focused = state.focus == row_index;
+            let nested_active = focused
+                && section_draft.is_some()
+                && matches!(
+                    item.editor,
+                    ReviewEditorKind::List
+                        | ReviewEditorKind::Compound
+                        | ReviewEditorKind::AutoCustom
+                );
+            row_line_indices.push(lines.len());
+            let label = review_item_label(item.label_key, language);
+            let label_padding =
+                " ".repeat(label_width.saturating_sub(UnicodeWidthStr::width(label)));
+            let editing = focused
+                .then_some(())
+                .and_then(|_| state.editing.as_ref())
+                .filter(|editing| item.field == Some(editing.field));
+            let display_value = if let Some(editing) = editing {
+                if item.editor == ReviewEditorKind::Secret {
+                    "•".repeat(editing.buffer.chars().count())
+                } else {
+                    editing.buffer.clone()
+                }
+            } else {
+                review_display_value(_session, group, item)
+            };
+            let inline_editing = editing.is_some()
+                && matches!(
+                    item.editor,
+                    ReviewEditorKind::Text | ReviewEditorKind::Secret
+                );
+            let value_width = UnicodeWidthStr::width(display_value.as_str())
+                .saturating_add(usize::from(inline_editing))
+                .clamp(min_value_width, max_value_width);
+            let mut row_spans = vec![
+                if focused {
+                    Span::styled(
+                        "❯ ",
+                        if nested_active {
+                            theme.emphasis
+                        } else {
+                            theme.pointer
+                        },
                     )
                 } else {
-                    t(language, "no existing config", "没有现有配置")
+                    Span::raw("  ")
                 },
-                theme.normal,
-            ),
-        ]),
-    ];
-    if let Some(secret) = &review.secret_write {
-        lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled(t(language, "Secret write: ", "密钥写入："), theme.dim),
-            Span::styled(
-                format!(
-                    "{} ({}) · {}",
-                    t(language, "yes", "是"),
-                    secret.path.display(),
-                    t(language, "value hidden", "值已隐藏")
-                ),
-                theme.normal,
-            ),
-        ]));
-    } else {
-        lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled(t(language, "Secret write: ", "密钥写入："), theme.dim),
-            Span::styled(t(language, "no", "否"), theme.normal),
-        ]));
-    }
-    for action in &review.pending_actions {
-        lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled(t(language, "Pending action: ", "待处理动作："), theme.dim),
-            Span::styled(pending_action_label(*action, language), theme.warning),
-        ]));
-    }
-    let mut group_line_indices = Vec::with_capacity(groups.len());
-    for (index, group) in groups.iter().enumerate() {
-        group_line_indices.push(lines.len());
-        let focused = state.focus == index;
-        let style = if focused { theme.focus } else { theme.normal };
-        let prefix = if focused { "› " } else { "  " };
-        lines.push(Line::from(vec![
-            Span::styled(prefix, style),
-            Span::styled(review_target_label(group.target, language), style),
-            Span::styled(
-                format!("  [{}]", section_status_label(group.status, language)),
-                theme.dim,
-            ),
-        ]));
-        for item in &group.items {
-            lines.push(Line::from(vec![
-                Span::raw("    "),
                 Span::styled(
-                    format!("{}: ", review_item_label(item.label_key, language)),
-                    theme.dim,
+                    format!("{label}{label_padding}"),
+                    if nested_active {
+                        theme.emphasis
+                    } else if focused {
+                        theme.selected
+                    } else {
+                        theme.dim
+                    },
                 ),
-                Span::styled(&item.value, theme.normal),
-            ]));
+                Span::raw("  "),
+            ];
+            row_spans.extend(inline_input_spans(
+                &display_value,
+                inline_editing,
+                editing.map(|editing| editing.cursor),
+                value_width,
+                theme,
+            ));
+            lines.push(Line::from(row_spans));
+
+            if focused {
+                if let Some(editing) = editing {
+                    if item.editor == ReviewEditorKind::Choice && item.choice_values().len() > 2 {
+                        for choice in item.choice_values() {
+                            lines.push(choice_row_line(
+                                choice,
+                                editing.buffer == *choice,
+                                item.value.eq_ignore_ascii_case(choice),
+                                0,
+                                theme,
+                            ));
+                        }
+                    }
+                }
+                if !matches!(
+                    item.editor,
+                    ReviewEditorKind::List
+                        | ReviewEditorKind::Compound
+                        | ReviewEditorKind::AutoCustom
+                ) {
+                    if let Some(field) = item.field {
+                        if let Some(error) = errors.get(&field) {
+                            lines.push(inline_error_line(&localized_error(error, language), theme));
+                        }
+                    }
+                }
+            }
+            if focused
+                && section_draft.is_some()
+                && matches!(
+                    item.editor,
+                    ReviewEditorKind::List
+                        | ReviewEditorKind::Compound
+                        | ReviewEditorKind::AutoCustom
+                )
+            {
+                lines.extend(review_complex_lines(
+                    item,
+                    state,
+                    section_draft,
+                    errors,
+                    language,
+                    left.width,
+                    theme,
+                ));
+            }
+            row_index += 1;
         }
+        lines.push(Line::raw(""));
     }
-    let focused_line = group_line_indices
-        .get(state.focus)
-        .copied()
-        .unwrap_or_else(|| lines.len().saturating_sub(1));
-    let body_height = usize::from(body.height);
-    let max_scroll = lines.len().saturating_sub(body_height);
+
+    let content_height = left.height.saturating_sub(2);
+    let content_area = Rect {
+        x: left.x,
+        y: left.y,
+        width: left.width,
+        height: content_height,
+    };
+    let visible = usize::from(content_height);
+    let max_scroll = lines.len().saturating_sub(visible);
+    let focused_line = if let Some(line) = mcp_create_line {
+        line
+    } else if action_focused {
+        lines.len().saturating_sub(1)
+    } else {
+        row_line_indices
+            .get(state.focus)
+            .copied()
+            .unwrap_or_default()
+    };
     let scroll = focused_line
-        .saturating_sub(body_height / 2)
+        .saturating_sub(visible.saturating_sub(1) / 2)
         .min(max_scroll)
         .min(usize::from(u16::MAX)) as u16;
-    frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), body);
-    render_action_button(
+    frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)), content_area);
+    render_surface_action_dock(
         frame,
-        actions,
-        t(language, "Confirm and write", "确认并写入"),
-        state.focus >= groups.len(),
+        left,
+        if state.review_preview_json.is_some() {
+            t(language, "Confirm and write", "确认并写入")
+        } else {
+            t(language, "Preview final JSON", "预览最终 JSON")
+        },
+        action_focused,
         theme,
     );
-    render_footer(
-        frame,
-        footer,
-        t(
-            language,
-            "Enter open/edit · Tab move · Esc back · Ctrl+C cancel",
-            "Enter 打开/编辑 · Tab 移动 · Esc 返回 · Ctrl+C 取消",
-        ),
-        theme,
-    );
+
+    if right.width > 0 {
+        render_surface(frame, right, theme);
+        let inspector = right.inner(Margin {
+            horizontal: 2,
+            vertical: 1,
+        });
+        if state.review_preview_json.is_some() {
+            render_review_json_preview(frame, inspector, state, language, theme);
+        } else if action_focused {
+            render_inspector(
+                frame,
+                inspector,
+                t(language, "Preview final JSON", "预览最终 JSON"),
+                review_confirm_inspector_body(language),
+                theme,
+            );
+        } else if let Some((group, item)) = review.row(state.focus) {
+            let title = review_item_label(item.label_key, language);
+            let body = review_item_inspector_body(group, item, state, language);
+            render_inspector(frame, inspector, title, body, theme);
+        }
+    }
+
+    render_horizontal_rule(frame, bottom_rule, theme);
+    let hints = if state.review_preview_json.is_some() {
+        if state.review_preview_search_active {
+            vec![
+                ("text", t(language, "query", "输入查询")),
+                ("Backspace", t(language, "delete", "删除")),
+                ("Enter", t(language, "find", "查找")),
+                ("Esc", t(language, "close search", "关闭搜索")),
+                ("Ctrl+C", t(language, "cancel", "取消")),
+            ]
+        } else {
+            vec![
+                ("↑↓ j/k", t(language, "scroll JSON", "滚动 JSON")),
+                ("/", t(language, "search JSON", "搜索 JSON")),
+                ("n/N", t(language, "matches", "匹配项")),
+                ("Esc", t(language, "modify", "返回修改")),
+                ("Enter", t(language, "write", "写入")),
+                ("Ctrl+C", t(language, "cancel", "取消")),
+            ]
+        }
+    } else if state.review_search_active {
+        vec![
+            ("text", t(language, "query", "输入查询")),
+            ("Backspace", t(language, "delete", "删除")),
+            ("Enter", t(language, "find", "查找")),
+            ("Esc", t(language, "close", "关闭")),
+            ("Ctrl+C", t(language, "cancel", "取消")),
+        ]
+    } else if state.editing.is_some() {
+        if review
+            .row(state.focus)
+            .is_some_and(|(_, item)| item.editor == ReviewEditorKind::Choice)
+        {
+            vec![
+                ("↑↓ j/k", t(language, "choose", "选择")),
+                ("Enter", t(language, "save", "保存")),
+                ("Esc", t(language, "discard", "放弃")),
+                ("Ctrl+C", t(language, "cancel", "取消")),
+            ]
+        } else {
+            vec![
+                ("←→", t(language, "cursor", "光标")),
+                ("Enter", t(language, "save", "保存")),
+                ("Esc", t(language, "discard", "放弃")),
+                ("Ctrl+C", t(language, "cancel", "取消")),
+            ]
+        }
+    } else if section_draft.is_some() {
+        match review.row(state.focus).map(|(_, item)| item.editor) {
+            Some(ReviewEditorKind::List) => vec![
+                ("↑↓ j/k", t(language, "move", "移动")),
+                ("Enter", t(language, "edit", "编辑")),
+                ("a/d", t(language, "add / remove", "添加 / 删除")),
+                ("Esc", t(language, "back", "返回")),
+                ("Ctrl+C", t(language, "cancel", "取消")),
+            ],
+            Some(ReviewEditorKind::Compound) => vec![
+                ("↑↓ j/k", t(language, "move", "移动")),
+                ("Enter", t(language, "edit / toggle", "编辑 / 切换")),
+                ("d", t(language, "delete server", "删除服务")),
+                ("Esc", t(language, "back", "返回")),
+                ("Ctrl+C", t(language, "cancel", "取消")),
+            ],
+            Some(ReviewEditorKind::AutoCustom) => vec![
+                ("↑↓ j/k", t(language, "move", "移动")),
+                ("Enter", t(language, "select / edit", "选择 / 编辑")),
+                ("Esc", t(language, "back", "返回")),
+                ("Ctrl+C", t(language, "cancel", "取消")),
+            ],
+            _ => vec![
+                ("↑↓ j/k", t(language, "move", "移动")),
+                ("Enter", t(language, "edit", "编辑")),
+                ("Ctrl+C", t(language, "cancel", "取消")),
+            ],
+        }
+    } else {
+        vec![
+            ("↑↓ j/k", t(language, "move", "移动")),
+            ("Enter", t(language, "edit / toggle", "编辑 / 切换")),
+            ("a", t(language, "add MCP", "添加 MCP")),
+            ("/", t(language, "search", "搜索")),
+            ("n/N", t(language, "matches", "匹配项")),
+            ("Ctrl+C", t(language, "cancel", "取消")),
+        ]
+    };
+    render_contextual_footer(frame, footer, &hints, theme);
 }
 
-fn review_groups(review: &ReviewModel) -> Vec<&crate::config_setup::ReviewGroup> {
-    let mut groups = vec![&review.basic];
-    if review.mode != RuntimeMode::Local {
-        groups.push(&review.connection);
-    }
-    groups.extend(
-        review
-            .optional_sections
-            .iter()
-            .filter(|group| group.status != SectionStatus::NotApplicable),
+fn render_review_json_preview(
+    frame: &mut Frame,
+    area: Rect,
+    state: &TuiState,
+    language: UiLanguage,
+    theme: &Theme,
+) {
+    let search_visible =
+        state.review_preview_search_active || !state.review_preview_search.is_empty();
+    let [title_area, rule_area, search_area, body_area] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(if search_visible { 2 } else { 0 }),
+        Constraint::Min(1),
+    ])
+    .areas(area);
+    frame.render_widget(
+        Paragraph::new(Line::styled(
+            t(language, "Final JSON preview", "最终 JSON 预览"),
+            theme.emphasis,
+        )),
+        title_area,
     );
-    groups
+    let rule_width = rule_area.width.saturating_sub(2).min(18) as usize;
+    frame.render_widget(
+        Paragraph::new(Line::styled("─".repeat(rule_width), theme.structure)),
+        rule_area,
+    );
+    if search_visible {
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(t(language, "Search: ", "搜索："), theme.dim),
+                Span::styled(format!("/{}", state.review_preview_search), theme.emphasis),
+            ])),
+            search_area,
+        );
+    }
+
+    let query = state.review_preview_search.trim().to_lowercase();
+    let json_lines: Vec<Line<'static>> = state
+        .review_preview_json
+        .as_deref()
+        .unwrap_or_default()
+        .lines()
+        .map(|line| {
+            let style = if !query.is_empty() && line.to_lowercase().contains(&query) {
+                theme.emphasis
+            } else {
+                theme.normal
+            };
+            Line::styled(line.to_string(), style)
+        })
+        .collect();
+    let visible = usize::from(body_area.height);
+    let max_scroll = json_lines.len().saturating_sub(visible);
+    let scroll = usize::from(state.review_preview_scroll)
+        .min(max_scroll)
+        .min(usize::from(u16::MAX)) as u16;
+    frame.render_widget(Paragraph::new(json_lines).scroll((scroll, 0)), body_area);
+}
+
+fn review_display_value(session: &SetupSession, group: &ReviewGroup, item: &ReviewItem) -> String {
+    if !item.value.is_empty() {
+        return item.value.clone();
+    }
+    match (group.target, item.field) {
+        (ReviewTarget::OptionalSection(OptionalSection::Room), Some(SetupField::NotebookRoot)) => {
+            let workspace = session.optional_draft(OptionalSection::Workspace);
+            let workspace_root = optional_field_value(&workspace, SetupField::WorkspaceRoot);
+            PathBuf::from(workspace_root)
+                .join("notebook")
+                .to_string_lossy()
+                .into_owned()
+        }
+        (
+            ReviewTarget::OptionalSection(OptionalSection::TunnelClient),
+            Some(SetupField::TunnelClientVersion),
+        ) => crate::tunnel_distribution::PINNED_VERSION.to_string(),
+        _ => item.value.clone(),
+    }
+}
+
+fn review_complex_lines(
+    item: &ReviewItem,
+    state: &TuiState,
+    section_draft: Option<&OptionalSectionDraft>,
+    errors: &HashMap<SetupField, String>,
+    language: UiLanguage,
+    area_width: u16,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let Some(draft) = section_draft else {
+        return Vec::new();
+    };
+    match item.editor {
+        ReviewEditorKind::List => {
+            let Some(field) = item.field else {
+                return Vec::new();
+            };
+            let Ok(list) = optional_list_state(draft, field) else {
+                return Vec::new();
+            };
+            let mut lines = Vec::new();
+            for (index, value) in list.items().iter().enumerate() {
+                let editing = state.list_edit.as_ref().is_some_and(|target| {
+                    target.field == field && target.index == index && state.editing.is_some()
+                });
+                let display_value = state
+                    .editing
+                    .as_ref()
+                    .filter(|_| editing)
+                    .map(|edit| edit.buffer.as_str())
+                    .unwrap_or(value);
+                let cursor = state
+                    .editing
+                    .as_ref()
+                    .filter(|_| editing)
+                    .map(|edit| edit.cursor);
+                lines.push(editable_list_item_line(
+                    display_value,
+                    state.review_subfocus == index,
+                    editing,
+                    cursor,
+                    area_width.saturating_sub(2),
+                    theme,
+                ));
+            }
+            if let Some(error) = errors.get(&field) {
+                lines.push(inline_error_line(&localized_error(error, language), theme));
+            }
+            lines
+        }
+        ReviewEditorKind::Compound => {
+            let Some(index) = state.review_mcp_index else {
+                return Vec::new();
+            };
+            let mut lines = Vec::new();
+            const LABEL_WIDTH: usize = 12;
+            for (subfocus, field) in [
+                SetupField::McpServerId,
+                SetupField::McpServerEnabled,
+                SetupField::McpServerTransport,
+                SetupField::McpServerEndpoint,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let value = mcp_server_value(draft, index, field).unwrap_or_default();
+                let label = optional_field_label(field, language);
+                let focused = state.review_subfocus == subfocus;
+                let editing = state.mcp_edit.as_ref().is_some_and(|target| {
+                    target.index == index && target.field == field && state.editing.is_some()
+                });
+                if matches!(
+                    field,
+                    SetupField::McpServerId | SetupField::McpServerEndpoint
+                ) {
+                    let display_value = state
+                        .editing
+                        .as_ref()
+                        .filter(|_| editing)
+                        .map(|edit| edit.buffer.as_str())
+                        .unwrap_or(value.as_str());
+                    let cursor = state
+                        .editing
+                        .as_ref()
+                        .filter(|_| editing)
+                        .map(|edit| edit.cursor);
+                    let input_width = UnicodeWidthStr::width(display_value)
+                        .saturating_add(usize::from(editing))
+                        .clamp(8, 36);
+                    lines.push(input_row_line(
+                        label,
+                        display_value,
+                        focused,
+                        editing,
+                        cursor,
+                        LABEL_WIDTH,
+                        input_width,
+                        theme,
+                    ));
+                } else {
+                    lines.push(value_row_line(label, &value, focused, LABEL_WIDTH, theme));
+                }
+                if focused {
+                    if let Some(error) = errors.get(&field) {
+                        lines.push(inline_error_line(&localized_error(error, language), theme));
+                    }
+                }
+            }
+            lines
+        }
+        ReviewEditorKind::AutoCustom => {
+            let configured = optional_field_value(draft, SetupField::MaxActiveJobs);
+            let editing = state
+                .editing
+                .as_ref()
+                .filter(|edit| edit.field == SetupField::MaxActiveJobs);
+            let custom_value = if let Some(edit) = editing {
+                edit.buffer.as_str()
+            } else if configured != "auto" {
+                configured.as_str()
+            } else {
+                state.max_active_custom.as_str()
+            };
+            let mut lines = vec![choice_row_line(
+                t(language, "Auto", "自动"),
+                state.review_subfocus == 0,
+                configured == "auto",
+                12,
+                theme,
+            )];
+            lines.push(choice_input_row_line(
+                t(language, "Custom", "自定义"),
+                custom_value,
+                state.review_subfocus == 1,
+                configured != "auto",
+                editing.is_some(),
+                editing.map(|edit| edit.cursor),
+                12,
+                5,
+                theme,
+            ));
+            if let Some(error) = errors.get(&SetupField::MaxActiveJobs) {
+                lines.push(inline_error_line(&localized_error(error, language), theme));
+            }
+            lines
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn review_item_inspector_body(
+    group: &ReviewGroup,
+    item: &ReviewItem,
+    state: &TuiState,
+    language: UiLanguage,
+) -> &'static [&'static str] {
+    if item.editor == ReviewEditorKind::Compound && state.review_mcp_index.is_some() {
+        if let ReviewTarget::OptionalSection(section) = group.target {
+            let field = match state.review_subfocus {
+                0 => Some(SetupField::McpServerId),
+                1 => Some(SetupField::McpServerEnabled),
+                2 => Some(SetupField::McpServerTransport),
+                3 => Some(SetupField::McpServerEndpoint),
+                _ => None,
+            };
+            return optional_form_inspector_body(section, field, language);
+        }
+    }
+    match item.field {
+        Some(SetupField::Mode) => match item.value.as_str() {
+            "Standalone" | "standalone" => basic_inspector_copy(0, language).1,
+            "Hub" | "hub" => basic_inspector_copy(1, language).1,
+            "Local" | "local" => basic_inspector_copy(2, language).1,
+            _ => basic_inspector_copy(0, language).1,
+        },
+        Some(SetupField::Profile) => match item.value.as_str() {
+            "Room" | "room" => basic_inspector_copy(4, language).1,
+            _ => basic_inspector_copy(3, language).1,
+        },
+        field @ Some(
+            SetupField::TunnelId
+            | SetupField::TunnelSecretSource
+            | SetupField::TunnelSecretPath
+            | SetupField::TunnelSecretEnvironment
+            | SetupField::ProvisionTunnelSecret
+            | SetupField::TunnelSecretValue
+            | SetupField::HubUrl
+            | SetupField::HubTransport
+            | SetupField::AgentId
+            | SetupField::AgentSecret,
+        ) => connection_inspector_body(field, language),
+        field @ Some(_) => match group.target {
+            ReviewTarget::OptionalSection(section) => {
+                optional_form_inspector_body(section, field, language)
+            }
+            _ => &[],
+        },
+        None => match group.target {
+            ReviewTarget::OptionalSection(section) => {
+                optional_form_inspector_body(section, None, language)
+            }
+            _ => &[],
+        },
+    }
+}
+
+fn review_confirm_inspector_body(language: UiLanguage) -> &'static [&'static str] {
+    match language {
+        UiLanguage::En => &[
+            "Write the staged configuration and any approved secret file changes.",
+            "",
+            "This is the only Review action that writes to disk.",
+        ],
+        UiLanguage::ZhCn => &[
+            "写入当前暂存配置，以及已确认的密钥文件变更。",
+            "",
+            "这是 Review 中唯一会写入磁盘的操作。",
+        ],
+    }
 }
 
 fn review_target_label(target: ReviewTarget, language: UiLanguage) -> &'static str {
@@ -3707,15 +4245,23 @@ fn section_status_label(status: SectionStatus, language: UiLanguage) -> &'static
     }
 }
 
-fn pending_action_label(action: PendingAction, language: UiLanguage) -> &'static str {
-    match action {
-        PendingAction::ReplaceTunnelId => t(language, "Replace tunnel ID", "替换隧道 ID"),
-        PendingAction::ProvisionTunnelSecret => {
-            t(language, "Provision tunnel secret", "写入隧道密钥")
-        }
-        PendingAction::ConfigureHubUrl => t(language, "Configure Hub URL", "配置 Hub 地址"),
-        PendingAction::ReplaceAgentSecret => t(language, "Replace agent secret", "替换代理密钥"),
-    }
+pub(super) fn review_search_text(
+    group: &ReviewGroup,
+    item: &ReviewItem,
+    session: &SetupSession,
+    language: UiLanguage,
+) -> String {
+    let value = if item.editor == ReviewEditorKind::Secret {
+        String::new()
+    } else {
+        review_display_value(session, group, item)
+    };
+    format!(
+        "{} {} {}",
+        review_target_label(group.target, language),
+        review_item_label(item.label_key, language),
+        value
+    )
 }
 
 fn review_item_label(label_key: &str, language: UiLanguage) -> &'static str {
@@ -3725,6 +4271,8 @@ fn review_item_label(label_key: &str, language: UiLanguage) -> &'static str {
         "tunnel_id" => t(language, "Tunnel ID", "隧道 ID"),
         "tunnel_secret_source" => t(language, "Secret source", "密钥来源"),
         "tunnel_secret_reference" => t(language, "Secret reference", "密钥引用"),
+        "provision_tunnel_secret" => t(language, "Provision secret now", "立即写入密钥"),
+        "tunnel_secret_value" => t(language, "Secret value", "密钥值"),
         "hub_url" => t(language, "Hub URL", "Hub 地址"),
         "hub_transport" => t(language, "Hub transport", "Hub 传输方式"),
         "agent_id" => t(language, "Agent ID", "代理 ID"),
@@ -3745,6 +4293,7 @@ fn review_item_label(label_key: &str, language: UiLanguage) -> &'static str {
         "sandbox_enabled" => t(language, "Sandbox enabled", "启用沙箱"),
         "bubblewrap_path" => t(language, "Bubblewrap path", "Bubblewrap 路径"),
         "required_runtime_paths" => t(language, "Required runtime paths", "必需运行时路径"),
+        "mcp_server" => t(language, "MCP server", "MCP 服务"),
         "room_timezone" => t(language, "Timezone", "时区"),
         "diary_boundary_hour" => t(language, "Diary boundary hour", "日记边界小时"),
         "notebook_root" => t(language, "Notebook root", "笔记本根目录"),
@@ -3758,55 +4307,6 @@ fn review_item_label(label_key: &str, language: UiLanguage) -> &'static str {
         "hub_reporting_detail" => t(language, "Reporting detail", "报告详细程度"),
         _ => t(language, "Value", "值"),
     }
-}
-
-pub(super) fn render_completion(
-    frame: &mut Frame,
-    summary: Option<&InitSummary>,
-    _finished: bool,
-    language: UiLanguage,
-    theme: &Theme,
-) {
-    let [header, body, actions, footer] = Layout::vertical([
-        Constraint::Length(2),
-        Constraint::Min(4),
-        Constraint::Length(2),
-        Constraint::Length(1),
-    ])
-    .areas(frame.area());
-    let title = match language {
-        UiLanguage::ZhCn => "AgenticGPT 初始化完成",
-        UiLanguage::En => "AgenticGPT initialization complete",
-    };
-    render_header(frame, header, title, "", theme);
-    let path = summary
-        .map(|summary| summary.config_path.display().to_string())
-        .unwrap_or_else(|| "(unknown)".to_string());
-    let guidance = match language {
-        UiLanguage::ZhCn => "下一步：运行 agentic-gpt config show 查看配置。",
-        UiLanguage::En => "Next: run `agentic-gpt config show` to inspect the configuration.",
-    };
-    frame.render_widget(
-        Paragraph::new(vec![
-            Line::from(vec![
-                Span::styled(t(language, "Config: ", "配置："), theme.dim),
-                Span::styled(path, theme.normal),
-            ]),
-            Line::from(guidance),
-        ]),
-        body,
-    );
-    let action = match language {
-        UiLanguage::ZhCn => "完成",
-        UiLanguage::En => "Done",
-    };
-    render_action_button(frame, actions, action, true, theme);
-    render_footer(
-        frame,
-        footer,
-        t(language, "Enter exit", "Enter 退出"),
-        theme,
-    );
 }
 
 pub(super) fn render_system_error(
@@ -3898,308 +4398,4 @@ fn render_placeholder(
         theme,
     );
     let _ = state;
-}
-
-#[cfg(test)]
-mod tests {
-    use ratatui::{backend::TestBackend, Terminal};
-
-    use crate::cli_i18n::UiLanguage;
-    use crate::config_setup::{SetupSeed, SetupSession};
-    use crate::config_templates::RuntimeMode;
-    use crate::config_tui::TuiAction;
-    use crate::WorkerProfile;
-
-    use super::super::{ConfigPage, ConfigTuiApp};
-
-    fn content(app: &ConfigTuiApp, width: u16, height: u16) -> String {
-        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        terminal.draw(|frame| app.render(frame)).unwrap();
-        terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect()
-    }
-
-    #[test]
-    fn basic_page_renders_mode_profile_and_footer() {
-        let app = ConfigTuiApp::new(SetupSession::new(
-            SetupSeed {
-                mode: Some(RuntimeMode::Standalone),
-                profile: Some(WorkerProfile::Normal),
-                ..SetupSeed::default()
-            },
-            UiLanguage::En,
-            "/tmp/config-tui-render.json".into(),
-        ));
-        let rendered = content(&app, 70, 20);
-        assert!(rendered.contains("Runtime mode"));
-        assert!(rendered.contains("Standalone"));
-        assert!(rendered.contains("Hub"));
-        assert!(rendered.contains("Local"));
-        assert!(rendered.contains("Normal"));
-        assert!(rendered.contains("Room"));
-        assert!(rendered.contains("Ctrl+C"));
-        assert!(rendered.contains("◆ Runtime mode"));
-        assert!(rendered.contains("◆ Profile"));
-        assert!(rendered.contains("❯"));
-        assert!(rendered.contains(""));
-        assert!(rendered.contains("resident Agent"));
-    }
-
-    #[test]
-    fn progress_header_matches_dynamic_mode_flow() {
-        let standalone = ConfigTuiApp::new(SetupSession::new(
-            SetupSeed {
-                mode: Some(RuntimeMode::Standalone),
-                ..SetupSeed::default()
-            },
-            UiLanguage::En,
-            "/tmp/config-tui-render.json".into(),
-        ));
-        assert!(content(&standalone, 70, 20).contains("1 / 4"));
-
-        let local = ConfigTuiApp::new(SetupSession::new(
-            SetupSeed {
-                mode: Some(RuntimeMode::Local),
-                ..SetupSeed::default()
-            },
-            UiLanguage::En,
-            "/tmp/config-tui-render.json".into(),
-        ));
-        assert!(content(&local, 70, 20).contains("1 / 3"));
-
-        let mut hub = ConfigTuiApp::new(SetupSession::new(
-            SetupSeed {
-                mode: Some(RuntimeMode::Hub),
-                ..SetupSeed::default()
-            },
-            UiLanguage::En,
-            "/tmp/config-tui-render.json".into(),
-        ));
-        hub.handle_action(super::super::TuiAction::Next).unwrap();
-        assert!(content(&hub, 70, 20).contains("2 / 4"));
-    }
-
-    #[test]
-    fn resize_rerender_preserves_page_and_staged_values() {
-        let mut app = ConfigTuiApp::new(SetupSession::new(
-            SetupSeed {
-                mode: Some(RuntimeMode::Standalone),
-                tunnel_id: Some("resize-staged-tunnel".into()),
-                ..SetupSeed::default()
-            },
-            UiLanguage::En,
-            "/tmp/config-tui-render.json".into(),
-        ));
-        app.handle_action(super::super::TuiAction::Next).unwrap();
-        let wide = content(&app, 70, 20);
-        let narrow = content(&app, 48, 12);
-        assert!(wide.contains("resize-staged-tunnel"));
-        assert!(narrow.contains("resize-staged-tunnel"));
-        assert_eq!(app.page(), ConfigPage::Connection);
-        assert_eq!(app.session().standalone().tunnel_id, "resize-staged-tunnel");
-    }
-
-    #[test]
-    fn optional_center_shows_all_sections_and_not_applicable_status() {
-        let mut app = ConfigTuiApp::new(SetupSession::new(
-            SetupSeed {
-                mode: Some(RuntimeMode::Standalone),
-                ..SetupSeed::default()
-            },
-            UiLanguage::En,
-            "/tmp/config-tui-render.json".into(),
-        ));
-        app.handle_action(super::super::TuiAction::Next).unwrap();
-        app.handle_action(super::super::TuiAction::Next).unwrap();
-        let rendered = content(&app, 90, 20);
-        assert!(rendered.contains("Optional settings"));
-        assert!(rendered.contains("Identity"));
-        assert!(rendered.contains("Workspace"));
-        assert!(rendered.contains("Room"));
-        assert!(rendered.contains("[Not applicable]"));
-        assert!(rendered.contains("Tunnel client"));
-        assert!(rendered.contains("Finish and continue"));
-    }
-
-    #[test]
-    fn workspace_form_renders_paths_as_scrollable_items_without_json() {
-        let mut app = ConfigTuiApp::new(SetupSession::new(
-            SetupSeed {
-                mode: Some(RuntimeMode::Standalone),
-                ..SetupSeed::default()
-            },
-            UiLanguage::En,
-            "/tmp/config-tui-render.json".into(),
-        ));
-        app.handle_action(super::super::TuiAction::Next).unwrap();
-        app.handle_action(super::super::TuiAction::Next).unwrap();
-        app.handle_action(super::super::TuiAction::MoveNext)
-            .unwrap();
-        app.handle_action(super::super::TuiAction::Activate)
-            .unwrap();
-        let rendered = content(&app, 100, 20);
-        assert!(rendered.contains("Workspace settings"));
-        assert!(rendered.contains("Workspace root"));
-        assert!(rendered.contains("Write roots"));
-        assert!(rendered.contains("~/Documents"));
-        assert!(rendered.contains("Return"));
-        assert!(!rendered.contains("(JSON)"));
-        assert!(!rendered.contains("[\"./workspace\""));
-
-        app.focus_field(crate::config_setup::SetupField::DenyRoots);
-        let scrolled = content(&app, 100, 20);
-        assert!(scrolled.contains("Deny roots"));
-        assert!(scrolled.contains("~/.ssh"));
-        assert!(scrolled.contains("Return"));
-    }
-
-    #[test]
-    fn connection_pages_are_conditional_and_secret_is_not_rendered() {
-        let marker = "connection-secret-marker";
-        let mut app = ConfigTuiApp::new(SetupSession::new(
-            SetupSeed {
-                mode: Some(RuntimeMode::Hub),
-                agent_secret: Some(crate::config_templates::SecretValue::new(marker)),
-                ..SetupSeed::default()
-            },
-            UiLanguage::En,
-            "/tmp/config-tui-render.json".into(),
-        ));
-        app.handle_action(super::super::TuiAction::Next).unwrap();
-        let rendered = content(&app, 70, 20);
-        assert!(rendered.contains("Hub URL"));
-        assert!(rendered.contains("Agent Secret"));
-        assert!(!rendered.contains(marker));
-
-        let mut local = ConfigTuiApp::new(SetupSession::new(
-            SetupSeed {
-                mode: Some(RuntimeMode::Local),
-                ..SetupSeed::default()
-            },
-            UiLanguage::ZhCn,
-            "/tmp/config-tui-render.json".into(),
-        ));
-        local.handle_action(super::super::TuiAction::Next).unwrap();
-        assert_ne!(local.page(), ConfigPage::Connection);
-    }
-
-    #[test]
-    fn standalone_connection_renders_source_and_boolean_as_inline_values() {
-        let mut app = ConfigTuiApp::new(SetupSession::new(
-            SetupSeed {
-                mode: Some(RuntimeMode::Standalone),
-                ..SetupSeed::default()
-            },
-            UiLanguage::En,
-            "/tmp/config-tui-render.json".into(),
-        ));
-        app.handle_action(super::super::TuiAction::Next).unwrap();
-        app.session_mut().standalone_mut().secret_path.clear();
-        let rendered = content(&app, 90, 28);
-        assert!(rendered.contains("Secret source"));
-        assert!(rendered.contains("file"));
-        assert!(!rendered.contains("env"));
-        assert_eq!(rendered.matches('').count(), 0);
-        assert!(rendered.contains("Provision secret now"));
-        assert!(rendered.contains("off"));
-        assert!(!rendered.contains('•'));
-    }
-
-    #[test]
-    fn standalone_secret_value_is_only_visible_when_provisioning() {
-        let mut app = ConfigTuiApp::new(SetupSession::new(
-            SetupSeed {
-                mode: Some(RuntimeMode::Standalone),
-                ..SetupSeed::default()
-            },
-            UiLanguage::En,
-            "/tmp/config-tui-render.json".into(),
-        ));
-        app.handle_action(super::super::TuiAction::Next).unwrap();
-        assert!(!content(&app, 70, 20).contains("Secret value"));
-
-        app.focus_field(crate::config_setup::SetupField::ProvisionTunnelSecret);
-        app.handle_action(super::super::TuiAction::Activate)
-            .unwrap();
-        assert!(content(&app, 70, 20).contains("Secret value"));
-    }
-
-    #[test]
-    fn every_optional_form_keeps_primary_action_in_a_narrow_terminal() {
-        for section_index in 0..7 {
-            let mut app = ConfigTuiApp::new(SetupSession::new(
-                SetupSeed {
-                    mode: Some(RuntimeMode::Standalone),
-                    profile: Some(WorkerProfile::Normal),
-                    ..SetupSeed::default()
-                },
-                UiLanguage::En,
-                "/tmp/config-tui-narrow-optional.json".into(),
-            ));
-            app.handle_action(TuiAction::Next).unwrap();
-            app.handle_action(TuiAction::Next).unwrap();
-            assert_eq!(app.page(), ConfigPage::OptionalCenter);
-            for _ in 0..section_index {
-                app.handle_action(TuiAction::MoveNext).unwrap();
-            }
-            app.handle_action(TuiAction::Activate).unwrap();
-            assert!(matches!(app.page(), ConfigPage::Optional(_)));
-            let rendered = content(&app, 48, 14);
-            assert!(
-                rendered.contains("Return"),
-                "optional action missing at center index {section_index}"
-            );
-        }
-    }
-
-    #[test]
-    fn critical_pages_keep_primary_actions_in_a_small_terminal() {
-        for mode in [
-            RuntimeMode::Standalone,
-            RuntimeMode::Hub,
-            RuntimeMode::Local,
-        ] {
-            let mut app = ConfigTuiApp::new(SetupSession::new(
-                SetupSeed {
-                    mode: Some(mode),
-                    profile: Some(WorkerProfile::Normal),
-                    tunnel_id: Some("small-terminal-tunnel".into()),
-                    tunnel_api_key: Some("file:/tmp/small-terminal-secret".into()),
-                    agent_secret: Some(crate::config_templates::SecretValue::new(
-                        "small-terminal-agent-secret",
-                    )),
-                    ..SetupSeed::default()
-                },
-                UiLanguage::En,
-                "/tmp/config-tui-small-terminal.json".into(),
-            ));
-
-            let basic = content(&app, 36, 12);
-            assert!(basic.contains("Next"), "basic action missing for {mode:?}");
-
-            app.handle_action(TuiAction::Next).unwrap();
-            if app.page() == ConfigPage::Connection {
-                let connection = content(&app, 36, 12);
-                assert!(
-                    connection.contains("Next"),
-                    "connection action missing for {mode:?}"
-                );
-                app.handle_action(TuiAction::Next).unwrap();
-            }
-
-            assert_eq!(app.page(), ConfigPage::OptionalCenter);
-            let optional = content(&app, 36, 12);
-            assert!(optional.contains("Finish and continue"));
-            app.handle_action(TuiAction::Next).unwrap();
-
-            assert_eq!(app.page(), ConfigPage::Review);
-            let review = content(&app, 36, 12);
-            assert!(review.contains("Confirm and write"));
-        }
-    }
 }

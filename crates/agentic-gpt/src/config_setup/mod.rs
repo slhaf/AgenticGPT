@@ -8,5 +8,8 @@ pub(crate) use model::{
     SetupSeed, SetupSession,
 };
 pub(crate) use outcome::{commit_wizard_outcome, WizardOutcome};
-pub(crate) use review::{ReviewGroup, ReviewModel, ReviewTarget};
+pub(crate) use review::{
+    ReviewEditorKind, ReviewGroup, ReviewItem, ReviewItemTarget, ReviewModel, ReviewRowKey,
+    ReviewTarget,
+};
 pub(crate) use validation::ValidationErrors;

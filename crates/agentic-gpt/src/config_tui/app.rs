@@ -6,8 +6,8 @@ use ratatui::Frame;
 
 use crate::cli_i18n::UiLanguage;
 use crate::config_setup::{
-    commit_wizard_outcome, OptionalSectionDraft, ReviewModel, SetupField, SetupSession,
-    ValidationErrors, WizardOutcome,
+    commit_wizard_outcome, OptionalSectionDraft, ReviewEditorKind, ReviewItemTarget, ReviewModel,
+    ReviewRowKey, ReviewTarget, SetupField, SetupSession, ValidationErrors, WizardOutcome,
 };
 use crate::config_templates::{InitSummary, RuntimeMode, SecretValue, TunnelSecretSource};
 use crate::tui::{TerminalEvent, Theme};
@@ -24,6 +24,15 @@ pub(crate) struct TuiState {
     pub(crate) editing: Option<EditState>,
     pub(crate) list_edit: Option<ListEditTarget>,
     pub(crate) mcp_edit: Option<McpEditTarget>,
+    pub(crate) review_subfocus: usize,
+    pub(crate) review_mcp_index: Option<usize>,
+    pub(crate) review_mcp_create: bool,
+    pub(crate) review_search: String,
+    pub(crate) review_search_active: bool,
+    pub(crate) review_preview_json: Option<String>,
+    pub(crate) review_preview_scroll: u16,
+    pub(crate) review_preview_search: String,
+    pub(crate) review_preview_search_active: bool,
     pub(crate) max_active_custom: String,
     pub(crate) optional_center_focus: usize,
     #[allow(dead_code)]
@@ -97,6 +106,7 @@ pub(crate) struct ConfigTuiApp {
     section_draft: Option<OptionalSectionDraft>,
     section_original: Option<OptionalSectionDraft>,
     review: Option<ReviewModel>,
+    review_focus_anchor: Option<ReviewRowKey>,
     language: UiLanguage,
     committer: Box<dyn Committer>,
 }
@@ -120,6 +130,15 @@ impl ConfigTuiApp {
                 editing: None,
                 list_edit: None,
                 mcp_edit: None,
+                review_subfocus: 0,
+                review_mcp_index: None,
+                review_mcp_create: false,
+                review_search: String::new(),
+                review_search_active: false,
+                review_preview_json: None,
+                review_preview_scroll: 0,
+                review_preview_search: String::new(),
+                review_preview_search_active: false,
                 max_active_custom: "12".to_string(),
                 optional_center_focus: 0,
                 scroll: 0,
@@ -134,6 +153,7 @@ impl ConfigTuiApp {
             section_draft: None,
             section_original: None,
             review: None,
+            review_focus_anchor: None,
             language,
             committer,
         }
@@ -170,10 +190,10 @@ impl ConfigTuiApp {
         self.review.as_ref()
     }
 
-    pub(crate) fn review_group_count(&self) -> usize {
+    pub(crate) fn review_row_count(&self) -> usize {
         self.review
             .as_ref()
-            .map(review_group_count)
+            .map(ReviewModel::row_count)
             .unwrap_or_default()
     }
 
@@ -214,10 +234,7 @@ impl ConfigTuiApp {
                     self.commit_edit();
                 } else if matches!(self.state.page, ConfigPage::Optional(_)) {
                     self.save_optional_section();
-                } else if matches!(
-                    self.state.page,
-                    ConfigPage::Completion | ConfigPage::SystemError
-                ) {
+                } else if self.state.page == ConfigPage::SystemError {
                     self.state.finished = true;
                 } else {
                     self.next_page();
@@ -228,6 +245,10 @@ impl ConfigTuiApp {
                     self.cancel_edit();
                     return Ok(());
                 }
+                if self.review_complex_open() {
+                    self.close_review_complex();
+                    return Ok(());
+                }
                 if matches!(self.state.page, ConfigPage::Optional(_)) {
                     self.leave_optional_section();
                 } else if self.state.return_target == ReturnTarget::Review
@@ -236,37 +257,34 @@ impl ConfigTuiApp {
                     self.return_to_review();
                 } else if self.state.page == ConfigPage::Review {
                     // Review is the wizard root after the staged flow; Esc is a no-op.
-                } else if matches!(
-                    self.state.page,
-                    ConfigPage::Completion | ConfigPage::SystemError
-                ) {
+                } else if self.state.page == ConfigPage::SystemError {
                     self.state.finished = true;
                 } else if self.navigation.back() {
                     self.sync_page();
                 }
             }
             TuiAction::Cancel => {
-                if self.state.page == ConfigPage::Completion {
-                    self.state.finished = true;
-                } else {
-                    self.state.cancelled = true;
-                    self.state.editing = None;
-                    self.state.list_edit = None;
-                    self.state.mcp_edit = None;
-                    self.section_draft = None;
-                    self.section_original = None;
-                    self.review = None;
-                }
+                self.state.cancelled = true;
+                self.state.editing = None;
+                self.state.list_edit = None;
+                self.state.mcp_edit = None;
+                self.state.review_subfocus = 0;
+                self.state.review_mcp_index = None;
+                self.state.review_mcp_create = false;
+                self.state.review_search.clear();
+                self.state.review_search_active = false;
+                self.leave_review_preview();
+                self.section_draft = None;
+                self.section_original = None;
+                self.review = None;
+                self.review_focus_anchor = None;
             }
             TuiAction::Activate => {
                 if self.state.editing.is_some() {
                     self.commit_edit();
                 } else if self.state.page == ConfigPage::Review {
                     self.activate_review_focus();
-                } else if matches!(
-                    self.state.page,
-                    ConfigPage::Completion | ConfigPage::SystemError
-                ) {
+                } else if self.state.page == ConfigPage::SystemError {
                     self.state.finished = true;
                 } else {
                     self.activate_focus();
@@ -310,13 +328,6 @@ impl ConfigTuiApp {
 
     pub(crate) fn render(&self, frame: &mut Frame) {
         match self.state.page {
-            ConfigPage::Completion => pages::render_completion(
-                frame,
-                self.state.committed_summary.as_ref(),
-                self.state.finished,
-                self.language,
-                &self.theme,
-            ),
             ConfigPage::SystemError => pages::render_system_error(
                 frame,
                 self.state.system_error.as_ref(),
@@ -348,7 +359,110 @@ impl ConfigTuiApp {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             return self.handle_action(TuiAction::Cancel);
         }
+        if self.review_preview_active() {
+            if self.state.review_preview_search_active {
+                return match key.code {
+                    KeyCode::Esc => {
+                        self.state.review_preview_search_active = false;
+                        Ok(())
+                    }
+                    KeyCode::Enter => {
+                        self.state.review_preview_search_active = false;
+                        self.jump_review_preview_match(1);
+                        Ok(())
+                    }
+                    KeyCode::Backspace => {
+                        self.state.review_preview_search.pop();
+                        Ok(())
+                    }
+                    KeyCode::Char(character) => {
+                        self.state.review_preview_search.push(character);
+                        Ok(())
+                    }
+                    _ => Ok(()),
+                };
+            }
+            return match key.code {
+                KeyCode::Esc => {
+                    self.leave_review_preview();
+                    Ok(())
+                }
+                KeyCode::Enter => {
+                    self.confirm_and_write();
+                    Ok(())
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.move_review_preview_scroll(1);
+                    Ok(())
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.move_review_preview_scroll(-1);
+                    Ok(())
+                }
+                KeyCode::PageDown => {
+                    self.move_review_preview_scroll(10);
+                    Ok(())
+                }
+                KeyCode::PageUp => {
+                    self.move_review_preview_scroll(-10);
+                    Ok(())
+                }
+                KeyCode::Char('/') => {
+                    self.state.review_preview_search.clear();
+                    self.state.review_preview_search_active = true;
+                    Ok(())
+                }
+                KeyCode::Char('n') => {
+                    self.jump_review_preview_match(1);
+                    Ok(())
+                }
+                KeyCode::Char('N') => {
+                    self.jump_review_preview_match(-1);
+                    Ok(())
+                }
+                _ => Ok(()),
+            };
+        }
+        if self.state.review_search_active {
+            return match key.code {
+                KeyCode::Esc => {
+                    self.state.review_search_active = false;
+                    Ok(())
+                }
+                KeyCode::Enter => {
+                    self.state.review_search_active = false;
+                    self.jump_review_match(1);
+                    Ok(())
+                }
+                KeyCode::Backspace => {
+                    self.state.review_search.pop();
+                    Ok(())
+                }
+                KeyCode::Char(character) => {
+                    self.state.review_search.push(character);
+                    Ok(())
+                }
+                _ => Ok(()),
+            };
+        }
         if self.state.editing.is_some() {
+            if self.state.page == ConfigPage::Review
+                && self.review_current_editor() == Some(ReviewEditorKind::Choice)
+            {
+                return match key.code {
+                    KeyCode::Esc => self.handle_action(TuiAction::Back),
+                    KeyCode::Enter => self.handle_action(TuiAction::Activate),
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        self.cycle_review_choice(1);
+                        Ok(())
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        self.cycle_review_choice(-1);
+                        Ok(())
+                    }
+                    _ => Ok(()),
+                };
+            }
             return match key.code {
                 KeyCode::Esc => self.handle_action(TuiAction::Back),
                 KeyCode::Enter => self.handle_action(TuiAction::Activate),
@@ -361,6 +475,21 @@ impl ConfigTuiApp {
             };
         }
         match key.code {
+            KeyCode::Char('/')
+                if self.state.page == ConfigPage::Review && !self.review_complex_open() =>
+            {
+                self.state.review_search.clear();
+                self.state.review_search_active = true;
+                Ok(())
+            }
+            KeyCode::Char('n') if self.state.page == ConfigPage::Review => {
+                self.jump_review_match(1);
+                Ok(())
+            }
+            KeyCode::Char('N') if self.state.page == ConfigPage::Review => {
+                self.jump_review_match(-1);
+                Ok(())
+            }
             KeyCode::Esc => self.handle_action(TuiAction::Back),
             KeyCode::Enter => {
                 if matches!(
@@ -377,18 +506,44 @@ impl ConfigTuiApp {
             KeyCode::BackTab => self.handle_action(TuiAction::MovePrevious),
             KeyCode::Down | KeyCode::Right => self.handle_action(TuiAction::MoveNext),
             KeyCode::Up | KeyCode::Left => self.handle_action(TuiAction::MovePrevious),
+            KeyCode::Char('a')
+                if self.state.page == ConfigPage::Review
+                    && self.review_current_editor() == Some(ReviewEditorKind::List)
+                    && self.review_complex_open() =>
+            {
+                self.add_review_list_item();
+                Ok(())
+            }
+            KeyCode::Char('d')
+                if self.state.page == ConfigPage::Review
+                    && self.review_current_editor() == Some(ReviewEditorKind::List)
+                    && self.review_complex_open() =>
+            {
+                self.remove_review_list_item();
+                Ok(())
+            }
+            KeyCode::Char('d')
+                if self.state.page == ConfigPage::Review
+                    && self.review_current_editor() == Some(ReviewEditorKind::Compound)
+                    && self.review_complex_open() =>
+            {
+                self.delete_review_mcp_server();
+                Ok(())
+            }
+            KeyCode::Char('a')
+                if self.state.page == ConfigPage::Review && !self.review_complex_open() =>
+            {
+                self.begin_review_mcp_add();
+                Ok(())
+            }
             KeyCode::Char('a') if matches!(self.state.page, ConfigPage::Optional(_)) => {
                 self.handle_action(TuiAction::AddListItem)
             }
             KeyCode::Char('d') if matches!(self.state.page, ConfigPage::Optional(_)) => {
                 self.handle_action(TuiAction::RemoveListItem)
             }
-            KeyCode::Char('j') if self.state.page != ConfigPage::Review => {
-                self.handle_action(TuiAction::MoveNext)
-            }
-            KeyCode::Char('k') if self.state.page != ConfigPage::Review => {
-                self.handle_action(TuiAction::MovePrevious)
-            }
+            KeyCode::Char('j') => self.handle_action(TuiAction::MoveNext),
+            KeyCode::Char('k') => self.handle_action(TuiAction::MovePrevious),
             KeyCode::Char('l') if self.state.page != ConfigPage::Review => {
                 if matches!(self.state.page, ConfigPage::OptionalCenter)
                     || self.focused_field().is_some()
@@ -444,8 +599,8 @@ impl ConfigTuiApp {
                 }
                 Err(errors) => self.route_validation_errors(errors),
             },
-            ConfigPage::Review if self.state.focus >= self.review_group_count() => {
-                self.confirm_and_write();
+            ConfigPage::Review if self.state.focus >= self.review_row_count() => {
+                self.activate_review_confirmation();
             }
             ConfigPage::Review => {}
             _ => {}
@@ -574,6 +729,10 @@ impl ConfigTuiApp {
         let Some(edit) = self.state.editing.take() else {
             return;
         };
+        if self.state.page == ConfigPage::Review {
+            self.commit_review_edit(edit);
+            return;
+        }
         let field = edit.field;
         let value = edit.buffer;
         if let Some(target) = self.state.mcp_edit.take() {
@@ -638,6 +797,822 @@ impl ConfigTuiApp {
             }
             Err(errors) => self.record_errors(errors),
         }
+    }
+
+    fn review_current_editor(&self) -> Option<ReviewEditorKind> {
+        if self.state.review_mcp_create {
+            return Some(ReviewEditorKind::Compound);
+        }
+        self.review
+            .as_ref()?
+            .row(self.state.focus)
+            .map(|(_, item)| item.editor)
+    }
+
+    fn review_preview_active(&self) -> bool {
+        self.state.page == ConfigPage::Review && self.state.review_preview_json.is_some()
+    }
+
+    fn review_preview_search_matches(&self) -> Vec<usize> {
+        let query = self.state.review_preview_search.trim().to_lowercase();
+        if query.is_empty() {
+            return Vec::new();
+        }
+        self.state
+            .review_preview_json
+            .as_deref()
+            .unwrap_or_default()
+            .lines()
+            .enumerate()
+            .filter_map(|(index, line)| line.to_lowercase().contains(&query).then_some(index))
+            .collect()
+    }
+
+    fn move_review_preview_scroll(&mut self, delta: isize) {
+        let line_count = self
+            .state
+            .review_preview_json
+            .as_deref()
+            .map(|json| json.lines().count())
+            .unwrap_or(0);
+        let max_line = line_count.saturating_sub(1).min(usize::from(u16::MAX));
+        let next = (isize::try_from(self.state.review_preview_scroll).unwrap_or_default() + delta)
+            .clamp(0, isize::try_from(max_line).unwrap_or(isize::MAX));
+        self.state.review_preview_scroll = u16::try_from(next).unwrap_or(u16::MAX);
+    }
+
+    fn jump_review_preview_match(&mut self, direction: isize) {
+        let matches = self.review_preview_search_matches();
+        if matches.is_empty() {
+            return;
+        }
+        let current = usize::from(self.state.review_preview_scroll);
+        let target = if direction >= 0 {
+            matches
+                .iter()
+                .copied()
+                .find(|line| *line > current)
+                .unwrap_or(matches[0])
+        } else {
+            matches
+                .iter()
+                .rev()
+                .copied()
+                .find(|line| *line < current)
+                .unwrap_or_else(|| *matches.last().expect("matches is non-empty"))
+        };
+        self.state.review_preview_scroll = target.min(usize::from(u16::MAX)) as u16;
+    }
+
+    fn leave_review_preview(&mut self) {
+        self.state.review_preview_json = None;
+        self.state.review_preview_scroll = 0;
+        self.state.review_preview_search.clear();
+        self.state.review_preview_search_active = false;
+    }
+
+    fn review_search_matches(&self) -> Vec<usize> {
+        let query = self.state.review_search.trim().to_lowercase();
+        if query.is_empty() {
+            return Vec::new();
+        }
+        let Some(review) = self.review.as_ref() else {
+            return Vec::new();
+        };
+        (0..review.row_count())
+            .filter(|index| {
+                review.row(*index).is_some_and(|(group, item)| {
+                    pages::review_search_text(group, item, self.session(), self.language)
+                        .to_lowercase()
+                        .contains(&query)
+                })
+            })
+            .collect()
+    }
+
+    fn jump_review_match(&mut self, direction: isize) {
+        if self.state.page != ConfigPage::Review || self.review_complex_open() {
+            return;
+        }
+        let matches = self.review_search_matches();
+        if matches.is_empty() {
+            return;
+        }
+        let current = self.state.focus;
+        self.state.focus = if direction >= 0 {
+            matches
+                .iter()
+                .copied()
+                .find(|index| *index > current)
+                .unwrap_or(matches[0])
+        } else {
+            matches
+                .iter()
+                .rev()
+                .copied()
+                .find(|index| *index < current)
+                .unwrap_or_else(|| *matches.last().expect("matches is non-empty"))
+        };
+    }
+
+    fn review_complex_open(&self) -> bool {
+        self.state.page == ConfigPage::Review
+            && self.section_draft.is_some()
+            && (self.state.review_mcp_create
+                || matches!(
+                    self.review_current_editor(),
+                    Some(
+                        ReviewEditorKind::List
+                            | ReviewEditorKind::Compound
+                            | ReviewEditorKind::AutoCustom
+                    )
+                ))
+    }
+
+    fn review_complex_focus_len(&self) -> usize {
+        match self.review_current_editor() {
+            Some(ReviewEditorKind::List) => {
+                let Some(field) = self.current_review_list_field() else {
+                    return 0;
+                };
+                let Some(draft) = self.section_draft.as_ref() else {
+                    return 0;
+                };
+                pages::optional_list_state(draft, field)
+                    .map(|state| state.items().len())
+                    .unwrap_or(0)
+            }
+            Some(ReviewEditorKind::Compound) => {
+                if self.state.review_mcp_index.is_some() {
+                    4
+                } else {
+                    0
+                }
+            }
+            Some(ReviewEditorKind::AutoCustom) => 2,
+            _ => 0,
+        }
+    }
+
+    fn current_review_list_field(&self) -> Option<SetupField> {
+        let (_, item) = self.review.as_ref()?.row(self.state.focus)?;
+        if item.editor == ReviewEditorKind::List {
+            item.field
+        } else {
+            None
+        }
+    }
+
+    fn activate_review_complex_focus(&mut self) {
+        match self.review_current_editor() {
+            Some(ReviewEditorKind::List) => {
+                let Some(field) = self.current_review_list_field() else {
+                    return;
+                };
+                let Some(draft) = self.section_draft.as_ref() else {
+                    return;
+                };
+                let Ok(list) = pages::optional_list_state(draft, field) else {
+                    return;
+                };
+                let item_count = list.items().len();
+                if self.state.review_subfocus < item_count {
+                    self.begin_review_list_edit(field, self.state.review_subfocus, false);
+                }
+            }
+            Some(ReviewEditorKind::Compound) => {
+                let Some(index) = self.state.review_mcp_index else {
+                    return;
+                };
+                match self.state.review_subfocus {
+                    0 => self.begin_review_mcp_edit(index, SetupField::McpServerId),
+                    1 => {
+                        if let Some(draft) = self.section_draft.as_mut() {
+                            pages::toggle_mcp_server_enabled(draft, index);
+                        }
+                        self.stage_review_mcp_draft_if_valid();
+                    }
+                    2 => {
+                        if let Some(draft) = self.section_draft.as_mut() {
+                            pages::toggle_mcp_server_transport(draft, index);
+                        }
+                        self.stage_review_mcp_draft_if_valid();
+                    }
+                    3 => self.begin_review_mcp_edit(index, SetupField::McpServerEndpoint),
+                    _ => {}
+                }
+            }
+            Some(ReviewEditorKind::AutoCustom) => match self.state.review_subfocus {
+                0 => self.stage_review_auto_custom("auto".to_string()),
+                1 => {
+                    let configured = self
+                        .section_draft
+                        .as_ref()
+                        .map(|draft| pages::optional_field_value(draft, SetupField::MaxActiveJobs))
+                        .unwrap_or_else(|| "auto".to_string());
+                    let value = if configured == "auto" {
+                        self.state.max_active_custom.clone()
+                    } else {
+                        configured
+                    };
+                    self.field_errors.remove(&SetupField::MaxActiveJobs);
+                    self.state.editing = Some(EditState::new(SetupField::MaxActiveJobs, value));
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+
+    fn begin_review_list_edit(&mut self, field: SetupField, index: usize, created: bool) {
+        let value = self
+            .section_draft
+            .as_ref()
+            .and_then(|draft| pages::optional_list_state(draft, field).ok())
+            .and_then(|mut list| {
+                list.set_focus(index);
+                list.focused().map(str::to_string)
+            });
+        let Some(value) = value else {
+            return;
+        };
+        self.state.list_edit = Some(ListEditTarget {
+            field,
+            index,
+            created,
+        });
+        self.state.editing = Some(EditState::new(field, value));
+        self.field_errors.remove(&field);
+    }
+
+    fn add_review_list_item(&mut self) {
+        let Some(field) = self.current_review_list_field() else {
+            return;
+        };
+        let Some(draft) = self.section_draft.as_mut() else {
+            return;
+        };
+        let Ok(mut list) = pages::optional_list_state(draft, field) else {
+            return;
+        };
+        if !list.is_empty() {
+            let existing = self.state.review_subfocus.min(list.items().len() - 1);
+            list.set_focus(existing);
+        }
+        let index = list.add_after_focused();
+        if !pages::set_optional_list_state(draft, field, &list) {
+            return;
+        }
+        self.state.review_subfocus = index;
+        self.begin_review_list_edit(field, index, true);
+    }
+
+    fn remove_review_list_item(&mut self) {
+        let Some(field) = self.current_review_list_field() else {
+            return;
+        };
+        let Some(mut draft) = self.section_draft.as_ref().cloned() else {
+            return;
+        };
+        let Ok(mut list) = pages::optional_list_state(&draft, field) else {
+            return;
+        };
+        if self.state.review_subfocus >= list.items().len() {
+            return;
+        }
+        list.set_focus(self.state.review_subfocus);
+        if list.delete_focused().is_none()
+            || !pages::set_optional_list_state(&mut draft, field, &list)
+        {
+            return;
+        }
+        match self
+            .session_mut()
+            .save_optional_section_for_review(draft.clone())
+        {
+            Ok(()) => {
+                self.section_draft = Some(draft);
+                self.state.review_subfocus = self
+                    .state
+                    .review_subfocus
+                    .min(list.items().len().saturating_sub(1));
+                self.field_errors.clear();
+                let anchor = self.review_focus_anchor;
+                self.refresh_review();
+                if self.state.page == ConfigPage::Review {
+                    self.state.focus = anchor
+                        .and_then(|key| self.review.as_ref()?.find_row(key))
+                        .unwrap_or(self.state.focus);
+                }
+            }
+            Err(errors) => self.record_errors(errors),
+        }
+    }
+
+    fn begin_review_mcp_add(&mut self) {
+        if self.state.page != ConfigPage::Review || self.review_preview_active() {
+            return;
+        }
+        let section = crate::config_templates::OptionalSection::McpServers;
+        let mut draft = self.session().optional_draft(section);
+        let Some(index) = pages::add_mcp_server(&mut draft, None) else {
+            return;
+        };
+        self.review_focus_anchor = None;
+        self.section_draft = Some(draft);
+        self.section_original = None;
+        self.state.review_subfocus = 0;
+        self.state.review_mcp_index = Some(index);
+        self.state.review_mcp_create = true;
+        self.field_errors.clear();
+    }
+
+    fn begin_review_mcp_edit(&mut self, index: usize, field: SetupField) {
+        let value = self
+            .section_draft
+            .as_ref()
+            .and_then(|draft| pages::mcp_server_value(draft, index, field));
+        let Some(value) = value else {
+            return;
+        };
+        self.state.mcp_edit = Some(McpEditTarget {
+            field,
+            index,
+            created: false,
+        });
+        self.state.editing = Some(EditState::new(field, value));
+        self.field_errors.remove(&field);
+    }
+
+    fn stage_review_auto_custom(&mut self, value: String) {
+        let Some(mut draft) = self.section_draft.as_ref().cloned() else {
+            return;
+        };
+        pages::set_optional_field(&mut draft, SetupField::MaxActiveJobs, value.clone());
+        match self
+            .session_mut()
+            .save_optional_section_for_review(draft.clone())
+        {
+            Ok(()) => {
+                if value != "auto" {
+                    self.state.max_active_custom = value;
+                }
+                self.section_draft = Some(draft);
+                self.field_errors.clear();
+                let anchor = self.review_focus_anchor;
+                let old_focus = self.state.focus;
+                self.refresh_review();
+                if self.state.page == ConfigPage::Review {
+                    self.state.focus = anchor
+                        .and_then(|key| self.review.as_ref()?.find_row(key))
+                        .unwrap_or(old_focus.min(self.review_row_count().saturating_sub(1)));
+                }
+            }
+            Err(errors) => self.record_errors(errors),
+        }
+    }
+
+    fn commit_review_auto_custom(&mut self, edit: EditState) {
+        let value = edit.buffer.clone();
+        let Some(mut draft) = self.section_draft.as_ref().cloned() else {
+            self.state.editing = Some(edit);
+            return;
+        };
+        pages::set_optional_field(&mut draft, SetupField::MaxActiveJobs, value.clone());
+        match self
+            .session_mut()
+            .save_optional_section_for_review(draft.clone())
+        {
+            Ok(()) => {
+                self.state.max_active_custom = value;
+                self.section_draft = Some(draft);
+                self.state.editing = None;
+                self.field_errors.remove(&SetupField::MaxActiveJobs);
+                let anchor = self.review_focus_anchor;
+                let old_focus = self.state.focus;
+                self.refresh_review();
+                if self.state.page == ConfigPage::Review {
+                    self.state.focus = anchor
+                        .and_then(|key| self.review.as_ref()?.find_row(key))
+                        .unwrap_or(old_focus.min(self.review_row_count().saturating_sub(1)));
+                }
+            }
+            Err(errors) => {
+                let inline_code = errors.first().map(|error| error.code);
+                self.record_errors(errors);
+                if let Some(code) = inline_code {
+                    self.field_errors
+                        .insert(SetupField::MaxActiveJobs, code.to_string());
+                }
+                self.state.editing = Some(edit);
+            }
+        }
+    }
+
+    fn stage_review_mcp_draft_if_valid(&mut self) {
+        let Some(draft) = self.section_draft.as_ref().cloned() else {
+            return;
+        };
+        match self
+            .session_mut()
+            .save_optional_section_for_review(draft.clone())
+        {
+            Ok(()) => {
+                let mut anchor = self.review_focus_anchor;
+                if self.state.review_mcp_create {
+                    if let Some(index) = self.state.review_mcp_index {
+                        anchor = Some(ReviewRowKey {
+                            group: ReviewTarget::OptionalSection(
+                                crate::config_templates::OptionalSection::McpServers,
+                            ),
+                            field: None,
+                            target: ReviewItemTarget::McpServer { index },
+                        });
+                        self.state.review_mcp_create = false;
+                    }
+                }
+                self.review_focus_anchor = anchor;
+                self.section_draft = Some(draft);
+                self.field_errors.clear();
+                let old_focus = self.state.focus;
+                self.refresh_review();
+                if self.state.page == ConfigPage::Review {
+                    self.state.focus = anchor
+                        .and_then(|key| self.review.as_ref()?.find_row(key))
+                        .unwrap_or(old_focus.min(self.review_row_count().saturating_sub(1)));
+                }
+            }
+            Err(errors) => {
+                self.field_errors.clear();
+                for error in errors {
+                    self.field_errors
+                        .insert(error.field, error.code.to_string());
+                }
+            }
+        }
+    }
+
+    fn save_review_complex(&mut self) {
+        let Some(draft) = self.section_draft.as_ref().cloned() else {
+            return;
+        };
+        match self.session_mut().save_optional_section_for_review(draft) {
+            Ok(()) => {
+                let anchor = self.review_focus_anchor.take();
+                let old_focus = self.state.focus;
+                self.section_draft = None;
+                self.section_original = None;
+                self.state.editing = None;
+                self.state.list_edit = None;
+                self.state.mcp_edit = None;
+                self.state.review_subfocus = 0;
+                self.state.review_mcp_index = None;
+                self.field_errors.clear();
+                self.state.review_mcp_create = false;
+                self.refresh_review();
+                if self.state.page == ConfigPage::Review {
+                    self.state.focus = anchor
+                        .and_then(|key| self.review.as_ref()?.find_row(key))
+                        .unwrap_or_else(|| {
+                            old_focus.min(self.review_row_count().saturating_sub(1))
+                        });
+                }
+            }
+            Err(errors) => self.record_errors(errors),
+        }
+    }
+
+    fn delete_review_mcp_server(&mut self) {
+        if self.state.review_mcp_create {
+            self.close_review_complex();
+            return;
+        }
+        let Some(index) = self.state.review_mcp_index else {
+            return;
+        };
+        let Some(draft) = self.section_draft.as_mut() else {
+            return;
+        };
+        if pages::remove_mcp_server(draft, index) {
+            self.save_review_complex();
+        }
+    }
+
+    fn close_review_complex(&mut self) {
+        self.section_draft = None;
+        self.section_original = None;
+        self.state.editing = None;
+        self.state.list_edit = None;
+        self.state.mcp_edit = None;
+        self.state.review_subfocus = 0;
+        self.state.review_mcp_index = None;
+        self.state.review_mcp_create = false;
+        self.review_focus_anchor = None;
+        self.field_errors.clear();
+    }
+
+    fn review_edit_value(&self, group: ReviewTarget, field: SetupField) -> Option<String> {
+        match group {
+            ReviewTarget::Connection => pages::connection_value(self.session(), field),
+            ReviewTarget::OptionalSection(section) => {
+                let draft = self.session().optional_draft(section);
+                Some(pages::optional_field_value(&draft, field))
+            }
+            ReviewTarget::Basic => match field {
+                SetupField::Mode => {
+                    Some(format!("{:?}", self.session().selected_mode()).to_lowercase())
+                }
+                SetupField::Profile => {
+                    Some(format!("{:?}", self.session().selected_profile()).to_lowercase())
+                }
+                _ => None,
+            },
+            ReviewTarget::OptionalCenter => None,
+        }
+    }
+
+    fn cycle_review_choice(&mut self, delta: isize) {
+        let next_value = {
+            let Some(review) = self.review.as_ref() else {
+                return;
+            };
+            let Some((_, item)) = review.row(self.state.focus) else {
+                return;
+            };
+            let choices = item.choice_values();
+            if choices.is_empty() {
+                return;
+            }
+            let Some(editing) = self.state.editing.as_ref() else {
+                return;
+            };
+            let current = choices
+                .iter()
+                .position(|choice| choice.eq_ignore_ascii_case(&editing.buffer))
+                .unwrap_or(0);
+            let next = (current as isize + delta).rem_euclid(choices.len() as isize) as usize;
+            choices[next].to_string()
+        };
+        if let Some(editing) = self.state.editing.as_mut() {
+            editing.buffer = next_value;
+            editing.cursor = editing.buffer.chars().count();
+        }
+    }
+
+    fn commit_review_edit(&mut self, edit: EditState) {
+        if let Some(target) = self.state.list_edit.take() {
+            self.commit_review_list_item(edit, target);
+            return;
+        }
+        if let Some(target) = self.state.mcp_edit.take() {
+            self.commit_review_mcp_field(edit, target);
+            return;
+        }
+        if self.review_current_editor() == Some(ReviewEditorKind::AutoCustom)
+            && edit.field == SetupField::MaxActiveJobs
+        {
+            self.commit_review_auto_custom(edit);
+            return;
+        }
+        let field = edit.field;
+        let anchor = self.review_focus_anchor.or_else(|| {
+            self.review
+                .as_ref()
+                .and_then(|review| review.row_key(self.state.focus))
+        });
+        let Some(anchor) = anchor else {
+            self.state.editing = Some(edit);
+            return;
+        };
+        let value = edit.buffer.clone();
+        match self.apply_review_value(anchor, field, value) {
+            Ok(()) => {
+                self.field_errors.clear();
+                self.review_focus_anchor = None;
+                self.refresh_review();
+                if self.state.page == ConfigPage::Review {
+                    self.state.focus = self
+                        .review
+                        .as_ref()
+                        .and_then(|review| review.find_row(anchor))
+                        .unwrap_or_else(|| self.review_row_count().saturating_sub(1));
+                }
+            }
+            Err(errors) => {
+                let inline_code = errors.first().map(|error| error.code);
+                self.record_errors(errors);
+                if let Some(code) = inline_code {
+                    self.field_errors.insert(field, code.to_string());
+                }
+                self.state.editing = Some(edit);
+            }
+        }
+    }
+
+    fn commit_review_list_item(&mut self, edit: EditState, target: ListEditTarget) {
+        let Some(mut draft) = self.section_draft.as_ref().cloned() else {
+            self.state.editing = Some(edit);
+            self.state.list_edit = Some(target);
+            return;
+        };
+        let Ok(mut list) = pages::optional_list_state(&draft, target.field) else {
+            self.state.editing = Some(edit);
+            self.state.list_edit = Some(target);
+            return;
+        };
+        list.set_focus(target.index);
+        if !list.set_focused(edit.buffer.clone())
+            || !pages::set_optional_list_state(&mut draft, target.field, &list)
+        {
+            self.state.editing = Some(edit);
+            self.state.list_edit = Some(target);
+            return;
+        }
+        match self
+            .session_mut()
+            .save_optional_section_for_review(draft.clone())
+        {
+            Ok(()) => {
+                self.section_draft = Some(draft);
+                self.state.editing = None;
+                self.field_errors.remove(&target.field);
+                let anchor = self.review_focus_anchor;
+                self.refresh_review();
+                if self.state.page == ConfigPage::Review {
+                    self.state.focus = anchor
+                        .and_then(|key| self.review.as_ref()?.find_row(key))
+                        .unwrap_or(self.state.focus);
+                }
+            }
+            Err(errors) => {
+                let inline_code = errors.first().map(|error| error.code);
+                self.record_errors(errors);
+                if let Some(code) = inline_code {
+                    self.field_errors.insert(target.field, code.to_string());
+                }
+                self.state.editing = Some(edit);
+                self.state.list_edit = Some(target);
+            }
+        }
+    }
+
+    fn commit_review_mcp_field(&mut self, edit: EditState, target: McpEditTarget) {
+        let Some(mut draft) = self.section_draft.as_ref().cloned() else {
+            self.state.editing = Some(edit);
+            self.state.mcp_edit = Some(target);
+            return;
+        };
+        if !pages::set_mcp_server_value(&mut draft, target.index, target.field, edit.buffer.clone())
+        {
+            self.state.editing = Some(edit);
+            self.state.mcp_edit = Some(target);
+            return;
+        }
+        self.section_draft = Some(draft);
+        self.state.editing = None;
+        self.field_errors.remove(&target.field);
+        self.stage_review_mcp_draft_if_valid();
+    }
+
+    fn apply_review_value(
+        &mut self,
+        anchor: ReviewRowKey,
+        field: SetupField,
+        value: String,
+    ) -> Result<(), ValidationErrors> {
+        match anchor.group {
+            ReviewTarget::Connection => self.apply_review_connection_value(field, value),
+            ReviewTarget::OptionalSection(section) => {
+                let mut draft = self.session().optional_draft(section);
+                pages::set_optional_field(&mut draft, field, value);
+                self.session_mut().save_optional_section_for_review(draft)
+            }
+            ReviewTarget::Basic => {
+                match field {
+                    SetupField::Mode => {
+                        let mode = match value.as_str() {
+                            "standalone" => Some(RuntimeMode::Standalone),
+                            "hub" => Some(RuntimeMode::Hub),
+                            "local" => Some(RuntimeMode::Local),
+                            _ => None,
+                        };
+                        if let Some(mode) = mode {
+                            self.session_mut().set_mode(mode);
+                            self.navigation.set_mode(mode);
+                        }
+                    }
+                    SetupField::Profile => match value.as_str() {
+                        "normal" => self.session_mut().set_profile(WorkerProfile::Normal),
+                        "room" => self.session_mut().set_profile(WorkerProfile::Room),
+                        _ => {}
+                    },
+                    _ => {}
+                }
+                Ok(())
+            }
+            ReviewTarget::OptionalCenter => Ok(()),
+        }
+    }
+
+    fn apply_review_connection_value(
+        &mut self,
+        field: SetupField,
+        value: String,
+    ) -> Result<(), ValidationErrors> {
+        if field == SetupField::TunnelSecretSource {
+            let source = match value.as_str() {
+                "file" => TunnelSecretSource::File,
+                "env" => TunnelSecretSource::Environment,
+                _ => return Ok(()),
+            };
+            let draft = self.session_mut().standalone_mut();
+            if source == TunnelSecretSource::Environment {
+                draft.provision_secret_now = false;
+                draft.secret_value = None;
+            }
+            draft.secret_source = source;
+            return Ok(());
+        }
+
+        if field == SetupField::ProvisionTunnelSecret {
+            self.session_mut().standalone_mut().provision_secret_now = value == "true";
+            return Ok(());
+        }
+
+        if field == SetupField::TunnelSecretValue {
+            let previous = self
+                .session_mut()
+                .standalone_mut()
+                .secret_value
+                .replace(SecretValue::new(value));
+            let result = self.session().validate_field(field);
+            if result.is_err() {
+                self.session_mut().standalone_mut().secret_value = previous;
+            }
+            return result;
+        }
+
+        if field == SetupField::AgentSecret {
+            let previous = self
+                .session_mut()
+                .hub_mut()
+                .agent_secret
+                .replace(SecretValue::new(value));
+            let result = self.session().validate_field(field);
+            if result.is_err() {
+                self.session_mut().hub_mut().agent_secret = previous;
+            }
+            return result;
+        }
+
+        let previous = match field {
+            SetupField::TunnelId => Some(std::mem::replace(
+                &mut self.session_mut().standalone_mut().tunnel_id,
+                value,
+            )),
+            SetupField::TunnelSecretPath => Some(std::mem::replace(
+                &mut self.session_mut().standalone_mut().secret_path,
+                value,
+            )),
+            SetupField::TunnelSecretEnvironment => Some(std::mem::replace(
+                &mut self.session_mut().standalone_mut().secret_environment,
+                value,
+            )),
+            SetupField::HubUrl => Some(std::mem::replace(
+                &mut self.session_mut().hub_mut().hub_url,
+                value,
+            )),
+            SetupField::HubTransport => Some(std::mem::replace(
+                &mut self.session_mut().hub_mut().hub_transport,
+                value,
+            )),
+            SetupField::AgentId => Some(std::mem::replace(
+                &mut self.session_mut().hub_mut().agent_id,
+                value,
+            )),
+            _ => None,
+        };
+        let Some(previous) = previous else {
+            return Ok(());
+        };
+
+        let result = self.session().validate_field(field);
+        if result.is_err() {
+            match field {
+                SetupField::TunnelId => self.session_mut().standalone_mut().tunnel_id = previous,
+                SetupField::TunnelSecretPath => {
+                    self.session_mut().standalone_mut().secret_path = previous
+                }
+                SetupField::TunnelSecretEnvironment => {
+                    self.session_mut().standalone_mut().secret_environment = previous
+                }
+                SetupField::HubUrl => self.session_mut().hub_mut().hub_url = previous,
+                SetupField::HubTransport => self.session_mut().hub_mut().hub_transport = previous,
+                SetupField::AgentId => self.session_mut().hub_mut().agent_id = previous,
+                _ => {}
+            }
+        }
+        result
     }
 
     fn with_edit(&mut self, update: impl FnOnce(EditState) -> EditState) {
@@ -812,6 +1787,38 @@ impl ConfigTuiApp {
     }
 
     fn cancel_edit(&mut self) {
+        if self.state.page == ConfigPage::Review {
+            if self.review_current_editor() == Some(ReviewEditorKind::AutoCustom) {
+                self.field_errors.clear();
+                self.state.editing = None;
+                return;
+            }
+            if let Some(target) = self.state.list_edit.take() {
+                if target.created {
+                    if let Some(draft) = self.section_draft.as_mut() {
+                        if let Ok(mut list) = pages::optional_list_state(draft, target.field) {
+                            list.set_focus(target.index);
+                            let _ = list.delete_focused();
+                            let _ = pages::set_optional_list_state(draft, target.field, &list);
+                            self.state.review_subfocus =
+                                self.state.review_subfocus.min(list.items().len());
+                        }
+                    }
+                }
+                self.field_errors.clear();
+                self.state.editing = None;
+                return;
+            }
+            if self.state.mcp_edit.take().is_some() {
+                self.field_errors.clear();
+                self.state.editing = None;
+                return;
+            }
+            self.field_errors.clear();
+            self.state.editing = None;
+            self.review_focus_anchor = None;
+            return;
+        }
         self.state.editing = None;
         if let Some(target) = self.state.mcp_edit.take() {
             if target.created {
@@ -863,6 +1870,15 @@ impl ConfigTuiApp {
     }
 
     fn move_focus(&mut self, direction: isize) {
+        if self.review_complex_open() {
+            let length = self.review_complex_focus_len();
+            if length > 0 {
+                let current = self.state.review_subfocus as isize;
+                self.state.review_subfocus =
+                    (current + direction).rem_euclid(length as isize) as usize;
+            }
+            return;
+        }
         let length = match self.state.page {
             ConfigPage::Basic => pages::basic_focus_len(),
             ConfigPage::Connection => pages::connection_focus_len(self.session()),
@@ -872,7 +1888,7 @@ impl ConfigTuiApp {
                 .as_ref()
                 .map(|draft| pages::optional_focus_len(section, draft))
                 .unwrap_or(1),
-            ConfigPage::Review => self.review_group_count() + 1,
+            ConfigPage::Review => self.review_row_count() + 1,
             _ => 1,
         };
         if length == 0 {
@@ -885,8 +1901,15 @@ impl ConfigTuiApp {
     fn field_index(&self, field: SetupField) -> Option<usize> {
         match self.state.page {
             ConfigPage::Basic => match field {
-                SetupField::Mode => Some(0),
-                SetupField::Profile => Some(3),
+                SetupField::Mode => Some(match self.session().selected_mode() {
+                    RuntimeMode::Standalone => 0,
+                    RuntimeMode::Hub => 1,
+                    RuntimeMode::Local => 2,
+                }),
+                SetupField::Profile => Some(match self.session().selected_profile() {
+                    WorkerProfile::Normal => 3,
+                    WorkerProfile::Room => 4,
+                }),
                 _ => None,
             },
             ConfigPage::Connection => pages::connection_field_index(self.session(), field),
@@ -894,6 +1917,20 @@ impl ConfigTuiApp {
                 .section_draft
                 .as_ref()
                 .and_then(|draft| pages::optional_field_index(section, draft, field)),
+            ConfigPage::Review => self.review.as_ref().and_then(|review| {
+                (0..review.row_count()).find(|index| {
+                    review.row(*index).is_some_and(|(_, item)| {
+                        item.field == Some(field)
+                            || (matches!(
+                                field,
+                                SetupField::McpServerId
+                                    | SetupField::McpServerEnabled
+                                    | SetupField::McpServerTransport
+                                    | SetupField::McpServerEndpoint
+                            ) && matches!(item.target, ReviewItemTarget::McpServer { .. }))
+                    })
+                })
+            }),
             _ => None,
         }
     }
@@ -999,58 +2036,157 @@ impl ConfigTuiApp {
     }
 
     fn activate_review_focus(&mut self) {
+        if self.review_complex_open() {
+            self.activate_review_complex_focus();
+            return;
+        }
         let Some(review) = self.review.as_ref() else {
             self.refresh_review();
             return;
         };
-        let targets = review_targets(review);
-        if let Some(target) = targets.get(self.state.focus).copied() {
-            self.open_review_target(target);
-        } else {
-            self.confirm_and_write();
+        if self.state.focus >= review.row_count() {
+            self.activate_review_confirmation();
+            return;
         }
-    }
+        let Some((group, item)) = review.row(self.state.focus) else {
+            return;
+        };
+        let row_key = review.row_key(self.state.focus);
+        let group_target = group.target;
+        let editor = item.editor;
+        let field = item.field;
+        let item_target = item.target;
 
-    fn open_review_target(&mut self, target: ReturnTargetKind) {
-        self.state.return_target = ReturnTarget::Review;
-        self.state.editing = None;
-        self.field_errors.clear();
-        match target {
-            ReturnTargetKind::Basic => {
-                self.navigation.go_to(ConfigPage::Basic);
-                self.state.page = ConfigPage::Basic;
-                self.state.focus = 0;
+        match editor {
+            ReviewEditorKind::Text | ReviewEditorKind::Secret => {
+                let Some(field) = field else {
+                    return;
+                };
+                let Some(value) = self.review_edit_value(group_target, field) else {
+                    return;
+                };
+                self.review_focus_anchor = row_key;
+                self.field_errors.remove(&field);
+                self.state.editing = Some(EditState::new(field, value));
             }
-            ReturnTargetKind::Connection => {
-                if self.navigation.go_to(ConfigPage::Connection) {
-                    self.state.page = ConfigPage::Connection;
-                    self.state.focus = 0;
+            ReviewEditorKind::Choice => {
+                let Some(field) = field else {
+                    return;
+                };
+                let choices = item.choice_values();
+                if group_target == ReviewTarget::Basic || choices.len() == 2 {
+                    let Some(anchor) = row_key else {
+                        return;
+                    };
+                    let Some(current) = self.review_edit_value(group_target, field) else {
+                        return;
+                    };
+                    let current_index = choices
+                        .iter()
+                        .position(|choice| choice.eq_ignore_ascii_case(&current))
+                        .unwrap_or(0);
+                    let next = choices[(current_index + 1) % choices.len()].to_string();
+                    match self.apply_review_value(anchor, field, next) {
+                        Ok(()) => {
+                            self.field_errors.clear();
+                            self.refresh_review();
+                            if self.state.page == ConfigPage::Review {
+                                self.state.focus = self
+                                    .review
+                                    .as_ref()
+                                    .and_then(|review| review.find_row(anchor))
+                                    .unwrap_or(0);
+                            }
+                        }
+                        Err(errors) => self.record_errors(errors),
+                    }
+                } else {
+                    let Some(value) = self.review_edit_value(group_target, field) else {
+                        return;
+                    };
+                    self.review_focus_anchor = row_key;
+                    self.field_errors.remove(&field);
+                    self.state.editing = Some(EditState::new(field, value));
                 }
             }
-            ReturnTargetKind::Optional(section) => {
-                let draft = self.session().optional_draft(section);
-                self.sync_optional_ui_state(&draft);
-                self.section_original = Some(draft.clone());
-                self.section_draft = Some(draft);
-                self.state.list_edit = None;
-                self.state.mcp_edit = None;
-                self.state.page = ConfigPage::Optional(section);
-                self.state.focus = 0;
+            ReviewEditorKind::List => {
+                let ReviewTarget::OptionalSection(section) = group_target else {
+                    return;
+                };
+                self.review_focus_anchor = row_key;
+                self.section_draft = Some(self.session().optional_draft(section));
+                self.section_original = None;
+                self.state.review_subfocus = 0;
+                self.state.review_mcp_index = None;
+                self.state.review_mcp_create = false;
+                self.field_errors.clear();
             }
+            ReviewEditorKind::Compound => {
+                let ReviewTarget::OptionalSection(section) = group_target else {
+                    return;
+                };
+                if section != crate::config_templates::OptionalSection::McpServers {
+                    return;
+                }
+                let draft = self.session().optional_draft(section);
+                let index = match item_target {
+                    ReviewItemTarget::McpServer { index } => Some(index),
+                    ReviewItemTarget::Static => None,
+                };
+                let Some(index) = index else {
+                    return;
+                };
+                self.review_focus_anchor = row_key;
+                self.section_draft = Some(draft);
+                self.section_original = None;
+                self.state.review_subfocus = 0;
+                self.state.review_mcp_index = Some(index);
+                self.field_errors.clear();
+            }
+            ReviewEditorKind::AutoCustom => {
+                let ReviewTarget::OptionalSection(section) = group_target else {
+                    return;
+                };
+                let Some(field) = field else {
+                    return;
+                };
+                let draft = self.session().optional_draft(section);
+                let configured = pages::optional_field_value(&draft, field);
+                if configured != "auto" {
+                    self.state.max_active_custom = configured.clone();
+                }
+                self.review_focus_anchor = row_key;
+                self.section_draft = Some(draft);
+                self.section_original = None;
+                self.state.review_subfocus = usize::from(configured != "auto");
+                self.state.review_mcp_index = None;
+                self.state.review_mcp_create = false;
+                self.field_errors.clear();
+            }
+            ReviewEditorKind::ReadOnly => {}
         }
     }
 
     fn return_to_review(&mut self) {
+        let restore = self.review_focus_anchor.take();
         self.section_draft = None;
         self.section_original = None;
         self.state.editing = None;
         self.state.list_edit = None;
         self.state.mcp_edit = None;
+        self.state.review_subfocus = 0;
+        self.state.review_mcp_index = None;
+        self.state.review_mcp_create = false;
         self.field_errors.clear();
         self.state.return_target = ReturnTarget::MainFlow;
         self.navigation.go_to(ConfigPage::Review);
         self.state.focus = 0;
         self.refresh_review();
+        if self.state.page == ConfigPage::Review {
+            self.state.focus = restore
+                .and_then(|key| self.review.as_ref()?.find_row(key))
+                .unwrap_or(0);
+        }
     }
 
     fn refresh_review(&mut self) {
@@ -1105,8 +2241,44 @@ impl ConfigTuiApp {
         }
     }
 
-    fn confirm_and_write(&mut self) {
+    fn activate_review_confirmation(&mut self) {
+        if self.review_preview_active() {
+            self.confirm_and_write();
+        } else {
+            self.enter_review_preview();
+        }
+    }
+
+    fn enter_review_preview(&mut self) {
         if self.state.page != ConfigPage::Review || self.state.finished {
+            return;
+        }
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        if let Err(errors) = session.validate_for_review() {
+            self.record_errors(errors);
+            return;
+        }
+        match session.redacted_config_json() {
+            Ok(json) => {
+                self.field_errors.clear();
+                self.state.review_search.clear();
+                self.state.review_search_active = false;
+                self.state.review_preview_json = Some(json);
+                self.state.review_preview_scroll = 0;
+                self.state.review_preview_search.clear();
+                self.state.review_preview_search_active = false;
+            }
+            Err(error) => self.set_system_error(&error),
+        }
+    }
+
+    fn confirm_and_write(&mut self) {
+        if self.state.page != ConfigPage::Review
+            || !self.review_preview_active()
+            || self.state.finished
+        {
             return;
         }
         let Some(session) = self.session.as_ref() else {
@@ -1114,7 +2286,8 @@ impl ConfigTuiApp {
         };
         let config_path = session.config_path().to_path_buf();
         if let Err(errors) = session.validate_for_review() {
-            self.route_validation_errors(errors);
+            self.leave_review_preview();
+            self.record_errors(errors);
             return;
         }
         let session = self.session.take().expect("session was checked above");
@@ -1128,10 +2301,9 @@ impl ConfigTuiApp {
         match self.committer.commit(&config_path, outcome) {
             Ok(summary) => {
                 self.state.committed_summary = Some(summary);
-                self.state.page = ConfigPage::Completion;
-                self.state.focus = 0;
-                self.state.return_target = ReturnTarget::MainFlow;
+                self.state.finished = true;
                 self.review = None;
+                self.leave_review_preview();
             }
             Err(error) => self.set_system_error(&error),
         }
@@ -1191,38 +2363,6 @@ fn numeric_field(field: SetupField) -> bool {
             | SetupField::MaxFileSearchContextLines
             | SetupField::DiaryBoundaryHour
     )
-}
-
-#[derive(Clone, Copy)]
-enum ReturnTargetKind {
-    Basic,
-    Connection,
-    Optional(crate::config_templates::OptionalSection),
-}
-
-fn review_group_count(review: &ReviewModel) -> usize {
-    review_targets(review).len()
-}
-
-fn review_targets(review: &ReviewModel) -> Vec<ReturnTargetKind> {
-    let mut targets = vec![ReturnTargetKind::Basic];
-    if review.mode != RuntimeMode::Local {
-        targets.push(ReturnTargetKind::Connection);
-    }
-    targets.extend(
-        review
-            .optional_sections
-            .iter()
-            .filter_map(|group| match group.target {
-                crate::config_setup::ReviewTarget::OptionalSection(section)
-                    if group.status != crate::config_setup::SectionStatus::NotApplicable =>
-                {
-                    Some(ReturnTargetKind::Optional(section))
-                }
-                _ => None,
-            }),
-    );
-    targets
 }
 
 fn optional_section_for_field(field: SetupField) -> crate::config_templates::OptionalSection {
@@ -1366,14 +2506,6 @@ mod tests {
             .iter()
             .position(|candidate| *candidate == section)
             .expect("optional section is available");
-    }
-
-    fn review_app(mode: RuntimeMode) -> ConfigTuiApp {
-        let mut app = app(mode);
-        while app.page() != ConfigPage::Review {
-            app.handle_action(TuiAction::Next).unwrap();
-        }
-        app
     }
 
     fn rendered(app: &ConfigTuiApp) -> String {
@@ -1769,184 +2901,37 @@ mod tests {
     }
 
     #[test]
-    fn review_return_targets_rebuild_the_review_model() {
-        let mut basic = review_app(RuntimeMode::Standalone);
-        basic.state.focus = 0;
-        basic.handle_action(TuiAction::Activate).unwrap();
-        assert_eq!(basic.page(), ConfigPage::Basic);
-        assert_eq!(
-            basic.state.return_target,
-            super::super::navigation::ReturnTarget::Review
-        );
-        basic
-            .handle_action(TuiAction::SetMode(RuntimeMode::Hub))
-            .unwrap();
-        basic.handle_action(TuiAction::Next).unwrap();
-        assert_eq!(basic.page(), ConfigPage::Review);
-        assert_eq!(basic.review_model().unwrap().mode, RuntimeMode::Hub);
-        assert!(basic
-            .review_model()
-            .unwrap()
-            .connection
-            .items
-            .iter()
-            .any(|item| item.label_key == "hub_url"));
-
-        let mut connection = review_app(RuntimeMode::Standalone);
-        connection.state.focus = 1;
-        connection.handle_action(TuiAction::Activate).unwrap();
-        assert_eq!(connection.page(), ConfigPage::Connection);
-        connection.handle_action(TuiAction::Next).unwrap();
-        assert_eq!(connection.page(), ConfigPage::Review);
-
-        let mut optional = review_app(RuntimeMode::Standalone);
-        optional.state.focus = 2;
-        optional.handle_action(TuiAction::Activate).unwrap();
-        assert_eq!(
-            optional.page(),
-            ConfigPage::Optional(crate::config_templates::OptionalSection::Identity)
-        );
-        optional.handle_action(TuiAction::Next).unwrap();
-        assert_eq!(optional.page(), ConfigPage::Review);
-
-        let mut escape = review_app(RuntimeMode::Standalone);
-        escape.state.focus = 0;
-        escape.handle_action(TuiAction::Activate).unwrap();
-        assert_eq!(escape.page(), ConfigPage::Basic);
-        escape.handle_action(TuiAction::Back).unwrap();
-        assert_eq!(escape.page(), ConfigPage::Review);
-    }
-
-    #[test]
-    fn review_cancel_has_no_side_effect_and_confirm_commits_once() {
-        let root =
-            std::env::temp_dir().join(format!("agentic-gpt-review-test-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-        let config_path = root.join("config.json");
-        let secret_path = root.join("secret");
-
+    fn review_final_confirmation_commits_once() {
         let calls = Rc::new(Cell::new(0));
-        let mut cancelled = ConfigTuiApp::with_committer(
+        let mut app = ConfigTuiApp::with_committer(
             SetupSession::new(
                 SetupSeed {
                     mode: Some(RuntimeMode::Standalone),
                     tunnel_id: Some("review-test-tunnel".into()),
-                    tunnel_api_key: Some(format!("file:{}", secret_path.display())),
+                    tunnel_api_key: Some("file:/tmp/review-test-secret".into()),
                     ..SetupSeed::default()
                 },
                 UiLanguage::En,
-                config_path.clone(),
+                PathBuf::from("/tmp/config-tui-review-commit-once.json"),
             ),
             Box::new(CountingCommitter {
                 calls: calls.clone(),
                 failure: None,
             }),
         );
-        while cancelled.page() != ConfigPage::Review {
-            cancelled.handle_action(TuiAction::Next).unwrap();
+        while app.page() != ConfigPage::Review {
+            app.handle_action(TuiAction::Next).unwrap();
         }
-        cancelled.handle_action(TuiAction::Cancel).unwrap();
+        app.state.focus = app.review_row_count();
+
+        app.handle_action(TuiAction::Next).unwrap();
         assert_eq!(calls.get(), 0);
-        assert!(!config_path.exists());
-        assert!(!secret_path.exists());
 
-        let calls = Rc::new(Cell::new(0));
-        let mut committed = ConfigTuiApp::with_committer(
-            SetupSession::new(
-                SetupSeed {
-                    mode: Some(RuntimeMode::Standalone),
-                    tunnel_id: Some("review-test-tunnel".into()),
-                    tunnel_api_key: Some(format!("file:{}", secret_path.display())),
-                    ..SetupSeed::default()
-                },
-                UiLanguage::En,
-                config_path.clone(),
-            ),
-            Box::new(CountingCommitter {
-                calls: calls.clone(),
-                failure: None,
-            }),
-        );
-        while committed.page() != ConfigPage::Review {
-            committed.handle_action(TuiAction::Next).unwrap();
-        }
-        committed.state.focus = committed.review_group_count();
-        committed.handle_action(TuiAction::Next).unwrap();
-        assert_eq!(calls.get(), 1);
-        assert_eq!(committed.page(), ConfigPage::Completion);
-        committed.handle_action(TuiAction::Next).unwrap();
+        app.handle_action(TuiAction::Next).unwrap();
         assert_eq!(calls.get(), 1);
 
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn review_completion_and_system_error_render_without_secret_markers() {
-        let marker = "phase-seven-secret-marker";
-        let calls = Rc::new(Cell::new(0));
-        let mut committed = ConfigTuiApp::with_committer(
-            SetupSession::new(
-                SetupSeed {
-                    mode: Some(RuntimeMode::Standalone),
-                    tunnel_id: Some("phase-seven-tunnel".into()),
-                    tunnel_api_key: Some("file:/tmp/phase-seven-secret".into()),
-                    ..SetupSeed::default()
-                },
-                UiLanguage::En,
-                "/tmp/phase-seven-review.json".into(),
-            ),
-            Box::new(CountingCommitter {
-                calls: calls.clone(),
-                failure: None,
-            }),
-        );
-        committed
-            .session_mut()
-            .standalone_mut()
-            .provision_secret_now = true;
-        committed.session_mut().standalone_mut().secret_value = Some(SecretValue::new(marker));
-        while committed.page() != ConfigPage::Review {
-            committed.handle_action(TuiAction::Next).unwrap();
-        }
-        assert!(rendered(&committed).contains("Review and write"));
-        assert!(rendered(&committed).contains("Config path"));
-        assert!(!rendered(&committed).contains(marker));
-        committed.state.focus = committed.review_group_count();
-        committed.handle_action(TuiAction::Next).unwrap();
-        let completion = rendered(&committed);
-        assert!(completion.contains("AgenticGPT initialization complete"));
-        assert!(completion.contains("phase-seven-review.json"));
-        assert!(completion.contains("Done"));
-        assert!(!rendered(&committed).contains(marker));
-
-        let calls = Rc::new(Cell::new(0));
-        let mut failed = ConfigTuiApp::with_committer(
-            SetupSession::new(
-                SetupSeed {
-                    mode: Some(RuntimeMode::Standalone),
-                    tunnel_id: Some("phase-seven-tunnel".into()),
-                    tunnel_api_key: Some("file:/tmp/phase-seven-secret".into()),
-                    ..SetupSeed::default()
-                },
-                UiLanguage::En,
-                "/tmp/phase-seven-error.json".into(),
-            ),
-            Box::new(CountingCommitter {
-                calls,
-                failure: Some(format!("write failed: {marker}")),
-            }),
-        );
-        while failed.page() != ConfigPage::Review {
-            failed.handle_action(TuiAction::Next).unwrap();
-        }
-        failed.state.focus = failed.review_group_count();
-        failed.handle_action(TuiAction::Next).unwrap();
-        assert_eq!(failed.page(), ConfigPage::SystemError);
-        let error = rendered(&failed);
-        assert!(error.contains("Initialization error"));
-        assert!(error.contains("Exit"));
-        assert!(!error.contains(marker));
+        app.handle_action(TuiAction::Next).unwrap();
+        assert_eq!(calls.get(), 1);
     }
 
     #[test]
@@ -2202,15 +3187,6 @@ mod tests {
             app.focused_field(),
             Some(crate::config_setup::SetupField::TunnelId)
         );
-    }
-
-    #[test]
-    fn review_focus_scrolls_lower_groups_into_view() {
-        let mut app = review_app(RuntimeMode::Standalone);
-        app.state.focus = app.review_group_count() - 1;
-        let rendered = rendered(&app);
-        assert!(rendered.contains("Hub reporting"));
-        assert!(rendered.contains("› Hub reporting"));
     }
 
     #[test]

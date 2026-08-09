@@ -1064,17 +1064,20 @@ fn interactive_init_required_message(language: UiLanguage) -> &'static str {
 }
 
 fn handle_init(config_path: &Path, args: ConfigInitArgs, language: UiLanguage) -> Result<()> {
-    let summary = if args.non_interactive {
-        init_non_interactive(config_path, &args, language)?
+    let (summary, print_pending) = if args.non_interactive {
+        (init_non_interactive(config_path, &args, language)?, true)
     } else if process_should_use_interactive_init(args.non_interactive) {
-        crate::config_tui::run_config_tui(config_path, setup_seed_from_args(&args), language)
-            .map_err(|error| {
+        (
+            crate::config_tui::run_config_tui(config_path, setup_seed_from_args(&args), language)
+                .map_err(|error| {
                 if error.to_string() == "config_init_cancelled" {
                     anyhow!(cli_i18n::text(language).cancelled)
                 } else {
                     error
                 }
-            })?
+            })?,
+            false,
+        )
     } else {
         return Err(anyhow!(interactive_init_required_message(language)));
     };
@@ -1084,8 +1087,10 @@ fn handle_init(config_path: &Path, args: ConfigInitArgs, language: UiLanguage) -
         cli_i18n::text(language).initialized,
         summary.config_path.display()
     );
-    for action in summary.pending {
-        eprintln!("{}", cli_i18n::pending_action_text(action, language));
+    if print_pending {
+        for action in summary.pending {
+            eprintln!("{}", cli_i18n::pending_action_text(action, language));
+        }
     }
     Ok(())
 }

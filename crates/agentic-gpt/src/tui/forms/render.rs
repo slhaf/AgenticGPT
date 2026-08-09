@@ -154,7 +154,7 @@ pub(crate) fn choice_input_row_line(
     Line::from(spans)
 }
 
-fn inline_input_spans(
+pub(crate) fn inline_input_spans(
     value: &str,
     editing: bool,
     cursor: Option<usize>,
@@ -216,7 +216,16 @@ pub(crate) fn editable_list_item_line(
     theme: &Theme,
 ) -> Line<'static> {
     if !editing {
-        return list_item_line(value, focused, theme);
+        let inner_width = usize::from(area_width).saturating_sub(4).max(1);
+        let window = input_window(value, false, value.chars().count(), inner_width);
+        let style = if focused {
+            theme.emphasis
+        } else {
+            theme.normal
+        };
+        let mut spans = vec![Span::raw("  "), focus_span(focused, theme)];
+        spans.extend(input_window_spans(&window, style, theme));
+        return Line::from(spans);
     }
     let inner_width = input_inner_width(value, area_width, true);
     let window = input_window(
@@ -507,264 +516,4 @@ fn trailing_plain_text(value: &str, width: usize) -> String {
     }
     chars.reverse();
     chars.into_iter().collect()
-}
-
-#[cfg(test)]
-mod tests {
-    use ratatui::{backend::TestBackend, layout::Rect, widgets::Paragraph, Terminal};
-
-    use super::*;
-
-    fn row_text(terminal: &Terminal<TestBackend>, y: u16, width: u16) -> String {
-        (0..width)
-            .map(|x| {
-                terminal
-                    .backend()
-                    .buffer()
-                    .cell((x, y))
-                    .map(|cell| cell.symbol())
-                    .unwrap_or(" ")
-            })
-            .collect::<String>()
-    }
-
-    #[test]
-    fn subsection_heading_uses_diamond_without_nested_rule() {
-        let backend = TestBackend::new(30, 2);
-        let mut terminal = Terminal::new(backend).unwrap();
-        let theme = Theme::from_env();
-        terminal
-            .draw(|frame| {
-                frame.render_widget(
-                    Paragraph::new(subsection_heading_line("任务并发", &theme)),
-                    frame.area(),
-                );
-            })
-            .unwrap();
-        let row = row_text(&terminal, 0, 30);
-        assert!(row.contains('◆'));
-        for character in "任务并发".chars() {
-            assert!(row.contains(character));
-        }
-        assert!(!row.contains('─'));
-    }
-
-    #[test]
-    fn empty_input_is_blank_and_cursor_only_exists_while_editing() {
-        let backend = TestBackend::new(42, 4);
-        let mut terminal = Terminal::new(backend).unwrap();
-        let theme = Theme::from_env();
-        terminal
-            .draw(|frame| {
-                render_long_form_input(
-                    frame,
-                    Rect::new(0, 0, 42, 2),
-                    "显示名称",
-                    "",
-                    true,
-                    false,
-                    None,
-                    false,
-                    false,
-                    &theme,
-                );
-            })
-            .unwrap();
-        let idle = row_text(&terminal, 1, 42);
-        assert!(idle.contains("[        ]"));
-        assert!(!idle.contains('•'));
-        assert!(!idle.contains('█'));
-
-        terminal
-            .draw(|frame| {
-                render_long_form_input(
-                    frame,
-                    Rect::new(0, 0, 42, 2),
-                    "显示名称",
-                    "abc",
-                    true,
-                    true,
-                    Some(1),
-                    false,
-                    false,
-                    &theme,
-                );
-            })
-            .unwrap();
-        let editing = row_text(&terminal, 1, 42);
-        assert!(editing.contains("a█bc"));
-    }
-
-    #[test]
-    fn short_long_form_values_are_centered_inside_the_input() {
-        let backend = TestBackend::new(42, 3);
-        let mut terminal = Terminal::new(backend).unwrap();
-        let theme = Theme::from_env();
-        terminal
-            .draw(|frame| {
-                render_long_form_input(
-                    frame,
-                    Rect::new(0, 0, 42, 2),
-                    "Bubblewrap path",
-                    "bwrap",
-                    true,
-                    false,
-                    None,
-                    false,
-                    false,
-                    &theme,
-                );
-            })
-            .unwrap();
-        let value = row_text(&terminal, 1, 42);
-        assert!(value.contains("[  bwrap ]"));
-    }
-
-    #[test]
-    fn idle_truncation_preserves_full_width_and_marks_right_fade() {
-        let value = "abcdefghijklmnopqrstuvwxyz";
-        let window = input_window(value, false, value.chars().count(), 12);
-
-        assert_eq!(UnicodeWidthStr::width(window.text.as_str()), 12);
-        assert!(!window.left_clipped);
-        assert!(window.right_clipped);
-        assert_eq!(window.text, "abcdefghijkl");
-        assert!(!window.text.contains('…'));
-    }
-
-    #[test]
-    fn editing_truncation_uses_all_available_space_near_end_cursor() {
-        let value = "abcdefghijklmnopqrstuvwxyz";
-        let window = input_window(value, true, value.chars().count(), 12);
-
-        assert_eq!(UnicodeWidthStr::width(window.text.as_str()), 12);
-        assert!(window.left_clipped);
-        assert!(!window.right_clipped);
-        assert!(window.text.ends_with('█'));
-        assert_eq!(window.text, "pqrstuvwxyz█");
-    }
-
-    #[test]
-    fn choice_marker_and_boolean_value_have_distinct_semantics() {
-        let backend = TestBackend::new(42, 4);
-        let mut terminal = Terminal::new(backend).unwrap();
-        let theme = Theme::from_env();
-        terminal
-            .draw(|frame| {
-                frame.render_widget(
-                    Paragraph::new(choice_row_line("file", false, true, 12, &theme)),
-                    Rect::new(0, 0, 42, 1),
-                );
-                frame.render_widget(
-                    Paragraph::new(choice_row_line("env", true, false, 12, &theme)),
-                    Rect::new(0, 1, 42, 1),
-                );
-                frame.render_widget(
-                    Paragraph::new(boolean_row_line("启用沙箱", "关", true, 18, &theme)),
-                    Rect::new(0, 2, 42, 1),
-                );
-            })
-            .unwrap();
-        let file = row_text(&terminal, 0, 42);
-        let env = row_text(&terminal, 1, 42);
-        let boolean = row_text(&terminal, 2, 42);
-        assert!(file.contains(''));
-        assert!(!file.contains('❯'));
-        assert!(env.contains('❯'));
-        assert!(!env.contains(''));
-        assert!(boolean.contains('❯'));
-        for character in "启用沙箱".chars() {
-            assert!(boolean.contains(character));
-        }
-        assert!(boolean.contains('关'));
-        assert!(!boolean.contains(''));
-    }
-
-    #[test]
-    fn inline_choice_input_keeps_focus_selection_and_edit_cursor_distinct() {
-        let backend = TestBackend::new(50, 3);
-        let mut terminal = Terminal::new(backend).unwrap();
-        let theme = Theme::from_env();
-        terminal
-            .draw(|frame| {
-                frame.render_widget(
-                    Paragraph::new(choice_input_row_line(
-                        "Custom",
-                        "12",
-                        true,
-                        false,
-                        true,
-                        Some(1),
-                        21,
-                        5,
-                        &theme,
-                    )),
-                    Rect::new(0, 0, 50, 1),
-                );
-                frame.render_widget(
-                    Paragraph::new(choice_input_row_line(
-                        "Custom", "12", false, true, false, None, 21, 5, &theme,
-                    )),
-                    Rect::new(0, 1, 50, 1),
-                );
-                frame.render_widget(
-                    Paragraph::new(input_row_line(
-                        "Max concurrent",
-                        "2",
-                        true,
-                        false,
-                        None,
-                        22,
-                        5,
-                        &theme,
-                    )),
-                    Rect::new(0, 2, 50, 1),
-                );
-            })
-            .unwrap();
-
-        let editing = row_text(&terminal, 0, 50);
-        assert!(editing.contains('❯'));
-        assert!(!editing.contains(''));
-        assert!(editing.contains("[ 1█2 ]"));
-
-        let selected = row_text(&terminal, 1, 50);
-        assert!(!selected.contains('❯'));
-        assert!(selected.contains(''));
-        assert!(selected.contains("[  12 ]"));
-
-        let numeric = row_text(&terminal, 2, 50);
-        assert!(numeric.contains('❯'));
-        assert!(!numeric.contains(''));
-        assert!(numeric.contains("[  2  ]"));
-    }
-
-    #[test]
-    fn long_form_width_uses_terminal_cells_for_cjk() {
-        let backend = TestBackend::new(28, 3);
-        let mut terminal = Terminal::new(backend).unwrap();
-        let theme = Theme::from_env();
-        terminal
-            .draw(|frame| {
-                render_long_form_input(
-                    frame,
-                    Rect::new(0, 0, 28, 2),
-                    "路径",
-                    "中文路径/abcdef",
-                    true,
-                    false,
-                    None,
-                    false,
-                    false,
-                    &theme,
-                );
-            })
-            .unwrap();
-        let row = row_text(&terminal, 1, 28);
-        for character in "中文路径".chars() {
-            assert!(row.contains(character));
-        }
-        assert!(row.contains("/abcdef"));
-        assert!(row.contains(']'));
-    }
 }

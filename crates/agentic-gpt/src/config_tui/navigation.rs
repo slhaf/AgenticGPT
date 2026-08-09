@@ -7,7 +7,6 @@ pub(crate) enum ConfigPage {
     OptionalCenter,
     Optional(OptionalSection),
     Review,
-    Completion,
     SystemError,
 }
 

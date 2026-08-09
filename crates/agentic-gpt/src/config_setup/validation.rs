@@ -766,7 +766,9 @@ pub(super) fn build_active_input(session: &SetupSession) -> Result<InitInput, Va
     build_active_input_unchecked(session)
 }
 
-fn build_active_input_unchecked(session: &SetupSession) -> Result<InitInput, ValidationErrors> {
+pub(super) fn build_active_input_unchecked(
+    session: &SetupSession,
+) -> Result<InitInput, ValidationErrors> {
     let mut input = InitInput::non_interactive_defaults(session.language());
     input.mode = session.selected_mode();
     input.profile = session.selected_profile();
