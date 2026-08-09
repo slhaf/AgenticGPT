@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::PathBuf;
 
@@ -9,6 +10,7 @@ use crate::config::{
     ConfirmationProviderConfig, HubReportingConfig, LimitsConfig, PathPolicyConfig, RoomConfig,
     SandboxConfig, TunnelClientConfig, TunnelConfig,
 };
+use crate::mcp::McpServerConfig;
 use crate::utils::agentic_home;
 use crate::WorkerProfile;
 
@@ -30,6 +32,7 @@ pub(crate) enum OptionalSection {
     Confirmation,
     Limits,
     Sandbox,
+    McpServers,
     Room,
     TunnelClient,
     HubReporting,
@@ -87,6 +90,7 @@ pub(crate) struct InitInput {
     pub(crate) room: Option<RoomConfig>,
     pub(crate) tunnel_client: Option<TunnelClientConfig>,
     pub(crate) hub_reporting: Option<HubReportingConfig>,
+    pub(crate) mcp_servers: Option<BTreeMap<String, McpServerConfig>>,
 }
 
 impl InitInput {
@@ -111,6 +115,7 @@ impl InitInput {
             room: None,
             tunnel_client: None,
             hub_reporting: None,
+            mcp_servers: None,
         }
     }
 }
@@ -165,6 +170,7 @@ pub(crate) fn build_config(input: InitInput) -> Result<InitBuild> {
         room,
         tunnel_client,
         hub_reporting,
+        mcp_servers,
     } = input;
 
     if room.is_some() && !optional_section_is_legal(OptionalSection::Room, mode, profile) {
@@ -202,6 +208,9 @@ pub(crate) fn build_config(input: InitInput) -> Result<InitBuild> {
     if let Some(room) = room {
         config.skills = room.skills.clone();
         config.room = room;
+    }
+    if let Some(mcp_servers) = mcp_servers {
+        config.mcp_servers = mcp_servers;
     }
 
     let mut pending = Vec::new();
@@ -283,7 +292,8 @@ pub(crate) fn optional_section_is_legal(
         | OptionalSection::Workspace
         | OptionalSection::Confirmation
         | OptionalSection::Limits
-        | OptionalSection::Sandbox => true,
+        | OptionalSection::Sandbox
+        | OptionalSection::McpServers => true,
         OptionalSection::Room => profile == WorkerProfile::Room,
         OptionalSection::TunnelClient | OptionalSection::HubReporting => {
             mode == RuntimeMode::Standalone
@@ -314,6 +324,25 @@ fn push_pending(pending: &mut Vec<PendingAction>, action: PendingAction) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mcp_servers_flow_into_built_config() {
+        let mut servers = std::collections::BTreeMap::new();
+        servers.insert(
+            "local_tools".to_string(),
+            crate::mcp::McpServerConfig {
+                enabled: true,
+                transport: "stdio".to_string(),
+                url: Some("node ./server.mjs".to_string()),
+            },
+        );
+        let mut input = InitInput::non_interactive_defaults(UiLanguage::En);
+        input.mcp_servers = Some(servers.clone());
+
+        let built = build_config(input).unwrap();
+
+        assert_eq!(built.config.mcp_servers, servers);
+    }
 
     #[test]
     fn default_template_is_standalone_normal_with_safe_placeholders() {

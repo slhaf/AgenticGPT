@@ -161,6 +161,7 @@ mod tests {
         assert_eq!(restored_hub.agent_secret.unwrap().expose(), marker);
     }
 }
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 
 use crate::config::{
@@ -171,9 +172,12 @@ use crate::config::{
 use crate::config_templates::{
     self, build_config, InitInput, OptionalSection, RuntimeMode, SecretValue, TunnelSecretSource,
 };
+use crate::mcp::{self, McpServerConfig};
 use crate::WorkerProfile;
 
-use super::model::{HubDraft, OptionalSectionDraft, SetupField, SetupSession, StandaloneDraft};
+use super::model::{
+    HubDraft, McpServerDraft, OptionalSectionDraft, SetupField, SetupSession, StandaloneDraft,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ValidationError {
@@ -205,6 +209,7 @@ pub(super) fn available_optional_sections(
         OptionalSection::Confirmation,
         OptionalSection::Limits,
         OptionalSection::Sandbox,
+        OptionalSection::McpServers,
         OptionalSection::Room,
         OptionalSection::TunnelClient,
         OptionalSection::HubReporting,
@@ -363,6 +368,13 @@ pub(super) fn validate_field(
             OptionalSection::Sandbox,
             &session.optional_draft(OptionalSection::Sandbox),
         ),
+        SetupField::McpServerId
+        | SetupField::McpServerEnabled
+        | SetupField::McpServerTransport
+        | SetupField::McpServerEndpoint => validate_optional(
+            OptionalSection::McpServers,
+            &session.optional_draft(OptionalSection::McpServers),
+        ),
         SetupField::RoomTimezone | SetupField::DiaryBoundaryHour | SetupField::NotebookRoot => {
             validate_optional(
                 OptionalSection::Room,
@@ -508,6 +520,11 @@ fn validate_optional(section: OptionalSection, draft: &OptionalSectionDraft) -> 
                 ));
             }
         }
+        (OptionalSection::McpServers, OptionalSectionDraft::McpServers(value)) => {
+            if let Err(mcp_errors) = mcp_servers_from_draft(&value.servers) {
+                errors.extend(mcp_errors);
+            }
+        }
         (OptionalSection::Room, OptionalSectionDraft::Room(value)) => {
             required(
                 &value.timezone,
@@ -558,6 +575,47 @@ fn validate_optional(section: OptionalSection, draft: &OptionalSectionDraft) -> 
         )),
     }
     errors
+}
+
+fn mcp_servers_from_draft(
+    servers: &[McpServerDraft],
+) -> Result<BTreeMap<String, McpServerConfig>, ValidationErrors> {
+    let mut ids = HashSet::new();
+    let mut configs = BTreeMap::new();
+    for server in servers {
+        if !ids.insert(server.id.clone()) {
+            return Err(vec![error(
+                SetupField::McpServerId,
+                "config_init_mcp_server_id_duplicate",
+            )]);
+        }
+        configs.insert(
+            server.id.clone(),
+            McpServerConfig {
+                enabled: server.enabled,
+                transport: server.transport.clone(),
+                url: Some(server.endpoint.clone()),
+            },
+        );
+    }
+    if let Err(validation_error) = mcp::validate_server_configs(&configs) {
+        let code = validation_error.to_string();
+        let (field, safe_code) = if code.starts_with("mcp_server_id_invalid") {
+            (SetupField::McpServerId, "config_init_mcp_server_id_invalid")
+        } else if code.starts_with("unsupported_mcp_transport") {
+            (
+                SetupField::McpServerTransport,
+                "config_init_mcp_transport_invalid",
+            )
+        } else {
+            (
+                SetupField::McpServerEndpoint,
+                "config_init_mcp_endpoint_invalid",
+            )
+        };
+        return Err(vec![error(field, safe_code)]);
+    }
+    Ok(configs)
 }
 
 fn required(value: &str, field: SetupField, key: &'static str, errors: &mut ValidationErrors) {
@@ -687,6 +745,10 @@ fn configured_draft(
             .map(OptionalSectionDraft::Confirmation),
         OptionalSection::Limits => drafts.limits.clone().map(OptionalSectionDraft::Limits),
         OptionalSection::Sandbox => drafts.sandbox.clone().map(OptionalSectionDraft::Sandbox),
+        OptionalSection::McpServers => drafts
+            .mcp_servers
+            .clone()
+            .map(OptionalSectionDraft::McpServers),
         OptionalSection::Room => drafts.room.clone().map(OptionalSectionDraft::Room),
         OptionalSection::TunnelClient => drafts
             .tunnel_client
@@ -844,6 +906,9 @@ fn apply_optional_draft(
                 required_runtime_paths,
             });
         }
+        (OptionalSection::McpServers, OptionalSectionDraft::McpServers(value)) => {
+            input.mcp_servers = Some(mcp_servers_from_draft(&value.servers)?);
+        }
         (OptionalSection::Room, OptionalSectionDraft::Room(value)) => {
             let diary_day_boundary_hour =
                 value.diary_boundary_hour.trim().parse().map_err(|_| {
@@ -952,6 +1017,7 @@ fn first_field(section: OptionalSection) -> SetupField {
         OptionalSection::Confirmation => SetupField::ConfirmationProvider,
         OptionalSection::Limits => SetupField::MaxConcurrentTasks,
         OptionalSection::Sandbox => SetupField::SandboxEnabled,
+        OptionalSection::McpServers => SetupField::McpServerId,
         OptionalSection::Room => SetupField::RoomTimezone,
         OptionalSection::TunnelClient => SetupField::TunnelClientVersion,
         OptionalSection::HubReporting => SetupField::HubReportingDetail,

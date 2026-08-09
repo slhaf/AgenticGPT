@@ -11,16 +11,16 @@ use ratatui::{
 
 use crate::cli_i18n::UiLanguage;
 use crate::config_setup::{
-    default_optional_draft, OptionalSectionDraft, ReviewModel, ReviewTarget, SectionStatus,
-    SetupField, SetupSession,
+    default_optional_draft, McpServerDraft, OptionalSectionDraft, ReviewModel, ReviewTarget,
+    SectionStatus, SetupField, SetupSession,
 };
 use crate::config_templates::{
     InitSummary, OptionalSection, PendingAction, RuntimeMode, TunnelSecretSource,
 };
 use crate::tui::forms::{
     boolean_row_line, choice_input_row_line, choice_row_line, editable_list_item_line,
-    input_row_line, long_form_input_value_line, numeric_input_value_line, render_long_form_input,
-    subsection_heading_line, EditableListState,
+    input_row_line, long_form_input_value_line, numeric_input_value_line, subsection_heading_line,
+    value_row_line, EditableListState,
 };
 use crate::tui::{
     action_line, inline_error_line, labeled_heading_line, render_action_button,
@@ -69,6 +69,18 @@ fn localized_error(code: &str, language: UiLanguage) -> String {
         "config_init_reporting_detail_invalid" => {
             ("Reporting detail is invalid.", "报告详细程度无效。")
         }
+        "config_init_mcp_server_id_duplicate" => {
+            ("MCP server IDs must be unique.", "MCP 服务 ID 不能重复。")
+        }
+        "config_init_mcp_server_id_invalid" => ("MCP server ID is invalid.", "MCP 服务 ID 无效。"),
+        "config_init_mcp_transport_invalid" => (
+            "Transport must be streamable-http or stdio.",
+            "传输方式必须是 streamable-http 或 stdio。",
+        ),
+        "config_init_mcp_endpoint_invalid" => (
+            "Enter a valid HTTP URL or stdio command.",
+            "请输入有效的 HTTP URL 或 stdio 命令。",
+        ),
         "config_init_optional_section_invalid" => {
             ("Optional section is invalid.", "可选配置区块无效。")
         }
@@ -398,7 +410,6 @@ fn render_connection(
     );
     render_horizontal_rule(frame, top_rule, theme);
     let [left, _, right] = surface_columns(body);
-    let relaxed_field_spacing = left.height >= 18;
 
     let items = connection_focus_items(session);
     let mut cursor = left.y;
@@ -411,59 +422,45 @@ fn render_connection(
     );
     render_surface_blank(left, &mut cursor, frame);
 
-    let mut index = 0usize;
-    while index < items.len() {
-        match items[index] {
-            ConnectionFocusItem::SecretSource(TunnelSecretSource::File) => {
+    const CONNECTION_LABEL_WIDTH: usize = 12;
+    const CONNECTION_MIN_INPUT_WIDTH: usize = 14;
+    let max_input_width = usize::from(left.width)
+        .saturating_sub(CONNECTION_LABEL_WIDTH + 8)
+        .clamp(8, 36);
+
+    for (index, item) in items.iter().copied().enumerate() {
+        match item {
+            ConnectionFocusItem::SecretSource => {
+                let focused = state.focus == index;
+                let value = match session.standalone().secret_source {
+                    TunnelSecretSource::File => "file",
+                    TunnelSecretSource::Environment => "env",
+                };
                 if let Some(row) = next_surface_row(left, &mut cursor) {
                     frame.render_widget(
-                        Paragraph::new(subsection_heading_line(
+                        Paragraph::new(value_row_line(
                             &connection_label(SetupField::TunnelSecretSource, None, language),
+                            value,
+                            focused,
+                            CONNECTION_LABEL_WIDTH,
                             theme,
                         )),
                         row,
                     );
                 }
-                for (offset, (source, label)) in [
-                    (TunnelSecretSource::File, "file"),
-                    (TunnelSecretSource::Environment, "env"),
-                ]
-                .into_iter()
-                .enumerate()
-                {
-                    if let Some(row) = next_surface_row(left, &mut cursor) {
-                        frame.render_widget(
-                            Paragraph::new(choice_row_line(
-                                label,
-                                state.focus == index + offset,
-                                session.standalone().secret_source == source,
-                                12,
-                                theme,
-                            )),
-                            row,
-                        );
+                if focused {
+                    if let Some(error) = errors.get(&SetupField::TunnelSecretSource) {
+                        if let Some(row) = next_surface_row(left, &mut cursor) {
+                            frame.render_widget(
+                                Paragraph::new(inline_error_line(
+                                    &localized_error(error, language),
+                                    theme,
+                                )),
+                                row,
+                            );
+                        }
                     }
                 }
-                if let Some(error) = errors.get(&SetupField::TunnelSecretSource) {
-                    if let Some(row) = next_surface_row(left, &mut cursor) {
-                        frame.render_widget(
-                            Paragraph::new(inline_error_line(
-                                &localized_error(error, language),
-                                theme,
-                            )),
-                            row,
-                        );
-                    }
-                }
-                if relaxed_field_spacing {
-                    render_surface_blank(left, &mut cursor, frame);
-                }
-                index += 2;
-                continue;
-            }
-            ConnectionFocusItem::SecretSource(TunnelSecretSource::Environment) => {
-                index += 1;
-                continue;
             }
             ConnectionFocusItem::Field(field) => {
                 let focused = state.focus == index;
@@ -473,7 +470,7 @@ fn render_connection(
                 if field == SetupField::ProvisionTunnelSecret {
                     if let Some(row) = next_surface_row(left, &mut cursor) {
                         frame.render_widget(
-                            Paragraph::new(boolean_row_line(
+                            Paragraph::new(value_row_line(
                                 &label,
                                 if value == "true" {
                                     t(language, "on", "开")
@@ -481,55 +478,59 @@ fn render_connection(
                                     t(language, "off", "关")
                                 },
                                 focused,
-                                24,
+                                CONNECTION_LABEL_WIDTH,
                                 theme,
                             )),
                             row,
                         );
                     }
-                } else if let Some(field_area) = next_surface_rows(left, &mut cursor, 2) {
+                } else if let Some(row) = next_surface_row(left, &mut cursor) {
                     let edit_cursor = editing_cursor(state, field);
-                    render_long_form_input(
-                        frame,
-                        field_area,
-                        &label,
-                        current_input_value(state, field, value),
-                        focused,
-                        edit_cursor.is_some(),
-                        edit_cursor,
-                        matches!(
-                            field,
-                            SetupField::TunnelSecretValue | SetupField::AgentSecret
-                        ),
-                        false,
-                        theme,
+                    let editing = edit_cursor.is_some();
+                    let current_value = current_input_value(state, field, value);
+                    let display_value = if matches!(
+                        field,
+                        SetupField::TunnelSecretValue | SetupField::AgentSecret
+                    ) {
+                        "•".repeat(current_value.chars().count())
+                    } else {
+                        current_value.to_string()
+                    };
+                    let input_width = (UnicodeWidthStr::width(display_value.as_str())
+                        + usize::from(editing))
+                    .clamp(
+                        CONNECTION_MIN_INPUT_WIDTH.min(max_input_width),
+                        max_input_width,
+                    );
+                    frame.render_widget(
+                        Paragraph::new(input_row_line(
+                            &label,
+                            &display_value,
+                            focused,
+                            editing,
+                            edit_cursor,
+                            CONNECTION_LABEL_WIDTH,
+                            input_width,
+                            theme,
+                        )),
+                        row,
                     );
                 }
-                if let Some(error) = errors.get(&field) {
-                    if let Some(row) = next_surface_row(left, &mut cursor) {
-                        frame.render_widget(
-                            Paragraph::new(inline_error_line(
-                                &localized_error(error, language),
-                                theme,
-                            )),
-                            row,
-                        );
+                if focused {
+                    if let Some(error) = errors.get(&field) {
+                        if let Some(row) = next_surface_row(left, &mut cursor) {
+                            frame.render_widget(
+                                Paragraph::new(inline_error_line(
+                                    &localized_error(error, language),
+                                    theme,
+                                )),
+                                row,
+                            );
+                        }
                     }
-                }
-                if relaxed_field_spacing
-                    && matches!(
-                        field,
-                        SetupField::TunnelId
-                            | SetupField::TunnelSecretPath
-                            | SetupField::TunnelSecretEnvironment
-                            | SetupField::ProvisionTunnelSecret
-                    )
-                {
-                    render_surface_blank(left, &mut cursor, frame);
                 }
             }
         }
-        index += 1;
     }
 
     render_surface_action_dock(
@@ -593,7 +594,7 @@ fn render_connection_footer(
     let action = if action_focused {
         t(language, "continue", "继续")
     } else if connection_secret_source_for_focus(session, state.focus).is_some() {
-        t(language, "choose", "选择")
+        t(language, "toggle", "切换")
     } else if field == Some(SetupField::ProvisionTunnelSecret) {
         t(language, "toggle", "切换")
     } else {
@@ -836,14 +837,14 @@ fn connection_inspector_body(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ConnectionFocusItem {
     Field(SetupField),
-    SecretSource(TunnelSecretSource),
+    SecretSource,
 }
 
 impl ConnectionFocusItem {
     fn field(self) -> SetupField {
         match self {
             Self::Field(field) => field,
-            Self::SecretSource(_) => SetupField::TunnelSecretSource,
+            Self::SecretSource => SetupField::TunnelSecretSource,
         }
     }
 }
@@ -853,8 +854,7 @@ pub(super) fn connection_focus_items(session: &SetupSession) -> Vec<ConnectionFo
         RuntimeMode::Standalone => {
             let mut items = vec![
                 ConnectionFocusItem::Field(SetupField::TunnelId),
-                ConnectionFocusItem::SecretSource(TunnelSecretSource::File),
-                ConnectionFocusItem::SecretSource(TunnelSecretSource::Environment),
+                ConnectionFocusItem::SecretSource,
             ];
             match session.standalone().secret_source {
                 TunnelSecretSource::File => {
@@ -900,20 +900,18 @@ pub(super) fn connection_secret_source_for_focus(
     focus: usize,
 ) -> Option<TunnelSecretSource> {
     match connection_focus_items(session).get(focus).copied() {
-        Some(ConnectionFocusItem::SecretSource(source)) => Some(source),
+        Some(ConnectionFocusItem::SecretSource) => Some(match session.standalone().secret_source {
+            TunnelSecretSource::File => TunnelSecretSource::Environment,
+            TunnelSecretSource::Environment => TunnelSecretSource::File,
+        }),
         _ => None,
     }
 }
 
 pub(super) fn connection_field_index(session: &SetupSession, field: SetupField) -> Option<usize> {
-    let items = connection_focus_items(session);
-    if field == SetupField::TunnelSecretSource {
-        let selected = session.standalone().secret_source;
-        return items.iter().position(
-            |item| matches!(item, ConnectionFocusItem::SecretSource(source) if *source == selected),
-        );
-    }
-    items.iter().position(|item| item.field() == field)
+    connection_focus_items(session)
+        .iter()
+        .position(|item| item.field() == field)
 }
 
 fn connection_label(field: SetupField, _value: Option<&str>, language: UiLanguage) -> String {
@@ -1203,6 +1201,16 @@ fn render_optional_form(
                 left.width,
             );
         }
+        OptionalSection::McpServers => push_mcp_servers_form(
+            &mut lines,
+            &mut focused_line,
+            draft,
+            state,
+            language,
+            theme,
+            errors,
+            left.width,
+        ),
         OptionalSection::Room => {
             for field in [
                 SetupField::RoomTimezone,
@@ -1486,6 +1494,172 @@ fn push_choice_group(
     }
     push_optional_error(lines, errors, field, language, theme);
     lines.push(Line::raw(""));
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_mcp_servers_form(
+    lines: &mut Vec<Line<'static>>,
+    focused_line: &mut usize,
+    draft: &OptionalSectionDraft,
+    state: &TuiState,
+    language: UiLanguage,
+    theme: &Theme,
+    errors: &HashMap<SetupField, String>,
+    width: u16,
+) {
+    const LABEL_WIDTH: usize = 10;
+    const ID_INPUT_WIDTH: usize = 14;
+
+    let OptionalSectionDraft::McpServers(mcp) = draft else {
+        return;
+    };
+    if mcp.servers.is_empty() {
+        if state.focus == 0 {
+            *focused_line = lines.len();
+        }
+        lines.push(action_line(
+            t(language, "Add MCP server", "新增 MCP 服务"),
+            state.focus == 0,
+            theme,
+        ));
+        lines.push(Line::raw(""));
+        return;
+    }
+
+    let focus_items = optional_focus_items(OptionalSection::McpServers, draft);
+    let max_endpoint_input_width = usize::from(width).saturating_sub(20).clamp(8, 36);
+    for (index, server) in mcp.servers.iter().enumerate() {
+        let id_focus = focus_items.iter().position(|item| {
+            matches!(item, OptionalFocusItem::McpField { field: SetupField::McpServerId, index: candidate } if *candidate == index)
+        });
+        let id_focused = id_focus == Some(state.focus);
+        let id_editing = state
+            .mcp_edit
+            .as_ref()
+            .is_some_and(|target| target.index == index && target.field == SetupField::McpServerId);
+        let id_value = if id_editing {
+            state
+                .editing
+                .as_ref()
+                .map(|edit| edit.buffer.as_str())
+                .unwrap_or(server.id.as_str())
+        } else {
+            server.id.as_str()
+        };
+        let heading = if id_value.trim().is_empty() {
+            t(language, "New MCP server", "新 MCP 服务")
+        } else {
+            id_value
+        };
+        lines.push(subsection_heading_line(heading, theme));
+
+        if id_focused {
+            *focused_line = lines.len();
+        }
+        lines.push(input_row_line(
+            "ID",
+            id_value,
+            id_focused,
+            id_editing,
+            id_editing
+                .then(|| state.editing.as_ref().map(|edit| edit.cursor))
+                .flatten(),
+            LABEL_WIDTH,
+            ID_INPUT_WIDTH,
+            theme,
+        ));
+        if id_focused {
+            if let Some(error) = errors.get(&SetupField::McpServerId) {
+                lines.push(inline_error_line(&localized_error(error, language), theme));
+            }
+        }
+
+        let enabled_focus = focus_items.iter().position(|item| {
+            matches!(item, OptionalFocusItem::McpField { field: SetupField::McpServerEnabled, index: candidate } if *candidate == index)
+        });
+        let enabled_focused = enabled_focus == Some(state.focus);
+        if enabled_focused {
+            *focused_line = lines.len();
+        }
+        lines.push(value_row_line(
+            t(language, "Enabled", "启用"),
+            if server.enabled {
+                t(language, "on", "开")
+            } else {
+                t(language, "off", "关")
+            },
+            enabled_focused,
+            LABEL_WIDTH,
+            theme,
+        ));
+
+        let transport_focus = focus_items.iter().position(|item| {
+            matches!(item, OptionalFocusItem::McpField { field: SetupField::McpServerTransport, index: candidate } if *candidate == index)
+        });
+        let transport_focused = transport_focus == Some(state.focus);
+        if transport_focused {
+            *focused_line = lines.len();
+        }
+        lines.push(value_row_line(
+            t(language, "Transport", "传输方式"),
+            &server.transport,
+            transport_focused,
+            LABEL_WIDTH,
+            theme,
+        ));
+        if transport_focused {
+            if let Some(error) = errors.get(&SetupField::McpServerTransport) {
+                lines.push(inline_error_line(&localized_error(error, language), theme));
+            }
+        }
+
+        let endpoint_focus = focus_items.iter().position(|item| {
+            matches!(item, OptionalFocusItem::McpField { field: SetupField::McpServerEndpoint, index: candidate } if *candidate == index)
+        });
+        let endpoint_focused = endpoint_focus == Some(state.focus);
+        let endpoint_editing = state.mcp_edit.as_ref().is_some_and(|target| {
+            target.index == index && target.field == SetupField::McpServerEndpoint
+        });
+        if endpoint_focused {
+            *focused_line = lines.len();
+        }
+        let endpoint_value = if endpoint_editing {
+            state
+                .editing
+                .as_ref()
+                .map(|edit| edit.buffer.as_str())
+                .unwrap_or(server.endpoint.as_str())
+        } else {
+            server.endpoint.as_str()
+        };
+        let endpoint_input_width =
+            (UnicodeWidthStr::width(endpoint_value) + usize::from(endpoint_editing)).clamp(
+                ID_INPUT_WIDTH.min(max_endpoint_input_width),
+                max_endpoint_input_width,
+            );
+        lines.push(input_row_line(
+            if server.transport == "stdio" {
+                t(language, "Command", "命令")
+            } else {
+                "URL"
+            },
+            endpoint_value,
+            endpoint_focused,
+            endpoint_editing,
+            endpoint_editing
+                .then(|| state.editing.as_ref().map(|edit| edit.cursor))
+                .flatten(),
+            LABEL_WIDTH,
+            endpoint_input_width,
+            theme,
+        ));
+        if endpoint_focused {
+            if let Some(error) = errors.get(&SetupField::McpServerEndpoint) {
+                lines.push(inline_error_line(&localized_error(error, language), theme));
+            }
+        }
+        lines.push(Line::raw(""));
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1793,6 +1967,29 @@ fn render_optional_form_footer(
         );
         return;
     }
+    if section == OptionalSection::McpServers {
+        if let Some(target) = optional_mcp_target(section, draft, state.focus) {
+            let action = match target {
+                McpFocusTarget::Add => t(language, "add", "新增"),
+                McpFocusTarget::Field {
+                    field: SetupField::McpServerEnabled | SetupField::McpServerTransport,
+                    ..
+                } => t(language, "toggle", "切换"),
+                McpFocusTarget::Field { .. } => t(language, "edit", "编辑"),
+            };
+            let mut bindings = vec![
+                ("↑↓ j/k", t(language, "move", "移动")),
+                ("Enter/l", action),
+                ("a", t(language, "add", "新增")),
+            ];
+            if !matches!(target, McpFocusTarget::Add) {
+                bindings.push(("d", t(language, "delete", "删除")));
+            }
+            bindings.push(("Esc/h", t(language, "back", "返回")));
+            render_contextual_footer(frame, area, &bindings, theme);
+            return;
+        }
+    }
     if let Some((_, index)) = optional_list_target(section, draft, state.focus) {
         render_contextual_footer(
             frame,
@@ -1929,14 +2126,29 @@ pub(super) enum OptionalFocusItem {
         field: SetupField,
         index: Option<usize>,
     },
+    McpField {
+        field: SetupField,
+        index: usize,
+    },
+    McpAdd,
 }
 
 impl OptionalFocusItem {
     fn field(self) -> SetupField {
         match self {
-            Self::Field(field) | Self::Choice { field, .. } | Self::List { field, .. } => field,
+            Self::Field(field)
+            | Self::Choice { field, .. }
+            | Self::List { field, .. }
+            | Self::McpField { field, .. } => field,
+            Self::McpAdd => SetupField::McpServerId,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum McpFocusTarget {
+    Add,
+    Field { index: usize, field: SetupField },
 }
 
 pub(super) fn optional_list_state(
@@ -2047,6 +2259,37 @@ pub(super) fn optional_focus_items(
             items.extend(list_focus_items(SetupField::RequiredRuntimePaths, draft));
             items
         }
+        OptionalSection::McpServers => match draft {
+            OptionalSectionDraft::McpServers(value) if value.servers.is_empty() => {
+                vec![OptionalFocusItem::McpAdd]
+            }
+            OptionalSectionDraft::McpServers(value) => value
+                .servers
+                .iter()
+                .enumerate()
+                .flat_map(|(index, _)| {
+                    [
+                        OptionalFocusItem::McpField {
+                            field: SetupField::McpServerId,
+                            index,
+                        },
+                        OptionalFocusItem::McpField {
+                            field: SetupField::McpServerEnabled,
+                            index,
+                        },
+                        OptionalFocusItem::McpField {
+                            field: SetupField::McpServerTransport,
+                            index,
+                        },
+                        OptionalFocusItem::McpField {
+                            field: SetupField::McpServerEndpoint,
+                            index,
+                        },
+                    ]
+                })
+                .collect(),
+            _ => Vec::new(),
+        },
         OptionalSection::Room => vec![
             OptionalFocusItem::Field(SetupField::RoomTimezone),
             OptionalFocusItem::Field(SetupField::DiaryBoundaryHour),
@@ -2071,6 +2314,149 @@ pub(super) fn optional_focus_items(
                 value: "full",
             },
         ],
+    }
+}
+
+pub(super) fn optional_mcp_target(
+    section: OptionalSection,
+    draft: &OptionalSectionDraft,
+    focus: usize,
+) -> Option<McpFocusTarget> {
+    if section != OptionalSection::McpServers {
+        return None;
+    }
+    match optional_focus_items(section, draft).get(focus).copied()? {
+        OptionalFocusItem::McpAdd => Some(McpFocusTarget::Add),
+        OptionalFocusItem::McpField { field, index } => {
+            Some(McpFocusTarget::Field { index, field })
+        }
+        _ => None,
+    }
+}
+
+pub(super) fn mcp_server_value(
+    draft: &OptionalSectionDraft,
+    index: usize,
+    field: SetupField,
+) -> Option<String> {
+    let OptionalSectionDraft::McpServers(value) = draft else {
+        return None;
+    };
+    let server = value.servers.get(index)?;
+    match field {
+        SetupField::McpServerId => Some(server.id.clone()),
+        SetupField::McpServerEnabled => Some(server.enabled.to_string()),
+        SetupField::McpServerTransport => Some(server.transport.clone()),
+        SetupField::McpServerEndpoint => Some(server.endpoint.clone()),
+        _ => None,
+    }
+}
+
+pub(super) fn set_mcp_server_value(
+    draft: &mut OptionalSectionDraft,
+    index: usize,
+    field: SetupField,
+    value: String,
+) -> bool {
+    let OptionalSectionDraft::McpServers(mcp) = draft else {
+        return false;
+    };
+    let Some(server) = mcp.servers.get_mut(index) else {
+        return false;
+    };
+    match field {
+        SetupField::McpServerId => server.id = value,
+        SetupField::McpServerEndpoint => server.endpoint = value,
+        SetupField::McpServerTransport => server.transport = value,
+        SetupField::McpServerEnabled => server.enabled = value == "true",
+        _ => return false,
+    }
+    true
+}
+
+pub(super) fn toggle_mcp_server_enabled(draft: &mut OptionalSectionDraft, index: usize) -> bool {
+    let OptionalSectionDraft::McpServers(mcp) = draft else {
+        return false;
+    };
+    let Some(server) = mcp.servers.get_mut(index) else {
+        return false;
+    };
+    server.enabled = !server.enabled;
+    true
+}
+
+pub(super) fn toggle_mcp_server_transport(draft: &mut OptionalSectionDraft, index: usize) -> bool {
+    let OptionalSectionDraft::McpServers(mcp) = draft else {
+        return false;
+    };
+    let Some(server) = mcp.servers.get_mut(index) else {
+        return false;
+    };
+    server.transport = if server.transport == "stdio" {
+        "streamable-http".to_string()
+    } else {
+        "stdio".to_string()
+    };
+    true
+}
+
+pub(super) fn add_mcp_server(
+    draft: &mut OptionalSectionDraft,
+    after: Option<usize>,
+) -> Option<usize> {
+    let OptionalSectionDraft::McpServers(mcp) = draft else {
+        return None;
+    };
+    let index = after
+        .map(|index| index.saturating_add(1).min(mcp.servers.len()))
+        .unwrap_or(mcp.servers.len());
+    mcp.servers.insert(
+        index,
+        McpServerDraft {
+            id: String::new(),
+            enabled: true,
+            transport: "streamable-http".to_string(),
+            endpoint: String::new(),
+        },
+    );
+    Some(index)
+}
+
+pub(super) fn remove_mcp_server(draft: &mut OptionalSectionDraft, index: usize) -> bool {
+    let OptionalSectionDraft::McpServers(mcp) = draft else {
+        return false;
+    };
+    if index >= mcp.servers.len() {
+        return false;
+    }
+    mcp.servers.remove(index);
+    true
+}
+
+pub(super) fn mcp_server_focus_index(
+    draft: &OptionalSectionDraft,
+    index: usize,
+    field: SetupField,
+) -> Option<usize> {
+    optional_focus_items(OptionalSection::McpServers, draft)
+        .iter()
+        .position(|item| matches!(item, OptionalFocusItem::McpField { field: candidate, index: candidate_index } if *candidate == field && *candidate_index == index))
+}
+
+pub(super) fn mcp_server_index_for_focus(
+    draft: &OptionalSectionDraft,
+    focus: usize,
+) -> Option<usize> {
+    match optional_mcp_target(OptionalSection::McpServers, draft, focus)? {
+        McpFocusTarget::Field { index, .. } => Some(index),
+        McpFocusTarget::Add => None,
+    }
+}
+
+pub(super) fn mcp_server_count(draft: &OptionalSectionDraft) -> usize {
+    match draft {
+        OptionalSectionDraft::McpServers(value) => value.servers.len(),
+        _ => 0,
     }
 }
 
@@ -2427,6 +2813,7 @@ fn optional_center_inspector_body(
                 }
                 OptionalSection::Limits => &["Tune concurrency and search limits."],
                 OptionalSection::Sandbox => &["Control sandbox execution and runtime paths."],
+                OptionalSection::McpServers => &["Configure downstream MCP servers."],
                 OptionalSection::Room => &["Configure long-lived Room context."],
                 OptionalSection::TunnelClient => &["Configure the managed Tunnel client."],
                 OptionalSection::HubReporting => &["Choose Hub reporting behavior."],
@@ -2437,6 +2824,7 @@ fn optional_center_inspector_body(
                 OptionalSection::Confirmation => &["选择确认提供方和语言。"],
                 OptionalSection::Limits => &["调整并发和搜索限制。"],
                 OptionalSection::Sandbox => &["控制沙箱执行和运行时路径。"],
+                OptionalSection::McpServers => &["配置下游 MCP 服务。"],
                 OptionalSection::Room => &["配置长期 Room 上下文。"],
                 OptionalSection::TunnelClient => &["配置托管的 Tunnel 客户端。"],
                 OptionalSection::HubReporting => &["选择 Hub 报告行为。"],
@@ -2509,13 +2897,14 @@ fn editing_cursor(state: &TuiState, field: SetupField) -> Option<usize> {
         .map(|editing| editing.cursor)
 }
 
-fn all_optional_sections() -> [OptionalSection; 8] {
+fn all_optional_sections() -> [OptionalSection; 9] {
     [
         OptionalSection::Identity,
         OptionalSection::Workspace,
         OptionalSection::Confirmation,
         OptionalSection::Limits,
         OptionalSection::Sandbox,
+        OptionalSection::McpServers,
         OptionalSection::Room,
         OptionalSection::TunnelClient,
         OptionalSection::HubReporting,
@@ -2529,6 +2918,7 @@ fn section_label(section: OptionalSection, language: UiLanguage) -> &'static str
         OptionalSection::Confirmation => t(language, "Confirmation", "确认"),
         OptionalSection::Limits => t(language, "Limits", "限制"),
         OptionalSection::Sandbox => t(language, "Sandbox", "沙箱"),
+        OptionalSection::McpServers => t(language, "MCP servers", "MCP 服务"),
         OptionalSection::Room => t(language, "Room", "Room"),
         OptionalSection::TunnelClient => t(language, "Tunnel client", "隧道客户端"),
         OptionalSection::HubReporting => t(language, "Hub reporting", "Hub 报告"),
@@ -2552,6 +2942,10 @@ fn optional_field_label(field: SetupField, language: UiLanguage) -> &'static str
         SetupField::SandboxEnabled => t(language, "Sandbox enabled", "启用沙箱"),
         SetupField::BubblewrapPath => t(language, "Bubblewrap path", "Bubblewrap 路径"),
         SetupField::RequiredRuntimePaths => t(language, "Required runtime paths", "必需运行时路径"),
+        SetupField::McpServerId => t(language, "MCP server ID", "MCP 服务 ID"),
+        SetupField::McpServerEnabled => t(language, "Enabled", "启用"),
+        SetupField::McpServerTransport => t(language, "Transport", "传输方式"),
+        SetupField::McpServerEndpoint => t(language, "URL / command", "URL / 命令"),
         SetupField::RoomTimezone => t(language, "Timezone", "时区"),
         SetupField::DiaryBoundaryHour => t(language, "Diary boundary hour", "日记边界小时"),
         SetupField::NotebookRoot => t(language, "Notebook root", "笔记本根目录"),
@@ -2606,6 +3000,7 @@ pub(super) fn optional_field_value(draft: &OptionalSectionDraft, field: SetupFie
             SetupField::RequiredRuntimePaths => value.required_runtime_paths.clone(),
             _ => String::new(),
         },
+        OptionalSectionDraft::McpServers(_) => String::new(),
         OptionalSectionDraft::Room(value) => match field {
             SetupField::RoomTimezone => value.timezone.clone(),
             SetupField::DiaryBoundaryHour => value.diary_boundary_hour.clone(),
@@ -3244,7 +3639,7 @@ mod tests {
     }
 
     #[test]
-    fn standalone_connection_renders_source_as_choices_and_boolean_without_marker() {
+    fn standalone_connection_renders_source_and_boolean_as_inline_values() {
         let mut app = ConfigTuiApp::new(SetupSession::new(
             SetupSeed {
                 mode: Some(RuntimeMode::Standalone),
@@ -3258,8 +3653,8 @@ mod tests {
         let rendered = content(&app, 90, 28);
         assert!(rendered.contains("Secret source"));
         assert!(rendered.contains("file"));
-        assert!(rendered.contains("env"));
-        assert_eq!(rendered.matches('').count(), 1);
+        assert!(!rendered.contains("env"));
+        assert_eq!(rendered.matches('').count(), 0);
         assert!(rendered.contains("Provision secret now"));
         assert!(rendered.contains("off"));
         assert!(!rendered.contains('•'));

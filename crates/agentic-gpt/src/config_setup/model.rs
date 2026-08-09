@@ -47,6 +47,10 @@ pub(crate) enum SetupField {
     SandboxEnabled,
     BubblewrapPath,
     RequiredRuntimePaths,
+    McpServerId,
+    McpServerEnabled,
+    McpServerTransport,
+    McpServerEndpoint,
     RoomTimezone,
     DiaryBoundaryHour,
     NotebookRoot,
@@ -153,6 +157,19 @@ pub(crate) struct SandboxDraft {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct McpServerDraft {
+    pub(crate) id: String,
+    pub(crate) enabled: bool,
+    pub(crate) transport: String,
+    pub(crate) endpoint: String,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct McpServersDraft {
+    pub(crate) servers: Vec<McpServerDraft>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RoomDraft {
     pub(crate) timezone: String,
     pub(crate) diary_boundary_hour: String,
@@ -182,6 +199,7 @@ pub(crate) struct OptionalDrafts {
     pub(crate) confirmation: Option<ConfirmationDraft>,
     pub(crate) limits: Option<LimitsDraft>,
     pub(crate) sandbox: Option<SandboxDraft>,
+    pub(crate) mcp_servers: Option<McpServersDraft>,
     pub(crate) room: Option<RoomDraft>,
     pub(crate) tunnel_client: Option<TunnelClientDraft>,
     pub(crate) hub_reporting: Option<HubReportingDraft>,
@@ -194,6 +212,7 @@ pub(crate) enum OptionalSectionDraft {
     Confirmation(ConfirmationDraft),
     Limits(LimitsDraft),
     Sandbox(SandboxDraft),
+    McpServers(McpServersDraft),
     Room(RoomDraft),
     TunnelClient(TunnelClientDraft),
     HubReporting(HubReportingDraft),
@@ -207,6 +226,7 @@ impl OptionalSectionDraft {
             Self::Confirmation(_) => OptionalSection::Confirmation,
             Self::Limits(_) => OptionalSection::Limits,
             Self::Sandbox(_) => OptionalSection::Sandbox,
+            Self::McpServers(_) => OptionalSection::McpServers,
             Self::Room(_) => OptionalSection::Room,
             Self::TunnelClient(_) => OptionalSection::TunnelClient,
             Self::HubReporting(_) => OptionalSection::HubReporting,
@@ -432,6 +452,7 @@ impl OptionalDrafts {
             OptionalSection::Confirmation => self.confirmation.is_some(),
             OptionalSection::Limits => self.limits.is_some(),
             OptionalSection::Sandbox => self.sandbox.is_some(),
+            OptionalSection::McpServers => self.mcp_servers.is_some(),
             OptionalSection::Room => self.room.is_some(),
             OptionalSection::TunnelClient => self.tunnel_client.is_some(),
             OptionalSection::HubReporting => self.hub_reporting.is_some(),
@@ -450,6 +471,10 @@ impl OptionalDrafts {
                 .map(OptionalSectionDraft::Confirmation),
             OptionalSection::Limits => self.limits.clone().map(OptionalSectionDraft::Limits),
             OptionalSection::Sandbox => self.sandbox.clone().map(OptionalSectionDraft::Sandbox),
+            OptionalSection::McpServers => self
+                .mcp_servers
+                .clone()
+                .map(OptionalSectionDraft::McpServers),
             OptionalSection::Room => self.room.clone().map(OptionalSectionDraft::Room),
             OptionalSection::TunnelClient => self
                 .tunnel_client
@@ -469,6 +494,7 @@ impl OptionalDrafts {
             OptionalSectionDraft::Confirmation(value) => self.confirmation = Some(value),
             OptionalSectionDraft::Limits(value) => self.limits = Some(value),
             OptionalSectionDraft::Sandbox(value) => self.sandbox = Some(value),
+            OptionalSectionDraft::McpServers(value) => self.mcp_servers = Some(value),
             OptionalSectionDraft::Room(value) => self.room = Some(value),
             OptionalSectionDraft::TunnelClient(value) => self.tunnel_client = Some(value),
             OptionalSectionDraft::HubReporting(value) => self.hub_reporting = Some(value),
@@ -511,6 +537,7 @@ pub(crate) fn default_optional_draft(
             bubblewrap_path: DEFAULT_BUBBLEWRAP_PATH.to_string(),
             required_runtime_paths: DEFAULT_RUNTIME_PATHS.to_string(),
         }),
+        OptionalSection::McpServers => OptionalSectionDraft::McpServers(McpServersDraft::default()),
         OptionalSection::Room => OptionalSectionDraft::Room(RoomDraft {
             timezone: "Asia/Shanghai".to_string(),
             diary_boundary_hour: "5".to_string(),
@@ -630,6 +657,35 @@ mod tests {
         let errors = session.validate_connection().unwrap_err();
         assert_eq!(errors[0].field, SetupField::TunnelSecretPath);
         assert_eq!(errors[0].code, "config_init_secret_path_invalid");
+    }
+
+    #[test]
+    fn mcp_server_draft_defaults_empty_and_saves_as_configured() {
+        let mut session = SetupSession::new(
+            SetupSeed::default(),
+            UiLanguage::En,
+            PathBuf::from("/tmp/config.json"),
+        );
+        assert!(matches!(
+            session.optional_draft(OptionalSection::McpServers),
+            OptionalSectionDraft::McpServers(McpServersDraft { ref servers }) if servers.is_empty()
+        ));
+
+        session
+            .save_optional_section(OptionalSectionDraft::McpServers(McpServersDraft {
+                servers: vec![McpServerDraft {
+                    id: "local_tools".into(),
+                    enabled: true,
+                    transport: "stdio".into(),
+                    endpoint: "node ./server.mjs".into(),
+                }],
+            }))
+            .unwrap();
+
+        assert_eq!(
+            session.section_status(OptionalSection::McpServers),
+            SectionStatus::Configured
+        );
     }
 
     #[test]

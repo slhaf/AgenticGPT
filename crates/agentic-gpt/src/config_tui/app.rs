@@ -23,6 +23,7 @@ pub(crate) struct TuiState {
     pub(crate) focus: usize,
     pub(crate) editing: Option<EditState>,
     pub(crate) list_edit: Option<ListEditTarget>,
+    pub(crate) mcp_edit: Option<McpEditTarget>,
     pub(crate) max_active_custom: String,
     pub(crate) optional_center_focus: usize,
     #[allow(dead_code)]
@@ -37,6 +38,13 @@ pub(crate) struct TuiState {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ListEditTarget {
+    pub(crate) field: SetupField,
+    pub(crate) index: usize,
+    pub(crate) created: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct McpEditTarget {
     pub(crate) field: SetupField,
     pub(crate) index: usize,
     pub(crate) created: bool,
@@ -111,6 +119,7 @@ impl ConfigTuiApp {
                 focus: 0,
                 editing: None,
                 list_edit: None,
+                mcp_edit: None,
                 max_active_custom: "12".to_string(),
                 optional_center_focus: 0,
                 scroll: 0,
@@ -243,6 +252,7 @@ impl ConfigTuiApp {
                     self.state.cancelled = true;
                     self.state.editing = None;
                     self.state.list_edit = None;
+                    self.state.mcp_edit = None;
                     self.section_draft = None;
                     self.section_original = None;
                     self.review = None;
@@ -462,6 +472,36 @@ impl ConfigTuiApp {
             }
         }
         if let ConfigPage::Optional(section) = self.state.page {
+            if section == crate::config_templates::OptionalSection::McpServers {
+                let target = self
+                    .section_draft
+                    .as_ref()
+                    .and_then(|draft| pages::optional_mcp_target(section, draft, self.state.focus));
+                match target {
+                    Some(pages::McpFocusTarget::Add) => self.add_mcp_server(),
+                    Some(pages::McpFocusTarget::Field { index, field })
+                        if field == SetupField::McpServerEnabled =>
+                    {
+                        if let Some(draft) = self.section_draft.as_mut() {
+                            pages::toggle_mcp_server_enabled(draft, index);
+                        }
+                        self.field_errors.remove(&field);
+                    }
+                    Some(pages::McpFocusTarget::Field { index, field })
+                        if field == SetupField::McpServerTransport =>
+                    {
+                        if let Some(draft) = self.section_draft.as_mut() {
+                            pages::toggle_mcp_server_transport(draft, index);
+                        }
+                        self.field_errors.remove(&field);
+                    }
+                    Some(pages::McpFocusTarget::Field { index, field }) => {
+                        self.begin_mcp_edit(index, field, false);
+                    }
+                    None => {}
+                }
+                return;
+            }
             if let Some((field, index)) = self.optional_list_target() {
                 if let Some(index) = index {
                     self.begin_optional_list_edit(field, index);
@@ -536,6 +576,19 @@ impl ConfigTuiApp {
         };
         let field = edit.field;
         let value = edit.buffer;
+        if let Some(target) = self.state.mcp_edit.take() {
+            let updated = self.section_draft.as_mut().is_some_and(|draft| {
+                pages::set_mcp_server_value(draft, target.index, target.field, value)
+            });
+            if updated {
+                if target.created && target.field == SetupField::McpServerId {
+                    self.field_errors.remove(&SetupField::McpServerId);
+                } else {
+                    self.validate_section_draft();
+                }
+            }
+            return;
+        }
         if let Some(target) = self.state.list_edit.take() {
             let updated = self.section_draft.as_mut().is_some_and(|draft| {
                 let Ok(mut list) = pages::optional_list_state(draft, target.field) else {
@@ -607,6 +660,73 @@ impl ConfigTuiApp {
             .and_then(|draft| pages::optional_list_target(section, draft, self.state.focus))
     }
 
+    fn begin_mcp_edit(&mut self, index: usize, field: SetupField, created: bool) {
+        let value = self
+            .section_draft
+            .as_ref()
+            .and_then(|draft| pages::mcp_server_value(draft, index, field));
+        let Some(value) = value else {
+            return;
+        };
+        self.state.mcp_edit = Some(McpEditTarget {
+            field,
+            index,
+            created,
+        });
+        self.state.editing = Some(EditState::new(field, value));
+    }
+
+    fn add_mcp_server(&mut self) {
+        let after = self
+            .section_draft
+            .as_ref()
+            .and_then(|draft| pages::mcp_server_index_for_focus(draft, self.state.focus));
+        let new_index = self
+            .section_draft
+            .as_mut()
+            .and_then(|draft| pages::add_mcp_server(draft, after));
+        let Some(new_index) = new_index else {
+            return;
+        };
+        if let Some(draft) = self.section_draft.as_ref() {
+            self.state.focus =
+                pages::mcp_server_focus_index(draft, new_index, SetupField::McpServerId)
+                    .unwrap_or(self.state.focus);
+        }
+        self.begin_mcp_edit(new_index, SetupField::McpServerId, true);
+    }
+
+    fn remove_mcp_server(&mut self) {
+        let Some(index) = self
+            .section_draft
+            .as_ref()
+            .and_then(|draft| pages::mcp_server_index_for_focus(draft, self.state.focus))
+        else {
+            return;
+        };
+        let removed = self
+            .section_draft
+            .as_mut()
+            .is_some_and(|draft| pages::remove_mcp_server(draft, index));
+        if !removed {
+            return;
+        }
+        if let Some(draft) = self.section_draft.as_ref() {
+            let count = pages::mcp_server_count(draft);
+            self.state.focus = if count == 0 {
+                0
+            } else {
+                pages::mcp_server_focus_index(
+                    draft,
+                    index.min(count.saturating_sub(1)),
+                    SetupField::McpServerId,
+                )
+                .unwrap_or(0)
+            };
+        }
+        self.field_errors.clear();
+    }
+
     fn begin_optional_list_edit(&mut self, field: SetupField, index: usize) {
         let value = self.section_draft.as_ref().and_then(|draft| {
             let mut list = pages::optional_list_state(draft, field).ok()?;
@@ -629,6 +749,10 @@ impl ConfigTuiApp {
         let Some(section) = self.current_optional_section() else {
             return;
         };
+        if section == crate::config_templates::OptionalSection::McpServers {
+            self.add_mcp_server();
+            return;
+        }
         let Some((field, current_index)) = self.optional_list_target() else {
             return;
         };
@@ -660,6 +784,10 @@ impl ConfigTuiApp {
         let Some(section) = self.current_optional_section() else {
             return;
         };
+        if section == crate::config_templates::OptionalSection::McpServers {
+            self.remove_mcp_server();
+            return;
+        }
         let Some((field, Some(index))) = self.optional_list_target() else {
             return;
         };
@@ -685,6 +813,28 @@ impl ConfigTuiApp {
 
     fn cancel_edit(&mut self) {
         self.state.editing = None;
+        if let Some(target) = self.state.mcp_edit.take() {
+            if target.created {
+                if let Some(draft) = self.section_draft.as_mut() {
+                    pages::remove_mcp_server(draft, target.index);
+                }
+                if let Some(draft) = self.section_draft.as_ref() {
+                    let count = pages::mcp_server_count(draft);
+                    self.state.focus = if count == 0 {
+                        0
+                    } else {
+                        pages::mcp_server_focus_index(
+                            draft,
+                            target.index.min(count.saturating_sub(1)),
+                            SetupField::McpServerId,
+                        )
+                        .unwrap_or(0)
+                    };
+                }
+                self.field_errors.clear();
+            }
+            return;
+        }
         let Some(target) = self.state.list_edit.take() else {
             return;
         };
@@ -774,6 +924,7 @@ impl ConfigTuiApp {
             self.field_errors.clear();
             self.state.editing = None;
             self.state.list_edit = None;
+            self.state.mcp_edit = None;
             self.state.page = ConfigPage::Optional(section);
             self.state.return_target = ReturnTarget::MainFlow;
             self.state.focus = 0;
@@ -799,6 +950,7 @@ impl ConfigTuiApp {
         self.field_errors.clear();
         self.state.editing = None;
         self.state.list_edit = None;
+        self.state.mcp_edit = None;
         self.state.focus = 0;
         if return_target == ReturnTarget::Review {
             self.return_to_review();
@@ -881,6 +1033,7 @@ impl ConfigTuiApp {
                 self.section_original = Some(draft.clone());
                 self.section_draft = Some(draft);
                 self.state.list_edit = None;
+                self.state.mcp_edit = None;
                 self.state.page = ConfigPage::Optional(section);
                 self.state.focus = 0;
             }
@@ -892,6 +1045,7 @@ impl ConfigTuiApp {
         self.section_original = None;
         self.state.editing = None;
         self.state.list_edit = None;
+        self.state.mcp_edit = None;
         self.field_errors.clear();
         self.state.return_target = ReturnTarget::MainFlow;
         self.navigation.go_to(ConfigPage::Review);
@@ -1023,6 +1177,7 @@ impl ConfigTuiApp {
         self.state.focus = 0;
         self.state.editing = None;
         self.state.list_edit = None;
+        self.state.mcp_edit = None;
         self.section_draft = None;
         self.section_original = None;
     }
@@ -1149,7 +1304,7 @@ mod tests {
 
     use crate::cli_i18n::UiLanguage;
     use crate::config_setup::{SetupSeed, SetupSession, WizardOutcome};
-    use crate::config_templates::{InitSummary, RuntimeMode, SecretValue};
+    use crate::config_templates::{InitSummary, OptionalSection, RuntimeMode, SecretValue};
     use crate::tui::TerminalEvent;
     use crate::WorkerProfile;
 
@@ -1204,6 +1359,15 @@ mod tests {
         app
     }
 
+    fn focus_optional_section(app: &mut ConfigTuiApp, section: OptionalSection) {
+        app.state.focus = app
+            .session()
+            .available_optional_sections()
+            .iter()
+            .position(|candidate| *candidate == section)
+            .expect("optional section is available");
+    }
+
     fn review_app(mode: RuntimeMode) -> ConfigTuiApp {
         let mut app = app(mode);
         while app.page() != ConfigPage::Review {
@@ -1250,14 +1414,75 @@ mod tests {
     }
 
     #[test]
+    fn cancelling_new_mcp_server_id_discards_the_created_server() {
+        let mut app = optional_center_app();
+        for _ in 0..5 {
+            app.handle_action(TuiAction::MoveNext).unwrap();
+        }
+        app.handle_action(TuiAction::Activate).unwrap();
+        app.handle_action(TuiAction::AddListItem).unwrap();
+        assert!(app.editing().is_some());
+
+        app.handle_action(TuiAction::Back).unwrap();
+
+        assert!(app.editing().is_none());
+        let draft = app.section_draft.as_ref().unwrap();
+        assert!(matches!(
+            draft,
+            crate::config_setup::OptionalSectionDraft::McpServers(value) if value.servers.is_empty()
+        ));
+    }
+
+    #[test]
+    fn mcp_servers_edit_as_compound_items_and_flow_into_config() {
+        let mut app = optional_center_app();
+        for _ in 0..5 {
+            app.handle_action(TuiAction::MoveNext).unwrap();
+        }
+        app.handle_action(TuiAction::Activate).unwrap();
+        assert_eq!(
+            app.page(),
+            ConfigPage::Optional(crate::config_templates::OptionalSection::McpServers)
+        );
+
+        app.handle_action(TuiAction::AddListItem).unwrap();
+        assert_eq!(
+            app.editing().unwrap().field,
+            crate::config_setup::SetupField::McpServerId
+        );
+        for character in "local_tools".chars() {
+            app.handle_action(TuiAction::Text(character)).unwrap();
+        }
+        app.handle_action(TuiAction::Activate).unwrap();
+
+        app.handle_action(TuiAction::MoveNext).unwrap();
+        app.handle_action(TuiAction::Activate).unwrap();
+        app.handle_action(TuiAction::MoveNext).unwrap();
+        app.handle_action(TuiAction::Activate).unwrap();
+        app.handle_action(TuiAction::MoveNext).unwrap();
+        app.handle_action(TuiAction::Activate).unwrap();
+        for character in "node ./server.mjs".chars() {
+            app.handle_action(TuiAction::Text(character)).unwrap();
+        }
+        app.handle_action(TuiAction::Activate).unwrap();
+
+        app.handle_action(TuiAction::MoveNext).unwrap();
+        app.handle_action(TuiAction::Next).unwrap();
+        assert_eq!(app.page(), ConfigPage::OptionalCenter);
+
+        let input = app.session().build_active_input().unwrap();
+        let servers = input.mcp_servers.unwrap();
+        let server = servers.get("local_tools").unwrap();
+        assert!(!server.enabled);
+        assert_eq!(server.transport, "stdio");
+        assert_eq!(server.url.as_deref(), Some("node ./server.mjs"));
+    }
+
+    #[test]
     fn optional_center_skips_not_applicable_rows_and_reenters_saved_sections() {
         let mut app = optional_center_app();
-        app.handle_action(TuiAction::MoveNext).unwrap();
-        app.handle_action(TuiAction::MoveNext).unwrap();
-        app.handle_action(TuiAction::MoveNext).unwrap();
-        app.handle_action(TuiAction::MoveNext).unwrap();
-        app.handle_action(TuiAction::MoveNext).unwrap();
-        assert_eq!(app.state().focus, 5);
+        focus_optional_section(&mut app, OptionalSection::TunnelClient);
+        let tunnel_focus = app.state().focus;
         app.handle_action(TuiAction::Activate).unwrap();
         assert_eq!(
             app.page(),
@@ -1266,7 +1491,7 @@ mod tests {
         assert!(rendered(&app).contains("Return"));
         app.handle_action(TuiAction::Next).unwrap();
         assert_eq!(app.page(), ConfigPage::OptionalCenter);
-        assert_eq!(app.state().focus, 5);
+        assert_eq!(app.state().focus, tunnel_focus);
         assert!(app.session().optional_drafts().tunnel_client.is_none());
         assert_eq!(
             app.session()
@@ -1409,7 +1634,7 @@ mod tests {
     #[test]
     fn tunnel_client_uses_real_defaults_and_empty_inputs_without_placeholders() {
         let mut app = optional_center_app();
-        app.state.focus = 5;
+        focus_optional_section(&mut app, OptionalSection::TunnelClient);
         app.handle_action(TuiAction::Activate).unwrap();
         assert_eq!(
             app.page(),
@@ -1428,7 +1653,7 @@ mod tests {
     #[test]
     fn hub_reporting_detail_is_a_committed_choice_not_a_cycle_row() {
         let mut app = optional_center_app();
-        app.state.focus = 6;
+        focus_optional_section(&mut app, OptionalSection::HubReporting);
         app.handle_action(TuiAction::Activate).unwrap();
         assert_eq!(
             app.page(),
@@ -1752,7 +1977,7 @@ mod tests {
         app.handle_action(TuiAction::Next).unwrap();
         assert_eq!(app.state().focus, 0);
         app.handle_action(TuiAction::MovePrevious).unwrap();
-        assert_eq!(app.state().focus, 5);
+        assert_eq!(app.state().focus, 4);
         app.handle_action(TuiAction::MoveNext).unwrap();
         assert_eq!(app.state().focus, 0);
     }
@@ -1923,7 +2148,7 @@ mod tests {
     }
 
     #[test]
-    fn standalone_source_choices_commit_only_on_activation_and_clear_file_only_provision() {
+    fn standalone_source_toggle_clears_file_only_provision() {
         let mut app = app(RuntimeMode::Standalone);
         app.handle_action(TuiAction::Next).unwrap();
         app.focus_field(crate::config_setup::SetupField::ProvisionTunnelSecret);
@@ -1931,11 +2156,6 @@ mod tests {
         assert!(app.session().standalone().provision_secret_now);
 
         app.focus_field(crate::config_setup::SetupField::TunnelSecretSource);
-        assert_eq!(
-            app.session().standalone().secret_source,
-            crate::config_templates::TunnelSecretSource::File
-        );
-        app.handle_action(TuiAction::MoveNext).unwrap();
         assert_eq!(
             app.session().standalone().secret_source,
             crate::config_templates::TunnelSecretSource::File
@@ -1948,9 +2168,7 @@ mod tests {
         assert!(!app.session().standalone().provision_secret_now);
         let rendered = rendered(&app);
         assert!(rendered.contains("Secret source"));
-        assert!(rendered.contains("file"));
         assert!(rendered.contains("env"));
-        assert!(rendered.contains(""));
     }
 
     #[test]

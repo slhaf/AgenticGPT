@@ -173,9 +173,9 @@ use crate::config_templates::{
 use crate::WorkerProfile;
 
 use super::model::{
-    ConfirmationDraft, HubReportingDraft, IdentityDraft, LimitsDraft, OptionalSectionDraft,
-    RoomDraft, SandboxDraft, SectionStatus, SetupField, SetupSession, TunnelClientDraft,
-    WorkspaceDraft,
+    ConfirmationDraft, HubReportingDraft, IdentityDraft, LimitsDraft, McpServersDraft,
+    OptionalSectionDraft, RoomDraft, SandboxDraft, SectionStatus, SetupField, SetupSession,
+    TunnelClientDraft, WorkspaceDraft,
 };
 use super::validation::{ValidationError, ValidationErrors};
 
@@ -237,6 +237,7 @@ pub(super) fn build_review_model(session: &SetupSession) -> Result<ReviewModel, 
         OptionalSection::Confirmation,
         OptionalSection::Limits,
         OptionalSection::Sandbox,
+        OptionalSection::McpServers,
         OptionalSection::Room,
         OptionalSection::TunnelClient,
         OptionalSection::HubReporting,
@@ -464,6 +465,23 @@ fn optional_items(draft: OptionalSectionDraft) -> Vec<ReviewItem> {
                 value: required_runtime_paths,
             },
         ],
+        OptionalSectionDraft::McpServers(McpServersDraft { servers }) => servers
+            .into_iter()
+            .map(|server| ReviewItem {
+                label_key: "mcp_server",
+                value: format!(
+                    "{} · {} · {} · {}",
+                    server.id,
+                    if server.enabled {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    },
+                    server.transport,
+                    server.endpoint
+                ),
+            })
+            .collect(),
         OptionalSectionDraft::Room(RoomDraft {
             timezone,
             diary_boundary_hour,
