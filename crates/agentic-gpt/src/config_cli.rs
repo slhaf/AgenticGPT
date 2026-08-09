@@ -1067,17 +1067,15 @@ fn handle_init(config_path: &Path, args: ConfigInitArgs, language: UiLanguage) -
     let (summary, print_pending) = if args.non_interactive {
         (init_non_interactive(config_path, &args, language)?, true)
     } else if process_should_use_interactive_init(args.non_interactive) {
-        (
-            crate::config_tui::run_config_tui(config_path, setup_seed_from_args(&args), language)
-                .map_err(|error| {
-                if error.to_string() == "config_init_cancelled" {
-                    anyhow!(cli_i18n::text(language).cancelled)
-                } else {
-                    error
-                }
-            })?,
-            false,
-        )
+        match crate::config_tui::run_config_tui(config_path, setup_seed_from_args(&args), language)
+        {
+            Ok(summary) => (summary, false),
+            Err(error) if error.to_string() == "config_init_cancelled" => {
+                println!("{}", cli_i18n::text(language).cancelled);
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        }
     } else {
         return Err(anyhow!(interactive_init_required_message(language)));
     };

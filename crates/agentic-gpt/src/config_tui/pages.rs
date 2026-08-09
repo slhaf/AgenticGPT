@@ -3808,7 +3808,7 @@ fn render_review(
         if state.review_preview_json.is_some() {
             t(language, "Confirm and write", "确认并写入")
         } else {
-            t(language, "Preview final JSON", "预览最终 JSON")
+            t(language, "Preview final JSON", "预览配置")
         },
         action_focused,
         theme,
@@ -3826,7 +3826,7 @@ fn render_review(
             render_inspector(
                 frame,
                 inspector,
-                t(language, "Preview final JSON", "预览最终 JSON"),
+                t(language, "Preview final JSON", "预览配置"),
                 review_confirm_inspector_body(language),
                 theme,
             );
