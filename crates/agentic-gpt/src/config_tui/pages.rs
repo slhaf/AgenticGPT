@@ -602,9 +602,9 @@ fn render_connection_footer(
     }
     let action = if action_focused {
         t(language, "continue", "继续")
-    } else if connection_secret_source_for_focus(session, state.focus).is_some() {
-        t(language, "toggle", "切换")
-    } else if field == Some(SetupField::ProvisionTunnelSecret) {
+    } else if connection_secret_source_for_focus(session, state.focus).is_some()
+        || field == Some(SetupField::ProvisionTunnelSecret)
+    {
         t(language, "toggle", "切换")
     } else {
         t(language, "edit", "编辑")
@@ -3645,6 +3645,7 @@ pub(super) fn toggle_optional_field(draft: &mut OptionalSectionDraft, field: Set
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_review(
     frame: &mut Frame,
     review: &ReviewModel,
@@ -3771,7 +3772,7 @@ fn render_review(
                 " ".repeat(label_width.saturating_sub(UnicodeWidthStr::width(label)));
             let editing = focused
                 .then_some(())
-                .and_then(|_| state.editing.as_ref())
+                .and(state.editing.as_ref())
                 .filter(|editing| item.field == Some(editing.field));
             let display_value = if let Some(editing) = editing {
                 if item.editor == ReviewEditorKind::Secret {

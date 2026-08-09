@@ -191,7 +191,7 @@ pub(crate) fn inline_input_spans(
     );
     let used = UnicodeWidthStr::width(window.text.as_str());
     let remaining = width.saturating_sub(used);
-    let left_padding = " ".repeat((remaining + 1) / 2);
+    let left_padding = " ".repeat(remaining.div_ceil(2));
     let right_padding = " ".repeat(remaining / 2);
     let style = if editing {
         theme.emphasis.add_modifier(Modifier::BOLD)
@@ -294,7 +294,7 @@ pub(crate) fn long_form_input_value_line(
     );
     let content_width = UnicodeWidthStr::width(window.text.as_str());
     let remaining = inner_width.saturating_sub(content_width);
-    let left_padding = " ".repeat((remaining + 1) / 2);
+    let left_padding = " ".repeat(remaining.div_ceil(2));
     let right_padding = " ".repeat(remaining / 2);
     let value_style = if editing {
         theme.emphasis.add_modifier(Modifier::BOLD)

@@ -308,7 +308,7 @@ impl SetupSession {
         };
         let optional = imported_base
             .as_ref()
-            .map(|config| optional_drafts_from_config(config))
+            .map(optional_drafts_from_config)
             .unwrap_or_default();
         Self {
             selected_mode,
@@ -443,7 +443,7 @@ impl SetupSession {
             .build_active_input()
             .map_err(|_| anyhow::anyhow!("config_init_preview_invalid"))?;
         let built = build_config(input)?;
-        Ok(sparse_config_json(&built.config, true)?)
+        sparse_config_json(&built.config, true)
     }
 
     pub(super) fn tunnel_seed_error(&self) -> Option<&'static str> {

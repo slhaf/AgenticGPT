@@ -1975,7 +1975,7 @@ mod tests {
             for job in &batch.jobs {
                 states.push(get_job(&state, &job.job_id, 0).await.unwrap().state);
             }
-            if states.iter().any(|state| *state == JobState::Running) {
+            if states.contains(&JobState::Running) {
                 break;
             }
             sleep(Duration::from_millis(10)).await;
