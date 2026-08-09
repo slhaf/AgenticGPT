@@ -26,7 +26,7 @@ use crate::tui::{
     action_line, inline_error_line, labeled_heading_line, render_action_button,
     render_contextual_footer, render_footer, render_header, render_horizontal_rule,
     render_inspector, render_surface, render_surface_header, surface_choice_line,
-    surface_status_line, Theme,
+    surface_local_rule_width, surface_status_line, Theme,
 };
 use crate::WorkerProfile;
 
@@ -147,23 +147,7 @@ fn render_basic(
     errors: &HashMap<SetupField, String>,
     progress: (usize, usize),
 ) {
-    let full = frame.area();
-    let content = if full.width >= 60 && full.height >= 16 {
-        full.inner(Margin {
-            horizontal: 2,
-            vertical: 1,
-        })
-    } else {
-        full
-    };
-    let [header, top_rule, body, bottom_rule, footer] = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Min(10),
-        Constraint::Length(1),
-        Constraint::Length(1),
-    ])
-    .areas(content);
+    let [header, top_rule, body, bottom_rule, footer] = surface_shell_areas(frame.area());
     render_surface_header(
         frame,
         header,
@@ -173,12 +157,7 @@ fn render_basic(
     );
     render_horizontal_rule(frame, top_rule, theme);
 
-    let [left, _, right] = Layout::horizontal([
-        Constraint::Percentage(43),
-        Constraint::Length(2),
-        Constraint::Min(24),
-    ])
-    .areas(body);
+    let [left, _, right] = surface_columns(body);
     render_basic_controls(frame, left, session, state, language, theme, errors);
     render_surface(frame, right, theme);
     let inspector = right.inner(Margin {
@@ -246,11 +225,11 @@ fn render_basic_controls(
     theme: &Theme,
     errors: &HashMap<SetupField, String>,
 ) {
-    let mut lines = vec![labeled_heading_line(
-        t(language, "Runtime mode", "运行模式"),
-        area.width,
-        theme,
-    )];
+    let mut lines = vec![
+        labeled_heading_line(t(language, "Basic settings", "基础配置"), area.width, theme),
+        Line::raw(""),
+        subsection_heading_line(t(language, "Runtime mode", "运行模式"), theme),
+    ];
     lines.push(Line::raw(""));
     for (index, (mode, label)) in [
         (
@@ -272,9 +251,8 @@ fn render_basic_controls(
     }
 
     lines.push(Line::raw(""));
-    lines.push(labeled_heading_line(
+    lines.push(subsection_heading_line(
         t(language, "Profile", "能力配置"),
-        area.width,
         theme,
     ));
     lines.push(Line::raw(""));
@@ -300,18 +278,22 @@ fn render_basic_controls(
         lines.push(inline_error_line(&localized_error(error, language), theme));
     }
 
-    let target_next_y = area.height.saturating_sub(1) as usize;
-    if lines.len() > target_next_y {
-        lines.truncate(target_next_y);
-    } else {
-        lines.extend((0..target_next_y.saturating_sub(lines.len())).map(|_| Line::raw("")));
-    }
-    lines.push(action_line(
+    let content_height = area.height.saturating_sub(2);
+    let content_area = Rect {
+        x: area.x,
+        y: area.y,
+        width: area.width,
+        height: content_height,
+    };
+    lines.truncate(usize::from(content_height));
+    frame.render_widget(Paragraph::new(lines), content_area);
+    render_surface_action_dock(
+        frame,
+        area,
         t(language, "Next", "下一步"),
         state.focus == BASIC_NEXT_FOCUS,
         theme,
-    ));
-    frame.render_widget(Paragraph::new(lines), area);
+    );
 }
 
 fn basic_inspector_copy(
@@ -473,7 +455,9 @@ fn render_connection(
                         );
                     }
                 }
-                render_surface_blank(left, &mut cursor, frame);
+                if relaxed_field_spacing {
+                    render_surface_blank(left, &mut cursor, frame);
+                }
                 index += 2;
                 continue;
             }
@@ -548,7 +532,7 @@ fn render_connection(
         index += 1;
     }
 
-    render_surface_action(
+    render_surface_action_dock(
         frame,
         left,
         t(language, "Next", "下一步"),
@@ -665,7 +649,7 @@ fn next_surface_row(area: Rect, cursor: &mut u16) -> Option<Rect> {
 }
 
 fn next_surface_rows(area: Rect, cursor: &mut u16, height: u16) -> Option<Rect> {
-    let action_y = area.y + area.height.saturating_sub(1);
+    let action_y = area.y + area.height.saturating_sub(2);
     if height == 0 || cursor.saturating_add(height) > action_y {
         return None;
     }
@@ -724,7 +708,7 @@ fn render_surface_action_dock(
     let separator = Rect {
         x: area.x,
         y: area.y + area.height.saturating_sub(2),
-        width: area.width,
+        width: surface_local_rule_width(area.width),
         height: 1,
     };
     let action = Rect {
@@ -1040,7 +1024,7 @@ fn render_optional_center(
             );
         }
     }
-    render_surface_action(
+    render_surface_action_dock(
         frame,
         left,
         t(language, "Finish and continue", "完成并继续"),
@@ -3114,11 +3098,11 @@ mod tests {
         assert!(rendered.contains("Normal"));
         assert!(rendered.contains("Room"));
         assert!(rendered.contains("Ctrl+C"));
-        assert!(rendered.contains("── Runtime mode"));
-        assert!(rendered.contains("── Profile"));
+        assert!(rendered.contains("◆ Runtime mode"));
+        assert!(rendered.contains("◆ Profile"));
         assert!(rendered.contains("❯"));
         assert!(rendered.contains(""));
-        assert!(rendered.contains("Suitable for a resident Agent"));
+        assert!(rendered.contains("resident Agent"));
     }
 
     #[test]

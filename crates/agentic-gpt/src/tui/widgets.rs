@@ -1,3 +1,5 @@
+use unicode_width::UnicodeWidthStr;
+
 use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::Modifier,
@@ -54,9 +56,16 @@ pub(crate) fn render_horizontal_rule(frame: &mut Frame, area: Rect, theme: &Them
     );
 }
 
+const SURFACE_LOCAL_RULE_TRAILING_GAP: u16 = 7;
+
+pub(crate) fn surface_local_rule_width(width: u16) -> u16 {
+    width.saturating_sub(SURFACE_LOCAL_RULE_TRAILING_GAP)
+}
+
 pub(crate) fn labeled_heading_line(label: &str, width: u16, theme: &Theme) -> Line<'static> {
     let prefix = format!("── {label} ");
-    let fill_width = width.saturating_sub(prefix.chars().count() as u16 + 7) as usize;
+    let fill_width = usize::from(surface_local_rule_width(width))
+        .saturating_sub(UnicodeWidthStr::width(prefix.as_str()));
     Line::from(vec![
         Span::styled(prefix, theme.emphasis),
         Span::styled("─".repeat(fill_width), theme.structure),
