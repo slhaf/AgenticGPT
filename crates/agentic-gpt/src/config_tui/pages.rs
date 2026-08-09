@@ -238,7 +238,11 @@ fn render_basic_controls(
     errors: &HashMap<SetupField, String>,
 ) {
     let mut lines = vec![
-        labeled_heading_line(t(language, "Basic settings", "基础配置"), area.width, theme),
+        labeled_heading_line(
+            t(language, "Global settings", "全局设定"),
+            area.width,
+            theme,
+        ),
         Line::raw(""),
         subsection_heading_line(t(language, "Runtime mode", "运行模式"), theme),
     ];
@@ -317,12 +321,12 @@ fn basic_inspector_copy(
             t(language, "Standalone", "Standalone"),
             match language {
                 UiLanguage::En => &[
-                    "Agent runs independently and exposes capabilities through the Tunnel.",
-                    "Suitable for a resident Agent with remote access.",
+                    "Expose a remote Tunnel while keeping local MCP access.",
+                    "This mode is intended for ChatGPT Developer mode with Secure MCP Tunnel.",
                 ],
                 UiLanguage::ZhCn => &[
-                    "Agent 独立运行，并通过 Tunnel 暴露能力。",
-                    "适合：单机常驻 Agent 与远程接入。",
+                    "通过 Tunnel 提供远程入口，同时保留本机 MCP。",
+                    "此模式仅适用于 ChatGPT Developer mode + Secure MCP Tunnel。",
                 ],
             },
         ),
@@ -330,12 +334,12 @@ fn basic_inspector_copy(
             t(language, "Hub", "Hub"),
             match language {
                 UiLanguage::En => &[
-                    "Connect to a remote AgenticGPT Hub for connection management and dispatch.",
-                    "Suitable for centrally managing multiple Agents.",
+                    "Connect directly to an AgenticGPT Hub for routing and dispatch.",
+                    "Suitable for regular Streamable HTTP MCP access and centrally managed agents.",
                 ],
                 UiLanguage::ZhCn => &[
-                    "连接远程 AgenticGPT Hub，由 Hub 管理连接与调度。",
-                    "适合：集中管理多个 Agent。",
+                    "直接连接 AgenticGPT Hub，由 Hub 负责路由与调度。",
+                    "适用于常规 Streamable HTTP MCP 接入和集中管理多个 Agent。",
                 ],
             },
         ),
@@ -343,12 +347,12 @@ fn basic_inspector_copy(
             t(language, "Local", "Local"),
             match language {
                 UiLanguage::En => &[
-                    "Provide MCP capabilities locally without Hub or Tunnel.",
-                    "Suitable for local development and personal use.",
+                    "Serve MCP only on this machine without connecting to Tunnel or Hub.",
+                    "Use it when no remote entry point is needed.",
                 ],
                 UiLanguage::ZhCn => &[
-                    "仅在本机提供 MCP 能力，不连接 Hub 或 Tunnel。",
-                    "适合：本地开发与个人使用。",
+                    "不连接 Tunnel 或 Hub，只在本机提供 MCP。",
+                    "适合不需要远程入口的本地使用。",
                 ],
             },
         ),
@@ -356,22 +360,25 @@ fn basic_inspector_copy(
             t(language, "Normal", "Normal"),
             match language {
                 UiLanguage::En => &[
-                    "Enable the general Agent capability set.",
-                    "Keep the configuration and runtime surface compact.",
+                    "Enable the general agent capability set; this is the default profile.",
+                    "Profiles are not stored in config, so launch the agent with Normal as well.",
                 ],
-                UiLanguage::ZhCn => &["启用通用 Agent 能力集。", "保持配置和运行面最精简。"],
+                UiLanguage::ZhCn => &[
+                    "仅启用通用 Agent 能力；这是默认 profile。",
+                    "Profile 不写入配置，启动时仍需使用 Normal。",
+                ],
             },
         ),
         4 => (
             t(language, "Room", "Room"),
             match language {
                 UiLanguage::En => &[
-                    "Enable Room capabilities on top of the Normal profile.",
-                    "Includes Diary, Notebook, and other long-lived context features.",
+                    "Add Diary, Notebook, and other long-lived context capabilities to Normal.",
+                    "Profiles are not stored in config, so launch the agent with Room as well.",
                 ],
                 UiLanguage::ZhCn => &[
-                    "在 Normal 基础上启用 Room 能力。",
-                    "包括 Diary、Notebook 等长期上下文功能。",
+                    "在 Normal 基础上增加 Diary、Notebook 等长期上下文能力。",
+                    "Profile 不写入配置，启动时仍需使用 Room。",
                 ],
             },
         ),
@@ -379,12 +386,12 @@ fn basic_inspector_copy(
             t(language, "Next", "下一步"),
             match language {
                 UiLanguage::En => &[
-                    "Confirm the committed choices and continue to connection settings.",
-                    "All values remain in memory until the final commit.",
+                    "Continue to connection settings with the selected mode and profile.",
+                    "Nothing is written to disk until final confirmation.",
                 ],
                 UiLanguage::ZhCn => &[
-                    "确认已提交的选择并进入连接设置。",
-                    "所有值仍只保存在内存中。",
+                    "按当前运行模式和 profile 进入连接设置。",
+                    "最终确认前不会写入磁盘。",
                 ],
             },
         ),
@@ -768,68 +775,124 @@ fn connection_inspector_body(
     match field {
         Some(SetupField::TunnelId) => match language {
             UiLanguage::En => &[
-                "Stable identifier used by the Tunnel.",
-                "Keep it short and reusable.",
+                "The Tunnel client uses this ID to connect to its assigned Tunnel.",
+                "",
+                "Get it from:",
+                "• OpenAI Platform → Organization → Tunnels",
+                "• https://platform.openai.com/settings/organization/tunnels",
             ],
-            UiLanguage::ZhCn => &["Tunnel 使用的稳定标识。", "建议保持简短并长期复用。"],
+            UiLanguage::ZhCn => &[
+                "Tunnel client 用它连接指定 Tunnel；此项不能为空。",
+                "",
+                "获取位置：",
+                "• OpenAI Platform → Organization → Tunnels",
+                "• https://platform.openai.com/settings/organization/tunnels",
+            ],
         },
         Some(SetupField::TunnelSecretSource) => match language {
             UiLanguage::En => &[
-                "Choose a file or environment reference.",
-                "Secret contents stay masked.",
+                "Choose whether the Tunnel API key is read from a file or environment variable.",
+                "Config stores only the reference, not the plaintext key.",
+                "",
+                "Create the key at:",
+                "• OpenAI Platform → Organization → API keys",
+                "• https://platform.openai.com/settings/organization/api-keys",
             ],
-            UiLanguage::ZhCn => &["选择文件或环境变量引用。", "密钥内容始终保持隐藏。"],
+            UiLanguage::ZhCn => &[
+                "选择从文件或环境变量读取 Tunnel API key。",
+                "配置只保存引用，不保存明文密钥。",
+                "",
+                "密钥获取位置：",
+                "• OpenAI Platform → Organization → API keys",
+                "• https://platform.openai.com/settings/organization/api-keys",
+            ],
         },
-        Some(SetupField::TunnelSecretPath | SetupField::TunnelSecretEnvironment) => {
-            match language {
-                UiLanguage::En => &[
-                    "Only the reference is shown here.",
-                    "The secret itself is never rendered.",
-                ],
-                UiLanguage::ZhCn => &["这里仅显示引用位置。", "密钥本身不会被渲染。"],
-            }
-        }
-        Some(SetupField::ProvisionTunnelSecret | SetupField::TunnelSecretValue) => match language {
+        Some(SetupField::TunnelSecretPath) => match language {
             UiLanguage::En => &[
-                "Provisioning is staged until final write.",
-                "Input remains masked while editing.",
+                "The Tunnel API key is read from this file at startup.",
+                "Default: ~/.agentic_gpt/secrets/tunnel-api-key; naming the path does not create it.",
             ],
-            UiLanguage::ZhCn => &["写入动作会暂存到最终提交。", "编辑时输入始终隐藏。"],
+            UiLanguage::ZhCn => &[
+                "启动时从此文件读取 Tunnel API key。",
+                "默认 ~/.agentic_gpt/secrets/tunnel-api-key；填写路径本身不会创建文件。",
+            ],
+        },
+        Some(SetupField::TunnelSecretEnvironment) => match language {
+            UiLanguage::En => &[
+                "The Tunnel API key is read from this environment variable at startup.",
+                "Enter a valid variable name and ensure the launching process receives a non-empty value.",
+            ],
+            UiLanguage::ZhCn => &[
+                "启动时从这个环境变量读取 Tunnel API key。",
+                "切到 env 后必须填写有效变量名，并确保启动进程能读取到非空值。",
+            ],
+        },
+        Some(SetupField::ProvisionTunnelSecret) => match language {
+            UiLanguage::En => &[
+                "When enabled, final commit writes the secret to the selected file.",
+                "It is off by default and is available only for a file source.",
+            ],
+            UiLanguage::ZhCn => &[
+                "开启后，最终提交时把密钥写入所选文件。",
+                "默认关闭，并且只支持 file 来源。",
+            ],
+        },
+        Some(SetupField::TunnelSecretValue) => match language {
+            UiLanguage::En => &[
+                "This is the secret content written to the Secret file for this transaction.",
+                "It is never stored in config JSON and must be non-empty when provisioning is enabled.",
+            ],
+            UiLanguage::ZhCn => &[
+                "这是本次要写入 Secret file 的密钥内容。",
+                "它不会进入配置 JSON；启用立即写入后不能为空。",
+            ],
         },
         Some(SetupField::HubUrl) => match language {
             UiLanguage::En => &[
-                "Remote Hub endpoint used for dispatch.",
-                "Validation runs before leaving this page.",
+                "Base URL of the Hub this agent connects to.",
+                "Default: http://localhost:8787; change it when the Hub is not running locally.",
             ],
-            UiLanguage::ZhCn => &["用于调度的远程 Hub 地址。", "离开页面前会执行验证。"],
+            UiLanguage::ZhCn => &[
+                "Agent 连接的 Hub 基地址。",
+                "默认 http://localhost:8787；Hub 不在本机时改为它的 HTTP(S) 地址。",
+            ],
         },
         Some(SetupField::HubTransport) => match language {
             UiLanguage::En => &[
-                "Transport used to reach the Hub.",
-                "Keep the existing setup semantics.",
+                "Choose websocket or sse for the Hub connection; websocket is the default.",
+                "Switch to sse mainly when the network or proxy does not support WebSockets well.",
             ],
-            UiLanguage::ZhCn => &["访问 Hub 所使用的传输方式。", "保持现有配置语义。"],
+            UiLanguage::ZhCn => &[
+                "选择连接 Hub 的 websocket 或 sse 传输；默认 websocket。",
+                "网络或代理不适合 WebSocket 时通常才改为 sse。",
+            ],
         },
         Some(SetupField::AgentId) => match language {
             UiLanguage::En => &[
-                "Stable identity presented to the Hub.",
-                "It is safe to edit before commit.",
+                "The Hub uses this ID to identify and route to the agent; default: laptop.",
+                "It also names local socket/runtime paths, so use a stable ASCII identifier.",
             ],
-            UiLanguage::ZhCn => &["向 Hub 呈现的稳定身份。", "提交前可以安全编辑。"],
+            UiLanguage::ZhCn => &[
+                "Hub 用它识别并路由到此 Agent；默认 laptop。",
+                "它也用于本机 socket/运行目录，建议使用稳定的 ASCII 标识。",
+            ],
         },
         Some(SetupField::AgentSecret) => match language {
             UiLanguage::En => &[
-                "Credential for Hub authentication.",
-                "The value is never displayed.",
+                "Sent as x-agent-secret when connecting to the Hub.",
+                "There is no usable default; it must match the Hub and is stored as a string in config.",
             ],
-            UiLanguage::ZhCn => &["用于 Hub 身份验证的凭据。", "值不会显示出来。"],
+            UiLanguage::ZhCn => &[
+                "连接 Hub 时作为 x-agent-secret 发送。",
+                "没有可用默认值，必须与 Hub 注册一致；它会以字符串保存在配置文件中。",
+            ],
         },
         _ => match language {
             UiLanguage::En => &[
-                "Selections are staged in memory.",
-                "Validation remains authoritative.",
+                "Continue with the current connection settings.",
+                "Nothing is written to disk until final confirmation.",
             ],
-            UiLanguage::ZhCn => &["选择会暂存在内存中。", "验证逻辑保持不变。"],
+            UiLanguage::ZhCn => &["按当前连接设置继续。", "最终确认前不会写入磁盘。"],
         },
     }
 }
@@ -2806,28 +2869,108 @@ fn optional_center_inspector_body(
     match section {
         Some(section) => match language {
             UiLanguage::En => match section {
-                OptionalSection::Identity => &["Set a stable display name for this agent."],
-                OptionalSection::Workspace => &["Keep path policy values explicit and reviewable."],
-                OptionalSection::Confirmation => {
-                    &["Choose the confirmation provider and language."]
-                }
-                OptionalSection::Limits => &["Tune concurrency and search limits."],
-                OptionalSection::Sandbox => &["Control sandbox execution and runtime paths."],
-                OptionalSection::McpServers => &["Configure downstream MCP servers."],
-                OptionalSection::Room => &["Configure long-lived Room context."],
-                OptionalSection::TunnelClient => &["Configure the managed Tunnel client."],
-                OptionalSection::HubReporting => &["Choose Hub reporting behavior."],
+                OptionalSection::Identity => &[
+                    "Set the human-readable name shown for this agent.",
+                    "The display name is separate from the Agent ID used for routing.",
+                ],
+                OptionalSection::Workspace => &[
+                    "Set the default working directory and the paths file tools may write, read only, or not access.",
+                    "",
+                    "Access priority:",
+                    "• deny > write > read-only",
+                    "• workspace root is always writable",
+                ],
+                OptionalSection::Confirmation => &[
+                    "Choose how confirmation requests are delivered and which language they use.",
+                    "",
+                    "Default channel order:",
+                    "• freedesktop → ntfy",
+                ],
+                OptionalSection::Limits => &[
+                    "Control Process batch concurrency, total active Job capacity, and file-search context.",
+                    "",
+                    "Defaults:",
+                    "• Process batch concurrency: 2",
+                    "• Active Jobs: auto",
+                    "• File-search context: 5 lines",
+                ],
+                OptionalSection::Sandbox => &[
+                    "Add bubblewrap isolation to process execution.",
+                    "Path policy and confirmation checks still apply whether the sandbox is on or off.",
+                    "",
+                    "Default: off",
+                ],
+                OptionalSection::McpServers => &[
+                    "Configure downstream MCP servers used by mcp.listTools, mcp.callTool, and mcp.batch.",
+                    "",
+                    "Supported transports:",
+                    "• streamable-http",
+                    "• stdio",
+                ],
+                OptionalSection::Room => &[
+                    "Set Room timezone, diary day boundary, and Notebook storage location.",
+                    "Only available when the Room profile is selected.",
+                ],
+                OptionalSection::TunnelClient => &[
+                    "Configure how Standalone locates or downloads the Tunnel client.",
+                    "Default: managed version 0.0.10 with auto-download enabled.",
+                ],
+                OptionalSection::HubReporting => &[
+                    "Control optional run and Job reporting from Standalone to the Hub.",
+                    "Default: off; metadata hides tool arguments, results, and command/output details.",
+                ],
             },
             UiLanguage::ZhCn => match section {
-                OptionalSection::Identity => &["为 Agent 设置稳定的显示名称。"],
-                OptionalSection::Workspace => &["路径策略保持明确且可复核。"],
-                OptionalSection::Confirmation => &["选择确认提供方和语言。"],
-                OptionalSection::Limits => &["调整并发和搜索限制。"],
-                OptionalSection::Sandbox => &["控制沙箱执行和运行时路径。"],
-                OptionalSection::McpServers => &["配置下游 MCP 服务。"],
-                OptionalSection::Room => &["配置长期 Room 上下文。"],
-                OptionalSection::TunnelClient => &["配置托管的 Tunnel 客户端。"],
-                OptionalSection::HubReporting => &["选择 Hub 报告行为。"],
+                OptionalSection::Identity => &[
+                    "设置此 Agent 的可读显示名称。",
+                    "显示名称与用于路由的 Agent ID 相互独立。",
+                ],
+                OptionalSection::Workspace => &[
+                    "设置默认工作目录，以及文件工具允许写入、只读和禁止访问的路径范围。",
+                    "",
+                    "权限优先级：",
+                    "• deny > write > read-only",
+                    "• workspace root 始终可写",
+                ],
+                OptionalSection::Confirmation => &[
+                    "设置确认请求的投递通道和语言。",
+                    "",
+                    "默认通道顺序：",
+                    "• freedesktop → ntfy",
+                ],
+                OptionalSection::Limits => &[
+                    "控制 Process 批处理并发、活动 Job 总容量和文件搜索上下文。",
+                    "",
+                    "默认值：",
+                    "• Process 批处理并发：2",
+                    "• 活动 Job：auto",
+                    "• 文件搜索上下文：5 行",
+                ],
+                OptionalSection::Sandbox => &[
+                    "为进程执行增加 bubblewrap 隔离。",
+                    "无论是否启用沙箱，路径策略和确认检查仍然生效。",
+                    "",
+                    "默认：关闭",
+                ],
+                OptionalSection::McpServers => &[
+                    "配置 mcp.listTools、mcp.callTool 和 mcp.batch 使用的下游 MCP 服务。",
+                    "",
+                    "支持的传输：",
+                    "• streamable-http",
+                    "• stdio",
+                ],
+                OptionalSection::Room => &[
+                    "设置 Room 的时区、日记日界线和 Notebook 存储位置。",
+                    "仅在选择 Room profile 时可用。",
+                ],
+                OptionalSection::TunnelClient => &[
+                    "设置 Standalone 如何查找或下载 Tunnel client。",
+                    "默认使用托管版本 0.0.10，并开启自动下载。",
+                ],
+                OptionalSection::HubReporting => &[
+                    "控制 Standalone 向 Hub 上报运行和 Job 信息。",
+                    "默认关闭；metadata 会隐藏工具参数、结果以及命令和输出细节。",
+                ],
             },
         },
         None => match language {
@@ -2845,38 +2988,345 @@ fn optional_form_inspector_body(
     match field {
         Some(field) => match language {
             UiLanguage::En => match field {
-                SetupField::DisplayName => &["A human-readable identity for this agent."],
-                SetupField::MaxConcurrentTasks | SetupField::MaxActiveJobs => {
-                    &["Numeric limits are validated before save."]
-                }
-                SetupField::MaxFileSearchContextLines => &["Controls search context size."],
-                SetupField::SandboxEnabled
-                | SetupField::TunnelAutoDownload
-                | SetupField::HubReportingEnabled => &["Toggle the staged value with Enter or l."],
+                SetupField::DisplayName => &[
+                    "Human-readable name shown in status and notifications; it does not change the Agent ID.",
+                    "",
+                    "Default behavior:",
+                    "• untouched: use the host name when available",
+                    "• saved default draft: write AgenticGPT agent",
+                ],
+                SetupField::WorkspaceRoot => &[
+                    "Default working directory for relative paths and workspace-scoped data.",
+                    "Default: ~/.agentic_gpt/workspace.",
+                    "",
+                    "Access rule:",
+                    "• workspace root is always writable",
+                ],
+                SetupField::WriteRoots => &[
+                    "Additional roots file tools may modify.",
+                    "Default: workspace, ~/Documents, ~/Downloads, /tmp.",
+                    "",
+                    "Workspace root remains writable even if it is removed from this list.",
+                ],
+                SetupField::ReadOnlyRoots => &[
+                    "Roots file tools may read but not modify.",
+                    "",
+                    "Access priority:",
+                    "• write overrides read-only",
+                    "• deny overrides both",
+                ],
+                SetupField::DenyRoots => &[
+                    "Roots file tools cannot access.",
+                    "Default includes common credential, browser, cloud, and package-manager locations.",
+                    "",
+                    "Access priority:",
+                    "• deny overrides write and read-only",
+                ],
+                SetupField::ConfirmationProvider => &[
+                    "Choose where confirmation requests are delivered.",
+                    "",
+                    "Choices:",
+                    "• default: freedesktop → ntfy",
+                    "• freedesktop: desktop notification only",
+                    "• ntfy: ntfy only",
+                    "• none: no confirmation channel; required confirmations fail",
+                ],
+                SetupField::ConfirmationLanguage => &[
+                    "Language used in confirmation requests.",
+                    "If this section stays Default, final config uses the current Config TUI language.",
+                ],
+                SetupField::MaxConcurrentTasks => &[
+                    "Maximum number of child Process Jobs from one batch that may run at once.",
+                    "Default: 2. A configured 0 still runs one child at a time.",
+                    "",
+                    "This does not raise the total active Job capacity controlled by Max active jobs.",
+                ],
+                SetupField::MaxActiveJobs => &[
+                    "Total number of managed Jobs that may be active at once.",
+                    "Default: auto.",
+                    "",
+                    "Auto behavior:",
+                    "• ceil(available parallelism × 1.5)",
+                    "• clamped to 6–24",
+                    "• explicit 0 rejects new Jobs",
+                ],
+                SetupField::MaxFileSearchContextLines => &[
+                    "Number of surrounding lines included for each file-search hit.",
+                    "Default: 5; valid range: 0–100.",
+                ],
+                SetupField::SandboxEnabled => &[
+                    "Wrap process execution with bubblewrap isolation when enabled.",
+                    "Default: off. Path policy and confirmation checks still apply either way.",
+                ],
+                SetupField::BubblewrapPath => &[
+                    "Command or path used to launch bubblewrap.",
+                    "Default: bwrap. This wizard checks only that the value is non-empty.",
+                ],
+                SetupField::RequiredRuntimePaths => &[
+                    "Host paths mounted read-only into the sandbox so programs can run.",
+                    "Default: /usr, /bin, /lib, /lib64, /etc/ssl.",
+                    "",
+                    "Paths that do not exist on the host are skipped.",
+                ],
+                SetupField::McpServerId => &[
+                    "Stable server ID used in MCP requests, confirmations, Jobs, and audit records.",
+                    "",
+                    "Rules:",
+                    "• 1–64 bytes and unique",
+                    "• ASCII letters, digits, dot, underscore, or dash",
+                    "• no leading or trailing whitespace",
+                ],
+                SetupField::McpServerEnabled => &[
+                    "Controls whether this configured MCP server may be called.",
+                    "Disabled servers remain saved and listed, but calls to them fail as disabled.",
+                ],
+                SetupField::McpServerTransport => &[
+                    "Select how AgenticGPT connects to this MCP server.",
+                    "",
+                    "Supported transports:",
+                    "• streamable-http: Endpoint is an HTTP(S) URL",
+                    "• stdio: Endpoint is a shell command",
+                ],
+                SetupField::McpServerEndpoint => &[
+                    "Connection target interpreted according to the selected transport.",
+                    "",
+                    "Requirements:",
+                    "• streamable-http: absolute HTTP(S) URL with a host",
+                    "• stdio: full shell command executed with sh -lc",
+                    "• stdio shell quoting, expansion, and composition apply",
+                ],
+                SetupField::RoomTimezone => &[
+                    "Timezone used to assign Room diary and Notebook dates.",
+                    "Default: Asia/Shanghai. Use an IANA timezone such as Europe/Berlin.",
+                    "",
+                    "The wizard checks only that it is non-empty; an invalid timezone fails at runtime.",
+                ],
+                SetupField::DiaryBoundaryHour => &[
+                    "Hour at which the Room diary date rolls over.",
+                    "Default: 5; valid range: 0–23.",
+                    "",
+                    "Times before the boundary belong to the previous diary day.",
+                ],
+                SetupField::NotebookRoot => &[
+                    "Directory used by Room Notebook storage.",
+                    "Leave blank to use <workspace>/notebook.",
+                ],
+                SetupField::TunnelClientVersion => &[
+                    "Managed Tunnel client version.",
+                    "Leave blank to use the built-in pinned version 0.0.10.",
+                ],
+                SetupField::TunnelCacheDir => &[
+                    "Cache directory for managed Tunnel client artifacts.",
+                    "Default: ~/.agentic_gpt/cache/tunnel-client.",
+                ],
+                SetupField::TunnelAutoDownload => &[
+                    "Allow AgenticGPT to download the managed Tunnel client when the cache is missing or invalid.",
+                    "Default: on.",
+                    "",
+                    "When off, a valid cached client or executable override must already be available.",
+                ],
+                SetupField::TunnelExecutable => &[
+                    "Optional custom Tunnel client executable.",
+                    "When set, it takes precedence over the managed cache and download path.",
+                    "",
+                    "Leave blank to use the managed client.",
+                ],
+                SetupField::TunnelDownloadUrl => &[
+                    "Override the managed Tunnel client download source.",
+                    "Usually leave this blank.",
+                    "",
+                    "A custom source must use HTTPS and requires a SHA-256 value.",
+                ],
+                SetupField::TunnelSha256 => &[
+                    "Expected SHA-256 for a custom download or executable.",
+                    "It must contain exactly 64 hexadecimal characters.",
+                    "",
+                    "A custom download URL requires this value.",
+                ],
+                SetupField::HubReportingEnabled => &[
+                    "Enable reporting of Standalone Tunnel runs and Jobs to the Hub.",
+                    "Default: off.",
+                ],
+                SetupField::HubReportingDetail => &[
+                    "Choose how much data Hub reporting includes.",
+                    "",
+                    "Levels:",
+                    "• metadata: hide tool arguments/results and command, cwd, stdout/stderr details",
+                    "• full: include bounded arguments/results and full Job details",
+                ],
                 _ => &["Edit the staged value; validation remains authoritative."],
             },
             UiLanguage::ZhCn => match field {
-                SetupField::DisplayName => &["用于标识 Agent 的可读名称。"],
-                SetupField::MaxConcurrentTasks | SetupField::MaxActiveJobs => {
-                    &["保存前会验证数值限制。"]
-                }
-                SetupField::MaxFileSearchContextLines => &["控制搜索上下文大小。"],
-                SetupField::SandboxEnabled
-                | SetupField::TunnelAutoDownload
-                | SetupField::HubReportingEnabled => &["按 Enter 或 l 切换暂存值。"],
+                SetupField::DisplayName => &[
+                    "显示在状态信息和通知里的可读名称；不会修改 Agent ID。",
+                    "",
+                    "默认行为：",
+                    "• 未配置：优先使用主机名",
+                    "• 保存默认草稿：写入 AgenticGPT agent",
+                ],
+                SetupField::WorkspaceRoot => &[
+                    "相对路径和工作区数据使用的默认目录。",
+                    "默认 ~/.agentic_gpt/workspace。",
+                    "",
+                    "访问规则：",
+                    "• workspace root 始终可写",
+                ],
+                SetupField::WriteRoots => &[
+                    "文件工具允许修改的额外根目录。",
+                    "默认包含 workspace、~/Documents、~/Downloads 和 /tmp。",
+                    "",
+                    "即使从此列表移除，workspace root 仍保持可写。",
+                ],
+                SetupField::ReadOnlyRoots => &[
+                    "文件工具可以读取、但不能修改的根目录。",
+                    "",
+                    "权限优先级：",
+                    "• write 覆盖 read-only",
+                    "• deny 覆盖两者",
+                ],
+                SetupField::DenyRoots => &[
+                    "文件工具禁止访问的根目录。",
+                    "默认包含常见的凭据、浏览器、云服务和包管理器配置位置。",
+                    "",
+                    "权限优先级：",
+                    "• deny 覆盖 write 和 read-only",
+                ],
+                SetupField::ConfirmationProvider => &[
+                    "选择确认请求的投递通道。",
+                    "",
+                    "可选项：",
+                    "• default：freedesktop → ntfy",
+                    "• freedesktop：仅桌面通知",
+                    "• ntfy：仅 ntfy",
+                    "• none：没有确认通道；需要确认的操作会失败",
+                ],
+                SetupField::ConfirmationLanguage => &[
+                    "确认请求使用的语言。",
+                    "如果此区块保持 Default，最终配置会使用当前 Config TUI 的界面语言。",
+                ],
+                SetupField::MaxConcurrentTasks => &[
+                    "单个 Process 批处理中，同时运行的子 Job 数上限。",
+                    "默认 2；即使配置为 0，运行时仍会按 1 个并发处理。",
+                    "",
+                    "它不会提高 Max active jobs 控制的活动 Job 总容量。",
+                ],
+                SetupField::MaxActiveJobs => &[
+                    "允许同时处于活动状态的托管 Job 总数。",
+                    "默认 auto。",
+                    "",
+                    "Auto 行为：",
+                    "• ceil(可用并行度 × 1.5)",
+                    "• 结果限制在 6–24",
+                    "• 显式设为 0 会拒绝新的 Job",
+                ],
+                SetupField::MaxFileSearchContextLines => &[
+                    "每个文件搜索命中项附带的上下文行数。",
+                    "默认 5；有效范围 0–100。",
+                ],
+                SetupField::SandboxEnabled => &[
+                    "开启后使用 bubblewrap 隔离进程执行。",
+                    "默认关闭；无论是否开启，路径策略和确认检查仍然生效。",
+                ],
+                SetupField::BubblewrapPath => &[
+                    "启动 bubblewrap 使用的命令名或路径。",
+                    "默认 bwrap；此向导只检查它是否非空，不检查可执行文件是否存在。",
+                ],
+                SetupField::RequiredRuntimePaths => &[
+                    "以只读方式挂载进沙箱、供程序运行所需的宿主机路径。",
+                    "默认 /usr、/bin、/lib、/lib64、/etc/ssl。",
+                    "",
+                    "宿主机上不存在的路径会跳过。",
+                ],
+                SetupField::McpServerId => &[
+                    "MCP 请求、确认、Job 和审计记录中使用的稳定服务 ID。",
+                    "",
+                    "规则：",
+                    "• 1–64 字节且不能重复",
+                    "• 仅 ASCII 字母、数字、点、下划线和短横线",
+                    "• 首尾不能有空白",
+                ],
+                SetupField::McpServerEnabled => &[
+                    "控制此 MCP 服务是否允许被调用。",
+                    "关闭后配置仍会保留并显示，但调用会以 disabled 失败。",
+                ],
+                SetupField::McpServerTransport => &[
+                    "选择 AgenticGPT 连接此 MCP 服务的方式。",
+                    "",
+                    "支持的传输：",
+                    "• streamable-http：Endpoint 是 HTTP(S) URL",
+                    "• stdio：Endpoint 是 shell 命令",
+                ],
+                SetupField::McpServerEndpoint => &[
+                    "连接目标，其含义取决于当前 transport。",
+                    "",
+                    "要求：",
+                    "• streamable-http：带 host 的绝对 HTTP(S) URL",
+                    "• stdio：通过 sh -lc 执行的完整 shell 命令",
+                    "• stdio 会应用 shell 的引用、展开和命令组合语义",
+                ],
+                SetupField::RoomTimezone => &[
+                    "Room 日记和 Notebook 日期归属使用的时区。",
+                    "默认 Asia/Shanghai；建议使用 Europe/Berlin 这类 IANA 时区。",
+                    "",
+                    "向导只检查非空；无效时区会在运行时失败。",
+                ],
+                SetupField::DiaryBoundaryHour => &[
+                    "Room 日记切换日期的小时。",
+                    "默认 5；有效范围 0–23。",
+                    "",
+                    "边界时间之前的内容归到前一个日记日。",
+                ],
+                SetupField::NotebookRoot => &[
+                    "Room Notebook 的存储目录。",
+                    "留空时使用 <workspace>/notebook。",
+                ],
+                SetupField::TunnelClientVersion => &[
+                    "Tunnel client 的托管版本。",
+                    "留空时使用内置固定版本 0.0.10。",
+                ],
+                SetupField::TunnelCacheDir => &[
+                    "托管 Tunnel client 文件的缓存目录。",
+                    "默认 ~/.agentic_gpt/cache/tunnel-client。",
+                ],
+                SetupField::TunnelAutoDownload => &[
+                    "缓存缺失或无效时，是否允许 AgenticGPT 自动下载托管 Tunnel client。",
+                    "默认开启。",
+                    "",
+                    "关闭后，必须已有有效缓存或提供 executable override。",
+                ],
+                SetupField::TunnelExecutable => &[
+                    "可选的自定义 Tunnel client 可执行文件。",
+                    "设置后优先于托管缓存和下载流程。",
+                    "",
+                    "留空时使用托管 client。",
+                ],
+                SetupField::TunnelDownloadUrl => &[
+                    "覆盖 Tunnel client 的默认下载来源。",
+                    "通常无需设置。",
+                    "",
+                    "自定义来源必须使用 HTTPS，并同时提供 SHA-256。",
+                ],
+                SetupField::TunnelSha256 => &[
+                    "自定义下载包或可执行文件的预期 SHA-256。",
+                    "必须正好是 64 个十六进制字符。",
+                    "",
+                    "设置自定义下载 URL 时此项必填。",
+                ],
+                SetupField::HubReportingEnabled => &[
+                    "是否把 Standalone Tunnel 的运行和 Job 信息上报到 Hub。",
+                    "默认关闭。",
+                ],
+                SetupField::HubReportingDetail => &[
+                    "选择 Hub 上报包含的信息量。",
+                    "",
+                    "级别：",
+                    "• metadata：隐藏工具参数/结果，以及命令、cwd、stdout/stderr 细节",
+                    "• full：包含受大小限制的参数/结果和完整 Job 细节",
+                ],
                 _ => &["编辑暂存值；验证逻辑保持不变。"],
             },
         },
-        None => match language {
-            UiLanguage::En => match section {
-                OptionalSection::Limits => &["Numeric and Auto/Custom-style values remain staged."],
-                _ => &["Values remain staged until this section is saved."],
-            },
-            UiLanguage::ZhCn => match section {
-                OptionalSection::Limits => &["数值和 Auto/Custom 风格的值会暂存。"],
-                _ => &["值会暂存到保存此区块为止。"],
-            },
-        },
+        None => optional_center_inspector_body(Some(section), language),
     }
 }
 
@@ -3242,7 +3692,7 @@ fn review_groups(review: &ReviewModel) -> Vec<&crate::config_setup::ReviewGroup>
 
 fn review_target_label(target: ReviewTarget, language: UiLanguage) -> &'static str {
     match target {
-        ReviewTarget::Basic => t(language, "Basic settings", "基础设置"),
+        ReviewTarget::Basic => t(language, "Global settings", "全局设定"),
         ReviewTarget::Connection => t(language, "Connection settings", "连接设置"),
         ReviewTarget::OptionalCenter => t(language, "Optional settings", "可选配置"),
         ReviewTarget::OptionalSection(section) => section_label(section, language),

@@ -1831,6 +1831,7 @@ mod tests {
             SetupSession::new(
                 SetupSeed {
                     mode: Some(RuntimeMode::Standalone),
+                    tunnel_id: Some("review-test-tunnel".into()),
                     tunnel_api_key: Some(format!("file:{}", secret_path.display())),
                     ..SetupSeed::default()
                 },
@@ -1855,6 +1856,7 @@ mod tests {
             SetupSession::new(
                 SetupSeed {
                     mode: Some(RuntimeMode::Standalone),
+                    tunnel_id: Some("review-test-tunnel".into()),
                     tunnel_api_key: Some(format!("file:{}", secret_path.display())),
                     ..SetupSeed::default()
                 },
@@ -1887,6 +1889,7 @@ mod tests {
             SetupSession::new(
                 SetupSeed {
                     mode: Some(RuntimeMode::Standalone),
+                    tunnel_id: Some("phase-seven-tunnel".into()),
                     tunnel_api_key: Some("file:/tmp/phase-seven-secret".into()),
                     ..SetupSeed::default()
                 },
@@ -1922,6 +1925,7 @@ mod tests {
             SetupSession::new(
                 SetupSeed {
                     mode: Some(RuntimeMode::Standalone),
+                    tunnel_id: Some("phase-seven-tunnel".into()),
                     tunnel_api_key: Some("file:/tmp/phase-seven-secret".into()),
                     ..SetupSeed::default()
                 },

@@ -10,7 +10,6 @@ use crate::WorkerProfile;
 
 use super::validation;
 
-const DEFAULT_TUNNEL_ID: &str = "tunnel_replace-me";
 const DEFAULT_SECRET_PATH: &str = "~/.agentic_gpt/secrets/tunnel-api-key";
 const DEFAULT_HUB_URL: &str = "http://localhost:8787";
 const DEFAULT_HUB_TRANSPORT: &str = "websocket";
@@ -405,7 +404,7 @@ impl StandaloneDraft {
         tunnel_api_key: Option<String>,
     ) -> (Self, Option<&'static str>) {
         let mut draft = Self {
-            tunnel_id: tunnel_id.unwrap_or_else(|| DEFAULT_TUNNEL_ID.to_string()),
+            tunnel_id: tunnel_id.unwrap_or_default(),
             secret_source: TunnelSecretSource::File,
             secret_path: DEFAULT_SECRET_PATH.to_string(),
             secret_environment: String::new(),
@@ -647,6 +646,7 @@ mod tests {
         let session = SetupSession::new(
             SetupSeed {
                 mode: Some(RuntimeMode::Standalone),
+                tunnel_id: Some("tunnel-test".into()),
                 tunnel_api_key: Some("file:".into()),
                 ..SetupSeed::default()
             },

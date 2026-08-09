@@ -15,7 +15,7 @@ mod tests {
             SetupSeed {
                 mode: Some(RuntimeMode::Standalone),
                 profile: Some(WorkerProfile::Normal),
-                tunnel_id: None,
+                tunnel_id: Some("review-tunnel".to_string()),
                 tunnel_api_key: Some("file:/tmp/review-secret".to_string()),
                 hub_url: Some("https://inactive-hub.example.com".to_string()),
                 hub_transport: Some("sse".to_string()),
@@ -38,9 +38,6 @@ mod tests {
             review.basic.target,
             super::super::review::ReviewTarget::Basic
         );
-        assert!(review
-            .pending_actions
-            .contains(&PendingAction::ReplaceTunnelId));
         assert!(review
             .connection
             .items
@@ -108,7 +105,7 @@ mod tests {
         let deferred = SetupSession::new(
             SetupSeed {
                 mode: Some(RuntimeMode::Standalone),
-                tunnel_id: None,
+                tunnel_id: Some("tunnel_replace-me".to_string()),
                 tunnel_api_key: Some(format!("file:{}", default_secret.display())),
                 ..SetupSeed::default()
             },
@@ -131,6 +128,7 @@ mod tests {
         let mut immediate = SetupSession::new(
             SetupSeed {
                 mode: Some(RuntimeMode::Standalone),
+                tunnel_id: Some("immediate-tunnel".into()),
                 tunnel_api_key: Some("file:/tmp/immediate-tunnel-secret".into()),
                 ..SetupSeed::default()
             },
