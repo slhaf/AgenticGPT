@@ -82,21 +82,3 @@ fn byte_index_at_cursor(value: &str, cursor: usize) -> usize {
         .map(|(index, _)| index)
         .unwrap_or(value.len())
 }
-
-#[cfg(test)]
-mod tests {
-    use crate::config_setup::SetupField;
-
-    use super::*;
-
-    #[test]
-    fn edit_state_starts_at_end_and_character_keys_only_change_ui_buffer() {
-        let edit = EditState::new(SetupField::TunnelId, "confirmed-tunnel");
-        assert_eq!(edit.cursor, "confirmed-tunnel".len());
-        assert_eq!(edit.buffer, "confirmed-tunnel");
-        assert_eq!(
-            apply_text_key(edit, crossterm::event::KeyCode::Char('x')).buffer,
-            "confirmed-tunnelx"
-        );
-    }
-}

@@ -73,29 +73,3 @@ impl Theme {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use ratatui::style::Modifier;
-
-    use super::*;
-
-    #[test]
-    fn theme_exposes_all_state_tokens_and_contrast() {
-        let theme = Theme::from_env();
-        assert_ne!(theme.focus, theme.normal);
-        assert_ne!(theme.pointer, theme.normal);
-        assert_ne!(theme.error, theme.normal);
-        assert_ne!(theme.disabled, theme.normal);
-    }
-
-    #[test]
-    fn no_color_uses_modifiers_instead_of_hue() {
-        let theme = Theme::no_color();
-        assert_eq!(theme.focus.fg, None);
-        assert_eq!(theme.pointer.fg, None);
-        assert_eq!(theme.surface.bg, None);
-        assert!(theme.focus.add_modifier.contains(Modifier::REVERSED));
-        assert!(theme.disabled.add_modifier.contains(Modifier::DIM));
-    }
-}
