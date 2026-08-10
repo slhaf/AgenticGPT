@@ -56,7 +56,7 @@ struct SkillPackage {
 
 pub(crate) async fn list(state: &AppState) -> Result<SkillsListResponse> {
     let config = state.config.read().await.clone();
-    let active = read_active_file(&config)?;
+    let active = read_active_file(&config, &state.private_state.active_skills)?;
     let mut warnings = Vec::new();
     let mut skills = scan_skills(&config, &active, &mut warnings)?
         .into_values()
@@ -69,7 +69,7 @@ pub(crate) async fn list(state: &AppState) -> Result<SkillsListResponse> {
 pub(crate) async fn read(state: &AppState, request: SkillReadRequest) -> Result<SkillReadResponse> {
     validate_skill_id(&request.id)?;
     let config = state.config.read().await.clone();
-    let active = read_active_file(&config)?;
+    let active = read_active_file(&config, &state.private_state.active_skills)?;
     let package = load_skill(&config, &request.id, active_contains(&active, &request.id))?;
     let resource = request
         .path
@@ -88,7 +88,7 @@ pub(crate) async fn resolve_run_program(
 ) -> Result<PathBuf> {
     validate_skill_id(&request.id)?;
     let config = state.config.read().await.clone();
-    let active = read_active_file(&config)?;
+    let active = read_active_file(&config, &state.private_state.active_skills)?;
     if !active_contains(&active, &request.id) {
         return Err(anyhow!("skill_inactive"));
     }
@@ -152,7 +152,7 @@ pub(crate) async fn search(
     let query = query.to_lowercase();
     let limit = request.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
     let config = state.config.read().await.clone();
-    let active = read_active_file(&config)?;
+    let active = read_active_file(&config, &state.private_state.active_skills)?;
     let mut warnings = Vec::new();
     let mut skills = scan_skills(&config, &active, &mut warnings)?
         .into_values()
@@ -166,7 +166,7 @@ pub(crate) async fn search(
 
 pub(crate) async fn active(state: &AppState) -> Result<SkillsActiveResponse> {
     let config = state.config.read().await.clone();
-    let active = read_active_file(&config)?;
+    let active = read_active_file(&config, &state.private_state.active_skills)?;
     let mut warnings = Vec::new();
     let skills = scan_skills(&config, &active, &mut warnings)?;
     let active_skills = active
@@ -203,7 +203,7 @@ pub(crate) async fn activate(
     let config = state.config.read().await.clone();
     load_skill(&config, &request.id, false)?;
     let _guard = state.skills_writes.lock().await;
-    let mut active = read_active_file(&config)?;
+    let mut active = read_active_file(&config, &state.private_state.active_skills)?;
     let removed_disabled_default = active.disabled_defaults.iter().any(|id| id == &request.id);
     active.disabled_defaults.retain(|id| id != &request.id);
     if let Some(record) = active
@@ -212,7 +212,7 @@ pub(crate) async fn activate(
         .find(|record| record.id == request.id)
     {
         if removed_disabled_default {
-            write_active_file(&config, &active)?;
+            write_active_file(&state.private_state.active_skills, &active)?;
         }
         return Ok(SkillActivationResponse {
             id: request.id,
@@ -229,7 +229,7 @@ pub(crate) async fn activate(
     active
         .active_skills
         .sort_by(|left, right| left.id.cmp(&right.id));
-    write_active_file(&config, &active)?;
+    write_active_file(&state.private_state.active_skills, &active)?;
     Ok(SkillActivationResponse {
         id: request.id,
         active: true,
@@ -245,7 +245,7 @@ pub(crate) async fn deactivate(
     validate_skill_id(&request.id)?;
     let config = state.config.read().await.clone();
     let _guard = state.skills_writes.lock().await;
-    let mut active = read_active_file(&config)?;
+    let mut active = read_active_file(&config, &state.private_state.active_skills)?;
     let before = active.active_skills.len();
     active
         .active_skills
@@ -259,7 +259,7 @@ pub(crate) async fn deactivate(
         active.disabled_defaults.sort();
     }
     if changed || tombstone_added {
-        write_active_file(&config, &active)?;
+        write_active_file(&state.private_state.active_skills, &active)?;
     }
     Ok(SkillActivationResponse {
         id: request.id,
@@ -575,21 +575,21 @@ fn active_contains(active: &ActiveSkillsFile, id: &str) -> bool {
     active.active_skills.iter().any(|record| record.id == id)
 }
 
-fn read_active_file(config: &Config) -> Result<ActiveSkillsFile> {
-    let path = active_file_path(config);
+fn read_active_file(config: &Config, path: &Path) -> Result<ActiveSkillsFile> {
     if !path.exists() {
         let active = ActiveSkillsFile {
             active_skills: Vec::new(),
             disabled_defaults: Vec::new(),
         };
-        return reconcile_default_activation(config, active);
+        return reconcile_default_activation(config, path, active);
     }
     let text = fs::read_to_string(path)?;
-    reconcile_default_activation(config, serde_json::from_str(&text)?)
+    reconcile_default_activation(config, path, serde_json::from_str(&text)?)
 }
 
 fn reconcile_default_activation(
-    config: &Config,
+    _config: &Config,
+    path: &Path,
     mut active: ActiveSkillsFile,
 ) -> Result<ActiveSkillsFile> {
     if is_default_active_builtin(BUILTIN_INSTALLER_ID)
@@ -606,7 +606,7 @@ fn reconcile_default_activation(
         active
             .active_skills
             .sort_by(|left, right| left.id.cmp(&right.id));
-        write_active_file(config, &active)?;
+        write_active_file(path, &active)?;
     }
     Ok(active)
 }
@@ -615,8 +615,7 @@ fn is_default_active_builtin(id: &str) -> bool {
     id == BUILTIN_INSTALLER_ID
 }
 
-fn write_active_file(config: &Config, active: &ActiveSkillsFile) -> Result<()> {
-    let path = active_file_path(config);
+fn write_active_file(path: &Path, active: &ActiveSkillsFile) -> Result<()> {
     let state_dir = path
         .parent()
         .ok_or_else(|| anyhow!("active_state_parent_missing"))?;
@@ -645,16 +644,9 @@ pub(crate) fn skills_root(config: &Config) -> PathBuf {
     config.workspace_root.join("skills")
 }
 
-fn active_file_path(config: &Config) -> PathBuf {
-    config
-        .workspace_root
-        .join("state")
-        .join("active-skills.json")
-}
-
 pub(crate) async fn is_active(state: &AppState, id: &str) -> Result<bool> {
     let config = state.config.read().await.clone();
-    let active = read_active_file(&config)?;
+    let active = read_active_file(&config, &state.private_state.active_skills)?;
     Ok(active_contains(&active, id))
 }
 
@@ -674,6 +666,12 @@ mod tests {
         AppState {
             config_path: PathBuf::from("test-config.json"),
             config: Arc::new(RwLock::new(config)),
+            private_state: crate::private_state::PrivateStatePaths::for_test(
+                std::env::temp_dir().join(format!(
+                    "agentic-test-private-{}",
+                    uuid::Uuid::new_v4().simple()
+                )),
+            ),
             runtime: crate::state::RuntimeModel::hub(crate::state::CapabilityProfile::Room),
             started_at: chrono::Utc::now(),
             boot_generation: uuid::Uuid::new_v4().simple().to_string()[..12].to_string(),
@@ -863,7 +861,7 @@ mod tests {
         assert!(first.changed);
         assert!(!second.changed);
         assert_eq!(first.activated_at, second.activated_at);
-        let text = fs::read_to_string(root.join("state/active-skills.json")).unwrap();
+        let text = fs::read_to_string(&state.private_state.active_skills).unwrap();
         assert!(text.contains("activeSkills"));
         assert!(text.contains("activatedAt"));
         assert!(!text.contains("summary"));
@@ -931,7 +929,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let text = fs::read_to_string(root.join("state/active-skills.json")).unwrap();
+        let text = fs::read_to_string(&state.private_state.active_skills).unwrap();
         assert!(text.contains("disabledDefaults"));
         assert!(text.contains(BUILTIN_INSTALLER_ID));
         assert!(
@@ -953,7 +951,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let text = fs::read_to_string(root.join("state/active-skills.json")).unwrap();
+        let text = fs::read_to_string(&state.private_state.active_skills).unwrap();
         assert!(!text.contains("disabledDefaults"));
     }
 

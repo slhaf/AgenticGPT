@@ -147,6 +147,7 @@ pub(crate) struct Capabilities {
 pub(crate) struct AppState {
     pub(crate) config_path: PathBuf,
     pub(crate) config: Arc<RwLock<Config>>,
+    pub(crate) private_state: crate::private_state::PrivateStatePaths,
     pub(crate) runtime: RuntimeModel,
     pub(crate) started_at: DateTime<Utc>,
     pub(crate) boot_generation: String,

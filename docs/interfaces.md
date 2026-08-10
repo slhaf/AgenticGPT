@@ -86,9 +86,9 @@ standalone Tunnel documentation.
 
 The ntfy confirmation callback routes are intentionally not part of `openapi/hub.yaml`. They are only used by confirmation action buttons.
 
-Room skills API stores active state in the Room Agent workspace under `state/active-skills.json`. Activating a skill does not execute it or grant permissions; stale active entries remain visible as `missing` until explicitly deactivated. The built-in `skill-installer` guide is active by default and can be explicitly deactivated.
+Room skill packages remain workspace-visible under `<workspaceRoot>/skills/`, while tool-managed activation state is stored as private durable state under `~/.agentic_gpt/state/agent/<agentId>/active-skills.json`. On startup, Agentic migrates an unambiguous legacy `<workspaceRoot>/state/active-skills.json`; if both old and new copies differ, the private copy remains authoritative and the legacy copy is retained with a warning. Activating a skill does not execute it or grant permissions; stale active entries remain visible as `missing` until explicitly deactivated. The built-in `skill-installer` guide is active by default and can be explicitly deactivated.
 
-Installation jobs are persisted under `state/skill-installs/`, retain terminal records for seven days (capped at 100), and never expose inline payloads or URL query/fragment values in public status. Existing skills are archived under `skills/.archive/<id>/` before an explicit replacement. Remote file URLs require public HTTPS and are revalidated after DNS resolution and redirects; deployments can narrow hosts with `room.skills.allowedHosts`.
+Installation jobs are persisted under `~/.agentic_gpt/state/agent/<agentId>/skill-installs/`; the legacy `<workspaceRoot>/state/skill-installs/` tree is migrated with the same preserve-on-conflict behavior before install recovery runs. Installation records retain terminal state for seven days (capped at 100) and never expose inline payloads or URL query/fragment values in public status. Existing skills are archived under `skills/.archive/<id>/` before an explicit replacement. Remote file URLs require public HTTPS and are revalidated after DNS resolution and redirects; deployments can narrow hosts with `room.skills.allowedHosts`.
 
 ## Room session bootstrap package
 

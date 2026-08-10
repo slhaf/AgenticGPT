@@ -5036,6 +5036,12 @@ mod tests {
         AppState {
             config_path: PathBuf::from("stdio-test-config.json"),
             config: Arc::new(RwLock::new(config)),
+            private_state: crate::private_state::PrivateStatePaths::for_test(
+                std::env::temp_dir().join(format!(
+                    "agentic-test-private-{}",
+                    uuid::Uuid::new_v4().simple()
+                )),
+            ),
             runtime: RuntimeModel::tunnel(profile, false),
             started_at: chrono::Utc::now(),
             boot_generation: uuid::Uuid::new_v4().simple().to_string()[..12].to_string(),

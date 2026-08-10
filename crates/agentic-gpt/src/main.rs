@@ -20,6 +20,7 @@ mod mcp;
 mod notebook;
 mod notify;
 mod policy;
+mod private_state;
 mod skill_installs;
 mod skills;
 mod state;
@@ -193,7 +194,7 @@ async fn run_hub(config_path: PathBuf) -> Result<()> {
         },
         initial.limits.max_active_jobs.resolve().diagnostic()
     ));
-    let state = build_app_state(config_path.clone(), initial, runtime, false);
+    let state = build_app_state(config_path.clone(), initial, runtime, false)?;
     state.skill_installs.recover(state.clone()).await?;
     tokio::spawn(watch_config(state.clone()));
     hub::connect_loop(state).await
@@ -233,7 +234,7 @@ async fn run_stdio_worker(
         config,
         RuntimeModel::tunnel(profile, reporting_enabled),
         supervised,
-    );
+    )?;
     state.skill_installs.recover(state.clone()).await?;
     tokio::spawn(watch_standalone_live_config(state.clone(), supervised));
     if reporting_enabled {
@@ -269,11 +270,18 @@ fn build_app_state(
     config: Config,
     runtime: RuntimeModel,
     supervised: bool,
-) -> AppState {
+) -> Result<AppState> {
     let max_concurrent_skill_installs = config.skills.max_concurrent_installs;
-    AppState {
+    let prepared = private_state::prepare(&config)?;
+    for warning in &prepared.warnings {
+        log_warn(warning.clone());
+    }
+    let private_state = prepared.paths;
+    let skill_installs_root = private_state.skill_installs.clone();
+    Ok(AppState {
         config_path,
         config: Arc::new(RwLock::new(config)),
+        private_state,
         runtime,
         started_at: chrono::Utc::now(),
         boot_generation: uuid::Uuid::new_v4().simple().to_string()[..12].to_string(),
@@ -289,9 +297,10 @@ fn build_app_state(
         skills_writes: Arc::new(Mutex::new(())),
         skill_leases: Arc::new(jobs::SkillLeaseManager::new()),
         skill_installs: Arc::new(skill_installs::InstallManager::with_concurrency(
+            skill_installs_root,
             max_concurrent_skill_installs,
         )),
-    }
+    })
 }
 
 async fn run_local(config_path: PathBuf) -> Result<()> {
@@ -313,7 +322,7 @@ async fn run_local(config_path: PathBuf) -> Result<()> {
         log_warn(format!("default tmux session unavailable: {error}"));
     }
     let agent_id = config.agent_id.clone();
-    let state = build_app_state(config_path, config, RuntimeModel::local(profile), false);
+    let state = build_app_state(config_path, config, RuntimeModel::local(profile), false)?;
     state.skill_installs.recover(state.clone()).await?;
     tokio::spawn(watch_standalone_live_config(state.clone(), false));
     let listener = local_control::bind(&agent_id).await?;
@@ -719,6 +728,12 @@ mod tests {
             AppState {
                 config_path: PathBuf::from("test-config.json"),
                 config: Arc::new(RwLock::new(config)),
+                private_state: crate::private_state::PrivateStatePaths::for_test(
+                    std::env::temp_dir().join(format!(
+                        "agentic-test-private-{}",
+                        uuid::Uuid::new_v4().simple()
+                    )),
+                ),
                 runtime: RuntimeModel::hub(profile),
                 started_at: chrono::Utc::now(),
                 boot_generation: "testboot0001".to_string(),

@@ -125,7 +125,7 @@ Set `profile` to `room` for the Room surface (for example, `agentic-gpt config s
 | --- | --- |
 | `mode` | Authoritative runtime dispatch: `standalone`, `hub`, or `local`. |
 | `profile` | Authoritative capability surface: `normal` or `room`. |
-| `agentId` | Stable local identity. It also determines the private runtime/socket path. |
+| `agentId` | Stable local identity. It also determines the private runtime/socket path and per-agent durable state root under `~/.agentic_gpt/state/agent/<agentId>/`. |
 | `displayName` | Human-readable machine label used in summaries/reporting. |
 | `workspaceRoot` | Main writable workspace and location of `.agentic-gpt-audit.jsonl`. |
 | `backupLimit` | Number of config backups retained by Agentic-managed writes. |
@@ -140,6 +140,8 @@ Set `profile` to `room` for the Room surface (for example, `agentic-gpt config s
 | `room` | Room timezone, diary boundary, and optional notebook root. |
 | `tunnel` | Standalone tunnel-client source, secret reference, and optional reporting. |
 | `hub` | Centralized Hub connection or optional standalone Hub reporting/ntfy relay. |
+
+Path-safe `agentId` values map directly to the private state directory name. Wider legacy Hub identities remain supported and use a stable hashed directory key instead of becoming a filesystem path component.
 
 Unknown top-level fields are preserved by load/write round trips. Nested strict objects such as `limits` reject removed v0.8 fields.
 

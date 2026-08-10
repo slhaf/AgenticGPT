@@ -113,7 +113,7 @@ agentic-gpt run
 | --- | --- |
 | `mode` | 权威运行时分派：`standalone`、`hub` 或 `local`。 |
 | `profile` | 权威能力 surface：`normal` 或 `room`。 |
-| `agentId` | 稳定本地 identity，也用于派生私有 runtime/socket 路径。 |
+| `agentId` | 稳定本地 identity，也用于派生私有 runtime/socket 路径，以及 `~/.agentic_gpt/state/agent/<agentId>/` 下的 per-agent 持久状态根目录。 |
 | `displayName` | summary/reporting 中的人类可读机器名称。 |
 | `workspaceRoot` | 主可写工作区，也是 `.agentic-gpt-audit.jsonl` 所在位置。 |
 | `backupLimit` | Agentic 管理配置写入时保留的备份数量。 |
@@ -128,6 +128,8 @@ agentic-gpt run
 | `room` | Room 时区、日记日界线和可选 notebook root。 |
 | `tunnel` | Standalone tunnel-client 来源、secret 引用与可选 reporting。 |
 | `hub` | 集中式 Hub 连接，或 Standalone 的可选 Hub reporting/ntfy relay。 |
+
+可直接作为路径组件的 `agentId` 会原样映射为私有状态目录名；历史上较宽松的 Hub identity 仍然兼容，但会使用稳定 hash 目录 key，而不会直接成为文件系统路径组件。
 
 未知顶层字段会在 load/write round trip 中保留。`limits` 等严格嵌套对象会拒绝已经删除的 v0.8 字段。
 

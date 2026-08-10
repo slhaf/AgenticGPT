@@ -1884,6 +1884,12 @@ mod tests {
         let state = AppState {
             config_path: root.join("config.json"),
             config: Arc::new(RwLock::new(config)),
+            private_state: crate::private_state::PrivateStatePaths::for_test(
+                std::env::temp_dir().join(format!(
+                    "agentic-test-private-{}",
+                    uuid::Uuid::new_v4().simple()
+                )),
+            ),
             runtime: crate::state::RuntimeModel::hub(crate::state::CapabilityProfile::Normal),
             started_at: Utc::now(),
             boot_generation: "testboot0001".to_string(),

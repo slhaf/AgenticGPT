@@ -44,6 +44,7 @@ struct CommitJournal {
 
 #[derive(Clone)]
 pub(crate) struct InstallManager {
+    records_root: PathBuf,
     records: Arc<Mutex<HashMap<String, SkillInstallJobRecord>>>,
     cancellations: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
     target_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
@@ -54,11 +55,21 @@ pub(crate) struct InstallManager {
 impl InstallManager {
     #[cfg(test)]
     pub(crate) fn new() -> Self {
-        Self::with_concurrency(2)
+        let records_root = std::env::temp_dir().join(format!(
+            "agentic-install-manager-{}",
+            Uuid::new_v4().simple()
+        ));
+        Self::with_concurrency(records_root, 2)
     }
 
-    pub(crate) fn with_concurrency(max_concurrent_installs: usize) -> Self {
+    #[cfg(test)]
+    pub(crate) fn for_test(records_root: PathBuf) -> Self {
+        Self::with_concurrency(records_root, 2)
+    }
+
+    pub(crate) fn with_concurrency(records_root: PathBuf, max_concurrent_installs: usize) -> Self {
         Self {
+            records_root,
             records: Arc::new(Mutex::new(HashMap::new())),
             cancellations: Arc::new(Mutex::new(HashMap::new())),
             target_locks: Arc::new(Mutex::new(HashMap::new())),
@@ -69,7 +80,7 @@ impl InstallManager {
 
     pub(crate) async fn recover(&self, state: AppState) -> Result<()> {
         let config = state.config.read().await.clone();
-        let root = install_records_root(&config);
+        let root = self.records_root.clone();
         let Ok(entries) = fs::read_dir(&root) else {
             return Ok(());
         };
@@ -92,14 +103,16 @@ impl InstallManager {
                 // process stopped after persisting the terminal state but
                 // before journal cleanup, the commit has already reached its
                 // terminal outcome, so only discard the stale marker here.
-                remove_commit_journal(&config, &record.install_id);
+                remove_commit_journal(&self.records_root, &record.install_id);
                 self.records
                     .lock()
                     .await
                     .insert(record.install_id.clone(), record);
                 continue;
             }
-            if let Err(error) = reconcile_commit_journal(&config, &record.install_id) {
+            if let Err(error) =
+                reconcile_commit_journal(&config, &self.records_root, &record.install_id)
+            {
                 record.status.status = SkillInstallStatus::Failed;
                 record.status.phase = None;
                 record.status.error = Some(SkillInstallError {
@@ -132,7 +145,7 @@ impl InstallManager {
                 self.save_cache(&config, &record).await?;
                 continue;
             }
-            let _ = fs::remove_dir_all(staging_path(&config, &record.install_id));
+            let _ = fs::remove_dir_all(staging_path(&self.records_root, &record.install_id));
             record.status.status = SkillInstallStatus::Queued;
             record.status.phase = None;
             record.status.cancel_requested_at = None;
@@ -321,7 +334,7 @@ impl InstallManager {
         touch_status(&mut record.status);
         self.save_cache(&config, &record).await?;
 
-        let staging = staging_path(&config, install_id);
+        let staging = staging_path(&self.records_root, install_id);
         if let Err(error) = fs::remove_dir_all(&staging) {
             if error.kind() != std::io::ErrorKind::NotFound {
                 return self
@@ -520,7 +533,13 @@ impl InstallManager {
         touch_status(&mut record.status);
         self.save_cache(&config, &record).await?;
         let was_active = skills::is_active(state, &record.request.id).await?;
-        let archive = commit_staging(&config, &record.request, &staging, install_id)?;
+        let archive = commit_staging(
+            &config,
+            &self.records_root,
+            &record.request,
+            &staging,
+            install_id,
+        )?;
         drop(guard);
 
         record = self.load_record(&config, install_id).await?;
@@ -540,7 +559,7 @@ impl InstallManager {
             .await
             {
                 rollback_commit(&config, &record.request.id, archive.as_deref())?;
-                remove_commit_journal(&config, install_id);
+                remove_commit_journal(&self.records_root, install_id);
                 let _ = fs::remove_dir_all(&staging);
                 return self
                     .fail(
@@ -579,7 +598,7 @@ impl InstallManager {
             package_sha256: package_sha256(&config, &record.request.id)?,
         };
         let _ = fs::remove_dir_all(&staging);
-        remove_commit_journal(&config, install_id);
+        remove_commit_journal(&self.records_root, install_id);
         record = self.load_record(&config, install_id).await?;
         record.status.phase = None;
         record.status.status = SkillInstallStatus::Completed;
@@ -613,8 +632,8 @@ impl InstallManager {
         record.status.poll_after_ms = 0;
         touch_status(&mut record.status);
         self.save_cache(&config, &record).await?;
-        let _ = fs::remove_dir_all(staging_path(&config, install_id));
-        remove_commit_journal(&config, install_id);
+        let _ = fs::remove_dir_all(staging_path(&self.records_root, install_id));
+        remove_commit_journal(&self.records_root, install_id);
         Ok(())
     }
 
@@ -663,7 +682,7 @@ impl InstallManager {
         record: &SkillInstallJobRecord,
     ) -> Result<()> {
         validate_install_id(&record.install_id)?;
-        let root = install_records_root(config);
+        let root = self.records_root.clone();
         fs::create_dir_all(&root)?;
         let path = root.join(format!("{}.json", record.install_id));
         let tmp = root.join(format!(".{}.tmp", record.install_id));
@@ -675,14 +694,14 @@ impl InstallManager {
 
     async fn load_record(
         &self,
-        config: &crate::config::Config,
+        _config: &crate::config::Config,
         install_id: &str,
     ) -> Result<SkillInstallJobRecord> {
         validate_install_id(install_id)?;
         if let Some(record) = self.records.lock().await.get(install_id).cloned() {
             return Ok(record);
         }
-        let path = install_records_root(config).join(format!("{install_id}.json"));
+        let path = self.records_root.join(format!("{install_id}.json"));
         let text = fs::read_to_string(path).map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
                 anyhow!("install_not_found")
@@ -704,11 +723,11 @@ impl InstallManager {
 
     async fn find_idempotent(
         &self,
-        config: &crate::config::Config,
+        _config: &crate::config::Config,
         key: Option<&str>,
     ) -> Result<Option<SkillInstallJobRecord>> {
         let Some(key) = key else { return Ok(None) };
-        let root = install_records_root(config);
+        let root = self.records_root.clone();
         if let Ok(entries) = fs::read_dir(root) {
             for entry in entries.flatten() {
                 let path = entry.path();
@@ -758,8 +777,8 @@ impl InstallManager {
             .clone()
     }
 
-    async fn prune_records(&self, config: &crate::config::Config) -> Result<()> {
-        let root = install_records_root(config);
+    async fn prune_records(&self, _config: &crate::config::Config) -> Result<()> {
+        let root = self.records_root.clone();
         let now = Utc::now();
         let mut terminal = Vec::new();
         for entry in fs::read_dir(&root).into_iter().flatten().flatten() {
@@ -1416,6 +1435,7 @@ fn validate_tree(root: &Path, path: &Path, count: &mut usize, total: &mut u64) -
 
 fn commit_staging(
     config: &crate::config::Config,
+    records_root: &Path,
     request: &SkillInstallRequest,
     staging: &Path,
     install_id: &str,
@@ -1426,7 +1446,7 @@ fn commit_staging(
     let archive = root.join(".archive").join(&request.id).join(install_id);
     let had_target = target.exists();
     let mut archived = None;
-    let journal_path = commit_journal_path(config, install_id);
+    let journal_path = commit_journal_path(records_root, install_id);
     let journal = CommitJournal {
         install_id: install_id.to_string(),
         id: request.id.clone(),
@@ -1456,7 +1476,7 @@ fn commit_staging(
         if let Some(archive) = archived.as_ref() {
             let _ = fs::rename(archive, &target);
         }
-        remove_commit_journal(config, install_id);
+        remove_commit_journal(records_root, install_id);
         return Err(anyhow!("commit_failed: {error}"));
     }
     let mut journal = journal;
@@ -1466,7 +1486,7 @@ fn commit_staging(
         if let Some(archive) = archived.as_ref() {
             let _ = fs::rename(archive, &target);
         }
-        remove_commit_journal(config, install_id);
+        remove_commit_journal(records_root, install_id);
         return Err(anyhow!("commit_journal_failed: {error}"));
     }
     Ok(archived)
@@ -1481,20 +1501,24 @@ fn rollback_commit(config: &crate::config::Config, id: &str, archive: Option<&Pa
     Ok(())
 }
 
-fn commit_journal_path(config: &crate::config::Config, install_id: &str) -> PathBuf {
-    install_records_root(config).join(format!("{install_id}.commit.json"))
+fn commit_journal_path(records_root: &Path, install_id: &str) -> PathBuf {
+    records_root.join(format!("{install_id}.commit.json"))
 }
 
-fn remove_commit_journal(config: &crate::config::Config, install_id: &str) {
+fn remove_commit_journal(records_root: &Path, install_id: &str) {
     if validate_install_id(install_id).is_err() {
         return;
     }
-    let _ = fs::remove_file(commit_journal_path(config, install_id));
+    let _ = fs::remove_file(commit_journal_path(records_root, install_id));
 }
 
-fn reconcile_commit_journal(config: &crate::config::Config, install_id: &str) -> Result<()> {
+fn reconcile_commit_journal(
+    config: &crate::config::Config,
+    records_root: &Path,
+    install_id: &str,
+) -> Result<()> {
     validate_install_id(install_id)?;
-    let journal_path = commit_journal_path(config, install_id);
+    let journal_path = commit_journal_path(records_root, install_id);
     if !journal_path.exists() {
         return Ok(());
     }
@@ -1786,14 +1810,8 @@ fn remaining_deadline(deadline: DateTime<Utc>) -> Duration {
     Duration::from_secs(seconds)
 }
 
-fn install_records_root(config: &crate::config::Config) -> PathBuf {
-    config.workspace_root.join("state").join("skill-installs")
-}
-
-fn staging_path(config: &crate::config::Config, install_id: &str) -> PathBuf {
-    install_records_root(config)
-        .join("staging")
-        .join(install_id)
+fn staging_path(records_root: &Path, install_id: &str) -> PathBuf {
+    records_root.join("staging").join(install_id)
 }
 
 fn sha256_json<T: serde::Serialize>(value: &T) -> Result<String> {
@@ -1825,12 +1843,15 @@ mod tests {
         let root =
             std::env::temp_dir().join(format!("agentic-install-{}", Uuid::new_v4().simple()));
         let mut config = Config::default_config().unwrap();
-        config.workspace_root = root;
+        config.workspace_root = root.clone();
         config.confirmation_provider =
             crate::config::ConfirmationProviderConfig::from_legacy("none").unwrap();
+        let private_state =
+            crate::private_state::PrivateStatePaths::for_test(root.join("private-state"));
         AppState {
             config_path: PathBuf::from("test-config.json"),
             config: Arc::new(RwLock::new(config)),
+            private_state: private_state.clone(),
             runtime: crate::state::RuntimeModel::hub(crate::state::CapabilityProfile::Room),
             started_at: chrono::Utc::now(),
             boot_generation: uuid::Uuid::new_v4().simple().to_string()[..12].to_string(),
@@ -1845,7 +1866,9 @@ mod tests {
             notebook_writes: Arc::new(Mutex::new(())),
             skills_writes: Arc::new(Mutex::new(())),
             skill_leases: Arc::new(crate::jobs::SkillLeaseManager::new()),
-            skill_installs: Arc::new(InstallManager::new()),
+            skill_installs: Arc::new(InstallManager::for_test(
+                private_state.skill_installs.clone(),
+            )),
         }
     }
 
@@ -1908,9 +1931,9 @@ mod tests {
             .workspace_root
             .join("skills/demo/references/info.txt")
             .is_file());
-        assert!(config
-            .workspace_root
-            .join("state/skill-installs")
+        assert!(state
+            .private_state
+            .skill_installs
             .join(format!("{}.json", response.install_id))
             .is_file());
     }
@@ -2050,6 +2073,7 @@ mod tests {
             Uuid::new_v4().simple()
         ));
         let root = skills::skills_root(&config);
+        let records_root = config.workspace_root.join("private-state/skill-installs");
         let target = root.join("demo");
         let archive = root.join(".archive/demo/install-test");
         fs::create_dir_all(&target).unwrap();
@@ -2063,17 +2087,17 @@ mod tests {
             archive: Some(archive.to_string_lossy().to_string()),
             candidate_committed: true,
         };
-        fs::create_dir_all(install_records_root(&config)).unwrap();
+        fs::create_dir_all(&records_root).unwrap();
         fs::write(
-            commit_journal_path(&config, "install-test"),
+            commit_journal_path(&records_root, "install-test"),
             serde_json::to_vec(&journal).unwrap(),
         )
         .unwrap();
 
-        reconcile_commit_journal(&config, "install-test").unwrap();
+        reconcile_commit_journal(&config, &records_root, "install-test").unwrap();
         assert_eq!(fs::read_to_string(target.join("SKILL.md")).unwrap(), "old");
         assert!(!archive.exists());
-        assert!(!commit_journal_path(&config, "install-test").exists());
+        assert!(!commit_journal_path(&records_root, "install-test").exists());
 
         // A journal written before the old target is moved must not delete it.
         fs::write(target.join("SKILL.md"), "still-old").unwrap();
@@ -2085,11 +2109,11 @@ mod tests {
             candidate_committed: false,
         };
         fs::write(
-            commit_journal_path(&config, "install-test-2"),
+            commit_journal_path(&records_root, "install-test-2"),
             serde_json::to_vec(&precommit).unwrap(),
         )
         .unwrap();
-        reconcile_commit_journal(&config, "install-test-2").unwrap();
+        reconcile_commit_journal(&config, &records_root, "install-test-2").unwrap();
         assert_eq!(
             fs::read_to_string(target.join("SKILL.md")).unwrap(),
             "still-old"
@@ -2104,6 +2128,7 @@ mod tests {
             Uuid::new_v4().simple()
         ));
         let outside = config.workspace_root.join("outside");
+        let records_root = config.workspace_root.join("private-state/skill-installs");
         fs::create_dir_all(&outside).unwrap();
         let journal = CommitJournal {
             install_id: "install-test".to_string(),
@@ -2112,14 +2137,14 @@ mod tests {
             archive: None,
             candidate_committed: true,
         };
-        fs::create_dir_all(install_records_root(&config)).unwrap();
+        fs::create_dir_all(&records_root).unwrap();
         fs::write(
-            commit_journal_path(&config, "install-test"),
+            commit_journal_path(&records_root, "install-test"),
             serde_json::to_vec(&journal).unwrap(),
         )
         .unwrap();
 
-        assert!(reconcile_commit_journal(&config, "install-test").is_err());
+        assert!(reconcile_commit_journal(&config, &records_root, "install-test").is_err());
         assert!(outside.exists());
     }
 }
