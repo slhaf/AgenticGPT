@@ -1046,6 +1046,7 @@ mod tests {
         let request = SkillRunRequest {
             id: "demo".to_string(),
             path: "scripts/check.sh".to_string(),
+            group: None,
             args: None,
             working_directory: None,
             wait_seconds: None,
@@ -1075,6 +1076,7 @@ mod tests {
             &SkillRunRequest {
                 id: "demo".to_string(),
                 path: "SKILL.md".to_string(),
+                group: None,
                 args: None,
                 working_directory: None,
                 wait_seconds: None,

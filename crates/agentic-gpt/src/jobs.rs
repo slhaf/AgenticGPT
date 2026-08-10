@@ -387,13 +387,14 @@ pub(crate) async fn register_mcp_job(
     let info = JobInfo {
         agent_id: spec.agent_id,
         job_id: job_id.clone(),
+        group: None,
         batch_id: spec.batch_id.clone(),
         batch_call_id: spec.batch_call_id.clone(),
         batch_index: spec.batch_index,
         kind: JobKind::Mcp,
         state: JobState::WaitingConfirmation,
         created_at: now,
-        started_at: now,
+        started_at: Some(now),
         updated_at: now,
         finished_at: None,
         program: None,
@@ -491,13 +492,14 @@ pub(crate) async fn register_mcp_batch(
         let info = JobInfo {
             agent_id: spec.agent_id,
             job_id: job_id.clone(),
+            group: None,
             batch_id: spec.batch_id.clone(),
             batch_call_id: spec.batch_call_id.clone(),
             batch_index: spec.batch_index,
             kind: JobKind::Mcp,
             state: JobState::WaitingConfirmation,
             created_at: now,
-            started_at: now,
+            started_at: Some(now),
             updated_at: now,
             finished_at: None,
             program: None,
@@ -876,6 +878,7 @@ pub(crate) async fn start_process_batch(
         .map(|element| ManagedProcessSpec {
             request: ExecRequest {
                 agent_id: request.agent_id.clone(),
+                group: None,
                 program: element.program,
                 args: element.args,
                 need_confirm: request.need_confirm,
@@ -1136,13 +1139,14 @@ fn process_job_info(
     JobInfo {
         agent_id: request.agent_id.clone(),
         job_id,
+        group: None,
         batch_id: None,
         batch_call_id: None,
         batch_index: None,
         kind,
         state,
         created_at: now,
-        started_at: now,
+        started_at: Some(now),
         updated_at: now,
         finished_at: None,
         program: Some(request.program.clone()),
@@ -1420,9 +1424,10 @@ async fn finalize_job(state: &AppState, job: &mut ManagedJob) {
             policy_decision: context.policy_decision,
             confirmation_result: context.confirmation_result,
             exit_code: info.exit_code,
-            duration_ms: (info.updated_at - info.started_at)
-                .num_milliseconds()
-                .max(0) as u128,
+            duration_ms: info
+                .started_at
+                .map(|started_at| (info.updated_at - started_at).num_milliseconds().max(0) as u128)
+                .unwrap_or(0),
             truncated: info.truncated || job.detail.result_truncated,
             request_source: context.request_source,
             reject_reason: info.reject_reason.clone(),
@@ -1493,9 +1498,11 @@ pub(crate) async fn current_jobs(state: &AppState) -> Vec<JobInfo> {
     list_jobs(
         state,
         JobListRequest {
+            group: None,
             kind: None,
             state: None,
             limit: Some(MAX_LIST_JOBS),
+            cursor: None,
         },
     )
     .await
@@ -1863,6 +1870,7 @@ mod tests {
     fn exec_request(program: &str, working_directory: &Path) -> ExecRequest {
         ExecRequest {
             agent_id: "test-agent".to_string(),
+            group: None,
             program: program.to_string(),
             args: Vec::new(),
             need_confirm: false,
@@ -1945,6 +1953,7 @@ mod tests {
         state.config.write().await.limits.max_concurrent_tasks = 1;
         let request = BatchExecRequest {
             agent_id: "test-agent".to_string(),
+            group: None,
             elements: vec![
                 agentic_gpt_protocol::ExecElement {
                     program: "sleep".to_string(),
@@ -2070,9 +2079,11 @@ mod tests {
         let listed = list_jobs(
             &state,
             JobListRequest {
+                group: None,
                 kind: Some(JobKind::Process),
                 state: Some(JobState::Completed),
                 limit: Some(1),
+                cursor: None,
             },
         )
         .await;

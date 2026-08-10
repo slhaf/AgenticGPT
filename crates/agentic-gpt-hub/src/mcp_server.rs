@@ -692,6 +692,7 @@ impl AgenticMcpServer {
         self.ensure_agent_enabled(&params.agent_id)?;
         let payload = ExecRequest {
             agent_id: params.agent_id.clone(),
+            group: None,
             program: params.program,
             args: params.args.unwrap_or_default(),
             need_confirm: params.need_confirm.unwrap_or(false),
@@ -728,6 +729,7 @@ impl AgenticMcpServer {
         self.ensure_agent_enabled(&params.agent_id)?;
         let payload = BatchExecRequest {
             agent_id: params.agent_id.clone(),
+            group: None,
             elements: params
                 .elements
                 .into_iter()
@@ -767,9 +769,11 @@ impl AgenticMcpServer {
         let params = params.0;
         self.ensure_agent_enabled(&params.agent_id)?;
         let payload = JobListRequest {
+            group: None,
             kind: parse_job_kind(params.kind.as_deref())?,
             state: parse_job_state(params.state.as_deref())?,
             limit: params.limit,
+            cursor: None,
         };
         let command = HubCommand::JobList {
             request_id: random_id("req"),
@@ -794,6 +798,7 @@ impl AgenticMcpServer {
             request_id: random_id("req"),
             payload: JobGetRequest {
                 job_id: params.job_id.clone(),
+                wait_only: false,
                 wait_seconds: Some(wait_seconds),
             },
         };
@@ -1065,6 +1070,7 @@ impl AgenticMcpServer {
         self.ensure_agent_enabled(&params.agent_id)?;
         let payload = McpCallToolRequest {
             agent_id: params.agent_id.clone(),
+            group: None,
             server_id: params.server_id,
             tool_name: params.tool_name,
             arguments: params.arguments.unwrap_or_else(|| json!({})),
@@ -1096,6 +1102,7 @@ impl AgenticMcpServer {
         self.ensure_agent_enabled(&params.agent_id)?;
         let payload = McpBatchRequest {
             agent_id: params.agent_id.clone(),
+            group: None,
             calls: params
                 .calls
                 .into_iter()
@@ -1741,6 +1748,7 @@ impl AgenticMcpServer {
                 payload: SkillRunRequest {
                     id: params.id,
                     path: params.path,
+                    group: None,
                     args: params.args,
                     working_directory: params.working_directory,
                     wait_seconds: params.wait_seconds,

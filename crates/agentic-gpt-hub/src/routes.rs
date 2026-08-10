@@ -288,9 +288,11 @@ pub(crate) async fn list_jobs(
         return response;
     }
     let payload = JobListRequest {
+        group: None,
         kind: query.kind,
         state: query.state,
         limit: query.limit,
+        cursor: None,
     };
     let command = HubCommand::JobList {
         request_id: random_id("req"),
@@ -331,6 +333,7 @@ pub(crate) async fn get_job(
         request_id: random_id("req"),
         payload: JobGetRequest {
             job_id: job_id.clone(),
+            wait_only: false,
             wait_seconds: query
                 .wait_seconds
                 .map(|seconds| seconds.min(MAX_WAIT_SECONDS)),

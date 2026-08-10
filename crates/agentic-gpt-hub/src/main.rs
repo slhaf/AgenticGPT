@@ -1092,6 +1092,7 @@ mod tests {
                 payload: agentic_gpt_protocol::SkillRunRequest {
                     id: "demo".to_string(),
                     path: "scripts/check.sh".to_string(),
+                    group: None,
                     args: None,
                     working_directory: None,
                     wait_seconds: Some(0),

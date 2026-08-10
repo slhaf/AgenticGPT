@@ -526,6 +526,7 @@ async fn prepare_mcp_batch(
             id: call.id.clone(),
             payload: McpCallToolRequest {
                 agent_id: payload.agent_id.clone(),
+                group: None,
                 server_id: call.server_id.clone(),
                 tool_name: call.tool_name.clone(),
                 arguments: call.arguments.clone(),
@@ -1757,6 +1758,7 @@ mod tests {
     ) -> McpBatchRequest {
         McpBatchRequest {
             agent_id: "test-agent".to_string(),
+            group: None,
             calls,
             mode,
             fail_fast,
@@ -1776,6 +1778,7 @@ mod tests {
     ) -> McpCallToolRequest {
         McpCallToolRequest {
             agent_id: "test-agent".to_string(),
+            group: None,
             server_id: "fake".to_string(),
             tool_name: "fake.tool".to_string(),
             arguments,

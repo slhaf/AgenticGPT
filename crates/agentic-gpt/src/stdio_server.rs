@@ -824,6 +824,7 @@ impl AgentMcpServer {
                     &self.state,
                     agentic_gpt_protocol::McpCallToolRequest {
                         agent_id: config.agent_id,
+                        group: None,
                         server_id: args.server_id,
                         tool_name: args.tool_name,
                         arguments: args.arguments,
@@ -853,6 +854,7 @@ impl AgentMcpServer {
                     &self.state,
                     agentic_gpt_protocol::McpBatchRequest {
                         agent_id: config.agent_id,
+                        group: None,
                         calls: args
                             .calls
                             .into_iter()
@@ -1120,6 +1122,7 @@ impl AgentMcpServer {
             self.state.clone(),
             ExecRequest {
                 agent_id: config.agent_id,
+                group: None,
                 program: args.program,
                 args: args.args,
                 need_confirm: args.need_confirm,
@@ -1165,6 +1168,7 @@ impl AgentMcpServer {
         );
         let request = BatchExecRequest {
             agent_id: config.agent_id,
+            group: None,
             elements: args
                 .elements
                 .into_iter()
@@ -1210,9 +1214,11 @@ impl AgentMcpServer {
         let jobs = crate::jobs::list_jobs(
             &self.state,
             JobListRequest {
+                group: None,
                 kind: args.kind,
                 state: args.state,
                 limit: args.limit,
+                cursor: None,
             },
         )
         .await;
@@ -1228,6 +1234,7 @@ impl AgentMcpServer {
         let request = agentic_gpt_protocol::SkillRunRequest {
             id: args.id,
             path: args.path,
+            group: None,
             args: args.args,
             working_directory: args.working_directory,
             wait_seconds: args.wait_seconds,
@@ -1252,6 +1259,7 @@ impl AgentMcpServer {
             self.state.clone(),
             ExecRequest {
                 agent_id: config.agent_id,
+                group: None,
                 program: program.to_string_lossy().to_string(),
                 args: request.args.unwrap_or_default(),
                 need_confirm: false,
@@ -2028,7 +2036,10 @@ fn managed_terminal_event_hook(
 }
 
 fn managed_terminal_event_message(profile: &str, source: &str, job: &JobInfo) -> String {
-    let duration_ms = (job.updated_at - job.started_at).num_milliseconds().max(0);
+    let duration_ms = job
+        .started_at
+        .map(|started_at| (job.updated_at - started_at).num_milliseconds().max(0))
+        .unwrap_or(0);
     let mut message = format!(
         "managed_job; source={source}; profile={profile}; status={}; job={}; durationMs={duration_ms}",
         job.state,
@@ -3902,7 +3913,7 @@ mod tests {
         let started_at = Utc::now() - chrono::Duration::milliseconds(42);
         let mut job = test_terminal_job();
         job.created_at = started_at;
-        job.started_at = started_at;
+        job.started_at = Some(started_at);
         job.updated_at = started_at + chrono::Duration::milliseconds(42);
         job.finished_at = Some(job.updated_at);
         job.args = vec!["sentinel-argument".to_string()];
@@ -3997,13 +4008,14 @@ mod tests {
         JobInfo {
             agent_id: "agent".to_string(),
             job_id: "job_testboot_0123456789abcdef".to_string(),
+            group: None,
             batch_id: None,
             batch_call_id: None,
             batch_index: None,
             kind: JobKind::Process,
             state: JobState::Completed,
             created_at: now,
-            started_at: now,
+            started_at: Some(now),
             updated_at: now,
             finished_at: Some(now),
             program: Some("true".to_string()),

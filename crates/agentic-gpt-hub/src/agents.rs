@@ -889,13 +889,14 @@ mod tests {
         JobInfo {
             agent_id: "agent".to_string(),
             job_id: job_id.to_string(),
+            group: None,
             batch_id: None,
             batch_call_id: None,
             batch_index: None,
             kind: JobKind::Process,
             state: JobState::Running,
             created_at: now,
-            started_at: now,
+            started_at: Some(now),
             updated_at: now,
             finished_at: None,
             program: Some("sleep".to_string()),
@@ -1052,6 +1053,7 @@ mod tests {
             request_id: "req_replay".to_string(),
             payload: ExecRequest {
                 agent_id: "agent".to_string(),
+                group: None,
                 program: "printf".to_string(),
                 args: vec!["ok".to_string()],
                 need_confirm: false,
@@ -1136,6 +1138,7 @@ mod tests {
             request_id: "req_late".to_string(),
             payload: ExecRequest {
                 agent_id: "agent".to_string(),
+                group: None,
                 program: "printf".to_string(),
                 args: vec!["ok".to_string()],
                 need_confirm: false,
@@ -1176,6 +1179,7 @@ mod tests {
             request_id: "req_send_failed".to_string(),
             payload: ExecRequest {
                 agent_id: "agent".to_string(),
+                group: None,
                 program: "printf".to_string(),
                 args: vec!["ok".to_string()],
                 need_confirm: false,
@@ -1206,6 +1210,7 @@ mod tests {
             request_id: "req_reporting_only".to_string(),
             payload: ExecRequest {
                 agent_id: "agent".to_string(),
+                group: None,
                 program: "printf".to_string(),
                 args: vec!["blocked".to_string()],
                 need_confirm: false,

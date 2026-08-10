@@ -1102,6 +1102,7 @@ pub(crate) async fn run_skill(state: &AppState, request: SkillRunRequest) -> ser
         state.clone(),
         ExecRequest {
             agent_id: config.agent_id,
+            group: None,
             program: program.to_string_lossy().to_string(),
             args: request.args.unwrap_or_default(),
             need_confirm: false,
@@ -1193,13 +1194,14 @@ mod reporting_tests {
         let job = JobInfo {
             agent_id: "agent".to_string(),
             job_id: "job_boot_1".to_string(),
+            group: None,
             batch_id: None,
             batch_call_id: None,
             batch_index: None,
             kind: agentic_gpt_protocol::JobKind::Process,
             state: agentic_gpt_protocol::JobState::Running,
             created_at: now,
-            started_at: now,
+            started_at: Some(now),
             updated_at: now,
             finished_at: None,
             program: Some("sleep".to_string()),

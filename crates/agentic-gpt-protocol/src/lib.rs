@@ -212,6 +212,8 @@ pub struct AgentRegistryEntry {
 #[serde(rename_all = "camelCase")]
 pub struct ExecRequest {
     pub agent_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
     pub program: String,
     pub args: Vec<String>,
     pub need_confirm: bool,
@@ -247,6 +249,8 @@ pub struct ExecElement {
 #[serde(rename_all = "camelCase")]
 pub struct BatchExecRequest {
     pub agent_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
     pub elements: Vec<ExecElement>,
     pub need_confirm: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -295,6 +299,8 @@ pub struct McpListToolsRequest {
 #[serde(rename_all = "camelCase")]
 pub struct McpCallToolRequest {
     pub agent_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
     pub server_id: String,
     pub tool_name: String,
     #[serde(default)]
@@ -348,6 +354,8 @@ pub struct McpBatchCall {
 #[serde(rename_all = "camelCase")]
 pub struct McpBatchRequest {
     pub agent_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
     pub calls: Vec<McpBatchCall>,
     #[serde(default)]
     pub mode: McpBatchMode,
@@ -1120,6 +1128,8 @@ pub struct SkillRunRequest {
     pub id: String,
     pub path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub args: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub working_directory: Option<String>,
@@ -1231,11 +1241,61 @@ impl std::fmt::Display for JobState {
     }
 }
 
+pub const JOB_GROUP_MAX_CHARS: usize = 32;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum JobGroupValidationError {
+    Empty,
+    TooLong,
+    ControlCharacter,
+}
+
+impl JobGroupValidationError {
+    pub fn code(self) -> &'static str {
+        "job_group_invalid"
+    }
+
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::Empty => "group must not be empty after trimming",
+            Self::TooLong => "group must contain at most 32 Unicode characters",
+            Self::ControlCharacter => "group must not contain control characters",
+        }
+    }
+}
+
+impl std::fmt::Display for JobGroupValidationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.message())
+    }
+}
+
+impl std::error::Error for JobGroupValidationError {}
+
+pub fn normalize_job_group(group: Option<&str>) -> Result<Option<String>, JobGroupValidationError> {
+    let Some(group) = group else {
+        return Ok(None);
+    };
+    let trimmed = group.trim();
+    if trimmed.is_empty() {
+        return Err(JobGroupValidationError::Empty);
+    }
+    if trimmed.chars().count() > JOB_GROUP_MAX_CHARS {
+        return Err(JobGroupValidationError::TooLong);
+    }
+    if trimmed.chars().any(char::is_control) {
+        return Err(JobGroupValidationError::ControlCharacter);
+    }
+    Ok(Some(trimmed.to_string()))
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JobInfo {
     pub agent_id: String,
     pub job_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1245,7 +1305,8 @@ pub struct JobInfo {
     pub kind: JobKind,
     pub state: JobState,
     pub created_at: DateTime<Utc>,
-    pub started_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<DateTime<Utc>>,
     pub updated_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finished_at: Option<DateTime<Utc>>,
@@ -1290,6 +1351,117 @@ pub struct JobInfo {
 pub struct JobError {
     pub code: String,
     pub message: String,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobToolResponse {
+    pub job_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<JobKind>,
+    pub state: JobState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elapsed_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub stdout_tail: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub stderr_tail: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<JobError>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub result_truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_bytes: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_preview: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub result_omitted: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobWaitResponse {
+    pub job_id: String,
+    pub state: JobState,
+    pub elapsed_ms: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobListItem {
+    pub job_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    pub kind: JobKind,
+    pub state: JobState,
+    pub created_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobListResponse {
+    pub jobs: Vec<JobListItem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobCancelResponse {
+    pub job_id: String,
+    pub state: JobState,
+    pub cancel_outcome: String,
+    pub termination_evidence: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<JobError>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobBatchToolResponse {
+    pub batch_id: String,
+    pub status: String,
+    pub jobs: Vec<JobToolResponse>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpBatchToolChildResponse {
+    pub index: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(flatten)]
+    pub job: JobToolResponse,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpBatchToolResponse {
+    pub batch_id: String,
+    pub status: McpBatchStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<JobError>,
+    pub results: Vec<McpBatchToolChildResponse>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1371,11 +1543,26 @@ pub struct JobBatchResponse {
 #[serde(rename_all = "camelCase")]
 pub struct JobListRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<JobKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state: Option<JobState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
+
+impl JobListRequest {
+    pub const DEFAULT_LIMIT: usize = 50;
+    pub const MAX_LIMIT: usize = 100;
+
+    pub fn effective_limit(&self) -> usize {
+        self.limit
+            .unwrap_or(Self::DEFAULT_LIMIT)
+            .clamp(1, Self::MAX_LIMIT)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1384,6 +1571,8 @@ pub struct JobGetRequest {
     pub job_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wait_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub wait_only: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1808,6 +1997,213 @@ pub enum AgentMessage {
         timeout_seconds: u64,
         payload: ConfirmationPayload,
     },
+}
+
+#[cfg(test)]
+mod job_contract_tests {
+    use super::*;
+
+    fn sample_tool_response() -> JobToolResponse {
+        JobToolResponse {
+            job_id: "job-1".to_string(),
+            group: None,
+            kind: None,
+            state: JobState::Running,
+            elapsed_ms: Some(42),
+            duration_ms: None,
+            exit_code: None,
+            stdout_tail: String::new(),
+            stderr_tail: String::new(),
+            truncated: false,
+            result: None,
+            error: None,
+            result_truncated: false,
+            result_bytes: None,
+            result_sha256: None,
+            result_preview: None,
+            result_omitted: false,
+        }
+    }
+
+    #[test]
+    fn job_group_validation_trims_and_bounds_readable_text() {
+        assert_eq!(
+            normalize_job_group(Some("  direct work  ")).unwrap(),
+            Some("direct work".to_string())
+        );
+        assert_eq!(normalize_job_group(None).unwrap(), None);
+        assert_eq!(
+            normalize_job_group(Some("   ")).unwrap_err(),
+            JobGroupValidationError::Empty
+        );
+        assert_eq!(
+            normalize_job_group(Some("work\tstream")).unwrap_err(),
+            JobGroupValidationError::ControlCharacter
+        );
+        assert!(normalize_job_group(Some(&"界".repeat(JOB_GROUP_MAX_CHARS))).is_ok());
+        assert_eq!(
+            normalize_job_group(Some(&"界".repeat(JOB_GROUP_MAX_CHARS + 1))).unwrap_err(),
+            JobGroupValidationError::TooLong
+        );
+        assert_eq!(JobGroupValidationError::TooLong.code(), "job_group_invalid");
+    }
+
+    #[test]
+    fn managed_job_admission_group_is_additive_and_parent_scoped() {
+        let exec: ExecRequest = serde_json::from_value(serde_json::json!({
+            "agentId": "agent",
+            "program": "true",
+            "args": [],
+            "needConfirm": false
+        }))
+        .unwrap();
+        assert_eq!(exec.group, None);
+
+        let batch: BatchExecRequest = serde_json::from_value(serde_json::json!({
+            "agentId": "agent",
+            "group": "chat-direct",
+            "elements": [{"program": "true", "args": []}],
+            "needConfirm": false
+        }))
+        .unwrap();
+        assert_eq!(batch.group.as_deref(), Some("chat-direct"));
+
+        let skill: SkillRunRequest = serde_json::from_value(serde_json::json!({
+            "id": "demo",
+            "path": "scripts/check.sh",
+            "group": "chat-direct"
+        }))
+        .unwrap();
+        assert_eq!(skill.group.as_deref(), Some("chat-direct"));
+
+        let mcp: McpCallToolRequest = serde_json::from_value(serde_json::json!({
+            "agentId": "agent",
+            "serverId": "server",
+            "toolName": "tool",
+            "group": "chat-direct"
+        }))
+        .unwrap();
+        assert_eq!(mcp.group.as_deref(), Some("chat-direct"));
+
+        let mcp_batch: McpBatchRequest = serde_json::from_value(serde_json::json!({
+            "agentId": "agent",
+            "group": "chat-direct",
+            "calls": [{"serverId": "server", "toolName": "tool"}]
+        }))
+        .unwrap();
+        assert_eq!(mcp_batch.group.as_deref(), Some("chat-direct"));
+        assert!(serde_json::to_value(&mcp_batch.calls[0])
+            .unwrap()
+            .get("group")
+            .is_none());
+    }
+
+    #[test]
+    fn job_list_and_wait_contracts_have_frozen_defaults() {
+        let list: JobListRequest = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(list.effective_limit(), 50);
+        assert_eq!(list.group, None);
+        assert_eq!(list.cursor, None);
+
+        let oversized: JobListRequest = serde_json::from_value(serde_json::json!({
+            "limit": 999,
+            "group": "work",
+            "cursor": "opaque"
+        }))
+        .unwrap();
+        assert_eq!(oversized.effective_limit(), 100);
+        assert_eq!(oversized.group.as_deref(), Some("work"));
+        assert_eq!(oversized.cursor.as_deref(), Some("opaque"));
+
+        let get: JobGetRequest = serde_json::from_value(serde_json::json!({
+            "jobId": "job-1"
+        }))
+        .unwrap();
+        assert!(!get.wait_only);
+        assert!(serde_json::to_value(&get)
+            .unwrap()
+            .get("waitOnly")
+            .is_none());
+
+        let wait = JobWaitResponse {
+            job_id: "job-1".to_string(),
+            state: JobState::Running,
+            elapsed_ms: 42,
+        };
+        assert_eq!(
+            serde_json::to_value(wait).unwrap(),
+            serde_json::json!({"jobId":"job-1","state":"running","elapsedMs":42})
+        );
+    }
+
+    #[test]
+    fn slim_job_views_omit_routine_noise_and_keep_batch_budget_semantics() {
+        let active = serde_json::to_value(sample_tool_response()).unwrap();
+        assert_eq!(
+            active,
+            serde_json::json!({"jobId":"job-1","state":"running","elapsedMs":42})
+        );
+
+        let mut omitted = sample_tool_response();
+        omitted.state = JobState::Completed;
+        omitted.elapsed_ms = None;
+        omitted.duration_ms = Some(7);
+        omitted.result_omitted = true;
+        let batch = McpBatchToolResponse {
+            batch_id: "batch-1".to_string(),
+            status: McpBatchStatus::Completed,
+            error: None,
+            results: vec![McpBatchToolChildResponse {
+                index: 0,
+                id: Some("first".to_string()),
+                job: omitted,
+            }],
+        };
+        let value = serde_json::to_value(batch).unwrap();
+        assert_eq!(value["results"][0]["resultOmitted"], true);
+        assert!(value.get("completedInline").is_none());
+        assert!(value.get("pollAfterMs").is_none());
+        assert!(value.get("aggregateTruncated").is_none());
+    }
+
+    #[test]
+    fn job_info_can_represent_not_started_without_fabricated_timestamp() {
+        let now = Utc::now();
+        let info = JobInfo {
+            agent_id: "agent".to_string(),
+            job_id: "job-1".to_string(),
+            group: Some("work".to_string()),
+            batch_id: None,
+            batch_call_id: None,
+            batch_index: None,
+            kind: JobKind::Process,
+            state: JobState::Queued,
+            created_at: now,
+            started_at: None,
+            updated_at: now,
+            finished_at: None,
+            program: None,
+            args: Vec::new(),
+            working_directory: None,
+            command_preview: None,
+            exit_code: None,
+            stdout_tail: String::new(),
+            stderr_tail: String::new(),
+            truncated: false,
+            reject_reason: None,
+            skill_id: None,
+            skill_path: None,
+            installed_digest: None,
+            mcp_server_id: None,
+            mcp_tool_name: None,
+            cancel_requested: false,
+            cancel_outcome: None,
+            termination_evidence: None,
+        };
+        let value = serde_json::to_value(info).unwrap();
+        assert_eq!(value["group"], "work");
+        assert!(value.get("startedAt").is_none());
+    }
 }
 
 #[cfg(test)]
