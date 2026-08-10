@@ -5054,6 +5054,9 @@ mod tests {
                     uuid::Uuid::new_v4().simple()
                 )),
             ),
+            job_history: crate::job_history::JobHistoryStore::disabled(
+                std::env::temp_dir().join("agentic-stdio-test-jobs.sqlite3"),
+            ),
             runtime: RuntimeModel::tunnel(profile, false),
             started_at: chrono::Utc::now(),
             boot_generation: uuid::Uuid::new_v4().simple().to_string()[..12].to_string(),

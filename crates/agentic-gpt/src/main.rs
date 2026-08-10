@@ -13,6 +13,7 @@ mod exec;
 mod file_ops;
 mod hub;
 mod instance_lock;
+mod job_history;
 mod jobs;
 mod local_control;
 mod local_service;
@@ -277,11 +278,13 @@ fn build_app_state(
         log_warn(warning.clone());
     }
     let private_state = prepared.paths;
+    let job_history = job_history::JobHistoryStore::open(&private_state);
     let skill_installs_root = private_state.skill_installs.clone();
     Ok(AppState {
         config_path,
         config: Arc::new(RwLock::new(config)),
         private_state,
+        job_history,
         runtime,
         started_at: chrono::Utc::now(),
         boot_generation: uuid::Uuid::new_v4().simple().to_string()[..12].to_string(),
@@ -733,6 +736,9 @@ mod tests {
                         "agentic-test-private-{}",
                         uuid::Uuid::new_v4().simple()
                     )),
+                ),
+                job_history: crate::job_history::JobHistoryStore::disabled(
+                    std::env::temp_dir().join("agentic-main-test-jobs.sqlite3"),
                 ),
                 runtime: RuntimeModel::hub(profile),
                 started_at: chrono::Utc::now(),

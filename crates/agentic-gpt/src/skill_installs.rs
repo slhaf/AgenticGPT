@@ -1852,6 +1852,9 @@ mod tests {
             config_path: PathBuf::from("test-config.json"),
             config: Arc::new(RwLock::new(config)),
             private_state: private_state.clone(),
+            job_history: crate::job_history::JobHistoryStore::disabled(
+                root.join("test-jobs.sqlite3"),
+            ),
             runtime: crate::state::RuntimeModel::hub(crate::state::CapabilityProfile::Room),
             started_at: chrono::Utc::now(),
             boot_generation: uuid::Uuid::new_v4().simple().to_string()[..12].to_string(),

@@ -148,6 +148,8 @@ pub(crate) struct AppState {
     pub(crate) config_path: PathBuf,
     pub(crate) config: Arc<RwLock<Config>>,
     pub(crate) private_state: crate::private_state::PrivateStatePaths,
+    #[allow(dead_code)]
+    pub(crate) job_history: std::sync::Arc<crate::job_history::JobHistoryStore>,
     pub(crate) runtime: RuntimeModel,
     pub(crate) started_at: DateTime<Utc>,
     pub(crate) boot_generation: String,

@@ -13,7 +13,7 @@ Phase 3 — Job Runtime & Tool Surface Implementation
 - **Entry phase:** Phase 3A — Protocol & Domain Contract
 - **Open blocking decisions:** 0
 - **Design checkpoint:** not set (private-state prerequisite committed as `a50655f`)
-- **Next action:** begin Phase 3B — Durable Job History Store when implementation resumes
+- **Next action:** begin Phase 3C — Managed Job Runtime Integration when implementation resumes
 
 ## Scope and constraints
 - Add optional caller-provided `group` metadata to every Managed Job admission surface and carry it through live state, durable history, `job.get`, and `job.list`.
@@ -61,13 +61,13 @@ Phase 3 — Job Runtime & Tool Surface Implementation
 ### Phase 3B: Durable Job History Store
 **Prerequisite:** Phase 3A protocol/domain types and existing `AppState.private_state`.
 
-- [ ] Add Agent-side `rusqlite` using the repository's existing 0.32/bundled stack and create a private `jobs.sqlite3` history store under D-21.
-- [ ] Implement idempotent schema initialization, indexed query columns for `jobId/group/kind/state/createdAt`, and bounded rich detail storage suitable for `job.get`/Inspector.
-- [ ] Implement admission insert, terminal upsert/snapshot, startup active→`unknown_after_restart` recovery, terminal preservation, and truthful optional start/duration handling.
-- [ ] Implement D-20 fail-open/degraded health, bounded retry for never-persisted terminal results, corruption-only isolation, and non-destructive handling for permission/disk/I/O/lock failures.
-- [ ] Implement 30-day/~512 MiB logical cleanup, startup/hourly/immediate-cap checks, terminal-only pruning, and no-vacuum behavior.
+- [x] Add Agent-side `rusqlite` using the repository's existing 0.32/bundled stack and create a private `jobs.sqlite3` history store under D-21.
+- [x] Implement idempotent schema initialization, indexed query columns for `jobId/group/kind/state/createdAt`, and bounded rich detail storage suitable for `job.get`/Inspector.
+- [x] Implement admission insert, terminal upsert/snapshot, startup active→`unknown_after_restart` recovery, terminal preservation, and truthful optional start/duration handling.
+- [x] Implement D-20 fail-open/degraded health, bounded retry for never-persisted terminal results, corruption-only isolation, and non-destructive handling for permission/disk/I/O/lock failures.
+- [x] Implement 30-day/~512 MiB logical cleanup, startup/hourly/immediate-cap checks, terminal-only pruning, and no-vacuum behavior.
 - **Completion boundary:** history store is independently tested for schema, recovery, retention, and failure injection before tool responses depend on it.
-- **Status:** pending
+- **Status:** complete
 
 ### Phase 3C: Managed Job Runtime Integration
 **Prerequisite:** Phases 3A–3B.

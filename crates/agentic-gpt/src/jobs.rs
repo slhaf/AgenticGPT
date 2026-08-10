@@ -1898,6 +1898,9 @@ mod tests {
                     uuid::Uuid::new_v4().simple()
                 )),
             ),
+            job_history: crate::job_history::JobHistoryStore::disabled(
+                std::env::temp_dir().join("agentic-jobs-test-jobs.sqlite3"),
+            ),
             runtime: crate::state::RuntimeModel::hub(crate::state::CapabilityProfile::Normal),
             started_at: Utc::now(),
             boot_generation: "testboot0001".to_string(),

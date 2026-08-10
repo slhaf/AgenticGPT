@@ -1703,6 +1703,9 @@ mod tests {
                     uuid::Uuid::new_v4().simple()
                 )),
             ),
+            job_history: crate::job_history::JobHistoryStore::disabled(
+                std::env::temp_dir().join("agentic-mcp-test-jobs.sqlite3"),
+            ),
             runtime: crate::state::RuntimeModel::local(crate::state::CapabilityProfile::Normal),
             started_at: chrono::Utc::now(),
             boot_generation: "mcpboot00001".to_string(),

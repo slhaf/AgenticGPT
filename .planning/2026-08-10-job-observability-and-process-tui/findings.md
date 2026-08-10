@@ -223,3 +223,14 @@
 - `crates/agentic-gpt/src/mcp.rs` — MCP batch preparation, registration, response construction, batch call id validation.
 - `crates/agentic-gpt/src/jobs.rs` — managed MCP/job retention of `batch_call_id` and Job detail.
 - `crates/agentic-gpt/src/file_ops.rs` — `file.batch` operation id echo/group/audit behavior.
+
+## Phase 3B implementation findings
+
+- Agent-side `rusqlite 0.32` with `bundled, chrono` matches the existing Hub dependency and only adds the Agent crate dependency/lockfile entry.
+- `JobHistoryStore` owns one SQLite connection at `PrivateStatePaths.root.join("jobs.sqlite3")`; `build_app_state` opens it during startup, runs idempotent schema setup, recovers persisted active rows, and performs startup cleanup. It does not reconstruct an agent-id path and does not write workspace `state/`.
+- The schema stores indexed query columns (`job_id`, `group_name`, `kind`, `state`, `created_at`, `finished_at`) plus bounded rich provenance/detail JSON. Admission uses `INSERT OR IGNORE`; terminal snapshots use a complete idempotent `ON CONFLICT` upsert, so a missed admission can be repaired later without regressing an existing terminal row.
+- Cursor paging is opaque URL-safe JSON over (`created_at DESC, job_id DESC`). `get` returns the rich snapshot when present; `list` returns ordered `JobInfo` summaries for later live+persistent merge.
+- Startup recovery only rewrites active persisted states to `unknown_after_restart`, sets recovery `finishedAt`, and preserves optional `startedAt`; terminal rows are unchanged. No duration is fabricated by the store.
+- D-20 is implemented as fail-open: initialization/open/schema/write/cleanup failures degrade health, do not block Job execution, retain never-persisted terminal snapshots in a bounded 100-entry queue, and allow later terminal upsert/retry to repair history. Review tightened retry semantics to a finite 5-attempt budget (initial write plus retries) with 2/4/8/16-second exponential backoff; queue-capacity or retry-budget drops increment diagnostics and emit an explicit warning. Only diagnosed SQLite corruption/not-a-database errors are isolated to a timestamped sibling; permission/directory/I/O failures remain non-destructive.
+- Health is inspectable through `AppState.job_history.health()` with status, DB path, pending/dropped terminal counts, and bounded last-error text. A successful unrelated write cannot clear degraded status while terminal snapshots remain pending; health returns to healthy only after the pending queue is drained. Rich result/error/tail/argument fields are clipped before persistence; no raw environment field is persisted.
+- Cleanup runs at startup and at most hourly after terminal snapshots, with an immediate logical non-free-page cap check. It deletes terminal rows older than 30 days, then oldest terminal rows until the approximately 512 MiB cap is met; active rows are never retention-pruned and no VACUUM is issued.

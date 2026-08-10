@@ -118,3 +118,21 @@
 | Error | Resolution |
 |-------|------------|
 | None | — |
+
+### Phase 3B implementation and verification
+
+- Added `crates/agentic-gpt/src/job_history.rs` and Agent-side bundled `rusqlite 0.32`; `AppState` now owns the startup-opened per-agent history handle without wiring admission/finalization/runtime lifecycle hooks.
+- Implemented schema/index initialization, bounded rich snapshots, admission insert, terminal upsert, get/list with exact filters and opaque cursor, startup active-row recovery, terminal preservation, logical retention/cap cleanup, health/degraded state, bounded pending-terminal retry, corruption-only isolation, and non-destructive failure behavior.
+- Focused store tests: 9/9 PASS (`job_history::tests`), covering schema idempotency/indexes, admission+terminal upsert, ordering/filter/cursor, group/startedAt recovery round-trip, restart recovery, age/cap retention, nonterminal preservation, bounds, degraded failure, and corruption isolation.
+- `cargo check --workspace --all-targets`: PASS.
+- `cargo clippy -p agentic-gpt --all-targets -- -D warnings`: PASS.
+- `cargo fmt --all -- --check`: PASS.
+- `cargo test -p agentic-gpt`: unit/in-process suite passed (323 tests plus 15 config integration tests); the existing `tests/local_control.rs` runtime test failed only because the sandbox run could not make its Unix socket ready (`local socket did not become ready`), an environment-bound local socket condition rather than a Job-history assertion.
+- `git diff --check`: PASS. No commit created. No Phase 3C lifecycle wiring, slim response adapter changes, waitOnly behavior, Hub semantics, TUI work, or non-Managed-Job tool changes were made.
+
+### Phase 3B review corrections
+- Independent review found three related D-20 gaps in the initial implementation: retry memory was bounded but retry attempts/backoff were not; dropping a never-persisted terminal only incremented a counter without the frozen high-signal warning; and a successful unrelated history write could mark health healthy while pending terminal snapshots still existed.
+- Corrected pending persistence to a 100-entry queue with a finite 5-attempt budget and 2/4/8/16-second backoff. Exhausted retry budget and queue-capacity eviction both increment dropped-terminal diagnostics and emit a bounded warning containing only the Job id/reason.
+- Corrected health semantics and mutex lock order: pending state is inspected before the health lock, avoiding the prior opposite lock ordering, and health remains degraded until pending persistence is fully drained.
+- Added two focused D-20 regression tests and strengthened the queue-bound test; `job_history::tests` now passes 11/11.
+- Fresh post-review verification: `cargo fmt --all -- --check` PASS; `cargo check --workspace --all-targets` PASS; `cargo clippy -p agentic-gpt --all-targets -- -D warnings` PASS; focused Job history tests 11/11 PASS; `git diff --check` PASS.
