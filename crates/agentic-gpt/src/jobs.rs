@@ -6,8 +6,8 @@ use std::sync::{
 };
 
 use agentic_gpt_protocol::{
-    BatchExecRequest, ExecRequest, JobBatchResponse, JobDetail, JobError, JobInfo, JobKind,
-    JobListRequest, JobResponse, JobState,
+    normalize_job_group, BatchExecRequest, ExecRequest, JobBatchResponse, JobDetail, JobError,
+    JobInfo, JobKind, JobListRequest, JobResponse, JobState,
 };
 use anyhow::Result;
 use chrono::{Duration as ChronoDuration, Utc};
@@ -27,7 +27,7 @@ use crate::{
     AppState,
 };
 
-const TERMINAL_JOB_RETENTION_HOURS: i64 = 24;
+const TERMINAL_JOB_HOT_CACHE_MINUTES: i64 = 5;
 const MAX_TERMINAL_JOBS: usize = 100;
 const MAX_LIST_JOBS: usize = 100;
 pub(crate) const MAX_MCP_ARGUMENT_BYTES: usize = 256 * 1024;
@@ -43,6 +43,10 @@ pub(crate) fn capacity_rejection(active: usize, requested: usize, limit: usize) 
 
 fn resolved_job_limit(config: &Config) -> usize {
     config.limits.max_active_jobs.resolve().resolved
+}
+
+fn validated_group(group: Option<&str>) -> std::result::Result<Option<String>, String> {
+    normalize_job_group(group).map_err(|error| format!("{}: {}", error.code(), error.message()))
 }
 
 pub(crate) type TerminalEventHook = Arc<dyn Fn(&JobInfo) + Send + Sync>;
@@ -158,6 +162,7 @@ pub(crate) struct ManagedJob {
     runtime: ManagedJobRuntime,
     cancel_requested: Arc<std::sync::atomic::AtomicBool>,
     audit: Option<ManagedAuditContext>,
+    history_terminal_snapshot_at: Option<chrono::DateTime<Utc>>,
 }
 
 #[derive(Default)]
@@ -218,6 +223,7 @@ pub(crate) struct ManagedProcessSpec {
 
 pub(crate) struct ManagedMcpSpec {
     pub(crate) agent_id: String,
+    pub(crate) group: Option<String>,
     pub(crate) batch_id: Option<String>,
     pub(crate) batch_call_id: Option<String>,
     pub(crate) batch_index: Option<usize>,
@@ -381,20 +387,21 @@ pub(crate) async fn register_mcp_job(
     state: &AppState,
     spec: ManagedMcpSpec,
 ) -> Result<ManagedMcpRegistration, String> {
+    let group = validated_group(spec.group.as_deref())?;
     let config = state.config.read().await.clone();
     let job_id = state.new_job_id();
     let now = Utc::now();
     let info = JobInfo {
         agent_id: spec.agent_id,
         job_id: job_id.clone(),
-        group: None,
+        group,
         batch_id: spec.batch_id.clone(),
         batch_call_id: spec.batch_call_id.clone(),
         batch_index: spec.batch_index,
         kind: JobKind::Mcp,
         state: JobState::WaitingConfirmation,
         created_at: now,
-        started_at: Some(now),
+        started_at: None,
         updated_at: now,
         finished_at: None,
         program: None,
@@ -458,8 +465,10 @@ pub(crate) async fn register_mcp_job(
                 config_revision: Some(spec.config_revision),
                 terminal_event_hook: spec.terminal_event_hook,
             }),
+            history_terminal_snapshot_at: None,
         },
     );
+    let _ = state.job_history.insert_admission(&info);
     Ok(ManagedMcpRegistration {
         info,
         cancel_requested,
@@ -472,6 +481,9 @@ pub(crate) async fn register_mcp_batch(
 ) -> Result<Vec<ManagedMcpRegistration>, String> {
     if specs.is_empty() {
         return Ok(Vec::new());
+    }
+    for spec in &specs {
+        validated_group(spec.group.as_deref())?;
     }
     let config = state.config.read().await.clone();
     let requested = specs.len();
@@ -488,18 +500,19 @@ pub(crate) async fn register_mcp_batch(
     }
     let mut registrations = Vec::with_capacity(requested);
     for spec in specs {
+        let group = validated_group(spec.group.as_deref())?;
         let job_id = state.new_job_id();
         let info = JobInfo {
             agent_id: spec.agent_id,
             job_id: job_id.clone(),
-            group: None,
+            group,
             batch_id: spec.batch_id.clone(),
             batch_call_id: spec.batch_call_id.clone(),
             batch_index: spec.batch_index,
             kind: JobKind::Mcp,
             state: JobState::WaitingConfirmation,
             created_at: now,
-            started_at: Some(now),
+            started_at: None,
             updated_at: now,
             finished_at: None,
             program: None,
@@ -553,8 +566,10 @@ pub(crate) async fn register_mcp_batch(
                     config_revision: Some(spec.config_revision),
                     terminal_event_hook: spec.terminal_event_hook,
                 }),
+                history_terminal_snapshot_at: None,
             },
         );
+        let _ = state.job_history.insert_admission(&info);
         registrations.push(ManagedMcpRegistration {
             info,
             cancel_requested,
@@ -636,8 +651,11 @@ pub(crate) async fn attach_mcp_request(
     }
     runtime.peer = Some(peer);
     runtime.request_id = Some(request_id);
+    let now = Utc::now();
     job.info.state = JobState::Running;
-    job.info.updated_at = Utc::now();
+    job.info.started_at = Some(now);
+    job.info.updated_at = now;
+    let _ = state.job_history.mark_started(&job.info);
     Ok(())
 }
 
@@ -692,7 +710,7 @@ pub(crate) async fn complete_mcp_result(
     }
     finalize_job(state, job).await;
     let detail = job_detail(job);
-    prune_terminal_jobs(&mut jobs);
+    prune_terminal_jobs(state, &mut jobs);
     Ok(detail)
 }
 
@@ -729,7 +747,7 @@ pub(crate) async fn finish_mcp_error(
     }
     finalize_job(state, job).await;
     let detail = job_detail(job);
-    prune_terminal_jobs(&mut jobs);
+    prune_terminal_jobs(state, &mut jobs);
     Ok(detail)
 }
 
@@ -807,6 +825,7 @@ pub(crate) async fn start_process_batch(
 ) -> Result<JobBatchResponse, String> {
     let wait_seconds = request.effective_wait_seconds();
     let batch_id = format!("batch_{}", uuid::Uuid::new_v4().simple());
+    let group = validated_group(request.group.as_deref())?;
     if request.elements.is_empty() {
         return Ok(JobBatchResponse {
             batch_id,
@@ -878,7 +897,7 @@ pub(crate) async fn start_process_batch(
         .map(|element| ManagedProcessSpec {
             request: ExecRequest {
                 agent_id: request.agent_id.clone(),
-                group: None,
+                group: group.clone(),
                 program: element.program,
                 args: element.args,
                 need_confirm: request.need_confirm,
@@ -931,6 +950,9 @@ pub(crate) async fn start_prepared_managed_batch(
 ) -> Result<Vec<JobInfo>, String> {
     if specs.is_empty() {
         return Ok(Vec::new());
+    }
+    for spec in &specs {
+        validated_group(spec.request.group.as_deref())?;
     }
     let config = state.config.read().await.clone();
     let requested = specs.len();
@@ -993,8 +1015,10 @@ pub(crate) async fn start_prepared_managed_batch(
                     runtime: ManagedJobRuntime::Process(runtime),
                     cancel_requested: cancel_requested.clone(),
                     audit: Some(audit),
+                    history_terminal_snapshot_at: None,
                 },
             );
+            let _ = state.job_history.insert_admission(&info);
             registered.push((spec, info, stdout, stderr, cancel_requested));
         }
     }
@@ -1038,6 +1062,7 @@ async fn start_process_job_inner(
     let config = state.config.read().await.clone();
     let job_id = state.new_job_id();
     let now = Utc::now();
+    let group_error = validated_group(request.group.as_deref()).err();
     let kind = if options.skill_id.is_some() {
         JobKind::Skill
     } else {
@@ -1102,11 +1127,17 @@ async fn start_process_job_inner(
                 runtime: ManagedJobRuntime::Process(runtime),
                 cancel_requested: cancel_requested.clone(),
                 audit: Some(audit),
+                history_terminal_snapshot_at: None,
             },
         );
+        let _ = state.job_history.insert_admission(&info);
         error
     };
     if let Some(reason) = capacity_error {
+        finish_job(&state, &job_id, JobState::Rejected, &reason).await;
+        return get_job_now(&state, &job_id).await.unwrap_or(info);
+    }
+    if let Some(reason) = group_error {
         finish_job(&state, &job_id, JobState::Rejected, &reason).await;
         return get_job_now(&state, &job_id).await.unwrap_or(info);
     }
@@ -1139,14 +1170,14 @@ fn process_job_info(
     JobInfo {
         agent_id: request.agent_id.clone(),
         job_id,
-        group: None,
+        group: validated_group(request.group.as_deref()).ok().flatten(),
         batch_id: None,
         batch_call_id: None,
         batch_index: None,
         kind,
         state,
         created_at: now,
-        started_at: Some(now),
+        started_at: None,
         updated_at: now,
         finished_at: None,
         program: Some(request.program.clone()),
@@ -1286,8 +1317,11 @@ async fn run_async_job(
         finish_job(&state, &job_id, JobState::Cancelled, "cancelled").await;
         return;
     }
+    let now = Utc::now();
     job.info.state = JobState::Running;
-    job.info.updated_at = Utc::now();
+    job.info.started_at = Some(now);
+    job.info.updated_at = now;
+    let _ = state.job_history.mark_started(&job.info);
     let ManagedJobRuntime::Process(runtime) = &mut job.runtime else {
         drop(jobs);
         let mut child = child;
@@ -1396,10 +1430,16 @@ async fn finish_job(state: &AppState, job_id: &str, terminal: JobState, reason: 
         }
         finalize_job(state, job).await;
     }
-    prune_terminal_jobs(&mut jobs);
+    prune_terminal_jobs(state, &mut jobs);
 }
 
 async fn finalize_job(state: &AppState, job: &mut ManagedJob) {
+    if job.info.state.is_terminal() && job.history_terminal_snapshot_at != Some(job.info.updated_at)
+    {
+        let detail = job_detail(job);
+        let _ = state.job_history.upsert_terminal(&detail);
+        job.history_terminal_snapshot_at = Some(job.info.updated_at);
+    }
     let Some(context) = job.audit.take() else {
         return;
     };
@@ -1474,24 +1514,107 @@ pub(crate) async fn wait_for_job(
     info
 }
 
+pub(crate) async fn list_jobs_page(
+    state: &AppState,
+    request: JobListRequest,
+) -> std::result::Result<crate::job_history::JobHistoryPage, String> {
+    let cursor = request
+        .cursor
+        .as_deref()
+        .map(crate::job_history::decode_list_cursor)
+        .transpose()
+        .map_err(|error| error.to_string())?;
+    let limit = request.effective_limit();
+    let live = {
+        let mut jobs = state.jobs.lock().await;
+        refresh_jobs(state, &mut jobs).await;
+        prune_terminal_jobs(state, &mut jobs);
+        jobs.values()
+            .map(|job| job.info.clone())
+            .collect::<Vec<_>>()
+    };
+
+    let mut persisted = Vec::new();
+    let mut history_request = request.clone();
+    history_request.limit = Some(JobListRequest::MAX_LIMIT);
+    let mut history_cursor = request.cursor.clone();
+    let mut history_failed = false;
+    loop {
+        history_request.cursor = history_cursor.clone();
+        match state.job_history.list(&history_request) {
+            Ok(page) => {
+                let next_cursor = page.next_cursor.clone();
+                persisted.extend(page.jobs);
+                let merged = merge_job_infos(&live, &persisted, &request, cursor.as_ref());
+                if merged.len() > limit || next_cursor.is_none() {
+                    break;
+                }
+                history_cursor = next_cursor;
+            }
+            Err(_) => {
+                history_failed = true;
+                break;
+            }
+        }
+    }
+    if history_failed {
+        persisted.clear();
+    }
+
+    let mut jobs = merge_job_infos(&live, &persisted, &request, cursor.as_ref());
+    let next_cursor = if jobs.len() > limit {
+        jobs.truncate(limit);
+        jobs.last().map(crate::job_history::encode_list_cursor)
+    } else {
+        None
+    };
+    Ok(crate::job_history::JobHistoryPage { jobs, next_cursor })
+}
+
 pub(crate) async fn list_jobs(state: &AppState, request: JobListRequest) -> Vec<JobInfo> {
-    let mut jobs = state.jobs.lock().await;
-    refresh_jobs(state, &mut jobs).await;
-    prune_terminal_jobs(&mut jobs);
-    let mut infos = jobs
-        .values()
-        .map(|job| job.info.clone())
-        .filter(|job| request.kind.is_none_or(|kind| job.kind == kind))
-        .filter(|job| request.state.is_none_or(|state| job.state == state))
+    list_jobs_page(state, request)
+        .await
+        .map(|page| page.jobs)
+        .unwrap_or_default()
+}
+
+fn merge_job_infos(
+    live: &[JobInfo],
+    persisted: &[JobInfo],
+    request: &JobListRequest,
+    cursor: Option<&crate::job_history::JobHistoryCursor>,
+) -> Vec<JobInfo> {
+    let mut by_id = std::collections::HashMap::new();
+    for job in persisted {
+        by_id
+            .entry(job.job_id.clone())
+            .or_insert_with(|| job.clone());
+    }
+    for job in live {
+        by_id.insert(job.job_id.clone(), job.clone());
+    }
+    let mut jobs = by_id
+        .into_values()
+        .filter(|job| {
+            request
+                .group
+                .as_ref()
+                .is_none_or(|group| job.group.as_deref() == Some(group.as_str()))
+                && request.kind.is_none_or(|kind| job.kind == kind)
+                && request.state.is_none_or(|state| job.state == state)
+                && cursor.is_none_or(|cursor| {
+                    job.created_at < cursor.created_at
+                        || (job.created_at == cursor.created_at && job.job_id < cursor.job_id)
+                })
+        })
         .collect::<Vec<_>>();
-    infos.sort_by_key(|job| std::cmp::Reverse(job.updated_at));
-    infos.truncate(
-        request
-            .limit
-            .unwrap_or(MAX_LIST_JOBS)
-            .clamp(1, MAX_LIST_JOBS),
-    );
-    infos
+    jobs.sort_by(|left, right| {
+        right
+            .created_at
+            .cmp(&left.created_at)
+            .then_with(|| right.job_id.cmp(&left.job_id))
+    });
+    jobs
 }
 
 pub(crate) async fn current_jobs(state: &AppState) -> Vec<JobInfo> {
@@ -1516,10 +1639,13 @@ pub(crate) async fn get_job(
     job_id: &str,
     wait_seconds: u64,
 ) -> Result<JobInfo, String> {
-    let info = get_job_now(state, job_id)
-        .await
-        .ok_or_else(|| missing_job_reason(state, job_id))?;
-    Ok(wait_for_job(state, info, wait_seconds).await)
+    if let Some(info) = get_job_now(state, job_id).await {
+        return Ok(wait_for_job(state, info, wait_seconds).await);
+    }
+    match state.job_history.get(job_id) {
+        Ok(Some(record)) if record.info.state.is_terminal() => Ok(record.info),
+        _ => Err(missing_job_reason(state, job_id)),
+    }
 }
 
 pub(crate) async fn get_job_detail(
@@ -1527,13 +1653,29 @@ pub(crate) async fn get_job_detail(
     job_id: &str,
     wait_seconds: u64,
 ) -> Result<JobDetail, String> {
-    get_job(state, job_id, wait_seconds).await?;
-    let mut jobs = state.jobs.lock().await;
-    let job = jobs
-        .get_mut(job_id)
-        .ok_or_else(|| missing_job_reason(state, job_id))?;
-    refresh_job(state, job).await;
-    Ok(job_detail(job))
+    let info = get_job(state, job_id, wait_seconds).await?;
+    {
+        let mut jobs = state.jobs.lock().await;
+        if let Some(job) = jobs.get_mut(job_id) {
+            refresh_job(state, job).await;
+            return Ok(job_detail(job));
+        }
+    }
+    match state.job_history.get(job_id) {
+        Ok(Some(record)) if record.info.state.is_terminal() => {
+            Ok(record.detail.unwrap_or(JobDetail {
+                job: info,
+                detail_available: false,
+                result: None,
+                error: None,
+                result_truncated: false,
+                result_bytes: None,
+                result_sha256: None,
+                result_preview: None,
+            }))
+        }
+        _ => Err(missing_job_reason(state, job_id)),
+    }
 }
 
 fn job_detail(job: &ManagedJob) -> JobDetail {
@@ -1554,7 +1696,7 @@ async fn get_job_now(state: &AppState, job_id: &str) -> Option<JobInfo> {
     let job = jobs.get_mut(job_id)?;
     refresh_job(state, job).await;
     let info = job.info.clone();
-    prune_terminal_jobs(&mut jobs);
+    prune_terminal_jobs(state, &mut jobs);
     Some(info)
 }
 
@@ -1584,9 +1726,13 @@ async fn cancel_process_job(state: &AppState, job_id: &str) -> Result<JobDetail,
             .store(true, std::sync::atomic::Ordering::Release);
         job.info.cancel_requested = true;
         if job.info.state.is_terminal() {
+            job.info.updated_at = Utc::now();
             job.info.cancel_outcome = Some("already_terminal".to_string());
             job.info.termination_evidence = Some("job_state".to_string());
-            return Ok(job_detail(job));
+            finalize_job(state, job).await;
+            let detail = job_detail(job);
+            prune_terminal_jobs(state, &mut jobs);
+            return Ok(detail);
         }
         job.info.state = JobState::CancelRequested;
         job.info.updated_at = Utc::now();
@@ -1604,7 +1750,7 @@ async fn cancel_process_job(state: &AppState, job_id: &str) -> Result<JobDetail,
                 runtime.skill_lease = None;
                 finalize_job(state, job).await;
                 let detail = job_detail(job);
-                prune_terminal_jobs(&mut jobs);
+                prune_terminal_jobs(state, &mut jobs);
                 return Ok(detail);
             }
         }
@@ -1654,7 +1800,7 @@ async fn cancel_process_job(state: &AppState, job_id: &str) -> Result<JobDetail,
         finalize_job(state, job).await;
     }
     let detail = job_detail(job);
-    prune_terminal_jobs(&mut jobs);
+    prune_terminal_jobs(state, &mut jobs);
     Ok(detail)
 }
 
@@ -1668,9 +1814,13 @@ async fn cancel_mcp_job(state: &AppState, job_id: &str) -> Result<JobDetail, Str
             .store(true, std::sync::atomic::Ordering::Release);
         job.info.cancel_requested = true;
         if job.info.state.is_terminal() {
+            job.info.updated_at = Utc::now();
             job.info.cancel_outcome = Some("already_terminal".to_string());
             job.info.termination_evidence = Some("job_state".to_string());
-            return Ok(job_detail(job));
+            finalize_job(state, job).await;
+            let detail = job_detail(job);
+            prune_terminal_jobs(state, &mut jobs);
+            return Ok(detail);
         }
         let ManagedJobRuntime::Mcp(runtime) = &job.runtime else {
             return Err("job_kind_mismatch".to_string());
@@ -1691,7 +1841,7 @@ async fn cancel_mcp_job(state: &AppState, job_id: &str) -> Result<JobDetail, Str
             });
             finalize_job(state, job).await;
             let detail = job_detail(job);
-            prune_terminal_jobs(&mut jobs);
+            prune_terminal_jobs(state, &mut jobs);
             return Ok(detail);
         }
         job.info.state = JobState::CancelRequested;
@@ -1754,7 +1904,7 @@ async fn cancel_mcp_job(state: &AppState, job_id: &str) -> Result<JobDetail, Str
         }
     }
     let detail = job_detail(job);
-    prune_terminal_jobs(&mut jobs);
+    prune_terminal_jobs(state, &mut jobs);
     Ok(detail)
 }
 
@@ -1837,12 +1987,22 @@ async fn refresh_job(state: &AppState, job: &mut ManagedJob) {
     }
 }
 
-fn prune_terminal_jobs(jobs: &mut std::collections::HashMap<String, ManagedJob>) {
-    let cutoff = Utc::now() - ChronoDuration::hours(TERMINAL_JOB_RETENTION_HOURS);
+fn prune_terminal_jobs(state: &AppState, jobs: &mut std::collections::HashMap<String, ManagedJob>) {
+    let _ = state.job_history.retry_pending();
+    let cutoff = Utc::now() - ChronoDuration::minutes(TERMINAL_JOB_HOT_CACHE_MINUTES);
     let mut terminal = jobs
         .iter()
-        .filter(|(_, job)| job.info.state.is_terminal())
-        .map(|(id, job)| (id.clone(), job.info.updated_at))
+        .filter(|(_, job)| {
+            job.info.state.is_terminal()
+                && job.history_terminal_snapshot_at.is_some()
+                && !state.job_history.terminal_pending(&job.info.job_id)
+        })
+        .map(|(id, job)| {
+            (
+                id.clone(),
+                job.info.finished_at.unwrap_or(job.info.updated_at),
+            )
+        })
         .collect::<Vec<_>>();
     terminal.sort_by_key(|entry| std::cmp::Reverse(entry.1));
     for (index, (id, updated_at)) in terminal.into_iter().enumerate() {
@@ -1899,7 +2059,7 @@ mod tests {
                 )),
             ),
             job_history: crate::job_history::JobHistoryStore::disabled(
-                std::env::temp_dir().join("agentic-jobs-test-jobs.sqlite3"),
+                root.join("disabled-history-parent").join("jobs.sqlite3"),
             ),
             runtime: crate::state::RuntimeModel::hub(crate::state::CapabilityProfile::Normal),
             started_at: Utc::now(),
@@ -1918,6 +2078,67 @@ mod tests {
             skill_installs: Arc::new(crate::skill_installs::InstallManager::new()),
         };
         (state, workspace)
+    }
+
+    async fn test_state_with_history(max_active_jobs: usize) -> (AppState, PathBuf) {
+        let (mut state, workspace) = test_state(max_active_jobs).await;
+        state.job_history = crate::job_history::JobHistoryStore::open(&state.private_state);
+        (state, workspace)
+    }
+
+    fn synthetic_job(
+        job_id: &str,
+        group: Option<&str>,
+        kind: JobKind,
+        state: JobState,
+        created_at: chrono::DateTime<Utc>,
+    ) -> JobInfo {
+        let started_at = Some(created_at + chrono::Duration::milliseconds(1));
+        let updated_at = created_at + chrono::Duration::milliseconds(2);
+        JobInfo {
+            agent_id: "test-agent".to_string(),
+            job_id: job_id.to_string(),
+            group: group.map(str::to_string),
+            batch_id: None,
+            batch_call_id: None,
+            batch_index: None,
+            kind,
+            state,
+            created_at,
+            started_at,
+            updated_at,
+            finished_at: state.is_terminal().then_some(updated_at),
+            program: Some("true".to_string()),
+            args: Vec::new(),
+            working_directory: None,
+            command_preview: Some("true".to_string()),
+            exit_code: state.is_terminal().then_some(0),
+            stdout_tail: String::new(),
+            stderr_tail: String::new(),
+            truncated: false,
+            reject_reason: None,
+            skill_id: None,
+            skill_path: None,
+            installed_digest: None,
+            mcp_server_id: None,
+            mcp_tool_name: None,
+            cancel_requested: false,
+            cancel_outcome: None,
+            termination_evidence: None,
+        }
+    }
+
+    fn synthetic_detail(info: JobInfo) -> JobDetail {
+        JobDetail {
+            job: info,
+            detail_available: true,
+            result: None,
+            error: None,
+            result_truncated: false,
+            result_bytes: None,
+            result_sha256: None,
+            result_preview: None,
+        }
     }
 
     async fn wait_terminal(state: &AppState, job: JobInfo) -> JobInfo {
@@ -2100,6 +2321,177 @@ mod tests {
             get_job(&state, "not-a-job", 0).await.unwrap_err(),
             "job_not_found"
         );
+    }
+
+    #[tokio::test]
+    async fn runtime_history_tracks_group_timestamps_and_hot_cache_fallback() {
+        let (state, workspace) = test_state_with_history(2).await;
+        let mut request = exec_request("printf", &workspace);
+        request.group = Some("  runtime-group  ".to_string());
+        request.args = vec!["history-output".to_string()];
+        let admitted = start_process_job(state.clone(), request).await;
+        assert_eq!(admitted.group.as_deref(), Some("runtime-group"));
+        assert!(admitted.started_at.is_none());
+
+        let terminal = wait_terminal(&state, admitted).await;
+        let started_at = terminal.started_at.expect("process should start");
+        let finished_at = terminal.finished_at.expect("process should finish");
+        assert!(terminal.created_at <= started_at);
+        assert!(started_at <= finished_at);
+        assert_eq!(terminal.stdout_tail, "history-output");
+
+        let record = state
+            .job_history
+            .get(&terminal.job_id)
+            .unwrap()
+            .expect("terminal admission should be persisted");
+        assert_eq!(record.info.group.as_deref(), Some("runtime-group"));
+        assert_eq!(record.info.started_at, terminal.started_at);
+        assert_eq!(record.info.finished_at, terminal.finished_at);
+        assert_eq!(record.detail.unwrap().job.stdout_tail, "history-output");
+
+        {
+            let mut jobs = state.jobs.lock().await;
+            let job = jobs.get_mut(&terminal.job_id).unwrap();
+            job.info.finished_at = Some(Utc::now() - chrono::Duration::minutes(6));
+            prune_terminal_jobs(&state, &mut jobs);
+            assert!(!jobs.contains_key(&terminal.job_id));
+        }
+        let recovered = get_job_detail(&state, &terminal.job_id, 0).await.unwrap();
+        assert_eq!(recovered.job.group.as_deref(), Some("runtime-group"));
+        assert_eq!(recovered.job.state, JobState::Completed);
+        assert_eq!(recovered.job.stdout_tail, "history-output");
+    }
+
+    #[tokio::test]
+    async fn job_list_merges_live_wins_and_uses_global_cursor_order() {
+        let (state, _workspace) = test_state_with_history(4).await;
+        let now = Utc::now();
+        let persisted_old = synthetic_job(
+            "job_persisted_old",
+            Some("alpha"),
+            JobKind::Process,
+            JobState::Completed,
+            now - chrono::Duration::seconds(2),
+        );
+        let persisted_new = synthetic_job(
+            "job_persisted_new",
+            Some("alpha"),
+            JobKind::Mcp,
+            JobState::Completed,
+            now - chrono::Duration::seconds(1),
+        );
+        for info in [&persisted_old, &persisted_new] {
+            let _ = state.job_history.insert_admission(info);
+            let _ = state
+                .job_history
+                .upsert_terminal(&synthetic_detail(info.clone()));
+        }
+        let live_duplicate = synthetic_job(
+            "job_persisted_old",
+            Some("alpha"),
+            JobKind::Process,
+            JobState::Running,
+            persisted_old.created_at,
+        );
+        state.jobs.lock().await.insert(
+            live_duplicate.job_id.clone(),
+            ManagedJob {
+                info: live_duplicate,
+                detail: ManagedJobDetail::default(),
+                runtime: ManagedJobRuntime::Process(process_runtime(None)),
+                cancel_requested: Arc::new(AtomicBool::new(false)),
+                audit: None,
+                history_terminal_snapshot_at: None,
+            },
+        );
+
+        let first = list_jobs_page(
+            &state,
+            JobListRequest {
+                group: Some("alpha".to_string()),
+                kind: None,
+                state: None,
+                limit: Some(1),
+                cursor: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(first.jobs.len(), 1);
+        assert_eq!(first.jobs[0].job_id, "job_persisted_new");
+        let cursor = first.next_cursor.clone().expect("second page cursor");
+
+        let running = list_jobs_page(
+            &state,
+            JobListRequest {
+                group: Some("alpha".to_string()),
+                kind: None,
+                state: Some(JobState::Running),
+                limit: Some(10),
+                cursor: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(running.jobs.len(), 1);
+        assert_eq!(running.jobs[0].job_id, "job_persisted_old");
+        assert_eq!(running.jobs[0].state, JobState::Running);
+
+        let completed = list_jobs_page(
+            &state,
+            JobListRequest {
+                group: Some("alpha".to_string()),
+                kind: None,
+                state: Some(JobState::Completed),
+                limit: Some(10),
+                cursor: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(completed.jobs.len(), 1);
+        assert_eq!(completed.jobs[0].job_id, "job_persisted_new");
+
+        let second = list_jobs_page(
+            &state,
+            JobListRequest {
+                group: Some("alpha".to_string()),
+                kind: None,
+                state: None,
+                limit: Some(10),
+                cursor: Some(cursor),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(second.jobs.len(), 1);
+        assert_eq!(second.jobs[0].job_id, "job_persisted_old");
+        assert_eq!(second.jobs[0].state, JobState::Running);
+        assert!(second.next_cursor.is_none());
+    }
+
+    #[tokio::test]
+    async fn degraded_history_does_not_change_live_result_or_cancel_truth() {
+        let (state, workspace) = test_state(1).await;
+        let mut state = state;
+        state.job_history = crate::job_history::JobHistoryStore::disabled(
+            workspace
+                .join("missing-history-parent")
+                .join("jobs.sqlite3"),
+        );
+        let mut request = exec_request("printf", &workspace);
+        request.args = vec!["live-only".to_string()];
+        let terminal = wait_terminal(&state, start_process_job(state.clone(), request).await).await;
+        assert_eq!(terminal.state, JobState::Completed);
+        assert_eq!(terminal.stdout_tail, "live-only");
+        let detail = get_job_detail(&state, &terminal.job_id, 0).await.unwrap();
+        assert_eq!(detail.job.stdout_tail, "live-only");
+        assert_eq!(
+            state.job_history.health().status,
+            crate::job_history::HistoryHealthStatus::Degraded
+        );
+        assert!(state.job_history.health().pending_terminal_count > 0);
     }
 
     #[tokio::test]

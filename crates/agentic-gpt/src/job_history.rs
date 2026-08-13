@@ -111,6 +111,12 @@ struct Cursor {
     job_id: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct JobHistoryCursor {
+    pub(crate) created_at: DateTime<Utc>,
+    pub(crate) job_id: String,
+}
+
 #[derive(Debug)]
 struct HealthState {
     status: HistoryHealthStatus,
@@ -127,6 +133,7 @@ struct PendingTerminal {
 
 pub(crate) struct JobHistoryStore {
     path: PathBuf,
+    disabled: bool,
     connection: Mutex<Option<Connection>>,
     health: Mutex<HealthState>,
     pending_terminals: Mutex<VecDeque<PendingTerminal>>,
@@ -137,6 +144,7 @@ impl JobHistoryStore {
     pub(crate) fn open(paths: &PrivateStatePaths) -> std::sync::Arc<Self> {
         let store = std::sync::Arc::new(Self {
             path: paths.root.join("jobs.sqlite3"),
+            disabled: false,
             connection: Mutex::new(None),
             health: Mutex::new(HealthState {
                 status: HistoryHealthStatus::Degraded,
@@ -153,6 +161,7 @@ impl JobHistoryStore {
     pub(crate) fn disabled(path: PathBuf) -> std::sync::Arc<Self> {
         std::sync::Arc::new(Self {
             path,
+            disabled: true,
             connection: Mutex::new(None),
             health: Mutex::new(HealthState {
                 status: HistoryHealthStatus::Degraded,
@@ -252,6 +261,40 @@ impl JobHistoryStore {
         }
     }
 
+    pub(crate) fn mark_started(&self, info: &JobInfo) -> HistoryWriteOutcome {
+        let Some(started_at) = info.started_at else {
+            return HistoryWriteOutcome::Persisted;
+        };
+        if let Err(error) = self.ensure_ready() {
+            self.degrade(error);
+            return HistoryWriteOutcome::Deferred;
+        }
+        let result = self.with_connection(|connection| {
+            connection.execute(
+                "UPDATE jobs
+                    SET state = ?1, started_at = ?2, updated_at = ?3
+                  WHERE job_id = ?4 AND finished_at IS NULL",
+                params![
+                    info.state.label(),
+                    format_time(started_at),
+                    format_time(info.updated_at),
+                    &info.job_id,
+                ],
+            )?;
+            Ok(())
+        });
+        match result {
+            Ok(()) => {
+                self.healthy();
+                HistoryWriteOutcome::Persisted
+            }
+            Err(error) => {
+                self.degrade(error);
+                HistoryWriteOutcome::Deferred
+            }
+        }
+    }
+
     pub(crate) fn upsert_terminal(&self, detail: &JobDetail) -> HistoryWriteOutcome {
         let bounded = bounded_detail(detail.clone());
         let _ = self.retry_pending();
@@ -277,6 +320,14 @@ impl JobHistoryStore {
 
     pub(crate) fn retry_pending(&self) -> usize {
         self.retry_pending_at(Utc::now())
+    }
+
+    pub(crate) fn terminal_pending(&self, job_id: &str) -> bool {
+        self.pending_terminals
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .any(|pending| pending.detail.job.job_id == job_id)
     }
 
     fn retry_pending_at(&self, now: DateTime<Utc>) -> usize {
@@ -381,10 +432,11 @@ impl JobHistoryStore {
             values.push(Value::Text(state.label().to_string()));
         }
         if let Some(cursor) = request.cursor.as_deref() {
-            let cursor = decode_cursor(cursor)?;
+            let cursor = decode_list_cursor(cursor)?;
             sql.push_str(" AND (created_at < ? OR (created_at = ? AND job_id < ?))");
-            values.push(Value::Text(cursor.created_at.clone()));
-            values.push(Value::Text(cursor.created_at));
+            let created_at = format_time(cursor.created_at);
+            values.push(Value::Text(created_at.clone()));
+            values.push(Value::Text(created_at));
             values.push(Value::Text(cursor.job_id));
         }
         sql.push_str(" ORDER BY created_at DESC, job_id DESC LIMIT ?");
@@ -403,10 +455,7 @@ impl JobHistoryStore {
             let next_cursor = if jobs.len() > limit {
                 jobs.truncate(limit);
                 let last = jobs.last().expect("limit row exists");
-                Some(encode_cursor(&Cursor {
-                    created_at: format_time(last.created_at),
-                    job_id: last.job_id.clone(),
-                }))
+                Some(encode_list_cursor(last))
             } else {
                 None
             };
@@ -533,6 +582,9 @@ impl JobHistoryStore {
     }
 
     fn ensure_ready(&self) -> Result<()> {
+        if self.disabled {
+            return Err(anyhow!("history_disabled"));
+        }
         if self
             .connection
             .lock()
@@ -679,17 +731,25 @@ impl JobHistoryStore {
                 .pending_terminals
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let dropped = if pending.len() >= MAX_PENDING_TERMINALS {
-                pending.pop_front().map(|pending| pending.detail.job.job_id)
-            } else {
+            if let Some(existing) = pending
+                .iter_mut()
+                .find(|pending| pending.detail.job.job_id == detail.job.job_id)
+            {
+                existing.detail = detail;
                 None
-            };
-            pending.push_back(PendingTerminal {
-                detail,
-                attempts: 1,
-                next_retry_at: now + pending_retry_delay(1),
-            });
-            dropped
+            } else {
+                let dropped = if pending.len() >= MAX_PENDING_TERMINALS {
+                    pending.pop_front().map(|pending| pending.detail.job.job_id)
+                } else {
+                    None
+                };
+                pending.push_back(PendingTerminal {
+                    detail,
+                    attempts: 1,
+                    next_retry_at: now + pending_retry_delay(1),
+                });
+                dropped
+            }
         };
         if let Some(job_id) = dropped_job_id {
             self.record_terminal_drop(&job_id, "pending terminal queue capacity exceeded");
@@ -871,11 +931,32 @@ fn encode_cursor(cursor: &Cursor) -> String {
     URL_SAFE_NO_PAD.encode(serde_json::to_vec(cursor).expect("cursor serialization cannot fail"))
 }
 
+pub(crate) fn encode_list_cursor(info: &JobInfo) -> String {
+    encode_cursor(&Cursor {
+        created_at: format_time(info.created_at),
+        job_id: info.job_id.clone(),
+    })
+}
+
 fn decode_cursor(value: &str) -> Result<Cursor> {
     let bytes = URL_SAFE_NO_PAD
         .decode(value)
         .map_err(|_| anyhow!("invalid_job_history_cursor"))?;
     serde_json::from_slice(&bytes).map_err(|_| anyhow!("invalid_job_history_cursor"))
+}
+
+pub(crate) fn decode_list_cursor(value: &str) -> Result<JobHistoryCursor> {
+    let cursor = decode_cursor(value)?;
+    let created_at = DateTime::parse_from_rfc3339(&cursor.created_at)
+        .map(|value| value.with_timezone(&Utc))
+        .map_err(|_| anyhow!("invalid_job_history_cursor"))?;
+    if cursor.job_id.is_empty() {
+        return Err(anyhow!("invalid_job_history_cursor"));
+    }
+    Ok(JobHistoryCursor {
+        created_at,
+        job_id: cursor.job_id,
+    })
 }
 
 fn is_corruption(error: &rusqlite::Error) -> bool {

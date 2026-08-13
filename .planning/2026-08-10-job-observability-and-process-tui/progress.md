@@ -136,3 +136,22 @@
 - Corrected health semantics and mutex lock order: pending state is inspected before the health lock, avoiding the prior opposite lock ordering, and health remains degraded until pending persistence is fully drained.
 - Added two focused D-20 regression tests and strengthened the queue-bound test; `job_history::tests` now passes 11/11.
 - Fresh post-review verification: `cargo fmt --all -- --check` PASS; `cargo check --workspace --all-targets` PASS; `cargo clippy -p agentic-gpt --all-targets -- -D warnings` PASS; focused Job history tests 11/11 PASS; `git diff --check` PASS.
+### Phase 3C runtime resumption (2026-08-13)
+
+- Recovered the active plan after two interrupted context-loading invocations; session catchup found no unsynced implementation work.
+- Confirmed HEAD contains the completed Phase 3A protocol and Phase 3B history-store commits. Current product diffs are absent; preserved the pre-existing tracked plan edit and unrelated untracked planning/experimental paths.
+- Began repository-grounded inspection of `jobs.rs`, `job_history.rs`, `AppState`, and process/skill/MCP call sites. Next: map every live admission/start/terminal/query transition before making the scoped 3C integration patch.
+- First compile attempt caught a typo in the new pending-terminal replacement predicate (`detail.job.job.job_id`); corrected it before retrying the check.
+- The first focused test command used multiple test filters, which Cargo rejects; no tests ran. Switched to the module filter form for the next attempt.
+- Phase 3C module tests reached 9/10: the degraded-history assertion was invalid because the legacy shared disabled path had become openable/healthy. The test now replaces it with a unique path whose parent is absent, making the intended failure injection deterministic.
+- The follow-up exposed the same shared-path contamination in the pre-existing list test; the common Job test fixture now uses a per-test missing-parent disabled path, preserving its live-only restart-loss expectation.
+- Full `cargo test -p agentic-gpt` reached 323 passing tests; 5 unrelated environment-bound tests failed with sandbox `Operation not permitted` while binding Unix sockets/HTTP test listeners (`local_control`, `supervisor`, `tunnel_distribution`). All Job/history/MCP tests passed.
+
+### Phase 3C handoff (2026-08-13)
+
+- Completed runtime integration in `jobs.rs`, `job_history.rs`, `mcp.rs`, `hub.rs`, and the Agent local operation layer. Validated protocol group metadata now reaches process/skill/MCP Managed Jobs, including inherited batch children; actual start is recorded only at successful process spawn or MCP downstream request attachment.
+- Admission rows, actual-start updates, and idempotent bounded terminal snapshots are wired. Pending terminal persistence is deduplicated and bounded by the Phase 3B retry queue; hot cache pruning is 5 minutes/100 while pending snapshots are retained. Live execution, result, and cancellation paths ignore history write failures.
+- `job.get` is live-first with terminal-history fallback; `list_jobs_page` merges/deduplicates live + persisted rows, applies exact filters, and emits the global created/job cursor. Agent Hub-command dispatch now preserves `nextCursor` when present.
+- Focused runtime tests: `jobs::tests::` 10/10, `job_history::tests::` 11/11, `mcp::tests::` 18/18. Workspace all-targets check, Agent clippy (`-D warnings`), rustfmt check, and `git diff --check` pass.
+- No commit made. Next scoped work is Phase 3D slim tool surfaces/`waitOnly`; do not infer Phase 3D/3E work from this handoff.
+- Final merge audit found and fixed a regression-test expectation that ignored a separate persisted completed MCP row; the test now asserts the stale duplicate is absent while the unrelated completed row remains. The focused pagination test passes.

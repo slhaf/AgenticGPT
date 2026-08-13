@@ -1102,7 +1102,7 @@ pub(crate) async fn run_skill(state: &AppState, request: SkillRunRequest) -> ser
         state.clone(),
         ExecRequest {
             agent_id: config.agent_id,
-            group: None,
+            group: request.group.clone(),
             program: program.to_string_lossy().to_string(),
             args: request.args.unwrap_or_default(),
             need_confirm: false,

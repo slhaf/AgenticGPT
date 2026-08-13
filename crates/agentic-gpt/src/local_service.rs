@@ -37,9 +37,18 @@ async fn dispatch_inner(state: AppState, command: HubCommand) -> Result<serde_js
                 })),
             }
         }
-        HubCommand::JobList { payload, .. } => {
-            Ok(serde_json::json!({ "jobs": jobs::list_jobs(&state, payload).await }))
-        }
+        HubCommand::JobList { payload, .. } => match jobs::list_jobs_page(&state, payload).await {
+            Ok(page) => {
+                let mut response = serde_json::json!({ "jobs": page.jobs });
+                if let Some(cursor) = page.next_cursor {
+                    response["nextCursor"] = serde_json::Value::String(cursor);
+                }
+                Ok(response)
+            }
+            Err(reason) => Ok(serde_json::json!({
+                "error": { "code": reason.clone(), "message": reason }
+            })),
+        },
         HubCommand::JobGet { payload, .. } => match jobs::get_job_detail(
             &state,
             &payload.job_id,

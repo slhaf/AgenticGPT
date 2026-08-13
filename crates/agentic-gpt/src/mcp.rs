@@ -278,6 +278,7 @@ async fn start_managed_batch_with_factory(
         .iter()
         .map(|call| ManagedMcpSpec {
             agent_id: payload.agent_id.clone(),
+            group: payload.group.clone(),
             batch_id: Some(batch_id.clone()),
             batch_call_id: call.id.clone(),
             batch_index: Some(call.index),
@@ -526,7 +527,7 @@ async fn prepare_mcp_batch(
             id: call.id.clone(),
             payload: McpCallToolRequest {
                 agent_id: payload.agent_id.clone(),
-                group: None,
+                group: payload.group.clone(),
                 server_id: call.server_id.clone(),
                 tool_name: call.tool_name.clone(),
                 arguments: call.arguments.clone(),
@@ -902,6 +903,7 @@ async fn start_managed_call_with_factory(
         state,
         ManagedMcpSpec {
             agent_id: payload.agent_id.clone(),
+            group: payload.group.clone(),
             batch_id: None,
             batch_call_id: None,
             batch_index: None,
