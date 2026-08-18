@@ -1941,33 +1941,35 @@ async fn refresh_job(state: &AppState, job: &mut ManagedJob) {
         }
         return;
     };
-    if let Some(child) = runtime.child.as_mut() {
-        if let Ok(Some(status)) = child.try_wait() {
-            let now = Utc::now();
-            job.info.exit_code = status.code();
-            if job
-                .cancel_requested
-                .load(std::sync::atomic::Ordering::Acquire)
-            {
-                job.info.state = JobState::Cancelled;
-                job.info.reject_reason = Some("cancelled".to_string());
-                job.info.cancel_requested = true;
-                job.info
-                    .cancel_outcome
-                    .get_or_insert_with(|| "cancelled".to_string());
-                job.info
-                    .termination_evidence
-                    .get_or_insert_with(|| "process_exit_after_cancel".to_string());
-            } else {
-                job.info.state = if status.success() {
-                    JobState::Completed
+    if !job.info.state.is_terminal() {
+        if let Some(child) = runtime.child.as_mut() {
+            if let Ok(Some(status)) = child.try_wait() {
+                let now = Utc::now();
+                job.info.exit_code = status.code();
+                if job
+                    .cancel_requested
+                    .load(std::sync::atomic::Ordering::Acquire)
+                {
+                    job.info.state = JobState::Cancelled;
+                    job.info.reject_reason = Some("cancelled".to_string());
+                    job.info.cancel_requested = true;
+                    job.info
+                        .cancel_outcome
+                        .get_or_insert_with(|| "cancelled".to_string());
+                    job.info
+                        .termination_evidence
+                        .get_or_insert_with(|| "process_exit_after_cancel".to_string());
                 } else {
-                    JobState::Failed
-                };
+                    job.info.state = if status.success() {
+                        JobState::Completed
+                    } else {
+                        JobState::Failed
+                    };
+                }
+                job.info.updated_at = now;
+                job.info.finished_at = Some(now);
+                runtime.skill_lease = None;
             }
-            job.info.updated_at = now;
-            job.info.finished_at = Some(now);
-            runtime.skill_lease = None;
         }
     }
     let (stdout_tail, stderr_tail, truncated) = {

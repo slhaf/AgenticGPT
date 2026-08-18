@@ -979,106 +979,96 @@ impl AgentMcpServer {
                 .await
             }
             "skills.run" => self.dispatch_skill_run(arguments, terminal_tracker).await,
-            "room.notebook.append" => {
-                dispatch(
-                    self,
-                    HubCommand::RoomNotebookAppend {
-                        request_id,
-                        payload: from_value(arguments)?,
-                    },
-                )
-                .await
-            }
-            "room.notebook.recent" => {
-                dispatch(
-                    self,
-                    HubCommand::RoomNotebookRecent {
-                        request_id,
-                        payload: from_value(arguments)?,
-                    },
-                )
-                .await
-            }
-            "room.notebook.selectExact" => {
-                dispatch(
-                    self,
-                    HubCommand::RoomNotebookSelectExact {
-                        request_id,
-                        payload: from_value(arguments)?,
-                    },
-                )
-                .await
-            }
-            "room.notebook.search" => {
-                dispatch(
-                    self,
-                    HubCommand::RoomNotebookSearch {
-                        request_id,
-                        payload: from_value(arguments)?,
-                    },
-                )
-                .await
-            }
-            "room.notebook.current" => {
-                dispatch(
-                    self,
-                    HubCommand::RoomNotebookCurrent {
-                        request_id,
-                        payload: from_value(arguments)?,
-                    },
-                )
-                .await
-            }
-            "room.notebook.update" => {
-                dispatch(
-                    self,
-                    HubCommand::RoomNotebookUpdate {
-                        request_id,
-                        payload: from_value(arguments)?,
-                    },
-                )
-                .await
-            }
-            "room.notebook.remove" => {
-                dispatch(
-                    self,
-                    HubCommand::RoomNotebookRemove {
-                        request_id,
-                        payload: from_value(arguments)?,
-                    },
-                )
-                .await
-            }
-            "room.diary.append" => {
-                dispatch(
-                    self,
-                    HubCommand::RoomDiaryAppend {
-                        request_id,
-                        payload: from_value(arguments)?,
-                    },
-                )
-                .await
-            }
-            "room.diary.recent" => {
-                dispatch(
-                    self,
-                    HubCommand::RoomDiaryRecent {
-                        request_id,
-                        payload: from_value(arguments)?,
-                    },
-                )
-                .await
-            }
-            "room.diary.selectExact" => {
-                dispatch(
-                    self,
-                    HubCommand::RoomDiarySelectExact {
-                        request_id,
-                        payload: from_value(arguments)?,
-                    },
-                )
-                .await
-            }
+            "room.notebook.append" => dispatch(
+                self,
+                HubCommand::RoomNotebookAppend {
+                    request_id,
+                    payload: from_value(arguments)?,
+                },
+            )
+            .await
+            .map(|value| slim_room_response("room.notebook.append", value)),
+            "room.notebook.recent" => dispatch(
+                self,
+                HubCommand::RoomNotebookRecent {
+                    request_id,
+                    payload: from_value(arguments)?,
+                },
+            )
+            .await
+            .map(|value| slim_room_response("room.notebook.recent", value)),
+            "room.notebook.selectExact" => dispatch(
+                self,
+                HubCommand::RoomNotebookSelectExact {
+                    request_id,
+                    payload: from_value(arguments)?,
+                },
+            )
+            .await
+            .map(|value| slim_room_response("room.notebook.selectExact", value)),
+            "room.notebook.search" => dispatch(
+                self,
+                HubCommand::RoomNotebookSearch {
+                    request_id,
+                    payload: from_value(arguments)?,
+                },
+            )
+            .await
+            .map(|value| slim_room_response("room.notebook.search", value)),
+            "room.notebook.current" => dispatch(
+                self,
+                HubCommand::RoomNotebookCurrent {
+                    request_id,
+                    payload: from_value(arguments)?,
+                },
+            )
+            .await
+            .map(|value| slim_room_response("room.notebook.current", value)),
+            "room.notebook.update" => dispatch(
+                self,
+                HubCommand::RoomNotebookUpdate {
+                    request_id,
+                    payload: from_value(arguments)?,
+                },
+            )
+            .await
+            .map(|value| slim_room_response("room.notebook.update", value)),
+            "room.notebook.remove" => dispatch(
+                self,
+                HubCommand::RoomNotebookRemove {
+                    request_id,
+                    payload: from_value(arguments)?,
+                },
+            )
+            .await
+            .map(|value| slim_room_response("room.notebook.remove", value)),
+            "room.diary.append" => dispatch(
+                self,
+                HubCommand::RoomDiaryAppend {
+                    request_id,
+                    payload: from_value(arguments)?,
+                },
+            )
+            .await
+            .map(|value| slim_room_response("room.diary.append", value)),
+            "room.diary.recent" => dispatch(
+                self,
+                HubCommand::RoomDiaryRecent {
+                    request_id,
+                    payload: from_value(arguments)?,
+                },
+            )
+            .await
+            .map(|value| slim_room_response("room.diary.recent", value)),
+            "room.diary.selectExact" => dispatch(
+                self,
+                HubCommand::RoomDiarySelectExact {
+                    request_id,
+                    payload: from_value(arguments)?,
+                },
+            )
+            .await
+            .map(|value| slim_room_response("room.diary.selectExact", value)),
             _ => Err(anyhow::anyhow!("unknown agent tool: {name}")),
         }
     }
@@ -1346,7 +1336,13 @@ impl AgentMcpServer {
                 skills.truncate(limit.clamp(1, 100));
             }
         }
-        let mut response = json!({"skills": skills});
+        let mut skill_values = serde_json::to_value(skills)?;
+        if let Some(skills) = skill_values.as_array_mut() {
+            for skill in skills {
+                remove_empty_warnings(skill);
+            }
+        }
+        let mut response = json!({"skills": skill_values});
         if !warnings.is_empty() {
             response["warnings"] = json!(warnings);
         }
@@ -2302,6 +2298,38 @@ fn managed_terminal_event_message(profile: &str, source: &str, job: &JobInfo) ->
         message.push_str(&format!("; errorCode={}", bounded_error_code(reason)));
     }
     message
+}
+
+fn remove_empty_warnings(value: &mut Value) {
+    if value
+        .get("warnings")
+        .and_then(Value::as_array)
+        .is_some_and(Vec::is_empty)
+    {
+        if let Some(object) = value.as_object_mut() {
+            object.remove("warnings");
+        }
+    }
+}
+
+fn slim_room_response(tool: &str, mut value: Value) -> Value {
+    remove_empty_warnings(&mut value);
+    let Some(object) = value.as_object_mut() else {
+        return value;
+    };
+    match tool {
+        "room.notebook.append" => {
+            object.remove("path");
+            object.remove("created");
+        }
+        "room.diary.append" => {
+            object.remove("path");
+            object.remove("created");
+            object.remove("createdAt");
+        }
+        _ => {}
+    }
+    value
 }
 
 fn tool_descriptor(name: &str) -> Tool {

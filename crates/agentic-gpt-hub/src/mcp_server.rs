@@ -1217,7 +1217,10 @@ impl AgenticMcpServer {
         )
         .await
         .unwrap_or_else(room_route_error_value);
-        Ok(result_from_value(value))
+        Ok(result_from_value(slim_room_response(
+            "room.notebook.append",
+            value,
+        )))
     }
 
     #[tool(
@@ -1249,7 +1252,10 @@ impl AgenticMcpServer {
         )
         .await
         .unwrap_or_else(room_route_error_value);
-        Ok(result_from_value(value))
+        Ok(result_from_value(slim_room_response(
+            "room.notebook.recent",
+            value,
+        )))
     }
 
     #[tool(
@@ -1276,7 +1282,10 @@ impl AgenticMcpServer {
         )
         .await
         .unwrap_or_else(room_route_error_value);
-        Ok(result_from_value(value))
+        Ok(result_from_value(slim_room_response(
+            "room.notebook.selectExact",
+            value,
+        )))
     }
 
     #[tool(
@@ -1303,7 +1312,10 @@ impl AgenticMcpServer {
         )
         .await
         .unwrap_or_else(room_route_error_value);
-        Ok(result_from_value(value))
+        Ok(result_from_value(slim_room_response(
+            "room.notebook.search",
+            value,
+        )))
     }
 
     #[tool(
@@ -1328,7 +1340,10 @@ impl AgenticMcpServer {
         )
         .await
         .unwrap_or_else(room_route_error_value);
-        Ok(result_from_value(value))
+        Ok(result_from_value(slim_room_response(
+            "room.notebook.current",
+            value,
+        )))
     }
 
     #[tool(
@@ -1361,7 +1376,10 @@ impl AgenticMcpServer {
         )
         .await
         .unwrap_or_else(room_route_error_value);
-        Ok(result_from_value(value))
+        Ok(result_from_value(slim_room_response(
+            "room.notebook.update",
+            value,
+        )))
     }
 
     #[tool(
@@ -1384,7 +1402,10 @@ impl AgenticMcpServer {
         )
         .await
         .unwrap_or_else(room_route_error_value);
-        Ok(result_from_value(value))
+        Ok(result_from_value(slim_room_response(
+            "room.notebook.remove",
+            value,
+        )))
     }
 
     #[tool(
@@ -1410,7 +1431,10 @@ impl AgenticMcpServer {
         )
         .await
         .unwrap_or_else(room_route_error_value);
-        Ok(result_from_value(value))
+        Ok(result_from_value(slim_room_response(
+            "room.diary.append",
+            value,
+        )))
     }
 
     #[tool(
@@ -1436,7 +1460,10 @@ impl AgenticMcpServer {
         )
         .await
         .unwrap_or_else(room_route_error_value);
-        Ok(result_from_value(value))
+        Ok(result_from_value(slim_room_response(
+            "room.diary.recent",
+            value,
+        )))
     }
 
     #[tool(
@@ -1462,7 +1489,10 @@ impl AgenticMcpServer {
         )
         .await
         .unwrap_or_else(room_route_error_value);
-        Ok(result_from_value(value))
+        Ok(result_from_value(slim_room_response(
+            "room.diary.selectExact",
+            value,
+        )))
     }
 
     #[tool(
@@ -1540,7 +1570,7 @@ impl AgenticMcpServer {
         )
         .await
         .unwrap_or_else(room_route_error_value);
-        Ok(result_from_value(value))
+        Ok(result_from_value(slim_skills_list_response(value)))
     }
 
     #[tool(
@@ -2485,6 +2515,48 @@ struct SkillRunArgs {
 
 fn ok_json(value: Value) -> CallToolResult {
     AgenticResult::from_native_value(value).into_call_tool_result()
+}
+
+fn remove_empty_warnings(value: &mut Value) {
+    if value
+        .get("warnings")
+        .and_then(Value::as_array)
+        .is_some_and(Vec::is_empty)
+    {
+        if let Some(object) = value.as_object_mut() {
+            object.remove("warnings");
+        }
+    }
+}
+
+fn slim_room_response(tool: &str, mut value: Value) -> Value {
+    remove_empty_warnings(&mut value);
+    let Some(object) = value.as_object_mut() else {
+        return value;
+    };
+    match tool {
+        "room.notebook.append" => {
+            object.remove("path");
+            object.remove("created");
+        }
+        "room.diary.append" => {
+            object.remove("path");
+            object.remove("created");
+            object.remove("createdAt");
+        }
+        _ => {}
+    }
+    value
+}
+
+fn slim_skills_list_response(mut value: Value) -> Value {
+    remove_empty_warnings(&mut value);
+    if let Some(skills) = value.get_mut("skills").and_then(Value::as_array_mut) {
+        for skill in skills {
+            remove_empty_warnings(skill);
+        }
+    }
+    value
 }
 
 fn result_from_value(value: Value) -> CallToolResult {
