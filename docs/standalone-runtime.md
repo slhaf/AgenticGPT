@@ -186,14 +186,15 @@ collapsing envelopes at the approximately 1 MiB aggregate response bound.
 Search batches retain the 20,000-file and 128 MiB aggregate scan limits in
 addition to each search's ordinary limits.
 
-`file.edit` accepts only `patch`, optional `dryRun`, and optional `needConfirm`.
+`file.edit` accepts only `patch` and optional `needConfirm`.
 The patch uses Codex apply-patch syntax and may add, update, delete, or move
 multiple files. Every source and destination is resolved through path policy,
 locked deterministically, checked as UTF-8 and at most 8 MiB, staged and
 validated before one optional confirmation. Source snapshots are revalidated
-immediately before commit; dry runs never confirm or write. Responses contain
-ordered requested/resolved paths, actions, statuses, bounded diffs, and changed
-line counts, while internal audit records may retain revisions.
+immediately before commit. Normal success responses contain only committed
+requested paths and actions; partial failures retain ordered status/error
+evidence. Diffs, resolved paths, changed-line counts, and revisions stay
+internal for confirmation and audit.
 
 ## Hub MCP profiles
 

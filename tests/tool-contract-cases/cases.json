@@ -49,24 +49,12 @@
     }
   },
   {
-    "id": "file_edit_apply_patch_dry_run",
-    "tool": "file.edit",
-    "kind": "positive",
-    "arguments": {
-      "patch": "*** Begin Patch\n*** Update File: contract-fixture.txt\n@@\n-prefix\n+changed\n*** Add File: contract-created.txt\n+created\n*** End Patch",
-      "dryRun": true
-    },
-    "expect": {
-      "status": "dry-run"
-    }
-  },
-  {
     "id": "file_edit_descriptor",
     "tool": "file.edit",
     "kind": "descriptor",
     "arguments": {},
     "expect": {
-      "descriptionIncludes": ["Codex apply_patch", "dryRun"],
+      "descriptionIncludes": ["Codex apply_patch", "compact change summary"],
       "required": ["patch"]
     }
   },

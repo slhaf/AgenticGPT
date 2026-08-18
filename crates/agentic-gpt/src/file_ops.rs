@@ -918,7 +918,6 @@ fn truncate_batch_output(response: &mut Value) {
 #[derive(Clone, Debug)]
 pub(crate) struct EditRequest {
     pub(crate) patch: String,
-    pub(crate) dry_run: bool,
     pub(crate) need_confirm: bool,
 }
 
@@ -944,28 +943,26 @@ pub(crate) async fn edit(state: &AppState, request: EditRequest) -> Value {
     let config = state.config.read().await.clone();
     let result = apply_patch_inner(state, &config, &request).await;
     match result {
-        Ok(mut response) => {
-            if !request.dry_run {
-                response["auditStatus"] = json!(write_patch_audits(
-                    &config,
-                    &response,
-                    request.need_confirm,
-                    started.elapsed().as_millis()
-                ));
-            }
-            strip_internal_revisions(&mut response);
-            response
+        Ok(response) => {
+            let audit_status = write_patch_audits(
+                &config,
+                &response,
+                request.need_confirm,
+                started.elapsed().as_millis(),
+            );
+            let mut value = slim_edit_response(&response);
+            add_audit_warning(&mut value, audit_status);
+            value
         }
         Err(error) => {
+            let audit_status = write_patch_failure_audit(
+                &config,
+                &error.code,
+                request.need_confirm,
+                started.elapsed().as_millis(),
+            );
             let mut value = error.value();
-            if !request.dry_run {
-                value["auditStatus"] = json!(write_patch_failure_audit(
-                    &config,
-                    &error.code,
-                    request.need_confirm,
-                    started.elapsed().as_millis(),
-                ));
-            }
+            add_audit_warning(&mut value, audit_status);
             value
         }
     }
@@ -1122,16 +1119,6 @@ async fn apply_patch_inner(
 
     let mut response_changes = changes.iter().map(change_value).collect::<Vec<_>>();
     let effective = changes.iter().filter(|change| is_effective(change)).count();
-    if request.dry_run {
-        for (value, change) in response_changes.iter_mut().zip(&changes) {
-            value["status"] = json!(if is_effective(change) {
-                "dry-run"
-            } else {
-                "unchanged"
-            });
-        }
-        return Ok(patch_response("dry-run", response_changes, effective));
-    }
 
     if effective > 0 {
         for change in &mut changes {
@@ -1369,14 +1356,72 @@ fn change_value(change: &PlannedChange) -> Value {
     value
 }
 
-fn strip_internal_revisions(response: &mut Value) {
-    if let Some(changes) = response["changes"].as_array_mut() {
-        for change in changes {
-            if let Some(object) = change.as_object_mut() {
-                object.remove("beforeRevision");
-                object.remove("afterRevision");
-            }
-        }
+fn slim_edit_response(response: &Value) -> Value {
+    let status = response["status"].as_str().unwrap_or("completed");
+    let changes = response["changes"].as_array().cloned().unwrap_or_default();
+    if status == "completed" {
+        let changes = changes
+            .iter()
+            .filter_map(slim_committed_change)
+            .collect::<Vec<_>>();
+        return json!({
+            "status": "completed",
+            "changed": changes.len(),
+            "changes": changes,
+        });
+    }
+
+    let changes = changes.iter().map(slim_evidence_change).collect::<Vec<_>>();
+    let mut value = json!({
+        "status": status,
+        "changes": changes,
+    });
+    if status == "completed_with_errors" {
+        value["summary"] = json!({
+            "committed": response["summary"]["committed"],
+            "failed": response["summary"]["failed"],
+            "skipped": response["summary"]["skipped"],
+        });
+    }
+    value
+}
+
+fn slim_committed_change(change: &Value) -> Option<Value> {
+    let action = change["status"].as_str()?;
+    if !matches!(action, "created" | "updated" | "deleted" | "moved") {
+        return None;
+    }
+    let mut value = json!({
+        "path": change["requestedPath"],
+        "action": action,
+    });
+    if action == "moved" {
+        value["destination"] = change["destinationRequestedPath"].clone();
+    }
+    Some(value)
+}
+
+fn slim_evidence_change(change: &Value) -> Value {
+    let status = change["status"].as_str().unwrap_or("failed");
+    let mut value = json!({
+        "path": change["requestedPath"],
+        "status": status,
+    });
+    if !change["destinationRequestedPath"].is_null() {
+        value["destination"] = change["destinationRequestedPath"].clone();
+    }
+    if status == "failed" {
+        value["error"] = change["error"].clone();
+    }
+    value
+}
+
+fn add_audit_warning(value: &mut Value, audit_status: &str) {
+    if audit_status == "failed" {
+        value["warnings"] = json!([{
+            "code": "file_audit_failed",
+            "message": "file edit audit record could not be written"
+        }]);
     }
 }
 

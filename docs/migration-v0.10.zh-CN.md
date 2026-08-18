@@ -8,9 +8,11 @@
 - 两种形式互斥；批量结果按输入顺序返回，单项失败不会压制其他项。
 - `file.edit` 只接受 Codex apply-patch 文本，可跨文件 Add、Update、Delete、Move。
   旧的 mode/path/revision/content 字段不再接受。
-- `dryRun` 只校验和预览，不确认、不写入；`needConfirm` 对整份有效补丁只请求一次确认。
+- `needConfirm` 对整份有效补丁只请求一次确认。
 
-读取/搜索批量调用查看有序 `results`，编辑查看 `changes` 与 `summary`。解析、路径/
+读取/搜索批量调用查看有序 `results`。`file.edit` 正常成功只返回精简的已提交
+路径/动作列表；部分提交失败才返回按顺序的状态与错误证据。详细 diff、resolved path、
+changed-line 统计和 revision hash 仅保留在内部 confirmation/audit 路径。解析、路径/
 上下文、暂存、确认以及最终再次校验若失败，都发生在第一次物理提交之前，因此不会
 写入任何文件。物理提交开始后不承诺跨文件回滚；若后续某项提交失败，`file.edit`
 返回 `completed_with_errors`，并按顺序明确标记哪些变更已经提交、哪一项失败，以及

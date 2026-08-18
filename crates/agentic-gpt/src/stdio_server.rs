@@ -597,7 +597,6 @@ impl AgentMcpServer {
                     &self.state,
                     crate::file_ops::EditRequest {
                         patch: args.patch,
-                        dry_run: args.dry_run,
                         need_confirm: args.need_confirm,
                     },
                 )
@@ -1565,8 +1564,6 @@ struct FileSearchRequestArgs {
 struct FileEditArgs {
     patch: String,
     #[serde(default)]
-    dry_run: bool,
-    #[serde(default)]
     need_confirm: bool,
 }
 
@@ -2492,12 +2489,6 @@ fn properties_for(name: &str) -> Map<String, Value> {
         "file.edit" => {
             add("patch", string(PATCH_SCHEMA_DESCRIPTION));
             add(
-                "dryRun",
-                boolean(
-                    "Validate and preview without confirmation or physical write; default false.",
-                ),
-            );
-            add(
                 "needConfirm",
                 boolean("Request one confirmation before an effective mutation; default false."),
             );
@@ -2912,7 +2903,7 @@ fn tool_description(name: &str) -> String {
         "agent.info" => "Inspect bounded local profile, workspace/path policy, confirmation, capacity, live limits, MCP state, and Job diagnostics; read-only and does not execute work.".to_string(),
         "file.read" => "Read bounded UTF-8 file content or metadata; use flat fields for one request or ordered requests for up to 32 independent reads, with one failed item isolated from the others.".to_string(),
         "file.search" => "Search workspace text in-process; use flat fields for one request or ordered requests for up to 32 independent searches, preserving per-search limits and bounded aggregate output.".to_string(),
-        "file.edit" => "Apply one complete Codex apply_patch patch across multiple UTF-8 files; stages and validates every add, update, delete, or move before one optional confirmation, and dryRun never confirms or writes.".to_string(),
+        "file.edit" => "Apply one complete Codex apply_patch patch across multiple UTF-8 files; stages and validates every add, update, delete, or move before one optional confirmation and returns a compact change summary.".to_string(),
         "process.exec" => "Start one managed local process with an optional group and return a slim Job result after a bounded inline wait; use job.get for later state/output and job.cancel for cancellation evidence.".to_string(),
         "process.batch" => "Admit multiple managed local processes with one optional group, one confirmation boundary, and ordered slim child Jobs; preflight/capacity rejection starts none, running children are bounded by limits.maxConcurrentTasks while excess Jobs stay queued, and use job.get/job.cancel for lifecycle.".to_string(),
         "job.get" => "Inspect one managed Job or wait up to waitSeconds (maximum 30); waitOnly returns exactly jobId/state/elapsedMs on an active timeout, terminal completion returns normal detail, and cached state may be marked unavailable after an Agent restart.".to_string(),
@@ -3208,7 +3199,7 @@ mod tests {
             .keys()
             .cloned()
             .collect::<BTreeSet<_>>();
-        let expected_edit_fields = ["dryRun", "needConfirm", "patch"]
+        let expected_edit_fields = ["needConfirm", "patch"]
             .into_iter()
             .map(String::from)
             .collect::<BTreeSet<_>>();
@@ -4570,26 +4561,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn file_edit_apply_patch_supports_multi_file_changes_and_dry_run() -> anyhow::Result<()> {
+    async fn file_edit_apply_patch_supports_multi_file_changes_and_slim_response(
+    ) -> anyhow::Result<()> {
         let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
         let workspace = server.state.config.read().await.workspace_root.clone();
         std::fs::write(workspace.join("update.txt"), "old\n")?;
         std::fs::write(workspace.join("delete.txt"), "gone\n")?;
         std::fs::write(workspace.join("move.txt"), "move\n")?;
         let patch = "*** Begin Patch\n*** Add File: add.txt\n+added\n*** Update File: update.txt\n@@\n-old\n+new\n*** Delete File: delete.txt\n*** Update File: move.txt\n*** Move to: moved.txt\n@@\n-move\n+moved\n*** End Patch";
-        let dry = server
-            .dispatch(
-                "file.edit",
-                json!({"patch":patch,"dryRun":true,"needConfirm":true}),
-            )
-            .await?;
-        assert_eq!(dry["status"], "dry-run");
-        assert_eq!(dry["summary"]["total"], 4);
-        assert!(!workspace.join("add.txt").is_file());
-
         let result = server.dispatch("file.edit", json!({"patch":patch})).await?;
         assert_eq!(result["status"], "completed");
-        assert_eq!(result["summary"]["changed"], 4);
+        assert_eq!(result["changed"], 4);
+        assert_eq!(result["changes"].as_array().map(Vec::len), Some(4));
         assert_eq!(
             std::fs::read_to_string(workspace.join("add.txt"))?,
             "added\n"
@@ -4604,7 +4587,23 @@ mod tests {
             "moved\n"
         );
         assert!(!workspace.join("move.txt").exists());
-        assert!(result["changes"][3].get("beforeRevision").is_none());
+        assert_eq!(
+            result["changes"][0],
+            json!({"path":"add.txt","action":"created"})
+        );
+        assert_eq!(
+            result["changes"][1],
+            json!({"path":"update.txt","action":"updated"})
+        );
+        assert_eq!(
+            result["changes"][2],
+            json!({"path":"delete.txt","action":"deleted"})
+        );
+        assert_eq!(
+            result["changes"][3],
+            json!({"path":"move.txt","action":"moved","destination":"moved.txt"})
+        );
+        assert!(result.get("summary").is_none());
         Ok(())
     }
 
@@ -4638,8 +4637,6 @@ mod tests {
         assert_eq!(result["changes"][2]["status"], "failed");
         assert_eq!(result["changes"][2]["error"]["code"], "file_write_failed");
         assert_eq!(result["changes"][3]["status"], "skipped-not-attempted");
-        assert_eq!(result["summary"]["changed"], 1);
-        assert_eq!(result["summary"]["planned"], 3);
         assert_eq!(result["summary"]["committed"], 1);
         assert_eq!(result["summary"]["failed"], 1);
         assert_eq!(result["summary"]["skipped"], 1);
