@@ -259,7 +259,11 @@ v0.9 会拒绝 `maxActiveSessions` 与 `sessionIdleTimeoutSecs`。
     "docs": {
       "enabled": false,
       "transport": "streamable-http",
-      "url": "https://mcp.example.com/mcp"
+      "url": "https://mcp.example.com/mcp",
+      "auth": {
+        "type": "bearer",
+        "token": "replace-me"
+      }
     },
     "local-tool": {
       "enabled": false,
@@ -270,7 +274,7 @@ v0.9 会拒绝 `maxActiveSessions` 与 `sessionIdleTimeoutSecs`。
 }
 ```
 
-Server id 最长 64 字节，只使用字母、数字、`.`、`_`、`-`。`streamable-http` 需要绝对 HTTP(S) URL；`stdio` 需要非空命令。在审查信任与确认策略之前，示例应保持 disabled。
+Server id 最长 64 字节，只使用字母、数字、`.`、`_`、`-`。`streamable-http` 需要绝对 HTTP(S) URL，并可配置 `auth: {"type":"bearer","token":"..."}`；运行时会发送 `Authorization: Bearer <token>`。`stdio` 不接受 Bearer auth，且需要非空命令。TUI 会掩码 Bearer token，并在最终 JSON 预览中脱敏。在审查信任与确认策略之前，示例应保持 disabled。
 
 ## Skills、Room 与 sandbox
 

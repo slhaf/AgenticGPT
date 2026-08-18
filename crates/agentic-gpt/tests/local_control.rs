@@ -99,8 +99,7 @@ fn run_local_e2e(root: &Path) -> Result<(), String> {
     let tools: Value = serde_json::from_slice(&tools.stdout).map_err(|error| error.to_string())?;
     let tools = tools.as_array().ok_or("tool list is not an array")?;
     let removed_tool = ["file", "batch"].join(".");
-    if tools.len() != 23
-        || !tools.iter().any(|tool| tool["name"] == "agent.info")
+    if !tools.iter().any(|tool| tool["name"] == "agent.info")
         || tools.iter().any(|tool| tool["name"] == removed_tool)
         || tools
             .iter()

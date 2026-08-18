@@ -662,6 +662,15 @@ impl ConfigTuiApp {
                         }
                         self.field_errors.remove(&field);
                     }
+                    Some(pages::McpFocusTarget::Field { index, field })
+                        if field == SetupField::McpServerBearerAuth =>
+                    {
+                        if let Some(draft) = self.section_draft.as_mut() {
+                            pages::toggle_mcp_server_bearer_auth(draft, index);
+                        }
+                        self.field_errors.remove(&field);
+                        self.field_errors.remove(&SetupField::McpServerBearerToken);
+                    }
                     Some(pages::McpFocusTarget::Field { index, field }) => {
                         self.begin_mcp_edit(index, field, false);
                     }
@@ -1080,11 +1089,13 @@ impl ConfigTuiApp {
                     .unwrap_or(0)
             }
             Some(ReviewEditorKind::Compound) => {
-                if self.state.review_mcp_index.is_some() {
-                    4
-                } else {
-                    0
-                }
+                let Some(index) = self.state.review_mcp_index else {
+                    return 0;
+                };
+                self.section_draft
+                    .as_ref()
+                    .map(|draft| pages::mcp_server_review_fields(draft, index).len())
+                    .unwrap_or(0)
             }
             Some(ReviewEditorKind::AutoCustom) => 2,
             _ => 0,
@@ -1122,21 +1133,45 @@ impl ConfigTuiApp {
                 let Some(index) = self.state.review_mcp_index else {
                     return;
                 };
-                match self.state.review_subfocus {
-                    0 => self.begin_review_mcp_edit(index, SetupField::McpServerId),
-                    1 => {
+                let field = self.section_draft.as_ref().and_then(|draft| {
+                    pages::mcp_server_review_fields(draft, index)
+                        .get(self.state.review_subfocus)
+                        .copied()
+                });
+                match field {
+                    Some(SetupField::McpServerId)
+                    | Some(SetupField::McpServerEndpoint)
+                    | Some(SetupField::McpServerBearerToken) => {
+                        self.begin_review_mcp_edit(index, field.unwrap())
+                    }
+                    Some(SetupField::McpServerEnabled) => {
                         if let Some(draft) = self.section_draft.as_mut() {
                             pages::toggle_mcp_server_enabled(draft, index);
                         }
                         self.stage_review_mcp_draft_if_valid();
                     }
-                    2 => {
+                    Some(SetupField::McpServerTransport) => {
                         if let Some(draft) = self.section_draft.as_mut() {
                             pages::toggle_mcp_server_transport(draft, index);
                         }
+                        self.state.review_subfocus = self.state.review_subfocus.min(
+                            self.section_draft
+                                .as_ref()
+                                .map(|draft| {
+                                    pages::mcp_server_review_fields(draft, index)
+                                        .len()
+                                        .saturating_sub(1)
+                                })
+                                .unwrap_or(0),
+                        );
                         self.stage_review_mcp_draft_if_valid();
                     }
-                    3 => self.begin_review_mcp_edit(index, SetupField::McpServerEndpoint),
+                    Some(SetupField::McpServerBearerAuth) => {
+                        if let Some(draft) = self.section_draft.as_mut() {
+                            pages::toggle_mcp_server_bearer_auth(draft, index);
+                        }
+                        self.stage_review_mcp_draft_if_valid();
+                    }
                     _ => {}
                 }
             }

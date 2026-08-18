@@ -323,7 +323,8 @@ While the standalone worker is running, edits to `policy`, `pathPolicy`,
 `limits`, and `mcpServers` are polled, fully validated, and applied atomically
 to new admissions/calls. MCP server ids use `A-Z`, `a-z`, `0-9`, `.`, `_`, or
 `-` (maximum 64 bytes); `streamable-http` requires an absolute HTTP(S) URL and
-`stdio` requires a non-empty command. Invalid config versions keep the last
+may optionally use structured Bearer auth; `stdio` requires a non-empty command
+and rejects HTTP auth. Invalid config versions keep the last
 valid live subset. Already admitted Jobs and already-created downstream
 MCP clients retain their original decision/server definition and are not
 cancelled or rerouted by a reload. Because downstream clients are currently

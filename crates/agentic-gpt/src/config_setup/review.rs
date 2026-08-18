@@ -153,6 +153,8 @@ mod tests {
                 enabled: true,
                 transport: "stdio".into(),
                 endpoint: "node server.mjs".into(),
+                bearer_auth: false,
+                bearer_token: None,
             }],
         }));
         assert_eq!(mcp_items.len(), 1);
@@ -749,7 +751,7 @@ fn optional_items(draft: OptionalSectionDraft) -> Vec<ReviewItem> {
                     ReviewItem::mcp_server(
                         index,
                         format!(
-                            "{} · {} · {} · {}",
+                            "{} · {} · {} · {}{}",
                             server.id,
                             if server.enabled {
                                 "enabled"
@@ -757,7 +759,8 @@ fn optional_items(draft: OptionalSectionDraft) -> Vec<ReviewItem> {
                                 "disabled"
                             },
                             server.transport,
-                            server.endpoint
+                            server.endpoint,
+                            if server.bearer_auth { " · bearer" } else { "" }
                         ),
                     )
                 })

@@ -113,11 +113,11 @@ pub(crate) async fn request_batch_confirmation(
                 request_hub_batch_confirmation(state, config, &preview, needs_confirmation).await
             }
         };
-        if result != "confirmation_provider_unavailable" {
+        if result != "provider_unavailable" {
             return result;
         }
     }
-    "confirmation_provider_unavailable".to_string()
+    "provider_unavailable".to_string()
 }
 
 fn confirmation_channels(
@@ -151,7 +151,7 @@ async fn request_freedesktop_batch_confirmation(
     .await
     .unwrap_or(false);
     if !supports_actions {
-        return "confirmation_provider_unavailable".to_string();
+        return "provider_unavailable".to_string();
     }
     let has_risky_file_mutation = needs_confirmation
         .iter()
@@ -200,7 +200,7 @@ async fn request_freedesktop_batch_confirmation(
                 "deny".to_string()
             }
         }
-        Err(_) => "confirmation_provider_unavailable".to_string(),
+        Err(_) => "provider_unavailable".to_string(),
     }
 }
 
@@ -251,11 +251,11 @@ pub(crate) async fn request_confirmation(
                 request_hub_confirmation(state, config, program, args).await
             }
         };
-        if result != "confirmation_provider_unavailable" {
+        if result != "provider_unavailable" {
             return result;
         }
     }
-    "confirmation_provider_unavailable".to_string()
+    "provider_unavailable".to_string()
 }
 
 /// Confirmation used by an asynchronously registered Job. Hub-backed
@@ -286,11 +286,11 @@ pub(crate) async fn request_confirmation_cancellable(
                 .await
             }
         };
-        if result != "confirmation_provider_unavailable" {
+        if result != "provider_unavailable" {
             return result;
         }
     }
-    "confirmation_provider_unavailable".to_string()
+    "provider_unavailable".to_string()
 }
 
 async fn request_freedesktop_confirmation(
@@ -310,7 +310,7 @@ async fn request_freedesktop_confirmation(
     .await
     .unwrap_or(false);
     if !supports_actions {
-        return "confirmation_provider_unavailable".to_string();
+        return "provider_unavailable".to_string();
     }
     let zh = confirmation_language_is_zh(config);
     let warning = if !config.sandbox.enabled && risky_file_mutation(program) {
@@ -358,7 +358,7 @@ async fn request_freedesktop_confirmation(
                 "deny".to_string()
             }
         }
-        Err(_) => "confirmation_provider_unavailable".to_string(),
+        Err(_) => "provider_unavailable".to_string(),
     }
 }
 
@@ -610,11 +610,11 @@ async fn request_mcp_batch_confirmation_cancellable(
                 .await
             }
         };
-        if result == "cancelled" || result != "confirmation_provider_unavailable" {
+        if result == "cancelled" || result != "provider_unavailable" {
             return result;
         }
     }
-    "confirmation_provider_unavailable".to_string()
+    "provider_unavailable".to_string()
 }
 
 async fn request_freedesktop_mcp_batch_confirmation(
@@ -633,7 +633,7 @@ async fn request_freedesktop_mcp_batch_confirmation(
     .await
     .unwrap_or(false);
     if !supports_actions {
-        return "confirmation_provider_unavailable".to_string();
+        return "provider_unavailable".to_string();
     }
     let mut notification = notify_rust::Notification::new();
     notification
@@ -662,7 +662,7 @@ async fn request_freedesktop_mcp_batch_confirmation(
                 _ => "deny".to_string(),
             }
         }
-        Err(_) => "confirmation_provider_unavailable".to_string(),
+        Err(_) => "provider_unavailable".to_string(),
     }
 }
 
@@ -747,11 +747,11 @@ async fn request_mcp_tool_confirmation_cancellable(
                 .await
             }
         };
-        if result == "cancelled" || result != "confirmation_provider_unavailable" {
+        if result == "cancelled" || result != "provider_unavailable" {
             return result;
         }
     }
-    "confirmation_provider_unavailable".to_string()
+    "provider_unavailable".to_string()
 }
 
 async fn request_freedesktop_mcp_confirmation(
@@ -772,7 +772,7 @@ async fn request_freedesktop_mcp_confirmation(
     .await
     .unwrap_or(false);
     if !supports_actions {
-        return "confirmation_provider_unavailable".to_string();
+        return "provider_unavailable".to_string();
     }
     let body = format!(
         "{}\n\nAllow once, or temporarily allow this MCP server?",
@@ -801,7 +801,7 @@ async fn request_freedesktop_mcp_confirmation(
                 _ => "deny".to_string(),
             }
         }
-        Err(_) => "confirmation_provider_unavailable".to_string(),
+        Err(_) => "provider_unavailable".to_string(),
     }
 }
 

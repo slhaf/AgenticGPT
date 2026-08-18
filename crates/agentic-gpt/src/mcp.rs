@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, HashSet},
-    env,
+    env, fmt,
     future::Future,
     path::PathBuf,
     pin::Pin,
@@ -95,6 +95,25 @@ pub(crate) struct McpServerConfig {
     pub(crate) transport: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) auth: Option<McpServerAuthConfig>,
+}
+
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "type", rename_all = "kebab-case")]
+pub(crate) enum McpServerAuthConfig {
+    Bearer { token: String },
+}
+
+impl fmt::Debug for McpServerAuthConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Bearer { .. } => formatter
+                .debug_struct("Bearer")
+                .field("token", &"[REDACTED]")
+                .finish(),
+        }
+    }
 }
 
 pub(crate) fn mutate_servers(config_path: PathBuf, command: McpConfigCommand) -> Result<()> {
@@ -116,6 +135,7 @@ pub(crate) fn mutate_servers(config_path: PathBuf, command: McpConfigCommand) ->
                     enabled,
                     transport,
                     url: Some(url),
+                    auth: None,
                 },
             );
         }
@@ -167,6 +187,15 @@ pub(crate) fn validate_server_configs(servers: &BTreeMap<String, McpServerConfig
                 if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
                     return Err(anyhow!("mcp_server_url_invalid: {server_id}"));
                 }
+                if let Some(McpServerAuthConfig::Bearer { token }) = &server.auth {
+                    if token.is_empty()
+                        || token.trim() != token
+                        || token.chars().any(char::is_whitespace)
+                        || token.chars().any(char::is_control)
+                    {
+                        return Err(anyhow!("mcp_server_auth_invalid: {server_id}"));
+                    }
+                }
             }
             "stdio" => {
                 if endpoint.is_empty() {
@@ -174,6 +203,9 @@ pub(crate) fn validate_server_configs(servers: &BTreeMap<String, McpServerConfig
                 }
                 if endpoint != raw_endpoint || endpoint.chars().any(|character| character == '\0') {
                     return Err(anyhow!("mcp_server_command_invalid: {server_id}"));
+                }
+                if server.auth.is_some() {
+                    return Err(anyhow!("mcp_server_auth_unsupported: {server_id}: stdio"));
                 }
             }
             other => return Err(anyhow!("unsupported_mcp_transport: {server_id}: {other}")),
@@ -1497,9 +1529,8 @@ fn production_client_factory() -> McpClientFactory {
 async fn client(server: &McpServerConfig) -> Result<McpClient> {
     match server.transport.as_str() {
         "streamable-http" => {
-            let url = server.url.clone().context("mcp_server_url_missing")?;
             let transport = StreamableHttpClientTransport::from_config(
-                StreamableHttpClientTransportConfig::with_uri(url),
+                streamable_http_transport_config(server)?,
             );
             Ok(ClientInfo::default().serve(transport).await?)
         }
@@ -1517,6 +1548,17 @@ async fn client(server: &McpServerConfig) -> Result<McpClient> {
         }
         other => Err(anyhow!("unsupported_mcp_transport: {other}")),
     }
+}
+
+fn streamable_http_transport_config(
+    server: &McpServerConfig,
+) -> Result<StreamableHttpClientTransportConfig> {
+    let url = server.url.clone().context("mcp_server_url_missing")?;
+    let mut config = StreamableHttpClientTransportConfig::with_uri(url);
+    if let Some(McpServerAuthConfig::Bearer { token }) = &server.auth {
+        config = config.auth_header(token.clone());
+    }
+    Ok(config)
 }
 
 fn tool_arguments(arguments: Value) -> Result<JsonObject> {
@@ -1537,6 +1579,7 @@ mod tests {
             enabled: true,
             transport: transport.to_string(),
             url: endpoint.map(str::to_string),
+            auth: None,
         }
     }
 
@@ -1757,6 +1800,7 @@ mod tests {
                 enabled: true,
                 transport: "stdio".to_string(),
                 url: Some("fake-command".to_string()),
+                auth: None,
             },
         );
         let state = AppState {
@@ -1798,6 +1842,7 @@ mod tests {
                 enabled: true,
                 transport: "stdio".to_string(),
                 url: Some(server_id.to_string()),
+                auth: None,
             },
         );
         if temporary_allow {
@@ -2954,5 +2999,33 @@ mod tests {
             server_config_revision(&first),
             server_config_revision(&second)
         );
+    }
+
+    #[test]
+    fn streamable_http_bearer_auth_is_validated_and_injected() {
+        let mut http = server("streamable-http", Some("https://example.test/mcp"));
+        http.auth = Some(McpServerAuthConfig::Bearer {
+            token: "secret-token".to_string(),
+        });
+        let mut servers = BTreeMap::new();
+        servers.insert("secured".to_string(), http.clone());
+        validate_server_configs(&servers).unwrap();
+        assert_eq!(
+            streamable_http_transport_config(&http)
+                .unwrap()
+                .auth_header
+                .as_deref(),
+            Some("secret-token")
+        );
+        assert!(!format!("{http:?}").contains("secret-token"));
+
+        let mut stdio = server("stdio", Some("node server.mjs"));
+        stdio.auth = http.auth;
+        servers.clear();
+        servers.insert("local".to_string(), stdio);
+        assert!(validate_server_configs(&servers)
+            .unwrap_err()
+            .to_string()
+            .starts_with("mcp_server_auth_unsupported"));
     }
 }

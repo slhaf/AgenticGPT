@@ -1116,6 +1116,22 @@ pub(crate) fn sparse_config_value(config: &Config, redact_secrets: bool) -> Resu
         {
             *secret = Value::String("[REDACTED]".to_string());
         }
+        if let Some(servers) = value
+            .as_object_mut()
+            .and_then(|object| object.get_mut("mcpServers"))
+            .and_then(Value::as_object_mut)
+        {
+            for server in servers.values_mut() {
+                if let Some(token) = server
+                    .as_object_mut()
+                    .and_then(|server| server.get_mut("auth"))
+                    .and_then(Value::as_object_mut)
+                    .and_then(|auth| auth.get_mut("token"))
+                {
+                    *token = Value::String("[REDACTED]".to_string());
+                }
+            }
+        }
     }
     Ok(value)
 }
@@ -1694,6 +1710,7 @@ mod tests {
                 enabled: true,
                 transport: "streamable-http".to_string(),
                 url: Some("https://example.test/mcp".to_string()),
+                auth: None,
             },
         );
         assert!(config.validate_mcp_servers().is_ok());
@@ -1788,14 +1805,32 @@ mod tests {
             api_key: "file:/tmp/tunnel-secret".to_string(),
             ..TunnelConfig::default()
         });
+        config.mcp_servers.insert(
+            "secured".to_string(),
+            crate::mcp::McpServerConfig {
+                enabled: true,
+                transport: "streamable-http".to_string(),
+                url: Some("https://example.test/mcp".to_string()),
+                auth: Some(crate::mcp::McpServerAuthConfig::Bearer {
+                    token: "mcp-secret-marker".to_string(),
+                }),
+            },
+        );
 
         let value = sparse_config_value(&config, true).unwrap();
         assert!(value.get("tunnel").is_some());
         assert_eq!(value["hub"]["agentSecret"], json!("[REDACTED]"));
         assert_eq!(value["tunnel"]["apiKey"], json!("file:/tmp/tunnel-secret"));
+        assert_eq!(
+            value["mcpServers"]["secured"]["auth"]["token"],
+            json!("[REDACTED]")
+        );
         assert!(!serde_json::to_string(&value)
             .unwrap()
             .contains("hub-secret-marker"));
+        assert!(!serde_json::to_string(&value)
+            .unwrap()
+            .contains("mcp-secret-marker"));
     }
 
     #[test]

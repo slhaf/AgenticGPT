@@ -423,35 +423,50 @@ async fn publish_ntfy(
     let ntfy = &remote.ntfy;
     let server_url = ntfy.server_url.trim_end_matches('/');
     let callback_base = ntfy.callback_base_url.trim_end_matches('/');
-    let allow_url =
-        format!("{callback_base}/v1/confirmations/{confirmation_id}/allow?token={token}");
-    let allow_mcp_15m_url = format!(
-        "{callback_base}/v1/confirmations/{confirmation_id}/allow-mcp-server-15m?token={token}"
-    );
-    let allow_mcp_30m_url = format!(
-        "{callback_base}/v1/confirmations/{confirmation_id}/allow-mcp-server-30m?token={token}"
-    );
-    let deny_url = format!("{callback_base}/v1/confirmations/{confirmation_id}/deny?token={token}");
     let message = format!(
         "Agent {agent_id} wants to run:\n{command_preview}\n\nReason: {}\nRisk: {}",
         payload.reason, payload.risk_level
     );
-    let actions = if matches!(
+    let actions = ntfy_confirmation_actions(
+        callback_base,
+        confirmation_id,
+        token,
         payload.kind.as_deref(),
-        Some("mcpTool" | "mcpBatchSingleServer")
-    ) {
+    );
+    let body = json!({
+        "topic": ntfy.topic,
+        "title": "AgenticGPT confirmation",
+        "message": message,
+        "priority": 5,
+        "tags": ["warning"],
+        "actions": actions
+    });
+    let response = state.http.post(server_url).json(&body).send().await?;
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!("ntfy returned {}", response.status()))
+    }
+}
+
+fn ntfy_confirmation_actions(
+    callback_base: &str,
+    confirmation_id: &str,
+    token: &str,
+    kind: Option<&str>,
+) -> serde_json::Value {
+    let allow_url =
+        format!("{callback_base}/v1/confirmations/{confirmation_id}/allow?token={token}");
+    let allow_mcp_30m_url = format!(
+        "{callback_base}/v1/confirmations/{confirmation_id}/allow-mcp-server-30m?token={token}"
+    );
+    let deny_url = format!("{callback_base}/v1/confirmations/{confirmation_id}/deny?token={token}");
+    if matches!(kind, Some("mcpTool" | "mcpBatchSingleServer")) {
         json!([
             {
                 "action": "http",
                 "label": "Allow once",
                 "url": allow_url,
-                "method": "POST",
-                "clear": true
-            },
-            {
-                "action": "http",
-                "label": "Allow MCP 15m",
-                "url": allow_mcp_15m_url,
                 "method": "POST",
                 "clear": true
             },
@@ -487,20 +502,6 @@ async fn publish_ntfy(
                 "clear": true
             }
         ])
-    };
-    let body = json!({
-        "topic": ntfy.topic,
-        "title": "AgenticGPT confirmation",
-        "message": message,
-        "priority": 5,
-        "tags": ["warning"],
-        "actions": actions
-    });
-    let response = state.http.post(server_url).json(&body).send().await?;
-    if response.status().is_success() {
-        Ok(())
-    } else {
-        Err(anyhow::anyhow!("ntfy returned {}", response.status()))
     }
 }
 
@@ -971,6 +972,21 @@ mod tests {
     fn parses_bearer_case_insensitively() {
         assert_eq!(parse_bearer_token("bearer  abc ").as_deref(), Some("abc"));
         assert_eq!(parse_bearer_token("Basic abc"), None);
+    }
+
+    #[test]
+    fn ntfy_mcp_confirmation_stays_within_three_action_limit() {
+        let actions = ntfy_confirmation_actions(
+            "https://hub.example",
+            "confirm-1",
+            "token-1",
+            Some("mcpTool"),
+        );
+        let actions = actions.as_array().unwrap();
+        assert_eq!(actions.len(), 3);
+        assert_eq!(actions[0]["label"], "Allow once");
+        assert_eq!(actions[1]["label"], "Allow MCP 30m");
+        assert_eq!(actions[2]["label"], "Deny");
     }
 
     #[test]

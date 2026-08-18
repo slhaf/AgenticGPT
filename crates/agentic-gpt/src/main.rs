@@ -1619,6 +1619,7 @@ mod tests {
                 enabled: true,
                 transport: "streamable-http".to_string(),
                 url: Some("https://old.example/mcp".to_string()),
+                auth: None,
             },
         );
         let in_flight = live.mcp_servers["primary"].clone();
@@ -1628,6 +1629,7 @@ mod tests {
                 enabled: false,
                 transport: "streamable-http".to_string(),
                 url: Some("https://new.example/mcp".to_string()),
+                auth: None,
             },
         );
 
@@ -1686,6 +1688,7 @@ mod tests {
                 enabled: true,
                 transport: "streamable-http".to_string(),
                 url: Some("https://old.example/mcp".to_string()),
+                auth: None,
             },
         );
         *state.config.write().await = initial.clone();
@@ -1697,6 +1700,7 @@ mod tests {
                 enabled: true,
                 transport: "streamable-http".to_string(),
                 url: Some("https://new.example/mcp".to_string()),
+                auth: None,
             },
         );
         valid.mcp_servers.insert(
@@ -1705,6 +1709,7 @@ mod tests {
                 enabled: false,
                 transport: "stdio".to_string(),
                 url: Some("node ./local-server.mjs".to_string()),
+                auth: None,
             },
         );
         valid.limits.max_file_search_context_lines = 20;

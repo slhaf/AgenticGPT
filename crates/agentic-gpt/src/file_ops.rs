@@ -1154,7 +1154,7 @@ async fn apply_patch_inner(
                 .await;
         if confirmation != "allow_once" {
             cleanup_temps(&mut changes);
-            let code = if confirmation == "confirmation_provider_unavailable" {
+            let code = if confirmation == "provider_unavailable" {
                 "file_confirmation_unavailable"
             } else {
                 "file_confirmation_denied"

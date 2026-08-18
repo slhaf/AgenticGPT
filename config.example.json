@@ -21,7 +21,11 @@
     "example-http": {
       "enabled": false,
       "transport": "streamable-http",
-      "url": "https://mcp.example.com/mcp"
+      "url": "https://mcp.example.com/mcp",
+      "auth": {
+        "type": "bearer",
+        "token": "replace-me"
+      }
     },
     "example-stdio": {
       "enabled": false,

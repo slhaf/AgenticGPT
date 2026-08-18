@@ -173,7 +173,7 @@ use crate::config::{
 use crate::config_templates::{
     self, build_config, InitInput, OptionalSection, RuntimeMode, SecretValue, TunnelSecretSource,
 };
-use crate::mcp::{self, McpServerConfig};
+use crate::mcp::{self, McpServerAuthConfig, McpServerConfig};
 use crate::WorkerProfile;
 
 use super::model::{
@@ -372,7 +372,9 @@ pub(super) fn validate_field(
         SetupField::McpServerId
         | SetupField::McpServerEnabled
         | SetupField::McpServerTransport
-        | SetupField::McpServerEndpoint => validate_optional(
+        | SetupField::McpServerEndpoint
+        | SetupField::McpServerBearerAuth
+        | SetupField::McpServerBearerToken => validate_optional(
             OptionalSection::McpServers,
             &session.optional_draft(OptionalSection::McpServers),
         ),
@@ -588,6 +590,13 @@ fn mcp_servers_from_draft(
                 enabled: server.enabled,
                 transport: server.transport.clone(),
                 url: Some(server.endpoint.clone()),
+                auth: server.bearer_auth.then(|| McpServerAuthConfig::Bearer {
+                    token: server
+                        .bearer_token
+                        .as_ref()
+                        .map(|value| value.expose().to_string())
+                        .unwrap_or_default(),
+                }),
             },
         );
     }
@@ -599,6 +608,11 @@ fn mcp_servers_from_draft(
             (
                 SetupField::McpServerTransport,
                 "config_init_mcp_transport_invalid",
+            )
+        } else if code.starts_with("mcp_server_auth") {
+            (
+                SetupField::McpServerBearerToken,
+                "config_init_mcp_bearer_token_invalid",
             )
         } else {
             (

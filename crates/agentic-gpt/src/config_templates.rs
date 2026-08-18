@@ -46,6 +46,7 @@ pub(crate) enum PendingAction {
     ReplaceAgentSecret,
 }
 
+#[derive(Clone, Eq, PartialEq)]
 pub(crate) struct SecretValue(String);
 
 impl SecretValue {
@@ -341,6 +342,7 @@ mod tests {
                 enabled: true,
                 transport: "stdio".to_string(),
                 url: Some("node ./server.mjs".to_string()),
+                auth: None,
             },
         );
         let mut input = InitInput::non_interactive_defaults(UiLanguage::En);
@@ -455,6 +457,7 @@ mod tests {
                 enabled: true,
                 transport: "stdio".to_string(),
                 url: Some("node ./server.mjs".to_string()),
+                auth: None,
             },
         );
 

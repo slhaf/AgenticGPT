@@ -81,6 +81,10 @@ fn localized_error(code: &str, language: UiLanguage) -> String {
             "Enter a valid HTTP URL or stdio command.",
             "请输入有效的 HTTP URL 或 stdio 命令。",
         ),
+        "config_init_mcp_bearer_token_invalid" => (
+            "Bearer token must be non-empty and contain no whitespace or control characters.",
+            "Bearer 令牌不能为空，且不能包含空白或控制字符。",
+        ),
         "config_init_optional_section_invalid" => {
             ("Optional section is invalid.", "可选配置区块无效。")
         }
@@ -1763,6 +1767,67 @@ fn push_mcp_servers_form(
                 lines.push(inline_error_line(&localized_error(error, language), theme));
             }
         }
+
+        if server.transport == "streamable-http" {
+            let auth_focus = focus_items.iter().position(|item| {
+                matches!(item, OptionalFocusItem::McpField { field: SetupField::McpServerBearerAuth, index: candidate } if *candidate == index)
+            });
+            let auth_focused = auth_focus == Some(state.focus);
+            if auth_focused {
+                *focused_line = lines.len();
+            }
+            lines.push(value_row_line(
+                t(language, "Auth", "认证"),
+                if server.bearer_auth { "bearer" } else { "none" },
+                auth_focused,
+                LABEL_WIDTH,
+                theme,
+            ));
+
+            if server.bearer_auth {
+                let token_focus = focus_items.iter().position(|item| {
+                    matches!(item, OptionalFocusItem::McpField { field: SetupField::McpServerBearerToken, index: candidate } if *candidate == index)
+                });
+                let token_focused = token_focus == Some(state.focus);
+                let token_editing = state.mcp_edit.as_ref().is_some_and(|target| {
+                    target.index == index && target.field == SetupField::McpServerBearerToken
+                });
+                if token_focused {
+                    *focused_line = lines.len();
+                }
+                let token_value = if token_editing {
+                    state
+                        .editing
+                        .as_ref()
+                        .map(|edit| edit.buffer.as_str())
+                        .unwrap_or_default()
+                } else {
+                    server
+                        .bearer_token
+                        .as_ref()
+                        .map(|value| value.expose())
+                        .unwrap_or_default()
+                };
+                let masked = "•".repeat(token_value.chars().count());
+                lines.push(input_row_line(
+                    t(language, "Token", "令牌"),
+                    &masked,
+                    token_focused,
+                    token_editing,
+                    token_editing
+                        .then(|| state.editing.as_ref().map(|edit| edit.cursor))
+                        .flatten(),
+                    LABEL_WIDTH,
+                    (masked.chars().count() + usize::from(token_editing)).clamp(8, 36),
+                    theme,
+                ));
+                if token_focused {
+                    if let Some(error) = errors.get(&SetupField::McpServerBearerToken) {
+                        lines.push(inline_error_line(&localized_error(error, language), theme));
+                    }
+                }
+            }
+        }
         lines.push(Line::raw(""));
     }
 }
@@ -2064,7 +2129,10 @@ fn render_optional_form_footer(
             let action = match target {
                 McpFocusTarget::Add => t(language, "add", "新增"),
                 McpFocusTarget::Field {
-                    field: SetupField::McpServerEnabled | SetupField::McpServerTransport,
+                    field:
+                        SetupField::McpServerEnabled
+                        | SetupField::McpServerTransport
+                        | SetupField::McpServerBearerAuth,
                     ..
                 } => t(language, "toggle", "切换"),
                 McpFocusTarget::Field { .. } => t(language, "edit", "编辑"),
@@ -2424,8 +2492,8 @@ pub(super) fn optional_focus_items(
                 .servers
                 .iter()
                 .enumerate()
-                .flat_map(|(index, _)| {
-                    [
+                .flat_map(|(index, server)| {
+                    let mut items = vec![
                         OptionalFocusItem::McpField {
                             field: SetupField::McpServerId,
                             index,
@@ -2442,7 +2510,20 @@ pub(super) fn optional_focus_items(
                             field: SetupField::McpServerEndpoint,
                             index,
                         },
-                    ]
+                    ];
+                    if server.transport == "streamable-http" {
+                        items.push(OptionalFocusItem::McpField {
+                            field: SetupField::McpServerBearerAuth,
+                            index,
+                        });
+                        if server.bearer_auth {
+                            items.push(OptionalFocusItem::McpField {
+                                field: SetupField::McpServerBearerToken,
+                                index,
+                            });
+                        }
+                    }
+                    items
                 })
                 .collect(),
             _ => Vec::new(),
@@ -2505,6 +2586,14 @@ pub(super) fn mcp_server_value(
         SetupField::McpServerEnabled => Some(server.enabled.to_string()),
         SetupField::McpServerTransport => Some(server.transport.clone()),
         SetupField::McpServerEndpoint => Some(server.endpoint.clone()),
+        SetupField::McpServerBearerAuth => Some(server.bearer_auth.to_string()),
+        SetupField::McpServerBearerToken => Some(
+            server
+                .bearer_token
+                .as_ref()
+                .map(|value| value.expose().to_string())
+                .unwrap_or_default(),
+        ),
         _ => None,
     }
 }
@@ -2526,6 +2615,14 @@ pub(super) fn set_mcp_server_value(
         SetupField::McpServerEndpoint => server.endpoint = value,
         SetupField::McpServerTransport => server.transport = value,
         SetupField::McpServerEnabled => server.enabled = value == "true",
+        SetupField::McpServerBearerAuth => server.bearer_auth = value == "true",
+        SetupField::McpServerBearerToken => {
+            server.bearer_token = if value.is_empty() {
+                None
+            } else {
+                Some(crate::config_templates::SecretValue::new(value))
+            }
+        }
         _ => return false,
     }
     true
@@ -2552,9 +2649,56 @@ pub(super) fn toggle_mcp_server_transport(draft: &mut OptionalSectionDraft, inde
     server.transport = if server.transport == "stdio" {
         "streamable-http".to_string()
     } else {
+        server.bearer_auth = false;
+        server.bearer_token = None;
         "stdio".to_string()
     };
     true
+}
+
+pub(super) fn toggle_mcp_server_bearer_auth(
+    draft: &mut OptionalSectionDraft,
+    index: usize,
+) -> bool {
+    let OptionalSectionDraft::McpServers(mcp) = draft else {
+        return false;
+    };
+    let Some(server) = mcp.servers.get_mut(index) else {
+        return false;
+    };
+    if server.transport != "streamable-http" {
+        return false;
+    }
+    server.bearer_auth = !server.bearer_auth;
+    if !server.bearer_auth {
+        server.bearer_token = None;
+    }
+    true
+}
+
+pub(super) fn mcp_server_review_fields(
+    draft: &OptionalSectionDraft,
+    index: usize,
+) -> Vec<SetupField> {
+    let OptionalSectionDraft::McpServers(mcp) = draft else {
+        return Vec::new();
+    };
+    let Some(server) = mcp.servers.get(index) else {
+        return Vec::new();
+    };
+    let mut fields = vec![
+        SetupField::McpServerId,
+        SetupField::McpServerEnabled,
+        SetupField::McpServerTransport,
+        SetupField::McpServerEndpoint,
+    ];
+    if server.transport == "streamable-http" {
+        fields.push(SetupField::McpServerBearerAuth);
+        if server.bearer_auth {
+            fields.push(SetupField::McpServerBearerToken);
+        }
+    }
+    fields
 }
 
 pub(super) fn add_mcp_server(
@@ -2574,6 +2718,8 @@ pub(super) fn add_mcp_server(
             enabled: true,
             transport: "streamable-http".to_string(),
             endpoint: String::new(),
+            bearer_auth: false,
+            bearer_token: None,
         },
     );
     Some(index)
@@ -3197,6 +3343,16 @@ fn optional_form_inspector_body(
                     "• stdio: full shell command executed with sh -lc",
                     "• stdio shell quoting, expansion, and composition apply",
                 ],
+                SetupField::McpServerBearerAuth => &[
+                    "Optional Bearer authentication for streamable-http MCP servers.",
+                    "When enabled, AgenticGPT sends Authorization: Bearer <token> on each MCP HTTP request.",
+                    "Switching the server to stdio clears this setting.",
+                ],
+                SetupField::McpServerBearerToken => &[
+                    "Bearer token for this streamable-http MCP server.",
+                    "Enter the token without the Bearer prefix.",
+                    "The TUI masks this value and redacts it from the final JSON preview.",
+                ],
                 SetupField::RoomTimezone => &[
                     "Timezone used to assign Room diary and Notebook dates.",
                     "Default: Asia/Shanghai. Use an IANA timezone such as Europe/Berlin.",
@@ -3363,6 +3519,16 @@ fn optional_form_inspector_body(
                     "• stdio：通过 sh -lc 执行的完整 shell 命令",
                     "• stdio 会应用 shell 的引用、展开和命令组合语义",
                 ],
+                SetupField::McpServerBearerAuth => &[
+                    "streamable-http MCP 服务可选的 Bearer 认证。",
+                    "启用后，AgenticGPT 会在每个 MCP HTTP 请求中发送 Authorization: Bearer <token>。",
+                    "切换到 stdio 时会清除此设置。",
+                ],
+                SetupField::McpServerBearerToken => &[
+                    "此 streamable-http MCP 服务使用的 Bearer token。",
+                    "只填写 token 本身，不要带 Bearer 前缀。",
+                    "TUI 会掩码该值，并在最终 JSON 预览中脱敏。",
+                ],
                 SetupField::RoomTimezone => &[
                     "Room 日记和 Notebook 日期归属使用的时区。",
                     "默认 Asia/Shanghai；建议使用 Europe/Berlin 这类 IANA 时区。",
@@ -3495,6 +3661,8 @@ fn optional_field_label(field: SetupField, language: UiLanguage) -> &'static str
         SetupField::McpServerEnabled => t(language, "Enabled", "启用"),
         SetupField::McpServerTransport => t(language, "Transport", "传输方式"),
         SetupField::McpServerEndpoint => t(language, "URL / command", "URL / 命令"),
+        SetupField::McpServerBearerAuth => t(language, "Bearer auth", "Bearer 认证"),
+        SetupField::McpServerBearerToken => t(language, "Bearer token", "Bearer 令牌"),
         SetupField::RoomTimezone => t(language, "Timezone", "时区"),
         SetupField::DiaryBoundaryHour => t(language, "Diary boundary hour", "日记边界小时"),
         SetupField::NotebookRoot => t(language, "Notebook root", "笔记本根目录"),
@@ -4192,14 +4360,9 @@ fn review_complex_lines(
             };
             let mut lines = Vec::new();
             const LABEL_WIDTH: usize = 12;
-            for (subfocus, field) in [
-                SetupField::McpServerId,
-                SetupField::McpServerEnabled,
-                SetupField::McpServerTransport,
-                SetupField::McpServerEndpoint,
-            ]
-            .into_iter()
-            .enumerate()
+            for (subfocus, field) in mcp_server_review_fields(draft, index)
+                .into_iter()
+                .enumerate()
             {
                 let value = mcp_server_value(draft, index, field).unwrap_or_default();
                 let label = optional_field_label(field, language);
@@ -4209,25 +4372,32 @@ fn review_complex_lines(
                 });
                 if matches!(
                     field,
-                    SetupField::McpServerId | SetupField::McpServerEndpoint
+                    SetupField::McpServerId
+                        | SetupField::McpServerEndpoint
+                        | SetupField::McpServerBearerToken
                 ) {
-                    let display_value = state
+                    let raw_display_value = state
                         .editing
                         .as_ref()
                         .filter(|_| editing)
                         .map(|edit| edit.buffer.as_str())
                         .unwrap_or(value.as_str());
+                    let display_value = if field == SetupField::McpServerBearerToken {
+                        "•".repeat(raw_display_value.chars().count())
+                    } else {
+                        raw_display_value.to_string()
+                    };
                     let cursor = state
                         .editing
                         .as_ref()
                         .filter(|_| editing)
                         .map(|edit| edit.cursor);
-                    let input_width = UnicodeWidthStr::width(display_value)
+                    let input_width = UnicodeWidthStr::width(display_value.as_str())
                         .saturating_add(usize::from(editing))
                         .clamp(8, 36);
                     lines.push(input_row_line(
                         label,
-                        display_value,
+                        &display_value,
                         focused,
                         editing,
                         cursor,
@@ -4236,7 +4406,22 @@ fn review_complex_lines(
                         theme,
                     ));
                 } else {
-                    lines.push(value_row_line(label, &value, focused, LABEL_WIDTH, theme));
+                    let display_value = if field == SetupField::McpServerBearerAuth {
+                        if value == "true" {
+                            "bearer"
+                        } else {
+                            "none"
+                        }
+                    } else {
+                        value.as_str()
+                    };
+                    lines.push(value_row_line(
+                        label,
+                        display_value,
+                        focused,
+                        LABEL_WIDTH,
+                        theme,
+                    ));
                 }
                 if focused {
                     if let Some(error) = errors.get(&field) {
@@ -4299,6 +4484,8 @@ fn review_item_inspector_body(
                 1 => Some(SetupField::McpServerEnabled),
                 2 => Some(SetupField::McpServerTransport),
                 3 => Some(SetupField::McpServerEndpoint),
+                4 => Some(SetupField::McpServerBearerAuth),
+                5 => Some(SetupField::McpServerBearerToken),
                 _ => None,
             };
             return optional_form_inspector_body(section, field, language);

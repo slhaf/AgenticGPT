@@ -271,7 +271,11 @@ v0.9 rejects `maxActiveSessions` and `sessionIdleTimeoutSecs`.
     "docs": {
       "enabled": false,
       "transport": "streamable-http",
-      "url": "https://mcp.example.com/mcp"
+      "url": "https://mcp.example.com/mcp",
+      "auth": {
+        "type": "bearer",
+        "token": "replace-me"
+      }
     },
     "local-tool": {
       "enabled": false,
@@ -282,7 +286,7 @@ v0.9 rejects `maxActiveSessions` and `sessionIdleTimeoutSecs`.
 }
 ```
 
-Server ids are at most 64 bytes and use letters, digits, `.`, `_`, or `-`. `streamable-http` requires an absolute HTTP(S) URL. `stdio` requires a non-empty command. Keep examples disabled until their trust and confirmation policy are reviewed.
+Server ids are at most 64 bytes and use letters, digits, `.`, `_`, or `-`. `streamable-http` requires an absolute HTTP(S) URL and may use `auth: {"type":"bearer","token":"..."}`; the runtime sends the token as `Authorization: Bearer <token>`. Bearer auth is rejected for `stdio`, which requires a non-empty command. The TUI masks Bearer tokens and redacts them from its final JSON preview. Keep examples disabled until their trust and confirmation policy are reviewed.
 
 ## Skills, Room, and sandbox
 

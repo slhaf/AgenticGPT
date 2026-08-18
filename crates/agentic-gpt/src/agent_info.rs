@@ -554,6 +554,7 @@ mod tests {
                 enabled: true,
                 transport: "streamable-http".to_string(),
                 url: Some("https://old.example/mcp".to_string()),
+                auth: None,
             },
         );
         *app.config.write().await = effective.clone();
@@ -566,6 +567,7 @@ mod tests {
                 enabled: false,
                 transport: "streamable-http".to_string(),
                 url: Some("https://new.example/mcp".to_string()),
+                auth: None,
             },
         );
         disk.mcp_servers.insert(
@@ -574,6 +576,7 @@ mod tests {
                 enabled: true,
                 transport: "stdio".to_string(),
                 url: Some("node ./local.mjs".to_string()),
+                auth: None,
             },
         );
         fs::write(&disk_path, serde_json::to_vec_pretty(&disk).unwrap()).unwrap();

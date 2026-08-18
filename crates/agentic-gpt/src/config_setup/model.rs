@@ -50,6 +50,8 @@ pub(crate) enum SetupField {
     McpServerEnabled,
     McpServerTransport,
     McpServerEndpoint,
+    McpServerBearerAuth,
+    McpServerBearerToken,
     RoomTimezone,
     DiaryBoundaryHour,
     NotebookRoot,
@@ -166,6 +168,8 @@ pub(crate) struct McpServerDraft {
     pub(crate) enabled: bool,
     pub(crate) transport: String,
     pub(crate) endpoint: String,
+    pub(crate) bearer_auth: bool,
+    pub(crate) bearer_token: Option<SecretValue>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -653,6 +657,15 @@ fn optional_drafts_from_config(config: &Config) -> OptionalDrafts {
                     enabled: server.enabled,
                     transport: server.transport.clone(),
                     endpoint: server.url.clone().unwrap_or_default(),
+                    bearer_auth: matches!(
+                        server.auth,
+                        Some(crate::mcp::McpServerAuthConfig::Bearer { .. })
+                    ),
+                    bearer_token: server.auth.as_ref().map(
+                        |crate::mcp::McpServerAuthConfig::Bearer { token }| {
+                            SecretValue::new(token.clone())
+                        },
+                    ),
                 })
                 .collect(),
         }),
@@ -811,6 +824,7 @@ mod tests {
                 enabled: true,
                 transport: "stdio".to_string(),
                 url: Some("node ./server.mjs".to_string()),
+                auth: None,
             },
         );
         base.extra
@@ -878,10 +892,12 @@ mod tests {
         session
             .save_optional_section(OptionalSectionDraft::McpServers(McpServersDraft {
                 servers: vec![McpServerDraft {
-                    id: "local_tools".into(),
+                    id: "secured_tools".into(),
                     enabled: true,
-                    transport: "stdio".into(),
-                    endpoint: "node ./server.mjs".into(),
+                    transport: "streamable-http".into(),
+                    endpoint: "https://example.test/mcp".into(),
+                    bearer_auth: true,
+                    bearer_token: Some(SecretValue::new("mcp-token-marker")),
                 }],
             }))
             .unwrap();
@@ -890,6 +906,16 @@ mod tests {
             session.section_status(OptionalSection::McpServers),
             SectionStatus::Configured
         );
+        let draft = session.optional_draft(OptionalSection::McpServers);
+        let OptionalSectionDraft::McpServers(draft) = draft else {
+            panic!("expected MCP draft");
+        };
+        assert!(draft.servers[0].bearer_auth);
+        assert_eq!(
+            draft.servers[0].bearer_token.as_ref().unwrap().expose(),
+            "mcp-token-marker"
+        );
+        assert!(!format!("{draft:?}").contains("mcp-token-marker"));
     }
 
     #[test]
