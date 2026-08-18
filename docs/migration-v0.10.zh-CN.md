@@ -3,7 +3,8 @@
 文件工具现在保留单次读/搜的易用平铺字段，并把批量能力合并到同一个
 工具的 `requests` 字段；原来的组合文件批处理工具已移除。
 
-- `file.read` 单次使用平铺字段，批量使用 1–32 个 `requests`。
+- `file.read` 单次使用平铺字段，批量使用 1–32 个 `requests`。默认返回内容；
+  `metadata: true` 额外附带元数据；截断只返回 `nextStartLine`，不会切断单行。
 - `file.search` 单次使用平铺字段，批量使用 1–32 个 `requests`。
 - 两种形式互斥；批量结果按输入顺序返回，单项失败不会压制其他项。
 - `file.edit` 只接受 Codex apply-patch 文本，可跨文件 Add、Update、Delete、Move。

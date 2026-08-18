@@ -16,14 +16,12 @@ const DEFAULT_RECENT_DAYS: u32 = 3;
 const MAX_RECENT_DAYS: u32 = 30;
 const DEFAULT_LIMIT: usize = 20;
 const MAX_LIMIT: usize = 100;
-const DEFAULT_TIME_HINT: &str = "unknown";
 
 pub(crate) async fn append(
     state: &AppState,
     request: DiaryAppendRequest,
 ) -> Result<DiaryAppendResponse> {
     validate_entry(&request.entry)?;
-    validate_time_hint(request.time_hint.as_deref())?;
     let config = state.config.read().await.clone();
     let timezone = room_timezone(&config)?;
     let root = diary_root(&config);
@@ -35,10 +33,7 @@ pub(crate) async fn append(
         id: format!("dia_{}", Uuid::new_v4().simple()),
         created_at: now,
         date: date.clone(),
-        time_hint: request
-            .time_hint
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| DEFAULT_TIME_HINT.to_string()),
+        time_hint: time_hint_for_local(local).to_string(),
         tags: request.tags,
         entry: request.entry,
     };
@@ -87,8 +82,8 @@ pub(crate) async fn select_exact(
     state: &AppState,
     request: DiarySelectExactRequest,
 ) -> Result<DiaryEntriesResponse> {
-    let date = NaiveDate::from_ymd_opt(request.year, request.month, request.day)
-        .ok_or_else(|| anyhow!("invalid_date"))?;
+    let date = NaiveDate::parse_from_str(&request.date, "%Y-%m-%d")
+        .map_err(|_| anyhow!("invalid_date"))?;
     let config = state.config.read().await.clone();
     let root = diary_root(&config);
     let (mut entries, warnings) = read_entries_for_dates(&root, &[date])?;
@@ -148,19 +143,14 @@ fn validate_entry(entry: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_time_hint(time_hint: Option<&str>) -> Result<()> {
-    if let Some(value) = time_hint {
-        if value.trim().is_empty() {
-            return Ok(());
-        }
-        if !value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-        {
-            return Err(anyhow!("invalid_time_hint"));
-        }
+fn time_hint_for_local(local: DateTime<Tz>) -> &'static str {
+    match local.hour() {
+        5..=11 => "morning",
+        12..=13 => "noon",
+        14..=17 => "afternoon",
+        18..=22 => "evening",
+        _ => "bedtime",
     }
-    Ok(())
 }
 
 fn normalized_limit(limit: Option<usize>) -> usize {
@@ -308,7 +298,6 @@ mod tests {
         let response = append(
             &state,
             DiaryAppendRequest {
-                time_hint: Some("evening".to_string()),
                 tags: vec!["agentic".to_string()],
                 entry: "用户决定 diary V0 直接使用 workspaceRoot，不新增 root 配置。".to_string(),
             },
@@ -319,9 +308,7 @@ mod tests {
         let exact = select_exact(
             &state,
             DiarySelectExactRequest {
-                year: diary_date.year(),
-                month: diary_date.month(),
-                day: diary_date.day(),
+                date: diary_date.to_string(),
                 limit: None,
             },
         )
@@ -329,7 +316,10 @@ mod tests {
         .unwrap();
         assert_eq!(exact.entries.len(), 1);
         assert_eq!(exact.entries[0].id, response.id);
-        assert_eq!(exact.entries[0].time_hint, "evening");
+        assert!(matches!(
+            exact.entries[0].time_hint.as_str(),
+            "morning" | "noon" | "afternoon" | "evening" | "bedtime"
+        ));
         assert_eq!(exact.entries[0].tags, vec!["agentic"]);
         assert!(exact.entries[0].entry.contains("workspaceRoot"));
         assert!(workspace.join("diary").exists());
@@ -343,7 +333,6 @@ mod tests {
             append(
                 &state,
                 DiaryAppendRequest {
-                    time_hint: None,
                     tags: Vec::new(),
                     entry: format!("entry {index}"),
                 },

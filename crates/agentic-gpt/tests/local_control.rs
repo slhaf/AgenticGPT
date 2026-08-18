@@ -140,7 +140,7 @@ fn run_local_e2e(root: &Path) -> Result<(), String> {
         .stdin
         .as_mut()
         .ok_or("missing local CLI stdin")?
-        .write_all(br#"{"path":"ranged.txt","includeContent":true,"startLine":2,"endLine":3}"#)
+        .write_all(br#"{"path":"ranged.txt","startLine":2,"endLine":3}"#)
         .map_err(|error| error.to_string())?;
     let ranged = ranged
         .wait_with_output()
@@ -149,10 +149,7 @@ fn run_local_e2e(root: &Path) -> Result<(), String> {
     let ranged: Value =
         serde_json::from_slice(&ranged.stdout).map_err(|error| error.to_string())?;
     let ranged = &ranged["structuredContent"];
-    if ranged["content"] != "two\nthree\n"
-        || ranged["startLine"] != 2
-        || ranged["returnedThroughLine"] != 3
-    {
+    if ranged["content"] != "two\nthree\n" || ranged.get("metadata").is_some() {
         return Err("ranged local read mismatch".to_string());
     }
 
@@ -163,15 +160,15 @@ fn run_local_e2e(root: &Path) -> Result<(), String> {
             "call",
             "mcp.batch",
             "--arguments",
-            r#"{"calls":[{"id":"dup","serverId":"primary","toolName":"fake.tool","arguments":{}},{"id":"dup","serverId":"primary","toolName":"fake.tool","arguments":{}}],"waitSeconds":0}"#,
+            r#"{"calls":[],"waitSeconds":0}"#,
         ],
     )?;
     let batch_rejected: Value =
         serde_json::from_slice(&batch_rejected.stdout).map_err(|error| error.to_string())?;
-    if batch_rejected["structuredContent"]["error"]["code"] != "mcp_batch_failed"
+    if batch_rejected["structuredContent"]["error"]["code"] != "mcp_batch_call_count_invalid"
         || batch_rejected["structuredContent"]["error"]["message"]
             .as_str()
-            .is_none_or(|message| !message.starts_with("mcp_batch_call_id_duplicate"))
+            .is_none_or(|message| !message.starts_with("mcp_batch_call_count_invalid"))
     {
         return Err("local mcp.batch typed preflight rejection mismatch".to_string());
     }
@@ -180,7 +177,7 @@ fn run_local_e2e(root: &Path) -> Result<(), String> {
     if !batch_audit.contains("\"tool\":\"mcp.batch\"")
         || !batch_audit.contains("\"requestSource\":\"local:mcp.batch\"")
         || !batch_audit.contains("\"outcome\":\"validation_rejected\"")
-        || !batch_audit.contains("\"errorCode\":\"mcp_batch_call_id_duplicate\"")
+        || !batch_audit.contains("\"errorCode\":\"mcp_batch_call_count_invalid\"")
         || batch_audit.contains("\"program\":\"mcp.callTool\"")
     {
         return Err("local mcp.batch aggregate audit mismatch".to_string());
@@ -233,8 +230,8 @@ fn run_local_e2e(root: &Path) -> Result<(), String> {
     )?;
     let guarded: Value =
         serde_json::from_slice(&guarded.stdout).map_err(|error| error.to_string())?;
-    if guarded["structuredContent"]["job"]["state"] != "rejected"
-        || guarded["structuredContent"]["job"]["rejectReason"] != "policy_denied"
+    if guarded["structuredContent"]["state"] != "rejected"
+        || guarded["structuredContent"]["error"]["code"] != "policy_denied"
     {
         return Err("guarded local process was not rejected".to_string());
     }

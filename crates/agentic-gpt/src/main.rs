@@ -925,7 +925,7 @@ mod tests {
                 datetime: None,
                 scope: "agentic".to_string(),
                 significance: PassageSignificance::Anchor,
-                abstract_text: "original".to_string(),
+                abstract_text: Some("original".to_string()),
                 content: "details".to_string(),
                 tags: vec![],
             },

@@ -572,7 +572,7 @@ impl ServerHandler for AgenticMcpServer {
 impl AgenticMcpServer {
     #[tool(
         name = "hub.info",
-        description = "Return the safe Hub runtime summary, including version, public URL, agent counts, confirmation status, and bounded pending/Job counts."
+        description = "Inspect Hub runtime health and bounded capacity summaries; read-only."
     )]
     async fn hub_info(&self) -> Result<CallToolResult, ErrorData> {
         let info = crate::routes::build_hub_info_response(&self.state)
@@ -585,7 +585,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "agent.list",
-        description = "List registered local agents, their online status, capabilities, and safe config summaries. Use this before choosing an agentId."
+        description = "List registered local agents and availability; read-only discovery."
     )]
     async fn list_agents(&self) -> Result<CallToolResult, ErrorData> {
         let entries = registry_entries(&self.state)
@@ -613,7 +613,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "hub.run.get",
-        description = "Return persisted status and optional late result for one Hub-to-Agent command run by runId."
+        description = "Read one retained Hub command run by id."
     )]
     async fn hub_run_get(
         &self,
@@ -632,7 +632,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "hub.run.list",
-        description = "List bounded, filterable Hub and Agent-originated run records retained for 24 hours."
+        description = "List retained Hub and Agent-originated run records; read-only."
     )]
     async fn hub_run_list(
         &self,
@@ -657,7 +657,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "hub.job.list",
-        description = "List current or recently cached job snapshots without dispatching a command to an Agent."
+        description = "List current or cached Job snapshots without dispatching to an Agent."
     )]
     async fn hub_job_list(
         &self,
@@ -670,7 +670,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "hub.job.get",
-        description = "Get one current or recently cached job snapshot without dispatching a command to an Agent."
+        description = "Get one current or cached Job snapshot without dispatching to an Agent."
     )]
     async fn hub_job_get(
         &self,
@@ -685,7 +685,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "process.exec",
-        description = "Start one managed process on a local Agentic agent and wait briefly. The response is always a Job envelope; policy/confirmation/capacity can reject before spawn, and job.get/job.cancel provide later state or cancellation evidence."
+        description = "Start one managed process on a local Agent; use job tools for lifecycle follow-up."
     )]
     async fn exec(&self, params: Parameters<ExecArgs>) -> Result<CallToolResult, ErrorData> {
         let params = params.0;
@@ -719,7 +719,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "process.batch",
-        description = "Admit multiple managed processes on a local Agentic agent with one confirmation boundary and ordered child Jobs. Validation/capacity rejection starts none; already-started children are not rolled back, and job.get/job.cancel provide lifecycle control."
+        description = "Start multiple managed processes under one admission boundary; started side effects are not rolled back."
     )]
     async fn batch_exec(
         &self,
@@ -763,7 +763,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "job.list",
-        description = "List active or recently retained Jobs for one local Agentic agent with optional kind/state filters. This is bounded read-only discovery and never starts work."
+        description = "List active or retained Jobs for one local Agent; read-only discovery."
     )]
     async fn job_list(&self, params: Parameters<JobListArgs>) -> Result<CallToolResult, ErrorData> {
         let params = params.0;
@@ -788,7 +788,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "job.get",
-        description = "Inspect or briefly wait for one Job by id. waitSeconds is capped at 30; cached state may be returned when the Agent is temporarily unavailable and is not proof of a fresh live result."
+        description = "Inspect or briefly wait for one Job; cached fallback is not proof of a fresh live result."
     )]
     async fn job_get(&self, params: Parameters<JobGetArgs>) -> Result<CallToolResult, ErrorData> {
         let params = params.0;
@@ -812,7 +812,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "job.cancel",
-        description = "Request kind-aware cancellation for one Job and return observed outcome/termination evidence. A remote or unconfirmed stop is reported as detached rather than claimed cancelled."
+        description = "Request Job cancellation and return observed termination evidence; remote stop is not assumed."
     )]
     async fn job_cancel(&self, params: Parameters<JobIdArgs>) -> Result<CallToolResult, ErrorData> {
         let params = params.0;
@@ -842,7 +842,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "tmux.listSessions",
-        description = "List persistent tmux shared workspaces on a local Agentic agent. Start tmux workflows here, then use tmux.listPanes to locate the relevant pane."
+        description = "List persistent tmux sessions on a local Agent; read-only."
     )]
     async fn tmux_list_sessions(
         &self,
@@ -861,7 +861,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "tmux.listPanes",
-        description = "List tmux panes, optionally scoped to one session. Returns target ids, cwd, foreground command, size, process/mode state, and isLikelyShell. Inspect this before choosing tmux.exec for a shell pane or tmux.pasteText for a non-shell pane."
+        description = "List tmux panes and shell/TUI hints; read-only."
     )]
     async fn tmux_list_panes(
         &self,
@@ -883,7 +883,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "tmux.capturePane",
-        description = "Capture recent tmux pane history to inspect a shared shell or TUI before acting and to observe progress afterward. This is the primary observation mechanism for tmux.exec, which does not report command completion."
+        description = "Capture bounded tmux pane history; use it to observe tmux.exec progress."
     )]
     async fn tmux_capture_pane(
         &self,
@@ -906,7 +906,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "tmux.pasteText",
-        description = "Paste text into a non-shell tmux pane or TUI, optionally appending Enter. Shell panes are rejected; use tmux.exec there. Defaults to confirmation because this writes into an interactive workspace."
+        description = "Paste text into a non-shell tmux pane or TUI; shell panes are rejected."
     )]
     async fn tmux_paste_text(
         &self,
@@ -931,7 +931,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "tmux.exec",
-        description = "Submit one structured program and argument vector atomically to an existing tmux shell pane for persistent collaborative work. The pane cwd, command policy, path policy, confirmation, and audit apply. Returns a bounded post-submit pane snapshot after waitMs; this is not proof of completion, so use exec when an exit status is required."
+        description = "Submit one structured command to a tmux shell pane; returned snapshot is not proof of completion."
     )]
     async fn tmux_exec(
         &self,
@@ -958,7 +958,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "tmux.createSession",
-        description = "Create an idempotent persistent tmux workspace when no suitable session exists. Prefer reusing the default agentic session; cwd is checked by the local path policy."
+        description = "Create or reuse one persistent tmux session in an allowed working directory."
     )]
     async fn tmux_create_session(
         &self,
@@ -981,7 +981,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "tmux.closeSession",
-        description = "Close a persistent tmux workspace only when it is explicitly no longer needed. Defaults to local confirmation."
+        description = "Close one persistent tmux session; destructive and confirmation-aware."
     )]
     async fn tmux_close_session(
         &self,
@@ -1004,7 +1004,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "mcp.listServers",
-        description = "List MCP servers configured inside local Agentic agents. If agentId is omitted, returns MCP servers for all connected agents grouped by agent. If agentId is provided, returns that agent's servers."
+        description = "List downstream MCP servers, optionally scoped to one Agent; read-only discovery."
     )]
     async fn mcp_list_servers(
         &self,
@@ -1029,7 +1029,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "mcp.listTools",
-        description = "List tools exposed by one MCP server configured inside a local Agentic agent. Use the returned serverId/tool name/schema for mcp.callTool or mcp.batch; this is read-only discovery."
+        description = "List tools exposed by one downstream MCP server; read-only discovery."
     )]
     async fn mcp_list_tools(
         &self,
@@ -1060,7 +1060,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "mcp.callTool",
-        description = "Start one downstream MCP call as a managed Job on a configured local Agentic agent. Arguments are bounded, the response is a Job envelope after a bounded inline wait (maximum 30 seconds), and job.get/job.cancel provide later result or cancellation evidence; this is not a direct transactional call."
+        description = "Run one downstream MCP tool as a managed Job; use job tools for lifecycle follow-up."
     )]
     async fn mcp_call_tool(
         &self,
@@ -1092,7 +1092,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "mcp.batch",
-        description = "Atomically validate/admit 1..16 managed downstream MCP child Jobs with one aggregate confirmation, bounded global/per-server concurrency, ordered results, and optional fail-fast scheduling. Admission/confirmation is atomic; downstream side effects are not rolled back."
+        description = "Run multiple downstream MCP calls as managed Jobs under one admission boundary; downstream side effects are not rolled back."
     )]
     async fn mcp_batch(
         &self,
@@ -1107,7 +1107,7 @@ impl AgenticMcpServer {
                 .calls
                 .into_iter()
                 .map(|call| McpBatchCall {
-                    id: call.id,
+                    id: None,
                     server_id: call.server_id,
                     tool_name: call.tool_name,
                     arguments: call.arguments.unwrap_or_else(|| json!({})),
@@ -1133,7 +1133,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "user.notify.channels",
-        description = "List Hub-native user notification channels. This does not use the active Room Agent."
+        description = "List Hub-native notification channels; read-only."
     )]
     async fn user_notify_channels(&self) -> Result<CallToolResult, ErrorData> {
         let channels = notification_channels(&self.state)
@@ -1144,7 +1144,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "user.notify.send",
-        description = "Send a Hub-native notification to the user through a selected channel. This does not use the active Room Agent."
+        description = "Send one Hub-native user notification."
     )]
     async fn user_notify_send(
         &self,
@@ -1180,7 +1180,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "room.notebook.append",
-        description = "Append an explicit notebook passage to the active Room Agent. ANCHOR passages update current state for their scope. No agentId is used."
+        description = "Append one durable Room notebook passage; ANCHOR updates current state for its scope."
     )]
     async fn room_notebook_append(
         &self,
@@ -1197,7 +1197,12 @@ impl AgenticMcpServer {
                 })
                 .transpose()?,
             scope: params.scope,
-            significance: parse_significance(&params.significance)?,
+            significance: params
+                .significance
+                .as_deref()
+                .map(parse_significance)
+                .transpose()?
+                .unwrap_or_default(),
             abstract_text: params.abstract_text,
             content: params.content,
             tags: params.tags.unwrap_or_default(),
@@ -1217,7 +1222,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "room.notebook.recent",
-        description = "Return recent notebook passages from the active Room Agent. Supports optional scope and significance filters. No agentId is used."
+        description = "Read recent Room notebook passages; read-only."
     )]
     async fn room_notebook_recent(
         &self,
@@ -1249,7 +1254,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "room.notebook.selectExact",
-        description = "Return notebook passages for one exact room-timezone calendar day from the active Room Agent. No agentId is used."
+        description = "Read Room notebook passages for one exact Room-local date; read-only."
     )]
     async fn room_notebook_select_exact(
         &self,
@@ -1257,9 +1262,7 @@ impl AgenticMcpServer {
     ) -> Result<CallToolResult, ErrorData> {
         let params = params.0;
         let payload = NotebookSelectExactRequest {
-            year: params.year,
-            month: params.month,
-            day: params.day,
+            date: params.date,
             scope: params.scope,
             limit: params.limit,
         };
@@ -1278,7 +1281,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "room.notebook.search",
-        description = "Search notebook passages in the active Room Agent by substring over abstract, content, scope, and tags. No vector search is used in V1."
+        description = "Search Room notebook passages by bounded substring fields; read-only."
     )]
     async fn room_notebook_search(
         &self,
@@ -1305,7 +1308,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "room.notebook.current",
-        description = "Return current recoverable notebook state for one scope, derived from current state or latest ANCHOR. No agentId is used."
+        description = "Read recoverable current Room notebook state for one scope; read-only."
     )]
     async fn room_notebook_current(
         &self,
@@ -1330,7 +1333,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "room.notebook.update",
-        description = "Update editable fields of one notebook passage in the active Room Agent. Scope and datetime are immutable; current state is refreshed when anchors change."
+        description = "Update editable fields of one Room notebook passage; scope and datetime stay immutable."
     )]
     async fn room_notebook_update(
         &self,
@@ -1363,7 +1366,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "room.notebook.remove",
-        description = "Physically remove one notebook passage from the active Room Agent. If it was current, current state falls back to the latest ANCHOR or becomes null."
+        description = "Remove one Room notebook passage; destructive."
     )]
     async fn room_notebook_remove(
         &self,
@@ -1386,7 +1389,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "room.diary.append",
-        description = "Append one diary entry to the active Room Agent. The entry is stored under the current logical diary day in workspace diary storage. No agentId is used."
+        description = "Append one durable Room diary entry to the current logical diary day."
     )]
     async fn room_diary_append(
         &self,
@@ -1394,7 +1397,6 @@ impl AgenticMcpServer {
     ) -> Result<CallToolResult, ErrorData> {
         let params = params.0;
         let payload = DiaryAppendRequest {
-            time_hint: params.time_hint,
             tags: params.tags.unwrap_or_default(),
             entry: params.entry,
         };
@@ -1413,7 +1415,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "room.diary.recent",
-        description = "Return recent diary entries from the active Room Agent. Scans recent logical diary days in workspace diary storage. No agentId is used."
+        description = "Read recent Room diary entries; read-only."
     )]
     async fn room_diary_recent(
         &self,
@@ -1439,7 +1441,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "room.diary.selectExact",
-        description = "Return diary entries for one exact logical diary date from the active Room Agent workspace diary storage. No agentId is used."
+        description = "Read Room diary entries for one exact Room-local logical date; read-only."
     )]
     async fn room_diary_select_exact(
         &self,
@@ -1447,9 +1449,7 @@ impl AgenticMcpServer {
     ) -> Result<CallToolResult, ErrorData> {
         let params = params.0;
         let payload = DiarySelectExactRequest {
-            year: params.year,
-            month: params.month,
-            day: params.day,
+            date: params.date,
             limit: params.limit,
         };
         let value = request_active_room(
@@ -1467,7 +1467,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "room.bootstrap",
-        description = "Load the active Room Agent session bootstrap entrypoint and deterministic guide manifest. Call this at Room session start; it takes no agentId."
+        description = "Load Room bootstrap guidance; read-only."
     )]
     async fn room_bootstrap(&self) -> Result<CallToolResult, ErrorData> {
         let value = request_active_room(
@@ -1486,7 +1486,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "room.bootstrap.read",
-        description = "Read one valid bootstrap guide by id from the active Room Agent workspace, including typed metadata, raw frontmatter, and bounded Markdown content. No agentId is used."
+        description = "Read one validated Room bootstrap guide by id."
     )]
     async fn room_bootstrap_read(
         &self,
@@ -1509,7 +1509,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "bootstrap",
-        description = "Load the active Room Agent bootstrap entrypoint and guide manifest. This additive alias does not take agentId."
+        description = "Load Room bootstrap guidance; read-only alias."
     )]
     async fn bootstrap(&self) -> Result<CallToolResult, ErrorData> {
         self.room_bootstrap().await
@@ -1517,7 +1517,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "bootstrap.read",
-        description = "Read one active Room Agent bootstrap guide by id. This additive alias does not take agentId."
+        description = "Read one Room bootstrap guide by id; read-only alias."
     )]
     async fn bootstrap_read(
         &self,
@@ -1528,7 +1528,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "skills.list",
-        description = "List valid skills in the active Room Agent workspace. Scans workspace skills/*/SKILL.md and marks active skills. No agentId is used."
+        description = "List local Room skills with active state; read-only discovery."
     )]
     async fn skills_list(&self) -> Result<CallToolResult, ErrorData> {
         let value = request_active_room(
@@ -1545,7 +1545,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "skills.read",
-        description = "Read one skill package from the active Room Agent workspace by id, including SKILL.md, parsed frontmatter, package summary, warnings, and active status. No agentId is used."
+        description = "Read one local Room skill package or resource."
     )]
     async fn skills_read(
         &self,
@@ -1570,7 +1570,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "skills.search",
-        description = "Search skills in the active Room Agent workspace by case-insensitive substring over id, frontmatter, tags, and SKILL.md content. No agentId is used."
+        description = "Search local Room skill metadata and content; read-only."
     )]
     async fn skills_search(
         &self,
@@ -1596,7 +1596,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "skills.active",
-        description = "Return active skills for the active Room Agent workspace. Deleted skills remain listed as stale/missing until deactivated. No agentId is used."
+        description = "List active Room skill state, including stale entries; read-only."
     )]
     async fn skills_active(&self) -> Result<CallToolResult, ErrorData> {
         let value = request_active_room(
@@ -1613,7 +1613,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "skills.activate",
-        description = "Mark an existing valid skill as active in the active Room Agent workspace. This grants no permissions and executes nothing. No agentId is used."
+        description = "Mark one valid Room skill active; executes nothing."
     )]
     async fn skills_activate(
         &self,
@@ -1635,7 +1635,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "skills.deactivate",
-        description = "Remove active state for a skill id in the active Room Agent workspace. This succeeds even for stale/missing skills. No agentId is used."
+        description = "Remove active state for one Room skill; executes nothing."
     )]
     async fn skills_deactivate(
         &self,
@@ -1657,7 +1657,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "skills.install",
-        description = "Start an asynchronous installation of one Room skill from public GitHub, HTTPS file entries, or inline content. Returns an installId immediately; poll with skills.install.get. No agentId is used."
+        description = "Start one asynchronous Room skill installation; use install get/cancel for follow-up."
     )]
     async fn skills_install(
         &self,
@@ -1686,7 +1686,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "skills.install.get",
-        description = "Return the latest asynchronous Room skill installation status. Waits up to waitSeconds (default 5, maximum 30) and returns pollAfterMs guidance. No agentId is used."
+        description = "Inspect or briefly wait for one Room skill installation; read-only lifecycle inspection."
     )]
     async fn skills_install_get(
         &self,
@@ -1711,7 +1711,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "skills.install.cancel",
-        description = "Request cooperative cancellation of a Room skill installation. Cancellation is idempotent and reports tooLate once atomic commit has begun. No agentId is used."
+        description = "Request cooperative cancellation of one Room skill installation before commit."
     )]
     async fn skills_install_cancel(
         &self,
@@ -1734,7 +1734,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "skills.run",
-        description = "Run an executable scripts/ file from an active workspace skill through the Room Agent ManagedJob engine. Returns terminal output inline when it finishes within waitSeconds (default 5), otherwise returns jobId for job.get/job.cancel. No agentId is used."
+        description = "Run an executable from an active Room skill as a managed Job."
     )]
     async fn skills_run(
         &self,
@@ -2094,11 +2094,6 @@ impl From<McpBatchModeArgs> for McpBatchMode {
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 struct McpBatchCallArgs {
-    #[serde(default)]
-    #[schemars(
-        description = "Optional stable call id matching ^[A-Za-z0-9._:-]{1,64}$; ids must be unique within the batch."
-    )]
-    id: Option<String>,
     #[schemars(description = "Configured MCP server id.")]
     server_id: String,
     #[schemars(description = "Downstream MCP tool name.")]
@@ -2187,13 +2182,16 @@ struct RoomNotebookAppendArgs {
         description = "Path-safe notebook namespace such as agentic or monopoly; used for current state and filtering."
     )]
     scope: String,
+    #[serde(default)]
     #[schemars(
-        description = "NORMAL for ordinary passages; ANCHOR for passages that should update current state for the scope."
+        description = "Optional significance: NORMAL by default, or ANCHOR to update current state for the scope."
     )]
-    significance: String,
-    #[serde(rename = "abstract")]
-    #[schemars(description = "Short summary used in timelines and previews.")]
-    abstract_text: String,
+    significance: Option<String>,
+    #[serde(rename = "abstract", default)]
+    #[schemars(
+        description = "Optional short summary; omitted values are derived from the content."
+    )]
+    abstract_text: Option<String>,
     #[schemars(description = "Full recoverable passage content.")]
     content: String,
     #[serde(default)]
@@ -2223,12 +2221,8 @@ struct RoomNotebookRecentArgs {
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 struct RoomNotebookSelectExactArgs {
-    #[schemars(description = "Year in the configured room timezone calendar.")]
-    year: i32,
-    #[schemars(description = "Month in the configured room timezone calendar, 1-12.")]
-    month: u32,
-    #[schemars(description = "Day of month in the configured room timezone calendar.")]
-    day: u32,
+    #[schemars(description = "Room-local calendar date in YYYY-MM-DD format.")]
+    date: String,
     #[serde(default)]
     #[schemars(description = "Optional path-safe notebook scope filter.")]
     scope: Option<String>,
@@ -2293,11 +2287,6 @@ struct RoomNotebookRemoveArgs {
 #[serde(rename_all = "camelCase")]
 struct RoomDiaryAppendArgs {
     #[serde(default)]
-    #[schemars(
-        description = "Optional daypart label such as morning, noon, afternoon, evening, bedtime, or unknown. Stored as metadata only; the date is derived from the current logical diary day."
-    )]
-    time_hint: Option<String>,
-    #[serde(default)]
     #[schemars(description = "Optional labels included with the diary entry.")]
     tags: Option<Vec<String>>,
     #[schemars(description = "Diary entry text to append.")]
@@ -2320,12 +2309,8 @@ struct RoomDiaryRecentArgs {
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 struct RoomDiarySelectExactArgs {
-    #[schemars(description = "Year in the logical diary date.")]
-    year: i32,
-    #[schemars(description = "Month in the logical diary date, 1-12.")]
-    month: u32,
-    #[schemars(description = "Day of month in the logical diary date.")]
-    day: u32,
+    #[schemars(description = "Room-local logical diary date in YYYY-MM-DD format.")]
+    date: String,
     #[serde(default)]
     #[schemars(description = "Maximum diary entries returned, capped by the server.")]
     limit: Option<usize>,
@@ -2769,74 +2754,6 @@ mod tests {
             .as_array()
             .is_some_and(|required| required.contains(&json!("agentId"))
                 && required.contains(&json!("calls"))));
-    }
-
-    #[test]
-    fn priority_hub_descriptions_preserve_job_and_admission_boundaries() {
-        let server = AgenticMcpServer::new(test_state());
-        let tools = app_tool_descriptors(&server);
-        let description = |name: &str| {
-            tools
-                .iter()
-                .find(|tool| tool.get("name").and_then(Value::as_str) == Some(name))
-                .and_then(|tool| tool.get("description"))
-                .and_then(Value::as_str)
-                .unwrap_or_else(|| panic!("missing Hub tool description for {name}"))
-        };
-        for (name, phrases) in [
-            (
-                "process.exec",
-                ["Job envelope", "policy/confirmation/capacity", "job.cancel"].as_slice(),
-            ),
-            (
-                "process.batch",
-                [
-                    "one confirmation boundary",
-                    "starts none",
-                    "not rolled back",
-                ]
-                .as_slice(),
-            ),
-            (
-                "job.get",
-                [
-                    "waitSeconds",
-                    "capped at 30",
-                    "not proof of a fresh live result",
-                ]
-                .as_slice(),
-            ),
-            (
-                "job.cancel",
-                ["termination evidence", "detached", "claimed cancelled"].as_slice(),
-            ),
-            (
-                "mcp.callTool",
-                [
-                    "managed Job",
-                    "bounded inline wait",
-                    "not a direct transactional",
-                ]
-                .as_slice(),
-            ),
-            (
-                "mcp.batch",
-                [
-                    "1..16",
-                    "Admission/confirmation is atomic",
-                    "not rolled back",
-                ]
-                .as_slice(),
-            ),
-        ] {
-            let text = description(name);
-            for phrase in phrases {
-                assert!(
-                    text.contains(phrase),
-                    "{name} description missing contract phrase {phrase:?}: {text}"
-                );
-            }
-        }
     }
 
     #[test]

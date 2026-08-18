@@ -27,7 +27,6 @@ use rmcp::{
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
-use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
@@ -532,7 +531,7 @@ impl AgentMcpServer {
                 match crate::file_ops::resolve_path(&config, &path, crate::file_ops::Access::Read) {
                     Ok(resolved) => crate::file_ops::to_result(crate::file_ops::read(
                         &resolved,
-                        args.include_content.unwrap_or(true),
+                        args.metadata.unwrap_or(false),
                         args.start_line,
                         args.end_line,
                     )),
@@ -558,8 +557,8 @@ impl AgentMcpServer {
                     crate::file_ops::Access::Read,
                 );
                 match resolved {
-                    Ok(resolved) => {
-                        crate::file_ops::to_result(crate::file_ops::search_with_context_limit(
+                    Ok(resolved) => crate::file_ops::to_result(
+                        crate::file_ops::search_with_context_limit(
                             crate::file_ops::SearchOptions {
                                 root: &resolved,
                                 query: args.query.as_deref().expect("validated search query"),
@@ -579,8 +578,9 @@ impl AgentMcpServer {
                                 scan_byte_limit: crate::file_ops::MAX_SEARCH_BYTES,
                             },
                             config.limits.max_file_search_context_lines,
-                        ))
-                    }
+                        )
+                        .map(crate::file_ops::slim_search_response),
+                    ),
                     Err(error) if error.code == "file_not_found" => {
                         Ok(crate::file_ops::FileError::new(
                             "file_search_path_not_found",
@@ -836,7 +836,7 @@ impl AgentMcpServer {
                             .calls
                             .into_iter()
                             .map(|call| agentic_gpt_protocol::McpBatchCall {
-                                id: call.id,
+                                id: None,
                                 server_id: call.server_id,
                                 tool_name: call.tool_name,
                                 arguments: call.arguments,
@@ -1290,6 +1290,13 @@ impl AgentMcpServer {
             }
         };
         let mut warnings = active.warnings.clone();
+        warnings.extend(
+            active
+                .active_skills
+                .iter()
+                .filter(|skill| skill.stale)
+                .map(|skill| format!("active_skill_missing:{}", skill.id)),
+        );
         let mut skills = if args
             .query
             .as_deref()
@@ -1339,11 +1346,11 @@ impl AgentMcpServer {
                 skills.truncate(limit.clamp(1, 100));
             }
         }
-        Ok(json!({
-            "skills": skills,
-            "activeSkills": active.active_skills,
-            "warnings": warnings,
-        }))
+        let mut response = json!({"skills": skills});
+        if !warnings.is_empty() {
+            response["warnings"] = json!(warnings);
+        }
+        Ok(response)
     }
 
     async fn require_agent(&self, arguments: &Value) -> Result<()> {
@@ -1488,7 +1495,7 @@ struct FileReadArgs {
     #[serde(default)]
     path: Option<String>,
     #[serde(default)]
-    include_content: Option<bool>,
+    metadata: Option<bool>,
     #[serde(default)]
     start_line: Option<usize>,
     #[serde(default)]
@@ -1501,8 +1508,8 @@ struct FileReadArgs {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct FileReadRequestArgs {
     path: String,
-    #[serde(default = "default_true")]
-    include_content: bool,
+    #[serde(default)]
+    metadata: bool,
     #[serde(default)]
     start_line: Option<usize>,
     #[serde(default)]
@@ -1579,7 +1586,7 @@ impl From<FileReadRequestArgs> for crate::file_ops::ReadRequest {
     fn from(value: FileReadRequestArgs) -> Self {
         Self {
             path: value.path,
-            include_content: value.include_content,
+            metadata: value.metadata,
             start_line: value.start_line,
             end_line: value.end_line,
         }
@@ -1644,8 +1651,6 @@ struct McpBatchArgs {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct McpBatchCallArgs {
-    #[serde(default)]
-    id: Option<String>,
     server_id: String,
     tool_name: String,
     #[serde(default)]
@@ -1872,7 +1877,8 @@ fn job_tool_response(
         duration_ms: terminal.then(|| duration_ms(info)).flatten(),
         exit_code: (terminal && process_like)
             .then_some(info.exit_code)
-            .flatten(),
+            .flatten()
+            .filter(|code| *code != 0),
         stdout_tail: if process_like {
             info.stdout_tail.clone()
         } else {
@@ -2025,15 +2031,12 @@ fn slim_cancel_response(detail: JobDetail) -> Result<Value> {
 fn slim_mcp_batch_response(value: Value) -> Result<Value> {
     let response: McpBatchResponse = serde_json::from_value(value)?;
     let mut slim = McpBatchToolResponse {
-        batch_id: response.batch_id,
         status: response.status,
         error: response.error,
         results: response
             .results
             .into_iter()
             .map(|child| McpBatchToolChildResponse {
-                index: child.index,
-                id: child.id,
                 job: job_tool_response(&child.detail, false, child.result_omitted),
             })
             .collect(),
@@ -2096,7 +2099,7 @@ fn validate_file_read_args(args: &FileReadArgs) -> Result<()> {
         (None, Some(requests))
             if !requests.is_empty()
                 && requests.len() <= crate::file_ops::MAX_BATCH_OPERATIONS
-                && args.include_content.is_none()
+                && args.metadata.is_none()
                 && args.start_line.is_none()
                 && args.end_line.is_none() =>
         {
@@ -2339,7 +2342,7 @@ fn tool_input_schema(name: &str) -> Map<String, Value> {
         } else {
             (
                 vec!["path"],
-                vec!["path", "includeContent", "startLine", "endLine"],
+                vec!["path", "metadata", "startLine", "endLine"],
             )
         };
         let flat_absent_requests = json!({
@@ -2383,13 +2386,13 @@ fn tool_schema(name: &str) -> (Map<String, Value>, &'static [&'static str]) {
         "skills.install" => &["id", "source"],
         "skills.install.get" | "skills.install.cancel" => &["installId"],
         "skills.run" => &["id", "path"],
-        "room.notebook.append" => &["scope", "significance", "abstract", "content"],
-        "room.notebook.selectExact" => &["year", "month", "day"],
+        "room.notebook.append" => &["scope", "content"],
+        "room.notebook.selectExact" => &["date"],
         "room.notebook.search" => &["query"],
         "room.notebook.current" => &["scope"],
         "room.notebook.update" | "room.notebook.remove" => &["id"],
         "room.diary.append" => &["entry"],
-        "room.diary.selectExact" => &["year", "month", "day"],
+        "room.diary.selectExact" => &["date"],
         _ => &[],
     };
     (properties_for(name), required)
@@ -2421,8 +2424,8 @@ fn properties_for(name: &str) -> Map<String, Value> {
                 string("File or directory path; resolved and checked by path policy."),
             );
             add(
-                "includeContent",
-                boolean("Include bounded content; default true."),
+                "metadata",
+                boolean("Include file metadata alongside content; default false."),
             );
             add("startLine", number("Inclusive start line."));
             add("endLine", number("Inclusive end line."));
@@ -2432,7 +2435,7 @@ fn properties_for(name: &str) -> Map<String, Value> {
                     "type":"array", "minItems":1, "maxItems":32,
                     "items":{"type":"object","additionalProperties":false,"properties":{
                         "path":string("File or directory path; resolved and checked by path policy."),
-                        "includeContent":boolean("Include bounded content; default true."),
+                        "metadata":boolean("Include file metadata alongside content; default false."),
                         "startLine":number("Inclusive start line."), "endLine":number("Inclusive end line.")
                     },"required":["path"]},
                     "description":"Ordered batch reads; mutually exclusive with flat single-read fields. Maximum 32."
@@ -2661,12 +2664,6 @@ fn properties_for(name: &str) -> Map<String, Value> {
                         "additionalProperties": false,
                         "required": ["serverId", "toolName"],
                         "properties": {
-                            "id": {
-                                "type": "string",
-                                "minLength": 1,
-                                "maxLength": 64,
-                                "pattern": "^[A-Za-z0-9._:-]+$"
-                            },
                             "serverId": {"type": "string", "description": "Configured downstream MCP server id."},
                             "toolName": {"type": "string", "description": "Tool name returned by mcp.listTools for this server."},
                             "arguments": {
@@ -2815,7 +2812,7 @@ fn properties_for(name: &str) -> Map<String, Value> {
             add("scope", string("Path-safe notebook namespace."));
             add(
                 "significance",
-                json!({"type": "string", "enum": ["NORMAL", "ANCHOR"]}),
+                json!({"type": "string", "enum": ["NORMAL", "ANCHOR"], "default": "NORMAL"}),
             );
             add("abstract", string("Short summary."));
             add("content", string("Full passage content."));
@@ -2831,9 +2828,14 @@ fn properties_for(name: &str) -> Map<String, Value> {
             add("limit", number("Maximum passages."));
         }
         "room.notebook.selectExact" => {
-            add("year", number("Calendar year."));
-            add("month", number("Calendar month."));
-            add("day", number("Calendar day."));
+            add(
+                "date",
+                json!({
+                    "type": "string",
+                    "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+                    "description": "Room-local calendar date in YYYY-MM-DD format."
+                }),
+            );
             add("scope", string("Optional scope filter."));
             add("limit", number("Maximum passages."));
         }
@@ -2855,7 +2857,6 @@ fn properties_for(name: &str) -> Map<String, Value> {
         }
         "room.notebook.remove" => add("id", string("Passage id.")),
         "room.diary.append" => {
-            add("timeHint", string("Optional daypart label."));
             add("tags", strings("Optional labels."));
             add("entry", string("Diary entry text."));
         }
@@ -2864,9 +2865,14 @@ fn properties_for(name: &str) -> Map<String, Value> {
             add("limit", number("Maximum entries."));
         }
         "room.diary.selectExact" => {
-            add("year", number("Diary year."));
-            add("month", number("Diary month."));
-            add("day", number("Diary day."));
+            add(
+                "date",
+                json!({
+                    "type": "string",
+                    "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+                    "description": "Room-local logical diary date in YYYY-MM-DD format."
+                }),
+            );
             add("limit", number("Maximum entries."));
         }
         _ => {}
@@ -2900,52 +2906,52 @@ fn output_schema() -> Map<String, Value> {
 
 fn tool_description(name: &str) -> String {
     match name {
-        "agent.info" => "Inspect bounded local profile, workspace/path policy, confirmation, capacity, live limits, MCP state, and Job diagnostics; read-only and does not execute work.".to_string(),
-        "file.read" => "Read bounded UTF-8 file content or metadata; use flat fields for one request or ordered requests for up to 32 independent reads, with one failed item isolated from the others.".to_string(),
-        "file.search" => "Search workspace text in-process; use flat fields for one request or ordered requests for up to 32 independent searches, preserving per-search limits and bounded aggregate output.".to_string(),
-        "file.edit" => "Apply one complete Codex apply_patch patch across multiple UTF-8 files; stages and validates every add, update, delete, or move before one optional confirmation and returns a compact change summary.".to_string(),
-        "process.exec" => "Start one managed local process with an optional group and return a slim Job result after a bounded inline wait; use job.get for later state/output and job.cancel for cancellation evidence.".to_string(),
-        "process.batch" => "Admit multiple managed local processes with one optional group, one confirmation boundary, and ordered slim child Jobs; preflight/capacity rejection starts none, running children are bounded by limits.maxConcurrentTasks while excess Jobs stay queued, and use job.get/job.cancel for lifecycle.".to_string(),
-        "job.get" => "Inspect one managed Job or wait up to waitSeconds (maximum 30); waitOnly returns exactly jobId/state/elapsedMs on an active timeout, terminal completion returns normal detail, and cached state may be marked unavailable after an Agent restart.".to_string(),
-        "job.list" => "List active or recently retained managed Jobs with optional exact group/kind/state filters, limit, and opaque cursor; read-only discovery, bounded output, and no new work is started.".to_string(),
-        "job.cancel" => "Request kind-aware cancellation for one managed Job and return observed outcome/termination evidence; a remote or unconfirmed stop is reported as detached rather than claimed cancelled.".to_string(),
-        "tmux.listSessions" => "Read-only list of persistent tmux sessions; use tmux.sessions when creating or closing one.".to_string(),
-        "tmux.sessions" => "List, create, or close persistent tmux sessions; close is destructive and may require confirmation.".to_string(),
-        "tmux.listPanes" => "Read-only list of tmux panes with cwd/foreground state; use tmux.exec only for shell panes.".to_string(),
-        "tmux.panes" => "List or capture bounded tmux pane history; capture is read-only and requires the action-compatible target fields.".to_string(),
-        "tmux.capturePane" => "Capture bounded history from one tmux pane; read-only and does not submit input.".to_string(),
-        "tmux.pasteText" => "Paste text into a non-shell tmux pane or TUI; shell panes are rejected and must use tmux.exec.".to_string(),
-        "tmux.exec" => "Submit one structured command to a tmux shell pane and return a bounded post-submit snapshot; submission does not prove completion.".to_string(),
-        "tmux.createSession" => "Create one persistent tmux session in a policy-allowed cwd; prefer reusing an existing session when possible.".to_string(),
-        "tmux.closeSession" => "Close one persistent tmux session; destructive, confirmation-aware, and only for explicitly finished workspaces.".to_string(),
-        "mcp.listServers" => "List configured downstream MCP servers for the local Agent; read-only discovery before mcp.callTool or mcp.batch.".to_string(),
-        "mcp.listTools" => "List tools exposed by one configured downstream MCP server; use returned names and schemas for mcp.callTool/mcp.batch.".to_string(),
-        "mcp.list" => "List configured downstream MCP servers or one server's tools; read-only discovery before managed calls.".to_string(),
-        "mcp.batch" => "Atomically validate/admit 1..16 downstream MCP child Jobs with one optional group, one aggregate confirmation, bounded concurrency, ordered slim results, and optional fail-fast scheduling; admission is atomic, downstream side effects are not rolled back.".to_string(),
-        "mcp.callTool" => "Start one downstream MCP call with an optional group as a managed Job with bounded arguments, inline wait, timeout, retained/truncated result evidence, and job.get/job.cancel follow-up; it is not a direct transactional tool call.".to_string(),
-        "bootstrap" => "Load the Room bootstrap manifest and guide summaries; read-only startup guidance, not a generic file reader.".to_string(),
-        "bootstrap.read" => "Read one validated Room bootstrap guide by id; read-only and package-relative, not an arbitrary path reader.".to_string(),
-        "skills.list" => "List valid local skills with optional query/active filtering; read-only discovery.".to_string(),
-        "skills.setActive" => "Set one local skill's active flag; this changes workspace state but grants no permissions and executes nothing.".to_string(),
-        "skills.read" => "Read one local skill package or bounded package-relative resource; not a generic workspace file reader.".to_string(),
-        "skills.search" => "Search local skill metadata/content; read-only discovery.".to_string(),
-        "skills.active" => "List active local skills, including stale entries; read-only discovery.".to_string(),
-        "skills.activate" => "Mark one existing valid local skill active; no execution or permission grant.".to_string(),
-        "skills.deactivate" => "Remove active state for one local skill; stale/missing entries may still be removed.".to_string(),
-        "skills.install" => "Start an asynchronous local skill installation; returns an installId before network work, then use skills.install.get/cancel.".to_string(),
-        "skills.install.get" => "Inspect or briefly wait for one skill installation by installId; read-only lifecycle inspection.".to_string(),
-        "skills.install.cancel" => "Request cooperative cancellation of one skill installation before its atomic commit; outcome is evidence-based.".to_string(),
-        "skills.run" => "Run one executable from an active local skill with an optional group as a managed Job; use job.get/job.cancel when it does not finish inline.".to_string(),
-        "room.notebook.append" => "Append one explicit Room notebook passage; durable workspace state, not a transient chat note.".to_string(),
-        "room.notebook.recent" => "Read recent Room notebook passages with optional scope/significance filters; read-only.".to_string(),
-        "room.notebook.selectExact" => "Read Room notebook passages for one exact room-timezone calendar date; read-only.".to_string(),
-        "room.notebook.search" => "Search Room notebook passages by bounded substring fields; no vector search, read-only.".to_string(),
+        "agent.info" => "Inspect local Agent runtime, workspace policy, connectivity, capacity, and health; read-only diagnostics.".to_string(),
+        "file.read" => "Read bounded UTF-8 file content and optionally metadata; read-only.".to_string(),
+        "file.search" => "Search bounded workspace text in-process; read-only.".to_string(),
+        "file.edit" => "Apply a Codex apply_patch patch to workspace files; mutations remain policy and confirmation controlled.".to_string(),
+        "process.exec" => "Start one managed local process; use job tools for lifecycle follow-up.".to_string(),
+        "process.batch" => "Start multiple managed local processes under one admission boundary; started side effects are not rolled back.".to_string(),
+        "job.get" => "Inspect or briefly wait for one managed Job; waitOnly performs status-only waiting.".to_string(),
+        "job.list" => "List active or retained managed Jobs; read-only discovery.".to_string(),
+        "job.cancel" => "Request cancellation of one managed Job; returned state is observed evidence, not a termination guarantee.".to_string(),
+        "tmux.listSessions" => "List persistent tmux sessions; read-only.".to_string(),
+        "tmux.sessions" => "List, create, or close persistent tmux sessions; close is destructive.".to_string(),
+        "tmux.listPanes" => "List tmux panes; read-only.".to_string(),
+        "tmux.panes" => "List panes or capture bounded pane history; read-only.".to_string(),
+        "tmux.capturePane" => "Capture bounded history from one tmux pane; read-only.".to_string(),
+        "tmux.pasteText" => "Paste text into a non-shell tmux pane or TUI; shell panes are rejected.".to_string(),
+        "tmux.exec" => "Submit one structured command to a tmux shell pane; submission does not prove command completion.".to_string(),
+        "tmux.createSession" => "Create or reuse one persistent tmux session in an allowed working directory.".to_string(),
+        "tmux.closeSession" => "Close one persistent tmux session; destructive and confirmation-aware.".to_string(),
+        "mcp.listServers" => "List configured downstream MCP servers; read-only discovery.".to_string(),
+        "mcp.listTools" => "List tools exposed by one downstream MCP server; read-only discovery.".to_string(),
+        "mcp.list" => "List downstream MCP servers or one server's tools; read-only discovery.".to_string(),
+        "mcp.batch" => "Run multiple downstream MCP calls as managed Jobs under one admission boundary; downstream side effects are not rolled back.".to_string(),
+        "mcp.callTool" => "Run one downstream MCP tool as a managed Job; use job tools for lifecycle follow-up.".to_string(),
+        "bootstrap" => "Load Room bootstrap guidance; read-only and not a generic file reader.".to_string(),
+        "bootstrap.read" => "Read one validated Room bootstrap guide; not an arbitrary path reader.".to_string(),
+        "skills.list" => "List local skills with optional filtering; read-only discovery.".to_string(),
+        "skills.setActive" => "Set one local skill's active state; grants no permissions and executes nothing.".to_string(),
+        "skills.read" => "Read one local skill package or package resource; not a generic file reader.".to_string(),
+        "skills.search" => "Search local skill metadata and content; read-only discovery.".to_string(),
+        "skills.active" => "List active local skill state, including stale entries; read-only.".to_string(),
+        "skills.activate" => "Mark one valid local skill active; executes nothing.".to_string(),
+        "skills.deactivate" => "Remove active state for one local skill; executes nothing.".to_string(),
+        "skills.install" => "Start an asynchronous local skill installation; use install get/cancel for lifecycle follow-up.".to_string(),
+        "skills.install.get" => "Inspect or briefly wait for one skill installation; read-only lifecycle inspection.".to_string(),
+        "skills.install.cancel" => "Request cooperative cancellation of one skill installation before commit.".to_string(),
+        "skills.run" => "Run an executable from an active local skill as a managed Job.".to_string(),
+        "room.notebook.append" => "Append one durable Room notebook passage; ANCHOR updates current state for its scope.".to_string(),
+        "room.notebook.recent" => "Read recent Room notebook passages; read-only.".to_string(),
+        "room.notebook.selectExact" => "Read Room notebook passages for one exact Room-local calendar date; read-only.".to_string(),
+        "room.notebook.search" => "Search Room notebook passages by bounded substring fields; read-only.".to_string(),
         "room.notebook.current" => "Read recoverable current Room notebook state for one scope; read-only.".to_string(),
-        "room.notebook.update" => "Update editable fields of one Room notebook passage; scope and datetime remain immutable.".to_string(),
-        "room.notebook.remove" => "Remove one Room notebook passage; destructive and current-state fallback is reported.".to_string(),
-        "room.diary.append" => "Append one dated Room diary entry; durable diary state, not notebook replacement.".to_string(),
-        "room.diary.recent" => "Read recent Room diary entries with bounded day/limit filters; read-only.".to_string(),
-        "room.diary.selectExact" => "Read Room diary entries for one exact room-timezone calendar date; read-only.".to_string(),
+        "room.notebook.update" => "Update editable fields of one Room notebook passage; scope and datetime stay immutable.".to_string(),
+        "room.notebook.remove" => "Remove one Room notebook passage; destructive.".to_string(),
+        "room.diary.append" => "Append one durable Room diary entry to the current logical diary day.".to_string(),
+        "room.diary.recent" => "Read recent Room diary entries; read-only.".to_string(),
+        "room.diary.selectExact" => "Read Room diary entries for one exact Room-local logical date; read-only.".to_string(),
         _ => "Agentic GPT local tool.".to_string(),
     }
 }
@@ -3006,34 +3012,6 @@ fn tool_is_open_world(name: &str) -> bool {
             | "skills.install"
             | "skills.run"
     )
-}
-
-pub(crate) fn standalone_surface(profile: CapabilityProfile) -> (Vec<String>, String) {
-    let mut names = NORMAL_TOOLS.to_vec();
-    if profile == CapabilityProfile::Room {
-        names.extend_from_slice(ROOM_BOOTSTRAP_TOOLS);
-        names.extend_from_slice(ROOM_ONLY_TOOLS);
-    }
-    names.sort_unstable();
-    let names = names.into_iter().map(str::to_string).collect::<Vec<_>>();
-    let tools = names
-        .iter()
-        .map(|name| {
-            json!({
-                "name": name,
-                "inputSchema": tool_input_schema(name),
-                "annotations": {
-                    "readOnly": tool_is_read_only(name),
-                    "destructive": tool_is_destructive(name),
-                    "openWorld": tool_is_open_world(name),
-                }
-            })
-        })
-        .collect::<Vec<_>>();
-    let canonical = json!({"surfaceSchemaVersion": 1, "tools": tools});
-    let digest =
-        Sha256::digest(serde_json::to_vec(&canonical).expect("standalone surface is serializable"));
-    (names, format!("sha256:{digest:x}"))
 }
 
 #[cfg(test)]
@@ -3159,7 +3137,7 @@ mod tests {
         assert_eq!(read_one_of[0]["not"]["required"], json!(["requests"]));
         assert_eq!(read_one_of[1]["required"], json!(["requests"]));
         let read_batch_forbidden = read_one_of[1]["not"]["anyOf"].as_array().unwrap();
-        for field in ["path", "includeContent", "startLine", "endLine"] {
+        for field in ["path", "metadata", "startLine", "endLine"] {
             assert!(read_batch_forbidden
                 .iter()
                 .any(|branch| branch["required"] == json!([field])));
@@ -3306,27 +3284,6 @@ mod tests {
                 assert!(
                     !serde_json::to_string(&value)?.contains("revision"),
                     "{} unexpectedly exposes a revision",
-                    case.id
-                );
-            }
-            if let Some(requested) = expected["requestedContextLines"].as_u64() {
-                assert_eq!(
-                    value["requestedContextLines"], requested,
-                    "{} requested context",
-                    case.id
-                );
-            }
-            if let Some(effective) = expected["effectiveContextLines"].as_u64() {
-                assert_eq!(
-                    value["effectiveContextLines"], effective,
-                    "{} effective context",
-                    case.id
-                );
-            }
-            if let Some(clipped) = expected["contextLinesClipped"].as_bool() {
-                assert_eq!(
-                    value["contextLinesClipped"], clipped,
-                    "{} clipped context",
                     case.id
                 );
             }
@@ -3909,7 +3866,7 @@ mod tests {
             aggregate_bytes: None,
             error: None,
         })?)?;
-        assert_eq!(value["batchId"], "batch_test");
+        assert!(value.get("batchId").is_none());
         assert!(value.get("completedInline").is_none());
         assert!(value.get("pollAfterMs").is_none());
         assert!(value.get("aggregateTruncated").is_none());
@@ -4329,7 +4286,7 @@ mod tests {
             ("room.notebook.recent", json!({"agentId":"foreign"})),
             (
                 "room.notebook.selectExact",
-                json!({"year":2026,"month":7,"day":25,"agentId":"foreign"}),
+                json!({"date":"2026-07-25","agentId":"foreign"}),
             ),
             (
                 "room.notebook.search",
@@ -4354,7 +4311,7 @@ mod tests {
             ("room.diary.recent", json!({"agentId":"foreign"})),
             (
                 "room.diary.selectExact",
-                json!({"year":2026,"month":7,"day":25,"agentId":"foreign"}),
+                json!({"date":"2026-07-25","agentId":"foreign"}),
             ),
         ];
         for (name, arguments) in cases {
@@ -4377,14 +4334,12 @@ mod tests {
             )
             .await?;
         assert_eq!(content["content"], "second\n");
-        assert_eq!(content["totalLines"], 2);
+        assert!(content.get("metadata").is_none());
         let metadata = server
-            .dispatch(
-                "file.read",
-                json!({"path":"read-me.txt", "includeContent": false}),
-            )
+            .dispatch("file.read", json!({"path":"read-me.txt", "metadata": true}))
             .await?;
-        assert!(metadata.get("content").is_none());
+        assert_eq!(metadata["content"], "first\nsecond\n");
+        assert_eq!(metadata["metadata"]["totalLines"], 2);
         assert!(metadata.get("revision").is_none());
         let missing = server
             .dispatch("file.read", json!({"path":"missing.txt"}))
@@ -4449,13 +4404,12 @@ mod tests {
                 json!({"path":"search.rs", "query":"Beta", "contextLines":8}),
             )
             .await?;
-        assert_eq!(clipped["requestedContextLines"], 8);
-        assert_eq!(clipped["effectiveContextLines"], 5);
-        assert_eq!(clipped["contextLinesClipped"], true);
+        assert_eq!(clipped["contextLines"], 5);
         assert_eq!(
             clipped["warnings"][0],
             "context_lines_clipped_to_configured_limit"
         );
+        assert_eq!(clipped["matches"].as_array().map(Vec::len), Some(1));
 
         server
             .state
@@ -4470,10 +4424,9 @@ mod tests {
                 json!({"path":"search.rs", "query":"Beta", "contextLines":8}),
             )
             .await?;
-        assert_eq!(expanded["requestedContextLines"], 8);
-        assert_eq!(expanded["effectiveContextLines"], 8);
-        assert_eq!(expanded["contextLinesClipped"], false);
-        assert!(expanded["warnings"].as_array().unwrap().is_empty());
+        assert_eq!(expanded["matches"].as_array().map(Vec::len), Some(1));
+        assert!(expanded.get("contextLines").is_none());
+        assert!(expanded.get("warnings").is_none());
 
         server
             .state
@@ -4488,8 +4441,8 @@ mod tests {
                 json!({"path":"search.rs", "query":"Beta", "contextLines":5}),
             )
             .await?;
-        assert_eq!(disabled_context["effectiveContextLines"], 0);
-        assert_eq!(disabled_context["contextLinesClipped"], true);
+        assert_eq!(disabled_context["contextLines"], 0);
+        assert!(disabled_context["warnings"].is_array());
 
         let literal = server
             .dispatch(
@@ -4497,14 +4450,14 @@ mod tests {
                 json!({"path":".", "query":"alpha", "caseSensitive":false, "include":["**/*.rs"]}),
             )
             .await?;
-        assert_eq!(literal["matchCount"], 1);
+        assert_eq!(literal["matches"].as_array().map(Vec::len), Some(1));
         let regex = server
             .dispatch(
                 "file.search",
                 json!({"path":"search.rs", "query":"Beta \\d+", "mode":"regex"}),
             )
             .await?;
-        assert_eq!(regex["matchCount"], 1);
+        assert_eq!(regex["matches"].as_array().map(Vec::len), Some(1));
         Ok(())
     }
 
@@ -4522,7 +4475,7 @@ mod tests {
                 json!({"requests":[
                     {"path":"batch-a.txt"},
                     {"path":"missing.txt"},
-                    {"path":"batch-b.txt","includeContent":false}
+                    {"path":"batch-b.txt","metadata":true}
                 ]}),
             )
             .await?;
@@ -4530,7 +4483,8 @@ mod tests {
         assert_eq!(reads["results"][0]["result"]["content"], "needle-a\n");
         assert_eq!(reads["results"][1]["status"], "failed");
         assert_eq!(reads["results"][2]["index"], 2);
-        assert!(reads["results"][2]["result"].get("content").is_none());
+        assert_eq!(reads["results"][2]["result"]["content"], "needle-b\n");
+        assert!(reads["results"][2]["result"]["metadata"].is_object());
 
         let searches = server
             .dispatch(
@@ -4542,9 +4496,19 @@ mod tests {
                 ]}),
             )
             .await?;
-        assert_eq!(searches["results"][0]["result"]["matchCount"], 1);
+        assert_eq!(
+            searches["results"][0]["result"]["matches"]
+                .as_array()
+                .map(Vec::len),
+            Some(1)
+        );
         assert_eq!(searches["results"][1]["status"], "failed");
-        assert_eq!(searches["results"][2]["result"]["matchCount"], 1);
+        assert_eq!(
+            searches["results"][2]["result"]["matches"]
+                .as_array()
+                .map(Vec::len),
+            Some(1)
+        );
 
         assert!(server
             .dispatch("file.read", json!({"path":"batch-a.txt","requests":[]}))
@@ -4737,8 +4701,8 @@ mod tests {
         assert!(mcp["servers"].is_array());
         let skills = server.dispatch("skills.list", json!({})).await?;
         assert!(skills["skills"].is_array());
-        assert!(skills["activeSkills"].is_array());
-        assert!(skills["warnings"].is_array());
+        assert!(skills.get("activeSkills").is_none());
+        assert!(skills.get("warnings").is_none());
         let panes = server
             .dispatch("tmux.panes", json!({"action": "list"}))
             .await?;

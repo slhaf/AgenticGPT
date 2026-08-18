@@ -17,8 +17,6 @@ const MAX_CONFIG_BYTES: u64 = 4 * 1024 * 1024;
 pub(crate) async fn collect(state: &AppState) -> Value {
     let generated_at = Utc::now();
     let config = state.config.read().await.clone();
-    let (surface_tools, surface_revision) =
-        crate::stdio_server::standalone_surface(state.runtime.profile);
     let active = jobs::current_jobs(state).await;
     let active_count = active.len();
     let resolved_limit = config.limits.max_active_jobs.resolve();
@@ -75,24 +73,33 @@ pub(crate) async fn collect(state: &AppState) -> Value {
         .iter()
         .map(|channel| channel.as_str())
         .collect::<Vec<_>>();
-    let providers = vec![
-        json!({
+    let mut providers = Vec::new();
+    if config
+        .confirmation_provider
+        .channels
+        .contains(&ConfirmationChannel::Freedesktop)
+    {
+        providers.push(json!({
             "id": "freedesktop",
-            "configured": config.confirmation_provider.channels.contains(&ConfirmationChannel::Freedesktop),
             "available": freedesktop_available && freedesktop_actions,
             "supportsActions": freedesktop_actions,
             "reason": if !freedesktop_available { json!("notification_service_unavailable") } else if !freedesktop_actions { json!("actions_unavailable") } else { Value::Null },
-        }),
-        json!({
+        }));
+    }
+    if config
+        .confirmation_provider
+        .channels
+        .contains(&ConfirmationChannel::Ntfy)
+    {
+        providers.push(json!({
             "id": "ntfy",
-            "configured": config.confirmation_provider.channels.contains(&ConfirmationChannel::Ntfy),
             "available": ntfy_available,
             "supportsActions": ntfy_available,
             "transport": "hub-relay",
             "deliveryHealth": "unknown",
             "reason": if ntfy_available { Value::Null } else { json!("hub_relay_disconnected") },
-        }),
-    ];
+        }));
+    }
     json!({
         "schemaVersion": 1,
         "generatedAt": generated_at,
@@ -111,11 +118,6 @@ pub(crate) async fn collect(state: &AppState) -> Value {
             "os": std::env::consts::OS,
             "arch": std::env::consts::ARCH,
             "availableParallelism": resolved_limit.available_parallelism.unwrap_or(1),
-        },
-        "surface": {
-            "toolCount": surface_tools.len(),
-            "tools": surface_tools,
-            "revision": surface_revision,
         },
         "workspace": {
             "root": exact_path(&config.workspace_root),
@@ -447,7 +449,7 @@ mod tests {
     #[tokio::test]
     async fn info_is_bounded_redacted_and_profile_correct() {
         let value = collect(&state(CapabilityProfile::Room)).await;
-        assert_eq!(value["surface"]["toolCount"], 35);
+        assert!(value.get("surface").is_none());
         assert_eq!(value["identity"]["profile"], "room");
         assert!(value["workspace"]["pathPolicy"]["writeRoots"][0].is_string());
         assert_eq!(value["config"]["diskStatus"], "missing");
@@ -527,11 +529,14 @@ mod tests {
             .unwrap()
             .iter()
             .any(|field| field == "profile"));
-        assert_eq!(value["confirmation"]["providers"][1]["available"], true);
-        assert_eq!(
-            value["confirmation"]["providers"][1]["deliveryHealth"],
-            "unknown"
-        );
+        let ntfy = value["confirmation"]["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|provider| provider["id"] == "ntfy")
+            .unwrap();
+        assert_eq!(ntfy["available"], true);
+        assert_eq!(ntfy["deliveryHealth"], "unknown");
         let _ = fs::remove_file(disk_path);
     }
 

@@ -67,9 +67,9 @@ pub(crate) async fn list_panes(request: TmuxListPanesRequest) -> Value {
     }
     let args = list_panes_arguments(request.session.as_deref());
     match tmux_output(args).await {
-        Ok(stdout) => json!({ "session": request.session, "panes": parse_panes(&stdout) }),
+        Ok(stdout) => json!({ "panes": parse_panes(&stdout) }),
         Err(error) if error.code == "tmux_server_not_running" && request.session.is_none() => {
-            json!({ "session": null, "panes": [] })
+            json!({ "panes": [] })
         }
         Err(error) => error.value(),
     }
@@ -101,7 +101,7 @@ pub(crate) async fn capture_pane(request: TmuxCapturePaneRequest) -> Value {
     ])
     .await
     {
-        Ok(capture) => json!({ "target": request.target, "lines": lines, "capture": capture }),
+        Ok(capture) => json!({ "capture": capture }),
         Err(error) => error.value(),
     }
 }
@@ -125,7 +125,11 @@ pub(crate) async fn paste_text(state: &AppState, request: TmuxPasteTextRequest) 
         started,
     )
     .await;
-    result
+    if result.get("error").is_some() {
+        result
+    } else {
+        json!({"status": "completed"})
+    }
 }
 
 async fn paste_text_inner(state: &AppState, request: TmuxPasteTextRequest) -> Value {
@@ -198,7 +202,22 @@ pub(crate) async fn exec(state: &AppState, request: TmuxExecRequest) -> Value {
         started,
     )
     .await;
-    result
+    slim_exec_response(result)
+}
+
+fn slim_exec_response(result: Value) -> Value {
+    if result.get("error").is_some() {
+        return result;
+    }
+    let mut value = json!({"status": "submitted"});
+    if let Some(snapshot) = result.get("snapshot") {
+        if let Some(capture) = snapshot.get("capture") {
+            value["snapshot"] = capture.clone();
+        } else if let Some(error) = snapshot.get("error") {
+            value["warning"] = error.clone();
+        }
+    }
+    value
 }
 
 async fn exec_inner(state: &AppState, request: TmuxExecRequest) -> Value {
@@ -356,7 +375,14 @@ pub(crate) async fn create_session(state: &AppState, request: TmuxCreateSessionR
         started,
     )
     .await;
-    result
+    if result.get("error").is_some() {
+        result
+    } else {
+        json!({
+            "session": result["session"],
+            "created": result["created"],
+        })
+    }
 }
 
 async fn create_session_inner(state: &AppState, request: TmuxCreateSessionRequest) -> Value {
@@ -416,7 +442,11 @@ pub(crate) async fn close_session(state: &AppState, request: TmuxCloseSessionReq
         started,
     )
     .await;
-    result
+    if result.get("error").is_some() {
+        result
+    } else {
+        json!({"closed": true})
+    }
 }
 
 async fn close_session_inner(state: &AppState, request: TmuxCloseSessionRequest) -> Value {

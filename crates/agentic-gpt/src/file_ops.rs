@@ -302,7 +302,7 @@ fn is_reserved_path(config: &Config, path: &Path) -> bool {
 
 pub(crate) fn read(
     resolved: &ResolvedPath,
-    include_content: bool,
+    include_metadata: bool,
     start_line: Option<usize>,
     end_line: Option<usize>,
 ) -> std::result::Result<Value, FileError> {
@@ -325,28 +325,33 @@ pub(crate) fn read(
             "path is not a regular file or directory",
         ));
     }
-    let mut result = json!({
-        "path": resolved.input,
-        "resolvedPath": resolved.path.to_string_lossy(),
+
+    let mut metadata_value = json!({
         "type": file_type,
         "sizeBytes": metadata.len(),
         "modifiedAt": modified_at,
-        "encoding": Value::Null,
     });
-    if !metadata.is_file() || metadata.len() > MAX_FILE_BYTES {
-        if include_content && metadata.is_file() && metadata.len() > MAX_FILE_BYTES {
-            return Err(FileError::new(
-                "file_too_large",
-                "file exceeds the 8 MiB content bound",
-            ));
-        }
-        return Ok(result);
+    if metadata.is_dir() {
+        return if include_metadata {
+            Ok(json!({"metadata": metadata_value}))
+        } else {
+            Err(FileError::new(
+                "file_is_directory",
+                "path is a directory; set metadata=true to inspect directory metadata",
+            ))
+        };
     }
+    if metadata.len() > MAX_FILE_BYTES {
+        return Err(FileError::new(
+            "file_too_large",
+            "file exceeds the 8 MiB content bound",
+        ));
+    }
+
     let bytes = match read_bounded(&resolved.path, MAX_FILE_BYTES)
         .map_err(|_| FileError::new("file_read_failed", "file could not be read"))?
     {
         BoundedRead::Complete(bytes) => bytes,
-        BoundedRead::Exceeded if !include_content => return Ok(result),
         BoundedRead::Exceeded => {
             return Err(FileError::new(
                 "file_too_large",
@@ -354,23 +359,9 @@ pub(crate) fn read(
             ))
         }
     };
-    result["sizeBytes"] = json!(bytes.len());
-    let text = match String::from_utf8(bytes) {
-        Ok(text) => text,
-        Err(_) if !include_content => return Ok(result),
-        Err(_) => {
-            return Err(FileError::new(
-                "file_not_utf8",
-                "file content is not UTF-8 text",
-            ))
-        }
-    };
+    let text = String::from_utf8(bytes)
+        .map_err(|_| FileError::new("file_not_utf8", "file content is not UTF-8 text"))?;
     let total_lines = line_count(&text);
-    result["encoding"] = json!("utf-8");
-    result["totalLines"] = json!(total_lines);
-    if !include_content {
-        return Ok(result);
-    }
     let start = start_line.unwrap_or(1);
     let end = end_line.unwrap_or(total_lines.max(1));
     if start == 0 || end == 0 || end < start {
@@ -379,16 +370,15 @@ pub(crate) fn read(
             "line range is invalid",
         ));
     }
-    let (content, returned_through, returned_bytes, truncated, last_complete, next_start) =
-        bounded_lines(&text, start, end);
-    result["content"] = json!(content);
-    result["startLine"] = json!(start);
-    result["returnedThroughLine"] = returned_through.map_or(Value::Null, |line| json!(line));
-    result["returnedBytes"] = json!(returned_bytes);
-    result["truncated"] = json!(truncated);
-    result["lastLineComplete"] = json!(last_complete);
+    let (content, next_start) = bounded_lines(&text, start, end)?;
+    let mut result = json!({"content": content});
     if let Some(next_start) = next_start {
         result["nextStartLine"] = json!(next_start);
+    }
+    if include_metadata {
+        metadata_value["encoding"] = json!("utf-8");
+        metadata_value["totalLines"] = json!(total_lines);
+        result["metadata"] = metadata_value;
     }
     Ok(result)
 }
@@ -618,6 +608,28 @@ pub(crate) fn search_with_context_limit(
     }))
 }
 
+pub(crate) fn slim_search_response(value: Value) -> Value {
+    let mut result = json!({"matches": value["matches"].clone()});
+    if value["contextLinesClipped"].as_bool() == Some(true) {
+        result["contextLines"] = value["effectiveContextLines"].clone();
+        result["warnings"] = value["warnings"].clone();
+    }
+    if value["skippedFiles"].as_object().is_some_and(|skipped| {
+        skipped
+            .values()
+            .any(|count| count.as_u64().unwrap_or(0) > 0)
+    }) {
+        result["skippedFiles"] = value["skippedFiles"].clone();
+    }
+    if value["truncated"].as_bool() == Some(true) {
+        result["truncated"] = json!(true);
+        if !value["truncationReason"].is_null() {
+            result["reason"] = value["truncationReason"].clone();
+        }
+    }
+    result
+}
+
 fn compile_globs(patterns: &[String]) -> std::result::Result<Option<GlobSet>, FileError> {
     if patterns.len() > 16 {
         return Err(FileError::new(
@@ -667,45 +679,32 @@ fn bounded_lines(
     text: &str,
     start: usize,
     end: usize,
-) -> (String, Option<usize>, usize, bool, bool, Option<usize>) {
-    if text.is_empty() || start > line_count(text) {
-        return (String::new(), None, 0, false, true, None);
+) -> std::result::Result<(String, Option<usize>), FileError> {
+    let total_lines = line_count(text);
+    if text.is_empty() || start > total_lines {
+        return Ok((String::new(), None));
     }
+    let target_end = end.min(total_lines);
     let mut output = String::new();
-    let mut returned_through = None;
-    let mut truncated = false;
-    let mut last_complete = true;
     for (line_number, line) in (1..).zip(text.split_inclusive('\n')) {
-        if line_number >= start && line_number <= end {
-            let available = MAX_READ_OUTPUT_BYTES.saturating_sub(output.len());
-            if line.len() <= available {
-                output.push_str(line);
-                returned_through = Some(line_number);
-            } else {
-                output.push_str(utf8_prefix(line, available));
-                truncated = true;
-                last_complete = false;
-                break;
-            }
+        if line_number < start {
+            continue;
         }
-        if line_number >= end {
+        if line_number > target_end {
             break;
         }
+        if line.len() > MAX_READ_OUTPUT_BYTES && output.is_empty() {
+            return Err(FileError::new(
+                "file_line_too_large",
+                "one requested line exceeds the 256 KiB read response bound",
+            ));
+        }
+        if output.len().saturating_add(line.len()) > MAX_READ_OUTPUT_BYTES {
+            return Ok((output, Some(line_number)));
+        }
+        output.push_str(line);
     }
-    if returned_through.is_some_and(|line| line < end) {
-        truncated = true;
-    }
-    let next_start = (truncated && last_complete)
-        .then(|| returned_through.map(|line| line + 1))
-        .flatten();
-    (
-        output.clone(),
-        returned_through,
-        output.len(),
-        truncated,
-        last_complete,
-        next_start,
-    )
+    Ok((output, None))
 }
 
 fn utf8_prefix(value: &str, max_bytes: usize) -> &str {
@@ -742,7 +741,7 @@ pub(crate) fn to_result(result: std::result::Result<Value, FileError>) -> Result
 #[derive(Clone, Debug)]
 pub(crate) struct ReadRequest {
     pub(crate) path: String,
-    pub(crate) include_content: bool,
+    pub(crate) metadata: bool,
     pub(crate) start_line: Option<usize>,
     pub(crate) end_line: Option<usize>,
 }
@@ -770,7 +769,7 @@ pub(crate) async fn read_batch(state: &AppState, requests: &[ReadRequest]) -> Va
             let value = resolve_path(&config, &request.path, Access::Read).and_then(|resolved| {
                 read(
                     &resolved,
-                    request.include_content,
+                    request.metadata,
                     request.start_line,
                     request.end_line,
                 )
@@ -844,7 +843,7 @@ pub(crate) async fn search_batch(state: &AppState, requests: &[SearchRequest]) -
                         "aggregate search scan exceeds the batch bound",
                     ))
                 } else {
-                    Ok(value)
+                    Ok(slim_search_response(value))
                 }
             }
             Err(error) => Err(error),
@@ -1752,7 +1751,7 @@ mod tests {
         let resolved = resolve_path(&config(&root), "sample.txt", Access::Read).unwrap();
         let value = read(&resolved, true, None, None).unwrap();
         assert_eq!(value["content"], "one\r\ntwo\n");
-        assert_eq!(value["totalLines"], 2);
+        assert_eq!(value["metadata"]["totalLines"], 2);
         assert!(value.get("revision").is_none());
     }
 
@@ -1765,8 +1764,7 @@ mod tests {
         let resolved = resolve_path(&config(&root), "sample.txt", Access::Read).unwrap();
         let value = read(&resolved, true, Some(2), Some(2)).unwrap();
         assert_eq!(value["content"], "β\n");
-        assert_eq!(value["startLine"], 2);
-        assert_eq!(value["returnedThroughLine"], 2);
+        assert_eq!(value["metadata"]["totalLines"], 3);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1792,8 +1790,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            read(&read_resolved, false, None, None).unwrap()["type"],
-            "file"
+            read(&read_resolved, false, None, None).unwrap()["content"],
+            "a"
         );
         assert_eq!(
             check_policy(&config, &read_resolved.path, Access::Write)
@@ -1815,15 +1813,16 @@ mod tests {
     }
 
     #[test]
-    fn metadata_mode_describes_binary_and_content_mode_rejects_it() {
+    fn binary_content_is_rejected_with_or_without_metadata() {
         let root =
             std::env::temp_dir().join(format!("file-binary-{}", uuid::Uuid::new_v4().simple()));
         fs::create_dir_all(&root).unwrap();
         fs::write(root.join("binary.dat"), [0_u8, 159, 146, 150]).unwrap();
         let resolved = resolve_path(&config(&root), "binary.dat", Access::Read).unwrap();
-        let metadata = read(&resolved, false, None, None).unwrap();
-        assert_eq!(metadata["encoding"], Value::Null);
-        assert!(metadata.get("content").is_none());
+        assert_eq!(
+            read(&resolved, false, None, None).unwrap_err().code,
+            "file_not_utf8"
+        );
         assert_eq!(
             read(&resolved, true, None, None).unwrap_err().code,
             "file_not_utf8"
@@ -1832,7 +1831,7 @@ mod tests {
     }
 
     #[test]
-    fn large_files_keep_metadata_bounded() {
+    fn large_files_are_rejected_with_or_without_metadata() {
         let root =
             std::env::temp_dir().join(format!("file-large-{}", uuid::Uuid::new_v4().simple()));
         fs::create_dir_all(&root).unwrap();
@@ -1843,8 +1842,8 @@ mod tests {
         .unwrap();
         let resolved = resolve_path(&config(&root), "large.txt", Access::Read).unwrap();
         assert_eq!(
-            read(&resolved, false, None, None).unwrap()["sizeBytes"],
-            MAX_FILE_BYTES + 1
+            read(&resolved, false, None, None).unwrap_err().code,
+            "file_too_large"
         );
         assert_eq!(
             read(&resolved, true, None, None).unwrap_err().code,

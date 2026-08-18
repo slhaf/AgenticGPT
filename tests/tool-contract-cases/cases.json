@@ -9,10 +9,7 @@
       "contextLines": 8
     },
     "expect": {
-      "resultFields": ["requestedContextLines", "effectiveContextLines", "contextLinesClipped"],
-      "requestedContextLines": 8,
-      "effectiveContextLines": 5,
-      "contextLinesClipped": true
+      "resultFields": ["matches", "contextLines", "warnings"]
     }
   },
   {
@@ -21,7 +18,7 @@
     "kind": "positive",
     "arguments": {
       "requests": [
-        {"path": "contract-fixture.txt", "includeContent": false},
+        {"path": "contract-fixture.txt", "metadata": true},
         {"path": "missing-contract-fixture.txt"},
         {"path": "contract-fixture.txt", "startLine": 2, "endLine": 2}
       ]
@@ -54,7 +51,7 @@
     "kind": "descriptor",
     "arguments": {},
     "expect": {
-      "descriptionIncludes": ["Codex apply_patch", "compact change summary"],
+      "descriptionIncludes": ["Codex apply_patch"],
       "required": ["patch"]
     }
   },
@@ -103,11 +100,11 @@
     "kind": "descriptor",
     "arguments": {
       "calls": [
-        {"id": "call-1", "serverId": "configured-server", "toolName": "tool", "arguments": {}}
+        {"serverId": "configured-server", "toolName": "tool", "arguments": {}}
       ]
     },
     "expect": {
-      "descriptionIncludes": ["1..16", "not rolled back"],
+      "descriptionIncludes": ["managed Jobs", "not rolled back"],
       "required": ["calls"]
     }
   },
@@ -117,7 +114,7 @@
     "kind": "negative",
     "arguments": {
       "calls": [
-        {"id": "call-1", "serverId": "missing-server", "toolName": "one", "arguments": {}}
+        {"serverId": "missing-server", "toolName": "one", "arguments": {}}
       ]
     },
     "expect": {

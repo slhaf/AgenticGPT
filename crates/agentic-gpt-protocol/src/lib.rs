@@ -454,9 +454,10 @@ pub struct UserNotifyDeliveryResponse {
     pub reason: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum PassageSignificance {
+    #[default]
     Normal,
     Anchor,
 }
@@ -507,9 +508,10 @@ pub struct NotebookAppendRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub datetime: Option<DateTime<Utc>>,
     pub scope: String,
+    #[serde(default)]
     pub significance: PassageSignificance,
-    #[serde(rename = "abstract")]
-    pub abstract_text: String,
+    #[serde(rename = "abstract", default, skip_serializing_if = "Option::is_none")]
+    pub abstract_text: Option<String>,
     pub content: String,
     #[serde(default)]
     pub tags: Vec<String>,
@@ -540,9 +542,7 @@ pub struct NotebookRecentRequest {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NotebookSelectExactRequest {
-    pub year: i32,
-    pub month: u32,
-    pub day: u32,
+    pub date: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -631,8 +631,6 @@ pub struct DiaryEntry {
 #[serde(rename_all = "camelCase")]
 pub struct DiaryAppendRequest {
     #[serde(default)]
-    pub time_hint: Option<String>,
-    #[serde(default)]
     pub tags: Vec<String>,
     pub entry: String,
 }
@@ -660,9 +658,7 @@ pub struct DiaryRecentRequest {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DiarySelectExactRequest {
-    pub year: i32,
-    pub month: u32,
-    pub day: u32,
+    pub date: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<usize>,
 }
@@ -1447,9 +1443,6 @@ pub struct JobBatchToolResponse {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpBatchToolChildResponse {
-    pub index: usize,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub id: Option<String>,
     #[serde(flatten)]
     pub job: JobToolResponse,
 }
@@ -1457,7 +1450,6 @@ pub struct McpBatchToolChildResponse {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpBatchToolResponse {
-    pub batch_id: String,
     pub status: McpBatchStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<JobError>,
@@ -2152,14 +2144,9 @@ mod job_contract_tests {
         omitted.duration_ms = Some(7);
         omitted.result_omitted = true;
         let batch = McpBatchToolResponse {
-            batch_id: "batch-1".to_string(),
             status: McpBatchStatus::Completed,
             error: None,
-            results: vec![McpBatchToolChildResponse {
-                index: 0,
-                id: Some("first".to_string()),
-                job: omitted,
-            }],
+            results: vec![McpBatchToolChildResponse { job: omitted }],
         };
         let value = serde_json::to_value(batch).unwrap();
         assert_eq!(value["results"][0]["resultOmitted"], true);

@@ -27,8 +27,11 @@ pub(crate) async fn append(
     request: NotebookAppendRequest,
 ) -> Result<NotebookAppendResponse> {
     validate_scope(&request.scope)?;
-    validate_text("abstract", &request.abstract_text, ABSTRACT_MAX_CHARS)?;
     validate_text("content", &request.content, usize::MAX)?;
+    let abstract_text = request
+        .abstract_text
+        .unwrap_or_else(|| derive_abstract(&request.content));
+    validate_text("abstract", &abstract_text, ABSTRACT_MAX_CHARS)?;
     let config = state.config.read().await.clone();
     let timezone = room_timezone(&config)?;
     let root = notebook_root(&config);
@@ -38,7 +41,7 @@ pub(crate) async fn append(
         datetime: request.datetime.unwrap_or(now),
         scope: request.scope,
         significance: request.significance,
-        abstract_text: request.abstract_text,
+        abstract_text,
         content: request.content,
         tags: request.tags,
     };
@@ -104,8 +107,8 @@ pub(crate) async fn select_exact(
     if let Some(scope) = request.scope.as_deref() {
         validate_scope(scope)?;
     }
-    let date = NaiveDate::from_ymd_opt(request.year, request.month, request.day)
-        .ok_or_else(|| anyhow!("invalid_date"))?;
+    let date = NaiveDate::parse_from_str(&request.date, "%Y-%m-%d")
+        .map_err(|_| anyhow!("invalid_date"))?;
     let config = state.config.read().await.clone();
     let root = notebook_root(&config);
     let (mut passages, warnings) = read_passages_for_dates(&root, &[date])?;
@@ -295,6 +298,15 @@ fn ensure_notebook_layout(root: &Path) -> Result<()> {
         )?;
     }
     Ok(())
+}
+
+fn derive_abstract(content: &str) -> String {
+    let source = content
+        .split("\n\n")
+        .map(str::trim)
+        .find(|part| !part.is_empty())
+        .unwrap_or_else(|| content.trim());
+    source.chars().take(ABSTRACT_MAX_CHARS).collect()
 }
 
 fn validate_scope(scope: &str) -> Result<()> {
@@ -725,7 +737,7 @@ mod tests {
                 datetime: None,
                 scope: "agentic".to_string(),
                 significance: PassageSignificance::Anchor,
-                abstract_text: "handoff".to_string(),
+                abstract_text: Some("handoff".to_string()),
                 content: "recoverable details".to_string(),
                 tags: vec!["handoff".to_string()],
             },
@@ -751,7 +763,7 @@ mod tests {
                 datetime: Some(datetime),
                 scope: "agentic".to_string(),
                 significance: PassageSignificance::Normal,
-                abstract_text: "original".to_string(),
+                abstract_text: Some("original".to_string()),
                 content: "original content".to_string(),
                 tags: vec!["old".to_string()],
             },
@@ -829,7 +841,7 @@ mod tests {
                 datetime: None,
                 scope: "agentic".to_string(),
                 significance: PassageSignificance::Anchor,
-                abstract_text: "handoff".to_string(),
+                abstract_text: Some("handoff".to_string()),
                 content: "details".to_string(),
                 tags: vec!["old".to_string()],
             },
@@ -898,7 +910,7 @@ mod tests {
                 datetime: Some(now),
                 scope: "agentic".to_string(),
                 significance: PassageSignificance::Normal,
-                abstract_text: "remove me".to_string(),
+                abstract_text: Some("remove me".to_string()),
                 content: "searchable remove target".to_string(),
                 tags: vec!["remove-tag".to_string()],
             },
@@ -946,9 +958,7 @@ mod tests {
         let exact = select_exact(
             &state,
             NotebookSelectExactRequest {
-                year: local_day.year(),
-                month: local_day.month(),
-                day: local_day.day(),
+                date: local_day.to_string(),
                 scope: Some("agentic".to_string()),
                 limit: Some(20),
             },
@@ -985,7 +995,7 @@ mod tests {
                 datetime: Some(Utc.with_ymd_and_hms(2026, 6, 8, 1, 0, 0).unwrap()),
                 scope: "agentic".to_string(),
                 significance: PassageSignificance::Anchor,
-                abstract_text: "older".to_string(),
+                abstract_text: Some("older".to_string()),
                 content: "older details".to_string(),
                 tags: vec![],
             },
@@ -998,7 +1008,7 @@ mod tests {
                 datetime: Some(Utc.with_ymd_and_hms(2026, 6, 8, 2, 0, 0).unwrap()),
                 scope: "agentic".to_string(),
                 significance: PassageSignificance::Anchor,
-                abstract_text: "newer".to_string(),
+                abstract_text: Some("newer".to_string()),
                 content: "newer details".to_string(),
                 tags: vec![],
             },
@@ -1049,7 +1059,7 @@ mod tests {
                 datetime: None,
                 scope: "agentic".to_string(),
                 significance: PassageSignificance::Normal,
-                abstract_text: "original".to_string(),
+                abstract_text: Some("original".to_string()),
                 content: "details".to_string(),
                 tags: vec![],
             },
@@ -1090,7 +1100,7 @@ mod tests {
                 datetime: None,
                 scope: "agentic".to_string(),
                 significance: PassageSignificance::Anchor,
-                abstract_text: "smoke original".to_string(),
+                abstract_text: Some("smoke original".to_string()),
                 content: "smoke original content".to_string(),
                 tags: vec!["smoke".to_string()],
             },

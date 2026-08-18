@@ -5,6 +5,8 @@ bounded ordered requests to those same tools. The former combined file batch
 tool is removed.
 
 - Use `file.read` with flat fields for one request or `requests` for 1–32 reads.
+  Content is returned by default; `metadata: true` adds metadata. Continuations use
+  `nextStartLine` and never split a line.
 - Use `file.search` with flat fields for one request or `requests` for 1–32 searches.
 - Keep the two forms mutually exclusive; batch envelopes preserve order and
   isolate per-item failures.

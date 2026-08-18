@@ -167,17 +167,21 @@ and standalone/Hub parity for every Normal, Room, and Hub profile tool.
 `file.read` and `file.search` are bounded UTF-8 operations. They accept paths
 relative to `workspaceRoot` (or absolute paths authorized by `pathPolicy`),
 resolve symlinks before policy checks, and never invoke a shell or external
-search process. Reads support metadata-only inspection, line ranges, and a
-256 KiB response bound. Inside Git repositories, search honors Git ignore
+search process. Reads return content by default, optionally attach metadata with
+`metadata: true`, support inclusive line ranges, and stop at the last complete
+line before the 256 KiB response bound. A truncated read returns only
+`nextStartLine`; a single line larger than the bound is rejected. Inside Git
+repositories, search honors Git ignore
 rules by default and caps its returned match/context payload at 256 KiB while
 also bounding scanned files and bytes.
 
 `contextLines` is a non-negative integer with a default of 0. The live maximum
 is `limits.maxFileSearchContextLines` (default 5, configurable from 0 through
 100 and visible as `agent.info.execution.fileSearch.maxContextLines`). Requests
-above that maximum are clipped rather than discarded; search responses expose
-the requested/effective values, a `contextLinesClipped` flag, and one bounded
-warning. Negative or non-integer values fail argument validation.
+above that maximum are clipped rather than discarded. Normal search responses
+return only `matches`; clipping adds the effective `contextLines` and a bounded
+warning, while truncation/skipped-file evidence appears only when it occurs.
+Negative or non-integer values fail argument validation.
 
 `file.read` and `file.search` also accept an ordered `requests` array of up to
 32 per-request shapes. Flat and batch forms are mutually exclusive. Batch
