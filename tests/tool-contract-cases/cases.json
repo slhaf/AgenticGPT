@@ -16,123 +16,62 @@
     }
   },
   {
-    "id": "batch_same_file_dry_run",
-    "tool": "file.batch",
+    "id": "read_batch_order_and_partial_failure",
+    "tool": "file.read",
     "kind": "positive",
     "arguments": {
-      "dryRun": true,
-      "operations": [
-        {
-          "type": "edit",
-          "id": "first",
-          "mode": "replace",
-          "path": "contract-fixture.txt",
-          "expectedRevision": "$fixtureRevision",
-          "oldText": "needle",
-          "newText": "changed"
-        },
-        {
-          "type": "edit",
-          "id": "second",
-          "mode": "replace",
-          "path": "./contract-fixture.txt",
-          "expectedRevision": "$fixtureRevision",
-          "oldText": "changed",
-          "newText": "final"
-        }
+      "requests": [
+        {"path": "contract-fixture.txt", "includeContent": false},
+        {"path": "missing-contract-fixture.txt"},
+        {"path": "contract-fixture.txt", "startLine": 2, "endLine": 2}
       ]
     },
     "expect": {
-      "status": "dry-run",
-      "operationCount": 2,
-      "groupTotal": 1,
-      "groupStatus": "dry-run",
-      "committed": false
+      "status": "completed_with_errors",
+      "operationCount": 3,
+      "noRevision": true
     }
   },
   {
-    "id": "batch_unrelated_missing_target",
-    "tool": "file.batch",
+    "id": "search_batch_order_and_partial_failure",
+    "tool": "file.search",
     "kind": "positive",
     "arguments": {
-      "dryRun": true,
-      "operations": [
-        {
-          "type": "edit",
-          "id": "valid",
-          "mode": "replace",
-          "path": "contract-fixture.txt",
-          "expectedRevision": "$fixtureRevision",
-          "oldText": "needle",
-          "newText": "valid"
-        },
-        {
-          "type": "edit",
-          "id": "missing-parent",
-          "mode": "write",
-          "path": "missing-parent/contract-fixture.txt",
-          "expectedAbsent": true,
-          "content": "not-created\n"
-        }
+      "requests": [
+        {"path": "contract-fixture.txt", "query": "needle"},
+        {"path": "missing-contract-fixture.txt", "query": "needle"},
+        {"path": "contract-fixture.txt", "query": "prefix"}
       ]
     },
     "expect": {
-      "status": "dry-run",
-      "groupTotal": 2,
-      "failedGroups": 1,
-      "failureCount": 1
+      "status": "completed_with_errors",
+      "operationCount": 3
     }
   },
   {
-    "id": "file_edit_guarded_create",
+    "id": "file_edit_apply_patch_dry_run",
     "tool": "file.edit",
     "kind": "positive",
     "arguments": {
-      "mode": "write",
-      "path": "contract-created.txt",
-      "expectedAbsent": true,
-      "content": "created\n",
+      "patch": "*** Begin Patch\n*** Update File: contract-fixture.txt\n@@\n-prefix\n+changed\n*** Add File: contract-created.txt\n+created\n*** End Patch",
       "dryRun": true
     },
     "expect": {
-      "status": "dry-run",
-      "changedLinesAdded": 1,
-      "changedLinesRemoved": 0
+      "status": "dry-run"
     }
   },
   {
-    "id": "job_discovery",
-    "tool": "job.list",
-    "kind": "positive",
-    "arguments": {
-      "kind": "process",
-      "limit": 10
-    },
-    "expect": {
-      "resultFields": ["jobs"]
-    }
-  },
-  {
-    "id": "mcp_batch_admission_descriptor",
-    "tool": "mcp.batch",
+    "id": "file_edit_descriptor",
+    "tool": "file.edit",
     "kind": "descriptor",
-    "arguments": {
-      "calls": [
-        {
-          "id": "call-1",
-          "serverId": "configured-server",
-          "toolName": "tool",
-          "arguments": {}
-        }
-      ]
-    },
+    "arguments": {},
     "expect": {
-      "descriptionIncludes": ["1..16", "not rolled back"],
-      "required": ["calls"]
+      "descriptionIncludes": ["Codex apply_patch", "dryRun"],
+      "required": ["patch"]
     }
   },
   {
-    "id": "file_edit_missing_revision",
+    "id": "file_edit_rejects_obsolete_fields",
     "tool": "file.edit",
     "kind": "negative",
     "arguments": {
@@ -142,7 +81,19 @@
       "newText": "invalid"
     },
     "expect": {
-      "errorCode": "file_revision_required"
+      "errorIncludes": "unknown tool argument"
+    }
+  },
+  {
+    "id": "file_read_mutually_exclusive",
+    "tool": "file.read",
+    "kind": "negative",
+    "arguments": {
+      "path": "contract-fixture.txt",
+      "requests": [{"path": "contract-fixture.txt"}]
+    },
+    "expect": {
+      "errorIncludes": "mutually exclusive"
     }
   },
   {
@@ -156,6 +107,20 @@
     },
     "expect": {
       "errorIncludes": "invalid value"
+    }
+  },
+  {
+    "id": "mcp_batch_admission_descriptor",
+    "tool": "mcp.batch",
+    "kind": "descriptor",
+    "arguments": {
+      "calls": [
+        {"id": "call-1", "serverId": "configured-server", "toolName": "tool", "arguments": {}}
+      ]
+    },
+    "expect": {
+      "descriptionIncludes": ["1..16", "not rolled back"],
+      "required": ["calls"]
     }
   },
   {

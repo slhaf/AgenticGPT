@@ -100,26 +100,6 @@ pub(crate) struct ChangedLines {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct BatchAuditRecord {
-    pub(crate) time: DateTime<Utc>,
-    pub(crate) tool: String,
-    pub(crate) action: String,
-    pub(crate) batch_id: String,
-    pub(crate) operation_count: usize,
-    pub(crate) edit_count: usize,
-    pub(crate) group_count: usize,
-    pub(crate) committed_group_count: usize,
-    pub(crate) failed_group_count: usize,
-    pub(crate) unchanged_group_count: usize,
-    pub(crate) failure_count: usize,
-    pub(crate) confirmation_result: Option<String>,
-    pub(crate) outcome: String,
-    pub(crate) duration_ms: u128,
-    pub(crate) truncated: bool,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
 pub(crate) struct McpBatchAuditRecord {
     pub(crate) time: DateTime<Utc>,
     pub(crate) tool: String,
@@ -159,16 +139,6 @@ pub(crate) fn write_mcp_batch_audit(config: &Config, record: McpBatchAuditRecord
 }
 
 pub(crate) fn write_file_audit(config: &Config, record: FileAuditRecord) -> Result<()> {
-    let audit_path = config.workspace_root.join(".agentic-gpt-audit.jsonl");
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(audit_path)?;
-    writeln!(file, "{}", serde_json::to_string(&record)?)?;
-    Ok(())
-}
-
-pub(crate) fn write_batch_audit(config: &Config, record: BatchAuditRecord) -> Result<()> {
     let audit_path = config.workspace_root.join(".agentic-gpt-audit.jsonl");
     let mut file = OpenOptions::new()
         .create(true)

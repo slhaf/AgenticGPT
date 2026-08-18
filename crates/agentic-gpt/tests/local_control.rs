@@ -98,9 +98,10 @@ fn run_local_e2e(root: &Path) -> Result<(), String> {
     }
     let tools: Value = serde_json::from_slice(&tools.stdout).map_err(|error| error.to_string())?;
     let tools = tools.as_array().ok_or("tool list is not an array")?;
-    if tools.len() != 24
+    let removed_tool = ["file", "batch"].join(".");
+    if tools.len() != 23
         || !tools.iter().any(|tool| tool["name"] == "agent.info")
-        || !tools.iter().any(|tool| tool["name"] == "file.batch")
+        || tools.iter().any(|tool| tool["name"] == removed_tool)
         || tools
             .iter()
             .any(|tool| tool["_meta"]["surface"] != "agent-local")
@@ -129,7 +130,7 @@ fn run_local_e2e(root: &Path) -> Result<(), String> {
     let mut ranged = command(&binary)
         .args(["local", "--config"])
         .arg(&config_path)
-        .args(["call", "file.batch", "--arguments-file", "-"])
+        .args(["call", "file.read", "--arguments-file", "-"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -139,9 +140,7 @@ fn run_local_e2e(root: &Path) -> Result<(), String> {
         .stdin
         .as_mut()
         .ok_or("missing local CLI stdin")?
-        .write_all(
-            br#"{"operations":[{"type":"read","path":"ranged.txt","includeContent":true,"startLine":2,"endLine":3}]}"#,
-        )
+        .write_all(br#"{"path":"ranged.txt","includeContent":true,"startLine":2,"endLine":3}"#)
         .map_err(|error| error.to_string())?;
     let ranged = ranged
         .wait_with_output()
@@ -149,7 +148,7 @@ fn run_local_e2e(root: &Path) -> Result<(), String> {
     ensure_success(&ranged, "ranged local call")?;
     let ranged: Value =
         serde_json::from_slice(&ranged.stdout).map_err(|error| error.to_string())?;
-    let ranged = &ranged["structuredContent"]["results"][0]["result"];
+    let ranged = &ranged["structuredContent"];
     if ranged["content"] != "two\nthree\n"
         || ranged["startLine"] != 2
         || ranged["returnedThroughLine"] != 3

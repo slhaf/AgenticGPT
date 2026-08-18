@@ -1,15 +1,17 @@
 # Agentic GPT v0.10 迁移说明
 
-v0.10 将 `file.batch` 的变更边界从“尽力跨文件回滚”改为相互独立的规范化文件组。
+文件工具现在保留单次读/搜的易用平铺字段，并把批量能力合并到同一个
+工具的 `requests` 字段；原来的组合文件批处理工具已移除。
 
-## `file.batch`
+- `file.read` 单次使用平铺字段，批量使用 1–32 个 `requests`。
+- `file.search` 单次使用平铺字段，批量使用 1–32 个 `requests`。
+- 两种形式互斥；批量结果按输入顺序返回，单项失败不会压制其他项。
+- `file.edit` 只接受 Codex apply-patch 文本，可跨文件 Add、Update、Delete、Move。
+  旧的 mode/path/revision/content 字段不再接受。
+- `dryRun` 只校验和预览，不确认、不写入；`needConfirm` 对整份有效补丁只请求一次确认。
 
-- 继续使用扁平有序的 `operations` 数组；不再提供 `atomicity` 选择器。
-- 同一规范化目标的重复编辑按输入顺序作用于一个内存候选，只产生一次物理替换。
-- 读取和搜索仍使用编辑前快照；它们失败时不再阻止无关的有效文件组提交。
-- 失败只影响所属文件组。其他组可以提交，混合结果使用 `completed_with_errors`，并提供有序操作错误和有界的 `groups` 摘要。
-- 确认仍是针对所有有效变更组的一次聚合决定；拒绝时不会写入任何已暂存组。
-- `dryRun:true` 是整批校验和预览机制；后续真实调用仍以精确的 `expectedRevision` 与 `expectedAbsent:true` 守卫为准。
-- 删除旧的 `rolled_back`、`partial_failed`、`rollback_failed`、`not_committed` 状态及仅用于回滚的错误码。普通提交失败不会撤销已经提交的组，而是报告受影响组失败。
-
-调用方应只根据 `completed`、`completed_with_errors`、`rejected`、`dry-run` 分支处理，结合 `groups` 判断每个文件的物理状态，不要从批量成功响应推断跨文件原子性。
+读取/搜索批量调用查看有序 `results`，编辑查看 `changes` 与 `summary`。解析、路径/
+上下文、暂存、确认以及最终再次校验若失败，都发生在第一次物理提交之前，因此不会
+写入任何文件。物理提交开始后不承诺跨文件回滚；若后续某项提交失败，`file.edit`
+返回 `completed_with_errors`，并按顺序明确标记哪些变更已经提交、哪一项失败，以及
+哪些后续变更尚未尝试。

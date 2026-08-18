@@ -9,6 +9,7 @@ name = "agentic-gpt"
 path = "src/main.rs"
 
 [dependencies]
+agentic-apply-patch = { path = "../agentic-apply-patch" }
 agentic-gpt-protocol.workspace = true
 anyhow.workspace = true
 base64 = "0.22"

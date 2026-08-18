@@ -35,15 +35,14 @@ use crate::{
     state::{AppState, CapabilityProfile},
 };
 
-const INSTRUCTIONS: &str = "Agentic GPT local Tunnel worker. Start with agent.info to inspect the active profile, exact workspace/path policy, capacity, confirmation channels, MCP scheduler state, and connection state. Use file.read/search/edit/batch for bounded UTF-8 workspace work, process.exec/process.batch for process Jobs, mcp.callTool for one downstream MCP Job, mcp.batch for 1..16 atomically admitted child Jobs with one aggregate confirmation and bounded 8/2 concurrency, job.get/list/cancel for lifecycle control, tmux for persistent workspaces, skills for the local skills workspace, and bootstrap for Room startup guidance. All calls remain subject to path policy, configured confirmation, audit, and bounded waits.";
-const PATCH_SCHEMA_DESCRIPTION: &str = "Standard single-file unified diff with hunk headers like @@ -1,2 +1,2 @@. Omitted counts mean 1; bare @@ is invalid.";
+const INSTRUCTIONS: &str = "Agentic GPT local Tunnel worker. Start with agent.info to inspect the active profile, exact workspace/path policy, capacity, confirmation channels, MCP scheduler state, and connection state. Use file.read/search for bounded UTF-8 workspace work and file.edit for Codex apply-patch edits, process.exec/process.batch for process Jobs, mcp.callTool for one downstream MCP Job, mcp.batch for 1..16 atomically admitted child Jobs with one aggregate confirmation and bounded 8/2 concurrency, job.get/list/cancel for lifecycle control, tmux for persistent workspaces, skills for the local skills workspace, and bootstrap for Room startup guidance. All calls remain subject to path policy, configured confirmation, audit, and bounded waits.";
+const PATCH_SCHEMA_DESCRIPTION: &str = "Codex apply_patch text beginning with *** Begin Patch and ending with *** End Patch; supports Add File, Delete File, Update File, and Move to across multiple files.";
 
 const NORMAL_TOOLS: &[&str] = &[
     "agent.info",
     "file.read",
     "file.search",
     "file.edit",
-    "file.batch",
     "mcp.batch",
     "mcp.callTool",
     "mcp.list",
@@ -520,16 +519,20 @@ impl AgentMcpServer {
             }
             "file.read" => {
                 let args: FileReadArgs = from_value(arguments)?;
+                validate_file_read_args(&args)?;
+                if let Some(requests) = args.requests {
+                    return Ok(crate::file_ops::read_batch(
+                        &self.state,
+                        &requests.into_iter().map(Into::into).collect::<Vec<_>>(),
+                    )
+                    .await);
+                }
                 let config = self.state.config.read().await.clone();
-                let resolved = crate::file_ops::resolve_path(
-                    &config,
-                    &args.path,
-                    crate::file_ops::Access::Read,
-                );
-                match resolved {
+                let path = args.path.expect("validated single file.read path");
+                match crate::file_ops::resolve_path(&config, &path, crate::file_ops::Access::Read) {
                     Ok(resolved) => crate::file_ops::to_result(crate::file_ops::read(
                         &resolved,
-                        args.include_content,
+                        args.include_content.unwrap_or(true),
                         args.start_line,
                         args.end_line,
                     )),
@@ -538,21 +541,20 @@ impl AgentMcpServer {
             }
             "file.search" => {
                 let args: FileSearchArgs = from_value(arguments)?;
-                if args
-                    .mode
-                    .as_deref()
-                    .is_some_and(|mode| !matches!(mode, "literal" | "regex"))
-                {
-                    return Ok(crate::file_ops::FileError::new(
-                        "file_invalid_mode",
-                        "mode must be literal or regex",
+                validate_file_search_args(&args)?;
+                if let Some(requests) = args.requests {
+                    return Ok(crate::file_ops::search_batch(
+                        &self.state,
+                        &requests.into_iter().map(Into::into).collect::<Vec<_>>(),
                     )
-                    .value());
+                    .await);
                 }
                 let config = self.state.config.read().await.clone();
                 let resolved = crate::file_ops::resolve_path(
                     &config,
-                    &args.path,
+                    args.path
+                        .as_deref()
+                        .expect("validated single file.search path"),
                     crate::file_ops::Access::Read,
                 );
                 match resolved {
@@ -560,19 +562,19 @@ impl AgentMcpServer {
                         crate::file_ops::to_result(crate::file_ops::search_with_context_limit(
                             crate::file_ops::SearchOptions {
                                 root: &resolved,
-                                query: &args.query,
+                                query: args.query.as_deref().expect("validated search query"),
                                 mode: if args.mode.as_deref() == Some("regex") {
                                     crate::file_ops::SearchMode::Regex
                                 } else {
                                     crate::file_ops::SearchMode::Literal
                                 },
-                                case_sensitive: args.case_sensitive,
-                                include: &args.include,
-                                exclude: &args.exclude,
-                                context_lines: args.context_lines,
-                                max_results: args.max_results,
-                                hidden: args.hidden,
-                                respect_gitignore: args.respect_gitignore,
+                                case_sensitive: args.case_sensitive.unwrap_or(true),
+                                include: args.include.as_deref().unwrap_or(&[]),
+                                exclude: args.exclude.as_deref().unwrap_or(&[]),
+                                context_lines: args.context_lines.unwrap_or(0),
+                                max_results: args.max_results.unwrap_or(50),
+                                hidden: args.hidden.unwrap_or(false),
+                                respect_gitignore: args.respect_gitignore.unwrap_or(true),
                                 scan_file_limit: crate::file_ops::MAX_SEARCH_FILES,
                                 scan_byte_limit: crate::file_ops::MAX_SEARCH_BYTES,
                             },
@@ -591,47 +593,10 @@ impl AgentMcpServer {
             }
             "file.edit" => {
                 let args: FileEditArgs = from_value(arguments)?;
-                let mode = match args.mode.as_str() {
-                    "replace" => crate::file_ops::EditMode::Replace,
-                    "patch" => crate::file_ops::EditMode::Patch,
-                    "write" => crate::file_ops::EditMode::Write,
-                    _ => {
-                        return Ok(crate::file_ops::FileError::new(
-                            "file_invalid_mode",
-                            "mode must be replace, patch, or write",
-                        )
-                        .value())
-                    }
-                };
                 Ok(crate::file_ops::edit(
                     &self.state,
                     crate::file_ops::EditRequest {
-                        mode,
-                        path: args.path,
-                        expected_revision: args.expected_revision,
-                        expected_absent: args.expected_absent,
-                        old_text: args.old_text,
-                        new_text: args.new_text,
-                        expected_matches: args.expected_matches,
                         patch: args.patch,
-                        content: args.content,
-                        dry_run: args.dry_run,
-                        need_confirm: args.need_confirm,
-                    },
-                )
-                .await)
-            }
-            "file.batch" => {
-                let args: FileBatchArgs = from_value(arguments)?;
-                let operations = args
-                    .operations
-                    .into_iter()
-                    .map(to_file_batch_operation)
-                    .collect();
-                Ok(crate::file_ops::batch(
-                    &self.state,
-                    crate::file_ops::BatchRequest {
-                        operations,
                         dry_run: args.dry_run,
                         need_confirm: args.need_confirm,
                     },
@@ -1521,6 +1486,21 @@ struct EmptyArgs {}
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct FileReadArgs {
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    include_content: Option<bool>,
+    #[serde(default)]
+    start_line: Option<usize>,
+    #[serde(default)]
+    end_line: Option<usize>,
+    #[serde(default)]
+    requests: Option<Vec<FileReadRequestArgs>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FileReadRequestArgs {
     path: String,
     #[serde(default = "default_true")]
     include_content: bool,
@@ -1533,6 +1513,33 @@ struct FileReadArgs {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct FileSearchArgs {
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    query: Option<String>,
+    #[serde(default)]
+    mode: Option<String>,
+    #[serde(default)]
+    case_sensitive: Option<bool>,
+    #[serde(default)]
+    include: Option<Vec<String>>,
+    #[serde(default)]
+    exclude: Option<Vec<String>>,
+    #[serde(default)]
+    context_lines: Option<usize>,
+    #[serde(default)]
+    max_results: Option<usize>,
+    #[serde(default)]
+    hidden: Option<bool>,
+    #[serde(default)]
+    respect_gitignore: Option<bool>,
+    #[serde(default)]
+    requests: Option<Vec<FileSearchRequestArgs>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FileSearchRequestArgs {
     path: String,
     query: String,
     #[serde(default)]
@@ -1556,97 +1563,11 @@ struct FileSearchArgs {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct FileEditArgs {
-    mode: String,
-    path: String,
-    #[serde(default)]
-    expected_revision: Option<String>,
-    #[serde(default)]
-    expected_absent: Option<bool>,
-    #[serde(default)]
-    old_text: Option<String>,
-    #[serde(default)]
-    new_text: Option<String>,
-    #[serde(default)]
-    expected_matches: Option<usize>,
-    #[serde(default)]
-    patch: Option<String>,
-    #[serde(default)]
-    content: Option<String>,
+    patch: String,
     #[serde(default)]
     dry_run: bool,
     #[serde(default)]
     need_confirm: bool,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct FileBatchArgs {
-    operations: Vec<FileBatchOperationArgs>,
-    #[serde(default)]
-    dry_run: bool,
-    #[serde(default)]
-    need_confirm: bool,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
-enum FileBatchOperationArgs {
-    #[serde(rename = "read")]
-    Read {
-        #[serde(default)]
-        id: Option<String>,
-        path: String,
-        #[serde(default = "default_true", rename = "includeContent")]
-        include_content: bool,
-        #[serde(default, rename = "startLine")]
-        start_line: Option<usize>,
-        #[serde(default, rename = "endLine")]
-        end_line: Option<usize>,
-    },
-    #[serde(rename = "search")]
-    Search {
-        #[serde(default)]
-        id: Option<String>,
-        path: String,
-        query: String,
-        #[serde(default)]
-        mode: Option<String>,
-        #[serde(default = "default_true", rename = "caseSensitive")]
-        case_sensitive: bool,
-        #[serde(default)]
-        include: Vec<String>,
-        #[serde(default)]
-        exclude: Vec<String>,
-        #[serde(default, rename = "contextLines")]
-        context_lines: usize,
-        #[serde(default = "default_max_search_results", rename = "maxResults")]
-        max_results: usize,
-        #[serde(default)]
-        hidden: bool,
-        #[serde(default = "default_true", rename = "respectGitignore")]
-        respect_gitignore: bool,
-    },
-    #[serde(rename = "edit")]
-    Edit {
-        #[serde(default)]
-        id: Option<String>,
-        mode: String,
-        path: String,
-        #[serde(default, rename = "expectedRevision")]
-        expected_revision: Option<String>,
-        #[serde(default, rename = "expectedAbsent")]
-        expected_absent: Option<bool>,
-        #[serde(default, rename = "oldText")]
-        old_text: Option<String>,
-        #[serde(default, rename = "newText")]
-        new_text: Option<String>,
-        #[serde(default, rename = "expectedMatches")]
-        expected_matches: Option<usize>,
-        #[serde(default)]
-        patch: Option<String>,
-        #[serde(default)]
-        content: Option<String>,
-    },
 }
 
 fn default_max_search_results() -> usize {
@@ -1657,102 +1578,30 @@ fn default_true() -> bool {
     true
 }
 
-fn to_file_batch_operation(operation: FileBatchOperationArgs) -> crate::file_ops::BatchOperation {
-    let empty = || crate::file_ops::BatchOperation {
-        id: None,
-        kind: String::new(),
-        path: String::new(),
-        include_content: true,
-        start_line: None,
-        end_line: None,
-        query: None,
-        search_mode: None,
-        case_sensitive: true,
-        include: Vec::new(),
-        exclude: Vec::new(),
-        context_lines: 0,
-        max_results: default_max_search_results(),
-        hidden: false,
-        respect_gitignore: true,
-        edit_mode: None,
-        expected_revision: None,
-        expected_absent: None,
-        old_text: None,
-        new_text: None,
-        expected_matches: None,
-        patch: None,
-        content: None,
-    };
-    match operation {
-        FileBatchOperationArgs::Read {
-            id,
-            path,
-            include_content,
-            start_line,
-            end_line,
-        } => {
-            let mut value = empty();
-            value.id = id;
-            value.kind = "read".to_string();
-            value.path = path;
-            value.include_content = include_content;
-            value.start_line = start_line;
-            value.end_line = end_line;
-            value
+impl From<FileReadRequestArgs> for crate::file_ops::ReadRequest {
+    fn from(value: FileReadRequestArgs) -> Self {
+        Self {
+            path: value.path,
+            include_content: value.include_content,
+            start_line: value.start_line,
+            end_line: value.end_line,
         }
-        FileBatchOperationArgs::Search {
-            id,
-            path,
-            query,
-            mode,
-            case_sensitive,
-            include,
-            exclude,
-            context_lines,
-            max_results,
-            hidden,
-            respect_gitignore,
-        } => {
-            let mut value = empty();
-            value.id = id;
-            value.kind = "search".to_string();
-            value.path = path;
-            value.query = Some(query);
-            value.search_mode = mode;
-            value.case_sensitive = case_sensitive;
-            value.include = include;
-            value.exclude = exclude;
-            value.context_lines = context_lines;
-            value.max_results = max_results;
-            value.hidden = hidden;
-            value.respect_gitignore = respect_gitignore;
-            value
-        }
-        FileBatchOperationArgs::Edit {
-            id,
-            mode,
-            path,
-            expected_revision,
-            expected_absent,
-            old_text,
-            new_text,
-            expected_matches,
-            patch,
-            content,
-        } => {
-            let mut value = empty();
-            value.id = id;
-            value.kind = "edit".to_string();
-            value.path = path;
-            value.edit_mode = Some(mode);
-            value.expected_revision = expected_revision;
-            value.expected_absent = expected_absent;
-            value.old_text = old_text;
-            value.new_text = new_text;
-            value.expected_matches = expected_matches;
-            value.patch = patch;
-            value.content = content;
-            value
+    }
+}
+
+impl From<FileSearchRequestArgs> for crate::file_ops::SearchRequest {
+    fn from(value: FileSearchRequestArgs) -> Self {
+        Self {
+            path: value.path,
+            query: value.query,
+            mode: value.mode,
+            case_sensitive: value.case_sensitive,
+            include: value.include,
+            exclude: value.exclude,
+            context_lines: value.context_lines,
+            max_results: value.max_results,
+            hidden: value.hidden,
+            respect_gitignore: value.respect_gitignore,
         }
     }
 }
@@ -2230,6 +2079,80 @@ fn validate_stdio_arguments(name: &str, arguments: &Value) -> Result<()> {
     if let Some(unknown) = object.keys().find(|key| !allowed.contains_key(*key)) {
         return Err(anyhow::anyhow!("unknown tool argument: {unknown}"));
     }
+    match name {
+        "file.read" => {
+            let args: FileReadArgs = from_value(arguments.clone())?;
+            validate_file_read_args(&args)?;
+        }
+        "file.search" => {
+            let args: FileSearchArgs = from_value(arguments.clone())?;
+            validate_file_search_args(&args)?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn validate_file_read_args(args: &FileReadArgs) -> Result<()> {
+    match (&args.path, &args.requests) {
+        (Some(_), None) => Ok(()),
+        (None, Some(requests))
+            if !requests.is_empty()
+                && requests.len() <= crate::file_ops::MAX_BATCH_OPERATIONS
+                && args.include_content.is_none()
+                && args.start_line.is_none()
+                && args.end_line.is_none() =>
+        {
+            Ok(())
+        }
+        (Some(_), Some(_)) => Err(anyhow::anyhow!(
+            "file.read single fields and requests are mutually exclusive"
+        )),
+        (None, Some(_)) => Err(anyhow::anyhow!(
+            "file.read requests must contain 1..32 items"
+        )),
+        (None, None) => Err(anyhow::anyhow!("file.read requires path or requests")),
+    }
+}
+
+fn validate_file_search_args(args: &FileSearchArgs) -> Result<()> {
+    let batch = args.requests.is_some();
+    let has_flat = args.path.is_some()
+        || args.query.is_some()
+        || args.mode.is_some()
+        || args.case_sensitive.is_some()
+        || args.include.is_some()
+        || args.exclude.is_some()
+        || args.context_lines.is_some()
+        || args.max_results.is_some()
+        || args.hidden.is_some()
+        || args.respect_gitignore.is_some();
+    if batch {
+        let requests = args.requests.as_ref().expect("batch request present");
+        if requests.is_empty() || requests.len() > crate::file_ops::MAX_BATCH_OPERATIONS {
+            return Err(anyhow::anyhow!(
+                "file.search requests must contain 1..32 items"
+            ));
+        }
+        if has_flat {
+            return Err(anyhow::anyhow!(
+                "file.search single fields and requests are mutually exclusive"
+            ));
+        }
+        return Ok(());
+    }
+    if args.path.is_none() || args.query.is_none() {
+        return Err(anyhow::anyhow!(
+            "file.search requires path and query or requests"
+        ));
+    }
+    if args
+        .mode
+        .as_deref()
+        .is_some_and(|mode| !matches!(mode, "literal" | "regex"))
+    {
+        return Err(anyhow::anyhow!("file search mode must be literal or regex"));
+    }
     Ok(())
 }
 
@@ -2382,22 +2305,60 @@ fn managed_terminal_event_message(profile: &str, source: &str, job: &JobInfo) ->
 }
 
 fn tool_descriptor(name: &str) -> Tool {
-    let (properties, required) = tool_schema(name);
+    let input_schema = tool_input_schema(name);
     let annotations = ToolAnnotations::new()
         .read_only(tool_is_read_only(name))
         .destructive(tool_is_destructive(name))
         .open_world(tool_is_open_world(name));
-    Tool::new(
-        name.to_string(),
-        tool_description(name),
-        schema(properties, required),
-    )
-    .with_annotations(annotations)
-    .with_raw_output_schema(Arc::new(output_schema()))
-    .with_meta(Meta(Map::from_iter([(
-        "surface".to_string(),
-        Value::String("agent-local".to_string()),
-    )])))
+    Tool::new(name.to_string(), tool_description(name), input_schema)
+        .with_annotations(annotations)
+        .with_raw_output_schema(Arc::new(output_schema()))
+        .with_meta(Meta(Map::from_iter([(
+            "surface".to_string(),
+            Value::String("agent-local".to_string()),
+        )])))
+}
+
+fn tool_input_schema(name: &str) -> Map<String, Value> {
+    let (properties, required) = tool_schema(name);
+    let mut result = schema(properties, required);
+    if matches!(name, "file.read" | "file.search") {
+        let (flat_required, flat_fields) = if name == "file.search" {
+            (
+                vec!["path", "query"],
+                vec![
+                    "path",
+                    "query",
+                    "mode",
+                    "caseSensitive",
+                    "include",
+                    "exclude",
+                    "contextLines",
+                    "maxResults",
+                    "hidden",
+                    "respectGitignore",
+                ],
+            )
+        } else {
+            (
+                vec!["path"],
+                vec!["path", "includeContent", "startLine", "endLine"],
+            )
+        };
+        let flat_absent_requests = json!({
+            "required": flat_required,
+            "not": {"required": ["requests"]}
+        });
+        let batch_absent_flat = json!({
+            "required": ["requests"],
+            "not": {"anyOf": flat_fields.iter().map(|field| json!({"required": [field]})).collect::<Vec<_>>()}
+        });
+        result.insert(
+            "oneOf".to_string(),
+            json!([flat_absent_requests, batch_absent_flat]),
+        );
+    }
+    result
 }
 
 fn tool_schema(name: &str) -> (Map<String, Value>, &'static [&'static str]) {
@@ -2405,10 +2366,8 @@ fn tool_schema(name: &str) -> (Map<String, Value>, &'static [&'static str]) {
         "process.exec" => &["program"],
         "process.batch" => &["elements"],
         "job.get" | "job.cancel" => &["jobId"],
-        "file.read" => &["path"],
-        "file.search" => &["path", "query"],
-        "file.edit" => &["mode", "path"],
-        "file.batch" => &["operations"],
+        "file.read" | "file.search" => &[],
+        "file.edit" => &["patch"],
         "mcp.callTool" => &["serverId", "toolName"],
         "mcp.batch" => &["calls"],
         "skills.setActive" => &["id", "active"],
@@ -2470,6 +2429,18 @@ fn properties_for(name: &str) -> Map<String, Value> {
             );
             add("startLine", number("Inclusive start line."));
             add("endLine", number("Inclusive end line."));
+            add(
+                "requests",
+                json!({
+                    "type":"array", "minItems":1, "maxItems":32,
+                    "items":{"type":"object","additionalProperties":false,"properties":{
+                        "path":string("File or directory path; resolved and checked by path policy."),
+                        "includeContent":boolean("Include bounded content; default true."),
+                        "startLine":number("Inclusive start line."), "endLine":number("Inclusive end line.")
+                    },"required":["path"]},
+                    "description":"Ordered batch reads; mutually exclusive with flat single-read fields. Maximum 32."
+                }),
+            );
         }
         "file.search" => {
             add(
@@ -2499,41 +2470,27 @@ fn properties_for(name: &str) -> Map<String, Value> {
                 "respectGitignore",
                 boolean("Honor Git ignore rules inside repositories; default true."),
             );
+            add(
+                "requests",
+                json!({
+                    "type":"array", "minItems":1, "maxItems":32,
+                    "items":{"type":"object","additionalProperties":false,"properties":{
+                        "path":string("File or directory root; resolved and checked by path policy."),
+                        "query":string("Literal or regex query."),
+                        "mode":{"type":"string","enum":["literal","regex"],"default":"literal"},
+                        "caseSensitive":{"type":"boolean","default":true},
+                        "include":strings("Include globs; max 16."), "exclude":strings("Exclude globs; max 16."),
+                        "contextLines":{"type":"integer","minimum":0,"default":0},
+                        "maxResults":{"type":"integer","maximum":200,"default":50},
+                        "hidden":{"type":"boolean","default":false},
+                        "respectGitignore":{"type":"boolean","default":true}
+                    },"required":["path","query"]},
+                    "description":"Ordered batch searches; mutually exclusive with flat single-search fields. Maximum 32."
+                }),
+            );
         }
         "file.edit" => {
-            add(
-                "mode",
-                json!({"type":"string","enum":["replace","patch","write"]}),
-            );
-            add(
-                "path",
-                string("UTF-8 text file path; resolved and checked by path policy."),
-            );
-            add(
-                "expectedRevision",
-                string("Required sha256:<hex> revision for an existing target; do not combine with expectedAbsent."),
-            );
-            add(
-                "expectedAbsent",
-                boolean("Require a missing target; only write mode may create, and its parent must already exist."),
-            );
-            add(
-                "oldText",
-                string("Exact non-empty text to replace; required for replace mode."),
-            );
-            add(
-                "newText",
-                string("Replacement text for replace mode; may be empty."),
-            );
-            add(
-                "expectedMatches",
-                number("Expected exact replacement count in replace mode; defaults to 1."),
-            );
             add("patch", string(PATCH_SCHEMA_DESCRIPTION));
-            add(
-                "content",
-                string("Complete UTF-8 file content; required for write mode and used for guarded create/overwrite."),
-            );
             add(
                 "dryRun",
                 boolean(
@@ -2543,59 +2500,6 @@ fn properties_for(name: &str) -> Map<String, Value> {
             add(
                 "needConfirm",
                 boolean("Request one confirmation before an effective mutation; default false."),
-            );
-        }
-        "file.batch" => {
-            let read = json!({
-                "type":"object", "additionalProperties":false,
-                "properties": {
-                    "type":{"const":"read"}, "id":string("Optional operation id."),
-                    "path":string("File or directory path; resolved and checked by path policy."),
-                    "includeContent":{"type":"boolean","description":"Include bounded content; default true.","default":true},
-                    "startLine":number("Inclusive start line; optional."), "endLine":number("Inclusive end line; optional.")
-                }, "required":["type","path"]
-            });
-            let search = json!({
-                "type":"object", "additionalProperties":false,
-                "properties": {
-                    "type":{"const":"search"}, "id":string("Optional operation id."), "path":string("File or directory root; resolved and checked by path policy."),
-                    "query":string("Literal or regex query."), "mode":{"type":"string","enum":["literal","regex"],"default":"literal"},
-                    "caseSensitive":{"type":"boolean","description":"Case-sensitive; default true.","default":true},
-                    "include":{"type":"array","items":{"type":"string"},"description":"Include globs; max 16.","default":[]},
-                    "exclude":{"type":"array","items":{"type":"string"},"description":"Exclude globs; max 16.","default":[]},
-                    "contextLines":{"type":"integer","minimum":0,"description":"Requested context lines; values above the live configured maximum are clipped and reported.","default":0},
-                    "maxResults":{"type":"integer","description":"Maximum matches, max 200.","default":50},
-                    "hidden":{"type":"boolean","description":"Include hidden files; default false.","default":false},
-                    "respectGitignore":{"type":"boolean","description":"Honor Git ignore rules inside repositories; default true.","default":true}
-                }, "required":["type","path","query"]
-            });
-            let edit = json!({
-                "type":"object", "additionalProperties":false,
-                "properties": {
-                    "type":{"const":"edit"}, "id":string("Optional operation id."),
-                    "mode":{"type":"string","enum":["replace","patch","write"]}, "path":string("UTF-8 text file path; resolved and checked by path policy."),
-                    "expectedRevision":string("Required sha256:<hex> revision for an existing target; do not combine with expectedAbsent."), "expectedAbsent":boolean("Require a missing target; only write mode may create, and its parent must already exist."),
-                    "oldText":string("Exact non-empty text to replace; required for replace mode."), "newText":string("Replacement text for replace mode; may be empty."),
-                    "expectedMatches":{"type":"integer","description":"Expected exact replacement count in replace mode; defaults to 1.","default":1},
-                    "patch":string(PATCH_SCHEMA_DESCRIPTION),
-                    "content":string("Complete UTF-8 file content; required for write mode and used for guarded create/overwrite.")
-                }, "required":["type","mode","path"]
-            });
-            add(
-                "operations",
-                json!({
-                    "type":"array", "minItems":1, "maxItems":32,
-                    "items":{"oneOf":[read,search,edit]},
-                    "description":"Ordered bounded read, search, and edit operations. Reads/searches run before edits; edit groups commit independently by normalized target."
-                }),
-            );
-            add(
-                "dryRun",
-                boolean("Preview the whole request without confirmation or writes; default false."),
-            );
-            add(
-                "needConfirm",
-                boolean("Request one aggregate confirmation for valid effective edit groups; default false."),
             );
         }
         "mcp.list" => add("serverId", string("Optional configured MCP server id.")),
@@ -3006,10 +2910,9 @@ fn output_schema() -> Map<String, Value> {
 fn tool_description(name: &str) -> String {
     match name {
         "agent.info" => "Inspect bounded local profile, workspace/path policy, confirmation, capacity, live limits, MCP state, and Job diagnostics; read-only and does not execute work.".to_string(),
-        "file.read" => "Read bounded UTF-8 file content or metadata by path; read-only, no shell/external process, and line ranges are optional and inclusive.".to_string(),
-        "file.search" => "Search workspace text in-process with literal or regex matching; read-only, bounded by path/search limits, and context requests above the live maximum are clipped and reported.".to_string(),
-        "file.edit" => "Apply one guarded UTF-8 replace, patch, or write; existing files require expectedRevision, new writes require expectedAbsent, replace/patch never create, and dryRun previews without writing.".to_string(),
-        "file.batch" => "Run ordered bounded reads, searches, and guarded edits; reads/searches use the pre-edit snapshot, edits commit per normalized file group, and mixed group outcomes are reported without cross-file rollback.".to_string(),
+        "file.read" => "Read bounded UTF-8 file content or metadata; use flat fields for one request or ordered requests for up to 32 independent reads, with one failed item isolated from the others.".to_string(),
+        "file.search" => "Search workspace text in-process; use flat fields for one request or ordered requests for up to 32 independent searches, preserving per-search limits and bounded aggregate output.".to_string(),
+        "file.edit" => "Apply one complete Codex apply_patch patch across multiple UTF-8 files; stages and validates every add, update, delete, or move before one optional confirmation, and dryRun never confirms or writes.".to_string(),
         "process.exec" => "Start one managed local process with an optional group and return a slim Job result after a bounded inline wait; use job.get for later state/output and job.cancel for cancellation evidence.".to_string(),
         "process.batch" => "Admit multiple managed local processes with one optional group, one confirmation boundary, and ordered slim child Jobs; preflight/capacity rejection starts none, running children are bounded by limits.maxConcurrentTasks while excess Jobs stay queued, and use job.get/job.cancel for lifecycle.".to_string(),
         "job.get" => "Inspect one managed Job or wait up to waitSeconds (maximum 30); waitOnly returns exactly jobId/state/elapsedMs on an active timeout, terminal completion returns normal detail, and cached state may be marked unavailable after an Agent restart.".to_string(),
@@ -3079,15 +2982,13 @@ fn tool_is_read_only(name: &str) -> bool {
             | "skills.install.cancel"
             | "skills.run"
             | "file.edit"
-            | "file.batch"
     )
 }
 
 fn tool_is_destructive(name: &str) -> bool {
     matches!(
         name,
-        "file.batch"
-            | "file.edit"
+        "file.edit"
             | "job.cancel"
             | "tmux.sessions"
             | "tmux.closeSession"
@@ -3127,10 +3028,9 @@ pub(crate) fn standalone_surface(profile: CapabilityProfile) -> (Vec<String>, St
     let tools = names
         .iter()
         .map(|name| {
-            let (properties, required) = tool_schema(name);
             json!({
                 "name": name,
-                "inputSchema": schema(properties, required),
+                "inputSchema": tool_input_schema(name),
                 "annotations": {
                     "readOnly": tool_is_read_only(name),
                     "destructive": tool_is_destructive(name),
@@ -3177,25 +3077,6 @@ mod tests {
         expect: Value,
     }
 
-    fn replace_fixture_revision(value: &mut Value, revision: &str) {
-        match value {
-            Value::String(text) if text == "$fixtureRevision" => {
-                *text = revision.to_string();
-            }
-            Value::Array(values) => {
-                for value in values {
-                    replace_fixture_revision(value, revision);
-                }
-            }
-            Value::Object(values) => {
-                for value in values.values_mut() {
-                    replace_fixture_revision(value, revision);
-                }
-            }
-            _ => {}
-        }
-    }
-
     #[test]
     fn normal_and_room_tool_sets_are_exact() {
         let normal = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
@@ -3210,8 +3091,8 @@ mod tests {
             .iter()
             .map(|tool| tool.name.to_string())
             .collect::<Vec<_>>();
-        assert_eq!(normal_names.len(), 24);
-        assert_eq!(room_names.len(), 36);
+        assert_eq!(normal_names.len(), 23);
+        assert_eq!(room_names.len(), 35);
         assert!(!normal_names.iter().any(|name| name.starts_with("room.")));
         assert!(room_names.iter().any(|name| name == "room.diary.append"));
         assert!(room_names.iter().any(|name| name == "room.notebook.remove"));
@@ -3229,6 +3110,8 @@ mod tests {
         let serialized = serde_json::to_string(&normal.tools).unwrap();
         assert!(!serialized.contains("agentId"));
         assert!(!serialized.contains("confirmMethod"));
+        let removed_tool = ["file", "batch"].join(".");
+        assert!(!normal_names.iter().any(|name| name == &removed_tool));
         assert!(serialized.contains("mcp.list"));
         assert!(serialized.contains("skills.setActive"));
         assert!(serialized.contains("tmux.sessions"));
@@ -3267,135 +3150,70 @@ mod tests {
     }
 
     #[test]
-    fn file_patch_schema_documents_standard_hunk_contract() {
-        let file_edit = tool_descriptor("file.edit");
-        let description = file_edit.input_schema["properties"]["patch"]["description"]
-            .as_str()
-            .expect("file.edit patch description");
-        assert!(description.contains("@@ -1,2 +1,2 @@"));
-        assert!(description.contains("Omitted counts mean 1"));
-        assert!(description.contains("bare @@ is invalid"));
-
-        let file_batch = tool_descriptor("file.batch");
-        let variants = file_batch.input_schema["properties"]["operations"]["items"]["oneOf"]
-            .as_array()
-            .expect("file.batch operation variants");
-        let edit = variants
+    fn file_surface_schema_is_exact() -> anyhow::Result<()> {
+        let names = AgentMcpServer::new(test_state(CapabilityProfile::Normal))
+            .tools
             .iter()
-            .find(|variant| variant["properties"]["type"]["const"] == "edit")
-            .expect("file.batch edit schema");
-        assert_eq!(
-            edit["properties"]["patch"]["description"],
-            PATCH_SCHEMA_DESCRIPTION
-        );
+            .map(|tool| tool.name.to_string())
+            .collect::<Vec<_>>();
+        let removed_tool = ["file", "batch"].join(".");
+        assert!(!names.iter().any(|name| name == &removed_tool));
 
-        let file_search = tool_descriptor("file.search");
-        assert_eq!(
-            file_search.input_schema["properties"]["contextLines"]["minimum"],
-            0
-        );
-        assert_eq!(
-            file_search.input_schema["properties"]["contextLines"]["default"],
-            0
-        );
-        assert!(
-            file_search.input_schema["properties"]["contextLines"]["description"]
-                .as_str()
+        let read = serde_json::to_value(tool_descriptor("file.read"))?;
+        assert_eq!(read["inputSchema"]["required"], json!([]));
+        assert!(read["inputSchema"]["properties"].get("requests").is_some());
+        let read_one_of = read["inputSchema"]["oneOf"].as_array().unwrap();
+        assert_eq!(read_one_of.len(), 2);
+        assert_eq!(read_one_of[0]["required"], json!(["path"]));
+        assert_eq!(read_one_of[0]["not"]["required"], json!(["requests"]));
+        assert_eq!(read_one_of[1]["required"], json!(["requests"]));
+        let read_batch_forbidden = read_one_of[1]["not"]["anyOf"].as_array().unwrap();
+        for field in ["path", "includeContent", "startLine", "endLine"] {
+            assert!(read_batch_forbidden
+                .iter()
+                .any(|branch| branch["required"] == json!([field])));
+        }
+
+        let search = serde_json::to_value(tool_descriptor("file.search"))?;
+        assert!(search["inputSchema"]["properties"]
+            .get("requests")
+            .is_some());
+        let search_one_of = search["inputSchema"]["oneOf"].as_array().unwrap();
+        assert_eq!(search_one_of[0]["required"], json!(["path", "query"]));
+        assert_eq!(search_one_of[0]["not"]["required"], json!(["requests"]));
+        assert_eq!(search_one_of[1]["required"], json!(["requests"]));
+        for field in [
+            "path",
+            "query",
+            "mode",
+            "caseSensitive",
+            "include",
+            "exclude",
+            "contextLines",
+            "maxResults",
+            "hidden",
+            "respectGitignore",
+        ] {
+            assert!(search_one_of[1]["not"]["anyOf"]
+                .as_array()
                 .unwrap()
-                .contains("live configured maximum")
-        );
-    }
-
-    #[test]
-    fn priority_tool_descriptions_state_use_and_lifecycle_boundaries() -> anyhow::Result<()> {
-        let expectations = [
-            (
-                "file.read",
-                ["read-only", "no shell", "line ranges"].as_slice(),
-            ),
-            (
-                "file.search",
-                ["literal or regex", "read-only", "clipped and reported"].as_slice(),
-            ),
-            (
-                "file.edit",
-                ["expectedRevision", "expectedAbsent", "never create"].as_slice(),
-            ),
-            (
-                "file.batch",
-                [
-                    "pre-edit snapshot",
-                    "per normalized file group",
-                    "without cross-file rollback",
-                ]
-                .as_slice(),
-            ),
-            (
-                "job.get",
-                ["waitSeconds", "maximum 30", "Agent restart"].as_slice(),
-            ),
-            (
-                "job.cancel",
-                ["termination evidence", "detached", "claimed cancelled"].as_slice(),
-            ),
-            (
-                "mcp.callTool",
-                [
-                    "managed Job",
-                    "job.get/job.cancel",
-                    "not a direct transactional",
-                ]
-                .as_slice(),
-            ),
-            (
-                "mcp.batch",
-                ["1..16", "aggregate confirmation", "not rolled back"].as_slice(),
-            ),
-        ];
-        for (name, needles) in expectations {
-            let descriptor = serde_json::to_value(tool_descriptor(name))?;
-            let description = descriptor["description"]
-                .as_str()
-                .unwrap_or_else(|| panic!("missing description for {name}"));
-            for needle in needles {
-                assert!(
-                    description.contains(needle),
-                    "{name} description missing contract phrase {needle:?}: {description}"
-                );
-            }
+                .iter()
+                .any(|branch| branch["required"] == json!([field])));
         }
 
         let edit = serde_json::to_value(tool_descriptor("file.edit"))?;
-        assert!(
-            edit["inputSchema"]["properties"]["expectedRevision"]["description"]
-                .as_str()
-                .is_some_and(|description| description.contains("expectedAbsent"))
-        );
-        assert!(
-            edit["inputSchema"]["properties"]["expectedAbsent"]["description"]
-                .as_str()
-                .is_some_and(|description| description.contains("parent must already exist"))
-        );
-
-        let batch = serde_json::to_value(tool_descriptor("mcp.batch"))?;
-        assert!(batch["inputSchema"]["properties"]["calls"]["description"]
-            .as_str()
-            .is_some_and(|description| description.contains("not rolled back")));
-        assert!(
-            batch["inputSchema"]["properties"]["failFast"]["description"]
-                .as_str()
-                .is_some_and(
-                    |description| description.contains("already-started calls are never cancelled")
-                )
-        );
-        assert!(!batch.to_string().contains("atomicity"));
-
-        let file_batch = serde_json::to_value(tool_descriptor("file.batch"))?;
-        assert_eq!(file_batch["annotations"]["readOnlyHint"], false);
-        assert_eq!(file_batch["annotations"]["destructiveHint"], true);
-        let job_get = serde_json::to_value(tool_descriptor("job.get"))?;
-        assert_eq!(job_get["annotations"]["readOnlyHint"], true);
-        assert_eq!(job_get["annotations"]["destructiveHint"], false);
+        let edit_fields = edit["inputSchema"]["properties"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let expected_edit_fields = ["dryRun", "needConfirm", "patch"]
+            .into_iter()
+            .map(String::from)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(edit_fields, expected_edit_fields);
+        assert_eq!(edit["inputSchema"]["required"], json!(["patch"]));
         Ok(())
     }
 
@@ -3408,13 +3226,14 @@ mod tests {
         let workspace = server.state.config.read().await.workspace_root.clone();
         let fixture_path = workspace.join("contract-fixture.txt");
         std::fs::write(&fixture_path, "prefix\nneedle\nsuffix\n")?;
-        let fixture_revision = crate::file_ops::revision(&std::fs::read(&fixture_path)?);
 
         for case in cases {
             let descriptor = serde_json::to_value(tool_descriptor(&case.tool))?;
-            validate_stdio_arguments(&case.tool, &case.arguments).unwrap_or_else(|error| {
-                panic!("{} descriptor arguments rejected: {error}", case.id)
-            });
+            if case.kind != "negative" {
+                validate_stdio_arguments(&case.tool, &case.arguments).unwrap_or_else(|error| {
+                    panic!("{} descriptor arguments rejected: {error}", case.id)
+                });
+            }
             let expected = &case.expect;
 
             if case.kind == "descriptor" {
@@ -3443,8 +3262,7 @@ mod tests {
                 continue;
             }
 
-            let mut arguments = case.arguments;
-            replace_fixture_revision(&mut arguments, &fixture_revision);
+            let arguments = case.arguments;
             if case.kind == "negative" {
                 match server.dispatch(&case.tool, arguments).await {
                     Ok(value) => {
@@ -3492,6 +3310,13 @@ mod tests {
             }
             if let Some(status) = expected["status"].as_str() {
                 assert_eq!(value["status"], status, "{} status", case.id);
+            }
+            if expected["noRevision"].as_bool() == Some(true) {
+                assert!(
+                    !serde_json::to_string(&value)?.contains("revision"),
+                    "{} unexpectedly exposes a revision",
+                    case.id
+                );
             }
             if let Some(requested) = expected["requestedContextLines"].as_u64() {
                 assert_eq!(
@@ -3579,326 +3404,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn file_batch_descriptor_fields_defaults_and_runtime_are_in_sync() -> anyhow::Result<()> {
-        let descriptor = serde_json::to_value(tool_descriptor("file.batch"))?;
-        let (_, revision) = standalone_surface(CapabilityProfile::Normal);
-        assert_ne!(
-            revision, "sha256:ae1d453a2a98cf054ea01d8aa212bb8f8291e6cb412987e42665571618d67cf5",
-            "the connector schema change must advance the standalone surface revision"
-        );
-        let variants = descriptor["inputSchema"]["properties"]["operations"]["items"]["oneOf"]
-            .as_array()
-            .expect("file.batch operation variants");
-
-        let expected = [
-            (
-                "read",
-                [
-                    "type",
-                    "id",
-                    "path",
-                    "includeContent",
-                    "startLine",
-                    "endLine",
-                ]
-                .into_iter()
-                .collect::<BTreeSet<_>>(),
-            ),
-            (
-                "search",
-                [
-                    "type",
-                    "id",
-                    "path",
-                    "query",
-                    "mode",
-                    "caseSensitive",
-                    "include",
-                    "exclude",
-                    "contextLines",
-                    "maxResults",
-                    "hidden",
-                    "respectGitignore",
-                ]
-                .into_iter()
-                .collect::<BTreeSet<_>>(),
-            ),
-            (
-                "edit",
-                [
-                    "type",
-                    "id",
-                    "mode",
-                    "path",
-                    "expectedRevision",
-                    "expectedAbsent",
-                    "oldText",
-                    "newText",
-                    "expectedMatches",
-                    "patch",
-                    "content",
-                ]
-                .into_iter()
-                .collect::<BTreeSet<_>>(),
-            ),
-        ];
-
-        for (kind, expected_fields) in expected {
-            let variant = variants
-                .iter()
-                .find(|variant| variant["properties"]["type"]["const"] == kind)
-                .unwrap_or_else(|| panic!("missing {kind} operation schema"));
-            let actual_fields = variant["properties"]
-                .as_object()
-                .expect("operation properties")
-                .keys()
-                .map(String::as_str)
-                .collect::<BTreeSet<_>>();
-            assert_eq!(actual_fields, expected_fields, "{kind} schema fields");
-        }
-
-        let read_schema = variants
-            .iter()
-            .find(|variant| variant["properties"]["type"]["const"] == "read")
-            .unwrap();
-        assert_eq!(
-            read_schema["properties"]["includeContent"]["default"],
-            json!(true)
-        );
-        let search_schema = variants
-            .iter()
-            .find(|variant| variant["properties"]["type"]["const"] == "search")
-            .unwrap();
-        assert_eq!(search_schema["properties"]["contextLines"]["minimum"], 0);
-        assert!(search_schema["properties"]["contextLines"]["description"]
-            .as_str()
-            .unwrap()
-            .contains("live configured maximum"));
-        for (field, value) in [
-            ("mode", json!("literal")),
-            ("caseSensitive", json!(true)),
-            ("include", json!([])),
-            ("exclude", json!([])),
-            ("contextLines", json!(0)),
-            ("maxResults", json!(50)),
-            ("hidden", json!(false)),
-            ("respectGitignore", json!(true)),
-        ] {
-            assert_eq!(search_schema["properties"][field]["default"], value);
-        }
-        let edit_schema = variants
-            .iter()
-            .find(|variant| variant["properties"]["type"]["const"] == "edit")
-            .unwrap();
-        assert_eq!(
-            edit_schema["properties"]["expectedMatches"]["default"],
-            json!(1)
-        );
-
-        let args: FileBatchArgs = from_value(json!({
-            "dryRun": true,
-            "needConfirm": true,
-            "operations": [
-                {
-                    "type": "read",
-                    "id": "read-all",
-                    "path": "sample.txt",
-                    "includeContent": false,
-                    "startLine": 2,
-                    "endLine": 4
-                },
-                {
-                    "type": "search",
-                    "id": "search-all",
-                    "path": ".",
-                    "query": "needle",
-                    "mode": "regex",
-                    "caseSensitive": false,
-                    "include": ["*.rs"],
-                    "exclude": ["target/**"],
-                    "contextLines": 3,
-                    "maxResults": 7,
-                    "hidden": true,
-                    "respectGitignore": false
-                },
-                {
-                    "type": "edit",
-                    "id": "edit-all",
-                    "mode": "replace",
-                    "path": "sample.txt",
-                    "expectedRevision": "sha256:test",
-                    "expectedAbsent": false,
-                    "oldText": "before",
-                    "newText": "after",
-                    "expectedMatches": 2,
-                    "patch": "patch",
-                    "content": "content"
-                }
-            ]
-        }))?;
-        assert!(args.dry_run);
-        assert!(args.need_confirm);
-        let operations = args
-            .operations
-            .into_iter()
-            .map(to_file_batch_operation)
-            .collect::<Vec<_>>();
-        assert_eq!(operations[0].id.as_deref(), Some("read-all"));
-        assert!(!operations[0].include_content);
-        assert_eq!(operations[0].start_line, Some(2));
-        assert_eq!(operations[0].end_line, Some(4));
-        assert_eq!(operations[1].search_mode.as_deref(), Some("regex"));
-        assert!(!operations[1].case_sensitive);
-        assert_eq!(operations[1].include, vec!["*.rs"]);
-        assert_eq!(operations[1].exclude, vec!["target/**"]);
-        assert_eq!(operations[1].context_lines, 3);
-        assert_eq!(operations[1].max_results, 7);
-        assert!(operations[1].hidden);
-        assert!(!operations[1].respect_gitignore);
-        assert_eq!(
-            operations[2].expected_revision.as_deref(),
-            Some("sha256:test")
-        );
-        assert_eq!(operations[2].expected_absent, Some(false));
-        assert_eq!(operations[2].old_text.as_deref(), Some("before"));
-        assert_eq!(operations[2].new_text.as_deref(), Some("after"));
-        assert_eq!(operations[2].expected_matches, Some(2));
-        assert_eq!(operations[2].patch.as_deref(), Some("patch"));
-        assert_eq!(operations[2].content.as_deref(), Some("content"));
-
-        let defaults: FileBatchArgs = from_value(json!({
-            "operations": [
-                {"type": "read", "path": "sample.txt"},
-                {"type": "search", "path": ".", "query": "needle"},
-                {"type": "edit", "mode": "replace", "path": "sample.txt"}
-            ]
-        }))?;
-        let defaults = defaults
-            .operations
-            .into_iter()
-            .map(to_file_batch_operation)
-            .collect::<Vec<_>>();
-        assert!(defaults[0].include_content);
-        assert_eq!(defaults[0].start_line, None);
-        assert_eq!(defaults[0].end_line, None);
-        assert_eq!(defaults[1].search_mode, None);
-        assert!(defaults[1].case_sensitive);
-        assert!(defaults[1].include.is_empty());
-        assert!(defaults[1].exclude.is_empty());
-        assert_eq!(defaults[1].context_lines, 0);
-        assert_eq!(defaults[1].max_results, 50);
-        assert!(!defaults[1].hidden);
-        assert!(defaults[1].respect_gitignore);
-        assert_eq!(defaults[2].expected_matches, None);
-
-        let error = from_value::<FileBatchArgs>(json!({
-            "operations": [{"type": "read", "path": "sample.txt", "start_line": 1}]
-        }))
-        .expect_err("snake_case nested fields must remain rejected");
-        assert!(error.to_string().contains("unknown field `start_line`"));
-        assert!(from_value::<FileSearchArgs>(json!({
-            "path": ".",
-            "query": "needle",
-            "contextLines": -1
-        }))
-        .is_err());
-        assert!(from_value::<FileSearchArgs>(json!({
-            "path": ".",
-            "query": "needle",
-            "contextLines": 1.5
-        }))
-        .is_err());
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn in_process_stdio_file_batch_schema_and_ranged_read() -> anyhow::Result<()> {
-        let state = test_state(CapabilityProfile::Normal);
-        let workspace = state.config.read().await.workspace_root.clone();
-        std::fs::write(workspace.join("ranged.txt"), "one\ntwo\nthree\nfour\n")?;
-
-        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
-        let (client_read, client_write) = split(client_io);
-        let (server_read, server_write) = split(server_io);
-        let server = AgentMcpServer::new(state);
-        let server_task = tokio::spawn(async move {
-            let transport =
-                AsyncRwTransport::<RoleServer, _, _>::new_server(server_read, server_write);
-            let running = server
-                .serve(ResumableStdioTransport::new(transport))
-                .await?;
-            let _ = running.waiting().await?;
-            anyhow::Result::<()>::Ok(())
-        });
-
-        let client = ().serve((client_read, client_write)).await?;
-        let tools = client.list_all_tools().await?;
-        let file_batch = tools
-            .iter()
-            .find(|tool| tool.name.as_ref() == "file.batch")
-            .expect("file.batch descriptor");
-        let schema = Value::Object(file_batch.input_schema.as_ref().clone());
-        let read_properties = schema["properties"]["operations"]["items"]["oneOf"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|variant| variant["properties"]["type"]["const"] == "read")
-            .unwrap()["properties"]
-            .as_object()
-            .unwrap();
-        assert!(read_properties.contains_key("startLine"));
-        assert!(read_properties.contains_key("endLine"));
-        assert!(!read_properties.contains_key("start_line"));
-        assert!(!read_properties.contains_key("end_line"));
-
-        let result = client
-            .call_tool(
-                CallToolRequestParams::new("file.batch").with_arguments(Map::from_iter([(
-                    "operations".to_string(),
-                    json!([{
-                        "type": "read",
-                        "id": "range",
-                        "path": "ranged.txt",
-                        "includeContent": true,
-                        "startLine": 2,
-                        "endLine": 3
-                    }]),
-                )])),
-            )
-            .await?;
-        assert_eq!(result.is_error, Some(false));
-        let structured = result.structured_content.as_ref().unwrap();
-        assert_eq!(structured["status"], "completed");
-        assert_eq!(structured["results"][0]["id"], "range");
-        assert_eq!(
-            structured["results"][0]["result"]["content"],
-            "two\nthree\n"
-        );
-        assert_eq!(structured["results"][0]["result"]["startLine"], 2);
-        assert_eq!(structured["results"][0]["result"]["returnedThroughLine"], 3);
-
-        let error = client
-            .call_tool(
-                CallToolRequestParams::new("file.batch").with_arguments(Map::from_iter([(
-                    "operations".to_string(),
-                    json!([{"type": "read", "path": "ranged.txt", "start_line": 2}]),
-                )])),
-            )
-            .await
-            .expect_err("snake_case nested field must fail through rmcp");
-        match error {
-            rmcp::service::ServiceError::McpError(error) => {
-                assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
-            }
-            other => panic!("expected MCP invalid-params error, got {other:?}"),
-        }
-
-        let _ = client.cancel().await;
-        server_task.await??;
-        Ok(())
-    }
-
     #[tokio::test]
     async fn absent_room_tool_is_rejected_for_normal_worker() {
         let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
@@ -3968,7 +3473,7 @@ mod tests {
         assert_eq!(follow_up["id"], 1);
         assert_eq!(
             follow_up["result"]["tools"].as_array().map(Vec::len),
-            Some(24)
+            Some(23)
         );
 
         drop(client_write);
@@ -3995,7 +3500,7 @@ mod tests {
 
         let client = ().serve((client_read, client_write)).await?;
         let tools = client.list_all_tools().await?;
-        assert_eq!(tools.len(), 24);
+        assert_eq!(tools.len(), 23);
         let result = client
             .call_tool(CallToolRequestParams::new("job.list"))
             .await?;
@@ -4035,7 +3540,7 @@ mod tests {
 
         let client = ().serve((client_read, client_write)).await?;
         let tools = client.list_all_tools().await?;
-        assert_eq!(tools.len(), 36);
+        assert_eq!(tools.len(), 35);
         let result = client
             .call_tool(CallToolRequestParams::new("room.diary.recent"))
             .await?;
@@ -4889,14 +4394,56 @@ mod tests {
             )
             .await?;
         assert!(metadata.get("content").is_none());
-        assert!(metadata["revision"]
-            .as_str()
-            .unwrap()
-            .starts_with("sha256:"));
+        assert!(metadata.get("revision").is_none());
         let missing = server
             .dispatch("file.read", json!({"path":"missing.txt"}))
             .await?;
         assert_eq!(missing["error"]["code"], "file_not_found");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn in_process_stdio_file_read_batch_descriptor_and_call_contract() -> anyhow::Result<()> {
+        let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
+        let workspace = server.state.config.read().await.workspace_root.clone();
+        std::fs::write(workspace.join("stdio-batch.txt"), "needle\n")?;
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let (client_read, client_write) = split(client_io);
+        let (server_read, server_write) = split(server_io);
+        let server_task = tokio::spawn(async move {
+            let transport =
+                AsyncRwTransport::<RoleServer, _, _>::new_server(server_read, server_write);
+            let running = server
+                .serve(ResumableStdioTransport::new(transport))
+                .await?;
+            let _ = running.waiting().await?;
+            anyhow::Result::<()>::Ok(())
+        });
+
+        let client = ().serve((client_read, client_write)).await?;
+        let tools = client.list_all_tools().await?;
+        let read_descriptor = tools.iter().find(|tool| tool.name == "file.read").unwrap();
+        let read_schema = serde_json::to_value(read_descriptor)?;
+        assert!(read_schema["inputSchema"]["properties"]["requests"].is_object());
+        assert!(read_schema["inputSchema"]["oneOf"].is_array());
+        let removed_tool = ["file", "batch"].join(".");
+        assert!(!tools.iter().any(|tool| tool.name == removed_tool));
+
+        let result = client
+            .call_tool(
+                CallToolRequestParams::new("file.read").with_arguments(Map::from_iter([(
+                    "requests".to_string(),
+                    json!([{"path":"stdio-batch.txt"},{"path":"missing.txt"}]),
+                )])),
+            )
+            .await?;
+        let value = result.structured_content.unwrap();
+        assert_eq!(value["results"][0]["status"], "completed");
+        assert_eq!(value["results"][0]["result"]["content"], "needle\n");
+        assert_eq!(value["results"][1]["status"], "failed");
+        assert!(value["results"][0]["result"].get("revision").is_none());
+        let _ = client.cancel().await;
+        server_task.await??;
         Ok(())
     }
 
@@ -4971,630 +4518,201 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn file_edit_replace_write_patch_and_revision_guards() -> anyhow::Result<()> {
+    async fn file_read_and_search_batches_preserve_order_and_isolate_failures() -> anyhow::Result<()>
+    {
         let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
         let workspace = server.state.config.read().await.workspace_root.clone();
-        let path = workspace.join("edit.txt");
-        std::fs::write(&path, "old\nold\n")?;
-        let before = crate::file_ops::revision(&std::fs::read(&path)?);
-        let replaced = server
-            .dispatch(
-                "file.edit",
-                json!({
-                    "mode":"replace", "path":"edit.txt", "expectedRevision":before,
-                    "oldText":"old", "newText":"secret-new", "expectedMatches":2
-                }),
-            )
-            .await?;
-        assert_eq!(replaced["status"], "updated");
-        assert_eq!(replaced["replacementCount"], 2);
-        assert_eq!(replaced["changedLines"], json!({"added": 2, "removed": 2}));
-        assert!(replaced["diff"].as_str().unwrap().contains("-old"));
-        assert!(replaced["diff"].as_str().unwrap().contains("+secret-new"));
-        assert_eq!(std::fs::read_to_string(&path)?, "secret-new\nsecret-new\n");
-        let dry_revision = crate::file_ops::revision(&std::fs::read(&path)?);
-        let dry_run = server
-            .dispatch(
-                "file.edit",
-                json!({"mode":"replace", "path":"edit.txt", "expectedRevision":dry_revision, "oldText":"secret-new", "newText":"preview", "expectedMatches":2, "dryRun":true}),
-            )
-            .await?;
-        assert_eq!(dry_run["status"], "dry-run");
-        assert_eq!(dry_run["changedLines"], json!({"added": 2, "removed": 2}));
-        assert!(dry_run["diff"].as_str().unwrap().contains("+preview"));
-        assert!(dry_run.get("auditStatus").is_none());
-        assert_eq!(std::fs::read_to_string(&path)?, "secret-new\nsecret-new\n");
-        let no_op = server
-            .dispatch(
-                "file.edit",
-                json!({"mode":"replace", "path":"edit.txt", "expectedRevision":dry_revision, "oldText":"secret-new", "newText":"secret-new", "expectedMatches":2, "needConfirm":true}),
-            )
-            .await?;
-        assert_eq!(no_op["status"], "unchanged");
-        assert_eq!(no_op["changedLines"], json!({"added": 0, "removed": 0}));
-        assert_eq!(no_op["diff"], "");
-        assert!(no_op.get("confirmation").is_none());
-        assert_eq!(
-            server
-                .dispatch(
-                    "file.edit",
-                    json!({"mode":"replace", "path":"edit.txt", "oldText":"secret-new", "newText":"x"}),
-                )
-                .await?["error"]["code"],
-            "file_revision_required"
-        );
+        std::fs::write(workspace.join("batch-a.txt"), "needle-a\n")?;
+        std::fs::write(workspace.join("batch-b.txt"), "needle-b\n")?;
 
-        let new_file = server
+        let reads = server
             .dispatch(
-                "file.edit",
-                json!({"mode":"write", "path":"new.txt", "content":"created\n", "expectedAbsent":true}),
+                "file.read",
+                json!({"requests":[
+                    {"path":"batch-a.txt"},
+                    {"path":"missing.txt"},
+                    {"path":"batch-b.txt","includeContent":false}
+                ]}),
             )
             .await?;
-        assert_eq!(new_file["status"], "created");
-        assert_eq!(new_file["changedLines"], json!({"added": 1, "removed": 0}));
-        assert!(new_file["diff"].as_str().unwrap().contains("+created"));
-        let new_revision = new_file["afterRevision"].as_str().unwrap().to_string();
-        let overwritten = server
-            .dispatch(
-                "file.edit",
-                json!({"mode":"write", "path":"new.txt", "content":"overwritten\n", "expectedRevision":new_revision}),
-            )
-            .await?;
-        assert_eq!(overwritten["status"], "updated");
-        assert_eq!(
-            overwritten["changedLines"],
-            json!({"added": 1, "removed": 1})
-        );
+        assert_eq!(reads["results"][0]["index"], 0);
+        assert_eq!(reads["results"][0]["result"]["content"], "needle-a\n");
+        assert_eq!(reads["results"][1]["status"], "failed");
+        assert_eq!(reads["results"][2]["index"], 2);
+        assert!(reads["results"][2]["result"].get("content").is_none());
 
-        let patch_path = workspace.join("patch.txt");
-        std::fs::write(&patch_path, "a\nb\nc\n")?;
-        let patch_revision = crate::file_ops::revision(&std::fs::read(&patch_path)?);
-        let patched = server
+        let searches = server
             .dispatch(
-                "file.edit",
-                json!({
-                    "mode":"patch", "path":"patch.txt", "expectedRevision":patch_revision,
-                    "patch":"--- a/patch.txt\n+++ b/patch.txt\n@@ -1,3 +1,3 @@\n a\n-b\n+B\n c\n"
-                }),
+                "file.search",
+                json!({"requests":[
+                    {"path":"batch-a.txt","query":"needle-a"},
+                    {"path":"missing.txt","query":"needle"},
+                    {"path":"batch-b.txt","query":"needle-b"}
+                ]}),
             )
             .await?;
-        assert_eq!(patched["status"], "updated");
-        assert_eq!(patched["changedLines"], json!({"added": 1, "removed": 1}));
-        assert!(patched["diff"].as_str().unwrap().contains("-b"));
-        assert!(patched["diff"].as_str().unwrap().contains("+B"));
-        assert_eq!(std::fs::read_to_string(&patch_path)?, "a\nB\nc\n");
+        assert_eq!(searches["results"][0]["result"]["matchCount"], 1);
+        assert_eq!(searches["results"][1]["status"], "failed");
+        assert_eq!(searches["results"][2]["result"]["matchCount"], 1);
+
+        assert!(server
+            .dispatch("file.read", json!({"path":"batch-a.txt","requests":[]}))
+            .await
+            .is_err());
+        assert!(server
+            .dispatch(
+                "file.search",
+                json!({"path":"batch-a.txt","query":"x","requests":[]})
+            )
+            .await
+            .is_err());
         Ok(())
     }
 
     #[tokio::test]
-    async fn file_edit_rejects_conflicts_and_redacts_audit() -> anyhow::Result<()> {
+    async fn file_edit_apply_patch_supports_multi_file_changes_and_dry_run() -> anyhow::Result<()> {
         let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
         let workspace = server.state.config.read().await.workspace_root.clone();
-        let path = workspace.join("guard.txt");
-        std::fs::write(&path, "audit-old\n")?;
-        let stale = crate::file_ops::revision(&std::fs::read(&path)?);
-        std::fs::write(&path, "external\n")?;
-        let conflict = server
-            .dispatch(
-                "file.edit",
-                json!({"mode":"replace", "path":"guard.txt", "expectedRevision":stale, "oldText":"external", "newText":"audit-new"}),
-            )
-            .await?;
-        assert_eq!(conflict["error"]["code"], "file_revision_conflict");
-
-        let current = crate::file_ops::revision(&std::fs::read(&path)?);
-        let edited = server
-            .dispatch(
-                "file.edit",
-                json!({"mode":"replace", "path":"guard.txt", "expectedRevision":current, "oldText":"external", "newText":"audit-new"}),
-            )
-            .await?;
-        assert_eq!(edited["auditStatus"], "written");
-        let audit = std::fs::read_to_string(workspace.join(".agentic-gpt-audit.jsonl"))?;
-        assert!(audit.contains("file.edit"));
-        assert!(!audit.contains("external"));
-        assert!(!audit.contains("audit-new"));
-        assert!(!audit.contains("audit-old"));
-        assert!(std::fs::read_dir(&workspace)?
-            .filter_map(Result::ok)
-            .all(|entry| !entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with(".agentic-file-tmp-")));
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn file_edit_confirmation_unavailable_does_not_write() -> anyhow::Result<()> {
-        let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
-        {
-            let mut config = server.state.config.write().await;
-            config.confirmation_provider.channels.clear();
-        }
-        let workspace = server.state.config.read().await.workspace_root.clone();
-        let path = workspace.join("confirm.txt");
-        std::fs::write(&path, "before\n")?;
-        let revision = crate::file_ops::revision(&std::fs::read(&path)?);
-        let result = server
-            .dispatch(
-                "file.edit",
-                json!({"mode":"replace", "path":"confirm.txt", "expectedRevision":revision, "oldText":"before", "newText":"after", "needConfirm":true}),
-            )
-            .await?;
-        assert_eq!(result["error"]["code"], "file_confirmation_unavailable");
-        assert_eq!(std::fs::read_to_string(&path)?, "before\n");
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn file_batch_reads_before_edits_and_preserves_order() -> anyhow::Result<()> {
-        let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
-        let workspace = server.state.config.read().await.workspace_root.clone();
-        let path = workspace.join("batch.txt");
-        std::fs::write(&path, "secret-before\n")?;
-        let revision = crate::file_ops::revision(&std::fs::read(&path)?);
-        let result = server
-            .dispatch(
-                "file.batch",
-                json!({
-                    "operations":[
-                        {"type":"read", "id":"pre", "path":"batch.txt"},
-                        {"type":"search", "id":"find", "path":"batch.txt", "query":"secret-before", "contextLines":8},
-                        {"type":"edit", "id":"mutate", "mode":"replace", "path":"batch.txt", "expectedRevision":revision, "oldText":"secret-before", "newText":"secret-after"}
-                    ]
-                }),
-            )
-            .await?;
-        assert_eq!(result["status"], "completed");
-        assert_eq!(result["results"][0]["id"], "pre");
-        assert_eq!(result["results"][0]["result"]["content"], "secret-before\n");
-        assert_eq!(
-            result["results"][1]["result"]["matches"][0]["lineText"],
-            "secret-before"
-        );
-        assert_eq!(result["results"][1]["result"]["requestedContextLines"], 8);
-        assert_eq!(result["results"][1]["result"]["effectiveContextLines"], 5);
-        assert_eq!(result["results"][1]["result"]["contextLinesClipped"], true);
-        assert_eq!(result["results"][2]["id"], "mutate");
-        assert_eq!(result["results"][2]["result"]["status"], "updated");
-        assert_eq!(
-            result["results"][2]["result"]["changedLines"],
-            json!({"added": 1, "removed": 1})
-        );
-        assert!(result["results"][2]["result"]["diff"]
-            .as_str()
-            .unwrap()
-            .contains("+secret-after"));
-        assert_eq!(result["auditStatus"], "written");
-        let audit = std::fs::read_to_string(workspace.join(".agentic-gpt-audit.jsonl"))?;
-        assert!(audit.contains("file.batch"));
-        assert!(!audit.contains("secret-before"));
-        assert!(!audit.contains("secret-after"));
-        assert_eq!(std::fs::read_to_string(&path)?, "secret-after\n");
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn file_batch_isolates_read_and_edit_group_failures() -> anyhow::Result<()> {
-        let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
-        let workspace = server.state.config.read().await.workspace_root.clone();
-        let valid_path = workspace.join("batch-independent.txt");
-        std::fs::write(&valid_path, "before\n")?;
-        let revision = crate::file_ops::revision(&std::fs::read(&valid_path)?);
-        let result = server
-            .dispatch(
-                "file.batch",
-                json!({
-                    "operations":[
-                        {"type":"read", "id":"missing-read", "path":"missing-read.txt"},
-                        {"type":"edit", "id":"good", "mode":"replace", "path":"batch-independent.txt", "expectedRevision":revision, "oldText":"before", "newText":"after"},
-                        {"type":"edit", "id":"bad", "mode":"write", "path":"missing-parent/bad.txt", "expectedAbsent":true, "content":"not-created\n"}
-                    ]
-                }),
-            )
-            .await?;
-        assert_eq!(result["status"], "completed_with_errors");
-        assert_eq!(result["results"][0]["status"], "failed");
-        assert_eq!(result["results"][0]["error"]["code"], "file_not_found");
-        assert_eq!(result["results"][1]["status"], "completed");
-        assert_eq!(result["results"][1]["committed"], true);
-        assert_eq!(result["results"][2]["status"], "failed");
-        assert_eq!(
-            result["results"][2]["error"]["code"],
-            "file_parent_not_found"
-        );
-        assert_eq!(result["groupCounts"]["total"], 2);
-        assert_eq!(result["groupCounts"]["committed"], 1);
-        assert_eq!(result["groupCounts"]["failed"], 1);
-        assert_eq!(result["failureCount"], 2);
-        assert_eq!(std::fs::read_to_string(&valid_path)?, "after\n");
-        let groups = result["groups"].as_array().unwrap();
-        assert!(groups.iter().any(|group| {
-            group["status"] == "committed"
-                && group["committed"] == true
-                && group["operationIds"] == json!(["good"])
-        }));
-        assert!(groups.iter().any(|group| {
-            group["status"] == "failed"
-                && group["committed"] == false
-                && group["operationIds"] == json!(["bad"])
-        }));
-        let audit = std::fs::read_to_string(workspace.join(".agentic-gpt-audit.jsonl"))?;
-        assert!(audit.contains("\"groupCount\":2"));
-        assert!(audit.contains("\"committedGroupCount\":1"));
-        assert!(audit.contains("\"failedGroupCount\":1"));
-        assert!(audit.contains("\"operationIndex\":1"));
-        assert!(audit.contains("\"groupId\":\"file_group_1\""));
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn file_batch_commit_conflict_isolated_without_rollback() -> anyhow::Result<()> {
-        let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
-        {
-            let mut config = server.state.config.write().await;
-            config.confirmation_provider =
-                crate::config::ConfirmationProviderConfig::from_legacy("hub").unwrap();
-        }
-        let workspace = server.state.config.read().await.workspace_root.clone();
-        let conflict_path = workspace.join("a-batch-race.txt");
-        let valid_path = workspace.join("b-batch-valid.txt");
-        std::fs::write(&conflict_path, "before-race\n")?;
-        std::fs::write(&valid_path, "before-valid\n")?;
-        let conflict_revision = crate::file_ops::revision(&std::fs::read(&conflict_path)?);
-        let valid_revision = crate::file_ops::revision(&std::fs::read(&valid_path)?);
-        let (sender, mut receiver) = mpsc::unbounded_channel();
-        *server.state.hub_sender.lock().await = Some(sender);
-        let response_state = server.state.clone();
-        let conflict_for_responder = conflict_path.clone();
-        let responder = tokio::spawn(async move {
-            while let Some(message) = receiver.recv().await {
-                if let AgentMessage::ConfirmationRequest { request_id, .. } = message {
-                    std::fs::write(&conflict_for_responder, "external-race\n").unwrap();
-                    if let Some(sender) = response_state
-                        .pending_confirmations
-                        .lock()
-                        .await
-                        .remove(&request_id)
-                    {
-                        let _ = sender.send("allow_once".to_string());
-                    }
-                    break;
-                }
-            }
-        });
-        let result = server
-            .dispatch(
-                "file.batch",
-                json!({
-                    "needConfirm":true,
-                    "operations":[
-                        {"type":"edit", "id":"race", "mode":"replace", "path":"a-batch-race.txt", "expectedRevision":conflict_revision, "oldText":"before-race", "newText":"agent-race"},
-                        {"type":"edit", "id":"valid", "mode":"replace", "path":"b-batch-valid.txt", "expectedRevision":valid_revision, "oldText":"before-valid", "newText":"after-valid"}
-                    ]
-                }),
-            )
-            .await?;
-        responder.await?;
-        assert_eq!(result["status"], "completed_with_errors");
-        assert_eq!(result["results"][0]["status"], "failed");
-        assert_eq!(
-            result["results"][0]["error"]["code"],
-            "file_revision_conflict"
-        );
-        assert_eq!(result["results"][1]["status"], "completed");
-        assert_eq!(result["results"][1]["committed"], true);
-        assert_eq!(result["groupCounts"]["committed"], 1);
-        assert_eq!(result["groupCounts"]["failed"], 1);
-        assert_eq!(std::fs::read_to_string(&conflict_path)?, "external-race\n");
-        assert_eq!(std::fs::read_to_string(&valid_path)?, "after-valid\n");
-        let groups = result["groups"].as_array().unwrap();
-        assert!(groups.iter().any(|group| {
-            group["operationIds"] == json!(["race"])
-                && group["status"] == "failed"
-                && group["committed"] == false
-        }));
-        assert!(groups.iter().any(|group| {
-            group["operationIds"] == json!(["valid"])
-                && group["status"] == "committed"
-                && group["committed"] == true
-        }));
-        assert!(!result.to_string().contains("rolled_back"));
-        assert!(!result.to_string().contains("rollback_failed"));
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn file_batch_stage_failure_isolated_to_one_group() -> anyhow::Result<()> {
-        let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
-        let workspace = server.state.config.read().await.workspace_root.clone();
-        let failed_path = workspace.join("a-batch-stage.txt");
-        let valid_path = workspace.join("b-batch-stage.txt");
-        std::fs::write(&failed_path, "before-failed\n")?;
-        std::fs::write(&valid_path, "before-valid\n")?;
-        let failed_revision = crate::file_ops::revision(&std::fs::read(&failed_path)?);
-        let valid_revision = crate::file_ops::revision(&std::fs::read(&valid_path)?);
-        crate::file_ops::inject_batch_stage_failure(&failed_path);
-        let result = server
-            .dispatch(
-                "file.batch",
-                json!({
-                    "operations":[
-                        {"type":"edit", "id":"stage-failed", "mode":"replace", "path":"a-batch-stage.txt", "expectedRevision":failed_revision, "oldText":"before-failed", "newText":"not-written"},
-                        {"type":"edit", "id":"stage-valid", "mode":"replace", "path":"b-batch-stage.txt", "expectedRevision":valid_revision, "oldText":"before-valid", "newText":"written"}
-                    ]
-                }),
-            )
-            .await?;
-        assert_eq!(result["status"], "completed_with_errors");
-        assert_eq!(result["results"][0]["status"], "failed");
-        assert_eq!(
-            result["results"][0]["error"]["code"],
-            "file_batch_stage_failed"
-        );
-        assert_eq!(result["results"][1]["status"], "completed");
-        assert_eq!(result["results"][1]["committed"], true);
-        assert_eq!(std::fs::read_to_string(&failed_path)?, "before-failed\n");
-        assert_eq!(std::fs::read_to_string(&valid_path)?, "written\n");
-        assert_eq!(result["groupCounts"]["committed"], 1);
-        assert_eq!(result["groupCounts"]["failed"], 1);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn file_batch_groups_normalized_aliases_and_chains_candidates() -> anyhow::Result<()> {
-        let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
-        let workspace = server.state.config.read().await.workspace_root.clone();
-        let path = workspace.join("batch-guard.txt");
-        std::fs::write(&path, "same\n")?;
-        let revision = crate::file_ops::revision(&std::fs::read(&path)?);
-        let result = server
-            .dispatch(
-                "file.batch",
-                json!({
-                    "operations":[
-                        {"type":"edit", "mode":"replace", "path":"batch-guard.txt", "expectedRevision":revision, "oldText":"same", "newText":"same"},
-                        {"type":"edit", "mode":"replace", "path":"./batch-guard.txt", "expectedRevision":revision, "oldText":"same", "newText":"one"},
-                        {"type":"edit", "mode":"replace", "path":"batch-guard.txt", "expectedRevision":revision, "oldText":"one", "newText":"two"}
-                    ]
-                }),
-            )
-            .await?;
-        assert_eq!(result["status"], "completed");
-        assert_eq!(result["effectiveMutationCount"], 2);
-        assert_eq!(result["results"][0]["result"]["status"], "unchanged");
-        assert_eq!(result["results"][0]["result"]["beforeRevision"], revision);
-        assert_eq!(result["results"][1]["result"]["status"], "updated");
-        assert_eq!(result["results"][2]["result"]["status"], "updated");
-        assert_eq!(
-            result["results"][2]["result"]["beforeRevision"],
-            result["results"][1]["result"]["afterRevision"]
-        );
-        assert_eq!(
-            result["results"][0]["result"]["resolvedPath"],
-            result["results"][1]["result"]["resolvedPath"]
-        );
-        assert_eq!(
-            result["results"][1]["result"]["resolvedPath"],
-            result["results"][2]["result"]["resolvedPath"]
-        );
-        assert_eq!(std::fs::read_to_string(&path)?, "two\n");
-        assert!(std::fs::read_dir(&workspace)?
-            .filter_map(Result::ok)
-            .all(|entry| !entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with(".agentic-file-tmp-")));
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn file_batch_group_handles_utf8_and_rejects_oversized_candidate() -> anyhow::Result<()> {
-        let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
-        let workspace = server.state.config.read().await.workspace_root.clone();
-        let unicode_path = workspace.join("batch-unicode.txt");
-        std::fs::write(&unicode_path, "前\n")?;
-        let revision = crate::file_ops::revision(&std::fs::read(&unicode_path)?);
-        let result = server
-            .dispatch(
-                "file.batch",
-                json!({
-                    "operations":[
-                        {"type":"edit", "mode":"replace", "path":"batch-unicode.txt", "expectedRevision":revision, "oldText":"前", "newText":"后"},
-                        {"type":"edit", "mode":"replace", "path":"./batch-unicode.txt", "expectedRevision":revision, "oldText":"后", "newText":"终"}
-                    ]
-                }),
-            )
-            .await?;
-        assert_eq!(result["status"], "completed");
-        assert_eq!(std::fs::read_to_string(&unicode_path)?, "终\n");
-
-        let oversized_path = workspace.join("batch-oversized.txt");
-        let oversized = "x".repeat(crate::file_ops::MAX_FILE_BYTES as usize + 1);
-        let result = server
-            .dispatch(
-                "file.batch",
-                json!({
-                    "operations":[
-                        {"type":"edit", "mode":"write", "path":"batch-oversized.txt", "expectedAbsent":true, "content":oversized}
-                    ]
-                }),
-            )
-            .await?;
-        assert_eq!(result["status"], "rejected");
-        assert_eq!(result["results"][0]["status"], "failed");
-        assert_eq!(result["results"][0]["error"]["code"], "file_too_large");
-        assert!(!oversized_path.exists());
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn file_batch_revalidates_after_external_revision_change() -> anyhow::Result<()> {
-        let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
-        let workspace = server.state.config.read().await.workspace_root.clone();
-        let path = workspace.join("batch-race.txt");
-        std::fs::write(&path, "same\n")?;
-        let revision = crate::file_ops::revision(&std::fs::read(&path)?);
-        let lock = crate::file_ops::lock_target(&server.state, &path).await;
-        let pending = {
-            let server = server.clone();
-            tokio::spawn(async move {
-                server
-                    .dispatch(
-                        "file.batch",
-                        json!({"operations":[{"type":"edit","mode":"replace","path":"batch-race.txt","expectedRevision":revision,"oldText":"same","newText":"agent"}]}),
-                    )
-                    .await
-            })
-        };
-        tokio::task::yield_now().await;
-        std::fs::write(&path, "external\n")?;
-        drop(lock);
-        let result = pending.await??;
-        assert_eq!(result["status"], "rejected");
-        assert_eq!(result["results"][0]["status"], "failed");
-        assert_eq!(
-            result["results"][0]["error"]["code"],
-            "file_revision_conflict"
-        );
-        assert_eq!(std::fs::read_to_string(&path)?, "external\n");
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn file_batch_rejects_conflicting_same_file_guards() -> anyhow::Result<()> {
-        let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
-        let workspace = server.state.config.read().await.workspace_root.clone();
-        let path = workspace.join("batch-conflict.txt");
-        std::fs::write(&path, "same\n")?;
-        let revision = crate::file_ops::revision(&std::fs::read(&path)?);
-        let conflicting = crate::file_ops::revision(b"other\n");
-        let result = server
-            .dispatch(
-                "file.batch",
-                json!({
-                    "operations":[
-                        {"type":"edit", "mode":"replace", "path":"batch-conflict.txt", "expectedRevision":revision, "oldText":"same", "newText":"one"},
-                        {"type":"edit", "mode":"replace", "path":"./batch-conflict.txt", "expectedRevision":conflicting, "oldText":"same", "newText":"two"}
-                    ]
-                }),
-            )
-            .await?;
-        assert_eq!(result["status"], "rejected");
-        assert_eq!(result["results"][0]["status"], "failed");
-        assert_eq!(
-            result["results"][0]["error"]["code"],
-            "file_batch_guard_conflict"
-        );
-        assert_eq!(result["results"][1]["status"], "skipped");
-        assert_eq!(
-            result["results"][1]["error"]["code"],
-            "file_batch_group_rejected"
-        );
-        assert_eq!(std::fs::read_to_string(&path)?, "same\n");
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn file_batch_create_then_replace_and_patch_uses_one_candidate_chain(
-    ) -> anyhow::Result<()> {
-        let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
-        let workspace = server.state.config.read().await.workspace_root.clone();
-        let path = workspace.join("batch-create.txt");
-        let result = server
-            .dispatch(
-                "file.batch",
-                json!({
-                    "operations":[
-                        {"type":"edit", "mode":"write", "path":"batch-create.txt", "expectedAbsent":true, "content":"one\n"},
-                        {"type":"edit", "mode":"replace", "path":"./batch-create.txt", "expectedAbsent":true, "oldText":"one", "newText":"two"},
-                        {"type":"edit", "mode":"patch", "path":"batch-create.txt", "expectedAbsent":true, "patch":"--- a/batch-create.txt\n+++ b/batch-create.txt\n@@ -1,1 +1,1 @@\n-two\n+three\n"}
-                    ]
-                }),
-            )
-            .await?;
-        assert_eq!(result["status"], "completed");
-        assert_eq!(result["results"][0]["result"]["status"], "created");
-        assert_eq!(result["results"][1]["result"]["status"], "updated");
-        assert_eq!(result["results"][2]["result"]["status"], "updated");
-        assert_eq!(
-            result["results"][2]["result"]["beforeRevision"],
-            result["results"][1]["result"]["afterRevision"]
-        );
-        assert_eq!(std::fs::read_to_string(&path)?, "three\n");
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn file_batch_later_locator_failure_leaves_the_group_unchanged() -> anyhow::Result<()> {
-        let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
-        let workspace = server.state.config.read().await.workspace_root.clone();
-        let path = workspace.join("batch-locator.txt");
-        std::fs::write(&path, "same\n")?;
-        let revision = crate::file_ops::revision(&std::fs::read(&path)?);
-        let result = server
-            .dispatch(
-                "file.batch",
-                json!({
-                    "operations":[
-                        {"type":"edit", "mode":"replace", "path":"batch-locator.txt", "expectedRevision":revision, "oldText":"same", "newText":"one"},
-                        {"type":"edit", "mode":"replace", "path":"./batch-locator.txt", "expectedRevision":revision, "oldText":"missing", "newText":"two"}
-                    ]
-                }),
-            )
-            .await?;
-        assert_eq!(result["status"], "rejected");
-        assert_eq!(result["results"][0]["status"], "skipped");
-        assert_eq!(
-            result["results"][0]["error"]["code"],
-            "file_batch_group_rejected"
-        );
-        assert_eq!(result["results"][1]["status"], "failed");
-        assert_eq!(
-            result["results"][1]["error"]["code"],
-            "file_match_count_mismatch"
-        );
-        assert_eq!(std::fs::read_to_string(&path)?, "same\n");
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn file_batch_dry_run_and_confirmation_are_single_boundary() -> anyhow::Result<()> {
-        let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
-        let workspace = server.state.config.read().await.workspace_root.clone();
-        let path = workspace.join("batch-confirm.txt");
-        std::fs::write(&path, "before\n")?;
-        let revision = crate::file_ops::revision(&std::fs::read(&path)?);
+        std::fs::write(workspace.join("update.txt"), "old\n")?;
+        std::fs::write(workspace.join("delete.txt"), "gone\n")?;
+        std::fs::write(workspace.join("move.txt"), "move\n")?;
+        let patch = "*** Begin Patch\n*** Add File: add.txt\n+added\n*** Update File: update.txt\n@@\n-old\n+new\n*** Delete File: delete.txt\n*** Update File: move.txt\n*** Move to: moved.txt\n@@\n-move\n+moved\n*** End Patch";
         let dry = server
             .dispatch(
-                "file.batch",
-                json!({"dryRun":true,"needConfirm":true,"operations":[{"type":"edit","mode":"replace","path":"batch-confirm.txt","expectedRevision":revision,"oldText":"before","newText":"after"}]}),
+                "file.edit",
+                json!({"patch":patch,"dryRun":true,"needConfirm":true}),
             )
             .await?;
         assert_eq!(dry["status"], "dry-run");
+        assert_eq!(dry["summary"]["total"], 4);
+        assert!(!workspace.join("add.txt").is_file());
+
+        let result = server.dispatch("file.edit", json!({"patch":patch})).await?;
+        assert_eq!(result["status"], "completed");
+        assert_eq!(result["summary"]["changed"], 4);
         assert_eq!(
-            dry["results"][0]["result"]["changedLines"],
-            json!({"added": 1, "removed": 1})
+            std::fs::read_to_string(workspace.join("add.txt"))?,
+            "added\n"
         );
-        assert_eq!(dry["confirmation"]["requested"], false);
-        assert_eq!(std::fs::read_to_string(&path)?, "before\n");
-        {
-            let mut config = server.state.config.write().await;
-            config.confirmation_provider.channels.clear();
-        }
-        let revision = crate::file_ops::revision(&std::fs::read(&path)?);
-        let denied = server
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("update.txt"))?,
+            "new\n"
+        );
+        assert!(!workspace.join("delete.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("moved.txt"))?,
+            "moved\n"
+        );
+        assert!(!workspace.join("move.txt").exists());
+        assert!(result["changes"][3].get("beforeRevision").is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn file_edit_later_commit_failure_reports_prior_and_skipped_changes() -> anyhow::Result<()>
+    {
+        let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
+        let workspace = server.state.config.read().await.workspace_root.clone();
+        std::fs::write(workspace.join("unchanged.txt"), "same\n")?;
+        crate::file_ops::inject_commit_failure(&workspace.join("failed.txt"));
+        let result = server
             .dispatch(
-                "file.batch",
-                json!({"needConfirm":true,"operations":[{"type":"edit","mode":"replace","path":"batch-confirm.txt","expectedRevision":revision,"oldText":"before","newText":"after"}]}),
+                "file.edit",
+                json!({"patch":"*** Begin Patch
+*** Update File: unchanged.txt
+@@
+-same
++same
+*** Add File: committed.txt
++committed
+*** Add File: failed.txt
++failed
+*** Add File: skipped.txt
++skipped
+*** End Patch"}),
             )
             .await?;
-        assert_eq!(denied["status"], "rejected");
+        assert_eq!(result["status"], "completed_with_errors");
+        assert_eq!(result["changes"][0]["status"], "unchanged");
+        assert_eq!(result["changes"][1]["status"], "created");
+        assert_eq!(result["changes"][2]["status"], "failed");
+        assert_eq!(result["changes"][2]["error"]["code"], "file_write_failed");
+        assert_eq!(result["changes"][3]["status"], "skipped-not-attempted");
+        assert_eq!(result["summary"]["changed"], 1);
+        assert_eq!(result["summary"]["planned"], 3);
+        assert_eq!(result["summary"]["committed"], 1);
+        assert_eq!(result["summary"]["failed"], 1);
+        assert_eq!(result["summary"]["skipped"], 1);
+        assert!(workspace.join("committed.txt").is_file());
+        assert!(!workspace.join("failed.txt").exists());
+        assert!(!workspace.join("skipped.txt").exists());
+
+        let audit_lines = std::fs::read_to_string(workspace.join(".agentic-gpt-audit.jsonl"))?
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|record| record["tool"] == "file.edit")
+            .collect::<Vec<_>>();
+        assert_eq!(audit_lines.len(), 4);
+        assert_eq!(audit_lines[0]["outcome"], "unchanged");
+        assert_eq!(audit_lines[0]["committed"], false);
+        assert_eq!(audit_lines[1]["outcome"], "created");
+        assert_eq!(audit_lines[2]["outcome"], "failed");
+        assert_eq!(audit_lines[2]["errorCode"], "file_write_failed");
+        assert_eq!(audit_lines[3]["outcome"], "skipped-not-attempted");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn file_edit_apply_patch_context_mismatch_and_confirmation_do_not_write(
+    ) -> anyhow::Result<()> {
+        let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
+        let workspace = server.state.config.read().await.workspace_root.clone();
+        std::fs::write(workspace.join("good.txt"), "good\n")?;
+        std::fs::write(workspace.join("bad.txt"), "actual\n")?;
+        let mismatch = server
+            .dispatch("file.edit", json!({"patch":"*** Begin Patch\n*** Update File: good.txt\n@@\n-good\n+changed\n*** Update File: bad.txt\n@@\n-wrong\n+never\n*** End Patch"}))
+            .await?;
+        assert_eq!(mismatch["error"]["code"], "file_patch_conflict");
         assert_eq!(
-            denied["results"][0]["error"]["code"],
-            "file_batch_confirmation_unavailable"
+            std::fs::read_to_string(workspace.join("good.txt"))?,
+            "good\n"
         );
-        assert_eq!(std::fs::read_to_string(&path)?, "before\n");
+
+        server
+            .state
+            .config
+            .write()
+            .await
+            .confirmation_provider
+            .channels
+            .clear();
+        let denied = server
+            .dispatch("file.edit", json!({"patch":"*** Begin Patch\n*** Update File: good.txt\n@@\n-good\n+confirmed\n*** End Patch","needConfirm":true}))
+            .await?;
+        assert_eq!(denied["error"]["code"], "file_confirmation_unavailable");
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("good.txt"))?,
+            "good\n"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn file_edit_apply_patch_revalidates_external_change_before_commit() -> anyhow::Result<()>
+    {
+        let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
+        let workspace = server.state.config.read().await.workspace_root.clone();
+        let path = workspace.join("race.txt");
+        std::fs::write(&path, "before\n")?;
+        crate::file_ops::inject_external_change(&path, b"external\n");
+        let result = server
+            .dispatch(
+                "file.edit",
+                json!({"patch":"*** Begin Patch\n*** Update File: race.txt\n@@\n-before\n+agent\n*** End Patch"}),
+            )
+            .await?;
+        assert_eq!(result["error"]["code"], "file_revision_conflict");
+        assert_eq!(std::fs::read_to_string(&path)?, "external\n");
         Ok(())
     }
 
@@ -5611,33 +4729,6 @@ mod tests {
                 crate::file_ops::lock_target(&server.state, &workspace.join("two.txt")).await;
         }
         assert_eq!(server.state.file_locks.lock().await.len(), 1);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn file_batch_reports_failure_when_any_audit_write_fails() -> anyhow::Result<()> {
-        let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
-        let workspace = server.state.config.read().await.workspace_root.clone();
-        std::fs::create_dir(workspace.join(".agentic-gpt-audit.jsonl"))?;
-        let path = workspace.join("batch-audit.txt");
-        std::fs::write(
-            &path, "before
-",
-        )?;
-        let revision = crate::file_ops::revision(&std::fs::read(&path)?);
-        let result = server
-            .dispatch(
-                "file.batch",
-                json!({"operations":[{"type":"edit","mode":"replace","path":"batch-audit.txt","expectedRevision":revision,"oldText":"before","newText":"after"}]}),
-            )
-            .await?;
-        assert_eq!(result["status"], "completed");
-        assert_eq!(result["auditStatus"], "failed");
-        assert_eq!(
-            std::fs::read_to_string(&path)?,
-            "after
-"
-        );
         Ok(())
     }
 

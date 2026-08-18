@@ -287,7 +287,7 @@ Standalone/Local deployments upgrade `agentic-gpt` independently. Hub deployment
 - [`docs/tool-contract-matrix.md`](docs/tool-contract-matrix.md): checked-in Normal/Room/Hub tool contract and parity matrix.
 - [`docs/operations.md`](docs/operations.md): local verification, Standalone-first deployment checks, Hub checks, and safety invariants.
 - [`docs/migration-v0.9.md`](docs/migration-v0.9.md): v0.8 to v0.9 migration by runtime.
-- [`docs/migration-v0.10.md`](docs/migration-v0.10.md): file.batch per-file group and partial-success migration.
+- [`docs/migration-v0.10.md`](docs/migration-v0.10.md): unified file read/search requests and apply-patch migration.
 - [`docs/release-notes-v0.9.1.md`](docs/release-notes-v0.9.1.md): v0.9.1 release boundary and verification summary.
 - [`docs/release-notes-v0.9.0.md`](docs/release-notes-v0.9.0.md): v0.9.0 feature and verification summary.
 - [`docs/development.md`](docs/development.md): development, CI, and release publishing.
@@ -315,4 +315,9 @@ Creating or pushing a tag is a separate release action; normal commits do not pu
 
 ## License
 
-MIT
+AgenticGPT original and main code is licensed under the MIT License.
+
+The `crates/agentic-apply-patch` subcrate contains code derived from OpenAI
+Codex under the Apache License 2.0. See
+[`crates/agentic-apply-patch/LICENSE`](crates/agentic-apply-patch/LICENSE) and
+[`crates/agentic-apply-patch/NOTICE`](crates/agentic-apply-patch/NOTICE).

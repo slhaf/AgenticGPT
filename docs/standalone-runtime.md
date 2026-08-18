@@ -94,10 +94,10 @@ process.exec, process.batch, job.get, job.list, job.cancel
 skills.list, skills.read, skills.setActive, skills.install,
 skills.install.get, skills.install.cancel, skills.run
 tmux.sessions, tmux.panes, tmux.exec, tmux.pasteText
-agent.info, file.read, file.search, file.edit, file.batch
+agent.info, file.read, file.search, file.edit
 ```
 
-Room advertises exactly 36 tools through either ingress: the 24 Normal tools,
+Room advertises exactly 35 tools through either ingress: the 23 Normal tools,
 `bootstrap` and `bootstrap.read`, plus these ten Room memory tools:
 
 ```text
@@ -179,30 +179,21 @@ above that maximum are clipped rather than discarded; search responses expose
 the requested/effective values, a `contextLinesClipped` flag, and one bounded
 warning. Negative or non-integer values fail argument validation.
 
-`file.edit` is the guarded single-file mutation tool. Its `replace`, `patch`,
-and `write` modes operate on UTF-8 text only. Existing files require an exact
-`expectedRevision` (`sha256:<hex>`); new files require `expectedAbsent: true`.
-Replace counts exact matches; patch accepts one standard single-file unified
-diff with hunk headers such as `@@ -1,2 +1,2 @@` (an omitted count means 1,
-while bare `@@` is invalid); and write creates or overwrites complete content.
-Candidates are capped at
-8 MiB, dry runs and no-ops do not write or request confirmation, and successful
-mutations use a synced same-directory temporary file with atomic replacement
-(or atomic no-replace creation) while preserving ordinary overwrite
-permissions. Every non-dry-run attempt is redacted in the audit JSONL.
+`file.read` and `file.search` also accept an ordered `requests` array of up to
+32 per-request shapes. Flat and batch forms are mutually exclusive. Batch
+results preserve input order, isolate failures, and trim result detail before
+collapsing envelopes at the approximately 1 MiB aggregate response bound.
+Search batches retain the 20,000-file and 128 MiB aggregate scan limits in
+addition to each search's ordinary limits.
 
-`file.batch` accepts 1–32 ordered `read`, `search`, and `edit` operations (at
-most 16 edits). Reads/searches complete before batch-owned writes; edit targets
-are normalized into file groups and locked in sorted order. Each group has one
-candidate, one staged file, and one guarded atomic replacement (or no-replace
-creation). One optional confirmation covers all valid effective groups. A read,
-search, staging, or commit failure is reported on its own group and does not
-roll back or block unrelated groups; mixed outcomes use `completed_with_errors`.
-Responses include ordered operation envelopes plus bounded `groups` summaries
-with group ids, revisions, committed state, and failure counts. `dryRun:true`
-is the whole-request preview path. No cross-file rollback or atomicity selector
-is provided, and crash/power-loss recovery is not claimed. Batch responses and
-audits omit file content, replacement text, patch text, and full diffs.
+`file.edit` accepts only `patch`, optional `dryRun`, and optional `needConfirm`.
+The patch uses Codex apply-patch syntax and may add, update, delete, or move
+multiple files. Every source and destination is resolved through path policy,
+locked deterministically, checked as UTF-8 and at most 8 MiB, staged and
+validated before one optional confirmation. Source snapshots are revalidated
+immediately before commit; dry runs never confirm or write. Responses contain
+ordered requested/resolved paths, actions, statuses, bounded diffs, and changed
+line counts, while internal audit records may retain revisions.
 
 ## Hub MCP profiles
 
@@ -306,9 +297,9 @@ and HTTP aliases are also removed rather than wrapped: use `process.batch`,
 `/v1/batchExec`, and `/v1/sessions/*` calls fail explicitly. tmux session names
 and tmux session APIs are unchanged.
 
-The v0.10 `file.batch` mutation boundary is documented in
-[`migration-v0.10.md`](migration-v0.10.md): file groups commit independently,
-and the old cross-file rollback states and guarantees no longer apply.
+The current multi-file mutation boundary is documented in the file contract
+matrix: one complete apply-patch request is staged and validated before its
+optional confirmation and commit.
 
 While the standalone worker is running, edits to `policy`, `pathPolicy`,
 `limits`, and `mcpServers` are polled, fully validated, and applied atomically
