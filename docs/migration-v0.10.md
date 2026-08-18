@@ -25,3 +25,14 @@ therefore write nothing. No cross-file rollback guarantee is made after commit
 begins: if a later physical commit fails, `file.edit` returns
 `completed_with_errors` and records which ordered changes committed, which one
 failed, and which later changes were skipped without being attempted.
+
+## Managed Job contracts
+
+Managed Job surfaces now use compact routine responses while retaining rich bounded
+history internally. `process.exec`, `process.batch`, `skills.run`, `mcp.callTool`,
+and `mcp.batch` accept an optional human-readable `group`; batch children inherit
+the parent value. `job.get` supports `waitOnly`, and `job.list` supports exact
+`group`/kind/state filters, default limit 50 (max 100), and opaque cursor paging.
+Terminal Jobs remain addressable by `jobId` through the per-agent durable history
+window. Hub full and HTTP Job routes forward these fields when the Agent is online;
+Hub cache fallback never fabricates cursor continuation or a fresh wait result.

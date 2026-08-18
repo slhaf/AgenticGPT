@@ -171,3 +171,13 @@
 - Focused runtime tests: `jobs::tests::` 10/10, `job_history::tests::` 11/11, `mcp::tests::` 18/18. Workspace all-targets check, Agent clippy (`-D warnings`), rustfmt check, and `git diff --check` pass.
 - No commit made. Next scoped work is Phase 3D slim tool surfaces/`waitOnly`; do not infer Phase 3D/3E work from this handoff.
 - Final merge audit found and fixed a regression-test expectation that ignored a separate persisted completed MCP row; the test now asserts the stale duplicate is absent while the unrelated completed row remains. The focused pagination test passes.
+
+## Phase 3E–3F completion and plan close (2026-08-18)
+
+- Completion review found a real Hub parity gap rather than a stale checkbox: Hub full MCP was dropping `group` for all five Managed Job admission surfaces, forcing `job.get.waitOnly=false`, and dropping `job.list.group/cursor`; HTTP Job queries similarly lacked `group/cursor/waitOnly`.
+- Closed that gap. Hub full now forwards `group` for process/skill/MCP admissions, `job.list` forwards exact group/filter/cursor fields, and `job.get` forwards `waitOnly`; HTTP `/v1/jobs` mirrors the same query fields.
+- Hub cache fallback is now explicitly truthful: group/kind/state can filter a first cached page, Agent-issued cursor continuation fails explicitly while the Agent is unavailable, and `job.get` transport failure returns `job_get_unavailable` with only a slim cached summary when present instead of leaking rich `JobInfo` or pretending the wait was fresh.
+- Updated current docs to remove the obsolete `completedInline/pollAfterMs/nested job` description and document compact responses, durable `jobs.sqlite3` history, group propagation, waitOnly, stable cursor paging, and Hub fallback boundaries.
+- Earlier same-day local-runtime smoke (`agentic-gpt run` + `agentic-gpt local`) passed the model-facing file/Job/Room/skills surfaces and found one real lifecycle bug: repeated `job.get` on a terminal process rewrote `finishedAt`, growing `durationMs`. Fixed by preventing terminal process refresh from re-finalizing timestamps; repeated smoke observed stable duration across multiple gets.
+- Verification before plan close: Hub unit suite 58/58 PASS; Agent unit suite 317/317 PASS from the immediately preceding compact-surface checkpoint; stdio/local MCP and focused Job/history suites PASS; workspace check, Agent/Hub clippy, rustfmt, and diff checks PASS across the closing work. No new single-point tests were added.
+- This plan is complete. The separate unified-TUI baseline remains untouched/untracked and is not automatically activated.

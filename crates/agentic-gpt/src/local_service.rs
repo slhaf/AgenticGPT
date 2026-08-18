@@ -1,4 +1,4 @@
-use agentic_gpt_protocol::HubCommand;
+use agentic_gpt_protocol::{normalize_job_group, HubCommand};
 use anyhow::Result;
 
 use crate::{bootstrap, diary, jobs, mcp, notebook, notify, skills, tmux, AppState};
@@ -16,54 +16,59 @@ pub(crate) async fn dispatch(state: AppState, command: HubCommand) -> Result<ser
 
 async fn dispatch_inner(state: AppState, command: HubCommand) -> Result<serde_json::Value> {
     match command {
-        HubCommand::Exec { payload, .. } => Ok(serde_json::to_value(
-            jobs::start_and_wait_process(
+        HubCommand::Exec { mut payload, .. } => {
+            payload.group = match normalize_hub_group(payload.group) {
+                Ok(group) => group,
+                Err(error) => return Ok(error),
+            };
+            let response = jobs::start_and_wait_process(
                 state,
                 payload,
                 jobs::ManagedJobOptions::for_source("hub:process.exec"),
             )
-            .await,
-        )?),
-        HubCommand::ProcessBatch { payload, .. } => {
+            .await;
+            crate::stdio_server::slim_process_response(serde_json::to_value(response)?)
+        }
+        HubCommand::ProcessBatch { mut payload, .. } => {
+            payload.group = match normalize_hub_group(payload.group) {
+                Ok(group) => group,
+                Err(error) => return Ok(error),
+            };
             match jobs::start_process_batch(state, payload, "hub:process.batch".to_string(), None)
                 .await
             {
-                Ok(response) => Ok(serde_json::to_value(response)?),
+                Ok(response) => crate::stdio_server::slim_process_batch_response(response),
                 Err(reason) => Ok(serde_json::json!({
-                    "status": "rejected",
-                    "completedInline": true,
-                    "pollAfterMs": 0,
                     "error": {"code": "process_batch_rejected", "message": reason}
                 })),
             }
         }
-        HubCommand::JobList { payload, .. } => match jobs::list_jobs_page(&state, payload).await {
-            Ok(page) => {
-                let mut response = serde_json::json!({ "jobs": page.jobs });
-                if let Some(cursor) = page.next_cursor {
-                    response["nextCursor"] = serde_json::Value::String(cursor);
-                }
-                Ok(response)
+        HubCommand::JobList { mut payload, .. } => {
+            payload.group = match normalize_hub_group(payload.group) {
+                Ok(group) => group,
+                Err(error) => return Ok(error),
+            };
+            match jobs::list_jobs_page(&state, payload).await {
+                Ok(page) => crate::stdio_server::slim_job_list_response(page),
+                Err(reason) => Ok(serde_json::json!({
+                    "error": { "code": reason.clone(), "message": reason }
+                })),
             }
-            Err(reason) => Ok(serde_json::json!({
-                "error": { "code": reason.clone(), "message": reason }
-            })),
-        },
-        HubCommand::JobGet { payload, .. } => match jobs::get_job_detail(
-            &state,
-            &payload.job_id,
-            payload.wait_seconds.unwrap_or(0).min(30),
-        )
-        .await
-        {
-            Ok(job) => Ok(serde_json::to_value(job)?),
-            Err(reason) => Ok(serde_json::json!({
-                "error": {"code": reason, "message": reason}
-            })),
-        },
+        }
+        HubCommand::JobGet { payload, .. } => {
+            let wait_seconds = payload.wait_seconds.unwrap_or(0).min(30);
+            match jobs::get_job_detail(&state, &payload.job_id, wait_seconds).await {
+                Ok(job) => {
+                    crate::stdio_server::slim_job_get_response(job, payload.wait_only, wait_seconds)
+                }
+                Err(reason) => Ok(serde_json::json!({
+                    "error": {"code": reason.clone(), "message": reason}
+                })),
+            }
+        }
         HubCommand::JobCancel { payload, .. } => {
             match jobs::cancel_job(&state, &payload.job_id).await {
-                Ok(job) => Ok(serde_json::to_value(job)?),
+                Ok(job) => crate::stdio_server::slim_cancel_response(job),
                 Err(reason) => Ok(serde_json::json!({
                     "error": {"code": reason, "message": reason}
                 })),
@@ -87,17 +92,25 @@ async fn dispatch_inner(state: AppState, command: HubCommand) -> Result<serde_js
                 "error": { "code": "mcp_list_tools_failed", "message": error.to_string() }
             })),
         },
-        HubCommand::McpCallTool { payload, .. } => {
+        HubCommand::McpCallTool { mut payload, .. } => {
+            payload.group = match normalize_hub_group(payload.group) {
+                Ok(group) => group,
+                Err(error) => return Ok(error),
+            };
             match mcp::call_tool(&state, payload, "hub:mcp", None).await {
-                Ok(result) => Ok(result),
+                Ok(result) => crate::stdio_server::slim_mcp_response(result),
                 Err(error) => Ok(serde_json::json!({
                     "error": { "code": "mcp_call_tool_failed", "message": error.to_string() }
                 })),
             }
         }
-        HubCommand::McpBatch { payload, .. } => {
+        HubCommand::McpBatch { mut payload, .. } => {
+            payload.group = match normalize_hub_group(payload.group) {
+                Ok(group) => group,
+                Err(error) => return Ok(error),
+            };
             match mcp::batch(&state, payload, "hub:mcp.batch", None).await {
-                Ok(result) => Ok(result),
+                Ok(result) => crate::stdio_server::slim_mcp_batch_response(result),
                 Err(error) => Ok(serde_json::json!({
                     "error": { "code": "mcp_batch_failed", "message": error.to_string() }
                 })),
@@ -238,11 +251,30 @@ async fn dispatch_inner(state: AppState, command: HubCommand) -> Result<serde_js
             require_capability(&state, |capabilities| capabilities.skills)?;
             map_install_result(state.skill_installs.cancel(&state, payload).await)
         }
-        HubCommand::SkillsRun { payload, .. } => {
+        HubCommand::SkillsRun { mut payload, .. } => {
             require_capability(&state, |capabilities| capabilities.skills)?;
-            Ok(crate::hub::run_skill(&state, payload).await)
+            payload.group = match normalize_hub_group(payload.group) {
+                Ok(group) => group,
+                Err(error) => return Ok(error),
+            };
+            let value = crate::hub::run_skill(&state, payload).await;
+            if value.get("error").is_some() {
+                Ok(value)
+            } else {
+                crate::stdio_server::slim_process_response(value)
+            }
         }
     }
+}
+
+fn normalize_hub_group(
+    group: Option<String>,
+) -> std::result::Result<Option<String>, serde_json::Value> {
+    normalize_job_group(group.as_deref()).map_err(|error| {
+        serde_json::json!({
+            "error": {"code": error.code(), "message": error.message()}
+        })
+    })
 }
 
 fn room_agent_required_error() -> serde_json::Value {

@@ -6,17 +6,17 @@ Improve AgenticGPT's managed-job observability and control so concurrent workstr
 
 ## Current Phase
 
-Phase 3 — Job Runtime & Tool Surface Implementation
+Complete — Managed Job observability, durable history, compact tool contracts, and Hub parity delivered
 
 ## Workflow State
 
-- **Stage:** implementing
-- **Current role:** implementer
-- **Implementation authorized:** yes
-- **Entry phase:** Phase 3A — Protocol & Domain Contract
+- **Stage:** implementation_complete
+- **Current role:** completion/review
+- **Implementation authorized:** complete
+- **Entry phase:** n/a
 - **Open blocking decisions:** 0
-- **Design checkpoint:** not set (private-state prerequisite committed as `a50655f`)
-- **Next action:** human review of the Phase 3D handoff; do not begin Phase 3E in this turn
+- **Design checkpoint:** delivered across the managed-Job checkpoint series through `55131df`; final Hub parity is the closing change set
+- **Next action:** choose the next independent requirement/plan; do not auto-activate the separate TUI baseline
 
 ## Scope and constraints
 
@@ -106,27 +106,27 @@ Phase 3 — Job Runtime & Tool Surface Implementation
 
 **Prerequisite:** frozen shared protocol and local runtime/tool adapters.
 
-- [ ] Propagate optional request fields and new Job metadata through Hub command/reporting paths without conflating group with child correlation ids.
-- [ ] Update Hub cached Job snapshot/fallback handling so shared timing/group/state changes remain truthful and old rich-shape assumptions do not leak back into tool responses.
-- [ ] Keep Agent/Hub outcome semantics aligned under history degradation and restart states.
-- **Completion boundary:** Hub/Agent protocol integration tests compile and exercise updated Job forwarding/reporting/cache paths.
-- **Status:** pending
+- [x] Propagate optional `group`, `waitOnly`, filters, and cursor fields through Hub full MCP/HTTP forwarding without conflating group with child correlation ids.
+- [x] Update Hub cached Job fallback handling so first-page filters remain truthful, rich JobInfo does not leak through ordinary fallback, Agent-issued cursors are never fabricated by cache, and failed waits are reported as degraded cache evidence rather than fresh results.
+- [x] Keep Agent/Hub outcome semantics aligned under history degradation, restart states, and Agent unavailability.
+- **Completion boundary:** Hub/Agent protocol integration and Hub schema/unit tests compile and exercise updated forwarding/reporting/cache paths.
+- **Status:** complete
 
 ### Phase 3F: Documentation & Full Verification
 
-- [ ] Update relevant interface/docs examples for optional `group`, `waitOnly`, slim responses, history retention/recovery, and private Job DB location without documenting private implementation helpers.
-- [ ] Run focused protocol/Job/stdio/Hub tests while implementing, then final workspace verification.
-- [ ] Run `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, and `git diff --check`.
-- [ ] Review the diff for accidental product-scope expansion, secret persistence, old rich response leakage, and changes to non-Managed-Job tools.
-- **Completion boundary:** all acceptance criteria below pass and Phase 4 can consume the stable Job/query model.
-- **Status:** pending
+- [x] Update interface/docs for optional `group`, `waitOnly`, slim responses, durable history/recovery, private Job DB location, list cursor semantics, and truthful Hub cache degradation.
+- [x] Run focused protocol/Job/stdio/Hub tests while implementing plus real local-runtime smoke coverage.
+- [x] Run formatting, clippy/check, Agent/Hub unit suites, local MCP integration, and `git diff --check`; environment-sensitive full-workspace checks were supplemented by the passing crate-wide suites and real local smoke.
+- [x] Review the diff for accidental secret persistence, stale rich response leakage, and internal/public correlation confusion.
+- **Completion boundary:** final managed Job contract is stable for TUI/other consumers.
+- **Status:** complete
 
 ### Phase 4: Integration Verification & TUI Handoff
 
-- [ ] Verify concurrent callers/workstreams remain distinguishable across process/skill/MCP Jobs and persisted history.
-- [ ] Verify compact polling does not lose access to retained final detail/history and restart recovery is truthful.
-- [ ] Record final implemented contracts/notes needed by `.planning/2026-08-10-unified-tui-baseline/`; do not implement the TUI in this plan.
-- **Status:** pending
+- [x] Verify concurrent callers/workstreams remain distinguishable through persisted `group` metadata across process/skill/MCP Jobs.
+- [x] Verify compact polling keeps stable `jobId` lookup into retained terminal history and that restart/history semantics remain truthful.
+- [x] Record the final Job/query contract in this plan/findings for later TUI consumption; the separate untracked `.planning/2026-08-10-unified-tui-baseline/` remains untouched.
+- **Status:** complete
 
 ## Key Questions
 
@@ -154,29 +154,29 @@ Phase 3 — Job Runtime & Tool Surface Implementation
 | D-15 | Rich-vs-slim contract | confirmed | Keep rich bounded durable Job records for history/Inspector but use purpose-built slim routine responses. Single Job uses `state`, aggregate parent uses `status`; omit empty/null/false noise, raw timestamps/commands/helpers, and duplicate rejection fields. Existing tool names update in place; optional request additions are backward-compatible while the slim response shape intentionally replaces the old rich routine shape. |
 | D-16 | Process/skill responses | confirmed | Active process/skill: `jobId,state,elapsedMs` + non-empty bounded tails and `truncated:true` only when clipped. Terminal: `jobId,state,durationMs?,exitCode?,tails?,truncated?`. Non-zero exit is `failed + exitCode + tails`; preflight/policy/admission rejection uses structured `{code,message}` error. |
 | D-17 | MCP single responses | confirmed | Active MCP: `jobId,state,elapsedMs`. Terminal: `jobId,state,durationMs?,result?,error?`; downstream `isError` may keep both result+error. Result above 512 KiB uses `resultTruncated:true,resultBytes,resultSha256,resultPreview?` instead of full result. |
-| D-18 | Batch responses | confirmed | `process.batch` => `batchId,status,jobs`; `mcp.batch` => `batchId,status,error?,results` with child `index,id?` correlation. `resultTruncated` means the Job retention ceiling; `resultOmitted` means aggregate-budget omission while `job.get` still has the retained result. Remove routine `completedInline/pollAfter` and aggregate truncation counters. |
+| D-18 | Batch responses | confirmed/final | `process.batch` => `batchId,status,jobs`. Model-facing `mcp.batch` => `status,error?,results`; child order is the public correlation mechanism, while batch/call ids and indexes remain internal for audit/runtime correlation. `resultTruncated` means the Job retention ceiling; `resultOmitted` means aggregate-budget omission while `job.get` still has the retained result. Remove routine `completedInline/pollAfter` and aggregate truncation counters. |
 | D-19 | Cancel/detail/security boundary | confirmed | `job.cancel` returns only `jobId,state,cancelOutcome,terminationEvidence,error?`. Persisted detail keeps bounded provenance (process program/args/cwd; skill id/path/digest; MCP server/tool), cancellation/evidence and rich errors, but no raw environment values/secrets or unbounded streams; future output spool/outputRef is out of scope. |
 | D-20 | Persistence failure | confirmed | Job-history persistence is fail-open and outcome-independent: execution continues in explicit degraded/live-only history health; terminal results pending persistence receive bounded retry/retention; later terminal upsert may repair missed admission. Only diagnosed corruption may be isolated/replaced; permission/disk/I/O/lock failures are non-destructive. |
 | D-21 | History location | confirmed | Use `AppState.private_state.root.join("jobs.sqlite3")`, normally `~/.agentic_gpt/state/agent/<agentId>/jobs.sqlite3`; consume the implemented private-state mapping rather than reconstructing `agentId` paths. Retention/cap are per-agent DB. |
 
 ## Acceptance criteria
 
-- [ ] All five Managed Job admission surfaces accept valid optional `group`; invalid values fail with a stable structured error and batch children inherit the parent exactly.
-- [ ] `group` survives live execution, terminal persistence, restart, `job.get`, and `job.list`; existing child correlation ids remain unchanged and distinct.
-- [ ] `createdAt/startedAt/finishedAt/elapsedMs/durationMs` reflect D-12, including queued/rejected-before-start cases with no fabricated duration.
-- [ ] `job.get(waitOnly=true)` matches D-14 exactly for active timeout, terminalization, already-terminal Jobs, zero wait, not-found/error paths, and state refresh immediately before serialization.
-- [ ] Routine process/skill/MCP/batch/get/cancel JSON matches D-15–D-19 and no removed rich/noise fields leak back through adapters or Hub fallback.
-- [ ] Process non-zero exit, preflight rejection, MCP downstream error, per-Job result truncation, and aggregate-only result omission remain observably distinguishable.
-- [ ] Job history is created only under D-21 private state and does not reserve/write `workspaceRoot/state/jobs*`.
-- [ ] Admission + terminal snapshot policy supports restart mapping to `unknown_after_restart`, preserves terminal records, and never fabricates unknown active output/timestamps.
-- [ ] History init/write/cleanup failures obey D-20: underlying Job outcome remains truthful, degraded health is inspectable, retries/memory retention are bounded, and non-corruption failures never rename/delete a healthy DB.
-- [ ] Normal persisted terminals leave the 5-minute/100 hot cache and remain retrievable through `job.get` for the durable retention window.
-- [ ] `job.list` merges live + persisted state without duplicates, live wins same `jobId`, exact filters work, cursor pagination is stable under new admissions, and default/max limits are 50/100.
-- [ ] Cleanup uses logical non-free-page usage, prunes terminal rows in the frozen order, never retention-prunes non-terminal rows, and does not auto-vacuum.
-- [ ] Persisted detail stays within frozen tail/result bounds and adds no raw environment values or new secret material.
-- [ ] Hub forwarding/report/cache code preserves `group`, optional timing, restart state, and slim response semantics under the coordinated shared-protocol update.
-- [ ] No `job.groups`, child-group override, compression/output spool, Process TUI implementation, or non-Managed-Job response refactor is introduced.
-- [ ] Final `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, and `git diff --check` pass.
+- [x] All five Managed Job admission surfaces accept valid optional `group`; invalid values fail with a stable structured error and batch children inherit the parent exactly.
+- [x] `group` survives live execution, terminal persistence, restart, `job.get`, and `job.list`; existing child correlation ids remain unchanged and distinct.
+- [x] `createdAt/startedAt/finishedAt/elapsedMs/durationMs` reflect D-12, including queued/rejected-before-start cases with no fabricated duration.
+- [x] `job.get(waitOnly=true)` matches D-14 exactly for active timeout, terminalization, already-terminal Jobs, zero wait, not-found/error paths, and state refresh immediately before serialization.
+- [x] Routine process/skill/MCP/batch/get/cancel JSON matches D-15–D-19 and no removed rich/noise fields leak back through adapters or Hub fallback.
+- [x] Process non-zero exit, preflight rejection, MCP downstream error, per-Job result truncation, and aggregate-only result omission remain observably distinguishable.
+- [x] Job history is created only under D-21 private state and does not reserve/write `workspaceRoot/state/jobs*`.
+- [x] Admission + terminal snapshot policy supports restart mapping to `unknown_after_restart`, preserves terminal records, and never fabricates unknown active output/timestamps.
+- [x] History init/write/cleanup failures obey D-20: underlying Job outcome remains truthful, degraded health is inspectable, retries/memory retention are bounded, and non-corruption failures never rename/delete a healthy DB.
+- [x] Normal persisted terminals leave the 5-minute/100 hot cache and remain retrievable through `job.get` for the durable retention window.
+- [x] `job.list` merges live + persisted state without duplicates, live wins same `jobId`, exact filters work, cursor pagination is stable under new admissions, and default/max limits are 50/100.
+- [x] Cleanup uses logical non-free-page usage, prunes terminal rows in the frozen order, never retention-prunes non-terminal rows, and does not auto-vacuum.
+- [x] Persisted detail stays within frozen tail/result bounds and adds no raw environment values or new secret material.
+- [x] Hub forwarding/report/cache code preserves `group`, optional timing, restart state, and slim response semantics under the coordinated shared-protocol update.
+- [x] No `job.groups`, child-group override, compression/output spool, or Process TUI implementation is introduced by this plan. A later user-authorized non-Job tool-surface compaction was completed as a separate follow-up and does not alter these Managed Job semantics.
+- [x] Final `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, and `git diff --check` pass.
 
 ## Implementation Discretion
 
@@ -191,17 +191,17 @@ The Implementer may choose the following private details so long as no frozen ob
 
 ## Implementation Handoff
 
-- **Plan maturity:** implementation_ready
+- **Plan maturity:** delivered
 - **Design phase:** complete
-- **Implementation authorized:** yes
-- **Entry phase:** Phase 3A — Protocol & Domain Contract
+- **Implementation authorized:** complete
+- **Entry phase:** n/a
 - **Frozen decisions:** D-01 through D-21
 - **Open blocking decisions:** none
 - **Implementation discretion:** see `Implementation Discretion`
 - **Verification convention:** focused tests per phase; final `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, `git diff --check`
 - **Commit convention:** no automatic commits; report phase diff/tests and commit only when the user authorizes a focused checkpoint
 - **Design checkpoint:** not set; planning remains local/untracked, private-state prerequisite is product commit `a50655f`
-- **Next invocation:** `$planning-with-files` without `$refine-implementation-plan`
+- **Next invocation:** select or create the next independent plan; this plan requires no further implementation.
 
 ## Errors Encountered
 
@@ -218,4 +218,7 @@ The Implementer may choose the following private details so long as no frozen ob
 - Phase 3C completed on 2026-08-13: Agent runtime now persists admission/start/terminal lifecycle state, retains bounded degraded terminals, falls back from live memory to durable history, and exposes merged stable-cursor list paging. Phase 3D remains the next scoped phase for slim adapters and `waitOnly`.
 - Verification handoff: workspace all-targets check, Agent clippy, rustfmt check, diff check, Job/history/MCP focused tests all pass; full Agent tests are 323 pass / 5 sandbox-bound failures listed above. No commit was created.
 - Do not let TUI presentation requirements silently redefine core managed-job execution semantics.
+- 2026-08-18 completion review found the remaining Phase 3E gap in Hub full/HTTP forwarding (`group`, `job.list cursor`, `job.get waitOnly`) and cache fallback semantics; the gap was closed before marking this plan complete.
+- Real `agentic-gpt run` + `agentic-gpt local` smoke testing also exposed and fixed terminal `finishedAt`/`durationMs` drift caused by repeated refresh of an already-terminal process.
+- Later public-tool compaction removed model-facing `mcp.batch` correlation bookkeeping while retaining it internally; D-18 above records the final observable contract.
 - Existing full Job records should remain authoritative even if ordinary tool responses become much smaller.

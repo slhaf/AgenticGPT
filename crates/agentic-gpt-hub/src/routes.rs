@@ -1,9 +1,9 @@
 use agentic_gpt_protocol::{
-    BatchExecRequest, ExecRequest, HubCommand, HubInfoAgents, HubInfoCounts,
-    HubInfoRemoteConfirmation, HubInfoResponse, JobCancelRequest, JobGetRequest, JobKind,
-    JobListRequest, JobState, McpBatchRequest, McpCallToolRequest, McpListServersRequest,
-    McpListToolsRequest, TmuxCapturePaneRequest, TmuxCloseSessionRequest, TmuxCreateSessionRequest,
-    TmuxExecRequest, TmuxListPanesRequest, TmuxPasteTextRequest,
+    normalize_job_group, BatchExecRequest, ExecRequest, HubCommand, HubInfoAgents, HubInfoCounts,
+    HubInfoRemoteConfirmation, HubInfoResponse, JobCancelRequest, JobGetRequest, JobInfo, JobKind,
+    JobListItem, JobListRequest, JobState, McpBatchRequest, McpCallToolRequest,
+    McpListServersRequest, McpListToolsRequest, TmuxCapturePaneRequest, TmuxCloseSessionRequest,
+    TmuxCreateSessionRequest, TmuxExecRequest, TmuxListPanesRequest, TmuxPasteTextRequest,
 };
 use anyhow::Result;
 use axum::extract::{Path, Query, State};
@@ -32,9 +32,11 @@ pub(crate) struct AgentIdQuery {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct JobListQuery {
     agent_id: String,
+    group: Option<String>,
     kind: Option<JobKind>,
     state: Option<JobState>,
     limit: Option<usize>,
+    cursor: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -42,6 +44,8 @@ pub(crate) struct JobListQuery {
 pub(crate) struct JobGetQuery {
     agent_id: String,
     wait_seconds: Option<u64>,
+    #[serde(default)]
+    wait_only: bool,
 }
 
 #[derive(Deserialize)]
@@ -287,12 +291,18 @@ pub(crate) async fn list_jobs(
     if let Err(response) = require_agent_enabled(&state, &query.agent_id) {
         return response;
     }
+    let group = match normalize_job_group(query.group.as_deref()) {
+        Ok(group) => group,
+        Err(error) => {
+            return api_error(StatusCode::BAD_REQUEST, error.code(), error.message());
+        }
+    };
     let payload = JobListRequest {
-        group: None,
+        group,
         kind: query.kind,
         state: query.state,
         limit: query.limit,
-        cursor: None,
+        cursor: query.cursor,
     };
     let command = HubCommand::JobList {
         request_id: random_id("req"),
@@ -300,6 +310,13 @@ pub(crate) async fn list_jobs(
     };
     match request_agent(&state, &query.agent_id, command, 2).await {
         Ok(value) => Json(value).into_response(),
+        Err(reason) if payload.cursor.is_some() => api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "job_list_cursor_unavailable",
+            format!(
+                "Agent is unavailable and Hub cache cannot continue an Agent-issued cursor: {reason}"
+            ),
+        ),
         Err(_) => {
             let mut jobs = state
                 .jobs
@@ -308,11 +325,25 @@ pub(crate) async fn list_jobs(
                 .get(&query.agent_id)
                 .map(|jobs| jobs.values().cloned().collect::<Vec<_>>())
                 .unwrap_or_default();
+            jobs.retain(|job| {
+                payload
+                    .group
+                    .as_ref()
+                    .is_none_or(|group| job.group.as_deref() == Some(group.as_str()))
+            });
             jobs.retain(|job| payload.kind.is_none_or(|kind| job.kind == kind));
             jobs.retain(|job| payload.state.is_none_or(|state| job.state == state));
-            jobs.sort_by_key(|job| std::cmp::Reverse(job.updated_at));
-            jobs.truncate(payload.limit.unwrap_or(100).clamp(1, 100));
-            Json(json!({ "jobs": jobs })).into_response()
+            jobs.sort_by(|left, right| {
+                right
+                    .created_at
+                    .cmp(&left.created_at)
+                    .then_with(|| right.job_id.cmp(&left.job_id))
+            });
+            jobs.truncate(payload.effective_limit());
+            Json(json!({
+                "jobs": jobs.into_iter().map(job_list_item).collect::<Vec<_>>()
+            }))
+            .into_response()
         }
     }
 }
@@ -333,7 +364,7 @@ pub(crate) async fn get_job(
         request_id: random_id("req"),
         payload: JobGetRequest {
             job_id: job_id.clone(),
-            wait_only: false,
+            wait_only: query.wait_only,
             wait_seconds: query
                 .wait_seconds
                 .map(|seconds| seconds.min(MAX_WAIT_SECONDS)),
@@ -341,16 +372,34 @@ pub(crate) async fn get_job(
     };
     let timeout_seconds = query.wait_seconds.unwrap_or(0).min(MAX_WAIT_SECONDS) + 2;
     match request_agent(&state, &query.agent_id, command, timeout_seconds).await {
-        Ok(value) if value.get("error").is_none() => Json(value).into_response(),
-        _ => match cached_job(&state, &query.agent_id, &job_id).await {
+        Ok(value) => Json(value).into_response(),
+        Err(reason) => match cached_job(&state, &query.agent_id, &job_id).await {
             Some(job) => Json(json!({
-                "job": job,
-                "detailAvailable": false,
-                "resultTruncated": false
+                "error": {
+                    "code": "job_get_unavailable",
+                    "message": reason
+                },
+                "cached": job_list_item(job)
             }))
             .into_response(),
-            None => api_error(StatusCode::NOT_FOUND, "job_not_found", "Job was not found"),
+            None => api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "job_get_unavailable",
+                reason,
+            ),
         },
+    }
+}
+
+fn job_list_item(job: JobInfo) -> JobListItem {
+    JobListItem {
+        job_id: job.job_id,
+        group: job.group,
+        kind: job.kind,
+        state: job.state,
+        created_at: job.created_at,
+        started_at: job.started_at,
+        finished_at: job.finished_at,
     }
 }
 

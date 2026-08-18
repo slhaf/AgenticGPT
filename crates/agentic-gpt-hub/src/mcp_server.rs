@@ -1,14 +1,15 @@
 use agentic_gpt_protocol::{
-    BatchExecRequest, BootstrapReadRequest, DiaryAppendRequest, DiaryRecentRequest,
-    DiarySelectExactRequest, ExecElement, ExecRequest, HubCommand, JobCancelRequest, JobGetRequest,
-    JobKind, JobListRequest, JobState, McpBatchCall, McpBatchMode, McpBatchRequest,
-    McpCallToolRequest, McpListToolsRequest, NotebookAppendRequest, NotebookCurrentRequest,
-    NotebookRecentRequest, NotebookRemoveRequest, NotebookSearchRequest,
-    NotebookSelectExactRequest, NotebookUpdateRequest, NotificationAction, PassageSignificance,
-    SkillActivationRequest, SkillInstallCancelRequest, SkillInstallFile, SkillInstallGetRequest,
-    SkillInstallRequest, SkillInstallSource, SkillReadRequest, SkillRunRequest, SkillSearchRequest,
-    TmuxCapturePaneRequest, TmuxCloseSessionRequest, TmuxCreateSessionRequest, TmuxExecRequest,
-    TmuxListPanesRequest, TmuxPasteTextRequest, UserNotifySendRequest,
+    normalize_job_group, BatchExecRequest, BootstrapReadRequest, DiaryAppendRequest,
+    DiaryRecentRequest, DiarySelectExactRequest, ExecElement, ExecRequest, HubCommand,
+    JobCancelRequest, JobGetRequest, JobInfo, JobKind, JobListItem, JobListRequest, JobState,
+    McpBatchCall, McpBatchMode, McpBatchRequest, McpCallToolRequest, McpListToolsRequest,
+    NotebookAppendRequest, NotebookCurrentRequest, NotebookRecentRequest, NotebookRemoveRequest,
+    NotebookSearchRequest, NotebookSelectExactRequest, NotebookUpdateRequest, NotificationAction,
+    PassageSignificance, SkillActivationRequest, SkillInstallCancelRequest, SkillInstallFile,
+    SkillInstallGetRequest, SkillInstallRequest, SkillInstallSource, SkillReadRequest,
+    SkillRunRequest, SkillSearchRequest, TmuxCapturePaneRequest, TmuxCloseSessionRequest,
+    TmuxCreateSessionRequest, TmuxExecRequest, TmuxListPanesRequest, TmuxPasteTextRequest,
+    UserNotifySendRequest,
 };
 use axum::extract::{Request, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -461,7 +462,18 @@ async fn snapshot_job_list_filtered(
     state: &HubState,
     agent_id: &str,
     request: &JobListRequest,
+    unavailable_reason: &str,
 ) -> Value {
+    if request.cursor.is_some() {
+        return json!({
+            "error": {
+                "code": "job_list_cursor_unavailable",
+                "message": format!(
+                    "Agent is unavailable and Hub cache cannot continue an Agent-issued cursor: {unavailable_reason}"
+                )
+            }
+        });
+    }
     let mut jobs = state
         .jobs
         .lock()
@@ -469,11 +481,42 @@ async fn snapshot_job_list_filtered(
         .get(agent_id)
         .map(|jobs| jobs.values().cloned().collect::<Vec<_>>())
         .unwrap_or_default();
+    jobs.retain(|job| {
+        request
+            .group
+            .as_ref()
+            .is_none_or(|group| job.group.as_deref() == Some(group.as_str()))
+    });
     jobs.retain(|job| request.kind.is_none_or(|kind| job.kind == kind));
     jobs.retain(|job| request.state.is_none_or(|state| job.state == state));
-    jobs.sort_by_key(|job| std::cmp::Reverse(job.updated_at));
-    jobs.truncate(request.limit.unwrap_or(100).clamp(1, 100));
-    json!({ "jobs": jobs })
+    jobs.sort_by(|left, right| {
+        right
+            .created_at
+            .cmp(&left.created_at)
+            .then_with(|| right.job_id.cmp(&left.job_id))
+    });
+    jobs.truncate(request.effective_limit());
+    json!({
+        "jobs": jobs.into_iter().map(job_list_item).collect::<Vec<_>>()
+    })
+}
+
+fn job_list_item(job: JobInfo) -> JobListItem {
+    JobListItem {
+        job_id: job.job_id,
+        group: job.group,
+        kind: job.kind,
+        state: job.state,
+        created_at: job.created_at,
+        started_at: job.started_at,
+        finished_at: job.finished_at,
+    }
+}
+
+async fn cached_job_summary(state: &HubState, agent_id: &str, job_id: &str) -> Option<Value> {
+    cached_job(state, agent_id, job_id)
+        .await
+        .and_then(|job| serde_json::to_value(job_list_item(job)).ok())
 }
 
 async fn snapshot_job_get(state: &HubState, agent_id: &str, job_id: &str) -> Value {
@@ -692,7 +735,7 @@ impl AgenticMcpServer {
         self.ensure_agent_enabled(&params.agent_id)?;
         let payload = ExecRequest {
             agent_id: params.agent_id.clone(),
-            group: None,
+            group: params.group,
             program: params.program,
             args: params.args.unwrap_or_default(),
             need_confirm: params.need_confirm.unwrap_or(false),
@@ -729,7 +772,7 @@ impl AgenticMcpServer {
         self.ensure_agent_enabled(&params.agent_id)?;
         let payload = BatchExecRequest {
             agent_id: params.agent_id.clone(),
-            group: None,
+            group: params.group,
             elements: params
                 .elements
                 .into_iter()
@@ -769,11 +812,11 @@ impl AgenticMcpServer {
         let params = params.0;
         self.ensure_agent_enabled(&params.agent_id)?;
         let payload = JobListRequest {
-            group: None,
+            group: parse_job_group(params.group)?,
             kind: parse_job_kind(params.kind.as_deref())?,
             state: parse_job_state(params.state.as_deref())?,
             limit: params.limit,
-            cursor: None,
+            cursor: params.cursor,
         };
         let command = HubCommand::JobList {
             request_id: random_id("req"),
@@ -781,7 +824,9 @@ impl AgenticMcpServer {
         };
         let value = match request_agent(&self.state, &params.agent_id, command, 2).await {
             Ok(value) => value,
-            Err(_) => snapshot_job_list_filtered(&self.state, &params.agent_id, &payload).await,
+            Err(reason) => {
+                snapshot_job_list_filtered(&self.state, &params.agent_id, &payload, &reason).await
+            }
         };
         Ok(result_from_value(value))
     }
@@ -798,14 +843,27 @@ impl AgenticMcpServer {
             request_id: random_id("req"),
             payload: JobGetRequest {
                 job_id: params.job_id.clone(),
-                wait_only: false,
+                wait_only: params.wait_only.unwrap_or(false),
                 wait_seconds: Some(wait_seconds),
             },
         };
         let value =
             match request_agent(&self.state, &params.agent_id, command, wait_seconds + 2).await {
-                Ok(value) if value.get("error").is_none() => value,
-                _ => snapshot_job_get(&self.state, &params.agent_id, &params.job_id).await,
+                Ok(value) => value,
+                Err(reason) => {
+                    let cached =
+                        cached_job_summary(&self.state, &params.agent_id, &params.job_id).await;
+                    let mut value = json!({
+                        "error": {
+                            "code": "job_get_unavailable",
+                            "message": reason
+                        }
+                    });
+                    if let Some(cached) = cached {
+                        value["cached"] = cached;
+                    }
+                    value
+                }
             };
         Ok(result_from_value(value))
     }
@@ -1070,7 +1128,7 @@ impl AgenticMcpServer {
         self.ensure_agent_enabled(&params.agent_id)?;
         let payload = McpCallToolRequest {
             agent_id: params.agent_id.clone(),
-            group: None,
+            group: params.group,
             server_id: params.server_id,
             tool_name: params.tool_name,
             arguments: params.arguments.unwrap_or_else(|| json!({})),
@@ -1102,7 +1160,7 @@ impl AgenticMcpServer {
         self.ensure_agent_enabled(&params.agent_id)?;
         let payload = McpBatchRequest {
             agent_id: params.agent_id.clone(),
-            group: None,
+            group: params.group,
             calls: params
                 .calls
                 .into_iter()
@@ -1778,7 +1836,7 @@ impl AgenticMcpServer {
                 payload: SkillRunRequest {
                     id: params.id,
                     path: params.path,
-                    group: None,
+                    group: params.group,
                     args: params.args,
                     working_directory: params.working_directory,
                     wait_seconds: params.wait_seconds,
@@ -1848,6 +1906,9 @@ struct HubRunListArgs {
 struct ExecArgs {
     #[schemars(description = "Target local agent id.")]
     agent_id: String,
+    #[serde(default)]
+    #[schemars(description = "Optional human-readable workstream key inherited by the Job.")]
+    group: Option<String>,
     #[schemars(
         description = "Executable name or path. For shell syntax, use bash or sh with args such as ['-lc', '...']."
     )]
@@ -1885,6 +1946,11 @@ struct ExecArgs {
 struct BatchExecArgs {
     #[schemars(description = "Target local agent id.")]
     agent_id: String,
+    #[serde(default)]
+    #[schemars(
+        description = "Optional human-readable workstream key inherited by every child Job."
+    )]
+    group: Option<String>,
     #[schemars(
         description = "Commands to run. Each element can override the top-level workingDirectory."
     )]
@@ -1945,6 +2011,11 @@ struct JobGetArgs {
     #[serde(default)]
     #[schemars(description = "Maximum seconds to wait for an update, capped at 30.")]
     wait_seconds: Option<u64>,
+    #[serde(default)]
+    #[schemars(
+        description = "While waiting, suppress active intermediate detail; terminal completion still returns normal detail."
+    )]
+    wait_only: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
@@ -1953,14 +2024,20 @@ struct JobListArgs {
     #[schemars(description = "Target local agent id.")]
     agent_id: String,
     #[serde(default)]
+    #[schemars(description = "Exact human-readable workstream filter.")]
+    group: Option<String>,
+    #[serde(default)]
     #[schemars(description = "Optional Job kind: process, skill, or mcp.")]
     kind: Option<String>,
     #[serde(default)]
     #[schemars(description = "Optional Job state filter.")]
     state: Option<String>,
     #[serde(default)]
-    #[schemars(description = "Maximum retained Jobs, default 100 and capped at 100.")]
+    #[schemars(description = "Maximum retained Jobs, default 50 and capped at 100.")]
     limit: Option<usize>,
+    #[serde(default)]
+    #[schemars(description = "Opaque cursor returned by a prior job.list response.")]
+    cursor: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
@@ -2085,6 +2162,9 @@ struct McpListToolsArgs {
 struct McpCallToolArgs {
     #[schemars(description = "Target local agent id.")]
     agent_id: String,
+    #[serde(default)]
+    #[schemars(description = "Optional human-readable workstream key inherited by the Job.")]
+    group: Option<String>,
     #[schemars(description = "MCP server id returned by mcp.listServers.")]
     server_id: String,
     #[schemars(description = "Tool name returned by mcp.listTools.")]
@@ -2138,6 +2218,11 @@ struct McpBatchCallArgs {
 struct McpBatchArgs {
     #[schemars(description = "Target local agent id.")]
     agent_id: String,
+    #[serde(default)]
+    #[schemars(
+        description = "Optional human-readable workstream key inherited by every child Job."
+    )]
+    group: Option<String>,
     #[schemars(
         length(min = 1, max = 16),
         description = "Ordered 1..16 downstream MCP calls; aggregate serialized arguments are capped at 2 MiB."
@@ -2505,6 +2590,9 @@ struct SkillRunArgs {
     #[schemars(description = "Package-relative executable path under scripts/.")]
     path: String,
     #[serde(default)]
+    #[schemars(description = "Optional human-readable workstream key inherited by the Job.")]
+    group: Option<String>,
+    #[serde(default)]
     args: Option<Vec<String>>,
     #[serde(default)]
     working_directory: Option<String>,
@@ -2579,6 +2667,11 @@ fn room_route_error_value_with_timeout(error: RoomRouteError, timeout_code: &'st
             "error": { "code": timeout_code, "message": reason }
         }),
     }
+}
+
+fn parse_job_group(value: Option<String>) -> Result<Option<String>, ErrorData> {
+    normalize_job_group(value.as_deref())
+        .map_err(|error| mcp_invalid_params(error.code(), error.message()))
 }
 
 fn parse_significance(value: &str) -> Result<PassageSignificance, ErrorData> {

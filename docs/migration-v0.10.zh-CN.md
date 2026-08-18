@@ -18,3 +18,13 @@ changed-line 统计和 revision hash 仅保留在内部 confirmation/audit 路�
 写入任何文件。物理提交开始后不承诺跨文件回滚；若后续某项提交失败，`file.edit`
 返回 `completed_with_errors`，并按顺序明确标记哪些变更已经提交、哪一项失败，以及
 哪些后续变更尚未尝试。
+
+## Managed Job 契约
+
+Managed Job 的常规响应现已精简，丰富且有界的明细继续保留在内部历史中。
+`process.exec`、`process.batch`、`skills.run`、`mcp.callTool` 和 `mcp.batch`
+均可传可选的人类可读 `group`，批量子 Job 继承父级 `group`。`job.get`
+支持 `waitOnly`；`job.list` 支持精确 `group`/kind/state 过滤、默认 50
+（最大 100）的 limit，以及不透明 cursor 分页。终态 Job 在持久历史保留期内
+仍可通过 `jobId` 精确回看。Hub full 与 HTTP Job 路由在 Agent 在线时透传这些
+字段；Hub 缓存降级不会伪造 cursor 续页，也不会把缓存快照冒充为一次新的等待结果。

@@ -1115,15 +1115,7 @@ impl AgentMcpServer {
         let args: JobGetArgs = from_value(arguments)?;
         let wait_seconds = args.wait_seconds.unwrap_or(0).min(30);
         match crate::jobs::get_job_detail(&self.state, &args.job_id, wait_seconds).await {
-            Ok(job) if args.wait_only && wait_seconds > 0 && !job.job.state.is_terminal() => {
-                let elapsed_ms = elapsed_ms(&job.job);
-                Ok(serde_json::to_value(JobWaitResponse {
-                    job_id: job.job.job_id.clone(),
-                    state: job.job.state,
-                    elapsed_ms,
-                })?)
-            }
-            Ok(job) => slim_job_detail_response(job, true),
+            Ok(job) => slim_job_get_response(job, args.wait_only, wait_seconds),
             Err(reason) => Ok(job_error(reason)),
         }
     }
@@ -1918,7 +1910,7 @@ fn job_tool_response(
     response
 }
 
-fn slim_job_detail_response(detail: JobDetail, include_identity: bool) -> Result<Value> {
+pub(crate) fn slim_job_detail_response(detail: JobDetail, include_identity: bool) -> Result<Value> {
     Ok(serde_json::to_value(job_tool_response(
         &detail,
         include_identity,
@@ -1926,17 +1918,32 @@ fn slim_job_detail_response(detail: JobDetail, include_identity: bool) -> Result
     ))?)
 }
 
-fn slim_process_response(value: Value) -> Result<Value> {
+pub(crate) fn slim_job_get_response(
+    detail: JobDetail,
+    wait_only: bool,
+    wait_seconds: u64,
+) -> Result<Value> {
+    if wait_only && wait_seconds > 0 && !detail.job.state.is_terminal() {
+        return Ok(serde_json::to_value(JobWaitResponse {
+            job_id: detail.job.job_id.clone(),
+            state: detail.job.state,
+            elapsed_ms: elapsed_ms(&detail.job),
+        })?);
+    }
+    slim_job_detail_response(detail, true)
+}
+
+pub(crate) fn slim_process_response(value: Value) -> Result<Value> {
     let response: JobResponse = serde_json::from_value(value)?;
     slim_job_detail_response(response.detail, false)
 }
 
-fn slim_mcp_response(value: Value) -> Result<Value> {
+pub(crate) fn slim_mcp_response(value: Value) -> Result<Value> {
     let response: JobResponse = serde_json::from_value(value)?;
     slim_job_detail_response(response.detail, false)
 }
 
-fn slim_process_batch_response(response: JobBatchResponse) -> Result<Value> {
+pub(crate) fn slim_process_batch_response(response: JobBatchResponse) -> Result<Value> {
     let jobs = response
         .jobs
         .into_iter()
@@ -1966,7 +1973,7 @@ fn slim_process_batch_response(response: JobBatchResponse) -> Result<Value> {
     )?)
 }
 
-fn slim_job_list_response(page: crate::job_history::JobHistoryPage) -> Result<Value> {
+pub(crate) fn slim_job_list_response(page: crate::job_history::JobHistoryPage) -> Result<Value> {
     let jobs = page
         .jobs
         .into_iter()
@@ -1986,7 +1993,7 @@ fn slim_job_list_response(page: crate::job_history::JobHistoryPage) -> Result<Va
     })?)
 }
 
-fn slim_cancel_response(detail: JobDetail) -> Result<Value> {
+pub(crate) fn slim_cancel_response(detail: JobDetail) -> Result<Value> {
     let cancel_outcome = detail
         .job
         .cancel_outcome
@@ -2024,7 +2031,7 @@ fn slim_cancel_response(detail: JobDetail) -> Result<Value> {
     })?)
 }
 
-fn slim_mcp_batch_response(value: Value) -> Result<Value> {
+pub(crate) fn slim_mcp_batch_response(value: Value) -> Result<Value> {
     let response: McpBatchResponse = serde_json::from_value(value)?;
     let mut slim = McpBatchToolResponse {
         status: response.status,

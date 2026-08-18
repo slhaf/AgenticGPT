@@ -148,12 +148,25 @@ result size/hash, and terminal evidence, but never raw arguments or raw results.
 The standalone worker intentionally has no Tunnel `agentId` or
 `confirmMethod` input fields. The worker supplies its configured local agent
 identity internally; unexpected legacy fields are rejected. `bootstrap` is
-Room-only. `process.exec` and `skills.run` return a stable Job envelope with
-`jobId`, `completedInline`, `pollAfterMs`, and nested `job`; the Job retains its
-`agentId`, kind, state, bounded output, and cancellation evidence. Batch
-execution returns ordered child Jobs and
-rejects the whole batch before admission when any element fails preflight,
-policy, confirmation, or capacity checks.
+Room-only. Managed Job admission tools (`process.exec`, `process.batch`,
+`skills.run`, `mcp.callTool`, and `mcp.batch`) accept an optional validated
+human-readable `group`; batch children inherit their parent group. Routine Job
+responses are compact and keep `jobId` as the stable handle for later lookup.
+Rich bounded provenance remains internal/durable rather than being repeated in
+every response.
+
+Terminal Job history is retained in the per-agent private `jobs.sqlite3` store
+for 30 days subject to the logical soft cap, while a short live hot cache serves
+recent results. `job.get` falls back to retained history by `jobId`;
+`waitOnly=true` suppresses active intermediate detail while a bounded wait is in
+progress and returns normal detail once terminal. `job.list` supports exact
+`group`/kind/state filters plus stable opaque cursor pagination ordered by
+`createdAt DESC, jobId DESC`. Hub full and HTTP forwarding preserve those fields
+while the Agent is available. Hub cache fallback can filter a first page by
+group/kind/state, but it explicitly refuses to invent continuation for an
+Agent-issued cursor and reports cached `job.get` data only as degraded evidence,
+not as a fresh wait result. Batch admission still rejects the whole batch before
+starting any child when preflight, policy, confirmation, or capacity fails.
 
 Tunnel surfaces do not expose Hub aggregation or notification tools. They use
 the same local policy, path-policy, confirmation, audit, and ManagedJob lifecycle as Hub execution while keeping the Hub out of the command path.

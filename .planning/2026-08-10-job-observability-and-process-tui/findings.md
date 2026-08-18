@@ -267,3 +267,12 @@
 - The local adapter converts rich runtime records into purpose-built process/MCP/batch/list/cancel views. Rich Job/history records and the existing Hub-facing MCP batch budget path remain unchanged for the deferred parity phase.
 - Stdio `mcp.batch` uses a no-aggregate-clipping runtime path, then applies the frozen response budget at the slim boundary: per-Job retention emits `resultTruncated` evidence, while response-only clipping emits `resultOmitted` and leaves `job.get` retention untouched.
 - Focused exact-shape tests cover active/terminal/wait-only process views, list filters/cursor schema exposure, structured rejection/non-zero failure semantics, and the two MCP result-budget cases.
+
+## Final Hub parity and consumer contract (2026-08-18)
+
+- Hub full MCP and HTTP forwarding are part of the observable Managed Job contract, not optional wrappers: `group`, `job.list` filters/cursor, and `job.get.waitOnly` must reach the selected Agent unchanged.
+- Hub cache can truthfully filter cached `JobInfo` by group/kind/state and project it to `JobListItem`, but it cannot decode/continue the Agent's opaque durable-history cursor. When an Agent-issued cursor cannot be forwarded, the correct fallback is an explicit availability error rather than a fabricated page.
+- Likewise, a cached snapshot cannot satisfy the temporal promise of `waitOnly`; transport failure is reported as `job_get_unavailable`, with an optional slim cached summary only as degraded evidence. Agent-returned structured errors remain authoritative and are no longer replaced by stale cache.
+- `jobId` remains present even on successful terminal responses because it is the durable-history lookup key for exact later review. Successful `exitCode: 0` is omitted as redundant; non-zero exit codes remain meaningful.
+- Public `mcp.batch` correlation was later simplified: ordered results are sufficient for the model-facing response, while batch/call ids and indexes stay in internal runtime/audit records. This supersedes the earlier public-correlation wording without weakening retained history or audit correlation.
+- The final consumer boundary for Process/TUI work is therefore: flat paged `job.list` summaries, stable `jobId`, optional group, exact kind/state, true created/started/finished timestamps in list/history, compact active/terminal get shapes, and rich private history for later Inspector/detail needs.
