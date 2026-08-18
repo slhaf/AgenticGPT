@@ -1,5 +1,21 @@
 # Progress Log
 
+## Phase 3D start (2026-08-13)
+
+- Resumed from clean product HEAD `655ef04`; protected untracked `.planning/2026-08-10-unified-tui-baseline/` and `experimental/` paths are unchanged.
+- Phase 3D is in progress. Frozen D-01 through D-21 and Phase 3A–3C runtime/history behavior remain constraints; Phase 3E/3F, TUI, Terminal, browser/chrome work remain out of scope.
+- Mapped the unused protocol slim view types, rich `jobs.rs` runtime serializers, stdio request/schema adapters, MCP batch budget code, and existing lifecycle tests. Next action is a focused boundary/runtime patch plus exact contract tests.
+- First Phase 3D compile check caught a partial move in the new `waitOnly` serializer when taking `jobId` before calculating `elapsedMs`; fixed by calculating elapsed time first and cloning the id. No runtime test had run at that point.
+
+## Phase 3D completion (2026-08-13)
+
+- Implemented only the local stdio/MCP boundary changes in `stdio_server.rs`, the MCP slim-batch entry point/budget distinction in `mcp.rs`, and the small rich-child omission marker in the shared protocol. Hub/reporting/cache parity and later TUI phases remain untouched.
+- Focused tests passed: `stdio_server::tests::` 49, `mcp::tests::` 18, `jobs::tests::` 10, and the full `agentic-gpt-protocol` suite 17.
+- Verification passed: `cargo check --workspace --all-targets`, Agent and protocol `cargo clippy --all-targets -- -D warnings`, `cargo fmt --all -- --check`, and `git diff --check`.
+- Early focused adapter tests failed only because existing assertions still expected removed `completedInline`, `pollAfterMs`, nested rich Job fields, and batch rejection status; assertions were updated to the frozen slim/error-only contract and the rerun passed. Clippy also flagged two obfuscated tail-selection chains; they were replaced with explicit branches and the rerun passed.
+- A final adapter rerun after preserving stable MCP preflight codes found one remaining contract-corpus expectation for generic `mcp_batch_failed`; the fixture now expects `mcp_server_not_found`, and the final stdio module run is 49/49. Cancellation-delivery fallback errors are now synthesized when the runtime provides outcome/evidence but no detail error.
+- No commit was created. Protected untracked `.planning/2026-08-10-unified-tui-baseline/` and `experimental/` paths remain unchanged. Stop here for human review before Phase 3E.
+
 ## Session: 2026-08-10
 
 ### Current Status

@@ -16,7 +16,7 @@ Phase 3 — Job Runtime & Tool Surface Implementation
 - **Entry phase:** Phase 3A — Protocol & Domain Contract
 - **Open blocking decisions:** 0
 - **Design checkpoint:** not set (private-state prerequisite committed as `a50655f`)
-- **Next action:** begin Phase 3D — Slim Tool Surfaces & `waitOnly` when implementation resumes
+- **Next action:** human review of the Phase 3D handoff; do not begin Phase 3E in this turn
 
 ## Scope and constraints
 
@@ -94,13 +94,13 @@ Phase 3 — Job Runtime & Tool Surface Implementation
 
 **Prerequisite:** Phase 3C runtime/query behavior.
 
-- [ ] Update stdio/MCP schemas and adapters for `group`, `waitOnly`, filters/cursor, and exact frozen response shapes.
-- [ ] Implement `waitOnly=true`: terminal-or-timeout only; timeout while active returns exactly `jobId/state/elapsedMs`; `waitSeconds=0` is ordinary get.
-- [ ] Slim `process.exec`, `skills.run`, `mcp.callTool`, `process.batch`, `mcp.batch`, `job.get`, and `job.cancel` according to D-15–D-19.
-- [ ] Preserve process non-zero exit as `failed + exitCode + tails`, structured preflight/rejection errors, MCP downstream result+error semantics, and per-Job truncation evidence.
-- [ ] Enforce `mcp.batch` distinction between `resultTruncated` (Job retention ceiling) and `resultOmitted` (aggregate budget only); remove obsolete aggregate/helper noise.
+- [x] Update stdio/MCP schemas and adapters for `group`, `waitOnly`, filters/cursor, and exact frozen response shapes.
+- [x] Implement `waitOnly=true`: terminal-or-timeout only; timeout while active returns exactly `jobId/state/elapsedMs`; `waitSeconds=0` is ordinary get.
+- [x] Slim `process.exec`, `skills.run`, `mcp.callTool`, `process.batch`, `mcp.batch`, `job.get`, and `job.cancel` according to D-15–D-19.
+- [x] Preserve process non-zero exit as `failed + exitCode + tails`, structured preflight/rejection errors, MCP downstream result+error semantics, and per-Job truncation evidence.
+- [x] Enforce `mcp.batch` distinction between `resultTruncated` (Job retention ceiling) and `resultOmitted` (aggregate budget only); remove obsolete aggregate/helper noise.
 - **Completion boundary:** schema/adapter tests assert the exact active/terminal/batch/cancel JSON shapes and absence of removed noise.
-- **Status:** pending
+- **Status:** complete
 
 ### Phase 3E: Hub / Reporting / Cache Parity
 

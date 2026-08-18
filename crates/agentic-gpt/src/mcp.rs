@@ -244,12 +244,66 @@ pub(crate) async fn batch(
     Ok(serde_json::to_value(response)?)
 }
 
+pub(crate) async fn batch_slim(
+    state: &AppState,
+    payload: McpBatchRequest,
+    request_source: &str,
+    terminal_event_hook: Option<TerminalEventHook>,
+) -> Result<Value> {
+    let response = start_managed_batch_without_aggregate_budget(
+        state,
+        payload,
+        request_source,
+        terminal_event_hook,
+        production_client_factory(),
+    )
+    .await?;
+    Ok(serde_json::to_value(response)?)
+}
+
 async fn start_managed_batch_with_factory(
     state: &AppState,
     payload: McpBatchRequest,
     request_source: &str,
     terminal_event_hook: Option<TerminalEventHook>,
     client_factory: McpClientFactory,
+) -> Result<McpBatchResponse> {
+    start_managed_batch_with_factory_budget(
+        state,
+        payload,
+        request_source,
+        terminal_event_hook,
+        client_factory,
+        true,
+    )
+    .await
+}
+
+async fn start_managed_batch_without_aggregate_budget(
+    state: &AppState,
+    payload: McpBatchRequest,
+    request_source: &str,
+    terminal_event_hook: Option<TerminalEventHook>,
+    client_factory: McpClientFactory,
+) -> Result<McpBatchResponse> {
+    start_managed_batch_with_factory_budget(
+        state,
+        payload,
+        request_source,
+        terminal_event_hook,
+        client_factory,
+        false,
+    )
+    .await
+}
+
+async fn start_managed_batch_with_factory_budget(
+    state: &AppState,
+    payload: McpBatchRequest,
+    request_source: &str,
+    terminal_event_hook: Option<TerminalEventHook>,
+    client_factory: McpClientFactory,
+    enforce_aggregate_budget: bool,
 ) -> Result<McpBatchResponse> {
     let started = Instant::now();
     let batch_id = format!("batch_{}", uuid::Uuid::new_v4().simple());
@@ -398,13 +452,16 @@ async fn start_managed_batch_with_factory(
             &child_refs,
             0,
             Some(McpBatchStatus::Rejected),
+            enforce_aggregate_budget,
         )
         .await?;
         response.error = Some(JobError {
             code: "mcp_batch_rejected".to_string(),
             message: format!("MCP batch did not start: {confirmation_result}"),
         });
-        apply_batch_result_budget(&mut response)?;
+        if enforce_aggregate_budget {
+            apply_batch_result_budget(&mut response)?;
+        }
         write_batch_audit(
             state,
             &batch_id,
@@ -448,6 +505,7 @@ async fn start_managed_batch_with_factory(
             &coordinator_refs,
             0,
             None,
+            enforce_aggregate_budget,
         )
         .await
         {
@@ -473,6 +531,7 @@ async fn start_managed_batch_with_factory(
         &child_refs,
         payload.effective_wait_seconds(),
         None,
+        enforce_aggregate_budget,
     )
     .await
 }
@@ -673,6 +732,7 @@ async fn build_mcp_batch_response(
     child_refs: &[(usize, Option<String>, String)],
     wait_seconds: u64,
     forced_status: Option<McpBatchStatus>,
+    enforce_aggregate_budget: bool,
 ) -> Result<McpBatchResponse> {
     let deadline = Instant::now() + Duration::from_secs(wait_seconds.min(30));
     let mut details = Vec::new();
@@ -687,6 +747,7 @@ async fn build_mcp_batch_response(
             details.push(McpBatchChildResponse {
                 index: *index,
                 id: id.clone(),
+                result_omitted: false,
                 detail,
             });
         }
@@ -720,7 +781,9 @@ async fn build_mcp_batch_response(
         aggregate_bytes: None,
         error: None,
     };
-    apply_batch_result_budget(&mut response)?;
+    if enforce_aggregate_budget {
+        apply_batch_result_budget(&mut response)?;
+    }
     Ok(response)
 }
 
@@ -732,7 +795,7 @@ fn apply_batch_result_budget(response: &mut McpBatchResponse) -> Result<()> {
             let removed = {
                 let child = &mut response.results[index];
                 if child.detail.result.take().is_some() {
-                    child.detail.result_truncated = true;
+                    child.result_omitted = true;
                     true
                 } else {
                     false
@@ -2486,7 +2549,7 @@ mod tests {
         let clipped = response
             .results
             .iter()
-            .filter(|result| result.detail.result.is_none() && result.detail.result_truncated)
+            .filter(|result| result.detail.result.is_none() && result.result_omitted)
             .count();
         assert!(retained > 0);
         assert!(clipped > 0);

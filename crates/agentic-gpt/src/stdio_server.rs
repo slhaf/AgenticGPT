@@ -4,9 +4,13 @@ use std::{
 };
 
 use agentic_gpt_protocol::{
-    BatchExecRequest, ExecElement, ExecRequest, HubCommand, JobInfo, JobKind, JobListRequest,
-    JobState,
+    normalize_job_group, BatchExecRequest, ExecElement, ExecRequest, HubCommand, JobBatchResponse,
+    JobCancelResponse, JobDetail, JobError, JobInfo, JobKind, JobListItem, JobListRequest,
+    JobListResponse, JobResponse, JobState, JobToolResponse, JobWaitResponse, McpBatchResponse,
+    McpBatchToolChildResponse, McpBatchToolResponse,
 };
+#[cfg(test)]
+use agentic_gpt_protocol::{McpBatchChildResponse, McpBatchStatus};
 use anyhow::Result;
 use chrono::Utc;
 use rmcp::{
@@ -818,13 +822,17 @@ impl AgentMcpServer {
             }
             "mcp.callTool" => {
                 let args: McpCallArgs = from_value(arguments)?;
+                let group = match normalize_stdio_group(args.group) {
+                    Ok(group) => group,
+                    Err(error) => return Ok(error),
+                };
                 let config = self.state.config.read().await.clone();
                 let request_source = self.ingress.source("mcp.callTool");
                 match crate::mcp::call_tool(
                     &self.state,
                     agentic_gpt_protocol::McpCallToolRequest {
                         agent_id: config.agent_id,
-                        group: None,
+                        group,
                         server_id: args.server_id,
                         tool_name: args.tool_name,
                         arguments: args.arguments,
@@ -840,21 +848,26 @@ impl AgentMcpServer {
                 )
                 .await
                 {
-                    Ok(value) => Ok(value),
-                    Err(error) => Ok(json!({
-                        "error": { "code": "mcp_call_tool_failed", "message": error.to_string() }
-                    })),
+                    Ok(value) => slim_mcp_response(value),
+                    Err(error) => Ok(structured_error_from_reason(
+                        "mcp_call_tool_failed",
+                        error.to_string(),
+                    )),
                 }
             }
             "mcp.batch" => {
                 let args: McpBatchArgs = from_value(arguments)?;
+                let group = match normalize_stdio_group(args.group) {
+                    Ok(group) => group,
+                    Err(error) => return Ok(error),
+                };
                 let config = self.state.config.read().await.clone();
                 let request_source = self.ingress.source("mcp.batch");
-                match crate::mcp::batch(
+                match crate::mcp::batch_slim(
                     &self.state,
                     agentic_gpt_protocol::McpBatchRequest {
                         agent_id: config.agent_id,
-                        group: None,
+                        group,
                         calls: args
                             .calls
                             .into_iter()
@@ -879,10 +892,11 @@ impl AgentMcpServer {
                 )
                 .await
                 {
-                    Ok(value) => Ok(value),
-                    Err(error) => Ok(json!({
-                        "error": { "code": "mcp_batch_failed", "message": error.to_string() }
-                    })),
+                    Ok(value) => slim_mcp_batch_response(value),
+                    Err(error) => Ok(structured_error_from_reason(
+                        "mcp_batch_failed",
+                        error.to_string(),
+                    )),
                 }
             }
             "bootstrap" => {
@@ -1111,6 +1125,10 @@ impl AgentMcpServer {
         terminal_tracker: Arc<HumanTerminalTracker>,
     ) -> Result<Value> {
         let args: ProcessExecArgs = from_value(arguments)?;
+        let group = match normalize_stdio_group(args.group) {
+            Ok(group) => group,
+            Err(error) => return Ok(error),
+        };
         let config = self.state.config.read().await.clone();
         let request_source = self.ingress.source("process.exec");
         let terminal_event_hook = managed_terminal_event_hook(
@@ -1122,7 +1140,7 @@ impl AgentMcpServer {
             self.state.clone(),
             ExecRequest {
                 agent_id: config.agent_id,
-                group: None,
+                group,
                 program: args.program,
                 args: args.args,
                 need_confirm: args.need_confirm,
@@ -1136,19 +1154,22 @@ impl AgentMcpServer {
             },
         )
         .await;
-        Ok(serde_json::to_value(response)?)
+        slim_process_response(serde_json::to_value(response)?)
     }
 
     async fn dispatch_job_get(&self, arguments: Value) -> Result<Value> {
         let args: JobGetArgs = from_value(arguments)?;
-        match crate::jobs::get_job_detail(
-            &self.state,
-            &args.job_id,
-            args.wait_seconds.unwrap_or(0).min(30),
-        )
-        .await
-        {
-            Ok(job) => Ok(serde_json::to_value(job)?),
+        let wait_seconds = args.wait_seconds.unwrap_or(0).min(30);
+        match crate::jobs::get_job_detail(&self.state, &args.job_id, wait_seconds).await {
+            Ok(job) if args.wait_only && wait_seconds > 0 && !job.job.state.is_terminal() => {
+                let elapsed_ms = elapsed_ms(&job.job);
+                Ok(serde_json::to_value(JobWaitResponse {
+                    job_id: job.job.job_id.clone(),
+                    state: job.job.state,
+                    elapsed_ms,
+                })?)
+            }
+            Ok(job) => slim_job_detail_response(job, true),
             Err(reason) => Ok(job_error(reason)),
         }
     }
@@ -1159,6 +1180,10 @@ impl AgentMcpServer {
         terminal_tracker: Arc<HumanTerminalTracker>,
     ) -> Result<Value> {
         let args: ProcessBatchArgs = from_value(arguments)?;
+        let group = match normalize_stdio_group(args.group) {
+            Ok(group) => group,
+            Err(error) => return Ok(error),
+        };
         let config = self.state.config.read().await.clone();
         let request_source = self.ingress.source("process.batch");
         let terminal_event_hook = managed_terminal_event_hook(
@@ -1168,7 +1193,7 @@ impl AgentMcpServer {
         );
         let request = BatchExecRequest {
             agent_id: config.agent_id,
-            group: None,
+            group,
             elements: args
                 .elements
                 .into_iter()
@@ -1191,38 +1216,40 @@ impl AgentMcpServer {
         )
         .await
         {
-            Ok(response) => Ok(serde_json::to_value(response)?),
-            Err(reason) => Ok(json!({
-                "status": "rejected",
-                "completedInline": true,
-                "pollAfterMs": 0,
-                "error": {"code": "process_batch_rejected", "message": reason}
-            })),
+            Ok(response) => slim_process_batch_response(response),
+            Err(reason) => Ok(structured_error_value("process_batch_rejected", reason)),
         }
     }
 
     async fn dispatch_job_cancel(&self, arguments: Value) -> Result<Value> {
         let args: JobCancelArgs = from_value(arguments)?;
         match crate::jobs::cancel_job(&self.state, &args.job_id).await {
-            Ok(job) => Ok(serde_json::to_value(job)?),
+            Ok(job) => slim_cancel_response(job),
             Err(reason) => Ok(job_error(reason)),
         }
     }
 
     async fn dispatch_job_list(&self, arguments: Value) -> Result<Value> {
         let args: JobListArgs = from_value(arguments)?;
-        let jobs = crate::jobs::list_jobs(
+        let group = match normalize_stdio_group(args.group) {
+            Ok(group) => group,
+            Err(error) => return Ok(error),
+        };
+        match crate::jobs::list_jobs_page(
             &self.state,
             JobListRequest {
-                group: None,
+                group,
                 kind: args.kind,
                 state: args.state,
                 limit: args.limit,
-                cursor: None,
+                cursor: args.cursor,
             },
         )
-        .await;
-        Ok(json!({"jobs": jobs}))
+        .await
+        {
+            Ok(page) => slim_job_list_response(page),
+            Err(reason) => Ok(structured_error_from_reason("job_list_failed", reason)),
+        }
     }
 
     async fn dispatch_skill_run(
@@ -1231,10 +1258,14 @@ impl AgentMcpServer {
         terminal_tracker: Arc<HumanTerminalTracker>,
     ) -> Result<Value> {
         let args: SkillRunArgs = from_value(arguments)?;
+        let group = match normalize_stdio_group(args.group) {
+            Ok(group) => group,
+            Err(error) => return Ok(error),
+        };
         let request = agentic_gpt_protocol::SkillRunRequest {
             id: args.id,
             path: args.path,
-            group: None,
+            group,
             args: args.args,
             working_directory: args.working_directory,
             wait_seconds: args.wait_seconds,
@@ -1259,7 +1290,7 @@ impl AgentMcpServer {
             self.state.clone(),
             ExecRequest {
                 agent_id: config.agent_id,
-                group: None,
+                group: request.group.clone(),
                 program: program.to_string_lossy().to_string(),
                 args: request.args.unwrap_or_default(),
                 need_confirm: false,
@@ -1278,7 +1309,7 @@ impl AgentMcpServer {
         )
         .await;
         let info = crate::jobs::wait_for_job(&self.state, info, wait_seconds).await;
-        Ok(serde_json::to_value(crate::jobs::response(
+        slim_process_response(serde_json::to_value(crate::jobs::response(
             info.clone(),
             info.state.is_terminal(),
         ))?)
@@ -1419,6 +1450,8 @@ struct ProcessExecArgs {
     #[serde(default)]
     args: Vec<String>,
     #[serde(default)]
+    group: Option<String>,
+    #[serde(default)]
     working_directory: Option<String>,
     #[serde(default)]
     need_confirm: bool,
@@ -1432,6 +1465,8 @@ struct JobGetArgs {
     job_id: String,
     #[serde(default)]
     wait_seconds: Option<u64>,
+    #[serde(default)]
+    wait_only: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1444,11 +1479,15 @@ struct JobCancelArgs {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct JobListArgs {
     #[serde(default)]
+    group: Option<String>,
+    #[serde(default)]
     kind: Option<JobKind>,
     #[serde(default)]
     state: Option<JobState>,
     #[serde(default)]
     limit: Option<usize>,
+    #[serde(default)]
+    cursor: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -1465,6 +1504,8 @@ struct BatchElementArgs {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ProcessBatchArgs {
     elements: Vec<BatchElementArgs>,
+    #[serde(default)]
+    group: Option<String>,
     #[serde(default)]
     working_directory: Option<String>,
     #[serde(default)]
@@ -1726,6 +1767,8 @@ struct McpListArgs {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct McpCallArgs {
+    #[serde(default)]
+    group: Option<String>,
     server_id: String,
     tool_name: String,
     #[serde(default)]
@@ -1740,6 +1783,8 @@ struct McpCallArgs {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct McpBatchArgs {
     calls: Vec<McpBatchCallArgs>,
+    #[serde(default)]
+    group: Option<String>,
     #[serde(default)]
     mode: Option<agentic_gpt_protocol::McpBatchMode>,
     #[serde(default)]
@@ -1792,6 +1837,8 @@ struct SkillSetActiveArgs {
 struct SkillRunArgs {
     id: String,
     path: String,
+    #[serde(default)]
+    group: Option<String>,
     #[serde(default)]
     args: Option<Vec<String>>,
     #[serde(default)]
@@ -1889,6 +1936,286 @@ async fn dispatch(server: &AgentMcpServer, command: HubCommand) -> Result<Value>
 
 fn job_error(reason: String) -> Value {
     json!({"error": {"code": reason, "message": reason}})
+}
+
+fn structured_error_value(default_code: &str, message: impl Into<String>) -> Value {
+    json!({
+        "error": {
+            "code": default_code,
+            "message": message.into()
+        }
+    })
+}
+
+fn structured_error_from_reason(default_code: &str, message: impl Into<String>) -> Value {
+    let message = message.into();
+    let mut error = rejection_error(&message);
+    if error.code == "job_rejected" {
+        error.code = default_code.to_string();
+    }
+    json!({"error": error})
+}
+
+fn normalize_stdio_group(group: Option<String>) -> std::result::Result<Option<String>, Value> {
+    normalize_job_group(group.as_deref()).map_err(|error| {
+        json!({
+            "error": {
+                "code": error.code(),
+                "message": error.message()
+            }
+        })
+    })
+}
+
+fn elapsed_ms(info: &JobInfo) -> u64 {
+    info.started_at
+        .map(|started_at| (Utc::now() - started_at).num_milliseconds().max(0) as u64)
+        .unwrap_or(0)
+}
+
+fn duration_ms(info: &JobInfo) -> Option<u64> {
+    info.started_at.map(|started_at| {
+        let finished_at = info.finished_at.unwrap_or(info.updated_at);
+        (finished_at - started_at).num_milliseconds().max(0) as u64
+    })
+}
+
+fn rejection_error(reason: &str) -> JobError {
+    let code = reason
+        .split([':', ';'])
+        .next()
+        .map(str::trim)
+        .filter(|code| {
+            !code.is_empty()
+                && code
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric() || character == '_')
+        })
+        .unwrap_or("job_rejected")
+        .chars()
+        .take(64)
+        .collect();
+    JobError {
+        code,
+        message: reason.to_string(),
+    }
+}
+
+fn process_error(info: &JobInfo, detail: &JobDetail) -> Option<JobError> {
+    detail.error.clone().or_else(|| {
+        (info.state == JobState::Rejected)
+            .then(|| info.reject_reason.as_deref().map(rejection_error))
+            .flatten()
+    })
+}
+
+fn job_tool_response(
+    detail: &JobDetail,
+    include_identity: bool,
+    aggregate_result_omitted: bool,
+) -> JobToolResponse {
+    let info = &detail.job;
+    let process_like = matches!(info.kind, JobKind::Process | JobKind::Skill);
+    let terminal = info.state.is_terminal();
+    let mut response = JobToolResponse {
+        job_id: info.job_id.clone(),
+        group: include_identity.then(|| info.group.clone()).flatten(),
+        kind: include_identity.then_some(info.kind),
+        state: info.state,
+        elapsed_ms: (!terminal).then(|| elapsed_ms(info)),
+        duration_ms: terminal.then(|| duration_ms(info)).flatten(),
+        exit_code: (terminal && process_like)
+            .then_some(info.exit_code)
+            .flatten(),
+        stdout_tail: if process_like {
+            info.stdout_tail.clone()
+        } else {
+            String::new()
+        },
+        stderr_tail: if process_like {
+            info.stderr_tail.clone()
+        } else {
+            String::new()
+        },
+        truncated: (terminal || !info.state.is_terminal()) && process_like && info.truncated,
+        result: (!process_like && terminal)
+            .then(|| detail.result.clone())
+            .flatten(),
+        error: if terminal {
+            if process_like {
+                process_error(info, detail)
+            } else {
+                detail.error.clone()
+            }
+        } else {
+            None
+        },
+        result_truncated: (!process_like && terminal) && detail.result_truncated,
+        result_bytes: (!process_like && terminal && detail.result_truncated)
+            .then_some(detail.result_bytes)
+            .flatten(),
+        result_sha256: (!process_like && terminal && detail.result_truncated)
+            .then(|| detail.result_sha256.clone())
+            .flatten(),
+        result_preview: (!process_like && terminal && detail.result_truncated)
+            .then(|| detail.result_preview.clone())
+            .flatten(),
+        result_omitted: (!process_like && terminal) && aggregate_result_omitted,
+    };
+    if !process_like {
+        response.stdout_tail.clear();
+        response.stderr_tail.clear();
+        response.truncated = false;
+    }
+    response
+}
+
+fn slim_job_detail_response(detail: JobDetail, include_identity: bool) -> Result<Value> {
+    Ok(serde_json::to_value(job_tool_response(
+        &detail,
+        include_identity,
+        false,
+    ))?)
+}
+
+fn slim_process_response(value: Value) -> Result<Value> {
+    let response: JobResponse = serde_json::from_value(value)?;
+    slim_job_detail_response(response.detail, false)
+}
+
+fn slim_mcp_response(value: Value) -> Result<Value> {
+    let response: JobResponse = serde_json::from_value(value)?;
+    slim_job_detail_response(response.detail, false)
+}
+
+fn slim_process_batch_response(response: JobBatchResponse) -> Result<Value> {
+    let jobs = response
+        .jobs
+        .into_iter()
+        .map(|job| {
+            job_tool_response(
+                &JobDetail {
+                    job,
+                    detail_available: true,
+                    result: None,
+                    error: None,
+                    result_truncated: false,
+                    result_bytes: None,
+                    result_sha256: None,
+                    result_preview: None,
+                },
+                false,
+                false,
+            )
+        })
+        .collect();
+    Ok(serde_json::to_value(
+        agentic_gpt_protocol::JobBatchToolResponse {
+            batch_id: response.batch_id,
+            status: response.status,
+            jobs,
+        },
+    )?)
+}
+
+fn slim_job_list_response(page: crate::job_history::JobHistoryPage) -> Result<Value> {
+    let jobs = page
+        .jobs
+        .into_iter()
+        .map(|job| JobListItem {
+            job_id: job.job_id,
+            group: job.group,
+            kind: job.kind,
+            state: job.state,
+            created_at: job.created_at,
+            started_at: job.started_at,
+            finished_at: job.finished_at,
+        })
+        .collect();
+    Ok(serde_json::to_value(JobListResponse {
+        jobs,
+        next_cursor: page.next_cursor,
+    })?)
+}
+
+fn slim_cancel_response(detail: JobDetail) -> Result<Value> {
+    let cancel_outcome = detail
+        .job
+        .cancel_outcome
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
+    let error = if matches!(
+        cancel_outcome.as_str(),
+        "cancel_failed" | "notification_failed" | "notification_timeout"
+    ) {
+        detail.error.or_else(|| {
+            Some(JobError {
+                code: cancel_outcome.clone(),
+                message: format!(
+                    "Cancellation did not complete; termination evidence: {}",
+                    detail
+                        .job
+                        .termination_evidence
+                        .as_deref()
+                        .unwrap_or("unknown")
+                ),
+            })
+        })
+    } else {
+        None
+    };
+    Ok(serde_json::to_value(JobCancelResponse {
+        job_id: detail.job.job_id,
+        state: detail.job.state,
+        cancel_outcome,
+        termination_evidence: detail
+            .job
+            .termination_evidence
+            .unwrap_or_else(|| "unknown".to_string()),
+        error,
+    })?)
+}
+
+fn slim_mcp_batch_response(value: Value) -> Result<Value> {
+    let response: McpBatchResponse = serde_json::from_value(value)?;
+    let mut slim = McpBatchToolResponse {
+        batch_id: response.batch_id,
+        status: response.status,
+        error: response.error,
+        results: response
+            .results
+            .into_iter()
+            .map(|child| McpBatchToolChildResponse {
+                index: child.index,
+                id: child.id,
+                job: job_tool_response(&child.detail, false, child.result_omitted),
+            })
+            .collect(),
+    };
+    apply_slim_mcp_batch_budget(&mut slim)?;
+    Ok(serde_json::to_value(slim)?)
+}
+
+fn apply_slim_mcp_batch_budget(response: &mut McpBatchToolResponse) -> Result<()> {
+    let limit = agentic_gpt_protocol::McpBatchRequest::MAX_AGGREGATE_RESULT_BYTES;
+    let mut bytes = serde_json::to_vec(response)?.len();
+    if bytes > limit {
+        for index in (0..response.results.len()).rev() {
+            if response.results[index].job.result.take().is_some() {
+                response.results[index].job.result_omitted = true;
+                bytes = serde_json::to_vec(response)?.len();
+                if bytes <= limit {
+                    break;
+                }
+            }
+        }
+    }
+    if bytes > limit {
+        return Err(anyhow::anyhow!(
+            "mcp_batch_result_too_large_after_clipping: bytes={bytes}; max={limit}"
+        ));
+    }
+    Ok(())
 }
 
 fn from_value<T: DeserializeOwned>(value: Value) -> Result<T> {
@@ -2276,6 +2603,15 @@ fn properties_for(name: &str) -> Map<String, Value> {
             add("program", string("Executable name or path."));
             add("args", strings("Direct argument vector."));
             add(
+                "group",
+                json!({
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 32,
+                    "description": "Optional human-readable workstream key; trimmed, control-free, and at most 32 Unicode characters."
+                }),
+            );
+            add(
                 "needConfirm",
                 boolean("Request confirmation before execution."),
             );
@@ -2302,6 +2638,15 @@ fn properties_for(name: &str) -> Map<String, Value> {
                 boolean("Request confirmation for the batch."),
             );
             add(
+                "group",
+                json!({
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 32,
+                    "description": "Optional human-readable workstream key inherited by every child Job."
+                }),
+            );
+            add(
                 "workingDirectory",
                 string("Default process working directory."),
             );
@@ -2316,11 +2661,28 @@ fn properties_for(name: &str) -> Map<String, Value> {
                 "waitSeconds",
                 number("Bounded wait in seconds, capped at 30."),
             );
+            add(
+                "waitOnly",
+                json!({
+                    "type": "boolean",
+                    "default": false,
+                    "description": "While waiting, return only jobId/state/elapsedMs if the Job remains active; terminal completion returns normal detail."
+                }),
+            );
         }
         "job.cancel" => {
             add("jobId", string("Managed Job id."));
         }
         "job.list" => {
+            add(
+                "group",
+                json!({
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 32,
+                    "description": "Exact human-readable workstream filter."
+                }),
+            );
             add(
                 "kind",
                 json!({"type":"string","enum":["process","skill","mcp"]}),
@@ -2330,6 +2692,10 @@ fn properties_for(name: &str) -> Map<String, Value> {
                 json!({"type":"string","enum":["queued","waiting_confirmation","starting","running","completed","failed","rejected","cancel_requested","cancelled","timed_out","detached","unknown_after_restart","skipped"]}),
             );
             add("limit", number("Maximum Jobs to return, capped at 100."));
+            add(
+                "cursor",
+                string("Opaque cursor returned by a prior job.list response."),
+            );
         }
         "tmux.sessions" => {
             add(
@@ -2422,6 +2788,15 @@ fn properties_for(name: &str) -> Map<String, Value> {
                 json!({"type":"string","enum":["parallel","sequential"],"default":"parallel","description":"Scheduling mode; sequential waits for each child to become terminal."}),
             );
             add(
+                "group",
+                json!({
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 32,
+                    "description": "Optional human-readable workstream key inherited by every child Job."
+                }),
+            );
+            add(
                 "failFast",
                 json!({"type":"boolean","default":false,"description":"After a hard failure, skip only children that have not started; already-started calls are never cancelled."}),
             );
@@ -2435,6 +2810,15 @@ fn properties_for(name: &str) -> Map<String, Value> {
             );
         }
         "mcp.callTool" => {
+            add(
+                "group",
+                json!({
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 32,
+                    "description": "Optional human-readable workstream key for this downstream Job."
+                }),
+            );
             add(
                 "serverId",
                 string("Configured downstream MCP server id; discover valid values with mcp.list."),
@@ -2518,6 +2902,15 @@ fn properties_for(name: &str) -> Map<String, Value> {
         "skills.run" => {
             add("id", string("Skill id."));
             add("path", string("Package-relative executable path."));
+            add(
+                "group",
+                json!({
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 32,
+                    "description": "Optional human-readable workstream key for this skill Job."
+                }),
+            );
             add("args", strings("Script argument vector."));
             add("workingDirectory", string("Optional working directory."));
             add("waitSeconds", number("Bounded inline wait, capped at 30."));
@@ -2617,10 +3010,10 @@ fn tool_description(name: &str) -> String {
         "file.search" => "Search workspace text in-process with literal or regex matching; read-only, bounded by path/search limits, and context requests above the live maximum are clipped and reported.".to_string(),
         "file.edit" => "Apply one guarded UTF-8 replace, patch, or write; existing files require expectedRevision, new writes require expectedAbsent, replace/patch never create, and dryRun previews without writing.".to_string(),
         "file.batch" => "Run ordered bounded reads, searches, and guarded edits; reads/searches use the pre-edit snapshot, edits commit per normalized file group, and mixed group outcomes are reported without cross-file rollback.".to_string(),
-        "process.exec" => "Start one managed local process and return a Job envelope after a bounded inline wait; use job.get for later state/output and job.cancel for cancellation evidence.".to_string(),
-        "process.batch" => "Admit multiple managed local processes with one confirmation boundary and ordered child Jobs; preflight/capacity rejection starts none, running children are bounded by limits.maxConcurrentTasks while excess Jobs stay queued, and use job.get/job.cancel for lifecycle.".to_string(),
-        "job.get" => "Inspect one managed Job or wait up to waitSeconds (maximum 30); this is lifecycle inspection only, and cached state may be marked unavailable after an Agent restart.".to_string(),
-        "job.list" => "List active or recently retained managed Jobs with optional kind/state filters; read-only discovery, bounded output, and no new work is started.".to_string(),
+        "process.exec" => "Start one managed local process with an optional group and return a slim Job result after a bounded inline wait; use job.get for later state/output and job.cancel for cancellation evidence.".to_string(),
+        "process.batch" => "Admit multiple managed local processes with one optional group, one confirmation boundary, and ordered slim child Jobs; preflight/capacity rejection starts none, running children are bounded by limits.maxConcurrentTasks while excess Jobs stay queued, and use job.get/job.cancel for lifecycle.".to_string(),
+        "job.get" => "Inspect one managed Job or wait up to waitSeconds (maximum 30); waitOnly returns exactly jobId/state/elapsedMs on an active timeout, terminal completion returns normal detail, and cached state may be marked unavailable after an Agent restart.".to_string(),
+        "job.list" => "List active or recently retained managed Jobs with optional exact group/kind/state filters, limit, and opaque cursor; read-only discovery, bounded output, and no new work is started.".to_string(),
         "job.cancel" => "Request kind-aware cancellation for one managed Job and return observed outcome/termination evidence; a remote or unconfirmed stop is reported as detached rather than claimed cancelled.".to_string(),
         "tmux.listSessions" => "Read-only list of persistent tmux sessions; use tmux.sessions when creating or closing one.".to_string(),
         "tmux.sessions" => "List, create, or close persistent tmux sessions; close is destructive and may require confirmation.".to_string(),
@@ -2634,8 +3027,8 @@ fn tool_description(name: &str) -> String {
         "mcp.listServers" => "List configured downstream MCP servers for the local Agent; read-only discovery before mcp.callTool or mcp.batch.".to_string(),
         "mcp.listTools" => "List tools exposed by one configured downstream MCP server; use returned names and schemas for mcp.callTool/mcp.batch.".to_string(),
         "mcp.list" => "List configured downstream MCP servers or one server's tools; read-only discovery before managed calls.".to_string(),
-        "mcp.batch" => "Atomically validate/admit 1..16 downstream MCP child Jobs with one aggregate confirmation, bounded concurrency, ordered results, and optional fail-fast scheduling; admission is atomic, downstream side effects are not rolled back.".to_string(),
-        "mcp.callTool" => "Start one downstream MCP call as a managed Job with bounded arguments, inline wait, timeout, retained/truncated result evidence, and job.get/job.cancel follow-up; it is not a direct transactional tool call.".to_string(),
+        "mcp.batch" => "Atomically validate/admit 1..16 downstream MCP child Jobs with one optional group, one aggregate confirmation, bounded concurrency, ordered slim results, and optional fail-fast scheduling; admission is atomic, downstream side effects are not rolled back.".to_string(),
+        "mcp.callTool" => "Start one downstream MCP call with an optional group as a managed Job with bounded arguments, inline wait, timeout, retained/truncated result evidence, and job.get/job.cancel follow-up; it is not a direct transactional tool call.".to_string(),
         "bootstrap" => "Load the Room bootstrap manifest and guide summaries; read-only startup guidance, not a generic file reader.".to_string(),
         "bootstrap.read" => "Read one validated Room bootstrap guide by id; read-only and package-relative, not an arbitrary path reader.".to_string(),
         "skills.list" => "List valid local skills with optional query/active filtering; read-only discovery.".to_string(),
@@ -2648,7 +3041,7 @@ fn tool_description(name: &str) -> String {
         "skills.install" => "Start an asynchronous local skill installation; returns an installId before network work, then use skills.install.get/cancel.".to_string(),
         "skills.install.get" => "Inspect or briefly wait for one skill installation by installId; read-only lifecycle inspection.".to_string(),
         "skills.install.cancel" => "Request cooperative cancellation of one skill installation before its atomic commit; outcome is evidence-based.".to_string(),
-        "skills.run" => "Run one executable from an active local skill as a managed Job; use job.get/job.cancel when it does not finish inline.".to_string(),
+        "skills.run" => "Run one executable from an active local skill with an optional group as a managed Job; use job.get/job.cancel when it does not finish inline.".to_string(),
         "room.notebook.append" => "Append one explicit Room notebook passage; durable workspace state, not a transient chat note.".to_string(),
         "room.notebook.recent" => "Read recent Room notebook passages with optional scope/significance filters; read-only.".to_string(),
         "room.notebook.selectExact" => "Read Room notebook passages for one exact room-timezone calendar date; read-only.".to_string(),
@@ -3709,15 +4102,16 @@ mod tests {
         let quick = server
             .dispatch("process.exec", json!({"program": "true", "waitSeconds": 5}))
             .await?;
-        assert_eq!(quick["completedInline"], true);
-        assert_eq!(quick["status"], "completed");
+        assert_eq!(quick["state"], "completed");
+        assert!(quick.get("completedInline").is_none());
+        assert!(quick.get("pollAfterMs").is_none());
         let quick_job = quick["jobId"].as_str().unwrap().to_string();
         assert!(quick_job.starts_with("job_"));
         let fetched = server
             .dispatch("job.get", json!({"jobId": quick_job, "waitSeconds": 0}))
             .await?;
-        assert_eq!(fetched["job"]["kind"], "process");
-        assert_eq!(fetched["job"]["state"], "completed");
+        assert_eq!(fetched["kind"], "process");
+        assert_eq!(fetched["state"], "completed");
 
         let long = server
             .dispatch(
@@ -3725,13 +4119,14 @@ mod tests {
                 json!({"program": "sleep", "args": ["2"], "waitSeconds": 0}),
             )
             .await?;
-        assert_eq!(long["completedInline"], false);
+        assert_eq!(long["state"], "starting");
+        assert!(long.get("completedInline").is_none());
         let long_job = long["jobId"].as_str().unwrap().to_string();
         for _ in 0..100 {
             let state = server
                 .dispatch("job.get", json!({"jobId": long_job, "waitSeconds": 0}))
                 .await?;
-            if state["job"]["state"] == "running" {
+            if state["state"] == "running" {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -3747,10 +4142,10 @@ mod tests {
         let cancelled = server
             .dispatch("job.cancel", json!({"jobId": long_job}))
             .await?;
-        assert_eq!(cancelled["job"]["state"], "cancelled");
-        assert_eq!(cancelled["job"]["cancelOutcome"], "cancelled");
+        assert_eq!(cancelled["state"], "cancelled");
+        assert_eq!(cancelled["cancelOutcome"], "cancelled");
         assert_eq!(
-            cancelled["job"]["terminationEvidence"],
+            cancelled["terminationEvidence"],
             "local_process_kill_completed"
         );
 
@@ -3768,7 +4163,6 @@ mod tests {
             .await?;
         assert_eq!(batch["jobs"].as_array().unwrap().len(), 2);
         assert_eq!(batch["status"], "completed_with_errors");
-        assert_eq!(batch["jobs"][0]["kind"], "process");
         assert_eq!(batch["jobs"][0]["state"], "completed");
         assert_eq!(batch["jobs"][1]["state"], "failed");
 
@@ -3784,8 +4178,250 @@ mod tests {
                 }),
             )
             .await?;
-        assert_eq!(rejected["status"], "rejected");
         assert_eq!(rejected["error"]["code"], "process_batch_rejected");
+        assert!(rejected.get("completedInline").is_none());
+        assert!(rejected.get("pollAfterMs").is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn slim_job_shapes_group_and_wait_only_are_exact() -> anyhow::Result<()> {
+        let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
+        let quick = server
+            .dispatch(
+                "process.exec",
+                json!({
+                    "program": "true",
+                    "group": "  workstream  ",
+                    "waitSeconds": 5
+                }),
+            )
+            .await?;
+        assert_eq!(quick["state"], "completed");
+        assert!(quick["jobId"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("job_")));
+        assert!(quick.get("group").is_none());
+        assert!(quick.get("kind").is_none());
+        assert!(quick.get("completedInline").is_none());
+        assert!(quick.get("pollAfterMs").is_none());
+        assert!(quick.get("job").is_none());
+        let quick_job = quick["jobId"].as_str().unwrap().to_string();
+
+        let ordinary = server
+            .dispatch(
+                "job.get",
+                json!({"jobId": quick_job, "waitSeconds": 0, "waitOnly": true}),
+            )
+            .await?;
+        assert_eq!(ordinary["group"], "workstream");
+        assert_eq!(ordinary["kind"], "process");
+        assert_eq!(ordinary["state"], "completed");
+        assert!(ordinary.get("createdAt").is_none());
+        assert!(ordinary.get("finishedAt").is_none());
+        assert!(ordinary.get("detailAvailable").is_none());
+        assert!(ordinary.get("rejectReason").is_none());
+
+        let listed = server
+            .dispatch(
+                "job.list",
+                json!({"group": "workstream", "kind": "process", "limit": 1}),
+            )
+            .await?;
+        assert!(listed.get("nextCursor").is_none());
+        assert_eq!(listed["jobs"].as_array().unwrap().len(), 1);
+        assert_eq!(listed["jobs"][0]["group"], "workstream");
+        assert_eq!(listed["jobs"][0]["kind"], "process");
+        assert_eq!(listed["jobs"][0]["jobId"], quick_job);
+        assert!(listed["jobs"][0]["createdAt"].is_string());
+        assert!(listed["jobs"][0].get("program").is_none());
+
+        let running = server
+            .dispatch(
+                "process.exec",
+                json!({"program": "sleep", "args": ["2"], "waitSeconds": 0}),
+            )
+            .await?;
+        let running_job = running["jobId"].as_str().unwrap().to_string();
+        let active_keys = running
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            active_keys,
+            BTreeSet::from_iter([
+                "elapsedMs".to_string(),
+                "jobId".to_string(),
+                "state".to_string(),
+            ])
+        );
+
+        let wait_only = server
+            .dispatch(
+                "job.get",
+                json!({
+                    "jobId": running_job,
+                    "waitSeconds": 1,
+                    "waitOnly": true
+                }),
+            )
+            .await?;
+        let wait_keys = wait_only
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            wait_keys,
+            BTreeSet::from_iter([
+                "elapsedMs".to_string(),
+                "jobId".to_string(),
+                "state".to_string(),
+            ])
+        );
+        assert!(is_active_job_state(wait_only["state"].as_str().unwrap()));
+
+        let ordinary_zero = server
+            .dispatch(
+                "job.get",
+                json!({
+                    "jobId": wait_only["jobId"],
+                    "waitSeconds": 0,
+                    "waitOnly": true
+                }),
+            )
+            .await?;
+        assert_eq!(ordinary_zero["kind"], "process");
+        assert!(ordinary_zero.get("elapsedMs").is_some());
+        assert!(ordinary_zero.get("createdAt").is_none());
+        let _ = server
+            .dispatch("job.cancel", json!({"jobId": wait_only["jobId"]}))
+            .await?;
+
+        let rejected = server
+            .dispatch("process.exec", json!({"program": "vim", "waitSeconds": 5}))
+            .await?;
+        assert_eq!(rejected["state"], "rejected");
+        assert_eq!(rejected["error"]["code"], "requires_tty_not_supported");
+        assert!(rejected.get("rejectReason").is_none());
+        assert!(rejected.get("durationMs").is_none());
+
+        let failed = server
+            .dispatch(
+                "process.exec",
+                json!({"program": "false", "waitSeconds": 5}),
+            )
+            .await?;
+        assert_eq!(failed["state"], "failed");
+        assert_eq!(failed["exitCode"], 1);
+        assert!(failed.get("error").is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn managed_job_input_schemas_advertise_group_wait_only_and_cursor() {
+        for name in [
+            "process.exec",
+            "process.batch",
+            "mcp.callTool",
+            "mcp.batch",
+            "skills.run",
+        ] {
+            let descriptor = serde_json::to_value(tool_descriptor(name)).unwrap();
+            assert!(descriptor["inputSchema"]["properties"]["group"].is_object());
+            assert_eq!(
+                descriptor["inputSchema"]["properties"]["group"]["maxLength"],
+                32
+            );
+        }
+        let get = serde_json::to_value(tool_descriptor("job.get")).unwrap();
+        assert_eq!(
+            get["inputSchema"]["properties"]["waitOnly"]["default"],
+            false
+        );
+        let list = serde_json::to_value(tool_descriptor("job.list")).unwrap();
+        for field in ["group", "kind", "state", "limit", "cursor"] {
+            assert!(
+                list["inputSchema"]["properties"][field].is_object(),
+                "{field}"
+            );
+        }
+    }
+
+    #[test]
+    fn mcp_batch_slim_conversion_distinguishes_job_truncation_from_aggregate_omission(
+    ) -> anyhow::Result<()> {
+        let now = Utc::now();
+        let mut truncated_job = test_terminal_job();
+        truncated_job.job_id = "job_testboot_truncated".to_string();
+        truncated_job.kind = JobKind::Mcp;
+        truncated_job.mcp_server_id = Some("fake".to_string());
+        truncated_job.mcp_tool_name = Some("large".to_string());
+        let truncated_detail = JobDetail {
+            job: truncated_job,
+            detail_available: true,
+            result: None,
+            error: None,
+            result_truncated: true,
+            result_bytes: Some(agentic_gpt_protocol::McpBatchRequest::MAX_AGGREGATE_RESULT_BYTES),
+            result_sha256: Some("sha256:truncated".to_string()),
+            result_preview: Some("preview".to_string()),
+        };
+        let mut retained_job = test_terminal_job();
+        retained_job.job_id = "job_testboot_retained".to_string();
+        retained_job.kind = JobKind::Mcp;
+        retained_job.created_at = now;
+        retained_job.updated_at = now;
+        retained_job.finished_at = Some(now);
+        retained_job.mcp_server_id = Some("fake".to_string());
+        retained_job.mcp_tool_name = Some("large".to_string());
+        let retained_detail = JobDetail {
+            job: retained_job,
+            detail_available: true,
+            result: Some(json!("x".repeat(
+                agentic_gpt_protocol::McpBatchRequest::MAX_AGGREGATE_RESULT_BYTES
+            ))),
+            error: None,
+            result_truncated: false,
+            result_bytes: None,
+            result_sha256: None,
+            result_preview: None,
+        };
+        let value = slim_mcp_batch_response(serde_json::to_value(McpBatchResponse {
+            batch_id: "batch_test".to_string(),
+            status: McpBatchStatus::Completed,
+            completed_inline: true,
+            poll_after_ms: 0,
+            results: vec![
+                McpBatchChildResponse {
+                    index: 0,
+                    id: Some("truncated".to_string()),
+                    result_omitted: false,
+                    detail: truncated_detail,
+                },
+                McpBatchChildResponse {
+                    index: 1,
+                    id: Some("retained".to_string()),
+                    result_omitted: false,
+                    detail: retained_detail,
+                },
+            ],
+            aggregate_truncated: false,
+            aggregate_bytes: None,
+            error: None,
+        })?)?;
+        assert_eq!(value["batchId"], "batch_test");
+        assert!(value.get("completedInline").is_none());
+        assert!(value.get("pollAfterMs").is_none());
+        assert!(value.get("aggregateTruncated").is_none());
+        assert!(value.get("aggregateBytes").is_none());
+        assert_eq!(value["results"][0]["resultTruncated"], true);
+        assert!(value["results"][0].get("resultOmitted").is_none());
+        assert_eq!(value["results"][1]["resultOmitted"], true);
+        assert!(value["results"][1].get("result").is_none());
         Ok(())
     }
 
@@ -3882,7 +4518,7 @@ mod tests {
                 }),
             )
             .await?;
-        assert_eq!(batch["status"], json!("rejected"));
+        assert_eq!(batch["error"]["code"], "process_batch_rejected");
         let jobs = server.dispatch("job.list", json!({})).await?;
         assert_eq!(jobs["jobs"], json!([]));
         responder.abort();
@@ -4101,8 +4737,8 @@ mod tests {
                 json!({"id": "demo", "path": "scripts/check.sh", "waitSeconds": 5}),
             )
             .await?;
-        assert_eq!(result["job"]["kind"], "skill");
-        assert_eq!(result["job"]["state"], "completed");
+        assert_eq!(result["state"], "completed");
+        assert!(result.get("kind").is_none());
         let audit = std::fs::read_to_string(workspace.join(".agentic-gpt-audit.jsonl"))?;
         assert!(audit.contains("\"requestSource\":\"local:skills.run\""));
         assert!(!audit.contains("\"requestSource\":\"tunnel:skills.run\""));
@@ -4126,14 +4762,10 @@ mod tests {
                 }),
             )
             .await?;
-        assert_eq!(result["status"], "rejected");
-        assert_eq!(result["job"]["kind"], "mcp");
-        assert_eq!(result["job"]["rejectReason"], "mcp_server_not_found");
+        assert_eq!(result["state"], "rejected");
+        assert!(result.get("kind").is_none());
+        assert!(result.get("rejectReason").is_none());
         assert_eq!(result["error"]["code"], "mcp_server_not_found");
-        assert_eq!(
-            result["job"]["terminationEvidence"],
-            "server_config_validation"
-        );
         let audit = std::fs::read_to_string(workspace.join(".agentic-gpt-audit.jsonl"))?;
         assert!(audit.contains("\"requestSource\":\"local:mcp.callTool\""));
         assert!(audit.contains("\"terminalState\":\"rejected\""));
@@ -4169,8 +4801,8 @@ mod tests {
                 json!({"id": "demo", "path": "scripts/check.sh", "waitSeconds": 5}),
             )
             .await?;
-        assert_eq!(result["job"]["kind"], "skill");
-        assert_eq!(result["job"]["state"], "completed");
+        assert_eq!(result["state"], "completed");
+        assert!(result.get("kind").is_none());
         let audit = std::fs::read_to_string(workspace.join(".agentic-gpt-audit.jsonl"))?;
         assert!(audit.contains("\"requestSource\":\"tunnel:skills.run\""));
         Ok(())

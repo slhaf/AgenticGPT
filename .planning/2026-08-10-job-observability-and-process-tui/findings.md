@@ -250,3 +250,20 @@
 - `JobHistoryStore::disabled` is now explicitly non-opening, preventing test-only/live-only states from accidentally creating a database at a reusable fixture path once runtime persistence hooks are active.
 - The runtime page query tolerates history read failure by returning filtered live rows, while malformed cursors still fail deterministically before querying either source. The cursor returned to callers is always based on the merged final row, not a persisted-only page boundary.
 - Merge implementation deduplicates persisted rows first, overlays all live rows by `jobId`, and only then applies group/kind/state/cursor filters; this prevents a stale persisted duplicate from resurfacing when the live Job changed state.
+
+## Phase 3D implementation findings
+
+- The Phase 3A slim protocol types are present but unused by the local adapters. `jobs.rs` remains the rich runtime/history authority; Phase 3D should add serializers at the stdio/MCP boundary rather than alter `JobInfo` or durable `JobDetail`.
+- The frozen ordinary-detail distinction is adapter-visible: initial `process.exec`/`skills.run` and ordinary `job.get` include bounded process tails, while `waitOnly=true` active timeout is exactly `jobId/state/elapsedMs`; terminal `job.get` returns the normal kind-specific slim detail.
+- `job.get` currently waits and then serializes a rich `JobDetail`; the wait helper must refresh state immediately before choosing the wait-only timeout versus terminal serializer, and `waitSeconds=0` must take the ordinary-get path even when `waitOnly` is true.
+- `process.batch` currently returns legacy `completedInline/pollAfterMs` plus rich `JobInfo` children; `mcp.batch` currently returns flattened rich child details and parent `aggregateTruncated/aggregateBytes`. Both require boundary-only conversion to the frozen slim parent/child shapes.
+- MCP per-Job result truncation is already retained in `ManagedJobDetail` as `resultTruncated/resultBytes/resultSha256/resultPreview`; aggregate clipping must instead remove only the full retained `result` from later child responses and mark that child `resultOmitted`, without changing its durable/live record.
+- Stdio request structs currently omit parent `group`, `job.get.waitOnly`, and list `group/cursor`; all are `deny_unknown_fields`, so schema properties and deserializers must be updated together. Invalid group values should remain structured `{error:{code,message}}` at the tool boundary.
+
+## Phase 3D completion findings
+
+- Stdio now accepts and normalizes `group` on all five Managed Job admission surfaces, advertises it in input schemas, and exposes exact `group/kind/state` identity only on ordinary `job.get`; admission surfaces omit implied kind and caller-supplied group as frozen.
+- `job.get(waitOnly=true)` delegates to the existing bounded runtime wait, returns the three-field `jobId/state/elapsedMs` view only when a positive wait times out while active, and falls through to the ordinary slim view for terminal, already-terminal, zero-wait, and error cases.
+- The local adapter converts rich runtime records into purpose-built process/MCP/batch/list/cancel views. Rich Job/history records and the existing Hub-facing MCP batch budget path remain unchanged for the deferred parity phase.
+- Stdio `mcp.batch` uses a no-aggregate-clipping runtime path, then applies the frozen response budget at the slim boundary: per-Job retention emits `resultTruncated` evidence, while response-only clipping emits `resultOmitted` and leaves `job.get` retention untouched.
+- Focused exact-shape tests cover active/terminal/wait-only process views, list filters/cursor schema exposure, structured rejection/non-zero failure semantics, and the two MCP result-budget cases.

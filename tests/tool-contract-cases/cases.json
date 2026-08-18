@@ -168,7 +168,7 @@
       ]
     },
     "expect": {
-      "errorCode": "mcp_batch_failed",
+      "errorCode": "mcp_server_not_found",
       "errorIncludes": "mcp_server_not_found"
     }
   }

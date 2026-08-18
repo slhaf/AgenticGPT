@@ -1509,6 +1509,8 @@ pub struct McpBatchChildResponse {
     pub index: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub result_omitted: bool,
     #[serde(flatten)]
     pub detail: JobDetail,
 }
