@@ -2356,44 +2356,11 @@ fn tool_descriptor(name: &str) -> Tool {
 
 fn tool_input_schema(name: &str) -> Map<String, Value> {
     let (properties, required) = tool_schema(name);
-    let mut result = schema(properties, required);
-    if matches!(name, "file.read" | "file.search") {
-        let (flat_required, flat_fields) = if name == "file.search" {
-            (
-                vec!["path", "query"],
-                vec![
-                    "path",
-                    "query",
-                    "mode",
-                    "caseSensitive",
-                    "include",
-                    "exclude",
-                    "contextLines",
-                    "maxResults",
-                    "hidden",
-                    "respectGitignore",
-                ],
-            )
-        } else {
-            (
-                vec!["path"],
-                vec!["path", "metadata", "startLine", "endLine"],
-            )
-        };
-        let flat_absent_requests = json!({
-            "required": flat_required,
-            "not": {"required": ["requests"]}
-        });
-        let batch_absent_flat = json!({
-            "required": ["requests"],
-            "not": {"anyOf": flat_fields.iter().map(|field| json!({"required": [field]})).collect::<Vec<_>>()}
-        });
-        result.insert(
-            "oneOf".to_string(),
-            json!([flat_absent_requests, batch_absent_flat]),
-        );
-    }
-    result
+    // Keep the exposed schema in the simple object/property subset supported by
+    // MCP consumers. Conditional relationships (for example single vs batch
+    // file operations) are enforced by runtime validation and described on the
+    // tool/field level instead of using top-level oneOf.
+    schema(properties, required)
 }
 
 fn tool_schema(name: &str) -> (Map<String, Value>, &'static [&'static str]) {
@@ -2528,7 +2495,7 @@ fn properties_for(name: &str) -> Map<String, Value> {
             add("patch", string(PATCH_SCHEMA_DESCRIPTION));
             add(
                 "needConfirm",
-                boolean("Request one confirmation before an effective mutation; default false."),
+                json!({"type":"boolean","default":false,"description":"Request one confirmation before an effective mutation."}),
             );
         }
         "mcp.list" => add("serverId", string("Optional configured MCP server id.")),
@@ -2546,12 +2513,12 @@ fn properties_for(name: &str) -> Map<String, Value> {
             );
             add(
                 "needConfirm",
-                boolean("Request confirmation before execution."),
+                json!({"type":"boolean","default":false,"description":"Request confirmation before execution."}),
             );
             add("workingDirectory", string("Process working directory."));
             add(
                 "waitSeconds",
-                number("Bounded inline wait in seconds, capped at 30."),
+                json!({"type":"integer","minimum":0,"maximum":30,"default":5,"description":"Bounded inline wait in seconds."}),
             );
         }
         "process.batch" => {
@@ -2585,14 +2552,14 @@ fn properties_for(name: &str) -> Map<String, Value> {
             );
             add(
                 "waitSeconds",
-                number("Bounded inline wait in seconds, capped at 30."),
+                json!({"type":"integer","minimum":0,"maximum":30,"default":5,"description":"Bounded inline wait in seconds."}),
             );
         }
         "job.get" => {
             add("jobId", string("Managed Job id."));
             add(
                 "waitSeconds",
-                number("Bounded wait in seconds, capped at 30."),
+                json!({"type":"integer","minimum":0,"maximum":30,"default":5,"description":"Bounded wait in seconds."}),
             );
             add(
                 "waitOnly",
@@ -2624,7 +2591,10 @@ fn properties_for(name: &str) -> Map<String, Value> {
                 "state",
                 json!({"type":"string","enum":["queued","waiting_confirmation","starting","running","completed","failed","rejected","cancel_requested","cancelled","timed_out","detached","unknown_after_restart","skipped"]}),
             );
-            add("limit", number("Maximum Jobs to return, capped at 100."));
+            add(
+                "limit",
+                json!({"type":"integer","minimum":1,"maximum":100,"default":50,"description":"Maximum Jobs to return."}),
+            );
             add(
                 "cursor",
                 string("Opaque cursor returned by a prior job.list response."),
@@ -2633,7 +2603,7 @@ fn properties_for(name: &str) -> Map<String, Value> {
         "tmux.sessions" => {
             add(
                 "action",
-                json!({"type": "string", "enum": ["list", "create", "close"]}),
+                json!({"type": "string", "enum": ["list", "create", "close"], "description":"list discovers sessions; create requires name/cwd; close terminates a session."}),
             );
             add("name", string("tmux session name for create or close."));
             add("cwd", string("Working directory for create."));
@@ -2645,7 +2615,7 @@ fn properties_for(name: &str) -> Map<String, Value> {
         "tmux.panes" => {
             add(
                 "action",
-                json!({"type": "string", "enum": ["list", "capture"]}),
+                json!({"type": "string", "enum": ["list", "capture"], "description":"list discovers panes; capture requires a target and returns bounded history."}),
             );
             add("session", string("Optional tmux session name for list."));
             add("target", string("tmux pane target for capture."));
@@ -2786,15 +2756,21 @@ fn properties_for(name: &str) -> Map<String, Value> {
         "bootstrap.read" => add("id", string("Guide id returned by bootstrap.")),
         "skills.list" => {
             add("query", string("Optional case-insensitive skill query."));
-            add("limit", number("Maximum skills returned."));
+            add(
+                "limit",
+                json!({"type":"integer","minimum":1,"maximum":100,"description":"Maximum skills returned."}),
+            );
             add(
                 "activeOnly",
-                boolean("Return only valid active skill summaries."),
+                json!({"type":"boolean","default":false,"description":"Return only valid active skill summaries."}),
             );
         }
         "skills.setActive" => {
             add("id", string("Skill id."));
-            add("active", boolean("Whether the skill should be active."));
+            add(
+                "active",
+                json!({"type":"boolean","default":false,"description":"Whether the skill should be active."}),
+            );
         }
         "skills.read" => {
             add("id", string("Skill id."));
@@ -2802,24 +2778,60 @@ fn properties_for(name: &str) -> Map<String, Value> {
         }
         "skills.search" => {
             add("query", string("Case-insensitive search query."));
-            add("limit", number("Maximum skills returned."));
+            add(
+                "limit",
+                json!({"type":"integer","minimum":1,"maximum":100,"description":"Maximum skills returned."}),
+            );
         }
         "skills.activate" | "skills.deactivate" => add("id", string("Skill id.")),
         "skills.install" => {
             add("id", string("Target skill id."));
             add(
                 "source",
-                json!({"type": "object", "description": "GitHub, HTTPS-file, or inline source descriptor."}),
+                json!({
+                    "type":"object",
+                    "required":["type"],
+                    "additionalProperties":false,
+                    "description":"Tagged skill source descriptor. Use github sources for repositories and files sources for explicit file payloads.",
+                    "properties":{
+                        "type":{"type":"string","enum":["github","files"]},
+                        "repository":{"type":"string"},
+                        "url":{"type":"string"},
+                        "ref":{"type":"string"},
+                        "path":{"type":"string"},
+                        "files":{
+                            "type":"array",
+                            "minItems":1,
+                            "description":"Explicit file payloads for files source.",
+                            "items":{
+                                "type":"object",
+                                "required":["path"],
+                                "additionalProperties":false,
+                                "properties":{
+                                    "path":{"type":"string","description":"Package-relative destination path."},
+                                    "url":{"type":"string","description":"HTTPS source URL."},
+                                    "content":{"type":"string","description":"Inline UTF-8 content."},
+                                    "contentBase64":{"type":"string","description":"Inline base64 content."},
+                                    "sha256":{"type":"string","description":"Optional expected SHA-256."},
+                                    "executable":{"type":"boolean","default":false}
+                                }
+                            }
+                        }
+                    }
+                }),
             );
             add(
                 "replaceExisting",
-                boolean("Archive an existing skill before replacement."),
+                json!({"type":"boolean","default":false,"description":"Archive an existing skill before replacement."}),
             );
             add(
                 "activateAfterInstall",
-                boolean("Optional activation choice."),
+                json!({"type":"boolean","description":"Optional activation choice."}),
             );
-            add("idempotencyKey", string("Optional retry key."));
+            add(
+                "idempotencyKey",
+                json!({"type":"string","minLength":1,"maxLength":128,"description":"Optional retry key."}),
+            );
         }
         "skills.install.get" => {
             add("installId", string("Installation job id."));
@@ -2843,8 +2855,14 @@ fn properties_for(name: &str) -> Map<String, Value> {
             add("waitSeconds", number("Bounded inline wait, capped at 30."));
         }
         "room.notebook.append" => {
-            add("datetime", string("Optional ISO-8601 timestamp."));
-            add("scope", string("Path-safe notebook namespace."));
+            add(
+                "datetime",
+                json!({"type":"string","description":"Optional ISO-8601 timestamp; defaults to the current Room logical time."}),
+            );
+            add(
+                "scope",
+                json!({"type":"string","minLength":1,"description":"Notebook namespace path."}),
+            );
             add(
                 "significance",
                 json!({"type": "string", "enum": ["NORMAL", "ANCHOR"], "default": "NORMAL"}),
@@ -2854,13 +2872,22 @@ fn properties_for(name: &str) -> Map<String, Value> {
             add("tags", strings("Optional labels."));
         }
         "room.notebook.recent" => {
-            add("scope", string("Optional scope filter."));
-            add("days", number("Calendar days to scan."));
+            add(
+                "scope",
+                json!({"type":"string","description":"Optional notebook namespace filter."}),
+            );
+            add(
+                "days",
+                json!({"type":"integer","minimum":1,"description":"Logical calendar days to scan."}),
+            );
             add(
                 "significance",
                 json!({"type": "string", "enum": ["NORMAL", "ANCHOR"]}),
             );
-            add("limit", number("Maximum passages."));
+            add(
+                "limit",
+                json!({"type":"integer","minimum":1,"maximum":100,"description":"Maximum passages returned."}),
+            );
         }
         "room.notebook.selectExact" => {
             add(
@@ -2871,13 +2898,25 @@ fn properties_for(name: &str) -> Map<String, Value> {
                     "description": "Room-local calendar date in YYYY-MM-DD format."
                 }),
             );
-            add("scope", string("Optional scope filter."));
-            add("limit", number("Maximum passages."));
+            add(
+                "scope",
+                json!({"type":"string","description":"Optional notebook namespace filter."}),
+            );
+            add(
+                "limit",
+                json!({"type":"integer","minimum":1,"maximum":100,"description":"Maximum passages returned."}),
+            );
         }
         "room.notebook.search" => {
             add("query", string("Search query."));
-            add("scope", string("Optional scope filter."));
-            add("limit", number("Maximum passages."));
+            add(
+                "scope",
+                json!({"type":"string","description":"Optional notebook namespace filter."}),
+            );
+            add(
+                "limit",
+                json!({"type":"integer","minimum":1,"maximum":100,"description":"Maximum passages returned."}),
+            );
         }
         "room.notebook.current" => add("scope", string("Notebook scope.")),
         "room.notebook.update" => {
@@ -2896,8 +2935,14 @@ fn properties_for(name: &str) -> Map<String, Value> {
             add("entry", string("Diary entry text."));
         }
         "room.diary.recent" => {
-            add("days", number("Logical diary days to scan."));
-            add("limit", number("Maximum entries."));
+            add(
+                "days",
+                json!({"type":"integer","minimum":1,"description":"Logical diary days to scan."}),
+            );
+            add(
+                "limit",
+                json!({"type":"integer","minimum":1,"maximum":100,"description":"Maximum diary entries returned."}),
+            );
         }
         "room.diary.selectExact" => {
             add(
@@ -2908,7 +2953,10 @@ fn properties_for(name: &str) -> Map<String, Value> {
                     "description": "Room-local logical diary date in YYYY-MM-DD format."
                 }),
             );
-            add("limit", number("Maximum entries."));
+            add(
+                "limit",
+                json!({"type":"integer","minimum":1,"maximum":100,"description":"Maximum diary entries returned."}),
+            );
         }
         _ => {}
     }
@@ -2942,8 +2990,8 @@ fn output_schema() -> Map<String, Value> {
 fn tool_description(name: &str) -> String {
     match name {
         "agent.info" => "Inspect local Agent runtime, workspace policy, connectivity, capacity, and health; read-only diagnostics.".to_string(),
-        "file.read" => "Read bounded UTF-8 file content and optionally metadata; read-only.".to_string(),
-        "file.search" => "Search bounded workspace text in-process; read-only.".to_string(),
+        "file.read" => "Read bounded UTF-8 workspace files without mutation. Supports single reads and ordered batch reads; use line ranges for large files and use metadata only when file information is needed.".to_string(),
+        "file.search" => "Search bounded workspace text without mutation. Supports scoped literal or regex searches and ordered batch searches; use filters to limit noisy workspace scans.".to_string(),
         "file.edit" => "Apply a Codex apply_patch patch to workspace files; mutations remain policy and confirmation controlled.".to_string(),
         "process.exec" => "Start one managed local process; use job tools for lifecycle follow-up.".to_string(),
         "process.batch" => "Start multiple managed local processes under one admission boundary; started side effects are not rolled back.".to_string(),
@@ -2951,9 +2999,9 @@ fn tool_description(name: &str) -> String {
         "job.list" => "List active or retained managed Jobs; read-only discovery.".to_string(),
         "job.cancel" => "Request cancellation of one managed Job; returned state is observed evidence, not a termination guarantee.".to_string(),
         "tmux.listSessions" => "List persistent tmux sessions; read-only.".to_string(),
-        "tmux.sessions" => "List, create, or close persistent tmux sessions; close is destructive.".to_string(),
+        "tmux.sessions" => "Manage persistent tmux sessions. Use list for discovery, create for reusable sessions, and close only when the session should be terminated.".to_string(),
         "tmux.listPanes" => "List tmux panes; read-only.".to_string(),
-        "tmux.panes" => "List panes or capture bounded pane history; read-only.".to_string(),
+        "tmux.panes" => "Inspect tmux panes or capture bounded pane output. Use this for observing persistent terminal state, not for submitting commands.".to_string(),
         "tmux.capturePane" => "Capture bounded history from one tmux pane; read-only.".to_string(),
         "tmux.pasteText" => "Paste text into a non-shell tmux pane or TUI; shell panes are rejected.".to_string(),
         "tmux.exec" => "Submit one structured command to a tmux shell pane; submission does not prove command completion.".to_string(),
@@ -2973,7 +3021,7 @@ fn tool_description(name: &str) -> String {
         "skills.active" => "List active local skill state, including stale entries; read-only.".to_string(),
         "skills.activate" => "Mark one valid local skill active; executes nothing.".to_string(),
         "skills.deactivate" => "Remove active state for one local skill; executes nothing.".to_string(),
-        "skills.install" => "Start an asynchronous local skill installation; use install get/cancel for lifecycle follow-up.".to_string(),
+        "skills.install" => "Start an asynchronous local skill installation from a validated source. Follow the returned installation job with get or cancel; installation may mutate the local skills workspace.".to_string(),
         "skills.install.get" => "Inspect or briefly wait for one skill installation; read-only lifecycle inspection.".to_string(),
         "skills.install.cancel" => "Request cooperative cancellation of one skill installation before commit.".to_string(),
         "skills.run" => "Run an executable from an active local skill as a managed Job.".to_string(),
@@ -2982,7 +3030,7 @@ fn tool_description(name: &str) -> String {
         "room.notebook.selectExact" => "Read Room notebook passages for one exact Room-local calendar date; read-only.".to_string(),
         "room.notebook.search" => "Search Room notebook passages by bounded substring fields; read-only.".to_string(),
         "room.notebook.current" => "Read recoverable current Room notebook state for one scope; read-only.".to_string(),
-        "room.notebook.update" => "Update editable fields of one Room notebook passage; scope and datetime stay immutable.".to_string(),
+        "room.notebook.update" => "Update editable fields of one Room notebook passage. Use this only for correcting existing notebook state; identity, scope, and datetime boundaries remain fixed.".to_string(),
         "room.notebook.remove" => "Remove one Room notebook passage; destructive.".to_string(),
         "room.diary.append" => "Append one durable Room diary entry to the current logical diary day.".to_string(),
         "room.diary.recent" => "Read recent Room diary entries; read-only.".to_string(),
@@ -3166,44 +3214,36 @@ mod tests {
         let read = serde_json::to_value(tool_descriptor("file.read"))?;
         assert_eq!(read["inputSchema"]["required"], json!([]));
         assert!(read["inputSchema"]["properties"].get("requests").is_some());
-        let read_one_of = read["inputSchema"]["oneOf"].as_array().unwrap();
-        assert_eq!(read_one_of.len(), 2);
-        assert_eq!(read_one_of[0]["required"], json!(["path"]));
-        assert_eq!(read_one_of[0]["not"]["required"], json!(["requests"]));
-        assert_eq!(read_one_of[1]["required"], json!(["requests"]));
-        let read_batch_forbidden = read_one_of[1]["not"]["anyOf"].as_array().unwrap();
-        for field in ["path", "metadata", "startLine", "endLine"] {
-            assert!(read_batch_forbidden
-                .iter()
-                .any(|branch| branch["required"] == json!([field])));
-        }
+        assert!(read["inputSchema"].get("oneOf").is_none());
+        assert_eq!(read["inputSchema"]["properties"]["requests"]["minItems"], 1);
+        assert_eq!(
+            read["inputSchema"]["properties"]["requests"]["maxItems"],
+            32
+        );
+        assert!(read["inputSchema"]["properties"]["requests"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("mutually exclusive"));
 
         let search = serde_json::to_value(tool_descriptor("file.search"))?;
         assert!(search["inputSchema"]["properties"]
             .get("requests")
             .is_some());
-        let search_one_of = search["inputSchema"]["oneOf"].as_array().unwrap();
-        assert_eq!(search_one_of[0]["required"], json!(["path", "query"]));
-        assert_eq!(search_one_of[0]["not"]["required"], json!(["requests"]));
-        assert_eq!(search_one_of[1]["required"], json!(["requests"]));
-        for field in [
-            "path",
-            "query",
-            "mode",
-            "caseSensitive",
-            "include",
-            "exclude",
-            "contextLines",
-            "maxResults",
-            "hidden",
-            "respectGitignore",
-        ] {
-            assert!(search_one_of[1]["not"]["anyOf"]
-                .as_array()
+        assert!(search["inputSchema"].get("oneOf").is_none());
+        assert_eq!(
+            search["inputSchema"]["properties"]["requests"]["minItems"],
+            1
+        );
+        assert_eq!(
+            search["inputSchema"]["properties"]["requests"]["maxItems"],
+            32
+        );
+        assert!(
+            search["inputSchema"]["properties"]["requests"]["description"]
+                .as_str()
                 .unwrap()
-                .iter()
-                .any(|branch| branch["required"] == json!([field])));
-        }
+                .contains("mutually exclusive")
+        );
 
         let edit = serde_json::to_value(tool_descriptor("file.edit"))?;
         let edit_fields = edit["inputSchema"]["properties"]
@@ -4403,7 +4443,7 @@ mod tests {
         let read_descriptor = tools.iter().find(|tool| tool.name == "file.read").unwrap();
         let read_schema = serde_json::to_value(read_descriptor)?;
         assert!(read_schema["inputSchema"]["properties"]["requests"].is_object());
-        assert!(read_schema["inputSchema"]["oneOf"].is_array());
+        assert!(read_schema["inputSchema"].get("oneOf").is_none());
         let removed_tool = ["file", "batch"].join(".");
         assert!(!tools.iter().any(|tool| tool.name == removed_tool));
 
