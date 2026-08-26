@@ -101,7 +101,6 @@ pub(crate) struct ConfigTuiApp {
     session: Option<SetupSession>,
     navigation: Navigation,
     state: TuiState,
-    theme: Theme,
     field_errors: HashMap<SetupField, String>,
     section_draft: Option<OptionalSectionDraft>,
     section_original: Option<OptionalSectionDraft>,
@@ -148,7 +147,6 @@ impl ConfigTuiApp {
                 finished: false,
                 system_error: None,
             },
-            theme: Theme::from_env(),
             field_errors: HashMap::new(),
             section_draft: None,
             section_original: None,
@@ -326,13 +324,13 @@ impl ConfigTuiApp {
         Ok(())
     }
 
-    pub(crate) fn render(&self, frame: &mut Frame) {
+    pub(crate) fn render(&self, frame: &mut Frame, theme: &Theme) {
         match self.state.page {
             ConfigPage::SystemError => pages::render_system_error(
                 frame,
                 self.state.system_error.as_ref(),
                 self.language,
-                &self.theme,
+                theme,
             ),
             _ => {
                 let Some(session) = self.session.as_ref() else {
@@ -344,7 +342,7 @@ impl ConfigTuiApp {
                     session,
                     &self.state,
                     self.language,
-                    &self.theme,
+                    theme,
                     &self.field_errors,
                     self.section_draft.as_ref(),
                     self.section_is_dirty(),

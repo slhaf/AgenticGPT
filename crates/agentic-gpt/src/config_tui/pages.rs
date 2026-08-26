@@ -22,10 +22,11 @@ use crate::tui::forms::{
     OrderedMultiSelectState,
 };
 use crate::tui::{
-    action_line, inline_error_line, labeled_heading_line, render_action_button,
-    render_contextual_footer, render_footer, render_header, render_horizontal_rule,
-    render_inspector, render_surface, render_surface_header, surface_choice_line,
-    surface_local_rule_width, surface_status_line, Theme,
+    action_line, inline_error_line, labeled_heading_line, master_detail_layout,
+    render_action_button, render_contextual_footer, render_footer, render_header,
+    render_horizontal_rule, render_inspector, render_surface, render_surface_action_dock,
+    render_surface_header, surface_choice_line, surface_shell_areas, surface_status_line,
+    MasterDetailSpec, PaneMode, SurfaceCursor, Theme,
 };
 use crate::WorkerProfile;
 
@@ -626,36 +627,17 @@ fn render_connection_footer(
     );
 }
 
-fn surface_shell_areas(area: Rect) -> [Rect; 5] {
-    let content = if area.width >= 60 && area.height >= 16 {
-        area.inner(Margin {
-            horizontal: 2,
-            vertical: 1,
-        })
-    } else {
-        area
-    };
-    Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Min(8),
-        Constraint::Length(1),
-        Constraint::Length(1),
-    ])
-    .areas(content)
+fn surface_columns(body: Rect) -> [Rect; 3] {
+    surface_columns_for_mode(body, PaneMode::Master)
 }
 
-fn surface_columns(body: Rect) -> [Rect; 3] {
-    if body.width < 66 {
-        [body, Rect::default(), Rect::default()]
-    } else {
-        Layout::horizontal([
-            Constraint::Min(40),
-            Constraint::Length(2),
-            Constraint::Min(24),
-        ])
-        .areas(body)
-    }
+fn surface_columns_for_mode(body: Rect, mode: PaneMode) -> [Rect; 3] {
+    let areas = master_detail_layout(
+        body,
+        MasterDetailSpec::new(Constraint::Min(40), 2, Constraint::Min(24), 66),
+        mode,
+    );
+    [areas.master, areas.gap, areas.detail]
 }
 
 fn next_surface_row(area: Rect, cursor: &mut u16) -> Option<Rect> {
@@ -663,17 +645,15 @@ fn next_surface_row(area: Rect, cursor: &mut u16) -> Option<Rect> {
 }
 
 fn next_surface_rows(area: Rect, cursor: &mut u16, height: u16) -> Option<Rect> {
-    let action_y = area.y + area.height.saturating_sub(2);
-    if height == 0 || cursor.saturating_add(height) > action_y {
-        return None;
-    }
-    let rows = Rect {
+    let remaining = Rect {
         x: area.x,
         y: *cursor,
         width: area.width,
-        height,
+        height: area.y.saturating_add(area.height).saturating_sub(*cursor),
     };
-    *cursor = cursor.saturating_add(height);
+    let mut surface_cursor = SurfaceCursor::new(remaining).reserve_bottom(2);
+    let rows = surface_cursor.rows(height)?;
+    *cursor = rows.y.saturating_add(rows.height);
     Some(rows)
 }
 
@@ -696,43 +676,6 @@ fn render_surface_blank(area: Rect, cursor: &mut u16, frame: &mut Frame) {
     if let Some(row) = next_surface_row(area, cursor) {
         frame.render_widget(Paragraph::new(""), row);
     }
-}
-
-fn render_surface_action(frame: &mut Frame, area: Rect, label: &str, focused: bool, theme: &Theme) {
-    let row = Rect {
-        x: area.x,
-        y: area.y + area.height.saturating_sub(1),
-        width: area.width,
-        height: 1,
-    };
-    frame.render_widget(Paragraph::new(action_line(label, focused, theme)), row);
-}
-
-fn render_surface_action_dock(
-    frame: &mut Frame,
-    area: Rect,
-    label: &str,
-    focused: bool,
-    theme: &Theme,
-) {
-    if area.height < 2 {
-        render_surface_action(frame, area, label, focused, theme);
-        return;
-    }
-    let separator = Rect {
-        x: area.x,
-        y: area.y + area.height.saturating_sub(2),
-        width: surface_local_rule_width(area.width),
-        height: 1,
-    };
-    let action = Rect {
-        x: area.x,
-        y: area.y + area.height.saturating_sub(1),
-        width: area.width,
-        height: 1,
-    };
-    render_horizontal_rule(frame, separator, theme);
-    frame.render_widget(Paragraph::new(action_line(label, focused, theme)), action);
 }
 
 fn optional_action_label(dirty: bool, language: UiLanguage) -> &'static str {
@@ -3834,7 +3777,14 @@ fn render_review(
         theme,
     );
     render_horizontal_rule(frame, top_rule, theme);
-    let [left, _, right] = surface_columns(body);
+    let [left, _, right] = surface_columns_for_mode(
+        body,
+        if state.review_preview_json.is_some() {
+            PaneMode::Detail
+        } else {
+            PaneMode::Master
+        },
+    );
 
     let row_count = review.row_count();
     let action_focused = state.focus >= row_count;

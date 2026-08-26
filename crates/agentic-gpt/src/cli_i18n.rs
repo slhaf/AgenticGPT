@@ -296,6 +296,11 @@ const COMMAND_CATALOG: &[CatalogEntry] = &[
         "禁用 MCP 服务器",
     ),
     CatalogEntry::new(
+        "tui",
+        "Open the Agentic GPT interactive console",
+        "打开 Agentic GPT 交互式控制台",
+    ),
+    CatalogEntry::new(
         "tmux",
         "Manage Agentic GPT tmux sessions",
         "管理 Agentic GPT tmux 会话",
@@ -396,6 +401,7 @@ const ARG_CATALOG: &[CatalogEntry] = &[
     CatalogEntry::new("config.mcp.remove.server_id", "MCP server identifier", "MCP 服务器标识符"),
     CatalogEntry::new("config.mcp.enable.server_id", "MCP server identifier", "MCP 服务器标识符"),
     CatalogEntry::new("config.mcp.disable.server_id", "MCP server identifier", "MCP 服务器标识符"),
+    CatalogEntry::new("tui.config", "Configuration file to use", "要使用的配置文件"),
     CatalogEntry::new("tmux.config", "Configuration file to use", "要使用的配置文件"),
     CatalogEntry::new("tmux.attach.session", "Session name", "会话名称"),
     CatalogEntry::new("tmux.create.name", "Session name", "会话名称"),

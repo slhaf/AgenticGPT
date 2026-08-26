@@ -44,7 +44,7 @@ use serde_json::{Map, Value};
 use state::{AppState, CapabilityProfile, RuntimeModel};
 use std::collections::HashMap;
 use std::fs;
-use std::io::Read;
+use std::io::{IsTerminal, Read};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
@@ -90,6 +90,10 @@ enum Commands {
         config: Option<PathBuf>,
         #[command(subcommand)]
         command: ConfigCommand,
+    },
+    Tui {
+        #[arg(long)]
+        config: Option<PathBuf>,
     },
     Tmux {
         #[arg(long)]
@@ -148,6 +152,7 @@ async fn main() -> Result<()> {
         Commands::Config { config, command } => {
             config_cli::handle_config(config_path(config), command, language).await
         }
+        Commands::Tui { config } => handle_tui(config_path(config), language).await,
         Commands::Tmux { config, command } => handle_tmux(config_path(config), command).await,
     }
 }
@@ -409,6 +414,62 @@ fn read_local_arguments(
         .as_object()
         .cloned()
         .ok_or_else(|| anyhow!("local_arguments_must_be_object"))
+}
+
+async fn handle_tui(config_path: PathBuf, language: cli_i18n::UiLanguage) -> Result<()> {
+    if !std::io::stdin().is_terminal()
+        || !std::io::stdout().is_terminal()
+        || !std::io::stderr().is_terminal()
+    {
+        return Err(anyhow!("tui_requires_tty"));
+    }
+    Config::load(&config_path)?;
+
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let poll_path = config_path.clone();
+    let poller = tokio::spawn(async move {
+        loop {
+            let client = match local_control::LocalJobClient::connect(&poll_path).await {
+                Ok(client) => client,
+                Err(error) => {
+                    if sender
+                        .send(tui::ProcessUpdate::Error(error.to_string()))
+                        .is_err()
+                    {
+                        break;
+                    }
+                    sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
+            };
+
+            loop {
+                match client.list_jobs(100).await {
+                    Ok(page) => {
+                        if sender.send(tui::ProcessUpdate::Jobs(page)).is_err() {
+                            client.close().await;
+                            return;
+                        }
+                    }
+                    Err(error) => {
+                        let _ = sender.send(tui::ProcessUpdate::Error(error.to_string()));
+                        break;
+                    }
+                }
+                sleep(Duration::from_millis(500)).await;
+            }
+            client.close().await;
+            sleep(Duration::from_millis(500)).await;
+        }
+    });
+
+    let screen = tui::ProcessScreen::new(receiver, language);
+    let outcome = tui::TuiApp::process(screen, language).run();
+    poller.abort();
+    match outcome? {
+        tui::TuiOutcome::Exited | tui::TuiOutcome::Cancelled => Ok(()),
+        tui::TuiOutcome::ConfigCommitted(_) => Err(anyhow!("unexpected_tui_outcome")),
+    }
 }
 
 async fn handle_tmux(config_path: PathBuf, command: TmuxCommand) -> Result<()> {

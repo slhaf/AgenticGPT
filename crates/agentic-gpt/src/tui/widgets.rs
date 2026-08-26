@@ -286,6 +286,39 @@ pub(crate) fn render_action_button(
     frame.render_widget(Paragraph::new(text).style(style), area);
 }
 
+pub(crate) fn render_surface_action_dock(
+    frame: &mut Frame,
+    area: Rect,
+    label: &str,
+    focused: bool,
+    theme: &Theme,
+) {
+    if area.height < 2 {
+        let row = Rect {
+            x: area.x,
+            y: area.y + area.height.saturating_sub(1),
+            width: area.width,
+            height: 1,
+        };
+        frame.render_widget(Paragraph::new(action_line(label, focused, theme)), row);
+        return;
+    }
+    let separator = Rect {
+        x: area.x,
+        y: area.y + area.height.saturating_sub(2),
+        width: surface_local_rule_width(area.width),
+        height: 1,
+    };
+    let action = Rect {
+        x: area.x,
+        y: area.y + area.height.saturating_sub(1),
+        width: area.width,
+        height: 1,
+    };
+    render_horizontal_rule(frame, separator, theme);
+    frame.render_widget(Paragraph::new(action_line(label, focused, theme)), action);
+}
+
 pub(crate) fn render_footer(frame: &mut Frame, area: Rect, text: &str, theme: &Theme) {
     frame.render_widget(Paragraph::new(text).style(theme.dim), area);
 }

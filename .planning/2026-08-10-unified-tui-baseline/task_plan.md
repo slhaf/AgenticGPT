@@ -4,36 +4,36 @@
 Establish one application-level TUI shell for AgenticGPT by extracting the proven app/runtime structure from the existing Config TUI, then host Config, Process, Terminal, and future screens inside the same `TuiApp` rather than building independent TUI applications.
 
 ## Current Phase
-Phase 1 — Extraction Boundary Discovery
+Phase 3 — Screen Model & Navigation Baseline
 
 ## Phases
 
 ### Phase 1: Extraction Boundary Discovery
-- [ ] Map `ConfigTuiApp` responsibilities into app-global versus Config-screen-specific state/behavior
-- [ ] Map reusable `src/tui/` runtime/theme/widget/form primitives and identify missing app-level primitives
-- [ ] Freeze the first unified navigation/screen lifecycle contract and startup/exit semantics
-- [ ] Decide how existing `config init` enters/exits the unified TUI without regressing current behavior
-- **Status:** in_progress
+- [x] Map `ConfigTuiApp` responsibilities into app-global versus Config-screen-specific state/behavior
+- [x] Map reusable `src/tui/` runtime/theme/widget/form primitives and identify missing app-level primitives
+- [x] Freeze the first unified navigation/screen lifecycle contract and startup/exit semantics
+- [x] Decide how existing `config init` enters/exits the unified TUI without regressing current behavior
+- **Status:** complete
 
 ### Phase 2: Extract Unified `TuiApp`
-- [ ] Introduce the application-level `TuiApp` shell from the existing Config TUI event/render loop
-- [ ] Move global terminal lifecycle, route/screen selection, theme, global key handling, overlays/footer, and shared app context into the shell
-- [ ] Keep Config wizard navigation/editing/validation/commit state inside a Config screen/module
-- [ ] Migrate current Config TUI behavior onto the unified shell with parity verification
-- **Status:** pending
+- [x] Introduce the application-level `TuiApp` shell from the existing Config TUI event/render loop
+- [x] Move terminal lifecycle, shared theme, screen dispatch, runtime-error handling, and outcome extraction into the shell; defer command-palette/global-overlay policy to Phase 3 where multiple workspace screens can drive it
+- [x] Keep Config wizard navigation/editing/validation/commit state inside a Config screen/module
+- [x] Migrate current Config TUI behavior onto the unified shell with unit-suite and manual TTY parity verification
+- **Status:** complete
 
 ### Phase 3: Screen Model & Navigation Baseline
-- [ ] Establish concrete screen routing and screen-local event/render/update boundaries
-- [ ] Support switching among top-level screens without duplicating terminal/session ownership
-- [ ] Preserve screen-local selection/scroll/edit state across reasonable navigation where useful
-- [ ] Avoid unnecessary trait/generic abstraction beyond what Config + first additional screen actually require
-- **Status:** pending
+- [x] Establish concrete Config/Process screen dispatch and screen-local event/render/update boundaries inside one `TuiApp`
+- [ ] Support switching among workspace screens without duplicating terminal/session ownership; the app-global `:` command palette/direct-jump layer is implemented, while actual cross-screen switching awaits the first real second workspace route (Terminal)
+- [ ] Preserve screen-local selection/scroll/edit state across top-level navigation; `WorkspaceState` owns route + screen instances, Process selection/detail mode are stable across refresh/palette use, but cross-route retention still needs Terminal to verify
+- [x] Avoid unnecessary trait/generic abstraction beyond Config + Process; concrete enum dispatch remains sufficient
+- **Status:** in_progress
 
 ### Phase 4: Process Screen Baseline
-- [ ] Build Process as the first non-Config screen against the frozen Managed Job/query contracts
-- [ ] Support group tabs/columns, mixed-kind renderers, stable selection, live-memory refresh, history cursor loading, and Inspector coordination
-- [ ] Validate that the extracted shell is genuinely reusable before further abstraction
-- **Status:** pending
+- [x] Build Process as the first non-Config screen against the frozen `job.list` contract, exposed through `agentic-gpt tui`
+- [ ] Support group tabs/columns, richer mixed-kind renderers, history cursor loading, and Inspector coordination *(stable selection + live refresh + reusable master/detail preview skeleton are implemented; rich `job.get` input/output detail remains pending)*
+- [x] Validate that the extracted shell is genuinely reusable before further abstraction via real local-MCP and tmux TTY smoke tests
+- **Status:** in_progress
 
 ### Phase 5: Terminal / Further Screen Integration
 - [ ] Define Terminal screen integration on the same `TuiApp`

@@ -16,6 +16,7 @@ use crossterm::{
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 
+#[derive(Clone, Copy, Debug)]
 pub(crate) enum TerminalEvent {
     Key(KeyEvent),
     Resize,
