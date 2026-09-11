@@ -672,6 +672,315 @@ pub struct DiaryEntriesResponse {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
+pub enum RoomDiaryLayer {
+    Daily,
+    Weekly,
+    Monthly,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RoomDiaryLayerIssue {
+    Missing,
+    Unreadable,
+    InvalidUtf8,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomDiaryLayerResult {
+    pub layer: RoomDiaryLayer,
+    pub period: String,
+    pub path: String,
+    pub available: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue: Option<RoomDiaryLayerIssue>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomDiaryActiveRequest {}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomDiaryActiveResponse {
+    pub daily: RoomDiaryLayerResult,
+    pub weekly: RoomDiaryLayerResult,
+    pub monthly: RoomDiaryLayerResult,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomDiaryReadRequest {
+    pub layer: RoomDiaryLayer,
+    pub period: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomDiaryReadResponse {
+    pub document: RoomDiaryLayerResult,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomNotebookPreview {
+    pub path: String,
+    pub title: String,
+    pub content_preview: String,
+    pub truncated: bool,
+    pub effective_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomNotebookRecentRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomNotebookSearchRequest {
+    pub query: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomNotebookReadRequest {
+    pub path: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomNotebookReadResponse {
+    pub path: String,
+    pub content: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomNotebookResultsResponse {
+    pub documents: Vec<RoomNotebookPreview>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomStateListRequest {}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomStateEntity {
+    pub entity: String,
+    pub path: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomStateListResponse {
+    pub entities: Vec<RoomStateEntity>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomStateReadRequest {
+    pub entity: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomStateReadResponse {
+    pub path: String,
+    pub content: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RoomMaintenanceSlot {
+    #[serde(rename = "diary.daily")]
+    DiaryDaily,
+    #[serde(rename = "diary.weekly")]
+    DiaryWeekly,
+    #[serde(rename = "diary.monthly")]
+    DiaryMonthly,
+    Notebook,
+    Entity,
+}
+
+impl RoomMaintenanceSlot {
+    pub const ALL: [Self; 5] = [
+        Self::DiaryDaily,
+        Self::DiaryWeekly,
+        Self::DiaryMonthly,
+        Self::Notebook,
+        Self::Entity,
+    ];
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomMaintenanceRequestItem {
+    pub slot: RoomMaintenanceSlot,
+    pub payload: serde_json::Value,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RoomMaintenanceExecutionMode {
+    Local,
+    Workflow,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomMaintenanceSubmitRequest {
+    pub items: Vec<RoomMaintenanceRequestItem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<RoomMaintenanceExecutionMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_seconds: Option<u8>,
+}
+
+impl RoomMaintenanceSubmitRequest {
+    pub const MIN_ITEMS: usize = 1;
+    pub const MAX_ITEMS: usize = 5;
+    pub const MAX_WAIT_SECONDS: u8 = 30;
+
+    pub fn has_valid_item_count(&self) -> bool {
+        (Self::MIN_ITEMS..=Self::MAX_ITEMS).contains(&self.items.len())
+    }
+
+    pub fn effective_wait_seconds(&self) -> u8 {
+        self.wait_seconds.unwrap_or(0).min(Self::MAX_WAIT_SECONDS)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RoomMaintenanceSubmissionState {
+    Applied,
+    Submitted,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RoomMaintenanceSyncOutcome {
+    NotRequested,
+    Succeeded,
+    Failed,
+    Unavailable,
+    Pending,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomMaintenanceSubmitResponse {
+    pub mode: RoomMaintenanceExecutionMode,
+    pub state: RoomMaintenanceSubmissionState,
+    pub local_applied: bool,
+    pub sync: RoomMaintenanceSyncOutcome,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomMaintenanceStatusRequest {}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomMaintenanceRepositoryStatus {
+    pub root: String,
+    pub initialized: bool,
+    pub top_level: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clean: Option<bool>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomMaintenanceSchemaStatus {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_version: Option<u32>,
+    pub supported: bool,
+    pub ready: bool,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomMaintenanceScaffoldStatus {
+    pub ready: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub missing_paths: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomMaintenanceLocalExecutorStatus {
+    pub ready: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomMaintenanceWorkflowStatus {
+    pub available: bool,
+    pub ready: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomMaintenanceRemoteStatus {
+    pub configured: bool,
+    pub available: bool,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomMaintenanceSyncStatus {
+    pub upstream_available: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_sync: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_head: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_head: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomMaintenanceSlotStatus {
+    pub slot: RoomMaintenanceSlot,
+    pub occupied: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoomMaintenanceStatusResponse {
+    pub repository: RoomMaintenanceRepositoryStatus,
+    pub schema: RoomMaintenanceSchemaStatus,
+    pub scaffold: RoomMaintenanceScaffoldStatus,
+    pub local_executor: RoomMaintenanceLocalExecutorStatus,
+    pub configured_mode: RoomMaintenanceExecutionMode,
+    pub auto_push: bool,
+    pub workflow: RoomMaintenanceWorkflowStatus,
+    pub remote: RoomMaintenanceRemoteStatus,
+    pub sync: RoomMaintenanceSyncStatus,
+    pub slots: Vec<RoomMaintenanceSlotStatus>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum BootstrapDocumentKind {
     Entrypoint,
     Guide,
@@ -1991,6 +2300,248 @@ pub enum AgentMessage {
         timeout_seconds: u64,
         payload: ConfirmationPayload,
     },
+}
+
+#[cfg(test)]
+mod room_v2_contract_tests {
+    use super::*;
+
+    fn diary_layer(
+        layer: RoomDiaryLayer,
+        period: &str,
+        path: &str,
+        available: bool,
+        content: Option<&str>,
+        issue: Option<RoomDiaryLayerIssue>,
+    ) -> RoomDiaryLayerResult {
+        RoomDiaryLayerResult {
+            layer,
+            period: period.to_string(),
+            path: path.to_string(),
+            available,
+            content: content.map(str::to_string),
+            issue,
+        }
+    }
+
+    #[test]
+    fn diary_v2_shapes_keep_periods_semantic_and_missing_layers_explicit() {
+        let request: RoomDiaryReadRequest = serde_json::from_value(serde_json::json!({
+            "layer": "weekly",
+            "period": "2026-09-07--2026-09-13"
+        }))
+        .unwrap();
+        assert_eq!(request.layer, RoomDiaryLayer::Weekly);
+        assert_eq!(request.period, "2026-09-07--2026-09-13");
+        let request_value = serde_json::to_value(request).unwrap();
+        assert_eq!(request_value["period"], "2026-09-07--2026-09-13");
+        assert!(request_value.get("path").is_none());
+
+        let response = RoomDiaryActiveResponse {
+            daily: diary_layer(
+                RoomDiaryLayer::Daily,
+                "current",
+                "Diary/Daily/current.md",
+                true,
+                Some("# Daily\n"),
+                None,
+            ),
+            weekly: diary_layer(
+                RoomDiaryLayer::Weekly,
+                "current",
+                "Diary/Weekly/current.md",
+                false,
+                None,
+                Some(RoomDiaryLayerIssue::Missing),
+            ),
+            monthly: diary_layer(
+                RoomDiaryLayer::Monthly,
+                "current",
+                "Diary/Monthly/current.md",
+                true,
+                Some("# Monthly\n"),
+                None,
+            ),
+        };
+        let value = serde_json::to_value(&response).unwrap();
+        assert_eq!(value["daily"]["content"], "# Daily\n");
+        assert_eq!(value["weekly"]["available"], false);
+        assert_eq!(value["weekly"]["issue"], "missing");
+        assert!(value["weekly"].get("content").is_none());
+        assert_eq!(value["daily"]["path"], "Diary/Daily/current.md");
+        assert_eq!(
+            serde_json::from_value::<RoomDiaryActiveResponse>(value).unwrap(),
+            response
+        );
+    }
+
+    #[test]
+    fn notebook_and_state_v2_shapes_bound_previews_and_read_markdown_exactly() {
+        let preview = RoomNotebookPreview {
+            path: "Notebook/topic.md".to_string(),
+            title: "Topic".to_string(),
+            content_preview: "bounded body".to_string(),
+            truncated: true,
+            effective_at: DateTime::parse_from_rfc3339("2026-09-11T01:02:03Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        };
+        let response = RoomNotebookResultsResponse {
+            documents: vec![preview.clone()],
+            warnings: vec![],
+        };
+        let value = serde_json::to_value(&response).unwrap();
+        assert_eq!(value["documents"][0]["contentPreview"], "bounded body");
+        assert_eq!(value["documents"][0]["effectiveAt"], "2026-09-11T01:02:03Z");
+        assert_eq!(
+            serde_json::from_value::<RoomNotebookResultsResponse>(value).unwrap(),
+            response
+        );
+
+        let read: RoomNotebookReadRequest = serde_json::from_value(serde_json::json!({
+            "path": "Notebook/topic.md"
+        }))
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(read).unwrap()["path"],
+            "Notebook/topic.md"
+        );
+        let read_response = RoomNotebookReadResponse {
+            path: "Notebook/topic.md".to_string(),
+            content: "# Topic\n\nFull Markdown body.\n".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_value(&read_response).unwrap()["content"],
+            "# Topic\n\nFull Markdown body.\n"
+        );
+
+        let state = RoomStateListResponse {
+            entities: vec![RoomStateEntity {
+                entity: "project".to_string(),
+                path: "State/entities/project.md".to_string(),
+            }],
+        };
+        let state_value = serde_json::to_value(&state).unwrap();
+        assert_eq!(state_value["entities"][0]["entity"], "project");
+        assert_eq!(
+            serde_json::from_value::<RoomStateListResponse>(state_value).unwrap(),
+            state
+        );
+        let state_request: RoomStateReadRequest =
+            serde_json::from_value(serde_json::json!({ "entity": "project" })).unwrap();
+        assert_eq!(state_request.entity, "project");
+    }
+
+    #[test]
+    fn maintenance_v2_shapes_close_slots_bound_wait_and_separate_sync() {
+        let slots: Vec<serde_json::Value> = RoomMaintenanceSlot::ALL
+            .iter()
+            .map(|slot| serde_json::to_value(slot).unwrap())
+            .collect();
+        assert_eq!(
+            slots,
+            vec![
+                serde_json::json!("diary.daily"),
+                serde_json::json!("diary.weekly"),
+                serde_json::json!("diary.monthly"),
+                serde_json::json!("notebook"),
+                serde_json::json!("entity"),
+            ]
+        );
+        assert!(
+            serde_json::from_value::<RoomMaintenanceSlot>(serde_json::json!("diary.other"))
+                .is_err()
+        );
+
+        let request: RoomMaintenanceSubmitRequest = serde_json::from_value(serde_json::json!({
+            "items": [{
+                "slot": "entity",
+                "payload": {"entity": "project", "operation": "refresh"}
+            }],
+            "mode": "workflow",
+            "waitSeconds": 31
+        }))
+        .unwrap();
+        assert!(request.has_valid_item_count());
+        assert_eq!(request.effective_wait_seconds(), 30);
+        assert_eq!(
+            serde_json::to_value(&request).unwrap()["items"][0]["payload"]["operation"],
+            "refresh"
+        );
+
+        let response = RoomMaintenanceSubmitResponse {
+            mode: RoomMaintenanceExecutionMode::Local,
+            state: RoomMaintenanceSubmissionState::Applied,
+            local_applied: true,
+            sync: RoomMaintenanceSyncOutcome::Failed,
+            revision: Some("abc123".to_string()),
+        };
+        let response_value = serde_json::to_value(&response).unwrap();
+        assert_eq!(response_value["localApplied"], true);
+        assert_eq!(response_value["state"], "applied");
+        assert_eq!(response_value["sync"], "failed");
+        assert_eq!(
+            serde_json::from_value::<RoomMaintenanceSubmitResponse>(response_value).unwrap(),
+            response
+        );
+
+        let status = RoomMaintenanceStatusResponse {
+            repository: RoomMaintenanceRepositoryStatus {
+                root: "/workspace/room".to_string(),
+                initialized: true,
+                top_level: true,
+                branch: Some("main".to_string()),
+                head: Some("abc123".to_string()),
+                clean: Some(true),
+            },
+            schema: RoomMaintenanceSchemaStatus {
+                schema_version: Some(1),
+                supported: true,
+                ready: true,
+            },
+            scaffold: RoomMaintenanceScaffoldStatus {
+                ready: false,
+                missing_paths: vec!["manual/entity.md".to_string()],
+            },
+            local_executor: RoomMaintenanceLocalExecutorStatus { ready: true },
+            configured_mode: RoomMaintenanceExecutionMode::Local,
+            auto_push: false,
+            workflow: RoomMaintenanceWorkflowStatus {
+                available: true,
+                ready: false,
+            },
+            remote: RoomMaintenanceRemoteStatus {
+                configured: true,
+                available: true,
+            },
+            sync: RoomMaintenanceSyncStatus {
+                upstream_available: true,
+                in_sync: Some(false),
+                local_head: Some("abc123".to_string()),
+                upstream_head: Some("def456".to_string()),
+            },
+            slots: RoomMaintenanceSlot::ALL
+                .iter()
+                .map(|slot| RoomMaintenanceSlotStatus {
+                    slot: *slot,
+                    occupied: false,
+                })
+                .collect(),
+        };
+        let status_value = serde_json::to_value(&status).unwrap();
+        assert_eq!(status_value["schema"]["schemaVersion"], 1);
+        assert_eq!(status_value["schema"]["ready"], true);
+        assert_eq!(status_value["scaffold"]["ready"], false);
+        assert_eq!(status_value["localExecutor"]["ready"], true);
+        assert_eq!(status_value["workflow"]["ready"], false);
+        assert_eq!(status_value["remote"]["available"], true);
+        assert_eq!(status_value["sync"]["inSync"], false);
+        assert_eq!(status_value["slots"].as_array().unwrap().len(), 5);
+        assert_eq!(
+            serde_json::from_value::<RoomMaintenanceStatusResponse>(status_value).unwrap(),
+            status
+        );
+    }
 }
 
 #[cfg(test)]

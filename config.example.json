@@ -23,6 +23,15 @@
     "agentSecret": "change-me-before-use"
   },
   "workspaceRoot": "/home/your-user/.agentic_gpt/workspace",
+  "room": {
+    "repositoryRoot": null,
+    "timezone": "Asia/Shanghai",
+    "diaryDayBoundaryHour": 5,
+    "maintenance": {
+      "mode": "local",
+      "autoPush": false
+    }
+  },
   "confirmationProvider": {
     "channels": [
       "freedesktop"

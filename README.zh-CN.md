@@ -139,6 +139,11 @@ shell 历史和本地进程检查中；全屏界面中输入时会隐藏它。Tu
 Windows 行为。
 
 默认配置路径为 `~/.agentic_gpt/config.json`。开放写入根或启用 MCP server 前，请先检查 [`config.example.json`](config.example.json) 与 [`docs/configuration.zh-CN.md`](docs/configuration.zh-CN.md)。
+Room 设置位于 `room`：可选的 `repositoryRoot` 默认是 `<workspaceRoot>/room`；
+`maintenance.mode` 可为 `local` 或 `workflow`，默认 `local`；`maintenance.autoPush` 默认
+为 `false`。也可以使用 `agentic-gpt config set room.repositoryRoot null`、
+`agentic-gpt config set room.maintenance.mode local` 和
+`agentic-gpt config set room.maintenance.autoPush false` 修改这些设置。
 使用 `agentic-gpt config keys [--section <SECTION>] [--json]` 可以查看受控的 `config set` registry。
 
 ### 2. 通过引用保存 tunnel 密钥

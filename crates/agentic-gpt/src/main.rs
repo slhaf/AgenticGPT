@@ -22,6 +22,9 @@ mod notebook;
 mod notify;
 mod policy;
 mod private_state;
+#[allow(dead_code)] // Phase 1 helpers are consumed by the Phase 2/3 Room surfaces.
+mod room_repository;
+
 mod skill_installs;
 mod skills;
 mod state;
@@ -277,6 +280,9 @@ fn build_app_state(
     runtime: RuntimeModel,
     supervised: bool,
 ) -> Result<AppState> {
+    if config.toolsets.is_enabled(config::ToolNamespace::Room) {
+        room_repository::ensure_repository(&config)?;
+    }
     let max_concurrent_skill_installs = config.skills.max_concurrent_installs;
     let prepared = private_state::prepare(&config)?;
     for warning in &prepared.warnings {
@@ -302,6 +308,7 @@ fn build_app_state(
         temporary_mcp_allows: Arc::new(Mutex::new(Vec::new())),
         mcp_concurrency: Arc::new(jobs::McpConcurrency::new()),
         notebook_writes: Arc::new(Mutex::new(())),
+        room_repository_writes: Arc::new(Mutex::new(())),
         skills_writes: Arc::new(Mutex::new(())),
         skill_leases: Arc::new(jobs::SkillLeaseManager::new()),
         skill_installs: Arc::new(skill_installs::InstallManager::with_concurrency(
@@ -678,12 +685,12 @@ mod tests {
     }
 
     #[test]
-    fn run_as_room_reuses_same_base_config_identity_and_workspace() {
+    fn run_as_room_uses_workspace_default_repository_root() {
         let config = Config::default_config().unwrap();
         assert_eq!(config.agent_id, "laptop");
         assert_eq!(
-            notebook::notebook_root(&config),
-            config.workspace_root.join("notebook")
+            room_repository::repository_root(&config),
+            config.workspace_root.join("room")
         );
     }
 
@@ -754,11 +761,11 @@ mod tests {
     }
 
     #[test]
-    fn configured_room_notebook_root_overrides_default() {
+    fn configured_room_repository_root_overrides_default() {
         let mut config = Config::default_config().unwrap();
-        let root = unique_temp_dir("configured-notebook-root");
-        config.room.notebook_root = Some(root.clone());
-        assert_eq!(notebook::notebook_root(&config), root);
+        let root = unique_temp_dir("configured-room-repository");
+        config.room.repository_root = Some(root.clone());
+        assert_eq!(room_repository::repository_root(&config), root);
     }
 
     #[test]
@@ -819,6 +826,7 @@ mod tests {
                 temporary_mcp_allows: Arc::new(Mutex::new(Vec::new())),
                 mcp_concurrency: Arc::new(crate::jobs::McpConcurrency::new()),
                 notebook_writes: Arc::new(Mutex::new(())),
+                room_repository_writes: Arc::new(Mutex::new(())),
                 skills_writes: Arc::new(Mutex::new(())),
                 skill_leases: Arc::new(jobs::SkillLeaseManager::new()),
                 skill_installs: Arc::new(skill_installs::InstallManager::new()),

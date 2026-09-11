@@ -11,7 +11,7 @@ use crate::{
     cli_i18n::{self, UiLanguage},
     config::{
         self, normalize_confirmation_language, ordered_config_json, write_config_with_backup,
-        Config, ReportingDetail, ToolNamespace,
+        Config, ReportingDetail, RoomMaintenanceMode, ToolNamespace,
     },
     config_setup::SetupSeed,
     config_templates::{self, InitInput, InitSummary, RuntimeMode, SecretValue},
@@ -37,6 +37,7 @@ pub(crate) enum ConfigValueKind {
     ReportingDetail,
     RuntimeMode,
     WorkerProfile,
+    RoomMaintenanceMode,
 }
 
 impl ConfigValueKind {
@@ -57,6 +58,7 @@ impl ConfigValueKind {
             Self::ReportingDetail => "reporting-detail",
             Self::RuntimeMode => "runtime-mode",
             Self::WorkerProfile => "worker-profile",
+            Self::RoomMaintenanceMode => "room-maintenance-mode",
         }
     }
 
@@ -68,6 +70,7 @@ impl ConfigValueKind {
             Self::ReportingDetail => Some(&["metadata", "full"]),
             Self::RuntimeMode => Some(&["standalone", "hub", "local"]),
             Self::WorkerProfile => Some(&["normal", "room"]),
+            Self::RoomMaintenanceMode => Some(&["local", "workflow"]),
             _ => None,
         }
     }
@@ -486,14 +489,14 @@ pub(crate) static CONFIG_KEYS: &[ConfigKeySpec] = &[
         set_skills_allowed_hosts
     ),
     config_key!(
-        "room.notebookRoot",
+        "room.repositoryRoot",
         Room,
         NullablePath,
         true,
-        "Notebook root path, or null to use the default.",
-        "笔记本根目录；使用 null 可恢复默认值。",
+        "Room repository root path, or null to use the workspace default.",
+        "Room 仓库根目录；使用 null 可恢复工作区默认值。",
         "null",
-        set_notebook_root
+        set_repository_root
     ),
     config_key!(
         "room.timezone",
@@ -514,6 +517,26 @@ pub(crate) static CONFIG_KEYS: &[ConfigKeySpec] = &[
         "日记日期开始的小时，范围为 0 到 23。",
         "5",
         set_diary_day_boundary_hour
+    ),
+    config_key!(
+        "room.maintenance.mode",
+        Room,
+        RoomMaintenanceMode,
+        false,
+        "Room maintenance execution mode: local or workflow.",
+        "Room 维护执行模式：local 或 workflow。",
+        "local",
+        set_room_maintenance_mode
+    ),
+    config_key!(
+        "room.maintenance.autoPush",
+        Room,
+        Boolean,
+        false,
+        "Synchronize successful local Room maintenance to the remote when possible.",
+        "本地 Room 维护成功后，尽可能同步到远端。",
+        "false",
+        set_room_maintenance_auto_push
     ),
     config_key!(
         "tunnel.tunnelId",
@@ -925,12 +948,26 @@ fn set_skills_allowed_hosts(config: &mut Config, value: &str) -> Result<()> {
     Ok(())
 }
 
-fn set_notebook_root(config: &mut Config, value: &str) -> Result<()> {
-    config.room.notebook_root = if value == "null" {
+fn set_repository_root(config: &mut Config, value: &str) -> Result<()> {
+    config.room.repository_root = if value == "null" {
         None
     } else {
         Some(PathBuf::from(value))
     };
+    Ok(())
+}
+
+fn set_room_maintenance_mode(config: &mut Config, value: &str) -> Result<()> {
+    config.room.maintenance.mode = match value.to_ascii_lowercase().as_str() {
+        "local" => RoomMaintenanceMode::Local,
+        "workflow" => RoomMaintenanceMode::Workflow,
+        _ => return Err(anyhow!("room.maintenance.mode must be local or workflow")),
+    };
+    Ok(())
+}
+
+fn set_room_maintenance_auto_push(config: &mut Config, value: &str) -> Result<()> {
+    config.room.maintenance.auto_push = value.parse::<bool>()?;
     Ok(())
 }
 
@@ -1575,11 +1612,22 @@ mod tests {
     }
 
     #[test]
-    fn registry_clears_nullable_notebook_root() {
+    fn registry_updates_room_repository_and_maintenance_settings() {
         let mut config = Config::default_config().unwrap();
-        apply_config_key(&mut config, "room.notebookRoot", "/tmp/notebook").unwrap();
-        apply_config_key(&mut config, "room.notebookRoot", "null").unwrap();
-        assert!(config.room.notebook_root.is_none());
+        apply_config_key(&mut config, "room.repositoryRoot", "/tmp/repository").unwrap();
+        apply_config_key(&mut config, "room.maintenance.mode", "workflow").unwrap();
+        apply_config_key(&mut config, "room.maintenance.autoPush", "true").unwrap();
+        assert_eq!(
+            config.room.repository_root.as_deref(),
+            Some(std::path::Path::new("/tmp/repository"))
+        );
+        assert_eq!(config.room.maintenance.mode, RoomMaintenanceMode::Workflow);
+        assert!(config.room.maintenance.auto_push);
+
+        apply_config_key(&mut config, "room.repositoryRoot", "null").unwrap();
+        assert!(config.room.repository_root.is_none());
+        assert!(apply_config_key(&mut config, "room.maintenance.mode", "invalid").is_err());
+        assert!(apply_config_key(&mut config, "room.notebookRoot", "null").is_err());
     }
 
     #[test]

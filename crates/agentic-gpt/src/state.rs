@@ -162,6 +162,8 @@ pub(crate) struct AppState {
     pub(crate) temporary_mcp_allows: Arc<Mutex<Vec<confirmation::TemporaryMcpAllow>>>,
     pub(crate) mcp_concurrency: Arc<jobs::McpConcurrency>,
     pub(crate) notebook_writes: Arc<Mutex<()>>,
+    #[allow(dead_code)] // Serialized Room maintenance starts using this in Phase 3.
+    pub(crate) room_repository_writes: Arc<Mutex<()>>,
     pub(crate) skills_writes: Arc<Mutex<()>>,
     pub(crate) skill_leases: Arc<jobs::SkillLeaseManager>,
     pub(crate) skill_installs: Arc<crate::skill_installs::InstallManager>,

@@ -161,7 +161,7 @@ agentic-gpt run
 | `policy` | 显式 allow / confirm / deny 命令规则。 |
 | `limits` | Process 并发与总 active Job 容量。 |
 | `skills` | Skill package/install 限制与网络策略。 |
-| `room` | Room 时区、日记日界线和可选 notebook root。 |
+| `room` | Room 仓库根目录、时区、日记日界线、维护模式和自动推送策略。 |
 | `tunnel` | Standalone tunnel-client 来源、secret 引用与可选 reporting。 |
 | `hub` | 集中式 Hub 连接，或 Standalone 的可选 Hub reporting/ntfy relay。 |
 
@@ -316,7 +316,10 @@ Server id 最长 64 字节，只使用字母、数字、`.`、`_`、`-`。`strea
 
 `skills` 控制 package 大小、redirect、timeout、重试/总 deadline、安装/下载并发，以及可选 host allowlist。规范字段是顶层 `skills`；只有缺少顶层字段时才读取 legacy `room.skills`。
 
-`room.timezone` 控制 Room 日期时间行为；`room.diaryDayBoundaryHour` 范围 0–23；`room.notebookRoot` 可选。
+`room.timezone` 控制 Room 日期时间行为；`room.diaryDayBoundaryHour` 范围 0–23。
+`room.repositoryRoot` 可选，默认是 `<workspaceRoot>/room`。嵌套的
+`room.maintenance.mode` 可为 `local` 或 `workflow`，默认 `local`；`room.maintenance.autoPush`
+默认是 `false`。
 
 `sandbox.enabled` 启用 bubblewrap；`requiredRuntimePaths` 定义 sandbox 中可见的宿主路径。Sandbox 不能替代命令策略、路径策略或确认。
 
@@ -333,13 +336,15 @@ agentic-gpt config keys [--section <SECTION>] [--json]
 null、示例、双语说明和别名元数据。`config set`
 只接受 registry 中的键；结构化 policy 与 MCP 集合应使用专用命令。
 
-注册键后的值是一个 shell 参数。因此 JSON 列表必须加引号；`room.notebookRoot` 可为 null，
-使用字面量 JSON 值 `null` 可以清除它。
+注册键后的值是一个 shell 参数。因此 JSON 列表必须加引号。`room.repositoryRoot` 可为 null，
+使用字面量 JSON 值 `null` 可以清除它并恢复 workspace 默认目录。
 
 ```bash
 agentic-gpt config set sandbox.requiredRuntimePaths '["/usr","/opt/runtime"]'
 agentic-gpt config set skills.allowedHosts '["skills.example.com"]'
-agentic-gpt config set room.notebookRoot null
+agentic-gpt config set room.repositoryRoot null
+agentic-gpt config set room.maintenance.mode local
+agentic-gpt config set room.maintenance.autoPush false
 ```
 
 registry 包含以下常用 scalar：
@@ -348,7 +353,8 @@ registry 包含以下常用 scalar：
 - `confirmationProvider.channels`、`confirmationLanguage`、`sandbox.enabled`
 - `tunnel.tunnelId`、`tunnel.apiKey`
 - 全部 `tunnel.client.*` 与 `tunnel.hubReporting.*`
-- `room.notebookRoot`、`room.timezone`、`room.diaryDayBoundaryHour`
+- `room.repositoryRoot`、`room.timezone`、`room.diaryDayBoundaryHour`
+- `room.maintenance.mode`、`room.maintenance.autoPush`
 - 文档列出的 `skills.*` scalar/list 字段
 
 结构化策略与 MCP 修改使用 `config allow/confirm/deny`、`config path`、`config mcp`。

@@ -98,7 +98,9 @@ mod tests {
         let room = OptionalSectionDraft::Room(RoomDraft {
             timezone: "Asia/Shanghai".to_string(),
             diary_boundary_hour: "24".to_string(),
-            notebook_root: String::new(),
+            repository_root: String::new(),
+            maintenance_mode: "local".to_string(),
+            maintenance_auto_push: false,
         });
         let errors = session.save_optional_section(room).unwrap_err();
         assert_eq!(errors[0].field, SetupField::RoomTimezone);
@@ -167,8 +169,8 @@ use std::path::PathBuf;
 
 use crate::config::{
     self, default_room_config, ConfirmationProviderConfig, HubReportingConfig, LimitsConfig,
-    MaxActiveJobs, PathPolicyConfig, ReportingDetail, RoomConfig, SandboxConfig, ToolNamespace,
-    ToolsetConfig, TunnelClientConfig,
+    MaxActiveJobs, PathPolicyConfig, ReportingDetail, RoomConfig, RoomMaintenanceConfig,
+    RoomMaintenanceMode, SandboxConfig, ToolNamespace, ToolsetConfig, TunnelClientConfig,
 };
 use crate::config_templates::{
     self, build_config, InitInput, OptionalSection, RuntimeMode, SecretValue, TunnelSecretSource,
@@ -383,12 +385,14 @@ pub(super) fn validate_field(
             OptionalSection::McpServers,
             &session.optional_draft(OptionalSection::McpServers),
         ),
-        SetupField::RoomTimezone | SetupField::DiaryBoundaryHour | SetupField::NotebookRoot => {
-            validate_optional(
-                OptionalSection::Room,
-                &session.optional_draft(OptionalSection::Room),
-            )
-        }
+        SetupField::RoomTimezone
+        | SetupField::DiaryBoundaryHour
+        | SetupField::RepositoryRoot
+        | SetupField::RoomMaintenanceMode
+        | SetupField::RoomMaintenanceAutoPush => validate_optional(
+            OptionalSection::Room,
+            &session.optional_draft(OptionalSection::Room),
+        ),
         SetupField::TunnelClientVersion
         | SetupField::TunnelCacheDir
         | SetupField::TunnelAutoDownload
@@ -548,6 +552,12 @@ fn validate_optional(section: OptionalSection, draft: &OptionalSectionDraft) -> 
                     SetupField::DiaryBoundaryHour,
                     "config_init_number_invalid: diary_boundary_hour",
                 )),
+            }
+            if !matches!(value.maintenance_mode.trim(), "local" | "workflow") {
+                errors.push(error(
+                    SetupField::RoomMaintenanceMode,
+                    "config_init_room_maintenance_mode_invalid",
+                ));
             }
         }
         (OptionalSection::TunnelClient, OptionalSectionDraft::TunnelClient(value)) => {
@@ -957,10 +967,24 @@ fn apply_optional_draft(
                         "config_init_number_invalid: diary_boundary_hour",
                     )]
                 })?;
+            let maintenance_mode = match value.maintenance_mode.trim() {
+                "local" => RoomMaintenanceMode::Local,
+                "workflow" => RoomMaintenanceMode::Workflow,
+                _ => {
+                    return Err(vec![error(
+                        SetupField::RoomMaintenanceMode,
+                        "config_init_room_maintenance_mode_invalid",
+                    )])
+                }
+            };
             input.room = Some(RoomConfig {
-                notebook_root: optional_path(&value.notebook_root),
+                repository_root: optional_path(&value.repository_root),
                 timezone: value.timezone.trim().to_string(),
                 diary_day_boundary_hour,
+                maintenance: RoomMaintenanceConfig {
+                    mode: maintenance_mode,
+                    auto_push: value.maintenance_auto_push,
+                },
                 skills: default_room_config().skills,
             });
         }

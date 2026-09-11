@@ -1,0 +1,30 @@
+name: Apply Room maintenance
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "maintenance/**/maintenance.json"
+
+permissions:
+  contents: write
+
+jobs:
+  apply-maintenance:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out Room repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply repository-owned maintenance
+        run: python3 scripts/apply_maintenance.py
+      - name: Commit semantic changes
+        run: |
+          git config user.name "Room maintenance workflow"
+          git config user.email "room-maintenance@localhost"
+          git add -- Diary Notebook State maintenance
+          git diff --cached --quiet || git commit -m "Apply Room maintenance"
+          git push

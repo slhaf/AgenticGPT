@@ -257,11 +257,7 @@ pub(crate) async fn remove(
 }
 
 pub(crate) fn notebook_root(config: &Config) -> PathBuf {
-    config
-        .room
-        .notebook_root
-        .clone()
-        .unwrap_or_else(|| config.workspace_root.join("notebook"))
+    config.workspace_root.join("notebook")
 }
 
 fn room_timezone(config: &Config) -> Result<Tz> {
@@ -672,6 +668,7 @@ mod tests {
             temporary_mcp_allows: Arc::new(Mutex::new(Vec::new())),
             mcp_concurrency: Arc::new(crate::jobs::McpConcurrency::new()),
             notebook_writes: Arc::new(Mutex::new(())),
+            room_repository_writes: Arc::new(Mutex::new(())),
             skills_writes: Arc::new(Mutex::new(())),
             skill_leases: Arc::new(crate::jobs::SkillLeaseManager::new()),
             skill_installs: Arc::new(crate::skill_installs::InstallManager::new()),

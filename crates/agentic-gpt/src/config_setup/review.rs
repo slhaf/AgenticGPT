@@ -329,11 +329,13 @@ impl ReviewItem {
             Some(SetupField::TunnelSecretSource) => &["file", "env"],
             Some(SetupField::HubTransport) => &["websocket", "sse"],
             Some(SetupField::ConfirmationLanguage) => &["zh-CN", "en"],
+            Some(SetupField::RoomMaintenanceMode) => &["local", "workflow"],
             Some(
                 SetupField::ProvisionTunnelSecret
                 | SetupField::SandboxEnabled
                 | SetupField::TunnelAutoDownload
-                | SetupField::HubReportingEnabled,
+                | SetupField::HubReportingEnabled
+                | SetupField::RoomMaintenanceAutoPush,
             ) => &["false", "true"],
             Some(SetupField::HubReportingDetail) => &["metadata", "full"],
             _ => &[],
@@ -787,7 +789,9 @@ fn optional_items(draft: OptionalSectionDraft) -> Vec<ReviewItem> {
         OptionalSectionDraft::Room(RoomDraft {
             timezone,
             diary_boundary_hour,
-            notebook_root,
+            repository_root,
+            maintenance_mode,
+            maintenance_auto_push,
         }) => vec![
             ReviewItem::field(
                 SetupField::RoomTimezone,
@@ -802,10 +806,22 @@ fn optional_items(draft: OptionalSectionDraft) -> Vec<ReviewItem> {
                 ReviewEditorKind::Text,
             ),
             ReviewItem::field(
-                SetupField::NotebookRoot,
-                "notebook_root",
-                notebook_root,
+                SetupField::RepositoryRoot,
+                "repository_root",
+                repository_root,
                 ReviewEditorKind::Text,
+            ),
+            ReviewItem::field(
+                SetupField::RoomMaintenanceMode,
+                "room_maintenance_mode",
+                maintenance_mode,
+                ReviewEditorKind::Choice,
+            ),
+            ReviewItem::field(
+                SetupField::RoomMaintenanceAutoPush,
+                "room_maintenance_auto_push",
+                maintenance_auto_push.to_string(),
+                ReviewEditorKind::Choice,
             ),
         ],
         OptionalSectionDraft::TunnelClient(TunnelClientDraft {

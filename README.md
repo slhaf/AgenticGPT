@@ -144,6 +144,12 @@ the fullscreen UI. For tunnel API keys, use a `file:`/`env:` reference. This fea
 keyboard fullscreen setup only; it does not promise mouse, inline, dashboard, or Windows behavior.
 
 The default config path is `~/.agentic_gpt/config.json`. Review [`config.example.json`](config.example.json) and [`docs/configuration.md`](docs/configuration.md) before exposing write roots or enabling MCP servers.
+Room settings are under `room`: `repositoryRoot` is optional and defaults to
+`<workspaceRoot>/room`; `maintenance.mode` is `local` or `workflow` and defaults to `local`,
+while `maintenance.autoPush` defaults to `false`. The same settings can be edited with
+`agentic-gpt config set room.repositoryRoot null`,
+`agentic-gpt config set room.maintenance.mode local`, and
+`agentic-gpt config set room.maintenance.autoPush false`.
 Use `agentic-gpt config keys [--section <SECTION>] [--json]` to inspect the controlled `config set` registry.
 Manage namespaces with these exact commands:
 

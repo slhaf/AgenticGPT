@@ -156,14 +156,14 @@ The Agentic API does not duplicate the Room repository's semantic validation rul
 
 ### Phase 1 — Contract/config/runtime foundation
 
-- [ ] Replace `room.notebookRoot` with optional `room.repositoryRoot` in config, CLI/init/review/docs.
-- [ ] Add `room.maintenance.mode` (`local` default / `workflow`) and `room.maintenance.autoPush` (`false` default) to config, CLI/init/review/docs.
-- [ ] Add versioned Room scaffold assets (`room.json`, temporal skeletons, manuals, maintenance layout, executor, workflow) and a deterministic new/empty-root bootstrap path.
-- [ ] Add `room_repository` runtime module and repository bootstrap/validation/read helpers, including independent `git init -b main`; reuse reviewed code from the frozen old branch where semantics still match.
-- [ ] For Agentic-created new/empty repositories, commit only the deterministic scaffold as the initial history. Never baseline unknown pre-existing files automatically.
-- [ ] Keep repository initialization, local-executor readiness, workflow readiness, and remote-sync readiness as distinct status concepts.
-- [ ] Add Agent-owned Room repository write mutex.
-- [ ] Add protocol request/response types required by the new Agent-side commands while keeping Hub compatibility compile-safe.
+- [x] Replace `room.notebookRoot` with optional `room.repositoryRoot` in config, CLI/init/review/docs.
+- [x] Add `room.maintenance.mode` (`local` default / `workflow`) and `room.maintenance.autoPush` (`false` default) to config, CLI/init/review/docs.
+- [x] Add versioned Room scaffold assets (`room.json`, temporal skeletons, manuals, maintenance layout, executor, workflow) and a deterministic new/empty-root bootstrap path.
+- [x] Add `room_repository` runtime module and repository bootstrap/validation/read helpers, including independent `git init -b main`; reuse reviewed code from the frozen old branch where semantics still match.
+- [x] For Agentic-created new/empty repositories, commit only the deterministic scaffold as the initial history. Never baseline unknown pre-existing files automatically.
+- [x] Keep repository initialization, local-executor readiness, workflow readiness, and remote-sync readiness as distinct status concepts.
+- [x] Add Agent-owned Room repository write mutex.
+- [x] Add protocol request/response types required by the new Agent-side commands while keeping Hub compatibility compile-safe.
 
 ### Phase 2 — Read surface
 

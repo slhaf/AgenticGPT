@@ -178,7 +178,7 @@ profile room`). An explicit `toolsets.enabled` selection remains authoritative.
 | `policy` | Explicit allow / confirm / deny command rules. |
 | `limits` | Process concurrency and total active Job capacity. |
 | `skills` | Skill package/install limits and network policy. |
-| `room` | Room timezone, diary boundary, and optional notebook root. |
+| `room` | Room repository root, timezone, diary boundary, maintenance mode, and auto-push policy. |
 | `tunnel` | Standalone tunnel-client source, secret reference, and optional reporting. |
 | `hub` | Centralized Hub connection or optional standalone Hub reporting/ntfy relay. |
 
@@ -333,7 +333,10 @@ Server ids are at most 64 bytes and use letters, digits, `.`, `_`, or `-`. `stre
 
 `skills` controls package sizes, redirects, timeouts, retry/deadline limits, install/download concurrency, and optional host allowlisting. The canonical block is top-level `skills`; legacy `room.skills` is read only when the top-level block is absent.
 
-`room.timezone` controls Room date/time behavior. `room.diaryDayBoundaryHour` is 0–23. `room.notebookRoot` is optional.
+`room.timezone` controls Room date/time behavior. `room.diaryDayBoundaryHour` is 0–23.
+`room.repositoryRoot` is optional and defaults to `<workspaceRoot>/room`. The nested
+`room.maintenance.mode` is `local` or `workflow` and defaults to `local`; `room.maintenance.autoPush`
+defaults to `false`.
 
 `sandbox.enabled` activates bubblewrap. `requiredRuntimePaths` lists host paths made available inside the sandbox. Sandbox does not replace command policy, path policy, or confirmation.
 
@@ -352,12 +355,15 @@ metadata including the value type, nullability, example, bilingual descriptions,
 `config set`; structured policy and MCP collections use their dedicated commands.
 
 The value is one shell argument after the registered key. JSON list values therefore need shell
-quoting, and `room.notebookRoot` is nullable: use the literal JSON value `null` to clear it.
+quoting. `room.repositoryRoot` is nullable: use the literal JSON value `null` to clear it and
+return to the workspace default.
 
 ```bash
 agentic-gpt config set sandbox.requiredRuntimePaths '["/usr","/opt/runtime"]'
 agentic-gpt config set skills.allowedHosts '["skills.example.com"]'
-agentic-gpt config set room.notebookRoot null
+agentic-gpt config set room.repositoryRoot null
+agentic-gpt config set room.maintenance.mode local
+agentic-gpt config set room.maintenance.autoPush false
 ```
 
 The registry includes common scalar values such as:
@@ -366,7 +372,8 @@ The registry includes common scalar values such as:
 - `confirmationProvider.channels`, `confirmationLanguage`, `sandbox.enabled`
 - `tunnel.tunnelId`, `tunnel.apiKey`
 - all `tunnel.client.*` and `tunnel.hubReporting.*` fields
-- `room.notebookRoot`, `room.timezone`, `room.diaryDayBoundaryHour`
+- `room.repositoryRoot`, `room.timezone`, `room.diaryDayBoundaryHour`
+- `room.maintenance.mode`, `room.maintenance.autoPush`
 - the documented `skills.*` scalar/list fields
 
 Use `config allow/confirm/deny`, `config path`, and `config mcp` for structured policy/MCP changes.

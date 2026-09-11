@@ -563,14 +563,33 @@ impl ResolvedMaxActiveJobs {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum RoomMaintenanceMode {
+    #[default]
+    Local,
+    Workflow,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct RoomMaintenanceConfig {
+    #[serde(default)]
+    pub(crate) mode: RoomMaintenanceMode,
+    #[serde(default)]
+    pub(crate) auto_push: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct RoomConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) notebook_root: Option<PathBuf>,
+    pub(crate) repository_root: Option<PathBuf>,
     pub(crate) timezone: String,
     #[serde(default = "default_diary_day_boundary_hour")]
     pub(crate) diary_day_boundary_hour: u32,
+    #[serde(default)]
+    pub(crate) maintenance: RoomMaintenanceConfig,
     #[serde(default, skip_serializing)]
     pub(crate) skills: RoomSkillsConfig,
 }
@@ -651,7 +670,7 @@ impl Default for HubReportingConfig {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RoomSkillsConfig {
     #[serde(default = "default_skill_max_files")]
@@ -1420,9 +1439,10 @@ fn safe_rules(rules: &[Rule]) -> Vec<SafeRule> {
 }
 pub(crate) fn default_room_config() -> RoomConfig {
     RoomConfig {
-        notebook_root: None,
+        repository_root: None,
         timezone: "Asia/Shanghai".to_string(),
         diary_day_boundary_hour: default_diary_day_boundary_hour(),
+        maintenance: RoomMaintenanceConfig::default(),
         skills: RoomSkillsConfig::default(),
     }
 }
@@ -1868,6 +1888,30 @@ mod tests {
         assert_eq!(written["limits"]["maxActiveJobs"], json!(4));
         assert_eq!(written["futureField"]["preserve"], json!(true));
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn room_repository_and_maintenance_use_the_v2_json_shape() {
+        let room = RoomConfig {
+            repository_root: Some(PathBuf::from("/tmp/room-repository")),
+            timezone: "UTC".to_string(),
+            diary_day_boundary_hour: 4,
+            maintenance: RoomMaintenanceConfig {
+                mode: RoomMaintenanceMode::Workflow,
+                auto_push: true,
+            },
+            skills: RoomSkillsConfig::default(),
+        };
+        let value = serde_json::to_value(room).unwrap();
+        assert_eq!(value["repositoryRoot"], json!("/tmp/room-repository"));
+        assert_eq!(value["maintenance"]["mode"], json!("workflow"));
+        assert_eq!(value["maintenance"]["autoPush"], json!(true));
+        assert!(serde_json::from_value::<RoomConfig>(json!({
+            "notebookRoot": "/tmp/legacy",
+            "timezone": "UTC",
+            "diaryDayBoundaryHour": 4
+        }))
+        .is_err());
     }
 
     #[test]

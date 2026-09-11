@@ -57,7 +57,9 @@ pub(crate) enum SetupField {
     McpServerBearerToken,
     RoomTimezone,
     DiaryBoundaryHour,
-    NotebookRoot,
+    RepositoryRoot,
+    RoomMaintenanceMode,
+    RoomMaintenanceAutoPush,
     TunnelClientVersion,
     TunnelCacheDir,
     TunnelAutoDownload,
@@ -211,7 +213,9 @@ pub(crate) struct McpServersDraft {
 pub(crate) struct RoomDraft {
     pub(crate) timezone: String,
     pub(crate) diary_boundary_hour: String,
-    pub(crate) notebook_root: String,
+    pub(crate) repository_root: String,
+    pub(crate) maintenance_mode: String,
+    pub(crate) maintenance_auto_push: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -646,7 +650,9 @@ pub(crate) fn default_optional_draft_for_profile(
         OptionalSection::Room => OptionalSectionDraft::Room(RoomDraft {
             timezone: "Asia/Shanghai".to_string(),
             diary_boundary_hour: "5".to_string(),
-            notebook_root: String::new(),
+            repository_root: String::new(),
+            maintenance_mode: "local".to_string(),
+            maintenance_auto_push: false,
         }),
         OptionalSection::TunnelClient => OptionalSectionDraft::TunnelClient(TunnelClientDraft {
             version: String::new(),
@@ -718,12 +724,14 @@ fn optional_drafts_from_config(config: &Config) -> OptionalDrafts {
         room: Some(RoomDraft {
             timezone: config.room.timezone.clone(),
             diary_boundary_hour: config.room.diary_day_boundary_hour.to_string(),
-            notebook_root: config
+            repository_root: config
                 .room
-                .notebook_root
+                .repository_root
                 .as_ref()
                 .map(|path| path.to_string_lossy().into_owned())
                 .unwrap_or_default(),
+            maintenance_mode: format!("{:?}", config.room.maintenance.mode).to_lowercase(),
+            maintenance_auto_push: config.room.maintenance.auto_push,
         }),
         tunnel_client: tunnel.map(|tunnel| TunnelClientDraft {
             version: tunnel.client.version.clone().unwrap_or_default(),
@@ -1021,7 +1029,9 @@ mod tests {
             .save_optional_section(OptionalSectionDraft::Room(RoomDraft {
                 timezone: "UTC".into(),
                 diary_boundary_hour: "4".into(),
-                notebook_root: String::new(),
+                repository_root: "/tmp/room-repository".into(),
+                maintenance_mode: "workflow".into(),
+                maintenance_auto_push: true,
             }))
             .unwrap();
         session.set_profile(WorkerProfile::Normal);
@@ -1034,5 +1044,13 @@ mod tests {
             session.section_status(OptionalSection::Room),
             SectionStatus::Configured
         );
+        match session.optional_draft(OptionalSection::Room) {
+            OptionalSectionDraft::Room(draft) => {
+                assert_eq!(draft.repository_root, "/tmp/room-repository");
+                assert_eq!(draft.maintenance_mode, "workflow");
+                assert!(draft.maintenance_auto_push);
+            }
+            other => panic!("unexpected room draft: {other:?}"),
+        }
     }
 }
