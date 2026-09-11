@@ -824,7 +824,7 @@ impl RoomMaintenanceSlot {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RoomMaintenanceRequestItem {
     pub slot: RoomMaintenanceSlot,
     pub payload: serde_json::Value,
@@ -838,7 +838,7 @@ pub enum RoomMaintenanceExecutionMode {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RoomMaintenanceSubmitRequest {
     pub items: Vec<RoomMaintenanceRequestItem>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -889,9 +889,8 @@ pub struct RoomMaintenanceSubmitResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revision: Option<String>,
 }
-
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RoomMaintenanceStatusRequest {}
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]

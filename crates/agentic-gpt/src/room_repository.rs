@@ -7,8 +7,12 @@ use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
+use std::time::{Duration as StdDuration, Instant};
+
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 
 /// Maximum data retained from a Git subprocess. Git is never allowed to make a
 /// user-facing error or status response unbounded.
@@ -16,7 +20,9 @@ pub(crate) const MAX_GIT_OUTPUT_BYTES: usize = 64 * 1024;
 /// Maximum Markdown payload retained by the reusable Room read helper.
 pub(crate) const MAX_MARKDOWN_BYTES: usize = 512 * 1024;
 const MAX_ROOM_JSON_BYTES: usize = 16 * 1024;
-const ROOM_SCHEMA_VERSION: u64 = 1;
+const GIT_COMMAND_TIMEOUT: StdDuration = StdDuration::from_secs(10);
+
+pub(crate) const ROOM_SCHEMA_VERSION: u64 = 1;
 const INITIAL_COMMIT_MESSAGE: &str = "Initialize Room repository scaffold";
 const SCAFFOLD_DATE_TOKEN: &str = "{{LOGICAL_DATE}}";
 
@@ -146,6 +152,16 @@ pub(crate) struct RepositoryStatus {
 pub(crate) struct BoundedText {
     pub(crate) content: String,
     pub(crate) truncated: bool,
+}
+
+/// The bounded, user-facing portion of a Git subprocess result.
+///
+/// stderr is deliberately discarded here. Callers must map failures to a
+/// stable semantic error instead of exposing repository-controlled output.
+#[derive(Debug)]
+pub(crate) struct BoundedGitOutput {
+    pub(crate) success: bool,
+    pub(crate) stdout: Vec<u8>,
 }
 
 #[derive(Debug)]
@@ -505,6 +521,30 @@ pub(crate) fn scaffold_paths() -> &'static [&'static str] {
     &PATHS
 }
 
+/// Return deterministic scaffold paths which are absent or not regular files.
+///
+/// The public status surface reports files rather than implicit directories;
+/// the scaffold's `.gitkeep` entries make every otherwise-empty directory
+/// observable in this list.
+pub(crate) fn scaffold_missing_paths(root: &Path) -> Vec<String> {
+    let root_ready = fs::symlink_metadata(root)
+        .map(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+        .unwrap_or(false);
+    scaffold_paths()
+        .iter()
+        .filter_map(|relative| {
+            let ready = root_ready
+                && repository_path(root, relative)
+                    .ok()
+                    .and_then(|path| fs::symlink_metadata(path).ok())
+                    .is_some_and(|metadata| {
+                        metadata.is_file() && !metadata.file_type().is_symlink()
+                    });
+            (!ready).then(|| (*relative).to_string())
+        })
+        .collect()
+}
+
 fn bootstrap_scaffold(root: &Path, boundary_hour: u32) -> Result<()> {
     let logical_date = room_logical_date(Utc::now().with_timezone(&Shanghai), boundary_hour)?;
     for &(relative, template) in SCAFFOLD_FILES {
@@ -805,6 +845,58 @@ fn git_top_level(root: &Path) -> Result<Option<PathBuf>> {
         .map(Some)
         .map_err(|error| anyhow!("room_repository_git_top_level_invalid: {error}"))
 }
+/// Run Git while retaining only bounded stdout and the exit status.
+///
+/// Callers must map unsuccessful commands to a stable semantic error. The
+/// bounded stderr captured by the internal runner is intentionally not exposed.
+pub(crate) fn run_git_bounded(root: &Path, args: &[&str]) -> Result<BoundedGitOutput> {
+    run_git_bounded_with_timeout(root, args, GIT_COMMAND_TIMEOUT)
+}
+
+/// Run Git with an explicit wall-clock timeout.
+pub(crate) fn run_git_bounded_with_timeout(
+    root: &Path,
+    args: &[&str],
+    timeout: StdDuration,
+) -> Result<BoundedGitOutput> {
+    let output = run_git_with_env_timeout(root, args, &[], timeout)?;
+    Ok(BoundedGitOutput {
+        success: output.status.success(),
+        stdout: output.stdout,
+    })
+}
+
+/// Dynamic-argument counterpart to [`run_git_bounded`].
+pub(crate) fn run_git_bounded_args(root: &Path, args: &[String]) -> Result<BoundedGitOutput> {
+    run_git_bounded_args_with_timeout(root, args, GIT_COMMAND_TIMEOUT)
+}
+
+/// Dynamic-argument counterpart to [`run_git_bounded_with_timeout`].
+pub(crate) fn run_git_bounded_args_with_timeout(
+    root: &Path,
+    args: &[String],
+    timeout: StdDuration,
+) -> Result<BoundedGitOutput> {
+    let args = args.iter().map(String::as_str).collect::<Vec<_>>();
+    run_git_bounded_with_timeout(root, &args, timeout)
+}
+
+/// Run Git with fixed identity/configuration while retaining bounded stdout.
+pub(crate) fn run_git_bounded_with_env(
+    root: &Path,
+    args: &[&str],
+    env: &[(&str, &str)],
+) -> Result<BoundedGitOutput> {
+    let output = run_git_with_env_timeout(root, args, env, GIT_COMMAND_TIMEOUT)?;
+    Ok(BoundedGitOutput {
+        success: output.status.success(),
+        stdout: output.stdout,
+    })
+}
+
+fn git_output(root: &Path, args: &[&str]) -> Result<GitOutput> {
+    run_git(root, args)
+}
 
 fn git_text(root: &Path, args: &[&str]) -> Option<String> {
     let output = git_output(root, args).ok()?;
@@ -825,15 +917,20 @@ fn git_text_lines(root: &Path, args: &[&str]) -> Result<Vec<String>> {
         .collect())
 }
 
-fn git_output(root: &Path, args: &[&str]) -> Result<GitOutput> {
-    run_git(root, args)
-}
-
 fn run_git(root: &Path, args: &[&str]) -> Result<GitOutput> {
     run_git_with_env(root, args, &[])
 }
 
 fn run_git_with_env(root: &Path, args: &[&str], env: &[(&str, &str)]) -> Result<GitOutput> {
+    run_git_with_env_timeout(root, args, env, GIT_COMMAND_TIMEOUT)
+}
+
+fn run_git_with_env_timeout(
+    root: &Path,
+    args: &[&str],
+    env: &[(&str, &str)],
+    timeout: StdDuration,
+) -> Result<GitOutput> {
     let mut command = Command::new("git");
     command
         .arg("-C")
@@ -843,34 +940,81 @@ fn run_git_with_env(root: &Path, args: &[&str], env: &[(&str, &str)]) -> Result<
         .env("GIT_OPTIONAL_LOCKS", "0")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    #[cfg(unix)]
+    command.process_group(0);
     for (key, value) in env {
         command.env(key, value);
     }
     let mut child = command
         .spawn()
         .with_context(|| format!("git_command_failed: {}", args.join(" ")))?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| anyhow!("git_stdout_unavailable"))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| anyhow!("git_stderr_unavailable"))?;
+    let stdout = match child.stdout.take() {
+        Some(stdout) => stdout,
+        None => {
+            terminate_child(&mut child);
+            let _ = child.wait();
+            return Err(anyhow!("git_stdout_unavailable"));
+        }
+    };
+    let stderr = match child.stderr.take() {
+        Some(stderr) => stderr,
+        None => {
+            terminate_child(&mut child);
+            let _ = child.wait();
+            return Err(anyhow!("git_stderr_unavailable"));
+        }
+    };
     let stdout_reader = thread::spawn(move || read_bounded_stream(stdout));
     let stderr_reader = thread::spawn(move || read_bounded_stream(stderr));
-    let status = child.wait()?;
+    let deadline = Instant::now() + timeout;
+    let status_result: Result<(ExitStatus, bool)> = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok((status, false)),
+            Ok(None) if Instant::now() >= deadline => {
+                terminate_child(&mut child);
+                break child
+                    .wait()
+                    .map(|status| (status, true))
+                    .map_err(|_| anyhow!("git_command_wait_failed"));
+            }
+            Ok(None) => thread::sleep(StdDuration::from_millis(10)),
+            Err(error) => {
+                terminate_child(&mut child);
+                let _ = child.wait();
+                break Err(error.into());
+            }
+        }
+    };
     let stdout = stdout_reader
         .join()
         .map_err(|_| anyhow!("git_stdout_reader_failed"))??;
     let stderr = stderr_reader
         .join()
         .map_err(|_| anyhow!("git_stderr_reader_failed"))??;
+    let (status, timed_out) = status_result?;
+    if timed_out {
+        return Err(anyhow!("git_command_timed_out"));
+    }
     Ok(GitOutput {
         status,
         stdout,
         stderr,
     })
+}
+
+fn terminate_child(child: &mut Child) {
+    #[cfg(unix)]
+    {
+        let pid = child.id() as libc::pid_t;
+        if pid > 0 {
+            // Git can leave an SSH/helper child attached to its output pipes.
+            // Kill the process group before joining the bounded readers.
+            unsafe {
+                libc::kill(-pid, libc::SIGKILL);
+            }
+        }
+    }
+    let _ = child.kill();
 }
 
 fn read_bounded_stream<R: Read>(mut reader: R) -> std::io::Result<Vec<u8>> {

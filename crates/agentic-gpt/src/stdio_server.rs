@@ -55,6 +55,8 @@ const TOOL_NAMESPACE_BY_NAME: &[(&str, ToolNamespace)] = &[
     ("process.exec", ToolNamespace::Process),
     ("room.diary.active", ToolNamespace::Room),
     ("room.diary.read", ToolNamespace::Room),
+    ("room.maintenance.status", ToolNamespace::Room),
+    ("room.maintenance.submit", ToolNamespace::Room),
     ("room.notebook.read", ToolNamespace::Room),
     ("room.notebook.recent", ToolNamespace::Room),
     ("room.notebook.search", ToolNamespace::Room),
@@ -1028,6 +1030,22 @@ impl AgentMcpServer {
                 let response = crate::room_reads::state_list(&self.state, request).await?;
                 Ok(serde_json::to_value(response)?)
             }
+            "room.maintenance.status" => {
+                let request: agentic_gpt_protocol::RoomMaintenanceStatusRequest =
+                    from_value(arguments)?;
+                match crate::room_maintenance::status(&self.state, request).await {
+                    Ok(response) => Ok(serde_json::to_value(response)?),
+                    Err(error) => Ok(room_maintenance_error("status", error)),
+                }
+            }
+            "room.maintenance.submit" => {
+                let request: agentic_gpt_protocol::RoomMaintenanceSubmitRequest =
+                    from_value(arguments)?;
+                match crate::room_maintenance::submit(&self.state, request).await {
+                    Ok(response) => Ok(serde_json::to_value(response)?),
+                    Err(error) => Ok(room_maintenance_error("submit", error)),
+                }
+            }
             "room.state.read" => {
                 let request: agentic_gpt_protocol::RoomStateReadRequest = from_value(arguments)?;
                 let response = crate::room_reads::state_read(&self.state, request).await?;
@@ -1755,6 +1773,16 @@ fn structured_error_value(default_code: &str, message: impl Into<String>) -> Val
     })
 }
 
+fn room_maintenance_error(operation: &str, error: impl std::fmt::Display) -> Value {
+    let reason = error.to_string();
+    let detail = reason.chars().take(384).collect::<String>();
+    let message = format!("room maintenance {operation} failed: {detail}")
+        .chars()
+        .take(512)
+        .collect::<String>();
+    structured_error_value("room_maintenance_failed", message)
+}
+
 fn structured_error_from_reason(default_code: &str, message: impl Into<String>) -> Value {
     let message = message.into();
     let mut error = rejection_error(&message);
@@ -2321,6 +2349,7 @@ fn tool_schema(name: &str) -> (Map<String, Value>, &'static [&'static str]) {
         "file.edit" => &["patch"],
         "mcp.callTool" => &["serverId", "toolName"],
         "mcp.batch" => &["calls"],
+        "room.maintenance.submit" => &["items"],
         "skills.setActive" => &["id", "active"],
         "tmux.sessions" | "tmux.panes" => &["action"],
         "tmux.exec" => &["target", "program"],
@@ -2800,6 +2829,51 @@ fn properties_for(name: &str) -> Map<String, Value> {
             add("workingDirectory", string("Optional working directory."));
             add("waitSeconds", number("Bounded inline wait, capped at 30."));
         }
+        "room.maintenance.status" => {}
+        "room.maintenance.submit" => {
+            add(
+                "items",
+                json!({
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 5,
+                    "description": "One to five maintenance requests; each slot may appear at most once. The set is validated against the Room repository before any mutation.",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["slot", "payload"],
+                        "properties": {
+                            "slot": {
+                                "type": "string",
+                                "enum": ["diary.daily", "diary.weekly", "diary.monthly", "notebook", "entity"],
+                                "description": "Unique Room semantic slot to maintain."
+                            },
+                            "payload": {
+                                "description": "Slot-specific maintenance payload; validated by the Room maintenance executor."
+                            }
+                        }
+                    }
+                }),
+            );
+            add(
+                "mode",
+                json!({
+                    "type": "string",
+                    "enum": ["local", "workflow"],
+                    "description": "Optional execution mode override; local applies in the validated Room repository, workflow submits through the configured Room workflow."
+                }),
+            );
+            add(
+                "waitSeconds",
+                json!({
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 30,
+                    "default": 0,
+                    "description": "Optional bounded wait for workflow consumption and local fast-forward, from 0 through 30 seconds."
+                }),
+            );
+        }
         "room.diary.active" | "room.state.list" => {}
         "room.diary.read" => {
             add(
@@ -2924,6 +2998,8 @@ fn tool_description(name: &str) -> String {
         "skills.install.get" => "Inspect or briefly wait for one skill installation; read-only lifecycle inspection.".to_string(),
         "skills.install.cancel" => "Request cooperative cancellation of one skill installation before commit.".to_string(),
         "skills.run" => "Run an executable from an active local skill as a managed Job.".to_string(),
+        "room.maintenance.status" => "Inspect Room maintenance readiness, repository state, schema/scaffold support, executor configuration, workflow/remote availability, synchronization heads, and deterministic occupancy for all five semantic slots; read-only and non-destructive.".to_string(),
+        "room.maintenance.submit" => "Apply one to five unique Room maintenance slot requests after exact validation; destructive but confined to the validated Room repository, with optional local/workflow mode and bounded workflow wait; not open-world.".to_string(),
         "room.diary.active" => "Read the active daily, weekly, and monthly Room diary documents; read-only, semantic, and bounded.".to_string(),
         "room.diary.read" => "Read one exact Room diary document by validated semantic layer and period; read-only, semantic, and bounded.".to_string(),
         "room.notebook.recent" => "Read bounded recent Room notebook Markdown previews; read-only, semantic, and bounded semantic discovery.".to_string(),
@@ -2952,6 +3028,7 @@ fn tool_is_read_only(name: &str) -> bool {
             | "skills.deactivate"
             | "skills.install"
             | "skills.install.cancel"
+            | "room.maintenance.submit"
             | "skills.run"
             | "file.edit"
     )
@@ -2966,6 +3043,7 @@ fn tool_is_destructive(name: &str) -> bool {
             | "tmux.closeSession"
             | "skills.install"
             | "skills.install.cancel"
+            | "room.maintenance.submit"
             | "skills.setActive"
             | "skills.run"
     )
@@ -3067,6 +3145,8 @@ mod tests {
             "bootstrap.read",
             "room.diary.active",
             "room.diary.read",
+            "room.maintenance.status",
+            "room.maintenance.submit",
             "room.notebook.read",
             "room.notebook.recent",
             "room.notebook.search",
@@ -3230,6 +3310,62 @@ mod tests {
         assert_eq!(edit_fields, expected_edit_fields);
         assert_eq!(edit["inputSchema"]["required"], json!(["patch"]));
         Ok(())
+    }
+
+    #[test]
+    fn room_maintenance_descriptors_are_frozen() -> anyhow::Result<()> {
+        let status = serde_json::to_value(tool_descriptor("room.maintenance.status"))?;
+        assert_eq!(status["annotations"]["readOnlyHint"], true);
+        assert_eq!(status["annotations"]["destructiveHint"], false);
+        assert_eq!(status["annotations"]["openWorldHint"], false);
+        assert_eq!(status["inputSchema"]["required"], json!([]));
+
+        let submit = serde_json::to_value(tool_descriptor("room.maintenance.submit"))?;
+        assert_eq!(submit["annotations"]["readOnlyHint"], false);
+        assert_eq!(submit["annotations"]["destructiveHint"], true);
+        assert_eq!(submit["annotations"]["openWorldHint"], false);
+        assert_eq!(submit["inputSchema"]["required"], json!(["items"]));
+        let items = &submit["inputSchema"]["properties"]["items"];
+        assert_eq!(items["minItems"], 1);
+        assert_eq!(items["maxItems"], 5);
+        assert_eq!(items["items"]["required"], json!(["slot", "payload"]));
+        assert_eq!(
+            items["items"]["properties"]["slot"]["enum"],
+            json!([
+                "diary.daily",
+                "diary.weekly",
+                "diary.monthly",
+                "notebook",
+                "entity"
+            ])
+        );
+        assert_eq!(
+            submit["inputSchema"]["properties"]["mode"]["enum"],
+            json!(["local", "workflow"])
+        );
+        assert_eq!(
+            submit["inputSchema"]["properties"]["waitSeconds"]["minimum"],
+            0
+        );
+        assert_eq!(
+            submit["inputSchema"]["properties"]["waitSeconds"]["maximum"],
+            30
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn room_maintenance_submit_rejects_unknown_nested_fields() {
+        let error =
+            serde_json::from_value::<agentic_gpt_protocol::RoomMaintenanceSubmitRequest>(json!({
+                "items": [{
+                    "slot": "entity",
+                    "payload": {"entity": "project", "content": "ok"},
+                    "unexpected": true
+                }]
+            }))
+            .expect_err("nested maintenance fields must be strict");
+        assert!(error.to_string().contains("unknown field"));
     }
 
     #[tokio::test]
@@ -3406,6 +3542,8 @@ mod tests {
             "bootstrap.read",
             "room.diary.active",
             "room.diary.read",
+            "room.maintenance.status",
+            "room.maintenance.submit",
             "room.notebook.recent",
             "room.notebook.search",
             "room.notebook.read",

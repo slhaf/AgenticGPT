@@ -175,13 +175,13 @@ The Agentic API does not duplicate the Room repository's semantic validation rul
 
 ### Phase 3 — Maintenance status/submit
 
-- [ ] Implement status and slot mapping.
-- [ ] Implement serialized clean-repository and occupancy checks.
-- [ ] Implement repository-owned `scripts/apply_maintenance.py` preflight in a disposable checkout with cleanup on all paths.
-- [ ] Implement local backend: write request → local executor apply/consume → one local semantic commit → optional best-effort/explicit remote sync.
-- [ ] Implement workflow backend: fast-forward sync → request commit/push → bounded workflow-consumption wait/pull.
-- [ ] Ensure local apply success and remote push status are represented independently; never roll back a successful local semantic commit solely because remote sync failed.
-- [ ] Add safe structured responses/errors; never include secrets or unbounded Git stderr.
+- [x] Implement status and slot mapping.
+- [x] Implement serialized clean-repository and occupancy checks.
+- [x] Implement repository-owned `scripts/apply_maintenance.py` preflight in a disposable checkout with cleanup on all paths.
+- [x] Implement local backend: write request → local executor apply/consume → one local semantic commit → optional best-effort/explicit remote sync.
+- [x] Implement workflow backend: fast-forward sync → request commit/push → bounded workflow-consumption wait/pull.
+- [x] Ensure local apply success and remote push status are represented independently; never roll back a successful local semantic commit solely because remote sync failed.
+- [x] Add safe structured responses/errors; never include secrets or unbounded Git stderr.
 
 ### Phase 4 — Legacy Agent cleanup
 
