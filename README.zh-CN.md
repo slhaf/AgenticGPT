@@ -241,7 +241,7 @@ Hub 原生工具和转发执行使用相同的 Managed Job envelope；运行中�
 
 ## Managed Job 与安全边界
 
-- Normal surface 24 个工具，Room surface 36 个工具。
+- V2 Normal surface 有 23 个工具，Room surface 有 34 个工具；profile preset 选择 namespace，显式 `toolsets.enabled` 仍可进一步缩小 surface。
 - `process.exec`、`skills.run`、`mcp.callTool` 返回 `JobResponse`。
 - `mcp.batch` 接受 1–16 个有序调用，只确认一次，并执行全局/单 server 并发限制。
 - MCP 单调用参数上限 256 KiB，保留结果上限 512 KiB；批次 aggregate 参数与结果各上限 2 MiB。

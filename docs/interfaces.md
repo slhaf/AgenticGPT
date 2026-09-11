@@ -134,13 +134,15 @@ priority: 80
 loadWhen:
   - The session continues prior personal or project context.
 toolBindings:
-  - room.diary.recent
-  - room.diary.append
+  - room.diary.active
+  - room.diary.read
+  - room.maintenance.submit
 tags:
   - continuity
 ---
 
-Use the Diary tools for dated records and follow the recovery rules described here.
+Use semantic Diary reads for current or exact documents; route mutations through the
+maintenance submission contract.
 ```
 
 Required guide fields are `id`, `kind: guide`, `title`, and `summary`. `loadPolicy` defaults to `on_demand` and accepts `startup`, `contextual`, or `on_demand`. `priority` defaults to `0` and is a signed 32-bit integer. `loadWhen`, `toolBindings`, and `tags` default to empty arrays and contain non-empty strings in authored order. Unknown fields are ignored for typed V1 behavior but remain in the raw `frontmatter` returned by `room.bootstrap.read`.
@@ -153,12 +155,12 @@ Guide metadata is generic. For example, a workspace may author guides like these
 id: notebook
 kind: guide
 title: Notebook continuity
-summary: Search and update durable project passages before making assumptions.
+summary: Search and read durable project passages before making assumptions.
 loadPolicy: contextual
-toolBindings: [room.notebook.search, room.notebook.current]
+toolBindings: [room.notebook.search, room.notebook.read, room.maintenance.submit]
 tags: [project-context]
 ---
-Keep MCP argument schemas in the tool definition; put selection and recovery rules here.
+Keep MCP argument schemas in the tool definition; use maintenance submission for Notebook changes.
 ```
 
 ```markdown

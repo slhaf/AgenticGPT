@@ -316,10 +316,14 @@ Server id 最长 64 字节，只使用字母、数字、`.`、`_`、`-`。`strea
 
 `skills` 控制 package 大小、redirect、timeout、重试/总 deadline、安装/下载并发，以及可选 host allowlist。规范字段是顶层 `skills`；只有缺少顶层字段时才读取 legacy `room.skills`。
 
-`room.timezone` 控制 Room 日期时间行为；`room.diaryDayBoundaryHour` 范围 0–23。
+`room.timezone` 保留为 Room metadata；V2 read 使用仓库路径，不再使用 legacy JSONL 日期分区。
+`room.diaryDayBoundaryHour` 范围为 0–23，用于新 bootstrap 的 Daily scaffold 逻辑日期。
 `room.repositoryRoot` 可选，默认是 `<workspaceRoot>/room`。嵌套的
 `room.maintenance.mode` 可为 `local` 或 `workflow`，默认 `local`；`room.maintenance.autoPush`
-默认是 `false`。
+默认是 `false`。Standalone Room toolset 只暴露 semantic read、`room.maintenance.status`
+和 `room.maintenance.submit`；所有 mutation 都走后者。
+Legacy JSONL Room command 仅保留在 protocol 与 Hub HTTP/MCP compatibility surface，供独立
+Hub parity workstream 使用，不由 Agent advertisement 或 runtime 执行。
 
 `sandbox.enabled` 启用 bubblewrap；`requiredRuntimePaths` 定义 sandbox 中可见的宿主路径。Sandbox 不能替代命令策略、路径策略或确认。
 

@@ -8,7 +8,6 @@ mod config_setup;
 mod config_templates;
 mod config_tui;
 mod confirmation;
-mod diary;
 mod exec;
 mod file_ops;
 mod hub;
@@ -18,13 +17,11 @@ mod jobs;
 mod local_control;
 mod local_service;
 mod mcp;
-mod notebook;
 mod notify;
 mod policy;
 mod private_state;
 mod room_maintenance;
 mod room_reads;
-#[allow(dead_code)] // Phase 1 helpers are consumed by the Phase 2/3 Room surfaces.
 mod room_repository;
 
 mod skill_installs;
@@ -309,7 +306,6 @@ fn build_app_state(
         pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
         temporary_mcp_allows: Arc::new(Mutex::new(Vec::new())),
         mcp_concurrency: Arc::new(jobs::McpConcurrency::new()),
-        notebook_writes: Arc::new(Mutex::new(())),
         room_repository_writes: Arc::new(Mutex::new(())),
         skills_writes: Arc::new(Mutex::new(())),
         skill_leases: Arc::new(jobs::SkillLeaseManager::new()),
@@ -652,8 +648,7 @@ mod tests {
     use crate::exec::PreparedBatchElement;
     use crate::mcp::McpServerConfig;
     use agentic_gpt_protocol::{
-        AgentMessage, BootstrapReadRequest, HubCommand, NotebookAppendRequest,
-        NotebookRemoveRequest, NotebookUpdateRequest, PassageSignificance,
+        AgentMessage, BootstrapReadRequest, HubCommand, NotebookAppendRequest, PassageSignificance,
     };
     use tokio::sync::mpsc;
     use uuid::Uuid;
@@ -827,7 +822,6 @@ mod tests {
                 pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
                 temporary_mcp_allows: Arc::new(Mutex::new(Vec::new())),
                 mcp_concurrency: Arc::new(crate::jobs::McpConcurrency::new()),
-                notebook_writes: Arc::new(Mutex::new(())),
                 room_repository_writes: Arc::new(Mutex::new(())),
                 skills_writes: Arc::new(Mutex::new(())),
                 skill_leases: Arc::new(jobs::SkillLeaseManager::new()),
@@ -958,33 +952,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn room_mode_executes_update_and_remove_room_commands() {
-        let workspace = unique_temp_dir("room-update-remove").join("workspace");
+    async fn room_mode_rejects_legacy_jsonl_commands() {
+        let workspace = unique_temp_dir("room-legacy-rejected").join("workspace");
         fs::create_dir_all(&workspace).unwrap();
         let (state, mut rx) = command_test_state(CapabilityProfile::Room, workspace);
-        let appended = notebook::append(
-            &state,
-            NotebookAppendRequest {
-                datetime: None,
-                scope: "agentic".to_string(),
-                significance: PassageSignificance::Anchor,
-                abstract_text: Some("original".to_string()),
-                content: "details".to_string(),
-                tags: vec![],
-            },
-        )
-        .await
-        .unwrap();
+
         hub::handle_hub_command(
-            state.clone(),
-            HubCommand::RoomNotebookUpdate {
-                request_id: "req-update".to_string(),
-                payload: NotebookUpdateRequest {
-                    id: appended.id.clone(),
-                    significance: None,
-                    abstract_text: Some("updated".to_string()),
-                    content: Some("updated details".to_string()),
-                    tags: Some(vec!["tag".to_string()]),
+            state,
+            HubCommand::RoomNotebookAppend {
+                request_id: "req-legacy".to_string(),
+                payload: NotebookAppendRequest {
+                    datetime: None,
+                    scope: "agentic".to_string(),
+                    significance: PassageSignificance::Anchor,
+                    abstract_text: None,
+                    content: "legacy".to_string(),
+                    tags: Vec::new(),
                 },
             },
             None,
@@ -992,21 +975,7 @@ mod tests {
         .await
         .unwrap();
         let response = recv_response(&mut rx).await;
-        assert_eq!(response["updated"], true);
-        assert_eq!(response["id"], appended.id);
-
-        hub::handle_hub_command(
-            state,
-            HubCommand::RoomNotebookRemove {
-                request_id: "req-remove".to_string(),
-                payload: NotebookRemoveRequest { id: appended.id },
-            },
-            None,
-        )
-        .await
-        .unwrap();
-        let response = recv_response(&mut rx).await;
-        assert_eq!(response["removed"], true);
+        assert_eq!(response["error"]["code"], "room_legacy_surface_removed");
     }
 
     #[test]

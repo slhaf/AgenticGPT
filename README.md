@@ -264,7 +264,7 @@ Hub-native and forwarded execution use the same managed Job envelopes. Active wo
 
 ## Managed Jobs and safety boundaries
 
-- The pre-existing advertised surface contains 23 Normal names and 35 Room names; profile presets select namespaces, and explicit `toolsets.enabled` can narrow that surface.
+- The V2 advertised surface contains 23 Normal names and 34 Room names; profile presets select namespaces, and explicit `toolsets.enabled` can narrow that surface.
 - `process.exec`, `skills.run`, and `mcp.callTool` return `JobResponse`.
 - `mcp.batch` accepts 1–16 ordered calls, uses one aggregate confirmation, and enforces global/per-server concurrency.
 - MCP arguments are JSON objects capped at 256 KiB per call; retained results are capped at 512 KiB; aggregate batch arguments/results are capped at 2 MiB.

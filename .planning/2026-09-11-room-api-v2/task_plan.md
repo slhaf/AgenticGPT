@@ -185,10 +185,10 @@ The Agentic API does not duplicate the Room repository's semantic validation rul
 
 ### Phase 4 — Legacy Agent cleanup
 
-- [ ] Remove legacy Room JSONL tool advertisements and Agent-side dispatch paths.
-- [ ] Remove now-unused `diary.rs` / `notebook.rs` runtime dependencies when no Agent path references them.
-- [ ] Keep only the minimum protocol/Hub compatibility residue required for the separate Hub parity branch; document it explicitly.
-- [ ] Update Room toolset descriptions/count/surface tests and standalone/config docs.
+- [x] Remove legacy Room JSONL tool advertisements and Agent-side dispatch paths.
+- [x] Remove now-unused `diary.rs` / `notebook.rs` runtime dependencies when no Agent path references them.
+- [x] Keep only the minimum protocol/Hub compatibility residue required for the separate Hub parity branch; document it explicitly.
+- [x] Update Room toolset descriptions/count/surface tests and standalone/config docs.
 
 ### Phase 5 — Verification
 

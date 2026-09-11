@@ -244,6 +244,7 @@ pub(crate) fn repository_path(root: &Path, relative: &str) -> Result<PathBuf> {
 /// Compute a repository-relative path after rejecting escapes and symlinked
 /// path components. This is intentionally independent of `Path::display` so
 /// callers receive stable `/` separators on every platform.
+#[cfg(test)]
 pub(crate) fn repository_relative(root: &Path, path: &Path) -> Result<String> {
     if path
         .components()
@@ -864,11 +865,6 @@ pub(crate) fn run_git_bounded_with_timeout(
         success: output.status.success(),
         stdout: output.stdout,
     })
-}
-
-/// Dynamic-argument counterpart to [`run_git_bounded`].
-pub(crate) fn run_git_bounded_args(root: &Path, args: &[String]) -> Result<BoundedGitOutput> {
-    run_git_bounded_args_with_timeout(root, args, GIT_COMMAND_TIMEOUT)
 }
 
 /// Dynamic-argument counterpart to [`run_git_bounded_with_timeout`].

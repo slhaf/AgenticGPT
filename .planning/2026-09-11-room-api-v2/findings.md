@@ -56,3 +56,11 @@
 - The frozen workflow asset currently triggers on maintenance request pushes and invokes `scripts/apply_maintenance.py`; Agent workflow mode must synchronize `main` fast-forward-only and never duplicate semantic validation.
 - Review hardening: preflight now uses `git worktree add --no-checkout`, filter-free `git archive` extraction, and bounded `tar` materialization, so repository smudge filters cannot perform offline-local network work.
 - Review hardening also bounds Git/executor process groups, cleans partial request writes and failed workflow staging, refreshes repository readiness after fast-forward sync, and records idempotent local applications with an empty semantic commit.
+
+## Phase 4 legacy boundary
+
+- The standalone Agent now has no legacy Room JSONL modules or execution path: `diary.rs`, `notebook.rs`, their write lock, and the old local operation handlers were removed.
+- Legacy `HubCommand` protocol variants and the Hub HTTP/MCP/OpenAPI forwarding surface remain only as explicit compatibility residue for the separate Hub parity workstream; the Agent accepts those inbound variants only to return `room_legacy_surface_removed`.
+- The advertised standalone Room preset is V2-only: 23 Normal names and 34 Room names, with nine semantic Room tools plus the two bootstrap aliases.
+- Standalone/runtime, README, interface, configuration, and contract-matrix documentation now describe V2 reads and maintenance submission. The matrix retains legacy names only under the Hub compatibility section.
+- Phase 4 focused verification passed: `cargo fmt --all`, `cargo check -p agentic-gpt`, all 45 `cargo test -p agentic-gpt room_` tests, the exact Room surface contract test, and no remaining `notebook_writes` or Agent legacy-module references.

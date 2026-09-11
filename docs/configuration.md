@@ -333,10 +333,15 @@ Server ids are at most 64 bytes and use letters, digits, `.`, `_`, or `-`. `stre
 
 `skills` controls package sizes, redirects, timeouts, retry/deadline limits, install/download concurrency, and optional host allowlisting. The canonical block is top-level `skills`; legacy `room.skills` is read only when the top-level block is absent.
 
-`room.timezone` controls Room date/time behavior. `room.diaryDayBoundaryHour` is 0–23.
+`room.timezone` is retained Room metadata; V2 reads use repository paths rather than the
+legacy JSONL date partitioning. `room.diaryDayBoundaryHour` is 0–23 and controls the logical
+date written into a newly bootstrapped Daily scaffold.
 `room.repositoryRoot` is optional and defaults to `<workspaceRoot>/room`. The nested
 `room.maintenance.mode` is `local` or `workflow` and defaults to `local`; `room.maintenance.autoPush`
-defaults to `false`.
+defaults to `false`. The standalone Room toolset exposes semantic reads plus
+`room.maintenance.status` and `room.maintenance.submit`; all mutations use the latter.
+Legacy JSONL Room commands remain only in the protocol and Hub HTTP/MCP compatibility surface
+for the separate Hub parity workstream and are not advertised or executed by the Agent.
 
 `sandbox.enabled` activates bubblewrap. `requiredRuntimePaths` lists host paths made available inside the sandbox. Sandbox does not replace command policy, path policy, or confirmation.
 

@@ -36,3 +36,8 @@
 - Full verification passed: `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo test --workspace` (459 passed across 9 suites), and `git diff --check`.
 - Integration note: the initial delegated core slice stalled and left two compile regressions in the repository helper; the constant and schema arm were restored before verification, with no contract change.
 - Final post-review recheck after filter-free preflight: `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo test --workspace` (459 passed across 9 suites), and `git diff --check` passed.
+
+- Phase 4 legacy Agent cleanup landed: removed `diary.rs`/`notebook.rs`, the obsolete `AppState.notebook_writes` mutex and initializers, and all Agent execution of legacy `HubCommand::RoomDiary*`/`RoomNotebook*` JSONL operations.
+- Legacy protocol variants plus Hub HTTP/MCP/OpenAPI forwarding remain as explicit compatibility residue for the separate Hub parity workstream; Agent inbound legacy commands now return `room_legacy_surface_removed`.
+- Standalone Room docs and surface tests now reflect the V2-only 23 Normal / 34 Room surface and the nine semantic tools plus bootstrap aliases; mutations are documented through `room.maintenance.submit`.
+- Phase 4 verification passed: `cargo fmt --all`, `cargo check -p agentic-gpt`, 45 Room-focused Agent tests, and the exact standalone Room surface test. The planning catch-up helper path was unavailable (`session-catchup.py` not found); planning continued from the checked-in files.

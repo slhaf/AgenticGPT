@@ -88,12 +88,12 @@ errors are written to stderr. A stopped/restarting runtime returns
 
 ## Tunnel and local tool surfaces
 
-The pre-existing advertised surface contains 23 Normal names and 35 Room names. Profiles select
+The V2 advertised surface contains 23 Normal names and 34 Room names. Profiles select
 namespace presets rather than fixing the final runtime surface: normal enables `agent`, `file`,
 `mcp`, `process`, `job`, `skills`, and `tmux`; room enables all of those plus `room`. An explicit
-`toolsets.enabled` selection is authoritative. The logical `room` namespace includes `bootstrap`,
-`bootstrap.read`, and every `room.*` tool. These filters only remove names from the advertised
-surface; they never expose dispatch-only aliases.
+`toolsets.enabled` selection is authoritative. The logical `room` namespace contains
+`bootstrap`, `bootstrap.read`, the semantic read tools, and maintenance status/submit. These
+filters only remove names from the advertised surface; they never expose dispatch-only aliases.
 
 Start with `agent.info` to inspect the active profile and enabled namespaces, bounded path policy,
 capacity, confirmation availability, and reporting state:
@@ -111,11 +111,15 @@ When the logical `room` namespace is enabled, the additional advertised names ar
 
 ```text
 bootstrap, bootstrap.read
-room.diary.append, room.diary.recent, room.diary.selectExact
-room.notebook.append, room.notebook.current, room.notebook.recent,
-room.notebook.remove, room.notebook.search, room.notebook.selectExact,
-room.notebook.update
+room.diary.active, room.diary.read
+room.notebook.recent, room.notebook.search, room.notebook.read
+room.state.list, room.state.read
+room.maintenance.status, room.maintenance.submit
 ```
+
+Legacy JSONL Room names are not advertised or executed by the Agent. The legacy protocol and
+Hub HTTP/MCP forwarding rows remain only as compatibility residue for the separate Hub parity
+workstream.
 
 Managed `mcp.callTool` uses the same Job registry and capacity limit as
 process and skill Jobs. Its `waitSeconds` defaults to 5 and is capped at 30;

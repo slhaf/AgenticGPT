@@ -3164,7 +3164,8 @@ mod tests {
             .all(|tool| !tool.name.starts_with("room.") && !tool.name.starts_with("bootstrap")));
 
         // These names remain dispatch-only compatibility paths and must never
-        // leak into the advertised MCP surface.
+        // leak into the advertised MCP surface. Legacy JSONL Room names are
+        // retained only by the separate Hub compatibility boundary.
         for alias in [
             "file.batch",
             "user.notify.deliver",
@@ -3176,6 +3177,14 @@ mod tests {
             "tmux.listSessions",
             "tmux.listPanes",
             "tmux.capturePane",
+            "room.diary.append",
+            "room.diary.recent",
+            "room.diary.selectExact",
+            "room.notebook.append",
+            "room.notebook.current",
+            "room.notebook.remove",
+            "room.notebook.selectExact",
+            "room.notebook.update",
         ] {
             assert!(
                 !expected_room.contains(alias),
@@ -4981,7 +4990,6 @@ mod tests {
             pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
             temporary_mcp_allows: Arc::new(Mutex::new(Vec::new())),
             mcp_concurrency: Arc::new(crate::jobs::McpConcurrency::new()),
-            notebook_writes: Arc::new(Mutex::new(())),
             room_repository_writes: Arc::new(Mutex::new(())),
             skills_writes: Arc::new(Mutex::new(())),
             skill_leases: Arc::new(SkillLeaseManager::new()),

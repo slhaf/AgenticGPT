@@ -554,7 +554,6 @@ mod tests {
             pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
             temporary_mcp_allows: Arc::new(Mutex::new(Vec::new())),
             mcp_concurrency: Arc::new(crate::jobs::McpConcurrency::new()),
-            notebook_writes: Arc::new(Mutex::new(())),
             room_repository_writes: Arc::new(Mutex::new(())),
             skills_writes: Arc::new(Mutex::new(())),
             skill_leases: Arc::new(crate::jobs::SkillLeaseManager::new()),
