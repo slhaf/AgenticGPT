@@ -75,3 +75,5 @@
 - Phase 5 verification passed: focused repository/read/maintenance suites (15/7/11 tests), Local Unix integration (1 test), workspace check, 452 workspace tests across 9 suites, rustfmt check, and `git diff --check`.
 
 - Post-verification documentation audit found stale current-runtime counts in `README.zh-CN.md` and `docs/operations.md`; both now state the live 23 Normal / 34 Room surface. Historical v0.9 migration/release notes retain their version-specific 24/36 acceptance text.
+
+- Count reconciliation against the canonical `stdio_server.rs` contract test: `expected_normal` contains 23 names and `room_additions` contains 11 names—two bootstrap entrypoints plus nine semantic `room.*` tools—for 34 Room names total. The 23/34 planning and current-runtime documentation counts are therefore correct; the 24/36 claim comes only from historical v0.9 text.

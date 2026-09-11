@@ -47,3 +47,5 @@
 - 2026-09-11: Final verification passed: `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo test --workspace` (452 passed across 9 suites), focused Phase 5 suites, and `git diff --check`.
 
 - 2026-09-11: Post-verification docs audit corrected the current-runtime Room counts in `README.zh-CN.md` and `docs/operations.md` to 23 Normal / 34 Room; versioned v0.9 migration/release notes remain historical.
+
+- 2026-09-11: Rechecked `normal_and_room_tool_sets_follow_fixed_surface_contract`: 23 Normal names plus 11 Room additions (two bootstrap entrypoints and nine semantic Room tools) produce 34 Room names; planning and current-runtime docs are aligned.
