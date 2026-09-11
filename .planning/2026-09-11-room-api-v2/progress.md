@@ -41,3 +41,7 @@
 - Legacy protocol variants plus Hub HTTP/MCP/OpenAPI forwarding remain as explicit compatibility residue for the separate Hub parity workstream; Agent inbound legacy commands now return `room_legacy_surface_removed`.
 - Standalone Room docs and surface tests now reflect the V2-only 23 Normal / 34 Room surface and the nine semantic tools plus bootstrap aliases; mutations are documented through `room.maintenance.submit`.
 - Phase 4 verification passed: `cargo fmt --all`, `cargo check -p agentic-gpt`, 45 Room-focused Agent tests, and the exact standalone Room surface test. The planning catch-up helper path was unavailable (`session-catchup.py` not found); planning continued from the checked-in files.
+
+- 2026-09-11: Phase 5 verification coverage landed: repository bootstrap/path/schema tests (15), deterministic read tests (7), and maintenance backend tests (11), including remote push outcomes and workflow worker consumption.
+- 2026-09-11: Real Local Unix integration passed (1 test): the running Agent exposed V2 Room tools only while `room` was enabled, rejected legacy JSONL names, and executed `room.diary.active` without restart.
+- 2026-09-11: Final verification passed: `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo test --workspace` (452 passed across 9 suites), focused Phase 5 suites, and `git diff --check`.

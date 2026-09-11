@@ -192,13 +192,13 @@ The Agentic API does not duplicate the Room repository's semantic validation rul
 
 ### Phase 5 — Verification
 
-- [ ] Unit tests for repository root/path/symlink/period parsing and deterministic reads.
-- [ ] Bootstrap tests: absent root, empty root, existing Git root, non-empty non-Git root, no overwrite, deterministic initial scaffold commit, schema/version detection.
-- [ ] Maintenance preflight invalid payload, occupied slot, dirty repo, local apply, local auto-push off/on, missing remote, push failure after local success, workflow missing origin, workflow wait timeout/applied paths.
-- [ ] Real disposable local Room repository smoke using the scaffolded repository-owned maintenance executor.
-- [ ] Workflow smoke verifies `.github/workflows/apply-maintenance.yml` invokes the same repository-owned executor path rather than a separate implementation.
-- [ ] Live toolset toggle smoke on one running Local Unix Agent.
-- [ ] `cargo fmt --all -- --check`, `cargo check --workspace`, focused tests, full workspace tests, `git diff --check`.
+- [x] Unit tests for repository root/path/symlink/period parsing and deterministic reads.
+- [x] Bootstrap tests: absent root, empty root, existing Git root, non-empty non-Git root, no overwrite, deterministic initial scaffold commit, schema/version detection.
+- [x] Maintenance preflight invalid payload, occupied slot, dirty repo, local apply, local auto-push off/on, missing remote, push failure after local success, workflow missing origin, workflow wait timeout/applied paths.
+- [x] Real disposable local Room repository smoke using the scaffolded repository-owned maintenance executor.
+- [x] Workflow smoke verifies `.github/workflows/apply-maintenance.yml` invokes the same repository-owned executor path rather than a separate implementation.
+- [x] Live toolset toggle smoke on one running Local Unix Agent.
+- [x] `cargo fmt --all -- --check`, `cargo check --workspace`, focused tests, full workspace tests, `git diff --check`.
 
 ## Completion boundary
 

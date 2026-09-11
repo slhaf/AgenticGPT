@@ -64,3 +64,12 @@
 - The advertised standalone Room preset is V2-only: 23 Normal names and 34 Room names, with nine semantic Room tools plus the two bootstrap aliases.
 - Standalone/runtime, README, interface, configuration, and contract-matrix documentation now describe V2 reads and maintenance submission. The matrix retains legacy names only under the Hub compatibility section.
 - Phase 4 focused verification passed: `cargo fmt --all`, `cargo check -p agentic-gpt`, all 45 `cargo test -p agentic-gpt room_` tests, the exact Room surface contract test, and no remaining `notebook_writes` or Agent legacy-module references.
+
+## Phase 5 verification
+
+- Repository coverage now proves empty-root bootstrap creates the exact scaffold, two independent bootstraps share the deterministic initial commit, schema metadata distinguishes outdated from invalid, and workflow configuration points at the repository-owned executor.
+- Read coverage proves active/exact Diary results are repeatable, missing layers report stable unavailable details without mutation, State listing is sorted, and oversized Markdown is rejected.
+- Maintenance coverage exercises occupied slots, dirty/local preconditions, auto-push disabled/enabled, absent and failed remotes after local success, workflow timeout preservation, and a worker-applied workflow request.
+- The disposable Local Unix smoke toggles the live `room` namespace without restart, exposes V2 tools only while enabled, rejects legacy JSONL names, and executes `room.diary.active` against the bootstrapped repository.
+- The workflow asset and repository test share `python3 scripts/apply_maintenance.py`; no second semantic executor is introduced.
+- Phase 5 verification passed: focused repository/read/maintenance suites (15/7/11 tests), Local Unix integration (1 test), workspace check, 452 workspace tests across 9 suites, rustfmt check, and `git diff --check`.

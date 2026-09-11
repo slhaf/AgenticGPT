@@ -1124,6 +1124,62 @@ mod tests {
     }
 
     #[test]
+    fn empty_root_bootstraps_exact_scaffold() {
+        let workspace = temp_root("empty");
+        let root = workspace.join("room");
+        fs::create_dir_all(&root).unwrap();
+        let config = config_for(&workspace);
+
+        ensure_repository(&config).expect("bootstrap");
+
+        assert_eq!(
+            git_text(&root, &["symbolic-ref", "--short", "HEAD"]).as_deref(),
+            Some("main")
+        );
+        assert_eq!(
+            git_text_lines(&root, &["ls-tree", "-r", "--name-only", "HEAD"])
+                .unwrap()
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+            scaffold_paths()
+                .iter()
+                .map(|path| (*path).to_string())
+                .collect::<BTreeSet<_>>()
+        );
+        assert_eq!(
+            git_text_lines(&root, &["rev-list", "--count", "HEAD"]).unwrap(),
+            vec!["1".to_string()]
+        );
+
+        let _ = fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn independent_bootstraps_have_the_same_deterministic_initial_commit() {
+        let first_workspace = temp_root("deterministic-first");
+        let second_workspace = temp_root("deterministic-second");
+        let first_config = config_for(&first_workspace);
+        let second_config = config_for(&second_workspace);
+
+        ensure_repository(&first_config).expect("first bootstrap");
+        ensure_repository(&second_config).expect("second bootstrap");
+
+        let first_root = repository_root(&first_config);
+        let second_root = repository_root(&second_config);
+        assert_eq!(
+            git_text(&first_root, &["rev-parse", "HEAD"]),
+            git_text(&second_root, &["rev-parse", "HEAD"])
+        );
+        assert_eq!(
+            fs::read_to_string(first_root.join("Diary/Daily/current.md")).unwrap(),
+            fs::read_to_string(second_root.join("Diary/Daily/current.md")).unwrap()
+        );
+
+        let _ = fs::remove_dir_all(first_workspace);
+        let _ = fs::remove_dir_all(second_workspace);
+    }
+
+    #[test]
     fn bootstrap_is_idempotent_and_does_not_rewrite_initial_commit() {
         let workspace = temp_root("idempotent");
         let config = config_for(&workspace);
@@ -1170,6 +1226,28 @@ mod tests {
             vec!["?? keep.md".to_string()]
         );
         assert!(!root.join("room.json").exists());
+        let _ = fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn schema_version_detection_distinguishes_outdated_and_invalid_metadata() {
+        let workspace = temp_root("schema-detection");
+        let config = config_for(&workspace);
+        ensure_repository(&config).expect("bootstrap");
+        let root = repository_root(&config);
+
+        fs::write(root.join("room.json"), r#"{"schemaVersion":99}"#).unwrap();
+        let outdated = inspect_repository(&config).unwrap();
+        assert_eq!(outdated.schema_version, Some(99));
+        assert_eq!(outdated.schema, Readiness::Outdated);
+        assert_eq!(outdated.scaffold, Readiness::Incomplete);
+
+        fs::write(root.join("room.json"), "{not json").unwrap();
+        let invalid = inspect_repository(&config).unwrap();
+        assert_eq!(invalid.schema_version, None);
+        assert_eq!(invalid.schema, Readiness::Missing);
+        assert_eq!(invalid.scaffold, Readiness::Incomplete);
+
         let _ = fs::remove_dir_all(workspace);
     }
 
@@ -1231,6 +1309,26 @@ mod tests {
         assert_eq!(after.workflow, Readiness::Ready);
         assert_eq!(after.remote, Readiness::Missing);
         assert_eq!(after.sync, Readiness::Missing);
+        let _ = fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn workflow_uses_the_repository_owned_executor() {
+        let workspace = temp_root("workflow-executor");
+        let config = config_for(&workspace);
+        ensure_repository(&config).expect("bootstrap");
+        let root = repository_root(&config);
+        let workflow =
+            fs::read_to_string(root.join(".github/workflows/apply-maintenance.yml")).unwrap();
+
+        assert_eq!(
+            workflow
+                .matches("python3 scripts/apply_maintenance.py")
+                .count(),
+            1
+        );
+        assert!(workflow.contains("git add -- Diary Notebook State maintenance"));
+
         let _ = fs::remove_dir_all(workspace);
     }
 

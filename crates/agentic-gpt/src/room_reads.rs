@@ -623,6 +623,255 @@ mod tests {
         let _ = fs::remove_dir_all(workspace_root);
     }
 
+    #[tokio::test]
+    async fn diary_active_and_exact_reads_are_deterministic_for_current_layout() {
+        let workspace_root = std::env::temp_dir().join(format!(
+            "agentic-room-diary-reads-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let diary_root = workspace_root.join("room/Diary");
+        for (directory, current, exact, content) in [
+            (
+                "Daily",
+                "Diary/Daily/current.md",
+                "Diary/Daily/2026-09-11.md",
+                "# Daily current\n",
+            ),
+            (
+                "Weekly",
+                "Diary/Weekly/current.md",
+                "Diary/Weekly/2026-09-07--2026-09-13.md",
+                "# Weekly current\n",
+            ),
+            (
+                "Monthly",
+                "Diary/Monthly/current.md",
+                "Diary/Monthly/2026-09-01--2026-09-30.md",
+                "# Monthly current\n",
+            ),
+        ] {
+            fs::create_dir_all(diary_root.join(directory)).unwrap();
+            fs::write(workspace_root.join("room").join(current), content).unwrap();
+            fs::write(
+                workspace_root.join("room").join(exact),
+                format!("{content}exact"),
+            )
+            .unwrap();
+        }
+
+        let state = test_state(workspace_root.clone());
+        let first = diary_active(&state, RoomDiaryActiveRequest::default())
+            .await
+            .unwrap();
+        let second = diary_active(&state, RoomDiaryActiveRequest::default())
+            .await
+            .unwrap();
+        assert_eq!(first, second);
+        assert_eq!(
+            (
+                first.daily.layer,
+                first.daily.period.as_str(),
+                first.daily.path.as_str(),
+                first.daily.available,
+                first.daily.content.as_deref(),
+                first.daily.issue,
+            ),
+            (
+                RoomDiaryLayer::Daily,
+                "current",
+                "Diary/Daily/current.md",
+                true,
+                Some("# Daily current\n"),
+                None,
+            )
+        );
+        assert_eq!(
+            (
+                first.weekly.layer,
+                first.weekly.period.as_str(),
+                first.weekly.path.as_str(),
+                first.weekly.available,
+                first.weekly.content.as_deref(),
+                first.weekly.issue,
+            ),
+            (
+                RoomDiaryLayer::Weekly,
+                "current",
+                "Diary/Weekly/current.md",
+                true,
+                Some("# Weekly current\n"),
+                None,
+            )
+        );
+        assert_eq!(
+            (
+                first.monthly.layer,
+                first.monthly.period.as_str(),
+                first.monthly.path.as_str(),
+                first.monthly.available,
+                first.monthly.content.as_deref(),
+                first.monthly.issue,
+            ),
+            (
+                RoomDiaryLayer::Monthly,
+                "current",
+                "Diary/Monthly/current.md",
+                true,
+                Some("# Monthly current\n"),
+                None,
+            )
+        );
+
+        for (layer, period, path, content) in [
+            (
+                RoomDiaryLayer::Daily,
+                "2026-09-11",
+                "Diary/Daily/2026-09-11.md",
+                "# Daily current\nexact",
+            ),
+            (
+                RoomDiaryLayer::Weekly,
+                "2026-09-07--2026-09-13",
+                "Diary/Weekly/2026-09-07--2026-09-13.md",
+                "# Weekly current\nexact",
+            ),
+            (
+                RoomDiaryLayer::Monthly,
+                "2026-09-01--2026-09-30",
+                "Diary/Monthly/2026-09-01--2026-09-30.md",
+                "# Monthly current\nexact",
+            ),
+        ] {
+            let request = RoomDiaryReadRequest {
+                layer,
+                period: period.to_string(),
+            };
+            let first = diary_read(&state, request.clone()).await.unwrap();
+            let second = diary_read(&state, request).await.unwrap();
+            assert_eq!(first, second);
+            assert_eq!(first.document.layer, layer);
+            assert_eq!(first.document.period, period);
+            assert_eq!(first.document.path, path);
+            assert!(first.document.available);
+            assert_eq!(first.document.content.as_deref(), Some(content));
+            assert_eq!(first.document.issue, None);
+        }
+
+        let _ = fs::remove_dir_all(workspace_root);
+    }
+
+    #[tokio::test]
+    async fn diary_active_reports_missing_layer_without_mutating_repository() {
+        let workspace_root = std::env::temp_dir().join(format!(
+            "agentic-room-diary-missing-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let diary_root = workspace_root.join("room/Diary");
+        fs::create_dir_all(diary_root.join("Daily")).unwrap();
+        fs::create_dir_all(diary_root.join("Weekly")).unwrap();
+        fs::write(diary_root.join("Daily/current.md"), "# Daily current\n").unwrap();
+        fs::write(diary_root.join("Weekly/current.md"), "# Weekly current\n").unwrap();
+        let mut before_directories = fs::read_dir(&diary_root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        before_directories.sort();
+        let before_daily = fs::read_to_string(diary_root.join("Daily/current.md")).unwrap();
+        let before_weekly = fs::read_to_string(diary_root.join("Weekly/current.md")).unwrap();
+
+        let state = test_state(workspace_root.clone());
+        let response = diary_active(&state, RoomDiaryActiveRequest::default())
+            .await
+            .unwrap();
+
+        assert!(!response.monthly.available);
+        assert_eq!(response.monthly.layer, RoomDiaryLayer::Monthly);
+        assert_eq!(response.monthly.period, "current");
+        assert_eq!(response.monthly.path, "Diary/Monthly/current.md");
+        assert_eq!(response.monthly.content, None);
+        assert_eq!(response.monthly.issue, Some(RoomDiaryLayerIssue::Missing));
+        let mut after_directories = fs::read_dir(&diary_root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        after_directories.sort();
+        assert_eq!(after_directories, before_directories);
+        assert_eq!(
+            fs::read_to_string(diary_root.join("Daily/current.md")).unwrap(),
+            before_daily
+        );
+        assert_eq!(
+            fs::read_to_string(diary_root.join("Weekly/current.md")).unwrap(),
+            before_weekly
+        );
+        assert!(!diary_root.join("Monthly/current.md").exists());
+
+        let _ = fs::remove_dir_all(workspace_root);
+    }
+
+    #[tokio::test]
+    async fn state_list_is_sorted_and_state_read_rejects_oversized_markdown() {
+        let workspace_root = std::env::temp_dir().join(format!(
+            "agentic-room-state-bounds-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let entities_root = workspace_root.join("room/State/entities");
+        fs::create_dir_all(&entities_root).unwrap();
+        fs::write(entities_root.join("zeta.md"), "# Zeta\n").unwrap();
+        fs::write(entities_root.join("alpha.md"), "# Alpha\n").unwrap();
+        fs::write(entities_root.join("middle.md"), "# Middle\n").unwrap();
+        fs::write(entities_root.join("ignored.txt"), "not markdown").unwrap();
+        fs::write(
+            entities_root.join("oversized.md"),
+            vec![b'x'; room_repository::MAX_MARKDOWN_BYTES + 1],
+        )
+        .unwrap();
+
+        let state = test_state(workspace_root.clone());
+        let first = state_list(&state, RoomStateListRequest::default())
+            .await
+            .unwrap();
+        let second = state_list(&state, RoomStateListRequest::default())
+            .await
+            .unwrap();
+        assert_eq!(first, second);
+        assert_eq!(
+            first
+                .entities
+                .iter()
+                .map(|entity| (entity.entity.as_str(), entity.path.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("alpha", "State/entities/alpha.md"),
+                ("middle", "State/entities/middle.md"),
+                ("oversized", "State/entities/oversized.md"),
+                ("zeta", "State/entities/zeta.md"),
+            ]
+        );
+
+        let read = state_read(
+            &state,
+            RoomStateReadRequest {
+                entity: "alpha".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(read.path, "State/entities/alpha.md");
+        assert_eq!(read.content, "# Alpha\n");
+        let error = state_read(
+            &state,
+            RoomStateReadRequest {
+                entity: "oversized".to_string(),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.to_string(), "room_markdown_too_large");
+
+        let _ = fs::remove_dir_all(workspace_root);
+    }
+
     #[test]
     fn notebook_recent_orders_by_recency_before_limit() {
         let root = std::env::temp_dir().join(format!(

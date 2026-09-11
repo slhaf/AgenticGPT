@@ -967,7 +967,7 @@ mod tests {
         fs,
         path::{Path, PathBuf},
         sync::Arc,
-        time::{SystemTime, UNIX_EPOCH},
+        time::{Duration, Instant, SystemTime, UNIX_EPOCH},
     };
     use tokio::sync::{Mutex, RwLock};
 
@@ -1040,6 +1040,392 @@ mod tests {
             .expect("utf8")
             .trim()
             .to_string()
+    }
+
+    struct WorkspaceCleanup(PathBuf);
+
+    impl Drop for WorkspaceCleanup {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    const TEST_GIT_ENV: &[(&str, &str)] = &[
+        ("GIT_CONFIG_NOSYSTEM", "1"),
+        ("GIT_CONFIG_GLOBAL", "/dev/null"),
+    ];
+
+    fn test_git(root: &Path, args: &[&str]) -> Result<room_repository::BoundedGitOutput> {
+        room_repository::run_git_bounded_with_env(root, args, TEST_GIT_ENV)
+    }
+
+    fn setup_local_origin(root: &Path, origin: &Path) -> Result<()> {
+        fs::create_dir_all(origin)?;
+        let initialized = test_git(origin, &["init", "--bare", "-b", "main"])?;
+        if !initialized.success {
+            return Err(anyhow!("test_origin_init_failed"));
+        }
+
+        let origin_url = origin.to_string_lossy().into_owned();
+        let added = test_git(root, &["remote", "add", "origin", origin_url.as_str()])?;
+        if !added.success {
+            return Err(anyhow!("test_origin_configure_failed"));
+        }
+        let pushed = test_git(root, &["push", "-u", "origin", "main"])?;
+        if !pushed.success {
+            return Err(anyhow!("test_origin_seed_failed"));
+        }
+        Ok(())
+    }
+
+    fn remote_head(origin: &Path) -> Result<String> {
+        let output = test_git(origin, &["rev-parse", "--verify", "refs/heads/main"])?;
+        if !output.success {
+            return Err(anyhow!("test_origin_head_unavailable"));
+        }
+        bounded_text(&output.stdout).ok_or_else(|| anyhow!("test_origin_head_unavailable"))
+    }
+
+    fn remote_contains_path(origin: &Path, relative: &str) -> Result<bool> {
+        let output = test_git(
+            origin,
+            &[
+                "ls-tree",
+                "-r",
+                "--name-only",
+                "refs/heads/main",
+                "--",
+                relative,
+            ],
+        )?;
+        if !output.success {
+            return Ok(false);
+        }
+        Ok(String::from_utf8(output.stdout)?
+            .lines()
+            .any(|path| path == relative))
+    }
+
+    fn remote_file_content(origin: &Path, relative: &str) -> Result<String> {
+        let spec = format!("refs/heads/main:{relative}");
+        let output = test_git(origin, &["show", spec.as_str()])?;
+        if !output.success {
+            return Err(anyhow!("test_origin_file_unavailable"));
+        }
+        Ok(String::from_utf8(output.stdout)?)
+    }
+
+    fn create_worker_clone(origin: &Path, worker: &Path) -> Result<()> {
+        let origin_url = origin.to_string_lossy().into_owned();
+        let worker_path = worker.to_string_lossy().into_owned();
+        let cloned = test_git(
+            origin,
+            &["clone", origin_url.as_str(), worker_path.as_str()],
+        )?;
+        if !cloned.success {
+            return Err(anyhow!("test_worker_clone_failed"));
+        }
+        Ok(())
+    }
+
+    fn worker_apply_request(worker: &Path, request_path: &str, target_path: &str) -> Result<()> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(anyhow!("test_worker_timeout"));
+            }
+
+            let fetch = room_repository::run_git_bounded_with_timeout(
+                worker,
+                &["fetch", "--no-tags", "origin", "main"],
+                remaining.min(Duration::from_secs(1)),
+            )
+            .ok();
+            if fetch.is_some_and(|output| output.success) {
+                let reset = room_repository::run_git_bounded_with_timeout(
+                    worker,
+                    &["reset", "--hard", "origin/main"],
+                    remaining.min(Duration::from_secs(1)),
+                )
+                .ok();
+                if reset.is_some_and(|output| output.success) {
+                    let request = room_repository::repository_path(worker, request_path)?;
+                    let request_ready = fs::symlink_metadata(request)
+                        .map(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
+                        .unwrap_or(false);
+                    if request_ready {
+                        run_executor(worker)?;
+                        let stage_args = vec![
+                            "add".to_string(),
+                            "--".to_string(),
+                            target_path.to_string(),
+                            request_path.to_string(),
+                        ];
+                        let staged = room_repository::run_git_bounded_args_with_timeout(
+                            worker,
+                            &stage_args,
+                            remaining.min(Duration::from_secs(1)),
+                        )?;
+                        if !staged.success {
+                            return Err(anyhow!("test_worker_stage_failed"));
+                        }
+                        commit(worker, COMMIT_MESSAGE)?;
+                        let pushed = room_repository::run_git_bounded_with_timeout(
+                            worker,
+                            &["push", "origin", "main"],
+                            remaining.min(Duration::from_secs(2)),
+                        )?;
+                        if !pushed.success {
+                            return Err(anyhow!("test_worker_push_failed"));
+                        }
+                        return Ok(());
+                    }
+                }
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    #[tokio::test]
+    async fn local_submit_rejects_occupied_clean_slot() -> Result<()> {
+        let workspace = test_workspace("occupied-clean");
+        fs::create_dir_all(&workspace)?;
+        let _cleanup = WorkspaceCleanup(workspace.clone());
+        let state = test_state(workspace.clone());
+        let config = state.config.read().await.clone();
+        room_repository::ensure_repository(&config)?;
+        let root = room_repository::repository_root(&config);
+
+        let request_relative = slot_request_path(RoomMaintenanceSlot::Notebook);
+        let request = root.join(request_relative);
+        let existing = br#"{"path":"Notebook/existing.md","title":"Existing","body":"Body"}"#;
+        fs::write(&request, existing)?;
+        let staged = run_git_mutation(root.as_path(), &["add", "--", request_relative])?;
+        assert!(staged.success);
+        commit(&root, "Seed occupied maintenance slot")?;
+        let before = current_head(&root)?;
+
+        let error = submit(&state, notebook_submit("Notebook/new.md"))
+            .await
+            .expect_err("occupied slot must be rejected");
+        assert_eq!(error.to_string(), "room_maintenance_slot_occupied");
+        assert_eq!(current_head(&root)?, before);
+        assert_eq!(fs::read(&request)?, existing);
+        assert!(!root.join("Notebook/new.md").exists());
+        assert_eq!(
+            room_repository::inspect_repository(&config)?.clean,
+            Some(true)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn local_auto_push_controls_origin_sync() -> Result<()> {
+        let workspace = test_workspace("auto-push");
+        fs::create_dir_all(&workspace)?;
+        let _cleanup = WorkspaceCleanup(workspace.clone());
+        let state = test_state(workspace.clone());
+        let config = state.config.read().await.clone();
+        room_repository::ensure_repository(&config)?;
+        let root = room_repository::repository_root(&config);
+        let origin = workspace.join("origin.git");
+        setup_local_origin(&root, &origin)?;
+        let baseline = remote_head(&origin)?;
+
+        let first = submit(&state, notebook_submit("Notebook/local-off.md")).await?;
+        assert_eq!(first.state, RoomMaintenanceSubmissionState::Applied);
+        assert!(first.local_applied);
+        assert_eq!(first.sync, RoomMaintenanceSyncOutcome::NotRequested);
+        let first_revision = first.revision.clone().expect("local revision");
+        assert_ne!(first_revision, baseline);
+        assert_eq!(remote_head(&origin)?, baseline);
+        assert!(!remote_contains_path(&origin, "Notebook/local-off.md")?);
+
+        {
+            let mut config = state.config.write().await;
+            config.room.maintenance.auto_push = true;
+        }
+        let second = submit(&state, notebook_submit("Notebook/local-on.md")).await?;
+        assert_eq!(second.state, RoomMaintenanceSubmissionState::Applied);
+        assert!(second.local_applied);
+        assert_eq!(second.sync, RoomMaintenanceSyncOutcome::Succeeded);
+        let second_revision = second.revision.clone().expect("pushed revision");
+        assert_eq!(remote_head(&origin)?, second_revision);
+        assert_eq!(
+            remote_file_content(&origin, "Notebook/local-on.md")?,
+            "# Topic\n\nBody\n"
+        );
+        assert!(remote_contains_path(&origin, "Notebook/local-off.md")?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn local_auto_push_without_origin_reports_unavailable_after_apply() -> Result<()> {
+        let workspace = test_workspace("auto-push-no-origin");
+        fs::create_dir_all(&workspace)?;
+        let _cleanup = WorkspaceCleanup(workspace.clone());
+        let state = test_state(workspace.clone());
+        {
+            let mut config = state.config.write().await;
+            config.room.maintenance.auto_push = true;
+        }
+        let config = state.config.read().await.clone();
+        room_repository::ensure_repository(&config)?;
+        let root = room_repository::repository_root(&config);
+
+        let response = submit(&state, notebook_submit("Notebook/no-origin.md")).await?;
+        assert_eq!(response.state, RoomMaintenanceSubmissionState::Applied);
+        assert!(response.local_applied);
+        assert_eq!(response.sync, RoomMaintenanceSyncOutcome::Unavailable);
+        assert!(response.revision.is_some());
+        assert_eq!(
+            fs::read_to_string(root.join("Notebook/no-origin.md"))?,
+            "# Topic\n\nBody\n"
+        );
+        assert_eq!(commit_count(&root), "2");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn local_auto_push_reports_failed_sync_after_origin_disappears() -> Result<()> {
+        let workspace = test_workspace("auto-push-unreachable");
+        fs::create_dir_all(&workspace)?;
+        let _cleanup = WorkspaceCleanup(workspace.clone());
+        let state = test_state(workspace.clone());
+        {
+            let mut config = state.config.write().await;
+            config.room.maintenance.auto_push = true;
+        }
+        let config = state.config.read().await.clone();
+        room_repository::ensure_repository(&config)?;
+        let root = room_repository::repository_root(&config);
+        let origin = workspace.join("origin.git");
+        setup_local_origin(&root, &origin)?;
+        let before = current_head(&root)?;
+        fs::remove_dir_all(&origin)?;
+
+        let response = submit(&state, notebook_submit("Notebook/unreachable.md")).await?;
+        assert_eq!(response.state, RoomMaintenanceSubmissionState::Applied);
+        assert!(response.local_applied);
+        assert_eq!(response.sync, RoomMaintenanceSyncOutcome::Failed);
+        let revision = response.revision.as_deref().expect("local revision");
+        assert_ne!(revision, before);
+        assert_eq!(current_head(&root)?, revision);
+        assert_eq!(
+            fs::read_to_string(root.join("Notebook/unreachable.md"))?,
+            "# Topic\n\nBody\n"
+        );
+        assert_eq!(commit_count(&root), "2");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn workflow_wait_timeout_preserves_submitted_request() -> Result<()> {
+        let workspace = test_workspace("workflow-timeout");
+        fs::create_dir_all(&workspace)?;
+        let _cleanup = WorkspaceCleanup(workspace.clone());
+        let state = test_state(workspace.clone());
+        {
+            let mut config = state.config.write().await;
+            config.room.maintenance.mode = RoomMaintenanceMode::Workflow;
+        }
+        let config = state.config.read().await.clone();
+        room_repository::ensure_repository(&config)?;
+        let root = room_repository::repository_root(&config);
+        let origin = workspace.join("origin.git");
+        setup_local_origin(&root, &origin)?;
+
+        let request_relative = slot_request_path(RoomMaintenanceSlot::Notebook);
+        let response = submit(
+            &state,
+            RoomMaintenanceSubmitRequest {
+                mode: Some(RoomMaintenanceExecutionMode::Workflow),
+                wait_seconds: Some(1),
+                ..notebook_submit("Notebook/workflow-timeout.md")
+            },
+        )
+        .await?;
+        assert_eq!(response.mode, RoomMaintenanceExecutionMode::Workflow);
+        assert_eq!(response.state, RoomMaintenanceSubmissionState::Submitted);
+        assert!(!response.local_applied);
+        assert_eq!(response.sync, RoomMaintenanceSyncOutcome::Pending);
+        assert!(response.revision.is_none());
+        assert!(root.join(request_relative).is_file());
+        assert!(remote_contains_path(&origin, request_relative)?);
+        let request_payload = remote_file_content(&origin, request_relative)?;
+        assert_eq!(
+            serde_json::from_str::<Value>(&request_payload)?,
+            json!({
+                "path": "Notebook/workflow-timeout.md",
+                "title": "Topic",
+                "body": "Body",
+            })
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn workflow_wait_applies_through_repository_worker() -> Result<()> {
+        let workspace = test_workspace("workflow-applied");
+        fs::create_dir_all(&workspace)?;
+        let _cleanup = WorkspaceCleanup(workspace.clone());
+        let state = test_state(workspace.clone());
+        {
+            let mut config = state.config.write().await;
+            config.room.maintenance.mode = RoomMaintenanceMode::Workflow;
+        }
+        let config = state.config.read().await.clone();
+        room_repository::ensure_repository(&config)?;
+        let root = room_repository::repository_root(&config);
+        let origin = workspace.join("origin.git");
+        setup_local_origin(&root, &origin)?;
+        let worker = workspace.join("worker");
+        create_worker_clone(&origin, &worker)?;
+
+        let request_relative = slot_request_path(RoomMaintenanceSlot::Notebook).to_string();
+        let worker_path = worker.clone();
+        let worker_request = request_relative.clone();
+        let worker_thread = std::thread::spawn(move || {
+            worker_apply_request(
+                &worker_path,
+                &worker_request,
+                "Notebook/workflow-applied.md",
+            )
+        });
+        let response_result = submit(
+            &state,
+            RoomMaintenanceSubmitRequest {
+                mode: Some(RoomMaintenanceExecutionMode::Workflow),
+                wait_seconds: Some(5),
+                ..notebook_submit("Notebook/workflow-applied.md")
+            },
+        )
+        .await;
+        let worker_result = worker_thread
+            .join()
+            .map_err(|_| anyhow!("test_worker_panicked"))?;
+        let response = response_result?;
+        worker_result?;
+
+        assert_eq!(response.mode, RoomMaintenanceExecutionMode::Workflow);
+        assert_eq!(response.state, RoomMaintenanceSubmissionState::Applied);
+        assert!(response.local_applied);
+        assert_eq!(response.sync, RoomMaintenanceSyncOutcome::Succeeded);
+        let revision = response.revision.as_deref().expect("applied revision");
+        assert_eq!(current_head(&root)?, revision);
+        assert_eq!(remote_head(&origin)?, revision);
+        assert_eq!(
+            fs::read_to_string(root.join("Notebook/workflow-applied.md"))?,
+            "# Topic\n\nBody\n"
+        );
+        assert_eq!(
+            remote_file_content(&origin, "Notebook/workflow-applied.md")?,
+            "# Topic\n\nBody\n"
+        );
+        assert!(!root.join(&request_relative).exists());
+        assert!(!remote_contains_path(&origin, &request_relative)?);
+        Ok(())
     }
 
     #[tokio::test]
