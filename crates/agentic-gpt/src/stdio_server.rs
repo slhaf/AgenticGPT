@@ -53,16 +53,13 @@ const TOOL_NAMESPACE_BY_NAME: &[(&str, ToolNamespace)] = &[
     ("mcp.list", ToolNamespace::Mcp),
     ("process.batch", ToolNamespace::Process),
     ("process.exec", ToolNamespace::Process),
-    ("room.diary.append", ToolNamespace::Room),
-    ("room.diary.recent", ToolNamespace::Room),
-    ("room.diary.selectExact", ToolNamespace::Room),
-    ("room.notebook.append", ToolNamespace::Room),
-    ("room.notebook.current", ToolNamespace::Room),
+    ("room.diary.active", ToolNamespace::Room),
+    ("room.diary.read", ToolNamespace::Room),
+    ("room.notebook.read", ToolNamespace::Room),
     ("room.notebook.recent", ToolNamespace::Room),
-    ("room.notebook.remove", ToolNamespace::Room),
     ("room.notebook.search", ToolNamespace::Room),
-    ("room.notebook.selectExact", ToolNamespace::Room),
-    ("room.notebook.update", ToolNamespace::Room),
+    ("room.state.list", ToolNamespace::Room),
+    ("room.state.read", ToolNamespace::Room),
     ("skills.install", ToolNamespace::Skills),
     ("skills.install.cancel", ToolNamespace::Skills),
     ("skills.install.get", ToolNamespace::Skills),
@@ -999,96 +996,43 @@ impl AgentMcpServer {
                 .await
             }
             "skills.run" => self.dispatch_skill_run(arguments, terminal_tracker).await,
-            "room.notebook.append" => dispatch(
-                self,
-                HubCommand::RoomNotebookAppend {
-                    request_id,
-                    payload: from_value(arguments)?,
-                },
-            )
-            .await
-            .map(|value| slim_room_response("room.notebook.append", value)),
-            "room.notebook.recent" => dispatch(
-                self,
-                HubCommand::RoomNotebookRecent {
-                    request_id,
-                    payload: from_value(arguments)?,
-                },
-            )
-            .await
-            .map(|value| slim_room_response("room.notebook.recent", value)),
-            "room.notebook.selectExact" => dispatch(
-                self,
-                HubCommand::RoomNotebookSelectExact {
-                    request_id,
-                    payload: from_value(arguments)?,
-                },
-            )
-            .await
-            .map(|value| slim_room_response("room.notebook.selectExact", value)),
-            "room.notebook.search" => dispatch(
-                self,
-                HubCommand::RoomNotebookSearch {
-                    request_id,
-                    payload: from_value(arguments)?,
-                },
-            )
-            .await
-            .map(|value| slim_room_response("room.notebook.search", value)),
-            "room.notebook.current" => dispatch(
-                self,
-                HubCommand::RoomNotebookCurrent {
-                    request_id,
-                    payload: from_value(arguments)?,
-                },
-            )
-            .await
-            .map(|value| slim_room_response("room.notebook.current", value)),
-            "room.notebook.update" => dispatch(
-                self,
-                HubCommand::RoomNotebookUpdate {
-                    request_id,
-                    payload: from_value(arguments)?,
-                },
-            )
-            .await
-            .map(|value| slim_room_response("room.notebook.update", value)),
-            "room.notebook.remove" => dispatch(
-                self,
-                HubCommand::RoomNotebookRemove {
-                    request_id,
-                    payload: from_value(arguments)?,
-                },
-            )
-            .await
-            .map(|value| slim_room_response("room.notebook.remove", value)),
-            "room.diary.append" => dispatch(
-                self,
-                HubCommand::RoomDiaryAppend {
-                    request_id,
-                    payload: from_value(arguments)?,
-                },
-            )
-            .await
-            .map(|value| slim_room_response("room.diary.append", value)),
-            "room.diary.recent" => dispatch(
-                self,
-                HubCommand::RoomDiaryRecent {
-                    request_id,
-                    payload: from_value(arguments)?,
-                },
-            )
-            .await
-            .map(|value| slim_room_response("room.diary.recent", value)),
-            "room.diary.selectExact" => dispatch(
-                self,
-                HubCommand::RoomDiarySelectExact {
-                    request_id,
-                    payload: from_value(arguments)?,
-                },
-            )
-            .await
-            .map(|value| slim_room_response("room.diary.selectExact", value)),
+            "room.diary.active" => {
+                let request: agentic_gpt_protocol::RoomDiaryActiveRequest = from_value(arguments)?;
+                let response = crate::room_reads::diary_active(&self.state, request).await?;
+                Ok(serde_json::to_value(response)?)
+            }
+            "room.diary.read" => {
+                let request: agentic_gpt_protocol::RoomDiaryReadRequest = from_value(arguments)?;
+                let response = crate::room_reads::diary_read(&self.state, request).await?;
+                Ok(serde_json::to_value(response)?)
+            }
+            "room.notebook.recent" => {
+                let request: agentic_gpt_protocol::RoomNotebookRecentRequest =
+                    from_value(arguments)?;
+                let response = crate::room_reads::notebook_recent(&self.state, request).await?;
+                Ok(serde_json::to_value(response)?)
+            }
+            "room.notebook.search" => {
+                let request: agentic_gpt_protocol::RoomNotebookSearchRequest =
+                    from_value(arguments)?;
+                let response = crate::room_reads::notebook_search(&self.state, request).await?;
+                Ok(serde_json::to_value(response)?)
+            }
+            "room.notebook.read" => {
+                let request: agentic_gpt_protocol::RoomNotebookReadRequest = from_value(arguments)?;
+                let response = crate::room_reads::notebook_read(&self.state, request).await?;
+                Ok(serde_json::to_value(response)?)
+            }
+            "room.state.list" => {
+                let request: agentic_gpt_protocol::RoomStateListRequest = from_value(arguments)?;
+                let response = crate::room_reads::state_list(&self.state, request).await?;
+                Ok(serde_json::to_value(response)?)
+            }
+            "room.state.read" => {
+                let request: agentic_gpt_protocol::RoomStateReadRequest = from_value(arguments)?;
+                let response = crate::room_reads::state_read(&self.state, request).await?;
+                Ok(serde_json::to_value(response)?)
+            }
             _ => Err(anyhow::anyhow!("unknown agent tool: {name}")),
         }
     }
@@ -2344,26 +2288,6 @@ fn remove_empty_warnings(value: &mut Value) {
     }
 }
 
-fn slim_room_response(tool: &str, mut value: Value) -> Value {
-    remove_empty_warnings(&mut value);
-    let Some(object) = value.as_object_mut() else {
-        return value;
-    };
-    match tool {
-        "room.notebook.append" => {
-            object.remove("path");
-            object.remove("created");
-        }
-        "room.diary.append" => {
-            object.remove("path");
-            object.remove("created");
-            object.remove("createdAt");
-        }
-        _ => {}
-    }
-    value
-}
-
 fn tool_descriptor(name: &str) -> Tool {
     let input_schema = tool_input_schema(name);
     let annotations = ToolAnnotations::new()
@@ -2413,13 +2337,10 @@ fn tool_schema(name: &str) -> (Map<String, Value>, &'static [&'static str]) {
         "skills.install" => &["id", "source"],
         "skills.install.get" | "skills.install.cancel" => &["installId"],
         "skills.run" => &["id", "path"],
-        "room.notebook.append" => &["scope", "content"],
-        "room.notebook.selectExact" => &["date"],
+        "room.diary.read" => &["layer", "period"],
         "room.notebook.search" => &["query"],
-        "room.notebook.current" => &["scope"],
-        "room.notebook.update" | "room.notebook.remove" => &["id"],
-        "room.diary.append" => &["entry"],
-        "room.diary.selectExact" => &["date"],
+        "room.notebook.read" => &["path"],
+        "room.state.read" => &["entity"],
         _ => &[],
     };
     (properties_for(name), required)
@@ -2879,108 +2800,61 @@ fn properties_for(name: &str) -> Map<String, Value> {
             add("workingDirectory", string("Optional working directory."));
             add("waitSeconds", number("Bounded inline wait, capped at 30."));
         }
-        "room.notebook.append" => {
+        "room.diary.active" | "room.state.list" => {}
+        "room.diary.read" => {
             add(
-                "datetime",
-                json!({"type":"string","description":"Optional ISO-8601 timestamp; defaults to the current Room logical time."}),
+                "layer",
+                json!({
+                    "type": "string",
+                    "enum": ["daily", "weekly", "monthly"],
+                    "description": "Room diary temporal layer."
+                }),
             );
             add(
-                "scope",
-                json!({"type":"string","minLength":1,"description":"Notebook namespace path."}),
+                "period",
+                json!({
+                    "type": "string",
+                    "pattern": "^(current|\\d{4}-\\d{2}-\\d{2}(--\\d{4}-\\d{2}-\\d{2})?)$",
+                    "description": "Room-local logical period: daily uses current or YYYY-MM-DD; weekly/monthly use current or YYYY-MM-DD--YYYY-MM-DD."
+                }),
             );
-            add(
-                "significance",
-                json!({"type": "string", "enum": ["NORMAL", "ANCHOR"], "default": "NORMAL"}),
-            );
-            add("abstract", string("Short summary."));
-            add("content", string("Full passage content."));
-            add("tags", strings("Optional labels."));
         }
         "room.notebook.recent" => {
             add(
-                "scope",
-                json!({"type":"string","description":"Optional notebook namespace filter."}),
-            );
-            add(
-                "days",
-                json!({"type":"integer","minimum":1,"description":"Logical calendar days to scan."}),
-            );
-            add(
-                "significance",
-                json!({"type": "string", "enum": ["NORMAL", "ANCHOR"]}),
-            );
-            add(
                 "limit",
-                json!({"type":"integer","minimum":1,"maximum":100,"description":"Maximum passages returned."}),
-            );
-        }
-        "room.notebook.selectExact" => {
-            add(
-                "date",
                 json!({
-                    "type": "string",
-                    "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
-                    "description": "Room-local calendar date in YYYY-MM-DD format."
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100,
+                    "description": "Maximum bounded recent Notebook previews returned."
                 }),
-            );
-            add(
-                "scope",
-                json!({"type":"string","description":"Optional notebook namespace filter."}),
-            );
-            add(
-                "limit",
-                json!({"type":"integer","minimum":1,"maximum":100,"description":"Maximum passages returned."}),
             );
         }
         "room.notebook.search" => {
-            add("query", string("Search query."));
             add(
-                "scope",
-                json!({"type":"string","description":"Optional notebook namespace filter."}),
+                "query",
+                string("Case-insensitive bounded substring query over Notebook paths, H1 titles, and bodies."),
             );
             add(
                 "limit",
-                json!({"type":"integer","minimum":1,"maximum":100,"description":"Maximum passages returned."}),
-            );
-        }
-        "room.notebook.current" => add("scope", string("Notebook scope.")),
-        "room.notebook.update" => {
-            add("id", string("Passage id."));
-            add(
-                "significance",
-                json!({"type": "string", "enum": ["NORMAL", "ANCHOR"]}),
-            );
-            add("abstract", string("Optional replacement summary."));
-            add("content", string("Optional replacement content."));
-            add("tags", strings("Optional replacement labels."));
-        }
-        "room.notebook.remove" => add("id", string("Passage id.")),
-        "room.diary.append" => {
-            add("tags", strings("Optional labels."));
-            add("entry", string("Diary entry text."));
-        }
-        "room.diary.recent" => {
-            add(
-                "days",
-                json!({"type":"integer","minimum":1,"description":"Logical diary days to scan."}),
-            );
-            add(
-                "limit",
-                json!({"type":"integer","minimum":1,"maximum":100,"description":"Maximum diary entries returned."}),
-            );
-        }
-        "room.diary.selectExact" => {
-            add(
-                "date",
                 json!({
-                    "type": "string",
-                    "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
-                    "description": "Room-local logical diary date in YYYY-MM-DD format."
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100,
+                    "description": "Maximum bounded Notebook previews returned."
                 }),
             );
+        }
+        "room.notebook.read" => {
             add(
-                "limit",
-                json!({"type":"integer","minimum":1,"maximum":100,"description":"Maximum diary entries returned."}),
+                "path",
+                string("Exact Notebook-relative Markdown path returned or discovered under Notebook/; arbitrary repository paths are rejected."),
+            );
+        }
+        "room.state.read" => {
+            add(
+                "entity",
+                string("State entity filename stem resolved under State/entities/; arbitrary repository paths are rejected."),
             );
         }
         _ => {}
@@ -3050,16 +2924,13 @@ fn tool_description(name: &str) -> String {
         "skills.install.get" => "Inspect or briefly wait for one skill installation; read-only lifecycle inspection.".to_string(),
         "skills.install.cancel" => "Request cooperative cancellation of one skill installation before commit.".to_string(),
         "skills.run" => "Run an executable from an active local skill as a managed Job.".to_string(),
-        "room.notebook.append" => "Append one durable Room notebook passage; ANCHOR updates current state for its scope.".to_string(),
-        "room.notebook.recent" => "Read recent Room notebook passages; read-only.".to_string(),
-        "room.notebook.selectExact" => "Read Room notebook passages for one exact Room-local calendar date; read-only.".to_string(),
-        "room.notebook.search" => "Search Room notebook passages by bounded substring fields; read-only.".to_string(),
-        "room.notebook.current" => "Read recoverable current Room notebook state for one scope; read-only.".to_string(),
-        "room.notebook.update" => "Update editable fields of one Room notebook passage. Use this only for correcting existing notebook state; identity, scope, and datetime boundaries remain fixed.".to_string(),
-        "room.notebook.remove" => "Remove one Room notebook passage; destructive.".to_string(),
-        "room.diary.append" => "Append one durable Room diary entry to the current logical diary day.".to_string(),
-        "room.diary.recent" => "Read recent Room diary entries; read-only.".to_string(),
-        "room.diary.selectExact" => "Read Room diary entries for one exact Room-local logical date; read-only.".to_string(),
+        "room.diary.active" => "Read the active daily, weekly, and monthly Room diary documents; read-only, semantic, and bounded.".to_string(),
+        "room.diary.read" => "Read one exact Room diary document by validated semantic layer and period; read-only, semantic, and bounded.".to_string(),
+        "room.notebook.recent" => "Read bounded recent Room notebook Markdown previews; read-only, semantic, and bounded semantic discovery.".to_string(),
+        "room.notebook.search" => "Search Room notebook Markdown by bounded case-insensitive substring fields; read-only, semantic, and bounded discovery.".to_string(),
+        "room.notebook.read" => "Read one exact Room notebook Markdown document under the validated Notebook root; read-only, semantic, and bounded.".to_string(),
+        "room.state.list" => "List deterministic Room state entity documents; read-only, semantic, and bounded.".to_string(),
+        "room.state.read" => "Read one exact Room state entity Markdown document by validated entity name; read-only, semantic, and bounded.".to_string(),
         _ => "Agentic GPT local tool.".to_string(),
     }
 }
@@ -3077,10 +2948,6 @@ fn tool_is_read_only(name: &str) -> bool {
             | "tmux.closeSession"
             | "mcp.batch"
             | "mcp.callTool"
-            | "room.notebook.append"
-            | "room.notebook.update"
-            | "room.notebook.remove"
-            | "room.diary.append"
             | "skills.activate"
             | "skills.deactivate"
             | "skills.install"
@@ -3097,7 +2964,6 @@ fn tool_is_destructive(name: &str) -> bool {
             | "job.cancel"
             | "tmux.sessions"
             | "tmux.closeSession"
-            | "room.notebook.remove"
             | "skills.install"
             | "skills.install.cancel"
             | "skills.setActive"
@@ -3199,16 +3065,13 @@ mod tests {
         let room_additions = [
             "bootstrap",
             "bootstrap.read",
-            "room.diary.append",
-            "room.diary.recent",
-            "room.diary.selectExact",
-            "room.notebook.append",
-            "room.notebook.current",
+            "room.diary.active",
+            "room.diary.read",
+            "room.notebook.read",
             "room.notebook.recent",
-            "room.notebook.remove",
             "room.notebook.search",
-            "room.notebook.selectExact",
-            "room.notebook.update",
+            "room.state.list",
+            "room.state.read",
         ];
         let mut expected_room = expected_normal.clone();
         expected_room.extend(room_additions.into_iter().map(str::to_owned));
@@ -3536,13 +3399,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn absent_room_tool_is_rejected_when_room_toolset_disabled() {
+    async fn absent_room_tools_are_rejected_when_room_toolset_disabled() {
         let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
-        let error = server
-            .call(CallToolRequestParams::new("room.diary.recent"))
-            .await
-            .expect_err("Room-only tool must not be callable by Normal worker");
-        assert_eq!(error.code, rmcp::model::ErrorCode::METHOD_NOT_FOUND);
+        for name in [
+            "bootstrap",
+            "bootstrap.read",
+            "room.diary.active",
+            "room.diary.read",
+            "room.notebook.recent",
+            "room.notebook.search",
+            "room.notebook.read",
+            "room.state.list",
+            "room.state.read",
+        ] {
+            let error = server
+                .call(CallToolRequestParams::new(name))
+                .await
+                .expect_err("Room-only tool must not be callable by Normal worker");
+            assert_eq!(error.code, rmcp::model::ErrorCode::METHOD_NOT_FOUND);
+        }
     }
     #[tokio::test]
     async fn changing_live_toolsets_updates_surface_and_authorization() {
@@ -3572,7 +3447,7 @@ mod tests {
             .map(|tool| tool.name.to_string())
             .collect::<Vec<_>>();
         assert!(room_names.iter().any(|name| name == "bootstrap"));
-        assert!(room_names.iter().any(|name| name == "room.diary.recent"));
+        assert!(room_names.iter().any(|name| name == "room.diary.active"));
         let bootstrap = server
             .call(CallToolRequestParams::new("bootstrap"))
             .await
@@ -3712,12 +3587,12 @@ mod tests {
 
         let client = ().serve((client_read, client_write)).await?;
         let tools = client.list_all_tools().await?;
-        assert!(tools.iter().any(|tool| tool.name == "room.diary.recent"));
+        assert!(tools.iter().any(|tool| tool.name == "room.diary.active"));
         let result = client
-            .call_tool(CallToolRequestParams::new("room.diary.recent"))
+            .call_tool(CallToolRequestParams::new("room.diary.active"))
             .await?;
         assert_eq!(result.is_error, Some(false));
-        assert!(result.structured_content.as_ref().unwrap()["entries"].is_array());
+        assert!(result.structured_content.as_ref().unwrap()["daily"].is_object());
         let _ = client.cancel().await;
         server_task.await??;
         Ok(())
@@ -4493,49 +4368,36 @@ mod tests {
         let skills = server.dispatch("skills.list", json!({})).await?;
         assert!(skills["skills"].is_array());
         let notebook = server.dispatch("room.notebook.recent", json!({})).await?;
-        assert!(notebook["passages"].is_array());
-        let diary = server.dispatch("room.diary.recent", json!({})).await?;
-        assert!(diary["entries"].is_array());
+        assert!(notebook["documents"].is_array());
+        let diary = server.dispatch("room.diary.active", json!({})).await?;
+        assert!(diary["daily"].is_object());
+        let state = server.dispatch("room.state.list", json!({})).await?;
+        assert!(state["entities"].is_array());
         Ok(())
     }
 
     #[tokio::test]
-    async fn every_room_adapter_rejects_legacy_identity_fields() {
+    async fn every_room_adapter_rejects_unknown_identity_fields() {
         let server = AgentMcpServer::new(test_state(CapabilityProfile::Room));
         let cases = [
+            ("room.diary.active", json!({"agentId":"foreign"})),
             (
-                "room.notebook.append",
-                json!({"scope":"x","significance":"Normal","abstract":"a","content":"c","agentId":"foreign"}),
+                "room.diary.read",
+                json!({"layer":"daily","period":"current","agentId":"foreign"}),
             ),
             ("room.notebook.recent", json!({"agentId":"foreign"})),
-            (
-                "room.notebook.selectExact",
-                json!({"date":"2026-07-25","agentId":"foreign"}),
-            ),
             (
                 "room.notebook.search",
                 json!({"query":"x","agentId":"foreign"}),
             ),
             (
-                "room.notebook.current",
-                json!({"scope":"x","agentId":"foreign"}),
+                "room.notebook.read",
+                json!({"path":"Notebook/topic.md","agentId":"foreign"}),
             ),
+            ("room.state.list", json!({"agentId":"foreign"})),
             (
-                "room.notebook.update",
-                json!({"id":"x","agentId":"foreign"}),
-            ),
-            (
-                "room.notebook.remove",
-                json!({"id":"x","agentId":"foreign"}),
-            ),
-            (
-                "room.diary.append",
-                json!({"entry":"x","agentId":"foreign"}),
-            ),
-            ("room.diary.recent", json!({"agentId":"foreign"})),
-            (
-                "room.diary.selectExact",
-                json!({"date":"2026-07-25","agentId":"foreign"}),
+                "room.state.read",
+                json!({"entity":"project","agentId":"foreign"}),
             ),
         ];
         for (name, arguments) in cases {

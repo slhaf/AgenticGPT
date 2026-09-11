@@ -199,7 +199,7 @@ fn run_smoke(
             "worker response did not contain tool output: {response}"
         ));
     }
-    let room_tool = "room.diary.append";
+    let room_tool = "room.diary.active";
     if profile == "room" && !response.contains(room_tool) {
         return Err(format!(
             "room worker response did not advertise Room tools: {response}"

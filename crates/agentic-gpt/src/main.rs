@@ -22,6 +22,7 @@ mod notebook;
 mod notify;
 mod policy;
 mod private_state;
+mod room_reads;
 #[allow(dead_code)] // Phase 1 helpers are consumed by the Phase 2/3 Room surfaces.
 mod room_repository;
 

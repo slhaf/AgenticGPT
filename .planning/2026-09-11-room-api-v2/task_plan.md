@@ -167,11 +167,11 @@ The Agentic API does not duplicate the Room repository's semantic validation rul
 
 ### Phase 2 — Read surface
 
-- [ ] Implement active/exact temporal reads for Daily/Weekly/Monthly current layout.
-- [ ] Implement Notebook recent/search/read.
-- [ ] Implement State list/read.
-- [ ] Replace advertised stdio tool descriptors/schemas/descriptions and local dispatch.
-- [ ] Ensure live optional-toolset enable/disable exposes/removes the complete V2 surface without restart.
+- [x] Implement active/exact temporal reads for Daily/Weekly/Monthly current layout.
+- [x] Implement Notebook recent/search/read.
+- [x] Implement State list/read.
+- [x] Replace advertised stdio tool descriptors/schemas/descriptions and local dispatch.
+- [x] Ensure live optional-toolset enable/disable exposes/removes the complete V2 surface without restart.
 
 ### Phase 3 — Maintenance status/submit
 
