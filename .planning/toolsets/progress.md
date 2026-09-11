@@ -1,0 +1,21 @@
+# Progress
+
+- Objective interview completed; scope, defaults, verification, three-attempt cap, and escalation conditions fixed.
+- Goal-mode device was unavailable; user authorized ordinary execution.
+- Persistent planning initialized.
+- Implemented required explicit `toolsets.enabled` configuration with closed namespace values and normal/room presets.
+- Added dynamic MCP descriptor/call authorization filtering from live config and included toolsets in the existing hot-reload subset.
+- Added `config toolset ls|enable|disable` and complete bilingual CLI metadata.
+- Added the reusable init TUI Toolsets optional section using `OrderedMultiSelectState`.
+- Updated the example, README, English/Chinese configuration docs, standalone runtime docs, and tool contract matrix.
+- Verification: `cargo fmt --all -- --check` passed; `cargo check --workspace` passed; `cargo test --workspace` passed 429 tests in 9 suites.
+- Actual Local Unix MCP smoke: normal exposed 23 tools; CLI disabled file → 20, re-enabled → 23; direct JSON removal of mcp → 20; disabled `mcp.list` returned method-not-found, all without process restart.
+- Actual init TUI smoke reached the Toolsets editor and rendered all eight namespaces with Normal selecting seven and leaving room unselected.
+- All `/tmp/agentic-toolset-*` verification directories and managed processes were removed/stopped.
+- Follow-up: `toolset ls` now lists all eight namespaces with localized status and descriptions; `enable`/`disable` print localized success confirmation.
+- Follow-up verification: 3 focused CLI tests passed; `cargo fmt --all -- --check`, `cargo check --workspace`, and all 430 workspace tests passed.
+- Real zh-CN CLI smoke displayed seven enabled namespaces plus disabled room with descriptions, then printed confirmations for enabling and disabling room. Temporary config removed.
+- Reviewer follow-up P1: Room bootstrap/diary/notebook dispatch now gates on live `toolsets.room`; disabled direct dispatch reports `room_toolset_required`, while unrelated profile capability gates remain unchanged.
+- Reviewer follow-up P2: explicit import without `toolsets` seeds the imported profile preset; valid explicit selections override it and invalid explicit data is rejected.
+- Verification: import regressions (8), Normal live-room execution, and disabled ingress regressions passed; `cargo fmt --all -- --check`, `cargo check --workspace`, and all 433 workspace tests passed.
+- Actual smoke: a running Normal Local runtime initially rejected `room.notebook.current`; after `toolset enable room` hot reload, the same process returned `{ \"current\": null }` successfully. Runtime and temporary files removed.

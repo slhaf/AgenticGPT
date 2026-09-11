@@ -6,12 +6,18 @@ objects remain authoritative. “No use” means the nearest tempting operation
 that this tool deliberately does not perform. Bounds are inclusive unless
 stated otherwise.
 
-## Standalone Normal and Room surface
+## Standalone advertised surface and namespace presets
 
-Normal exposes the first 24 names. Room adds the final 12 names, for exactly
-36. Tunnel stdio and local Unix MCP use the same descriptors, schemas,
-confirmation, path policy, audit, and Job registry. Standalone calls do not
-accept Hub-only `agentId` or `confirmMethod` fields.
+The pre-existing advertised surface contains 23 Normal names and 35 Room names. The normal
+preset enables every namespace except `room`; the room preset enables every namespace. Available
+namespaces are `agent`, `file`, `mcp`, `process`, `job`, `skills`, `tmux`, and `room`. The logical
+`room` namespace includes `bootstrap`, `bootstrap.read`, and every `room.*` tool. An explicit
+`toolsets.enabled` selection is authoritative regardless of profile, and filters only these
+advertised names; it never exposes dispatch-only aliases.
+
+Tunnel stdio and local Unix MCP use the same descriptors, schemas, confirmation, path policy,
+audit, and Job registry. Standalone calls do not accept Hub-only `agentId` or `confirmMethod`
+fields.
 
 | Public name | Use / no use | Required or conditional inputs | Defaults and bounds | Failure / lifecycle | Surface parity |
 |---|---|---|---|---|---|
@@ -94,6 +100,6 @@ active Room Agent and do not take it.
 - “Atomic” is reserved for validation/admission/confirmation boundaries. It
   never implies rollback of an already-started process, MCP call, notification,
   or other external side effect.
-- Standalone surface counts remain Normal 24 / Room 36. Hub full/coordinator
-  profile membership and standalone aliases are intentionally different and
-  must stay visible in tests and release notes.
+- Standalone surface counts remain Normal 23 / Room 35. They are profile preset counts, not a
+  guarantee after explicit toolset selection. Hub full/coordinator profile membership and
+  standalone aliases are intentionally different and must stay visible in tests and release notes.

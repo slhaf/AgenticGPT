@@ -1,0 +1,24 @@
+# Findings
+
+- Worktree-local CodeGraph index is absent; the available index targets another worktree and cannot be trusted for branch-specific source. Raw repository search/read is required.
+- Tool descriptors are assembled in `crates/agentic-gpt/src/stdio_server.rs`; room-only names are currently selected by `CapabilityProfile::Room`.
+- `Config` in `crates/agentic-gpt/src/config.rs` is persisted JSON and already held behind `AppState.config: Arc<RwLock<Config>>`.
+- CLI dispatch is `main.rs` → `config_cli::handle_config`; existing MCP config mutation offers a relevant list/enable/disable persistence pattern.
+- Initialization flows through `config_templates::InitInput`, `config_setup::SetupSession`, and `config_tui`; `OrderedMultiSelectState` is the existing reusable checklist state.
+- No Rust language server is configured, so reference discovery must use CodeGraph where trustworthy and targeted repository search otherwise.
+- Current tool availability is frozen in `AgentMcpServer::with_ingress`: `NORMAL_TOOLS` plus room arrays are copied into `Arc<Vec<Tool>>`; `list_tools`, `get_tool`, and dispatch authorization all consult that fixed vector. Hot reload therefore requires dynamic selection from `state.config`, not only config watcher support.
+- Tool namespaces are the prefix before the first dot for every current tool except bare `bootstrap`; the room preset must treat `bootstrap`/`bootstrap.read` and `room.*` as one logical room namespace or formally define a namespace table rather than infer ad hoc.
+- `Config::load` merges serialized JSON over mode/profile-adjusted defaults. A new field can have profile-aware defaults if defaults are recomputed after reading `profile`; sparse persistence must compare against the same profile preset.
+- Runtime config watchers already replace `AppState.config` after validated file changes while rejecting mode/profile changes. The optional toolset field should remain live-reloadable and must not be added to restart-required comparisons.
+- Existing MCP config commands demonstrate the requested clap shape and backup-aware persistence.
+- Standalone has two watchers: supervisor watches startup identity and only requests restart when identity changes; worker/local runtime `watch_standalone_live_config` applies an approved live subset to `AppState.config`. Toolsets belong in that live subset.
+- `config_templates::build_config` starts from `Config::default_config`, then overwrites mode/profile. Therefore profile-dependent toolset presets must be assigned after profile selection unless `default_config` accepts a profile.
+- Init TUI optional sections are round-tripped through `OptionalSection`, `OptionalSectionDraft`, `OptionalDrafts`, validation/save/build/review, and generic page rendering. Adding a Toolsets optional section can reuse `OrderedMultiSelectState`.
+- Current setup model preserves explicit imported settings; fresh sessions use default drafts. Profile changes need to update the default toolset preset only while the toolset section remains unconfigured, otherwise a user's explicit toggles should survive.
+- The exact live reload cutover is `main.rs::apply_standalone_live_subset`; it currently copies policy/path/limits/MCP only and must copy toolsets.
+- Local mode is the repository’s intended credential-free smoke surface and runs the same `watch_standalone_live_config` path as the standalone worker. It can verify live toolset reload with `agentic-gpt run` plus `agentic-gpt local list-tools`.
+- Existing docs assert fixed 24/36 profile counts and a fixed Normal/Room matrix. Documentation must instead state profile presets plus user-selectable toolsets; `README`, both configuration documents, `standalone-runtime.md`, and `tool-contract-matrix.md` are directly affected.
+- `config.example.json` must add an explicit normal-preset `toolsets` object because strict loading will require it.
+- Configuration docs need exact JSON shape and the three `config toolset` commands, and must replace fixed profile tool counts with defaults: normal excludes `room`, room enables all; the initializer optional-settings list must mention Toolsets.
+- `standalone-runtime.md` and `tool-contract-matrix.md` remain useful as per-tool contract references, but their fixed-surface claims must change to say exposure follows the enabled namespaces; the room namespace includes bootstrap plus Room memory tools.
+- `stdio_server` has dispatch-only aliases absent from the advertised `NORMAL_TOOLS`/room arrays. Decision: optional toolsets filter exactly the pre-existing advertised surface; they must not expand it by exposing aliases.

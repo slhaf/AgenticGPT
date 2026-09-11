@@ -167,8 +167,8 @@ use std::path::PathBuf;
 
 use crate::config::{
     self, default_room_config, ConfirmationProviderConfig, HubReportingConfig, LimitsConfig,
-    MaxActiveJobs, PathPolicyConfig, ReportingDetail, RoomConfig, SandboxConfig,
-    TunnelClientConfig,
+    MaxActiveJobs, PathPolicyConfig, ReportingDetail, RoomConfig, SandboxConfig, ToolNamespace,
+    ToolsetConfig, TunnelClientConfig,
 };
 use crate::config_templates::{
     self, build_config, InitInput, OptionalSection, RuntimeMode, SecretValue, TunnelSecretSource,
@@ -210,6 +210,7 @@ pub(super) fn available_optional_sections(
         OptionalSection::Confirmation,
         OptionalSection::Limits,
         OptionalSection::Sandbox,
+        OptionalSection::Toolsets,
         OptionalSection::McpServers,
         OptionalSection::Room,
         OptionalSection::TunnelClient,
@@ -369,6 +370,10 @@ pub(super) fn validate_field(
             OptionalSection::Sandbox,
             &session.optional_draft(OptionalSection::Sandbox),
         ),
+        SetupField::Toolsets => validate_optional(
+            OptionalSection::Toolsets,
+            &session.optional_draft(OptionalSection::Toolsets),
+        ),
         SetupField::McpServerId
         | SetupField::McpServerEnabled
         | SetupField::McpServerTransport
@@ -513,6 +518,16 @@ fn validate_optional(section: OptionalSection, draft: &OptionalSectionDraft) -> 
                     SetupField::RequiredRuntimePaths,
                     "config_init_runtime_paths_invalid",
                 ));
+            }
+        }
+        (OptionalSection::Toolsets, OptionalSectionDraft::Toolsets(value)) => {
+            if value
+                .selection
+                .selected()
+                .iter()
+                .any(|name| ToolNamespace::parse(name).is_err())
+            {
+                errors.push(error(SetupField::Toolsets, "config_init_toolsets_invalid"));
             }
         }
         (OptionalSection::McpServers, OptionalSectionDraft::McpServers(value)) => {
@@ -754,6 +769,7 @@ fn configured_draft(
             .map(OptionalSectionDraft::Confirmation),
         OptionalSection::Limits => drafts.limits.clone().map(OptionalSectionDraft::Limits),
         OptionalSection::Sandbox => drafts.sandbox.clone().map(OptionalSectionDraft::Sandbox),
+        OptionalSection::Toolsets => drafts.toolsets.clone().map(OptionalSectionDraft::Toolsets),
         OptionalSection::McpServers => drafts
             .mcp_servers
             .clone()
@@ -917,6 +933,19 @@ fn apply_optional_draft(
                 required_runtime_paths,
             });
         }
+        (OptionalSection::Toolsets, OptionalSectionDraft::Toolsets(value)) => {
+            let mut toolsets = ToolsetConfig::room();
+            for namespace in ToolNamespace::all().iter().copied() {
+                toolsets.disable(namespace);
+            }
+            for name in value.selection.selected() {
+                let namespace = ToolNamespace::parse(name).map_err(|_| {
+                    vec![error(SetupField::Toolsets, "config_init_toolsets_invalid")]
+                })?;
+                toolsets.enable(namespace);
+            }
+            input.toolsets = Some(toolsets);
+        }
         (OptionalSection::McpServers, OptionalSectionDraft::McpServers(value)) => {
             input.mcp_servers = Some(mcp_servers_from_draft(&value.servers)?);
         }
@@ -1028,6 +1057,7 @@ fn first_field(section: OptionalSection) -> SetupField {
         OptionalSection::Confirmation => SetupField::ConfirmationChannels,
         OptionalSection::Limits => SetupField::MaxConcurrentTasks,
         OptionalSection::Sandbox => SetupField::SandboxEnabled,
+        OptionalSection::Toolsets => SetupField::Toolsets,
         OptionalSection::McpServers => SetupField::McpServerId,
         OptionalSection::Room => SetupField::RoomTimezone,
         OptionalSection::TunnelClient => SetupField::TunnelClientVersion,

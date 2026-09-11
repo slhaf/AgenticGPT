@@ -178,6 +178,26 @@ const COMMAND_CATALOG: &[CatalogEntry] = &[
     CatalogEntry::new("config.keys", "List configuration keys", "列出配置键"),
     CatalogEntry::new("config.set", "Set a configuration value", "设置配置值"),
     CatalogEntry::new(
+        "config.toolset",
+        "Manage namespace-level optional toolsets",
+        "管理命名空间级可选工具集",
+    ),
+    CatalogEntry::new(
+        "config.toolset.ls",
+        "List enabled optional toolset namespaces",
+        "列出已启用的可选工具集命名空间",
+    ),
+    CatalogEntry::new(
+        "config.toolset.enable",
+        "Enable an optional toolset namespace",
+        "启用可选工具集命名空间",
+    ),
+    CatalogEntry::new(
+        "config.toolset.disable",
+        "Disable an optional toolset namespace",
+        "禁用可选工具集命名空间",
+    ),
+    CatalogEntry::new(
         "config.allow",
         "Manage commands allowed by policy",
         "管理策略允许的命令",
@@ -401,6 +421,16 @@ const ARG_CATALOG: &[CatalogEntry] = &[
     CatalogEntry::new("config.mcp.remove.server_id", "MCP server identifier", "MCP 服务器标识符"),
     CatalogEntry::new("config.mcp.enable.server_id", "MCP server identifier", "MCP 服务器标识符"),
     CatalogEntry::new("config.mcp.disable.server_id", "MCP server identifier", "MCP 服务器标识符"),
+    CatalogEntry::new(
+        "config.toolset.enable.namespace",
+        "Tool namespace",
+        "工具命名空间",
+    ),
+    CatalogEntry::new(
+        "config.toolset.disable.namespace",
+        "Tool namespace",
+        "工具命名空间",
+    ),
     CatalogEntry::new("tui.config", "Configuration file to use", "要使用的配置文件"),
     CatalogEntry::new("tmux.config", "Configuration file to use", "要使用的配置文件"),
     CatalogEntry::new("tmux.attach.session", "Session name", "会话名称"),

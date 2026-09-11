@@ -619,6 +619,7 @@ fn apply_standalone_live_subset(
     live.path_policy = candidate.path_policy;
     live.limits = candidate.limits;
     live.mcp_servers = candidate.mcp_servers;
+    live.toolsets = candidate.toolsets;
     resolved
 }
 
@@ -772,12 +773,12 @@ mod tests {
     }
 
     #[test]
-    fn normal_mode_room_command_error_is_structured() {
-        let value = hub::room_agent_required_error();
-        assert_eq!(value["error"]["code"], "room_agent_required");
+    fn room_toolset_required_error_is_structured() {
+        let value = hub::room_toolset_required_error();
+        assert_eq!(value["error"]["code"], "room_toolset_required");
         assert_eq!(
             value["error"]["message"],
-            "room commands require profile=room in config"
+            "room commands require toolsets.room to be enabled"
         );
     }
 
@@ -786,6 +787,11 @@ mod tests {
         workspace_root: PathBuf,
     ) -> (AppState, mpsc::UnboundedReceiver<AgentMessage>) {
         let mut config = Config::default_config().unwrap();
+        config.toolsets = if profile == CapabilityProfile::Room {
+            config::ToolsetConfig::room()
+        } else {
+            config::ToolsetConfig::normal()
+        };
         config.workspace_root = workspace_root;
         let (tx, rx) = mpsc::unbounded_channel();
         (
@@ -830,47 +836,50 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn normal_mode_rejects_update_and_remove_room_commands() {
-        let workspace = unique_temp_dir("normal-room-update-remove").join("workspace");
-        fs::create_dir_all(&workspace).unwrap();
-        let (state, mut rx) = command_test_state(CapabilityProfile::Normal, workspace);
-        hub::handle_hub_command(
-            state.clone(),
-            HubCommand::RoomNotebookUpdate {
-                request_id: "req-update".to_string(),
-                payload: NotebookUpdateRequest {
-                    id: "psg_1".to_string(),
-                    significance: None,
-                    abstract_text: Some("updated".to_string()),
-                    content: None,
-                    tags: None,
-                },
-            },
-            None,
+    async fn normal_runtime_follows_live_room_toolset_for_bootstrap_dispatch() {
+        let workspace = unique_temp_dir("normal-live-room-bootstrap").join("workspace");
+        let guides = workspace.join("bootstrap").join("guides");
+        fs::create_dir_all(&guides).unwrap();
+        fs::write(
+            workspace.join("bootstrap").join("bootstrap.md"),
+            "---\nid: room\nkind: entrypoint\nname: Room\ndescription: Route guides\nschemaVersion: 1\n---\nstart\n",
         )
-        .await
         .unwrap();
-        let response = recv_response(&mut rx).await;
-        assert_eq!(response["error"]["code"], "room_agent_required");
+        fs::write(
+            guides.join("guide.md"),
+            "---\nid: guide\nkind: guide\ntitle: Guide\nsummary: Use guide\n---\nbody\n",
+        )
+        .unwrap();
+        let (state, _rx) = command_test_state(CapabilityProfile::Normal, workspace);
 
-        hub::handle_hub_command(
-            state,
-            HubCommand::RoomNotebookRemove {
-                request_id: "req-remove".to_string(),
-                payload: NotebookRemoveRequest {
-                    id: "psg_1".to_string(),
-                },
+        let disabled = local_service::dispatch(
+            state.clone(),
+            HubCommand::RoomBootstrap {
+                request_id: "req-disabled".to_string(),
             },
-            None,
         )
         .await
         .unwrap();
-        let response = recv_response(&mut rx).await;
-        assert_eq!(response["error"]["code"], "room_agent_required");
+        assert_eq!(disabled["error"]["code"], "room_toolset_required");
+
+        let mut config = state.config.read().await.clone();
+        config.toolsets.enable(config::ToolNamespace::Room);
+        *state.config.write().await = config;
+
+        let enabled = local_service::dispatch(
+            state,
+            HubCommand::RoomBootstrap {
+                request_id: "req-enabled".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(enabled["entrypoint"]["id"], "room");
+        assert_eq!(enabled["guides"][0]["id"], "guide");
     }
 
     #[tokio::test]
-    async fn hub_adapter_and_local_dispatcher_share_capability_errors() {
+    async fn hub_adapter_and_local_dispatcher_share_toolset_errors() {
         let workspace = unique_temp_dir("dispatcher-parity").join("workspace");
         fs::create_dir_all(&workspace).unwrap();
         let (state, mut rx) = command_test_state(CapabilityProfile::Normal, workspace);
@@ -884,44 +893,7 @@ mod tests {
         hub::handle_hub_command(state, command, None).await.unwrap();
         let adapted = recv_response(&mut rx).await;
         assert_eq!(direct, adapted);
-        assert_eq!(direct["error"]["code"], "room_agent_required");
-    }
-
-    #[tokio::test]
-    async fn normal_mode_rejects_bootstrap_commands() {
-        let workspace = unique_temp_dir("normal-room-bootstrap").join("workspace");
-        fs::create_dir_all(&workspace).unwrap();
-        let (state, mut rx) = command_test_state(CapabilityProfile::Normal, workspace);
-        hub::handle_hub_command(
-            state.clone(),
-            HubCommand::RoomBootstrap {
-                request_id: "req-bootstrap".to_string(),
-            },
-            None,
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            recv_response(&mut rx).await["error"]["code"],
-            "room_agent_required"
-        );
-
-        hub::handle_hub_command(
-            state,
-            HubCommand::RoomBootstrapRead {
-                request_id: "req-bootstrap-read".to_string(),
-                payload: BootstrapReadRequest {
-                    id: "guide".to_string(),
-                },
-            },
-            None,
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            recv_response(&mut rx).await["error"]["code"],
-            "room_agent_required"
-        );
+        assert_eq!(direct["error"]["code"], "room_toolset_required");
     }
 
     #[tokio::test]
@@ -1694,6 +1666,7 @@ mod tests {
             },
         );
 
+        let candidate_toolsets = candidate.toolsets.clone();
         let resolved = apply_standalone_live_subset(&mut live, candidate);
 
         assert_eq!(live.agent_id, original_agent_id);
@@ -1713,6 +1686,7 @@ mod tests {
             config::MaxActiveJobs::Explicit(9)
         );
         assert_eq!(live.limits.max_file_search_context_lines, 20);
+        assert_eq!(live.toolsets, candidate_toolsets);
         assert_eq!(
             live.mcp_servers["primary"].url.as_deref(),
             Some("https://new.example/mcp")
@@ -1779,6 +1753,7 @@ mod tests {
         let live_after_valid = state.config.read().await.clone();
         assert_eq!(live_after_valid.mcp_servers, valid.mcp_servers);
         assert_eq!(live_after_valid.limits.max_file_search_context_lines, 20);
+        assert_eq!(live_after_valid.toolsets, valid.toolsets);
 
         let mut invalid = valid;
         invalid.mcp_servers.get_mut("primary").unwrap().transport = "sse".to_string();

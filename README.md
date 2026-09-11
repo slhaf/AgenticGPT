@@ -31,7 +31,7 @@ The historical Cloudflare-only Hub has been removed from `main`; it remains on b
 
 - No VPS, public domain, reverse proxy, Hub database, or shared command router is required.
 - Every machine has an independent connection and restart boundary.
-- The tunnel and owner-only Unix MCP ingress expose the same 24-tool Normal or 36-tool Room surface.
+- The tunnel and owner-only Unix MCP ingress expose the configured toolset surface from the pre-existing Normal/Room names; profile presets are defaults and explicit `toolsets.enabled` selection is authoritative.
 - Policy, confirmation, audit, live configuration, capacity, and managed Jobs stay local to that machine.
 - A fresh stdio worker can recover a resumed tunnel request that arrives before a new MCP `initialize` handshake.
 
@@ -105,7 +105,7 @@ Source builds, CI, and release publishing are documented in [`docs/development.m
 ### 1. Initialize the local configuration
 
 On a terminal, `agentic-gpt config init` opens the keyboard-driven fullscreen setup UI. Its
-defaults are Standalone mode and the Normal capability profile. Fullscreen mode requires stdin,
+defaults are Standalone mode and the Normal toolset preset. Fullscreen mode requires stdin,
 stdout, and stderr to all be terminals; a pipe or redirected stream returns an actionable error
 and writes nothing. Scripts and CI must choose the deterministic builder explicitly with
 `--non-interactive`.
@@ -131,19 +131,34 @@ agentic-gpt config init \
 
 The first command writes safe Standalone + Normal placeholders and reports the tunnel ID and
 secret-reference actions still pending; it does not provision a secret automatically. `--mode`
-selects the runtime transport (Standalone, Hub, or Local), while `--profile` selects the tool
-surface (Normal or Room). In fullscreen mode these flags seed editable fields rather than
-locking them. The flow is Basic → Connection (except Local) → Optional settings → Review →
-Completion; optional sections can be revisited, and Review redacts secret values and can jump
-back to an earlier section. Tab/Shift+Tab and arrow keys move focus, Enter edits or activates,
-Esc backs out (and is a no-op on the root Basic page), and Ctrl+C cancels. In fullscreen mode, no
-config, backup, or secret file is written until final Review confirmation. `--agent-secret` is visible to shell
-history and local process inspection; prefer hidden input in the fullscreen UI. For tunnel API
-keys, use a `file:`/`env:` reference. This feature documents keyboard fullscreen setup only; it
-does not promise mouse, inline, dashboard, or Windows behavior.
+selects the runtime transport (Standalone, Hub, or Local), while `--profile` selects the default
+toolset preset (normal enables every namespace except `room`; room enables every namespace).
+An explicit `toolsets.enabled` selection is authoritative. In fullscreen mode these flags seed
+editable fields rather than locking them. The flow is Basic → Connection (except Local) →
+Optional settings → Review → Completion; optional sections can be revisited, and Review redacts
+secret values and can jump back to an earlier section. Tab/Shift+Tab and arrow keys move focus,
+Enter edits or activates, Esc backs out (and is a no-op on the root Basic page), and Ctrl+C cancels.
+In fullscreen mode, no config, backup, or secret file is written until final Review confirmation.
+`--agent-secret` is visible to shell history and local process inspection; prefer hidden input in
+the fullscreen UI. For tunnel API keys, use a `file:`/`env:` reference. This feature documents
+keyboard fullscreen setup only; it does not promise mouse, inline, dashboard, or Windows behavior.
 
 The default config path is `~/.agentic_gpt/config.json`. Review [`config.example.json`](config.example.json) and [`docs/configuration.md`](docs/configuration.md) before exposing write roots or enabling MCP servers.
 Use `agentic-gpt config keys [--section <SECTION>] [--json]` to inspect the controlled `config set` registry.
+Manage namespaces with these exact commands:
+
+```bash
+agentic-gpt config toolset ls
+agentic-gpt config toolset enable <namespace>
+agentic-gpt config toolset disable <namespace>
+```
+`ls` shows every namespace with its enabled/disabled state and a short description. Successful
+`enable` and `disable` mutations print the namespace and resulting state.
+
+The available namespaces are `agent`, `file`, `mcp`, `process`, `job`, `skills`, `tmux`, and
+`room`; the logical `room` namespace includes `bootstrap`, `bootstrap.read`, and every `room.*`
+tool. You can edit `toolsets.enabled` directly in JSON; valid changes hot-reload without a
+restart, while an invalid candidate keeps the last valid selection.
 
 ### 2. Store the tunnel secret by reference
 
@@ -169,8 +184,9 @@ agentic-gpt config set tunnel.client.autoDownload true
 agentic-gpt run
 ```
 
-The config file’s `mode` and `profile` select Standalone/Hub/Local and Normal/Room; for example, use
-`agentic-gpt config set profile room` before starting for the 36-tool Room surface. The same worker
+The config file’s `mode` selects Standalone/Hub/Local and `profile` selects the default toolset
+preset. The normal preset enables every namespace except `room`, while the room preset enables all;
+an explicit `toolsets.enabled` selection is authoritative. The same worker
 also exposes an owner-only Unix MCP socket for local inspection:
 
 ```bash
@@ -224,7 +240,9 @@ agentic-gpt config set hub.agentSecret '<agent-secret>'
 agentic-gpt run
 ```
 
-Set `profile` to `room` before `agentic-gpt run` for the Room profile. `hub.transport` may be `websocket` or `sse`.
+Set `profile` to `room` before `agentic-gpt run` to choose the all-namespace Room preset.
+An explicit `toolsets.enabled` selection remains authoritative. `hub.transport` may be `websocket`
+or `sse`.
 
 For an existing v0.9 or external JSON file, use the explicit migration flow:
 `agentic-gpt config import --config PATH [SOURCE]` (omit `--config` for the default path). If
@@ -240,7 +258,7 @@ Hub-native and forwarded execution use the same managed Job envelopes. Active wo
 
 ## Managed Jobs and safety boundaries
 
-- Normal exposes 24 tools; Room exposes 36.
+- The pre-existing advertised surface contains 23 Normal names and 35 Room names; profile presets select namespaces, and explicit `toolsets.enabled` can narrow that surface.
 - `process.exec`, `skills.run`, and `mcp.callTool` return `JobResponse`.
 - `mcp.batch` accepts 1–16 ordered calls, uses one aggregate confirmation, and enforces global/per-server concurrency.
 - MCP arguments are JSON objects capped at 256 KiB per call; retained results are capped at 512 KiB; aggregate batch arguments/results are capped at 2 MiB.

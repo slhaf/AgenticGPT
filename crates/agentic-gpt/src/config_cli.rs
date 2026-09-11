@@ -11,7 +11,7 @@ use crate::{
     cli_i18n::{self, UiLanguage},
     config::{
         self, normalize_confirmation_language, ordered_config_json, write_config_with_backup,
-        Config, ReportingDetail,
+        Config, ReportingDetail, ToolNamespace,
     },
     config_setup::SetupSeed,
     config_templates::{self, InitInput, InitSummary, RuntimeMode, SecretValue},
@@ -1228,6 +1228,23 @@ pub(crate) enum ConfigCommand {
         #[command(subcommand)]
         command: McpConfigCommand,
     },
+    Toolset {
+        #[command(subcommand)]
+        command: ToolsetCommand,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum ToolsetCommand {
+    Ls,
+    Enable {
+        #[arg(value_enum)]
+        namespace: ToolNamespace,
+    },
+    Disable {
+        #[arg(value_enum)]
+        namespace: ToolNamespace,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1303,8 +1320,87 @@ pub(crate) async fn handle_config(
         }
         ConfigCommand::Path { command } => policy::mutate_path_policy(config_path, command)?,
         ConfigCommand::Mcp { command } => mcp::mutate_servers(config_path, command)?,
+        ConfigCommand::Toolset { command } => handle_toolset(&config_path, command, language)?,
     }
     Ok(())
+}
+
+fn handle_toolset(config_path: &Path, command: ToolsetCommand, language: UiLanguage) -> Result<()> {
+    let mut config = Config::load(config_path)?;
+    match command {
+        ToolsetCommand::Ls => println!("{}", render_toolsets(&config, language)),
+        ToolsetCommand::Enable { namespace } => {
+            config.toolsets.enable(namespace);
+            write_config_with_backup(config_path, &config)?;
+            println!("{}", toolset_mutation_message(namespace, true, language));
+        }
+        ToolsetCommand::Disable { namespace } => {
+            config.toolsets.disable(namespace);
+            write_config_with_backup(config_path, &config)?;
+            println!("{}", toolset_mutation_message(namespace, false, language));
+        }
+    }
+    Ok(())
+}
+
+fn render_toolsets(config: &Config, language: UiLanguage) -> String {
+    ToolNamespace::all()
+        .iter()
+        .copied()
+        .map(|namespace| {
+            let enabled = config.toolsets.is_enabled(namespace);
+            let status = match (language, enabled) {
+                (UiLanguage::En, true) => "enabled",
+                (UiLanguage::En, false) => "disabled",
+                (UiLanguage::ZhCn, true) => "启用",
+                (UiLanguage::ZhCn, false) => "禁用",
+            };
+            format!(
+                "[{status}]\t{}\t{}",
+                namespace.as_str(),
+                toolset_description(namespace, language)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn toolset_description(namespace: ToolNamespace, language: UiLanguage) -> &'static str {
+    match (namespace, language) {
+        (ToolNamespace::Agent, UiLanguage::En) => {
+            "Agent runtime information and health diagnostics."
+        }
+        (ToolNamespace::Agent, UiLanguage::ZhCn) => "Agent 运行信息与健康诊断。",
+        (ToolNamespace::File, UiLanguage::En) => "Workspace file reading, search, and editing.",
+        (ToolNamespace::File, UiLanguage::ZhCn) => "工作区文件读取、搜索与编辑。",
+        (ToolNamespace::Mcp, UiLanguage::En) => "Downstream MCP server discovery and tool calls.",
+        (ToolNamespace::Mcp, UiLanguage::ZhCn) => "下游 MCP 服务发现与工具调用。",
+        (ToolNamespace::Process, UiLanguage::En) => "Managed local process execution.",
+        (ToolNamespace::Process, UiLanguage::ZhCn) => "受管本地进程执行。",
+        (ToolNamespace::Job, UiLanguage::En) => "Managed job inspection and cancellation.",
+        (ToolNamespace::Job, UiLanguage::ZhCn) => "受管任务查看与取消。",
+        (ToolNamespace::Skills, UiLanguage::En) => {
+            "Skill discovery, installation, activation, and execution."
+        }
+        (ToolNamespace::Skills, UiLanguage::ZhCn) => "技能发现、安装、启用与执行。",
+        (ToolNamespace::Tmux, UiLanguage::En) => "Persistent tmux session and pane operations.",
+        (ToolNamespace::Tmux, UiLanguage::ZhCn) => "持久化 tmux 会话与窗格操作。",
+        (ToolNamespace::Room, UiLanguage::En) => "Room bootstrap, diary, and notebook tools.",
+        (ToolNamespace::Room, UiLanguage::ZhCn) => "Room 引导、日记与笔记本工具。",
+    }
+}
+
+fn toolset_mutation_message(
+    namespace: ToolNamespace,
+    enabled: bool,
+    language: UiLanguage,
+) -> String {
+    match (language, enabled) {
+        (UiLanguage::En, true) => format!("Enabled toolset: {namespace}."),
+        (UiLanguage::En, false) => format!("Disabled toolset: {namespace}."),
+        (UiLanguage::ZhCn, true) => format!("已启用工具集：{namespace}。"),
+        (UiLanguage::ZhCn, false) => format!("已禁用工具集：{namespace}。"),
+    }
 }
 
 fn tunnel_config(config: &mut Config) -> &mut config::TunnelConfig {
@@ -1316,6 +1412,125 @@ fn tunnel_config(config: &mut Config) -> &mut config::TunnelConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn toolset_commands_dispatch_and_reject_unknown_namespaces() {
+        let cli = crate::Cli::try_parse_from(["agentic-gpt", "config", "toolset", "ls"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            crate::Commands::Config {
+                command: ConfigCommand::Toolset {
+                    command: ToolsetCommand::Ls
+                },
+                ..
+            }
+        ));
+
+        let cli =
+            crate::Cli::try_parse_from(["agentic-gpt", "config", "toolset", "enable", "file"])
+                .unwrap();
+        assert!(matches!(
+            cli.command,
+            crate::Commands::Config {
+                command: ConfigCommand::Toolset {
+                    command: ToolsetCommand::Enable {
+                        namespace: ToolNamespace::File
+                    }
+                },
+                ..
+            }
+        ));
+
+        let cli =
+            crate::Cli::try_parse_from(["agentic-gpt", "config", "toolset", "disable", "room"])
+                .unwrap();
+        assert!(matches!(
+            cli.command,
+            crate::Commands::Config {
+                command: ConfigCommand::Toolset {
+                    command: ToolsetCommand::Disable {
+                        namespace: ToolNamespace::Room
+                    }
+                },
+                ..
+            }
+        ));
+
+        assert!(crate::Cli::try_parse_from([
+            "agentic-gpt",
+            "config",
+            "toolset",
+            "enable",
+            "unknown",
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn toolset_enable_and_disable_persist_across_config_loads() {
+        let root = std::env::temp_dir().join(format!(
+            "agentic-config-cli-toolset-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("config.json");
+        let mut config = Config::default_config().unwrap();
+        config.toolsets.disable(ToolNamespace::File);
+        write_config_with_backup(&path, &config).unwrap();
+
+        handle_toolset(
+            &path,
+            ToolsetCommand::Enable {
+                namespace: ToolNamespace::File,
+            },
+            UiLanguage::En,
+        )
+        .unwrap();
+        assert!(Config::load(&path)
+            .unwrap()
+            .toolsets
+            .is_enabled(ToolNamespace::File));
+
+        handle_toolset(
+            &path,
+            ToolsetCommand::Disable {
+                namespace: ToolNamespace::File,
+            },
+            UiLanguage::En,
+        )
+        .unwrap();
+        assert!(!Config::load(&path)
+            .unwrap()
+            .toolsets
+            .is_enabled(ToolNamespace::File));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn toolset_listing_describes_all_namespaces_and_feedback_is_localized() {
+        let config = Config::default_config().unwrap();
+
+        let english = render_toolsets(&config, UiLanguage::En);
+        assert_eq!(english.lines().count(), ToolNamespace::all().len());
+        assert!(
+            english.contains("[enabled]\tagent\tAgent runtime information and health diagnostics.")
+        );
+        assert!(english.contains("[disabled]\troom\tRoom bootstrap, diary, and notebook tools."));
+
+        let chinese = render_toolsets(&config, UiLanguage::ZhCn);
+        assert!(chinese.contains("[启用]\tfile\t工作区文件读取、搜索与编辑。"));
+        assert!(chinese.contains("[禁用]\troom\tRoom 引导、日记与笔记本工具。"));
+        assert_eq!(
+            toolset_mutation_message(ToolNamespace::File, true, UiLanguage::ZhCn),
+            "已启用工具集：file。"
+        );
+        assert_eq!(
+            toolset_mutation_message(ToolNamespace::Room, false, UiLanguage::En),
+            "Disabled toolset: room."
+        );
+    }
 
     #[test]
     fn interactive_init_requires_all_three_terminals_and_no_non_interactive_flag() {

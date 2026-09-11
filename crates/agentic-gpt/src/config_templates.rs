@@ -8,7 +8,7 @@ use crate::cli_i18n::UiLanguage;
 use crate::config::{
     default_path_policy, validate_hub_transport, validate_hub_url_shape, Config,
     ConfirmationProviderConfig, HubReportingConfig, LimitsConfig, PathPolicyConfig, RoomConfig,
-    SandboxConfig, TunnelClientConfig, TunnelConfig, WorkerProfile,
+    SandboxConfig, ToolsetConfig, TunnelClientConfig, TunnelConfig, WorkerProfile,
 };
 use crate::mcp::McpServerConfig;
 use crate::utils::agentic_home;
@@ -27,6 +27,7 @@ pub(crate) enum OptionalSection {
     Limits,
     Sandbox,
     McpServers,
+    Toolsets,
     Room,
     TunnelClient,
     HubReporting,
@@ -87,6 +88,7 @@ pub(crate) struct InitInput {
     pub(crate) tunnel_client: Option<TunnelClientConfig>,
     pub(crate) hub_reporting: Option<HubReportingConfig>,
     pub(crate) mcp_servers: Option<BTreeMap<String, McpServerConfig>>,
+    pub(crate) toolsets: Option<ToolsetConfig>,
 }
 
 impl InitInput {
@@ -113,6 +115,7 @@ impl InitInput {
             tunnel_client: None,
             hub_reporting: None,
             mcp_servers: None,
+            toolsets: None,
         }
     }
 }
@@ -169,6 +172,7 @@ pub(crate) fn build_config(input: InitInput) -> Result<InitBuild> {
         tunnel_client,
         hub_reporting,
         mcp_servers,
+        toolsets,
     } = input;
 
     if room.is_some() && !optional_section_is_legal(OptionalSection::Room, mode, profile) {
@@ -179,6 +183,11 @@ pub(crate) fn build_config(input: InitInput) -> Result<InitBuild> {
     let mut config = imported_base.unwrap_or(Config::default_config()?);
     config.mode = mode;
     config.profile = profile;
+    if let Some(toolsets) = toolsets {
+        config.toolsets = toolsets;
+    } else if !has_imported_base {
+        config.toolsets = ToolsetConfig::for_profile(profile);
+    }
     if let Some(confirmation_language) = confirmation_language {
         config.confirmation_language = confirmation_language;
     } else if !has_imported_base {
@@ -301,7 +310,8 @@ pub(crate) fn optional_section_is_legal(
         | OptionalSection::Confirmation
         | OptionalSection::Limits
         | OptionalSection::Sandbox
-        | OptionalSection::McpServers => true,
+        | OptionalSection::McpServers
+        | OptionalSection::Toolsets => true,
         OptionalSection::Room => profile == WorkerProfile::Room,
         OptionalSection::TunnelClient | OptionalSection::HubReporting => {
             mode == RuntimeMode::Standalone

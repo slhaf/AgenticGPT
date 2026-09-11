@@ -30,6 +30,7 @@ use serde_json::{json, Map, Value};
 use uuid::Uuid;
 
 use crate::{
+    config::ToolNamespace,
     local_service,
     state::{AppState, CapabilityProfile},
 };
@@ -37,46 +38,60 @@ use crate::{
 const INSTRUCTIONS: &str = "Agentic GPT local Tunnel worker. Start with agent.info to inspect the active profile, exact workspace/path policy, capacity, confirmation channels, MCP scheduler state, and connection state. Use file.read/search for bounded UTF-8 workspace work and file.edit for Codex apply-patch edits, process.exec/process.batch for process Jobs, mcp.callTool for one downstream MCP Job, mcp.batch for 1..16 atomically admitted child Jobs with one aggregate confirmation and bounded 8/2 concurrency, job.get/list/cancel for lifecycle control, tmux for persistent workspaces, skills for the local skills workspace, and bootstrap for Room startup guidance. All calls remain subject to path policy, configured confirmation, audit, and bounded waits.";
 const PATCH_SCHEMA_DESCRIPTION: &str = "Codex apply_patch text beginning with *** Begin Patch and ending with *** End Patch; supports Add File, Delete File, Update File, and Move to across multiple files.";
 
-const NORMAL_TOOLS: &[&str] = &[
-    "agent.info",
-    "file.read",
-    "file.search",
-    "file.edit",
-    "mcp.batch",
-    "mcp.callTool",
-    "mcp.list",
-    "process.batch",
-    "process.exec",
-    "job.cancel",
-    "job.get",
-    "job.list",
-    "skills.install",
-    "skills.install.cancel",
-    "skills.install.get",
-    "skills.list",
-    "skills.read",
-    "skills.run",
-    "skills.setActive",
-    "tmux.exec",
-    "tmux.pasteText",
-    "tmux.panes",
-    "tmux.sessions",
+const TOOL_NAMESPACE_BY_NAME: &[(&str, ToolNamespace)] = &[
+    ("agent.info", ToolNamespace::Agent),
+    ("bootstrap", ToolNamespace::Room),
+    ("bootstrap.read", ToolNamespace::Room),
+    ("file.edit", ToolNamespace::File),
+    ("file.read", ToolNamespace::File),
+    ("file.search", ToolNamespace::File),
+    ("job.cancel", ToolNamespace::Job),
+    ("job.get", ToolNamespace::Job),
+    ("job.list", ToolNamespace::Job),
+    ("mcp.batch", ToolNamespace::Mcp),
+    ("mcp.callTool", ToolNamespace::Mcp),
+    ("mcp.list", ToolNamespace::Mcp),
+    ("process.batch", ToolNamespace::Process),
+    ("process.exec", ToolNamespace::Process),
+    ("room.diary.append", ToolNamespace::Room),
+    ("room.diary.recent", ToolNamespace::Room),
+    ("room.diary.selectExact", ToolNamespace::Room),
+    ("room.notebook.append", ToolNamespace::Room),
+    ("room.notebook.current", ToolNamespace::Room),
+    ("room.notebook.recent", ToolNamespace::Room),
+    ("room.notebook.remove", ToolNamespace::Room),
+    ("room.notebook.search", ToolNamespace::Room),
+    ("room.notebook.selectExact", ToolNamespace::Room),
+    ("room.notebook.update", ToolNamespace::Room),
+    ("skills.install", ToolNamespace::Skills),
+    ("skills.install.cancel", ToolNamespace::Skills),
+    ("skills.install.get", ToolNamespace::Skills),
+    ("skills.list", ToolNamespace::Skills),
+    ("skills.read", ToolNamespace::Skills),
+    ("skills.run", ToolNamespace::Skills),
+    ("skills.setActive", ToolNamespace::Skills),
+    ("tmux.exec", ToolNamespace::Tmux),
+    ("tmux.panes", ToolNamespace::Tmux),
+    ("tmux.pasteText", ToolNamespace::Tmux),
+    ("tmux.sessions", ToolNamespace::Tmux),
 ];
 
-const ROOM_BOOTSTRAP_TOOLS: &[&str] = &["bootstrap", "bootstrap.read"];
+fn tool_namespace(name: &str) -> Option<ToolNamespace> {
+    TOOL_NAMESPACE_BY_NAME
+        .iter()
+        .find(|(tool, _)| *tool == name)
+        .map(|(_, namespace)| *namespace)
+}
 
-const ROOM_ONLY_TOOLS: &[&str] = &[
-    "room.diary.append",
-    "room.diary.recent",
-    "room.diary.selectExact",
-    "room.notebook.append",
-    "room.notebook.current",
-    "room.notebook.recent",
-    "room.notebook.remove",
-    "room.notebook.search",
-    "room.notebook.selectExact",
-    "room.notebook.update",
-];
+fn tool_descriptors(toolsets: &crate::config::ToolsetConfig) -> Vec<Tool> {
+    let mut tools = TOOL_NAMESPACE_BY_NAME
+        .iter()
+        .filter(|(_, namespace)| toolsets.is_enabled(*namespace))
+        .map(|(name, _)| tool_descriptor(name))
+        .collect::<Vec<_>>();
+    tools.sort_unstable_by(|left, right| left.name.cmp(&right.name));
+    tools
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RequestIngress {
@@ -277,7 +292,6 @@ where
 #[derive(Clone)]
 pub(crate) struct AgentMcpServer {
     state: AppState,
-    tools: Arc<Vec<Tool>>,
     ingress: RequestIngress,
 }
 
@@ -360,30 +374,36 @@ impl AgentMcpServer {
     }
 
     pub(crate) fn with_ingress(state: AppState, ingress: RequestIngress) -> Self {
-        let profile = state.runtime.profile;
-        let mut names = NORMAL_TOOLS.to_vec();
-        if profile == CapabilityProfile::Room {
-            names.extend_from_slice(ROOM_BOOTSTRAP_TOOLS);
-            names.extend_from_slice(ROOM_ONLY_TOOLS);
-        }
-        names.sort_unstable();
-        let tools = names.into_iter().map(tool_descriptor).collect::<Vec<_>>();
-        Self {
-            state,
-            tools: Arc::new(tools),
-            ingress,
-        }
+        Self { state, ingress }
+    }
+
+    async fn current_tools(&self) -> Vec<Tool> {
+        let config = self.state.config.read().await;
+        tool_descriptors(&config.toolsets)
+    }
+
+    async fn tool_is_available(&self, name: &str) -> bool {
+        let Some(namespace) = tool_namespace(name) else {
+            return false;
+        };
+        self.state
+            .config
+            .read()
+            .await
+            .toolsets
+            .is_enabled(namespace)
     }
 
     async fn call(&self, request: CallToolRequestParams) -> Result<Value, ErrorData> {
         let name = request.name.to_string();
-        if !self.tools.iter().any(|tool| tool.name == name) {
+        if !self.tool_is_available(&name).await {
             return Err(ErrorData::new(
                 rmcp::model::ErrorCode::METHOD_NOT_FOUND,
                 format!("Tool is not available: {name}"),
                 None,
             ));
         }
+
         let arguments = Value::Object(request.arguments.unwrap_or_default());
         let run_id = task_id("run");
         let report_request_id = task_id("req");
@@ -507,7 +527,7 @@ impl AgentMcpServer {
         arguments: Value,
         terminal_tracker: Arc<HumanTerminalTracker>,
     ) -> Result<Value> {
-        if self.tools.iter().any(|tool| tool.name == name) {
+        if tool_namespace(name).is_some() {
             validate_stdio_arguments(name, &arguments)?;
         }
         let request_id = request_id();
@@ -1383,13 +1403,18 @@ impl ServerHandler for AgentMcpServer {
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
         Ok(ListToolsResult {
-            tools: (*self.tools).clone(),
+            tools: self.current_tools().await,
             ..Default::default()
         })
     }
 
     fn get_tool(&self, name: &str) -> Option<Tool> {
-        self.tools.iter().find(|tool| tool.name == name).cloned()
+        let namespace = tool_namespace(name)?;
+        let config = self.state.config.try_read().ok()?;
+        config
+            .toolsets
+            .is_enabled(namespace)
+            .then(|| tool_descriptor(name))
     }
 
     fn get_info(&self) -> ServerInfo {
@@ -3116,7 +3141,9 @@ mod tests {
 
     use super::*;
     use crate::{
-        config::Config, jobs::SkillLeaseManager, skill_installs::InstallManager,
+        config::{Config, ToolsetConfig},
+        jobs::SkillLeaseManager,
+        skill_installs::InstallManager,
         state::RuntimeModel,
     };
 
@@ -3129,57 +3156,134 @@ mod tests {
         expect: Value,
     }
 
-    #[test]
-    fn normal_and_room_tool_sets_are_exact() {
+    #[tokio::test]
+    async fn normal_and_room_tool_sets_follow_fixed_surface_contract() {
         let normal = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
         let room = AgentMcpServer::new(test_state(CapabilityProfile::Room));
-        let normal_names = normal
-            .tools
+        let normal_tools = normal.current_tools().await;
+        let room_tools = room.current_tools().await;
+        let names = |tools: Vec<Tool>| {
+            tools
+                .into_iter()
+                .map(|tool| tool.name.to_string())
+                .collect::<BTreeSet<_>>()
+        };
+        let expected_normal = [
+            "agent.info",
+            "file.edit",
+            "file.read",
+            "file.search",
+            "job.cancel",
+            "job.get",
+            "job.list",
+            "mcp.batch",
+            "mcp.callTool",
+            "mcp.list",
+            "process.batch",
+            "process.exec",
+            "skills.install",
+            "skills.install.cancel",
+            "skills.install.get",
+            "skills.list",
+            "skills.read",
+            "skills.run",
+            "skills.setActive",
+            "tmux.exec",
+            "tmux.panes",
+            "tmux.pasteText",
+            "tmux.sessions",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+        let room_additions = [
+            "bootstrap",
+            "bootstrap.read",
+            "room.diary.append",
+            "room.diary.recent",
+            "room.diary.selectExact",
+            "room.notebook.append",
+            "room.notebook.current",
+            "room.notebook.recent",
+            "room.notebook.remove",
+            "room.notebook.search",
+            "room.notebook.selectExact",
+            "room.notebook.update",
+        ];
+        let mut expected_room = expected_normal.clone();
+        expected_room.extend(room_additions.into_iter().map(str::to_owned));
+
+        let normal_names = names(normal_tools.clone());
+        assert_eq!(normal_names, expected_normal);
+        assert_eq!(names(room_tools), expected_room);
+        assert!(normal_tools
             .iter()
-            .map(|tool| tool.name.to_string())
-            .collect::<Vec<_>>();
-        let room_names = room
-            .tools
-            .iter()
-            .map(|tool| tool.name.to_string())
-            .collect::<Vec<_>>();
-        assert_eq!(normal_names.len(), 23);
-        assert_eq!(room_names.len(), 35);
-        assert!(!normal_names.iter().any(|name| name.starts_with("room.")));
-        assert!(room_names.iter().any(|name| name == "room.diary.append"));
-        assert!(room_names.iter().any(|name| name == "room.notebook.remove"));
-        assert!(!normal_names
-            .iter()
-            .any(|name| name == "user.notify.deliver"));
-        assert_eq!(normal_names, {
-            let mut expected = NORMAL_TOOLS
-                .iter()
-                .map(|name| name.to_string())
-                .collect::<Vec<_>>();
-            expected.sort();
-            expected
-        });
-        let serialized = serde_json::to_string(&normal.tools).unwrap();
+            .all(|tool| !tool.name.starts_with("room.") && !tool.name.starts_with("bootstrap")));
+
+        // These names remain dispatch-only compatibility paths and must never
+        // leak into the advertised MCP surface.
+        for alias in [
+            "file.batch",
+            "user.notify.deliver",
+            "mcp.listServers",
+            "mcp.listTools",
+            "skills.active",
+            "skills.activate",
+            "skills.deactivate",
+            "tmux.listSessions",
+            "tmux.listPanes",
+            "tmux.capturePane",
+        ] {
+            assert!(
+                !expected_room.contains(alias),
+                "dispatch-only alias advertised: {alias}"
+            );
+            assert!(!normal_names.contains(alias));
+        }
+
+        let mut filtered_config = normal.state.config.read().await.clone();
+        filtered_config.toolsets.disable(ToolNamespace::File);
+        *normal.state.config.write().await = filtered_config;
+        let filtered_names = names(normal.current_tools().await);
+        let mut expected_filtered = expected_normal.clone();
+        for name in ["file.edit", "file.read", "file.search"] {
+            expected_filtered.remove(name);
+        }
+        assert_eq!(filtered_names, expected_filtered);
+        let error = normal
+            .call(CallToolRequestParams::new("file.read"))
+            .await
+            .expect_err("disabled namespace must not remain callable");
+        assert_eq!(error.code, rmcp::model::ErrorCode::METHOD_NOT_FOUND);
+        assert!(
+            normal
+                .call(CallToolRequestParams::new("mcp.list"))
+                .await
+                .is_ok(),
+            "disabling file must leave the MCP namespace callable"
+        );
+
+        let serialized = serde_json::to_string(&normal_tools).unwrap();
         assert!(!serialized.contains("agentId"));
         assert!(!serialized.contains("confirmMethod"));
-        let removed_tool = ["file", "batch"].join(".");
-        assert!(!normal_names.iter().any(|name| name == &removed_tool));
         assert!(serialized.contains("mcp.list"));
         assert!(serialized.contains("skills.setActive"));
         assert!(serialized.contains("tmux.sessions"));
         assert!(serialized.contains("tmux.panes"));
     }
 
-    #[test]
-    fn compact_tool_schema_budgets_hold() {
+    #[tokio::test]
+    async fn compact_tool_schema_budgets_hold() {
         let normal = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
         let room = AgentMcpServer::new(test_state(CapabilityProfile::Room));
+        let normal_tools = normal.current_tools().await;
+        let room_tools = room.current_tools().await;
         for (label, tools, max_total, max_inputs) in [
             // The frozen file schemas add bounded descriptors to the original
             // compact-surface budgets; retain explicit finite caps for the
             // resulting Normal/Room surfaces.
-            ("normal", normal.tools.as_ref(), 32_000usize, 16_000usize),
-            ("room", room.tools.as_ref(), 48_000usize, 24_000usize),
+            ("normal", &normal_tools, 32_000usize, 16_000usize),
+            ("room", &room_tools, 48_000usize, 24_000usize),
         ] {
             let serialized = serde_json::to_vec(tools).unwrap();
             let input_bytes = tools
@@ -3196,15 +3300,19 @@ mod tests {
             );
             assert!(
                 input_bytes <= max_inputs,
-                "{label} input schemas use {input_bytes} bytes, budget is {max_inputs}"
+                "{label} input schemas use {input_bytes} bytes, budget is {max_inputs}",
+                input_bytes = input_bytes,
+                max_inputs = max_inputs
             );
         }
     }
 
-    #[test]
-    fn file_surface_schema_is_exact() -> anyhow::Result<()> {
-        let names = AgentMcpServer::new(test_state(CapabilityProfile::Normal))
-            .tools
+    #[tokio::test]
+    async fn file_surface_schema_is_exact() -> anyhow::Result<()> {
+        let tools = AgentMcpServer::new(test_state(CapabilityProfile::Normal))
+            .current_tools()
+            .await;
+        let names = tools
             .iter()
             .map(|tool| tool.name.to_string())
             .collect::<Vec<_>>();
@@ -3428,12 +3536,56 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn absent_room_tool_is_rejected_for_normal_worker() {
+    async fn absent_room_tool_is_rejected_when_room_toolset_disabled() {
         let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
         let error = server
             .call(CallToolRequestParams::new("room.diary.recent"))
             .await
             .expect_err("Room-only tool must not be callable by Normal worker");
+        assert_eq!(error.code, rmcp::model::ErrorCode::METHOD_NOT_FOUND);
+    }
+    #[tokio::test]
+    async fn changing_live_toolsets_updates_surface_and_authorization() {
+        let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
+        let initial_names = server
+            .current_tools()
+            .await
+            .into_iter()
+            .map(|tool| tool.name.to_string())
+            .collect::<Vec<_>>();
+        assert!(!initial_names.iter().any(|name| name == "bootstrap"));
+        assert!(!initial_names.iter().any(|name| name.starts_with("room.")));
+
+        let error = server
+            .call(CallToolRequestParams::new("bootstrap"))
+            .await
+            .expect_err("Room tools must be unavailable before enabling Room");
+        assert_eq!(error.code, rmcp::model::ErrorCode::METHOD_NOT_FOUND);
+
+        let mut room_config = server.state.config.read().await.clone();
+        room_config.toolsets = ToolsetConfig::room();
+        *server.state.config.write().await = room_config;
+        let room_names = server
+            .current_tools()
+            .await
+            .into_iter()
+            .map(|tool| tool.name.to_string())
+            .collect::<Vec<_>>();
+        assert!(room_names.iter().any(|name| name == "bootstrap"));
+        assert!(room_names.iter().any(|name| name == "room.diary.recent"));
+        let bootstrap = server
+            .call(CallToolRequestParams::new("bootstrap"))
+            .await
+            .expect("enabled Room tool should reach the read path");
+        assert!(bootstrap.get("entrypoint").is_some());
+
+        let mut normal_config = server.state.config.read().await.clone();
+        normal_config.toolsets = ToolsetConfig::normal();
+        *server.state.config.write().await = normal_config;
+        let error = server
+            .call(CallToolRequestParams::new("bootstrap"))
+            .await
+            .expect_err("Room tools must disappear after disabling Room");
         assert_eq!(error.code, rmcp::model::ErrorCode::METHOD_NOT_FOUND);
     }
 
@@ -4222,14 +4374,14 @@ mod tests {
         );
     }
 
-    #[test]
-    fn tunnel_and_local_ingress_advertise_identical_surface() {
+    #[tokio::test]
+    async fn tunnel_and_local_ingress_advertise_identical_surface() {
         let state = test_state(CapabilityProfile::Normal);
         let tunnel = AgentMcpServer::with_ingress(state.clone(), RequestIngress::TunnelStdio);
         let local = AgentMcpServer::with_ingress(state, RequestIngress::LocalUnix);
         assert_eq!(
-            serde_json::to_value(tunnel.tools.as_ref()).unwrap(),
-            serde_json::to_value(local.tools.as_ref()).unwrap()
+            serde_json::to_value(tunnel.current_tools().await).unwrap(),
+            serde_json::to_value(local.current_tools().await).unwrap()
         );
         assert_eq!(tunnel.ingress.label(), "tunnel:stdio");
         assert_eq!(local.ingress.label(), "local:unix");
@@ -4791,6 +4943,11 @@ mod tests {
         let workspace_root = root.join("workspace");
         let mut config = Config::default_config().expect("default config");
         config.agent_id = "stdio-test-agent".to_string();
+        config.toolsets = if profile == CapabilityProfile::Room {
+            ToolsetConfig::room()
+        } else {
+            ToolsetConfig::normal()
+        };
         config.workspace_root = workspace_root.clone();
         config.path_policy.write_roots = vec![workspace_root.clone()];
         config.ensure_workspace().expect("workspace");

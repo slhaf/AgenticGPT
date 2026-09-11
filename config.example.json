@@ -2,6 +2,17 @@
   "displayName": "agentic-gpt-linux",
   "mode": "standalone",
   "profile": "normal",
+  "toolsets": {
+    "enabled": [
+      "agent",
+      "file",
+      "mcp",
+      "process",
+      "job",
+      "skills",
+      "tmux"
+    ]
+  },
   "tunnel": {
     "tunnelId": "tunnel_replace-me",
     "apiKey": "file:/home/your-user/.agentic_gpt/secrets/tunnel-api-key"

@@ -29,8 +29,41 @@ agentic-gpt config show
 模式与配置档是两个独立选择：
 
 - `--mode standalone|hub|local` 选择运行时连接方式与配置形状。
-- `--profile normal|room` 选择能力/工具面。Normal 暴露 24 个工具，Room 暴露 36 个工具；
-  配置档不会把 Local runtime 变成 Hub runtime。
+- `--profile normal|room` 选择默认 toolset preset。normal preset 启用除 `room` 外的所有
+  namespace；room preset 启用所有 namespace。配置档本身不会固定最终 runtime surface 或数量，
+  因为显式的 `toolsets.enabled` 选择具有权威性。
+
+可用 namespace 为 `agent`、`file`、`mcp`、`process`、`job`、`skills`、`tmux`、`room`。
+逻辑上的 `room` namespace 包含 Room bootstrap（`bootstrap` 与 `bootstrap.read`）以及全部
+`room.*` 工具。选择只会过滤既有的 Normal/Room advertised names，不会暴露 dispatch-only alias。
+
+使用以下精确命令固定选择：
+
+```bash
+agentic-gpt config toolset ls
+agentic-gpt config toolset enable <namespace>
+agentic-gpt config toolset disable <namespace>
+```
+`ls` 会列出全部 namespace、当前启用/禁用状态及其所含工具的简短说明。`enable` 和
+`disable` 成功后会明确输出被修改的 namespace 与结果状态。
+
+同一个 `toolsets.enabled` 数组也可以直接编辑 JSON。有效的 toolset 修改会在 worker 运行时
+热加载，并对后续工具发现与调用生效；无需重启。无效候选会保留上一次有效的 live selection。
+Room bootstrap、日记和笔记本命令以实时 `room` namespace 为授权依据，而不是启动时的
+profile。该 namespace 禁用时，直接分发 Room 命令会返回 `room_toolset_required`。
+
+例如，显式固定 normal 选择时写成：
+
+```json
+{
+  "profile": "normal",
+  "toolsets": {
+    "enabled": ["agent", "file", "mcp", "process", "job", "skills", "tmux"]
+  }
+}
+```
+
+如果之后切换 profile，这个显式选择仍然具有权威性。
 
 脚本需要确定性结果时，请使用以下实际 CLI 语法，并提供不应保留占位符的值：
 
@@ -54,9 +87,10 @@ agentic-gpt config init \
 
 全屏流程为 Basic → Connection（Local 除外）→ Optional settings → Review → Completion。
 交互模式下的命令行 flag 只是可编辑的预填值，不会锁定字段或跳过页面。身份/显示名称、
-工作区/路径策略、确认方式/语言、限制和沙箱始终可选。只有 Room 配置档会出现 Room 设置；
-只有 Standalone 模式会出现 tunnel-client 覆盖和 Hub reporting。Hub 与 Local 模式不会显示
-这些 tunnel 部分。不选可选部分时会保留模板默认值。
+工作区/路径策略、确认方式/语言、限制、沙箱和可选的 Toolsets section 始终可用。Toolsets
+从配置档 preset 开始；一旦显式编辑，其 namespace selection 具有权威性。只有 Room 配置档会
+出现 Room 设置；只有 Standalone 模式会出现 tunnel-client 覆盖和 Hub reporting。Hub 与 Local
+模式不会显示这些 tunnel 部分。不选可选部分时会保留模板默认值。
 
 界面使用键盘导航：Tab/Shift+Tab 与方向键移动焦点，Enter 编辑或触发当前操作，Esc 返回
 （根 Basic 页面是 no-op），Ctrl+C 取消初始化。编辑态按 Esc 只结束编辑，不会取消初始化。
@@ -105,14 +139,16 @@ agentic-gpt config set tunnel.client.autoDownload true
 agentic-gpt run
 ```
 
-将 `profile` 设为 `room` 即可使用 Room surface（例如 `agentic-gpt config set profile room`）。
+将 `profile` 设为 `room` 会选择启用所有 namespace 的 Room preset（例如
+`agentic-gpt config set profile room`）；如果存在 `toolsets.enabled`，则以它为准。
 
 ## 顶层字段
 
 | 字段 | 用途 |
 | --- | --- |
 | `mode` | 权威运行时分派：`standalone`、`hub` 或 `local`。 |
-| `profile` | 权威能力 surface：`normal` 或 `room`。 |
+| `profile` | 默认能力/toolset preset：`normal` 或 `room`。 |
+| `toolsets` | 已启用的 tool namespace；显式 `enabled` 列表会覆盖配置档 preset。 |
 | `agentId` | 稳定本地 identity，也用于派生私有 runtime/socket 路径，以及 `~/.agentic_gpt/state/agent/<agentId>/` 下的 per-agent 持久状态根目录。 |
 | `displayName` | summary/reporting 中的人类可读机器名称。 |
 | `workspaceRoot` | 主可写工作区，也是 `.agentic-gpt-audit.jsonl` 所在位置。 |
@@ -315,7 +351,10 @@ registry 包含以下常用 scalar：
 - `room.notebookRoot`、`room.timezone`、`room.diaryDayBoundaryHour`
 - 文档列出的 `skills.*` scalar/list 字段
 
-结构化策略与 MCP 修改使用 `config allow/confirm/deny`、`config path`、`config mcp`。复杂 JSON 也可在进程停止时直接编辑，随后执行 `agentic-gpt config show` 与 smoke test。
+结构化策略与 MCP 修改使用 `config allow/confirm/deny`、`config path`、`config mcp`。
+上面的 `config toolset` 命令用于管理 namespace 选择。复杂 JSON（包括 `toolsets.enabled`）
+也可直接编辑；有效编辑会在不重启 worker 的情况下热加载，无效候选会保留上一次有效状态。
+随后可执行 `agentic-gpt config show` 与 smoke test。
 
 ## 密钥文件与事务写入
 
@@ -341,7 +380,7 @@ Standalone 与 Local worker 会轮询配置，并原子应用通过验证的 liv
 
 | 配置 | 行为 |
 | --- | --- |
-| `policy`、`pathPolicy`、`limits`、`mcpServers` | 对新 admission/call 热加载 |
+| `policy`、`pathPolicy`、`limits`、`mcpServers`、`toolsets.enabled` | 对新 admission/call 与工具发现热加载 |
 | 已接纳 Job 与已创建下游调用 | 保留原决策/配置 |
 | `mode`、`profile`、`agentId`、`workspaceRoot` | 需要重启 |
 | `tunnel.*` client identity/source/secret | 需要重启 |

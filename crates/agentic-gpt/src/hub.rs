@@ -1041,6 +1041,7 @@ pub(crate) async fn handle_hub_command(
     let request_id = command.request_id().to_string();
     let data = match crate::local_service::dispatch(state.clone(), command).await {
         Ok(data) => data,
+        Err(error) if error.to_string() == "room_toolset_required" => room_toolset_required_error(),
         Err(error) if error.to_string() == "room_agent_required" => room_agent_required_error(),
         Err(error) => serde_json::json!({
             "error": {
@@ -1140,6 +1141,15 @@ pub(crate) fn skill_run_command_error(error: anyhow::Error) -> serde_json::Value
         _ => "skills_run_failed",
     };
     serde_json::json!({ "error": { "code": code, "message": message } })
+}
+
+pub(crate) fn room_toolset_required_error() -> serde_json::Value {
+    serde_json::json!({
+        "error": {
+            "code": "room_toolset_required",
+            "message": "room commands require toolsets.room to be enabled"
+        }
+    })
 }
 
 pub(crate) fn room_agent_required_error() -> serde_json::Value {

@@ -116,6 +116,11 @@ fn run_smoke(
             .map_err(|error| error.to_string())?;
     config["mode"] = Value::String("standalone".to_string());
     config["profile"] = Value::String(profile.to_string());
+    config["toolsets"]["enabled"] = if profile == "room" {
+        json!(["agent", "file", "mcp", "process", "job", "skills", "tmux", "room"])
+    } else {
+        json!(["agent", "file", "mcp", "process", "job", "skills", "tmux"])
+    };
     config["agentId"] = Value::String(agent_id.clone());
     config["workspaceRoot"] = Value::String(workspace.to_string_lossy().into_owned());
     config["pathPolicy"]["writeRoots"] = json!([workspace.to_string_lossy()]);

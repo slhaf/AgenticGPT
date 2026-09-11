@@ -240,9 +240,9 @@ use crate::config_templates::{
 use crate::WorkerProfile;
 
 use super::model::{
-    default_optional_draft, ConfirmationDraft, HubReportingDraft, IdentityDraft, LimitsDraft,
-    McpServersDraft, OptionalSectionDraft, RoomDraft, SandboxDraft, SectionStatus, SetupField,
-    SetupSession, TunnelClientDraft, WorkspaceDraft,
+    default_optional_draft_for_profile, ConfirmationDraft, HubReportingDraft, IdentityDraft,
+    LimitsDraft, McpServersDraft, OptionalSectionDraft, RoomDraft, SandboxDraft, SectionStatus,
+    SetupField, SetupSession, ToolsetsDraft, TunnelClientDraft, WorkspaceDraft,
 };
 use super::validation::ValidationErrors;
 
@@ -432,6 +432,7 @@ pub(super) fn build_review_model(session: &SetupSession) -> Result<ReviewModel, 
         OptionalSection::Confirmation,
         OptionalSection::Limits,
         OptionalSection::Sandbox,
+        OptionalSection::Toolsets,
         OptionalSection::McpServers,
         OptionalSection::Room,
         OptionalSection::TunnelClient,
@@ -616,7 +617,13 @@ fn optional_group(session: &SetupSession, section: OptionalSection) -> ReviewGro
         SectionStatus::NotApplicable
     } else {
         let draft = session.optional_draft(section);
-        if draft == default_optional_draft(session.language(), section) {
+        if draft
+            == default_optional_draft_for_profile(
+                session.language(),
+                section,
+                session.selected_profile(),
+            )
+        {
             SectionStatus::Default
         } else {
             SectionStatus::Configured
@@ -743,6 +750,16 @@ fn optional_items(draft: OptionalSectionDraft) -> Vec<ReviewItem> {
                 ReviewEditorKind::List,
             ),
         ],
+        OptionalSectionDraft::Toolsets(ToolsetsDraft { selection }) => vec![ReviewItem::field(
+            SetupField::Toolsets,
+            "toolsets",
+            if selection.selected().is_empty() {
+                "none".to_string()
+            } else {
+                selection.selected().join(" → ")
+            },
+            ReviewEditorKind::MultiSelect,
+        )],
         OptionalSectionDraft::McpServers(McpServersDraft { servers }) => {
             let items: Vec<_> = servers
                 .into_iter()
