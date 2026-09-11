@@ -73,3 +73,5 @@
 - The disposable Local Unix smoke toggles the live `room` namespace without restart, exposes V2 tools only while enabled, rejects legacy JSONL names, and executes `room.diary.active` against the bootstrapped repository.
 - The workflow asset and repository test share `python3 scripts/apply_maintenance.py`; no second semantic executor is introduced.
 - Phase 5 verification passed: focused repository/read/maintenance suites (15/7/11 tests), Local Unix integration (1 test), workspace check, 452 workspace tests across 9 suites, rustfmt check, and `git diff --check`.
+
+- Post-verification documentation audit found stale current-runtime counts in `README.zh-CN.md` and `docs/operations.md`; both now state the live 23 Normal / 34 Room surface. Historical v0.9 migration/release notes retain their version-specific 24/36 acceptance text.

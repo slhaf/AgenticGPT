@@ -45,3 +45,5 @@
 - 2026-09-11: Phase 5 verification coverage landed: repository bootstrap/path/schema tests (15), deterministic read tests (7), and maintenance backend tests (11), including remote push outcomes and workflow worker consumption.
 - 2026-09-11: Real Local Unix integration passed (1 test): the running Agent exposed V2 Room tools only while `room` was enabled, rejected legacy JSONL names, and executed `room.diary.active` without restart.
 - 2026-09-11: Final verification passed: `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo test --workspace` (452 passed across 9 suites), focused Phase 5 suites, and `git diff --check`.
+
+- 2026-09-11: Post-verification docs audit corrected the current-runtime Room counts in `README.zh-CN.md` and `docs/operations.md` to 23 Normal / 34 Room; versioned v0.9 migration/release notes remain historical.

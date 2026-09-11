@@ -31,7 +31,7 @@ ChatGPT Actions 或 Apps MCP
 
 - 不需要 VPS、公开域名、反向代理、Hub 数据库或共享命令路由器。
 - 每台机器具有独立连接与重启边界。
-- Tunnel 与 owner-only Unix MCP 对同一 profile 暴露一致的 24 个 Normal 工具或 36 个 Room 工具。
+- Tunnel 与 owner-only Unix MCP 对同一 profile 暴露一致的 23 个 Normal 工具或 34 个 Room 工具。
 - 策略、确认、审计、热配置、容量和 Managed Job 都保留在本机。
 - fresh stdio worker 即使先收到旧逻辑会话续发的请求、尚未收到新的 MCP `initialize`，也能自动恢复而不退出。
 
@@ -171,7 +171,7 @@ agentic-gpt run
 ```
 
 配置文件中的 `mode` 和 `profile` 选择 Standalone/Hub/Local 与 Normal/Room；例如启动前执行
-`agentic-gpt config set profile room` 可使用 Room 的 36 个工具。同一 worker 还会提供
+`agentic-gpt config set profile room` 可使用 Room 的 34 个工具。同一 worker 还会提供
 owner-only Unix MCP socket，便于本机检查：
 
 ```bash

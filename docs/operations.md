@@ -36,7 +36,7 @@ agentic-gpt local call agent.info --arguments '{}'
 
 Expected:
 
-- Normal exposes 24 tools; Room exposes 36.
+- Normal exposes 23 tools; Room exposes 34.
 - `agent.info.connections.localMcp.status` is `ready`.
 - Runtime directory is `0700`, socket is `0600`, and only the same UID is accepted.
 - `job.*`, `process.batch`, `mcp.callTool`, and `mcp.batch` are present.
@@ -100,7 +100,7 @@ agentic-gpt local call agent.info \
 Expected contract:
 
 - `agentic-gpt` reports `0.9.0`; Hub mode also requires `agentic-gpt-hub 0.9.0`.
-- Normal local/tunnel surfaces expose 24 tools and Room exposes 36.
+- Normal local/tunnel surfaces expose 23 tools and Room exposes 34.
 - `mcp.batch`, `mcp.callTool`, `job.get`, `job.list`, and `job.cancel` are present.
 - `process.batchExec`, managed `session.*`, and `process.get/list/kill` are absent.
 - `agent.info.execution.jobs` and `agent.info.mcp.concurrency` are present.
