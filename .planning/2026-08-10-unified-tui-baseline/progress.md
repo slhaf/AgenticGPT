@@ -65,3 +65,34 @@
 - Exercised Process selection, palette open/navigation/close, Enter detail, Esc detail-back, and application exit.
 - Found one real regression during the pass: moving Esc handling out of the workspace shell had removed the old "Esc exits Process from the master list" behavior. Fixed the boundary so Esc returns from an active detail pane, while Esc from the master list exits as before; q continues to exit from either mode.
 - Post-fix verification PASS: `cargo check -p agentic-gpt`, all-target clippy with `-D warnings`, focused `tui::` suite (10/10), and `git diff --check`.
+
+## Session: 2026-08-27
+
+### Current Status
+- **Phase:** Terminal V1 design freeze before implementation
+- **Implementation:** no Terminal code written yet; runtime/screen/policy seams frozen against the current clean `3cf7260` checkpoint
+
+### Actions Taken
+- Re-read the unified TUI plan and current `TuiApp` / `WorkspaceState` / `ProcessScreen` implementation. Confirmed the working tree remains clean and `main` remains one commit ahead of `origin/main` at `3cf7260 feat: establish unified TUI workspace shell`.
+- Confirmed Terminal cannot be TUI-owned: the TUI is already a separate process using the Agent's local Unix MCP ingress, so only Agent-owned `AppState` runtime state can guarantee that human input and model `terminal.repl` operate on one persistent shell and that the terminal survives TUI exit.
+- Froze a dedicated `TerminalManager` direction behind `AppState`, with one persistent PTY/shell, shell-integration semantic events, a PTY-aware sequential input scheduler, terminal-emulator state, and structured `TerminalBlock` history.
+- Froze `terminal.repl` as the primary Agent-facing surface rather than a tmux-like collection of screen/write/resize tools. Ordered shell-source/text/key input remains the intended shape; actual source schema is deferred until the runtime spike proves the sequencer.
+- Froze command-boundary semantics: one repl call is not one block; actual shell command lifecycle events define zero-to-many blocks. Multi-line/multi-command input must be fed according to continuation/command-ready state rather than dumped into the PTY or split naively on newlines.
+- Refined the TerminalScreen UX after reviewing eDEX-UI and Neovim-style embedded terminals. Final baseline is two-pane: left is always the live interactive terminal with Warp-like Block decoration over emulator/scrollback; right is a read-only Preview/Inspector for the selected block. There is no separate attach page and no visual attach transition.
+- Reused the existing master/detail mental model: terminal remains master/primary; Preview is detail/secondary and can collapse on narrow layouts. Process/Terminal top-level switching stays in the `:` palette (`:process` / future `:terminal`) with optional global shortcuts chosen later by smoke testing.
+- Froze the policy distinction: TUI presence changes confirmation presentation only. Shell source should use batch-like policy checks when safely resolvable; dynamic/uncertain constructs conservatively escalate to broader confirmation. The pending request remains Agent-owned whether answered by freedesktop/ntfy or by a future TUI confirmation frontend/status indicator.
+- Identified implementation references rather than dependencies to copy blindly: eDEX-UI for PTY/frontend layering, Neovim/libvterm for embedded terminal lifecycle/alternate-screen/input behavior, LazyVim/Snacks for focus UX, and WezTerm terminal core as a possible Rust emulator implementation reference.
+
+### Next
+- Finish the final focused source-review pass in WezTerm `mux::LocalPane`: PTY reader thread/lifecycle, writer ownership, resize flow, `Terminal` locking, and output notification/damage propagation.
+- Then implement a minimal Agent-owned PTY/runtime spike before any fake Terminal route using the now-preferred `portable-pty + wezterm-term + wezterm-escape-parser` stack. Prove persistent cwd/environment state, shell integration command boundaries/exit status/cwd, interactive foreground behavior, resize, and emulator rendering.
+- After the runtime spike is credible, add the real `WorkspaceRoute::Terminal`, persistent `TerminalScreen`, and `:terminal` command to close Phase 3 cross-route/state-retention acceptance.
+- Add TUI confirmation presence/status only after the shared Agent-owned pending-confirmation path is explicit; do not make the TUI the durable owner of confirmations.
+
+### 2026-08-27 source-review checkpoint
+- Cloned `/home/slhaf/Projects/neovim` and `/home/slhaf/Projects/wezterm`, initialized CodeGraph for both, and registered both repositories with `cg-watch` for local source navigation.
+- Neovim review established the host-terminal invariants: PTY bytes feed the emulator model; keyboard is encoded against terminal modes; alternate screen remains emulator state; host UI determines resize; refreshes are event-driven/batched rather than coarse polling.
+- WezTerm review established that its reusable terminal core already owns primary scrollback, alternate screen, reflow, semantic cell attributes, dirty-row sequence tracking, and terminal-aware input encoding. This removes the earlier need for an extra Agentic `TerminalSurface`/scrollback mirror.
+- Froze the semantic split: live display comes from `wezterm-term::Screen`; durable command history remains Agentic `TerminalBlock`; current Prompt/Input/Output placement is recomputed as semantic zones after resize/reflow rather than used as permanent block identity.
+- Froze the PTY-output fanout design: one byte stream feeds both `wezterm_term::Terminal::advance_bytes` and an independent streaming `wezterm_escape_parser::Parser` used by `SemanticTracker`. The latter observes OSC 133 lifecycle/status, OSC 7 cwd, and OSC 1337 command/user-var state without requiring a fork of `wezterm-term`.
+- Current stop point: source review is effectively complete except for one final WezTerm `LocalPane` wiring pass. No Terminal implementation code has been started yet.
