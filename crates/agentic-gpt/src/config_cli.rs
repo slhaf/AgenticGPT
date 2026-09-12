@@ -1422,8 +1422,10 @@ fn toolset_description(namespace: ToolNamespace, language: UiLanguage) -> &'stat
         (ToolNamespace::Skills, UiLanguage::ZhCn) => "技能发现、安装、启用与执行。",
         (ToolNamespace::Tmux, UiLanguage::En) => "Persistent tmux session and pane operations.",
         (ToolNamespace::Tmux, UiLanguage::ZhCn) => "持久化 tmux 会话与窗格操作。",
-        (ToolNamespace::Room, UiLanguage::En) => "Room bootstrap, diary, and notebook tools.",
-        (ToolNamespace::Room, UiLanguage::ZhCn) => "Room 引导、日记与笔记本工具。",
+        (ToolNamespace::Room, UiLanguage::En) => {
+            "Room bootstrap, diary, notebook, state, and maintenance tools."
+        }
+        (ToolNamespace::Room, UiLanguage::ZhCn) => "Room 引导、日记、笔记本、状态与维护工具。",
     }
 }
 
@@ -1554,11 +1556,13 @@ mod tests {
         assert!(
             english.contains("[enabled]\tagent\tAgent runtime information and health diagnostics.")
         );
-        assert!(english.contains("[disabled]\troom\tRoom bootstrap, diary, and notebook tools."));
+        assert!(english.contains(
+            "[disabled]\troom\tRoom bootstrap, diary, notebook, state, and maintenance tools."
+        ));
 
         let chinese = render_toolsets(&config, UiLanguage::ZhCn);
         assert!(chinese.contains("[启用]\tfile\t工作区文件读取、搜索与编辑。"));
-        assert!(chinese.contains("[禁用]\troom\tRoom 引导、日记与笔记本工具。"));
+        assert!(chinese.contains("[禁用]\troom\tRoom 引导、日记、笔记本、状态与维护工具。"));
         assert_eq!(
             toolset_mutation_message(ToolNamespace::File, true, UiLanguage::ZhCn),
             "已启用工具集：file。"

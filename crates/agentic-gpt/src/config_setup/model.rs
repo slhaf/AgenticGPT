@@ -195,6 +195,17 @@ impl ToolsetsDraft {
             ),
         }
     }
+    pub(crate) fn to_config(&self) -> Result<ToolsetConfig, ()> {
+        let mut config = ToolsetConfig::room();
+        for namespace in ToolNamespace::all().iter().copied() {
+            config.disable(namespace);
+        }
+        for name in self.selection.selected() {
+            let namespace = ToolNamespace::parse(name).map_err(|_| ())?;
+            config.enable(namespace);
+        }
+        Ok(config)
+    }
 }
 
 fn tool_namespace_options() -> Vec<String> {
@@ -407,6 +418,13 @@ impl SetupSession {
     pub(crate) fn optional_drafts(&self) -> &OptionalDrafts {
         &self.optional
     }
+    pub(crate) fn effective_toolsets(&self) -> ToolsetConfig {
+        self.optional
+            .toolsets
+            .as_ref()
+            .and_then(|draft| draft.to_config().ok())
+            .unwrap_or_else(|| ToolsetConfig::for_profile(self.selected_profile))
+    }
 
     pub(crate) fn set_mode(&mut self, mode: RuntimeMode) {
         self.selected_mode = mode;
@@ -417,11 +435,13 @@ impl SetupSession {
     }
 
     pub(crate) fn available_optional_sections(&self) -> Vec<OptionalSection> {
-        validation::available_optional_sections(self.selected_mode, self.selected_profile)
+        let toolsets = self.effective_toolsets();
+        validation::available_optional_sections(self.selected_mode, &toolsets)
     }
 
     pub(crate) fn section_status(&self, section: OptionalSection) -> SectionStatus {
-        if !validation::section_is_legal(section, self.selected_mode, self.selected_profile) {
+        let toolsets = self.effective_toolsets();
+        if !validation::section_is_legal(section, self.selected_mode, &toolsets) {
             return SectionStatus::NotApplicable;
         }
         if self.optional.has(section) {
@@ -758,7 +778,7 @@ mod tests {
     use std::path::PathBuf;
 
     use crate::cli_i18n::UiLanguage;
-    use crate::config::sparse_config_value;
+    use crate::config::{sparse_config_value, ToolNamespace};
     use crate::config_templates::{OptionalSection, RuntimeMode, SecretValue, TunnelSecretSource};
     use crate::WorkerProfile;
 
@@ -970,6 +990,36 @@ mod tests {
             "mcp-token-marker"
         );
         assert!(!format!("{draft:?}").contains("mcp-token-marker"));
+    }
+
+    #[test]
+    fn room_availability_uses_profile_preset_without_explicit_toolset_selection() {
+        let mut session = SetupSession::new(
+            SetupSeed {
+                mode: Some(RuntimeMode::Local),
+                profile: Some(WorkerProfile::Normal),
+                ..SetupSeed::default()
+            },
+            UiLanguage::En,
+            PathBuf::from("/tmp/config.json"),
+        );
+
+        assert!(!session.effective_toolsets().is_enabled(ToolNamespace::Room));
+        assert!(!session
+            .available_optional_sections()
+            .contains(&OptionalSection::Room));
+
+        session.set_profile(WorkerProfile::Room);
+        assert!(session.effective_toolsets().is_enabled(ToolNamespace::Room));
+        assert!(session
+            .available_optional_sections()
+            .contains(&OptionalSection::Room));
+
+        session.set_profile(WorkerProfile::Normal);
+        assert!(!session.effective_toolsets().is_enabled(ToolNamespace::Room));
+        assert!(!session
+            .available_optional_sections()
+            .contains(&OptionalSection::Room));
     }
 
     #[test]

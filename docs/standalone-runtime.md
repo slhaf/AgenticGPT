@@ -341,9 +341,11 @@ Bearer auth; `stdio` requires a non-empty command and rejects HTTP auth. Invalid
 MCP clients retain their original decision/server definition and are not
 cancelled or rerouted by a reload. Because downstream clients are currently
 created per call, no separate reload or reconnect command is needed.
-Startup-owned identity, workspace, tunnel/client, reporting connection, and
+Startup-owned identity, workspace, Room settings, tunnel/client, reporting connection, and
 skill-install concurrency changes remain restart-required and are reported by
-the supervisor. `agent.info.mcp` reports only the effective config revision,
+the supervisor. Enabling the `room` namespace live bootstraps against the current live Room
+configuration; restart-required `room.*` edits on disk do not change that runtime root until restart.
+`agent.info.mcp` reports only the effective config revision,
 configured/enabled counts, and client lifecycle; it does not expose endpoints.
 
 `apiKey` accepts only `env:NAME` and `file:PATH`. The resolved value is

@@ -612,6 +612,11 @@ async fn reload_standalone_live_config_once(
         crate::state::Transport::LocalUnix => candidate.validate_local()?,
         crate::state::Transport::Hub => candidate.validate_mcp_servers()?,
     }
+    let live_room_enabled = live.toolsets.is_enabled(config::ToolNamespace::Room);
+    let candidate_room_enabled = candidate.toolsets.is_enabled(config::ToolNamespace::Room);
+    if candidate_room_enabled && !live_room_enabled {
+        room_repository::ensure_repository(&live)?;
+    }
     Ok(apply_standalone_live_subset(&mut live, candidate))
 }
 
@@ -1748,6 +1753,80 @@ mod tests {
             "invalid disk changes must not partially replace the live map"
         );
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn standalone_live_reload_bootstraps_room_repository_before_maintenance_submit(
+    ) -> anyhow::Result<()> {
+        let root = unique_temp_dir("standalone-live-room-reload");
+        let config_path = root.join("config.json");
+        let workspace = root.join("workspace");
+        fs::create_dir_all(&workspace)?;
+        let (mut state, _rx) = command_test_state(CapabilityProfile::Normal, workspace.clone());
+        state.config_path.clone_from(&config_path);
+        state.runtime = RuntimeModel::tunnel(CapabilityProfile::Normal, false);
+        let mut initial = state.config.read().await.clone();
+        initial.workspace_root = workspace.clone();
+        initial.tunnel = Some(TunnelConfig {
+            tunnel_id: "tunnel_test".to_string(),
+            api_key: "env:AGENTIC_TUNNEL_API_KEY".to_string(),
+            ..TunnelConfig::default()
+        });
+        let live_room_root = workspace.join("room-live");
+        let candidate_room_root = workspace.join("room-candidate");
+        initial.room.repository_root = Some(live_room_root.clone());
+        assert!(!initial.toolsets.is_enabled(config::ToolNamespace::Room));
+        assert!(!room_repository::repository_root(&initial).exists());
+        *state.config.write().await = initial.clone();
+
+        let mut candidate = initial.clone();
+        candidate.room.repository_root = Some(candidate_room_root.clone());
+        candidate.toolsets.enable(config::ToolNamespace::Room);
+        fs::write(&config_path, serde_json::to_vec_pretty(&candidate)?)?;
+
+        reload_standalone_live_config_once(&state).await?;
+
+        let live = state.config.read().await.clone();
+        assert_eq!(live.room, initial.room);
+        assert!(!candidate_room_root.exists());
+        let room_root = room_repository::repository_root(&live);
+        assert_eq!(room_root, live_room_root);
+        assert!(room_root.join(".git").is_dir());
+        for relative in room_repository::scaffold_paths() {
+            assert!(
+                room_root.join(relative).is_file(),
+                "missing Room scaffold file: {relative}"
+            );
+        }
+
+        let response = room_maintenance::submit(
+            &state,
+            agentic_gpt_protocol::RoomMaintenanceSubmitRequest {
+                items: vec![agentic_gpt_protocol::RoomMaintenanceRequestItem {
+                    slot: agentic_gpt_protocol::RoomMaintenanceSlot::Notebook,
+                    payload: serde_json::json!({
+                        "path": "Notebook/live-reload.md",
+                        "title": "Live reload",
+                        "body": "Bootstrapped",
+                    }),
+                }],
+                mode: Some(agentic_gpt_protocol::RoomMaintenanceExecutionMode::Local),
+                wait_seconds: None,
+            },
+        )
+        .await?;
+        assert_eq!(
+            response.state,
+            agentic_gpt_protocol::RoomMaintenanceSubmissionState::Applied
+        );
+        assert!(response.local_applied);
+        assert_eq!(
+            fs::read_to_string(room_root.join("Notebook/live-reload.md"))?,
+            "# Live reload\n\nBootstrapped\n"
+        );
+
+        let _ = fs::remove_dir_all(root);
+        Ok(())
     }
 
     #[tokio::test]

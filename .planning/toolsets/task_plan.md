@@ -54,3 +54,16 @@ Implement namespace-based optional toolsets for standalone deployments: normal e
 | `cargo test --workspace` failed because a focused live-reload test read `candidate.toolsets` after moving `candidate`. | 2 | Preserved a cloned expected toolset before the ownership transfer. Final verification is next; stop and report if it fails. |
 | Final `cargo test --workspace` failed: `config.toolset` is absent from `cli_i18n` visible-command metadata; `stdio_server::normal_and_room_tool_sets_are_exact` still asserts the old Normal count. | 3 | Attempt cap reached. Stopped without modifying these remaining integration points, per user instruction. |
 | Authorized repair initially left CLI argument metadata and a room supervisor fixture stale. | Authorized round | Added namespace argument metadata, made the fixture select the room toolset preset, restored the exact 23/35 public mapping, and completed all verification. |
+| `cargo check --workspace` reported `TunnelConfig` has no direct `executable` field after the legality refactor. | Follow-up integration | Corrected the setup model round-trip to read `tunnel.client.executable`; rerun workspace verification. |
+
+## 2026-09-12 Constrained Follow-up
+- [complete] Bootstrap the Room repository on a real live `room` false-to-true transition.
+- [complete] Make Room init/config legality follow final Room toolset selection.
+- [complete] Update bilingual `config toolset ls` Room descriptions.
+- [complete] Run the requested workspace verification without committing or touching `WATCHDOG.yml`.
+
+## 2026-09-12 Post-review Closure
+- [complete] Bootstrap hot-enabled Room from current live Room config, not restart-required candidate `room.*`.
+- [complete] Cover distinct live/candidate repository roots and prove maintenance executes against the live root.
+- [complete] Include `toolsets` in `agent.info` live-subset observability with a focused config-health regression.
+- [complete] Document the `room.*` restart boundary and rerun focused + full workspace verification.

@@ -393,6 +393,7 @@ Standalone 与 Local worker 会轮询配置，并原子应用通过验证的 liv
 | `policy`、`pathPolicy`、`limits`、`mcpServers`、`toolsets.enabled` | 对新 admission/call 与工具发现热加载 |
 | 已接纳 Job 与已创建下游调用 | 保留原决策/配置 |
 | `mode`、`profile`、`agentId`、`workspaceRoot` | 需要重启 |
+| `room.*` 仓库、时区、日界线和 maintenance 设置 | 需要重启；`toolsets.enabled` 可热启用 Room，但使用当前 live Room 配置 |
 | `tunnel.*` client identity/source/secret | 需要重启 |
 | `hub`、reporting mode | 对相关连接需要重启 |
 | Skill install 并发等 startup-owned 设置 | 需要重启 |

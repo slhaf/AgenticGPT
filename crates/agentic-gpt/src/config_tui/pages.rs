@@ -93,6 +93,10 @@ fn localized_error(code: &str, language: UiLanguage) -> String {
         "config_init_toolsets_invalid" => {
             ("Toolset namespace selection is invalid.", "工具集命名空间选择无效。")
         }
+        "room_config_requires_room_toolset" => (
+            "Room settings require the Room toolset namespace to be enabled.",
+            "Room 配置需要启用 Room 工具集命名空间。",
+        ),
         "config_init_room_maintenance_mode_invalid" => {
             ("Maintenance mode must be local or workflow.", "维护模式必须是 local 或 workflow。")
         }
@@ -3179,7 +3183,7 @@ fn optional_center_inspector_body(
                 OptionalSection::Room => &[
                     "Set Room timezone, diary day boundary, repository root, and maintenance behavior.",
                     "The repository defaults to <workspace>/room; maintenance is local with auto-push off.",
-                    "Only available when the Room profile is selected.",
+                    "Only available when the Room toolset namespace is enabled.",
                 ],
                 OptionalSection::TunnelClient => &[
                     "Configure how Standalone locates or downloads the Tunnel client.",
@@ -3238,7 +3242,7 @@ fn optional_center_inspector_body(
                 OptionalSection::Room => &[
                     "设置 Room 的时区、日记日界线、仓库根目录和维护行为。",
                     "仓库默认使用 <workspace>/room；维护默认为 local 且关闭自动推送。",
-                    "仅在选择 Room profile 时可用。",
+                    "仅在启用 Room 工具集命名空间时可用。",
                 ],
                 OptionalSection::TunnelClient => &[
                     "设置 Standalone 如何查找或下载 Tunnel client。",

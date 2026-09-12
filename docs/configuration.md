@@ -418,6 +418,7 @@ Standalone and Local workers poll the config and atomically apply a valid live s
 | `policy`, `pathPolicy`, `limits`, `mcpServers`, `toolsets.enabled` | Live reload for new admissions/calls and tool discovery |
 | Already-admitted Jobs and already-created downstream calls | Keep their original decision/config |
 | `mode`, `profile`, `agentId`, `workspaceRoot` | Restart required |
+| `room.*` repository, timezone, diary-boundary, and maintenance settings | Restart required; `toolsets.enabled` may expose Room live using the current live Room settings |
 | `tunnel.*` client identity/source/secret | Restart required |
 | `hub`, reporting mode | Restart required for the related connection |
 | Skill install concurrency/startup-owned settings | Restart required |
