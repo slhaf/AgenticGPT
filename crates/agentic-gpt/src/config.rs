@@ -1,6 +1,7 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use agentic_gpt_protocol::{
     PolicyCounts, SafeBuiltinPolicyRules, SafeConfigSummary, SafePathPolicySummary, SafePathRoot,
@@ -27,6 +28,127 @@ pub(crate) enum RuntimeMode {
     Standalone,
     Hub,
     Local,
+}
+
+#[derive(
+    Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize, clap::ValueEnum,
+)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum ToolNamespace {
+    Agent,
+    File,
+    Mcp,
+    Process,
+    Job,
+    Skills,
+    Tmux,
+    Room,
+}
+
+impl ToolNamespace {
+    pub(crate) fn all() -> &'static [Self] {
+        &[
+            Self::Agent,
+            Self::File,
+            Self::Mcp,
+            Self::Process,
+            Self::Job,
+            Self::Skills,
+            Self::Tmux,
+            Self::Room,
+        ]
+    }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Agent => "agent",
+            Self::File => "file",
+            Self::Mcp => "mcp",
+            Self::Process => "process",
+            Self::Job => "job",
+            Self::Skills => "skills",
+            Self::Tmux => "tmux",
+            Self::Room => "room",
+        }
+    }
+
+    pub(crate) fn parse(value: &str) -> Result<Self, String> {
+        Self::all()
+            .iter()
+            .copied()
+            .find(|namespace| namespace.as_str() == value)
+            .ok_or_else(|| format!("unknown tool namespace: {value}"))
+    }
+}
+
+impl fmt::Display for ToolNamespace {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for ToolNamespace {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::parse(value)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ToolsetConfig {
+    pub(crate) enabled: BTreeSet<ToolNamespace>,
+}
+
+impl ToolsetConfig {
+    pub(crate) fn all() -> Self {
+        Self {
+            enabled: ToolNamespace::all().iter().copied().collect(),
+        }
+    }
+
+    pub(crate) fn normal() -> Self {
+        Self {
+            enabled: ToolNamespace::all()
+                .iter()
+                .copied()
+                .filter(|namespace| *namespace != ToolNamespace::Room)
+                .collect(),
+        }
+    }
+
+    pub(crate) fn room() -> Self {
+        Self::all()
+    }
+
+    pub(crate) fn for_profile(profile: WorkerProfile) -> Self {
+        match profile {
+            WorkerProfile::Normal => Self::normal(),
+            WorkerProfile::Room => Self::room(),
+        }
+    }
+
+    pub(crate) fn is_enabled(&self, namespace: ToolNamespace) -> bool {
+        self.enabled.contains(&namespace)
+    }
+
+    pub(crate) fn enable(&mut self, namespace: ToolNamespace) {
+        self.enabled.insert(namespace);
+    }
+
+    pub(crate) fn disable(&mut self, namespace: ToolNamespace) {
+        self.enabled.remove(&namespace);
+    }
+
+    pub(crate) fn enabled_names(&self) -> Vec<&'static str> {
+        ToolNamespace::all()
+            .iter()
+            .copied()
+            .filter(|namespace| self.is_enabled(*namespace))
+            .map(ToolNamespace::as_str)
+            .collect()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, clap::ValueEnum)]
@@ -72,6 +194,7 @@ impl Default for HubConfig {
 pub(crate) struct Config {
     pub(crate) mode: RuntimeMode,
     pub(crate) profile: WorkerProfile,
+    pub(crate) toolsets: ToolsetConfig,
     pub(crate) agent_id: String,
     pub(crate) display_name: String,
     pub(crate) hub: HubConfig,
@@ -440,14 +563,33 @@ impl ResolvedMaxActiveJobs {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum RoomMaintenanceMode {
+    #[default]
+    Local,
+    Workflow,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct RoomMaintenanceConfig {
+    #[serde(default)]
+    pub(crate) mode: RoomMaintenanceMode,
+    #[serde(default)]
+    pub(crate) auto_push: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct RoomConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) notebook_root: Option<PathBuf>,
+    pub(crate) repository_root: Option<PathBuf>,
     pub(crate) timezone: String,
     #[serde(default = "default_diary_day_boundary_hour")]
     pub(crate) diary_day_boundary_hour: u32,
+    #[serde(default)]
+    pub(crate) maintenance: RoomMaintenanceConfig,
     #[serde(default, skip_serializing)]
     pub(crate) skills: RoomSkillsConfig,
 }
@@ -528,7 +670,7 @@ impl Default for HubReportingConfig {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RoomSkillsConfig {
     #[serde(default = "default_skill_max_files")]
@@ -566,6 +708,7 @@ impl Config {
         Ok(Self {
             mode: RuntimeMode::Standalone,
             profile: WorkerProfile::Normal,
+            toolsets: ToolsetConfig::normal(),
             agent_id: "laptop".to_string(),
             display_name: hostname_fallback(),
             hub: HubConfig::default(),
@@ -612,6 +755,11 @@ impl Config {
                 "config_requires_mode_profile: run config import to migrate, or config init to reinitialize"
             ));
         }
+        if !object.contains_key("toolsets") {
+            return Err(anyhow!(
+                "config_requires_toolsets: run config import to migrate, or config init to reinitialize"
+            ));
+        }
         if ["hubUrl", "hubTransport", "agentSecret", "workerUrl"]
             .iter()
             .any(|key| object.contains_key(*key))
@@ -644,6 +792,13 @@ impl Config {
             object.get("profile").cloned().expect("profile was checked"),
         )
         .map_err(|_| anyhow!("config_profile_invalid"))?;
+        let toolsets = serde_json::from_value::<ToolsetConfig>(
+            object
+                .get("toolsets")
+                .cloned()
+                .expect("toolsets was checked"),
+        )
+        .map_err(|_| anyhow!("config_toolsets_invalid"))?;
         let has_path_policy = object.contains_key("pathPolicy");
         let defaults = Self::default_config()?;
         let workspace_root = object
@@ -655,6 +810,7 @@ impl Config {
         defaults.mode = mode;
         defaults.profile = profile;
         defaults.path_policy = default_path_policy(&workspace_root);
+        defaults.toolsets = toolsets;
         if object.get("tunnel").is_some_and(Value::is_object) {
             defaults.tunnel = Some(TunnelConfig::default());
         } else {
@@ -715,6 +871,10 @@ impl Config {
             },
             None => import_defaults.profile,
         };
+        if let Some(toolsets) = object.get("toolsets").cloned() {
+            serde_json::from_value::<ToolsetConfig>(toolsets)
+                .map_err(|_| anyhow!("config_toolsets_invalid"))?;
+        }
 
         let mut hub = match object.remove("hub") {
             Some(Value::Object(hub)) => hub,
@@ -821,6 +981,7 @@ impl Config {
         let known = [
             "mode",
             "profile",
+            "toolsets",
             "agentId",
             "displayName",
             "hub",
@@ -1014,6 +1175,7 @@ fn materialize_import_value(value: &Value) -> Result<Config> {
     )?;
     defaults.mode = mode;
     defaults.profile = profile;
+    defaults.toolsets = ToolsetConfig::for_profile(profile);
     let workspace_root = object
         .get("workspaceRoot")
         .cloned()
@@ -1068,7 +1230,7 @@ fn prune_sparse_value(value: &mut Value, defaults: &Value, root: bool) {
     };
     let keys = value.keys().cloned().collect::<Vec<_>>();
     for key in keys {
-        if root && matches!(key.as_str(), "mode" | "profile") {
+        if root && matches!(key.as_str(), "mode" | "profile" | "toolsets") {
             continue;
         }
         let Some(current) = value.get(&key) else {
@@ -1148,13 +1310,16 @@ impl Serialize for OrderedConfigRoot<'_> {
             .as_object()
             .ok_or_else(|| serde::ser::Error::custom("config_projection_object_required"))?;
         let mut map = serializer.serialize_map(Some(object.len()))?;
-        for key in ["agentId", "displayName", "mode", "profile"] {
+        for key in ["agentId", "displayName", "mode", "profile", "toolsets"] {
             if let Some(value) = object.get(key) {
                 map.serialize_entry(key, value)?;
             }
         }
         for (key, value) in object {
-            if !matches!(key.as_str(), "agentId" | "displayName" | "mode" | "profile") {
+            if !matches!(
+                key.as_str(),
+                "agentId" | "displayName" | "mode" | "profile" | "toolsets"
+            ) {
                 map.serialize_entry(key, value)?;
             }
         }
@@ -1274,9 +1439,10 @@ fn safe_rules(rules: &[Rule]) -> Vec<SafeRule> {
 }
 pub(crate) fn default_room_config() -> RoomConfig {
     RoomConfig {
-        notebook_root: None,
+        repository_root: None,
         timezone: "Asia/Shanghai".to_string(),
         diary_day_boundary_hour: default_diary_day_boundary_hour(),
+        maintenance: RoomMaintenanceConfig::default(),
         skills: RoomSkillsConfig::default(),
     }
 }
@@ -1500,9 +1666,10 @@ mod tests {
     #[test]
     fn checked_in_v09_config_example_is_strict_and_safe_to_copy() {
         let source = include_str!("../../../config.example.json");
-        let value: serde_json::Value = serde_json::from_str(source).unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(source).unwrap();
+        value["toolsets"] = serde_json::to_value(ToolsetConfig::normal()).unwrap();
         let path = temp_config_path();
-        fs::write(&path, source).unwrap();
+        fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
         let config = Config::load(&path).unwrap();
         config.validate_mcp_servers().unwrap();
         config.validate_standalone().unwrap();
@@ -1625,6 +1792,59 @@ mod tests {
         );
         assert!(value["confirmationProvider"].get("provider").is_none());
     }
+    #[test]
+    fn toolset_profiles_are_closed_and_deterministic() {
+        assert_eq!(
+            ToolNamespace::all(),
+            &[
+                ToolNamespace::Agent,
+                ToolNamespace::File,
+                ToolNamespace::Mcp,
+                ToolNamespace::Process,
+                ToolNamespace::Job,
+                ToolNamespace::Skills,
+                ToolNamespace::Tmux,
+                ToolNamespace::Room,
+            ]
+        );
+        let normal = ToolsetConfig::normal();
+        assert_eq!(
+            normal.enabled_names(),
+            vec!["agent", "file", "mcp", "process", "job", "skills", "tmux"]
+        );
+        let room = ToolsetConfig::room();
+        assert_eq!(
+            room.enabled_names(),
+            vec!["agent", "file", "mcp", "process", "job", "skills", "tmux", "room"]
+        );
+        assert_eq!(ToolsetConfig::for_profile(WorkerProfile::Normal), normal);
+        assert_eq!(ToolsetConfig::for_profile(WorkerProfile::Room), room);
+        assert!(!normal.is_enabled(ToolNamespace::Room));
+        assert!(room.is_enabled(ToolNamespace::Room));
+
+        let mut changed = normal.clone();
+        changed.disable(ToolNamespace::File);
+        changed.enable(ToolNamespace::Room);
+        assert!(!changed.is_enabled(ToolNamespace::File));
+        assert!(changed.is_enabled(ToolNamespace::Room));
+        assert_eq!(ToolNamespace::parse("room").unwrap(), ToolNamespace::Room);
+        assert!(ToolNamespace::parse("ROOM").is_err());
+
+        let config = Config::default_config().unwrap();
+        assert_eq!(config.toolsets, normal);
+    }
+
+    #[test]
+    fn config_load_rejects_missing_toolsets() {
+        let path = temp_config_path();
+        let mut value = serde_json::to_value(Config::default_config().unwrap()).unwrap();
+        value.as_object_mut().unwrap().remove("toolsets");
+        fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+
+        let error = Config::load(&path).unwrap_err().to_string();
+        assert!(error.contains("config_requires_toolsets"));
+        let _ = fs::remove_file(path);
+    }
 
     #[test]
     fn confirmation_provider_disk_shape_rejects_legacy_provider() {
@@ -1668,6 +1888,30 @@ mod tests {
         assert_eq!(written["limits"]["maxActiveJobs"], json!(4));
         assert_eq!(written["futureField"]["preserve"], json!(true));
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn room_repository_and_maintenance_use_the_v2_json_shape() {
+        let room = RoomConfig {
+            repository_root: Some(PathBuf::from("/tmp/room-repository")),
+            timezone: "UTC".to_string(),
+            diary_day_boundary_hour: 4,
+            maintenance: RoomMaintenanceConfig {
+                mode: RoomMaintenanceMode::Workflow,
+                auto_push: true,
+            },
+            skills: RoomSkillsConfig::default(),
+        };
+        let value = serde_json::to_value(room).unwrap();
+        assert_eq!(value["repositoryRoot"], json!("/tmp/room-repository"));
+        assert_eq!(value["maintenance"]["mode"], json!("workflow"));
+        assert_eq!(value["maintenance"]["autoPush"], json!(true));
+        assert!(serde_json::from_value::<RoomConfig>(json!({
+            "notebookRoot": "/tmp/legacy",
+            "timezone": "UTC",
+            "diaryDayBoundaryHour": 4
+        }))
+        .is_err());
     }
 
     #[test]
@@ -1753,6 +1997,10 @@ mod tests {
         let value = sparse_config_value(&config, false).unwrap();
         assert_eq!(value["mode"], json!("local"));
         assert_eq!(value["profile"], json!("normal"));
+        assert_eq!(
+            value["toolsets"],
+            serde_json::to_value(&config.toolsets).unwrap()
+        );
         for key in [
             "agentId",
             "displayName",
@@ -1841,6 +2089,7 @@ mod tests {
         let value = json!({
             "mode": "local",
             "profile": "normal",
+            "toolsets": serde_json::to_value(ToolsetConfig::normal()).unwrap(),
             "workspaceRoot": workspace,
             "futureField": {"enabled": true}
         });
@@ -1861,6 +2110,7 @@ mod tests {
         let value = json!({
             "mode": "local",
             "profile": "normal",
+            "toolsets": serde_json::to_value(ToolsetConfig::normal()).unwrap(),
             "tunnel": {"tunnelId": "stale"},
             "room": {"timezone": "UTC", "diaryDayBoundaryHour": 1}
         });
@@ -1922,6 +2172,7 @@ mod tests {
         let value = json!({
             "mode": "local",
             "profile": "normal",
+            "toolsets": serde_json::to_value(ToolsetConfig::normal()).unwrap(),
             "confirmationProvider": {"provider": "none"}
         });
         fs::write(&root, serde_json::to_string_pretty(&value).unwrap()).unwrap();
@@ -1953,6 +2204,7 @@ mod tests {
         let value = json!({
             "mode": "hub",
             "profile": "normal",
+            "toolsets": serde_json::to_value(ToolsetConfig::normal()).unwrap(),
             "hubUrl": "https://legacy.example.com",
             "hubTransport": "sse",
             "agentSecret": "legacy-secret"
@@ -2029,6 +2281,64 @@ mod tests {
             imported.config.extra["futureField"],
             json!({"preserve": true})
         );
+        let _ = fs::remove_file(root);
+    }
+
+    #[test]
+    fn explicit_import_uses_room_toolset_preset_when_toolsets_are_omitted() {
+        let root = temp_config_path();
+        let value = json!({
+            "mode": "standalone",
+            "profile": "room"
+        });
+        fs::write(&root, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+
+        let imported = Config::import(&root).unwrap();
+        assert_eq!(imported.config.toolsets, ToolsetConfig::all());
+        let _ = fs::remove_file(root);
+    }
+
+    #[test]
+    fn explicit_import_uses_normal_toolset_preset_when_toolsets_are_omitted() {
+        let root = temp_config_path();
+        let value = json!({
+            "mode": "standalone",
+            "profile": "normal"
+        });
+        fs::write(&root, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+
+        let imported = Config::import(&root).unwrap();
+        assert_eq!(imported.config.toolsets, ToolsetConfig::normal());
+        let _ = fs::remove_file(root);
+    }
+
+    #[test]
+    fn explicit_import_preserves_toolsets_that_omit_a_room_profile_namespace() {
+        let root = temp_config_path();
+        let value = json!({
+            "mode": "standalone",
+            "profile": "room",
+            "toolsets": {"enabled": ["room"]}
+        });
+        fs::write(&root, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+
+        let imported = Config::import(&root).unwrap();
+        assert_eq!(imported.config.toolsets.enabled_names(), vec!["room"]);
+        let _ = fs::remove_file(root);
+    }
+
+    #[test]
+    fn explicit_import_rejects_invalid_toolsets() {
+        let root = temp_config_path();
+        let value = json!({
+            "mode": "standalone",
+            "profile": "room",
+            "toolsets": {"enabled": ["not-a-tool"]}
+        });
+        fs::write(&root, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+
+        let error = Config::import(&root).unwrap_err().to_string();
+        assert!(error.contains("config_toolsets_invalid"));
         let _ = fs::remove_file(root);
     }
 

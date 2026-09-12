@@ -2,6 +2,17 @@
   "displayName": "agentic-gpt-linux",
   "mode": "standalone",
   "profile": "normal",
+  "toolsets": {
+    "enabled": [
+      "agent",
+      "file",
+      "mcp",
+      "process",
+      "job",
+      "skills",
+      "tmux"
+    ]
+  },
   "tunnel": {
     "tunnelId": "tunnel_replace-me",
     "apiKey": "file:/home/your-user/.agentic_gpt/secrets/tunnel-api-key"
@@ -12,6 +23,15 @@
     "agentSecret": "change-me-before-use"
   },
   "workspaceRoot": "/home/your-user/.agentic_gpt/workspace",
+  "room": {
+    "repositoryRoot": null,
+    "timezone": "Asia/Shanghai",
+    "diaryDayBoundaryHour": 5,
+    "maintenance": {
+      "mode": "local",
+      "autoPush": false
+    }
+  },
   "confirmationProvider": {
     "channels": [
       "freedesktop"

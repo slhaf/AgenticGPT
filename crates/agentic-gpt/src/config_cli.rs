@@ -11,7 +11,7 @@ use crate::{
     cli_i18n::{self, UiLanguage},
     config::{
         self, normalize_confirmation_language, ordered_config_json, write_config_with_backup,
-        Config, ReportingDetail,
+        Config, ReportingDetail, RoomMaintenanceMode, ToolNamespace,
     },
     config_setup::SetupSeed,
     config_templates::{self, InitInput, InitSummary, RuntimeMode, SecretValue},
@@ -37,6 +37,7 @@ pub(crate) enum ConfigValueKind {
     ReportingDetail,
     RuntimeMode,
     WorkerProfile,
+    RoomMaintenanceMode,
 }
 
 impl ConfigValueKind {
@@ -57,6 +58,7 @@ impl ConfigValueKind {
             Self::ReportingDetail => "reporting-detail",
             Self::RuntimeMode => "runtime-mode",
             Self::WorkerProfile => "worker-profile",
+            Self::RoomMaintenanceMode => "room-maintenance-mode",
         }
     }
 
@@ -68,6 +70,7 @@ impl ConfigValueKind {
             Self::ReportingDetail => Some(&["metadata", "full"]),
             Self::RuntimeMode => Some(&["standalone", "hub", "local"]),
             Self::WorkerProfile => Some(&["normal", "room"]),
+            Self::RoomMaintenanceMode => Some(&["local", "workflow"]),
             _ => None,
         }
     }
@@ -486,14 +489,14 @@ pub(crate) static CONFIG_KEYS: &[ConfigKeySpec] = &[
         set_skills_allowed_hosts
     ),
     config_key!(
-        "room.notebookRoot",
+        "room.repositoryRoot",
         Room,
         NullablePath,
         true,
-        "Notebook root path, or null to use the default.",
-        "笔记本根目录；使用 null 可恢复默认值。",
+        "Room repository root path, or null to use the workspace default.",
+        "Room 仓库根目录；使用 null 可恢复工作区默认值。",
         "null",
-        set_notebook_root
+        set_repository_root
     ),
     config_key!(
         "room.timezone",
@@ -514,6 +517,26 @@ pub(crate) static CONFIG_KEYS: &[ConfigKeySpec] = &[
         "日记日期开始的小时，范围为 0 到 23。",
         "5",
         set_diary_day_boundary_hour
+    ),
+    config_key!(
+        "room.maintenance.mode",
+        Room,
+        RoomMaintenanceMode,
+        false,
+        "Room maintenance execution mode: local or workflow.",
+        "Room 维护执行模式：local 或 workflow。",
+        "local",
+        set_room_maintenance_mode
+    ),
+    config_key!(
+        "room.maintenance.autoPush",
+        Room,
+        Boolean,
+        false,
+        "Synchronize successful local Room maintenance to the remote when possible.",
+        "本地 Room 维护成功后，尽可能同步到远端。",
+        "false",
+        set_room_maintenance_auto_push
     ),
     config_key!(
         "tunnel.tunnelId",
@@ -925,12 +948,26 @@ fn set_skills_allowed_hosts(config: &mut Config, value: &str) -> Result<()> {
     Ok(())
 }
 
-fn set_notebook_root(config: &mut Config, value: &str) -> Result<()> {
-    config.room.notebook_root = if value == "null" {
+fn set_repository_root(config: &mut Config, value: &str) -> Result<()> {
+    config.room.repository_root = if value == "null" {
         None
     } else {
         Some(PathBuf::from(value))
     };
+    Ok(())
+}
+
+fn set_room_maintenance_mode(config: &mut Config, value: &str) -> Result<()> {
+    config.room.maintenance.mode = match value.to_ascii_lowercase().as_str() {
+        "local" => RoomMaintenanceMode::Local,
+        "workflow" => RoomMaintenanceMode::Workflow,
+        _ => return Err(anyhow!("room.maintenance.mode must be local or workflow")),
+    };
+    Ok(())
+}
+
+fn set_room_maintenance_auto_push(config: &mut Config, value: &str) -> Result<()> {
+    config.room.maintenance.auto_push = value.parse::<bool>()?;
     Ok(())
 }
 
@@ -1228,6 +1265,23 @@ pub(crate) enum ConfigCommand {
         #[command(subcommand)]
         command: McpConfigCommand,
     },
+    Toolset {
+        #[command(subcommand)]
+        command: ToolsetCommand,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum ToolsetCommand {
+    Ls,
+    Enable {
+        #[arg(value_enum)]
+        namespace: ToolNamespace,
+    },
+    Disable {
+        #[arg(value_enum)]
+        namespace: ToolNamespace,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1303,8 +1357,89 @@ pub(crate) async fn handle_config(
         }
         ConfigCommand::Path { command } => policy::mutate_path_policy(config_path, command)?,
         ConfigCommand::Mcp { command } => mcp::mutate_servers(config_path, command)?,
+        ConfigCommand::Toolset { command } => handle_toolset(&config_path, command, language)?,
     }
     Ok(())
+}
+
+fn handle_toolset(config_path: &Path, command: ToolsetCommand, language: UiLanguage) -> Result<()> {
+    let mut config = Config::load(config_path)?;
+    match command {
+        ToolsetCommand::Ls => println!("{}", render_toolsets(&config, language)),
+        ToolsetCommand::Enable { namespace } => {
+            config.toolsets.enable(namespace);
+            write_config_with_backup(config_path, &config)?;
+            println!("{}", toolset_mutation_message(namespace, true, language));
+        }
+        ToolsetCommand::Disable { namespace } => {
+            config.toolsets.disable(namespace);
+            write_config_with_backup(config_path, &config)?;
+            println!("{}", toolset_mutation_message(namespace, false, language));
+        }
+    }
+    Ok(())
+}
+
+fn render_toolsets(config: &Config, language: UiLanguage) -> String {
+    ToolNamespace::all()
+        .iter()
+        .copied()
+        .map(|namespace| {
+            let enabled = config.toolsets.is_enabled(namespace);
+            let status = match (language, enabled) {
+                (UiLanguage::En, true) => "enabled",
+                (UiLanguage::En, false) => "disabled",
+                (UiLanguage::ZhCn, true) => "启用",
+                (UiLanguage::ZhCn, false) => "禁用",
+            };
+            format!(
+                "[{status}]\t{}\t{}",
+                namespace.as_str(),
+                toolset_description(namespace, language)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn toolset_description(namespace: ToolNamespace, language: UiLanguage) -> &'static str {
+    match (namespace, language) {
+        (ToolNamespace::Agent, UiLanguage::En) => {
+            "Agent runtime information and health diagnostics."
+        }
+        (ToolNamespace::Agent, UiLanguage::ZhCn) => "Agent 运行信息与健康诊断。",
+        (ToolNamespace::File, UiLanguage::En) => "Workspace file reading, search, and editing.",
+        (ToolNamespace::File, UiLanguage::ZhCn) => "工作区文件读取、搜索与编辑。",
+        (ToolNamespace::Mcp, UiLanguage::En) => "Downstream MCP server discovery and tool calls.",
+        (ToolNamespace::Mcp, UiLanguage::ZhCn) => "下游 MCP 服务发现与工具调用。",
+        (ToolNamespace::Process, UiLanguage::En) => "Managed local process execution.",
+        (ToolNamespace::Process, UiLanguage::ZhCn) => "受管本地进程执行。",
+        (ToolNamespace::Job, UiLanguage::En) => "Managed job inspection and cancellation.",
+        (ToolNamespace::Job, UiLanguage::ZhCn) => "受管任务查看与取消。",
+        (ToolNamespace::Skills, UiLanguage::En) => {
+            "Skill discovery, installation, activation, and execution."
+        }
+        (ToolNamespace::Skills, UiLanguage::ZhCn) => "技能发现、安装、启用与执行。",
+        (ToolNamespace::Tmux, UiLanguage::En) => "Persistent tmux session and pane operations.",
+        (ToolNamespace::Tmux, UiLanguage::ZhCn) => "持久化 tmux 会话与窗格操作。",
+        (ToolNamespace::Room, UiLanguage::En) => {
+            "Room bootstrap, diary, notebook, state, and maintenance tools."
+        }
+        (ToolNamespace::Room, UiLanguage::ZhCn) => "Room 引导、日记、笔记本、状态与维护工具。",
+    }
+}
+
+fn toolset_mutation_message(
+    namespace: ToolNamespace,
+    enabled: bool,
+    language: UiLanguage,
+) -> String {
+    match (language, enabled) {
+        (UiLanguage::En, true) => format!("Enabled toolset: {namespace}."),
+        (UiLanguage::En, false) => format!("Disabled toolset: {namespace}."),
+        (UiLanguage::ZhCn, true) => format!("已启用工具集：{namespace}。"),
+        (UiLanguage::ZhCn, false) => format!("已禁用工具集：{namespace}。"),
+    }
 }
 
 fn tunnel_config(config: &mut Config) -> &mut config::TunnelConfig {
@@ -1316,6 +1451,127 @@ fn tunnel_config(config: &mut Config) -> &mut config::TunnelConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn toolset_commands_dispatch_and_reject_unknown_namespaces() {
+        let cli = crate::Cli::try_parse_from(["agentic-gpt", "config", "toolset", "ls"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            crate::Commands::Config {
+                command: ConfigCommand::Toolset {
+                    command: ToolsetCommand::Ls
+                },
+                ..
+            }
+        ));
+
+        let cli =
+            crate::Cli::try_parse_from(["agentic-gpt", "config", "toolset", "enable", "file"])
+                .unwrap();
+        assert!(matches!(
+            cli.command,
+            crate::Commands::Config {
+                command: ConfigCommand::Toolset {
+                    command: ToolsetCommand::Enable {
+                        namespace: ToolNamespace::File
+                    }
+                },
+                ..
+            }
+        ));
+
+        let cli =
+            crate::Cli::try_parse_from(["agentic-gpt", "config", "toolset", "disable", "room"])
+                .unwrap();
+        assert!(matches!(
+            cli.command,
+            crate::Commands::Config {
+                command: ConfigCommand::Toolset {
+                    command: ToolsetCommand::Disable {
+                        namespace: ToolNamespace::Room
+                    }
+                },
+                ..
+            }
+        ));
+
+        assert!(crate::Cli::try_parse_from([
+            "agentic-gpt",
+            "config",
+            "toolset",
+            "enable",
+            "unknown",
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn toolset_enable_and_disable_persist_across_config_loads() {
+        let root = std::env::temp_dir().join(format!(
+            "agentic-config-cli-toolset-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("config.json");
+        let mut config = Config::default_config().unwrap();
+        config.toolsets.disable(ToolNamespace::File);
+        write_config_with_backup(&path, &config).unwrap();
+
+        handle_toolset(
+            &path,
+            ToolsetCommand::Enable {
+                namespace: ToolNamespace::File,
+            },
+            UiLanguage::En,
+        )
+        .unwrap();
+        assert!(Config::load(&path)
+            .unwrap()
+            .toolsets
+            .is_enabled(ToolNamespace::File));
+
+        handle_toolset(
+            &path,
+            ToolsetCommand::Disable {
+                namespace: ToolNamespace::File,
+            },
+            UiLanguage::En,
+        )
+        .unwrap();
+        assert!(!Config::load(&path)
+            .unwrap()
+            .toolsets
+            .is_enabled(ToolNamespace::File));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn toolset_listing_describes_all_namespaces_and_feedback_is_localized() {
+        let config = Config::default_config().unwrap();
+
+        let english = render_toolsets(&config, UiLanguage::En);
+        assert_eq!(english.lines().count(), ToolNamespace::all().len());
+        assert!(
+            english.contains("[enabled]\tagent\tAgent runtime information and health diagnostics.")
+        );
+        assert!(english.contains(
+            "[disabled]\troom\tRoom bootstrap, diary, notebook, state, and maintenance tools."
+        ));
+
+        let chinese = render_toolsets(&config, UiLanguage::ZhCn);
+        assert!(chinese.contains("[启用]\tfile\t工作区文件读取、搜索与编辑。"));
+        assert!(chinese.contains("[禁用]\troom\tRoom 引导、日记、笔记本、状态与维护工具。"));
+        assert_eq!(
+            toolset_mutation_message(ToolNamespace::File, true, UiLanguage::ZhCn),
+            "已启用工具集：file。"
+        );
+        assert_eq!(
+            toolset_mutation_message(ToolNamespace::Room, false, UiLanguage::En),
+            "Disabled toolset: room."
+        );
+    }
 
     #[test]
     fn interactive_init_requires_all_three_terminals_and_no_non_interactive_flag() {
@@ -1360,11 +1616,22 @@ mod tests {
     }
 
     #[test]
-    fn registry_clears_nullable_notebook_root() {
+    fn registry_updates_room_repository_and_maintenance_settings() {
         let mut config = Config::default_config().unwrap();
-        apply_config_key(&mut config, "room.notebookRoot", "/tmp/notebook").unwrap();
-        apply_config_key(&mut config, "room.notebookRoot", "null").unwrap();
-        assert!(config.room.notebook_root.is_none());
+        apply_config_key(&mut config, "room.repositoryRoot", "/tmp/repository").unwrap();
+        apply_config_key(&mut config, "room.maintenance.mode", "workflow").unwrap();
+        apply_config_key(&mut config, "room.maintenance.autoPush", "true").unwrap();
+        assert_eq!(
+            config.room.repository_root.as_deref(),
+            Some(std::path::Path::new("/tmp/repository"))
+        );
+        assert_eq!(config.room.maintenance.mode, RoomMaintenanceMode::Workflow);
+        assert!(config.room.maintenance.auto_push);
+
+        apply_config_key(&mut config, "room.repositoryRoot", "null").unwrap();
+        assert!(config.room.repository_root.is_none());
+        assert!(apply_config_key(&mut config, "room.maintenance.mode", "invalid").is_err());
+        assert!(apply_config_key(&mut config, "room.notebookRoot", "null").is_err());
     }
 
     #[test]

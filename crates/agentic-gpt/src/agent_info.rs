@@ -361,6 +361,7 @@ fn live_subset(config: &Config) -> Value {
         "pathPolicy": config.path_policy,
         "limits": config.limits,
         "mcpServers": config.mcp_servers,
+        "toolsets": config.toolsets,
     })
 }
 
@@ -439,7 +440,7 @@ mod tests {
             pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
             temporary_mcp_allows: Arc::new(Mutex::new(Vec::new())),
             mcp_concurrency: Arc::new(crate::jobs::McpConcurrency::new()),
-            notebook_writes: Arc::new(Mutex::new(())),
+            room_repository_writes: Arc::new(Mutex::new(())),
             skills_writes: Arc::new(Mutex::new(())),
             skill_leases: Arc::new(jobs::SkillLeaseManager::new()),
             skill_installs: Arc::new(crate::skill_installs::InstallManager::new()),
@@ -619,6 +620,38 @@ mod tests {
         let invalid = collect(&app).await;
         assert_eq!(invalid["config"]["diskStatus"], "invalid");
         assert_eq!(invalid["config"]["errorCode"], "config_invalid");
+        let _ = fs::remove_file(disk_path);
+    }
+
+    #[test]
+    fn info_reports_toolset_live_subset_difference_without_restart_requirement() {
+        let mut app = state(CapabilityProfile::Normal);
+        let disk_path = std::env::temp_dir().join(format!(
+            "agent-info-toolsets-config-{}.json",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let effective = Config::default_config().unwrap();
+        app.config_path = disk_path.clone();
+
+        let mut disk = effective.clone();
+        disk.toolsets.enable(crate::config::ToolNamespace::Room);
+        fs::write(&disk_path, serde_json::to_vec_pretty(&disk).unwrap()).unwrap();
+
+        let before_reload = config_health(&app, &effective);
+        assert_eq!(before_reload.disk_status, "valid");
+        assert!(!before_reload.live_subset_matches_disk);
+        assert!(!before_reload
+            .restart_required_fields
+            .iter()
+            .any(|field| field == "toolsets"));
+
+        let after_reload = config_health(&app, &disk);
+        assert!(after_reload.live_subset_matches_disk);
+        assert!(!after_reload
+            .restart_required_fields
+            .iter()
+            .any(|field| field == "toolsets"));
+
         let _ = fs::remove_file(disk_path);
     }
 

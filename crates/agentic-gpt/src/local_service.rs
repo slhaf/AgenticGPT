@@ -1,7 +1,7 @@
 use agentic_gpt_protocol::{normalize_job_group, HubCommand};
 use anyhow::Result;
 
-use crate::{bootstrap, diary, jobs, mcp, notebook, notify, skills, tmux, AppState};
+use crate::{bootstrap, config::ToolNamespace, jobs, mcp, notify, skills, tmux, AppState};
 
 /// Value-returning local operation layer shared by transport adapters.
 ///
@@ -9,7 +9,12 @@ use crate::{bootstrap, diary, jobs, mcp, notebook, notify, skills, tmux, AppStat
 /// owns the operation result and error shape so the stdio adapter can call the same code later.
 pub(crate) async fn dispatch(state: AppState, command: HubCommand) -> Result<serde_json::Value> {
     match dispatch_inner(state, command).await {
-        Err(error) if error.to_string() == "room_agent_required" => Ok(room_agent_required_error()),
+        Err(error) if error.to_string() == "room_toolset_required" => {
+            Ok(room_toolset_required_error())
+        }
+        Err(error) if error.to_string() == "room_agent_required" => {
+            Ok(profile_capability_required_error())
+        }
         result => result,
     }
 }
@@ -124,83 +129,23 @@ async fn dispatch_inner(state: AppState, command: HubCommand) -> Result<serde_js
                 notify::deliver_freedesktop_notification(payload).await,
             )?)
         }
-        HubCommand::RoomNotebookAppend { payload, .. } => {
-            require_capability(&state, |capabilities| capabilities.notebook)?;
-            map_result(
-                notebook::append(&state, payload).await,
-                "room_notebook_append_failed",
-            )
-        }
-        HubCommand::RoomNotebookRecent { payload, .. } => {
-            require_capability(&state, |capabilities| capabilities.notebook)?;
-            map_result(
-                notebook::recent(&state, payload).await,
-                "room_notebook_recent_failed",
-            )
-        }
-        HubCommand::RoomNotebookSelectExact { payload, .. } => {
-            require_capability(&state, |capabilities| capabilities.notebook)?;
-            map_result(
-                notebook::select_exact(&state, payload).await,
-                "room_notebook_select_exact_failed",
-            )
-        }
-        HubCommand::RoomNotebookSearch { payload, .. } => {
-            require_capability(&state, |capabilities| capabilities.notebook)?;
-            map_result(
-                notebook::search(&state, payload).await,
-                "room_notebook_search_failed",
-            )
-        }
-        HubCommand::RoomNotebookCurrent { payload, .. } => {
-            require_capability(&state, |capabilities| capabilities.notebook)?;
-            map_result(
-                notebook::current(&state, payload).await,
-                "room_notebook_current_failed",
-            )
-        }
-        HubCommand::RoomNotebookUpdate { payload, .. } => {
-            require_capability(&state, |capabilities| capabilities.notebook)?;
-            map_notebook_result(
-                notebook::update(&state, payload).await,
-                "room_notebook_update_failed",
-            )
-        }
-        HubCommand::RoomNotebookRemove { payload, .. } => {
-            require_capability(&state, |capabilities| capabilities.notebook)?;
-            map_notebook_result(
-                notebook::remove(&state, payload).await,
-                "room_notebook_remove_failed",
-            )
-        }
-        HubCommand::RoomDiaryAppend { payload, .. } => {
-            require_capability(&state, |capabilities| capabilities.diary)?;
-            map_result(
-                diary::append(&state, payload).await,
-                "room_diary_append_failed",
-            )
-        }
-        HubCommand::RoomDiaryRecent { payload, .. } => {
-            require_capability(&state, |capabilities| capabilities.diary)?;
-            map_result(
-                diary::recent(&state, payload).await,
-                "room_diary_recent_failed",
-            )
-        }
-        HubCommand::RoomDiarySelectExact { payload, .. } => {
-            require_capability(&state, |capabilities| capabilities.diary)?;
-            map_result(
-                diary::select_exact(&state, payload).await,
-                "room_diary_select_exact_failed",
-            )
-        }
+        HubCommand::RoomNotebookAppend { .. }
+        | HubCommand::RoomNotebookRecent { .. }
+        | HubCommand::RoomNotebookSelectExact { .. }
+        | HubCommand::RoomNotebookSearch { .. }
+        | HubCommand::RoomNotebookCurrent { .. }
+        | HubCommand::RoomNotebookUpdate { .. }
+        | HubCommand::RoomNotebookRemove { .. }
+        | HubCommand::RoomDiaryAppend { .. }
+        | HubCommand::RoomDiaryRecent { .. }
+        | HubCommand::RoomDiarySelectExact { .. } => Ok(legacy_room_surface_removed_error()),
         HubCommand::RoomBootstrap { .. } | HubCommand::Bootstrap { .. } => {
-            require_capability(&state, |capabilities| capabilities.bootstrap)?;
+            require_room_toolset(&state).await?;
             map_bootstrap_result(bootstrap::load(&state).await, "bootstrap_read_failed")
         }
         HubCommand::RoomBootstrapRead { payload, .. }
         | HubCommand::BootstrapRead { payload, .. } => {
-            require_capability(&state, |capabilities| capabilities.bootstrap)?;
+            require_room_toolset(&state).await?;
             map_bootstrap_result(
                 bootstrap::read(&state, payload).await,
                 "bootstrap_read_failed",
@@ -277,13 +222,34 @@ fn normalize_hub_group(
     })
 }
 
-fn room_agent_required_error() -> serde_json::Value {
+fn room_toolset_required_error() -> serde_json::Value {
+    serde_json::json!({
+        "error": {
+            "code": "room_toolset_required",
+            "message": "room commands require toolsets.room to be enabled"
+        }
+    })
+}
+
+fn profile_capability_required_error() -> serde_json::Value {
     serde_json::json!({
         "error": {
             "code": "room_agent_required",
             "message": "room commands require profile=room in config"
         }
     })
+}
+
+async fn require_room_toolset(state: &AppState) -> Result<()> {
+    let enabled = {
+        let config = state.config.read().await;
+        config.toolsets.is_enabled(ToolNamespace::Room)
+    };
+    if enabled {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!("room_toolset_required"))
+    }
 }
 
 fn require_capability(
@@ -306,25 +272,12 @@ fn capability_error(name: &str) -> serde_json::Value {
     })
 }
 
-fn map_result<T: serde::Serialize>(
-    result: std::result::Result<T, anyhow::Error>,
-    default_code: &str,
-) -> Result<serde_json::Value> {
-    Ok(match result {
-        Ok(result) => serde_json::to_value(result)?,
-        Err(error) => serde_json::json!({
-            "error": { "code": default_code, "message": error.to_string() }
-        }),
-    })
-}
-
-fn map_notebook_result<T: serde::Serialize>(
-    result: std::result::Result<T, anyhow::Error>,
-    default_code: &str,
-) -> Result<serde_json::Value> {
-    Ok(match result {
-        Ok(result) => serde_json::to_value(result)?,
-        Err(error) => notebook_command_error(default_code, error),
+fn legacy_room_surface_removed_error() -> serde_json::Value {
+    serde_json::json!({
+        "error": {
+            "code": "room_legacy_surface_removed",
+            "message": "legacy Room JSONL commands are reserved for Hub parity and are not available on the Agent"
+        }
     })
 }
 
@@ -408,24 +361,4 @@ fn install_command_error(error: anyhow::Error) -> serde_json::Value {
         _ => "skills_install_failed",
     };
     serde_json::json!({ "error": { "code": code, "message": message } })
-}
-
-fn notebook_command_error(default_code: &str, error: anyhow::Error) -> serde_json::Value {
-    let message = error.to_string();
-    let code = if message == "not_found" {
-        "not_found"
-    } else if message.starts_with("validation_error")
-        || message.ends_with("_required")
-        || message.ends_with("_too_long")
-    {
-        "validation_error"
-    } else {
-        default_code
-    };
-    serde_json::json!({
-        "error": {
-            "code": code,
-            "message": if code == "not_found" { "passage not found" } else { &message }
-        }
-    })
 }

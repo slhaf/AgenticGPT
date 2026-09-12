@@ -33,8 +33,45 @@ default mode is `standalone` and the default profile is `normal`.
 Mode and profile are independent choices:
 
 - `--mode standalone|hub|local` selects the runtime connection and configuration shape.
-- `--profile normal|room` selects the capability/tool surface. Normal exposes 24 tools and Room
-  exposes 36 tools; a profile does not turn a Local runtime into a Hub runtime.
+- `--profile normal|room` selects the default toolset preset. The normal preset enables every
+  namespace except `room`; the room preset enables every namespace. A profile preset does not
+  by itself fix the final runtime surface or count, because an explicit `toolsets.enabled`
+  selection is authoritative.
+
+The available namespaces are `agent`, `file`, `mcp`, `process`, `job`, `skills`, `tmux`, and
+`room`. The logical `room` namespace includes Room bootstrap (`bootstrap` and `bootstrap.read`)
+and every `room.*` tool. Selection filters the pre-existing advertised Normal/Room names only;
+it never exposes dispatch-only aliases.
+
+Pin a selection with the following exact commands:
+
+```bash
+agentic-gpt config toolset ls
+agentic-gpt config toolset enable <namespace>
+agentic-gpt config toolset disable <namespace>
+```
+`ls` prints all namespaces, their enabled/disabled state, and a concise description of the tools
+they contain. Successful `enable` and `disable` mutations print an explicit confirmation.
+
+The same `toolsets.enabled` array may be edited directly in JSON. Valid toolset changes are
+hot-reloaded while the worker is running and take effect for subsequent tool discovery and
+calls; restarting is not required. An invalid candidate keeps the last valid live selection.
+Room bootstrap, diary, and notebook authorization follows the live `room` namespace, not the
+startup profile. A direct Room command while that namespace is disabled returns
+`room_toolset_required`.
+
+For example, an explicit normal selection is represented as:
+
+```json
+{
+  "profile": "normal",
+  "toolsets": {
+    "enabled": ["agent", "file", "mcp", "process", "job", "skills", "tmux"]
+  }
+}
+```
+
+This later explicit selection remains authoritative if the profile is changed.
 
 For deterministic scripts, use the exact CLI grammar below and provide values that must not be
 placeholders:
@@ -62,10 +99,12 @@ rejected.
 The fullscreen flow is Basic → Connection (except for Local) → Optional settings → Review →
 Completion. The command-line flags seed editable fields in interactive mode; they do not lock the
 values or skip the pages. Identity/display name, workspace/path policy, confirmation/language,
-limits, and sandbox are always available. Room settings are offered only for the Room profile.
-Tunnel-client overrides and Hub reporting are offered only for Standalone mode. Hub and Local modes
-do not show those tunnel sections. Optional sections can be revisited, and selecting none keeps
-the template defaults.
+limits, sandbox, and the optional Toolsets section are available. Toolsets starts from the
+profile preset; once explicitly edited, its namespace selection is authoritative. Room settings
+are offered only for the Room profile. Tunnel-client overrides and Hub reporting are offered only
+for Standalone mode. Hub and Local modes do not show those tunnel sections. Optional sections can
+be revisited, and selecting none keeps the template defaults.
+
 
 The UI uses keyboard navigation: Tab/Shift+Tab and the arrow keys move focus, Enter edits or
 activates the focused item, Esc backs out (and is a no-op on the root Basic page), and Ctrl+C
@@ -117,14 +156,16 @@ agentic-gpt config set tunnel.client.autoDownload true
 agentic-gpt run
 ```
 
-Set `profile` to `room` for the Room surface (for example, `agentic-gpt config set profile room`).
+Set `profile` to `room` for the all-namespace Room preset (for example, `agentic-gpt config set
+profile room`). An explicit `toolsets.enabled` selection remains authoritative.
 
 ## Top-level fields
 
 | Field | Purpose |
 | --- | --- |
 | `mode` | Authoritative runtime dispatch: `standalone`, `hub`, or `local`. |
-| `profile` | Authoritative capability surface: `normal` or `room`. |
+| `profile` | Default capability/toolset preset: `normal` or `room`. |
+| `toolsets` | Enabled tool namespaces; an explicit `enabled` list overrides the profile preset. |
 | `agentId` | Stable local identity. It also determines the private runtime/socket path and per-agent durable state root under `~/.agentic_gpt/state/agent/<agentId>/`. |
 | `displayName` | Human-readable machine label used in summaries/reporting. |
 | `workspaceRoot` | Main writable workspace and location of `.agentic-gpt-audit.jsonl`. |
@@ -137,7 +178,7 @@ Set `profile` to `room` for the Room surface (for example, `agentic-gpt config s
 | `policy` | Explicit allow / confirm / deny command rules. |
 | `limits` | Process concurrency and total active Job capacity. |
 | `skills` | Skill package/install limits and network policy. |
-| `room` | Room timezone, diary boundary, and optional notebook root. |
+| `room` | Room repository root, timezone, diary boundary, maintenance mode, and auto-push policy. |
 | `tunnel` | Standalone tunnel-client source, secret reference, and optional reporting. |
 | `hub` | Centralized Hub connection or optional standalone Hub reporting/ntfy relay. |
 
@@ -292,7 +333,15 @@ Server ids are at most 64 bytes and use letters, digits, `.`, `_`, or `-`. `stre
 
 `skills` controls package sizes, redirects, timeouts, retry/deadline limits, install/download concurrency, and optional host allowlisting. The canonical block is top-level `skills`; legacy `room.skills` is read only when the top-level block is absent.
 
-`room.timezone` controls Room date/time behavior. `room.diaryDayBoundaryHour` is 0–23. `room.notebookRoot` is optional.
+`room.timezone` is retained Room metadata; V2 reads use repository paths rather than the
+legacy JSONL date partitioning. `room.diaryDayBoundaryHour` is 0–23 and controls the logical
+date written into a newly bootstrapped Daily scaffold.
+`room.repositoryRoot` is optional and defaults to `<workspaceRoot>/room`. The nested
+`room.maintenance.mode` is `local` or `workflow` and defaults to `local`; `room.maintenance.autoPush`
+defaults to `false`. The standalone Room toolset exposes semantic reads plus
+`room.maintenance.status` and `room.maintenance.submit`; all mutations use the latter.
+Legacy JSONL Room commands remain only in the protocol and Hub HTTP/MCP compatibility surface
+for the separate Hub parity workstream and are not advertised or executed by the Agent.
 
 `sandbox.enabled` activates bubblewrap. `requiredRuntimePaths` lists host paths made available inside the sandbox. Sandbox does not replace command policy, path policy, or confirmation.
 
@@ -311,12 +360,15 @@ metadata including the value type, nullability, example, bilingual descriptions,
 `config set`; structured policy and MCP collections use their dedicated commands.
 
 The value is one shell argument after the registered key. JSON list values therefore need shell
-quoting, and `room.notebookRoot` is nullable: use the literal JSON value `null` to clear it.
+quoting. `room.repositoryRoot` is nullable: use the literal JSON value `null` to clear it and
+return to the workspace default.
 
 ```bash
 agentic-gpt config set sandbox.requiredRuntimePaths '["/usr","/opt/runtime"]'
 agentic-gpt config set skills.allowedHosts '["skills.example.com"]'
-agentic-gpt config set room.notebookRoot null
+agentic-gpt config set room.repositoryRoot null
+agentic-gpt config set room.maintenance.mode local
+agentic-gpt config set room.maintenance.autoPush false
 ```
 
 The registry includes common scalar values such as:
@@ -325,10 +377,15 @@ The registry includes common scalar values such as:
 - `confirmationProvider.channels`, `confirmationLanguage`, `sandbox.enabled`
 - `tunnel.tunnelId`, `tunnel.apiKey`
 - all `tunnel.client.*` and `tunnel.hubReporting.*` fields
-- `room.notebookRoot`, `room.timezone`, `room.diaryDayBoundaryHour`
+- `room.repositoryRoot`, `room.timezone`, `room.diaryDayBoundaryHour`
+- `room.maintenance.mode`, `room.maintenance.autoPush`
 - the documented `skills.*` scalar/list fields
 
-Use `config allow/confirm/deny`, `config path`, and `config mcp` for structured policy/MCP changes. Complex JSON may also be edited directly while the process is stopped, followed by `agentic-gpt config show` and a smoke test.
+Use `config allow/confirm/deny`, `config path`, and `config mcp` for structured policy/MCP changes.
+The exact `config toolset` commands above manage namespace selection. Complex JSON, including
+`toolsets.enabled`, may also be edited directly; a valid edit hot-reloads without restarting the
+worker, while an invalid candidate leaves the last valid live state in place. Follow with
+`agentic-gpt config show` and a smoke test.
 
 ## Secret files and transactional writes
 
@@ -358,9 +415,10 @@ Standalone and Local workers poll the config and atomically apply a valid live s
 
 | Configuration | Effect |
 | --- | --- |
-| `policy`, `pathPolicy`, `limits`, `mcpServers` | Live reload for new admissions/calls |
+| `policy`, `pathPolicy`, `limits`, `mcpServers`, `toolsets.enabled` | Live reload for new admissions/calls and tool discovery |
 | Already-admitted Jobs and already-created downstream calls | Keep their original decision/config |
 | `mode`, `profile`, `agentId`, `workspaceRoot` | Restart required |
+| `room.*` repository, timezone, diary-boundary, and maintenance settings | Restart required; `toolsets.enabled` may expose Room live using the current live Room settings |
 | `tunnel.*` client identity/source/secret | Restart required |
 | `hub`, reporting mode | Restart required for the related connection |
 | Skill install concurrency/startup-owned settings | Restart required |

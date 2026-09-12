@@ -6,12 +6,18 @@ objects remain authoritative. “No use” means the nearest tempting operation
 that this tool deliberately does not perform. Bounds are inclusive unless
 stated otherwise.
 
-## Standalone Normal and Room surface
+## Standalone advertised surface and namespace presets
 
-Normal exposes the first 24 names. Room adds the final 12 names, for exactly
-36. Tunnel stdio and local Unix MCP use the same descriptors, schemas,
-confirmation, path policy, audit, and Job registry. Standalone calls do not
-accept Hub-only `agentId` or `confirmMethod` fields.
+The V2 advertised surface contains 23 Normal names and 34 Room names. The normal
+preset enables every namespace except `room`; the room preset enables every namespace. Available
+namespaces are `agent`, `file`, `mcp`, `process`, `job`, `skills`, `tmux`, and `room`. The logical
+`room` namespace includes `bootstrap`, `bootstrap.read`, semantic read tools, and maintenance
+status/submit. An explicit `toolsets.enabled` selection is authoritative regardless of profile,
+and filters only these advertised names; it never exposes dispatch-only aliases.
+
+Tunnel stdio and local Unix MCP use the same descriptors, schemas, confirmation, path policy,
+audit, and Job registry. Standalone calls do not accept Hub-only `agentId` or `confirmMethod`
+fields.
 
 | Public name | Use / no use | Required or conditional inputs | Defaults and bounds | Failure / lifecycle | Surface parity |
 |---|---|---|---|---|---|
@@ -40,16 +46,19 @@ accept Hub-only `agentId` or `confirmMethod` fields.
 | `tmux.pasteText` | Paste into non-shell pane/TUI; no shell execution. | `target`, `text`; optional `submit`, confirmation. | Text/history bounded. | Shell panes are rejected; pane state remains otherwise unchanged. | Normal + Room; Hub full mirrors. |
 | `bootstrap` | Load Room bootstrap entrypoint/guide manifest; no generic file read or file creation. | No fields. | Bounded guide summaries and package revision. | Missing/invalid package is typed/warned; read-only and retry-safe. | Room only standalone; Hub full has `bootstrap` and `room.bootstrap` routes. |
 | `bootstrap.read` | Read one validated bootstrap guide; no arbitrary path. | `id`. | Bounded Markdown/frontmatter. | Unknown/invalid/duplicate guide is `guide_not_found`; read-only. | Room only standalone; Hub full has `bootstrap.read` and `room.bootstrap.read`. |
-| `room.diary.append` | Append dated Room diary entry; no notebook replacement. | `entry`; optional tags. | Logical date and daypart are derived from Room time; bounded entry/tags. | Storage/validation errors are typed; durable mutation is audited. | Room only; Hub full and HTTP Room diary mirror. |
-| `room.diary.recent` | Read recent diary entries; no mutation. | Optional days/limit. | Bounded days and entries. | Read-only snapshot; timezone follows Room config. | Room only; Hub full/HTTP mirror. |
-| `room.diary.selectExact` | Read entries for one exact Room-local date; no range scan mutation. | `date` in `YYYY-MM-DD`; optional limit. | Date is the Room-local logical diary date; bounded result count. | Invalid date/storage errors are typed; read-only. | Room only; Hub full/HTTP mirror. |
-| `room.notebook.append` | Append durable notebook passage; no transient chat-only note. | `scope`, `content`; optional significance/abstract/datetime/tags. | Significance defaults NORMAL; omitted abstract is derived from content. Scope is path-safe; datetime stored UTC. | Validation/storage errors are typed; ANCHOR refreshes recoverable state. | Room only; Hub full/HTTP mirror. |
-| `room.notebook.current` | Read recoverable current state for one scope; no mutation. | `scope`. | One bounded state snapshot. | Missing state returns null/typed scope errors; read-only. | Room only; Hub full/HTTP mirror. |
-| `room.notebook.recent` | Read recent passages with filters; no mutation. | Optional scope/days/significance/limit. | Bounded calendar scan/result count. | Read-only snapshot; Room timezone controls date partitioning. | Room only; Hub full/HTTP mirror. |
-| `room.notebook.remove` | Remove one passage; no bulk or arbitrary file deletion. | `id`. | One passage per call. | Destructive; current state falls back to latest ANCHOR/null and response says what happened. | Room only; Hub full/HTTP mirror. |
-| `room.notebook.search` | Substring-search notebook fields; no vector search or mutation. | `query`; optional scope/limit. | Bounded substring scan/result count. | Read-only; invalid query/storage errors are typed. | Room only; Hub full/HTTP mirror. |
-| `room.notebook.selectExact` | Read passages for one exact Room-local date; no mutation. | `date` in `YYYY-MM-DD`; optional scope/limit. | Date is interpreted in the configured Room timezone; bounded result count. | Invalid date/storage errors are typed; read-only. | Room only; Hub full/HTTP mirror. |
-| `room.notebook.update` | Update editable passage fields; no scope/datetime rewrite. | `id`; at least one editable field. | Scope and datetime immutable; optional significance/abstract/content/tags. | Validation/storage errors are typed; current state refresh is reported. | Room only; Hub full/HTTP mirror. |
+| `room.diary.active` | Read the active Daily, Weekly, and Monthly Room diary documents; no mutation. | No fields. | Three bounded Markdown layer results; each reports a validated path and availability. | Missing, unreadable, or invalid-UTF-8 documents are reported per layer; read-only and retry-safe. | Room only standalone; no legacy JSONL alias. |
+| `room.diary.read` | Read one exact Room diary document by semantic layer and period; no arbitrary path. | `layer`, `period`; period is `current`, a daily date, or an ordered weekly/monthly range. | One bounded Markdown document. | Invalid periods are rejected; missing or unreadable documents are returned as typed layer issues. | Room only standalone; no legacy JSONL alias. |
+| `room.notebook.recent` | Read bounded recent Room notebook Markdown previews; no mutation. | Optional `limit`. | Limit defaults to 20 and is bounded to 1–100; previews are capped. | Missing or malformed documents become bounded warnings; read-only discovery. | Room only standalone; no legacy JSONL alias. |
+| `room.notebook.search` | Search Room notebook Markdown by a case-insensitive substring; no mutation. | Required `query`; optional `limit`. | Query is capped at 256 characters; limit defaults to 20 and is bounded to 1–100. | Empty or oversized queries and invalid limits are typed validation errors; read-only. | Room only standalone; no legacy JSONL alias. |
+| `room.notebook.read` | Read one exact Room notebook Markdown document; no arbitrary repository path. | Required validated Notebook-relative `.md` `path`. | One bounded Markdown document. | Unsafe, non-Markdown, missing, or oversized paths are typed; read-only. | Room only standalone; no legacy JSONL alias. |
+| `room.state.list` | List deterministic Room state entity documents; no mutation. | No fields. | Returns sorted `.md` entities under `State/entities`. | Symlinks and non-files are skipped; malformed repository roots are typed; read-only. | Room only standalone; no legacy JSONL alias. |
+| `room.state.read` | Read one exact Room state entity Markdown document; no arbitrary path. | Required safe entity filename stem `entity`. | One bounded Markdown document under `State/entities`. | Unsafe, missing, or oversized entities are typed; read-only. | Room only standalone; no legacy JSONL alias. |
+| `room.maintenance.status` | Inspect Room repository, scaffold, executor, workflow, remote, sync, and slot readiness; no mutation. | No fields. | Bounded status, heads, missing paths, and five-slot occupancy. | Read-only; readiness dimensions remain independent and failures are typed. | Room only standalone; mutations use `room.maintenance.submit`. |
+| `room.maintenance.submit` | Apply one to five validated Room maintenance requests through the repository-owned executor. | `items` with unique `slot`/`payload`; optional `mode` and `waitSeconds`. | Items are bounded to 1–5; mode is `local` or `workflow`; wait is capped at 30 seconds. | Admission, local apply, semantic commit, and remote/workflow sync are reported independently; destructive but repository-confined. | Room only standalone; replaces legacy JSONL mutations. |
+
+The legacy JSONL Room commands are intentionally absent from this standalone table. Their
+protocol variants and Hub HTTP/MCP forwarding remain below as compatibility residue for the
+separate Hub parity workstream; the Agent does not execute them.
 
 ## Hub full and coordinator surfaces
 
@@ -75,8 +84,8 @@ active Room Agent and do not take it.
 | `user.notify.channels` | List Hub-native notification routes; no Room Agent dispatch. | No required fields. | Bounded channel metadata. | Read-only channel availability. | Coordinator + Full; no standalone tool. |
 | `user.notify.send` | Send one Hub-native user notification; no local Agent command. | Channel/title/body; optional actions/priority. | Channel-specific bounded payload. | Route failure is explicit; no transactional retry claim. | Coordinator + Full; no standalone tool. |
 | `room.bootstrap`, `room.bootstrap.read` | Active Room bootstrap manifest/guide access; no arbitrary file read. | Read requires guide `id`; no `agentId`. | Same package bounds/revision as standalone Room bootstrap. | Room inactive/invalid/not-found errors are explicit and read-only. | Full only; standalone names omit `room.` prefix. |
-| `room.diary.append`, `room.diary.recent`, `room.diary.selectExact` | Active Room diary append/read/date selection. | Same standalone diary fields; no `agentId`. | Same bounded dates/entries. | Same durable/read-only distinction and timezone. | Full only; HTTP Room endpoints mirror. |
-| `room.notebook.append`, `room.notebook.current`, `room.notebook.recent`, `room.notebook.remove`, `room.notebook.search`, `room.notebook.selectExact`, `room.notebook.update` | Active Room notebook mutation/read/search. | Same standalone notebook fields; no `agentId`. | Same scope/date/content bounds. | Same anchor/current-state and destructive evidence. | Full only; HTTP Room endpoints mirror. |
+| `room.diary.append`, `room.diary.recent`, `room.diary.selectExact` | Legacy JSONL Room diary forwarding for Hub parity; not a standalone Agent surface. | Legacy diary fields; no `agentId`. | Hub compatibility bounds remain unchanged. | Separate Hub parity workstream; HTTP Room endpoints mirror the retained forwarding contract. | Hub compatibility residue only; never advertised by standalone Agent. |
+| `room.notebook.append`, `room.notebook.current`, `room.notebook.recent`, `room.notebook.remove`, `room.notebook.search`, `room.notebook.selectExact`, `room.notebook.update` | Legacy JSONL Room notebook forwarding for Hub parity; not a standalone Agent surface. | Legacy notebook fields; no `agentId`. | Hub compatibility bounds remain unchanged. | Separate Hub parity workstream; HTTP Room endpoints mirror the retained forwarding contract. | Hub compatibility residue only; never advertised by standalone Agent. |
 | `bootstrap`, `bootstrap.read` | Full-profile transport-neutral aliases for Room bootstrap. | Read requires `id`; no `agentId`. | Same package bounds/revision. | Same bootstrap errors; read-only. | Full only; aliases are intentional bootstrap names, not compatibility for removed tools. |
 | `skills.list`, `skills.read`, `skills.search`, `skills.active` | Active Room skill discovery/read/search. | Read/search fields as applicable; no `agentId`. | Bounded summaries/content. | Invalid/missing/stale skills are explicit. | Full only; HTTP Room skills endpoints mirror. |
 | `skills.activate`, `skills.deactivate` | Change active skill state only; no execution/permission grant. | `id`; no `agentId`. | Idempotent state operation. | Stale/missing deactivation is allowed and reported. | Full only; standalone `skills.setActive` combines intent. |
@@ -94,6 +103,7 @@ active Room Agent and do not take it.
 - “Atomic” is reserved for validation/admission/confirmation boundaries. It
   never implies rollback of an already-started process, MCP call, notification,
   or other external side effect.
-- Standalone surface counts remain Normal 24 / Room 36. Hub full/coordinator
-  profile membership and standalone aliases are intentionally different and
-  must stay visible in tests and release notes.
+- Standalone V2 surface counts are Normal 23 / Room 34. They are profile preset counts, not a
+  guarantee after explicit toolset selection.
+- Legacy JSONL names remain documented only in the Hub compatibility rows above; standalone
+  aliases and Hub full/coordinator profile membership are intentionally different.

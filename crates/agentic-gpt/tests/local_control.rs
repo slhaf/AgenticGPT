@@ -99,11 +99,30 @@ fn run_local_e2e(root: &Path) -> Result<(), String> {
     let tools: Value = serde_json::from_slice(&tools.stdout).map_err(|error| error.to_string())?;
     let tools = tools.as_array().ok_or("tool list is not an array")?;
     let removed_tool = ["file", "batch"].join(".");
+    let legacy_room_tools = [
+        "room.diary.append",
+        "room.diary.recent",
+        "room.diary.selectExact",
+        "room.notebook.append",
+        "room.notebook.current",
+        "room.notebook.remove",
+        "room.notebook.selectExact",
+        "room.notebook.update",
+    ];
     if !tools.iter().any(|tool| tool["name"] == "agent.info")
         || tools.iter().any(|tool| tool["name"] == removed_tool)
         || tools
             .iter()
             .any(|tool| tool["_meta"]["surface"] != "agent-local")
+        || tools.iter().any(|tool| tool["name"] == "room.diary.active")
+        || tools
+            .iter()
+            .any(|tool| tool["name"] == "room.maintenance.submit")
+        || legacy_room_tools.iter().any(|name| {
+            tools
+                .iter()
+                .any(|tool| tool["name"].as_str() == Some(*name))
+        })
     {
         return Err("unexpected local tool surface".to_string());
     }
@@ -180,6 +199,96 @@ fn run_local_e2e(root: &Path) -> Result<(), String> {
         || batch_audit.contains("\"program\":\"mcp.callTool\"")
     {
         return Err("local mcp.batch aggregate audit mismatch".to_string());
+    }
+
+    config["toolsets"]["enabled"] =
+        json!(["agent", "file", "mcp", "process", "job", "skills", "tmux", "room"]);
+    fs::write(
+        &config_path,
+        serde_json::to_vec_pretty(&config).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    thread::sleep(Duration::from_millis(2300));
+    let enabled_tools = local_output(&binary, &config_path, ["list-tools"])?;
+    if !enabled_tools.stderr.is_empty() {
+        return Err("enabled Room list-tools wrote to stderr".to_string());
+    }
+    let enabled_tools: Value =
+        serde_json::from_slice(&enabled_tools.stdout).map_err(|error| error.to_string())?;
+    let enabled_tools = enabled_tools
+        .as_array()
+        .ok_or("enabled Room tool list is not an array")?;
+    if !enabled_tools
+        .iter()
+        .any(|tool| tool["name"] == "room.diary.active")
+        || !enabled_tools
+            .iter()
+            .any(|tool| tool["name"] == "room.maintenance.submit")
+        || legacy_room_tools.iter().any(|name| {
+            enabled_tools
+                .iter()
+                .any(|tool| tool["name"].as_str() == Some(*name))
+        })
+    {
+        return Err("enabled Room tool surface mismatch".to_string());
+    }
+
+    let active = local_output(
+        &binary,
+        &config_path,
+        ["call", "room.diary.active", "--arguments", "{}"],
+    )?;
+    let active: Value =
+        serde_json::from_slice(&active.stdout).map_err(|error| error.to_string())?;
+    if active["structuredContent"].get("daily").is_none()
+        || active["structuredContent"].get("weekly").is_none()
+        || active["structuredContent"].get("monthly").is_none()
+    {
+        return Err("enabled Room call did not reach live server".to_string());
+    }
+
+    config["toolsets"]["enabled"] =
+        json!(["agent", "file", "mcp", "process", "job", "skills", "tmux"]);
+    fs::write(
+        &config_path,
+        serde_json::to_vec_pretty(&config).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    thread::sleep(Duration::from_millis(2300));
+    let disabled_tools = local_output(&binary, &config_path, ["list-tools"])?;
+    if !disabled_tools.stderr.is_empty() {
+        return Err("disabled Room list-tools wrote to stderr".to_string());
+    }
+    let disabled_tools: Value =
+        serde_json::from_slice(&disabled_tools.stdout).map_err(|error| error.to_string())?;
+    let disabled_tools = disabled_tools
+        .as_array()
+        .ok_or("disabled Room tool list is not an array")?;
+    if disabled_tools
+        .iter()
+        .any(|tool| tool["name"] == "room.diary.active")
+        || disabled_tools
+            .iter()
+            .any(|tool| tool["name"] == "room.maintenance.submit")
+        || legacy_room_tools.iter().any(|name| {
+            disabled_tools
+                .iter()
+                .any(|tool| tool["name"].as_str() == Some(*name))
+        })
+    {
+        return Err("disabled Room tool surface mismatch".to_string());
+    }
+    let rejected_room_call = local_output_raw(
+        &binary,
+        &config_path,
+        ["call", "room.diary.active", "--arguments", "{}"],
+    )?;
+    let rejected_room_stderr = String::from_utf8_lossy(&rejected_room_call.stderr);
+    if rejected_room_call.status.success()
+        || !rejected_room_stderr.contains("room.diary.active")
+        || !rejected_room_stderr.contains("not available")
+    {
+        return Err("disabled Room call was not rejected".to_string());
     }
 
     config["mcpServers"]["primary"]["url"] = json!("https://new.example/mcp");

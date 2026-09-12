@@ -2552,9 +2552,11 @@ fn optional_section_for_field(field: SetupField) -> crate::config_templates::Opt
         SetupField::SandboxEnabled
         | SetupField::BubblewrapPath
         | SetupField::RequiredRuntimePaths => crate::config_templates::OptionalSection::Sandbox,
-        SetupField::RoomTimezone | SetupField::DiaryBoundaryHour | SetupField::NotebookRoot => {
-            crate::config_templates::OptionalSection::Room
-        }
+        SetupField::RoomTimezone
+        | SetupField::DiaryBoundaryHour
+        | SetupField::RepositoryRoot
+        | SetupField::RoomMaintenanceMode
+        | SetupField::RoomMaintenanceAutoPush => crate::config_templates::OptionalSection::Room,
         SetupField::TunnelClientVersion
         | SetupField::TunnelCacheDir
         | SetupField::TunnelAutoDownload

@@ -10,6 +10,7 @@ use ratatui::{
 };
 
 use crate::cli_i18n::UiLanguage;
+use crate::config::ToolNamespace;
 use crate::config_setup::{
     default_optional_draft, McpServerDraft, OptionalSectionDraft, ReviewEditorKind, ReviewGroup,
     ReviewItem, ReviewModel, ReviewTarget, SectionStatus, SetupField, SetupSession,
@@ -89,7 +90,16 @@ fn localized_error(code: &str, language: UiLanguage) -> String {
         "config_init_optional_section_invalid" => {
             ("Optional section is invalid.", "可选配置区块无效。")
         }
-        "config_init_build_invalid" => ("Configuration could not be built.", "配置无法生成。"),
+        "config_init_toolsets_invalid" => {
+            ("Toolset namespace selection is invalid.", "工具集命名空间选择无效。")
+        }
+        "room_config_requires_room_toolset" => (
+            "Room settings require the Room toolset namespace to be enabled.",
+            "Room 配置需要启用 Room 工具集命名空间。",
+        ),
+        "config_init_room_maintenance_mode_invalid" => {
+            ("Maintenance mode must be local or workflow.", "维护模式必须是 local 或 workflow。")
+        }
         _ => ("Input is invalid.", "输入值无效。"),
     };
     t(language, en, zh).to_string()
@@ -1223,11 +1233,23 @@ fn render_optional_form(
             errors,
             left.width,
         ),
+        OptionalSection::Toolsets => push_ordered_multi_select_group(
+            &mut lines,
+            &mut focused_line,
+            section,
+            draft,
+            state,
+            SetupField::Toolsets,
+            t(language, "Enabled namespaces", "启用的命名空间"),
+            theme,
+            errors,
+            language,
+        ),
         OptionalSection::Room => {
             for field in [
                 SetupField::RoomTimezone,
                 SetupField::DiaryBoundaryHour,
-                SetupField::NotebookRoot,
+                SetupField::RepositoryRoot,
             ] {
                 push_long_form_field(
                     &mut lines,
@@ -1243,6 +1265,30 @@ fn render_optional_form(
                     left.width,
                 );
             }
+            push_choice_group(
+                &mut lines,
+                &mut focused_line,
+                section,
+                draft,
+                state,
+                SetupField::RoomMaintenanceMode,
+                t(language, "Maintenance mode", "维护模式"),
+                &[("local", "local"), ("workflow", "workflow")],
+                theme,
+                errors,
+                language,
+            );
+            push_boolean_field(
+                &mut lines,
+                &mut focused_line,
+                section,
+                draft,
+                state,
+                SetupField::RoomMaintenanceAutoPush,
+                language,
+                theme,
+                errors,
+            );
         }
         OptionalSection::TunnelClient => {
             for field in [SetupField::TunnelClientVersion, SetupField::TunnelCacheDir] {
@@ -1402,11 +1448,11 @@ fn push_long_form_field(
     let current = current_input_value(state, field, &confirmed);
     let display_value = if cursor.is_none() && is_default && confirmed.is_empty() {
         match field {
-            SetupField::NotebookRoot => {
+            SetupField::RepositoryRoot => {
                 let workspace = session.optional_draft(OptionalSection::Workspace);
                 let workspace_root = optional_field_value(&workspace, SetupField::WorkspaceRoot);
                 PathBuf::from(workspace_root)
-                    .join("notebook")
+                    .join("room")
                     .to_string_lossy()
                     .into_owned()
             }
@@ -2274,10 +2320,14 @@ pub(super) enum McpFocusTarget {
     Field { index: usize, field: SetupField },
 }
 
-pub(super) fn multi_select_options(field: SetupField) -> &'static [&'static str] {
+pub(super) fn multi_select_options(field: SetupField) -> Vec<&'static str> {
     match field {
-        SetupField::ConfirmationChannels => &["freedesktop", "ntfy"],
-        _ => &[],
+        SetupField::ConfirmationChannels => vec!["freedesktop", "ntfy"],
+        SetupField::Toolsets => ToolNamespace::all()
+            .iter()
+            .map(|namespace| namespace.as_str())
+            .collect(),
+        _ => Vec::new(),
     }
 }
 
@@ -2285,6 +2335,9 @@ pub(super) fn optional_multi_select_state(
     draft: &OptionalSectionDraft,
     field: SetupField,
 ) -> Result<OrderedMultiSelectState, ()> {
+    if let (OptionalSectionDraft::Toolsets(value), SetupField::Toolsets) = (draft, field) {
+        return Ok(value.selection.clone());
+    }
     let raw = match (draft, field) {
         (OptionalSectionDraft::Confirmation(value), SetupField::ConfirmationChannels) => {
             &value.channels
@@ -2312,6 +2365,10 @@ pub(super) fn set_optional_multi_select_state(
     match (draft, field) {
         (OptionalSectionDraft::Confirmation(value), SetupField::ConfirmationChannels) => {
             value.channels = serialized;
+            true
+        }
+        (OptionalSectionDraft::Toolsets(value), SetupField::Toolsets) => {
+            value.selection = state.clone();
             true
         }
         _ => false,
@@ -2427,6 +2484,13 @@ pub(super) fn optional_focus_items(
             items.extend(list_focus_items(SetupField::RequiredRuntimePaths, draft));
             items
         }
+        OptionalSection::Toolsets => multi_select_options(SetupField::Toolsets)
+            .into_iter()
+            .map(|value| OptionalFocusItem::MultiSelect {
+                field: SetupField::Toolsets,
+                value,
+            })
+            .collect(),
         OptionalSection::McpServers => match draft {
             OptionalSectionDraft::McpServers(value) if value.servers.is_empty() => {
                 vec![OptionalFocusItem::McpAdd]
@@ -2474,7 +2538,16 @@ pub(super) fn optional_focus_items(
         OptionalSection::Room => vec![
             OptionalFocusItem::Field(SetupField::RoomTimezone),
             OptionalFocusItem::Field(SetupField::DiaryBoundaryHour),
-            OptionalFocusItem::Field(SetupField::NotebookRoot),
+            OptionalFocusItem::Field(SetupField::RepositoryRoot),
+            OptionalFocusItem::Choice {
+                field: SetupField::RoomMaintenanceMode,
+                value: "local",
+            },
+            OptionalFocusItem::Choice {
+                field: SetupField::RoomMaintenanceMode,
+                value: "workflow",
+            },
+            OptionalFocusItem::Field(SetupField::RoomMaintenanceAutoPush),
         ],
         OptionalSection::TunnelClient => vec![
             OptionalFocusItem::Field(SetupField::TunnelClientVersion),
@@ -3094,6 +3167,12 @@ fn optional_center_inspector_body(
                     "",
                     "Default: off",
                 ],
+                OptionalSection::Toolsets => &[
+                    "Choose which built-in tool namespaces are available at runtime.",
+                    "The selection applies to every tool with the corresponding namespace prefix.",
+                    "",
+                    "Normal enables every namespace except Room; Room enables all namespaces.",
+                ],
                 OptionalSection::McpServers => &[
                     "Configure downstream MCP servers used by mcp.listTools, mcp.callTool, and mcp.batch.",
                     "",
@@ -3102,8 +3181,9 @@ fn optional_center_inspector_body(
                     "• stdio",
                 ],
                 OptionalSection::Room => &[
-                    "Set Room timezone, diary day boundary, and Notebook storage location.",
-                    "Only available when the Room profile is selected.",
+                    "Set Room timezone, diary day boundary, repository root, and maintenance behavior.",
+                    "The repository defaults to <workspace>/room; maintenance is local with auto-push off.",
+                    "Only available when the Room toolset namespace is enabled.",
                 ],
                 OptionalSection::TunnelClient => &[
                     "Configure how Standalone locates or downloads the Tunnel client.",
@@ -3153,9 +3233,16 @@ fn optional_center_inspector_body(
                     "• streamable-http",
                     "• stdio",
                 ],
+                OptionalSection::Toolsets => &[
+                    "选择运行时可用的内置工具命名空间。",
+                    "选择会应用到具有对应命名空间前缀的所有工具。",
+                    "",
+                    "Normal 启用除 Room 外的所有命名空间；Room 启用全部命名空间。",
+                ],
                 OptionalSection::Room => &[
-                    "设置 Room 的时区、日记日界线和 Notebook 存储位置。",
-                    "仅在选择 Room profile 时可用。",
+                    "设置 Room 的时区、日记日界线、仓库根目录和维护行为。",
+                    "仓库默认使用 <workspace>/room；维护默认为 local 且关闭自动推送。",
+                    "仅在启用 Room 工具集命名空间时可用。",
                 ],
                 OptionalSection::TunnelClient => &[
                     "设置 Standalone 如何查找或下载 Tunnel client。",
@@ -3259,6 +3346,11 @@ fn optional_form_inspector_body(
                     "",
                     "Paths that do not exist on the host are skipped.",
                 ],
+                SetupField::Toolsets => &[
+                    "Select the built-in tool namespaces enabled for this configuration.",
+                    "The list includes agent, file, mcp, process, job, skills, tmux, and room.",
+                    "Use Space to toggle a namespace and J/K to change selection priority.",
+                ],
                 SetupField::McpServerId => &[
                     "Stable server ID used in MCP requests, confirmations, Jobs, and audit records.",
                     "",
@@ -3308,9 +3400,17 @@ fn optional_form_inspector_body(
                     "",
                     "Times before the boundary belong to the previous diary day.",
                 ],
-                SetupField::NotebookRoot => &[
-                    "Directory used by Room Notebook storage.",
-                    "Leave blank to use <workspace>/notebook.",
+                SetupField::RepositoryRoot => &[
+                    "Directory used by the Room repository control plane.",
+                    "Leave blank to use <workspace>/room.",
+                ],
+                SetupField::RoomMaintenanceMode => &[
+                    "Select where Room maintenance requests execute.",
+                    "local applies changes in this checkout; workflow submits them to the repository workflow.",
+                ],
+                SetupField::RoomMaintenanceAutoPush => &[
+                    "Push successful local Room maintenance when a usable remote is available.",
+                    "Default: off. This does not change workflow mode behavior.",
                 ],
                 SetupField::TunnelClientVersion => &[
                     "Managed Tunnel client version.",
@@ -3435,6 +3535,11 @@ fn optional_form_inspector_body(
                     "",
                     "宿主机上不存在的路径会跳过。",
                 ],
+                SetupField::Toolsets => &[
+                    "选择此配置启用的内置工具命名空间。",
+                    "列表包含 agent、file、mcp、process、job、skills、tmux 和 room。",
+                    "使用 Space 切换命名空间，使用 J/K 调整选中顺序。",
+                ],
                 SetupField::McpServerId => &[
                     "MCP 请求、确认、Job 和审计记录中使用的稳定服务 ID。",
                     "",
@@ -3484,9 +3589,17 @@ fn optional_form_inspector_body(
                     "",
                     "边界时间之前的内容归到前一个日记日。",
                 ],
-                SetupField::NotebookRoot => &[
-                    "Room Notebook 的存储目录。",
-                    "留空时使用 <workspace>/notebook。",
+                SetupField::RepositoryRoot => &[
+                    "Room 仓库控制平面使用的目录。",
+                    "留空时使用 <workspace>/room。",
+                ],
+                SetupField::RoomMaintenanceMode => &[
+                    "选择 Room 维护请求的执行位置。",
+                    "local 在当前 checkout 应用；workflow 提交给仓库工作流。",
+                ],
+                SetupField::RoomMaintenanceAutoPush => &[
+                    "本地 Room 维护成功且存在可用远端时，是否推送。",
+                    "默认关闭；此设置不改变 workflow 模式。",
                 ],
                 SetupField::TunnelClientVersion => &[
                     "Tunnel client 的托管版本。",
@@ -3518,18 +3631,6 @@ fn optional_form_inspector_body(
                     "自定义下载包或可执行文件的预期 SHA-256。",
                     "必须正好是 64 个十六进制字符。",
                     "",
-                    "设置自定义下载 URL 时此项必填。",
-                ],
-                SetupField::HubReportingEnabled => &[
-                    "是否把 Standalone Tunnel 的运行和 Job 信息上报到 Hub。",
-                    "默认关闭。",
-                ],
-                SetupField::HubReportingDetail => &[
-                    "选择 Hub 上报包含的信息量。",
-                    "",
-                    "级别：",
-                    "• metadata：隐藏工具参数/结果，以及命令、cwd、stdout/stderr 细节",
-                    "• full：包含受大小限制的参数/结果和完整 Job 细节",
                 ],
                 _ => &["编辑暂存值；验证逻辑保持不变。"],
             },
@@ -3555,13 +3656,14 @@ fn editing_cursor(state: &TuiState, field: SetupField) -> Option<usize> {
         .map(|editing| editing.cursor)
 }
 
-fn all_optional_sections() -> [OptionalSection; 9] {
+fn all_optional_sections() -> [OptionalSection; 10] {
     [
         OptionalSection::Identity,
         OptionalSection::Workspace,
         OptionalSection::Confirmation,
         OptionalSection::Limits,
         OptionalSection::Sandbox,
+        OptionalSection::Toolsets,
         OptionalSection::McpServers,
         OptionalSection::Room,
         OptionalSection::TunnelClient,
@@ -3576,6 +3678,7 @@ fn section_label(section: OptionalSection, language: UiLanguage) -> &'static str
         OptionalSection::Confirmation => t(language, "Confirmation", "确认"),
         OptionalSection::Limits => t(language, "Limits", "限制"),
         OptionalSection::Sandbox => t(language, "Sandbox", "沙箱"),
+        OptionalSection::Toolsets => t(language, "Toolsets", "工具集"),
         OptionalSection::McpServers => t(language, "MCP servers", "MCP 服务"),
         OptionalSection::Room => t(language, "Room", "Room"),
         OptionalSection::TunnelClient => t(language, "Tunnel client", "隧道客户端"),
@@ -3600,6 +3703,9 @@ fn optional_field_label(field: SetupField, language: UiLanguage) -> &'static str
         SetupField::SandboxEnabled => t(language, "Sandbox enabled", "启用沙箱"),
         SetupField::BubblewrapPath => t(language, "Bubblewrap path", "Bubblewrap 路径"),
         SetupField::RequiredRuntimePaths => t(language, "Required runtime paths", "必需运行时路径"),
+        SetupField::RepositoryRoot => t(language, "Repository root", "仓库根目录"),
+        SetupField::RoomMaintenanceMode => t(language, "Maintenance mode", "维护模式"),
+        SetupField::RoomMaintenanceAutoPush => t(language, "Auto-push", "自动推送"),
         SetupField::McpServerId => t(language, "MCP server ID", "MCP 服务 ID"),
         SetupField::McpServerEnabled => t(language, "Enabled", "启用"),
         SetupField::McpServerTransport => t(language, "Transport", "传输方式"),
@@ -3608,7 +3714,6 @@ fn optional_field_label(field: SetupField, language: UiLanguage) -> &'static str
         SetupField::McpServerBearerToken => t(language, "Bearer token", "Bearer 令牌"),
         SetupField::RoomTimezone => t(language, "Timezone", "时区"),
         SetupField::DiaryBoundaryHour => t(language, "Diary boundary hour", "日记边界小时"),
-        SetupField::NotebookRoot => t(language, "Notebook root", "笔记本根目录"),
         SetupField::TunnelClientVersion => t(language, "Client version", "客户端版本"),
         SetupField::TunnelCacheDir => t(language, "Cache directory", "缓存目录"),
         SetupField::TunnelAutoDownload => t(language, "Auto-download", "自动下载"),
@@ -3627,6 +3732,7 @@ pub(super) fn optional_field_is_toggle(field: SetupField) -> bool {
         SetupField::SandboxEnabled
             | SetupField::TunnelAutoDownload
             | SetupField::HubReportingEnabled
+            | SetupField::RoomMaintenanceAutoPush
     )
 }
 
@@ -3660,11 +3766,17 @@ pub(super) fn optional_field_value(draft: &OptionalSectionDraft, field: SetupFie
             SetupField::RequiredRuntimePaths => value.required_runtime_paths.clone(),
             _ => String::new(),
         },
+        OptionalSectionDraft::Toolsets(value) => match field {
+            SetupField::Toolsets => value.selection.selected().join(" → "),
+            _ => String::new(),
+        },
         OptionalSectionDraft::McpServers(_) => String::new(),
         OptionalSectionDraft::Room(value) => match field {
             SetupField::RoomTimezone => value.timezone.clone(),
             SetupField::DiaryBoundaryHour => value.diary_boundary_hour.clone(),
-            SetupField::NotebookRoot => value.notebook_root.clone(),
+            SetupField::RepositoryRoot => value.repository_root.clone(),
+            SetupField::RoomMaintenanceMode => value.maintenance_mode.clone(),
+            SetupField::RoomMaintenanceAutoPush => value.maintenance_auto_push.to_string(),
             _ => String::new(),
         },
         OptionalSectionDraft::TunnelClient(value) => match field {
@@ -3720,7 +3832,9 @@ pub(super) fn set_optional_field(
         OptionalSectionDraft::Room(draft) => match field {
             SetupField::RoomTimezone => draft.timezone = value,
             SetupField::DiaryBoundaryHour => draft.diary_boundary_hour = value,
-            SetupField::NotebookRoot => draft.notebook_root = value,
+            SetupField::RepositoryRoot => draft.repository_root = value,
+            SetupField::RoomMaintenanceMode => draft.maintenance_mode = value,
+            SetupField::RoomMaintenanceAutoPush => draft.maintenance_auto_push = value == "true",
             _ => {}
         },
         OptionalSectionDraft::TunnelClient(draft) => match field {
@@ -3751,6 +3865,9 @@ pub(super) fn toggle_optional_field(draft: &mut OptionalSectionDraft, field: Set
         }
         OptionalSectionDraft::HubReporting(draft) if field == SetupField::HubReportingEnabled => {
             draft.enabled = !draft.enabled
+        }
+        OptionalSectionDraft::Room(draft) if field == SetupField::RoomMaintenanceAutoPush => {
+            draft.maintenance_auto_push = !draft.maintenance_auto_push
         }
         _ => {}
     }
@@ -4216,11 +4333,14 @@ fn review_display_value(session: &SetupSession, group: &ReviewGroup, item: &Revi
         return item.value.clone();
     }
     match (group.target, item.field) {
-        (ReviewTarget::OptionalSection(OptionalSection::Room), Some(SetupField::NotebookRoot)) => {
+        (
+            ReviewTarget::OptionalSection(OptionalSection::Room),
+            Some(SetupField::RepositoryRoot),
+        ) => {
             let workspace = session.optional_draft(OptionalSection::Workspace);
             let workspace_root = optional_field_value(&workspace, SetupField::WorkspaceRoot);
             PathBuf::from(workspace_root)
-                .join("notebook")
+                .join("room")
                 .to_string_lossy()
                 .into_owned()
         }
@@ -4562,7 +4682,9 @@ fn review_item_label(label_key: &str, language: UiLanguage) -> &'static str {
         "mcp_server" => t(language, "MCP server", "MCP 服务"),
         "room_timezone" => t(language, "Timezone", "时区"),
         "diary_boundary_hour" => t(language, "Diary boundary hour", "日记边界小时"),
-        "notebook_root" => t(language, "Notebook root", "笔记本根目录"),
+        "repository_root" => t(language, "Repository root", "仓库根目录"),
+        "room_maintenance_mode" => t(language, "Maintenance mode", "维护模式"),
+        "room_maintenance_auto_push" => t(language, "Auto-push", "自动推送"),
         "tunnel_client_version" => t(language, "Client version", "客户端版本"),
         "tunnel_cache_dir" => t(language, "Cache directory", "缓存目录"),
         "tunnel_auto_download" => t(language, "Auto-download", "自动下载"),

@@ -31,7 +31,7 @@ ChatGPT Actions 或 Apps MCP
 
 - 不需要 VPS、公开域名、反向代理、Hub 数据库或共享命令路由器。
 - 每台机器具有独立连接与重启边界。
-- Tunnel 与 owner-only Unix MCP 对同一 profile 暴露一致的 24 个 Normal 工具或 36 个 Room 工具。
+- Tunnel 与 owner-only Unix MCP 对同一 profile 暴露一致的 23 个 Normal 工具或 34 个 Room 工具。
 - 策略、确认、审计、热配置、容量和 Managed Job 都保留在本机。
 - fresh stdio worker 即使先收到旧逻辑会话续发的请求、尚未收到新的 MCP `initialize`，也能自动恢复而不退出。
 
@@ -139,6 +139,11 @@ shell 历史和本地进程检查中；全屏界面中输入时会隐藏它。Tu
 Windows 行为。
 
 默认配置路径为 `~/.agentic_gpt/config.json`。开放写入根或启用 MCP server 前，请先检查 [`config.example.json`](config.example.json) 与 [`docs/configuration.zh-CN.md`](docs/configuration.zh-CN.md)。
+Room 设置位于 `room`：可选的 `repositoryRoot` 默认是 `<workspaceRoot>/room`；
+`maintenance.mode` 可为 `local` 或 `workflow`，默认 `local`；`maintenance.autoPush` 默认
+为 `false`。也可以使用 `agentic-gpt config set room.repositoryRoot null`、
+`agentic-gpt config set room.maintenance.mode local` 和
+`agentic-gpt config set room.maintenance.autoPush false` 修改这些设置。
 使用 `agentic-gpt config keys [--section <SECTION>] [--json]` 可以查看受控的 `config set` registry。
 
 ### 2. 通过引用保存 tunnel 密钥
@@ -166,7 +171,7 @@ agentic-gpt run
 ```
 
 配置文件中的 `mode` 和 `profile` 选择 Standalone/Hub/Local 与 Normal/Room；例如启动前执行
-`agentic-gpt config set profile room` 可使用 Room 的 36 个工具。同一 worker 还会提供
+`agentic-gpt config set profile room` 可使用 Room 的 34 个工具。同一 worker 还会提供
 owner-only Unix MCP socket，便于本机检查：
 
 ```bash
@@ -236,7 +241,7 @@ Hub 原生工具和转发执行使用相同的 Managed Job envelope；运行中�
 
 ## Managed Job 与安全边界
 
-- Normal surface 24 个工具，Room surface 36 个工具。
+- V2 Normal surface 有 23 个工具，Room surface 有 34 个工具；profile preset 选择 namespace，显式 `toolsets.enabled` 仍可进一步缩小 surface。
 - `process.exec`、`skills.run`、`mcp.callTool` 返回 `JobResponse`。
 - `mcp.batch` 接受 1–16 个有序调用，只确认一次，并执行全局/单 server 并发限制。
 - MCP 单调用参数上限 256 KiB，保留结果上限 512 KiB；批次 aggregate 参数与结果各上限 2 MiB。

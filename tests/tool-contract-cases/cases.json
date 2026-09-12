@@ -121,5 +121,117 @@
       "errorCode": "mcp_server_not_found",
       "errorIncludes": "mcp_server_not_found"
     }
+  },
+  {
+    "id": "room_diary_active_descriptor",
+    "tool": "room.diary.active",
+    "kind": "descriptor",
+    "arguments": {},
+    "expect": {
+      "descriptionIncludes": [],
+      "required": []
+    }
+  },
+  {
+    "id": "room_diary_read_descriptor",
+    "tool": "room.diary.read",
+    "kind": "descriptor",
+    "arguments": {
+      "layer": "daily",
+      "period": "current"
+    },
+    "expect": {
+      "descriptionIncludes": [],
+      "required": ["layer", "period"]
+    }
+  },
+  {
+    "id": "room_notebook_recent_descriptor",
+    "tool": "room.notebook.recent",
+    "kind": "descriptor",
+    "arguments": {},
+    "expect": {
+      "descriptionIncludes": [],
+      "required": []
+    }
+  },
+  {
+    "id": "room_notebook_search_descriptor",
+    "tool": "room.notebook.search",
+    "kind": "descriptor",
+    "arguments": {
+      "query": "contract"
+    },
+    "expect": {
+      "descriptionIncludes": [],
+      "required": ["query"]
+    }
+  },
+  {
+    "id": "room_notebook_read_descriptor",
+    "tool": "room.notebook.read",
+    "kind": "descriptor",
+    "arguments": {
+      "path": "Notebook/contract.md"
+    },
+    "expect": {
+      "descriptionIncludes": [],
+      "required": ["path"]
+    }
+  },
+  {
+    "id": "room_state_list_descriptor",
+    "tool": "room.state.list",
+    "kind": "descriptor",
+    "arguments": {},
+    "expect": {
+      "descriptionIncludes": [],
+      "required": []
+    }
+  },
+  {
+    "id": "room_state_read_descriptor",
+    "tool": "room.state.read",
+    "kind": "descriptor",
+    "arguments": {
+      "entity": "contract"
+    },
+    "expect": {
+      "descriptionIncludes": [],
+      "required": ["entity"]
+    }
+  },
+  {
+    "id": "room_maintenance_status_descriptor",
+    "tool": "room.maintenance.status",
+    "kind": "descriptor",
+    "arguments": {},
+    "expect": {
+      "descriptionIncludes": [],
+      "required": []
+    }
+  },
+  {
+    "id": "room_maintenance_submit_descriptor",
+    "tool": "room.maintenance.submit",
+    "kind": "descriptor",
+    "arguments": {
+      "items": [
+        {
+          "slot": "notebook",
+          "payload": {
+            "path": "Notebook/contract.md",
+            "title": "Contract",
+            "body": "Body"
+          }
+        }
+      ],
+      "mode": "local",
+      "waitSeconds": 0
+    },
+    "expect": {
+      "descriptionIncludes": [],
+      "required": ["items"]
+    }
   }
 ]

@@ -30,10 +30,10 @@ worker's stdout reserved for MCP framing. That same worker also publishes an
 owner-only Unix MCP socket for local integration. Do not start the hidden
 `stdio-worker` command directly.
 
-For development without tunnel configuration or Hub reporting, set `mode=local` and use
-`agentic-gpt run`. It loads the same Normal/Room capability profile,
-policy, path policy, confirmation, audit, live config, and managed execution
-state, but serves only the Unix MCP ingress.
+For development without tunnel configuration or Hub reporting, set
+`mode=local` and use `agentic-gpt run`. It loads the same profile-selected toolset preset,
+policy, path policy, confirmation, audit, live config, and managed execution state, but serves
+only the Unix MCP ingress.
 
 ### Six public runtime mappings
 
@@ -46,10 +46,14 @@ state, but serves only the Unix MCP ingress.
 | `agentic-gpt run` (`mode=hub`, `profile=normal`) | Hub | Normal | command-capable |
 | `agentic-gpt run` (`mode=hub`, `profile=room`) | Hub | Room | command-capable |
 
-Transport does not change local policy. Tunnel and local Unix ingress use the
-same policy boundaries for a profile; Room adds diary and notebook, while
-Normal does not. Calls entering one worker share the same live config,
-confirmation state, audit, capacity, and managed execution registry.
+Transport does not change local policy. Tunnel and local Unix ingress use the same policy
+boundaries for a profile-selected toolset set. The normal preset excludes the logical `room`
+namespace by default; the room preset enables it. Explicit `toolsets.enabled` selection is
+authoritative. Calls entering one worker share the same live config, confirmation state, audit,
+capacity, and managed execution registry.
+Room bootstrap, diary, and notebook execution follows the live `room` namespace rather than the
+startup profile. A Normal-profile worker can therefore enable `room` without restart; direct
+Room dispatch while it is disabled returns `room_toolset_required`.
 
 ## Local Unix MCP control channel
 
@@ -84,9 +88,15 @@ errors are written to stderr. A stopped/restarting runtime returns
 
 ## Tunnel and local tool surfaces
 
-Normal advertises exactly 24 MCP tools through either tunnel stdio or local
-Unix MCP. Start with `agent.info` to inspect the active profile, bounded path
-policy, capacity, confirmation availability, and reporting state:
+The V2 advertised surface contains 23 Normal names and 34 Room names. Profiles select
+namespace presets rather than fixing the final runtime surface: normal enables `agent`, `file`,
+`mcp`, `process`, `job`, `skills`, and `tmux`; room enables all of those plus `room`. An explicit
+`toolsets.enabled` selection is authoritative. The logical `room` namespace contains
+`bootstrap`, `bootstrap.read`, the semantic read tools, and maintenance status/submit. These
+filters only remove names from the advertised surface; they never expose dispatch-only aliases.
+
+Start with `agent.info` to inspect the active profile and enabled namespaces, bounded path policy,
+capacity, confirmation availability, and reporting state:
 
 ```text
 mcp.list, mcp.callTool, mcp.batch
@@ -97,15 +107,19 @@ tmux.sessions, tmux.panes, tmux.exec, tmux.pasteText
 agent.info, file.read, file.search, file.edit
 ```
 
-Room advertises exactly 35 tools through either ingress: the 23 Normal tools,
-`bootstrap` and `bootstrap.read`, plus these ten Room memory tools:
+When the logical `room` namespace is enabled, the additional advertised names are:
 
 ```text
-room.diary.append, room.diary.recent, room.diary.selectExact
-room.notebook.append, room.notebook.current, room.notebook.recent,
-room.notebook.remove, room.notebook.search, room.notebook.selectExact,
-room.notebook.update
+bootstrap, bootstrap.read
+room.diary.active, room.diary.read
+room.notebook.recent, room.notebook.search, room.notebook.read
+room.state.list, room.state.read
+room.maintenance.status, room.maintenance.submit
 ```
+
+Legacy JSONL Room names are not advertised or executed by the Agent. The legacy protocol and
+Hub HTTP/MCP forwarding rows remain only as compatibility residue for the separate Hub parity
+workstream.
 
 Managed `mcp.callTool` uses the same Job registry and capacity limit as
 process and skill Jobs. Its `waitSeconds` defaults to 5 and is capped at 30;
@@ -319,19 +333,19 @@ The current multi-file mutation boundary is documented in the file contract
 matrix: one complete apply-patch request is staged and validated before its
 optional confirmation and commit.
 
-While the standalone worker is running, edits to `policy`, `pathPolicy`,
-`limits`, and `mcpServers` are polled, fully validated, and applied atomically
-to new admissions/calls. MCP server ids use `A-Z`, `a-z`, `0-9`, `.`, `_`, or
-`-` (maximum 64 bytes); `streamable-http` requires an absolute HTTP(S) URL and
-may optionally use structured Bearer auth; `stdio` requires a non-empty command
-and rejects HTTP auth. Invalid config versions keep the last
-valid live subset. Already admitted Jobs and already-created downstream
+While the standalone worker is running, edits to `policy`, `pathPolicy`, `limits`, `mcpServers`,
+and `toolsets.enabled` are polled, fully validated, and applied atomically to new admissions,
+calls, and tool discovery. MCP server ids use `A-Z`, `a-z`, `0-9`, `.`, `_`, or `-` (maximum
+64 bytes); `streamable-http` requires an absolute HTTP(S) URL and may optionally use structured
+Bearer auth; `stdio` requires a non-empty command and rejects HTTP auth. Invalid config versions keep the last valid live subset. Already admitted Jobs and already-created downstream
 MCP clients retain their original decision/server definition and are not
 cancelled or rerouted by a reload. Because downstream clients are currently
 created per call, no separate reload or reconnect command is needed.
-Startup-owned identity, workspace, tunnel/client, reporting connection, and
+Startup-owned identity, workspace, Room settings, tunnel/client, reporting connection, and
 skill-install concurrency changes remain restart-required and are reported by
-the supervisor. `agent.info.mcp` reports only the effective config revision,
+the supervisor. Enabling the `room` namespace live bootstraps against the current live Room
+configuration; restart-required `room.*` edits on disk do not change that runtime root until restart.
+`agent.info.mcp` reports only the effective config revision,
 configured/enabled counts, and client lifecycle; it does not expose endpoints.
 
 `apiKey` accepts only `env:NAME` and `file:PATH`. The resolved value is
@@ -373,7 +387,8 @@ Supported `config set` keys include:
 
 The tunnel identity, secret reference, client source/version/hash/cache, and
 CLI profile are startup identity. Editing one while the supervisor is running
-logs `restart_required`; it does not switch the existing child tree.
+logs `restart_required`; it does not switch the existing child tree. `toolsets.enabled` is
+live configuration and does not require a restart.
 
 ## Tunnel client trust and source selection
 

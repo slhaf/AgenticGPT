@@ -30,6 +30,7 @@ use serde_json::{json, Map, Value};
 use uuid::Uuid;
 
 use crate::{
+    config::ToolNamespace,
     local_service,
     state::{AppState, CapabilityProfile},
 };
@@ -37,46 +38,59 @@ use crate::{
 const INSTRUCTIONS: &str = "Agentic GPT local Tunnel worker. Start with agent.info to inspect the active profile, exact workspace/path policy, capacity, confirmation channels, MCP scheduler state, and connection state. Use file.read/search for bounded UTF-8 workspace work and file.edit for Codex apply-patch edits, process.exec/process.batch for process Jobs, mcp.callTool for one downstream MCP Job, mcp.batch for 1..16 atomically admitted child Jobs with one aggregate confirmation and bounded 8/2 concurrency, job.get/list/cancel for lifecycle control, tmux for persistent workspaces, skills for the local skills workspace, and bootstrap for Room startup guidance. All calls remain subject to path policy, configured confirmation, audit, and bounded waits.";
 const PATCH_SCHEMA_DESCRIPTION: &str = "Codex apply_patch text beginning with *** Begin Patch and ending with *** End Patch; supports Add File, Delete File, Update File, and Move to across multiple files.";
 
-const NORMAL_TOOLS: &[&str] = &[
-    "agent.info",
-    "file.read",
-    "file.search",
-    "file.edit",
-    "mcp.batch",
-    "mcp.callTool",
-    "mcp.list",
-    "process.batch",
-    "process.exec",
-    "job.cancel",
-    "job.get",
-    "job.list",
-    "skills.install",
-    "skills.install.cancel",
-    "skills.install.get",
-    "skills.list",
-    "skills.read",
-    "skills.run",
-    "skills.setActive",
-    "tmux.exec",
-    "tmux.pasteText",
-    "tmux.panes",
-    "tmux.sessions",
+const TOOL_NAMESPACE_BY_NAME: &[(&str, ToolNamespace)] = &[
+    ("agent.info", ToolNamespace::Agent),
+    ("bootstrap", ToolNamespace::Room),
+    ("bootstrap.read", ToolNamespace::Room),
+    ("file.edit", ToolNamespace::File),
+    ("file.read", ToolNamespace::File),
+    ("file.search", ToolNamespace::File),
+    ("job.cancel", ToolNamespace::Job),
+    ("job.get", ToolNamespace::Job),
+    ("job.list", ToolNamespace::Job),
+    ("mcp.batch", ToolNamespace::Mcp),
+    ("mcp.callTool", ToolNamespace::Mcp),
+    ("mcp.list", ToolNamespace::Mcp),
+    ("process.batch", ToolNamespace::Process),
+    ("process.exec", ToolNamespace::Process),
+    ("room.diary.active", ToolNamespace::Room),
+    ("room.diary.read", ToolNamespace::Room),
+    ("room.maintenance.status", ToolNamespace::Room),
+    ("room.maintenance.submit", ToolNamespace::Room),
+    ("room.notebook.read", ToolNamespace::Room),
+    ("room.notebook.recent", ToolNamespace::Room),
+    ("room.notebook.search", ToolNamespace::Room),
+    ("room.state.list", ToolNamespace::Room),
+    ("room.state.read", ToolNamespace::Room),
+    ("skills.install", ToolNamespace::Skills),
+    ("skills.install.cancel", ToolNamespace::Skills),
+    ("skills.install.get", ToolNamespace::Skills),
+    ("skills.list", ToolNamespace::Skills),
+    ("skills.read", ToolNamespace::Skills),
+    ("skills.run", ToolNamespace::Skills),
+    ("skills.setActive", ToolNamespace::Skills),
+    ("tmux.exec", ToolNamespace::Tmux),
+    ("tmux.panes", ToolNamespace::Tmux),
+    ("tmux.pasteText", ToolNamespace::Tmux),
+    ("tmux.sessions", ToolNamespace::Tmux),
 ];
 
-const ROOM_BOOTSTRAP_TOOLS: &[&str] = &["bootstrap", "bootstrap.read"];
+fn tool_namespace(name: &str) -> Option<ToolNamespace> {
+    TOOL_NAMESPACE_BY_NAME
+        .iter()
+        .find(|(tool, _)| *tool == name)
+        .map(|(_, namespace)| *namespace)
+}
 
-const ROOM_ONLY_TOOLS: &[&str] = &[
-    "room.diary.append",
-    "room.diary.recent",
-    "room.diary.selectExact",
-    "room.notebook.append",
-    "room.notebook.current",
-    "room.notebook.recent",
-    "room.notebook.remove",
-    "room.notebook.search",
-    "room.notebook.selectExact",
-    "room.notebook.update",
-];
+fn tool_descriptors(toolsets: &crate::config::ToolsetConfig) -> Vec<Tool> {
+    let mut tools = TOOL_NAMESPACE_BY_NAME
+        .iter()
+        .filter(|(_, namespace)| toolsets.is_enabled(*namespace))
+        .map(|(name, _)| tool_descriptor(name))
+        .collect::<Vec<_>>();
+    tools.sort_unstable_by(|left, right| left.name.cmp(&right.name));
+    tools
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RequestIngress {
@@ -277,7 +291,6 @@ where
 #[derive(Clone)]
 pub(crate) struct AgentMcpServer {
     state: AppState,
-    tools: Arc<Vec<Tool>>,
     ingress: RequestIngress,
 }
 
@@ -360,30 +373,36 @@ impl AgentMcpServer {
     }
 
     pub(crate) fn with_ingress(state: AppState, ingress: RequestIngress) -> Self {
-        let profile = state.runtime.profile;
-        let mut names = NORMAL_TOOLS.to_vec();
-        if profile == CapabilityProfile::Room {
-            names.extend_from_slice(ROOM_BOOTSTRAP_TOOLS);
-            names.extend_from_slice(ROOM_ONLY_TOOLS);
-        }
-        names.sort_unstable();
-        let tools = names.into_iter().map(tool_descriptor).collect::<Vec<_>>();
-        Self {
-            state,
-            tools: Arc::new(tools),
-            ingress,
-        }
+        Self { state, ingress }
+    }
+
+    async fn current_tools(&self) -> Vec<Tool> {
+        let config = self.state.config.read().await;
+        tool_descriptors(&config.toolsets)
+    }
+
+    async fn tool_is_available(&self, name: &str) -> bool {
+        let Some(namespace) = tool_namespace(name) else {
+            return false;
+        };
+        self.state
+            .config
+            .read()
+            .await
+            .toolsets
+            .is_enabled(namespace)
     }
 
     async fn call(&self, request: CallToolRequestParams) -> Result<Value, ErrorData> {
         let name = request.name.to_string();
-        if !self.tools.iter().any(|tool| tool.name == name) {
+        if !self.tool_is_available(&name).await {
             return Err(ErrorData::new(
                 rmcp::model::ErrorCode::METHOD_NOT_FOUND,
                 format!("Tool is not available: {name}"),
                 None,
             ));
         }
+
         let arguments = Value::Object(request.arguments.unwrap_or_default());
         let run_id = task_id("run");
         let report_request_id = task_id("req");
@@ -507,7 +526,7 @@ impl AgentMcpServer {
         arguments: Value,
         terminal_tracker: Arc<HumanTerminalTracker>,
     ) -> Result<Value> {
-        if self.tools.iter().any(|tool| tool.name == name) {
+        if tool_namespace(name).is_some() {
             validate_stdio_arguments(name, &arguments)?;
         }
         let request_id = request_id();
@@ -979,96 +998,59 @@ impl AgentMcpServer {
                 .await
             }
             "skills.run" => self.dispatch_skill_run(arguments, terminal_tracker).await,
-            "room.notebook.append" => dispatch(
-                self,
-                HubCommand::RoomNotebookAppend {
-                    request_id,
-                    payload: from_value(arguments)?,
-                },
-            )
-            .await
-            .map(|value| slim_room_response("room.notebook.append", value)),
-            "room.notebook.recent" => dispatch(
-                self,
-                HubCommand::RoomNotebookRecent {
-                    request_id,
-                    payload: from_value(arguments)?,
-                },
-            )
-            .await
-            .map(|value| slim_room_response("room.notebook.recent", value)),
-            "room.notebook.selectExact" => dispatch(
-                self,
-                HubCommand::RoomNotebookSelectExact {
-                    request_id,
-                    payload: from_value(arguments)?,
-                },
-            )
-            .await
-            .map(|value| slim_room_response("room.notebook.selectExact", value)),
-            "room.notebook.search" => dispatch(
-                self,
-                HubCommand::RoomNotebookSearch {
-                    request_id,
-                    payload: from_value(arguments)?,
-                },
-            )
-            .await
-            .map(|value| slim_room_response("room.notebook.search", value)),
-            "room.notebook.current" => dispatch(
-                self,
-                HubCommand::RoomNotebookCurrent {
-                    request_id,
-                    payload: from_value(arguments)?,
-                },
-            )
-            .await
-            .map(|value| slim_room_response("room.notebook.current", value)),
-            "room.notebook.update" => dispatch(
-                self,
-                HubCommand::RoomNotebookUpdate {
-                    request_id,
-                    payload: from_value(arguments)?,
-                },
-            )
-            .await
-            .map(|value| slim_room_response("room.notebook.update", value)),
-            "room.notebook.remove" => dispatch(
-                self,
-                HubCommand::RoomNotebookRemove {
-                    request_id,
-                    payload: from_value(arguments)?,
-                },
-            )
-            .await
-            .map(|value| slim_room_response("room.notebook.remove", value)),
-            "room.diary.append" => dispatch(
-                self,
-                HubCommand::RoomDiaryAppend {
-                    request_id,
-                    payload: from_value(arguments)?,
-                },
-            )
-            .await
-            .map(|value| slim_room_response("room.diary.append", value)),
-            "room.diary.recent" => dispatch(
-                self,
-                HubCommand::RoomDiaryRecent {
-                    request_id,
-                    payload: from_value(arguments)?,
-                },
-            )
-            .await
-            .map(|value| slim_room_response("room.diary.recent", value)),
-            "room.diary.selectExact" => dispatch(
-                self,
-                HubCommand::RoomDiarySelectExact {
-                    request_id,
-                    payload: from_value(arguments)?,
-                },
-            )
-            .await
-            .map(|value| slim_room_response("room.diary.selectExact", value)),
+            "room.diary.active" => {
+                let request: agentic_gpt_protocol::RoomDiaryActiveRequest = from_value(arguments)?;
+                let response = crate::room_reads::diary_active(&self.state, request).await?;
+                Ok(serde_json::to_value(response)?)
+            }
+            "room.diary.read" => {
+                let request: agentic_gpt_protocol::RoomDiaryReadRequest = from_value(arguments)?;
+                let response = crate::room_reads::diary_read(&self.state, request).await?;
+                Ok(serde_json::to_value(response)?)
+            }
+            "room.notebook.recent" => {
+                let request: agentic_gpt_protocol::RoomNotebookRecentRequest =
+                    from_value(arguments)?;
+                let response = crate::room_reads::notebook_recent(&self.state, request).await?;
+                Ok(serde_json::to_value(response)?)
+            }
+            "room.notebook.search" => {
+                let request: agentic_gpt_protocol::RoomNotebookSearchRequest =
+                    from_value(arguments)?;
+                let response = crate::room_reads::notebook_search(&self.state, request).await?;
+                Ok(serde_json::to_value(response)?)
+            }
+            "room.notebook.read" => {
+                let request: agentic_gpt_protocol::RoomNotebookReadRequest = from_value(arguments)?;
+                let response = crate::room_reads::notebook_read(&self.state, request).await?;
+                Ok(serde_json::to_value(response)?)
+            }
+            "room.state.list" => {
+                let request: agentic_gpt_protocol::RoomStateListRequest = from_value(arguments)?;
+                let response = crate::room_reads::state_list(&self.state, request).await?;
+                Ok(serde_json::to_value(response)?)
+            }
+            "room.maintenance.status" => {
+                let request: agentic_gpt_protocol::RoomMaintenanceStatusRequest =
+                    from_value(arguments)?;
+                match crate::room_maintenance::status(&self.state, request).await {
+                    Ok(response) => Ok(serde_json::to_value(response)?),
+                    Err(error) => Ok(room_maintenance_error("status", error)),
+                }
+            }
+            "room.maintenance.submit" => {
+                let request: agentic_gpt_protocol::RoomMaintenanceSubmitRequest =
+                    from_value(arguments)?;
+                match crate::room_maintenance::submit(&self.state, request).await {
+                    Ok(response) => Ok(serde_json::to_value(response)?),
+                    Err(error) => Ok(room_maintenance_error("submit", error)),
+                }
+            }
+            "room.state.read" => {
+                let request: agentic_gpt_protocol::RoomStateReadRequest = from_value(arguments)?;
+                let response = crate::room_reads::state_read(&self.state, request).await?;
+                Ok(serde_json::to_value(response)?)
+            }
             _ => Err(anyhow::anyhow!("unknown agent tool: {name}")),
         }
     }
@@ -1383,13 +1365,18 @@ impl ServerHandler for AgentMcpServer {
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
         Ok(ListToolsResult {
-            tools: (*self.tools).clone(),
+            tools: self.current_tools().await,
             ..Default::default()
         })
     }
 
     fn get_tool(&self, name: &str) -> Option<Tool> {
-        self.tools.iter().find(|tool| tool.name == name).cloned()
+        let namespace = tool_namespace(name)?;
+        let config = self.state.config.try_read().ok()?;
+        config
+            .toolsets
+            .is_enabled(namespace)
+            .then(|| tool_descriptor(name))
     }
 
     fn get_info(&self) -> ServerInfo {
@@ -1784,6 +1771,16 @@ fn structured_error_value(default_code: &str, message: impl Into<String>) -> Val
             "message": message.into()
         }
     })
+}
+
+fn room_maintenance_error(operation: &str, error: impl std::fmt::Display) -> Value {
+    let reason = error.to_string();
+    let detail = reason.chars().take(384).collect::<String>();
+    let message = format!("room maintenance {operation} failed: {detail}")
+        .chars()
+        .take(512)
+        .collect::<String>();
+    structured_error_value("room_maintenance_failed", message)
 }
 
 fn structured_error_from_reason(default_code: &str, message: impl Into<String>) -> Value {
@@ -2319,26 +2316,6 @@ fn remove_empty_warnings(value: &mut Value) {
     }
 }
 
-fn slim_room_response(tool: &str, mut value: Value) -> Value {
-    remove_empty_warnings(&mut value);
-    let Some(object) = value.as_object_mut() else {
-        return value;
-    };
-    match tool {
-        "room.notebook.append" => {
-            object.remove("path");
-            object.remove("created");
-        }
-        "room.diary.append" => {
-            object.remove("path");
-            object.remove("created");
-            object.remove("createdAt");
-        }
-        _ => {}
-    }
-    value
-}
-
 fn tool_descriptor(name: &str) -> Tool {
     let input_schema = tool_input_schema(name);
     let annotations = ToolAnnotations::new()
@@ -2372,6 +2349,7 @@ fn tool_schema(name: &str) -> (Map<String, Value>, &'static [&'static str]) {
         "file.edit" => &["patch"],
         "mcp.callTool" => &["serverId", "toolName"],
         "mcp.batch" => &["calls"],
+        "room.maintenance.submit" => &["items"],
         "skills.setActive" => &["id", "active"],
         "tmux.sessions" | "tmux.panes" => &["action"],
         "tmux.exec" => &["target", "program"],
@@ -2388,13 +2366,10 @@ fn tool_schema(name: &str) -> (Map<String, Value>, &'static [&'static str]) {
         "skills.install" => &["id", "source"],
         "skills.install.get" | "skills.install.cancel" => &["installId"],
         "skills.run" => &["id", "path"],
-        "room.notebook.append" => &["scope", "content"],
-        "room.notebook.selectExact" => &["date"],
+        "room.diary.read" => &["layer", "period"],
         "room.notebook.search" => &["query"],
-        "room.notebook.current" => &["scope"],
-        "room.notebook.update" | "room.notebook.remove" => &["id"],
-        "room.diary.append" => &["entry"],
-        "room.diary.selectExact" => &["date"],
+        "room.notebook.read" => &["path"],
+        "room.state.read" => &["entity"],
         _ => &[],
     };
     (properties_for(name), required)
@@ -2854,108 +2829,106 @@ fn properties_for(name: &str) -> Map<String, Value> {
             add("workingDirectory", string("Optional working directory."));
             add("waitSeconds", number("Bounded inline wait, capped at 30."));
         }
-        "room.notebook.append" => {
+        "room.maintenance.status" => {}
+        "room.maintenance.submit" => {
             add(
-                "datetime",
-                json!({"type":"string","description":"Optional ISO-8601 timestamp; defaults to the current Room logical time."}),
+                "items",
+                json!({
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 5,
+                    "description": "One to five maintenance requests; each slot may appear at most once. The set is validated against the Room repository before any mutation.",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["slot", "payload"],
+                        "properties": {
+                            "slot": {
+                                "type": "string",
+                                "enum": ["diary.daily", "diary.weekly", "diary.monthly", "notebook", "entity"],
+                                "description": "Unique Room semantic slot to maintain."
+                            },
+                            "payload": {
+                                "description": "Slot-specific maintenance payload; validated by the Room maintenance executor."
+                            }
+                        }
+                    }
+                }),
             );
             add(
-                "scope",
-                json!({"type":"string","minLength":1,"description":"Notebook namespace path."}),
+                "mode",
+                json!({
+                    "type": "string",
+                    "enum": ["local", "workflow"],
+                    "description": "Optional execution mode override; local applies in the validated Room repository, workflow submits through the configured Room workflow."
+                }),
             );
             add(
-                "significance",
-                json!({"type": "string", "enum": ["NORMAL", "ANCHOR"], "default": "NORMAL"}),
+                "waitSeconds",
+                json!({
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 30,
+                    "default": 0,
+                    "description": "Optional bounded wait for workflow consumption and local fast-forward, from 0 through 30 seconds."
+                }),
             );
-            add("abstract", string("Short summary."));
-            add("content", string("Full passage content."));
-            add("tags", strings("Optional labels."));
+        }
+        "room.diary.active" | "room.state.list" => {}
+        "room.diary.read" => {
+            add(
+                "layer",
+                json!({
+                    "type": "string",
+                    "enum": ["daily", "weekly", "monthly"],
+                    "description": "Room diary temporal layer."
+                }),
+            );
+            add(
+                "period",
+                json!({
+                    "type": "string",
+                    "pattern": "^(current|\\d{4}-\\d{2}-\\d{2}(--\\d{4}-\\d{2}-\\d{2})?)$",
+                    "description": "Room-local logical period: daily uses current or YYYY-MM-DD; weekly/monthly use current or YYYY-MM-DD--YYYY-MM-DD."
+                }),
+            );
         }
         "room.notebook.recent" => {
             add(
-                "scope",
-                json!({"type":"string","description":"Optional notebook namespace filter."}),
-            );
-            add(
-                "days",
-                json!({"type":"integer","minimum":1,"description":"Logical calendar days to scan."}),
-            );
-            add(
-                "significance",
-                json!({"type": "string", "enum": ["NORMAL", "ANCHOR"]}),
-            );
-            add(
                 "limit",
-                json!({"type":"integer","minimum":1,"maximum":100,"description":"Maximum passages returned."}),
-            );
-        }
-        "room.notebook.selectExact" => {
-            add(
-                "date",
                 json!({
-                    "type": "string",
-                    "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
-                    "description": "Room-local calendar date in YYYY-MM-DD format."
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100,
+                    "description": "Maximum bounded recent Notebook previews returned."
                 }),
-            );
-            add(
-                "scope",
-                json!({"type":"string","description":"Optional notebook namespace filter."}),
-            );
-            add(
-                "limit",
-                json!({"type":"integer","minimum":1,"maximum":100,"description":"Maximum passages returned."}),
             );
         }
         "room.notebook.search" => {
-            add("query", string("Search query."));
             add(
-                "scope",
-                json!({"type":"string","description":"Optional notebook namespace filter."}),
+                "query",
+                string("Case-insensitive bounded substring query over Notebook paths, H1 titles, and bodies."),
             );
             add(
                 "limit",
-                json!({"type":"integer","minimum":1,"maximum":100,"description":"Maximum passages returned."}),
-            );
-        }
-        "room.notebook.current" => add("scope", string("Notebook scope.")),
-        "room.notebook.update" => {
-            add("id", string("Passage id."));
-            add(
-                "significance",
-                json!({"type": "string", "enum": ["NORMAL", "ANCHOR"]}),
-            );
-            add("abstract", string("Optional replacement summary."));
-            add("content", string("Optional replacement content."));
-            add("tags", strings("Optional replacement labels."));
-        }
-        "room.notebook.remove" => add("id", string("Passage id.")),
-        "room.diary.append" => {
-            add("tags", strings("Optional labels."));
-            add("entry", string("Diary entry text."));
-        }
-        "room.diary.recent" => {
-            add(
-                "days",
-                json!({"type":"integer","minimum":1,"description":"Logical diary days to scan."}),
-            );
-            add(
-                "limit",
-                json!({"type":"integer","minimum":1,"maximum":100,"description":"Maximum diary entries returned."}),
-            );
-        }
-        "room.diary.selectExact" => {
-            add(
-                "date",
                 json!({
-                    "type": "string",
-                    "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
-                    "description": "Room-local logical diary date in YYYY-MM-DD format."
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100,
+                    "description": "Maximum bounded Notebook previews returned."
                 }),
             );
+        }
+        "room.notebook.read" => {
             add(
-                "limit",
-                json!({"type":"integer","minimum":1,"maximum":100,"description":"Maximum diary entries returned."}),
+                "path",
+                string("Exact Notebook-relative Markdown path returned or discovered under Notebook/; arbitrary repository paths are rejected."),
+            );
+        }
+        "room.state.read" => {
+            add(
+                "entity",
+                string("State entity filename stem resolved under State/entities/; arbitrary repository paths are rejected."),
             );
         }
         _ => {}
@@ -3025,16 +2998,15 @@ fn tool_description(name: &str) -> String {
         "skills.install.get" => "Inspect or briefly wait for one skill installation; read-only lifecycle inspection.".to_string(),
         "skills.install.cancel" => "Request cooperative cancellation of one skill installation before commit.".to_string(),
         "skills.run" => "Run an executable from an active local skill as a managed Job.".to_string(),
-        "room.notebook.append" => "Append one durable Room notebook passage; ANCHOR updates current state for its scope.".to_string(),
-        "room.notebook.recent" => "Read recent Room notebook passages; read-only.".to_string(),
-        "room.notebook.selectExact" => "Read Room notebook passages for one exact Room-local calendar date; read-only.".to_string(),
-        "room.notebook.search" => "Search Room notebook passages by bounded substring fields; read-only.".to_string(),
-        "room.notebook.current" => "Read recoverable current Room notebook state for one scope; read-only.".to_string(),
-        "room.notebook.update" => "Update editable fields of one Room notebook passage. Use this only for correcting existing notebook state; identity, scope, and datetime boundaries remain fixed.".to_string(),
-        "room.notebook.remove" => "Remove one Room notebook passage; destructive.".to_string(),
-        "room.diary.append" => "Append one durable Room diary entry to the current logical diary day.".to_string(),
-        "room.diary.recent" => "Read recent Room diary entries; read-only.".to_string(),
-        "room.diary.selectExact" => "Read Room diary entries for one exact Room-local logical date; read-only.".to_string(),
+        "room.maintenance.status" => "Inspect Room maintenance readiness, repository state, schema/scaffold support, executor configuration, workflow/remote availability, synchronization heads, and deterministic occupancy for all five semantic slots; read-only and non-destructive.".to_string(),
+        "room.maintenance.submit" => "Apply one to five unique Room maintenance slot requests after exact validation; destructive but confined to the validated Room repository, with optional local/workflow mode and bounded workflow wait; not open-world.".to_string(),
+        "room.diary.active" => "Read the active daily, weekly, and monthly Room diary documents; read-only, semantic, and bounded.".to_string(),
+        "room.diary.read" => "Read one exact Room diary document by validated semantic layer and period; read-only, semantic, and bounded.".to_string(),
+        "room.notebook.recent" => "Read bounded recent Room notebook Markdown previews; read-only, semantic, and bounded semantic discovery.".to_string(),
+        "room.notebook.search" => "Search Room notebook Markdown by bounded case-insensitive substring fields; read-only, semantic, and bounded discovery.".to_string(),
+        "room.notebook.read" => "Read one exact Room notebook Markdown document under the validated Notebook root; read-only, semantic, and bounded.".to_string(),
+        "room.state.list" => "List deterministic Room state entity documents; read-only, semantic, and bounded.".to_string(),
+        "room.state.read" => "Read one exact Room state entity Markdown document by validated entity name; read-only, semantic, and bounded.".to_string(),
         _ => "Agentic GPT local tool.".to_string(),
     }
 }
@@ -3052,14 +3024,11 @@ fn tool_is_read_only(name: &str) -> bool {
             | "tmux.closeSession"
             | "mcp.batch"
             | "mcp.callTool"
-            | "room.notebook.append"
-            | "room.notebook.update"
-            | "room.notebook.remove"
-            | "room.diary.append"
             | "skills.activate"
             | "skills.deactivate"
             | "skills.install"
             | "skills.install.cancel"
+            | "room.maintenance.submit"
             | "skills.run"
             | "file.edit"
     )
@@ -3072,9 +3041,9 @@ fn tool_is_destructive(name: &str) -> bool {
             | "job.cancel"
             | "tmux.sessions"
             | "tmux.closeSession"
-            | "room.notebook.remove"
             | "skills.install"
             | "skills.install.cancel"
+            | "room.maintenance.submit"
             | "skills.setActive"
             | "skills.run"
     )
@@ -3116,7 +3085,9 @@ mod tests {
 
     use super::*;
     use crate::{
-        config::Config, jobs::SkillLeaseManager, skill_installs::InstallManager,
+        config::{Config, ToolsetConfig},
+        jobs::SkillLeaseManager,
+        skill_installs::InstallManager,
         state::RuntimeModel,
     };
 
@@ -3129,57 +3100,142 @@ mod tests {
         expect: Value,
     }
 
-    #[test]
-    fn normal_and_room_tool_sets_are_exact() {
+    #[tokio::test]
+    async fn normal_and_room_tool_sets_follow_fixed_surface_contract() {
         let normal = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
         let room = AgentMcpServer::new(test_state(CapabilityProfile::Room));
-        let normal_names = normal
-            .tools
+        let normal_tools = normal.current_tools().await;
+        let room_tools = room.current_tools().await;
+        let names = |tools: Vec<Tool>| {
+            tools
+                .into_iter()
+                .map(|tool| tool.name.to_string())
+                .collect::<BTreeSet<_>>()
+        };
+        let expected_normal = [
+            "agent.info",
+            "file.edit",
+            "file.read",
+            "file.search",
+            "job.cancel",
+            "job.get",
+            "job.list",
+            "mcp.batch",
+            "mcp.callTool",
+            "mcp.list",
+            "process.batch",
+            "process.exec",
+            "skills.install",
+            "skills.install.cancel",
+            "skills.install.get",
+            "skills.list",
+            "skills.read",
+            "skills.run",
+            "skills.setActive",
+            "tmux.exec",
+            "tmux.panes",
+            "tmux.pasteText",
+            "tmux.sessions",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+        let room_additions = [
+            "bootstrap",
+            "bootstrap.read",
+            "room.diary.active",
+            "room.diary.read",
+            "room.maintenance.status",
+            "room.maintenance.submit",
+            "room.notebook.read",
+            "room.notebook.recent",
+            "room.notebook.search",
+            "room.state.list",
+            "room.state.read",
+        ];
+        let mut expected_room = expected_normal.clone();
+        expected_room.extend(room_additions.into_iter().map(str::to_owned));
+
+        let normal_names = names(normal_tools.clone());
+        assert_eq!(normal_names, expected_normal);
+        assert_eq!(names(room_tools), expected_room);
+        assert!(normal_tools
             .iter()
-            .map(|tool| tool.name.to_string())
-            .collect::<Vec<_>>();
-        let room_names = room
-            .tools
-            .iter()
-            .map(|tool| tool.name.to_string())
-            .collect::<Vec<_>>();
-        assert_eq!(normal_names.len(), 23);
-        assert_eq!(room_names.len(), 35);
-        assert!(!normal_names.iter().any(|name| name.starts_with("room.")));
-        assert!(room_names.iter().any(|name| name == "room.diary.append"));
-        assert!(room_names.iter().any(|name| name == "room.notebook.remove"));
-        assert!(!normal_names
-            .iter()
-            .any(|name| name == "user.notify.deliver"));
-        assert_eq!(normal_names, {
-            let mut expected = NORMAL_TOOLS
-                .iter()
-                .map(|name| name.to_string())
-                .collect::<Vec<_>>();
-            expected.sort();
-            expected
-        });
-        let serialized = serde_json::to_string(&normal.tools).unwrap();
+            .all(|tool| !tool.name.starts_with("room.") && !tool.name.starts_with("bootstrap")));
+
+        // These names remain dispatch-only compatibility paths and must never
+        // leak into the advertised MCP surface. Legacy JSONL Room names are
+        // retained only by the separate Hub compatibility boundary.
+        for alias in [
+            "file.batch",
+            "user.notify.deliver",
+            "mcp.listServers",
+            "mcp.listTools",
+            "skills.active",
+            "skills.activate",
+            "skills.deactivate",
+            "tmux.listSessions",
+            "tmux.listPanes",
+            "tmux.capturePane",
+            "room.diary.append",
+            "room.diary.recent",
+            "room.diary.selectExact",
+            "room.notebook.append",
+            "room.notebook.current",
+            "room.notebook.remove",
+            "room.notebook.selectExact",
+            "room.notebook.update",
+        ] {
+            assert!(
+                !expected_room.contains(alias),
+                "dispatch-only alias advertised: {alias}"
+            );
+            assert!(!normal_names.contains(alias));
+        }
+
+        let mut filtered_config = normal.state.config.read().await.clone();
+        filtered_config.toolsets.disable(ToolNamespace::File);
+        *normal.state.config.write().await = filtered_config;
+        let filtered_names = names(normal.current_tools().await);
+        let mut expected_filtered = expected_normal.clone();
+        for name in ["file.edit", "file.read", "file.search"] {
+            expected_filtered.remove(name);
+        }
+        assert_eq!(filtered_names, expected_filtered);
+        let error = normal
+            .call(CallToolRequestParams::new("file.read"))
+            .await
+            .expect_err("disabled namespace must not remain callable");
+        assert_eq!(error.code, rmcp::model::ErrorCode::METHOD_NOT_FOUND);
+        assert!(
+            normal
+                .call(CallToolRequestParams::new("mcp.list"))
+                .await
+                .is_ok(),
+            "disabling file must leave the MCP namespace callable"
+        );
+
+        let serialized = serde_json::to_string(&normal_tools).unwrap();
         assert!(!serialized.contains("agentId"));
         assert!(!serialized.contains("confirmMethod"));
-        let removed_tool = ["file", "batch"].join(".");
-        assert!(!normal_names.iter().any(|name| name == &removed_tool));
         assert!(serialized.contains("mcp.list"));
         assert!(serialized.contains("skills.setActive"));
         assert!(serialized.contains("tmux.sessions"));
         assert!(serialized.contains("tmux.panes"));
     }
 
-    #[test]
-    fn compact_tool_schema_budgets_hold() {
+    #[tokio::test]
+    async fn compact_tool_schema_budgets_hold() {
         let normal = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
         let room = AgentMcpServer::new(test_state(CapabilityProfile::Room));
+        let normal_tools = normal.current_tools().await;
+        let room_tools = room.current_tools().await;
         for (label, tools, max_total, max_inputs) in [
             // The frozen file schemas add bounded descriptors to the original
             // compact-surface budgets; retain explicit finite caps for the
             // resulting Normal/Room surfaces.
-            ("normal", normal.tools.as_ref(), 32_000usize, 16_000usize),
-            ("room", room.tools.as_ref(), 48_000usize, 24_000usize),
+            ("normal", &normal_tools, 32_000usize, 16_000usize),
+            ("room", &room_tools, 48_000usize, 24_000usize),
         ] {
             let serialized = serde_json::to_vec(tools).unwrap();
             let input_bytes = tools
@@ -3196,15 +3252,19 @@ mod tests {
             );
             assert!(
                 input_bytes <= max_inputs,
-                "{label} input schemas use {input_bytes} bytes, budget is {max_inputs}"
+                "{label} input schemas use {input_bytes} bytes, budget is {max_inputs}",
+                input_bytes = input_bytes,
+                max_inputs = max_inputs
             );
         }
     }
 
-    #[test]
-    fn file_surface_schema_is_exact() -> anyhow::Result<()> {
-        let names = AgentMcpServer::new(test_state(CapabilityProfile::Normal))
-            .tools
+    #[tokio::test]
+    async fn file_surface_schema_is_exact() -> anyhow::Result<()> {
+        let tools = AgentMcpServer::new(test_state(CapabilityProfile::Normal))
+            .current_tools()
+            .await;
+        let names = tools
             .iter()
             .map(|tool| tool.name.to_string())
             .collect::<Vec<_>>();
@@ -3259,6 +3319,62 @@ mod tests {
         assert_eq!(edit_fields, expected_edit_fields);
         assert_eq!(edit["inputSchema"]["required"], json!(["patch"]));
         Ok(())
+    }
+
+    #[test]
+    fn room_maintenance_descriptors_are_frozen() -> anyhow::Result<()> {
+        let status = serde_json::to_value(tool_descriptor("room.maintenance.status"))?;
+        assert_eq!(status["annotations"]["readOnlyHint"], true);
+        assert_eq!(status["annotations"]["destructiveHint"], false);
+        assert_eq!(status["annotations"]["openWorldHint"], false);
+        assert_eq!(status["inputSchema"]["required"], json!([]));
+
+        let submit = serde_json::to_value(tool_descriptor("room.maintenance.submit"))?;
+        assert_eq!(submit["annotations"]["readOnlyHint"], false);
+        assert_eq!(submit["annotations"]["destructiveHint"], true);
+        assert_eq!(submit["annotations"]["openWorldHint"], false);
+        assert_eq!(submit["inputSchema"]["required"], json!(["items"]));
+        let items = &submit["inputSchema"]["properties"]["items"];
+        assert_eq!(items["minItems"], 1);
+        assert_eq!(items["maxItems"], 5);
+        assert_eq!(items["items"]["required"], json!(["slot", "payload"]));
+        assert_eq!(
+            items["items"]["properties"]["slot"]["enum"],
+            json!([
+                "diary.daily",
+                "diary.weekly",
+                "diary.monthly",
+                "notebook",
+                "entity"
+            ])
+        );
+        assert_eq!(
+            submit["inputSchema"]["properties"]["mode"]["enum"],
+            json!(["local", "workflow"])
+        );
+        assert_eq!(
+            submit["inputSchema"]["properties"]["waitSeconds"]["minimum"],
+            0
+        );
+        assert_eq!(
+            submit["inputSchema"]["properties"]["waitSeconds"]["maximum"],
+            30
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn room_maintenance_submit_rejects_unknown_nested_fields() {
+        let error =
+            serde_json::from_value::<agentic_gpt_protocol::RoomMaintenanceSubmitRequest>(json!({
+                "items": [{
+                    "slot": "entity",
+                    "payload": {"entity": "project", "content": "ok"},
+                    "unexpected": true
+                }]
+            }))
+            .expect_err("nested maintenance fields must be strict");
+        assert!(error.to_string().contains("unknown field"));
     }
 
     #[tokio::test]
@@ -3428,12 +3544,70 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn absent_room_tool_is_rejected_for_normal_worker() {
+    async fn absent_room_tools_are_rejected_when_room_toolset_disabled() {
         let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
-        let error = server
-            .call(CallToolRequestParams::new("room.diary.recent"))
+        for name in [
+            "bootstrap",
+            "bootstrap.read",
+            "room.diary.active",
+            "room.diary.read",
+            "room.maintenance.status",
+            "room.maintenance.submit",
+            "room.notebook.recent",
+            "room.notebook.search",
+            "room.notebook.read",
+            "room.state.list",
+            "room.state.read",
+        ] {
+            let error = server
+                .call(CallToolRequestParams::new(name))
+                .await
+                .expect_err("Room-only tool must not be callable by Normal worker");
+            assert_eq!(error.code, rmcp::model::ErrorCode::METHOD_NOT_FOUND);
+        }
+    }
+    #[tokio::test]
+    async fn changing_live_toolsets_updates_surface_and_authorization() {
+        let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
+        let initial_names = server
+            .current_tools()
             .await
-            .expect_err("Room-only tool must not be callable by Normal worker");
+            .into_iter()
+            .map(|tool| tool.name.to_string())
+            .collect::<Vec<_>>();
+        assert!(!initial_names.iter().any(|name| name == "bootstrap"));
+        assert!(!initial_names.iter().any(|name| name.starts_with("room.")));
+
+        let error = server
+            .call(CallToolRequestParams::new("bootstrap"))
+            .await
+            .expect_err("Room tools must be unavailable before enabling Room");
+        assert_eq!(error.code, rmcp::model::ErrorCode::METHOD_NOT_FOUND);
+
+        let mut room_config = server.state.config.read().await.clone();
+        room_config.toolsets = ToolsetConfig::room();
+        *server.state.config.write().await = room_config;
+        let room_names = server
+            .current_tools()
+            .await
+            .into_iter()
+            .map(|tool| tool.name.to_string())
+            .collect::<Vec<_>>();
+        assert!(room_names.iter().any(|name| name == "bootstrap"));
+        assert!(room_names.iter().any(|name| name == "room.diary.active"));
+        let bootstrap = server
+            .call(CallToolRequestParams::new("bootstrap"))
+            .await
+            .expect("enabled Room tool should reach the read path");
+        assert!(bootstrap.get("entrypoint").is_some());
+
+        let mut normal_config = server.state.config.read().await.clone();
+        normal_config.toolsets = ToolsetConfig::normal();
+        *server.state.config.write().await = normal_config;
+        let error = server
+            .call(CallToolRequestParams::new("bootstrap"))
+            .await
+            .expect_err("Room tools must disappear after disabling Room");
         assert_eq!(error.code, rmcp::model::ErrorCode::METHOD_NOT_FOUND);
     }
 
@@ -3560,12 +3734,12 @@ mod tests {
 
         let client = ().serve((client_read, client_write)).await?;
         let tools = client.list_all_tools().await?;
-        assert!(tools.iter().any(|tool| tool.name == "room.diary.recent"));
+        assert!(tools.iter().any(|tool| tool.name == "room.diary.active"));
         let result = client
-            .call_tool(CallToolRequestParams::new("room.diary.recent"))
+            .call_tool(CallToolRequestParams::new("room.diary.active"))
             .await?;
         assert_eq!(result.is_error, Some(false));
-        assert!(result.structured_content.as_ref().unwrap()["entries"].is_array());
+        assert!(result.structured_content.as_ref().unwrap()["daily"].is_object());
         let _ = client.cancel().await;
         server_task.await??;
         Ok(())
@@ -4222,14 +4396,14 @@ mod tests {
         );
     }
 
-    #[test]
-    fn tunnel_and_local_ingress_advertise_identical_surface() {
+    #[tokio::test]
+    async fn tunnel_and_local_ingress_advertise_identical_surface() {
         let state = test_state(CapabilityProfile::Normal);
         let tunnel = AgentMcpServer::with_ingress(state.clone(), RequestIngress::TunnelStdio);
         let local = AgentMcpServer::with_ingress(state, RequestIngress::LocalUnix);
         assert_eq!(
-            serde_json::to_value(tunnel.tools.as_ref()).unwrap(),
-            serde_json::to_value(local.tools.as_ref()).unwrap()
+            serde_json::to_value(tunnel.current_tools().await).unwrap(),
+            serde_json::to_value(local.current_tools().await).unwrap()
         );
         assert_eq!(tunnel.ingress.label(), "tunnel:stdio");
         assert_eq!(local.ingress.label(), "local:unix");
@@ -4341,49 +4515,36 @@ mod tests {
         let skills = server.dispatch("skills.list", json!({})).await?;
         assert!(skills["skills"].is_array());
         let notebook = server.dispatch("room.notebook.recent", json!({})).await?;
-        assert!(notebook["passages"].is_array());
-        let diary = server.dispatch("room.diary.recent", json!({})).await?;
-        assert!(diary["entries"].is_array());
+        assert!(notebook["documents"].is_array());
+        let diary = server.dispatch("room.diary.active", json!({})).await?;
+        assert!(diary["daily"].is_object());
+        let state = server.dispatch("room.state.list", json!({})).await?;
+        assert!(state["entities"].is_array());
         Ok(())
     }
 
     #[tokio::test]
-    async fn every_room_adapter_rejects_legacy_identity_fields() {
+    async fn every_room_adapter_rejects_unknown_identity_fields() {
         let server = AgentMcpServer::new(test_state(CapabilityProfile::Room));
         let cases = [
+            ("room.diary.active", json!({"agentId":"foreign"})),
             (
-                "room.notebook.append",
-                json!({"scope":"x","significance":"Normal","abstract":"a","content":"c","agentId":"foreign"}),
+                "room.diary.read",
+                json!({"layer":"daily","period":"current","agentId":"foreign"}),
             ),
             ("room.notebook.recent", json!({"agentId":"foreign"})),
-            (
-                "room.notebook.selectExact",
-                json!({"date":"2026-07-25","agentId":"foreign"}),
-            ),
             (
                 "room.notebook.search",
                 json!({"query":"x","agentId":"foreign"}),
             ),
             (
-                "room.notebook.current",
-                json!({"scope":"x","agentId":"foreign"}),
+                "room.notebook.read",
+                json!({"path":"Notebook/topic.md","agentId":"foreign"}),
             ),
+            ("room.state.list", json!({"agentId":"foreign"})),
             (
-                "room.notebook.update",
-                json!({"id":"x","agentId":"foreign"}),
-            ),
-            (
-                "room.notebook.remove",
-                json!({"id":"x","agentId":"foreign"}),
-            ),
-            (
-                "room.diary.append",
-                json!({"entry":"x","agentId":"foreign"}),
-            ),
-            ("room.diary.recent", json!({"agentId":"foreign"})),
-            (
-                "room.diary.selectExact",
-                json!({"date":"2026-07-25","agentId":"foreign"}),
+                "room.state.read",
+                json!({"entity":"project","agentId":"foreign"}),
             ),
         ];
         for (name, arguments) in cases {
@@ -4791,6 +4952,11 @@ mod tests {
         let workspace_root = root.join("workspace");
         let mut config = Config::default_config().expect("default config");
         config.agent_id = "stdio-test-agent".to_string();
+        config.toolsets = if profile == CapabilityProfile::Room {
+            ToolsetConfig::room()
+        } else {
+            ToolsetConfig::normal()
+        };
         config.workspace_root = workspace_root.clone();
         config.path_policy.write_roots = vec![workspace_root.clone()];
         config.ensure_workspace().expect("workspace");
@@ -4824,7 +4990,7 @@ mod tests {
             pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
             temporary_mcp_allows: Arc::new(Mutex::new(Vec::new())),
             mcp_concurrency: Arc::new(crate::jobs::McpConcurrency::new()),
-            notebook_writes: Arc::new(Mutex::new(())),
+            room_repository_writes: Arc::new(Mutex::new(())),
             skills_writes: Arc::new(Mutex::new(())),
             skill_leases: Arc::new(SkillLeaseManager::new()),
             skill_installs: Arc::new(InstallManager::new()),

@@ -29,8 +29,41 @@ agentic-gpt config show
 模式与配置档是两个独立选择：
 
 - `--mode standalone|hub|local` 选择运行时连接方式与配置形状。
-- `--profile normal|room` 选择能力/工具面。Normal 暴露 24 个工具，Room 暴露 36 个工具；
-  配置档不会把 Local runtime 变成 Hub runtime。
+- `--profile normal|room` 选择默认 toolset preset。normal preset 启用除 `room` 外的所有
+  namespace；room preset 启用所有 namespace。配置档本身不会固定最终 runtime surface 或数量，
+  因为显式的 `toolsets.enabled` 选择具有权威性。
+
+可用 namespace 为 `agent`、`file`、`mcp`、`process`、`job`、`skills`、`tmux`、`room`。
+逻辑上的 `room` namespace 包含 Room bootstrap（`bootstrap` 与 `bootstrap.read`）以及全部
+`room.*` 工具。选择只会过滤既有的 Normal/Room advertised names，不会暴露 dispatch-only alias。
+
+使用以下精确命令固定选择：
+
+```bash
+agentic-gpt config toolset ls
+agentic-gpt config toolset enable <namespace>
+agentic-gpt config toolset disable <namespace>
+```
+`ls` 会列出全部 namespace、当前启用/禁用状态及其所含工具的简短说明。`enable` 和
+`disable` 成功后会明确输出被修改的 namespace 与结果状态。
+
+同一个 `toolsets.enabled` 数组也可以直接编辑 JSON。有效的 toolset 修改会在 worker 运行时
+热加载，并对后续工具发现与调用生效；无需重启。无效候选会保留上一次有效的 live selection。
+Room bootstrap、日记和笔记本命令以实时 `room` namespace 为授权依据，而不是启动时的
+profile。该 namespace 禁用时，直接分发 Room 命令会返回 `room_toolset_required`。
+
+例如，显式固定 normal 选择时写成：
+
+```json
+{
+  "profile": "normal",
+  "toolsets": {
+    "enabled": ["agent", "file", "mcp", "process", "job", "skills", "tmux"]
+  }
+}
+```
+
+如果之后切换 profile，这个显式选择仍然具有权威性。
 
 脚本需要确定性结果时，请使用以下实际 CLI 语法，并提供不应保留占位符的值：
 
@@ -54,9 +87,10 @@ agentic-gpt config init \
 
 全屏流程为 Basic → Connection（Local 除外）→ Optional settings → Review → Completion。
 交互模式下的命令行 flag 只是可编辑的预填值，不会锁定字段或跳过页面。身份/显示名称、
-工作区/路径策略、确认方式/语言、限制和沙箱始终可选。只有 Room 配置档会出现 Room 设置；
-只有 Standalone 模式会出现 tunnel-client 覆盖和 Hub reporting。Hub 与 Local 模式不会显示
-这些 tunnel 部分。不选可选部分时会保留模板默认值。
+工作区/路径策略、确认方式/语言、限制、沙箱和可选的 Toolsets section 始终可用。Toolsets
+从配置档 preset 开始；一旦显式编辑，其 namespace selection 具有权威性。只有 Room 配置档会
+出现 Room 设置；只有 Standalone 模式会出现 tunnel-client 覆盖和 Hub reporting。Hub 与 Local
+模式不会显示这些 tunnel 部分。不选可选部分时会保留模板默认值。
 
 界面使用键盘导航：Tab/Shift+Tab 与方向键移动焦点，Enter 编辑或触发当前操作，Esc 返回
 （根 Basic 页面是 no-op），Ctrl+C 取消初始化。编辑态按 Esc 只结束编辑，不会取消初始化。
@@ -105,14 +139,16 @@ agentic-gpt config set tunnel.client.autoDownload true
 agentic-gpt run
 ```
 
-将 `profile` 设为 `room` 即可使用 Room surface（例如 `agentic-gpt config set profile room`）。
+将 `profile` 设为 `room` 会选择启用所有 namespace 的 Room preset（例如
+`agentic-gpt config set profile room`）；如果存在 `toolsets.enabled`，则以它为准。
 
 ## 顶层字段
 
 | 字段 | 用途 |
 | --- | --- |
 | `mode` | 权威运行时分派：`standalone`、`hub` 或 `local`。 |
-| `profile` | 权威能力 surface：`normal` 或 `room`。 |
+| `profile` | 默认能力/toolset preset：`normal` 或 `room`。 |
+| `toolsets` | 已启用的 tool namespace；显式 `enabled` 列表会覆盖配置档 preset。 |
 | `agentId` | 稳定本地 identity，也用于派生私有 runtime/socket 路径，以及 `~/.agentic_gpt/state/agent/<agentId>/` 下的 per-agent 持久状态根目录。 |
 | `displayName` | summary/reporting 中的人类可读机器名称。 |
 | `workspaceRoot` | 主可写工作区，也是 `.agentic-gpt-audit.jsonl` 所在位置。 |
@@ -125,7 +161,7 @@ agentic-gpt run
 | `policy` | 显式 allow / confirm / deny 命令规则。 |
 | `limits` | Process 并发与总 active Job 容量。 |
 | `skills` | Skill package/install 限制与网络策略。 |
-| `room` | Room 时区、日记日界线和可选 notebook root。 |
+| `room` | Room 仓库根目录、时区、日记日界线、维护模式和自动推送策略。 |
 | `tunnel` | Standalone tunnel-client 来源、secret 引用与可选 reporting。 |
 | `hub` | 集中式 Hub 连接，或 Standalone 的可选 Hub reporting/ntfy relay。 |
 
@@ -280,7 +316,14 @@ Server id 最长 64 字节，只使用字母、数字、`.`、`_`、`-`。`strea
 
 `skills` 控制 package 大小、redirect、timeout、重试/总 deadline、安装/下载并发，以及可选 host allowlist。规范字段是顶层 `skills`；只有缺少顶层字段时才读取 legacy `room.skills`。
 
-`room.timezone` 控制 Room 日期时间行为；`room.diaryDayBoundaryHour` 范围 0–23；`room.notebookRoot` 可选。
+`room.timezone` 保留为 Room metadata；V2 read 使用仓库路径，不再使用 legacy JSONL 日期分区。
+`room.diaryDayBoundaryHour` 范围为 0–23，用于新 bootstrap 的 Daily scaffold 逻辑日期。
+`room.repositoryRoot` 可选，默认是 `<workspaceRoot>/room`。嵌套的
+`room.maintenance.mode` 可为 `local` 或 `workflow`，默认 `local`；`room.maintenance.autoPush`
+默认是 `false`。Standalone Room toolset 只暴露 semantic read、`room.maintenance.status`
+和 `room.maintenance.submit`；所有 mutation 都走后者。
+Legacy JSONL Room command 仅保留在 protocol 与 Hub HTTP/MCP compatibility surface，供独立
+Hub parity workstream 使用，不由 Agent advertisement 或 runtime 执行。
 
 `sandbox.enabled` 启用 bubblewrap；`requiredRuntimePaths` 定义 sandbox 中可见的宿主路径。Sandbox 不能替代命令策略、路径策略或确认。
 
@@ -297,13 +340,15 @@ agentic-gpt config keys [--section <SECTION>] [--json]
 null、示例、双语说明和别名元数据。`config set`
 只接受 registry 中的键；结构化 policy 与 MCP 集合应使用专用命令。
 
-注册键后的值是一个 shell 参数。因此 JSON 列表必须加引号；`room.notebookRoot` 可为 null，
-使用字面量 JSON 值 `null` 可以清除它。
+注册键后的值是一个 shell 参数。因此 JSON 列表必须加引号。`room.repositoryRoot` 可为 null，
+使用字面量 JSON 值 `null` 可以清除它并恢复 workspace 默认目录。
 
 ```bash
 agentic-gpt config set sandbox.requiredRuntimePaths '["/usr","/opt/runtime"]'
 agentic-gpt config set skills.allowedHosts '["skills.example.com"]'
-agentic-gpt config set room.notebookRoot null
+agentic-gpt config set room.repositoryRoot null
+agentic-gpt config set room.maintenance.mode local
+agentic-gpt config set room.maintenance.autoPush false
 ```
 
 registry 包含以下常用 scalar：
@@ -312,10 +357,14 @@ registry 包含以下常用 scalar：
 - `confirmationProvider.channels`、`confirmationLanguage`、`sandbox.enabled`
 - `tunnel.tunnelId`、`tunnel.apiKey`
 - 全部 `tunnel.client.*` 与 `tunnel.hubReporting.*`
-- `room.notebookRoot`、`room.timezone`、`room.diaryDayBoundaryHour`
+- `room.repositoryRoot`、`room.timezone`、`room.diaryDayBoundaryHour`
+- `room.maintenance.mode`、`room.maintenance.autoPush`
 - 文档列出的 `skills.*` scalar/list 字段
 
-结构化策略与 MCP 修改使用 `config allow/confirm/deny`、`config path`、`config mcp`。复杂 JSON 也可在进程停止时直接编辑，随后执行 `agentic-gpt config show` 与 smoke test。
+结构化策略与 MCP 修改使用 `config allow/confirm/deny`、`config path`、`config mcp`。
+上面的 `config toolset` 命令用于管理 namespace 选择。复杂 JSON（包括 `toolsets.enabled`）
+也可直接编辑；有效编辑会在不重启 worker 的情况下热加载，无效候选会保留上一次有效状态。
+随后可执行 `agentic-gpt config show` 与 smoke test。
 
 ## 密钥文件与事务写入
 
@@ -341,9 +390,10 @@ Standalone 与 Local worker 会轮询配置，并原子应用通过验证的 liv
 
 | 配置 | 行为 |
 | --- | --- |
-| `policy`、`pathPolicy`、`limits`、`mcpServers` | 对新 admission/call 热加载 |
+| `policy`、`pathPolicy`、`limits`、`mcpServers`、`toolsets.enabled` | 对新 admission/call 与工具发现热加载 |
 | 已接纳 Job 与已创建下游调用 | 保留原决策/配置 |
 | `mode`、`profile`、`agentId`、`workspaceRoot` | 需要重启 |
+| `room.*` 仓库、时区、日界线和 maintenance 设置 | 需要重启；`toolsets.enabled` 可热启用 Room，但使用当前 live Room 配置 |
 | `tunnel.*` client identity/source/secret | 需要重启 |
 | `hub`、reporting mode | 对相关连接需要重启 |
 | Skill install 并发等 startup-owned 设置 | 需要重启 |

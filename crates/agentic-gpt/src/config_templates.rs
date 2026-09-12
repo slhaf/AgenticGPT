@@ -8,7 +8,7 @@ use crate::cli_i18n::UiLanguage;
 use crate::config::{
     default_path_policy, validate_hub_transport, validate_hub_url_shape, Config,
     ConfirmationProviderConfig, HubReportingConfig, LimitsConfig, PathPolicyConfig, RoomConfig,
-    SandboxConfig, TunnelClientConfig, TunnelConfig, WorkerProfile,
+    SandboxConfig, ToolNamespace, ToolsetConfig, TunnelClientConfig, TunnelConfig, WorkerProfile,
 };
 use crate::mcp::McpServerConfig;
 use crate::utils::agentic_home;
@@ -27,6 +27,7 @@ pub(crate) enum OptionalSection {
     Limits,
     Sandbox,
     McpServers,
+    Toolsets,
     Room,
     TunnelClient,
     HubReporting,
@@ -87,6 +88,7 @@ pub(crate) struct InitInput {
     pub(crate) tunnel_client: Option<TunnelClientConfig>,
     pub(crate) hub_reporting: Option<HubReportingConfig>,
     pub(crate) mcp_servers: Option<BTreeMap<String, McpServerConfig>>,
+    pub(crate) toolsets: Option<ToolsetConfig>,
 }
 
 impl InitInput {
@@ -113,6 +115,7 @@ impl InitInput {
             tunnel_client: None,
             hub_reporting: None,
             mcp_servers: None,
+            toolsets: None,
         }
     }
 }
@@ -169,16 +172,21 @@ pub(crate) fn build_config(input: InitInput) -> Result<InitBuild> {
         tunnel_client,
         hub_reporting,
         mcp_servers,
+        toolsets,
     } = input;
-
-    if room.is_some() && !optional_section_is_legal(OptionalSection::Room, mode, profile) {
-        return Err(anyhow!("room_config_requires_room_profile"));
-    }
 
     let has_imported_base = imported_base.is_some();
     let mut config = imported_base.unwrap_or(Config::default_config()?);
     config.mode = mode;
     config.profile = profile;
+    if let Some(toolsets) = toolsets {
+        config.toolsets = toolsets;
+    } else if !has_imported_base {
+        config.toolsets = ToolsetConfig::for_profile(profile);
+    }
+    if room.is_some() && !optional_section_is_legal(OptionalSection::Room, mode, &config.toolsets) {
+        return Err(anyhow!("room_config_requires_room_toolset"));
+    }
     if let Some(confirmation_language) = confirmation_language {
         config.confirmation_language = confirmation_language;
     } else if !has_imported_base {
@@ -293,7 +301,7 @@ pub(crate) fn build_config(input: InitInput) -> Result<InitBuild> {
 pub(crate) fn optional_section_is_legal(
     section: OptionalSection,
     mode: RuntimeMode,
-    profile: WorkerProfile,
+    toolsets: &ToolsetConfig,
 ) -> bool {
     match section {
         OptionalSection::Identity
@@ -301,8 +309,9 @@ pub(crate) fn optional_section_is_legal(
         | OptionalSection::Confirmation
         | OptionalSection::Limits
         | OptionalSection::Sandbox
-        | OptionalSection::McpServers => true,
-        OptionalSection::Room => profile == WorkerProfile::Room,
+        | OptionalSection::McpServers
+        | OptionalSection::Toolsets => true,
+        OptionalSection::Room => toolsets.is_enabled(ToolNamespace::Room),
         OptionalSection::TunnelClient | OptionalSection::HubReporting => {
             mode == RuntimeMode::Standalone
         }
@@ -536,7 +545,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_confirmation_language_wins_and_normal_room_override_is_rejected() {
+    fn explicit_confirmation_language_wins_and_normal_room_override_requires_room_toolset() {
         let mut input = InitInput::non_interactive_defaults(UiLanguage::ZhCn);
         input.confirmation_language = Some("en-custom".to_string());
         let built = build_config(input).unwrap();
@@ -545,10 +554,26 @@ mod tests {
         let mut normal_room_input = InitInput::non_interactive_defaults(UiLanguage::En);
         normal_room_input.room = Some(crate::config::default_room_config());
         let error = match build_config(normal_room_input) {
-            Ok(_) => panic!("normal profile must reject a room override"),
+            Ok(_) => panic!("normal profile must reject a room override without the Room toolset"),
             Err(error) => error,
         };
-        assert_eq!(error.to_string(), "room_config_requires_room_profile");
+        assert_eq!(error.to_string(), "room_config_requires_room_toolset");
+    }
+
+    #[test]
+    fn normal_profile_accepts_room_override_with_explicit_room_toolset() {
+        let mut input = InitInput::non_interactive_defaults(UiLanguage::En);
+        input.profile = WorkerProfile::Normal;
+        let mut toolsets = ToolsetConfig::normal();
+        toolsets.enable(ToolNamespace::Room);
+        input.toolsets = Some(toolsets.clone());
+        let room = crate::config::default_room_config();
+        input.room = Some(room.clone());
+
+        let built = build_config(input).unwrap();
+
+        assert_eq!(built.config.toolsets, toolsets);
+        assert_eq!(built.config.room, room);
     }
 
     #[test]

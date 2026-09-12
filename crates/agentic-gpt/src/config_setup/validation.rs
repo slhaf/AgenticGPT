@@ -3,12 +3,14 @@ mod tests {
     use std::path::PathBuf;
 
     use crate::cli_i18n::UiLanguage;
-    use crate::config_templates::{OptionalSection, RuntimeMode, SecretValue};
+    use crate::config::{RoomMaintenanceMode, ToolNamespace, ToolsetConfig};
+    use crate::config_templates::{build_config, OptionalSection, RuntimeMode, SecretValue};
+    use crate::tui::forms::OrderedMultiSelectState;
     use crate::WorkerProfile;
 
     use super::super::model::{
         HubReportingDraft, LimitsDraft, OptionalSectionDraft, RoomDraft, SandboxDraft, SetupField,
-        SetupSeed, SetupSession, WorkspaceDraft,
+        SetupSeed, SetupSession, ToolsetsDraft, WorkspaceDraft,
     };
 
     fn session(mode: RuntimeMode, profile: WorkerProfile) -> SetupSession {
@@ -21,6 +23,22 @@ mod tests {
             UiLanguage::En,
             PathBuf::from("/tmp/config.json"),
         )
+    }
+
+    fn toolsets_draft(config: &ToolsetConfig) -> OptionalSectionDraft {
+        OptionalSectionDraft::Toolsets(ToolsetsDraft {
+            selection: OrderedMultiSelectState::new(
+                ToolNamespace::all()
+                    .iter()
+                    .map(|namespace| namespace.as_str().to_string())
+                    .collect(),
+                config
+                    .enabled_names()
+                    .into_iter()
+                    .map(|name| name.to_string())
+                    .collect(),
+            ),
+        })
     }
 
     #[test]
@@ -98,7 +116,9 @@ mod tests {
         let room = OptionalSectionDraft::Room(RoomDraft {
             timezone: "Asia/Shanghai".to_string(),
             diary_boundary_hour: "24".to_string(),
-            notebook_root: String::new(),
+            repository_root: String::new(),
+            maintenance_mode: "local".to_string(),
+            maintenance_auto_push: false,
         });
         let errors = session.save_optional_section(room).unwrap_err();
         assert_eq!(errors[0].field, SetupField::RoomTimezone);
@@ -161,20 +181,103 @@ mod tests {
         );
         assert_eq!(restored_hub.agent_secret.unwrap().expose(), marker);
     }
+    #[test]
+    fn normal_profile_accepts_explicit_room_toolset_and_round_trips_room_settings() {
+        let mut session = session(RuntimeMode::Local, WorkerProfile::Normal);
+        let mut toolsets = ToolsetConfig::normal();
+        toolsets.enable(ToolNamespace::Room);
+        session
+            .save_optional_section(toolsets_draft(&toolsets))
+            .unwrap();
+        assert!(session
+            .available_optional_sections()
+            .contains(&OptionalSection::Room));
+
+        session.set_profile(WorkerProfile::Room);
+        assert!(session
+            .available_optional_sections()
+            .contains(&OptionalSection::Room));
+        session.set_profile(WorkerProfile::Normal);
+        assert!(session
+            .available_optional_sections()
+            .contains(&OptionalSection::Room));
+
+        session
+            .save_optional_section(OptionalSectionDraft::Room(RoomDraft {
+                timezone: "Europe/Berlin".to_string(),
+                diary_boundary_hour: "4".to_string(),
+                repository_root: "/tmp/room-repository".to_string(),
+                maintenance_mode: "workflow".to_string(),
+                maintenance_auto_push: true,
+            }))
+            .unwrap();
+
+        let built = build_config(session.build_active_input().unwrap()).unwrap();
+
+        assert_eq!(built.config.toolsets, toolsets);
+        assert_eq!(
+            built.config.room.repository_root,
+            Some(PathBuf::from("/tmp/room-repository"))
+        );
+        assert_eq!(built.config.room.timezone, "Europe/Berlin");
+        assert_eq!(built.config.room.diary_day_boundary_hour, 4);
+        assert_eq!(
+            built.config.room.maintenance.mode,
+            RoomMaintenanceMode::Workflow
+        );
+        assert!(built.config.room.maintenance.auto_push);
+    }
+
+    #[test]
+    fn normal_profile_with_explicit_room_disabled_toolset_hides_and_rejects_room() {
+        let mut session = session(RuntimeMode::Local, WorkerProfile::Normal);
+        let toolsets = ToolsetConfig::normal();
+        session
+            .save_optional_section(toolsets_draft(&toolsets))
+            .unwrap();
+
+        assert!(!session
+            .available_optional_sections()
+            .contains(&OptionalSection::Room));
+        assert_eq!(
+            session.section_status(OptionalSection::Room),
+            super::super::model::SectionStatus::NotApplicable
+        );
+
+        let errors = session
+            .save_optional_section(OptionalSectionDraft::Room(RoomDraft {
+                timezone: "UTC".to_string(),
+                diary_boundary_hour: "5".to_string(),
+                repository_root: String::new(),
+                maintenance_mode: "local".to_string(),
+                maintenance_auto_push: false,
+            }))
+            .unwrap_err();
+        assert_eq!(errors[0].field, SetupField::RoomTimezone);
+        assert_eq!(errors[0].code, "config_init_optional_section_invalid");
+
+        session.set_profile(WorkerProfile::Room);
+        assert!(!session
+            .available_optional_sections()
+            .contains(&OptionalSection::Room));
+        assert_eq!(
+            session.section_status(OptionalSection::Room),
+            super::super::model::SectionStatus::NotApplicable
+        );
+    }
 }
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 
 use crate::config::{
     self, default_room_config, ConfirmationProviderConfig, HubReportingConfig, LimitsConfig,
-    MaxActiveJobs, PathPolicyConfig, ReportingDetail, RoomConfig, SandboxConfig,
-    TunnelClientConfig,
+    MaxActiveJobs, PathPolicyConfig, ReportingDetail, RoomConfig, RoomMaintenanceConfig,
+    RoomMaintenanceMode, SandboxConfig, ToolNamespace, ToolsetConfig, TunnelClientConfig,
 };
 use crate::config_templates::{
     self, build_config, InitInput, OptionalSection, RuntimeMode, SecretValue, TunnelSecretSource,
 };
 use crate::mcp::{self, McpServerAuthConfig, McpServerConfig};
-use crate::WorkerProfile;
 
 use super::model::{
     HubDraft, McpServerDraft, OptionalSectionDraft, SetupField, SetupSession, StandaloneDraft,
@@ -195,14 +298,14 @@ fn error(field: SetupField, code: &'static str) -> ValidationError {
 pub(super) fn section_is_legal(
     section: OptionalSection,
     mode: RuntimeMode,
-    profile: WorkerProfile,
+    toolsets: &ToolsetConfig,
 ) -> bool {
-    config_templates::optional_section_is_legal(section, mode, profile)
+    config_templates::optional_section_is_legal(section, mode, toolsets)
 }
 
 pub(super) fn available_optional_sections(
     mode: RuntimeMode,
-    profile: WorkerProfile,
+    toolsets: &ToolsetConfig,
 ) -> Vec<OptionalSection> {
     [
         OptionalSection::Identity,
@@ -210,13 +313,14 @@ pub(super) fn available_optional_sections(
         OptionalSection::Confirmation,
         OptionalSection::Limits,
         OptionalSection::Sandbox,
+        OptionalSection::Toolsets,
         OptionalSection::McpServers,
         OptionalSection::Room,
         OptionalSection::TunnelClient,
         OptionalSection::HubReporting,
     ]
     .into_iter()
-    .filter(|section| section_is_legal(*section, mode, profile))
+    .filter(|section| section_is_legal(*section, mode, toolsets))
     .collect()
 }
 
@@ -369,6 +473,10 @@ pub(super) fn validate_field(
             OptionalSection::Sandbox,
             &session.optional_draft(OptionalSection::Sandbox),
         ),
+        SetupField::Toolsets => validate_optional(
+            OptionalSection::Toolsets,
+            &session.optional_draft(OptionalSection::Toolsets),
+        ),
         SetupField::McpServerId
         | SetupField::McpServerEnabled
         | SetupField::McpServerTransport
@@ -378,12 +486,14 @@ pub(super) fn validate_field(
             OptionalSection::McpServers,
             &session.optional_draft(OptionalSection::McpServers),
         ),
-        SetupField::RoomTimezone | SetupField::DiaryBoundaryHour | SetupField::NotebookRoot => {
-            validate_optional(
-                OptionalSection::Room,
-                &session.optional_draft(OptionalSection::Room),
-            )
-        }
+        SetupField::RoomTimezone
+        | SetupField::DiaryBoundaryHour
+        | SetupField::RepositoryRoot
+        | SetupField::RoomMaintenanceMode
+        | SetupField::RoomMaintenanceAutoPush => validate_optional(
+            OptionalSection::Room,
+            &session.optional_draft(OptionalSection::Room),
+        ),
         SetupField::TunnelClientVersion
         | SetupField::TunnelCacheDir
         | SetupField::TunnelAutoDownload
@@ -423,7 +533,8 @@ pub(super) fn validate_optional_draft(
     draft: &OptionalSectionDraft,
 ) -> Result<(), ValidationErrors> {
     let section = draft.section();
-    if !section_is_legal(section, session.selected_mode(), session.selected_profile()) {
+    let toolsets = session.effective_toolsets();
+    if !section_is_legal(section, session.selected_mode(), &toolsets) {
         return Err(vec![error(
             first_field(section),
             "config_init_optional_section_invalid",
@@ -515,6 +626,16 @@ fn validate_optional(section: OptionalSection, draft: &OptionalSectionDraft) -> 
                 ));
             }
         }
+        (OptionalSection::Toolsets, OptionalSectionDraft::Toolsets(value)) => {
+            if value
+                .selection
+                .selected()
+                .iter()
+                .any(|name| ToolNamespace::parse(name).is_err())
+            {
+                errors.push(error(SetupField::Toolsets, "config_init_toolsets_invalid"));
+            }
+        }
         (OptionalSection::McpServers, OptionalSectionDraft::McpServers(value)) => {
             if let Err(mcp_errors) = mcp_servers_from_draft(&value.servers) {
                 errors.extend(mcp_errors);
@@ -533,6 +654,12 @@ fn validate_optional(section: OptionalSection, draft: &OptionalSectionDraft) -> 
                     SetupField::DiaryBoundaryHour,
                     "config_init_number_invalid: diary_boundary_hour",
                 )),
+            }
+            if !matches!(value.maintenance_mode.trim(), "local" | "workflow") {
+                errors.push(error(
+                    SetupField::RoomMaintenanceMode,
+                    "config_init_room_maintenance_mode_invalid",
+                ));
             }
         }
         (OptionalSection::TunnelClient, OptionalSectionDraft::TunnelClient(value)) => {
@@ -754,6 +881,7 @@ fn configured_draft(
             .map(OptionalSectionDraft::Confirmation),
         OptionalSection::Limits => drafts.limits.clone().map(OptionalSectionDraft::Limits),
         OptionalSection::Sandbox => drafts.sandbox.clone().map(OptionalSectionDraft::Sandbox),
+        OptionalSection::Toolsets => drafts.toolsets.clone().map(OptionalSectionDraft::Toolsets),
         OptionalSection::McpServers => drafts
             .mcp_servers
             .clone()
@@ -917,6 +1045,12 @@ fn apply_optional_draft(
                 required_runtime_paths,
             });
         }
+        (OptionalSection::Toolsets, OptionalSectionDraft::Toolsets(value)) => {
+            input.toolsets =
+                Some(value.to_config().map_err(|_| {
+                    vec![error(SetupField::Toolsets, "config_init_toolsets_invalid")]
+                })?);
+        }
         (OptionalSection::McpServers, OptionalSectionDraft::McpServers(value)) => {
             input.mcp_servers = Some(mcp_servers_from_draft(&value.servers)?);
         }
@@ -928,10 +1062,24 @@ fn apply_optional_draft(
                         "config_init_number_invalid: diary_boundary_hour",
                     )]
                 })?;
+            let maintenance_mode = match value.maintenance_mode.trim() {
+                "local" => RoomMaintenanceMode::Local,
+                "workflow" => RoomMaintenanceMode::Workflow,
+                _ => {
+                    return Err(vec![error(
+                        SetupField::RoomMaintenanceMode,
+                        "config_init_room_maintenance_mode_invalid",
+                    )])
+                }
+            };
             input.room = Some(RoomConfig {
-                notebook_root: optional_path(&value.notebook_root),
+                repository_root: optional_path(&value.repository_root),
                 timezone: value.timezone.trim().to_string(),
                 diary_day_boundary_hour,
+                maintenance: RoomMaintenanceConfig {
+                    mode: maintenance_mode,
+                    auto_push: value.maintenance_auto_push,
+                },
                 skills: default_room_config().skills,
             });
         }
@@ -1006,8 +1154,8 @@ fn map_build_error(session: &SetupSession, code: String) -> ValidationError {
             (SetupField::TunnelSha256, "tunnel_download_sha256_required")
         }
         "tunnel_sha256_invalid" => (SetupField::TunnelSha256, "tunnel_sha256_invalid"),
-        "room_config_requires_room_profile" => {
-            (SetupField::Profile, "room_config_requires_room_profile")
+        "room_config_requires_room_toolset" => {
+            (SetupField::Toolsets, "room_config_requires_room_toolset")
         }
         _ => (
             match session.selected_mode() {
@@ -1028,6 +1176,7 @@ fn first_field(section: OptionalSection) -> SetupField {
         OptionalSection::Confirmation => SetupField::ConfirmationChannels,
         OptionalSection::Limits => SetupField::MaxConcurrentTasks,
         OptionalSection::Sandbox => SetupField::SandboxEnabled,
+        OptionalSection::Toolsets => SetupField::Toolsets,
         OptionalSection::McpServers => SetupField::McpServerId,
         OptionalSection::Room => SetupField::RoomTimezone,
         OptionalSection::TunnelClient => SetupField::TunnelClientVersion,

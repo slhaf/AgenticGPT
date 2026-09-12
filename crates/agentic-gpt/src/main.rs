@@ -8,7 +8,6 @@ mod config_setup;
 mod config_templates;
 mod config_tui;
 mod confirmation;
-mod diary;
 mod exec;
 mod file_ops;
 mod hub;
@@ -18,10 +17,13 @@ mod jobs;
 mod local_control;
 mod local_service;
 mod mcp;
-mod notebook;
 mod notify;
 mod policy;
 mod private_state;
+mod room_maintenance;
+mod room_reads;
+mod room_repository;
+
 mod skill_installs;
 mod skills;
 mod state;
@@ -277,6 +279,9 @@ fn build_app_state(
     runtime: RuntimeModel,
     supervised: bool,
 ) -> Result<AppState> {
+    if config.toolsets.is_enabled(config::ToolNamespace::Room) {
+        room_repository::ensure_repository(&config)?;
+    }
     let max_concurrent_skill_installs = config.skills.max_concurrent_installs;
     let prepared = private_state::prepare(&config)?;
     for warning in &prepared.warnings {
@@ -301,7 +306,7 @@ fn build_app_state(
         pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
         temporary_mcp_allows: Arc::new(Mutex::new(Vec::new())),
         mcp_concurrency: Arc::new(jobs::McpConcurrency::new()),
-        notebook_writes: Arc::new(Mutex::new(())),
+        room_repository_writes: Arc::new(Mutex::new(())),
         skills_writes: Arc::new(Mutex::new(())),
         skill_leases: Arc::new(jobs::SkillLeaseManager::new()),
         skill_installs: Arc::new(skill_installs::InstallManager::with_concurrency(
@@ -607,6 +612,11 @@ async fn reload_standalone_live_config_once(
         crate::state::Transport::LocalUnix => candidate.validate_local()?,
         crate::state::Transport::Hub => candidate.validate_mcp_servers()?,
     }
+    let live_room_enabled = live.toolsets.is_enabled(config::ToolNamespace::Room);
+    let candidate_room_enabled = candidate.toolsets.is_enabled(config::ToolNamespace::Room);
+    if candidate_room_enabled && !live_room_enabled {
+        room_repository::ensure_repository(&live)?;
+    }
     Ok(apply_standalone_live_subset(&mut live, candidate))
 }
 
@@ -619,6 +629,7 @@ fn apply_standalone_live_subset(
     live.path_policy = candidate.path_policy;
     live.limits = candidate.limits;
     live.mcp_servers = candidate.mcp_servers;
+    live.toolsets = candidate.toolsets;
     resolved
 }
 
@@ -642,8 +653,7 @@ mod tests {
     use crate::exec::PreparedBatchElement;
     use crate::mcp::McpServerConfig;
     use agentic_gpt_protocol::{
-        AgentMessage, BootstrapReadRequest, HubCommand, NotebookAppendRequest,
-        NotebookRemoveRequest, NotebookUpdateRequest, PassageSignificance,
+        AgentMessage, BootstrapReadRequest, HubCommand, NotebookAppendRequest, PassageSignificance,
     };
     use tokio::sync::mpsc;
     use uuid::Uuid;
@@ -677,12 +687,12 @@ mod tests {
     }
 
     #[test]
-    fn run_as_room_reuses_same_base_config_identity_and_workspace() {
+    fn run_as_room_uses_workspace_default_repository_root() {
         let config = Config::default_config().unwrap();
         assert_eq!(config.agent_id, "laptop");
         assert_eq!(
-            notebook::notebook_root(&config),
-            config.workspace_root.join("notebook")
+            room_repository::repository_root(&config),
+            config.workspace_root.join("room")
         );
     }
 
@@ -753,11 +763,11 @@ mod tests {
     }
 
     #[test]
-    fn configured_room_notebook_root_overrides_default() {
+    fn configured_room_repository_root_overrides_default() {
         let mut config = Config::default_config().unwrap();
-        let root = unique_temp_dir("configured-notebook-root");
-        config.room.notebook_root = Some(root.clone());
-        assert_eq!(notebook::notebook_root(&config), root);
+        let root = unique_temp_dir("configured-room-repository");
+        config.room.repository_root = Some(root.clone());
+        assert_eq!(room_repository::repository_root(&config), root);
     }
 
     #[test]
@@ -772,12 +782,12 @@ mod tests {
     }
 
     #[test]
-    fn normal_mode_room_command_error_is_structured() {
-        let value = hub::room_agent_required_error();
-        assert_eq!(value["error"]["code"], "room_agent_required");
+    fn room_toolset_required_error_is_structured() {
+        let value = hub::room_toolset_required_error();
+        assert_eq!(value["error"]["code"], "room_toolset_required");
         assert_eq!(
             value["error"]["message"],
-            "room commands require profile=room in config"
+            "room commands require toolsets.room to be enabled"
         );
     }
 
@@ -786,6 +796,11 @@ mod tests {
         workspace_root: PathBuf,
     ) -> (AppState, mpsc::UnboundedReceiver<AgentMessage>) {
         let mut config = Config::default_config().unwrap();
+        config.toolsets = if profile == CapabilityProfile::Room {
+            config::ToolsetConfig::room()
+        } else {
+            config::ToolsetConfig::normal()
+        };
         config.workspace_root = workspace_root;
         let (tx, rx) = mpsc::unbounded_channel();
         (
@@ -812,7 +827,7 @@ mod tests {
                 pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
                 temporary_mcp_allows: Arc::new(Mutex::new(Vec::new())),
                 mcp_concurrency: Arc::new(crate::jobs::McpConcurrency::new()),
-                notebook_writes: Arc::new(Mutex::new(())),
+                room_repository_writes: Arc::new(Mutex::new(())),
                 skills_writes: Arc::new(Mutex::new(())),
                 skill_leases: Arc::new(jobs::SkillLeaseManager::new()),
                 skill_installs: Arc::new(skill_installs::InstallManager::new()),
@@ -830,47 +845,50 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn normal_mode_rejects_update_and_remove_room_commands() {
-        let workspace = unique_temp_dir("normal-room-update-remove").join("workspace");
-        fs::create_dir_all(&workspace).unwrap();
-        let (state, mut rx) = command_test_state(CapabilityProfile::Normal, workspace);
-        hub::handle_hub_command(
-            state.clone(),
-            HubCommand::RoomNotebookUpdate {
-                request_id: "req-update".to_string(),
-                payload: NotebookUpdateRequest {
-                    id: "psg_1".to_string(),
-                    significance: None,
-                    abstract_text: Some("updated".to_string()),
-                    content: None,
-                    tags: None,
-                },
-            },
-            None,
+    async fn normal_runtime_follows_live_room_toolset_for_bootstrap_dispatch() {
+        let workspace = unique_temp_dir("normal-live-room-bootstrap").join("workspace");
+        let guides = workspace.join("bootstrap").join("guides");
+        fs::create_dir_all(&guides).unwrap();
+        fs::write(
+            workspace.join("bootstrap").join("bootstrap.md"),
+            "---\nid: room\nkind: entrypoint\nname: Room\ndescription: Route guides\nschemaVersion: 1\n---\nstart\n",
         )
-        .await
         .unwrap();
-        let response = recv_response(&mut rx).await;
-        assert_eq!(response["error"]["code"], "room_agent_required");
+        fs::write(
+            guides.join("guide.md"),
+            "---\nid: guide\nkind: guide\ntitle: Guide\nsummary: Use guide\n---\nbody\n",
+        )
+        .unwrap();
+        let (state, _rx) = command_test_state(CapabilityProfile::Normal, workspace);
 
-        hub::handle_hub_command(
-            state,
-            HubCommand::RoomNotebookRemove {
-                request_id: "req-remove".to_string(),
-                payload: NotebookRemoveRequest {
-                    id: "psg_1".to_string(),
-                },
+        let disabled = local_service::dispatch(
+            state.clone(),
+            HubCommand::RoomBootstrap {
+                request_id: "req-disabled".to_string(),
             },
-            None,
         )
         .await
         .unwrap();
-        let response = recv_response(&mut rx).await;
-        assert_eq!(response["error"]["code"], "room_agent_required");
+        assert_eq!(disabled["error"]["code"], "room_toolset_required");
+
+        let mut config = state.config.read().await.clone();
+        config.toolsets.enable(config::ToolNamespace::Room);
+        *state.config.write().await = config;
+
+        let enabled = local_service::dispatch(
+            state,
+            HubCommand::RoomBootstrap {
+                request_id: "req-enabled".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(enabled["entrypoint"]["id"], "room");
+        assert_eq!(enabled["guides"][0]["id"], "guide");
     }
 
     #[tokio::test]
-    async fn hub_adapter_and_local_dispatcher_share_capability_errors() {
+    async fn hub_adapter_and_local_dispatcher_share_toolset_errors() {
         let workspace = unique_temp_dir("dispatcher-parity").join("workspace");
         fs::create_dir_all(&workspace).unwrap();
         let (state, mut rx) = command_test_state(CapabilityProfile::Normal, workspace);
@@ -884,44 +902,7 @@ mod tests {
         hub::handle_hub_command(state, command, None).await.unwrap();
         let adapted = recv_response(&mut rx).await;
         assert_eq!(direct, adapted);
-        assert_eq!(direct["error"]["code"], "room_agent_required");
-    }
-
-    #[tokio::test]
-    async fn normal_mode_rejects_bootstrap_commands() {
-        let workspace = unique_temp_dir("normal-room-bootstrap").join("workspace");
-        fs::create_dir_all(&workspace).unwrap();
-        let (state, mut rx) = command_test_state(CapabilityProfile::Normal, workspace);
-        hub::handle_hub_command(
-            state.clone(),
-            HubCommand::RoomBootstrap {
-                request_id: "req-bootstrap".to_string(),
-            },
-            None,
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            recv_response(&mut rx).await["error"]["code"],
-            "room_agent_required"
-        );
-
-        hub::handle_hub_command(
-            state,
-            HubCommand::RoomBootstrapRead {
-                request_id: "req-bootstrap-read".to_string(),
-                payload: BootstrapReadRequest {
-                    id: "guide".to_string(),
-                },
-            },
-            None,
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            recv_response(&mut rx).await["error"]["code"],
-            "room_agent_required"
-        );
+        assert_eq!(direct["error"]["code"], "room_toolset_required");
     }
 
     #[tokio::test]
@@ -976,33 +957,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn room_mode_executes_update_and_remove_room_commands() {
-        let workspace = unique_temp_dir("room-update-remove").join("workspace");
+    async fn room_mode_rejects_legacy_jsonl_commands() {
+        let workspace = unique_temp_dir("room-legacy-rejected").join("workspace");
         fs::create_dir_all(&workspace).unwrap();
         let (state, mut rx) = command_test_state(CapabilityProfile::Room, workspace);
-        let appended = notebook::append(
-            &state,
-            NotebookAppendRequest {
-                datetime: None,
-                scope: "agentic".to_string(),
-                significance: PassageSignificance::Anchor,
-                abstract_text: Some("original".to_string()),
-                content: "details".to_string(),
-                tags: vec![],
-            },
-        )
-        .await
-        .unwrap();
+
         hub::handle_hub_command(
-            state.clone(),
-            HubCommand::RoomNotebookUpdate {
-                request_id: "req-update".to_string(),
-                payload: NotebookUpdateRequest {
-                    id: appended.id.clone(),
-                    significance: None,
-                    abstract_text: Some("updated".to_string()),
-                    content: Some("updated details".to_string()),
-                    tags: Some(vec!["tag".to_string()]),
+            state,
+            HubCommand::RoomNotebookAppend {
+                request_id: "req-legacy".to_string(),
+                payload: NotebookAppendRequest {
+                    datetime: None,
+                    scope: "agentic".to_string(),
+                    significance: PassageSignificance::Anchor,
+                    abstract_text: None,
+                    content: "legacy".to_string(),
+                    tags: Vec::new(),
                 },
             },
             None,
@@ -1010,21 +980,7 @@ mod tests {
         .await
         .unwrap();
         let response = recv_response(&mut rx).await;
-        assert_eq!(response["updated"], true);
-        assert_eq!(response["id"], appended.id);
-
-        hub::handle_hub_command(
-            state,
-            HubCommand::RoomNotebookRemove {
-                request_id: "req-remove".to_string(),
-                payload: NotebookRemoveRequest { id: appended.id },
-            },
-            None,
-        )
-        .await
-        .unwrap();
-        let response = recv_response(&mut rx).await;
-        assert_eq!(response["removed"], true);
+        assert_eq!(response["error"]["code"], "room_legacy_surface_removed");
     }
 
     #[test]
@@ -1694,6 +1650,7 @@ mod tests {
             },
         );
 
+        let candidate_toolsets = candidate.toolsets.clone();
         let resolved = apply_standalone_live_subset(&mut live, candidate);
 
         assert_eq!(live.agent_id, original_agent_id);
@@ -1713,6 +1670,7 @@ mod tests {
             config::MaxActiveJobs::Explicit(9)
         );
         assert_eq!(live.limits.max_file_search_context_lines, 20);
+        assert_eq!(live.toolsets, candidate_toolsets);
         assert_eq!(
             live.mcp_servers["primary"].url.as_deref(),
             Some("https://new.example/mcp")
@@ -1779,6 +1737,7 @@ mod tests {
         let live_after_valid = state.config.read().await.clone();
         assert_eq!(live_after_valid.mcp_servers, valid.mcp_servers);
         assert_eq!(live_after_valid.limits.max_file_search_context_lines, 20);
+        assert_eq!(live_after_valid.toolsets, valid.toolsets);
 
         let mut invalid = valid;
         invalid.mcp_servers.get_mut("primary").unwrap().transport = "sse".to_string();
@@ -1794,6 +1753,80 @@ mod tests {
             "invalid disk changes must not partially replace the live map"
         );
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn standalone_live_reload_bootstraps_room_repository_before_maintenance_submit(
+    ) -> anyhow::Result<()> {
+        let root = unique_temp_dir("standalone-live-room-reload");
+        let config_path = root.join("config.json");
+        let workspace = root.join("workspace");
+        fs::create_dir_all(&workspace)?;
+        let (mut state, _rx) = command_test_state(CapabilityProfile::Normal, workspace.clone());
+        state.config_path.clone_from(&config_path);
+        state.runtime = RuntimeModel::tunnel(CapabilityProfile::Normal, false);
+        let mut initial = state.config.read().await.clone();
+        initial.workspace_root = workspace.clone();
+        initial.tunnel = Some(TunnelConfig {
+            tunnel_id: "tunnel_test".to_string(),
+            api_key: "env:AGENTIC_TUNNEL_API_KEY".to_string(),
+            ..TunnelConfig::default()
+        });
+        let live_room_root = workspace.join("room-live");
+        let candidate_room_root = workspace.join("room-candidate");
+        initial.room.repository_root = Some(live_room_root.clone());
+        assert!(!initial.toolsets.is_enabled(config::ToolNamespace::Room));
+        assert!(!room_repository::repository_root(&initial).exists());
+        *state.config.write().await = initial.clone();
+
+        let mut candidate = initial.clone();
+        candidate.room.repository_root = Some(candidate_room_root.clone());
+        candidate.toolsets.enable(config::ToolNamespace::Room);
+        fs::write(&config_path, serde_json::to_vec_pretty(&candidate)?)?;
+
+        reload_standalone_live_config_once(&state).await?;
+
+        let live = state.config.read().await.clone();
+        assert_eq!(live.room, initial.room);
+        assert!(!candidate_room_root.exists());
+        let room_root = room_repository::repository_root(&live);
+        assert_eq!(room_root, live_room_root);
+        assert!(room_root.join(".git").is_dir());
+        for relative in room_repository::scaffold_paths() {
+            assert!(
+                room_root.join(relative).is_file(),
+                "missing Room scaffold file: {relative}"
+            );
+        }
+
+        let response = room_maintenance::submit(
+            &state,
+            agentic_gpt_protocol::RoomMaintenanceSubmitRequest {
+                items: vec![agentic_gpt_protocol::RoomMaintenanceRequestItem {
+                    slot: agentic_gpt_protocol::RoomMaintenanceSlot::Notebook,
+                    payload: serde_json::json!({
+                        "path": "Notebook/live-reload.md",
+                        "title": "Live reload",
+                        "body": "Bootstrapped",
+                    }),
+                }],
+                mode: Some(agentic_gpt_protocol::RoomMaintenanceExecutionMode::Local),
+                wait_seconds: None,
+            },
+        )
+        .await?;
+        assert_eq!(
+            response.state,
+            agentic_gpt_protocol::RoomMaintenanceSubmissionState::Applied
+        );
+        assert!(response.local_applied);
+        assert_eq!(
+            fs::read_to_string(room_root.join("Notebook/live-reload.md"))?,
+            "# Live reload\n\nBootstrapped\n"
+        );
+
+        let _ = fs::remove_dir_all(root);
+        Ok(())
     }
 
     #[tokio::test]
