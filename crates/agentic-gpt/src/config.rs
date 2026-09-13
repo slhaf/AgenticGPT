@@ -1719,9 +1719,7 @@ pub(crate) fn parse_http_mcp_allow_hosts(value: &str) -> Result<Option<Vec<Strin
 pub(crate) fn validate_http_mcp_bearer_token(reference: &str) -> Result<()> {
     if reference.is_empty()
         || reference.trim() != reference
-        || reference
-            .chars()
-            .any(|character| character.is_whitespace() || character.is_control())
+        || reference.chars().any(char::is_control)
     {
         return Err(anyhow!("http_mcp_bearer_token_reference_invalid"));
     }

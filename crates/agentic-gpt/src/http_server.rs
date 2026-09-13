@@ -144,6 +144,13 @@ async fn reconcile(
         }
     }
 
+    let rebind_same_address = active.as_ref().is_some_and(|server| {
+        server.endpoint.host == endpoint.host && server.endpoint.port == endpoint.port
+    });
+    if rebind_same_address {
+        stop_active(active).await;
+    }
+
     let listener = match TcpListener::bind((desired.host.as_str(), desired.port)).await {
         Ok(listener) => listener,
         Err(error) => {
