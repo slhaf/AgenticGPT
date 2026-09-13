@@ -1,12 +1,41 @@
+use crate::browser_runtime::NodeReplLaunchSpec;
 use anyhow::{anyhow, Result};
 use rmcp::{
     model::{
-        CallToolRequestParams, CallToolResult, ClientInfo, JsonObject, Meta, RequestParamsMeta,
+        CallToolRequestParams, CallToolResult, ClientCapabilities, ClientInfo, Implementation,
+        JsonObject, Meta, ProtocolVersion, RequestParamsMeta,
     },
     service::RunningService,
-    RoleClient,
+    transport::TokioChildProcess,
+    RoleClient, ServiceExt,
 };
 use serde_json::{json, Map, Value};
+use std::time::Duration;
+
+fn node_repl_client_info() -> ClientInfo {
+    ClientInfo::new(
+        ClientCapabilities::default(),
+        Implementation::new("agentic-browser-runtime", env!("CARGO_PKG_VERSION")),
+    )
+    .with_protocol_version(ProtocolVersion::V_2025_06_18)
+}
+
+fn command_from_launch_spec(spec: &NodeReplLaunchSpec) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new(&spec.program);
+    command.current_dir(&spec.cwd);
+    command.envs(&spec.env_overrides);
+    command
+}
+
+fn validate_ids(session_id: &str, turn_id: &str) -> Result<()> {
+    if session_id.trim().is_empty() {
+        return Err(anyhow!("browser_runtime_session_id_invalid"));
+    }
+    if turn_id.trim().is_empty() {
+        return Err(anyhow!("browser_runtime_turn_id_invalid"));
+    }
+    Ok(())
+}
 
 pub(crate) struct NodeReplKernel {
     client: RunningService<RoleClient, ClientInfo>,
@@ -20,17 +49,48 @@ impl NodeReplKernel {
         session_id: String,
         turn_id: String,
     ) -> Result<NodeReplKernel> {
-        if session_id.trim().is_empty() {
-            return Err(anyhow!("browser_runtime_session_id_invalid"));
-        }
-        if turn_id.trim().is_empty() {
-            return Err(anyhow!("browser_runtime_turn_id_invalid"));
-        }
+        validate_ids(&session_id, &turn_id)?;
         Ok(Self {
             client,
             session_id,
             turn_id,
         })
+    }
+
+    pub(crate) async fn spawn(
+        spec: &NodeReplLaunchSpec,
+        session_id: String,
+        turn_id: String,
+    ) -> Result<NodeReplKernel> {
+        validate_ids(&session_id, &turn_id)?;
+
+        let command = command_from_launch_spec(spec);
+        let transport = TokioChildProcess::new(command)
+            .map_err(|error| anyhow!("browser_runtime_node_repl_spawn_failed:{error}"))?;
+        let client = match tokio::time::timeout(
+            Duration::from_secs(10),
+            node_repl_client_info().serve(transport),
+        )
+        .await
+        {
+            Ok(Ok(client)) => client,
+            Ok(Err(error)) => {
+                return Err(anyhow!(
+                    "browser_runtime_node_repl_initialize_failed:{error}"
+                ));
+            }
+            Err(_) => return Err(anyhow!("browser_runtime_node_repl_initialize_timeout")),
+        };
+
+        Self::from_initialized_client(client, session_id, turn_id)
+    }
+
+    pub(crate) async fn shutdown(self) -> Result<()> {
+        match tokio::time::timeout(Duration::from_secs(6), self.client.cancel()).await {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(error)) => Err(anyhow!("browser_runtime_node_repl_shutdown_failed:{error}")),
+            Err(_) => Err(anyhow!("browser_runtime_node_repl_shutdown_timeout")),
+        }
     }
 
     pub(crate) async fn js(&mut self, code: &str, timeout_ms: u64) -> Result<CallToolResult> {
@@ -60,13 +120,16 @@ mod tests {
     use super::*;
     use rmcp::{
         model::{
-            CallToolRequestParams, Content, InitializeRequestParams, ServerCapabilities, ServerInfo,
+            CallToolRequestParams, ClientCapabilities, Content, InitializeRequestParams,
+            ProtocolVersion, ServerCapabilities, ServerInfo,
         },
         service::{RequestContext, RunningService},
         RoleServer, ServerHandler, ServiceExt,
     };
     use std::{
+        ffi::OsStr,
         future::Future,
+        path::PathBuf,
         sync::{
             atomic::{AtomicUsize, Ordering},
             Arc, Mutex,
@@ -92,6 +155,7 @@ mod tests {
         behavior: Behavior,
         calls: Arc<Mutex<Vec<RecordedCall>>>,
         initialize_count: Arc<AtomicUsize>,
+        initialize_protocol: Arc<Mutex<Option<ProtocolVersion>>>,
     }
 
     impl FakeNodeReplServer {
@@ -100,6 +164,7 @@ mod tests {
                 behavior,
                 calls: Arc::new(Mutex::new(Vec::new())),
                 initialize_count: Arc::new(AtomicUsize::new(0)),
+                initialize_protocol: Arc::new(Mutex::new(None)),
             }
         }
     }
@@ -112,6 +177,7 @@ mod tests {
         ) -> impl Future<Output = Result<rmcp::model::InitializeResult, rmcp::ErrorData>> + Send + '_
         {
             self.initialize_count.fetch_add(1, Ordering::SeqCst);
+            *self.initialize_protocol.lock().unwrap() = Some(request.protocol_version.clone());
             if context.peer.peer_info().is_none() {
                 context.peer.set_peer_info(request);
             }
@@ -156,7 +222,7 @@ mod tests {
             let running = server.serve(server_io).await.unwrap();
             running.waiting().await.unwrap();
         });
-        let client = ClientInfo::default().serve(client_io).await.unwrap();
+        let client = node_repl_client_info().serve(client_io).await.unwrap();
         (client, server_task)
     }
 
@@ -177,6 +243,79 @@ mod tests {
 
     fn metadata_values(meta: &Meta) -> &Value {
         &meta.0["x-codex-turn-metadata"]
+    }
+
+    #[test]
+    fn node_repl_client_info_uses_the_frozen_initialize_contract() {
+        let info = node_repl_client_info();
+
+        assert_eq!(info.protocol_version, ProtocolVersion::V_2025_06_18);
+        assert_eq!(info.capabilities, ClientCapabilities::default());
+        assert_eq!(info.client_info.name, "agentic-browser-runtime");
+        assert_eq!(info.client_info.version, env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn command_helper_uses_direct_program_cwd_and_env_overrides() {
+        let spec = NodeReplLaunchSpec {
+            program: PathBuf::from("/runtime/node-repl.mjs"),
+            cwd: PathBuf::from("/runtime"),
+            env_overrides: std::collections::BTreeMap::from([(
+                "CUSTOM_SETTING".to_string(),
+                "preserved".to_string(),
+            )]),
+        };
+        let command = command_from_launch_spec(&spec);
+        let command = command.as_std();
+
+        assert_eq!(command.get_program(), OsStr::new("/runtime/node-repl.mjs"));
+        assert_eq!(
+            command.get_current_dir(),
+            Some(PathBuf::from("/runtime").as_path())
+        );
+        assert!(command.get_args().next().is_none());
+        assert_eq!(
+            command
+                .get_envs()
+                .find(|(key, _)| *key == OsStr::new("CUSTOM_SETTING"))
+                .and_then(|(_, value)| value),
+            Some(OsStr::new("preserved"))
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_rejects_invalid_ids_before_attempting_process_creation() {
+        let spec = NodeReplLaunchSpec {
+            program: PathBuf::from("/definitely/missing/node-repl"),
+            cwd: PathBuf::from("."),
+            env_overrides: std::collections::BTreeMap::new(),
+        };
+
+        let error = match NodeReplKernel::spawn(&spec, " ".to_string(), "turn-1".to_string()).await
+        {
+            Ok(_) => panic!("invalid session id was accepted"),
+            Err(error) => error,
+        };
+        assert_eq!(error.to_string(), "browser_runtime_session_id_invalid");
+    }
+
+    #[tokio::test]
+    async fn impossible_executable_is_a_spawn_failure() {
+        let spec = NodeReplLaunchSpec {
+            program: PathBuf::from("/definitely/missing/node-repl"),
+            cwd: PathBuf::from("."),
+            env_overrides: std::collections::BTreeMap::new(),
+        };
+
+        let error =
+            match NodeReplKernel::spawn(&spec, "session-1".to_string(), "turn-1".to_string()).await
+            {
+                Ok(_) => panic!("missing executable unexpectedly spawned"),
+                Err(error) => error,
+            };
+        assert!(error
+            .to_string()
+            .starts_with("browser_runtime_node_repl_spawn_failed:"));
     }
 
     #[tokio::test]
@@ -269,6 +408,7 @@ mod tests {
         let server = FakeNodeReplServer::new(Behavior::Preserve);
         let calls = server.calls.clone();
         let initialize_count = server.initialize_count.clone();
+        let initialize_protocol = server.initialize_protocol.clone();
         let (client, server_task) = connected(server).await;
         let mut kernel = NodeReplKernel::from_initialized_client(
             client,
@@ -280,6 +420,10 @@ mod tests {
         kernel.js("first", 10).await.unwrap();
         kernel.js("second", 20).await.unwrap();
         assert_eq!(initialize_count.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            initialize_protocol.lock().unwrap().as_ref(),
+            Some(&ProtocolVersion::V_2025_06_18)
+        );
         let calls = calls.lock().unwrap();
         assert_eq!(calls.len(), 2);
         for call in calls.iter() {
@@ -289,6 +433,20 @@ mod tests {
             );
         }
         drop(kernel);
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_cleanly_terminates_an_in_memory_service() {
+        let (client, server_task) = connected(FakeNodeReplServer::new(Behavior::Preserve)).await;
+        let kernel = NodeReplKernel::from_initialized_client(
+            client,
+            "session-1".to_string(),
+            "turn-1".to_string(),
+        )
+        .unwrap();
+
+        kernel.shutdown().await.unwrap();
         server_task.await.unwrap();
     }
 
