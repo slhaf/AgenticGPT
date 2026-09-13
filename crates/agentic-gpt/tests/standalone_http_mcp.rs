@@ -345,6 +345,8 @@ fn run_env_scenario(root: &Path) -> Result<(), String> {
             .any(|name| name == "process.exec"),
         "invalid endpoint reload did not retain the last-good HTTP listener and toolset",
     )?;
+    drop(worker);
+    wait_for_tcp(&endpoint, false)?;
     Ok(())
 }
 
@@ -483,6 +485,7 @@ fn run_file_scenario(root: &Path) -> Result<(), String> {
     )?;
 
     drop(worker);
+    wait_for_tcp(&replacement_endpoint, false)?;
     Ok(())
 }
 
