@@ -1,6 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::LazyLock;
 
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
@@ -26,14 +26,7 @@ pub(crate) async fn collect(state: &AppState) -> Value {
         tokio::join!(async { state.hub_sender.lock().await.is_some() }, async {
             state.reporting_sender.lock().await.is_some()
         },);
-    let (freedesktop_available, freedesktop_actions) = tokio::time::timeout(
-        Duration::from_millis(250),
-        tokio::task::spawn_blocking(notify::detect_freedesktop_notification_support),
-    )
-    .await
-    .ok()
-    .and_then(|result| result.ok())
-    .unwrap_or((false, false));
+    let (freedesktop_available, freedesktop_actions) = freedesktop_notification_support();
     let ntfy_available = match state.runtime.transport {
         Transport::Hub => hub_sender,
         Transport::TunnelStdio => reporting_sender,
@@ -194,6 +187,19 @@ pub(crate) async fn collect(state: &AppState) -> Value {
             "issues": issues,
         },
     })
+}
+
+fn freedesktop_notification_support() -> (bool, bool) {
+    static SUPPORT: LazyLock<(bool, bool)> = LazyLock::new(|| {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            let _ = sender.send(notify::detect_freedesktop_notification_support());
+        });
+        receiver
+            .recv_timeout(std::time::Duration::from_millis(250))
+            .unwrap_or((false, false))
+    });
+    *SUPPORT
 }
 
 fn reporting_status(
