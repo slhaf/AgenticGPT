@@ -14,7 +14,7 @@ use rmcp::transport::streamable_http_server::{
 use tokio::{
     net::TcpListener,
     sync::{watch, RwLock},
-    task::{JoinError, JoinHandle},
+    task::JoinHandle,
     time::sleep,
 };
 use tokio_util::sync::CancellationToken;
@@ -60,13 +60,15 @@ struct ActiveHttpServer {
 
 enum WaitEvent {
     Changed(bool),
-    Finished(std::result::Result<Result<()>, JoinError>),
+    Finished,
+    Shutdown,
     Retry,
 }
 
 pub(crate) async fn run(
     state: AppState,
     mut updates: watch::Receiver<HttpMcpConfig>,
+    shutdown: CancellationToken,
 ) -> Result<()> {
     let mut active = None;
     loop {
@@ -75,28 +77,27 @@ pub(crate) async fn run(
 
         let event = if let Some(server) = active.as_mut() {
             tokio::select! {
-                result = &mut server.task => WaitEvent::Finished(result),
+                _result = &mut server.task => WaitEvent::Finished,
                 changed = updates.changed() => WaitEvent::Changed(changed.is_ok()),
+                _ = shutdown.cancelled() => WaitEvent::Shutdown,
                 _ = sleep(RETRY_INTERVAL) => WaitEvent::Retry,
             }
         } else {
             tokio::select! {
                 changed = updates.changed() => WaitEvent::Changed(changed.is_ok()),
+                _ = shutdown.cancelled() => WaitEvent::Shutdown,
                 _ = sleep(RETRY_INTERVAL) => WaitEvent::Retry,
             }
         };
 
         match event {
             WaitEvent::Changed(true) | WaitEvent::Retry => {}
-            WaitEvent::Changed(false) => {
+            WaitEvent::Changed(false) | WaitEvent::Shutdown => {
                 stop_active(&mut active).await;
                 return Ok(());
             }
-            WaitEvent::Finished(result) => {
+            WaitEvent::Finished => {
                 stop_active(&mut active).await;
-                if result.is_err() || result.is_ok_and(|result| result.is_err()) {
-                    return Err(anyhow!("http_mcp_server_task_failed"));
-                }
                 return Err(anyhow!("http_mcp_server_task_failed"));
             }
         }

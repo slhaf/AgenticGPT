@@ -52,6 +52,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{watch, Mutex, RwLock};
 use tokio::time::{sleep, Duration};
+use tokio_util::sync::CancellationToken;
 use utils::{config_path, ensure_parent, log_info, log_warn};
 
 pub(crate) use config::{RuntimeMode, WorkerProfile};
@@ -261,19 +262,24 @@ async fn run_stdio_worker(
         tokio::spawn(hub::connect_loop(state.clone()));
     }
     let mut local_task = tokio::spawn(listener.serve(state.clone()));
-    let mut http_task = tokio::spawn(http_server::run(state.clone(), http_config));
+    let http_shutdown = CancellationToken::new();
+    let mut http_task = tokio::spawn(http_server::run(
+        state.clone(),
+        http_config,
+        http_shutdown.clone(),
+    ));
     let stdio = stdio_server::serve_stdio(state);
     tokio::pin!(stdio);
     tokio::select! {
         result = &mut stdio => {
             local_task.abort();
             let _ = local_task.await;
-            http_task.abort();
+            http_shutdown.cancel();
             let _ = http_task.await;
             result
         }
         result = &mut local_task => {
-            http_task.abort();
+            http_shutdown.cancel();
             let _ = http_task.await;
             match result {
                 Ok(result) => result,
