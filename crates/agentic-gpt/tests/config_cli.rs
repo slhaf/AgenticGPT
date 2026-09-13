@@ -726,6 +726,7 @@ fn config_set_http_mcp_updates_values_and_rejects_invalid_values_without_writing
     for (key, value) in [
         ("httpMcp.port", "0"),
         ("httpMcp.bearerToken", "literal-token-is-not-a-reference"),
+        ("httpMcp.bearerToken", "file:relative-token"),
         ("httpMcp.allowHosts", "[]"),
         ("httpMcp.allowHosts", r#"["*","localhost"]"#),
         ("httpMcp.allowHosts", r#"["bad/path"]"#),

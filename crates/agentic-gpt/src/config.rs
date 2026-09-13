@@ -1723,6 +1723,11 @@ pub(crate) fn validate_http_mcp_bearer_token(reference: &str) -> Result<()> {
     {
         return Err(anyhow!("http_mcp_bearer_token_reference_invalid"));
     }
+    if let Some(path) = reference.strip_prefix("file:") {
+        if !Path::new(path).is_absolute() {
+            return Err(anyhow!("http_mcp_bearer_token_reference_invalid"));
+        }
+    }
     validate_secret_reference(reference)
         .map_err(|_| anyhow!("http_mcp_bearer_token_reference_invalid"))
 }
@@ -2208,6 +2213,14 @@ mod tests {
         assert!(config.validate_standalone().is_ok());
         config.tunnel.as_mut().unwrap().api_key = "secret".to_string();
         assert!(config.validate_standalone().is_err());
+    }
+
+    #[test]
+    fn http_bearer_file_references_require_absolute_paths_without_tightening_tunnel_refs() {
+        assert!(validate_http_mcp_bearer_token("file:/run/secrets/http").is_ok());
+        assert!(validate_http_mcp_bearer_token("file:relative-token").is_err());
+        assert!(validate_http_mcp_bearer_token("file:~/secrets/http").is_err());
+        assert!(validate_secret_reference("file:relative-token").is_ok());
     }
 
     #[test]
