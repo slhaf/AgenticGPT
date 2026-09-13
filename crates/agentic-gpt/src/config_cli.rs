@@ -300,8 +300,8 @@ pub(crate) static CONFIG_KEYS: &[ConfigKeySpec] = &[
         HttpMcp,
         String,
         false,
-        "Bearer token reference; use file:PATH or env:NAME, never plaintext.",
-        "Bearer token 引用；使用 file:PATH 或 env:NAME，不能使用明文。",
+        "Bearer token reference; use file:/absolute/path or env:NAME, never plaintext.",
+        "Bearer token 引用；使用 file:/absolute/path 或 env:NAME，不能使用明文。",
         "env:HTTP_MCP_TOKEN",
         set_http_mcp_bearer_token
     ),

@@ -92,8 +92,8 @@ fn localized_error(code: &str, language: UiLanguage) -> String {
             "启用 HTTP MCP 时必须填写 Bearer token 引用。",
         ),
         "http_mcp_bearer_token_reference_invalid" => (
-            "Bearer token must be a file:PATH or env:NAME reference.",
-            "Bearer token 必须是 file:PATH 或 env:NAME 引用。",
+            "Bearer token must be a file:/absolute/path or env:NAME reference.",
+            "Bearer token 必须是 file:/absolute/path 或 env:NAME 引用。",
         ),
         "http_mcp_host_invalid" => (
             "HTTP MCP host is invalid.",
@@ -874,11 +874,11 @@ fn connection_inspector_body(
         Some(SetupField::HttpMcpBearerToken) => match language {
             UiLanguage::En => &[
                 "Bearer token reference used by inbound HTTP MCP authentication.",
-                "Use file:PATH or env:NAME only; the reference is masked in Review.",
+                "Use file:/absolute/path or env:NAME only; the reference is masked in Review.",
             ],
             UiLanguage::ZhCn => &[
                 "入站 HTTP MCP 认证使用的 Bearer token 引用。",
-                "只能使用 file:PATH 或 env:NAME；Review 中会隐藏此引用。",
+                "只能使用 file:/absolute/path 或 env:NAME；Review 中会隐藏此引用。",
             ],
         },
         Some(SetupField::HttpMcpAllowHosts) => match language {

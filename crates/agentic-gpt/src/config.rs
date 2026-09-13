@@ -1050,7 +1050,7 @@ impl Config {
             });
             if invalid_bearer_token {
                 warnings.push(
-                    "httpMcp.bearerToken (invalid secret reference; use file:PATH or env:NAME; cleared for import)"
+                    "httpMcp.bearerToken (invalid secret reference; use file:/absolute/path or env:NAME; cleared for import)"
                         .to_string(),
                 );
                 http_mcp.insert("bearerToken".to_string(), Value::String(String::new()));
