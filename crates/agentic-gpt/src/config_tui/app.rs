@@ -1760,6 +1760,28 @@ impl ConfigTuiApp {
             }
             return result;
         }
+        if field == SetupField::HttpMcpBearerToken {
+            let previous = self
+                .session_mut()
+                .standalone_mut()
+                .http_mcp_bearer_token
+                .replace(SecretValue::new(value));
+            let result = self.session().validate_field(field);
+            if result.is_err() {
+                self.session_mut().standalone_mut().http_mcp_bearer_token = previous;
+            }
+            return result;
+        }
+
+        if field == SetupField::HttpMcpEnabled {
+            let previous = self.session_mut().standalone_mut().http_mcp_enabled;
+            self.session_mut().standalone_mut().http_mcp_enabled = value == "true";
+            let result = self.session().validate_field(field);
+            if result.is_err() {
+                self.session_mut().standalone_mut().http_mcp_enabled = previous;
+            }
+            return result;
+        }
 
         let previous = match field {
             SetupField::TunnelId => Some(std::mem::replace(
@@ -1772,6 +1794,18 @@ impl ConfigTuiApp {
             )),
             SetupField::TunnelSecretEnvironment => Some(std::mem::replace(
                 &mut self.session_mut().standalone_mut().secret_environment,
+                value,
+            )),
+            SetupField::HttpMcpHost => Some(std::mem::replace(
+                &mut self.session_mut().standalone_mut().http_mcp_host,
+                value,
+            )),
+            SetupField::HttpMcpPort => Some(std::mem::replace(
+                &mut self.session_mut().standalone_mut().http_mcp_port,
+                value,
+            )),
+            SetupField::HttpMcpAllowHosts => Some(std::mem::replace(
+                &mut self.session_mut().standalone_mut().http_mcp_allow_hosts,
                 value,
             )),
             SetupField::HubUrl => Some(std::mem::replace(
@@ -1801,6 +1835,15 @@ impl ConfigTuiApp {
                 }
                 SetupField::TunnelSecretEnvironment => {
                     self.session_mut().standalone_mut().secret_environment = previous
+                }
+                SetupField::HttpMcpHost => {
+                    self.session_mut().standalone_mut().http_mcp_host = previous
+                }
+                SetupField::HttpMcpPort => {
+                    self.session_mut().standalone_mut().http_mcp_port = previous
+                }
+                SetupField::HttpMcpAllowHosts => {
+                    self.session_mut().standalone_mut().http_mcp_allow_hosts = previous
                 }
                 SetupField::HubUrl => self.session_mut().hub_mut().hub_url = previous,
                 SetupField::HubTransport => self.session_mut().hub_mut().hub_transport = previous,
@@ -2637,7 +2680,7 @@ mod tests {
     use std::rc::Rc;
 
     use crate::cli_i18n::UiLanguage;
-    use crate::config_setup::{SetupSeed, SetupSession, WizardOutcome};
+    use crate::config_setup::{SetupField, SetupSeed, SetupSession, WizardOutcome};
     use crate::config_templates::{InitSummary, RuntimeMode};
 
     use super::super::{Committer, ConfigPage, ConfigTuiApp, TuiAction};
@@ -2694,5 +2737,62 @@ mod tests {
 
         app.handle_action(TuiAction::Next).unwrap();
         assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn review_connection_applies_http_mcp_fields_and_rolls_back_invalid_edits() {
+        let mut app = ConfigTuiApp::new(SetupSession::new(
+            SetupSeed {
+                mode: Some(RuntimeMode::Standalone),
+                tunnel_id: Some("review-http-mcp-tunnel".into()),
+                tunnel_api_key: Some("file:/tmp/review-http-mcp-secret".into()),
+                ..SetupSeed::default()
+            },
+            UiLanguage::En,
+            PathBuf::from("/tmp/config-tui-review-http-mcp.json"),
+        ));
+        while app.page() != ConfigPage::Review {
+            app.handle_action(TuiAction::Next).unwrap();
+        }
+
+        app.apply_review_connection_value(SetupField::HttpMcpHost, "localhost".into())
+            .unwrap();
+        app.apply_review_connection_value(SetupField::HttpMcpPort, "9000".into())
+            .unwrap();
+        app.apply_review_connection_value(SetupField::HttpMcpAllowHosts, "null".into())
+            .unwrap();
+        app.apply_review_connection_value(
+            SetupField::HttpMcpBearerToken,
+            "env:REVIEW_HTTP_MCP_TOKEN".into(),
+        )
+        .unwrap();
+        app.apply_review_connection_value(SetupField::HttpMcpEnabled, "true".into())
+            .unwrap();
+
+        assert!(app.session().standalone().http_mcp_enabled);
+        assert_eq!(app.session().standalone().http_mcp_host, "localhost");
+        assert_eq!(app.session().standalone().http_mcp_port, "9000");
+        assert_eq!(app.session().standalone().http_mcp_allow_hosts, "null");
+        assert_eq!(
+            app.session()
+                .standalone()
+                .http_mcp_bearer_token
+                .as_ref()
+                .map(|value| value.expose()),
+            Some("env:REVIEW_HTTP_MCP_TOKEN")
+        );
+
+        assert!(app
+            .apply_review_connection_value(SetupField::HttpMcpHost, "http://bad".into())
+            .is_err());
+        assert_eq!(app.session().standalone().http_mcp_host, "localhost");
+        assert!(app
+            .apply_review_connection_value(SetupField::HttpMcpPort, "0".into())
+            .is_err());
+        assert_eq!(app.session().standalone().http_mcp_port, "9000");
+        assert!(app
+            .apply_review_connection_value(SetupField::HttpMcpAllowHosts, "[]".into())
+            .is_err());
+        assert_eq!(app.session().standalone().http_mcp_allow_hosts, "null");
     }
 }
