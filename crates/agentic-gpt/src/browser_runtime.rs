@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Result};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
@@ -15,6 +16,82 @@ pub(crate) struct BrowserRuntimeDescriptor {
     pub(crate) codex_cli_path: PathBuf,
     pub(crate) node_module_dirs: Vec<PathBuf>,
     pub(crate) docs_root: PathBuf,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct NodeReplLaunchSpec {
+    pub(crate) program: PathBuf,
+    pub(crate) cwd: PathBuf,
+    pub(crate) env_overrides: BTreeMap<String, String>,
+}
+
+pub(crate) fn build_node_repl_launch_spec(
+    runtime: &BrowserRuntimeDescriptor,
+    base_env: &BTreeMap<String, String>,
+) -> Result<NodeReplLaunchSpec> {
+    let cwd = runtime
+        .browser_client_path
+        .parent()
+        .and_then(Path::parent)
+        .filter(|path| {
+            path.components()
+                .any(|component| matches!(component, Component::Normal(_)))
+        })
+        .ok_or_else(|| anyhow!("browser_runtime_cwd_invalid"))?
+        .to_path_buf();
+
+    let node_path = path_to_env_string(&runtime.node_path, "node_path")?;
+    let codex_home = path_to_env_string(&runtime.codex_home, "codex_home")?;
+    let codex_cli_path = path_to_env_string(&runtime.codex_cli_path, "codex_cli_path")?;
+    let browser_service_path =
+        path_to_env_string(&runtime.browser_service_path, "browser_service_path")?;
+
+    let mut env_overrides = base_env.clone();
+    env_overrides.insert("NODE_REPL_NODE_PATH".to_string(), node_path);
+    env_overrides.insert("CODEX_HOME".to_string(), codex_home);
+    env_overrides.insert("CODEX_CLI_PATH".to_string(), codex_cli_path);
+    env_overrides.insert(
+        "BROWSER_USE_CODEX_APP_VERSION".to_string(),
+        runtime.app_version.clone(),
+    );
+    env_overrides.insert(
+        "BROWSER_USE_CODEX_APP_BUILD_FLAVOR".to_string(),
+        runtime.channel.clone(),
+    );
+
+    let mut trusted_services = match base_env.get("NODE_REPL_TRUSTED_SERVICES") {
+        Some(value) => serde_json::from_str(value)
+            .map_err(|_| anyhow!("browser_runtime_trusted_services_invalid"))?,
+        None => Value::Object(serde_json::Map::new()),
+    };
+    trusted_services
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("browser_runtime_trusted_services_invalid"))?
+        .insert("browser".to_string(), Value::String(browser_service_path));
+    let trusted_services = serde_json::to_string(&trusted_services)
+        .map_err(|_| anyhow!("browser_runtime_trusted_services_invalid"))?;
+    env_overrides.insert("NODE_REPL_TRUSTED_SERVICES".to_string(), trusted_services);
+
+    if !runtime.node_module_dirs.is_empty() {
+        let joined = std::env::join_paths(&runtime.node_module_dirs)
+            .map_err(|_| anyhow!("browser_runtime_node_module_dirs_invalid"))?;
+        let joined = joined
+            .to_str()
+            .ok_or_else(|| anyhow!("browser_runtime_path_not_utf8:node_module_dirs"))?;
+        env_overrides.insert("NODE_REPL_NODE_MODULE_DIRS".to_string(), joined.to_string());
+    }
+
+    Ok(NodeReplLaunchSpec {
+        program: runtime.node_repl_path.clone(),
+        cwd,
+        env_overrides,
+    })
+}
+
+fn path_to_env_string(path: &Path, field: &str) -> Result<String> {
+    path.to_str()
+        .map(ToString::to_string)
+        .ok_or_else(|| anyhow!("browser_runtime_path_not_utf8:{field}"))
 }
 
 pub(crate) fn default_desktop_registry_path() -> Result<PathBuf> {
@@ -183,6 +260,187 @@ mod tests {
         let result = discover_desktop_runtime(&path);
         let _ = fs::remove_file(path);
         result
+    }
+
+    fn launch_descriptor(include_node_module_dirs: bool) -> BrowserRuntimeDescriptor {
+        BrowserRuntimeDescriptor {
+            app_version: "2.3.4".to_string(),
+            channel: "stable".to_string(),
+            node_repl_path: PathBuf::from("/bundle/scripts/node-repl.mjs"),
+            node_path: PathBuf::from("/bundle/bin/node"),
+            browser_client_path: PathBuf::from("/bundle/scripts/browser-client.mjs"),
+            browser_service_path: PathBuf::from("/bundle/scripts/browser-service.mjs"),
+            codex_home: PathBuf::from("/bundle/codex"),
+            codex_cli_path: PathBuf::from("/bundle/bin/codex"),
+            node_module_dirs: if include_node_module_dirs {
+                vec![
+                    PathBuf::from("/bundle/node_modules"),
+                    PathBuf::from("/bundle/shared/node_modules"),
+                ]
+            } else {
+                Vec::new()
+            },
+            docs_root: PathBuf::from("/bundle/docs"),
+        }
+    }
+
+    #[test]
+    fn launch_spec_derives_program_and_cwd_from_descriptor() {
+        let runtime = launch_descriptor(true);
+        let spec = build_node_repl_launch_spec(&runtime, &BTreeMap::new()).unwrap();
+
+        assert_eq!(spec.program, runtime.node_repl_path);
+        assert_eq!(spec.cwd, PathBuf::from("/bundle"));
+    }
+
+    #[test]
+    fn launch_spec_overwrites_stale_runtime_coupled_values() {
+        let runtime = launch_descriptor(true);
+        let mut base_env = BTreeMap::new();
+        for key in [
+            "NODE_REPL_NODE_PATH",
+            "CODEX_HOME",
+            "CODEX_CLI_PATH",
+            "BROWSER_USE_CODEX_APP_VERSION",
+            "BROWSER_USE_CODEX_APP_BUILD_FLAVOR",
+            "NODE_REPL_NODE_MODULE_DIRS",
+        ] {
+            base_env.insert(key.to_string(), "stale".to_string());
+        }
+
+        let spec = build_node_repl_launch_spec(&runtime, &base_env).unwrap();
+
+        assert_eq!(
+            spec.env_overrides["NODE_REPL_NODE_PATH"],
+            "/bundle/bin/node"
+        );
+        assert_eq!(spec.env_overrides["CODEX_HOME"], "/bundle/codex");
+        assert_eq!(spec.env_overrides["CODEX_CLI_PATH"], "/bundle/bin/codex");
+        assert_eq!(spec.env_overrides["BROWSER_USE_CODEX_APP_VERSION"], "2.3.4");
+        assert_eq!(
+            spec.env_overrides["BROWSER_USE_CODEX_APP_BUILD_FLAVOR"],
+            "stable"
+        );
+        let expected = std::env::join_paths([
+            PathBuf::from("/bundle/node_modules"),
+            PathBuf::from("/bundle/shared/node_modules"),
+        ])
+        .unwrap()
+        .into_string()
+        .unwrap();
+        assert_eq!(spec.env_overrides["NODE_REPL_NODE_MODULE_DIRS"], expected);
+    }
+
+    #[test]
+    fn launch_spec_preserves_unrelated_base_environment() {
+        let runtime = launch_descriptor(false);
+        let base_env = BTreeMap::from([
+            ("CUSTOM_SETTING".to_string(), "preserved".to_string()),
+            (
+                "NODE_REPL_TRUSTED_CODE_PATHS".to_string(),
+                "/caller/path".to_string(),
+            ),
+        ]);
+
+        let spec = build_node_repl_launch_spec(&runtime, &base_env).unwrap();
+
+        assert_eq!(spec.env_overrides["CUSTOM_SETTING"], "preserved");
+        assert_eq!(
+            spec.env_overrides["NODE_REPL_TRUSTED_CODE_PATHS"],
+            "/caller/path"
+        );
+    }
+
+    #[test]
+    fn launch_spec_replaces_browser_trusted_service_and_preserves_others() {
+        let runtime = launch_descriptor(false);
+        let mut base_env = BTreeMap::new();
+        base_env.insert(
+            "NODE_REPL_TRUSTED_SERVICES".to_string(),
+            json!({ "browser": "stale", "other": "/other/service" }).to_string(),
+        );
+
+        let spec = build_node_repl_launch_spec(&runtime, &base_env).unwrap();
+        let trusted_services: Value =
+            serde_json::from_str(&spec.env_overrides["NODE_REPL_TRUSTED_SERVICES"]).unwrap();
+
+        assert_eq!(
+            trusted_services["browser"],
+            "/bundle/scripts/browser-service.mjs"
+        );
+        assert_eq!(trusted_services["other"], "/other/service");
+    }
+
+    #[test]
+    fn launch_spec_creates_browser_only_trusted_services_when_absent() {
+        let runtime = launch_descriptor(false);
+        let spec = build_node_repl_launch_spec(&runtime, &BTreeMap::new()).unwrap();
+        let trusted_services: Value =
+            serde_json::from_str(&spec.env_overrides["NODE_REPL_TRUSTED_SERVICES"]).unwrap();
+
+        assert_eq!(
+            trusted_services,
+            json!({
+                "browser": "/bundle/scripts/browser-service.mjs"
+            })
+        );
+    }
+
+    #[test]
+    fn launch_spec_rejects_invalid_trusted_services() {
+        let runtime = launch_descriptor(false);
+        for value in ["{", "[]", "null", "\"service\""] {
+            let base_env =
+                BTreeMap::from([("NODE_REPL_TRUSTED_SERVICES".to_string(), value.to_string())]);
+            let error = build_node_repl_launch_spec(&runtime, &base_env).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "browser_runtime_trusted_services_invalid"
+            );
+        }
+    }
+
+    #[test]
+    fn launch_spec_empty_node_module_dirs_preserves_base_value() {
+        let runtime = launch_descriptor(false);
+        let base_env = BTreeMap::from([(
+            "NODE_REPL_NODE_MODULE_DIRS".to_string(),
+            "caller/modules".to_string(),
+        )]);
+
+        let spec = build_node_repl_launch_spec(&runtime, &base_env).unwrap();
+
+        assert_eq!(
+            spec.env_overrides["NODE_REPL_NODE_MODULE_DIRS"],
+            "caller/modules"
+        );
+    }
+
+    #[test]
+    fn launch_spec_does_not_create_empty_node_module_dirs() {
+        let runtime = launch_descriptor(false);
+        let spec = build_node_repl_launch_spec(&runtime, &BTreeMap::new()).unwrap();
+
+        assert!(!spec
+            .env_overrides
+            .contains_key("NODE_REPL_NODE_MODULE_DIRS"));
+    }
+
+    #[test]
+    fn launch_spec_preserves_security_mode_without_inventing_it() {
+        let runtime = launch_descriptor(false);
+        let spec = build_node_repl_launch_spec(&runtime, &BTreeMap::new()).unwrap();
+        assert!(!spec.env_overrides.contains_key("BROWSER_USE_SECURITY_MODE"));
+
+        let base_env = BTreeMap::from([(
+            "BROWSER_USE_SECURITY_MODE".to_string(),
+            "caller-defined".to_string(),
+        )]);
+        let spec = build_node_repl_launch_spec(&runtime, &base_env).unwrap();
+        assert_eq!(
+            spec.env_overrides["BROWSER_USE_SECURITY_MODE"],
+            "caller-defined"
+        );
     }
 
     #[test]
