@@ -322,7 +322,7 @@ fn config_health(state: &AppState, effective: &Config) -> ConfigHealth {
             return invalid_config_health(modified_at);
         }
     };
-    if disk.validate_mcp_servers().is_err() {
+    if disk.validate_mcp_servers().is_err() || disk.validate_http_mcp().is_err() {
         return invalid_config_health(modified_at);
     }
     let live_subset_matches_disk = live_subset(effective) == live_subset(&disk);
@@ -362,6 +362,7 @@ fn live_subset(config: &Config) -> Value {
         "limits": config.limits,
         "mcpServers": config.mcp_servers,
         "toolsets": config.toolsets,
+        "httpMcp": config.http_mcp,
     })
 }
 

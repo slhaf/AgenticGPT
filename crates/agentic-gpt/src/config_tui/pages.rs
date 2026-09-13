@@ -87,6 +87,33 @@ fn localized_error(code: &str, language: UiLanguage) -> String {
             "Bearer token must be non-empty and contain no whitespace or control characters.",
             "Bearer 令牌不能为空，且不能包含空白或控制字符。",
         ),
+        "http_mcp_bearer_token_required" => (
+            "Enabled HTTP MCP requires a bearer token reference.",
+            "启用 HTTP MCP 时必须填写 Bearer token 引用。",
+        ),
+        "http_mcp_bearer_token_reference_invalid" => (
+            "Bearer token must be a file:PATH or env:NAME reference.",
+            "Bearer token 必须是 file:PATH 或 env:NAME 引用。",
+        ),
+        "http_mcp_host_invalid" => (
+            "HTTP MCP host is invalid.",
+            "HTTP MCP 主机地址无效。",
+        ),
+        "http_mcp_port_invalid" => (
+            "HTTP MCP port must be between 1 and 65535.",
+            "HTTP MCP 端口必须在 1 到 65535 之间。",
+        ),
+        "http_mcp_endpoint_invalid" | "http_mcp_host_or_port_invalid" => (
+            "HTTP MCP host or port is invalid.",
+            "HTTP MCP 主机或端口无效。",
+        ),
+        "http_mcp_allow_hosts_invalid"
+        | "http_mcp_allow_hosts_empty"
+        | "http_mcp_allow_hosts_wildcard_mixed"
+        | "http_mcp_allow_host_invalid" => (
+            "allowHosts must be null, [\"*\"], or a non-empty authority array.",
+            "allowHosts 必须是 null、[\"*\"] 或非空 authority 数组。",
+        ),
         "config_init_optional_section_invalid" => {
             ("Optional section is invalid.", "可选配置区块无效。")
         }
@@ -491,7 +518,10 @@ fn render_connection(
                 let confirmed_value = connection_value(session, field);
                 let value = confirmed_value.as_deref().unwrap_or_default();
                 let label = connection_label(field, None, language);
-                if field == SetupField::ProvisionTunnelSecret {
+                if matches!(
+                    field,
+                    SetupField::ProvisionTunnelSecret | SetupField::HttpMcpEnabled
+                ) {
                     if let Some(row) = next_surface_row(left, &mut cursor) {
                         frame.render_widget(
                             Paragraph::new(value_row_line(
@@ -514,7 +544,9 @@ fn render_connection(
                     let current_value = current_input_value(state, field, value);
                     let display_value = if matches!(
                         field,
-                        SetupField::TunnelSecretValue | SetupField::AgentSecret
+                        SetupField::TunnelSecretValue
+                            | SetupField::AgentSecret
+                            | SetupField::HttpMcpBearerToken
                     ) {
                         "•".repeat(current_value.chars().count())
                     } else {
@@ -618,7 +650,10 @@ fn render_connection_footer(
     let action = if action_focused {
         t(language, "continue", "继续")
     } else if connection_secret_source_for_focus(session, state.focus).is_some()
-        || field == Some(SetupField::ProvisionTunnelSecret)
+        || matches!(
+            field,
+            Some(SetupField::ProvisionTunnelSecret | SetupField::HttpMcpEnabled)
+        )
     {
         t(language, "toggle", "切换")
     } else {
@@ -806,6 +841,56 @@ fn connection_inspector_body(
                 "它不会进入配置 JSON；启用立即写入后不能为空。",
             ],
         },
+        Some(SetupField::HttpMcpEnabled) => match language {
+            UiLanguage::En => &[
+                "Enable the standalone inbound Streamable HTTP MCP endpoint.",
+                "Disabled by default; this setting does not change downstream mcpServers.",
+            ],
+            UiLanguage::ZhCn => &[
+                "启用 Standalone 入站 Streamable HTTP MCP 端点。",
+                "默认关闭；此设置不会改变下游 mcpServers。",
+            ],
+        },
+        Some(SetupField::HttpMcpHost) => match language {
+            UiLanguage::En => &[
+                "Host address where the standalone HTTP MCP listener binds.",
+                "Default: 127.0.0.1.",
+            ],
+            UiLanguage::ZhCn => &[
+                "Standalone HTTP MCP 监听器绑定的主机地址。",
+                "默认：127.0.0.1。",
+            ],
+        },
+        Some(SetupField::HttpMcpPort) => match language {
+            UiLanguage::En => &[
+                "TCP port where the standalone HTTP MCP listener binds.",
+                "Valid range: 1–65535. Default: 8765.",
+            ],
+            UiLanguage::ZhCn => &[
+                "Standalone HTTP MCP 监听器绑定的 TCP 端口。",
+                "有效范围：1–65535；默认：8765。",
+            ],
+        },
+        Some(SetupField::HttpMcpBearerToken) => match language {
+            UiLanguage::En => &[
+                "Bearer token reference used by inbound HTTP MCP authentication.",
+                "Use file:PATH or env:NAME only; the reference is masked in Review.",
+            ],
+            UiLanguage::ZhCn => &[
+                "入站 HTTP MCP 认证使用的 Bearer token 引用。",
+                "只能使用 file:PATH 或 env:NAME；Review 中会隐藏此引用。",
+            ],
+        },
+        Some(SetupField::HttpMcpAllowHosts) => match language {
+            UiLanguage::En => &[
+                "JSON authority allowlist for HTTP Host validation.",
+                "Use a non-empty array, null, or [\"*\"] for explicit unrestricted access.",
+            ],
+            UiLanguage::ZhCn => &[
+                "HTTP Host 校验使用的 JSON authority 白名单。",
+                "使用非空数组、null 或 [\"*\"] 明确允许全部主机。",
+            ],
+        },
         Some(SetupField::HubUrl) => match language {
             UiLanguage::En => &[
                 "Base URL of the Hub this agent connects to.",
@@ -894,6 +979,13 @@ pub(super) fn connection_focus_items(session: &SetupSession) -> Vec<ConnectionFo
                     ));
                 }
             }
+            items.extend([
+                ConnectionFocusItem::Field(SetupField::HttpMcpEnabled),
+                ConnectionFocusItem::Field(SetupField::HttpMcpHost),
+                ConnectionFocusItem::Field(SetupField::HttpMcpPort),
+                ConnectionFocusItem::Field(SetupField::HttpMcpBearerToken),
+                ConnectionFocusItem::Field(SetupField::HttpMcpAllowHosts),
+            ]);
             items
         }
         RuntimeMode::Hub => vec![
@@ -948,6 +1040,15 @@ fn connection_label(field: SetupField, _value: Option<&str>, language: UiLanguag
             t(language, "Provision secret now", "立即写入密钥").to_string()
         }
         SetupField::TunnelSecretValue => t(language, "Secret value", "密钥值").to_string(),
+        SetupField::HttpMcpEnabled => t(language, "HTTP MCP enabled", "启用 HTTP MCP").to_string(),
+        SetupField::HttpMcpHost => t(language, "HTTP MCP host", "HTTP MCP 主机").to_string(),
+        SetupField::HttpMcpPort => t(language, "HTTP MCP port", "HTTP MCP 端口").to_string(),
+        SetupField::HttpMcpBearerToken => {
+            t(language, "HTTP MCP bearer token", "HTTP MCP Bearer 令牌").to_string()
+        }
+        SetupField::HttpMcpAllowHosts => {
+            t(language, "HTTP MCP allowHosts", "HTTP MCP allowHosts").to_string()
+        }
         SetupField::HubUrl => t(language, "Hub URL", "Hub 地址").to_string(),
         SetupField::HubTransport => t(language, "Transport", "传输方式").to_string(),
         SetupField::AgentId => t(language, "Agent ID", "代理 ID").to_string(),
@@ -989,6 +1090,18 @@ pub(super) fn connection_value(session: &SetupSession, field: SetupField) -> Opt
                 .map(|secret| secret.expose().to_string())
                 .unwrap_or_default(),
         ),
+        SetupField::HttpMcpEnabled => Some(session.standalone().http_mcp_enabled.to_string()),
+        SetupField::HttpMcpHost => Some(session.standalone().http_mcp_host.clone()),
+        SetupField::HttpMcpPort => Some(session.standalone().http_mcp_port.clone()),
+        SetupField::HttpMcpBearerToken => Some(
+            session
+                .standalone()
+                .http_mcp_bearer_token
+                .as_ref()
+                .map(|secret| secret.expose().to_string())
+                .unwrap_or_default(),
+        ),
+        SetupField::HttpMcpAllowHosts => Some(session.standalone().http_mcp_allow_hosts.clone()),
         _ => None,
     }
 }

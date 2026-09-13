@@ -152,6 +152,7 @@ mod tests {
                 hub_transport: Some("websocket".to_string()),
                 agent_id: Some("desk".to_string()),
                 agent_secret: Some(SecretValue::new(marker)),
+                ..SetupSeed::default()
             },
             UiLanguage::En,
             PathBuf::from("/tmp/config.json"),
@@ -270,9 +271,10 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 
 use crate::config::{
-    self, default_room_config, ConfirmationProviderConfig, HubReportingConfig, LimitsConfig,
-    MaxActiveJobs, PathPolicyConfig, ReportingDetail, RoomConfig, RoomMaintenanceConfig,
-    RoomMaintenanceMode, SandboxConfig, ToolNamespace, ToolsetConfig, TunnelClientConfig,
+    self, default_room_config, ConfirmationProviderConfig, HttpMcpConfig, HubReportingConfig,
+    LimitsConfig, MaxActiveJobs, PathPolicyConfig, ReportingDetail, RoomConfig,
+    RoomMaintenanceConfig, RoomMaintenanceMode, SandboxConfig, ToolNamespace, ToolsetConfig,
+    TunnelClientConfig,
 };
 use crate::config_templates::{
     self, build_config, InitInput, OptionalSection, RuntimeMode, SecretValue, TunnelSecretSource,
@@ -334,11 +336,14 @@ pub(super) fn validate_basic(_session: &SetupSession) -> Result<(), ValidationEr
 pub(super) fn validate_connection(session: &SetupSession) -> Result<(), ValidationErrors> {
     let mut errors = Vec::new();
     match session.selected_mode() {
-        RuntimeMode::Standalone => validate_standalone(
-            session.standalone(),
-            session.tunnel_seed_error(),
-            &mut errors,
-        ),
+        RuntimeMode::Standalone => {
+            validate_standalone(
+                session.standalone(),
+                session.tunnel_seed_error(),
+                session.http_mcp_seed_error(),
+                &mut errors,
+            );
+        }
         RuntimeMode::Hub => validate_hub(session.hub(), &mut errors),
         RuntimeMode::Local => {}
     }
@@ -352,6 +357,7 @@ pub(super) fn validate_connection(session: &SetupSession) -> Result<(), Validati
 fn validate_standalone(
     draft: &StandaloneDraft,
     seed_error: Option<&'static str>,
+    http_mcp_seed_error: Option<&'static str>,
     errors: &mut ValidationErrors,
 ) {
     if draft.tunnel_id.trim().is_empty() {
@@ -402,6 +408,84 @@ fn validate_standalone(
             ));
         }
     }
+    validate_http_mcp_draft(draft, http_mcp_seed_error, errors);
+}
+fn validate_http_mcp_draft(
+    draft: &StandaloneDraft,
+    seed_error: Option<&'static str>,
+    errors: &mut ValidationErrors,
+) {
+    let parsed_port = match draft.http_mcp_port.trim().parse::<u16>() {
+        Ok(port) if port > 0 => Some(port),
+        _ => {
+            errors.push(error(SetupField::HttpMcpPort, "http_mcp_port_invalid"));
+            None
+        }
+    };
+    let parsed_allow_hosts = match config::parse_http_mcp_allow_hosts(&draft.http_mcp_allow_hosts) {
+        Ok(value) => Some(value),
+        Err(_) => {
+            errors.push(error(
+                SetupField::HttpMcpAllowHosts,
+                "http_mcp_allow_hosts_invalid",
+            ));
+            None
+        }
+    };
+    let host_valid = parsed_port.is_some()
+        && config::validate_http_mcp_host(
+            draft.http_mcp_host.trim(),
+            parsed_port.unwrap_or_default(),
+        )
+        .is_ok();
+    if !host_valid {
+        errors.push(error(SetupField::HttpMcpHost, "http_mcp_host_invalid"));
+    }
+
+    if seed_error.is_some() && draft.http_mcp_bearer_token.is_none() {
+        errors.push(error(
+            SetupField::HttpMcpBearerToken,
+            seed_error.expect("seed error is present"),
+        ));
+    }
+
+    let bearer_token = draft
+        .http_mcp_bearer_token
+        .as_ref()
+        .map(|value| value.expose().to_string())
+        .unwrap_or_default();
+    let allow_hosts_valid = parsed_allow_hosts.is_some();
+    let endpoint = HttpMcpConfig {
+        enabled: draft.http_mcp_enabled,
+        host: draft.http_mcp_host.trim().to_string(),
+        port: parsed_port.unwrap_or_default(),
+        bearer_token,
+        allow_hosts: parsed_allow_hosts.flatten(),
+    };
+    if host_valid && allow_hosts_valid {
+        if let Err(validation_error) = config::validate_http_mcp_config(&endpoint) {
+            let code = validation_error.to_string();
+            let (field, safe_code) = if code == "http_mcp_bearer_token_required" {
+                (
+                    SetupField::HttpMcpBearerToken,
+                    "http_mcp_bearer_token_required",
+                )
+            } else if code == "http_mcp_bearer_token_reference_invalid" {
+                (
+                    SetupField::HttpMcpBearerToken,
+                    "http_mcp_bearer_token_reference_invalid",
+                )
+            } else if code.starts_with("http_mcp_allow_hosts") {
+                (
+                    SetupField::HttpMcpAllowHosts,
+                    "http_mcp_allow_hosts_invalid",
+                )
+            } else {
+                (SetupField::HttpMcpHost, "http_mcp_endpoint_invalid")
+            };
+            errors.push(error(field, safe_code));
+        }
+    }
 }
 
 fn validate_hub(draft: &HubDraft, errors: &mut ValidationErrors) {
@@ -442,6 +526,11 @@ pub(super) fn validate_field(
         | SetupField::TunnelSecretEnvironment
         | SetupField::ProvisionTunnelSecret
         | SetupField::TunnelSecretValue
+        | SetupField::HttpMcpEnabled
+        | SetupField::HttpMcpHost
+        | SetupField::HttpMcpPort
+        | SetupField::HttpMcpBearerToken
+        | SetupField::HttpMcpAllowHosts
         | SetupField::HubUrl
         | SetupField::HubTransport
         | SetupField::AgentId
@@ -927,6 +1016,17 @@ pub(super) fn build_active_input_unchecked(
                 }
             };
             input.tunnel_api_key = Some(reference);
+            input.http_mcp_enabled = Some(draft.http_mcp_enabled);
+            input.http_mcp_host = Some(draft.http_mcp_host.clone());
+            input.http_mcp_port = Some(draft.http_mcp_port.trim().parse().unwrap_or_default());
+            input.http_mcp_bearer_token = Some(SecretValue::new(
+                draft
+                    .http_mcp_bearer_token
+                    .as_ref()
+                    .map(|value| value.expose())
+                    .unwrap_or_default(),
+            ));
+            input.http_mcp_allow_hosts = Some(draft.http_mcp_allow_hosts.clone());
         }
         RuntimeMode::Hub => {
             input.hub_url = Some(session.hub().hub_url.clone());
@@ -1141,6 +1241,24 @@ fn map_build_error(session: &SetupSession, code: String) -> ValidationError {
         "tunnel_api_key_reference_plaintext_rejected" => (
             SetupField::TunnelSecretPath,
             "tunnel_api_key_reference_plaintext_rejected",
+        ),
+        "http_mcp_bearer_token_required" => (
+            SetupField::HttpMcpBearerToken,
+            "http_mcp_bearer_token_required",
+        ),
+        "http_mcp_bearer_token_reference_invalid" => (
+            SetupField::HttpMcpBearerToken,
+            "http_mcp_bearer_token_reference_invalid",
+        ),
+        "http_mcp_host_or_port_invalid" | "http_mcp_host_invalid" => {
+            (SetupField::HttpMcpHost, "http_mcp_host_invalid")
+        }
+        "http_mcp_allow_hosts_empty"
+        | "http_mcp_allow_hosts_wildcard_mixed"
+        | "http_mcp_allow_host_invalid"
+        | "http_mcp_allow_hosts_must_be_json_array_or_null" => (
+            SetupField::HttpMcpAllowHosts,
+            "http_mcp_allow_hosts_invalid",
         ),
         "hub_url_invalid" => (SetupField::HubUrl, "hub_url_invalid"),
         "hub_transport_invalid" => (SetupField::HubTransport, "hub_transport_invalid"),

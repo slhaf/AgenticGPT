@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::net::{IpAddr, Ipv6Addr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -167,6 +168,67 @@ impl WorkerProfile {
     }
 }
 
+pub(crate) const DEFAULT_HTTP_MCP_HOST: &str = "127.0.0.1";
+pub(crate) const DEFAULT_HTTP_MCP_PORT: u16 = 8765;
+pub(crate) const DEFAULT_HTTP_MCP_ALLOW_HOSTS: &[&str] = &["localhost", "127.0.0.1", "::1"];
+
+fn default_http_mcp_host() -> String {
+    DEFAULT_HTTP_MCP_HOST.to_string()
+}
+
+fn default_http_mcp_port() -> u16 {
+    DEFAULT_HTTP_MCP_PORT
+}
+
+fn default_http_mcp_allow_hosts() -> Option<Vec<String>> {
+    Some(
+        DEFAULT_HTTP_MCP_ALLOW_HOSTS
+            .iter()
+            .map(|host| (*host).to_string())
+            .collect(),
+    )
+}
+
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct HttpMcpConfig {
+    #[serde(default)]
+    pub(crate) enabled: bool,
+    #[serde(default = "default_http_mcp_host")]
+    pub(crate) host: String,
+    #[serde(default = "default_http_mcp_port")]
+    pub(crate) port: u16,
+    #[serde(default)]
+    pub(crate) bearer_token: String,
+    #[serde(default = "default_http_mcp_allow_hosts")]
+    pub(crate) allow_hosts: Option<Vec<String>>,
+}
+
+impl fmt::Debug for HttpMcpConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HttpMcpConfig")
+            .field("enabled", &self.enabled)
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("bearer_token", &"[REDACTED]")
+            .field("allow_hosts", &self.allow_hosts)
+            .finish()
+    }
+}
+
+impl Default for HttpMcpConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            host: default_http_mcp_host(),
+            port: default_http_mcp_port(),
+            bearer_token: String::new(),
+            allow_hosts: default_http_mcp_allow_hosts(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct HubConfig {
@@ -206,6 +268,8 @@ pub(crate) struct Config {
     pub(crate) sandbox: SandboxConfig,
     #[serde(default)]
     pub(crate) mcp_servers: BTreeMap<String, McpServerConfig>,
+    #[serde(default)]
+    pub(crate) http_mcp: HttpMcpConfig,
     #[serde(default)]
     pub(crate) path_policy: PathPolicyConfig,
     pub(crate) policy: PolicyConfig,
@@ -719,6 +783,7 @@ impl Config {
             },
             confirmation_language: default_confirmation_language(),
             mcp_servers: BTreeMap::new(),
+            http_mcp: HttpMcpConfig::default(),
             sandbox: SandboxConfig {
                 enabled: false,
                 bubblewrap_path: "bwrap".to_string(),
@@ -977,6 +1042,20 @@ impl Config {
                 tunnel.insert("apiKey".to_string(), Value::String(String::new()));
             }
         }
+        if let Some(Value::Object(http_mcp)) = object.get_mut("httpMcp") {
+            let invalid_bearer_token = http_mcp.get("bearerToken").is_some_and(|value| {
+                value.as_str().is_none_or(|reference| {
+                    !reference.is_empty() && validate_http_mcp_bearer_token(reference).is_err()
+                })
+            });
+            if invalid_bearer_token {
+                warnings.push(
+                    "httpMcp.bearerToken (invalid secret reference; use file:PATH or env:NAME; cleared for import)"
+                        .to_string(),
+                );
+                http_mcp.insert("bearerToken".to_string(), Value::String(String::new()));
+            }
+        }
 
         let known = [
             "mode",
@@ -991,6 +1070,7 @@ impl Config {
             "confirmationLanguage",
             "sandbox",
             "mcpServers",
+            "httpMcp",
             "pathPolicy",
             "policy",
             "limits",
@@ -1106,6 +1186,9 @@ impl Config {
     pub(crate) fn validate_local(&self) -> Result<()> {
         self.validate_mcp_servers()
     }
+    pub(crate) fn validate_http_mcp(&self) -> Result<()> {
+        validate_http_mcp_config(&self.http_mcp)
+    }
 
     pub(crate) fn validate_hub(&self) -> Result<()> {
         self.validate_local()?;
@@ -1122,6 +1205,7 @@ impl Config {
 
     pub(crate) fn validate_standalone(&self) -> Result<()> {
         self.validate_local()?;
+        self.validate_http_mcp()?;
         let tunnel = self
             .tunnel
             .as_ref()
@@ -1260,6 +1344,38 @@ fn prune_sparse_value(value: &mut Value, defaults: &Value, root: bool) {
     }
 }
 
+fn redact_config_secrets(value: &mut Value) {
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    if let Some(secret) = object
+        .get_mut("hub")
+        .and_then(Value::as_object_mut)
+        .and_then(|hub| hub.get_mut("agentSecret"))
+    {
+        *secret = Value::String("[REDACTED]".to_string());
+    }
+    if let Some(servers) = object.get_mut("mcpServers").and_then(Value::as_object_mut) {
+        for server in servers.values_mut() {
+            if let Some(token) = server
+                .as_object_mut()
+                .and_then(|server| server.get_mut("auth"))
+                .and_then(Value::as_object_mut)
+                .and_then(|auth| auth.get_mut("token"))
+            {
+                *token = Value::String("[REDACTED]".to_string());
+            }
+        }
+    }
+    if let Some(token) = object
+        .get_mut("httpMcp")
+        .and_then(Value::as_object_mut)
+        .and_then(|http_mcp| http_mcp.get_mut("bearerToken"))
+    {
+        *token = Value::String("[REDACTED]".to_string());
+    }
+}
+
 pub(crate) fn sparse_config_value(config: &Config, redact_secrets: bool) -> Result<Value> {
     let defaults = sparse_defaults(config)?;
     let defaults_value = serde_json::to_value(defaults)?;
@@ -1270,30 +1386,7 @@ pub(crate) fn sparse_config_value(config: &Config, redact_secrets: bool) -> Resu
     prune_sparse_value(&mut value, &defaults_value, true);
 
     if redact_secrets {
-        if let Some(secret) = value
-            .as_object_mut()
-            .and_then(|object| object.get_mut("hub"))
-            .and_then(Value::as_object_mut)
-            .and_then(|hub| hub.get_mut("agentSecret"))
-        {
-            *secret = Value::String("[REDACTED]".to_string());
-        }
-        if let Some(servers) = value
-            .as_object_mut()
-            .and_then(|object| object.get_mut("mcpServers"))
-            .and_then(Value::as_object_mut)
-        {
-            for server in servers.values_mut() {
-                if let Some(token) = server
-                    .as_object_mut()
-                    .and_then(|server| server.get_mut("auth"))
-                    .and_then(Value::as_object_mut)
-                    .and_then(|auth| auth.get_mut("token"))
-                {
-                    *token = Value::String("[REDACTED]".to_string());
-                }
-            }
-        }
+        redact_config_secrets(&mut value);
     }
     Ok(value)
 }
@@ -1332,7 +1425,9 @@ fn ordered_config_value_json(value: &Value) -> Result<String> {
 }
 
 pub(crate) fn ordered_config_json(config: &Config) -> Result<String> {
-    ordered_config_value_json(&serde_json::to_value(config)?)
+    let mut value = serde_json::to_value(config)?;
+    redact_config_secrets(&mut value);
+    ordered_config_value_json(&value)
 }
 
 pub(crate) fn sparse_config_json(config: &Config, redact_secrets: bool) -> Result<String> {
@@ -1537,6 +1632,135 @@ pub(crate) fn validate_secret_reference(reference: &str) -> Result<()> {
         return Ok(());
     }
     Err(anyhow!("tunnel_api_key_reference_plaintext_rejected"))
+}
+
+pub(crate) fn validate_http_mcp_host(host: &str, port: u16) -> Result<()> {
+    if host.is_empty()
+        || host.trim() != host
+        || host
+            .chars()
+            .any(|character| character.is_whitespace() || character.is_control())
+        || host.contains("://")
+        || host.contains('/')
+        || port == 0
+    {
+        return Err(anyhow!("http_mcp_host_or_port_invalid"));
+    }
+
+    if host.parse::<IpAddr>().is_ok() || host.eq_ignore_ascii_case("localhost") {
+        if (host, port).to_socket_addrs().is_err() {
+            return Err(anyhow!("http_mcp_host_or_port_invalid"));
+        }
+        return Ok(());
+    }
+
+    let url = reqwest::Url::parse(&format!("http://{host}"))
+        .map_err(|_| anyhow!("http_mcp_host_or_port_invalid"))?;
+    if url.host_str().is_none() || url.port().is_some() || url.path() != "/" {
+        return Err(anyhow!("http_mcp_host_or_port_invalid"));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_http_mcp_allow_hosts(allow_hosts: Option<&[String]>) -> Result<()> {
+    let Some(hosts) = allow_hosts else {
+        return Ok(());
+    };
+    if hosts.is_empty() {
+        return Err(anyhow!("http_mcp_allow_hosts_empty"));
+    }
+    if hosts.len() == 1 && hosts[0] == "*" {
+        return Ok(());
+    }
+    if hosts.iter().any(|host| host == "*") {
+        return Err(anyhow!("http_mcp_allow_hosts_wildcard_mixed"));
+    }
+    for host in hosts {
+        validate_http_mcp_authority(host)?;
+    }
+    Ok(())
+}
+
+fn validate_http_mcp_authority(authority: &str) -> Result<()> {
+    if authority.is_empty()
+        || authority.trim() != authority
+        || authority
+            .chars()
+            .any(|character| character.is_whitespace() || character.is_control())
+    {
+        return Err(anyhow!("http_mcp_allow_host_invalid"));
+    }
+    let candidate = if authority.parse::<Ipv6Addr>().is_ok() {
+        format!("http://[{authority}]")
+    } else {
+        format!("http://{authority}")
+    };
+    let url =
+        reqwest::Url::parse(&candidate).map_err(|_| anyhow!("http_mcp_allow_host_invalid"))?;
+    if url.host_str().is_none()
+        || url.path() != "/"
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return Err(anyhow!("http_mcp_allow_host_invalid"));
+    }
+    Ok(())
+}
+
+pub(crate) fn parse_http_mcp_allow_hosts(value: &str) -> Result<Option<Vec<String>>> {
+    let parsed = serde_json::from_str::<Option<Vec<String>>>(value)
+        .map_err(|_| anyhow!("http_mcp_allow_hosts_must_be_json_array_or_null"))?;
+    validate_http_mcp_allow_hosts(parsed.as_deref())?;
+    Ok(parsed)
+}
+
+pub(crate) fn validate_http_mcp_bearer_token(reference: &str) -> Result<()> {
+    if reference.is_empty()
+        || reference.trim() != reference
+        || reference
+            .chars()
+            .any(|character| character.is_whitespace() || character.is_control())
+    {
+        return Err(anyhow!("http_mcp_bearer_token_reference_invalid"));
+    }
+    validate_secret_reference(reference)
+        .map_err(|_| anyhow!("http_mcp_bearer_token_reference_invalid"))
+}
+
+pub(crate) fn validate_http_mcp_config(config: &HttpMcpConfig) -> Result<()> {
+    validate_http_mcp_host(&config.host, config.port)?;
+    validate_http_mcp_allow_hosts(config.allow_hosts.as_deref())?;
+    if config.bearer_token.is_empty() {
+        if config.enabled {
+            return Err(anyhow!("http_mcp_bearer_token_required"));
+        }
+    } else {
+        validate_http_mcp_bearer_token(&config.bearer_token)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn resolve_secret_reference(reference: &str) -> Result<String> {
+    validate_secret_reference(reference).map_err(|_| anyhow!("secret_reference_invalid"))?;
+    let raw = if let Some(name) = reference.strip_prefix("env:") {
+        std::env::var(name).map_err(|_| anyhow!("secret_reference_unavailable"))?
+    } else if let Some(path) = reference.strip_prefix("file:") {
+        fs::read_to_string(path).map_err(|_| anyhow!("secret_reference_unavailable"))?
+    } else {
+        return Err(anyhow!("secret_reference_invalid"));
+    };
+    let value = raw
+        .trim_end_matches(|character| character == '\r' || character == '\n')
+        .to_string();
+    if value.trim().is_empty() {
+        return Err(anyhow!("secret_reference_empty"));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(anyhow!("secret_reference_control_character"));
+    }
+    Ok(value)
 }
 
 fn secret_reference_kind(reference: &str) -> Option<String> {

@@ -743,6 +743,16 @@ impl ConfigTuiApp {
                 let draft = self.session_mut().standalone_mut();
                 draft.provision_secret_now = !draft.provision_secret_now;
             }
+            SetupField::HttpMcpEnabled => {
+                let draft = self.session_mut().standalone_mut();
+                draft.http_mcp_enabled = !draft.http_mcp_enabled;
+                match self.session().validate_field(SetupField::HttpMcpEnabled) {
+                    Ok(()) => {
+                        self.field_errors.remove(&SetupField::HttpMcpEnabled);
+                    }
+                    Err(errors) => self.record_errors(errors),
+                }
+            }
             _ => {
                 let value = pages::connection_value(self.session(), field).unwrap_or_default();
                 self.state.editing = Some(EditState::new(field, value));
@@ -813,6 +823,21 @@ impl ConfigTuiApp {
             SetupField::AgentId => self.session_mut().hub_mut().agent_id = value,
             SetupField::AgentSecret => {
                 self.session_mut().hub_mut().agent_secret = Some(SecretValue::new(value))
+            }
+            SetupField::HttpMcpEnabled => {
+                self.session_mut().standalone_mut().http_mcp_enabled = value == "true"
+            }
+            SetupField::HttpMcpHost => self.session_mut().standalone_mut().http_mcp_host = value,
+            SetupField::HttpMcpPort => self.session_mut().standalone_mut().http_mcp_port = value,
+            SetupField::HttpMcpBearerToken => {
+                self.session_mut().standalone_mut().http_mcp_bearer_token = if value.is_empty() {
+                    None
+                } else {
+                    Some(SecretValue::new(value))
+                }
+            }
+            SetupField::HttpMcpAllowHosts => {
+                self.session_mut().standalone_mut().http_mcp_allow_hosts = value
             }
             _ => {}
         }
