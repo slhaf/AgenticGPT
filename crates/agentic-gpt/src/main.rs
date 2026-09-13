@@ -1,6 +1,7 @@
 mod agent_info;
 mod audit;
 mod bootstrap;
+mod browser_kernel;
 mod browser_runtime;
 mod cli_i18n;
 mod config;

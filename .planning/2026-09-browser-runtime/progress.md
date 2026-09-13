@@ -1,6 +1,6 @@
 # Browser Runtime V1 — Progress
 
-Status: Slice 02 node_repl launch-spec accepted by orchestrator.
+Status: Slice 03 persistent node_repl kernel facade accepted by orchestrator.
 
 Slice 01 runtime descriptor and desktop discovery accepted by orchestrator.
 
@@ -20,5 +20,15 @@ Slice 02 verification:
 - Expected temporary dead-code warnings remain until later slices consume the descriptor/launch APIs; no warning-suppression attributes were added.
 
 rmcp persistent-client mechanics investigation complete. Appended and source-path-checked exact rmcp 1.7.0/client-process/factory/result/handler evidence to `findings.md`; no implementation, tests, builds, git commands, or plan changes were made.
+
+Slice 03 implementation completed: added the typed persistent node_repl kernel facade and in-memory rmcp tests within the frozen module boundary.
+
+Slice 03 verification:
+- `cargo test -p agentic-gpt browser_kernel`: 8 passed, 0 failed.
+- `cargo test -p agentic-gpt browser_runtime`: 17 passed, 0 failed.
+- `cargo fmt --all -- --check`: passed.
+- `git diff --check`: passed.
+- Review confirmed the fake server is reached through real rmcp duplex initialization, sequential calls reuse one initialized service, request `_meta` is observed server-side with the exact Codex session/turn shape, mixed result fields are preserved, and `isError: true` remains a successful transport-level return.
+- Expected temporary dead-code warnings remain because this slice intentionally introduces the kernel API before a later slice consumes it; no warning-suppression attributes were added.
 
 
