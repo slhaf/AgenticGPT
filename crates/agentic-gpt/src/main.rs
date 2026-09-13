@@ -10,6 +10,7 @@ mod config_tui;
 mod confirmation;
 mod exec;
 mod file_ops;
+mod http_server;
 mod hub;
 mod instance_lock;
 mod job_history;
@@ -49,7 +50,7 @@ use std::fs;
 use std::io::{IsTerminal, Read};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{watch, Mutex, RwLock};
 use tokio::time::{sleep, Duration};
 use utils::{config_path, ensure_parent, log_info, log_warn};
 
@@ -244,28 +245,46 @@ async fn run_stdio_worker(
         supervised,
     )?;
     state.skill_installs.recover(state.clone()).await?;
-    tokio::spawn(watch_standalone_live_config(state.clone(), supervised));
-    if reporting_enabled {
-        tokio::spawn(hub::connect_loop(state.clone()));
-    }
     let listener = local_control::bind(&agent_id).await?;
     log_info(format!(
         "local MCP ingress ready; transport=unix; path={}",
         listener.path().display()
     ));
+    let initial_http_mcp = state.config.read().await.http_mcp.clone();
+    let (http_updates, http_config) = watch::channel(initial_http_mcp);
+    tokio::spawn(watch_standalone_live_config(
+        state.clone(),
+        supervised,
+        Some(http_updates),
+    ));
+    if reporting_enabled {
+        tokio::spawn(hub::connect_loop(state.clone()));
+    }
     let mut local_task = tokio::spawn(listener.serve(state.clone()));
+    let mut http_task = tokio::spawn(http_server::run(state.clone(), http_config));
     let stdio = stdio_server::serve_stdio(state);
     tokio::pin!(stdio);
     tokio::select! {
         result = &mut stdio => {
             local_task.abort();
             let _ = local_task.await;
+            http_task.abort();
+            let _ = http_task.await;
             result
         }
         result = &mut local_task => {
+            http_task.abort();
+            let _ = http_task.await;
             match result {
                 Ok(result) => result,
                 Err(_) => Err(anyhow!("local_mcp_listener_task_failed")),
+            }
+        }
+        result = &mut http_task => {
+            local_task.abort();
+            let _ = local_task.await;
+            match result {
+                Ok(Ok(())) | Ok(Err(_)) | Err(_) => Err(anyhow!("http_mcp_server_task_failed")),
             }
         }
     }
@@ -337,7 +356,7 @@ async fn run_local(config_path: PathBuf) -> Result<()> {
     let agent_id = config.agent_id.clone();
     let state = build_app_state(config_path, config, RuntimeModel::local(profile), false)?;
     state.skill_installs.recover(state.clone()).await?;
-    tokio::spawn(watch_standalone_live_config(state.clone(), false));
+    tokio::spawn(watch_standalone_live_config(state.clone(), false, None));
     let listener = local_control::bind(&agent_id).await?;
     log_info(format!(
         "local MCP ingress ready; transport=unix; path={}",
@@ -558,7 +577,11 @@ fn config_matches_runtime(config: &Config, runtime: RuntimeModel) -> bool {
     config.mode == mode && config.profile.capability_profile() == runtime.profile
 }
 
-async fn watch_standalone_live_config(state: AppState, supervised: bool) {
+async fn watch_standalone_live_config(
+    state: AppState,
+    supervised: bool,
+    http_updates: Option<watch::Sender<config::HttpMcpConfig>>,
+) {
     let mut last_modified = fs::metadata(&state.config_path)
         .and_then(|meta| meta.modified())
         .ok();
@@ -585,8 +608,11 @@ async fn watch_standalone_live_config(state: AppState, supervised: bool) {
             }
         };
         let live = state.config.read().await;
+        if let Some(updates) = http_updates.as_ref() {
+            let _ = updates.send(live.http_mcp.clone());
+        }
         log_info(format!(
-            "standalone live config reloaded; {}; policyAllow={}; policyConfirm={}; policyDeny={}; pathWriteRoots={}; pathReadOnlyRoots={}; pathDenyRoots={}; mcpServers={}",
+            "standalone live config reloaded; {}; policyAllow={}; policyConfirm={}; policyDeny={}; pathWriteRoots={}; pathReadOnlyRoots={}; pathDenyRoots={}; mcpServers={}; httpMcpEnabled={}",
             resolved.diagnostic(),
             live.policy.allow.len(),
             live.policy.confirm.len(),
@@ -595,6 +621,7 @@ async fn watch_standalone_live_config(state: AppState, supervised: bool) {
             live.path_policy.read_only_roots.len(),
             live.path_policy.deny_roots.len(),
             live.mcp_servers.len(),
+            live.http_mcp.enabled,
         ));
     }
 }
@@ -630,6 +657,7 @@ fn apply_standalone_live_subset(
     live.limits = candidate.limits;
     live.mcp_servers = candidate.mcp_servers;
     live.toolsets = candidate.toolsets;
+    live.http_mcp = candidate.http_mcp;
     resolved
 }
 
