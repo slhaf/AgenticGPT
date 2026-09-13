@@ -127,3 +127,74 @@ Evidence inspected: the frozen `PLAN.md` for scope; the two entries in `/home/sl
 6. **Aliases/layout.** The observed packaging names are `chrome/latest`, `chrome/26.901.51231`, and `browser/26.901.51231` under `/home/slhaf/.codex/plugins/cache/openai-bundled`; all three contain `scripts/browser-service.mjs`. The CUA package alias is `@oai/browser-desktop/service`, whose package export targets `@oai/browser-desktop/scripts/browser-service.mjs`. Inspected cache contents match at the sampled beginning and service-bundle sections; the package artifact differs in minified identifiers/line placement. Exact filesystem symlink targets were not returned by the available file-listing surface.
 
 7. **Ambiguities.** The evidence does not establish whether `chrome/latest` is a symlink, hard link, or a separate file; whether the two advertised cache paths share an inode; or whether every byte is equal. It also does not expose a separate Desktop launcher implementation that resolves the registry entry at node-repl launch, so Desktop registry discovery and active config generation cannot be traced beyond the observed registry/config data and the PoC. The CUA launch behavior is unambiguous in the inspected source: its `launch.mjs` replaces any inherited trusted-service mapping with the package alias when browser surface setup is enabled.
+
+## rmcp persistent-client mechanics
+
+Evidence: `Cargo.lock:2499` names the exact `rmcp` package as `1.7.0` from the crates.io registry; source root is `/home/slhaf/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rmcp-1.7.0/`.
+
+### 1. Client type, `serve`, and initialization info
+
+- `crates/agentic-gpt/src/mcp.rs:71` aliases `McpClient` to `RunningService<rmcp::RoleClient, ClientInfo>`. `rmcp::model::ClientInfo` is the alias `InitializeRequestParams` (`src/model.rs:801-810,894`). Thus `ClientInfo::default().serve(transport).await` returns `Result<RunningService<rmcp::RoleClient, ClientInfo>, rmcp::service::ClientInitializeError>` (defined in `src/service/client.rs`); the generic `ServiceExt::serve` signature is `src/service.rs:168-187`, and client implementation is `src/service/client.rs:161-180`.
+- `serve` initializes automatically. `src/service/client.rs:207-254` sends `initialize` with `service.get_info()`, awaits `ServerResult::InitializeResult`, stores the peer `ServerInfo`, and sends `notifications/initialized`. It can return `ClientInitializeError` for an unexpected response/result, connection close, transport/JSON-RPC failure, or cancellation.
+- Configurable client initialization fields are `meta: Option<Meta>`, `protocol_version: ProtocolVersion`, `capabilities: ClientCapabilities`, and `client_info: Implementation` (`src/model.rs:801-810`). Constructors/configurators are `InitializeRequestParams::new` and `.with_protocol_version` (`src/model.rs:813-828`); `Implementation::new`, `.with_title`, `.with_description`, `.with_icons`, and `.with_website_url` are `src/model.rs:994-1050`.
+- `ClientInfo::default()` uses latest `ProtocolVersion::default()` (`2025-11-25`), `ClientCapabilities::default()` (all optional fields absent), and `Implementation::from_build_env()` (`src/model.rs:908-917`). Agentic uses this default at `crates/agentic-gpt/src/mcp.rs:1535-1547` and in its test factories at `mcp.rs:1760,1779`.
+- `ClientCapabilities` fields are `experimental`, `extensions`, `roots`, `sampling`, `elicitation`, and `tasks` (`src/model/capabilities.rs:260-276`). Builder enables and sub-capability methods are generated at `src/model/capabilities.rs:338-400,510-564`.
+
+### 2. `CallToolRequestParams` and `_meta`
+
+- The exact rmcp 1.7.0 shape is `src/model.rs:2956-3009`: `meta: Option<Meta>` (serde name `_meta`), `name: Cow<'static, str>`, `arguments: Option<JsonObject>`, and `task: Option<JsonObject>`. `new`, `with_arguments`, and `with_task` are in the same impl.
+- `JsonObject` is `serde_json::Map<String, serde_json::Value>` (`src/model.rs:27-29`). `Meta` is transparent `pub struct Meta(pub JsonObject)` (`src/model/meta.rs:162-167`), with map access through `Deref`/`DerefMut`; `Meta::new` and `Meta::extend` are there. `RequestParamsMeta::set_meta(&mut self, Meta)` is `src/model/meta.rs:15-34`, and `CallToolRequestParams` implements it at `src/model.rs:2981-3009`.
+- Arbitrary metadata, including `x-codex-turn-metadata`, fits in `Meta`'s JSON map and can be set on the typed params; no hand-rolled JSON-RPC is needed. Alternatively, `PeerRequestOptions { meta: Some(meta), .. }` attaches metadata. `Peer::send_request_with_option` (`src/service.rs:421-485`) adds a progress token to `_meta`, then extends it with the option metadata. `Peer<RoleClient>::call_tool(params) -> Result<CallToolResult, ServiceError>` is generated at `src/service/client.rs:335-355`.
+- Agentic currently creates only `CallToolRequestParams::new(...).with_arguments(...)` and sends it with `PeerRequestOptions::no_options()` (`crates/agentic-gpt/src/mcp.rs:1224-1229`), so it currently supplies no custom `_meta`.
+
+### 3. Client operations and cancellation
+
+- `RunningService<R,S>` exposes `peer(&self) -> &Peer<R>`, `service`, `cancellation_token`, `is_closed`, `waiting(self)`, `close(&mut self)`, `close_with_timeout(&mut self, Duration)`, and `cancel(self)` (`src/service.rs:505-618`). It dereferences to `Peer<R>`.
+- `Peer<RoleClient>::call_tool(CallToolRequestParams) -> Result<CallToolResult, ServiceError>` is at `src/service/client.rs:335-355`. Generic peer methods `send_request`, `send_cancellable_request`, and `send_request_with_option` are `src/service.rs:390-485`.
+- `send_cancellable_request` returns `RequestHandle<RoleClient>` (`src/service.rs:305-358,433-485`), whose public `id`, `rx`, `peer`, and `cancel(self, reason: Option<String>)` are available. `RequestHandle::cancel` sends a `CancelledNotification`.
+- `Peer<RoleClient>::notify_cancelled(CancelledNotificationParam) -> Result<(), ServiceError>` is generated at `src/service/client.rs:341-355`; Agentic calls it under two-second timeouts at `crates/agentic-gpt/src/mcp.rs:1283-1290,1304-1310`.
+- Service cancellation is `RunningServiceCancellationToken::cancel(self)` (`src/service.rs:634-641`). Agentic's `close_client` consumes `client.cancel()` under a two-second timeout and discards the result (`mcp.rs:1331-1333`).
+
+### 4. `TokioChildProcess` command supply/configuration
+
+- `TokioChildProcess::new(command: impl Into<process_wrap::tokio::CommandWrap>)` and `.builder(...)` are `src/transport/child_process.rs:64-78`. `tokio::process::Command` converts to `CommandWrap` via `process-wrap-9.1.0/src/generic_wrap.rs:169-176`.
+- A direct executable is supplied with `tokio::process::Command::new(path)`. Before construction/spawn, Tokio's command APIs provide `current_dir`, `env`, `envs`, args, and stdio settings. Agentic instead supplies `Command::new("sh")`, configures `-lc` plus the command and `PATH` using `ConfigureCommandExt` (`crates/agentic-gpt/src/mcp.rs:1539-1546`; rmcp extension at `src/transport/child_process.rs:225-233`).
+- `TokioChildProcessBuilder` defaults to piped stdin/stdout and inherited stderr (`src/transport/child_process.rs:143-157`). `.stdin`, `.stdout`, and `.stderr` accept `Stdio`; stderr may be piped, null, or inherited before `.spawn()` (`child_process.rs:159-185`). Spawn returns `(TokioChildProcess, Option<ChildStderr>)`.
+- `TokioChildProcess` stores private `ChildWithCleanup` and `AsyncRwTransport` fields (`child_process.rs:37-42`). Once converted by `serve`, the service task owns the transport (`src/service.rs:742-750` onward); the running client owns that task.
+
+### 5. Close, drop, and transport shutdown
+
+- `TokioChildProcess`'s `Transport<RoleClient>::close` calls `graceful_shutdown` (`child_process.rs:205-223`). That method takes the child, closes the async transport writer, waits for normal exit for `MAX_WAIT_ON_DROP_SECS = 3`, then calls `ChildWrapper::kill()` if the wait times out (`child_process.rs:44-47,105-135`).
+- The rmcp service loop exits on input EOF or service cancellation, drains in-flight handler responses for up to five seconds on `QuitReason::Closed` or two seconds on `QuitReason::Cancelled`, then calls `transport.close().await` (`src/service.rs:786-820,1039-1084`). Explicit `RunningService::close`/`cancel` therefore reaches the child transport close path and waits for service cleanup, subject to errors and that drain path.
+- `RunningService::close_with_timeout` returns `Ok(None)` when its supplied wait expires; source does not establish that the child has exited when it returns (`src/service.rs:579-607`).
+- Dropping `TokioChildProcess` while its child is present invokes `ChildWithCleanup::drop`, which spawns an asynchronous task calling `ChildWrapper::kill()` (`child_process.rs:44-60`). Dropping `RunningService` relies on `DropGuard` to cancel asynchronously and explicitly says guaranteed cleanup requires `close()` or `cancel()` (`src/service.rs:621-631`). The caller does not await these drop paths.
+- Proven: graceful shutdown attempts close, wait up to three seconds, then kill; drop attempts an asynchronous kill. Not proven: that a dropped service has completed child cleanup before return, or that cleanup is bounded from the caller's perspective. Also, if `graceful_shutdown` returns early from `transport.close().await?`, this source does not establish a subsequent wait/kill guarantee.
+
+### 6. Child handle/PID/kill API
+
+- `TokioChildProcess::id() -> Option<u32>` is public (`child_process.rs:99-103`). `TokioChildProcess::into_inner(self) -> Option<Box<dyn process_wrap::tokio::ChildWrapper>>` is also public (`child_process.rs:138-141`).
+- The extracted `ChildWrapper` trait exposes `id`, `kill`, `start_kill`, `try_wait`, and `wait` (`process-wrap-9.1.0/src/tokio/core.rs:38-168`). rmcp has no non-consuming `TokioChildProcess::kill` or public `child()` accessor. Therefore it exposes a PID and a consuming kill-capable extraction, but `McpClient` after transport move exposes neither transport nor child handle.
+
+### 7. Agentic factory/fake seams
+
+- `crates/agentic-gpt/src/mcp.rs:71-73` defines private `McpClientFactory` as an `Arc` of a `McpServerConfig` closure returning `Pin<Box<dyn Future<Output = Result<McpClient>> + Send>>`; `McpClientFuture` is the boxed future alias.
+- `production_client_factory` (`mcp.rs:1525-1527`) adapts `client(&McpServerConfig)` (`mcp.rs:1529-1551`). The test-only `start_managed_call_with_factory` and batch functions accept the factory (`mcp.rs:296-338,972-977`).
+- `tests::fake_factory` (`mcp.rs:1750-1763`) uses a Tokio duplex pair, runs a cloned `FakeMcpServer` on one half, and serves `ClientInfo::default()` on the other. `tests::routing_factory` (`mcp.rs:1765-1782`) chooses a fake by `McpServerConfig.url` and uses the same setup.
+- `FakeMcpServer` (`mcp.rs:1618-1743`) records arguments, request IDs, cancellation IDs, context cancellation, concurrency, and event order. Behaviors include fast/structured, delayed, structured-error, large, waits-for-`RequestContext.ct`, and ignores cancellation.
+- Existing no-process tests are `managed_mcp_fast_result_uses_real_rmcp_transport` (`mcp.rs:1914-1950`), `managed_mcp_tool_error_and_large_result_are_truthful` (`mcp.rs:2030-2073`), `managed_mcp_timeout_sends_exact_cancel_notification` (`mcp.rs:2075-2098`), `managed_mcp_user_cancel_observes_remote_cancellation` (`mcp.rs:2100-2139`), and `managed_mcp_cancel_without_terminal_evidence_becomes_detached` (`mcp.rs:2141-2172`). These test call/result/cancellation behavior through the rmcp duplex service. The factory/helpers are private test-module seams, not a public production injection API.
+
+### 8. `call_tool` result shape
+
+- The exact result is `Result<rmcp::model::CallToolResult, rmcp::service::ServiceError>` from `Peer<RoleClient>::call_tool` (`src/service/client.rs:335-355`), carried in `ServerResult::CallToolResult`.
+- `CallToolResult` (`src/model.rs:2774-2790`) has `content: Vec<Content>`, `structured_content: Option<Value>`, `is_error: Option<bool>`, and `meta: Option<Meta>`. JSON names are `content`, `structuredContent`, `isError`, and `_meta`.
+- `CallToolResult::success`, `error`, `structured`, and `structured_error` are `src/model.rs:2834-2890`. Structured constructors put the supplied value in `structured_content`, add a text `Content` containing its JSON string, and set `is_error` false/true.
+- `Content` is `Annotated<RawContent>` (`src/model/content.rs:103-109`). `RawContent` includes text, image, resource, audio, and resource-link variants; image data is base64 `data` with `mime_type` (`content.rs:25-42,91-101`).
+- The custom `CallToolResult` deserializer (`src/model.rs:2793-2832`) defaults absent content to `[]`, requires at least one known result field, and ignores unknown top-level fields. Known content/image metadata, structured content, error state, and result `_meta` are typed/preserved; arbitrary unknown top-level result fields are not.
+- Agentic's `finish_from_response` checks `result.is_error == Some(true)` and serializes the typed result to `serde_json::Value` (`crates/agentic-gpt/src/mcp.rs:1357-1390`). Existing tests assert `structuredContent` and `isError` (`mcp.rs:1934-1941,2042-2045`).
+
+### 9. Default client-side handlers
+
+- `ClientInfo` implements `rmcp::ClientHandler` at `src/handler/client.rs:262-270`, overriding only `get_info` to clone itself. Other behavior is trait default behavior.
+- Incoming server requests are dispatched at `handler/client.rs:12-38`. Defaults: `ping` succeeds; `createMessage` returns `METHOD_NOT_FOUND`; `roots/list` returns an empty `ListRootsResult`; `elicitation/create` returns `ElicitationAction::Decline` with no content; custom requests return `METHOD_NOT_FOUND` (`handler/client.rs:55-116,165-188,214-260`).
+- Default notification handlers for cancellation, progress, logging, resource updates, resource-list changes, tool-list changes, prompt-list changes, URL-elicitation completion, and custom notifications are no-ops (`handler/client.rs:40-78,190-256`). Independently, the service loop recognizes `CancelledNotification`, cancels the matching request context token, then invokes `on_cancelled` (`src/service.rs:990-1015`); `ClientInfo`'s handler does nothing afterward.
+- During handshake, only logging notifications are passed to the handler and ping requests are ignored; other pre-handshake messages are warned and ignored (`src/service/client.rs:73-139`).

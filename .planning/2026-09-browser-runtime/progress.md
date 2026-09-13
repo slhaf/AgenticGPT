@@ -19,4 +19,6 @@ Slice 02 verification:
 - Review confirmed unrelated caller environment is preserved, runtime-coupled keys are replaced from the selected descriptor, non-browser trusted services survive while `browser` is replaced, and no Desktop/Neko/security policy is invented by this layer.
 - Expected temporary dead-code warnings remain until later slices consume the descriptor/launch APIs; no warning-suppression attributes were added.
 
+rmcp persistent-client mechanics investigation complete. Appended and source-path-checked exact rmcp 1.7.0/client-process/factory/result/handler evidence to `findings.md`; no implementation, tests, builds, git commands, or plan changes were made.
+
 
