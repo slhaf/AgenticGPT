@@ -11,6 +11,8 @@ Recommended — Standalone
 ChatGPT Secure MCP Tunnel
   -> official tunnel-client
   -> agentic-gpt worker
+  -> stdio MCP + owner-only Unix MCP
+  -> optional worker-owned HTTP MCP: http://<host>:<port>/mcp
   -> policy / files / process Jobs / skills / downstream MCP / tmux
 
 Centralized — Hub
@@ -31,7 +33,8 @@ The historical Cloudflare-only Hub has been removed from `main`; it remains on b
 
 - No VPS, public domain, reverse proxy, Hub database, or shared command router is required.
 - Every machine has an independent connection and restart boundary.
-- The tunnel and owner-only Unix MCP ingress expose the configured toolset surface from the pre-existing Normal/Room names; profile presets are defaults and explicit `toolsets.enabled` selection is authoritative.
+- The tunnel, HTTP, and owner-only Unix MCP ingress expose the configured toolset surface from the pre-existing Normal/Room names; profile presets are defaults and explicit `toolsets.enabled` selection is authoritative.
+- Standalone may additionally enable a worker-owned Streamable HTTP MCP endpoint at fixed `/mcp`; it is disabled by default and uses bearer-only auth.
 - Policy, confirmation, audit, live configuration, capacity, and managed Jobs stay local to that machine.
 - A fresh stdio worker can recover a resumed tunnel request that arrives before a new MCP `initialize` handshake.
 
@@ -41,7 +44,7 @@ Hub mode remains useful when you need one public endpoint for many agents, Custo
 
 | Runtime | Best for | Public server | Failure scope | Entrypoint |
 | --- | --- | --- | --- | --- |
-| **Secure MCP Tunnel / Standalone** | Recommended direct deployment | Not required | One tunnel/agent | `agentic-gpt run` (config `mode=standalone`) |
+| **Secure MCP Tunnel / Standalone** | Recommended direct deployment; optional worker-owned HTTP MCP | Not required | One tunnel/agent | `agentic-gpt run` (config `mode=standalone`) |
 | **Hub + Local Agents** | Central routing, Actions, shared history/reporting | Required | Hub is shared | `agentic-gpt-hub serve` + `agentic-gpt run` |
 | **Local Unix MCP** | Development, smoke tests, local automation | Not required | One local worker | `agentic-gpt run` (config `mode=local`) |
 
@@ -201,6 +204,27 @@ agentic-gpt local call agent.info --arguments '{}'
 ```
 
 Connect ChatGPT through the Secure MCP Tunnel assigned to this agent. Each machine is configured and started independently.
+
+Optional standalone HTTP MCP is configured independently of the tunnel:
+
+```bash
+agentic-gpt config set httpMcp.bearerToken env:AGENTIC_HTTP_MCP_TOKEN
+agentic-gpt config set httpMcp.host 127.0.0.1
+agentic-gpt config set httpMcp.port 8765
+agentic-gpt config set httpMcp.allowHosts '["localhost","127.0.0.1","::1"]'
+agentic-gpt config set httpMcp.enabled true
+```
+
+The endpoint is always `http://<host>:<port>/mcp`, uses only a secret reference
+(`file:` or `env:`), and has no OAuth flow. Host filtering defaults to loopback;
+`null` or exactly `["*"]` explicitly allows every Host, while an empty list or
+mixed wildcard is rejected. Rebinding or disabling closes stateful sessions and
+requires a new MCP `initialize`; token rotation updates authentication in place.
+Local mode remains Unix-only. Hub's `/mcp` is a separate OAuth/Hub contract, and
+`mcpServers` remains the downstream registry used by `mcp.*`, not this listener.
+
+See [`docs/configuration.md`](docs/configuration.md) for the full schema, init/import
+editor flow, redaction, and live-reload/last-good behavior.
 
 Complete tunnel-client trust, cache, recovery, reporting, and service-manager guidance is in [`docs/standalone-runtime.md`](docs/standalone-runtime.md).
 

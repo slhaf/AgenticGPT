@@ -11,6 +11,8 @@ Agentic GPT 通过每台机器独立的 Secure MCP Tunnel、可选的集中式 R
 ChatGPT Secure MCP Tunnel
   -> 官方 tunnel-client
   -> agentic-gpt worker
+  -> stdio MCP + owner-only Unix MCP
+  -> 可选的 worker-owned HTTP MCP：http://<host>:<port>/mcp
   -> 策略 / 文件 / Process Job / Skill / 下游 MCP / tmux
 
 集中式——Hub
@@ -31,7 +33,8 @@ ChatGPT Actions 或 Apps MCP
 
 - 不需要 VPS、公开域名、反向代理、Hub 数据库或共享命令路由器。
 - 每台机器具有独立连接与重启边界。
-- Tunnel 与 owner-only Unix MCP 对同一 profile 暴露一致的 23 个 Normal 工具或 34 个 Room 工具。
+- Standalone 还可以启用 worker-owned 的 Streamable HTTP MCP endpoint，路径固定为 `/mcp`；默认关闭且只使用 bearer auth。
+- Tunnel、HTTP 与 owner-only Unix MCP 对同一 profile 暴露一致的 23 个 Normal 工具或 34 个 Room 工具。
 - 策略、确认、审计、热配置、容量和 Managed Job 都保留在本机。
 - fresh stdio worker 即使先收到旧逻辑会话续发的请求、尚未收到新的 MCP `initialize`，也能自动恢复而不退出。
 
@@ -41,7 +44,7 @@ ChatGPT Actions 或 Apps MCP
 
 | 模式 | 适用场景 | 是否需要公开服务器 | 故障范围 | 启动入口 |
 | --- | --- | --- | --- | --- |
-| **Secure MCP Tunnel / Standalone** | 推荐的直接部署 | 不需要 | 单个 tunnel/Agent | `agentic-gpt run`（配置 `mode=standalone`） |
+| **Secure MCP Tunnel / Standalone** | 推荐的直接部署；可选 worker-owned HTTP MCP | 不需要 | 单个 tunnel/Agent | `agentic-gpt run`（配置 `mode=standalone`） |
 | **Hub + Local Agent** | 集中路由、Actions、共享历史/报告 | 需要 | Hub 是共享依赖 | `agentic-gpt-hub serve` + `agentic-gpt run` |
 | **Local Unix MCP** | 开发、smoke test、本地自动化 | 不需要 | 单个本地 worker | `agentic-gpt run`（配置 `mode=local`） |
 
@@ -180,6 +183,26 @@ agentic-gpt local call agent.info --arguments '{}'
 ```
 
 在 ChatGPT 中连接分配给该 Agent 的 Secure MCP Tunnel。每台机器独立配置、独立启动。
+
+可选的 Standalone HTTP MCP 与 tunnel 独立配置：
+
+```bash
+agentic-gpt config set httpMcp.bearerToken env:AGENTIC_HTTP_MCP_TOKEN
+agentic-gpt config set httpMcp.host 127.0.0.1
+agentic-gpt config set httpMcp.port 8765
+agentic-gpt config set httpMcp.allowHosts '["localhost","127.0.0.1","::1"]'
+agentic-gpt config set httpMcp.enabled true
+```
+
+endpoint 始终是 `http://<host>:<port>/mcp`，只接受 `file:` 或 `env:` secret
+引用，不提供 OAuth 流程。Host 过滤默认限于 loopback；`null` 或严格等于
+`["*"]` 明确允许任意 Host，空数组或 wildcard 混用会被拒绝。rebind 或关闭
+会终止有状态 session，必须重新 MCP `initialize`；token 轮换会原地更新认证。
+Local 模式仍然只有 Unix ingress。Hub 的 `/mcp` 是独立的 OAuth/Hub contract，
+`mcpServers` 仍是 `mcp.*` 使用的下游 registry，不是这个入站 listener。
+
+完整 schema、init/import 编辑流程、脱敏以及 live-reload/last-good 语义见
+[`docs/configuration.zh-CN.md`](docs/configuration.zh-CN.md)。
 
 Tunnel-client 信任、缓存、恢复、报告和 service manager 说明见 [`docs/standalone-runtime.md`](docs/standalone-runtime.md)。
 

@@ -17,6 +17,17 @@
     "tunnelId": "tunnel_replace-me",
     "apiKey": "file:/home/your-user/.agentic_gpt/secrets/tunnel-api-key"
   },
+  "httpMcp": {
+    "enabled": false,
+    "host": "127.0.0.1",
+    "port": 8765,
+    "bearerToken": "",
+    "allowHosts": [
+      "localhost",
+      "127.0.0.1",
+      "::1"
+    ]
+  },
   "hub": {
     "url": "https://agentic-gpt.example.com",
     "transport": "websocket",
