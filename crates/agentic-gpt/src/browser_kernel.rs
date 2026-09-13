@@ -10,7 +10,7 @@ use rmcp::{
     RoleClient, ServiceExt,
 };
 use serde_json::{json, Map, Value};
-use std::time::Duration;
+use std::{path::Path, time::Duration};
 
 fn node_repl_client_info() -> ClientInfo {
     ClientInfo::new(
@@ -113,6 +113,23 @@ impl NodeReplKernel {
             .await
             .map_err(|error| anyhow!("browser_runtime_node_repl_call_failed:{error}"))
     }
+
+    pub(crate) async fn bootstrap_browser(&mut self, browser_client_path: &Path) -> Result<()> {
+        let browser_client_path = browser_client_path
+            .to_str()
+            .ok_or_else(|| anyhow!("browser_runtime_path_not_utf8:browser_client_path"))?;
+        let browser_client_path = serde_json::to_string(browser_client_path)
+            .expect("serializing a Rust string as JSON cannot fail");
+        let code = format!(
+            "if (globalThis.agent == null) {{\n  const {{ setupBrowserRuntime }} = await import({browser_client_path});\n  globalThis.agent = await setupBrowserRuntime();\n}}\nif (globalThis.browser == null) {{\n  globalThis.browser = await globalThis.agent.browsers.get(\"chrome\");\n}}\nnodeRepl.write(JSON.stringify({{ browserId: globalThis.browser.browserId }}));",
+            browser_client_path = browser_client_path,
+        );
+        let result = self.js(&code, 20_000).await?;
+        if result.is_error == Some(true) {
+            return Err(anyhow!("browser_runtime_browser_bootstrap_failed"));
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -139,6 +156,7 @@ mod tests {
     #[derive(Clone, Debug)]
     enum Behavior {
         Preserve,
+        Success,
         ToolError,
         ServiceFailure,
     }
@@ -196,6 +214,7 @@ mod tests {
             });
             match self.behavior {
                 Behavior::Preserve => std::future::ready(Ok(expected_result())),
+                Behavior::Success => std::future::ready(Ok(CallToolResult::default())),
                 Behavior::ToolError => std::future::ready(Ok(CallToolResult::structured_error(
                     json!({"message": "tool failed"}),
                 ))),
@@ -494,6 +513,91 @@ mod tests {
         .unwrap();
 
         let error = kernel.js("code", 1).await.unwrap_err();
+        assert!(error
+            .to_string()
+            .starts_with("browser_runtime_node_repl_call_failed:"));
+        drop(kernel);
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn bootstrap_sends_escaped_path_and_frozen_browser_setup_code() {
+        let server = FakeNodeReplServer::new(Behavior::Success);
+        let calls = server.calls.clone();
+        let (client, server_task) = connected(server).await;
+        let mut kernel = NodeReplKernel::from_initialized_client(
+            client,
+            "session-1".to_string(),
+            "turn-1".to_string(),
+        )
+        .unwrap();
+        let browser_client_path = PathBuf::from(r#"/runtime/browser"client\browser-client.mjs"#);
+        let raw_path = browser_client_path.to_str().unwrap().to_string();
+
+        kernel
+            .bootstrap_browser(&browser_client_path)
+            .await
+            .unwrap();
+
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "js");
+        assert_eq!(calls[0].arguments["timeout_ms"], json!(20_000_u64));
+        let code = calls[0].arguments["code"].as_str().unwrap();
+        let encoded_path = serde_json::to_string(&raw_path).unwrap();
+        assert!(code.contains(&format!("await import({encoded_path})")));
+        assert!(!code.contains(&raw_path));
+        assert!(code.contains("if (globalThis.agent == null)"));
+        assert!(code.contains("const { setupBrowserRuntime } = await import("));
+        assert!(code.contains("globalThis.agent = await setupBrowserRuntime();"));
+        assert!(code.contains("if (globalThis.browser == null)"));
+        assert!(
+            code.contains("globalThis.browser = await globalThis.agent.browsers.get(\"chrome\");")
+        );
+        assert!(code.contains(
+            "nodeRepl.write(JSON.stringify({ browserId: globalThis.browser.browserId }));"
+        ));
+        drop(kernel);
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn bootstrap_converts_tool_error_to_stable_failure() {
+        let (client, server_task) = connected(FakeNodeReplServer::new(Behavior::ToolError)).await;
+        let mut kernel = NodeReplKernel::from_initialized_client(
+            client,
+            "session-1".to_string(),
+            "turn-1".to_string(),
+        )
+        .unwrap();
+
+        let error = kernel
+            .bootstrap_browser(Path::new("/runtime/browser-client.mjs"))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "browser_runtime_browser_bootstrap_failed"
+        );
+        drop(kernel);
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn bootstrap_preserves_rmcp_service_failure_prefix() {
+        let (client, server_task) =
+            connected(FakeNodeReplServer::new(Behavior::ServiceFailure)).await;
+        let mut kernel = NodeReplKernel::from_initialized_client(
+            client,
+            "session-1".to_string(),
+            "turn-1".to_string(),
+        )
+        .unwrap();
+
+        let error = kernel
+            .bootstrap_browser(Path::new("/runtime/browser-client.mjs"))
+            .await
+            .unwrap_err();
         assert!(error
             .to_string()
             .starts_with("browser_runtime_node_repl_call_failed:"));

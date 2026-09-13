@@ -1,5 +1,16 @@
 # Browser Runtime V1 — Progress
 
+Status: Slice 05 browser SDK bootstrap accepted by orchestrator.
+
+Slice 05 implementation: added the frozen Browser SDK bootstrap primitive to the persistent node_repl kernel. It uses one 20-second `js` call, JSON-escapes the supplied UTF-8 browser client path, establishes only `globalThis.agent` and `globalThis.browser` with null guards, preserves rmcp call failures, and maps tool errors to the stable bootstrap failure. Added in-memory fake-server coverage for the call, code semantics, escaping, timeout, and error behavior. No scope, binding, timeout, result/error, or non-goal changes were made.
+
+Slice 05 verification:
+- `cargo test -p agentic-gpt browser_kernel`: 16 passed, 0 failed.
+- `cargo test -p agentic-gpt browser_runtime`: 17 passed, 0 failed.
+- `cargo fmt --all -- --check`: passed.
+- `git diff --check`: passed.
+- Orchestrator review confirmed the browser client path is JSON-escaped before import, only `globalThis.agent` and `globalThis.browser` are established, the `chrome` backend choice remains internal to bootstrap, and tool-level bootstrap failure is not confused with rmcp transport failure.
+
 Status: Slice 04 node_repl process lifecycle accepted by orchestrator.
 
 Slice 01 runtime descriptor and desktop discovery accepted by orchestrator.
