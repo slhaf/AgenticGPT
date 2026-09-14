@@ -1,26 +1,16 @@
 use std::{sync::Arc, time::Duration};
 
 use anyhow::{anyhow, Result};
-use axum::{
-    extract::{Request, State},
-    http::{header, HeaderMap, StatusCode},
-    middleware::{self, Next},
-    response::{IntoResponse, Response},
-    Router,
-};
+use axum::{middleware, Router};
 use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
 };
-use tokio::{
-    net::TcpListener,
-    sync::{watch, RwLock},
-    task::JoinHandle,
-    time::sleep,
-};
+use tokio::{net::TcpListener, sync::watch, task::JoinHandle, time::sleep};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     config::{self, HttpMcpConfig},
+    http_oauth::{self, HttpMcpAuthState, HttpMcpHostPolicy},
     state::AppState,
     stdio_server::{AgentMcpServer, RequestIngress},
     utils::{log_info, log_warn},
@@ -29,15 +19,11 @@ use crate::{
 pub(crate) const HTTP_MCP_PATH: &str = "/mcp";
 const RETRY_INTERVAL: Duration = Duration::from_secs(2);
 
-#[derive(Clone)]
-struct HttpMcpAuthState {
-    resolved_token: Arc<RwLock<Option<String>>>,
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct EndpointKey {
     host: String,
     port: u16,
+    public_url: Option<String>,
     allow_hosts: Option<Vec<String>>,
 }
 
@@ -46,6 +32,7 @@ impl From<&HttpMcpConfig> for EndpointKey {
         Self {
             host: config.host.clone(),
             port: config.port,
+            public_url: config.public_url.clone(),
             allow_hosts: config.allow_hosts.clone(),
         }
     }
@@ -136,11 +123,7 @@ async fn reconcile(
 
     if let Some(server) = active.as_mut() {
         if server.endpoint == endpoint {
-            let changed =
-                server.auth.resolved_token.read().await.as_deref() != Some(resolved_token.as_str());
-            if changed {
-                *server.auth.resolved_token.write().await = Some(resolved_token);
-            }
+            server.auth.replace_resolved_token(resolved_token).await;
             return Ok(());
         }
     }
@@ -204,14 +187,22 @@ fn spawn_server(
     resolved_token: String,
 ) -> ActiveHttpServer {
     let cancellation = CancellationToken::new();
-    let auth = HttpMcpAuthState {
-        resolved_token: Arc::new(RwLock::new(Some(resolved_token))),
-    };
+    let auth = HttpMcpAuthState::new(resolved_token, endpoint.public_url.clone());
+    let host_policy =
+        HttpMcpHostPolicy::new(endpoint.public_url.clone(), desired.allow_hosts.clone());
     let task_auth = auth.clone();
     let task_cancellation = cancellation.clone();
     let allow_hosts = desired.allow_hosts.clone();
     let task = tokio::spawn(async move {
-        serve_listener(listener, state, task_auth, allow_hosts, task_cancellation).await
+        serve_listener(
+            listener,
+            state,
+            task_auth,
+            host_policy,
+            allow_hosts,
+            task_cancellation,
+        )
+        .await
     });
     ActiveHttpServer {
         endpoint,
@@ -225,6 +216,7 @@ async fn serve_listener(
     listener: TcpListener,
     state: AppState,
     auth: HttpMcpAuthState,
+    host_policy: HttpMcpHostPolicy,
     allow_hosts: Option<Vec<String>>,
     cancellation: CancellationToken,
 ) -> Result<()> {
@@ -249,53 +241,28 @@ async fn serve_listener(
             session_manager,
             server_config,
         );
-    let router = Router::new()
-        .nest_service(HTTP_MCP_PATH, service)
-        .layer(middleware::from_fn_with_state(auth, require_bearer));
+    let mcp_router =
+        Router::new()
+            .nest_service(HTTP_MCP_PATH, service)
+            .layer(middleware::from_fn_with_state(
+                auth.clone(),
+                http_oauth::require_bearer,
+            ));
+    let router =
+        http_oauth::routes(auth.clone())
+            .merge(mcp_router)
+            .layer(middleware::from_fn_with_state(
+                host_policy,
+                http_oauth::require_host_origin,
+            ));
 
-    axum::serve(listener, router)
-        .with_graceful_shutdown(cancellation.cancelled_owned())
-        .await
-        .map_err(|_| anyhow!("http_mcp_server_task_failed"))
-}
-
-async fn require_bearer(
-    State(auth): State<HttpMcpAuthState>,
-    request: Request,
-    next: Next,
-) -> Response {
-    let presented = parse_bearer_token(request.headers());
-    let authorized = {
-        let expected = auth.resolved_token.read().await;
-        expected
-            .as_deref()
-            .zip(presented)
-            .is_some_and(|(expected, presented)| constant_time_eq(expected, presented))
-    };
-    if authorized {
-        next.run(request).await
-    } else {
-        (
-            StatusCode::UNAUTHORIZED,
-            [(header::WWW_AUTHENTICATE, "Bearer")],
-        )
-            .into_response()
-    }
-}
-
-fn parse_bearer_token(headers: &HeaderMap) -> Option<&str> {
-    let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
-    let (scheme, token) = value.split_once(char::is_whitespace)?;
-    let token = token.trim();
-    (scheme.eq_ignore_ascii_case("Bearer") && !token.is_empty()).then_some(token)
-}
-
-fn constant_time_eq(left: &str, right: &str) -> bool {
-    let mut difference = left.len() ^ right.len();
-    for (left, right) in left.as_bytes().iter().zip(right.as_bytes()) {
-        difference |= usize::from(left ^ right);
-    }
-    difference == 0
+    let cleanup_task = tokio::spawn(http_oauth::cleanup(auth, cancellation.clone()));
+    let result = axum::serve(listener, router)
+        .with_graceful_shutdown(cancellation.clone().cancelled_owned())
+        .await;
+    cancellation.cancel();
+    let _ = cleanup_task.await;
+    result.map_err(|_| anyhow!("http_mcp_server_task_failed"))
 }
 
 async fn stop_active(active: &mut Option<ActiveHttpServer>) {
@@ -316,45 +283,4 @@ fn error_code(error: &impl std::fmt::Display) -> String {
         .chars()
         .take(64)
         .collect()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn bearer_parser_accepts_case_insensitive_scheme_and_trimmed_token() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            header::AUTHORIZATION,
-            "bEaReR   token-value  ".parse().unwrap(),
-        );
-        assert_eq!(parse_bearer_token(&headers), Some("token-value"));
-    }
-
-    #[test]
-    fn bearer_parser_rejects_missing_basic_empty_and_malformed_values() {
-        for value in [
-            "",
-            "Basic token",
-            "Bearer",
-            "Bearer   ",
-            "Bearer\ttoken\textra",
-        ] {
-            let mut headers = HeaderMap::new();
-            headers.insert(header::AUTHORIZATION, value.parse().unwrap());
-            if value == "Bearer\ttoken\textra" {
-                assert_eq!(parse_bearer_token(&headers), Some("token\textra"));
-            } else {
-                assert_eq!(parse_bearer_token(&headers), None);
-            }
-        }
-    }
-
-    #[test]
-    fn constant_time_comparison_checks_length_and_bytes() {
-        assert!(constant_time_eq("token", "token"));
-        assert!(!constant_time_eq("token", "Token"));
-        assert!(!constant_time_eq("token", "token-extra"));
-    }
 }
