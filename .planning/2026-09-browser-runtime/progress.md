@@ -97,3 +97,5 @@ Slice 10 verification:
 - `cargo fmt --all -- --check`: passed.
 - `git diff --check`: passed.
 Slice 10 orchestrator review kept the source-agnostic optional context shape and changed missing Desktop runtime from a generic warning into a bounded informational diagnostic with `source`, construction `stage`, and the stable error text; absence is an expected degraded capability, not an Agentic health fault. Reverification passed: all 65 Browser-focused tests, `cargo test -p agentic-gpt --no-run` for the full package compile surface, fmt check, and diff check. The temporary dead-code warnings are expected until the next tool-surface slice consumes the AppState context.
+
+Slice 11 runtime-manual contract frozen: the selected official docs tree is small but remains external runtime data, so Browser gets its own bounded docs-root-relative read/literal-search layer with traversal/symlink/UTF-8/scan/output limits. This internal slice stays source-agnostic and does not expose `browser.manual` or change toolsets/AppState; the later surface layer will bind it to `state.browser_runtime.descriptor.docs_root`.
