@@ -1,5 +1,9 @@
 # Browser Runtime V1 — Progress
 
+Status: Slice 06 named Browser session manager contract frozen; implementation starting.
+
+Slice 06 scope: add an internal named lease manager over the accepted persistent `NodeReplKernel` primitives. Same-name first acquire must deduplicate initialization; different names remain concurrent; one per-lease lifecycle mutex serializes REPL/release/reaper ownership; release and idle expiry always remove the exact entry even after bounded shutdown failure; failed initialization leaves no stale entry. This slice does not add AppState/tool/config/reset wiring.
+
 Status: Slice 05 browser SDK bootstrap accepted by orchestrator.
 
 Slice 05 implementation: added the frozen Browser SDK bootstrap primitive to the persistent node_repl kernel. It uses one 20-second `js` call, JSON-escapes the supplied UTF-8 browser client path, establishes only `globalThis.agent` and `globalThis.browser` with null guards, preserves rmcp call failures, and maps tool errors to the stable bootstrap failure. Added in-memory fake-server coverage for the call, code semantics, escaping, timeout, and error behavior. No scope, binding, timeout, result/error, or non-goal changes were made.
