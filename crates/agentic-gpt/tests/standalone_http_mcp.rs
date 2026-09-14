@@ -1,4 +1,7 @@
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -7,12 +10,21 @@ use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
+use url::{form_urlencoded, Url};
 use uuid::Uuid;
 
 const RELOAD_WAIT: Duration = Duration::from_millis(2300);
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(8);
 const INITIAL_PROTOCOL_VERSION: &str = "2025-06-18";
+
+#[test]
+fn standalone_http_mcp_chatgpt_oauth_discovery_authorize_token_and_mcp_use() {
+    let root = TempRoot::new("oauth").unwrap();
+    if let Err(error) = run_oauth_scenario(&root.path) {
+        panic!("{error}");
+    }
+}
 
 #[test]
 fn standalone_http_mcp_env_auth_handshake_parity_rotation_toolset_and_last_good() {
@@ -241,8 +253,9 @@ fn run_env_scenario(root: &Path) -> Result<(), String> {
         }),
         401,
     )?;
-    require(
-        old_token_response.header("www-authenticate") == Some("Bearer"),
+    assert_bearer_challenge(
+        &old_token_response,
+        None,
         "rotated HTTP endpoint did not reject the old token with Bearer challenge",
     )?;
     let new_auth = format!("Bearer {rotated_token}");
@@ -403,9 +416,10 @@ fn run_file_scenario(root: &Path) -> Result<(), String> {
         }),
         401,
     )?;
-    require(
-        old_token_response.header("www-authenticate") == Some("Bearer"),
-        "file token rotation did not reject the old resolved token",
+    assert_bearer_challenge(
+        &old_token_response,
+        None,
+        "file token rotation did not reject the old resolved token with Bearer challenge",
     )?;
     let (_, _) = wait_for_http_exchange(
         &initial_endpoint,
@@ -486,6 +500,802 @@ fn run_file_scenario(root: &Path) -> Result<(), String> {
 
     drop(worker);
     wait_for_tcp(&replacement_endpoint, false)?;
+    Ok(())
+}
+
+fn run_oauth_scenario(root: &Path) -> Result<(), String> {
+    let port = free_port()?;
+    let suffix = Uuid::new_v4().simple().to_string();
+    let env_name = format!("AGENTIC_HTTP_MCP_OAUTH_{suffix}");
+    let rotated_name = format!("AGENTIC_HTTP_MCP_OAUTH_ROTATED_{suffix}");
+    let initial_token = "http-oauth-initial-token";
+    let rotated_token = "http-oauth-rotated-token";
+    let environment = vec![
+        (env_name.clone(), initial_token.to_string()),
+        (rotated_name.clone(), rotated_token.to_string()),
+    ];
+    let public_url = format!("https://127.0.0.1:{port}");
+    let (mut worker, config_path) =
+        spawn_oauth_worker(root, port, format!("env:{env_name}"), &environment)?;
+    let endpoint = Endpoint::new("127.0.0.1", port);
+    let host = endpoint.address();
+    let resource = format!("{public_url}/mcp");
+    wait_for_tcp(&endpoint, true)?;
+
+    let unauthorized = http_post_with_host(
+        &endpoint,
+        &host,
+        None,
+        None,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": INITIAL_PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": { "name": "oauth-test", "version": "1" }
+            }
+        }),
+    )?;
+    require(
+        unauthorized.status == 401,
+        "OAuth MCP request was not unauthorized",
+    )?;
+    assert_bearer_challenge(
+        &unauthorized,
+        Some(&format!(
+            "{public_url}/.well-known/oauth-protected-resource/mcp"
+        )),
+        "OAuth MCP challenge",
+    )?;
+
+    for path in [
+        "/.well-known/oauth-protected-resource/mcp",
+        "/.well-known/oauth-protected-resource",
+    ] {
+        let response = http_get(&endpoint, path, Some(&host), &[])?;
+        require(
+            response.status == 200,
+            "protected-resource discovery failed",
+        )?;
+        let metadata: Value =
+            serde_json::from_str(&response.body).map_err(|error| error.to_string())?;
+        require(
+            metadata["resource"] == resource
+                && metadata["authorization_servers"][0] == public_url
+                && metadata["scopes_supported"][0] == "agentic:mcp"
+                && metadata["bearer_methods_supported"][0] == "header"
+                && metadata["resource_documentation"] == resource
+                && metadata.get("mcp_profile").is_none(),
+            "protected-resource metadata was not standalone",
+        )?;
+    }
+    for path in [
+        "/.well-known/oauth-authorization-server",
+        "/.well-known/openid-configuration",
+    ] {
+        let response = http_get(&endpoint, path, Some(&host), &[])?;
+        require(
+            response.status == 200,
+            "authorization-server discovery failed",
+        )?;
+        let metadata: Value =
+            serde_json::from_str(&response.body).map_err(|error| error.to_string())?;
+        require(
+            metadata["issuer"] == public_url
+                && metadata["authorization_endpoint"] == format!("{public_url}/oauth/authorize")
+                && metadata["token_endpoint"] == format!("{public_url}/oauth/token")
+                && metadata["scopes_supported"][0] == "agentic:mcp"
+                && metadata.get("mcp_profile").is_none(),
+            "authorization-server metadata was not standalone",
+        )?;
+    }
+
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let challenge = pkce_challenge(verifier);
+    require(
+        challenge == "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+        "PKCE challenge did not match RFC 7636",
+    )?;
+    let redirect_uri = "https://chatgpt.com/connector/oauth/oauth-test";
+    let client_id = "client<&\"";
+    let state = "state<&\"";
+    let authorize_path = oauth_authorize_path(
+        client_id,
+        redirect_uri,
+        state,
+        "agentic:mcp",
+        &challenge,
+        "S256",
+        &resource,
+    );
+    let page = http_get(&endpoint, &authorize_path, Some(&host), &[])?;
+    require(
+        page.status == 200 && page.header("cache-control") == Some("no-store"),
+        "valid authorize page did not render with no-store caching",
+    )?;
+    require(
+        page.body.contains("HTTP MCP bearer token")
+            && page.body.contains("name=\"bearer_token\"")
+            && page.body.contains("&lt;")
+            && page.body.contains("&amp;")
+            && page.body.contains("&quot;"),
+        "authorize page omitted standalone escaped fields",
+    )?;
+    require(
+        !page.body.contains("Hub API key")
+            && !page.body.contains("API key")
+            && !page.body.to_ascii_lowercase().contains("secret"),
+        "authorize page leaked Hub/API-key/secret wording",
+    )?;
+
+    for bad_redirect in [
+        "https://chatgpt.com/connector/oauth/",
+        "http://chatgpt.com/connector/oauth/oauth-test",
+        "https://evil.example/connector/oauth/oauth-test",
+        "not a URI",
+    ] {
+        let path = oauth_authorize_path(
+            client_id,
+            bad_redirect,
+            state,
+            "agentic:mcp",
+            &challenge,
+            "S256",
+            &resource,
+        );
+        let response = http_get(&endpoint, &path, Some(&host), &[])?;
+        require(
+            response.header("location").is_none()
+                && response.body.to_ascii_lowercase().contains("error"),
+            "invalid redirect was not rendered as a local authorize error",
+        )?;
+    }
+    let wrong_method = http_get(
+        &endpoint,
+        &oauth_authorize_path(
+            client_id,
+            redirect_uri,
+            state,
+            "agentic:mcp",
+            &challenge,
+            "plain",
+            &resource,
+        ),
+        Some(&host),
+        &[],
+    )?;
+    require(
+        wrong_method.header("location").is_none()
+            && wrong_method.body.to_ascii_lowercase().contains("error"),
+        "unsupported PKCE method was not rejected",
+    )?;
+    let wrong_scope = http_get(
+        &endpoint,
+        &oauth_authorize_path(
+            client_id,
+            redirect_uri,
+            state,
+            "other",
+            &challenge,
+            "S256",
+            &resource,
+        ),
+        Some(&host),
+        &[],
+    )?;
+    require(
+        wrong_scope.header("location").is_none()
+            && wrong_scope
+                .body
+                .to_ascii_lowercase()
+                .contains("invalid_scope"),
+        "unsupported OAuth scope was not rejected",
+    )?;
+
+    let wrong_form = oauth_authorize_form(
+        &endpoint,
+        &host,
+        client_id,
+        redirect_uri,
+        state,
+        "agentic:mcp",
+        &challenge,
+        "S256",
+        &resource,
+        "wrong-bearer",
+    )?;
+    require(
+        wrong_form.status == 200
+            && wrong_form.header("location").is_none()
+            && wrong_form.body.contains("HTTP MCP bearer token")
+            && !wrong_form.body.contains("code="),
+        "wrong bearer did not render a retry page",
+    )?;
+    let submitted = oauth_authorize_form(
+        &endpoint,
+        &host,
+        client_id,
+        redirect_uri,
+        state,
+        "agentic:mcp",
+        &challenge,
+        "S256",
+        &resource,
+        initial_token,
+    )?;
+    require(
+        submitted.status == 303,
+        "authorize submission did not redirect",
+    )?;
+    let location = submitted
+        .header("location")
+        .ok_or_else(|| "authorize submission omitted Location".to_string())?;
+    let (code, returned_state) = oauth_code_and_state(location)?;
+    let callback = Url::parse(location).map_err(|error| error.to_string())?;
+    require(
+        callback.scheme() == "https"
+            && callback.host_str() == Some("chatgpt.com")
+            && callback.path() == "/connector/oauth/oauth-test",
+        "authorize submission redirected to an unexpected callback",
+    )?;
+    require(
+        returned_state == state,
+        "authorize redirect did not preserve state byte-for-byte",
+    )?;
+
+    let token_response = oauth_token(
+        &endpoint,
+        &host,
+        &[
+            ("grant_type", "authorization_code"),
+            ("code", &code),
+            ("client_id", client_id),
+            ("redirect_uri", redirect_uri),
+            ("code_verifier", verifier),
+            ("resource", &resource),
+        ],
+        &[],
+    )?;
+    require(
+        token_response.status == 200
+            && token_response.header("cache-control") == Some("no-store")
+            && token_response.header("pragma") == Some("no-cache"),
+        "token response did not have required success headers",
+    )?;
+    let token_json: Value =
+        serde_json::from_str(&token_response.body).map_err(|error| error.to_string())?;
+    let access_token = token_json["access_token"]
+        .as_str()
+        .ok_or_else(|| "token response omitted access_token".to_string())?
+        .to_string();
+    require(
+        token_json["token_type"] == "Bearer"
+            && token_json["scope"] == "agentic:mcp"
+            && token_json["expires_in"].as_i64().unwrap_or_default() >= 7 * 24 * 60 * 60
+            && access_token != initial_token
+            && !token_response.body.contains(initial_token),
+        "token response did not contain an opaque seven-day Bearer token",
+    )?;
+
+    let stdio_initialize = worker.stdio_initialize(2)?;
+    require(
+        stdio_initialize["result"]["protocolVersion"].is_string(),
+        "stdio initialize did not return a protocol version",
+    )?;
+    worker.send(json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized",
+        "params": {}
+    }))?;
+    let stdio_tools = sorted_tools(&worker.stdio_tools_list(3)?["result"]["tools"])?;
+    let direct_session = http_initialize(&endpoint, initial_token, 10)?;
+    let (_, direct_message) = http_tools_list(&endpoint, initial_token, &direct_session, 11)?;
+    let direct_tools = sorted_tools(&direct_message["result"]["tools"])?;
+    let oauth_session = http_initialize(&endpoint, &access_token, 12)?;
+    let (_, oauth_message) = http_tools_list(&endpoint, &access_token, &oauth_session, 13)?;
+    let oauth_tools = sorted_tools(&oauth_message["result"]["tools"])?;
+    require(
+        oauth_tools == direct_tools && oauth_tools == stdio_tools,
+        "OAuth MCP tool descriptors diverged from direct bearer/stdio",
+    )?;
+    let local_tools = wait_for_local_tools(&worker.binary, &config_path)?;
+    require(
+        oauth_tools == sorted_tools(&local_tools)?,
+        "OAuth MCP tool descriptors diverged from Unix/local tools",
+    )?;
+
+    let wrong_client_code = oauth_issue_code(
+        &endpoint,
+        &host,
+        client_id,
+        redirect_uri,
+        "wrong-client",
+        verifier,
+        &resource,
+        initial_token,
+    )?;
+    assert_oauth_error(
+        &oauth_token(
+            &endpoint,
+            &host,
+            &[
+                ("grant_type", "authorization_code"),
+                ("code", &wrong_client_code),
+                ("client_id", "different-client"),
+                ("redirect_uri", redirect_uri),
+                ("code_verifier", verifier),
+                ("resource", &resource),
+            ],
+            &[],
+        )?,
+        "invalid_grant",
+        "wrong client",
+    )?;
+    let wrong_redirect_code = oauth_issue_code(
+        &endpoint,
+        &host,
+        client_id,
+        redirect_uri,
+        "wrong-redirect",
+        verifier,
+        &resource,
+        initial_token,
+    )?;
+    assert_oauth_error(
+        &oauth_token(
+            &endpoint,
+            &host,
+            &[
+                ("grant_type", "authorization_code"),
+                ("code", &wrong_redirect_code),
+                ("client_id", client_id),
+                ("redirect_uri", "https://chatgpt.com/connector/oauth/other"),
+                ("code_verifier", verifier),
+                ("resource", &resource),
+            ],
+            &[],
+        )?,
+        "invalid_grant",
+        "redirect mismatch",
+    )?;
+    let wrong_resource_code = oauth_issue_code(
+        &endpoint,
+        &host,
+        client_id,
+        redirect_uri,
+        "wrong-resource",
+        verifier,
+        &resource,
+        initial_token,
+    )?;
+    assert_oauth_error(
+        &oauth_token(
+            &endpoint,
+            &host,
+            &[
+                ("grant_type", "authorization_code"),
+                ("code", &wrong_resource_code),
+                ("client_id", client_id),
+                ("redirect_uri", redirect_uri),
+                ("code_verifier", verifier),
+                ("resource", "https://evil.example/mcp"),
+            ],
+            &[],
+        )?,
+        "invalid_target",
+        "resource mismatch",
+    )?;
+    let wrong_token_scope_code = oauth_issue_code(
+        &endpoint,
+        &host,
+        client_id,
+        redirect_uri,
+        "wrong-token-scope",
+        verifier,
+        &resource,
+        initial_token,
+    )?;
+    assert_oauth_error(
+        &oauth_token(
+            &endpoint,
+            &host,
+            &[
+                ("grant_type", "authorization_code"),
+                ("code", &wrong_token_scope_code),
+                ("client_id", client_id),
+                ("redirect_uri", redirect_uri),
+                ("code_verifier", verifier),
+                ("resource", &resource),
+                ("scope", "other"),
+            ],
+            &[],
+        )?,
+        "invalid_scope",
+        "token scope mismatch",
+    )?;
+    let wrong_verifier_code = oauth_issue_code(
+        &endpoint,
+        &host,
+        client_id,
+        redirect_uri,
+        "wrong-verifier",
+        verifier,
+        &resource,
+        initial_token,
+    )?;
+    assert_oauth_error(
+        &oauth_token(
+            &endpoint,
+            &host,
+            &[
+                ("grant_type", "authorization_code"),
+                ("code", &wrong_verifier_code),
+                ("client_id", client_id),
+                ("redirect_uri", redirect_uri),
+                ("code_verifier", "wrong-verifier"),
+                ("resource", &resource),
+            ],
+            &[],
+        )?,
+        "invalid_grant",
+        "PKCE mismatch",
+    )?;
+    assert_oauth_error(
+        &oauth_token(
+            &endpoint,
+            &host,
+            &[
+                ("grant_type", "authorization_code"),
+                ("code", &wrong_verifier_code),
+                ("client_id", client_id),
+                ("redirect_uri", redirect_uri),
+                ("code_verifier", verifier),
+                ("resource", &resource),
+            ],
+            &[],
+        )?,
+        "invalid_grant",
+        "consumed code",
+    )?;
+    assert_oauth_error(
+        &oauth_token(&endpoint, &host, &[("grant_type", "refresh_token")], &[])?,
+        "unsupported_grant_type",
+        "unsupported grant",
+    )?;
+    assert_oauth_error(
+        &oauth_token(
+            &endpoint,
+            &host,
+            &[("grant_type", "authorization_code")],
+            &[],
+        )?,
+        "invalid_request",
+        "missing code",
+    )?;
+    assert_oauth_error(
+        &oauth_token(
+            &endpoint,
+            &host,
+            &[("grant_type", "authorization_code"), ("code", "unused")],
+            &[],
+        )?,
+        "invalid_request",
+        "missing verifier",
+    )?;
+    assert_oauth_error(
+        &oauth_token(
+            &endpoint,
+            &host,
+            &[
+                ("grant_type", "authorization_code"),
+                ("code", "unused"),
+                ("code_verifier", verifier),
+            ],
+            &[],
+        )?,
+        "invalid_request",
+        "missing redirect",
+    )?;
+    assert_oauth_error(
+        &oauth_token(
+            &endpoint,
+            &host,
+            &[
+                ("grant_type", "authorization_code"),
+                ("code", "unused"),
+                ("code_verifier", verifier),
+                ("redirect_uri", redirect_uri),
+            ],
+            &[],
+        )?,
+        "invalid_request",
+        "missing client",
+    )?;
+    let reuse_code = oauth_issue_code(
+        &endpoint,
+        &host,
+        client_id,
+        redirect_uri,
+        "reuse",
+        verifier,
+        &resource,
+        initial_token,
+    )?;
+    let first_reuse = oauth_token(
+        &endpoint,
+        &host,
+        &[
+            ("grant_type", "authorization_code"),
+            ("code", &reuse_code),
+            ("client_id", client_id),
+            ("redirect_uri", redirect_uri),
+            ("code_verifier", verifier),
+            ("resource", &resource),
+        ],
+        &[],
+    )?;
+    require(first_reuse.status == 200, "first code exchange failed")?;
+    assert_oauth_error(
+        &oauth_token(
+            &endpoint,
+            &host,
+            &[
+                ("grant_type", "authorization_code"),
+                ("code", &reuse_code),
+                ("client_id", client_id),
+                ("redirect_uri", redirect_uri),
+                ("code_verifier", verifier),
+                ("resource", &resource),
+            ],
+            &[],
+        )?,
+        "invalid_grant",
+        "code reuse",
+    )?;
+    assert_oauth_error(
+        &oauth_token(
+            &endpoint,
+            &host,
+            &[
+                ("grant_type", "authorization_code"),
+                ("client_id", client_id),
+                ("redirect_uri", redirect_uri),
+                ("code_verifier", verifier),
+            ],
+            &[],
+        )?,
+        "invalid_request",
+        "missing code field",
+    )?;
+
+    let rotation_code = oauth_issue_code(
+        &endpoint,
+        &host,
+        client_id,
+        redirect_uri,
+        "rotation",
+        verifier,
+        &resource,
+        initial_token,
+    )?;
+    let mut config = read_config(&config_path)?;
+    config["httpMcp"]["bearerToken"] = json!(format!("env:{rotated_name}"));
+    write_config(&config_path, &config)?;
+    thread::sleep(RELOAD_WAIT);
+    let old_direct = http_post_with_host(
+        &endpoint,
+        &host,
+        Some(&format!("Bearer {initial_token}")),
+        Some(&direct_session),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 20,
+            "method": "tools/list",
+            "params": {}
+        }),
+    )?;
+    require(
+        old_direct.status == 401,
+        "old direct bearer survived rotation",
+    )?;
+    assert_bearer_challenge(
+        &old_direct,
+        Some(&format!(
+            "{public_url}/.well-known/oauth-protected-resource/mcp"
+        )),
+        "rotated direct challenge",
+    )?;
+    let (_, new_direct_tools) = http_tools_list(&endpoint, rotated_token, &direct_session, 21)?;
+    require(
+        sorted_tools(&new_direct_tools["result"]["tools"])? == direct_tools,
+        "new direct bearer did not preserve the existing MCP session",
+    )?;
+    let old_oauth = http_post_with_host(
+        &endpoint,
+        &host,
+        Some(&format!("Bearer {access_token}")),
+        Some(&oauth_session),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 22,
+            "method": "tools/list",
+            "params": {}
+        }),
+    )?;
+    require(
+        old_oauth.status == 401,
+        "OAuth token survived direct bearer rotation",
+    )?;
+    assert_oauth_error(
+        &oauth_token(
+            &endpoint,
+            &host,
+            &[
+                ("grant_type", "authorization_code"),
+                ("code", &rotation_code),
+                ("client_id", client_id),
+                ("redirect_uri", redirect_uri),
+                ("code_verifier", verifier),
+                ("resource", &resource),
+            ],
+            &[],
+        )?,
+        "invalid_grant",
+        "rotated code",
+    )?;
+
+    let audience_code = oauth_issue_code(
+        &endpoint,
+        &host,
+        client_id,
+        redirect_uri,
+        "audience",
+        verifier,
+        &resource,
+        rotated_token,
+    )?;
+    assert_oauth_error(
+        &oauth_token(
+            &endpoint,
+            &host,
+            &[
+                ("grant_type", "authorization_code"),
+                ("code", &audience_code),
+                ("client_id", client_id),
+                ("redirect_uri", redirect_uri),
+                ("code_verifier", verifier),
+                ("resource", "https://evil.example/mcp"),
+            ],
+            &[],
+        )?,
+        "invalid_target",
+        "audience mismatch",
+    )?;
+    let random_bearer = http_post_with_host(
+        &endpoint,
+        &host,
+        Some("Bearer audience-mismatch-token"),
+        None,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 23,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": INITIAL_PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": { "name": "oauth-test", "version": "1" }
+            }
+        }),
+    )?;
+    require(
+        random_bearer.status == 401,
+        "resource-mismatched bearer authorized MCP",
+    )?;
+
+    for path in [
+        "/.well-known/oauth-protected-resource/mcp",
+        "/.well-known/oauth-protected-resource",
+        "/.well-known/oauth-authorization-server",
+        "/.well-known/openid-configuration",
+        "/oauth/authorize",
+        "/oauth/token",
+    ] {
+        let response = http_get(&endpoint, path, Some("evil.example"), &[])?;
+        require(
+            response.status == 403,
+            "disallowed Host reached a public OAuth route",
+        )?;
+    }
+    let missing_host = http_get(
+        &endpoint,
+        "/.well-known/oauth-protected-resource",
+        None,
+        &[],
+    )?;
+    require(missing_host.status == 400, "missing Host was not rejected")?;
+    let same_origin = http_get(
+        &endpoint,
+        "/.well-known/oauth-protected-resource",
+        Some(&host),
+        &[("Origin", &public_url)],
+    )?;
+    require(
+        same_origin.status == 200,
+        "configured public Origin was rejected",
+    )?;
+    let malformed_host = http_get(
+        &endpoint,
+        "/.well-known/oauth-protected-resource",
+        Some(":bad"),
+        &[],
+    )?;
+    require(
+        malformed_host.status == 400,
+        "malformed Host was not rejected",
+    )?;
+    let foreign_origin = http_get(
+        &endpoint,
+        "/.well-known/oauth-protected-resource",
+        Some(&host),
+        &[("Origin", "https://evil.example")],
+    )?;
+    require(foreign_origin.status == 403, "foreign Origin was accepted")?;
+    let no_origin = http_get(
+        &endpoint,
+        "/.well-known/oauth-protected-resource",
+        Some(&host),
+        &[],
+    )?;
+    require(no_origin.status == 200, "missing Origin was rejected")?;
+
+    config = read_config(&config_path)?;
+    config["httpMcp"]["publicUrl"] = json!("http://invalid.example");
+    write_config(&config_path, &config)?;
+    thread::sleep(RELOAD_WAIT);
+    let retained_metadata = http_get(
+        &endpoint,
+        "/.well-known/oauth-protected-resource/mcp",
+        Some(&host),
+        &[],
+    )?;
+    require(
+        retained_metadata.status == 200
+            && serde_json::from_str::<Value>(&retained_metadata.body)
+                .map(|value| value["resource"] == resource)
+                .unwrap_or(false),
+        "invalid publicUrl candidate did not retain the last-good listener",
+    )?;
+    config["httpMcp"]["publicUrl"] = json!(public_url);
+    config["httpMcp"]["allowHosts"] = Value::Null;
+    write_config(&config_path, &config)?;
+    thread::sleep(RELOAD_WAIT);
+    let unrestricted = http_get(
+        &endpoint,
+        "/.well-known/oauth-protected-resource",
+        Some("evil.example"),
+        &[],
+    )?;
+    require(
+        unrestricted.status == 200,
+        "null allowHosts did not allow a public OAuth route",
+    )?;
+    config["httpMcp"]["allowHosts"] = json!(["*"]);
+    write_config(&config_path, &config)?;
+    thread::sleep(RELOAD_WAIT);
+    let wildcard = http_get(
+        &endpoint,
+        "/.well-known/oauth-protected-resource",
+        Some("another.evil.example"),
+        &[],
+    )?;
+    require(
+        wildcard.status == 200,
+        "wildcard allowHosts did not allow a public OAuth route",
+    )?;
+    drop(worker);
+    wait_for_tcp(&endpoint, false)?;
     Ok(())
 }
 
@@ -588,6 +1398,26 @@ fn spawn_worker(
     bearer_reference: String,
     environment: &[(String, String)],
 ) -> Result<(WorkerFixture, PathBuf), String> {
+    spawn_worker_with_public_url(root, port, bearer_reference, environment, None)
+}
+
+fn spawn_oauth_worker(
+    root: &Path,
+    port: u16,
+    bearer_reference: String,
+    environment: &[(String, String)],
+) -> Result<(WorkerFixture, PathBuf), String> {
+    let public_url = format!("https://127.0.0.1:{port}");
+    spawn_worker_with_public_url(root, port, bearer_reference, environment, Some(&public_url))
+}
+
+fn spawn_worker_with_public_url(
+    root: &Path,
+    port: u16,
+    bearer_reference: String,
+    environment: &[(String, String)],
+    public_url: Option<&str>,
+) -> Result<(WorkerFixture, PathBuf), String> {
     let binary = binary_path();
     if !binary.exists() {
         return Err(format!("agentic binary not found: {}", binary.display()));
@@ -629,12 +1459,19 @@ fn spawn_worker(
         "apiKey": "env:AGENTIC_HTTP_MCP_TUNNEL_KEY",
         "hubReporting": { "enabled": false, "detail": "metadata" }
     });
+    let allow_hosts = public_url
+        .map(|_| json!([format!("127.0.0.1:{port}")]))
+        .unwrap_or_else(|| json!(["localhost", "127.0.0.1", "::1"]));
+    let public_url_value = public_url
+        .map(|value| Value::String(value.to_string()))
+        .unwrap_or(Value::Null);
     config["httpMcp"] = json!({
         "enabled": true,
         "host": "127.0.0.1",
         "port": port,
+        "publicUrl": public_url_value,
         "bearerToken": bearer_reference,
-        "allowHosts": ["localhost", "127.0.0.1", "::1"]
+        "allowHosts": allow_hosts
     });
     write_config(&config_path, &config)?;
 
@@ -747,6 +1584,271 @@ impl HttpResponse {
             .find(|(key, _)| key.eq_ignore_ascii_case(name))
             .map(|(_, value)| value.as_str())
     }
+}
+
+fn pkce_challenge(verifier: &str) -> String {
+    URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
+}
+
+fn oauth_authorize_path(
+    client_id: &str,
+    redirect_uri: &str,
+    state: &str,
+    scope: &str,
+    code_challenge: &str,
+    code_challenge_method: &str,
+    resource: &str,
+) -> String {
+    let mut serializer = form_urlencoded::Serializer::new(String::new());
+    serializer
+        .append_pair("response_type", "code")
+        .append_pair("client_id", client_id)
+        .append_pair("redirect_uri", redirect_uri)
+        .append_pair("state", state)
+        .append_pair("scope", scope)
+        .append_pair("code_challenge", code_challenge)
+        .append_pair("code_challenge_method", code_challenge_method)
+        .append_pair("resource", resource);
+    format!("/oauth/authorize?{}", serializer.finish())
+}
+
+fn form_body(fields: &[(&str, &str)]) -> String {
+    let mut serializer = form_urlencoded::Serializer::new(String::new());
+    for (name, value) in fields {
+        serializer.append_pair(name, value);
+    }
+    serializer.finish()
+}
+
+fn oauth_authorize_form(
+    endpoint: &Endpoint,
+    host: &str,
+    client_id: &str,
+    redirect_uri: &str,
+    state: &str,
+    scope: &str,
+    code_challenge: &str,
+    code_challenge_method: &str,
+    resource: &str,
+    bearer_token: &str,
+) -> Result<HttpResponse, String> {
+    let body = form_body(&[
+        ("response_type", "code"),
+        ("client_id", client_id),
+        ("redirect_uri", redirect_uri),
+        ("state", state),
+        ("scope", scope),
+        ("code_challenge", code_challenge),
+        ("code_challenge_method", code_challenge_method),
+        ("resource", resource),
+        ("bearer_token", bearer_token),
+    ]);
+    http_form_post(endpoint, "/oauth/authorize", Some(host), &body, &[])
+}
+
+fn oauth_issue_code(
+    endpoint: &Endpoint,
+    host: &str,
+    client_id: &str,
+    redirect_uri: &str,
+    state: &str,
+    verifier: &str,
+    resource: &str,
+    bearer_token: &str,
+) -> Result<String, String> {
+    let challenge = pkce_challenge(verifier);
+    let page = http_get(
+        endpoint,
+        &oauth_authorize_path(
+            client_id,
+            redirect_uri,
+            state,
+            "agentic:mcp",
+            &challenge,
+            "S256",
+            resource,
+        ),
+        Some(host),
+        &[],
+    )?;
+    require(page.status == 200, "fresh authorize request did not render")?;
+    let submitted = oauth_authorize_form(
+        endpoint,
+        host,
+        client_id,
+        redirect_uri,
+        state,
+        "agentic:mcp",
+        &challenge,
+        "S256",
+        resource,
+        bearer_token,
+    )?;
+    require(submitted.status == 303, "fresh authorize submission failed")?;
+    let location = submitted
+        .header("location")
+        .ok_or_else(|| "fresh authorize submission omitted Location".to_string())?;
+    let (code, returned_state) = oauth_code_and_state(location)?;
+    require(
+        returned_state == state,
+        "fresh authorize submission changed state",
+    )?;
+    Ok(code)
+}
+
+fn oauth_code_and_state(location: &str) -> Result<(String, String), String> {
+    let url = Url::parse(location).map_err(|error| format!("invalid OAuth redirect: {error}"))?;
+    let mut code = None;
+    let mut state = None;
+    let mut names = Vec::new();
+    for (name, value) in url.query_pairs() {
+        names.push(name.to_string());
+        match name.as_ref() {
+            "code" => code = Some(value.into_owned()),
+            "state" => state = Some(value.into_owned()),
+            _ => {}
+        }
+    }
+    require(
+        names.iter().all(|name| name == "code" || name == "state")
+            && names.iter().any(|name| name == "code"),
+        "OAuth redirect contained unexpected query fields",
+    )?;
+    Ok((
+        code.ok_or_else(|| "OAuth redirect omitted code".to_string())?,
+        state.ok_or_else(|| "OAuth redirect omitted state".to_string())?,
+    ))
+}
+
+fn oauth_token(
+    endpoint: &Endpoint,
+    host: &str,
+    fields: &[(&str, &str)],
+    headers: &[(&str, &str)],
+) -> Result<HttpResponse, String> {
+    let body = form_body(fields);
+    http_form_post(endpoint, "/oauth/token", Some(host), &body, headers)
+}
+
+fn assert_oauth_error(response: &HttpResponse, expected: &str, label: &str) -> Result<(), String> {
+    require(
+        response.status == 400
+            && response.header("cache-control") == Some("no-store")
+            && response.header("pragma") == Some("no-cache"),
+        &format!("{label} returned HTTP/status headers inconsistent with OAuth errors"),
+    )?;
+    let value: Value =
+        serde_json::from_str(&response.body).map_err(|error| format!("{label}: {error}"))?;
+    require(
+        value["error"] == expected && value.get("access_token").is_none(),
+        &format!("{label} returned the wrong flat OAuth error"),
+    )
+}
+fn assert_bearer_challenge(
+    response: &HttpResponse,
+    expected_resource_metadata: Option<&str>,
+    label: &str,
+) -> Result<(), String> {
+    let challenge = response
+        .header("www-authenticate")
+        .ok_or_else(|| format!("{label} omitted WWW-Authenticate"))?;
+    let params = challenge
+        .trim()
+        .strip_prefix("Bearer")
+        .map(str::trim)
+        .ok_or_else(|| format!("{label} did not begin with a Bearer challenge"))?;
+    if !params.is_empty() {
+        for segment in params.split(',') {
+            let segment = segment.trim();
+            require(
+                !segment.is_empty()
+                    && segment.split_once('=').is_some_and(|(_, value)| {
+                        value.len() >= 2 && value.starts_with('"') && value.ends_with('"')
+                    }),
+                &format!("{label} contained an unparsable challenge parameter"),
+            )?;
+        }
+    }
+    if let Some(expected) = expected_resource_metadata {
+        require(
+            challenge.contains(&format!("resource_metadata=\"{expected}\""))
+                && challenge.contains("scope=\"agentic:mcp\""),
+            &format!("{label} omitted the configured OAuth metadata and scope"),
+        )?;
+    }
+    Ok(())
+}
+
+fn http_get(
+    endpoint: &Endpoint,
+    path: &str,
+    host: Option<&str>,
+    headers: &[(&str, &str)],
+) -> Result<HttpResponse, String> {
+    http_request(endpoint, "GET", path, host, headers, None)
+}
+
+fn http_form_post(
+    endpoint: &Endpoint,
+    path: &str,
+    host: Option<&str>,
+    body: &str,
+    headers: &[(&str, &str)],
+) -> Result<HttpResponse, String> {
+    let mut all_headers = Vec::with_capacity(headers.len() + 1);
+    all_headers.push(("Content-Type", "application/x-www-form-urlencoded"));
+    all_headers.extend_from_slice(headers);
+    http_request(
+        endpoint,
+        "POST",
+        path,
+        host,
+        &all_headers,
+        Some(body.as_bytes()),
+    )
+}
+
+fn http_request(
+    endpoint: &Endpoint,
+    method: &str,
+    path: &str,
+    host: Option<&str>,
+    headers: &[(&str, &str)],
+    body: Option<&[u8]>,
+) -> Result<HttpResponse, String> {
+    let mut stream = TcpStream::connect(endpoint.address())
+        .map_err(|error| format!("HTTP connect to {} failed: {error}", endpoint.address()))?;
+    stream
+        .set_read_timeout(Some(OPERATION_TIMEOUT))
+        .map_err(|error| error.to_string())?;
+    let mut head = format!("{method} {path} HTTP/1.1\r\n");
+    if let Some(host) = host {
+        head.push_str("Host: ");
+        head.push_str(host);
+        head.push_str("\r\n");
+    }
+    for (name, value) in headers {
+        head.push_str(name);
+        head.push_str(": ");
+        head.push_str(value);
+        head.push_str("\r\n");
+    }
+    if let Some(body) = body {
+        head.push_str(&format!("Content-Length: {}\r\n", body.len()));
+    }
+    head.push_str("Connection: close\r\n\r\n");
+    stream
+        .write_all(head.as_bytes())
+        .and_then(|_| {
+            if let Some(body) = body {
+                stream.write_all(body)
+            } else {
+                Ok(())
+            }
+        })
+        .and_then(|_| stream.flush())
+        .map_err(|error| error.to_string())?;
+    read_http_response(stream)
 }
 
 fn http_initialize(endpoint: &Endpoint, token: &str, id: i64) -> Result<String, String> {
@@ -999,10 +2101,7 @@ fn assert_unauthorized(
             response.status
         ),
     )?;
-    require(
-        response.header("www-authenticate") == Some("Bearer"),
-        &format!("{label} did not return WWW-Authenticate: Bearer"),
-    )?;
+    assert_bearer_challenge(&response, None, label)?;
     Ok(())
 }
 
