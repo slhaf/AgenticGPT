@@ -999,6 +999,7 @@ mod tests {
                     uuid::Uuid::new_v4().simple()
                 ),
             )),
+            browser_runtime: None,
             runtime: RuntimeModel::local(CapabilityProfile::Room),
             started_at: Utc::now(),
             boot_generation: uuid::Uuid::new_v4().simple().to_string()[..12].to_string(),

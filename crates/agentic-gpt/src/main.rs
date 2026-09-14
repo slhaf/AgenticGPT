@@ -46,8 +46,8 @@ use config_cli::ConfigCommand;
 #[cfg(test)]
 use policy::PolicyDecision;
 use serde_json::{Map, Value};
-use state::{AppState, CapabilityProfile, RuntimeModel};
-use std::collections::HashMap;
+use state::{AppState, BrowserRuntimeContext, CapabilityProfile, RuntimeModel};
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::{IsTerminal, Read};
 use std::path::PathBuf;
@@ -276,6 +276,39 @@ async fn run_stdio_worker(
 
 const MAX_LOCAL_ARGUMENT_BYTES: usize = 2 * 1024 * 1024;
 
+fn log_browser_runtime_unavailable(stage: &str, error: &anyhow::Error) {
+    let diagnostic = error.to_string().chars().take(256).collect::<String>();
+    log_info(format!(
+        "browser runtime unavailable during startup; source=desktop-registry; stage={stage}; error={diagnostic}"
+    ));
+}
+
+fn discover_browser_runtime() -> Option<Arc<BrowserRuntimeContext>> {
+    let registry_path = match browser_runtime::default_desktop_registry_path() {
+        Ok(path) => path,
+        Err(error) => {
+            log_browser_runtime_unavailable("registry-path", &error);
+            return None;
+        }
+    };
+    let descriptor = match browser_runtime::discover_desktop_runtime(&registry_path) {
+        Ok(descriptor) => descriptor,
+        Err(error) => {
+            log_browser_runtime_unavailable("discovery", &error);
+            return None;
+        }
+    };
+    let launch_spec =
+        match browser_runtime::build_node_repl_launch_spec(&descriptor, &BTreeMap::new()) {
+            Ok(spec) => spec,
+            Err(error) => {
+                log_browser_runtime_unavailable("launch-spec", &error);
+                return None;
+            }
+        };
+    Some(BrowserRuntimeContext::new(descriptor, launch_spec))
+}
+
 fn build_app_state(
     config_path: PathBuf,
     config: Config,
@@ -293,11 +326,13 @@ fn build_app_state(
     let private_state = prepared.paths;
     let job_history = job_history::JobHistoryStore::open(&private_state);
     let skill_installs_root = private_state.skill_installs.clone();
+    let browser_runtime = discover_browser_runtime();
     Ok(AppState {
         config_path,
         config: Arc::new(RwLock::new(config)),
         private_state,
         job_history,
+        browser_runtime,
         runtime,
         started_at: chrono::Utc::now(),
         boot_generation: uuid::Uuid::new_v4().simple().to_string()[..12].to_string(),
@@ -819,6 +854,7 @@ mod tests {
                 job_history: crate::job_history::JobHistoryStore::disabled(
                     std::env::temp_dir().join("agentic-main-test-jobs.sqlite3"),
                 ),
+                browser_runtime: None,
                 runtime: RuntimeModel::hub(profile),
                 started_at: chrono::Utc::now(),
                 boot_generation: "testboot0001".to_string(),

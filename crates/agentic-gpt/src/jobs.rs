@@ -2063,6 +2063,7 @@ mod tests {
             job_history: crate::job_history::JobHistoryStore::disabled(
                 root.join("disabled-history-parent").join("jobs.sqlite3"),
             ),
+            browser_runtime: None,
             runtime: crate::state::RuntimeModel::hub(crate::state::CapabilityProfile::Normal),
             started_at: Utc::now(),
             boot_generation: "testboot0001".to_string(),

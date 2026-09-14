@@ -1815,6 +1815,7 @@ mod tests {
             job_history: crate::job_history::JobHistoryStore::disabled(
                 std::env::temp_dir().join("agentic-mcp-test-jobs.sqlite3"),
             ),
+            browser_runtime: None,
             runtime: crate::state::RuntimeModel::local(crate::state::CapabilityProfile::Normal),
             started_at: chrono::Utc::now(),
             boot_generation: "mcpboot00001".to_string(),

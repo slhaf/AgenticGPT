@@ -6,6 +6,7 @@ use agentic_gpt_protocol::{AgentMessage, AgentRole};
 use chrono::{DateTime, Utc};
 use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
 
+use crate::{browser_manager::BrowserRuntimeManager, browser_runtime::BrowserRuntimeDescriptor};
 use crate::{config::Config, confirmation, jobs};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -144,12 +145,33 @@ pub(crate) struct Capabilities {
 }
 
 #[derive(Clone)]
+pub(crate) struct BrowserRuntimeContext {
+    pub(crate) descriptor: BrowserRuntimeDescriptor,
+    pub(crate) manager: Arc<BrowserRuntimeManager>,
+}
+
+impl BrowserRuntimeContext {
+    pub(crate) fn new(
+        descriptor: BrowserRuntimeDescriptor,
+        launch_spec: crate::browser_runtime::NodeReplLaunchSpec,
+    ) -> Arc<Self> {
+        let manager =
+            BrowserRuntimeManager::new(launch_spec, descriptor.browser_client_path.clone());
+        Arc::new(Self {
+            descriptor,
+            manager,
+        })
+    }
+}
+
+#[derive(Clone)]
 pub(crate) struct AppState {
     pub(crate) config_path: PathBuf,
     pub(crate) config: Arc<RwLock<Config>>,
     pub(crate) private_state: crate::private_state::PrivateStatePaths,
     #[allow(dead_code)]
     pub(crate) job_history: std::sync::Arc<crate::job_history::JobHistoryStore>,
+    pub(crate) browser_runtime: Option<Arc<BrowserRuntimeContext>>,
     pub(crate) runtime: RuntimeModel,
     pub(crate) started_at: DateTime<Utc>,
     pub(crate) boot_generation: String,

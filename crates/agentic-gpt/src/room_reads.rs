@@ -543,6 +543,7 @@ mod tests {
             job_history: crate::job_history::JobHistoryStore::disabled(
                 std::env::temp_dir().join("agentic-room-reads-test-jobs.sqlite3"),
             ),
+            browser_runtime: None,
             runtime: RuntimeModel::local(CapabilityProfile::Room),
             started_at: Utc::now(),
             boot_generation: uuid::Uuid::new_v4().simple().to_string()[..12].to_string(),
