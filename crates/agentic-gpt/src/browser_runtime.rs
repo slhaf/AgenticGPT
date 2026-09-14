@@ -15,6 +15,7 @@ pub(crate) struct BrowserRuntimeDescriptor {
     pub(crate) codex_home: PathBuf,
     pub(crate) codex_cli_path: PathBuf,
     pub(crate) node_module_dirs: Vec<PathBuf>,
+    pub(crate) trusted_code_paths: Vec<PathBuf>,
     pub(crate) docs_root: PathBuf,
 }
 
@@ -46,7 +47,26 @@ pub(crate) fn build_node_repl_launch_spec(
     let browser_service_path =
         path_to_env_string(&runtime.browser_service_path, "browser_service_path")?;
 
+    let mut trusted_code_paths = Vec::new();
+    if let Some(value) = base_env.get("NODE_REPL_TRUSTED_CODE_PATHS") {
+        trusted_code_paths.extend(std::env::split_paths(value));
+    }
+    for path in &runtime.trusted_code_paths {
+        if !trusted_code_paths.contains(path) {
+            trusted_code_paths.push(path.clone());
+        }
+    }
+    let trusted_code_paths = std::env::join_paths(&trusted_code_paths)
+        .map_err(|_| anyhow!("browser_runtime_trusted_code_paths_invalid"))?
+        .to_str()
+        .ok_or_else(|| anyhow!("browser_runtime_trusted_code_paths_invalid"))?
+        .to_string();
+
     let mut env_overrides = base_env.clone();
+    env_overrides.insert(
+        "NODE_REPL_TRUSTED_CODE_PATHS".to_string(),
+        trusted_code_paths,
+    );
     env_overrides.insert("NODE_REPL_NODE_PATH".to_string(), node_path);
     env_overrides.insert("CODEX_HOME".to_string(), codex_home);
     env_overrides.insert("CODEX_CLI_PATH".to_string(), codex_cli_path);
@@ -145,6 +165,12 @@ pub(crate) fn discover_desktop_runtime(registry_path: &Path) -> Result<BrowserRu
     let codex_home = required_path(paths.get("codexHome"), "paths.codexHome")?;
     let codex_cli_path = required_path(paths.get("codexCliPath"), "paths.codexCliPath")?;
     let node_module_dirs = optional_path_list(paths.get("nodeModuleDirs"))?;
+    let mut trusted_code_paths = Vec::with_capacity(1 + node_module_dirs.len());
+    for path in std::iter::once(&codex_home).chain(node_module_dirs.iter()) {
+        if !trusted_code_paths.contains(path) {
+            trusted_code_paths.push(path.clone());
+        }
+    }
     let docs_root = derive_docs_root(&browser_client_path)?;
 
     Ok(BrowserRuntimeDescriptor {
@@ -157,6 +183,7 @@ pub(crate) fn discover_desktop_runtime(registry_path: &Path) -> Result<BrowserRu
         codex_home,
         codex_cli_path,
         node_module_dirs,
+        trusted_code_paths,
         docs_root,
     })
 }
@@ -280,6 +307,7 @@ mod tests {
             } else {
                 Vec::new()
             },
+            trusted_code_paths: vec![PathBuf::from("/bundle/codex")],
             docs_root: PathBuf::from("/bundle/docs"),
         }
     }
@@ -345,9 +373,59 @@ mod tests {
         let spec = build_node_repl_launch_spec(&runtime, &base_env).unwrap();
 
         assert_eq!(spec.env_overrides["CUSTOM_SETTING"], "preserved");
+        let expected = std::env::join_paths([
+            PathBuf::from("/caller/path"),
+            PathBuf::from("/bundle/codex"),
+        ])
+        .unwrap()
+        .into_string()
+        .unwrap();
+        assert_eq!(spec.env_overrides["NODE_REPL_TRUSTED_CODE_PATHS"], expected);
+    }
+
+    #[test]
+    fn launch_spec_creates_trusted_code_paths_when_base_omits_them() {
+        let runtime = launch_descriptor(false);
+        let spec = build_node_repl_launch_spec(&runtime, &BTreeMap::new()).unwrap();
+
         assert_eq!(
             spec.env_overrides["NODE_REPL_TRUSTED_CODE_PATHS"],
-            "/caller/path"
+            "/bundle/codex"
+        );
+    }
+
+    #[test]
+    fn launch_spec_merges_and_deduplicates_trusted_code_paths() {
+        let mut runtime = launch_descriptor(true);
+        runtime.trusted_code_paths = vec![
+            PathBuf::from("/bundle/codex"),
+            PathBuf::from("/bundle/node_modules"),
+            PathBuf::from("/bundle/required"),
+        ];
+        let base_env = BTreeMap::from([(
+            "NODE_REPL_TRUSTED_CODE_PATHS".to_string(),
+            std::env::join_paths([
+                PathBuf::from("/caller/first"),
+                PathBuf::from("/bundle/codex"),
+                PathBuf::from("/caller/last"),
+            ])
+            .unwrap()
+            .into_string()
+            .unwrap(),
+        )]);
+
+        let spec = build_node_repl_launch_spec(&runtime, &base_env).unwrap();
+        let paths = std::env::split_paths(&spec.env_overrides["NODE_REPL_TRUSTED_CODE_PATHS"])
+            .collect::<Vec<_>>();
+        assert_eq!(
+            paths,
+            vec![
+                PathBuf::from("/caller/first"),
+                PathBuf::from("/bundle/codex"),
+                PathBuf::from("/caller/last"),
+                PathBuf::from("/bundle/node_modules"),
+                PathBuf::from("/bundle/required"),
+            ]
         );
     }
 
@@ -487,6 +565,14 @@ mod tests {
                 PathBuf::from("/opt/openai/latest/shared/node_modules")
             ]
         );
+        assert_eq!(
+            descriptor.trusted_code_paths,
+            vec![
+                PathBuf::from("/opt/openai/latest/codex"),
+                PathBuf::from("/opt/openai/latest/node_modules"),
+                PathBuf::from("/opt/openai/latest/shared/node_modules"),
+            ]
+        );
 
         let reversed = discover_fixture(
             "selection-reversed",
@@ -497,6 +583,26 @@ mod tests {
         )
         .unwrap();
         assert_eq!(reversed, descriptor);
+    }
+
+    #[test]
+    fn derives_ordered_deduplicated_trusted_code_paths() {
+        let mut entry = valid_entry("2026-03-01T00:00:00Z", "latest", false);
+        entry["paths"]["nodeModuleDirs"] = json!([
+            "/opt/openai/latest/codex",
+            "/opt/openai/latest/node_modules",
+            "/opt/openai/latest/codex",
+        ]);
+
+        let descriptor = discover_fixture("trusted-code-paths", vec![entry]).unwrap();
+
+        assert_eq!(
+            descriptor.trusted_code_paths,
+            vec![
+                PathBuf::from("/opt/openai/latest/codex"),
+                PathBuf::from("/opt/openai/latest/node_modules"),
+            ]
+        );
     }
 
     #[test]

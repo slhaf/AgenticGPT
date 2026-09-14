@@ -12,6 +12,8 @@ use rmcp::{
 use serde_json::{json, Map, Value};
 use std::{path::Path, time::Duration};
 
+const BROWSER_UNAVAILABLE_SENTINEL: &str = "agentic_browser_runtime_browser_unavailable";
+
 fn node_repl_client_info() -> ClientInfo {
     ClientInfo::new(
         ClientCapabilities::default(),
@@ -154,12 +156,21 @@ impl NodeReplKernel {
         let browser_client_path = serde_json::to_string(browser_client_path)
             .expect("serializing a Rust string as JSON cannot fail");
         let code = format!(
-            "if (globalThis.agent == null) {{\n  const {{ setupBrowserRuntime }} = await import({browser_client_path});\n  globalThis.agent = await setupBrowserRuntime();\n}}\nif (globalThis.browser == null) {{\n  globalThis.browser = await globalThis.agent.browsers.get(\"chrome\");\n}}\nnodeRepl.write(JSON.stringify({{ browserId: globalThis.browser.browserId }}));",
+            "if (globalThis.agent == null) {{\n  const {{ setupBrowserRuntime }} = await import({browser_client_path});\n  globalThis.agent = await setupBrowserRuntime();\n}}\nif (globalThis.browser == null) {{\n  const __agentic_browsers = await globalThis.agent.browsers.list();\n  if (!__agentic_browsers.some((browser) => browser.family === \"chrome\")) {{\n    nodeRepl.write({sentinel});\n  }} else {{\n    globalThis.browser = await globalThis.agent.browsers.get(\"chrome\");\n  }}\n}}\nif (globalThis.browser != null) {{\n  nodeRepl.write(JSON.stringify({{ browserId: globalThis.browser.browserId }}));\n}}",
             browser_client_path = browser_client_path,
+            sentinel = serde_json::to_string(BROWSER_UNAVAILABLE_SENTINEL)
+                .expect("serializing a Rust string as JSON cannot fail"),
         );
         let result = self.js(&code, 20_000).await?;
         if result.is_error == Some(true) {
             return Err(anyhow!("browser_runtime_browser_bootstrap_failed"));
+        }
+        if result.content.iter().any(|content| {
+            content
+                .as_text()
+                .is_some_and(|text| text.text == BROWSER_UNAVAILABLE_SENTINEL)
+        }) {
+            return Err(anyhow!("browser_runtime_browser_unavailable"));
         }
         Ok(())
     }
@@ -191,6 +202,7 @@ mod tests {
         Preserve,
         Success,
         ToolError,
+        BrowserUnavailable,
         ServiceFailure,
     }
 
@@ -250,6 +262,9 @@ mod tests {
                 Behavior::Success => std::future::ready(Ok(CallToolResult::default())),
                 Behavior::ToolError => std::future::ready(Ok(CallToolResult::structured_error(
                     json!({"message": "tool failed"}),
+                ))),
+                Behavior::BrowserUnavailable => std::future::ready(Ok(CallToolResult::success(
+                    vec![Content::text(BROWSER_UNAVAILABLE_SENTINEL)],
                 ))),
                 Behavior::ServiceFailure => std::future::ready(Err(
                     rmcp::ErrorData::internal_error("fake service failure", None),
@@ -703,12 +718,36 @@ mod tests {
         assert!(code.contains("const { setupBrowserRuntime } = await import("));
         assert!(code.contains("globalThis.agent = await setupBrowserRuntime();"));
         assert!(code.contains("if (globalThis.browser == null)"));
+        assert!(code.contains("await globalThis.agent.browsers.list()"));
+        assert!(code.contains("browser.family === \"chrome\""));
+        assert!(code.contains(BROWSER_UNAVAILABLE_SENTINEL));
         assert!(
             code.contains("globalThis.browser = await globalThis.agent.browsers.get(\"chrome\");")
         );
+        assert!(code.find("browsers.list").unwrap() < code.find("browsers.get").unwrap());
         assert!(code.contains(
             "nodeRepl.write(JSON.stringify({ browserId: globalThis.browser.browserId }));"
         ));
+        drop(kernel);
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn bootstrap_sentinel_maps_to_browser_unavailable() {
+        let (client, server_task) =
+            connected(FakeNodeReplServer::new(Behavior::BrowserUnavailable)).await;
+        let mut kernel = NodeReplKernel::from_initialized_client(
+            client,
+            "session-1".to_string(),
+            "turn-1".to_string(),
+        )
+        .unwrap();
+
+        let error = kernel
+            .bootstrap_browser(Path::new("/runtime/browser-client.mjs"))
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "browser_runtime_browser_unavailable");
         drop(kernel);
         server_task.await.unwrap();
     }
