@@ -4,6 +4,8 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
+use crate::config::ExplicitBrowserRuntimeConfig;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct BrowserRuntimeDescriptor {
     pub(crate) app_version: String,
@@ -165,12 +167,7 @@ pub(crate) fn discover_desktop_runtime(registry_path: &Path) -> Result<BrowserRu
     let codex_home = required_path(paths.get("codexHome"), "paths.codexHome")?;
     let codex_cli_path = required_path(paths.get("codexCliPath"), "paths.codexCliPath")?;
     let node_module_dirs = optional_path_list(paths.get("nodeModuleDirs"))?;
-    let mut trusted_code_paths = Vec::with_capacity(1 + node_module_dirs.len());
-    for path in std::iter::once(&codex_home).chain(node_module_dirs.iter()) {
-        if !trusted_code_paths.contains(path) {
-            trusted_code_paths.push(path.clone());
-        }
-    }
+    let trusted_code_paths = derive_trusted_code_paths(&codex_home, &node_module_dirs);
     let docs_root = derive_docs_root(&browser_client_path)?;
 
     Ok(BrowserRuntimeDescriptor {
@@ -186,6 +183,71 @@ pub(crate) fn discover_desktop_runtime(registry_path: &Path) -> Result<BrowserRu
         trusted_code_paths,
         docs_root,
     })
+}
+
+pub(crate) fn explicit_runtime_descriptor(
+    config: &ExplicitBrowserRuntimeConfig,
+) -> Result<BrowserRuntimeDescriptor> {
+    let app_version = explicit_string(config.app_version.as_deref(), "appVersion")?;
+    let channel = explicit_string(config.channel.as_deref(), "channel")?;
+    let node_repl_path = explicit_path(config.node_repl_path.as_deref(), "nodeReplPath")?;
+    let node_path = explicit_path(config.node_path.as_deref(), "nodePath")?;
+    let browser_client_path =
+        explicit_path(config.browser_client_path.as_deref(), "browserClientPath")?;
+    let browser_service_path =
+        explicit_path(config.browser_service_path.as_deref(), "browserServicePath")?;
+    let codex_home = explicit_path(config.codex_home.as_deref(), "codexHome")?;
+    let codex_cli_path = explicit_path(config.codex_cli_path.as_deref(), "codexCliPath")?;
+    let node_module_dirs = config
+        .node_module_dirs
+        .iter()
+        .enumerate()
+        .map(|(index, path)| explicit_path(Some(path), &format!("nodeModuleDirs[{index}]")))
+        .collect::<Result<Vec<_>>>()?;
+    let trusted_code_paths = derive_trusted_code_paths(&codex_home, &node_module_dirs);
+    let docs_root = derive_docs_root(&browser_client_path)
+        .map_err(|_| anyhow!("browser_runtime_explicit_docs_root_invalid"))?;
+
+    Ok(BrowserRuntimeDescriptor {
+        app_version,
+        channel,
+        node_repl_path,
+        node_path,
+        browser_client_path,
+        browser_service_path,
+        codex_home,
+        codex_cli_path,
+        node_module_dirs,
+        trusted_code_paths,
+        docs_root,
+    })
+}
+
+fn explicit_string(value: Option<&str>, field: &str) -> Result<String> {
+    let value = value.ok_or_else(|| anyhow!("browser_runtime_explicit_required:{field}"))?;
+    if value.is_empty() {
+        return Err(anyhow!("browser_runtime_explicit_empty:{field}"));
+    }
+    Ok(value.to_string())
+}
+
+fn explicit_path(value: Option<&str>, field: &str) -> Result<PathBuf> {
+    let value = explicit_string(value, field)?;
+    let path = PathBuf::from(&value);
+    if !path.is_absolute() {
+        return Err(anyhow!("browser_runtime_explicit_relative:{field}"));
+    }
+    Ok(path)
+}
+
+fn derive_trusted_code_paths(codex_home: &Path, node_module_dirs: &[PathBuf]) -> Vec<PathBuf> {
+    let mut paths = Vec::with_capacity(1 + node_module_dirs.len());
+    for path in std::iter::once(codex_home).chain(node_module_dirs.iter().map(PathBuf::as_path)) {
+        if !paths.contains(&path.to_path_buf()) {
+            paths.push(path.to_path_buf());
+        }
+    }
+    paths
 }
 
 fn required_string(value: Option<&Value>, field: &str) -> Result<String> {
@@ -687,5 +749,67 @@ mod tests {
         entry["paths"]["browserClientPath"] = json!("scripts/browser-client.mjs");
         let error = discover_fixture("docs-root-invalid", vec![entry]).unwrap_err();
         assert_eq!(error.to_string(), "browser_runtime_docs_root_invalid");
+    }
+
+    fn explicit_config() -> ExplicitBrowserRuntimeConfig {
+        ExplicitBrowserRuntimeConfig {
+            app_version: Some("26.1.2".to_string()),
+            channel: Some("prod".to_string()),
+            node_repl_path: Some("/opt/runtime/bin/node_repl".to_string()),
+            node_path: Some("/opt/runtime/bin/node".to_string()),
+            browser_client_path: Some("/opt/runtime/chrome/scripts/browser-client.mjs".to_string()),
+            browser_service_path: Some(
+                "/opt/runtime/chrome/scripts/browser-service.mjs".to_string(),
+            ),
+            codex_home: Some("/opt/runtime/home".to_string()),
+            codex_cli_path: Some("/opt/runtime/bin/codex".to_string()),
+            node_module_dirs: vec![
+                "/opt/runtime/modules".to_string(),
+                "/opt/runtime/home".to_string(),
+                "/opt/runtime/modules".to_string(),
+            ],
+        }
+    }
+
+    #[test]
+    fn explicit_descriptor_derives_shared_docs_and_trusted_paths() {
+        let descriptor = explicit_runtime_descriptor(&explicit_config()).unwrap();
+        assert_eq!(
+            descriptor.docs_root,
+            PathBuf::from("/opt/runtime/chrome/docs")
+        );
+        assert_eq!(
+            descriptor.trusted_code_paths,
+            vec![
+                PathBuf::from("/opt/runtime/home"),
+                PathBuf::from("/opt/runtime/modules")
+            ]
+        );
+    }
+
+    #[test]
+    fn explicit_descriptor_rejects_empty_and_relative_fields() {
+        let mut config = explicit_config();
+        config.node_path = Some(String::new());
+        assert_eq!(
+            explicit_runtime_descriptor(&config)
+                .unwrap_err()
+                .to_string(),
+            "browser_runtime_explicit_empty:nodePath"
+        );
+        config.node_path = Some("relative/node".to_string());
+        assert_eq!(
+            explicit_runtime_descriptor(&config)
+                .unwrap_err()
+                .to_string(),
+            "browser_runtime_explicit_relative:nodePath"
+        );
+        config.node_path = None;
+        assert_eq!(
+            explicit_runtime_descriptor(&config)
+                .unwrap_err()
+                .to_string(),
+            "browser_runtime_explicit_required:nodePath"
+        );
     }
 }

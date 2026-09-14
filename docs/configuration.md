@@ -180,11 +180,44 @@ profile room`). An explicit `toolsets.enabled` selection remains authoritative.
 | `skills` | Skill package/install limits and network policy. |
 | `room` | Room repository root, timezone, diary boundary, maintenance mode, and auto-push policy. |
 | `tunnel` | Standalone tunnel-client source, secret reference, and optional reporting. |
+| `browser` | Optional advanced explicit Browser runtime override; ordinary runtime discovery/provisioning is otherwise automatic. |
 | `hub` | Centralized Hub connection or optional standalone Hub reporting/ntfy relay. |
 
 Path-safe `agentId` values map directly to the private state directory name. Wider legacy Hub identities remain supported and use a stable hashed directory key instead of becoming a filesystem path component.
 
 Unknown top-level fields are preserved by load/write round trips. Nested strict objects such as `limits` reject removed v0.8 fields.
+
+### Browser runtime override
+
+Browser is not enabled by configuring a runtime; `toolsets.enabled` remains authoritative. With no
+`browser` section (or with `browser: {}`), normal runtime discovery is unchanged. The explicit
+descriptor is an advanced override for development, unusual deployments, or recovery; it is not
+intended to be the normal managed-runtime installation path. All scalar values are required when
+`runtime` is present, and every path must be absolute; `nodeModuleDirs` defaults to an empty list:
+
+```json
+{
+  "browser": {
+    "runtime": {
+      "appVersion": "<official-runtime-version>",
+      "channel": "<runtime-channel>",
+      "nodeReplPath": "/absolute/path/to/node_repl",
+      "nodePath": "/absolute/path/to/node",
+      "browserClientPath": "/absolute/path/to/browser-client.mjs",
+      "browserServicePath": "/absolute/path/to/browser-service.mjs",
+      "codexHome": "/absolute/path/to/runtime-home",
+      "codexCliPath": "/absolute/path/to/codex-or-compatible-cli",
+      "nodeModuleDirs": ["/absolute/path/to/node_modules"]
+    }
+  }
+}
+```
+
+The explicit source is selected at process startup and is authoritative: an invalid descriptor
+closes Browser capability rather than falling back to Desktop discovery, while Agentic startup
+continues. Changing it requires a process restart. `docsRoot` and `trustedCodePaths` are derived
+internally and are not configuration fields. No installer, downloader, or runtime cache is managed
+by this setting.
 
 ## Tunnel configuration
 

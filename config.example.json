@@ -24,6 +24,7 @@
     "agentSecret": "change-me-before-use"
   },
   "workspaceRoot": "/home/your-user/.agentic_gpt/workspace",
+  "browser": {},
   "room": {
     "repositoryRoot": null,
     "timezone": "Asia/Shanghai",

@@ -192,6 +192,34 @@ impl Default for HubConfig {
     }
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct BrowserConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) runtime: Option<ExplicitBrowserRuntimeConfig>,
+}
+
+impl BrowserConfig {
+    fn is_empty(&self) -> bool {
+        self.runtime.is_none()
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ExplicitBrowserRuntimeConfig {
+    pub(crate) app_version: Option<String>,
+    pub(crate) channel: Option<String>,
+    pub(crate) node_repl_path: Option<String>,
+    pub(crate) node_path: Option<String>,
+    pub(crate) browser_client_path: Option<String>,
+    pub(crate) browser_service_path: Option<String>,
+    pub(crate) codex_home: Option<String>,
+    pub(crate) codex_cli_path: Option<String>,
+    #[serde(default)]
+    pub(crate) node_module_dirs: Vec<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Config {
@@ -207,6 +235,8 @@ pub(crate) struct Config {
     #[serde(default = "default_confirmation_language")]
     pub(crate) confirmation_language: String,
     pub(crate) sandbox: SandboxConfig,
+    #[serde(default, skip_serializing_if = "BrowserConfig::is_empty")]
+    pub(crate) browser: BrowserConfig,
     #[serde(default)]
     pub(crate) mcp_servers: BTreeMap<String, McpServerConfig>,
     #[serde(default)]
@@ -721,6 +751,7 @@ impl Config {
                 channels: ConfirmationProviderConfig::default_channels(),
             },
             confirmation_language: default_confirmation_language(),
+            browser: BrowserConfig::default(),
             mcp_servers: BTreeMap::new(),
             sandbox: SandboxConfig {
                 enabled: false,
@@ -994,6 +1025,7 @@ impl Config {
             "confirmationLanguage",
             "sandbox",
             "mcpServers",
+            "browser",
             "pathPolicy",
             "policy",
             "limits",
@@ -2414,6 +2446,44 @@ mod tests {
         assert!(value.get("limits").is_none());
         assert!(value.get("pathPolicy").is_none());
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn explicit_browser_runtime_round_trips_through_sparse_write_and_import() {
+        let mut config = Config::default_config().unwrap();
+        config.browser.runtime = Some(ExplicitBrowserRuntimeConfig {
+            app_version: Some("26.1.2".to_string()),
+            channel: Some("prod".to_string()),
+            node_repl_path: Some("/opt/runtime/node_repl".to_string()),
+            node_path: Some("/opt/runtime/node".to_string()),
+            browser_client_path: Some("/opt/runtime/chrome/scripts/browser-client.mjs".to_string()),
+            browser_service_path: Some(
+                "/opt/runtime/chrome/scripts/browser-service.mjs".to_string(),
+            ),
+            codex_home: Some("/opt/runtime/home".to_string()),
+            codex_cli_path: Some("/opt/runtime/codex".to_string()),
+            node_module_dirs: vec!["/opt/runtime/modules".to_string()],
+        });
+        let path = temp_config_path();
+        write_config_with_backup(&path, &config).unwrap();
+        let loaded = Config::load(&path).unwrap();
+        assert_eq!(loaded.browser, config.browser);
+        assert_eq!(
+            sparse_config_value(&loaded, false).unwrap()["browser"],
+            serde_json::to_value(&config.browser).unwrap()
+        );
+        let imported = Config::import(&path).unwrap();
+        assert_eq!(imported.config.browser, config.browser);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn empty_browser_section_is_omitted_from_sparse_defaults() {
+        let config = Config::default_config().unwrap();
+        assert!(sparse_config_value(&config, false)
+            .unwrap()
+            .get("browser")
+            .is_none());
     }
 
     #[test]

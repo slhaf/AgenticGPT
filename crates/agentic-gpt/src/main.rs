@@ -277,33 +277,45 @@ async fn run_stdio_worker(
 
 const MAX_LOCAL_ARGUMENT_BYTES: usize = 2 * 1024 * 1024;
 
-fn log_browser_runtime_unavailable(stage: &str, error: &anyhow::Error) {
+fn log_browser_runtime_unavailable(source: &str, stage: &str, error: &anyhow::Error) {
     let diagnostic = error.to_string().chars().take(256).collect::<String>();
     log_info(format!(
-        "browser runtime unavailable during startup; source=desktop-registry; stage={stage}; error={diagnostic}"
+        "browser runtime unavailable during startup; source={source}; stage={stage}; error={diagnostic}"
     ));
 }
 
-fn discover_browser_runtime() -> Option<Arc<BrowserRuntimeContext>> {
-    let registry_path = match browser_runtime::default_desktop_registry_path() {
-        Ok(path) => path,
-        Err(error) => {
-            log_browser_runtime_unavailable("registry-path", &error);
-            return None;
-        }
-    };
-    let descriptor = match browser_runtime::discover_desktop_runtime(&registry_path) {
-        Ok(descriptor) => descriptor,
-        Err(error) => {
-            log_browser_runtime_unavailable("discovery", &error);
-            return None;
-        }
+fn discover_browser_runtime(config: &Config) -> Option<Arc<BrowserRuntimeContext>> {
+    let (source, descriptor) = if let Some(explicit) = config.browser.runtime.as_ref() {
+        let descriptor = match browser_runtime::explicit_runtime_descriptor(explicit) {
+            Ok(descriptor) => descriptor,
+            Err(error) => {
+                log_browser_runtime_unavailable("explicit-config", "descriptor", &error);
+                return None;
+            }
+        };
+        ("explicit-config", descriptor)
+    } else {
+        let registry_path = match browser_runtime::default_desktop_registry_path() {
+            Ok(path) => path,
+            Err(error) => {
+                log_browser_runtime_unavailable("desktop-registry", "registry-path", &error);
+                return None;
+            }
+        };
+        let descriptor = match browser_runtime::discover_desktop_runtime(&registry_path) {
+            Ok(descriptor) => descriptor,
+            Err(error) => {
+                log_browser_runtime_unavailable("desktop-registry", "discovery", &error);
+                return None;
+            }
+        };
+        ("desktop-registry", descriptor)
     };
     let launch_spec =
         match browser_runtime::build_node_repl_launch_spec(&descriptor, &BTreeMap::new()) {
             Ok(spec) => spec,
             Err(error) => {
-                log_browser_runtime_unavailable("launch-spec", &error);
+                log_browser_runtime_unavailable(source, "launch-spec", &error);
                 return None;
             }
         };
@@ -327,7 +339,7 @@ fn build_app_state(
     let private_state = prepared.paths;
     let job_history = job_history::JobHistoryStore::open(&private_state);
     let skill_installs_root = private_state.skill_installs.clone();
-    let browser_runtime = discover_browser_runtime();
+    let browser_runtime = discover_browser_runtime(&config);
     Ok(AppState {
         config_path,
         config: Arc::new(RwLock::new(config)),
@@ -696,6 +708,51 @@ mod tests {
     };
     use tokio::sync::mpsc;
     use uuid::Uuid;
+
+    fn explicit_browser_runtime_config() -> config::ExplicitBrowserRuntimeConfig {
+        config::ExplicitBrowserRuntimeConfig {
+            app_version: Some("26.1.2".to_string()),
+            channel: Some("prod".to_string()),
+            node_repl_path: Some("/opt/runtime/node_repl".to_string()),
+            node_path: Some("/opt/runtime/node".to_string()),
+            browser_client_path: Some("/opt/runtime/chrome/scripts/browser-client.mjs".to_string()),
+            browser_service_path: Some(
+                "/opt/runtime/chrome/scripts/browser-service.mjs".to_string(),
+            ),
+            codex_home: Some("/opt/runtime/home".to_string()),
+            codex_cli_path: Some("/opt/runtime/codex".to_string()),
+            node_module_dirs: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_runtime_precedes_desktop_discovery_and_invalid_does_not_fallback() {
+        let mut config = Config::default_config().unwrap();
+        config.browser.runtime = Some(explicit_browser_runtime_config());
+        let context = discover_browser_runtime(&config).expect("explicit runtime selected");
+        assert_eq!(context.descriptor.app_version, "26.1.2");
+
+        config.browser.runtime.as_mut().unwrap().node_path = Some("relative/node".to_string());
+        assert!(discover_browser_runtime(&config).is_none());
+    }
+
+    #[test]
+    fn invalid_explicit_runtime_keeps_app_startup_fail_open() {
+        let mut config = Config::default_config().unwrap();
+        config.browser.runtime = Some(explicit_browser_runtime_config());
+        config.browser.runtime.as_mut().unwrap().node_path = Some("relative/node".to_string());
+        let root = unique_temp_dir("explicit-browser-fail-open");
+        config.workspace_root = root.join("workspace");
+        let state = build_app_state(
+            root.join("config.json"),
+            config,
+            RuntimeModel::local(CapabilityProfile::Normal),
+            false,
+        )
+        .unwrap();
+        assert!(state.browser_runtime.is_none());
+        let _ = fs::remove_dir_all(root);
+    }
 
     #[test]
     fn cli_version_uses_crate_version() {
