@@ -95,6 +95,10 @@ fn localized_error(code: &str, language: UiLanguage) -> String {
             "Bearer token must be a file:/absolute/path or env:NAME reference.",
             "Bearer token 必须是 file:/absolute/path 或 env:NAME 引用。",
         ),
+        "http_mcp_public_url_invalid" => (
+            "Public URL must be an HTTPS origin with no userinfo, path, query, or fragment.",
+            "Public URL 必须是 HTTPS 来源，不能包含用户信息、路径、查询参数或片段。",
+        ),
         "http_mcp_host_invalid" => (
             "HTTP MCP host is invalid.",
             "HTTP MCP 主机地址无效。",
@@ -871,6 +875,16 @@ fn connection_inspector_body(
                 "有效范围：1–65535；默认：8765。",
             ],
         },
+        Some(SetupField::HttpMcpPublicUrl) => match language {
+            UiLanguage::En => &[
+                "External HTTPS origin advertised to ChatGPT for standalone HTTP MCP OAuth.",
+                "Optional for direct bearer use; leave empty to disable OAuth discovery and token issuance.",
+            ],
+            UiLanguage::ZhCn => &[
+                "向 ChatGPT 公布的 Standalone HTTP MCP OAuth 外部 HTTPS 来源。",
+                "直接 Bearer 使用时可选；留空会关闭 OAuth 发现和令牌签发。",
+            ],
+        },
         Some(SetupField::HttpMcpBearerToken) => match language {
             UiLanguage::En => &[
                 "Bearer token reference used by inbound HTTP MCP authentication.",
@@ -983,6 +997,7 @@ pub(super) fn connection_focus_items(session: &SetupSession) -> Vec<ConnectionFo
                 ConnectionFocusItem::Field(SetupField::HttpMcpEnabled),
                 ConnectionFocusItem::Field(SetupField::HttpMcpHost),
                 ConnectionFocusItem::Field(SetupField::HttpMcpPort),
+                ConnectionFocusItem::Field(SetupField::HttpMcpPublicUrl),
                 ConnectionFocusItem::Field(SetupField::HttpMcpBearerToken),
                 ConnectionFocusItem::Field(SetupField::HttpMcpAllowHosts),
             ]);
@@ -1043,6 +1058,9 @@ fn connection_label(field: SetupField, _value: Option<&str>, language: UiLanguag
         SetupField::HttpMcpEnabled => t(language, "HTTP MCP enabled", "启用 HTTP MCP").to_string(),
         SetupField::HttpMcpHost => t(language, "HTTP MCP host", "HTTP MCP 主机").to_string(),
         SetupField::HttpMcpPort => t(language, "HTTP MCP port", "HTTP MCP 端口").to_string(),
+        SetupField::HttpMcpPublicUrl => {
+            t(language, "HTTP MCP public URL", "HTTP MCP 公共 URL").to_string()
+        }
         SetupField::HttpMcpBearerToken => {
             t(language, "HTTP MCP bearer token", "HTTP MCP Bearer 令牌").to_string()
         }
@@ -1093,6 +1111,7 @@ pub(super) fn connection_value(session: &SetupSession, field: SetupField) -> Opt
         SetupField::HttpMcpEnabled => Some(session.standalone().http_mcp_enabled.to_string()),
         SetupField::HttpMcpHost => Some(session.standalone().http_mcp_host.clone()),
         SetupField::HttpMcpPort => Some(session.standalone().http_mcp_port.clone()),
+        SetupField::HttpMcpPublicUrl => Some(session.standalone().public_url.clone()),
         SetupField::HttpMcpBearerToken => Some(
             session
                 .standalone()

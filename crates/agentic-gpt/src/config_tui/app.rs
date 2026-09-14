@@ -829,6 +829,7 @@ impl ConfigTuiApp {
             }
             SetupField::HttpMcpHost => self.session_mut().standalone_mut().http_mcp_host = value,
             SetupField::HttpMcpPort => self.session_mut().standalone_mut().http_mcp_port = value,
+            SetupField::HttpMcpPublicUrl => self.session_mut().standalone_mut().public_url = value,
             SetupField::HttpMcpBearerToken => {
                 self.session_mut().standalone_mut().http_mcp_bearer_token = if value.is_empty() {
                     None
@@ -1804,6 +1805,10 @@ impl ConfigTuiApp {
                 &mut self.session_mut().standalone_mut().http_mcp_port,
                 value,
             )),
+            SetupField::HttpMcpPublicUrl => Some(std::mem::replace(
+                &mut self.session_mut().standalone_mut().public_url,
+                value,
+            )),
             SetupField::HttpMcpAllowHosts => Some(std::mem::replace(
                 &mut self.session_mut().standalone_mut().http_mcp_allow_hosts,
                 value,
@@ -1841,6 +1846,9 @@ impl ConfigTuiApp {
                 }
                 SetupField::HttpMcpPort => {
                     self.session_mut().standalone_mut().http_mcp_port = previous
+                }
+                SetupField::HttpMcpPublicUrl => {
+                    self.session_mut().standalone_mut().public_url = previous
                 }
                 SetupField::HttpMcpAllowHosts => {
                     self.session_mut().standalone_mut().http_mcp_allow_hosts = previous

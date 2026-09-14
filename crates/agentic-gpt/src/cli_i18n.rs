@@ -389,6 +389,11 @@ const ARG_CATALOG: &[CatalogEntry] = &[
         "HTTP MCP 监听器端口",
     ),
     CatalogEntry::new(
+        "config.init.http_mcp_public_url",
+        "External HTTPS origin for standalone ChatGPT OAuth",
+        "Standalone ChatGPT OAuth 使用的外部 HTTPS 来源",
+    ),
+    CatalogEntry::new(
         "config.init.http_mcp_bearer_token",
         "HTTP MCP bearer token reference",
         "HTTP MCP Bearer token 引用",

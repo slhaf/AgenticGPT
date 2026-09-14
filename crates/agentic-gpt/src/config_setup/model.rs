@@ -35,6 +35,7 @@ pub(crate) enum SetupField {
     HttpMcpEnabled,
     HttpMcpHost,
     HttpMcpPort,
+    HttpMcpPublicUrl,
     HttpMcpBearerToken,
     HttpMcpAllowHosts,
     HubUrl,
@@ -97,6 +98,7 @@ pub(crate) struct SetupSeed {
     pub(crate) http_mcp_enabled: Option<bool>,
     pub(crate) http_mcp_host: Option<String>,
     pub(crate) http_mcp_port: Option<u16>,
+    pub(crate) http_mcp_public_url: Option<String>,
     pub(crate) http_mcp_bearer_token: Option<SecretValue>,
     pub(crate) http_mcp_allow_hosts: Option<String>,
 }
@@ -123,6 +125,7 @@ impl fmt::Debug for SetupSeed {
                 "http_mcp_bearer_token",
                 &self.http_mcp_bearer_token.as_ref().map(|_| "[REDACTED]"),
             )
+            .field("http_mcp_public_url", &self.http_mcp_public_url)
             .field(
                 "agent_secret",
                 &self.agent_secret.as_ref().map(|_| "[REDACTED]"),
@@ -135,12 +138,13 @@ impl fmt::Debug for SetupSeed {
 pub(crate) struct StandaloneDraft {
     pub(crate) tunnel_id: String,
     pub(crate) secret_source: TunnelSecretSource,
+    pub(crate) secret_path: String,
     pub(crate) http_mcp_enabled: bool,
     pub(crate) http_mcp_host: String,
     pub(crate) http_mcp_port: String,
+    pub(crate) public_url: String,
     pub(crate) http_mcp_bearer_token: Option<SecretValue>,
     pub(crate) http_mcp_allow_hosts: String,
-    pub(crate) secret_path: String,
     pub(crate) secret_environment: String,
     pub(crate) provision_secret_now: bool,
     pub(crate) secret_value: Option<SecretValue>,
@@ -363,6 +367,7 @@ impl SetupSession {
             seed.http_mcp_enabled,
             seed.http_mcp_host,
             seed.http_mcp_port,
+            seed.http_mcp_public_url,
             seed.http_mcp_bearer_token,
             seed.http_mcp_allow_hosts,
             imported_http_mcp,
@@ -552,6 +557,7 @@ impl StandaloneDraft {
         http_mcp_enabled: Option<bool>,
         http_mcp_host: Option<String>,
         http_mcp_port: Option<u16>,
+        http_mcp_public_url: Option<String>,
         http_mcp_bearer_token: Option<SecretValue>,
         http_mcp_allow_hosts: Option<String>,
         imported_http_mcp: Option<&HttpMcpConfig>,
@@ -573,6 +579,9 @@ impl StandaloneDraft {
                 .or_else(|| imported_http_mcp.map(|config| config.port))
                 .unwrap_or(DEFAULT_HTTP_MCP_PORT)
                 .to_string(),
+            public_url: http_mcp_public_url
+                .or_else(|| imported_http_mcp.and_then(|config| config.public_url.clone()))
+                .unwrap_or_default(),
             http_mcp_bearer_token: None,
             http_mcp_allow_hosts: http_mcp_allow_hosts
                 .or_else(|| {

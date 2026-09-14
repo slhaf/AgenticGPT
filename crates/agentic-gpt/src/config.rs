@@ -199,6 +199,8 @@ pub(crate) struct HttpMcpConfig {
     #[serde(default = "default_http_mcp_port")]
     pub(crate) port: u16,
     #[serde(default)]
+    pub(crate) public_url: Option<String>,
+    #[serde(default)]
     pub(crate) bearer_token: String,
     #[serde(default = "default_http_mcp_allow_hosts")]
     pub(crate) allow_hosts: Option<Vec<String>>,
@@ -211,6 +213,7 @@ impl fmt::Debug for HttpMcpConfig {
             .field("enabled", &self.enabled)
             .field("host", &self.host)
             .field("port", &self.port)
+            .field("public_url", &self.public_url)
             .field("bearer_token", &"[REDACTED]")
             .field("allow_hosts", &self.allow_hosts)
             .finish()
@@ -223,6 +226,7 @@ impl Default for HttpMcpConfig {
             enabled: false,
             host: default_http_mcp_host(),
             port: default_http_mcp_port(),
+            public_url: None,
             bearer_token: String::new(),
             allow_hosts: default_http_mcp_allow_hosts(),
         }
@@ -884,6 +888,9 @@ impl Config {
         let mut effective = serde_json::to_value(defaults)?;
         merge_json_values(&mut effective, value);
         let mut config: Self = serde_json::from_value(effective)?;
+        if let Some(public_url) = config.http_mcp.public_url.take() {
+            config.http_mcp.public_url = Some(normalize_http_mcp_public_url(&public_url)?);
+        }
         if !has_path_policy {
             config.path_policy = default_path_policy(&config.workspace_root);
         }
@@ -1054,6 +1061,24 @@ impl Config {
                         .to_string(),
                 );
                 http_mcp.insert("bearerToken".to_string(), Value::String(String::new()));
+            }
+            let invalid_public_url = http_mcp.get("publicUrl").is_some_and(|value| match value {
+                Value::Null => false,
+                Value::String(public_url) => normalize_http_mcp_public_url(public_url).is_err(),
+                _ => true,
+            });
+            if invalid_public_url {
+                warnings.push(
+                    "httpMcp.publicUrl (invalid HTTPS origin; cleared for import)".to_string(),
+                );
+                http_mcp.insert("publicUrl".to_string(), Value::Null);
+            } else if let Some(public_url) = http_mcp
+                .get("publicUrl")
+                .and_then(Value::as_str)
+                .map(|public_url| public_url.to_string())
+            {
+                let normalized = normalize_http_mcp_public_url(&public_url)?;
+                http_mcp.insert("publicUrl".to_string(), Value::String(normalized));
             }
         }
 
@@ -1731,10 +1756,34 @@ pub(crate) fn validate_http_mcp_bearer_token(reference: &str) -> Result<()> {
     validate_secret_reference(reference)
         .map_err(|_| anyhow!("http_mcp_bearer_token_reference_invalid"))
 }
+pub(crate) fn normalize_http_mcp_public_url(public_url: &str) -> Result<String> {
+    let parsed = reqwest::Url::parse(public_url.trim())
+        .map_err(|_| anyhow!("http_mcp_public_url_invalid"))?;
+    if parsed.scheme() != "https"
+        || parsed.host_str().is_none_or(|host| host.is_empty())
+        || parsed.username() != ""
+        || parsed.password().is_some()
+        || parsed.as_str().contains('@')
+        || !(parsed.path().is_empty() || parsed.path() == "/")
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || parsed.port().is_some_and(|port| port == 0)
+    {
+        return Err(anyhow!("http_mcp_public_url_invalid"));
+    }
+    let mut normalized = parsed.to_string();
+    if normalized.ends_with('/') {
+        normalized.pop();
+    }
+    Ok(normalized)
+}
 
 pub(crate) fn validate_http_mcp_config(config: &HttpMcpConfig) -> Result<()> {
     validate_http_mcp_host(&config.host, config.port)?;
     validate_http_mcp_allow_hosts(config.allow_hosts.as_deref())?;
+    if let Some(public_url) = config.public_url.as_deref() {
+        normalize_http_mcp_public_url(public_url)?;
+    }
     if config.bearer_token.is_empty() {
         if config.enabled {
             return Err(anyhow!("http_mcp_bearer_token_required"));

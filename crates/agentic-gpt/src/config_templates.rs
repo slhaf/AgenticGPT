@@ -6,10 +6,10 @@ use anyhow::{anyhow, Result};
 
 use crate::cli_i18n::UiLanguage;
 use crate::config::{
-    default_path_policy, parse_http_mcp_allow_hosts, validate_hub_transport,
-    validate_hub_url_shape, Config, ConfirmationProviderConfig, HubReportingConfig, LimitsConfig,
-    PathPolicyConfig, RoomConfig, SandboxConfig, ToolNamespace, ToolsetConfig, TunnelClientConfig,
-    TunnelConfig, WorkerProfile,
+    default_path_policy, normalize_http_mcp_public_url, parse_http_mcp_allow_hosts,
+    validate_hub_transport, validate_hub_url_shape, Config, ConfirmationProviderConfig,
+    HubReportingConfig, LimitsConfig, PathPolicyConfig, RoomConfig, SandboxConfig, ToolNamespace,
+    ToolsetConfig, TunnelClientConfig, TunnelConfig, WorkerProfile,
 };
 use crate::mcp::McpServerConfig;
 use crate::utils::agentic_home;
@@ -82,6 +82,7 @@ pub(crate) struct InitInput {
     pub(crate) http_mcp_host: Option<String>,
     pub(crate) http_mcp_port: Option<u16>,
     pub(crate) http_mcp_bearer_token: Option<SecretValue>,
+    pub(crate) http_mcp_public_url: Option<String>,
     pub(crate) http_mcp_allow_hosts: Option<String>,
     pub(crate) display_name: Option<String>,
     pub(crate) workspace_root: Option<PathBuf>,
@@ -108,6 +109,7 @@ impl InitInput {
             http_mcp_enabled: None,
             http_mcp_host: None,
             http_mcp_port: None,
+            http_mcp_public_url: None,
             http_mcp_bearer_token: None,
             http_mcp_allow_hosts: None,
             tunnel_api_key: None,
@@ -170,6 +172,7 @@ pub(crate) fn build_config(input: InitInput) -> Result<InitBuild> {
         http_mcp_enabled,
         http_mcp_host,
         http_mcp_port,
+        http_mcp_public_url,
         http_mcp_bearer_token,
         http_mcp_allow_hosts,
         tunnel_api_key,
@@ -202,6 +205,13 @@ pub(crate) fn build_config(input: InitInput) -> Result<InitBuild> {
     }
     if let Some(port) = http_mcp_port {
         config.http_mcp.port = port;
+    }
+    if let Some(public_url) = http_mcp_public_url {
+        config.http_mcp.public_url = if public_url.trim().is_empty() {
+            None
+        } else {
+            Some(normalize_http_mcp_public_url(&public_url)?)
+        };
     }
     if let Some(bearer_token) = http_mcp_bearer_token {
         config.http_mcp.bearer_token = bearer_token.expose().to_string();

@@ -587,11 +587,12 @@ fn config_keys_http_mcp_section_exposes_editable_contract() {
 
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
     let keys = value["keys"].as_array().unwrap();
-    assert_eq!(keys.len(), 5);
+    assert_eq!(keys.len(), 6);
     for key in [
         "httpMcp.enabled",
         "httpMcp.host",
         "httpMcp.port",
+        "httpMcp.publicUrl",
         "httpMcp.bearerToken",
         "httpMcp.allowHosts",
     ] {
@@ -642,6 +643,8 @@ fn non_interactive_init_writes_http_mcp_flags_as_references_and_json() {
             "localhost",
             "--http-mcp-port",
             "18765",
+            "--http-mcp-public-url",
+            "https://mcp.example.com/",
             "--http-mcp-bearer-token",
             token_reference,
             "--http-mcp-allow-hosts",
@@ -654,6 +657,7 @@ fn non_interactive_init_writes_http_mcp_flags_as_references_and_json() {
     let value: Value = serde_json::from_slice(&fs::read(&config).unwrap()).unwrap();
     assert_eq!(value["httpMcp"]["enabled"], true);
     assert_eq!(value["httpMcp"]["host"], "localhost");
+    assert_eq!(value["httpMcp"]["publicUrl"], "https://mcp.example.com");
     assert_eq!(value["httpMcp"]["port"], 18765);
     assert_eq!(value["httpMcp"]["bearerToken"], token_reference);
     assert_eq!(
@@ -690,6 +694,7 @@ fn config_set_http_mcp_updates_values_and_rejects_invalid_values_without_writing
 
     for (key, value) in [
         ("httpMcp.host", "localhost"),
+        ("httpMcp.publicUrl", "https://mcp.example.com/"),
         ("httpMcp.port", "18766"),
         ("httpMcp.bearerToken", "env:CONFIG_CLI_HTTP_MCP_TOKEN_NEW"),
         ("httpMcp.allowHosts", "null"),
@@ -711,7 +716,17 @@ fn config_set_http_mcp_updates_values_and_rejects_invalid_values_without_writing
         updated["httpMcp"]["bearerToken"],
         "env:CONFIG_CLI_HTTP_MCP_TOKEN_NEW"
     );
-    assert!(updated["httpMcp"]["allowHosts"].is_null());
+    assert_eq!(updated["httpMcp"]["publicUrl"], "https://mcp.example.com");
+    let clear = Command::new(&binary)
+        .args(["config", "--config"])
+        .arg(&config)
+        .args(["set", "httpMcp.publicUrl", "null"])
+        .output()
+        .unwrap();
+    assert!(clear.status.success(), "publicUrl null clearing failed");
+    let cleared: Value = serde_json::from_slice(&fs::read(&config).unwrap()).unwrap();
+    assert!(cleared["httpMcp"]["publicUrl"].is_null());
+    assert!(cleared["httpMcp"]["allowHosts"].is_null());
 
     let show = Command::new(&binary)
         .args(["config", "--config"])
@@ -729,6 +744,7 @@ fn config_set_http_mcp_updates_values_and_rejects_invalid_values_without_writing
         ("httpMcp.bearerToken", "file:relative-token"),
         ("httpMcp.allowHosts", "[]"),
         ("httpMcp.allowHosts", r#"["*","localhost"]"#),
+        ("httpMcp.publicUrl", "http://mcp.example.com/path"),
         ("httpMcp.allowHosts", r#"["bad/path"]"#),
     ] {
         let before = fs::read(&config).unwrap();
@@ -812,6 +828,8 @@ fn config_import_compatible_round_trip_preserves_http_mcp_fields() {
             "127.0.0.1",
             "--http-mcp-port",
             "18767",
+            "--http-mcp-public-url",
+            "https://import.example.com/",
             "--http-mcp-bearer-token",
             token_reference,
             "--http-mcp-allow-hosts",
@@ -855,6 +873,10 @@ fn config_import_compatible_round_trip_preserves_http_mcp_fields() {
     assert_eq!(imported["httpMcp"]["host"], "127.0.0.1");
     assert_eq!(imported["httpMcp"]["port"], 18767);
     assert_eq!(imported["httpMcp"]["bearerToken"], "[REDACTED]");
+    assert_eq!(
+        imported["httpMcp"]["publicUrl"],
+        "https://import.example.com"
+    );
     assert_eq!(
         imported["httpMcp"]["allowHosts"],
         serde_json::json!(["localhost", "127.0.0.1"])

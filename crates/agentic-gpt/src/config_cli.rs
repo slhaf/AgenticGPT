@@ -296,6 +296,16 @@ pub(crate) static CONFIG_KEYS: &[ConfigKeySpec] = &[
         set_http_mcp_port
     ),
     config_key!(
+        "httpMcp.publicUrl",
+        HttpMcp,
+        NullableString,
+        true,
+        "Optional external HTTPS origin advertised for standalone ChatGPT OAuth.",
+        "可选的外部 HTTPS 来源，用于 Standalone ChatGPT OAuth。",
+        "https://mcp.example.com",
+        set_http_mcp_public_url
+    ),
+    config_key!(
         "httpMcp.bearerToken",
         HttpMcp,
         String,
@@ -889,6 +899,15 @@ fn set_http_mcp_bearer_token(config: &mut Config, value: &str) -> Result<()> {
     Ok(())
 }
 
+fn set_http_mcp_public_url(config: &mut Config, value: &str) -> Result<()> {
+    config.http_mcp.public_url = if value == "null" {
+        None
+    } else {
+        Some(config::normalize_http_mcp_public_url(value)?)
+    };
+    Ok(())
+}
+
 fn set_http_mcp_allow_hosts(config: &mut Config, value: &str) -> Result<()> {
     config.http_mcp.allow_hosts = config::parse_http_mcp_allow_hosts(value)?;
     Ok(())
@@ -1172,6 +1191,8 @@ pub(crate) struct ConfigInitArgs {
     #[arg(long)]
     pub(crate) http_mcp_port: Option<u16>,
     #[arg(long)]
+    pub(crate) http_mcp_public_url: Option<String>,
+    #[arg(long)]
     pub(crate) http_mcp_bearer_token: Option<String>,
     #[arg(long)]
     pub(crate) http_mcp_allow_hosts: Option<String>,
@@ -1210,11 +1231,15 @@ pub(crate) fn init_non_interactive(
     input.http_mcp_enabled = args.http_mcp_enabled;
     input.http_mcp_host = args.http_mcp_host.clone();
     input.http_mcp_port = args.http_mcp_port;
+    input.http_mcp_public_url = args.http_mcp_public_url.clone();
     input.http_mcp_bearer_token = args
         .http_mcp_bearer_token
         .as_ref()
         .map(|value| SecretValue::new(value.clone()));
     input.http_mcp_allow_hosts = args.http_mcp_allow_hosts.clone();
+    if let Some(public_url) = args.http_mcp_public_url.as_deref() {
+        config::normalize_http_mcp_public_url(public_url)?;
+    }
     input.tunnel_id = args.tunnel_id.clone();
     input.tunnel_api_key = args.tunnel_api_key.clone();
     input.hub_url = args.hub_url.clone();
@@ -1242,6 +1267,7 @@ pub(crate) fn setup_seed_from_args(args: &ConfigInitArgs) -> SetupSeed {
         http_mcp_enabled: args.http_mcp_enabled,
         http_mcp_host: args.http_mcp_host.clone(),
         http_mcp_port: args.http_mcp_port,
+        http_mcp_public_url: args.http_mcp_public_url.clone(),
         http_mcp_bearer_token: args
             .http_mcp_bearer_token
             .as_ref()

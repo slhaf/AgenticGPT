@@ -572,6 +572,12 @@ fn connection_group(session: &SetupSession) -> ReviewGroup {
                     ReviewEditorKind::Text,
                 ),
                 ReviewItem::field(
+                    SetupField::HttpMcpPublicUrl,
+                    "http_mcp_public_url",
+                    draft.public_url.clone(),
+                    ReviewEditorKind::Text,
+                ),
+                ReviewItem::field(
                     SetupField::HttpMcpBearerToken,
                     "http_mcp_bearer_token",
                     if draft.http_mcp_bearer_token.is_some() {

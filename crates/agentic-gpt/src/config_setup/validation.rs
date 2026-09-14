@@ -432,6 +432,20 @@ fn validate_http_mcp_draft(
             None
         }
     };
+    let parsed_public_url = if draft.public_url.trim().is_empty() {
+        Some(None)
+    } else {
+        match config::normalize_http_mcp_public_url(&draft.public_url) {
+            Ok(value) => Some(Some(value)),
+            Err(_) => {
+                errors.push(error(
+                    SetupField::HttpMcpPublicUrl,
+                    "http_mcp_public_url_invalid",
+                ));
+                None
+            }
+        }
+    };
     let host_valid = parsed_port.is_some()
         && config::validate_http_mcp_host(
             draft.http_mcp_host.trim(),
@@ -459,10 +473,11 @@ fn validate_http_mcp_draft(
         enabled: draft.http_mcp_enabled,
         host: draft.http_mcp_host.trim().to_string(),
         port: parsed_port.unwrap_or_default(),
+        public_url: parsed_public_url.clone().flatten(),
         bearer_token,
         allow_hosts: parsed_allow_hosts.flatten(),
     };
-    if host_valid && allow_hosts_valid {
+    if host_valid && allow_hosts_valid && parsed_public_url.is_some() {
         if let Err(validation_error) = config::validate_http_mcp_config(&endpoint) {
             let code = validation_error.to_string();
             let (field, safe_code) = if code == "http_mcp_bearer_token_required" {
@@ -475,6 +490,8 @@ fn validate_http_mcp_draft(
                     SetupField::HttpMcpBearerToken,
                     "http_mcp_bearer_token_reference_invalid",
                 )
+            } else if code == "http_mcp_public_url_invalid" {
+                (SetupField::HttpMcpPublicUrl, "http_mcp_public_url_invalid")
             } else if code.starts_with("http_mcp_allow_hosts") {
                 (
                     SetupField::HttpMcpAllowHosts,
@@ -529,6 +546,7 @@ pub(super) fn validate_field(
         | SetupField::HttpMcpEnabled
         | SetupField::HttpMcpHost
         | SetupField::HttpMcpPort
+        | SetupField::HttpMcpPublicUrl
         | SetupField::HttpMcpBearerToken
         | SetupField::HttpMcpAllowHosts
         | SetupField::HubUrl
@@ -1019,6 +1037,7 @@ pub(super) fn build_active_input_unchecked(
             input.http_mcp_enabled = Some(draft.http_mcp_enabled);
             input.http_mcp_host = Some(draft.http_mcp_host.clone());
             input.http_mcp_port = Some(draft.http_mcp_port.trim().parse().unwrap_or_default());
+            input.http_mcp_public_url = Some(draft.public_url.clone());
             input.http_mcp_bearer_token = Some(SecretValue::new(
                 draft
                     .http_mcp_bearer_token
@@ -1242,6 +1261,9 @@ fn map_build_error(session: &SetupSession, code: String) -> ValidationError {
             SetupField::TunnelSecretPath,
             "tunnel_api_key_reference_plaintext_rejected",
         ),
+        "http_mcp_public_url_invalid" => {
+            (SetupField::HttpMcpPublicUrl, "http_mcp_public_url_invalid")
+        }
         "http_mcp_bearer_token_required" => (
             SetupField::HttpMcpBearerToken,
             "http_mcp_bearer_token_required",
