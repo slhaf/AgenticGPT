@@ -73,6 +73,47 @@ impl ManagedKernel {
     }
 }
 
+const FINAL_CLEANUP_DIAGNOSTIC_LIMIT: usize = 512;
+const FINAL_TURN_ENDED_TIMEOUT: Duration = Duration::from_secs(6);
+
+async fn final_cleanup(kernel: ManagedKernel, already_closed: bool) -> Result<()> {
+    final_cleanup_with_turn_timeout(kernel, already_closed, FINAL_TURN_ENDED_TIMEOUT).await
+}
+
+async fn final_cleanup_with_turn_timeout(
+    mut kernel: ManagedKernel,
+    already_closed: bool,
+    turn_ended_timeout: Duration,
+) -> Result<()> {
+    let turn_ended_error = if already_closed {
+        None
+    } else {
+        match tokio::time::timeout(turn_ended_timeout, kernel.turn_ended()).await {
+            Ok(Ok(())) => None,
+            Ok(Err(error)) => Some(error),
+            Err(_) => Some(anyhow!("browser_runtime_turn_ended_timeout")),
+        }
+    };
+    let shutdown_error = kernel.shutdown().await.err();
+
+    match (turn_ended_error, shutdown_error) {
+        (None, None) => Ok(()),
+        (Some(error), None) | (None, Some(error)) => Err(error),
+        (Some(turn_ended_error), Some(shutdown_error)) => Err(anyhow!(
+            "browser_runtime_final_cleanup_failed:turn_ended={};shutdown={}",
+            bounded_diagnostic(&turn_ended_error.to_string()),
+            bounded_diagnostic(&shutdown_error.to_string()),
+        )),
+    }
+}
+
+fn bounded_diagnostic(diagnostic: &str) -> String {
+    diagnostic
+        .chars()
+        .take(FINAL_CLEANUP_DIAGNOSTIC_LIMIT)
+        .collect()
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum BrowserLeaseState {
     Initializing,
@@ -393,7 +434,10 @@ impl BrowserRuntimeManager {
                     let kernel = lifecycle.kernel.take();
                     drop(lifecycle);
                     let result = match kernel {
-                        Some(kernel) => kernel.shutdown().await,
+                        Some(kernel) => {
+                            let already_closed = kernel.is_closed();
+                            final_cleanup(kernel, already_closed).await
+                        }
                         None => Ok(()),
                     };
                     self.remove_exact(name, &entry).await;
@@ -476,7 +520,8 @@ impl BrowserRuntimeManager {
             let kernel = lifecycle.kernel.take();
             drop(lifecycle);
             if let Some(kernel) = kernel {
-                let _ = kernel.shutdown().await;
+                let already_closed = kernel.is_closed();
+                let _ = final_cleanup(kernel, already_closed).await;
             }
             self.remove_exact(&name, &entry).await;
         }
@@ -933,6 +978,104 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn release_orders_turn_ended_before_shutdown() {
+        let controller = FakeController::new();
+        let (factory, _) = fake_factory({
+            let controller = controller.clone();
+            move |_| FakeKernel::new(controller.clone())
+        });
+        let manager = manager(factory, Duration::from_secs(1));
+        manager
+            .acquire("release-order", Duration::from_secs(1))
+            .await
+            .unwrap();
+
+        assert!(manager.release("release-order").await.unwrap());
+
+        assert_eq!(
+            operations(&controller).await,
+            vec!["turn_ended", "shutdown"]
+        );
+        assert!(manager.list().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn release_turn_ended_error_still_shuts_down_and_removes_entry() {
+        let controller = FakeController::new();
+        let (factory, _) = fake_factory({
+            let controller = controller.clone();
+            move |_| {
+                let mut kernel = FakeKernel::new(controller.clone());
+                kernel.turn_ended_error = true;
+                kernel
+            }
+        });
+        let manager = manager(factory, Duration::from_secs(1));
+        manager
+            .acquire("turn-error", Duration::from_secs(1))
+            .await
+            .unwrap();
+
+        let error = manager.release("turn-error").await.unwrap_err();
+
+        assert_eq!(error.to_string(), "fake turn_ended failure");
+        assert_eq!(
+            operations(&controller).await,
+            vec!["turn_ended", "shutdown"]
+        );
+        assert!(manager.list().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn final_cleanup_times_out_stuck_turn_ended_and_still_shuts_down() {
+        let controller = FakeController::new();
+        controller.block_turn_ended.store(true, Ordering::SeqCst);
+        let kernel = ManagedKernel::Fake(FakeKernel::new(controller.clone()));
+
+        let error = final_cleanup_with_turn_timeout(kernel, false, Duration::from_millis(20))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.to_string(), "browser_runtime_turn_ended_timeout");
+        assert_eq!(
+            operations(&controller).await,
+            vec!["turn_ended", "shutdown"]
+        );
+        assert_eq!(controller.shutdown_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn release_reports_combined_cleanup_failure_and_removes_entry() {
+        let controller = FakeController::new();
+        let (factory, _) = fake_factory({
+            let controller = controller.clone();
+            move |_| {
+                let mut kernel = FakeKernel::new(controller.clone());
+                kernel.turn_ended_error = true;
+                kernel.shutdown_error = true;
+                kernel
+            }
+        });
+        let manager = manager(factory, Duration::from_secs(1));
+        manager
+            .acquire("both-errors", Duration::from_secs(1))
+            .await
+            .unwrap();
+
+        let error = manager.release("both-errors").await.unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "browser_runtime_final_cleanup_failed:turn_ended=fake turn_ended failure;shutdown=fake shutdown failed"
+        );
+        assert_eq!(
+            operations(&controller).await,
+            vec!["turn_ended", "shutdown"]
+        );
+        assert!(manager.list().await.is_empty());
+    }
+
+    #[tokio::test]
     async fn release_removes_after_shutdown_error_and_reacquire_is_fresh() {
         let controller = FakeController::new();
         let (factory, calls) = fake_factory({
@@ -950,6 +1093,10 @@ mod tests {
             .unwrap();
         let error = manager.release("release").await.unwrap_err();
         assert_eq!(error.to_string(), "fake shutdown failed");
+        assert_eq!(
+            operations(&controller).await,
+            vec!["turn_ended", "shutdown"]
+        );
         assert!(manager.list().await.is_empty());
 
         manager
@@ -1020,6 +1167,10 @@ mod tests {
         )
         .await
         .unwrap();
+        assert_eq!(
+            operations(&controller).await,
+            vec!["turn_ended", "shutdown"]
+        );
         assert!(manager.list().await.is_empty());
     }
 
@@ -1217,6 +1368,7 @@ mod tests {
         left_reset.await.unwrap().unwrap();
         right_reset.await.unwrap().unwrap();
         repl.await.unwrap().unwrap();
+        controller.block_turn_ended.store(false, Ordering::SeqCst);
         assert_eq!(controller.call_count.load(Ordering::SeqCst), 1);
 
         manager.release("left").await.unwrap();
@@ -1461,6 +1613,7 @@ mod tests {
         sleep(Duration::from_millis(100)).await;
         controller.release_turn_ended.notify_one();
         reset.await.unwrap().unwrap();
+        controller.block_turn_ended.store(false, Ordering::SeqCst);
         let snapshots = manager.list().await;
         assert_eq!(snapshots[0].state, BrowserLeaseState::Ready);
 
