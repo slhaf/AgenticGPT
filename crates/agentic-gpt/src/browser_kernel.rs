@@ -85,6 +85,10 @@ impl NodeReplKernel {
         Self::from_initialized_client(client, session_id, turn_id)
     }
 
+    pub(crate) fn is_closed(&self) -> bool {
+        self.client.is_closed()
+    }
+
     pub(crate) async fn shutdown(self) -> Result<()> {
         match tokio::time::timeout(Duration::from_secs(6), self.client.cancel()).await {
             Ok(Ok(_)) => Ok(()),
