@@ -1012,6 +1012,28 @@ mod tests {
         assert!(state.accepts_bearer("second", None).await);
     }
 
+    #[tokio::test]
+    async fn oauth_tokens_reject_wrong_resource_binding() {
+        let state = HttpMcpAuthState::new(
+            "direct".to_string(),
+            Some("https://example.com".to_string()),
+        );
+        let canonical = state.resource_url().unwrap();
+        state.oauth_tokens.lock().await.insert(
+            sha256_hex("wrong-audience"),
+            OAuthAccessToken {
+                expires_at: Utc::now() + chrono::Duration::minutes(1),
+                resource: "https://evil.example/mcp".to_string(),
+                scope: OAUTH_SCOPE.to_string(),
+            },
+        );
+        assert!(
+            !state
+                .accepts_bearer("wrong-audience", Some(&canonical))
+                .await
+        );
+    }
+
     #[test]
     fn standalone_page_escapes_hidden_fields_and_avoids_hub_copy() {
         let params = AuthorizeParams {
@@ -1048,6 +1070,41 @@ mod tests {
         );
         assert!(!state.accepts_bearer("expired", Some(&resource)).await);
         assert!(state.oauth_tokens.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn expired_authorization_codes_are_consumed_and_rejected() {
+        let state = HttpMcpAuthState::new(
+            "direct".to_string(),
+            Some("https://example.com".to_string()),
+        );
+        let code = "expired-code";
+        state.oauth_codes.lock().await.insert(
+            sha256_hex(code),
+            OAuthAuthorizationCode {
+                client_id: "client".to_string(),
+                redirect_uri: "https://chatgpt.com/connector/oauth/test".to_string(),
+                code_challenge: "challenge".to_string(),
+                scope: OAUTH_SCOPE.to_string(),
+                resource: state.resource_url().unwrap(),
+                expires_at: Utc::now() - chrono::Duration::seconds(1),
+            },
+        );
+        let response = token(
+            State(state.clone()),
+            Ok(Form(TokenForm {
+                grant_type: Some("authorization_code".to_string()),
+                code: Some(code.to_string()),
+                redirect_uri: Some("https://chatgpt.com/connector/oauth/test".to_string()),
+                client_id: Some("client".to_string()),
+                code_verifier: Some("verifier".to_string()),
+                resource: None,
+                scope: None,
+            })),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(state.oauth_codes.lock().await.is_empty());
     }
 
     #[test]
