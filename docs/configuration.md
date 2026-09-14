@@ -192,8 +192,10 @@ Unknown top-level fields are preserved by load/write round trips. Nested strict 
 Browser is not enabled by configuring a runtime; `toolsets.enabled` remains authoritative. With no
 `browser` section (or with `browser: {}`), normal runtime discovery is unchanged. The explicit
 descriptor is an advanced override for development, unusual deployments, or recovery; it is not
-intended to be the normal managed-runtime installation path. All scalar values are required when
-`runtime` is present, and every path must be absolute; `nodeModuleDirs` defaults to an empty list:
+intended to be the normal managed-runtime installation path. `codexCliPath` is optional because the
+official Browser launcher only exports `CODEX_CLI_PATH` when one is available. Other scalar values
+are required when `runtime` is present, and every configured path must be absolute;
+`nodeModuleDirs` defaults to an empty list:
 
 ```json
 {
@@ -206,7 +208,7 @@ intended to be the normal managed-runtime installation path. All scalar values a
       "browserClientPath": "/absolute/path/to/browser-client.mjs",
       "browserServicePath": "/absolute/path/to/browser-service.mjs",
       "codexHome": "/absolute/path/to/runtime-home",
-      "codexCliPath": "/absolute/path/to/codex-or-compatible-cli",
+      "codexCliPath": "/optional/absolute/path/to/codex-or-compatible-cli",
       "nodeModuleDirs": ["/absolute/path/to/node_modules"]
     }
   }

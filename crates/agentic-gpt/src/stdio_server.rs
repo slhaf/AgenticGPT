@@ -6177,7 +6177,7 @@ mod tests {
                 browser_client_path: PathBuf::from("/runtime/browser-client.mjs"),
                 browser_service_path: PathBuf::from("/runtime/browser-service.mjs"),
                 codex_home: PathBuf::from("/runtime/codex"),
-                codex_cli_path: PathBuf::from("/runtime/codex-cli"),
+                codex_cli_path: Some(PathBuf::from("/runtime/codex-cli")),
                 node_module_dirs: Vec::new(),
                 trusted_code_paths: Vec::new(),
                 docs_root,

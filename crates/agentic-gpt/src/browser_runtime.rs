@@ -15,7 +15,7 @@ pub(crate) struct BrowserRuntimeDescriptor {
     pub(crate) browser_client_path: PathBuf,
     pub(crate) browser_service_path: PathBuf,
     pub(crate) codex_home: PathBuf,
-    pub(crate) codex_cli_path: PathBuf,
+    pub(crate) codex_cli_path: Option<PathBuf>,
     pub(crate) node_module_dirs: Vec<PathBuf>,
     pub(crate) trusted_code_paths: Vec<PathBuf>,
     pub(crate) docs_root: PathBuf,
@@ -45,7 +45,6 @@ pub(crate) fn build_node_repl_launch_spec(
 
     let node_path = path_to_env_string(&runtime.node_path, "node_path")?;
     let codex_home = path_to_env_string(&runtime.codex_home, "codex_home")?;
-    let codex_cli_path = path_to_env_string(&runtime.codex_cli_path, "codex_cli_path")?;
     let browser_service_path =
         path_to_env_string(&runtime.browser_service_path, "browser_service_path")?;
 
@@ -71,7 +70,12 @@ pub(crate) fn build_node_repl_launch_spec(
     );
     env_overrides.insert("NODE_REPL_NODE_PATH".to_string(), node_path);
     env_overrides.insert("CODEX_HOME".to_string(), codex_home);
-    env_overrides.insert("CODEX_CLI_PATH".to_string(), codex_cli_path);
+    if let Some(codex_cli_path) = runtime.codex_cli_path.as_deref() {
+        env_overrides.insert(
+            "CODEX_CLI_PATH".to_string(),
+            path_to_env_string(codex_cli_path, "codex_cli_path")?,
+        );
+    }
     env_overrides.insert(
         "BROWSER_USE_CODEX_APP_VERSION".to_string(),
         runtime.app_version.clone(),
@@ -165,7 +169,7 @@ pub(crate) fn discover_desktop_runtime(registry_path: &Path) -> Result<BrowserRu
     let browser_service_path =
         required_path(paths.get("browserServicePath"), "paths.browserServicePath")?;
     let codex_home = required_path(paths.get("codexHome"), "paths.codexHome")?;
-    let codex_cli_path = required_path(paths.get("codexCliPath"), "paths.codexCliPath")?;
+    let codex_cli_path = optional_path(paths.get("codexCliPath"), "paths.codexCliPath")?;
     let node_module_dirs = optional_path_list(paths.get("nodeModuleDirs"))?;
     let trusted_code_paths = derive_trusted_code_paths(&codex_home, &node_module_dirs);
     let docs_root = derive_docs_root(&browser_client_path)?;
@@ -197,7 +201,7 @@ pub(crate) fn explicit_runtime_descriptor(
     let browser_service_path =
         explicit_path(config.browser_service_path.as_deref(), "browserServicePath")?;
     let codex_home = explicit_path(config.codex_home.as_deref(), "codexHome")?;
-    let codex_cli_path = explicit_path(config.codex_cli_path.as_deref(), "codexCliPath")?;
+    let codex_cli_path = explicit_optional_path(config.codex_cli_path.as_deref(), "codexCliPath")?;
     let node_module_dirs = config
         .node_module_dirs
         .iter()
@@ -240,6 +244,12 @@ fn explicit_path(value: Option<&str>, field: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
+fn explicit_optional_path(value: Option<&str>, field: &str) -> Result<Option<PathBuf>> {
+    value
+        .map(|value| explicit_path(Some(value), field))
+        .transpose()
+}
+
 fn derive_trusted_code_paths(codex_home: &Path, node_module_dirs: &[PathBuf]) -> Vec<PathBuf> {
     let mut paths = Vec::with_capacity(1 + node_module_dirs.len());
     for path in std::iter::once(codex_home).chain(node_module_dirs.iter().map(PathBuf::as_path)) {
@@ -263,6 +273,15 @@ fn required_string(value: Option<&Value>, field: &str) -> Result<String> {
 
 fn required_path(value: Option<&Value>, field: &str) -> Result<PathBuf> {
     Ok(PathBuf::from(required_string(value, field)?))
+}
+
+fn optional_path(value: Option<&Value>, field: &str) -> Result<Option<PathBuf>> {
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => required_string(Some(value), field)
+            .map(PathBuf::from)
+            .map(Some),
+    }
 }
 
 fn optional_path_list(value: Option<&Value>) -> Result<Vec<PathBuf>> {
@@ -360,7 +379,7 @@ mod tests {
             browser_client_path: PathBuf::from("/bundle/scripts/browser-client.mjs"),
             browser_service_path: PathBuf::from("/bundle/scripts/browser-service.mjs"),
             codex_home: PathBuf::from("/bundle/codex"),
-            codex_cli_path: PathBuf::from("/bundle/bin/codex"),
+            codex_cli_path: Some(PathBuf::from("/bundle/bin/codex")),
             node_module_dirs: if include_node_module_dirs {
                 vec![
                     PathBuf::from("/bundle/node_modules"),
@@ -618,7 +637,7 @@ mod tests {
         );
         assert_eq!(
             descriptor.codex_cli_path,
-            PathBuf::from("/opt/openai/latest/bin/codex")
+            Some(PathBuf::from("/opt/openai/latest/bin/codex"))
         );
         assert_eq!(
             descriptor.node_module_dirs,
@@ -690,6 +709,21 @@ mod tests {
         .unwrap();
 
         assert!(descriptor.node_module_dirs.is_empty());
+    }
+
+    #[test]
+    fn absent_codex_cli_path_is_supported() {
+        let mut entry = valid_entry("2026-03-01T00:00:00Z", "latest", false);
+        entry["paths"]
+            .as_object_mut()
+            .unwrap()
+            .remove("codexCliPath");
+
+        let descriptor = discover_fixture("codex-cli-absent", vec![entry]).unwrap();
+        assert_eq!(descriptor.codex_cli_path, None);
+
+        let spec = build_node_repl_launch_spec(&descriptor, &BTreeMap::new()).unwrap();
+        assert!(!spec.env_overrides.contains_key("CODEX_CLI_PATH"));
     }
 
     #[test]
@@ -788,6 +822,17 @@ mod tests {
     }
 
     #[test]
+    fn explicit_descriptor_allows_missing_codex_cli_path() {
+        let mut config = explicit_config();
+        config.codex_cli_path = None;
+        let descriptor = explicit_runtime_descriptor(&config).unwrap();
+        assert_eq!(descriptor.codex_cli_path, None);
+
+        let spec = build_node_repl_launch_spec(&descriptor, &BTreeMap::new()).unwrap();
+        assert!(!spec.env_overrides.contains_key("CODEX_CLI_PATH"));
+    }
+
+    #[test]
     fn explicit_descriptor_rejects_empty_and_relative_fields() {
         let mut config = explicit_config();
         config.node_path = Some(String::new());
@@ -810,6 +855,15 @@ mod tests {
                 .unwrap_err()
                 .to_string(),
             "browser_runtime_explicit_required:nodePath"
+        );
+
+        let mut config = explicit_config();
+        config.codex_cli_path = Some("relative/codex".to_string());
+        assert_eq!(
+            explicit_runtime_descriptor(&config)
+                .unwrap_err()
+                .to_string(),
+            "browser_runtime_explicit_relative:codexCliPath"
         );
     }
 }
