@@ -179,6 +179,7 @@ impl BrowserRuntimeManager {
         Self::with_factory_and_browser_client_path(factory, REAPER_INTERVAL, browser_client_path)
     }
 
+    #[cfg(test)]
     fn with_factory(factory: KernelFactory, reaper_interval: Duration) -> Arc<Self> {
         Self::with_factory_and_browser_client_path(factory, reaper_interval, PathBuf::new())
     }
@@ -719,6 +720,16 @@ impl FakeKernel {
             Ok(())
         }
     }
+}
+#[cfg(test)]
+pub(crate) fn test_manager_with_result(result: CallToolResult) -> Arc<BrowserRuntimeManager> {
+    let controller = FakeController::new();
+    let factory: KernelFactory = Arc::new(move |_, _| {
+        let mut kernel = FakeKernel::new(controller.clone());
+        kernel.result = result.clone();
+        Box::pin(async move { Ok(ManagedKernel::Fake(kernel)) })
+    });
+    BrowserRuntimeManager::with_factory(factory, Duration::from_secs(60))
 }
 
 #[cfg(test)]

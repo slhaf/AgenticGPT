@@ -1,6 +1,8 @@
 use std::{
+    collections::HashMap,
     future::Future,
     sync::{Arc, Mutex},
+    time::{Duration, Instant},
 };
 
 use agentic_gpt_protocol::{
@@ -27,6 +29,7 @@ use rmcp::{
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
@@ -35,11 +38,18 @@ use crate::{
     state::{AppState, CapabilityProfile},
 };
 
-const INSTRUCTIONS: &str = "Agentic GPT local Tunnel worker. Start with agent.info to inspect the active profile, exact workspace/path policy, capacity, confirmation channels, MCP scheduler state, and connection state. Use file.read/search for bounded UTF-8 workspace work and file.edit for Codex apply-patch edits, process.exec/process.batch for process Jobs, mcp.callTool for one downstream MCP Job, mcp.batch for 1..16 atomically admitted child Jobs with one aggregate confirmation and bounded 8/2 concurrency, job.get/list/cancel for lifecycle control, tmux for persistent workspaces, skills for the local skills workspace, and bootstrap for Room startup guidance. All calls remain subject to path policy, configured confirmation, audit, and bounded waits.";
+const INSTRUCTIONS: &str = "Agentic GPT local Tunnel worker. Start with agent.info to inspect the active profile, exact workspace/path policy, capacity, confirmation channels, MCP scheduler state, and connection state. Use file.read/search for bounded UTF-8 workspace work and file.edit for Codex apply-patch edits, process.exec/process.batch for process Jobs, mcp.callTool for one downstream MCP Job, mcp.batch for 1..16 atomically admitted child Jobs with one aggregate confirmation and bounded 8/2 concurrency, job.get/list/cancel for lifecycle control, tmux for persistent workspaces, skills for the local skills workspace, bootstrap for Room startup guidance, and browser.acquire/browser.repl for a named persistent Browser SDK JavaScript lease (bindings survive calls); use browser.reset for recovery, browser.release for final cleanup, browser.manual for selected-runtime official docs, and browser.list for bounded lease state. Browser SDK semantics belong in JavaScript. All calls remain subject to path policy, configured confirmation, audit, and bounded waits.";
 const PATCH_SCHEMA_DESCRIPTION: &str = "Codex apply_patch text beginning with *** Begin Patch and ending with *** End Patch; supports Add File, Delete File, Update File, and Move to across multiple files.";
+const BROWSER_REPL_RESULT_MARKER: &str = "__agentic_browser_repl_result";
 
 const TOOL_NAMESPACE_BY_NAME: &[(&str, ToolNamespace)] = &[
     ("agent.info", ToolNamespace::Agent),
+    ("browser.acquire", ToolNamespace::Browser),
+    ("browser.list", ToolNamespace::Browser),
+    ("browser.manual", ToolNamespace::Browser),
+    ("browser.release", ToolNamespace::Browser),
+    ("browser.repl", ToolNamespace::Browser),
+    ("browser.reset", ToolNamespace::Browser),
     ("bootstrap", ToolNamespace::Room),
     ("bootstrap.read", ToolNamespace::Room),
     ("file.edit", ToolNamespace::File),
@@ -292,6 +302,7 @@ where
 pub(crate) struct AgentMcpServer {
     state: AppState,
     ingress: RequestIngress,
+    browser_repl_results: Arc<Mutex<HashMap<String, CallToolResult>>>,
 }
 
 #[derive(Default)]
@@ -373,7 +384,11 @@ impl AgentMcpServer {
     }
 
     pub(crate) fn with_ingress(state: AppState, ingress: RequestIngress) -> Self {
-        Self { state, ingress }
+        Self {
+            state,
+            ingress,
+            browser_repl_results: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
     async fn current_tools(&self) -> Vec<Tool> {
@@ -393,7 +408,34 @@ impl AgentMcpServer {
             .is_enabled(namespace)
     }
 
+    fn take_browser_repl_result(&self, value: &mut Value) -> Option<CallToolResult> {
+        let marker = value
+            .as_object_mut()
+            .and_then(|object| object.remove(BROWSER_REPL_RESULT_MARKER))
+            .and_then(|value| value.as_str().map(str::to_owned))?;
+        self.browser_repl_results
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&marker)
+    }
+
+    fn stash_browser_repl_result(&self, result: CallToolResult) -> String {
+        let marker = task_id("browser_repl");
+        self.browser_repl_results
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(marker.clone(), result);
+        marker
+    }
+    #[cfg(test)]
     async fn call(&self, request: CallToolRequestParams) -> Result<Value, ErrorData> {
+        self.call_with_result(request).await.map(|(value, _)| value)
+    }
+
+    async fn call_with_result(
+        &self,
+        request: CallToolRequestParams,
+    ) -> Result<(Value, Option<CallToolResult>), ErrorData> {
         let name = request.name.to_string();
         if !self.tool_is_available(&name).await {
             return Err(ErrorData::new(
@@ -408,15 +450,20 @@ impl AgentMcpServer {
         let report_request_id = task_id("req");
         let started_at = Utc::now();
         let terminal_tracker = Arc::new(HumanTerminalTracker::default());
+        let reported_arguments = if name == "browser.repl" {
+            browser_report_arguments(&arguments)
+        } else {
+            arguments.clone()
+        };
         crate::hub::report_tool_arguments(
             &self.state,
             &run_id,
             &report_request_id,
             &name,
-            arguments.clone(),
+            reported_arguments,
             started_at,
         );
-        let value = match self
+        let mut value = match self
             .dispatch_with_lifecycle(&name, arguments, terminal_tracker.clone())
             .await
         {
@@ -445,6 +492,7 @@ impl AgentMcpServer {
                 return Err(ErrorData::invalid_params(error.to_string(), None));
             }
         };
+        let browser_repl_result = self.take_browser_repl_result(&mut value);
         let job: Option<agentic_gpt_protocol::JobInfo> = value
             .get("job")
             .cloned()
@@ -453,12 +501,22 @@ impl AgentMcpServer {
         if let Some(job) = job.as_ref() {
             crate::hub::report_job(&self.state, job.clone());
         }
-        let is_error = value.get("error").is_some();
-        let reason = value
-            .get("error")
-            .and_then(|error| error.get("message"))
-            .and_then(Value::as_str)
-            .map(str::to_string);
+        let is_browser_repl = name == "browser.repl";
+        let is_error = value.get("error").is_some()
+            || (is_browser_repl
+                && value
+                    .get("isError")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false));
+        let reason = if is_browser_repl {
+            browser_error_code_from_value(&value)
+        } else {
+            value
+                .get("error")
+                .and_then(|error| error.get("message"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        };
         let job_id = job.as_ref().map(|job| job.job_id.as_str());
         let exit_code = job.as_ref().and_then(|job| job.exit_code);
         let active = value_has_active_job(&value);
@@ -497,11 +555,15 @@ impl AgentMcpServer {
             &name,
             if is_error { "failed" } else { "completed" },
             started_at,
-            Some(value.clone()),
+            if name == "browser.repl" {
+                None
+            } else {
+                Some(value.clone())
+            },
             reason,
             job,
         );
-        Ok(value)
+        Ok((value, browser_repl_result))
     }
 
     #[cfg(test)]
@@ -510,6 +572,10 @@ impl AgentMcpServer {
         let result = self
             .dispatch_with_lifecycle(name, arguments, terminal_tracker.clone())
             .await;
+        let result = result.map(|mut value| {
+            let _ = self.take_browser_repl_result(&mut value);
+            value
+        });
         terminal_tracker.finish_response(
             result
                 .as_ref()
@@ -535,6 +601,12 @@ impl AgentMcpServer {
                 let _: EmptyArgs = from_value(arguments)?;
                 Ok(crate::agent_info::collect(&self.state).await)
             }
+            "browser.manual" => self.dispatch_browser_manual(arguments).await,
+            "browser.acquire" => self.dispatch_browser_acquire(arguments).await,
+            "browser.repl" => self.dispatch_browser_repl(arguments).await,
+            "browser.reset" => self.dispatch_browser_reset(arguments).await,
+            "browser.release" => self.dispatch_browser_release(arguments).await,
+            "browser.list" => self.dispatch_browser_list(arguments).await,
             "file.read" => {
                 let args: FileReadArgs = from_value(arguments)?;
                 validate_file_read_args(&args)?;
@@ -1341,6 +1413,276 @@ impl AgentMcpServer {
         }
         Ok(())
     }
+    async fn dispatch_browser_manual(&self, arguments: Value) -> Result<Value> {
+        let args: BrowserManualArgs = from_value(arguments)?;
+        let Some(runtime) = self.state.browser_runtime.clone() else {
+            return Ok(browser_runtime_unavailable_value());
+        };
+
+        let value = match args.action.as_str() {
+            "read" => match crate::browser_manual::read(
+                &runtime.descriptor.docs_root,
+                crate::browser_manual::ReadRequest {
+                    path: args.path.expect("validated browser.manual read path"),
+                    start_line: args.start_line,
+                    end_line: args.end_line,
+                },
+            ) {
+                Ok(response) => serde_json::to_value(response).unwrap_or_else(|error| {
+                    browser_error_value(format!("browser_manual_serialize_failed:{error}"))
+                }),
+                Err(error) => browser_error_value(error),
+            },
+            "search" => match crate::browser_manual::search(
+                &runtime.descriptor.docs_root,
+                crate::browser_manual::SearchRequest {
+                    query: args.query.expect("validated browser.manual search query"),
+                    max_results: args.max_results,
+                    context_lines: args.context_lines,
+                },
+            ) {
+                Ok(response) => serde_json::to_value(response).unwrap_or_else(|error| {
+                    browser_error_value(format!("browser_manual_serialize_failed:{error}"))
+                }),
+                Err(error) => browser_error_value(error),
+            },
+            _ => browser_error_value("browser_manual_action_invalid"),
+        };
+        Ok(value)
+    }
+
+    async fn dispatch_browser_acquire(&self, arguments: Value) -> Result<Value> {
+        let args: BrowserAcquireArgs = from_value(arguments)?;
+        let started = Instant::now();
+        let name = args.name.clone();
+        let idle_timeout_seconds = args.idle_timeout_seconds;
+        let runtime = self.state.browser_runtime.clone();
+        let runtime_app_version = runtime
+            .as_ref()
+            .map(|runtime| runtime.descriptor.app_version.clone());
+        let value = match runtime {
+            Some(runtime) => match runtime
+                .manager
+                .acquire(&name, Duration::from_secs(idle_timeout_seconds))
+                .await
+            {
+                Ok(()) => json!({
+                    "name": name,
+                    "state": "ready",
+                    "idleTimeoutSeconds": idle_timeout_seconds,
+                    "appVersion": runtime.descriptor.app_version,
+                    "channel": runtime.descriptor.channel,
+                }),
+                Err(error) => browser_error_value(error),
+            },
+            None => browser_runtime_unavailable_value(),
+        };
+        self.audit_browser(
+            "browser.acquire",
+            name,
+            runtime_app_version,
+            None,
+            None,
+            None,
+            None,
+            Some(idle_timeout_seconds),
+            browser_outcome(&value),
+            browser_error_code_from_value(&value),
+            started,
+        )
+        .await;
+        Ok(value)
+    }
+
+    async fn dispatch_browser_repl(&self, arguments: Value) -> Result<Value> {
+        let args: BrowserReplArgs = from_value(arguments)?;
+        let started = Instant::now();
+        let name = args.name.clone();
+        let code_bytes = args.code.len();
+        let code_sha256 = Some(browser_sha256(&args.code));
+        let timeout_ms = args.timeout_ms.unwrap_or(20_000);
+        let title = args.title.as_deref().map(bounded_browser_title);
+        let runtime = self.state.browser_runtime.clone();
+        let runtime_app_version = runtime
+            .as_ref()
+            .map(|runtime| runtime.descriptor.app_version.clone());
+        let (mut value, pending_result) = match runtime {
+            Some(runtime) => match runtime.manager.repl(&name, &args.code, timeout_ms).await {
+                Ok(result) => match serde_json::to_value(&result) {
+                    Ok(value) if value.is_object() => (value, Some(result)),
+                    Ok(_) => (browser_error_value("browser_repl_result_invalid"), None),
+                    Err(error) => (
+                        browser_error_value(format!(
+                            "browser_repl_result_serialize_failed:{error}"
+                        )),
+                        None,
+                    ),
+                },
+                Err(error) => (browser_error_value(error), None),
+            },
+            None => (browser_runtime_unavailable_value(), None),
+        };
+        self.audit_browser(
+            "browser.repl",
+            name,
+            runtime_app_version,
+            title,
+            Some(code_bytes),
+            code_sha256,
+            Some(timeout_ms),
+            None,
+            browser_outcome_for_repl(&value),
+            browser_error_code_from_value(&value),
+            started,
+        )
+        .await;
+        if let Some(result) = pending_result {
+            let marker = self.stash_browser_repl_result(result);
+            value
+                .as_object_mut()
+                .expect("serialized CallToolResult checked as object")
+                .insert(
+                    BROWSER_REPL_RESULT_MARKER.to_string(),
+                    Value::String(marker),
+                );
+        }
+        Ok(value)
+    }
+
+    async fn dispatch_browser_reset(&self, arguments: Value) -> Result<Value> {
+        let args: BrowserLeaseArgs = from_value(arguments)?;
+        let started = Instant::now();
+        let name = args.name;
+        let runtime = self.state.browser_runtime.clone();
+        let runtime_app_version = runtime
+            .as_ref()
+            .map(|runtime| runtime.descriptor.app_version.clone());
+        let value = match runtime {
+            Some(runtime) => match runtime.manager.reset(&name).await {
+                Ok(()) => json!({"name": name, "state": "ready"}),
+                Err(error) => browser_error_value(error),
+            },
+            None => browser_runtime_unavailable_value(),
+        };
+        self.audit_browser(
+            "browser.reset",
+            name,
+            runtime_app_version,
+            None,
+            None,
+            None,
+            None,
+            None,
+            browser_outcome(&value),
+            browser_error_code_from_value(&value),
+            started,
+        )
+        .await;
+        Ok(value)
+    }
+
+    async fn dispatch_browser_release(&self, arguments: Value) -> Result<Value> {
+        let args: BrowserLeaseArgs = from_value(arguments)?;
+        let started = Instant::now();
+        let name = args.name;
+        let runtime = self.state.browser_runtime.clone();
+        let runtime_app_version = runtime
+            .as_ref()
+            .map(|runtime| runtime.descriptor.app_version.clone());
+        let value = match runtime {
+            Some(runtime) => match runtime.manager.release(&name).await {
+                Ok(released) => json!({"name": name, "released": released}),
+                Err(error) => browser_error_value(error),
+            },
+            None => browser_runtime_unavailable_value(),
+        };
+        self.audit_browser(
+            "browser.release",
+            name,
+            runtime_app_version,
+            None,
+            None,
+            None,
+            None,
+            None,
+            browser_outcome(&value),
+            browser_error_code_from_value(&value),
+            started,
+        )
+        .await;
+        Ok(value)
+    }
+
+    async fn dispatch_browser_list(&self, arguments: Value) -> Result<Value> {
+        let _: EmptyArgs = from_value(arguments)?;
+        let Some(runtime) = self.state.browser_runtime.clone() else {
+            return Ok(browser_runtime_unavailable_list_value());
+        };
+        let mut leases = runtime
+            .manager
+            .list()
+            .await
+            .into_iter()
+            .map(browser_lease_value)
+            .collect::<Vec<_>>();
+        leases.sort_unstable_by(|left, right| {
+            left.get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .cmp(
+                    right
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
+                )
+        });
+        Ok(json!({
+            "runtimeAvailable": true,
+            "appVersion": runtime.descriptor.app_version,
+            "channel": runtime.descriptor.channel,
+            "leases": leases,
+        }))
+    }
+
+    async fn audit_browser(
+        &self,
+        tool: &str,
+        lease_name: String,
+        runtime_app_version: Option<String>,
+        title: Option<String>,
+        code_bytes: Option<usize>,
+        code_sha256: Option<String>,
+        timeout_ms: Option<u64>,
+        idle_timeout_seconds: Option<u64>,
+        outcome: String,
+        error_code: Option<String>,
+        started: Instant,
+    ) {
+        let config = self.state.config.read().await.clone();
+        let lease_name = bounded_browser_text(&lease_name, 128);
+        let runtime_app_version = runtime_app_version
+            .as_deref()
+            .map(|value| bounded_browser_text(value, 128));
+        let title = title.as_deref().map(bounded_browser_title);
+        let _ = crate::audit::write_browser_audit(
+            &config,
+            crate::audit::BrowserAuditRecord {
+                time: Utc::now(),
+                tool: tool.to_string(),
+                request_source: self.ingress.source(tool),
+                lease_name,
+                runtime_app_version,
+                title,
+                code_bytes,
+                code_sha256,
+                timeout_ms,
+                idle_timeout_seconds,
+                outcome,
+                error_code,
+                duration_ms: started.elapsed().as_millis(),
+            },
+        );
+    }
 }
 
 impl ServerHandler for AgentMcpServer {
@@ -1349,7 +1691,10 @@ impl ServerHandler for AgentMcpServer {
         request: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
-        let value = self.call(request).await?;
+        let (value, browser_repl_result) = self.call_with_result(request).await?;
+        if let Some(result) = browser_repl_result {
+            return Ok(result);
+        }
         let is_error = value.get("error").is_some();
         let result = if is_error {
             CallToolResult::structured_error(value)
@@ -1547,6 +1892,47 @@ struct FileEditArgs {
     patch: String,
     #[serde(default)]
     need_confirm: bool,
+}
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BrowserManualArgs {
+    action: String,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    start_line: Option<usize>,
+    #[serde(default)]
+    end_line: Option<usize>,
+    #[serde(default)]
+    query: Option<String>,
+    #[serde(default)]
+    max_results: Option<usize>,
+    #[serde(default)]
+    context_lines: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BrowserAcquireArgs {
+    name: String,
+    idle_timeout_seconds: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BrowserReplArgs {
+    name: String,
+    code: String,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+    #[serde(default)]
+    title: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BrowserLeaseArgs {
+    name: String,
 }
 
 fn default_max_search_results() -> usize {
@@ -2088,9 +2474,255 @@ fn validate_stdio_arguments(name: &str, arguments: &Value) -> Result<()> {
             let args: FileSearchArgs = from_value(arguments.clone())?;
             validate_file_search_args(&args)?;
         }
+        "browser.manual" => {
+            let args: BrowserManualArgs = from_value(arguments.clone())?;
+            validate_browser_manual_args(&args, object)?;
+        }
+        "browser.acquire" => {
+            let args: BrowserAcquireArgs = from_value(arguments.clone())?;
+            validate_browser_acquire_args(&args)?;
+        }
+        "browser.repl" => {
+            let args: BrowserReplArgs = from_value(arguments.clone())?;
+            validate_browser_repl_args(&args)?;
+        }
+        "browser.reset" | "browser.release" => {
+            let _: BrowserLeaseArgs = from_value(arguments.clone())?;
+        }
+        "browser.list" => {
+            let _: EmptyArgs = from_value(arguments.clone())?;
+        }
         _ => {}
     }
     Ok(())
+}
+
+fn validate_browser_manual_args(
+    args: &BrowserManualArgs,
+    object: &Map<String, Value>,
+) -> Result<()> {
+    let present = |name: &str| object.contains_key(name);
+    match args.action.as_str() {
+        "read" => {
+            if args.path.is_none() {
+                return Err(anyhow::anyhow!("browser.manual read requires path"));
+            }
+            if present("query") || present("maxResults") || present("contextLines") {
+                return Err(anyhow::anyhow!("browser.manual read rejects search fields"));
+            }
+            if args.start_line == Some(0)
+                || args.end_line == Some(0)
+                || matches!(
+                    (args.start_line, args.end_line),
+                    (Some(start), Some(end)) if start > end
+                )
+            {
+                return Err(anyhow::anyhow!("browser.manual invalid line range"));
+            }
+        }
+        "search" => {
+            if args.query.is_none() {
+                return Err(anyhow::anyhow!("browser.manual search requires query"));
+            }
+            if present("path") || present("startLine") || present("endLine") {
+                return Err(anyhow::anyhow!("browser.manual search rejects read fields"));
+            }
+            let query = args.query.as_deref().expect("query presence checked");
+            if query.trim().is_empty() || query.len() > 4 * 1024 {
+                return Err(anyhow::anyhow!("browser.manual invalid query"));
+            }
+            if args
+                .max_results
+                .is_some_and(|value| !(1..=100).contains(&value))
+            {
+                return Err(anyhow::anyhow!("browser.manual invalid maxResults"));
+            }
+            if args.context_lines.is_some_and(|value| value > 5) {
+                return Err(anyhow::anyhow!("browser.manual invalid contextLines"));
+            }
+        }
+        _ => {
+            return Err(anyhow::anyhow!(
+                "browser.manual action must be read or search"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_browser_acquire_args(args: &BrowserAcquireArgs) -> Result<()> {
+    if !(1..=86_400).contains(&args.idle_timeout_seconds) {
+        return Err(anyhow::anyhow!(
+            "browser.acquire idleTimeoutSeconds must be 1..=86400"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_browser_repl_args(args: &BrowserReplArgs) -> Result<()> {
+    if args.code.is_empty() {
+        return Err(anyhow::anyhow!("browser.repl code must be non-empty"));
+    }
+    if args.code.len() > 256 * 1024 {
+        return Err(anyhow::anyhow!(
+            "browser.repl code exceeds 256 KiB UTF-8 bytes"
+        ));
+    }
+    if args
+        .timeout_ms
+        .is_some_and(|value| !(1..=120_000).contains(&value))
+    {
+        return Err(anyhow::anyhow!("browser.repl timeoutMs must be 1..=120000"));
+    }
+    if args
+        .title
+        .as_deref()
+        .is_some_and(|title| title.chars().count() > 128)
+    {
+        return Err(anyhow::anyhow!("browser.repl title exceeds 128 characters"));
+    }
+    Ok(())
+}
+
+fn browser_runtime_unavailable_value() -> Value {
+    browser_error_value("browser_runtime_unavailable")
+}
+
+fn browser_runtime_unavailable_list_value() -> Value {
+    json!({
+        "runtimeAvailable": false,
+        "leases": [],
+    })
+}
+
+fn browser_error_value(reason: impl std::fmt::Display) -> Value {
+    let code = browser_error_code(&reason.to_string());
+    json!({
+        "error": {
+            "code": code.clone(),
+            "message": code,
+        }
+    })
+}
+
+fn browser_error_code(reason: &str) -> String {
+    let prefix = reason.split(':').next().unwrap_or(reason).trim();
+    let code = prefix
+        .chars()
+        .take_while(|character| {
+            character.is_ascii_alphanumeric() || *character == '_' || *character == '-'
+        })
+        .take(64)
+        .collect::<String>();
+    if code.is_empty() {
+        "browser_error".to_string()
+    } else {
+        code
+    }
+}
+
+fn browser_error_code_from_value(value: &Value) -> Option<String> {
+    value
+        .get("error")
+        .and_then(|error| error.get("code"))
+        .and_then(Value::as_str)
+        .map(browser_error_code)
+        .or_else(|| {
+            value
+                .get("structuredContent")
+                .and_then(|content| content.get("error"))
+                .and_then(|error| error.get("code"))
+                .and_then(Value::as_str)
+                .map(browser_error_code)
+        })
+        .or_else(|| {
+            value
+                .get("isError")
+                .and_then(Value::as_bool)
+                .filter(|is_error| *is_error)
+                .map(|_| "browser_repl_error".to_string())
+        })
+}
+
+fn browser_outcome(value: &Value) -> String {
+    if value.get("error").is_some() {
+        "failed".to_string()
+    } else {
+        "completed".to_string()
+    }
+}
+
+fn browser_outcome_for_repl(value: &Value) -> String {
+    if value.get("error").is_some()
+        || value
+            .get("isError")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    {
+        "failed".to_string()
+    } else {
+        "completed".to_string()
+    }
+}
+
+fn browser_sha256(code: &str) -> String {
+    format!("sha256:{:x}", Sha256::digest(code.as_bytes()))
+}
+
+fn bounded_browser_text(value: &str, max_chars: usize) -> String {
+    value
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(max_chars)
+        .collect()
+}
+
+fn bounded_browser_title(title: &str) -> String {
+    bounded_browser_text(title, 128)
+}
+
+fn browser_report_arguments(arguments: &Value) -> Value {
+    let mut reported = Map::new();
+    if let Some(name) = arguments.get("name").and_then(Value::as_str) {
+        reported.insert(
+            "name".to_string(),
+            Value::String(bounded_browser_text(name, 128)),
+        );
+    }
+    if let Some(code) = arguments.get("code").and_then(Value::as_str) {
+        reported.insert("codeBytes".to_string(), json!(code.len()));
+        reported.insert("codeSha256".to_string(), json!(browser_sha256(code)));
+    }
+    if let Some(timeout_ms) = arguments.get("timeoutMs").and_then(Value::as_u64) {
+        reported.insert("timeoutMs".to_string(), json!(timeout_ms));
+    }
+    if let Some(title) = arguments.get("title").and_then(Value::as_str) {
+        reported.insert(
+            "title".to_string(),
+            Value::String(bounded_browser_title(title)),
+        );
+    }
+    Value::Object(reported)
+}
+
+fn browser_lease_value(snapshot: crate::browser_manager::BrowserLeaseSnapshot) -> Value {
+    let mut value = json!({
+        "name": snapshot.name,
+        "state": browser_state_label(snapshot.state),
+        "idleTimeoutSeconds": snapshot.idle_timeout.as_secs().min(86_400),
+    });
+    if let Some(remaining) = snapshot.remaining_idle {
+        value["remainingIdleSeconds"] = json!(remaining.as_secs().min(86_400));
+    }
+    value
+}
+
+fn browser_state_label(state: crate::browser_manager::BrowserLeaseState) -> &'static str {
+    match state {
+        crate::browser_manager::BrowserLeaseState::Initializing => "initializing",
+        crate::browser_manager::BrowserLeaseState::Ready => "ready",
+        crate::browser_manager::BrowserLeaseState::Closing => "closing",
+    }
 }
 
 fn validate_file_read_args(args: &FileReadArgs) -> Result<()> {
@@ -2343,6 +2975,11 @@ fn tool_input_schema(name: &str) -> Map<String, Value> {
 fn tool_schema(name: &str) -> (Map<String, Value>, &'static [&'static str]) {
     let required: &'static [&'static str] = match name {
         "process.exec" => &["program"],
+        "browser.manual" => &["action"],
+        "browser.acquire" => &["name", "idleTimeoutSeconds"],
+        "browser.repl" => &["name", "code"],
+        "browser.reset" | "browser.release" => &["name"],
+        "browser.list" => &[],
         "process.batch" => &["elements"],
         "job.get" | "job.cancel" => &["jobId"],
         "file.read" | "file.search" => &[],
@@ -2395,6 +3032,138 @@ fn properties_for(name: &str) -> Map<String, Value> {
         add("agentId", string("Target local agent id."));
     }
     match name {
+        "browser.manual" => {
+            add(
+                "action",
+                json!({
+                    "type": "string",
+                    "enum": ["read", "search"],
+                    "description": "read returns one official-docs file; search scans selected runtime docs.",
+                }),
+            );
+            add(
+                "path",
+                json!({
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Docs-relative path for action read; absolute paths are not accepted.",
+                }),
+            );
+            add(
+                "startLine",
+                json!({"type":"integer","minimum":1,"description":"Optional inclusive line number for action read."}),
+            );
+            add(
+                "endLine",
+                json!({"type":"integer","minimum":1,"description":"Optional inclusive line number for action read."}),
+            );
+            add(
+                "query",
+                json!({
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096,
+                    "description": "Required bounded substring query for action search.",
+                }),
+            );
+            add(
+                "maxResults",
+                json!({
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100,
+                    "default": 50,
+                    "description": "Maximum matches for action search.",
+                }),
+            );
+            add(
+                "contextLines",
+                json!({
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 5,
+                    "default": 2,
+                    "description": "Context lines before and after each action-search match.",
+                }),
+            );
+        }
+        "browser.acquire" => {
+            add(
+                "name",
+                json!({
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Caller-chosen persistent lease name; Browser manager validates its lease syntax.",
+                }),
+            );
+            add(
+                "idleTimeoutSeconds",
+                json!({
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 86400,
+                    "description": "Idle lease timeout in seconds; acquire is idempotent by name.",
+                }),
+            );
+        }
+        "browser.repl" => {
+            add(
+                "name",
+                json!({
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Persistent Browser lease name acquired with browser.acquire.",
+                }),
+            );
+            add(
+                "code",
+                json!({
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 262144,
+                    "description": "Arbitrary JavaScript using official Browser SDK bindings; non-empty and at most 256 KiB UTF-8 bytes.",
+                }),
+            );
+            add(
+                "timeoutMs",
+                json!({
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 120000,
+                    "default": 20000,
+                    "description": "Per-call JavaScript deadline in milliseconds.",
+                }),
+            );
+            add(
+                "title",
+                json!({
+                    "type": "string",
+                    "maxLength": 128,
+                    "description": "Optional bounded observability title; not injected into JavaScript.",
+                }),
+            );
+        }
+        "browser.reset" => {
+            add(
+                "name",
+                json!({
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Persistent Browser lease name; recovery/admin reset preserves the lease.",
+                }),
+            );
+        }
+        "browser.release" => {
+            add(
+                "name",
+                json!({
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Persistent Browser lease name; release performs final cleanup.",
+                }),
+            );
+        }
+        "browser.list" => {}
         "file.read" => {
             add(
                 "path",
@@ -2963,6 +3732,12 @@ fn output_schema() -> Map<String, Value> {
 fn tool_description(name: &str) -> String {
     match name {
         "agent.info" => "Inspect local Agent runtime, workspace policy, connectivity, capacity, and health; read-only diagnostics.".to_string(),
+        "browser.manual" => "Read or search official Browser SDK documentation bundled with the selected runtime; results stay docs-relative.".to_string(),
+        "browser.acquire" => "Acquire a named persistent Browser lease; its JavaScript kernel and Browser SDK bindings survive multiple calls.".to_string(),
+        "browser.repl" => "Run arbitrary JavaScript in a persistent Browser lease; use official Browser SDK semantics in JS, with destructive open-world effects.".to_string(),
+        "browser.reset" => "Reset a Browser lease for recovery or administration; preserves the lease name and is not normal per-call cleanup.".to_string(),
+        "browser.release" => "Release a Browser lease for final cleanup; ends the turn and removes its persistent kernel.".to_string(),
+        "browser.list" => "List bounded Browser runtime availability and named lease state without exposing runtime paths or opaque IDs.".to_string(),
         "file.read" => "Read bounded UTF-8 workspace files without mutation. Supports single reads and ordered batch reads; use line ranges for large files and use metadata only when file information is needed.".to_string(),
         "file.search" => "Search bounded workspace text without mutation. Supports scoped literal or regex searches and ordered batch searches; use filters to limit noisy workspace scans.".to_string(),
         "file.edit" => "Apply a Codex apply_patch patch to workspace files; mutations remain policy and confirmation controlled.".to_string(),
@@ -3015,6 +3790,10 @@ fn tool_is_read_only(name: &str) -> bool {
     !matches!(
         name,
         "process.exec"
+            | "browser.acquire"
+            | "browser.repl"
+            | "browser.reset"
+            | "browser.release"
             | "process.batch"
             | "job.cancel"
             | "tmux.sessions"
@@ -3038,6 +3817,9 @@ fn tool_is_destructive(name: &str) -> bool {
     matches!(
         name,
         "file.edit"
+            | "browser.repl"
+            | "browser.reset"
+            | "browser.release"
             | "job.cancel"
             | "tmux.sessions"
             | "tmux.closeSession"
@@ -3053,6 +3835,7 @@ fn tool_is_open_world(name: &str) -> bool {
     matches!(
         name,
         "process.exec"
+            | "browser.repl"
             | "process.batch"
             | "tmux.sessions"
             | "mcp.batch"
@@ -3078,7 +3861,10 @@ mod tests {
     };
 
     use agentic_gpt_protocol::{AgentMessage, SkillActivationRequest};
-    use rmcp::{model::CallToolRequestParams, ServiceExt};
+    use rmcp::{
+        model::{CallToolRequestParams, Content},
+        ServiceExt,
+    };
     use serde::Deserialize;
     use tokio::io::{split, AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::sync::{mpsc, Mutex, RwLock};
@@ -3114,6 +3900,12 @@ mod tests {
         };
         let expected_normal = [
             "agent.info",
+            "browser.acquire",
+            "browser.list",
+            "browser.manual",
+            "browser.release",
+            "browser.repl",
+            "browser.reset",
             "file.edit",
             "file.read",
             "file.search",
@@ -3168,6 +3960,11 @@ mod tests {
         // retained only by the separate Hub compatibility boundary.
         for alias in [
             "file.batch",
+            "browser.read",
+            "browser.click",
+            "browser.navigate",
+            "browser.tabs",
+            "browser.screenshot",
             "user.notify.deliver",
             "mcp.listServers",
             "mcp.listTools",
@@ -3214,6 +4011,20 @@ mod tests {
                 .is_ok(),
             "disabling file must leave the MCP namespace callable"
         );
+        let mut browser_filtered_config = normal.state.config.read().await.clone();
+        browser_filtered_config
+            .toolsets
+            .disable(ToolNamespace::Browser);
+        *normal.state.config.write().await = browser_filtered_config;
+        let browser_filtered_names = names(normal.current_tools().await);
+        assert!(browser_filtered_names
+            .iter()
+            .all(|name| !name.starts_with("browser.")));
+        let browser_error = normal
+            .call(CallToolRequestParams::new("browser.list"))
+            .await
+            .expect_err("disabled Browser namespace must not remain callable");
+        assert_eq!(browser_error.code, rmcp::model::ErrorCode::METHOD_NOT_FOUND);
 
         let serialized = serde_json::to_string(&normal_tools).unwrap();
         assert!(!serialized.contains("agentId"));
@@ -3231,10 +4042,9 @@ mod tests {
         let normal_tools = normal.current_tools().await;
         let room_tools = room.current_tools().await;
         for (label, tools, max_total, max_inputs) in [
-            // The frozen file schemas add bounded descriptors to the original
-            // compact-surface budgets; retain explicit finite caps for the
-            // resulting Normal/Room surfaces.
-            ("normal", &normal_tools, 32_000usize, 16_000usize),
+            // File plus the six frozen Browser schemas remain under explicit
+            // finite caps for the resulting Normal/Room surfaces.
+            ("normal", &normal_tools, 32_000usize, 17_000usize),
             ("room", &room_tools, 48_000usize, 24_000usize),
         ] {
             let serialized = serde_json::to_vec(tools).unwrap();
@@ -3318,6 +4128,364 @@ mod tests {
             .collect::<BTreeSet<_>>();
         assert_eq!(edit_fields, expected_edit_fields);
         assert_eq!(edit["inputSchema"]["required"], json!(["patch"]));
+        Ok(())
+    }
+
+    #[test]
+    fn browser_descriptors_and_annotations_are_frozen() -> anyhow::Result<()> {
+        let expected = [
+            ("browser.manual", true, false, false, json!(["action"])),
+            (
+                "browser.acquire",
+                false,
+                false,
+                false,
+                json!(["name", "idleTimeoutSeconds"]),
+            ),
+            ("browser.repl", false, true, true, json!(["name", "code"])),
+            ("browser.reset", false, true, false, json!(["name"])),
+            ("browser.release", false, true, false, json!(["name"])),
+            ("browser.list", true, false, false, json!([])),
+        ];
+        for (name, read_only, destructive, open_world, required) in expected {
+            let descriptor = serde_json::to_value(tool_descriptor(name))?;
+            assert_eq!(descriptor["inputSchema"]["required"], required, "{name}");
+            assert_eq!(descriptor["inputSchema"]["additionalProperties"], false);
+            assert_eq!(
+                descriptor["annotations"]["readOnlyHint"], read_only,
+                "{name}"
+            );
+            assert_eq!(
+                descriptor["annotations"]["destructiveHint"], destructive,
+                "{name}"
+            );
+            assert_eq!(
+                descriptor["annotations"]["openWorldHint"], open_world,
+                "{name}"
+            );
+        }
+        let manual = serde_json::to_value(tool_descriptor("browser.manual"))?;
+        assert_eq!(
+            manual["inputSchema"]["properties"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            [
+                "action",
+                "contextLines",
+                "endLine",
+                "maxResults",
+                "path",
+                "query",
+                "startLine",
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect::<BTreeSet<_>>()
+        );
+        let repl = serde_json::to_value(tool_descriptor("browser.repl"))?;
+        assert_eq!(
+            repl["inputSchema"]["properties"]["timeoutMs"]["default"],
+            20_000
+        );
+        assert_eq!(repl["inputSchema"]["properties"]["timeoutMs"]["minimum"], 1);
+        assert_eq!(
+            repl["inputSchema"]["properties"]["timeoutMs"]["maximum"],
+            120_000
+        );
+        assert_eq!(repl["inputSchema"]["properties"]["title"]["maxLength"], 128);
+        Ok(())
+    }
+
+    #[test]
+    fn browser_conditional_arguments_and_bounds_are_validated() {
+        assert!(validate_stdio_arguments(
+            "browser.manual",
+            &json!({"action":"read","path":"api.md","startLine":1,"endLine":2})
+        )
+        .is_ok());
+        assert!(validate_stdio_arguments(
+            "browser.manual",
+            &json!({"action":"search","query":"tabs","maxResults":1,"contextLines":5})
+        )
+        .is_ok());
+        for arguments in [
+            json!({"action":"read"}),
+            json!({"action":"read","path":"api.md","query":"tabs"}),
+            json!({"action":"search"}),
+            json!({"action":"search","query":"tabs","path":"api.md"}),
+            json!({"action":"search","query":"tabs","maxResults":0}),
+            json!({"action":"search","query":"tabs","contextLines":6}),
+            json!({"action":"other","query":"tabs"}),
+        ] {
+            assert!(
+                validate_stdio_arguments("browser.manual", &arguments).is_err(),
+                "accepted invalid manual arguments: {arguments}"
+            );
+        }
+        assert!(validate_stdio_arguments(
+            "browser.acquire",
+            &json!({"name":"lease","idleTimeoutSeconds":1})
+        )
+        .is_ok());
+        assert!(validate_stdio_arguments(
+            "browser.acquire",
+            &json!({"name":"lease","idleTimeoutSeconds":86400})
+        )
+        .is_ok());
+        for seconds in [0, 86401] {
+            assert!(validate_stdio_arguments(
+                "browser.acquire",
+                &json!({"name":"lease","idleTimeoutSeconds":seconds})
+            )
+            .is_err());
+        }
+        assert!(
+            validate_stdio_arguments("browser.repl", &json!({"name":"lease","code":"1+1"})).is_ok()
+        );
+        assert!(validate_stdio_arguments(
+            "browser.repl",
+            &json!({"name":"lease","code":"1+1","timeoutMs":120000,"title":"ok"})
+        )
+        .is_ok());
+        for arguments in [
+            json!({"name":"lease","code":""}),
+            json!({"name":"lease","code":"1+1","timeoutMs":0}),
+            json!({"name":"lease","code":"1+1","timeoutMs":120001}),
+            json!({"name":"lease","code":"1+1","title":"🙂".repeat(129)}),
+        ] {
+            assert!(
+                validate_stdio_arguments("browser.repl", &arguments).is_err(),
+                "accepted invalid repl arguments: {arguments}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn browser_missing_runtime_has_stable_degraded_results() -> anyhow::Result<()> {
+        let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
+        let source = "console.log('browser-audit-secret')";
+        assert_eq!(
+            server.dispatch("browser.list", json!({})).await?,
+            json!({"runtimeAvailable":false,"leases":[]})
+        );
+        for (name, arguments) in [
+            ("browser.manual", json!({"action":"search","query":"tabs"})),
+            (
+                "browser.acquire",
+                json!({"name":"lease","idleTimeoutSeconds":1}),
+            ),
+            ("browser.repl", json!({"name":"lease","code":source})),
+            ("browser.reset", json!({"name":"lease"})),
+            ("browser.release", json!({"name":"lease"})),
+        ] {
+            let value = server.dispatch(name, arguments).await?;
+            assert_eq!(value["error"]["code"], "browser_runtime_unavailable");
+            assert_eq!(value["error"]["message"], "browser_runtime_unavailable");
+        }
+        let audit = std::fs::read_to_string(
+            server
+                .state
+                .config
+                .read()
+                .await
+                .workspace_root
+                .join(".agentic-gpt-audit.jsonl"),
+        )?;
+        let records = audit
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|record| record["tool"] == "browser.repl")
+            .collect::<Vec<_>>();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0]["requestSource"], "tunnel:browser.repl");
+        assert_eq!(records[0]["codeBytes"], source.len());
+        assert_eq!(records[0]["codeSha256"], browser_sha256(source));
+        assert_eq!(records[0]["outcome"], "failed");
+        assert_eq!(records[0]["errorCode"], "browser_runtime_unavailable");
+        assert!(!audit.contains(source));
+
+        Ok(())
+    }
+
+    #[test]
+    fn browser_reporting_and_error_helpers_do_not_retain_source() {
+        let source = "console.log('do-not-record')";
+        let reported = browser_report_arguments(&json!({
+            "name":"lease",
+            "code":source,
+            "timeoutMs":42,
+            "title":"title"
+        }));
+        assert!(reported.get("code").is_none());
+        assert_eq!(reported["codeBytes"], source.len());
+        assert_eq!(reported["codeSha256"], browser_sha256(source));
+        assert!(!reported.to_string().contains(source));
+
+        let error = browser_error_value(
+            "browser_runtime_lease_not_found: /secret/path and private diagnostics",
+        );
+        assert_eq!(
+            error,
+            json!({"error":{"code":"browser_runtime_lease_not_found","message":"browser_runtime_lease_not_found"}})
+        );
+        assert_eq!(
+            browser_error_code(
+                "browser_runtime_node_repl_call_failed: /secret/path and private diagnostics"
+            ),
+            "browser_runtime_node_repl_call_failed"
+        );
+    }
+
+    #[tokio::test]
+    async fn browser_manual_dispatch_uses_selected_runtime_docs_root() -> anyhow::Result<()> {
+        let docs_root =
+            std::env::temp_dir().join(format!("agentic-browser-docs-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&docs_root)?;
+        std::fs::write(docs_root.join("api.md"), "before\nbrowser sdk\napi after\n")?;
+        let server = AgentMcpServer::new(state_with_browser_runtime(
+            docs_root.clone(),
+            CallToolResult::default(),
+        ));
+
+        let read = server
+            .dispatch(
+                "browser.manual",
+                json!({"action":"read","path":"api.md","startLine":2,"endLine":2}),
+            )
+            .await?;
+        assert_eq!(read["path"], "api.md");
+        assert_eq!(read["content"], "browser sdk\n");
+        assert!(!serde_json::to_string(&read)?.contains(docs_root.to_string_lossy().as_ref()));
+
+        let search = server
+            .dispatch(
+                "browser.manual",
+                json!({"action":"search","query":"browser","maxResults":1}),
+            )
+            .await?;
+        assert_eq!(search["matches"][0]["path"], "api.md");
+        assert_eq!(search["matches"][0]["line"], 2);
+        assert!(!serde_json::to_string(&search)?.contains(docs_root.to_string_lossy().as_ref()));
+
+        let absolute = server
+            .dispatch(
+                "browser.manual",
+                json!({"action":"read","path":docs_root.join("api.md")}),
+            )
+            .await?;
+        assert_eq!(absolute["error"]["code"], "browser_manual_invalid_path");
+        std::fs::remove_dir_all(docs_root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn browser_list_maps_runtime_snapshots_and_release_is_idempotent() -> anyhow::Result<()> {
+        let server = AgentMcpServer::new(state_with_browser_runtime(
+            PathBuf::from("/runtime/docs"),
+            CallToolResult::default(),
+        ));
+        for (name, timeout) in [("zeta", 5_u64), ("alpha", 6_u64)] {
+            server
+                .dispatch(
+                    "browser.acquire",
+                    json!({"name":name,"idleTimeoutSeconds":timeout}),
+                )
+                .await?;
+        }
+
+        let listed = server.dispatch("browser.list", json!({})).await?;
+        assert_eq!(listed["runtimeAvailable"], true);
+        assert_eq!(listed["appVersion"], "test-browser");
+        assert_eq!(listed["channel"], "test");
+        let leases = listed["leases"].as_array().expect("lease array");
+        assert_eq!(
+            leases
+                .iter()
+                .map(|lease| lease["name"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["alpha", "zeta"]
+        );
+        for lease in leases {
+            assert!(lease["remainingIdleSeconds"].is_u64());
+            assert!(lease["remainingIdleSeconds"].as_u64().unwrap() <= 6);
+            let serialized = serde_json::to_string(lease)?;
+            for forbidden in ["session_id", "turn_id", "nodeRepl", "/runtime"] {
+                assert!(
+                    !serialized.contains(forbidden),
+                    "opaque field leaked: {forbidden}"
+                );
+            }
+        }
+
+        let absent = server
+            .dispatch("browser.release", json!({"name":"missing"}))
+            .await?;
+        assert_eq!(absent, json!({"name":"missing","released":false}));
+        server
+            .dispatch("browser.release", json!({"name":"alpha"}))
+            .await?;
+        server
+            .dispatch("browser.release", json!({"name":"zeta"}))
+            .await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn browser_repl_returns_inner_result_channels_verbatim() -> anyhow::Result<()> {
+        let mut inner = CallToolResult::default();
+        inner.content = vec![
+            Content::text("hello"),
+            Content::image("aW1hZ2U=", "image/png"),
+        ];
+        inner.structured_content = Some(json!({"value":42}));
+        inner.is_error = Some(true);
+        inner.meta = Some(Meta(Map::from_iter([(
+            "result-key".to_string(),
+            json!("result-value"),
+        )])));
+
+        let server = AgentMcpServer::new(state_with_browser_runtime(
+            PathBuf::from("/runtime/docs"),
+            inner.clone(),
+        ));
+        server
+            .dispatch(
+                "browser.acquire",
+                json!({"name":"lease","idleTimeoutSeconds":60}),
+            )
+            .await?;
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let (client_read, client_write) = split(client_io);
+        let (server_read, server_write) = split(server_io);
+        let server_task = tokio::spawn(async move {
+            let transport =
+                AsyncRwTransport::<RoleServer, _, _>::new_server(server_read, server_write);
+            let running = server
+                .serve(ResumableStdioTransport::new(transport))
+                .await?;
+            let _ = running.waiting().await?;
+            anyhow::Result::<()>::Ok(())
+        });
+
+        let client = ().serve((client_read, client_write)).await?;
+        let outer = client
+            .call_tool(
+                CallToolRequestParams::new("browser.repl").with_arguments(Map::from_iter([
+                    ("name".to_string(), json!("lease")),
+                    ("code".to_string(), json!("browser code")),
+                ])),
+            )
+            .await?;
+        assert_eq!(serde_json::to_value(&outer)?, serde_json::to_value(&inner)?);
+        assert_eq!(outer.content.len(), 2);
+        assert_eq!(outer.structured_content, inner.structured_content);
+        assert_eq!(outer.is_error, Some(true));
+        assert_eq!(outer.meta, inner.meta);
+        let _ = client.cancel().await;
+        server_task.await??;
         Ok(())
     }
 
@@ -4996,5 +6164,26 @@ mod tests {
             skill_leases: Arc::new(SkillLeaseManager::new()),
             skill_installs: Arc::new(InstallManager::new()),
         }
+    }
+
+    fn state_with_browser_runtime(docs_root: PathBuf, result: CallToolResult) -> AppState {
+        let mut state = test_state(CapabilityProfile::Normal);
+        state.browser_runtime = Some(Arc::new(crate::state::BrowserRuntimeContext {
+            descriptor: crate::browser_runtime::BrowserRuntimeDescriptor {
+                app_version: "test-browser".to_string(),
+                channel: "test".to_string(),
+                node_repl_path: PathBuf::from("/runtime/node-repl"),
+                node_path: PathBuf::from("/runtime/node"),
+                browser_client_path: PathBuf::from("/runtime/browser-client.mjs"),
+                browser_service_path: PathBuf::from("/runtime/browser-service.mjs"),
+                codex_home: PathBuf::from("/runtime/codex"),
+                codex_cli_path: PathBuf::from("/runtime/codex-cli"),
+                node_module_dirs: Vec::new(),
+                trusted_code_paths: Vec::new(),
+                docs_root,
+            },
+            manager: crate::browser_manager::test_manager_with_result(result),
+        }));
+        state
     }
 }

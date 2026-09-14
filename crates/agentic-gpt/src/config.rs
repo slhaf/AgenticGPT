@@ -42,6 +42,7 @@ pub(crate) enum ToolNamespace {
     Job,
     Skills,
     Tmux,
+    Browser,
     Room,
 }
 
@@ -55,6 +56,7 @@ impl ToolNamespace {
             Self::Job,
             Self::Skills,
             Self::Tmux,
+            Self::Browser,
             Self::Room,
         ]
     }
@@ -68,6 +70,7 @@ impl ToolNamespace {
             Self::Job => "job",
             Self::Skills => "skills",
             Self::Tmux => "tmux",
+            Self::Browser => "browser",
             Self::Room => "room",
         }
     }
@@ -1804,18 +1807,19 @@ mod tests {
                 ToolNamespace::Job,
                 ToolNamespace::Skills,
                 ToolNamespace::Tmux,
+                ToolNamespace::Browser,
                 ToolNamespace::Room,
             ]
         );
         let normal = ToolsetConfig::normal();
         assert_eq!(
             normal.enabled_names(),
-            vec!["agent", "file", "mcp", "process", "job", "skills", "tmux"]
+            vec!["agent", "file", "mcp", "process", "job", "skills", "tmux", "browser",]
         );
         let room = ToolsetConfig::room();
         assert_eq!(
             room.enabled_names(),
-            vec!["agent", "file", "mcp", "process", "job", "skills", "tmux", "room"]
+            vec!["agent", "file", "mcp", "process", "job", "skills", "tmux", "browser", "room",]
         );
         assert_eq!(ToolsetConfig::for_profile(WorkerProfile::Normal), normal);
         assert_eq!(ToolsetConfig::for_profile(WorkerProfile::Room), room);
@@ -1828,6 +1832,10 @@ mod tests {
         assert!(!changed.is_enabled(ToolNamespace::File));
         assert!(changed.is_enabled(ToolNamespace::Room));
         assert_eq!(ToolNamespace::parse("room").unwrap(), ToolNamespace::Room);
+        assert_eq!(
+            ToolNamespace::parse("browser").unwrap(),
+            ToolNamespace::Browser
+        );
         assert!(ToolNamespace::parse("ROOM").is_err());
 
         let config = Config::default_config().unwrap();

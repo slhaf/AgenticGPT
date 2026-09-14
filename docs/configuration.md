@@ -38,9 +38,9 @@ Mode and profile are independent choices:
   by itself fix the final runtime surface or count, because an explicit `toolsets.enabled`
   selection is authoritative.
 
-The available namespaces are `agent`, `file`, `mcp`, `process`, `job`, `skills`, `tmux`, and
-`room`. The logical `room` namespace includes Room bootstrap (`bootstrap` and `bootstrap.read`)
-and every `room.*` tool. Selection filters the pre-existing advertised Normal/Room names only;
+The available namespaces are `agent`, `file`, `mcp`, `process`, `job`, `skills`, `tmux`,
+`browser`, and `room`. The logical `room` namespace includes Room bootstrap (`bootstrap` and
+`bootstrap.read`) and every `room.*` tool. Selection filters the pre-existing advertised Normal/Room names only;
 it never exposes dispatch-only aliases.
 
 Pin a selection with the following exact commands:
@@ -66,7 +66,7 @@ For example, an explicit normal selection is represented as:
 {
   "profile": "normal",
   "toolsets": {
-    "enabled": ["agent", "file", "mcp", "process", "job", "skills", "tmux"]
+    "enabled": ["agent", "file", "mcp", "process", "job", "skills", "tmux", "browser"]
   }
 }
 ```

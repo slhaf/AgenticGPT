@@ -33,10 +33,9 @@ agentic-gpt config show
   namespace；room preset 启用所有 namespace。配置档本身不会固定最终 runtime surface 或数量，
   因为显式的 `toolsets.enabled` 选择具有权威性。
 
-可用 namespace 为 `agent`、`file`、`mcp`、`process`、`job`、`skills`、`tmux`、`room`。
+可用 namespace 为 `agent`、`file`、`mcp`、`process`、`job`、`skills`、`tmux`、`browser`、`room`。
 逻辑上的 `room` namespace 包含 Room bootstrap（`bootstrap` 与 `bootstrap.read`）以及全部
 `room.*` 工具。选择只会过滤既有的 Normal/Room advertised names，不会暴露 dispatch-only alias。
-
 使用以下精确命令固定选择：
 
 ```bash
@@ -58,7 +57,7 @@ profile。该 namespace 禁用时，直接分发 Room 命令会返回 `room_tool
 {
   "profile": "normal",
   "toolsets": {
-    "enabled": ["agent", "file", "mcp", "process", "job", "skills", "tmux"]
+    "enabled": ["agent", "file", "mcp", "process", "job", "skills", "tmux", "browser"]
   }
 }
 ```

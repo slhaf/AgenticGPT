@@ -1422,6 +1422,10 @@ fn toolset_description(namespace: ToolNamespace, language: UiLanguage) -> &'stat
         (ToolNamespace::Skills, UiLanguage::ZhCn) => "技能发现、安装、启用与执行。",
         (ToolNamespace::Tmux, UiLanguage::En) => "Persistent tmux session and pane operations.",
         (ToolNamespace::Tmux, UiLanguage::ZhCn) => "持久化 tmux 会话与窗格操作。",
+        (ToolNamespace::Browser, UiLanguage::En) => {
+            "Browser runtime manual and persistent JavaScript sessions."
+        }
+        (ToolNamespace::Browser, UiLanguage::ZhCn) => "浏览器运行时手册与持久化 JavaScript 会话。",
         (ToolNamespace::Room, UiLanguage::En) => {
             "Room bootstrap, diary, notebook, state, and maintenance tools."
         }
@@ -1556,6 +1560,9 @@ mod tests {
         assert!(
             english.contains("[enabled]\tagent\tAgent runtime information and health diagnostics.")
         );
+        assert!(english.contains(
+            "[enabled]\tbrowser\tBrowser runtime manual and persistent JavaScript sessions."
+        ));
         assert!(english.contains(
             "[disabled]\troom\tRoom bootstrap, diary, notebook, state, and maintenance tools."
         ));

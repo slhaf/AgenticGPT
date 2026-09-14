@@ -88,10 +88,10 @@ errors are written to stderr. A stopped/restarting runtime returns
 
 ## Tunnel and local tool surfaces
 
-The V2 advertised surface contains 23 Normal names and 34 Room names. Profiles select
+The V2 advertised surface contains 29 Normal names and 40 Room names. Profiles select
 namespace presets rather than fixing the final runtime surface: normal enables `agent`, `file`,
-`mcp`, `process`, `job`, `skills`, and `tmux`; room enables all of those plus `room`. An explicit
-`toolsets.enabled` selection is authoritative. The logical `room` namespace contains
+`mcp`, `process`, `job`, `skills`, `tmux`, and `browser`; room enables all of those plus `room`.
+An explicit `toolsets.enabled` selection is authoritative. The logical `room` namespace contains
 `bootstrap`, `bootstrap.read`, the semantic read tools, and maintenance status/submit. These
 filters only remove names from the advertised surface; they never expose dispatch-only aliases.
 
@@ -104,6 +104,7 @@ process.exec, process.batch, job.get, job.list, job.cancel
 skills.list, skills.read, skills.setActive, skills.install,
 skills.install.get, skills.install.cancel, skills.run
 tmux.sessions, tmux.panes, tmux.exec, tmux.pasteText
+browser.manual, browser.acquire, browser.repl, browser.reset, browser.release, browser.list
 agent.info, file.read, file.search, file.edit
 ```
 

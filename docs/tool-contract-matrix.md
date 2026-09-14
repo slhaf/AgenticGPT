@@ -8,10 +8,10 @@ stated otherwise.
 
 ## Standalone advertised surface and namespace presets
 
-The V2 advertised surface contains 23 Normal names and 34 Room names. The normal
+The V2 advertised surface contains 29 Normal names and 40 Room names. The normal
 preset enables every namespace except `room`; the room preset enables every namespace. Available
-namespaces are `agent`, `file`, `mcp`, `process`, `job`, `skills`, `tmux`, and `room`. The logical
-`room` namespace includes `bootstrap`, `bootstrap.read`, semantic read tools, and maintenance
+namespaces are `agent`, `file`, `mcp`, `process`, `job`, `skills`, `tmux`, `browser`, and `room`. The
+logical `room` namespace includes `bootstrap`, `bootstrap.read`, semantic read tools, and maintenance
 status/submit. An explicit `toolsets.enabled` selection is authoritative regardless of profile,
 and filters only these advertised names; it never exposes dispatch-only aliases.
 
@@ -22,6 +22,12 @@ fields.
 | Public name | Use / no use | Required or conditional inputs | Defaults and bounds | Failure / lifecycle | Surface parity |
 |---|---|---|---|---|---|
 | `agent.info` | Inspect local runtime; no execution or mutation. | No required fields. | Bounded diagnostics and safe config summary. | Read-only snapshot; live Job/config state may change after return. | Normal + Room; Tunnel = local Unix. |
+| `browser.manual` | Read or search the selected runtime's official Browser documentation; no semantic Browser operation. | `action`; `read` requires `path` with optional `startLine`/`endLine`, while `search` requires `query` with optional `maxResults`/`contextLines`; action-incompatible fields are rejected. | Docs-root-relative bounded reads; search `maxResults` is 1–100 and `contextLines` is 0–5. | Runtime absence and manual bounds/path errors are stable Browser errors; read-only and non-destructive. | Normal + Room; uses the selected runtime docs root. |
+| `browser.acquire` | Acquire or reuse one named persistent Browser JavaScript lease; no semantic Browser call. | `name`, `idleTimeoutSeconds`. | Idle timeout is 1–86,400 seconds; same name is idempotent. | Missing runtime or manager failures are stable Browser errors; lease state is ready on success. | Normal + Room; same manager in both ingress paths. |
+| `browser.repl` | Run arbitrary JavaScript in a persistent Browser lease; no Rust-side Browser semantic translation. | `name`, non-empty `code`; optional `timeoutMs` and observability `title`. | Code ≤256 KiB UTF-8 bytes; timeout default 20,000 ms and bounded to 1–120,000; title ≤128 Unicode scalars. | Official text/image/structured content, error state, and metadata pass through; use acquire first. Destructive and open-world. | Normal + Room; same persistent lease manager in both ingress paths. |
+| `browser.reset` | Recover/admin-reset one Browser lease; no normal per-call cleanup. | `name`. | Preserves lease identity while resetting/rebootstrapping kernel state. | Missing runtime, lease, or recovery failures are stable Browser errors; destructive but not open-world. | Normal + Room; same manager in both ingress paths. |
+| `browser.release` | Perform final cleanup for one Browser lease; no implicit reuse after release. | `name`. | Bounded turn-ending/shutdown cleanup; absent names return `released: false`. | Cleanup failures remain stable Browser errors while the lease is removed; destructive but not open-world. | Normal + Room; same manager in both ingress paths. |
+| `browser.list` | Discover bounded Browser runtime/lease state; no mutation. | No fields. | Reports runtime availability, version/channel, sorted lease names, lower-case state, idle timeout, and bounded remaining idle seconds. | Missing runtime succeeds with `runtimeAvailable: false` and no leases; read-only and non-destructive. | Normal + Room; opaque IDs and paths remain hidden. |
 | `file.read` | Read UTF-8 content and optional metadata; no shell, search process, or write. | Flat `path` form or ordered `requests` of the same shape (1–32), mutually exclusive; optional `metadata`, inclusive `startLine`/`endLine`. | Content is default; `metadata=true` adds metadata. Reads stop on complete-line boundaries at 256 KiB and return `nextStartLine` only when continuation is needed. | Typed path/UTF-8/size/oversized-line errors; retry-safe and non-destructive. | Normal + Room; same file schema in both ingress paths. |
 | `file.search` | In-process literal/regex search; no shell or external search fallback. | Flat `path`/`query` form or ordered `requests` of the same shape (1–32), mutually exclusive; optional mode/globs/context/limits. | Normal success returns matches only; clipping/truncation/skipped-file evidence is conditional. Per-search limits plus 20k-file/128 MiB aggregate scan and ~1 MiB response bounds apply. | Invalid regex/glob/path or typed argument errors; read-only and bounded. | Normal + Room; same search schema in both ingress paths. |
 | `file.edit` | Apply a complete Codex apply-patch patch across UTF-8 files; no model-supplied revision guards. | `patch` plus optional `needConfirm`; patch supports Add/Delete/Update/Move across multiple files. | One complete preflight, deterministic locks, one confirmation, internal source revalidation, bounded diff, and atomic/temp commits. | Context/path/UTF-8/size/race/confirmation failures write nothing before commit; audit retains internal revisions without exposing them in the response. | Normal + Room; standalone only. |
@@ -103,7 +109,7 @@ active Room Agent and do not take it.
 - “Atomic” is reserved for validation/admission/confirmation boundaries. It
   never implies rollback of an already-started process, MCP call, notification,
   or other external side effect.
-- Standalone V2 surface counts are Normal 23 / Room 34. They are profile preset counts, not a
+- Standalone V2 surface counts are Normal 29 / Room 40. They are profile preset counts, not a
   guarantee after explicit toolset selection.
 - Legacy JSONL names remain documented only in the Hub compatibility rows above; standalone
   aliases and Hub full/coordinator profile membership are intentionally different.

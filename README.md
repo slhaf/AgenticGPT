@@ -11,7 +11,7 @@ Recommended — Standalone
 ChatGPT Secure MCP Tunnel
   -> official tunnel-client
   -> agentic-gpt worker
-  -> policy / files / process Jobs / skills / downstream MCP / tmux
+  -> policy / files / process Jobs / skills / downstream MCP / tmux / Browser runtime
 
 Centralized — Hub
 ChatGPT Actions or Apps MCP
@@ -161,8 +161,8 @@ agentic-gpt config toolset disable <namespace>
 `ls` shows every namespace with its enabled/disabled state and a short description. Successful
 `enable` and `disable` mutations print the namespace and resulting state.
 
-The available namespaces are `agent`, `file`, `mcp`, `process`, `job`, `skills`, `tmux`, and
-`room`; the logical `room` namespace includes `bootstrap`, `bootstrap.read`, and every `room.*`
+The available namespaces are `agent`, `file`, `mcp`, `process`, `job`, `skills`, `tmux`, `browser`,
+and `room`; the logical `room` namespace includes `bootstrap`, `bootstrap.read`, and every `room.*`
 tool. You can edit `toolsets.enabled` directly in JSON; valid changes hot-reload without a
 restart, while an invalid candidate keeps the last valid selection.
 
@@ -264,7 +264,7 @@ Hub-native and forwarded execution use the same managed Job envelopes. Active wo
 
 ## Managed Jobs and safety boundaries
 
-- The V2 advertised surface contains 23 Normal names and 34 Room names; profile presets select namespaces, and explicit `toolsets.enabled` can narrow that surface.
+- The V2 advertised surface contains 29 Normal names and 40 Room names; profile presets select namespaces, and explicit `toolsets.enabled` can narrow that surface.
 - `process.exec`, `skills.run`, and `mcp.callTool` return `JobResponse`.
 - `mcp.batch` accepts 1–16 ordered calls, uses one aggregate confirmation, and enforces global/per-server concurrency.
 - MCP arguments are JSON objects capped at 256 KiB per call; retained results are capped at 512 KiB; aggregate batch arguments/results are capped at 2 MiB.

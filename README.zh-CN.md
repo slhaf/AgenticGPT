@@ -11,7 +11,7 @@ Agentic GPT 通过每台机器独立的 Secure MCP Tunnel、可选的集中式 R
 ChatGPT Secure MCP Tunnel
   -> 官方 tunnel-client
   -> agentic-gpt worker
-  -> 策略 / 文件 / Process Job / Skill / 下游 MCP / tmux
+  -> 策略 / 文件 / Process Job / Skill / 下游 MCP / tmux / Browser runtime
 
 集中式——Hub
 ChatGPT Actions 或 Apps MCP
@@ -31,7 +31,7 @@ ChatGPT Actions 或 Apps MCP
 
 - 不需要 VPS、公开域名、反向代理、Hub 数据库或共享命令路由器。
 - 每台机器具有独立连接与重启边界。
-- Tunnel 与 owner-only Unix MCP 对同一 profile 暴露一致的 23 个 Normal 工具或 34 个 Room 工具。
+- Tunnel 与 owner-only Unix MCP 对同一 profile 暴露一致的 29 个 Normal 工具或 40 个 Room 工具。
 - 策略、确认、审计、热配置、容量和 Managed Job 都保留在本机。
 - fresh stdio worker 即使先收到旧逻辑会话续发的请求、尚未收到新的 MCP `initialize`，也能自动恢复而不退出。
 
@@ -171,7 +171,7 @@ agentic-gpt run
 ```
 
 配置文件中的 `mode` 和 `profile` 选择 Standalone/Hub/Local 与 Normal/Room；例如启动前执行
-`agentic-gpt config set profile room` 可使用 Room 的 34 个工具。同一 worker 还会提供
+`agentic-gpt config set profile room` 可使用 Room 的 40 个工具。同一 worker 还会提供
 owner-only Unix MCP socket，便于本机检查：
 
 ```bash
@@ -241,7 +241,7 @@ Hub 原生工具和转发执行使用相同的 Managed Job envelope；运行中�
 
 ## Managed Job 与安全边界
 
-- V2 Normal surface 有 23 个工具，Room surface 有 34 个工具；profile preset 选择 namespace，显式 `toolsets.enabled` 仍可进一步缩小 surface。
+- V2 Normal surface 有 29 个工具，Room surface 有 40 个工具；profile preset 选择 namespace，显式 `toolsets.enabled` 仍可进一步缩小 surface。
 - `process.exec`、`skills.run`、`mcp.callTool` 返回 `JobResponse`。
 - `mcp.batch` 接受 1–16 个有序调用，只确认一次，并执行全局/单 server 并发限制。
 - MCP 单调用参数上限 256 KiB，保留结果上限 512 KiB；批次 aggregate 参数与结果各上限 2 MiB。

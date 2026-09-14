@@ -118,6 +118,31 @@ pub(crate) struct McpBatchAuditRecord {
     pub(crate) truncated: bool,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BrowserAuditRecord {
+    pub(crate) time: DateTime<Utc>,
+    pub(crate) tool: String,
+    pub(crate) request_source: String,
+    pub(crate) lease_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) runtime_app_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) code_bytes: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) code_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) timeout_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) idle_timeout_seconds: Option<u64>,
+    pub(crate) outcome: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) error_code: Option<String>,
+    pub(crate) duration_ms: u128,
+}
+
 pub(crate) fn write_audit(config: &Config, record: AuditRecord) -> Result<()> {
     let audit_path = config.workspace_root.join(".agentic-gpt-audit.jsonl");
     let mut file = OpenOptions::new()
@@ -139,6 +164,16 @@ pub(crate) fn write_mcp_batch_audit(config: &Config, record: McpBatchAuditRecord
 }
 
 pub(crate) fn write_file_audit(config: &Config, record: FileAuditRecord) -> Result<()> {
+    let audit_path = config.workspace_root.join(".agentic-gpt-audit.jsonl");
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(audit_path)?;
+    writeln!(file, "{}", serde_json::to_string(&record)?)?;
+    Ok(())
+}
+
+pub(crate) fn write_browser_audit(config: &Config, record: BrowserAuditRecord) -> Result<()> {
     let audit_path = config.workspace_root.join(".agentic-gpt-audit.jsonl");
     let mut file = OpenOptions::new()
         .create(true)
