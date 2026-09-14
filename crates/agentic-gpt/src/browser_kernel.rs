@@ -118,6 +118,35 @@ impl NodeReplKernel {
             .map_err(|error| anyhow!("browser_runtime_node_repl_call_failed:{error}"))
     }
 
+    pub(crate) async fn turn_ended(&mut self) -> Result<()> {
+        let arguments: JsonObject = Map::from_iter([
+            ("hook_event_name".to_string(), json!("Stop")),
+            ("session_id".to_string(), json!(self.session_id)),
+            ("turn_id".to_string(), json!(self.turn_id)),
+        ]);
+        let result = self
+            .client
+            .call_tool(CallToolRequestParams::new("turn_ended").with_arguments(arguments))
+            .await
+            .map_err(|error| anyhow!("browser_runtime_node_repl_call_failed:{error}"))?;
+        if result.is_error == Some(true) {
+            return Err(anyhow!("browser_runtime_turn_ended_failed"));
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn reset_js(&mut self) -> Result<()> {
+        let result = self
+            .client
+            .call_tool(CallToolRequestParams::new("js_reset").with_arguments(Map::new()))
+            .await
+            .map_err(|error| anyhow!("browser_runtime_node_repl_call_failed:{error}"))?;
+        if result.is_error == Some(true) {
+            return Err(anyhow!("browser_runtime_js_reset_failed"));
+        }
+        Ok(())
+    }
+
     pub(crate) async fn bootstrap_browser(&mut self, browser_client_path: &Path) -> Result<()> {
         let browser_client_path = browser_client_path
             .to_str()
@@ -422,6 +451,125 @@ mod tests {
             metadata_values(calls[0].meta.as_ref().unwrap()),
             &json!({"session_id": "session-abc", "turn_id": "turn-xyz"})
         );
+        drop(kernel);
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn turn_ended_sends_exact_tool_name_and_arguments() {
+        let server = FakeNodeReplServer::new(Behavior::Success);
+        let calls = server.calls.clone();
+        let (client, server_task) = connected(server).await;
+        let mut kernel = NodeReplKernel::from_initialized_client(
+            client,
+            "session-abc".to_string(),
+            "turn-xyz".to_string(),
+        )
+        .unwrap();
+
+        kernel.turn_ended().await.unwrap();
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "turn_ended");
+        assert_eq!(
+            calls[0].arguments,
+            Map::from_iter([
+                ("hook_event_name".to_string(), json!("Stop")),
+                ("session_id".to_string(), json!("session-abc")),
+                ("turn_id".to_string(), json!("turn-xyz")),
+            ])
+        );
+        drop(kernel);
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reset_js_sends_exact_tool_name_and_empty_arguments() {
+        let server = FakeNodeReplServer::new(Behavior::Success);
+        let calls = server.calls.clone();
+        let (client, server_task) = connected(server).await;
+        let mut kernel = NodeReplKernel::from_initialized_client(
+            client,
+            "session-1".to_string(),
+            "turn-1".to_string(),
+        )
+        .unwrap();
+
+        kernel.reset_js().await.unwrap();
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "js_reset");
+        assert!(calls[0].arguments.is_empty());
+        drop(kernel);
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn turn_ended_converts_tool_error_to_stable_failure() {
+        let (client, server_task) = connected(FakeNodeReplServer::new(Behavior::ToolError)).await;
+        let mut kernel = NodeReplKernel::from_initialized_client(
+            client,
+            "session-1".to_string(),
+            "turn-1".to_string(),
+        )
+        .unwrap();
+
+        let error = kernel.turn_ended().await.unwrap_err();
+        assert_eq!(error.to_string(), "browser_runtime_turn_ended_failed");
+        drop(kernel);
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reset_js_converts_tool_error_to_stable_failure() {
+        let (client, server_task) = connected(FakeNodeReplServer::new(Behavior::ToolError)).await;
+        let mut kernel = NodeReplKernel::from_initialized_client(
+            client,
+            "session-1".to_string(),
+            "turn-1".to_string(),
+        )
+        .unwrap();
+
+        let error = kernel.reset_js().await.unwrap_err();
+        assert_eq!(error.to_string(), "browser_runtime_js_reset_failed");
+        drop(kernel);
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn turn_ended_prefixes_rmcp_service_failures() {
+        let (client, server_task) =
+            connected(FakeNodeReplServer::new(Behavior::ServiceFailure)).await;
+        let mut kernel = NodeReplKernel::from_initialized_client(
+            client,
+            "session-1".to_string(),
+            "turn-1".to_string(),
+        )
+        .unwrap();
+
+        let error = kernel.turn_ended().await.unwrap_err();
+        assert!(error
+            .to_string()
+            .starts_with("browser_runtime_node_repl_call_failed:"));
+        drop(kernel);
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reset_js_prefixes_rmcp_service_failures() {
+        let (client, server_task) =
+            connected(FakeNodeReplServer::new(Behavior::ServiceFailure)).await;
+        let mut kernel = NodeReplKernel::from_initialized_client(
+            client,
+            "session-1".to_string(),
+            "turn-1".to_string(),
+        )
+        .unwrap();
+
+        let error = kernel.reset_js().await.unwrap_err();
+        assert!(error
+            .to_string()
+            .starts_with("browser_runtime_node_repl_call_failed:"));
         drop(kernel);
         server_task.await.unwrap();
     }
