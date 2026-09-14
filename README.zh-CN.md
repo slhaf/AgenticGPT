@@ -33,7 +33,7 @@ ChatGPT Actions 或 Apps MCP
 
 - 不需要 VPS、公开域名、反向代理、Hub 数据库或共享命令路由器。
 - 每台机器具有独立连接与重启边界。
-- Standalone 还可以启用 worker-owned 的 Streamable HTTP MCP endpoint，路径固定为 `/mcp`；默认关闭且只使用 bearer auth。
+- Standalone 还可以启用 worker-owned 的 Streamable HTTP MCP endpoint，路径固定为 `/mcp`；默认关闭，可使用直接 bearer authentication，也可选择 ChatGPT connector OAuth 流程。
 - Tunnel、HTTP 与 owner-only Unix MCP 对同一 profile 暴露一致的 23 个 Normal 工具或 34 个 Room 工具。
 - 策略、确认、审计、热配置、容量和 Managed Job 都保留在本机。
 - fresh stdio worker 即使先收到旧逻辑会话续发的请求、尚未收到新的 MCP `initialize`，也能自动恢复而不退出。
@@ -190,14 +190,41 @@ agentic-gpt local call agent.info --arguments '{}'
 agentic-gpt config set httpMcp.bearerToken env:AGENTIC_HTTP_MCP_TOKEN
 agentic-gpt config set httpMcp.host 127.0.0.1
 agentic-gpt config set httpMcp.port 8765
-agentic-gpt config set httpMcp.allowHosts '["localhost","127.0.0.1","::1"]'
+agentic-gpt config set httpMcp.publicUrl https://mcp.example.com
+agentic-gpt config set httpMcp.allowHosts '["mcp.example.com"]'
 agentic-gpt config set httpMcp.enabled true
 ```
 
-endpoint 始终是 `http://<host>:<port>/mcp`，只接受 `file:` 或 `env:` secret
-引用，不提供 OAuth 流程。Host 过滤默认限于 loopback；`null` 或严格等于
-`["*"]` 明确允许任意 Host，空数组或 wildcard 混用会被拒绝。rebind 或关闭
-会终止有状态 session，必须重新 MCP `initialize`；token 轮换会原地更新认证。
+endpoint 始终是 `http://<host>:<port>/mcp`，直接 bearer 使用 `file:` 或
+`env:` secret 引用；即使没有 `publicUrl`，这种直接 bearer 模式仍然有效。
+`publicUrl` 是可选、非 secret 的 HTTPS origin，用于 ChatGPT connector OAuth；
+它在全屏 TUI、`config init --non-interactive --http-mcp-public-url ...` 或
+`config set httpMcp.publicUrl ...` 中可显示并编辑且不会隐藏（用 `null` 清除）。
+它只用于公布外部 origin，不会改变本地 bind host 或 port。
+
+配置 `publicUrl` 后，Standalone 会提供 OAuth discovery：
+`/.well-known/oauth-protected-resource/mcp` 以及兼容根路径的
+`/.well-known/oauth-protected-resource` alias，还有
+`/.well-known/oauth-authorization-server` 和
+`/.well-known/openid-configuration` 两个 AS/OIDC metadata alias。
+ChatGPT authorization 使用 `/oauth/authorize` 与 `/oauth/token`、唯一的
+`agentic:mcp` scope，并且只接受以下 callback family：
+`https://chatgpt.com/connector/oauth/<suffix>`，或精确的
+`https://chatgpt.com/connector_platform_oauth_redirect`。code 与 access token
+只在当前 listener 内存中保存，有过期和撤销机制；不提供 refresh token、
+`offline_access`、dynamic client registration、generic registration 或任意
+redirect。OAuth 不会替代直接 bearer authentication；Standalone 的页面、
+工具与 profile 语义也不是 Hub 的 `Hub API key`、profile 或 routing contract。
+
+Host 过滤默认限于 loopback；`null` 或严格等于 `["*"]` 明确允许任意 Host，
+空数组或 wildcard 混用会被拒绝。必须允许实际收到的 Host authority（包括
+反向代理或 ESA 改写 Host 的情况）；如果存在 `Origin`，必须精确匹配
+`publicUrl`，缺少 Origin 的 server-to-server 请求仍然允许。ChatGPT OAuth
+部署必须通过 HTTPS 转发 discovery、authorization、token 和 `/mcp` 全部
+路由；origin 可以保持 loopback/private。`publicUrl` 不负责路由，代理必须
+把实际发送的 authority 放入 `allowHosts`。rebind 或关闭会终止有状态
+session 并丢弃 listener-local OAuth state；直接 token 内容轮换会原地更新
+认证，同时撤销 OAuth code/token。
 Local 模式仍然只有 Unix ingress。Hub 的 `/mcp` 是独立的 OAuth/Hub contract，
 `mcpServers` 仍是 `mcp.*` 使用的下游 registry，不是这个入站 listener。
 

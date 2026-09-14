@@ -183,18 +183,52 @@ http://<host>:<port>/mcp
     "enabled": false,
     "host": "127.0.0.1",
     "port": 8765,
+    "publicUrl": null,
     "bearerToken": "",
     "allowHosts": ["localhost", "127.0.0.1", "::1"]
   }
 }
 ```
 
-路径固定为 `/mcp`，不能通过配置修改。启用后只接受
-`Authorization: Bearer ...`；缺少、格式错误或不正确的凭据统一返回 `401`
-与 `WWW-Authenticate: Bearer`。它不提供 OAuth discovery、authorize/token 流程、
-redirect、scope 或 resource-metadata contract。rmcp transport 使用有状态的
-Streamable HTTP/SSE：客户端必须先初始化 session；listener rebind 或关闭会终止
-session，客户端必须重新 initialize。
+路径固定为 `/mcp`，不能通过配置修改。没有 `publicUrl` 时，endpoint 接受配置的
+`Authorization: Bearer ...` 凭据，保持直接本地使用；配置 `publicUrl` 后，另外
+提供 Standalone ChatGPT connector OAuth contract：
+
+- `GET /.well-known/oauth-protected-resource/mcp` 是 canonical path-specific
+  protected-resource metadata；`GET /.well-known/oauth-protected-resource` 是根路径
+ 兼容 alias。
+- `GET /.well-known/oauth-authorization-server` 与
+  `GET /.well-known/openid-configuration` 是 authorization-server/OpenID alias。
+- `GET|POST /oauth/authorize` 与 `POST /oauth/token` 实现唯一 `agentic:mcp`
+  scope 的 authorization-code flow。
+
+`publicUrl` 必须是非空 HTTPS origin，不能包含 userinfo、除空路径或 `/` 之外的
+path、query 或 fragment；末尾 `/` 会被规范化。它只是公布的外部 origin，不是
+路由或 proxy 覆盖：`host` 与 `port` 仍是本地 bind 坐标，origin 可以保持
+loopback/private。`publicUrl` 不是 secret，在 `config show`、Review、诊断和 TUI
+中始终显示且不隐藏；`bearerToken` 仍是 secret 引用，解析后的值不会暴露。
+
+connector 只接受以下精确 ChatGPT callback family：
+`https://chatgpt.com/connector/oauth/<suffix>` 或精确的
+`https://chatgpt.com/connector_platform_oauth_redirect`。只接受 `agentic:mcp`；
+不提供 refresh token、`offline_access`、dynamic client registration、generic
+registration 或任意 redirect。authorization code 与 access token 是 opaque、
+listener-local 的内存记录，有过期、单次 code 消费和 listener 替换/token 内容
+轮换时撤销机制。Standalone authorization 页面以及 tool/profile surface 使用
+Standalone 语义，不是 Hub 的 `Hub API key`、profile 或 routing contract。
+
+OAuth 路由与 `/mcp` 共用 listener Host 防护。缺失或 malformed Host 会被拒绝，
+不允许的 authority 返回 forbidden；不带 port 的 allowlist 项匹配任意 port，
+带 port 的项目必须精确匹配。`null` 与严格等于 `["*"]` 仍是明确的全量放行值。
+如果存在 `Origin`，必须精确匹配配置的 `publicUrl`；缺失 Origin 的
+server-to-server 请求仍然有效，不添加 permissive CORS。未配置 `publicUrl` 时，
+直接 bearer 失败仍使用普通 Bearer challenge；配置后，MCP challenge 指向
+path-specific protected-resource metadata URL。
+
+rmcp transport 使用有状态的 Streamable HTTP/SSE：客户端必须先初始化 session；
+listener rebind 或关闭会终止 session，客户端必须重新 initialize。直接 bearer
+内容轮换会原地更新认证并保留既有 session，同时原子撤销 OAuth 记录。无效候选
+保留上一次有效 listener 及其 state。
 
 `allowHosts` 是 HTTP MCP transport 使用的 DNS-rebinding 防护：
 
@@ -224,24 +258,26 @@ session，客户端必须重新 initialize。
 受控 registry 在 `http-mcp` section 中提供这些键：
 
 ```bash
-agentic-gpt config keys --section http-mcp
 agentic-gpt config set httpMcp.bearerToken env:AGENTIC_HTTP_MCP_TOKEN
 agentic-gpt config set httpMcp.host 127.0.0.1
 agentic-gpt config set httpMcp.port 8765
-agentic-gpt config set httpMcp.allowHosts '["localhost","127.0.0.1","::1"]'
+agentic-gpt config set httpMcp.publicUrl https://mcp.example.com
+agentic-gpt config set httpMcp.allowHosts '["mcp.example.com"]'
 agentic-gpt config set httpMcp.enabled true
 ```
 
-要明确关闭 Host 过滤，可使用 JSON `null` 或 `["*"]`：
+要明确关闭 Host 过滤，可使用 JSON `null` 或 `["*"]`；要让 OAuth 路由 fail closed
+并回到本地直接 bearer 模式，请清除可选 origin：
 
 ```bash
 agentic-gpt config set httpMcp.allowHosts null
 agentic-gpt config set httpMcp.allowHosts '["*"]'
+agentic-gpt config set httpMcp.publicUrl null
 ```
 
-`allowHosts` 是 JSON array 或 `null`，不是逗号分隔字符串。`config set` 会在写入前
-校验完整候选值；被拒绝的值不会修改配置或 backup。`config mcp` 仍专门管理下游
-`mcpServers` registry，不配置这个入站 listener。
+`allowHosts` 是 JSON array 或 `null`，不是逗号分隔字符串。`publicUrl` 必须是 HTTPS
+origin；`config set` 会在写入前校验完整候选值。被拒绝的值不会修改配置或 backup。
+`config mcp` 仍专门管理下游 `mcpServers` registry，不配置这个入站 listener。
 
 确定性部署可使用 `config init --non-interactive` 的全部 endpoint flags：
 
@@ -251,17 +287,19 @@ agentic-gpt config init --non-interactive \
   --http-mcp-enabled true \
   --http-mcp-host 127.0.0.1 \
   --http-mcp-port 8765 \
+  --http-mcp-public-url https://mcp.example.com \
   --http-mcp-bearer-token env:AGENTIC_HTTP_MCP_TOKEN \
-  --http-mcp-allow-hosts '["localhost","127.0.0.1","::1"]'
+  --http-mcp-allow-hosts '["mcp.example.com"]'
 ```
 
-这些 flags 仍须通过 secret 引用和 allow-host 规则；启用 endpoint 却没有 token 引用时，
-会在写入 config 或 backup 前失败。交互式 `config init` 会把同样的 flags 作为 Connection
-字段的可编辑初始值。HTTP MCP enabled toggle、host/port、secret-reference editor 与
-JSON array/`null` allow-host editor 都可在 Review 前修改。
+这些 flags 仍须通过 HTTPS origin、secret 引用和 allow-host 规则；启用 endpoint 却没有
+token 引用时，会在写入 config 或 backup 前失败。交互式 `config init` 会把同样的 flags
+作为 Connection 字段的可编辑初始值。HTTP MCP enabled toggle、host/port、非 secret 的
+public-origin editor、secret-reference editor 与 JSON array/`null` allow-host editor
+都可在 Review 前修改；public-origin 输入为空时会清除它。
 `config import --config PATH [SOURCE]` 会识别已有的 `httpMcp` object，把字段带入同一套
-交互式 editor；用户可在最终一次提交前修正或关闭 endpoint。Review 中 token 字段显示为
-`[REDACTED]`；取消或校验失败不会写入任何内容。
+交互式 editor；用户可在最终一次提交前修正或关闭 endpoint。Review 中 bearer 引用显示为
+`[REDACTED]`，但会显示 `publicUrl`；取消或校验失败不会写入任何内容。
 
 可直接作为路径组件的 `agentId` 会原样映射为私有状态目录名；历史上较宽松的 Hub identity 仍然兼容，但会使用稳定 hash 目录 key，而不会直接成为文件系统路径组件。
 

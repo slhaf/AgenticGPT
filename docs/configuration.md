@@ -201,18 +201,61 @@ configuration shape and defaults are:
     "enabled": false,
     "host": "127.0.0.1",
     "port": 8765,
+    "publicUrl": null,
     "bearerToken": "",
     "allowHosts": ["localhost", "127.0.0.1", "::1"]
   }
 }
 ```
 
-The path is fixed at `/mcp`; it cannot be changed through configuration. When enabled,
-the endpoint accepts only `Authorization: Bearer ...` and returns `401
-WWW-Authenticate: Bearer` for missing, malformed, or incorrect credentials. It has no
-OAuth discovery, authorize/token flow, redirect, scope, or resource-metadata contract.
-The rmcp transport is stateful Streamable HTTP/SSE: clients must initialize a session,
-and a listener rebind or disable closes its sessions so the client must initialize again.
+The path is fixed at `/mcp`; it cannot be changed through configuration. When
+`publicUrl` is absent, the endpoint accepts the configured
+`Authorization: Bearer ...` credential for direct local use. When `publicUrl`
+is present, it additionally exposes the standalone ChatGPT connector OAuth
+contract:
+
+- `GET /.well-known/oauth-protected-resource/mcp` is the canonical
+  path-specific protected-resource metadata; `GET
+  /.well-known/oauth-protected-resource` is a root-compatible alias.
+- `GET /.well-known/oauth-authorization-server` and `GET
+  /.well-known/openid-configuration` are authorization-server/OpenID aliases.
+- `GET|POST /oauth/authorize` and `POST /oauth/token` implement the
+  authorization-code flow with the single `agentic:mcp` scope.
+
+The configured value must be a non-empty HTTPS origin with no userinfo, path
+other than empty or `/`, query, or fragment. A trailing slash is normalized.
+It is an advertised external origin, not a routing or proxy override: `host`
+and `port` remain the local bind coordinates, and the origin may remain
+loopback/private. `publicUrl` is non-secret and is never masked in `config
+show`, Review, diagnostics, or the TUI; `bearerToken` remains a secret
+reference and its resolved value is never exposed.
+
+The connector accepts only ChatGPT callback URIs in these exact families:
+`https://chatgpt.com/connector/oauth/<suffix>` or
+`https://chatgpt.com/connector_platform_oauth_redirect`. It accepts only
+`agentic:mcp`; there are no refresh tokens, `offline_access`, dynamic client
+registration, generic registration, or arbitrary redirects. Authorization codes
+and access tokens are opaque, listener-local in-memory records with expiry,
+one-use code consumption, and revocation on listener replacement or bearer
+content rotation. The standalone authorization page and tool/profile surface
+are standalone semantics; they do not use Hub's `Hub API key`, profile, or
+routing contract.
+
+OAuth routes and `/mcp` share listener Host protection. Missing or malformed
+Host is rejected, and a disallowed authority is forbidden; an allowlist entry
+without a port matches any port, while a port-bearing entry matches exactly.
+`null` and exactly `["*"]` remain explicit allow-all values. If `Origin` is
+present it must exactly match the configured `publicUrl`; absent Origin remains
+valid for server-to-server requests, and no permissive CORS is added. With no
+`publicUrl`, failed direct bearer authentication keeps a plain Bearer
+challenge; with one configured, the MCP challenge points to the
+path-specific protected-resource metadata URL.
+
+The rmcp transport is stateful Streamable HTTP/SSE: clients must initialize a
+session, and a listener rebind or disable closes its sessions so the client
+must initialize again. Direct bearer content rotation updates authentication
+in place and preserves existing sessions while atomically revoking OAuth
+records. Invalid candidates retain the last-good listener and its state.
 
 `allowHosts` is the DNS-rebinding protection applied by the HTTP MCP transport:
 
@@ -249,21 +292,26 @@ agentic-gpt config keys --section http-mcp
 agentic-gpt config set httpMcp.bearerToken env:AGENTIC_HTTP_MCP_TOKEN
 agentic-gpt config set httpMcp.host 127.0.0.1
 agentic-gpt config set httpMcp.port 8765
-agentic-gpt config set httpMcp.allowHosts '["localhost","127.0.0.1","::1"]'
+agentic-gpt config set httpMcp.publicUrl https://mcp.example.com
+agentic-gpt config set httpMcp.allowHosts '["mcp.example.com"]'
 agentic-gpt config set httpMcp.enabled true
 ```
 
-To explicitly disable Host filtering, use either JSON `null` or `["*"]`:
+To explicitly disable Host filtering, use either JSON `null` or `["*"]`; to
+make the OAuth routes fail closed and return to direct-bearer local use,
+clear the optional origin:
 
 ```bash
 agentic-gpt config set httpMcp.allowHosts null
 agentic-gpt config set httpMcp.allowHosts '["*"]'
+agentic-gpt config set httpMcp.publicUrl null
 ```
 
-`allowHosts` is a JSON array or `null`, not a comma-delimited string. `config set`
-validates the complete candidate before writing; a rejected value leaves both the
-configuration and its backup unchanged. `config mcp` remains reserved for the
-downstream `mcpServers` registry and does not configure this inbound listener.
+`allowHosts` is a JSON array or `null`, not a comma-delimited string.
+`publicUrl` must be an HTTPS origin; `config set` validates the complete
+candidate before writing. A rejected value leaves both the configuration and
+its backup unchanged. `config mcp` remains reserved for the downstream
+`mcpServers` registry and does not configure this inbound listener.
 
 For deterministic provisioning, `config init --non-interactive` accepts all endpoint
 fields as flags:
@@ -274,18 +322,22 @@ agentic-gpt config init --non-interactive \
   --http-mcp-enabled true \
   --http-mcp-host 127.0.0.1 \
   --http-mcp-port 8765 \
+  --http-mcp-public-url https://mcp.example.com \
   --http-mcp-bearer-token env:AGENTIC_HTTP_MCP_TOKEN \
-  --http-mcp-allow-hosts '["localhost","127.0.0.1","::1"]'
+  --http-mcp-allow-hosts '["mcp.example.com"]'
 ```
 
-The flags must still obey the reference and allow-host rules; enabling without a token
-reference fails before any config or backup is written. In interactive `config init`,
-the same flags seed editable Connection fields. The HTTP MCP enabled toggle, bind
-host/port, secret-reference editor, and JSON array/`null` allow-host editor can be
-changed before Review. `config import --config PATH [SOURCE]` recognizes an existing
-`httpMcp` object, seeds these fields into the same interactive editor, and lets the
-operator correct or disable it before the single final commit. Review shows the token
-field as `[REDACTED]`; cancellation or validation failure writes nothing.
+The flags must still obey the HTTPS-origin, secret-reference, and allow-host
+rules; enabling without a token reference fails before any config or backup is
+written. In interactive `config init`, the same flags seed editable Connection
+fields. The HTTP MCP enabled toggle, bind host/port, non-secret public-origin
+editor, secret-reference editor, and JSON array/`null` allow-host editor can be
+changed before Review; an empty public-origin value clears it. `config import
+--config PATH [SOURCE]` recognizes an existing `httpMcp` object, seeds these
+fields into the same interactive editor, and lets the operator correct or
+disable it before the single final commit. Review shows the bearer reference as
+`[REDACTED]` but displays `publicUrl`; cancellation or validation failure writes
+nothing.
 
 Path-safe `agentId` values map directly to the private state directory name. Wider legacy Hub identities remain supported and use a stable hashed directory key instead of becoming a filesystem path component.
 

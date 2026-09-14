@@ -34,7 +34,7 @@ The historical Cloudflare-only Hub has been removed from `main`; it remains on b
 - No VPS, public domain, reverse proxy, Hub database, or shared command router is required.
 - Every machine has an independent connection and restart boundary.
 - The tunnel, HTTP, and owner-only Unix MCP ingress expose the configured toolset surface from the pre-existing Normal/Room names; profile presets are defaults and explicit `toolsets.enabled` selection is authoritative.
-- Standalone may additionally enable a worker-owned Streamable HTTP MCP endpoint at fixed `/mcp`; it is disabled by default and uses bearer-only auth.
+- Standalone may additionally enable a worker-owned Streamable HTTP MCP endpoint at fixed `/mcp`; it is disabled by default and supports either direct bearer authentication or the optional ChatGPT connector OAuth flow.
 - Policy, confirmation, audit, live configuration, capacity, and managed Jobs stay local to that machine.
 - A fresh stdio worker can recover a resumed tunnel request that arrives before a new MCP `initialize` handshake.
 
@@ -211,15 +211,44 @@ Optional standalone HTTP MCP is configured independently of the tunnel:
 agentic-gpt config set httpMcp.bearerToken env:AGENTIC_HTTP_MCP_TOKEN
 agentic-gpt config set httpMcp.host 127.0.0.1
 agentic-gpt config set httpMcp.port 8765
-agentic-gpt config set httpMcp.allowHosts '["localhost","127.0.0.1","::1"]'
+agentic-gpt config set httpMcp.publicUrl https://mcp.example.com
+agentic-gpt config set httpMcp.allowHosts '["mcp.example.com"]'
 agentic-gpt config set httpMcp.enabled true
 ```
 
-The endpoint is always `http://<host>:<port>/mcp`, uses only a secret reference
-(`file:` or `env:`), and has no OAuth flow. Host filtering defaults to loopback;
-`null` or exactly `["*"]` explicitly allows every Host, while an empty list or
-mixed wildcard is rejected. Rebinding or disabling closes stateful sessions and
-requires a new MCP `initialize`; token rotation updates authentication in place.
+The endpoint is always `http://<host>:<port>/mcp`, uses a `file:` or `env:`
+secret reference for its direct bearer, and keeps that direct-bearer mode valid
+when `publicUrl` is absent. `publicUrl` is an optional, non-secret HTTPS origin
+for ChatGPT connector OAuth; it is shown and edited without masking in the
+fullscreen TUI, `config init --non-interactive --http-mcp-public-url ...`, or
+`config set httpMcp.publicUrl ...` (use `null` to clear it). It is an advertised
+external origin only and does not change the local bind host or port.
+
+When `publicUrl` is configured, the standalone listener exposes OAuth discovery
+at `/.well-known/oauth-protected-resource/mcp` plus a root-compatible
+`/.well-known/oauth-protected-resource` alias, and AS/OIDC metadata at
+`/.well-known/oauth-authorization-server` and
+`/.well-known/openid-configuration`. ChatGPT authorization uses
+`/oauth/authorize` and `/oauth/token`, the single `agentic:mcp` scope, and only
+these callback families: `https://chatgpt.com/connector/oauth/<suffix>` or the
+exact `https://chatgpt.com/connector_platform_oauth_redirect`. Codes and access
+tokens are listener-local, in-memory, expiring, and revocable; there are no
+refresh tokens, `offline_access`, dynamic client registration, generic
+registration, or arbitrary redirects. OAuth does not replace direct bearer
+authentication, and the standalone page, tools, and profile semantics are not
+Hub's `Hub API key`, profile, or routing contract.
+
+Host filtering defaults to loopback; `null` or exactly `["*"]` explicitly allows
+every Host, while an empty list or mixed wildcard is rejected. The received
+Host authority must be allowed (including when a reverse proxy or ESA rewrites
+it), and a present `Origin` must match `publicUrl`; absent Origin is allowed for
+server-to-server requests. For ChatGPT OAuth, expose every discovery,
+authorization, token, and `/mcp` route through HTTPS. The origin may remain
+loopback/private; `publicUrl` does not route traffic, and the proxy must put the
+authority it actually sends in `allowHosts`.
+Rebinding or disabling closes stateful sessions and discards listener-local
+OAuth state; direct-token content rotation updates authentication in place and
+revokes OAuth codes/tokens.
 Local mode remains Unix-only. Hub's `/mcp` is a separate OAuth/Hub contract, and
 `mcpServers` remains the downstream registry used by `mcp.*`, not this listener.
 
