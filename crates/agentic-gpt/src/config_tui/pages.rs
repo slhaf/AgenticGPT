@@ -4711,6 +4711,7 @@ fn review_item_inspector_body(
             | SetupField::TunnelSecretEnvironment
             | SetupField::ProvisionTunnelSecret
             | SetupField::TunnelSecretValue
+            | SetupField::HttpMcpPublicUrl
             | SetupField::HubUrl
             | SetupField::HubTransport
             | SetupField::AgentId
@@ -4791,6 +4792,7 @@ fn review_item_label(label_key: &str, language: UiLanguage) -> &'static str {
         "tunnel_secret_reference" => t(language, "Secret reference", "密钥引用"),
         "provision_tunnel_secret" => t(language, "Provision secret now", "立即写入密钥"),
         "tunnel_secret_value" => t(language, "Secret value", "密钥值"),
+        "http_mcp_public_url" => t(language, "HTTP MCP public URL", "HTTP MCP 公共 URL"),
         "hub_url" => t(language, "Hub URL", "Hub 地址"),
         "hub_transport" => t(language, "Hub transport", "Hub 传输方式"),
         "agent_id" => t(language, "Agent ID", "代理 ID"),
