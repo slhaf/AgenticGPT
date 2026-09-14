@@ -10,6 +10,7 @@ mod config_tui;
 mod confirmation;
 mod exec;
 mod file_ops;
+mod http_oauth;
 mod http_server;
 mod hub;
 mod instance_lock;

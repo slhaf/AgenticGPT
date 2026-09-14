@@ -49,6 +49,7 @@ dependencies = [
  "tokio-tungstenite 0.28.0",
  "tokio-util",
  "unicode-width 0.2.0",
+ "url",
  "urlencoding",
  "uuid",
  "zip",
