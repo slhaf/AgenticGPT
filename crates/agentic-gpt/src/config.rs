@@ -2675,6 +2675,37 @@ mod tests {
     }
 
     #[test]
+    fn explicit_import_clears_invalid_http_public_url_and_keeps_other_fields() {
+        let root = temp_config_path();
+        let mut value = serde_json::to_value(Config::default_config().unwrap()).unwrap();
+        value["mode"] = json!("standalone");
+        value["profile"] = json!("normal");
+        value["displayName"] = json!("keep-this-display-name");
+        value["httpMcp"]["enabled"] = json!(true);
+        value["httpMcp"]["host"] = json!("localhost");
+        value["httpMcp"]["port"] = json!(18768);
+        value["httpMcp"]["publicUrl"] = json!("http://invalid.example/path");
+        value["httpMcp"]["bearerToken"] = json!("env:IMPORTED_HTTP_MCP_TOKEN");
+        value["httpMcp"]["allowHosts"] = json!(["localhost"]);
+        fs::write(&root, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+
+        let imported = Config::import(&root).unwrap();
+        assert!(imported
+            .warnings
+            .iter()
+            .any(|warning| warning.starts_with("httpMcp.publicUrl ")));
+        assert_eq!(imported.config.display_name, "keep-this-display-name");
+        assert_eq!(imported.config.http_mcp.host, "localhost");
+        assert_eq!(imported.config.http_mcp.port, 18768);
+        assert_eq!(
+            imported.config.http_mcp.bearer_token,
+            "env:IMPORTED_HTTP_MCP_TOKEN"
+        );
+        assert!(imported.config.http_mcp.public_url.is_none());
+        let _ = fs::remove_file(root);
+    }
+
+    #[test]
     fn durable_writer_uses_sparse_projection_and_preserves_unknown_fields() {
         let path = temp_config_path();
         let mut config = Config::default_config().unwrap();
