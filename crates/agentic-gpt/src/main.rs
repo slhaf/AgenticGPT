@@ -3,6 +3,7 @@ mod audit;
 mod bootstrap;
 mod browser_kernel;
 mod browser_manager;
+mod browser_manual;
 mod browser_runtime;
 mod cli_i18n;
 mod config;
