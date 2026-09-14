@@ -1,5 +1,7 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
+use parking_lot::{Mutex, RwLock};
+
 use axum::{
     extract::{
         rejection::{FormRejection, QueryRejection},
@@ -16,10 +18,7 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use tokio::{
-    sync::{Mutex, RwLock},
-    time::sleep,
-};
+use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 use uuid::Uuid;
@@ -141,26 +140,22 @@ impl HttpMcpAuthState {
         }
     }
 
-    pub(crate) async fn replace_resolved_token(&self, resolved_token: String) -> bool {
-        let _mutation = self.mutation_lock.lock().await;
-        let mut current = self.resolved_token.write().await;
+    pub(crate) fn replace_resolved_token(&self, resolved_token: String) -> bool {
+        let _mutation = self.mutation_lock.lock();
+        let mut current = self.resolved_token.write();
         if current.as_deref() == Some(resolved_token.as_str()) {
             return false;
         }
         *current = Some(resolved_token);
         drop(current);
-        self.oauth_codes.lock().await.clear();
-        self.oauth_tokens.lock().await.clear();
+        self.oauth_codes.lock().clear();
+        self.oauth_tokens.lock().clear();
         true
     }
 
-    pub(crate) async fn accepts_bearer(
-        &self,
-        presented: &str,
-        request_resource: Option<&str>,
-    ) -> bool {
-        let _mutation = self.mutation_lock.lock().await;
-        let expected = self.resolved_token.read().await;
+    pub(crate) fn accepts_bearer(&self, presented: &str, request_resource: Option<&str>) -> bool {
+        let _mutation = self.mutation_lock.lock();
+        let expected = self.resolved_token.read();
         if expected
             .as_deref()
             .is_some_and(|value| constant_time_equal(value, presented))
@@ -171,7 +166,7 @@ impl HttpMcpAuthState {
 
         let token_hash = sha256_hex(presented);
         let now = Utc::now();
-        let mut tokens = self.oauth_tokens.lock().await;
+        let mut tokens = self.oauth_tokens.lock();
         tokens.retain(|_, token| token.expires_at > now);
         tokens.get(&token_hash).is_some_and(|token| {
             token.expires_at > now
@@ -237,10 +232,16 @@ pub(crate) async fn cleanup(state: HttpMcpAuthState, cancellation: CancellationT
         tokio::select! {
             _ = cancellation.cancelled() => break,
             _ = sleep(CLEANUP_INTERVAL) => {
-                let _mutation = state.mutation_lock.lock().await;
+                let _mutation = state.mutation_lock.lock();
                 let now = Utc::now();
-                state.oauth_codes.lock().await.retain(|_, code| code.expires_at > now);
-                state.oauth_tokens.lock().await.retain(|_, token| token.expires_at > now);
+                state
+                    .oauth_codes
+                    .lock()
+                    .retain(|_, code| code.expires_at > now);
+                state
+                    .oauth_tokens
+                    .lock()
+                    .retain(|_, token| token.expires_at > now);
             }
         }
     }
@@ -254,10 +255,7 @@ pub(crate) async fn require_bearer(
     let Some(presented) = parse_bearer_token(request.headers()) else {
         return unauthorized_response(&state);
     };
-    if state
-        .accepts_bearer(presented, state.resource_url().as_deref())
-        .await
-    {
+    if state.accepts_bearer(presented, state.resource_url().as_deref()) {
         next.run(request).await
     } else {
         unauthorized_response(&state)
@@ -363,8 +361,8 @@ async fn authorize_submit(
     };
     let code = opaque_value("code");
     let code_hash = sha256_hex(&code);
-    let _mutation = state.mutation_lock.lock().await;
-    let expected = state.resolved_token.read().await;
+    let _mutation = state.mutation_lock.lock();
+    let expected = state.resolved_token.read();
     if !expected
         .as_deref()
         .is_some_and(|value| constant_time_equal(value, &form.bearer_token))
@@ -378,7 +376,7 @@ async fn authorize_submit(
         );
     }
     drop(expected);
-    state.oauth_codes.lock().await.insert(
+    state.oauth_codes.lock().insert(
         code_hash,
         OAuthAuthorizationCode {
             client_id: validated.client_id,
@@ -428,8 +426,8 @@ async fn token(
         return oauth_error("invalid_request", "Missing client_id.");
     };
 
-    let _mutation = state.mutation_lock.lock().await;
-    let stored = state.oauth_codes.lock().await.remove(&sha256_hex(code));
+    let _mutation = state.mutation_lock.lock();
+    let stored = state.oauth_codes.lock().remove(&sha256_hex(code));
     let Some(stored) = stored else {
         return oauth_error("invalid_grant", "Invalid code.");
     };
@@ -464,7 +462,7 @@ async fn token(
     }
 
     let access_token = opaque_value("token");
-    state.oauth_tokens.lock().await.insert(
+    state.oauth_tokens.lock().insert(
         sha256_hex(&access_token),
         OAuthAccessToken {
             expires_at: Utc::now() + chrono::Duration::seconds(TOKEN_TTL_SECONDS),
@@ -1001,12 +999,12 @@ mod tests {
         assert!(validate_host_origin(&Uri::from_static("/mcp"), &headers, &policy).is_ok());
     }
 
-    #[tokio::test]
-    async fn token_rotation_revokes_oauth_state_but_direct_bearer_changes() {
+    #[test]
+    fn token_rotation_revokes_oauth_state_but_direct_bearer_changes() {
         let state =
             HttpMcpAuthState::new("first".to_string(), Some("https://example.com".to_string()));
         let resource = state.resource_url().unwrap();
-        state.oauth_tokens.lock().await.insert(
+        state.oauth_tokens.lock().insert(
             sha256_hex("oauth"),
             OAuthAccessToken {
                 expires_at: Utc::now() + chrono::Duration::minutes(1),
@@ -1014,27 +1012,23 @@ mod tests {
                 scope: OAUTH_SCOPE.to_string(),
             },
         );
-        assert!(state.accepts_bearer("first", None).await);
-        assert!(state.accepts_bearer("oauth", Some(&resource)).await);
-        assert!(
-            !state
-                .accepts_bearer("oauth", Some("https://evil.example/mcp"))
-                .await
-        );
-        assert!(state.replace_resolved_token("second".to_string()).await);
-        assert!(!state.accepts_bearer("first", None).await);
-        assert!(!state.accepts_bearer("oauth", Some(&resource)).await);
-        assert!(state.accepts_bearer("second", None).await);
+        assert!(state.accepts_bearer("first", None));
+        assert!(state.accepts_bearer("oauth", Some(&resource)));
+        assert!(!state.accepts_bearer("oauth", Some("https://evil.example/mcp")));
+        assert!(state.replace_resolved_token("second".to_string()));
+        assert!(!state.accepts_bearer("first", None));
+        assert!(!state.accepts_bearer("oauth", Some(&resource)));
+        assert!(state.accepts_bearer("second", None));
     }
 
-    #[tokio::test]
-    async fn oauth_tokens_reject_wrong_resource_binding() {
+    #[test]
+    fn oauth_tokens_reject_wrong_resource_binding() {
         let state = HttpMcpAuthState::new(
             "direct".to_string(),
             Some("https://example.com".to_string()),
         );
         let canonical = state.resource_url().unwrap();
-        state.oauth_tokens.lock().await.insert(
+        state.oauth_tokens.lock().insert(
             sha256_hex("wrong-audience"),
             OAuthAccessToken {
                 expires_at: Utc::now() + chrono::Duration::minutes(1),
@@ -1042,11 +1036,7 @@ mod tests {
                 scope: OAUTH_SCOPE.to_string(),
             },
         );
-        assert!(
-            !state
-                .accepts_bearer("wrong-audience", Some(&canonical))
-                .await
-        );
+        assert!(!state.accepts_bearer("wrong-audience", Some(&canonical)));
     }
 
     #[test]
@@ -1068,14 +1058,14 @@ mod tests {
         assert!(hidden_fields(&params).contains("&lt;"));
     }
 
-    #[tokio::test]
-    async fn expired_oauth_tokens_are_pruned_and_rejected() {
+    #[test]
+    fn expired_oauth_tokens_are_pruned_and_rejected() {
         let state = HttpMcpAuthState::new(
             "direct".to_string(),
             Some("https://example.com".to_string()),
         );
         let resource = state.resource_url().unwrap();
-        state.oauth_tokens.lock().await.insert(
+        state.oauth_tokens.lock().insert(
             sha256_hex("expired"),
             OAuthAccessToken {
                 expires_at: Utc::now() - chrono::Duration::seconds(1),
@@ -1083,8 +1073,8 @@ mod tests {
                 scope: OAUTH_SCOPE.to_string(),
             },
         );
-        assert!(!state.accepts_bearer("expired", Some(&resource)).await);
-        assert!(state.oauth_tokens.lock().await.is_empty());
+        assert!(!state.accepts_bearer("expired", Some(&resource)));
+        assert!(state.oauth_tokens.lock().is_empty());
     }
 
     #[tokio::test]
@@ -1094,7 +1084,7 @@ mod tests {
             Some("https://example.com".to_string()),
         );
         let code = "expired-code";
-        state.oauth_codes.lock().await.insert(
+        state.oauth_codes.lock().insert(
             sha256_hex(code),
             OAuthAuthorizationCode {
                 client_id: "client".to_string(),
@@ -1119,7 +1109,13 @@ mod tests {
         )
         .await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        assert!(state.oauth_codes.lock().await.is_empty());
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["error"], "invalid_grant");
+        assert!(value.get("access_token").is_none());
+        assert!(state.oauth_codes.lock().is_empty());
     }
 
     #[test]

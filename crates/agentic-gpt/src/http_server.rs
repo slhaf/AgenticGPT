@@ -123,7 +123,7 @@ async fn reconcile(
 
     if let Some(server) = active.as_mut() {
         if server.endpoint == endpoint {
-            server.auth.replace_resolved_token(resolved_token).await;
+            server.auth.replace_resolved_token(resolved_token);
             return Ok(());
         }
     }
