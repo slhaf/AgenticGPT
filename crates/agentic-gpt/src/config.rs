@@ -1757,13 +1757,25 @@ pub(crate) fn validate_http_mcp_bearer_token(reference: &str) -> Result<()> {
         .map_err(|_| anyhow!("http_mcp_bearer_token_reference_invalid"))
 }
 pub(crate) fn normalize_http_mcp_public_url(public_url: &str) -> Result<String> {
-    let parsed = reqwest::Url::parse(public_url.trim())
-        .map_err(|_| anyhow!("http_mcp_public_url_invalid"))?;
+    let value = public_url.trim();
+    let parsed = reqwest::Url::parse(value).map_err(|_| anyhow!("http_mcp_public_url_invalid"))?;
+    let raw_path = value.find("://").map(|index| {
+        let rest = &value[index + 3..];
+        let authority_end = rest
+            .find(|character| matches!(character, '/' | '?' | '#'))
+            .unwrap_or(rest.len());
+        let suffix = &rest[authority_end..];
+        let path_end = suffix
+            .find(|character| matches!(character, '?' | '#'))
+            .unwrap_or(suffix.len());
+        &suffix[..path_end]
+    });
     if parsed.scheme() != "https"
         || parsed.host_str().is_none_or(|host| host.is_empty())
         || parsed.username() != ""
         || parsed.password().is_some()
         || parsed.as_str().contains('@')
+        || raw_path.is_none_or(|path| !(path.is_empty() || path == "/"))
         || !(parsed.path().is_empty() || parsed.path() == "/")
         || parsed.query().is_some()
         || parsed.fragment().is_some()

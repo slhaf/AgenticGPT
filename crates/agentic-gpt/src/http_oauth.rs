@@ -1,7 +1,10 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use axum::{
-    extract::{rejection::FormRejection, Form, Query, Request, State},
+    extract::{
+        rejection::{FormRejection, QueryRejection},
+        Form, Query, Request, State,
+    },
     http::{header, uri::Authority, HeaderMap, HeaderValue, StatusCode, Uri},
     middleware::Next,
     response::{Html, IntoResponse, Redirect, Response},
@@ -304,8 +307,17 @@ async fn authorization_server_metadata(State(state): State<HttpMcpAuthState>) ->
 
 async fn authorize(
     State(state): State<HttpMcpAuthState>,
-    Query(params): Query<AuthorizeParams>,
+    params: Result<Query<AuthorizeParams>, QueryRejection>,
 ) -> Response {
+    let Query(params) = match params {
+        Ok(params) => params,
+        Err(_) => {
+            return html_error_response(&AuthorizeError::new(
+                "invalid_request",
+                "Invalid authorization query.",
+            ))
+        }
+    };
     match validate_authorize_params(&state, &params) {
         Ok(_) => authorize_page(None, &params),
         Err(error) => html_error_response(&error),
@@ -949,6 +961,9 @@ mod tests {
             "https://",
             "https://example.com/path",
             "https://user@example.com",
+            "https://example.com/..",
+            "https://example.com/./",
+            "https://example.com//",
             "https://example.com?query=1",
             "https://example.com#fragment",
         ] {
