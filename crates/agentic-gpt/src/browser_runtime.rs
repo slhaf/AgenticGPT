@@ -250,7 +250,10 @@ fn explicit_optional_path(value: Option<&str>, field: &str) -> Result<Option<Pat
         .transpose()
 }
 
-fn derive_trusted_code_paths(codex_home: &Path, node_module_dirs: &[PathBuf]) -> Vec<PathBuf> {
+pub(crate) fn derive_trusted_code_paths(
+    codex_home: &Path,
+    node_module_dirs: &[PathBuf],
+) -> Vec<PathBuf> {
     let mut paths = Vec::with_capacity(1 + node_module_dirs.len());
     for path in std::iter::once(codex_home).chain(node_module_dirs.iter().map(PathBuf::as_path)) {
         if !paths.contains(&path.to_path_buf()) {
@@ -301,7 +304,7 @@ fn optional_path_list(value: Option<&Value>) -> Result<Vec<PathBuf>> {
         .collect()
 }
 
-fn derive_docs_root(browser_client_path: &Path) -> Result<PathBuf> {
+pub(crate) fn derive_docs_root(browser_client_path: &Path) -> Result<PathBuf> {
     let bundle_root = browser_client_path
         .parent()
         .and_then(|parent| parent.parent())

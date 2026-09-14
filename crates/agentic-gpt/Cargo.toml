@@ -36,7 +36,9 @@ sha2 = "0.10"
 similar = "=3.1.1"
 tokio.workspace = true
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
+tar = "0.4"
 urlencoding = "2.1"
+xz2 = "0.1"
 unicode-width.workspace = true
 uuid.workspace = true
 zip = { version = "2.4.2", default-features = false, features = ["deflate"] }

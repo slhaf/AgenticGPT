@@ -1,6 +1,8 @@
 mod agent_info;
 mod audit;
 mod bootstrap;
+#[cfg(test)]
+mod browser_distribution;
 mod browser_kernel;
 mod browser_manager;
 mod browser_manual;
