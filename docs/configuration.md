@@ -537,7 +537,7 @@ The registry includes common scalar values such as:
 - `room.repositoryRoot`, `room.timezone`, `room.diaryDayBoundaryHour`
 - `room.maintenance.mode`, `room.maintenance.autoPush`
 - the documented `skills.*` scalar/list fields
-- `httpMcp.enabled`, `httpMcp.host`, `httpMcp.port`, `httpMcp.bearerToken`, `httpMcp.allowHosts`
+- `httpMcp.enabled`, `httpMcp.host`, `httpMcp.port`, `httpMcp.publicUrl`, `httpMcp.bearerToken`, `httpMcp.allowHosts`
 
 Use `config allow/confirm/deny`, `config path`, and `config mcp` for structured policy/MCP changes.
 The exact `config toolset` commands above manage namespace selection. Complex JSON, including
@@ -574,7 +574,7 @@ Standalone and Local workers poll the config and atomically apply a valid live s
 | Configuration | Effect |
 | --- | --- |
 | `policy`, `pathPolicy`, `limits`, `mcpServers`, `toolsets.enabled` | Live reload for new admissions/calls and tool discovery |
-| `httpMcp.enabled`, `host`, `port`, `allowHosts` | Standalone live rebind; the old listener and its stateful sessions close, so clients must initialize again |
+| `httpMcp.enabled`, `host`, `port`, `publicUrl`, `allowHosts` | Standalone live rebind; listener identity changes close stateful sessions and discard listener-local OAuth state, so clients must initialize again |
 | `httpMcp.bearerToken` reference or referenced content | Standalone live authentication update without rebind; existing sessions remain valid while the resolved credential is available |
 | Already-admitted Jobs and already-created downstream calls | Keep their original decision/config |
 | `mode`, `profile`, `agentId`, `workspaceRoot` | Restart required |

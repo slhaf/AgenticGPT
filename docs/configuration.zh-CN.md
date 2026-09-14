@@ -496,7 +496,7 @@ registry 包含以下常用 scalar：
 - `room.repositoryRoot`、`room.timezone`、`room.diaryDayBoundaryHour`
 - `room.maintenance.mode`、`room.maintenance.autoPush`
 - 文档列出的 `skills.*` scalar/list 字段
-- `httpMcp.enabled`、`httpMcp.host`、`httpMcp.port`、`httpMcp.bearerToken`、`httpMcp.allowHosts`
+- `httpMcp.enabled`、`httpMcp.host`、`httpMcp.port`、`httpMcp.publicUrl`、`httpMcp.bearerToken`、`httpMcp.allowHosts`
 
 结构化策略与 MCP 修改使用 `config allow/confirm/deny`、`config path`、`config mcp`。
 上面的 `config toolset` 命令用于管理 namespace 选择。复杂 JSON（包括 `toolsets.enabled`）
@@ -528,7 +528,7 @@ Standalone 与 Local worker 会轮询配置，并原子应用通过验证的 liv
 | 配置 | 行为 |
 | --- | --- |
 | `policy`、`pathPolicy`、`limits`、`mcpServers`、`toolsets.enabled` | 对新 admission/call 与工具发现热加载 |
-| `httpMcp.enabled`、`host`、`port`、`allowHosts` | Standalone 热 rebind；旧 listener 与有状态 session 会关闭，客户端必须重新 initialize |
+| `httpMcp.enabled`、`host`、`port`、`publicUrl`、`allowHosts` | Standalone 热 rebind；listener identity 变化会关闭有状态 session 并丢弃 listener-local OAuth state，客户端必须重新 initialize |
 | `httpMcp.bearerToken` 引用或其解析内容 | Standalone 原地更新认证，无需 rebind；解析凭据可用时保留已有 session |
 | 已接纳 Job 与已创建下游调用 | 保留原决策/配置 |
 | `mode`、`profile`、`agentId`、`workspaceRoot` | 需要重启 |
