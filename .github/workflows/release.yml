@@ -35,7 +35,7 @@ jobs:
           mkdir -p release
           for target_dir in dist/*; do
             target="$(basename "$target_dir")"
-            tar -C "$target_dir" -czf "release/agentic-gpt-${target}.tar.gz" agentic-gpt agentic-gpt-hub
+            tar -C "$target_dir" -czf "release/agentic-gpt-${target}.tar.gz" agentic-gpt agentic-gpt-hub agentic-browser-host
           done
           sha256sum release/*.tar.gz > release/SHA256SUMS
           ls -lh release

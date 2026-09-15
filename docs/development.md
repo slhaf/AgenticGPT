@@ -35,8 +35,10 @@ Artifacts are written to:
 
 - `dist/x86_64-unknown-linux-gnu/agentic-gpt`
 - `dist/x86_64-unknown-linux-gnu/agentic-gpt-hub`
+- `dist/x86_64-unknown-linux-gnu/agentic-browser-host`
 - `dist/aarch64-unknown-linux-gnu/agentic-gpt`
 - `dist/aarch64-unknown-linux-gnu/agentic-gpt-hub`
+- `dist/aarch64-unknown-linux-gnu/agentic-browser-host`
 
 Pushing a version tag builds Linux release archives and publishes a GitHub Release:
 
@@ -45,7 +47,7 @@ git tag v0.9.0
 git push origin v0.9.0
 ```
 
-Release archives contain both binaries for one target:
+Release archives contain all three binaries for one target:
 
 - `agentic-gpt-x86_64-unknown-linux-gnu.tar.gz`
 - `agentic-gpt-aarch64-unknown-linux-gnu.tar.gz`
@@ -64,4 +66,4 @@ GitHub Actions runs CI on pushes and pull requests to `main`:
 
 ## Notes
 
-The release workflow is triggered by version tags matching `v*`. It uses `scripts/dist-linux.sh`, packages both binaries per target, writes `SHA256SUMS`, and publishes a GitHub Release.
+The release workflow is triggered by version tags matching `v*`. It uses `scripts/dist-linux.sh`, packages all three binaries per target, writes `SHA256SUMS`, and publishes a GitHub Release.

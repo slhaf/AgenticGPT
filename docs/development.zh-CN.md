@@ -35,8 +35,10 @@ cargo install cross --git https://github.com/cross-rs/cross
 
 - `dist/x86_64-unknown-linux-gnu/agentic-gpt`
 - `dist/x86_64-unknown-linux-gnu/agentic-gpt-hub`
+- `dist/x86_64-unknown-linux-gnu/agentic-browser-host`
 - `dist/aarch64-unknown-linux-gnu/agentic-gpt`
 - `dist/aarch64-unknown-linux-gnu/agentic-gpt-hub`
+- `dist/aarch64-unknown-linux-gnu/agentic-browser-host`
 
 推送版本 tag 会构建 Linux release archives 并发布 GitHub Release：
 
@@ -45,7 +47,7 @@ git tag v0.9.0
 git push origin v0.9.0
 ```
 
-Release archive 每个 target 包含两个二进制：
+Release archive 每个 target 包含三个二进制：
 
 - `agentic-gpt-x86_64-unknown-linux-gnu.tar.gz`
 - `agentic-gpt-aarch64-unknown-linux-gnu.tar.gz`
@@ -64,4 +66,4 @@ GitHub Actions 会在 push 和 pull request 到 `main` 时运行 CI：
 
 ## 说明
 
-Release workflow 由匹配 `v*` 的版本 tag 触发。它会调用 `scripts/dist-linux.sh`，按目标平台打包两个二进制，生成 `SHA256SUMS`，并发布 GitHub Release。
+Release workflow 由匹配 `v*` 的版本 tag 触发。它会调用 `scripts/dist-linux.sh`，按目标平台打包三个二进制，生成 `SHA256SUMS`，并发布 GitHub Release。

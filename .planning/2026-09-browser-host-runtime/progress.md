@@ -1,6 +1,6 @@
 # Browser Host Runtime — Progress
 
-Status: Rust host translation and Linux ARM64 clean-room Agentic Browser E2E accepted; reproducible public installation/deployment plumbing remains.
+Status: Rust host translation, Linux ARM64 clean-room Agentic Browser E2E, release packaging, and reproducible self-hosted/Neko deployment guidance accepted.
 
 ## Translation pass
 
@@ -39,4 +39,13 @@ Passed final `cargo test -p agentic-browser-host` (9 tests), `cargo fmt --all --
 
 ## Deferred frozen-plan work
 
-Production installation/manifests, durable Neko/host socket plumbing, and first-class configuration/launch plumbing for the two explicitly proven standalone compatibility settings remain. The Rust host, official ARM64 managed runtime acquisition, and full Agentic `browser.*` end-to-end path are now live-proven.
+The Rust host, official ARM64 managed runtime acquisition, full Agentic `browser.*` end-to-end path, release packaging, Native Messaging manifest/launcher contract, and durable Neko socket layout are now live-proven or repository-documented. The two explicitly proven standalone compatibility settings remain opt-in launch environment settings rather than new Agentic config-schema fields; this is intentional for the current narrow self-hosted deployment rather than a blocker for the Browser tool surface.
+
+## Public release and deployment integration
+
+- Added `agentic-browser-host` to the standard Linux distribution binary lists, remote release copy path, and GitHub release archive. Future x86_64 and ARM64 release tarballs contain `agentic-gpt`, `agentic-gpt-hub`, and `agentic-browser-host` together.
+- Updated English/Chinese README and development docs for the third optional binary.
+- Added `docs/browser-self-hosted.md` and `docs/browser-self-hosted.zh-CN.md` with the official extension id, standalone launcher/manifest shape, managed runtime settings, explicit `BROWSER_USE_SECURITY_MODE=disabled-for-local-testing` worker launch, Neko volume layout, local-only socket boundary, and smoke commands.
+- The documented Neko socket layout was independently live-smoked on Orange Pi after removing the temporary bind mount. Host `/tmp/codex-browser-use` was made a symlink to the persistent Neko bridge directory `/srv/data/neko-browser/bridge`; with no bind mount present, isolated Agentic `browser.acquire` still reached the Rust host/extension backend, created and navigated an agent-owned Example Domain tab, closed it, and released the lease successfully.
+- `cargo test --workspace` passed, including host 10/10 and the full Agent/Hub/protocol suites. `cargo clippy -p agentic-browser-host --all-targets -- -D warnings`, fmt check, shell syntax checks, YAML parsing, and `git diff --check` passed.
+- The repository-wide `cargo clippy --workspace --all-targets -- -D warnings` remains blocked by pre-existing lint debt in Browser Runtime 1–16 and unrelated Room code (dead-code/type-complexity/test-guard plus Room iterator/question-mark/then_some lints). The new `agentic-browser-host` crate itself is warning-free under the exact `-D warnings` policy; this phase did not broaden scope into unrelated lint refactoring.

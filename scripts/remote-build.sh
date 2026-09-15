@@ -12,6 +12,7 @@ LOCAL_DIST_DIR="${LOCAL_DIST_DIR:-dist/remote}"
 BINS=(
   "agentic-gpt"
   "agentic-gpt-hub"
+  "agentic-browser-host"
 )
 
 usage() {

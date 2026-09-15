@@ -61,6 +61,7 @@ ChatGPT Actions 或 Apps MCP
 
 - `crates/agentic-gpt`：Linux Agent、Standalone supervisor、本地 MCP runtime 与 CLI。
 - `crates/agentic-gpt-hub`：可选 Rust Hub HTTP/WebSocket/SSE/MCP 服务。
+- `crates/agentic-browser-host`：自托管 ChatGPT Chrome 扩展 Browser backend 使用的可选 Linux Native Messaging bridge。
 - `crates/agentic-gpt-protocol`：共享 JSON 协议类型。
 - `config.example.json`：无可用密钥的严格 v0.9、Standalone-first 配置示例。
 - `openapi/hub.yaml`：Hub 模式的 Custom GPT Actions schema。
@@ -83,13 +84,15 @@ Hub 模式额外需要服务器/VPS、HTTPS、公开部署时的反向代理、H
 
 ## 安装
 
-Release 压缩包同时包含两个二进制。Standalone 与 Local 模式只需安装 `agentic-gpt`；只有 Hub 模式需要 `agentic-gpt-hub`。
+Release 压缩包同时包含 Agent、Hub 与 Browser-host 三个二进制。Standalone 与 Local 模式只需安装 `agentic-gpt`；只有 Hub 模式需要 `agentic-gpt-hub`，只有自托管 Chrome 扩展 Browser backend 需要 `agentic-browser-host`。
 
 ```bash
 tar -xzf agentic-gpt-x86_64-unknown-linux-gnu.tar.gz
 install -m 0755 agentic-gpt ~/.local/bin/
 # 仅 Hub 模式：
 install -m 0755 agentic-gpt-hub ~/.local/bin/
+# 仅自托管 Browser backend：
+install -m 0755 agentic-browser-host ~/.local/bin/
 ```
 
 支持：
@@ -98,6 +101,7 @@ install -m 0755 agentic-gpt-hub ~/.local/bin/
 - `aarch64-unknown-linux-gnu`
 
 源码构建、CI 与发布流程见 [`docs/development.zh-CN.md`](docs/development.zh-CN.md)。
+自托管 Browser 扩展/Neko 部署见 [`docs/browser-self-hosted.zh-CN.md`](docs/browser-self-hosted.zh-CN.md)。
 
 ## 快速开始：Secure MCP Tunnel（推荐）
 

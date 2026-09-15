@@ -62,6 +62,7 @@ Hub mode remains useful when you need one public endpoint for many agents, Custo
 
 - `crates/agentic-gpt`: Linux agent, standalone supervisor, local MCP runtime, and CLI.
 - `crates/agentic-gpt-hub`: optional Rust Hub HTTP/WebSocket/SSE/MCP service.
+- `crates/agentic-browser-host`: optional Linux Native Messaging bridge for the self-hosted ChatGPT Chrome extension Browser backend.
 - `crates/agentic-gpt-protocol`: shared JSON protocol types.
 - `config.example.json`: strict v0.9 standalone-first configuration example with no usable secrets.
 - `openapi/hub.yaml`: Custom GPT Actions schema for Hub mode.
@@ -84,13 +85,15 @@ Hub mode additionally needs a server/VPS, HTTPS, a reverse proxy when exposed pu
 
 ## Installation
 
-Release archives contain both binaries. Standalone and Local modes need only `agentic-gpt`; install `agentic-gpt-hub` only for Hub mode.
+Release archives contain the Agent, Hub, and Browser-host binaries. Standalone and Local modes need only `agentic-gpt`; install `agentic-gpt-hub` only for Hub mode and `agentic-browser-host` only for the self-hosted Chrome-extension Browser backend.
 
 ```bash
 tar -xzf agentic-gpt-x86_64-unknown-linux-gnu.tar.gz
 install -m 0755 agentic-gpt ~/.local/bin/
 # Hub mode only:
 install -m 0755 agentic-gpt-hub ~/.local/bin/
+# Self-hosted Browser backend only:
+install -m 0755 agentic-browser-host ~/.local/bin/
 ```
 
 Supported targets:
@@ -99,6 +102,7 @@ Supported targets:
 - `aarch64-unknown-linux-gnu`
 
 Source builds, CI, and release publishing are documented in [`docs/development.md`](docs/development.md).
+Self-hosted Browser extension/Neko deployment is documented in [`docs/browser-self-hosted.md`](docs/browser-self-hosted.md).
 
 ## Quick start: Secure MCP Tunnel (recommended)
 

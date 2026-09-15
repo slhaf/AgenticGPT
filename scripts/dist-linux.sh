@@ -11,6 +11,7 @@ TARGETS=(
 BINS=(
   "agentic-gpt"
   "agentic-gpt-hub"
+  "agentic-browser-host"
 )
 
 if ! command -v cross >/dev/null 2>&1; then
