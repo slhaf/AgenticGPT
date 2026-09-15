@@ -373,6 +373,36 @@ const ARG_CATALOG: &[CatalogEntry] = &[
         "Do not prompt; use supplied values and safe defaults",
         "不提示；使用提供的值和安全默认值",
     ),
+    CatalogEntry::new(
+        "config.init.http_mcp_enabled",
+        "Enable the standalone inbound HTTP MCP endpoint",
+        "启用 Standalone 入站 HTTP MCP 端点",
+    ),
+    CatalogEntry::new(
+        "config.init.http_mcp_host",
+        "HTTP MCP listener host",
+        "HTTP MCP 监听器主机",
+    ),
+    CatalogEntry::new(
+        "config.init.http_mcp_port",
+        "HTTP MCP listener port",
+        "HTTP MCP 监听器端口",
+    ),
+    CatalogEntry::new(
+        "config.init.http_mcp_public_url",
+        "External HTTPS origin for standalone ChatGPT OAuth",
+        "Standalone ChatGPT OAuth 使用的外部 HTTPS 来源",
+    ),
+    CatalogEntry::new(
+        "config.init.http_mcp_bearer_token",
+        "HTTP MCP bearer token reference",
+        "HTTP MCP Bearer token 引用",
+    ),
+    CatalogEntry::new(
+        "config.init.http_mcp_allow_hosts",
+        "HTTP MCP Host allowlist as JSON",
+        "JSON 格式的 HTTP MCP Host 白名单",
+    ),
     CatalogEntry::new("config.init.tunnel_id", "Tunnel identifier", "隧道标识符"),
     CatalogEntry::new(
         "config.init.tunnel_api_key",

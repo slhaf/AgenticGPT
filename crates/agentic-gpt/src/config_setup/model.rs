@@ -3,7 +3,8 @@ use std::path::PathBuf;
 
 use crate::cli_i18n::UiLanguage;
 use crate::config::{
-    default_path_policy, sparse_config_json, Config, ToolNamespace, ToolsetConfig,
+    default_path_policy, sparse_config_json, Config, HttpMcpConfig, ToolNamespace, ToolsetConfig,
+    DEFAULT_HTTP_MCP_ALLOW_HOSTS, DEFAULT_HTTP_MCP_HOST, DEFAULT_HTTP_MCP_PORT,
 };
 use crate::config_templates::{
     build_config, InitInput, OptionalSection, RuntimeMode, SecretValue, TunnelSecretSource,
@@ -21,7 +22,6 @@ const DEFAULT_WORKSPACE_ROOT: &str = "~/.agentic_gpt/workspace";
 const DEFAULT_TUNNEL_CACHE_DIR: &str = "~/.agentic_gpt/cache/tunnel-client";
 const DEFAULT_BUBBLEWRAP_PATH: &str = "bwrap";
 const DEFAULT_RUNTIME_PATHS: &str = r#"["/usr","/bin","/lib","/lib64","/etc/ssl"]"#;
-
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum SetupField {
     Mode,
@@ -32,6 +32,12 @@ pub(crate) enum SetupField {
     TunnelSecretEnvironment,
     ProvisionTunnelSecret,
     TunnelSecretValue,
+    HttpMcpEnabled,
+    HttpMcpHost,
+    HttpMcpPort,
+    HttpMcpPublicUrl,
+    HttpMcpBearerToken,
+    HttpMcpAllowHosts,
     HubUrl,
     HubTransport,
     AgentId,
@@ -89,6 +95,12 @@ pub(crate) struct SetupSeed {
     pub(crate) hub_transport: Option<String>,
     pub(crate) agent_id: Option<String>,
     pub(crate) agent_secret: Option<SecretValue>,
+    pub(crate) http_mcp_enabled: Option<bool>,
+    pub(crate) http_mcp_host: Option<String>,
+    pub(crate) http_mcp_port: Option<u16>,
+    pub(crate) http_mcp_public_url: Option<String>,
+    pub(crate) http_mcp_bearer_token: Option<SecretValue>,
+    pub(crate) http_mcp_allow_hosts: Option<String>,
 }
 
 impl fmt::Debug for SetupSeed {
@@ -110,6 +122,11 @@ impl fmt::Debug for SetupSeed {
             .field("hub_transport", &self.hub_transport)
             .field("agent_id", &self.agent_id)
             .field(
+                "http_mcp_bearer_token",
+                &self.http_mcp_bearer_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("http_mcp_public_url", &self.http_mcp_public_url)
+            .field(
                 "agent_secret",
                 &self.agent_secret.as_ref().map(|_| "[REDACTED]"),
             )
@@ -122,6 +139,12 @@ pub(crate) struct StandaloneDraft {
     pub(crate) tunnel_id: String,
     pub(crate) secret_source: TunnelSecretSource,
     pub(crate) secret_path: String,
+    pub(crate) http_mcp_enabled: bool,
+    pub(crate) http_mcp_host: String,
+    pub(crate) http_mcp_port: String,
+    pub(crate) public_url: String,
+    pub(crate) http_mcp_bearer_token: Option<SecretValue>,
+    pub(crate) http_mcp_allow_hosts: String,
     pub(crate) secret_environment: String,
     pub(crate) provision_secret_now: bool,
     pub(crate) secret_value: Option<SecretValue>,
@@ -300,6 +323,7 @@ pub(crate) struct SetupSession {
     language: UiLanguage,
     config_path: PathBuf,
     tunnel_seed_error: Option<&'static str>,
+    http_mcp_seed_error: Option<&'static str>,
 }
 
 impl fmt::Debug for SetupSession {
@@ -336,9 +360,17 @@ impl SetupSession {
             .as_ref()
             .and_then(|config| config.tunnel.as_ref())
             .map(|tunnel| tunnel.api_key.clone());
-        let (standalone, tunnel_seed_error) = StandaloneDraft::from_seed(
+        let imported_http_mcp = imported_base.as_ref().map(|config| &config.http_mcp);
+        let (standalone, tunnel_seed_error, http_mcp_seed_error) = StandaloneDraft::from_seed(
             seed.tunnel_id.or(imported_tunnel_id),
             seed.tunnel_api_key.or(imported_tunnel_api_key),
+            seed.http_mcp_enabled,
+            seed.http_mcp_host,
+            seed.http_mcp_port,
+            seed.http_mcp_public_url,
+            seed.http_mcp_bearer_token,
+            seed.http_mcp_allow_hosts,
+            imported_http_mcp,
         );
         let imported_hub = imported_base.as_ref().map(|config| &config.hub);
         let hub = HubDraft {
@@ -372,6 +404,7 @@ impl SetupSession {
             language,
             config_path,
             tunnel_seed_error,
+            http_mcp_seed_error,
         }
     }
 
@@ -508,6 +541,9 @@ impl SetupSession {
     pub(super) fn tunnel_seed_error(&self) -> Option<&'static str> {
         self.tunnel_seed_error
     }
+    pub(super) fn http_mcp_seed_error(&self) -> Option<&'static str> {
+        self.http_mcp_seed_error
+    }
 
     pub(super) fn replace_optional(&mut self, draft: OptionalSectionDraft) {
         self.optional.set(draft);
@@ -518,7 +554,14 @@ impl StandaloneDraft {
     fn from_seed(
         tunnel_id: Option<String>,
         tunnel_api_key: Option<String>,
-    ) -> (Self, Option<&'static str>) {
+        http_mcp_enabled: Option<bool>,
+        http_mcp_host: Option<String>,
+        http_mcp_port: Option<u16>,
+        http_mcp_public_url: Option<String>,
+        http_mcp_bearer_token: Option<SecretValue>,
+        http_mcp_allow_hosts: Option<String>,
+        imported_http_mcp: Option<&HttpMcpConfig>,
+    ) -> (Self, Option<&'static str>, Option<&'static str>) {
         let mut draft = Self {
             tunnel_id: tunnel_id.unwrap_or_default(),
             secret_source: TunnelSecretSource::File,
@@ -526,6 +569,34 @@ impl StandaloneDraft {
             secret_environment: String::new(),
             provision_secret_now: false,
             secret_value: None,
+            http_mcp_enabled: http_mcp_enabled
+                .or_else(|| imported_http_mcp.map(|config| config.enabled))
+                .unwrap_or(false),
+            http_mcp_host: http_mcp_host
+                .or_else(|| imported_http_mcp.map(|config| config.host.clone()))
+                .unwrap_or_else(|| DEFAULT_HTTP_MCP_HOST.to_string()),
+            http_mcp_port: http_mcp_port
+                .or_else(|| imported_http_mcp.map(|config| config.port))
+                .unwrap_or(DEFAULT_HTTP_MCP_PORT)
+                .to_string(),
+            public_url: http_mcp_public_url
+                .or_else(|| imported_http_mcp.and_then(|config| config.public_url.clone()))
+                .unwrap_or_default(),
+            http_mcp_bearer_token: None,
+            http_mcp_allow_hosts: http_mcp_allow_hosts
+                .or_else(|| {
+                    imported_http_mcp
+                        .map(|config| serde_json::to_string(&config.allow_hosts).unwrap())
+                })
+                .unwrap_or_else(|| {
+                    serde_json::to_string(&Some(
+                        DEFAULT_HTTP_MCP_ALLOW_HOSTS
+                            .iter()
+                            .map(|host| (*host).to_string())
+                            .collect::<Vec<_>>(),
+                    ))
+                    .unwrap()
+                }),
         };
         let mut error = None;
         if let Some(reference) = tunnel_api_key {
@@ -555,7 +626,24 @@ impl StandaloneDraft {
                 error = Some("tunnel_api_key_reference_plaintext_rejected");
             }
         }
-        (draft, error)
+
+        let seeded_http_token = http_mcp_bearer_token.or_else(|| {
+            imported_http_mcp
+                .filter(|config| !config.bearer_token.is_empty())
+                .map(|config| SecretValue::new(config.bearer_token.clone()))
+        });
+        let (http_token, http_error) = match seeded_http_token {
+            Some(token) if token.expose().is_empty() => (Some(token), None),
+            Some(token)
+                if crate::config::validate_http_mcp_bearer_token(token.expose()).is_ok() =>
+            {
+                (Some(token), None)
+            }
+            Some(_) => (None, Some("http_mcp_bearer_token_reference_invalid")),
+            None => (None, None),
+        };
+        draft.http_mcp_bearer_token = http_token;
+        (draft, error, http_error)
     }
 }
 

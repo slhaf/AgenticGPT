@@ -106,6 +106,7 @@ fn tool_descriptors(toolsets: &crate::config::ToolsetConfig) -> Vec<Tool> {
 pub(crate) enum RequestIngress {
     TunnelStdio,
     LocalUnix,
+    Http,
 }
 
 impl RequestIngress {
@@ -113,6 +114,7 @@ impl RequestIngress {
         match self {
             Self::TunnelStdio => "tunnel:stdio",
             Self::LocalUnix => "local:unix",
+            Self::Http => "http:mcp",
         }
     }
 
@@ -120,6 +122,7 @@ impl RequestIngress {
         let prefix = match self {
             Self::TunnelStdio => "tunnel",
             Self::LocalUnix => "local",
+            Self::Http => "http",
         };
         format!("{prefix}:{tool}")
     }
@@ -5565,16 +5568,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tunnel_and_local_ingress_advertise_identical_surface() {
+    async fn tunnel_local_and_http_ingress_advertise_identical_surface() {
         let state = test_state(CapabilityProfile::Normal);
         let tunnel = AgentMcpServer::with_ingress(state.clone(), RequestIngress::TunnelStdio);
-        let local = AgentMcpServer::with_ingress(state, RequestIngress::LocalUnix);
+        let local = AgentMcpServer::with_ingress(state.clone(), RequestIngress::LocalUnix);
+        let http = AgentMcpServer::with_ingress(state, RequestIngress::Http);
+        let tunnel_tools = serde_json::to_value(tunnel.current_tools().await).unwrap();
         assert_eq!(
-            serde_json::to_value(tunnel.current_tools().await).unwrap(),
+            tunnel_tools,
             serde_json::to_value(local.current_tools().await).unwrap()
+        );
+        assert_eq!(
+            tunnel_tools,
+            serde_json::to_value(http.current_tools().await).unwrap()
         );
         assert_eq!(tunnel.ingress.label(), "tunnel:stdio");
         assert_eq!(local.ingress.label(), "local:unix");
+        assert_eq!(http.ingress.label(), "http:mcp");
+        assert_eq!(http.ingress.source("agent.info"), "http:agent.info");
     }
 
     #[tokio::test]

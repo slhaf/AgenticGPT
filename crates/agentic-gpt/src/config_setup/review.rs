@@ -26,6 +26,7 @@ mod tests {
                 hub_transport: Some("sse".to_string()),
                 agent_id: Some("inactive-agent".to_string()),
                 agent_secret: Some(SecretValue::new("inactive-hub-secret")),
+                ..SetupSeed::default()
             },
             UiLanguage::En,
             PathBuf::from("/tmp/review-config.json"),
@@ -332,6 +333,7 @@ impl ReviewItem {
             Some(SetupField::RoomMaintenanceMode) => &["local", "workflow"],
             Some(
                 SetupField::ProvisionTunnelSecret
+                | SetupField::HttpMcpEnabled
                 | SetupField::SandboxEnabled
                 | SetupField::TunnelAutoDownload
                 | SetupField::HubReportingEnabled
@@ -550,6 +552,48 @@ fn connection_group(session: &SetupSession) -> ReviewGroup {
                     ));
                 }
             }
+            items.extend([
+                ReviewItem::field(
+                    SetupField::HttpMcpEnabled,
+                    "http_mcp_enabled",
+                    draft.http_mcp_enabled.to_string(),
+                    ReviewEditorKind::Choice,
+                ),
+                ReviewItem::field(
+                    SetupField::HttpMcpHost,
+                    "http_mcp_host",
+                    draft.http_mcp_host.clone(),
+                    ReviewEditorKind::Text,
+                ),
+                ReviewItem::field(
+                    SetupField::HttpMcpPort,
+                    "http_mcp_port",
+                    draft.http_mcp_port.clone(),
+                    ReviewEditorKind::Text,
+                ),
+                ReviewItem::field(
+                    SetupField::HttpMcpPublicUrl,
+                    "http_mcp_public_url",
+                    draft.public_url.clone(),
+                    ReviewEditorKind::Text,
+                ),
+                ReviewItem::field(
+                    SetupField::HttpMcpBearerToken,
+                    "http_mcp_bearer_token",
+                    if draft.http_mcp_bearer_token.is_some() {
+                        "[REDACTED]"
+                    } else {
+                        ""
+                    },
+                    ReviewEditorKind::Secret,
+                ),
+                ReviewItem::field(
+                    SetupField::HttpMcpAllowHosts,
+                    "http_mcp_allow_hosts",
+                    draft.http_mcp_allow_hosts.clone(),
+                    ReviewEditorKind::Text,
+                ),
+            ]);
         }
         RuntimeMode::Hub => {
             let draft = session.hub();

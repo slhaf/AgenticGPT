@@ -6,9 +6,10 @@ use anyhow::{anyhow, Result};
 
 use crate::cli_i18n::UiLanguage;
 use crate::config::{
-    default_path_policy, validate_hub_transport, validate_hub_url_shape, Config,
-    ConfirmationProviderConfig, HubReportingConfig, LimitsConfig, PathPolicyConfig, RoomConfig,
-    SandboxConfig, ToolNamespace, ToolsetConfig, TunnelClientConfig, TunnelConfig, WorkerProfile,
+    default_path_policy, normalize_http_mcp_public_url, parse_http_mcp_allow_hosts,
+    validate_hub_transport, validate_hub_url_shape, Config, ConfirmationProviderConfig,
+    HubReportingConfig, LimitsConfig, PathPolicyConfig, RoomConfig, SandboxConfig, ToolNamespace,
+    ToolsetConfig, TunnelClientConfig, TunnelConfig, WorkerProfile,
 };
 use crate::mcp::McpServerConfig;
 use crate::utils::agentic_home;
@@ -77,6 +78,12 @@ pub(crate) struct InitInput {
     pub(crate) hub_transport: Option<String>,
     pub(crate) agent_id: Option<String>,
     pub(crate) agent_secret: Option<SecretValue>,
+    pub(crate) http_mcp_enabled: Option<bool>,
+    pub(crate) http_mcp_host: Option<String>,
+    pub(crate) http_mcp_port: Option<u16>,
+    pub(crate) http_mcp_bearer_token: Option<SecretValue>,
+    pub(crate) http_mcp_public_url: Option<String>,
+    pub(crate) http_mcp_allow_hosts: Option<String>,
     pub(crate) display_name: Option<String>,
     pub(crate) workspace_root: Option<PathBuf>,
     pub(crate) path_policy: Option<PathPolicyConfig>,
@@ -99,6 +106,12 @@ impl InitInput {
             imported_base: None,
             ui_language: language,
             tunnel_id: None,
+            http_mcp_enabled: None,
+            http_mcp_host: None,
+            http_mcp_port: None,
+            http_mcp_public_url: None,
+            http_mcp_bearer_token: None,
+            http_mcp_allow_hosts: None,
             tunnel_api_key: None,
             hub_url: None,
             hub_transport: None,
@@ -156,6 +169,12 @@ pub(crate) fn build_config(input: InitInput) -> Result<InitBuild> {
         imported_base,
         ui_language,
         tunnel_id,
+        http_mcp_enabled,
+        http_mcp_host,
+        http_mcp_port,
+        http_mcp_public_url,
+        http_mcp_bearer_token,
+        http_mcp_allow_hosts,
         tunnel_api_key,
         hub_url,
         hub_transport,
@@ -178,7 +197,32 @@ pub(crate) fn build_config(input: InitInput) -> Result<InitBuild> {
     let has_imported_base = imported_base.is_some();
     let mut config = imported_base.unwrap_or(Config::default_config()?);
     config.mode = mode;
+    if let Some(enabled) = http_mcp_enabled {
+        config.http_mcp.enabled = enabled;
+    }
+    if let Some(host) = http_mcp_host {
+        config.http_mcp.host = host;
+    }
+    if let Some(port) = http_mcp_port {
+        config.http_mcp.port = port;
+    }
+    if let Some(public_url) = http_mcp_public_url {
+        config.http_mcp.public_url = if public_url.trim().is_empty() {
+            None
+        } else {
+            Some(normalize_http_mcp_public_url(&public_url)?)
+        };
+    }
+    if let Some(bearer_token) = http_mcp_bearer_token {
+        config.http_mcp.bearer_token = bearer_token.expose().to_string();
+    }
+    if let Some(allow_hosts) = http_mcp_allow_hosts {
+        config.http_mcp.allow_hosts = parse_http_mcp_allow_hosts(&allow_hosts)?;
+    }
     config.profile = profile;
+    if let Some(agent_id) = agent_id {
+        config.agent_id = agent_id;
+    }
     if let Some(toolsets) = toolsets {
         config.toolsets = toolsets;
     } else if !has_imported_base {
@@ -266,7 +310,6 @@ pub(crate) fn build_config(input: InitInput) -> Result<InitBuild> {
                 push_pending(&mut pending, PendingAction::ConfigureHubUrl);
             }
             config.hub.transport = hub_transport.unwrap_or_else(|| config.hub.transport.clone());
-            config.agent_id = agent_id.unwrap_or_else(|| config.agent_id.clone());
             config.hub.agent_secret = match agent_secret {
                 Some(value) if !value.expose().trim().is_empty() => value.expose().to_string(),
                 _ => HUB_AGENT_SECRET_PLACEHOLDER.to_string(),

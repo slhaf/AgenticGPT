@@ -25,9 +25,11 @@ pub(crate) enum ConfigValueKind {
     String,
     Path,
     Boolean,
+    Port,
     NonNegativeInteger,
     AutoOrNonNegativeInteger,
     JsonStringArray,
+    JsonStringArrayOrNull,
     JsonPathArray,
     NullableString,
     NullablePath,
@@ -46,9 +48,11 @@ impl ConfigValueKind {
             Self::String => "string",
             Self::Path => "path",
             Self::Boolean => "boolean",
+            Self::Port => "port",
             Self::NonNegativeInteger => "non-negative-integer",
             Self::AutoOrNonNegativeInteger => "auto-or-non-negative-integer",
             Self::JsonStringArray => "json-string-array",
+            Self::JsonStringArrayOrNull => "json-string-array-or-null",
             Self::JsonPathArray => "json-path-array",
             Self::NullableString => "nullable-string",
             Self::NullablePath => "nullable-path",
@@ -75,12 +79,12 @@ impl ConfigValueKind {
         }
     }
 }
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
 pub(crate) enum ConfigSection {
     Runtime,
     Identity,
     Hub,
+    HttpMcp,
     Confirmation,
     Sandbox,
     Limits,
@@ -93,6 +97,7 @@ impl ConfigSection {
     fn as_str(self) -> &'static str {
         match self {
             Self::Runtime => "runtime",
+            Self::HttpMcp => "http-mcp",
             Self::Identity => "identity",
             Self::Hub => "hub",
             Self::Confirmation => "confirmation",
@@ -111,6 +116,8 @@ impl ConfigSection {
             (Self::Identity, UiLanguage::En) => "Identity",
             (Self::Identity, UiLanguage::ZhCn) => "身份",
             (Self::Hub, UiLanguage::En) => "Hub",
+            (Self::HttpMcp, UiLanguage::En) => "HTTP MCP",
+            (Self::HttpMcp, UiLanguage::ZhCn) => "HTTP MCP",
             (Self::Hub, UiLanguage::ZhCn) => "Hub",
             (Self::Confirmation, UiLanguage::En) => "Confirmation",
             (Self::Confirmation, UiLanguage::ZhCn) => "确认",
@@ -257,6 +264,66 @@ pub(crate) static CONFIG_KEYS: &[ConfigKeySpec] = &[
         "代理认证密钥或密钥引用。",
         "env:AGENT_SECRET",
         set_agent_secret
+    ),
+    config_key!(
+        "httpMcp.enabled",
+        HttpMcp,
+        Boolean,
+        false,
+        "Enable the standalone inbound HTTP MCP endpoint.",
+        "启用 Standalone 入站 HTTP MCP 端点。",
+        "false",
+        set_http_mcp_enabled
+    ),
+    config_key!(
+        "httpMcp.host",
+        HttpMcp,
+        String,
+        false,
+        "Host address for the standalone HTTP MCP listener.",
+        "Standalone HTTP MCP 监听器使用的主机地址。",
+        "127.0.0.1",
+        set_http_mcp_host
+    ),
+    config_key!(
+        "httpMcp.port",
+        HttpMcp,
+        Port,
+        false,
+        "TCP port for the standalone HTTP MCP listener.",
+        "Standalone HTTP MCP 监听器使用的 TCP 端口。",
+        "8765",
+        set_http_mcp_port
+    ),
+    config_key!(
+        "httpMcp.publicUrl",
+        HttpMcp,
+        NullableString,
+        true,
+        "Optional external HTTPS origin advertised for standalone ChatGPT OAuth.",
+        "可选的外部 HTTPS 来源，用于 Standalone ChatGPT OAuth。",
+        "https://mcp.example.com",
+        set_http_mcp_public_url
+    ),
+    config_key!(
+        "httpMcp.bearerToken",
+        HttpMcp,
+        String,
+        false,
+        "Bearer token reference; use file:/absolute/path or env:NAME, never plaintext.",
+        "Bearer token 引用；使用 file:/absolute/path 或 env:NAME，不能使用明文。",
+        "env:HTTP_MCP_TOKEN",
+        set_http_mcp_bearer_token
+    ),
+    config_key!(
+        "httpMcp.allowHosts",
+        HttpMcp,
+        JsonStringArrayOrNull,
+        true,
+        "JSON authority array, null, or [\"*\"] for unrestricted Host validation.",
+        "JSON authority 数组、null 或 [\"*\"]（不限制 Host 校验）。",
+        r#"["localhost","127.0.0.1","::1"]"#,
+        set_http_mcp_allow_hosts
     ),
     config_key!(
         "confirmationProvider.channels",
@@ -645,7 +712,11 @@ pub(crate) fn apply_config_key(config: &mut Config, key: &str, value: &str) -> R
         .iter()
         .find(|spec| spec.key == key)
         .ok_or_else(|| anyhow!("unsupported config key: {key}"))?;
-    (spec.apply)(config, value)
+    (spec.apply)(config, value)?;
+    if spec.section == ConfigSection::HttpMcp {
+        config.validate_http_mcp()?;
+    }
+    Ok(())
 }
 
 #[derive(Serialize)]
@@ -675,10 +746,11 @@ struct ConfigDescriptionOutput {
     zh_cn: &'static str,
 }
 
-const CONFIG_SECTION_ORDER: [ConfigSection; 9] = [
+const CONFIG_SECTION_ORDER: [ConfigSection; 10] = [
     ConfigSection::Runtime,
     ConfigSection::Identity,
     ConfigSection::Hub,
+    ConfigSection::HttpMcp,
     ConfigSection::Confirmation,
     ConfigSection::Sandbox,
     ConfigSection::Limits,
@@ -798,6 +870,46 @@ fn set_display_name(config: &mut Config, value: &str) -> Result<()> {
 
 fn set_agent_secret(config: &mut Config, value: &str) -> Result<()> {
     config.hub.agent_secret = value.to_string();
+    Ok(())
+}
+fn set_http_mcp_enabled(config: &mut Config, value: &str) -> Result<()> {
+    config.http_mcp.enabled = value.parse::<bool>()?;
+    Ok(())
+}
+
+fn set_http_mcp_host(config: &mut Config, value: &str) -> Result<()> {
+    config.http_mcp.host = value.to_string();
+    Ok(())
+}
+
+fn set_http_mcp_port(config: &mut Config, value: &str) -> Result<()> {
+    let port = value.parse::<u16>()?;
+    if port == 0 {
+        return Err(anyhow!("httpMcp.port must be between 1 and 65535"));
+    }
+    config.http_mcp.port = port;
+    Ok(())
+}
+
+fn set_http_mcp_bearer_token(config: &mut Config, value: &str) -> Result<()> {
+    if !value.is_empty() {
+        config::validate_http_mcp_bearer_token(value)?;
+    }
+    config.http_mcp.bearer_token = value.to_string();
+    Ok(())
+}
+
+fn set_http_mcp_public_url(config: &mut Config, value: &str) -> Result<()> {
+    config.http_mcp.public_url = if value == "null" {
+        None
+    } else {
+        Some(config::normalize_http_mcp_public_url(value)?)
+    };
+    Ok(())
+}
+
+fn set_http_mcp_allow_hosts(config: &mut Config, value: &str) -> Result<()> {
+    config.http_mcp.allow_hosts = config::parse_http_mcp_allow_hosts(value)?;
     Ok(())
 }
 
@@ -1073,6 +1185,18 @@ pub(crate) struct ConfigInitArgs {
     #[arg(long)]
     pub(crate) non_interactive: bool,
     #[arg(long)]
+    pub(crate) http_mcp_enabled: Option<bool>,
+    #[arg(long)]
+    pub(crate) http_mcp_host: Option<String>,
+    #[arg(long)]
+    pub(crate) http_mcp_port: Option<u16>,
+    #[arg(long)]
+    pub(crate) http_mcp_public_url: Option<String>,
+    #[arg(long)]
+    pub(crate) http_mcp_bearer_token: Option<String>,
+    #[arg(long)]
+    pub(crate) http_mcp_allow_hosts: Option<String>,
+    #[arg(long)]
     pub(crate) tunnel_id: Option<String>,
     #[arg(long)]
     pub(crate) tunnel_api_key: Option<String>,
@@ -1104,6 +1228,18 @@ pub(crate) fn init_non_interactive(
     let mut input = InitInput::non_interactive_defaults(language);
     input.mode = args.mode.unwrap_or(input.mode);
     input.profile = args.profile.unwrap_or(input.profile);
+    input.http_mcp_enabled = args.http_mcp_enabled;
+    input.http_mcp_host = args.http_mcp_host.clone();
+    input.http_mcp_port = args.http_mcp_port;
+    input.http_mcp_public_url = args.http_mcp_public_url.clone();
+    input.http_mcp_bearer_token = args
+        .http_mcp_bearer_token
+        .as_ref()
+        .map(|value| SecretValue::new(value.clone()));
+    input.http_mcp_allow_hosts = args.http_mcp_allow_hosts.clone();
+    if let Some(public_url) = args.http_mcp_public_url.as_deref() {
+        config::normalize_http_mcp_public_url(public_url)?;
+    }
     input.tunnel_id = args.tunnel_id.clone();
     input.tunnel_api_key = args.tunnel_api_key.clone();
     input.hub_url = args.hub_url.clone();
@@ -1128,6 +1264,15 @@ pub(crate) fn setup_seed_from_args(args: &ConfigInitArgs) -> SetupSeed {
     SetupSeed {
         mode: args.mode,
         profile: args.profile,
+        http_mcp_enabled: args.http_mcp_enabled,
+        http_mcp_host: args.http_mcp_host.clone(),
+        http_mcp_port: args.http_mcp_port,
+        http_mcp_public_url: args.http_mcp_public_url.clone(),
+        http_mcp_bearer_token: args
+            .http_mcp_bearer_token
+            .as_ref()
+            .map(|value| SecretValue::new(value.clone())),
+        http_mcp_allow_hosts: args.http_mcp_allow_hosts.clone(),
         imported_base: None,
         tunnel_id: args.tunnel_id.clone(),
         tunnel_api_key: args.tunnel_api_key.clone(),

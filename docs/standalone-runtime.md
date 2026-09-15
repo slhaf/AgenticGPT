@@ -13,6 +13,8 @@ Standalone mode (recommended):
 Secure MCP Tunnel -> tunnel-client -> agentic-gpt worker
                                       |-> stdio MCP ingress
                                       |-> owner-only Unix MCP ingress
+                                      \-> optional HTTP MCP ingress: http://<host>:<port>/mcp
+                                          (worker-owned, enabled by httpMcp)
                                       \-> optional reporting-only Hub connection
 
 Local integration mode:
@@ -26,31 +28,65 @@ The tunnel runtime is started with `agentic-gpt run` when the config has `mode=s
 Agentic resolves and
 verifies the tunnel client, runs its `doctor --json` preflight, creates the
 worker command, supervises the tunnel/worker process tree, and keeps the
-worker's stdout reserved for MCP framing. That same worker also publishes an
-owner-only Unix MCP socket for local integration. Do not start the hidden
-`stdio-worker` command directly.
+worker's stdout reserved for MCP framing. That same hidden worker owns the
+owner-only Unix MCP socket and, when `httpMcp.enabled` is true, the optional
+HTTP MCP listener. Do not start the hidden `stdio-worker` command directly.
+
+The standalone HTTP endpoint is fixed at `/mcp` and supports the configured
+direct bearer plus an optional standalone ChatGPT connector OAuth contract.
+Without `httpMcp.publicUrl`, direct bearer use remains valid and OAuth routes
+fail closed; with a valid HTTPS `publicUrl`, the listener advertises
+path-specific protected-resource metadata at
+`/.well-known/oauth-protected-resource/mcp`, a root-compatible alias at
+`/.well-known/oauth-protected-resource`, and AS/OIDC aliases at
+`/.well-known/oauth-authorization-server` and
+`/.well-known/openid-configuration`. `/oauth/authorize` and `/oauth/token`
+implement one authorization-code flow for `agentic:mcp`. Only
+`https://chatgpt.com/connector/oauth/<suffix>` and the exact
+`https://chatgpt.com/connector_platform_oauth_redirect` callbacks are
+accepted. There are no refresh tokens, `offline_access`, DCR, generic
+registration, or arbitrary redirects.
+
+OAuth codes and access tokens are opaque, listener-local in-memory records with
+expiry and revocation. Direct bearer content rotation updates authentication in
+place, preserves existing rmcp sessions, and revokes OAuth records; listener
+replacement, rebind, disable, or restart discards all listener-local state.
+The standalone authorization page and tool/profile semantics are not Hub's
+`Hub API key`, profile, or routing contract. The rmcp transport is stateful
+Streamable HTTP/SSE, so rebind or disable still requires a new `initialize`.
+See [`configuration.md`](configuration.md) for schema, allow-host, CLI, and
+reload details.
+
+`publicUrl` is the advertised external HTTPS origin only; it does not change
+the local bind or route traffic, and the origin may remain loopback/private.
+All sibling discovery, authorization, token, and `/mcp` routes must be exposed
+through HTTPS for ChatGPT. The listener rejects malformed/missing Host and
+forbids disallowed authorities on every sibling route. A reverse proxy or ESA
+must put the authority it actually sends in `allowHosts`; a present `Origin`
+must exactly match `publicUrl`, while absent Origin remains valid for
+server-to-server requests. No permissive CORS is added.
 
 For development without tunnel configuration or Hub reporting, set
 `mode=local` and use `agentic-gpt run`. It loads the same profile-selected toolset preset,
 policy, path policy, confirmation, audit, live config, and managed execution state, but serves
-only the Unix MCP ingress.
+only the Unix MCP ingress; `httpMcp` does not add a TCP listener in Local mode.
 
 ### Six public runtime mappings
 
 | Command | Command transport | Capability profile | Hub connection |
 | --- | --- | --- | --- |
-| `agentic-gpt run` (`mode=standalone`, `profile=normal`) | Tunnel stdio + local Unix MCP | Normal | disabled by default; reporting-only when enabled |
-| `agentic-gpt run` (`mode=standalone`, `profile=room`) | Tunnel stdio + local Unix MCP | Room | disabled by default; reporting-only when enabled |
+| `agentic-gpt run` (`mode=standalone`, `profile=normal`) | Tunnel stdio + local Unix MCP + optional HTTP MCP | Normal | disabled by default; reporting-only when enabled |
+| `agentic-gpt run` (`mode=standalone`, `profile=room`) | Tunnel stdio + local Unix MCP + optional HTTP MCP | Room | disabled by default; reporting-only when enabled |
 | `agentic-gpt run` (`mode=local`, `profile=normal`) | Local Unix MCP | Normal | disabled |
 | `agentic-gpt run` (`mode=local`, `profile=room`) | Local Unix MCP | Room | disabled |
 | `agentic-gpt run` (`mode=hub`, `profile=normal`) | Hub | Normal | command-capable |
 | `agentic-gpt run` (`mode=hub`, `profile=room`) | Hub | Room | command-capable |
 
-Transport does not change local policy. Tunnel and local Unix ingress use the same policy
-boundaries for a profile-selected toolset set. The normal preset excludes the logical `room`
-namespace by default; the room preset enables it. Explicit `toolsets.enabled` selection is
-authoritative. Calls entering one worker share the same live config, confirmation state, audit,
-capacity, and managed execution registry.
+Transport does not change local policy. Tunnel, HTTP, and local Unix ingress use the same
+Agent tool surface and policy boundaries for a profile-selected toolset set. The normal preset
+excludes the logical `room` namespace by default; the room preset enables it. Explicit
+`toolsets.enabled` selection is authoritative. Calls entering one worker share the same live
+config, confirmation state, audit, capacity, and managed execution registry.
 Room bootstrap, diary, and notebook execution follows the live `room` namespace rather than the
 startup profile. A Normal-profile worker can therefore enable `room` without restart; direct
 Room dispatch while it is disabled returns `room_toolset_required`.
@@ -86,7 +122,7 @@ printf '%s' '{"path":"README.md"}' | \
 errors are written to stderr. A stopped/restarting runtime returns
 `local_mcp_unavailable`; clients may reconnect but must not replay side effects.
 
-## Tunnel and local tool surfaces
+## Tunnel, HTTP, and local tool surfaces
 
 The V2 advertised surface contains 29 Normal names and 40 Room names. Profiles select
 namespace presets rather than fixing the final runtime surface: normal enables `agent`, `file`,
@@ -183,8 +219,10 @@ Agent-issued cursor and reports cached `job.get` data only as degraded evidence,
 not as a fresh wait result. Batch admission still rejects the whole batch before
 starting any child when preflight, policy, confirmation, or capacity fails.
 
-Tunnel surfaces do not expose Hub aggregation or notification tools. They use
-the same local policy, path-policy, confirmation, audit, and ManagedJob lifecycle as Hub execution while keeping the Hub out of the command path.
+Tunnel, HTTP, and local Unix ingress do not expose Hub aggregation or notification tools. They use
+the same local policy, path-policy, confirmation, audit, and ManagedJob lifecycle as Hub execution
+while keeping the Hub out of the command path. The top-level `mcpServers` block is different: it
+is the downstream registry consumed by `mcp.*` calls, not an inbound listener definition.
 
 The checked-in [public tool contract matrix](tool-contract-matrix.md) records
 use/non-use guidance, conditional fields, bounds, lifecycle/failure semantics,
@@ -334,20 +372,44 @@ The current multi-file mutation boundary is documented in the file contract
 matrix: one complete apply-patch request is staged and validated before its
 optional confirmation and commit.
 
-While the standalone worker is running, edits to `policy`, `pathPolicy`, `limits`, `mcpServers`,
-and `toolsets.enabled` are polled, fully validated, and applied atomically to new admissions,
-calls, and tool discovery. MCP server ids use `A-Z`, `a-z`, `0-9`, `.`, `_`, or `-` (maximum
-64 bytes); `streamable-http` requires an absolute HTTP(S) URL and may optionally use structured
-Bearer auth; `stdio` requires a non-empty command and rejects HTTP auth. Invalid config versions keep the last valid live subset. Already admitted Jobs and already-created downstream
-MCP clients retain their original decision/server definition and are not
-cancelled or rerouted by a reload. Because downstream clients are currently
-created per call, no separate reload or reconnect command is needed.
-Startup-owned identity, workspace, Room settings, tunnel/client, reporting connection, and
-skill-install concurrency changes remain restart-required and are reported by
-the supervisor. Enabling the `room` namespace live bootstraps against the current live Room
-configuration; restart-required `room.*` edits on disk do not change that runtime root until restart.
-`agent.info.mcp` reports only the effective config revision,
-configured/enabled counts, and client lifecycle; it does not expose endpoints.
+While the standalone worker is running, edits to `policy`, `pathPolicy`, `limits`,
+`mcpServers`, and `toolsets.enabled` are polled, fully validated, and applied
+atomically to new admissions, calls, and tool discovery. MCP server ids use
+`A-Z`, `a-z`, `0-9`, `.`, `_`, or `-` (maximum 64 bytes);
+`streamable-http` requires an absolute HTTP(S) URL and may optionally use
+structured Bearer auth; `stdio` requires a non-empty command and rejects HTTP
+auth. Invalid config versions keep the last valid live subset. Already admitted
+Jobs and already-created downstream MCP clients retain their original
+decision/server definition and are not cancelled or rerouted by a reload.
+Because downstream clients are currently created per call, no separate reload
+or reconnect command is needed.
+
+Startup-owned identity, workspace, Room settings, tunnel/client, reporting
+connection, and skill-install concurrency changes remain restart-required and
+are reported by the supervisor. Enabling the `room` namespace live bootstraps
+against the current live Room configuration; restart-required `room.*` edits on
+disk do not change that runtime root until restart. `agent.info.mcp` reports only
+the effective config revision, configured/enabled counts, and client lifecycle;
+it does not expose endpoints.
+
+The worker also watches the standalone `httpMcp` subset. Enabling or disabling
+the endpoint, or changing `host`, `port`, `publicUrl`, or `allowHosts`,
+reconciles the listener. A public-origin or listener replacement is a new
+listener identity: it closes stateful HTTP sessions and discards listener-local
+OAuth codes and tokens. When the replacement bind address differs, it binds the
+replacement before retiring the old listener. A same-address `allowHosts` or
+`publicUrl` change must retire the old listener before binding the replacement;
+if that replacement bind fails, the old listener is already gone and a later
+retry starts fresh. A bind conflict on a different address keeps a working old
+listener when the old address remains usable and is retried without
+interrupting tunnel or Unix execution. Changing the token reference, or the
+content resolved from it, updates the in-memory direct authenticator without
+rebinding, preserves existing sessions, and atomically revokes OAuth records.
+If the reference cannot be resolved, HTTP authentication fails closed: the
+listener stops listening and accepting requests until the credential becomes
+available again. Invalid candidates retain the last-good live configuration and
+state, and no reference, token, code, or access-token value is logged or
+included in summaries.
 
 `apiKey` accepts only `env:NAME` and `file:PATH`. The resolved value is
 injected into the tunnel-client child environment as
@@ -361,7 +423,6 @@ example, configure the path without putting the key in shell history or
 argv:
 
 ```bash
-install -d -m 700 "$HOME/.agentic_gpt/secrets"
 touch "$HOME/.agentic_gpt/secrets/tunnel-api-key"
 chmod 600 "$HOME/.agentic_gpt/secrets/tunnel-api-key"
 read -rsp "Tunnel API key: " AGENTIC_TUNNEL_API_KEY
@@ -385,6 +446,8 @@ Supported `config set` keys include:
   `tunnel.client.autoDownload`, `tunnel.client.executable`,
   `tunnel.client.downloadUrl`, `tunnel.client.sha256`.
 - `tunnel.hubReporting.enabled`, `tunnel.hubReporting.detail`.
+- `httpMcp.enabled`, `httpMcp.host`, `httpMcp.port`, `httpMcp.publicUrl`,
+  `httpMcp.bearerToken`, `httpMcp.allowHosts`.
 
 The tunnel identity, secret reference, client source/version/hash/cache, and
 CLI profile are startup identity. Editing one while the supervisor is running
