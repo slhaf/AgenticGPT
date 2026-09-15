@@ -197,12 +197,42 @@ impl Default for HubConfig {
 pub(crate) struct BrowserConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) runtime: Option<ExplicitBrowserRuntimeConfig>,
+    #[serde(default, skip_serializing_if = "ManagedBrowserConfig::is_default")]
+    pub(crate) managed: ManagedBrowserConfig,
 }
 
 impl BrowserConfig {
     fn is_empty(&self) -> bool {
-        self.runtime.is_none()
+        self.runtime.is_none() && self.managed.is_default()
     }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ManagedBrowserConfig {
+    #[serde(default = "default_managed_browser_enabled")]
+    pub(crate) enabled: bool,
+    #[serde(default)]
+    pub(crate) auto_provision: bool,
+}
+
+impl Default for ManagedBrowserConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_managed_browser_enabled(),
+            auto_provision: false,
+        }
+    }
+}
+
+impl ManagedBrowserConfig {
+    fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+fn default_managed_browser_enabled() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -2484,6 +2514,51 @@ mod tests {
             .unwrap()
             .get("browser")
             .is_none());
+    }
+
+    #[test]
+    fn managed_browser_policy_defaults_are_enabled_without_auto_provisioning() {
+        let config = Config::default_config().unwrap();
+        assert!(config.browser.managed.enabled);
+        assert!(!config.browser.managed.auto_provision);
+        assert_eq!(serde_json::to_value(&config.browser).unwrap(), json!({}));
+        let parsed = serde_json::from_value::<BrowserConfig>(json!({"managed": {}})).unwrap();
+        assert!(parsed.managed.enabled);
+        assert!(!parsed.managed.auto_provision);
+        assert!(sparse_config_value(&config, false)
+            .unwrap()
+            .get("browser")
+            .is_none());
+    }
+
+    #[test]
+    fn managed_browser_policy_round_trips_non_default_values() {
+        let mut config = Config::default_config().unwrap();
+        config.browser.managed.enabled = false;
+        config.browser.managed.auto_provision = true;
+
+        let path = temp_config_path();
+        write_config_with_backup(&path, &config).unwrap();
+        let written: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(written["browser"]["managed"]["enabled"], json!(false));
+        assert_eq!(written["browser"]["managed"]["autoProvision"], json!(true));
+
+        let loaded = Config::load(&path).unwrap();
+        assert_eq!(loaded.browser.managed, config.browser.managed);
+        let imported = Config::import(&path).unwrap();
+        assert_eq!(imported.config.browser.managed, config.browser.managed);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn managed_browser_policy_rejects_unknown_fields() {
+        let error = serde_json::from_value::<BrowserConfig>(json!({
+            "managed": {
+                "unknownField": true
+            }
+        }))
+        .unwrap_err();
+        assert!(error.to_string().contains("unknown field"));
     }
 
     #[test]

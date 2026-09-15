@@ -1,7 +1,6 @@
 mod agent_info;
 mod audit;
 mod bootstrap;
-#[cfg(test)]
 mod browser_distribution;
 mod browser_kernel;
 mod browser_manager;
@@ -52,8 +51,10 @@ use serde_json::{Map, Value};
 use state::{AppState, BrowserRuntimeContext, CapabilityProfile, RuntimeModel};
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
+use std::future::Future;
 use std::io::{IsTerminal, Read};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::{sleep, Duration};
@@ -208,7 +209,14 @@ async fn run_hub(config_path: PathBuf) -> Result<()> {
         },
         initial.limits.max_active_jobs.resolve().diagnostic()
     ));
-    let state = build_app_state(config_path.clone(), initial, runtime, false)?;
+    let browser_runtime = resolve_browser_runtime(&initial).await;
+    let state = build_app_state(
+        config_path.clone(),
+        initial,
+        runtime,
+        false,
+        browser_runtime,
+    )?;
     state.skill_installs.recover(state.clone()).await?;
     tokio::spawn(watch_config(state.clone()));
     hub::connect_loop(state).await
@@ -243,11 +251,13 @@ async fn run_stdio_worker(
         .map(|tunnel| tunnel.hub_reporting.enabled)
         .unwrap_or(false);
     let agent_id = config.agent_id.clone();
+    let browser_runtime = resolve_browser_runtime(&config).await;
     let state = build_app_state(
         config_path,
         config,
         RuntimeModel::tunnel(profile, reporting_enabled),
         supervised,
+        browser_runtime,
     )?;
     state.skill_installs.recover(state.clone()).await?;
     tokio::spawn(watch_standalone_live_config(state.clone(), supervised));
@@ -280,14 +290,55 @@ async fn run_stdio_worker(
 const MAX_LOCAL_ARGUMENT_BYTES: usize = 2 * 1024 * 1024;
 
 fn log_browser_runtime_unavailable(source: &str, stage: &str, error: &anyhow::Error) {
-    let diagnostic = error.to_string().chars().take(256).collect::<String>();
     log_info(format!(
-        "browser runtime unavailable during startup; source={source}; stage={stage}; error={diagnostic}"
+        "browser runtime unavailable during startup; source={source}; stage={stage}; errorCode={}",
+        error_code(&error.to_string())
     ));
 }
+type BrowserRuntimeProvisionFuture =
+    Pin<Box<dyn Future<Output = Result<browser_runtime::BrowserRuntimeDescriptor>> + Send>>;
 
-fn discover_browser_runtime(config: &Config) -> Option<Arc<BrowserRuntimeContext>> {
-    let (source, descriptor) = if let Some(explicit) = config.browser.runtime.as_ref() {
+struct BrowserRuntimeSources {
+    managed_cache_root: Arc<dyn Fn() -> Result<PathBuf> + Send + Sync>,
+    managed_codex_home: Arc<dyn Fn() -> Result<PathBuf> + Send + Sync>,
+    managed_target: Arc<dyn Fn() -> Result<&'static str> + Send + Sync>,
+    managed_discover: Arc<
+        dyn Fn(&Path, &str, &Path) -> Result<browser_runtime::BrowserRuntimeDescriptor>
+            + Send
+            + Sync,
+    >,
+    managed_provision: Arc<dyn Fn(String) -> BrowserRuntimeProvisionFuture + Send + Sync>,
+    desktop_registry_path: Arc<dyn Fn() -> Result<PathBuf> + Send + Sync>,
+    desktop_discover:
+        Arc<dyn Fn(&Path) -> Result<browser_runtime::BrowserRuntimeDescriptor> + Send + Sync>,
+}
+
+fn production_browser_runtime_sources() -> BrowserRuntimeSources {
+    BrowserRuntimeSources {
+        managed_cache_root: Arc::new(browser_distribution::managed_browser_cache_root),
+        managed_codex_home: Arc::new(browser_distribution::managed_browser_codex_home),
+        managed_target: Arc::new(browser_distribution::current_managed_target),
+        managed_discover: Arc::new(browser_distribution::discover_managed_browser_runtime),
+        managed_provision: Arc::new(|target| {
+            Box::pin(async move {
+                browser_distribution::provision_managed_browser_runtime(&target).await
+            })
+        }),
+        desktop_registry_path: Arc::new(browser_runtime::default_desktop_registry_path),
+        desktop_discover: Arc::new(browser_runtime::discover_desktop_runtime),
+    }
+}
+
+async fn resolve_browser_runtime(config: &Config) -> Option<Arc<BrowserRuntimeContext>> {
+    let sources = production_browser_runtime_sources();
+    resolve_browser_runtime_with_sources(config, &sources).await
+}
+
+async fn resolve_browser_runtime_with_sources(
+    config: &Config,
+    sources: &BrowserRuntimeSources,
+) -> Option<Arc<BrowserRuntimeContext>> {
+    if let Some(explicit) = config.browser.runtime.as_ref() {
         let descriptor = match browser_runtime::explicit_runtime_descriptor(explicit) {
             Ok(descriptor) => descriptor,
             Err(error) => {
@@ -295,33 +346,165 @@ fn discover_browser_runtime(config: &Config) -> Option<Arc<BrowserRuntimeContext
                 return None;
             }
         };
-        ("explicit-config", descriptor)
-    } else {
-        let registry_path = match browser_runtime::default_desktop_registry_path() {
-            Ok(path) => path,
+        return match browser_runtime_context("explicit-config", descriptor) {
+            Ok(context) => Some(context),
             Err(error) => {
-                log_browser_runtime_unavailable("desktop-registry", "registry-path", &error);
-                return None;
+                log_browser_runtime_unavailable("explicit-config", "launch-spec", &error);
+                None
             }
         };
-        let descriptor = match browser_runtime::discover_desktop_runtime(&registry_path) {
-            Ok(descriptor) => descriptor,
+    }
+
+    if config.browser.managed.enabled {
+        let target = match (sources.managed_target)() {
+            Ok(target) => Some(target),
             Err(error) => {
-                log_browser_runtime_unavailable("desktop-registry", "discovery", &error);
-                return None;
+                log_browser_runtime_unavailable("managed", "target", &error);
+                None
             }
         };
-        ("desktop-registry", descriptor)
+        if let Some(target) = target {
+            let codex_home = match (sources.managed_codex_home)() {
+                Ok(path) => match prepare_managed_codex_home(&path) {
+                    Ok(()) => Some(path),
+                    Err(error) => {
+                        log_browser_runtime_unavailable("managed", "codex-home", &error);
+                        None
+                    }
+                },
+                Err(error) => {
+                    log_browser_runtime_unavailable("managed", "codex-home", &error);
+                    None
+                }
+            };
+
+            if let Some(codex_home) = codex_home {
+                let cache_root = match (sources.managed_cache_root)() {
+                    Ok(path) => Some(path),
+                    Err(error) => {
+                        log_browser_runtime_unavailable("managed-cache", "cache-root", &error);
+                        None
+                    }
+                };
+
+                if let Some(cache_root) = cache_root {
+                    match (sources.managed_discover)(&cache_root, target, &codex_home) {
+                        Ok(descriptor) => {
+                            if let Err(error) = validate_managed_browser_descriptor(&descriptor) {
+                                log_browser_runtime_unavailable(
+                                    "managed-cache",
+                                    "descriptor",
+                                    &error,
+                                );
+                            } else {
+                                match browser_runtime_context("managed-cache", descriptor) {
+                                    Ok(context) => return Some(context),
+                                    Err(error) => log_browser_runtime_unavailable(
+                                        "managed-cache",
+                                        "launch-spec",
+                                        &error,
+                                    ),
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            log_browser_runtime_unavailable("managed-cache", "discovery", &error)
+                        }
+                    }
+                }
+
+                if config.browser.managed.auto_provision {
+                    match (sources.managed_provision)(target.to_owned()).await {
+                        Ok(descriptor) => {
+                            if let Err(error) = validate_managed_browser_descriptor(&descriptor) {
+                                log_browser_runtime_unavailable(
+                                    "managed-provision",
+                                    "descriptor",
+                                    &error,
+                                );
+                            } else {
+                                match browser_runtime_context("managed-provision", descriptor) {
+                                    Ok(context) => return Some(context),
+                                    Err(error) => log_browser_runtime_unavailable(
+                                        "managed-provision",
+                                        "launch-spec",
+                                        &error,
+                                    ),
+                                }
+                            }
+                        }
+                        Err(error) => log_browser_runtime_unavailable(
+                            "managed-provision",
+                            "provision",
+                            &error,
+                        ),
+                    }
+                }
+            }
+        }
+    }
+
+    let registry_path = match (sources.desktop_registry_path)() {
+        Ok(path) => path,
+        Err(error) => {
+            log_browser_runtime_unavailable("desktop-registry", "registry-path", &error);
+            return None;
+        }
     };
-    let launch_spec =
-        match browser_runtime::build_node_repl_launch_spec(&descriptor, &BTreeMap::new()) {
-            Ok(spec) => spec,
-            Err(error) => {
-                log_browser_runtime_unavailable(source, "launch-spec", &error);
-                return None;
-            }
-        };
-    Some(BrowserRuntimeContext::new(descriptor, launch_spec))
+    let descriptor = match (sources.desktop_discover)(&registry_path) {
+        Ok(descriptor) => descriptor,
+        Err(error) => {
+            log_browser_runtime_unavailable("desktop-registry", "discovery", &error);
+            return None;
+        }
+    };
+    match browser_runtime_context("desktop-registry", descriptor) {
+        Ok(context) => Some(context),
+        Err(error) => {
+            log_browser_runtime_unavailable("desktop-registry", "launch-spec", &error);
+            None
+        }
+    }
+}
+
+fn browser_runtime_context(
+    _source: &str,
+    descriptor: browser_runtime::BrowserRuntimeDescriptor,
+) -> Result<Arc<BrowserRuntimeContext>> {
+    let launch_spec = browser_runtime::build_node_repl_launch_spec(&descriptor, &BTreeMap::new())?;
+    Ok(BrowserRuntimeContext::new(descriptor, launch_spec))
+}
+
+fn validate_managed_browser_descriptor(
+    descriptor: &browser_runtime::BrowserRuntimeDescriptor,
+) -> Result<()> {
+    if descriptor.channel != "prod" {
+        return Err(anyhow!("browser_runtime_managed_channel_invalid"));
+    }
+    if descriptor.codex_cli_path.is_some() {
+        return Err(anyhow!("browser_runtime_managed_codex_cli_path_invalid"));
+    }
+    Ok(())
+}
+
+fn prepare_managed_codex_home(path: &Path) -> Result<()> {
+    if !path.is_absolute() {
+        return Err(anyhow!("browser_runtime_managed_codex_home_invalid"));
+    }
+    fs::create_dir_all(path)
+        .map_err(|_| anyhow!("browser_runtime_managed_codex_home_unavailable"))?;
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|_| anyhow!("browser_runtime_managed_codex_home_unavailable"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(anyhow!("browser_runtime_managed_codex_home_invalid"));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+            .map_err(|_| anyhow!("browser_runtime_managed_codex_home_unavailable"))?;
+    }
+    Ok(())
 }
 
 fn build_app_state(
@@ -329,6 +512,7 @@ fn build_app_state(
     config: Config,
     runtime: RuntimeModel,
     supervised: bool,
+    browser_runtime: Option<Arc<BrowserRuntimeContext>>,
 ) -> Result<AppState> {
     if config.toolsets.is_enabled(config::ToolNamespace::Room) {
         room_repository::ensure_repository(&config)?;
@@ -341,7 +525,6 @@ fn build_app_state(
     let private_state = prepared.paths;
     let job_history = job_history::JobHistoryStore::open(&private_state);
     let skill_installs_root = private_state.skill_installs.clone();
-    let browser_runtime = discover_browser_runtime(&config);
     Ok(AppState {
         config_path,
         config: Arc::new(RwLock::new(config)),
@@ -388,7 +571,14 @@ async fn run_local(config_path: PathBuf) -> Result<()> {
         log_warn(format!("default tmux session unavailable: {error}"));
     }
     let agent_id = config.agent_id.clone();
-    let state = build_app_state(config_path, config, RuntimeModel::local(profile), false)?;
+    let browser_runtime = resolve_browser_runtime(&config).await;
+    let state = build_app_state(
+        config_path,
+        config,
+        RuntimeModel::local(profile),
+        false,
+        browser_runtime,
+    )?;
     state.skill_installs.recover(state.clone()).await?;
     tokio::spawn(watch_standalone_live_config(state.clone(), false));
     let listener = local_control::bind(&agent_id).await?;
@@ -708,6 +898,7 @@ mod tests {
     use agentic_gpt_protocol::{
         AgentMessage, BootstrapReadRequest, HubCommand, NotebookAppendRequest, PassageSignificance,
     };
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::mpsc;
     use uuid::Uuid;
 
@@ -731,11 +922,12 @@ mod tests {
     async fn explicit_runtime_precedes_desktop_discovery_and_invalid_does_not_fallback() {
         let mut config = Config::default_config().unwrap();
         config.browser.runtime = Some(explicit_browser_runtime_config());
-        let context = discover_browser_runtime(&config).expect("explicit runtime selected");
+        let context = resolve_browser_runtime(&config)
+            .await
+            .expect("explicit runtime selected");
         assert_eq!(context.descriptor.app_version, "26.1.2");
-
         config.browser.runtime.as_mut().unwrap().node_path = Some("relative/node".to_string());
-        assert!(discover_browser_runtime(&config).is_none());
+        assert!(resolve_browser_runtime(&config).await.is_none());
     }
 
     #[test]
@@ -750,9 +942,248 @@ mod tests {
             config,
             RuntimeModel::local(CapabilityProfile::Normal),
             false,
+            None,
         )
         .unwrap();
         assert!(state.browser_runtime.is_none());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    fn managed_config(auto_provision: bool) -> Config {
+        let mut config = Config::default_config().unwrap();
+        config.browser.runtime = None;
+        config.browser.managed.enabled = true;
+        config.browser.managed.auto_provision = auto_provision;
+        config
+    }
+
+    fn test_browser_descriptor(
+        label: &str,
+        codex_home: &Path,
+        codex_cli_path: Option<&str>,
+    ) -> browser_runtime::BrowserRuntimeDescriptor {
+        let root = PathBuf::from(format!("/tmp/agentic-browser-source-{label}"));
+        browser_runtime::BrowserRuntimeDescriptor {
+            app_version: format!("test-{label}"),
+            channel: "prod".to_string(),
+            node_repl_path: root.join("cua_node/bin/node_repl"),
+            node_path: root.join("cua_node/bin/node"),
+            browser_client_path: root.join("chrome/scripts/browser-client.mjs"),
+            browser_service_path: root.join("chrome/scripts/browser-service.mjs"),
+            codex_home: codex_home.to_path_buf(),
+            codex_cli_path: codex_cli_path.map(PathBuf::from),
+            node_module_dirs: Vec::new(),
+            trusted_code_paths: vec![codex_home.to_path_buf()],
+            docs_root: root.join("chrome/docs"),
+        }
+    }
+
+    fn injected_browser_sources(
+        cache_root: PathBuf,
+        codex_home: PathBuf,
+        cache: Option<browser_runtime::BrowserRuntimeDescriptor>,
+        provision: Option<browser_runtime::BrowserRuntimeDescriptor>,
+        desktop: Option<browser_runtime::BrowserRuntimeDescriptor>,
+        provision_calls: Arc<AtomicUsize>,
+        desktop_calls: Arc<AtomicUsize>,
+    ) -> BrowserRuntimeSources {
+        let cache = Arc::new(cache);
+        let provision = Arc::new(provision);
+        let desktop = Arc::new(desktop);
+        BrowserRuntimeSources {
+            managed_cache_root: Arc::new(move || Ok(cache_root.clone())),
+            managed_codex_home: Arc::new(move || Ok(codex_home.clone())),
+            managed_target: Arc::new(|| Ok("test-target")),
+            managed_discover: Arc::new(move |_, _, _| {
+                cache
+                    .as_ref()
+                    .clone()
+                    .ok_or_else(|| anyhow!("test_managed_cache_miss"))
+            }),
+            managed_provision: Arc::new(move |_| {
+                provision_calls.fetch_add(1, Ordering::SeqCst);
+                let provision = provision.clone();
+                Box::pin(async move {
+                    provision
+                        .as_ref()
+                        .clone()
+                        .ok_or_else(|| anyhow!("test_managed_provision_failed"))
+                })
+            }),
+            desktop_registry_path: Arc::new(|| {
+                Ok(PathBuf::from("/tmp/test-desktop-registry.json"))
+            }),
+            desktop_discover: Arc::new(move |_| {
+                desktop_calls.fetch_add(1, Ordering::SeqCst);
+                desktop
+                    .as_ref()
+                    .clone()
+                    .ok_or_else(|| anyhow!("test_desktop_unavailable"))
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn managed_cache_precedes_desktop_and_preserves_descriptor_fields() {
+        let root = unique_temp_dir("browser-source-cache");
+        let codex_home = root.join("browser-runtime").join("codex-home");
+        let provision_calls = Arc::new(AtomicUsize::new(0));
+        let desktop_calls = Arc::new(AtomicUsize::new(0));
+        let cached = test_browser_descriptor("cache", &codex_home, None);
+        let desktop = test_browser_descriptor("desktop", &codex_home, Some("/tmp/desktop-cli"));
+        let sources = injected_browser_sources(
+            root.clone(),
+            codex_home.clone(),
+            Some(cached),
+            Some(test_browser_descriptor(
+                "provision",
+                &codex_home,
+                Some("/tmp/provision-cli"),
+            )),
+            Some(desktop),
+            provision_calls.clone(),
+            desktop_calls.clone(),
+        );
+
+        let context = resolve_browser_runtime_with_sources(&managed_config(false), &sources)
+            .await
+            .expect("managed cache selected");
+        assert_eq!(context.descriptor.app_version, "test-cache");
+        assert_eq!(context.descriptor.channel, "prod");
+        assert_eq!(context.descriptor.codex_home, codex_home);
+        assert_eq!(context.descriptor.codex_cli_path, None);
+        assert_eq!(provision_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(desktop_calls.load(Ordering::SeqCst), 0);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(context.descriptor.codex_home.clone())
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn auto_provision_is_gated_and_failures_fall_back_to_desktop() {
+        let root = unique_temp_dir("browser-source-provision");
+        let codex_home = root.join("codex-home");
+        let provision_calls = Arc::new(AtomicUsize::new(0));
+        let desktop_calls = Arc::new(AtomicUsize::new(0));
+        let provisioned = test_browser_descriptor("provision", &codex_home, None);
+        let desktop = test_browser_descriptor("desktop", &codex_home, None);
+
+        let enabled_sources = injected_browser_sources(
+            root.clone(),
+            codex_home.clone(),
+            None,
+            Some(provisioned),
+            Some(desktop.clone()),
+            provision_calls.clone(),
+            desktop_calls.clone(),
+        );
+        let context = resolve_browser_runtime_with_sources(&managed_config(true), &enabled_sources)
+            .await
+            .expect("managed provision selected");
+        assert_eq!(context.descriptor.app_version, "test-provision");
+        assert_eq!(provision_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(desktop_calls.load(Ordering::SeqCst), 0);
+
+        let disabled_sources = injected_browser_sources(
+            root.clone(),
+            codex_home.clone(),
+            None,
+            Some(test_browser_descriptor(
+                "disabled-provision",
+                &codex_home,
+                None,
+            )),
+            Some(desktop),
+            provision_calls.clone(),
+            desktop_calls.clone(),
+        );
+        let context =
+            resolve_browser_runtime_with_sources(&managed_config(false), &disabled_sources)
+                .await
+                .expect("desktop fallback selected");
+        assert_eq!(context.descriptor.app_version, "test-desktop");
+        assert_eq!(provision_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(desktop_calls.load(Ordering::SeqCst), 1);
+
+        let failed_sources = injected_browser_sources(
+            root.clone(),
+            codex_home.clone(),
+            None,
+            None,
+            Some(test_browser_descriptor("failed-desktop", &codex_home, None)),
+            provision_calls.clone(),
+            desktop_calls.clone(),
+        );
+        let context = resolve_browser_runtime_with_sources(&managed_config(true), &failed_sources)
+            .await
+            .expect("desktop fallback after provisioning failure");
+        assert_eq!(context.descriptor.app_version, "test-failed-desktop");
+        assert_eq!(provision_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(desktop_calls.load(Ordering::SeqCst), 2);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn unavailable_sources_fail_open_without_host_io() {
+        let root = unique_temp_dir("browser-source-unavailable");
+        let codex_home = root.join("codex-home");
+        let provision_calls = Arc::new(AtomicUsize::new(0));
+        let desktop_calls = Arc::new(AtomicUsize::new(0));
+        let sources = injected_browser_sources(
+            root.clone(),
+            codex_home,
+            None,
+            None,
+            None,
+            provision_calls.clone(),
+            desktop_calls.clone(),
+        );
+        assert!(
+            resolve_browser_runtime_with_sources(&managed_config(true), &sources)
+                .await
+                .is_none()
+        );
+        assert_eq!(provision_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(desktop_calls.load(Ordering::SeqCst), 1);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn builder_accepts_pre_resolved_browser_context_without_discovery() {
+        let root = unique_temp_dir("browser-builder-resolved");
+        let mut config = Config::default_config().unwrap();
+        config.workspace_root = root.join("workspace");
+        let descriptor = test_browser_descriptor("builder", &root.join("codex-home"), None);
+        let launch_spec =
+            browser_runtime::build_node_repl_launch_spec(&descriptor, &BTreeMap::new()).unwrap();
+        let context = BrowserRuntimeContext::new(descriptor, launch_spec);
+        let state = build_app_state(
+            root.join("config.json"),
+            config,
+            RuntimeModel::local(CapabilityProfile::Normal),
+            false,
+            Some(context),
+        )
+        .unwrap();
+        assert_eq!(
+            state
+                .browser_runtime
+                .as_ref()
+                .unwrap()
+                .descriptor
+                .app_version,
+            "test-builder"
+        );
         let _ = fs::remove_dir_all(root);
     }
 
