@@ -123,6 +123,7 @@ struct ClientEntry {
 struct PendingRoute {
     client_id: ClientId,
     original_id: Value,
+    method: Option<String>,
 }
 
 struct Registry {
@@ -146,6 +147,7 @@ pub struct Host {
     logger: Logger,
     extension_writer: LockedWriter,
     registry: Mutex<Registry>,
+    standalone_compat: bool,
 }
 
 impl Host {
@@ -154,11 +156,21 @@ impl Host {
         log_path: impl Into<PathBuf>,
         extension_writer: Box<dyn Write + Send>,
     ) -> Self {
+        Self::new_with_standalone_compat(socket_path, log_path, extension_writer, false)
+    }
+
+    fn new_with_standalone_compat(
+        socket_path: impl Into<PathBuf>,
+        log_path: impl Into<PathBuf>,
+        extension_writer: Box<dyn Write + Send>,
+        standalone_compat: bool,
+    ) -> Self {
         Self {
             socket_path: socket_path.into(),
             logger: Logger::new(log_path),
             extension_writer: Arc::new(Mutex::new(extension_writer)),
             registry: Mutex::new(Registry::default()),
+            standalone_compat,
         }
     }
 
@@ -287,6 +299,10 @@ impl Host {
 
         let bridge_id = format!("{ID_PREFIX}{client_id}:{}", Uuid::new_v4().simple());
         let original_id = object.get("id").expect("id checked").clone();
+        let method = object
+            .get("method")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         self.registry
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -296,6 +312,7 @@ impl Host {
                 PendingRoute {
                     client_id,
                     original_id,
+                    method,
                 },
             );
 
@@ -354,6 +371,11 @@ impl Host {
             return;
         };
         let mut response = object.clone();
+        if self.standalone_compat && route.method.as_deref() == Some("getInfo") {
+            if let Some(result) = response.get_mut("result").and_then(Value::as_object_mut) {
+                result.remove("agentRequestHeaderEnabled");
+            }
+        }
         response.insert("id".to_owned(), route.original_id);
         if Self::write_locked(&writer, &Value::Object(response)).is_err() {
             self.drop_client(route.client_id);
@@ -451,6 +473,11 @@ fn socket_path_for_pid(pid: u32) -> PathBuf {
     Path::new(BRIDGE_DIR).join(format!("agentic-browser-host-{pid}.sock"))
 }
 
+fn standalone_compat_enabled() -> bool {
+    std::env::var_os("AGENTIC_BROWSER_HOST_STANDALONE_COMPAT").as_deref()
+        == Some(std::ffi::OsStr::new("1"))
+}
+
 pub fn run() {
     let socket_path = socket_path_for_pid(std::process::id());
     let logger = Logger::new(LOG_PATH);
@@ -460,7 +487,14 @@ pub fn run() {
         std::process::id()
     ));
 
-    let host = Arc::new(Host::new(&socket_path, LOG_PATH, Box::new(io::stdout())));
+    let standalone_compat = standalone_compat_enabled();
+    logger.log(format!("standalone compatibility={standalone_compat}"));
+    let host = Arc::new(Host::new_with_standalone_compat(
+        &socket_path,
+        LOG_PATH,
+        Box::new(io::stdout()),
+        standalone_compat,
+    ));
     match prepare_socket(&socket_path, &logger) {
         Ok(listener) => {
             let socket_host = Arc::clone(&host);
@@ -548,6 +582,19 @@ mod tests {
                 "/tmp/test-browser-host.sock",
                 "/dev/null",
                 Box::new(extension.clone()),
+            ),
+            extension,
+        )
+    }
+
+    fn compat_test_host() -> (Host, SharedBuffer) {
+        let extension = SharedBuffer::default();
+        (
+            Host::new_with_standalone_compat(
+                "/tmp/test-browser-host.sock",
+                "/dev/null",
+                Box::new(extension.clone()),
+                true,
             ),
             extension,
         )
@@ -779,6 +826,38 @@ mod tests {
         assert_eq!(
             second_client.messages(),
             vec![json!({"id": "two", "result": "second"})]
+        );
+    }
+
+    #[test]
+    fn standalone_compat_hides_agent_request_header_capability_for_get_info() {
+        let (host, extension) = compat_test_host();
+        let client = SharedBuffer::default();
+        let client_id = host.register_client(Box::new(client.clone()), None);
+
+        host.handle_client_message(
+            client_id,
+            json!({"jsonrpc": "2.0", "id": 1, "method": "getInfo"}),
+        )
+        .unwrap();
+        let bridge_id = extension.messages()[0]["id"].as_str().unwrap().to_owned();
+        host.handle_extension_message(json!({
+            "jsonrpc": "2.0",
+            "id": bridge_id,
+            "result": {
+                "family": "chrome",
+                "agentRequestHeaderEnabled": false,
+            },
+        }))
+        .unwrap();
+
+        assert_eq!(
+            client.messages(),
+            vec![json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {"family": "chrome"},
+            })]
         );
     }
 }

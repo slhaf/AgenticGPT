@@ -1,6 +1,6 @@
 # Browser Host Runtime — Progress
 
-Status: baseline-compatible Rust translation accepted after real ARM64/Neko replacement smoke; ready for full Agentic Browser E2E.
+Status: Rust host translation and Linux ARM64 clean-room Agentic Browser E2E accepted; reproducible public installation/deployment plumbing remains.
 
 ## Translation pass
 
@@ -25,6 +25,18 @@ Passed final `cargo test -p agentic-browser-host` (9 tests), `cargo fmt --all --
 - Re-ran the exact existing `/srv/apps/neko-browser-host/probe.py` against the Rust host without changing the probe. `bridge.getStatus`, `getInfo`, `getUserTabs`, `claimUserTab`, `attach`, `Target.setAutoAttach`, `Runtime.evaluate`, `Page.captureScreenshot`, `detach`, and `finalizeTabs` all succeeded against the real Neko Chromium extension backend. The live BOSS tab returned `readyState=complete`; screenshot capture returned a non-empty payload (`base64Length=355224`).
 - No rollback was required; Neko is currently using the Rust host. The Python implementation and launcher backup remain available as live-test rollback evidence only.
 
+## Standalone compatibility and ARM64 clean-room E2E
+
+- Current official extension/runtime behavior reconfirmed the earlier standalone gap: the Neko ChatGPT extension still returns `agentRequestHeaderEnabled:false`; with that field forwarded unchanged, the official Browser service attempts to start Codex app-server and a pure Agentic host fails with `failed to start codex app-server: No such file or directory`. The current official `26.908.70816` Browser bundle still contains both the `agentRequestHeaderEnabled` compatibility branch and `BROWSER_USE_SECURITY_MODE` support.
+- Added an explicit host-only opt-in mode, `AGENTIC_BROWSER_HOST_STANDALONE_COMPAT=1`. Default Rust-host behavior remains Python-baseline-equivalent. In standalone mode, only a routed `getInfo` response has the optional `agentRequestHeaderEnabled` field removed before it reaches Browser service; other responses are unchanged. A focused unit test covers this behavior; the host suite is now 10/10.
+- Rebuilt the ARM64 Rust host and deployed it to Neko with the opt-in compatibility flag. The unchanged baseline probe again passed the real extension sequence; `getInfo` intentionally omitted `agentRequestHeaderEnabled`, BOSS evaluation remained complete, and screenshot capture remained non-empty (`base64Length=355108`).
+- Cross-built the current `agentic-gpt` worktree for ARM64 and started it with an isolated HOME/config/cache on Orange Pi. Starting from an empty Browser cache with `browser.managed.autoProvision=true`, Agentic fetched the signed current official ARM64 package, verified/materialized it, and selected managed runtime `26.908.70816/prod`. `browser.list` reported `runtimeAvailable:true`, and `browser.manual` read/searchable docs from that newly materialized runtime.
+- For this explicit standalone acceptance run, the isolated Agentic process was launched with the official `BROWSER_USE_SECURITY_MODE=disabled-for-local-testing` environment mode. A temporary host bind mount made Neko's `/srv/data/neko-browser/bridge` visible at host `/tmp/codex-browser-use`; both the isolated Agentic process and the bind mount were removed after acceptance.
+- `browser.acquire` created real lease `arm64-e2e` against the Rust-host-backed Neko extension backend. `browser.repl` created an agent-owned tab, navigated to `https://example.com`, and returned `Example Domain`; a second call preserved `globalThis.__armSmoke=41`, proving persistent JavaScript state.
+- Current runtime/backend surface exposed `dom_cua`, `cua`, `playwright`, etc., but not `tab.ax`, despite bundled `accessibility.md` still documenting `tab.ax`. The E2E therefore used the actual current official `tab.dom_cua.get_visible_dom()` surface, which returned the real Example Domain `Learn more` link. This docs/surface mismatch is recorded as an upstream/current-runtime observation rather than hidden by Agentic.
+- Real screenshot passthrough succeeded: `Tab.screenshot()` returned 16,921 bytes and `nodeRepl.emitImage(...)` emerged through outer `browser.repl` as an `image/jpeg` content item.
+- The temporary agent-owned tab was closed (`openTabs=[]`). `browser.reset` returned the lease to `ready`; the subsequent REPL observed both test globals as `undefined` while `browserId` remained `1`, proving JS reset plus Browser re-bootstrap. `browser.release` returned `released:true`, and final `browser.list` showed an empty lease list with the managed runtime still available.
+
 ## Deferred frozen-plan work
 
-Protocol expansion beyond the verified Python behavior, production installation/manifests, and full Agentic `browser.*` ARM64 clean-room end-to-end acceptance remain deferred after this translation pass.
+Production installation/manifests, durable Neko/host socket plumbing, and first-class configuration/launch plumbing for the two explicitly proven standalone compatibility settings remain. The Rust host, official ARM64 managed runtime acquisition, and full Agentic `browser.*` end-to-end path are now live-proven.
