@@ -61,6 +61,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentic-browser-host"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "agentic-gpt"
 version = "0.9.1"
 dependencies = [

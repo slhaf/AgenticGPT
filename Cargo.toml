@@ -4,6 +4,7 @@ members = [
     "crates/agentic-gpt-hub",
     "crates/agentic-gpt-protocol",
     "crates/agentic-apply-patch",
+    "crates/agentic-browser-host",
 ]
 resolver = "2"
 
