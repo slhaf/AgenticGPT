@@ -22,8 +22,7 @@ use crate::state::{
 };
 use crate::utils::{constant_time_equal, random_id, sha256_hex};
 use crate::{
-    api_error, discard_agent_confirmations, handle_confirmation_request, room,
-    send_confirmation_response, REQUEST_TIMEOUT_SECS,
+    api_error, discard_agent_confirmations, handle_confirmation_request, room, REQUEST_TIMEOUT_SECS,
 };
 
 const AGENT_CONNECTION_SWEEP_SECS: u64 = 15;
@@ -117,15 +116,11 @@ pub(crate) async fn post_agent_message(
         return response;
     }
     let connection_id = query.connection_id.unwrap_or_default();
-    let is_current = is_current_connection(&state, &agent_id, &connection_id).await;
-    if !is_current && !is_reliable_agent_message(&message) {
-        return api_error(StatusCode::CONFLICT, "stale_connection", "stale_connection");
-    }
-    if is_current {
-        update_last_seen(&state, &agent_id).ok();
-    }
-    match handle_agent_message(&state, &agent_id, &connection_id, message, is_current).await {
+    match handle_agent_message(&state, &agent_id, &connection_id, message).await {
         Ok(()) => axum::Json(json!({ "ok": true })).into_response(),
+        Err(reason) if reason == "stale_connection" => {
+            api_error(StatusCode::CONFLICT, "stale_connection", reason)
+        }
         Err(reason) => api_error(StatusCode::BAD_REQUEST, "agent_message_rejected", reason),
     }
 }
@@ -218,9 +213,7 @@ async fn handle_socket(state: HubState, agent_id: String, socket: WebSocket) {
                 continue;
             }
         };
-        if let Err(reason) =
-            handle_agent_message(&state, &agent_id, &connection_id, parsed, true).await
-        {
+        if let Err(reason) = handle_agent_message(&state, &agent_id, &connection_id, parsed).await {
             warn!(%agent_id, %connection_id, %reason, "agent message rejected");
         }
     }
@@ -229,17 +222,127 @@ async fn handle_socket(state: HubState, agent_id: String, socket: WebSocket) {
     disconnect_agent(&state, &agent_id, &connection_id).await;
 }
 
+// `agents` is the admission and side-effect linearization guard. While it is
+// held, acquire only short state locks in agents -> room/boot/jobs/
+// confirmations order; do not await network, receivers, or spawned tasks, and
+// do not call helpers that reacquire `state.agents`.
 async fn handle_agent_message(
     state: &HubState,
     agent_id: &str,
     connection_id: &str,
     parsed: AgentMessage,
-    touch_current: bool,
 ) -> std::result::Result<(), String> {
-    if touch_current {
-        touch_agent(state, agent_id).await;
+    let reliable = is_reliable_agent_message(&parsed);
+    let mut agents = state.agents.lock().await;
+    let is_current = agents
+        .get(agent_id)
+        .map(|connection| connection.connection_id == connection_id)
+        .unwrap_or(false);
+    if !reliable && !is_current {
+        return Err("stale_connection".to_string());
     }
-    match parsed {
+    if is_current {
+        let transport = {
+            let connection = agents
+                .get_mut(agent_id)
+                .expect("current connection disappeared under agents guard");
+            connection.last_seen_at = chrono::Utc::now();
+            connection.transport
+        };
+        if transport == AgentTransport::Sse {
+            update_last_seen(state, agent_id).ok();
+        }
+    }
+
+    if reliable {
+        drop(agents);
+        return match parsed {
+            AgentMessage::Response {
+                run_id,
+                request_id,
+                data,
+            } => {
+                let Some(run_id) = run_id else {
+                    return Err("response_run_id_required".to_string());
+                };
+                let outcome =
+                    match runs::store_result(state, agent_id, &run_id, &request_id, &data) {
+                        Ok(outcome) => outcome,
+                        Err(error) => {
+                            warn!(%agent_id, %request_id, %error, "failed to store agent result");
+                            return Err("response_result_store_failed".to_string());
+                        }
+                    };
+                match outcome {
+                    runs::StoreResultOutcome::Unmatched => {
+                        Err("response_run_mismatch".to_string())
+                    }
+                    runs::StoreResultOutcome::Conflict => {
+                        Err("response_result_conflict".to_string())
+                    }
+                    runs::StoreResultOutcome::Stored { command_hash }
+                    | runs::StoreResultOutcome::Duplicate { command_hash } => {
+                        let sender = {
+                            let mut pending = state.pending.lock().await;
+                            let owner_matches = pending.get(&run_id).map(|owner| {
+                                owner.agent_id == agent_id
+                                    && owner.request_id == request_id
+                                    && owner.command_hash == command_hash
+                            });
+                            match owner_matches {
+                                None => None,
+                                Some(true) => pending.remove(&run_id).map(|pending| pending.sender),
+                                Some(false) => {
+                                    return Err("response_waiter_owner_mismatch".to_string());
+                                }
+                            }
+                        };
+                        if let Some(sender) = sender {
+                            let _ = sender.send(data);
+                        }
+                        Ok(())
+                    }
+                }
+            }
+            AgentMessage::TransportAck {
+                event_id: _,
+                run_id,
+                request_id,
+                command_hash,
+            } => {
+                let matched =
+                    runs::mark_acked(state, agent_id, &run_id, &request_id, &command_hash)
+                        .map_err(|error| error.to_string())?;
+                if !matched {
+                    return Err("transport_ack_run_mismatch".to_string());
+                }
+                Ok(())
+            }
+            AgentMessage::TransportRunStatus {
+                run_id,
+                request_id,
+                status,
+                reason,
+            } => {
+                let matched = runs::mark_status(
+                    state,
+                    agent_id,
+                    &run_id,
+                    &request_id,
+                    &status,
+                    reason.as_deref(),
+                )
+                .map_err(|error| error.to_string())?;
+                if !matched {
+                    return Err("transport_status_run_mismatch".to_string());
+                }
+                Ok(())
+            }
+            _ => unreachable!("reliable message classification drifted"),
+        };
+    }
+
+    let replay_sender = match parsed {
         AgentMessage::Hello {
             boot_generation,
             role,
@@ -259,43 +362,34 @@ async fn handle_agent_message(
                 if generation_changed {
                     mark_cached_jobs_unknown_after_restart(state, agent_id).await;
                 }
-                {
-                    let mut agents = state.agents.lock().await;
-                    if let Some(connection) = agents.get_mut(agent_id) {
-                        connection.role = role;
-                        connection.connection_mode = connection_mode;
-                        connection.hello_received = true;
-                        connection.boot_generation = Some(boot_generation);
-                        connection.config_summary = Some(config_summary);
-                        connection.notification_channels = notification_channels;
-                    }
-                }
+                let connection = agents
+                    .get_mut(agent_id)
+                    .expect("current connection disappeared under agents guard");
+                connection.role = role;
+                connection.connection_mode = connection_mode;
+                connection.hello_received = true;
+                connection.boot_generation = Some(boot_generation);
+                connection.config_summary = Some(config_summary);
+                connection.notification_channels = notification_channels;
                 if connection_mode == AgentConnectionMode::CommandCapable {
-                    let sender = state
-                        .agents
-                        .lock()
-                        .await
-                        .get(agent_id)
-                        .filter(|connection| connection.connection_id == connection_id)
-                        .map(|connection| connection.sender.clone());
-                    if let Some(sender) = sender {
-                        send_pending_replays(state, agent_id, &sender).await;
-                    }
+                    Some(connection.sender.clone())
+                } else {
+                    None
                 }
             }
             Err(reason) => {
                 warn!(%agent_id, %connection_id, %reason, "room role rejected");
-                send_to_connection(
-                    state,
-                    agent_id,
-                    connection_id,
-                    serde_json::to_string(&json!({
-                        "error": { "code": reason, "message": reason }
-                    }))
-                    .map_err(|error| error.to_string())?,
-                )
-                .await;
-                close_connection(state, agent_id, connection_id).await;
+                let text = serde_json::to_string(&json!({
+                    "error": { "code": reason, "message": reason }
+                }))
+                .map_err(|error| error.to_string())?;
+                let sender = agents
+                    .get(agent_id)
+                    .expect("current connection disappeared under agents guard")
+                    .sender
+                    .clone();
+                let _ = sender.send(OutboundAgentMessage::Text(text));
+                let _ = sender.send(OutboundAgentMessage::Close);
                 return Err(reason.to_string());
             }
         },
@@ -304,13 +398,14 @@ async fn handle_agent_message(
                 sent_at,
                 received_at: chrono::Utc::now(),
             };
-            send_to_connection(
-                state,
-                agent_id,
-                connection_id,
-                serde_json::to_string(&ack).map_err(|error| error.to_string())?,
-            )
-            .await;
+            let text = serde_json::to_string(&ack).map_err(|error| error.to_string())?;
+            let sender = agents
+                .get(agent_id)
+                .expect("current connection disappeared under agents guard")
+                .sender
+                .clone();
+            let _ = sender.send(OutboundAgentMessage::Text(text));
+            None
         }
         AgentMessage::JobUpdate { job } => {
             state
@@ -320,87 +415,13 @@ async fn handle_agent_message(
                 .entry(agent_id.to_string())
                 .or_default()
                 .insert(job.job_id.clone(), job);
+            None
         }
         AgentMessage::RunReport { report } => {
             if let Err(error) = runs::upsert_agent_report(state, agent_id, *report) {
                 warn!(%agent_id, %error, "failed to store agent run report");
             }
-        }
-        AgentMessage::Response {
-            run_id,
-            request_id,
-            data,
-        } => {
-            let Some(run_id) = run_id else {
-                return Err("response_run_id_required".to_string());
-            };
-            let outcome = match runs::store_result(state, agent_id, &run_id, &request_id, &data) {
-                Ok(outcome) => outcome,
-                Err(error) => {
-                    warn!(%agent_id, %request_id, %error, "failed to store agent result");
-                    return Err("response_result_store_failed".to_string());
-                }
-            };
-            match outcome {
-                runs::StoreResultOutcome::Unmatched => {
-                    return Err("response_run_mismatch".to_string());
-                }
-                runs::StoreResultOutcome::Conflict => {
-                    return Err("response_result_conflict".to_string());
-                }
-                runs::StoreResultOutcome::Stored { command_hash }
-                | runs::StoreResultOutcome::Duplicate { command_hash } => {
-                    let sender = {
-                        let mut pending = state.pending.lock().await;
-                        let owner_matches = pending.get(&run_id).map(|owner| {
-                            owner.agent_id == agent_id
-                                && owner.request_id == request_id
-                                && owner.command_hash == command_hash
-                        });
-                        match owner_matches {
-                            None => None,
-                            Some(true) => pending.remove(&run_id).map(|pending| pending.sender),
-                            Some(false) => {
-                                return Err("response_waiter_owner_mismatch".to_string());
-                            }
-                        }
-                    };
-                    if let Some(sender) = sender {
-                        let _ = sender.send(data);
-                    }
-                }
-            }
-        }
-        AgentMessage::TransportAck {
-            event_id: _,
-            run_id,
-            request_id,
-            command_hash,
-        } => {
-            let matched = runs::mark_acked(state, agent_id, &run_id, &request_id, &command_hash)
-                .map_err(|error| error.to_string())?;
-            if !matched {
-                return Err("transport_ack_run_mismatch".to_string());
-            }
-        }
-        AgentMessage::TransportRunStatus {
-            run_id,
-            request_id,
-            status,
-            reason,
-        } => {
-            let matched = runs::mark_status(
-                state,
-                agent_id,
-                &run_id,
-                &request_id,
-                &status,
-                reason.as_deref(),
-            )
-            .map_err(|error| error.to_string())?;
-            if !matched {
-                return Err("transport_status_run_mismatch".to_string());
-            }
+            None
         }
         AgentMessage::ConfirmationRequest {
             request_id,
@@ -414,14 +435,18 @@ async fn handle_agent_message(
                     requestAgentId = %request_agent_id,
                     "rejected confirmation request with mismatched agentId"
                 );
-                send_confirmation_response(
-                    state,
-                    agent_id,
-                    &request_id,
-                    agentic_gpt_protocol::ConfirmationDecision::ProviderUnavailable,
-                    "agent_id_mismatch",
-                )
-                .await;
+                let message = HubMessage::ConfirmationResponse {
+                    request_id: request_id.clone(),
+                    decision: agentic_gpt_protocol::ConfirmationDecision::ProviderUnavailable,
+                    reason: "agent_id_mismatch".to_string(),
+                };
+                let text = serde_json::to_string(&message).map_err(|error| error.to_string())?;
+                let sender = agents
+                    .get(agent_id)
+                    .expect("current connection disappeared under agents guard")
+                    .sender
+                    .clone();
+                let _ = sender.send(OutboundAgentMessage::Text(text));
                 return Err("agent_id_mismatch".to_string());
             }
             let state = state.clone();
@@ -439,20 +464,21 @@ async fn handle_agent_message(
                     warn!(%error, "confirmation request failed");
                 }
             });
+            None
         }
+        AgentMessage::Response { .. }
+        | AgentMessage::TransportAck { .. }
+        | AgentMessage::TransportRunStatus { .. } => {
+            unreachable!("reliable message classification drifted")
+        }
+    };
+    drop(agents);
+    if let Some(sender) = replay_sender {
+        send_pending_replays(state, agent_id, &sender).await;
     }
     Ok(())
 }
 
-async fn is_current_connection(state: &HubState, agent_id: &str, connection_id: &str) -> bool {
-    state
-        .agents
-        .lock()
-        .await
-        .get(agent_id)
-        .map(|connection| connection.connection_id == connection_id)
-        .unwrap_or(false)
-}
 
 fn is_reliable_agent_message(message: &AgentMessage) -> bool {
     matches!(
@@ -477,31 +503,7 @@ async fn register_connection_mode(
     room::register_connection_role(state, agent_id, connection_id, role).await
 }
 
-async fn send_to_connection(state: &HubState, agent_id: &str, connection_id: &str, text: String) {
-    let sender = {
-        let agents = state.agents.lock().await;
-        agents
-            .get(agent_id)
-            .filter(|connection| connection.connection_id == connection_id)
-            .map(|connection| connection.sender.clone())
-    };
-    if let Some(sender) = sender {
-        let _ = sender.send(OutboundAgentMessage::Text(text));
-    }
-}
 
-async fn close_connection(state: &HubState, agent_id: &str, connection_id: &str) {
-    let sender = {
-        let agents = state.agents.lock().await;
-        agents
-            .get(agent_id)
-            .filter(|connection| connection.connection_id == connection_id)
-            .map(|connection| connection.sender.clone())
-    };
-    if let Some(sender) = sender {
-        let _ = sender.send(OutboundAgentMessage::Close);
-    }
-}
 
 async fn disconnect_agent(state: &HubState, agent_id: &str, connection_id: &str) {
     let removed_current_connection = {
@@ -853,20 +855,18 @@ async fn mark_cached_jobs_unknown_after_restart(state: &HubState, agent_id: &str
     }
 }
 
-async fn touch_agent(state: &HubState, agent_id: &str) {
-    if let Some(connection) = state.agents.lock().await.get_mut(agent_id) {
-        connection.last_seen_at = chrono::Utc::now();
-    }
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::db::init_db;
     use crate::{HubConfig, McpProfile, NtfyConfig, RemoteConfirmationConfig};
-    use agentic_gpt_protocol::{Capabilities, ExecRequest, JobKind, SafeConfigSummary};
+    use agentic_gpt_protocol::{
+        AgentRunReport, Capabilities, ConfirmationPayload, ExecRequest, JobKind, SafeConfigSummary,
+    };
     use axum::body::to_bytes;
     use axum::http::HeaderValue;
+    use crate::state::PendingConfirmation;
     use rusqlite::{params, Connection};
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex as StdMutex};
@@ -1122,7 +1122,6 @@ mod tests {
                 config_summary: test_config_summary(),
                 notification_channels: Vec::new(),
             },
-            false,
         )
         .await
         .unwrap();
