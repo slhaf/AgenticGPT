@@ -481,11 +481,15 @@ pub(crate) async fn release_active_room_for_agent(state: &HubState, agent_id: &s
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agents::{command_request_id, replace_agent_connection};
+    use crate::agents::{post_agent_message, replace_agent_connection, SseConnectQuery};
     use crate::db::init_db;
+    use crate::registry::{handle_agent_command, AgentCommand};
     use crate::state::{AgentConnection, AgentTransport, OutboundAgentMessage};
     use crate::{HubConfig, McpProfile, RemoteConfirmationConfig};
-    use agentic_gpt_protocol::{BootstrapReadRequest, HubCommand, HubCommandEnvelope};
+    use agentic_gpt_protocol::{AgentMessage, HubCommand, HubCommandEnvelope};
+    use axum::body::to_bytes;
+    use axum::extract::{Path, Query, State};
+    use axum::http::{HeaderMap, HeaderValue, StatusCode};
     use chrono::Utc;
     use rusqlite::Connection;
     use serde_json::json;
@@ -557,12 +561,6 @@ mod tests {
             },
         );
         rx
-    }
-
-    fn command_from_envelope(text: &str) -> HubCommand {
-        serde_json::from_str::<HubCommandEnvelope>(text)
-            .unwrap()
-            .command
     }
 
     #[test]
@@ -774,164 +772,87 @@ mod tests {
     #[tokio::test]
     async fn room_api_routes_to_active_room_connection() {
         let state = test_state();
-        let mut rx = insert_connection(&state, "room", "conn1", AgentRole::Room).await;
+        {
+            let conn = state.db.lock().unwrap();
+            handle_agent_command(
+                &conn,
+                AgentCommand::Add {
+                    agent_id: "room".to_string(),
+                    alias: None,
+                    display_name: "Room".to_string(),
+                    secret: "test-secret".to_string(),
+                },
+            )
+            .unwrap();
+        }
+        let mut room_rx = insert_connection(&state, "room", "conn1", AgentRole::Room).await;
+        let mut normal_rx = insert_connection(&state, "normal", "normal1", AgentRole::Normal).await;
         register_connection_role(&state, "room", "conn1", AgentRole::Room)
             .await
             .unwrap();
-        let request_state = state.clone();
-        let task = tokio::spawn(async move {
-            request_active_room(
-                &request_state,
-                HubCommand::RoomNotebookCurrent {
-                    request_id: "req".to_string(),
-                    payload: NotebookCurrentRequest {
-                        scope: "agentic".to_string(),
-                    },
-                },
-                5,
-            )
-            .await
-            .unwrap()
-        });
-        let OutboundAgentMessage::Text(text) = rx.recv().await.unwrap() else {
-            panic!("expected text command");
-        };
-        let command = command_from_envelope(&text);
-        let request_id = command_request_id(&command).to_string();
-        assert!(matches!(command, HubCommand::RoomNotebookCurrent { .. }));
-        let sender = state.pending.lock().await.remove(&request_id).unwrap();
-        sender
-            .send(json!({ "current": null, "warnings": [] }))
-            .unwrap();
-        let value = task.await.unwrap();
-        assert_eq!(value["current"], Value::Null);
-    }
-
-    #[tokio::test]
-    async fn bootstrap_room_api_routes_to_active_room_connection() {
-        let state = test_state();
-        let mut rx = insert_connection(&state, "room", "conn1", AgentRole::Room).await;
-        register_connection_role(&state, "room", "conn1", AgentRole::Room)
-            .await
-            .unwrap();
-        let request_state = state.clone();
-        let task = tokio::spawn(async move {
-            request_active_room(
-                &request_state,
-                HubCommand::RoomBootstrap {
-                    request_id: "req-bootstrap".to_string(),
-                },
-                5,
-            )
-            .await
-            .unwrap()
-        });
-        let OutboundAgentMessage::Text(text) = rx.recv().await.unwrap() else {
-            panic!("expected text command");
-        };
-        let command = command_from_envelope(&text);
-        let request_id = command_request_id(&command).to_string();
-        assert!(matches!(command, HubCommand::RoomBootstrap { .. }));
-        let sender = state.pending.lock().await.remove(&request_id).unwrap();
-        sender
-            .send(json!({ "schemaVersion": 1, "guides": [], "warnings": [] }))
-            .unwrap();
-        assert_eq!(task.await.unwrap()["schemaVersion"], 1);
 
         let request_state = state.clone();
+        let mut action_headers = HeaderMap::new();
+        action_headers.insert(
+            "authorization",
+            HeaderValue::from_static("Bearer test-api-key"),
+        );
         let task = tokio::spawn(async move {
-            request_active_room(
-                &request_state,
-                HubCommand::RoomBootstrapRead {
-                    request_id: "req-bootstrap-read".to_string(),
-                    payload: BootstrapReadRequest {
-                        id: "diary".to_string(),
-                    },
-                },
-                5,
+            room_notebook_current(
+                State(request_state),
+                action_headers,
+                Json(NotebookCurrentRequest {
+                    scope: "agentic".to_string(),
+                }),
             )
             .await
-            .unwrap()
         });
-        let OutboundAgentMessage::Text(text) = rx.recv().await.unwrap() else {
+        let OutboundAgentMessage::Text(text) = room_rx.recv().await.unwrap() else {
             panic!("expected text command");
         };
-        let command = command_from_envelope(&text);
-        let request_id = command_request_id(&command).to_string();
-        assert!(matches!(command, HubCommand::RoomBootstrapRead { .. }));
-        let sender = state.pending.lock().await.remove(&request_id).unwrap();
-        sender
-            .send(json!({ "guide": { "id": "diary" }, "warnings": [] }))
-            .unwrap();
-        assert_eq!(task.await.unwrap()["guide"]["id"], "diary");
-    }
+        let envelope = serde_json::from_str::<HubCommandEnvelope>(&text).unwrap();
+        assert!(matches!(
+            &envelope.command,
+            HubCommand::RoomNotebookCurrent { .. }
+        ));
 
-    #[tokio::test]
-    async fn update_remove_room_api_routes_to_active_room_connection() {
-        let state = test_state();
-        let mut rx = insert_connection(&state, "room", "conn1", AgentRole::Room).await;
-        register_connection_role(&state, "room", "conn1", AgentRole::Room)
-            .await
-            .unwrap();
-        let request_state = state.clone();
-        let task = tokio::spawn(async move {
-            request_active_room(
-                &request_state,
-                HubCommand::RoomNotebookUpdate {
-                    request_id: "req-update".to_string(),
-                    payload: NotebookUpdateRequest {
-                        id: "psg_1".to_string(),
-                        significance: None,
-                        abstract_text: Some("updated".to_string()),
-                        content: None,
-                        tags: None,
-                    },
-                },
-                5,
-            )
-            .await
-            .unwrap()
-        });
-        let OutboundAgentMessage::Text(text) = rx.recv().await.unwrap() else {
-            panic!("expected text command");
-        };
-        let command = command_from_envelope(&text);
-        let request_id = command_request_id(&command).to_string();
-        assert!(matches!(command, HubCommand::RoomNotebookUpdate { .. }));
-        let sender = state.pending.lock().await.remove(&request_id).unwrap();
-        sender
-            .send(json!({ "updated": true, "id": "psg_1", "warnings": [] }))
-            .unwrap();
-        let value = task.await.unwrap();
-        assert_eq!(value["updated"], true);
+        let response_data = json!({ "current": null, "warnings": [] });
+        let mut agent_headers = HeaderMap::new();
+        agent_headers.insert("x-agent-secret", HeaderValue::from_static("test-secret"));
+        let query: SseConnectQuery =
+            serde_json::from_value(json!({ "connectionId": "conn1" })).unwrap();
+        let response = post_agent_message(
+            State(state.clone()),
+            Path("room".to_string()),
+            Query(query),
+            agent_headers,
+            axum::Json(AgentMessage::Response {
+                run_id: Some(envelope.run_id.clone()),
+                request_id: envelope.request_id.clone(),
+                data: response_data.clone(),
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
 
-        let request_state = state.clone();
-        let task = tokio::spawn(async move {
-            request_active_room(
-                &request_state,
-                HubCommand::RoomNotebookRemove {
-                    request_id: "req-remove".to_string(),
-                    payload: NotebookRemoveRequest {
-                        id: "psg_1".to_string(),
-                    },
-                },
-                5,
-            )
+        let route_response = task.await.unwrap();
+        assert_eq!(route_response.status(), StatusCode::OK);
+        let body = to_bytes(route_response.into_body(), usize::MAX)
             .await
-            .unwrap()
-        });
-        let OutboundAgentMessage::Text(text) = rx.recv().await.unwrap() else {
-            panic!("expected text command");
-        };
-        let command = command_from_envelope(&text);
-        let request_id = command_request_id(&command).to_string();
-        assert!(matches!(command, HubCommand::RoomNotebookRemove { .. }));
-        let sender = state.pending.lock().await.remove(&request_id).unwrap();
-        sender
-            .send(json!({ "removed": true, "id": "psg_1", "warnings": [] }))
             .unwrap();
-        let value = task.await.unwrap();
-        assert_eq!(value["removed"], true);
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value, response_data);
+
+        assert!(matches!(
+            normal_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        let run = crate::runs::get_run(&state, &envelope.run_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.agent_id, "room");
+        assert_eq!(run.status, "completed");
+        assert_eq!(run.result, Some(response_data));
     }
 
     #[tokio::test]

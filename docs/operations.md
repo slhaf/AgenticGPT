@@ -82,6 +82,22 @@ Expected JSON includes `service`, `version`, `remoteConfirmation`, `agents`, `co
 6. Validate `/mcp` and refresh Actions schema when the contract changed.
 7. If Standalone reporting is enabled, confirm reporting-only connections reject Hub execution.
 
+### Hub Response ownership cutover
+
+Use this procedure when moving to a Hub build with the Response ownership fix:
+
+1. Identify the exact new Hub artifact and the paired, verified Agent artifact/commit. Do not proceed unless the pair has been verified together.
+2. Pause new requests and wait for in-flight requests to settle. If they cannot be drained, record their `runId` values and retain the corresponding Agent ledger entries.
+3. Stop the Hub. While it is stopped, back up the actual Hub configuration and SQLite database; if present, preserve the matching `-wal` and `-shm` files with the database backup.
+4. Deploy the paired artifacts, restart the Hub, and reconnect the Agent.
+5. Execute one matching request, then verify `GET /v1/runs/{runId}` reports the matching `agentId`, `runId`, and `requestId`, with `status=completed` and the expected `result`.
+
+No SQL, database/schema, configuration-format, or Room-file migration is required. A missing `runId`, previously accepted leniently, is now rejected. The rejection uses `error.code=agent_message_rejected` and one of these fixed reasons: `response_run_id_required`, `response_run_mismatch`, `response_result_conflict`, `response_result_store_failed`, or `response_waiter_owner_mismatch`.
+
+By accepted D06 behavior, a Hub restart loses synchronous waiters, OAuth sessions, and pending sessions. Do not re-execute commands to restore HTTP waits. Durable SQLite results and the Agent ledger remain.
+
+To roll back, pause new requests, restore only the old Hub binary, and continue using the current database and Agent ledger. Never overwrite new results with an old database backup. The old binary reopens the Response ownership defect, so rollback is not risk-free.
+
 ## v0.9 acceptance checklist
 
 ```bash

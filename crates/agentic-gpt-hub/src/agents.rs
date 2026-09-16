@@ -17,7 +17,9 @@ use tracing::{info, warn};
 
 use crate::registry::{registry_entries, registry_entry, update_last_seen};
 use crate::runs;
-use crate::state::{AgentConnection, AgentTransport, HubState, OutboundAgentMessage};
+use crate::state::{
+    AgentConnection, AgentTransport, HubState, OutboundAgentMessage, PendingResponse,
+};
 use crate::utils::{constant_time_equal, random_id, sha256_hex};
 use crate::{
     api_error, discard_agent_confirmations, handle_confirmation_request, room,
@@ -346,9 +348,24 @@ async fn handle_agent_message(
                 runs::StoreResultOutcome::Conflict => {
                     return Err("response_result_conflict".to_string());
                 }
-                runs::StoreResultOutcome::Stored { .. }
-                | runs::StoreResultOutcome::Duplicate { .. } => {
-                    if let Some(sender) = state.pending.lock().await.remove(&request_id) {
+                runs::StoreResultOutcome::Stored { command_hash }
+                | runs::StoreResultOutcome::Duplicate { command_hash } => {
+                    let sender = {
+                        let mut pending = state.pending.lock().await;
+                        let owner_matches = pending.get(&run_id).map(|owner| {
+                            owner.agent_id == agent_id
+                                && owner.request_id == request_id
+                                && owner.command_hash == command_hash
+                        });
+                        match owner_matches {
+                            None => None,
+                            Some(true) => pending.remove(&run_id).map(|pending| pending.sender),
+                            Some(false) => {
+                                return Err("response_waiter_owner_mismatch".to_string());
+                            }
+                        }
+                    };
+                    if let Some(sender) = sender {
                         let _ = sender.send(data);
                     }
                 }
@@ -533,31 +550,37 @@ pub(crate) async fn request_agent(
     }?;
     let run = runs::prepare_run(state, agent_id, &request_id, &command)
         .map_err(|error| error.to_string())?;
+    let text = envelope_text(&run.run_id, &run.request_id, &run.command_hash, command)
+        .map_err(|error| error.to_string())?;
+    let run_id = run.run_id;
+    let run_request_id = run.request_id;
+    let command_hash = run.command_hash;
     let (tx, rx) = oneshot::channel();
-    state.pending.lock().await.insert(request_id.clone(), tx);
-    let text = envelope_text(
-        &run.run_id,
-        &run.request_id,
-        &run.command_hash,
-        command.clone(),
-    )
-    .map_err(|error| error.to_string())?;
+    state.pending.lock().await.insert(
+        run_id.clone(),
+        PendingResponse {
+            agent_id: agent_id.to_string(),
+            request_id: run_request_id,
+            command_hash,
+            sender: tx,
+        },
+    );
     if sender.1.send(OutboundAgentMessage::Text(text)).is_err() {
-        state.pending.lock().await.remove(&request_id);
+        state.pending.lock().await.remove(&run_id);
         disconnect_agent(state, agent_id, &sender.0).await;
         return Err("agent_offline".to_string());
     }
-    if let Err(error) = runs::mark_dispatched(state, &run.run_id) {
-        warn!(runId = %run.run_id, %error, "failed to mark run dispatched");
+    if let Err(error) = runs::mark_dispatched(state, &run_id) {
+        warn!(runId = %run_id, %error, "failed to mark run dispatched");
     }
     match timeout(Duration::from_secs(timeout_secs), rx).await {
         Ok(Ok(value)) => Ok(value),
         _ => {
-            state.pending.lock().await.remove(&request_id);
-            if let Err(error) = runs::mark_timeout(state, &run.run_id, "process_exec_timeout") {
-                warn!(runId = %run.run_id, %error, "failed to mark run timeout");
+            state.pending.lock().await.remove(&run_id);
+            if let Err(error) = runs::mark_timeout(state, &run_id, "process_exec_timeout") {
+                warn!(runId = %run_id, %error, "failed to mark run timeout");
             }
-            Err(format!("process_exec_timeout; runId={}", run.run_id))
+            Err(format!("process_exec_timeout; runId={}", run_id))
         }
     }
 }
@@ -1329,6 +1352,236 @@ mod tests {
         }
     }
     #[tokio::test]
+    async fn response_owner_isolates_runs_sharing_request_id() {
+        let state = test_state();
+        register_agent(&state, "agent", "secret");
+        let mut outbound = insert_connection(&state, "agent", "current", chrono::Utc::now()).await;
+        let request_id = "req_response_owner_shared_request".to_string();
+        let make_command = || HubCommand::Exec {
+            request_id: request_id.clone(),
+            payload: ExecRequest {
+                agent_id: "agent".to_string(),
+                group: None,
+                program: "printf".to_string(),
+                args: vec!["ok".to_string()],
+                need_confirm: false,
+                confirm_method: None,
+                working_directory: None,
+                wait_seconds: None,
+            },
+        };
+
+        let first_command = make_command();
+        let second_command = make_command();
+        let first_state = state.clone();
+        let first_caller =
+            tokio::spawn(
+                async move { request_agent(&first_state, "agent", first_command, 5).await },
+            );
+        let OutboundAgentMessage::Text(first_text) = outbound.recv().await.unwrap() else {
+            panic!("expected first command envelope");
+        };
+        let first_envelope = serde_json::from_str::<HubCommandEnvelope>(&first_text).unwrap();
+
+        let second_state = state.clone();
+        let second_caller =
+            tokio::spawn(
+                async move { request_agent(&second_state, "agent", second_command, 5).await },
+            );
+        let OutboundAgentMessage::Text(second_text) = outbound.recv().await.unwrap() else {
+            panic!("expected second command envelope");
+        };
+        let second_envelope = serde_json::from_str::<HubCommandEnvelope>(&second_text).unwrap();
+
+        assert_eq!(first_envelope.request_id, request_id);
+        assert_eq!(second_envelope.request_id, request_id);
+        assert_ne!(first_envelope.run_id, second_envelope.run_id);
+        assert!(!first_envelope.event_id.is_empty());
+        assert!(!second_envelope.event_id.is_empty());
+        assert!(!first_envelope.command_hash.is_empty());
+        assert!(!second_envelope.command_hash.is_empty());
+
+        let first_data = json!({ "runId": first_envelope.run_id.clone() });
+        let second_data = json!({ "runId": second_envelope.run_id.clone() });
+
+        let second_response = post_response(
+            &state,
+            "agent",
+            "secret",
+            Some(second_envelope.run_id.clone()),
+            second_envelope.request_id.clone(),
+            second_data.clone(),
+        )
+        .await;
+        assert_eq!(second_response.status(), StatusCode::OK);
+
+        let first_response = post_response(
+            &state,
+            "agent",
+            "secret",
+            Some(first_envelope.run_id.clone()),
+            first_envelope.request_id.clone(),
+            first_data.clone(),
+        )
+        .await;
+        assert_eq!(first_response.status(), StatusCode::OK);
+
+        let (first_joined, second_joined) = tokio::join!(first_caller, second_caller);
+        let first_result = first_joined.unwrap().unwrap();
+        let second_result = second_joined.unwrap().unwrap();
+        assert_eq!(first_result, first_data);
+        assert_eq!(second_result, second_data);
+
+        let first_run = runs::get_run(&state, &first_envelope.run_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(first_run.status, "completed");
+        assert_eq!(first_run.result, Some(first_data));
+
+        let second_run = runs::get_run(&state, &second_envelope.run_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(second_run.status, "completed");
+        assert_eq!(second_run.result, Some(second_data));
+    }
+    #[tokio::test]
+    async fn response_owner_timeout_preserves_other_run_and_accepts_late_result() {
+        let state = test_state();
+        register_agent(&state, "agent", "secret");
+        let mut outbound = insert_connection(&state, "agent", "current", chrono::Utc::now()).await;
+        let request_id = "req_response_owner_timeout_shared_request".to_string();
+        let make_command = || HubCommand::Exec {
+            request_id: request_id.clone(),
+            payload: ExecRequest {
+                agent_id: "agent".to_string(),
+                group: None,
+                program: "printf".to_string(),
+                args: vec!["ok".to_string()],
+                need_confirm: false,
+                confirm_method: None,
+                working_directory: None,
+                wait_seconds: None,
+            },
+        };
+        let long_command = make_command();
+        let short_command = make_command();
+        let long_state = state.clone();
+        let long_caller =
+            tokio::spawn(async move { request_agent(&long_state, "agent", long_command, 5).await });
+        let OutboundAgentMessage::Text(long_text) = outbound.recv().await.unwrap() else {
+            panic!("expected long-running command envelope");
+        };
+        let long_envelope = serde_json::from_str::<HubCommandEnvelope>(&long_text).unwrap();
+
+        let short_state = state.clone();
+        let short_caller =
+            tokio::spawn(
+                async move { request_agent(&short_state, "agent", short_command, 0).await },
+            );
+        let OutboundAgentMessage::Text(short_text) = outbound.recv().await.unwrap() else {
+            panic!("expected short-running command envelope");
+        };
+        let short_envelope = serde_json::from_str::<HubCommandEnvelope>(&short_text).unwrap();
+        assert_eq!(long_envelope.request_id, request_id);
+        assert_eq!(short_envelope.request_id, request_id);
+        assert_ne!(long_envelope.run_id, short_envelope.run_id);
+
+        let short_error = short_caller.await.unwrap().unwrap_err();
+        assert_eq!(
+            short_error,
+            format!("process_exec_timeout; runId={}", short_envelope.run_id)
+        );
+        assert!(!long_caller.is_finished());
+
+        let short_data = json!({ "runId": short_envelope.run_id.clone() });
+        let response = post_response(
+            &state,
+            "agent",
+            "secret",
+            Some(short_envelope.run_id.clone()),
+            short_envelope.request_id.clone(),
+            short_data.clone(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(!long_caller.is_finished());
+        let short_run = runs::get_run(&state, &short_envelope.run_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(short_run.status, "completed");
+        assert_eq!(short_run.result, Some(short_data));
+
+        let long_data = json!({ "runId": long_envelope.run_id.clone() });
+        let response = post_response(
+            &state,
+            "agent",
+            "secret",
+            Some(long_envelope.run_id.clone()),
+            long_envelope.request_id.clone(),
+            long_data.clone(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(long_caller.await.unwrap().unwrap(), long_data.clone());
+        let long_run = runs::get_run(&state, &long_envelope.run_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(long_run.status, "completed");
+        assert_eq!(long_run.result, Some(long_data));
+    }
+
+    #[tokio::test]
+    async fn response_owner_checks_pending_hash_against_durable_run() {
+        let (state, _outbound, caller, envelope) =
+            start_response_owner_request("req_response_owner_pending_hash").await;
+        state
+            .pending
+            .lock()
+            .await
+            .get_mut(&envelope.run_id)
+            .expect("request waiter should be present")
+            .command_hash = "tampered-command-hash".to_string();
+
+        let data = json!({ "servers": ["canonical"] });
+        let response = post_response(
+            &state,
+            "agent",
+            "secret",
+            Some(envelope.run_id.clone()),
+            envelope.request_id.clone(),
+            data.clone(),
+        )
+        .await;
+        assert_eq!(
+            rejected_reason(response).await,
+            "response_waiter_owner_mismatch"
+        );
+        assert!(!caller.is_finished());
+        let stored = runs::get_run(&state, &envelope.run_id).unwrap().unwrap();
+        assert_eq!(stored.status, "completed");
+        assert_eq!(stored.result, Some(data.clone()));
+
+        state
+            .pending
+            .lock()
+            .await
+            .get_mut(&envelope.run_id)
+            .expect("mismatched waiter should be retained")
+            .command_hash = envelope.command_hash.clone();
+        let response = post_response(
+            &state,
+            "agent",
+            "secret",
+            Some(envelope.run_id.clone()),
+            envelope.request_id.clone(),
+            data.clone(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(caller.await.unwrap().unwrap(), data);
+    }
+
+    #[tokio::test]
     async fn response_owner_rejects_conflict_and_accepts_duplicate() {
         let (state, _outbound, caller, envelope) =
             start_response_owner_request("req_response_owner_conflict").await;
@@ -1471,6 +1724,17 @@ mod tests {
 
         assert_eq!(result.unwrap_err(), "agent_offline");
         assert!(!state.agents.lock().await.contains_key("agent"));
+        let run_id: String = state
+            .db
+            .lock()
+            .unwrap()
+            .query_row(
+                "select run_id from agent_runs where request_id = ?1",
+                params!["req_send_failed"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!state.pending.lock().await.contains_key(&run_id));
     }
 
     #[tokio::test]

@@ -504,12 +504,15 @@ fn notify_route_error_response(error: NotifyRouteError) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agentic_gpt_protocol::{AgentRole, Capabilities, HubCommandEnvelope};
+    use agentic_gpt_protocol::{AgentMessage, AgentRole, Capabilities, HubCommandEnvelope};
+    use axum::body::to_bytes;
+    use axum::extract::{Path, Query, State};
+    use axum::http::{HeaderValue, StatusCode};
     use rusqlite::Connection;
     use std::sync::{Arc, Mutex as StdMutex};
     use tokio::sync::{mpsc, Mutex};
 
-    use crate::agents::command_request_id;
+    use crate::agents::{post_agent_message, SseConnectQuery};
     use crate::db::init_db;
     use crate::state::{AgentConnection, AgentTransport, OutboundAgentMessage};
     use crate::{HubConfig, McpProfile, RemoteConfirmationConfig};
@@ -578,12 +581,6 @@ mod tests {
             },
         );
         rx
-    }
-
-    fn command_from_envelope(text: &str) -> HubCommand {
-        serde_json::from_str::<HubCommandEnvelope>(text)
-            .unwrap()
-            .command
     }
 
     #[test]
@@ -762,8 +759,8 @@ mod tests {
             .unwrap();
             conn.execute(
                 "insert into agents(agent_id, alias, display_name, enabled, secret_hash, last_seen_at, capabilities_json)
-                 values ('agentic-gpt-slhaf-laptop', 'laptop', 'Laptop', 1, 'hash', null, ?1)",
-                params![capabilities],
+                 values ('agentic-gpt-slhaf-laptop', 'laptop', 'Laptop', 1, ?1, null, ?2)",
+                params![sha256_hex("test-secret"), capabilities],
             )
             .unwrap();
         }
@@ -776,34 +773,87 @@ mod tests {
         .await;
         let request_state = state.clone();
         let task = tokio::spawn(async move {
-            send_user_notification(
-                &request_state,
-                UserNotifySendRequest {
-                    channel_key: "agent::laptop::freedesktop".to_string(),
+            let mut headers = axum::http::HeaderMap::new();
+            headers.insert(
+                "authorization",
+                HeaderValue::from_static("Bearer test-api-key"),
+            );
+            notify_send(
+                State(request_state),
+                headers,
+                Json(UserNotifySendBody {
+                    channel: "agent::laptop::freedesktop".to_string(),
                     title: "Hello".to_string(),
                     body: "World".to_string(),
                     actions: Vec::new(),
                     priority: None,
-                },
+                }),
             )
             .await
-            .unwrap()
         });
         let OutboundAgentMessage::Text(text) = rx.recv().await.unwrap() else {
             panic!("expected command");
         };
-        let command = command_from_envelope(&text);
-        let request_id = command_request_id(&command).to_string();
-        assert!(matches!(command, HubCommand::UserNotifyDeliver { .. }));
-        let sender = state.pending.lock().await.remove(&request_id).unwrap();
-        sender
-            .send(json!({
-                "channelKey": "agent::laptop::freedesktop",
-                "delivered": true
-            }))
+        let envelope = serde_json::from_str::<HubCommandEnvelope>(&text).unwrap();
+        match &envelope.command {
+            HubCommand::UserNotifyDeliver {
+                request_id,
+                payload,
+            } => {
+                assert_eq!(request_id, &envelope.request_id);
+                assert_eq!(payload.channel_key, "agent::laptop::freedesktop");
+                assert_eq!(payload.title, "Hello");
+                assert_eq!(payload.body, "World");
+                assert!(payload.actions.is_empty());
+                assert_eq!(payload.priority, None);
+            }
+            command => panic!("expected user notification command, got {command:?}"),
+        }
+
+        let response_data = json!({
+            "channelKey": "agent::laptop::freedesktop",
+            "delivered": true
+        });
+        let mut agent_headers = axum::http::HeaderMap::new();
+        agent_headers.insert("x-agent-secret", HeaderValue::from_static("test-secret"));
+        let agent_response = post_agent_message(
+            State(state.clone()),
+            Path("agentic-gpt-slhaf-laptop".to_string()),
+            Query(
+                serde_json::from_value::<SseConnectQuery>(json!({"connectionId": "conn1"}))
+                    .unwrap(),
+            ),
+            agent_headers,
+            Json(AgentMessage::Response {
+                run_id: Some(envelope.run_id.clone()),
+                request_id: envelope.request_id.clone(),
+                data: response_data.clone(),
+            }),
+        )
+        .await;
+        assert_eq!(agent_response.status(), StatusCode::OK);
+
+        let route_response = task.await.unwrap();
+        assert_eq!(route_response.status(), StatusCode::OK);
+        let body = to_bytes(route_response.into_body(), usize::MAX)
+            .await
             .unwrap();
-        let response = task.await.unwrap();
-        assert!(response.accepted);
-        assert_eq!(response.channel_key, "agent::laptop::freedesktop");
+        let accepted: UserNotifySendResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            accepted.accepted,
+            response_data["delivered"].as_bool().unwrap()
+        );
+        assert_eq!(
+            accepted.channel_key,
+            response_data["channelKey"].as_str().unwrap()
+        );
+
+        let run = crate::runs::get_run(&state, &envelope.run_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.agent_id, "agentic-gpt-slhaf-laptop");
+        assert_eq!(run.request_id, envelope.request_id);
+        assert_eq!(run.status, "completed");
+        assert_eq!(run.result, Some(response_data));
     }
 }
