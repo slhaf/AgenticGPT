@@ -8,6 +8,8 @@
 
 证据来自源码、CodeGraph 定位、Cargo metadata 与解析后的 OpenAPI。完整分域记录和核验记录位于 `.planning/2026-09-16-architecture-audit/`。本轮没有启动真实 Hub/Agent/Android/浏览器/tunnel，没有读取用户密钥或 `~/.agentic_gpt`。已存在测试是后续验证入口，不是本轮测试通过证明。
 
+用户后续确认的需求与部署事实见[已确认决策](decisions.md)：Room 能力需要远端提供，Hub 未同步属于实现遗漏；实际已有 Neko/container/共享目录与 Unix socket 部署。这些是用户报告，不是本轮运行验证结果。源码现状不因决策确认而被描述为已修复。
+
 规模口径：对已跟踪 `.rs/.kt/.kts/.js/.ts/.py/.sh` 文件统计物理行，含注释、测试、配置和脚本，共 148 文件、91,041 行。执行端 69,497；Hub 9,965；protocol 3,223；apply-patch 1,146；browser-host 866；Console 2,868；其余为示例/实验/脚本。文件大只能说明调查优先级，不能单独证明架构错误。
 
 ## 2. 实际部署与编译边界

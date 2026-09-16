@@ -1,6 +1,8 @@
-# 目标架构（规范草案）
+# 目标架构（技术草案）
 
-> **状态：草案，待维护者和用户确认。** 本文描述目标边界和迁移方向，不表示代码已经按此组织，也不得据此直接删除现有接口或改变权限、协议、部署方式。
+> **状态：技术草案，受已确认的 D01–D08 约束。** 本文描述目标边界和迁移方向，不表示代码已经按此组织，也不得据此直接删除现有接口或改变权限、协议、部署方式。
+>
+> 适用决策： [D01](decisions.md#d01--room-是受控资源不是-agent-记忆运行时) · [D02](decisions.md#d02--room-远端能力必须补齐) · [D03](decisions.md#d03--一次升级明确迁移不刻意维持旧兼容) · [D04](decisions.md#d04--自用部署背景与具体副作用控制并存) · [D05](decisions.md#d05--browser-host-先盘点实际拓扑再收紧机制) · [D06](decisions.md#d06--持久化按正确性与用途分层) · [D07](decisions.md#d07--console-与本轮核心重构解耦) · [D08](decisions.md#d08--不借架构重构扩张范围)。这些决策确定本轮产品边界和工程取舍，不表示相关代码已经改造；剩余内容是实施细节，不是再次请求用户选择。
 >
 > 本文的现状事实来自本轮只读调查、`CodeGraph` 索引和对应调查记录：`.planning/2026-09-16-architecture-audit/execution-survey.md`、`contract-ops-survey.md`、`hub-survey.md`、`hub-supplement.md`、`console-survey.md`、`verification.md`。调查记录中的源码路径和符号是本文件引用的证据；未调查的关系标为“待核验”。
 
@@ -23,18 +25,18 @@ Agentic 的长期定位仍是 **Agent 的受控执行基础设施**：在明确�
 - provider orchestration、模型选择、context manager、reasoning loop 或长期上下文管理；
 - 把 Room Notebook/Diary/State 变成通用长期记忆系统；
 - 因架构整理由五个 crate 强行拆出更多 service/crate；
-- 改变既有默认部署拓扑、权限范围、HTTP 路径、camelCase 名称或 wire 语义而不经过兼容门槛。
+- 未先盘点受影响合同、调用方和迁移影响，就改变既有默认部署拓扑、权限范围、HTTP 路径、camelCase 名称或 wire 语义。破坏性调整按一次协调升级实施，并随真实实现交付迁移文档，而不是维持长期兼容双轨。
 
 ### 1.2 不可变约束
 
-以下约束是目标草案中的硬规则，除非另有明确决策记录，不得由“重构”绕过：
+以下约束是在 D01–D08 已确认前提下的目标硬规则，不得由“重构”绕过：
 
 - **权限不放宽**：入口、profile、toolset、policy 和 confirmation 的变化必须说明授权前后差异；元数据 annotation 不是授权。
 - **等待不等于取消**：Hub/HTTP/MCP 的 caller wait timeout 只结束该等待或标记观察状态，不自动声称远端 Job 已停止；资源自身若有独立 execution deadline，可以按其契约请求终止，但必须有独立状态和 termination evidence。
 - **身份分离**：user/auth principal、`agent_id`、`connection_id`、`run_id`、`request_id`、`event_id`、`job_id`、Room lease 和 Browser lease 不是同一 ID，不得用其中一个代替另一个。
 - **迟到/重复结果必须验证 owner**：至少验证 agent、connection generation（按可靠/非可靠消息规则）、run、request、command hash；不匹配的结果不能唤醒无关 waiter 或覆写终态事实。
 - **真实状态、缓存和占位必须明示**：`live`、`cached`、`stale`、`unknown_after_restart`、`unavailable`、`placeholder` 不得互相冒充。
-- **先盘点兼容性**：变更前必须盘点既有 HTTP/OpenAPI、MCP profile、stdio toolset、协议字段、工具名、camelCase、部署路径和 release 产物；不得只改一侧。
+- **先盘点合同与迁移影响**：变更前必须盘点既有 HTTP/OpenAPI、MCP profile、stdio toolset、协议字段、工具名、camelCase、部署路径和 release 产物；一次升级时迁移全部仓库调用方，不得只改一侧。
 
 ## 2. 目标拓扑
 
@@ -72,7 +74,7 @@ Agentic 的长期定位仍是 **Agent 的受控执行基础设施**：在明确�
 - `agentic-gpt-protocol`：Hub↔Agent wire DTO、消息、命令和必要的纯契约规则。
 - `agentic-apply-patch`：纯 patch 解析/变换算法，不拥有文件系统或策略。
 - `agentic-browser-host`：独立 Browser extension/native-messaging bridge 进程。
-- `console/`：交互适配和 Android 本地 attention；Desktop/Web 是否接远端 Hub 由后续显式 adapter 决策。
+- `console/`：交互适配和 Android 本地 attention；Desktop/Web 当前保持诚实的 UI 壳，remote console、approval board、exec ledger 是独立的未来产品，不是本轮核心完成条件。
 
 `agentic-browser-host` 与 release 一起打包不等于它已经被 `agentic-gpt` 生产调用；现有调查未发现 Agent 对该 crate 的生产 import，目标上仍保持独立进程边界（证据：`execution-survey.md` §1.5、§2.1）。
 
@@ -107,11 +109,11 @@ Console Kotlin modules      （当前不编译依赖 Rust protocol/network clien
 
 运行时调用图不等同于上面的 Rust `use`/Cargo graph：
 
-1. **Hub 远程执行**（现状链条保留其正确方向）：HTTP action 或 Apps `/mcp` → Hub auth/profile/route → `agents::request_agent` → `runs::prepare_run`/pending → protocol envelope 经 WS/SSE → Agent `hub::connect_loop`/可靠 ledger → 共享本地操作层 → 当前 `HubCommand` 支持的 process、Job、tmux、下游 MCP、notify，以及显式暴露的 Room/skills/bootstrap 路径 → Agent Response/JobUpdate/RunReport → Hub receipt/projection/waiter。这里不表示 Hub 已拥有 Agent-local file/Browser 全能力；新的远程 surface 必须另行决定、版本化并经过 owner/security gate。
+1. **Hub 远程执行**（现状链条保留其正确方向）：HTTP action 或 Apps `/mcp` → Hub auth/profile/route → `agents::request_agent` → `runs::prepare_run`/pending → protocol envelope 经 WS/SSE → Agent `hub::connect_loop`/可靠 ledger → 共享本地操作层 → process、Job、tmux、下游 MCP、notify，以及 D02 要求补齐的 Room 读与维护能力 → Agent Response/JobUpdate/RunReport → Hub receipt/projection/waiter。这里不表示 Hub 已拥有 Agent-local file/Browser 全能力；Room 远端入口必须逐项定义输入、结果、错误、权限和生命周期，并可使用与本地不同的 transport projection/schema。
 2. **Local/Standalone/stdio**：local Unix、tunnel stdio、worker HTTP MCP、直接 stdio → Agent MCP framing/ingress → 共享 value-returning operation layer → capability/approval gate → 执行核心和资源适配器。`execution-survey.md` 已确认这几个入口复用真正执行核心，而不是三套 process/file/MCP executor。
 3. **Hub 控制面不反向调用自己的 transport**：HTTP route 与 Apps MCP 是两个入口适配器，二者共享 Hub operation/control logic；一个入口不得通过伪造另一个入口的 HTTP/MCP DTO 来实现复用。
 4. **TUI/CLI**：生产 Process TUI 是通过 Local Unix `job.list` 的观察器，不是第二个 Job executor；配置 TUI 的 commit 是配置/secret 写入适配器。CLI 直接绕过 AppState 的高风险路径应在迁移中纳入同一 operation gate（现状差异见 `execution-survey.md` §2.2）。
-5. **Console**：当前 Android attention 是 Room + AlarmManager/Notification 的 local-only 链；Hub connection field/按钮是 placeholder，不存在 Console→Hub 调用边。未来远程 Hub 操作必须新增明确的 HTTP/WS/SSE client adapter、认证和状态 projection，不能把 token field 接上就宣称集成。
+5. **Console**：当前 Android attention 是 Room + AlarmManager/Notification 的 local-only 链；Hub connection field/按钮是 placeholder，不存在 Console→Hub 调用边。remote console、approval board、exec ledger 不属于本轮核心依赖；未来若作为独立产品接入，必须新增明确的 HTTP/WS/SSE client adapter、认证和状态 projection，不能把 token field 接上就宣称集成。
 6. **Browser**：Agent 的 `BrowserRuntimeManager`/Node kernel 与 `agentic-browser-host` extension bridge 是两个不同运行时边界。若二者需要交互，必须显式经过 bridge contract；不得凭共同的“Browser”命名推断共享 lease 或执行状态。
 
 ### 2.4 运行时分层
@@ -141,7 +143,7 @@ Durability and projections
   └─ Console local Room/UI cache or remote status projection
 ```
 
-`stdio_server` 和 `local_service` 当前存在工具/HubCommand 映射与错误/兼容转换的重复；这是真实的 boundary/metadata 漂移风险，不是两套执行器。目标是逐步使 operation core 成为唯一业务操作入口，保留各 ingress 的 framing、schema、auth 和 projection 责任；不先造一个覆盖所有入口的万能 schema 或万能 registry。
+`stdio_server` 和 `local_service` 当前存在工具/HubCommand 映射与错误/兼容转换的重复；这是真实的 boundary/metadata 漂移风险，不是两套执行器。目标是逐步使 operation core 成为唯一业务操作入口，保留各 ingress 的 framing、schema、auth 和 projection 责任；不先造一个覆盖所有入口的万能 schema 或万能 registry。破坏性接口变更通过一次升级迁移调用方和文档，不以长期兼容转换掩盖语义差异。
 
 ## 3. 模块职责、禁止责任与建议边界
 
@@ -159,7 +161,7 @@ Durability and projections
 | `mcp.rs` | downstream MCP adapter | server config、HTTP/stdio child、batch admission、并发、confirmation、cancel/timeout、结果和 audit | 把下游 provider 的任意副作用伪装为 core sandbox 已隔离；在 Hub 中复制下游 client |
 | `tmux.rs`、相关 CLI 路径 | terminal/tmux adapter | session/pane 观察、paste、structured exec、policy/confirmation（按 operation 分类）和外部 tmux 状态投影 | 让外部 tmux server 的生命周期成为 Hub 所有；保留绕过 AppState 的未审计 consequential path |
 | `hub.rs`、`transport_ledger.rs` | Hub ingress/transport client | WS/SSE Hello/heartbeat、connection generation、可靠 envelope、ACK/replay、run report、ReportingOnly 约束 | 公共 Hub auth/registry；把 reporting 当完整 audit；混淆 tunnel key、worker token、Hub API key |
-| `room_repository.rs`、`room_reads.rs`、`room_maintenance.rs` | Room resource adapter/owner | repository-relative path、symlink/root、schema/scaffold、bounded reads、semantic slots、Git/worktree/preflight/maintenance lock | Hub-owned notebook/diary 内容；通用长期记忆、context manager 或 reasoning loop；无版本地复活旧 JSONL surface |
+| `room/mod.rs`（建议边界：`repository`、`read/{diary,notebook,state}`、`maintenance`；当前对应 `room_repository.rs`、`room_reads.rs`、`room_maintenance.rs`） | Room resource adapter/owner | repository-relative path、symlink/root、schema/scaffold、bounded reads、semantic slots、Git/worktree/preflight/maintenance lock；按真实 seam 划分，不预建通用抽象 | Hub-owned notebook/diary 内容；通用长期记忆、context manager 或 reasoning loop；把维护 preflight 写成纯校验、凭 patch/检查成功声称提交完成、编造 ACID transaction，或静默复活旧 JSONL/append/update 语义 |
 | `skills.rs`、`skill_installs.rs`、`bootstrap.rs` | Skill/bootstrap resource adapters | bounded package/resource read、install journal、digest、activation lease、crash recovery、bootstrap read | provider orchestration、长期记忆；绕过 Process/Skill-specific policy 运行任意脚本 |
 | `browser_distribution.rs`、`browser_runtime.rs`、`browser_kernel.rs`、`browser_manager.rs`、`browser_manual.rs` | Browser runtime/resource adapter | package provenance、descriptor/cache discovery、Node kernel、named lease、reaper/reset、bounded manual docs read | 把 arbitrary JS 当作 core sandbox 已覆盖；把 browser lease 传播成 Hub durable state；把 Browser host 当同一实现 |
 | `audit.rs`、`private_state.rs`、`config*.rs` | local durability/config adapter | 配置分层、secret/config commit、private state、history/audit/retention/redaction | 让 best-effort audit 充当 command receipt；在 live reload 中替换 startup-only identity/root 而不重启 |
@@ -176,11 +178,11 @@ Durability and projections
 | `registry.rs`、部分 `state.rs` | Agent registry and connection projection | enabled、alias、secret hash、capability/last-seen 摘要；当前 connection lease 投影 | 持有执行结果的最终效果；把 registry capability 摘要当 Agent runtime authorization 的唯一依据 |
 | `agents.rs` | connection/dispatch/coordination | connection generation、mode/role、pending owner tuple、可靠 envelope、replay/late result 校验、confirmation coordination | 无 owner 校验地消费 waiter；让 stale 非可靠消息更新当前 projection；无条件把 `store_result` failure 当成功 |
 | `runs.rs`、`db.rs` | durable control-plane receipts | `agent_runs` command/hash/ack/status/result/conflict/reason/history、schema/retention/migration；区分 not-sent/sent-unknown/acked/wait-expired/remote-unknown | 把 receipt 当远端副作用证明；把同步 timeout 当远端 cancel；无限增长的 job cache 当历史库 |
-| `room.rs` | active Room lease / RPC façade | active `(agent_id, connection_id)` lease、Room request routing、错误映射、显式版本 adapter | 打开 Room 文件或保存长期 Room content；无版本透明 shim；把 active pointer 当文件锁/持久所有权 |
+| `room.rs` | active Room lease / RPC façade | active `(agent_id, connection_id)` lease、Room request routing、按入口投影结果/错误和必要的窄 surface adapter | 打开 Room 文件或保存长期 Room content；把 active pointer 当文件锁/持久所有权；以透明 alias/shim 隐藏必需远端能力或把不等价 maintenance 当旧 append/update |
 | `notify.rs` | delivery adapter | Agent freedesktop、ntfy 和明确 unavailable 的 Android 状态；投递结果/健康状态 | 借通知接口引入 reminder/task scheduler；把 Android registration placeholder 说成 delivery |
 | `instance_lock.rs`、`utils.rs` | process/security guard | 单 DB serve lock、ID/token/hash 工具、constant-time comparison | 代替业务 owner validation 或持久化设计 |
 
-Hub 内部的 `HubState` 是控制面运行时组合根，不是所有领域状态的总仓库。`active_room` 是租约，`jobs` 是缓存 projection，pending/OAuth/confirmation 是易失 session；它们都不能冒充 Agent 或 Room 的 source of truth。
+Hub 内部的 `HubState` 是控制面运行时组合根，不是所有领域状态的总仓库。`active_room` 是租约，`jobs` 是缓存 projection，OAuth token、pending confirmation 和临时 cache 是易失 session；已产生的 confirmation result、Job history 和错误原因则按实际结果 owner 的 retention 尽量保留。它们都不能冒充 Agent 或 Room 的 source of truth；pending 会话失效也不能推断已批准、已取消或任务已停止。
 
 ### 3.3 Protocol、Apply Patch、Browser Host
 
@@ -188,9 +190,9 @@ Hub 内部的 `HubState` 是控制面运行时组合根，不是所有领域状�
 |---|---|---|
 | `agentic-gpt-protocol/src/lib.rs` | `HubCommand`、`AgentMessage`、`HubMessage`、envelope、request/run/hash、Job/confirmation DTO、显式 serde/camelCase 名称和必要的纯验证/边界规则 | filesystem、network、Hub DB、process spawn、policy decision、confirmation delivery、Room/Browser/MCP 业务服务；成为所有入口的万能 schema |
 | `agentic-apply-patch/src/{parser.rs,streaming_parser.rs,file_update.rs,seek_sequence.rs,text_file.rs,lib.rs}` | parse/normalize/compute/apply replacement 的纯算法 | 读写文件、path authorization、secret filtering、确认、audit、Git commit |
-| `agentic-browser-host/src/{main.rs,lib.rs}` | 独立 native messaging/extension framed bridge、client/pending route 生命周期 | 共享 Agent Browser kernel/lease；把 `/tmp` socket 当 owner-only；未经正式 peer/auth 决策作为远程服务暴露 |
+| `agentic-browser-host/src/{main.rs,lib.rs}` | 独立 native messaging/extension framed bridge、client/pending route 生命周期 | 共享 Agent Browser kernel/lease；把共享目录或 socket 当作无需保护；未经明确 peer/auth 机制和部署边界作为网络服务暴露 |
 
-Browser host 当前 socket `/tmp/codex-browser-use` 的 mode 为 0660，调查未见 peer UID 检查；它不能与 Agent local MCP 的 0700 parent/0600 socket 自动视为同一安全等级。正式 owner-only、受限组、peer credential 或一次性 token 方案仍是待确认设计。
+Browser host 当前 socket `/tmp/codex-browser-use` 的 mode 为 0660，调查未见 peer UID 检查；这与 Agent local MCP 的 parent 0700/socket 0600 不是同一安全等级。Neko、container、共享目录与 Unix socket 是需要保留的真实部署拓扑；应先盘点进程/用户/容器、挂载、UID/GID、访问主体和连接链，再在实施中选择 peer credential、token、组/文件权限等收紧机制，不预选 owner-only。任何本地 bridge 仍不得无授权暴露到网络。
 
 ### 3.4 Console、TUI 和 Demo
 
@@ -208,7 +210,7 @@ Console 当前只有 Android 本地 attention 具有真实 side effect：Room �
 
 完整的“当前路径 → 目标逻辑模块”映射已经按 owner 写在 §3：Agent 见 §3.1，Hub 见 §3.2，Protocol/Apply Patch/Browser Host 见 §3.3，Console/TUI/Demo 见 §3.4。§3 的第一列保留现有路径/符号，第二列是目标逻辑模块；这些目标目录尚不存在，不能把映射表当作已完成迁移。
 
-使用映射时，先按 source of truth 和副作用 owner 选择 §3 模块，再按入口类型接入 §2.4 的 operation core。只为更名或“看起来分层”重复建立 facade；若确需搬迁，必须保留兼容边界、旧路径迁移记录和回退方案。
+使用映射时，先按 source of truth 和副作用 owner 选择 §3 模块，再按入口类型接入 §2.4 的 operation core。只为更名或“看起来分层”重复建立 facade；若确需搬迁，必须保留调用方迁移记录、发布文档和回退边界，不以长期 alias/shim 或双轨执行替代 clean cutover。
 
 ### 4.1 建议目录（尚不存在）
 
@@ -219,7 +221,7 @@ crates/agentic-gpt/src/
   ingress/       # stdio, local, HTTP, Hub transport adapters
   operation/     # request context, capability/approval, shared value layer
   execution/     # jobs, process, policy, confirmation, cancellation
-  resources/     # files, MCP, tmux, Room, Skills, Browser
+  resources/     # files, MCP, tmux, Room（room/mod.rs 建议按 repository/read/{diary,notebook,state}/maintenance 划 seam）, Skills, Browser
   durability/    # job history, transport ledger, audit, private state
   tui/ config*/  # existing interaction/config surfaces
 
@@ -247,7 +249,8 @@ crates/agentic-gpt-hub/src/
 | Android attention item | Android Room `agentic_attention.db` | Compose UI state、AlarmManager/notification PendingIntent | OS alarm/notification 不得当数据库；Hub item 不得伪装成 LocalMock |
 | Browser named lease/kernel | Agent 进程内 `BrowserRuntimeManager` | audit/result metadata | Hub durable map 或 browser-host client map 不得代替 Agent lease |
 | Browser extension bridge client/pending route（若启用） | 独立 `agentic-browser-host` 进程 | framed response/status | 不得假定与 Agent BrowserManager 共享 state；socket 可访问性不得由“本地”一词证明 |
-| OAuth code/token、pending confirmation、Hub Job cache | Hub 内存 session/projection | status/error response | 不得在文档中承诺 Hub 重启可恢复，除非先改变 durability contract |
+| OAuth code/token、pending confirmation、Hub Job cache | Hub 内存 session/projection | status/error response | Hub 重启可使 OAuth/pending/cache 失效；失效不得变成默认批准、远端停止或结果丢失的推断 |
+| 已产生的 confirmation result、关联 Job history 与错误原因 | 实际结果 owner 的 Agent history/Hub receipt（按明确 retention） | status/error/history projection | 不得因 pending session 失效而抹掉已产生结果；audit/telemetry 也不能替代结果事实 |
 | audit/report/telemetry | 各自明确的 evidence/projection durability（当前 audit/report 有 best-effort 成分） | 运维日志、Hub report、TUI/Console 摘要 | telemetry 丢失不得伪装为 command outcome；敏感 args/CWD 不能无界扩散 |
 
 ### 5.1 运行身份模型
@@ -279,7 +282,7 @@ principal/auth context
 **规则**：
 
 - `exec::preflight` 的路径启发式检查不等于 OS sandbox；`bwrap` 当前受配置控制且默认关闭，不能在文档中宣称 generic process 已被 roots 隔离。
-- sandbox enforcement、trusted external effect 和兼容默认值必须分开描述；不要为架构整理直接偷偷把 sandbox 默认打开，也不要把未受 core sandbox 约束的 MCP stdio/Browser JS/tmux/tunnel child 说成同一安全等级。caller wait timeout 不能覆盖资源自身可终止的 execution deadline；二者必须使用不同状态和 evidence。
+- sandbox enforcement、外部执行的信任假设和既有安全默认必须分开描述；自用可控环境不等于脚本/MCP/Browser代码完全可信。本轮不改变 sandbox 默认、policy override 或权限模型，也不把未受 core sandbox 约束的 MCP stdio/Browser JS/tmux/tunnel child 说成同一安全等级。caller wait timeout 不能覆盖资源自身可终止的 execution deadline；二者必须使用不同状态和 evidence。
 - 每个 entry 都必须经过相同 operation authorization/gate；CLI `tmux create/close` 等现有绕过路径属于待收敛债务，不应复制。
 
 ### 6.2 File 与 apply-patch
@@ -312,25 +315,26 @@ principal/auth context
 
 Agent Browser 路径（`browser_distribution` → `browser_runtime` → `browser_kernel` → `browser_manager` lease）负责包 provenance、runtime discovery、Node kernel 和进程内 named lease。`browser.repl` 的 arbitrary JavaScript 是显式 open-world/external effect，必须有单独授权/部署说明，不得自动等同于 `policy.rs` 的 process guard。
 
-`agentic-browser-host` 只负责独立 extension bridge。当前固定 `/tmp/codex-browser-use`、socket 0660、未见 peer UID 检查；在正式 owner/peer/token 决策前，目标部署约束仍是本地、不可远程暴露，并将共享 volume/container 视为额外信任边界。实验性 `experimental/chrome-control-poc` 不迁入核心 runtime。
+`agentic-browser-host` 只负责独立 extension bridge。当前固定 `/tmp/codex-browser-use`、socket 0660、未见 peer UID 检查；Neko、container、共享目录与 Unix socket 是需要保留的真实部署拓扑，具体 peer/auth、组/文件权限或 token 机制在盘点后细化，不预选 owner-only。任何本地 bridge 仍不得无授权暴露到网络。实验性 `experimental/chrome-control-poc` 不迁入核心 runtime。
 
 ### 6.5 Room
 
-Room 是受控文件/文档资源，不是通用 memory：
+Room 是受控文件/文档资源，不是通用 memory；D02 已确定所需 Room 读与维护能力必须补齐远端公共面：
 
-- Agent `room_repository` 是路径、root、symlink、Git、schema/scaffold 的资源 owner；`room_reads` 做 bounded read；`room_maintenance` 做 semantic slot/预期变更/提交。
-- Hub `room.rs` 只拥有 active Room `(agent_id, connection_id)` lease、路由和错误映射；Hub 不打开 Room 文件，不把内容装入长期 `HubState`。
-- 当前 Hub Full profile 仍可发现/调用部分 legacy Room tool，但 Agent `local_service` 对旧 `RoomNotebook*`/`RoomDiary*` 返回 `room_legacy_surface_removed`；这证明兼容表面和当前 Agent surface 已分叉，不证明 Room repository 应删除。
-- 目标迁移先由维护者明确哪些 Room 操作需要保留为远端合同；仅对选定的远端合同定义 Hub adapter、版本、字段/错误/权限和真实跨进程验证，其余当前 Agent Room 工具可以继续保持 Agent-local。之后再按版本和消费者逐步移除旧 command；不得添加无条件 legacy shim。
+- **建议模块边界（仅技术布局，不表示代码已搬）**：`room/mod.rs` 作为模块入口，按真实 seam 划分 `repository`（repository-relative path、root、symlink、schema/scaffold、Git readiness）、`read/{diary,notebook,state}`（各资源的 bounded read）和 `maintenance`（semantic slot、预期变更、worktree/tar preflight、受控写入/提交）。
+- Room maintenance 是真实副作用链：本地操作可能写入文件、创建 worktree 或 archive、运行 executor、提交 Git，并可由 `auto_push` 产生或使用 Git remote；workflow 也可以采用本地 request/Git。应逐项记录 policy、confirmation、path/lifecycle gate 和结果 evidence，不能把 preflight 写成纯校验或编造 ACID transaction。
+- Hub `room.rs` 只拥有 active Room `(agent_id, connection_id)` lease、路由与结果/错误投影；Hub 不打开 Room 文件，不把内容装入长期 `HubState`。实际内容、文件/Git 副作用和提交事实仍由 Agent Room repository 所有。
+- Hub→Protocol→Agent 必须覆盖产品要求的 Room 远端读与维护语义；远端与本地应在 operation、权限、错误和生命周期上对齐，但不要求机械复制 transport envelope 或同一输入/输出 schema。各入口应有明确的 surface adapter/parity 记录。
+- 当前 Hub Full profile 与 Agent `local_service` 的 `RoomNotebook*`/`RoomDiary*` 分叉是待修复的合同遗漏，不是永久 unsupported 设计，也不意味着删除 Room repository。一次升级时迁移全部仓库 caller、descriptor、HTTP/OpenAPI、Protocol 与文档，移除被替代旧路径；不得把旧 append/update 静默伪装成不等价 maintenance，也不得添加长期透明 alias/shim。
 
 ### 6.6 Console、Android attention 与 TUI
 
 - Android attention 当前是 local-only：Android Room 保存 item，AlarmManager/Notification 是 OS side effect，boot/action coordinator 重新读取 Room；不引入 Hub reminder scheduler。
 - `AttentionSourceKind.Hub` 是数据模型预留，不是远端 producer；不能将 Hub run/job 写入 Android Room 后称为同步完成。
-- Desktop/Web 当前是 UI 壳，shared `App()` 指向 placeholder；`HubConnectionCard` 只保存短生命周期 UI field。任何 Hub client、Bearer、TLS、WebSocket/SSE、token storage 和 error state 都必须作为新 adapter 单独设计并验证。
+- Desktop/Web 当前是 UI 壳，shared `App()` 指向 placeholder；`HubConnectionCard` 只保存短生命周期 UI field。remote console、approval board、exec ledger 另立产品，不是本轮核心完成条件；若未来接入，另行定义 client、认证、token storage 和状态 projection。
 - 生产 TUI 的 Process screen 通过 local Unix `job.list` 观察；demo 的静态 process/Hub rows 只可借鉴视觉原则，不能成为生产事实。
 
-## 7. 兼容、版本与迁移边界
+## 7. 合同、迁移与发布边界
 
 ### 7.1 多入口 parity gate
 
@@ -342,16 +346,17 @@ Room 是受控文件/文档资源，不是通用 memory：
 - profile/toolset visibility；
 - effect annotation 与真实 authorization；
 - lifecycle（wait、cancel、late result、unknown）；
-- 版本、部署入口和旧客户端行为。
+- 迁移影响、发布/部署组合和回退边界；不要求各 transport 使用同一 schema。
 
 当前调查已发现 HTTP OpenAPI 与实际 Job/Room DTO 存在 `startedAt` optionality、`nextCursor`、`group/cursor/waitOnly`、cancel response、Notebook date 等漂移；这些是后续显式修复项，不得被“Protocol 已有类型”自动覆盖。`openapi/agents-minimal.yaml` 也不得因存在即宣称被 CI/runtime 使用。
 
-### 7.2 公开 legacy surface
+### 7.2 公开合同与 clean cutover
 
-- 公开 legacy parity 只能通过显式版本/迁移说明维护；禁止“顺手加 alias”或在 adapter 中永久吞掉旧错误。
-- 旧命令是否继续存在、何时返回 deprecation、何时删除，必须记录消费者、版本、回退窗口和真实跨进程验证。
-- 历史 release/migration 文档中的版本数字本身不是运行时 bug；真正需要修复的是当前运维指引、descriptor、OpenAPI 和 release artifact 的漂移。
-- 兼容不等于权限放宽：旧客户端不能借 shim 获得新 toolset、Room、Browser 或 execution capability。
+- 项目已公开发布；破坏性变更随同一代码批次提供迁移文档和可执行步骤，说明版本/产物组合、接口/配置变化、备份、升级顺序、验证及回退边界。本文只规定交付要求，不编造尚不存在的命令或版本号。
+- 一次协调升级中迁移全部仓库 caller、descriptor、OpenAPI/Protocol 投影和部署说明，并移除被替代路径；不为历史形状添加长期 alias、shim、双轨执行或额外协议协商。
+- 远端与本地语义需要一致，但各 surface 可拥有自己的输入/输出 projection；显式 adapter 用来表达真实差异，不能用静默转换吞掉旧错误或权限变化。
+- 历史 release/migration 文档中的版本数字本身不是运行时 bug；真正需要修复的是当前运维指引、descriptor、OpenAPI 和 release artifact 的漂移。迁移文档不等于保留旧服务兼容，也不授权删除用户数据。
+
 
 ### 7.3 配置与部署
 
@@ -379,22 +384,22 @@ startup-only identity/root/resource 字段与 live-safe policy/limits 字段必�
 | 先把五 crate 拆成多个 service/crate 或全仓重写 | 编译/部署边界已有；大拆分扩大兼容和回退面，不能解决 owner/gate/parity 漂移。先在 crate 内建立模块边界。 |
 | 让 Hub 执行 shell、文件、MCP、tmux 或 Browser | 破坏 Agent 本地 policy/confirmation/resource ownership，增加双 executor 和权限分叉。 |
 | 让 Protocol 成为所有入口的统一 schema，或先造万能 registry | Agent-local、Hub Apps MCP、HTTP/OpenAPI、WS wire 的 authority 和消费者约束不同；应共享窄的 operation identity/effect 语义并做 parity gate，不强行一套 schema。 |
-| 给所有旧 Room/工具名加永久 alias/shim | 会掩盖 legacy/current surface 断裂，持续放大旧权限和错误语义；公开兼容必须显式版本迁移。 |
+| 给所有旧 Room/工具名加永久 alias/shim | 与一次升级、迁移全部 caller、移除 obsolete path 的 clean cutover 相冲突；会掩盖旧权限和错误语义。用随实现交付的迁移文档说明真实步骤，不把必需远端能力标成永久 unsupported。 |
 | 把 Hub `active_room`/Room 文本做成长期 Hub memory | 当前文件/Git ownership 在 Agent；会引入长期上下文管理，超出受控资源目标。 |
 | 自动把 Android attention、Hub notify 做成统一 reminder scheduler | Android 现有功能是 local-only；Hub 目前没有 reminder/task domain，混合会模糊 source of truth 和部署边界。 |
 | 把 `agentic-browser-host` 与 Agent BrowserManager 合并 | 一个是 extension bridge，一个是 Node/browser SDK lease；安全、进程和生命周期不同。 |
-| 直接把 sandbox 默认打开或把 Browser/MCP annotation 当隔离保证 | 这是未审议的行为/权限变化；应先定义 trusted external effect、OS containment 和兼容策略。 |
+| 直接把 sandbox 默认打开或把 Browser/MCP annotation 当隔离保证 | 会改变行为或权限；本轮按 D04 保持 sandbox 默认、policy override 和权限模型不变。若以后另立威胁模型专题，须分别说明 trusted external effect 与 OS containment，不能用 annotation 代替隔离。 |
 
-## 9. 待维护者确认的草案决策
+## 9. 剩余实施细节（随工作包细化）
 
-以下事项不是当前事实，也不是本轮已批准的实现方案：
+以下事项不是新的用户选择，也不是当前代码已完成的声明；实现者应在 D01–D08 约束下，依据真实 seam、消费者和部署证据细化：
 
-1. Browser host socket 的正式 peer/auth boundary：owner-only、受限组、peer credential 或一次性 token，以及 Neko/shared-volume 部署规则。
-2. generic Process、MCP stdio、Browser JS、tmux 和 tunnel child 的 effect/trust taxonomy；sandbox 默认与显式 trusted mode 的兼容策略。
+1. Browser host 在 Neko/container/共享目录/Unix socket 拓扑中的具体 peer/auth、组/文件权限或 token 机制，以及对应的部署检查；不预选 owner-only，也不允许无授权网络暴露。
+2. generic Process、MCP stdio、Browser JS、tmux 和 tunnel child 的 effect/trust 分类及其逐操作的 policy/confirmation/evidence 表达；本轮不改变 sandbox 默认、policy override 或权限模型，不扩大公网多租户威胁模型。
 3. operation core 的最小 `RequestContext`/authorization helper 接口；不预设一个跨所有 projection 的万能 registry。
-4. Hub Room 当前 Agent surface 的版本化 adapter、旧 command deprecation 和真实 Hub↔Agent E2E 门槛。
-5. HTTP/OpenAPI、Hub Apps MCP、Agent-local descriptors、Protocol wire 的版本来源和 parity checker；具体以哪一侧改为准需逐项决定。
-6. Console Android/Desktop/Web 的 Hub transport、TLS/CORS、token 安全存储、remote status projection 和 local-only attention 交互。
-7. config startup/live 字段清单，以及 Job history、transport ledger、audit、report、Hub receipt 的 durability/retention/secret projection 级别。
+4. Room 远端读与维护操作的精确输入/输出、错误、权限、生命周期和 surface adapter；一次升级所需的 caller 迁移、旧路径移除、数据保护与真实 Hub↔Agent E2E 步骤。远端需求本身已确定，不能以“暂不支持”代替实现。
+5. HTTP/OpenAPI、Hub Apps MCP、Agent-local descriptors、Protocol wire 的 parity checker 与各自 authority 的变更顺序；不要求同一 transport schema。
+6. Console 本地 Attention 的独立维护细节；remote console、approval board、exec ledger 的 transport、token/TLS/CORS 和 status projection 只有在另立产品时再设计，不作为核心完成门槛。
+7. config startup/live 字段清单，以及 correctness/history/observability 各层的 durability、retention、secret projection、crash/recovery 规则；OAuth/pending confirmation/cache 可在 Hub 重启失效，但已产生的 confirmation result、Job history 和错误原因按 owner/retention 尽量保留。
 
-在上述决策确认前，coding agent 只能按现有行为和安全边界工作，不能把本文目标段落当作已落地 API。
+以上决策已确认，但本文仍是目标/技术草案，不是实现证明。coding agent 必须按当前代码和安全边界实施，不能把目标段落当作已落地 API；破坏性改动须随真实实现交付迁移文档和实际验证证据。

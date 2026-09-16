@@ -2,6 +2,8 @@
 
 状态：调查结论，不是已实施修复；基线 2026-09-16。现状见 [current-state](current-state.md)，实施顺序见 [refactoring-plan](refactoring-plan.md)。
 
+后续用户决策见[已确认决策](decisions.md)。下列问题仍描述修复前实现；Room 远端需求已经确认，Console 局部问题保留为独立维护记录，不属于本轮核心重构完成条件。
+
 ## 1. 总判断
 
 Agentic 不是已经失去所有边界的单体。实际执行核心、Hub 控制平面、wire 协议、纯 patch 算法和独立浏览器桥已有可用分工。应保留这些边界，优先收敛**入口到操作的共同规则、跨端契约、状态所有权及恢复语义**，而不是先按理论模板分 crate 或把所有模块改成 service/repository/interface。
@@ -50,11 +52,11 @@ Agentic 不是已经失去所有边界的单体。实际执行核心、Hub 控�
 
 **机制/影响**：认证、active Room 路由与投递都可以成功，最终能力却明确拒绝；单端 fake connection 测试无法证明真实 Hub↔Agent parity。Coordinator 不广告这些工具，不受同一工具发现路径影响。
 
-**根因 [推断]**：Room 从旧 JSONL surface 转向文件仓库/维护语义时，Agent 与 Hub 的合同切换未作为同一个跨端工作包交付。
+**根因判断**：用户确认 Room 能力需要远端提供，Hub API 未同步主要是实现遗漏；源码也显示 Agent 与 Hub 的合同切换未作为同一端到端工作包完成。这不是有意保留本地专属能力的产品选择。
 
-**建议**：先列清旧客户端和所需远端能力，再明确版本化支持面；为保留的能力实现端到端合同，删除已退出合同的旧路径。不偷偷把旧 append 映射成新 maintenance，也不无限期添加 alias。保留底层 Room repository/安全/文件数据。
+**已确认方向（D01–D03）**：补齐产品要求的 Room 远端公共面，使 Hub→Protocol→Agent 与当前本地能力语义一致；不通过隐藏工具或永久 unsupported 掩盖遗漏。协调一次升级，迁移全部调用方、移除被替代的旧路径，并随实现提供迁移文档与步骤；不刻意维持旧 alias/shim/双轨。不把旧 append 静默映射为不等价 maintenance，保留底层 Room repository/安全/文件数据。
 
-**验证门槛**：真实 Hub Full → 当前 Room Agent 读/维护链；旧客户端得到约定的版本错误或升级结果；现有文件数据不丢失。本轮为静态可达链确认，不是实际双进程复现。
+**验证门槛**：真实 Hub Full → 当前 Room Agent 读/维护链及迁移后的公共合同通过；旧入口退出与调用方升级步骤明确；现有文件数据不丢失。不要求继续支持混合旧版本。本轮为静态可达链确认，不是实际双进程复现。
 
 ### A03 — tool visibility、capability、authorization 分散【高；结构风险已确认】
 
@@ -102,9 +104,9 @@ Agentic 不是已经失去所有边界的单体。实际执行核心、Hub 控�
 
 **根因 [推断]**：设备能力逐步增加，而信任模型没有按“本机管理员、上层 Agent、配置的外部服务、任意代码桥”分层描述。
 
-**建议**：明确 trusted mode 与 sandbox enforcement、每种能力的实际权限和确认粒度；browser-host 单独评审共享组/容器场景。保留现有默认，改变授权/沙箱/路径默认须显式兼容和产品决策。worker token 与 tunnel key 分别审查，不能用日志脱敏代替 argv 暴露分析。
+**已确认方向（D04/D05）**：当前自用可控环境不等于每个脚本/MCP/Browser代码完全可信；保留具体 policy/confirmation/path/lifecycle 控制，准确说明与OS隔离的差别。本轮不二选一扩大为“完全可信”或“强对抗”，不改sandbox默认、policy override或权限模型。用户实际已有Neko/container/共享目录与Unix socket，先盘点拓扑再选择peer/token/权限，不强推owner-only。worker token与tunnel key分别审查，不能用日志脱敏代替argv暴露分析。
 
-**验证门槛**：受限 root/脚本间接访问、downstream spawn、browser JS/bridge owner、trusted 与 sandbox 模式；本轮没有运行这些攻击或隔离实验。
+**验证门槛**：对应工作包核验既有路径检查、确认、生命周期和真实Browser拓扑访问边界；新隔离强度/不可信provider支持另立工作，不作为本轮前置。本轮未运行这些部署或隔离场景。
 
 ### A07 — 持久化、等待和投影缺少一致的语义说明【中高；恢复风险】
 
@@ -119,7 +121,7 @@ Agentic 不是已经失去所有边界的单体。实际执行核心、Hub 控�
 
 **根因 [推断]**：各功能自行选择最简单持久化方式，未区分必须可靠的执行身份、可丢观测和可重建缓存。
 
-**建议**：逐存储定义 owner、敏感性、durability、retention、恢复与失败处理；不为了统一而全部搬进同一个数据库。区分 dispatch、wait expired、remote running/unknown、cancel requested/confirmed。
+**已确认方向（D06）**：逐存储定义 owner、敏感性、durability、retention、恢复与失败处理。执行身份/幂等/去重/run-job结果尽量可靠；history/已产生确认结果/错误原因尽量保留且允许retention；audit/report可best-effort；Hub OAuth token/pending confirmation/临时cache重启失效可接受，不为全量durable扩张Hub。区分 dispatch、wait expired、remote running/unknown、cancel requested/confirmed；失效不能变成默认批准或任务已停止。
 
 **验证门槛**：Hub/Agent 分别重启、ledger重复/损坏/增长、history写失败、cache stale、配置写中断；不得用进程退出或 HTTP timeout 证明子任务已终止。
 
@@ -133,9 +135,9 @@ Agentic 不是已经失去所有边界的单体。实际执行核心、Hub 控�
 
 **根因 [推断]**：Android 本地 spike 由 mock 演进为真实 OS 副作用时，统一 domain policy 与跨入口恢复语义没有一起完成。
 
-**建议**：先明确 local-only 并收敛本地行为；shared 保持 domain/UI ports，平台拥有持久化和 OS adapter。Hub client 是另一个产品功能切片，非架构整理必做扩展；不引入 Hub reminder scheduler 或以 local DB 代替远端 Job authority。
+**已确认范围（D07）**：保留本地 Attention，局部状态/恢复问题在独立维护工作中处理，不计入本轮 Agent/Hub/Protocol/Room 核心完成条件。shared 保持 domain/UI ports，平台拥有持久化和 OS adapter；Hub remote console、approval board、exec ledger 以后另立产品，不引入 Hub reminder scheduler 或以 local DB 代替远端 Job authority。
 
-**验证门槛**：真实 Android 权限/精确闹钟/通知动作/重启与过期项；Desktop/Web capability诚实展示。未来网络 token、TLS/CORS、平台安全存储须随接入另行设计。
+**独立维护验证门槛（不阻塞核心重构）**：真实 Android 权限/精确闹钟/通知动作/重启与过期项；Desktop/Web capability诚实展示。未来网络 token、TLS/CORS、平台安全存储随产品接入另行设计。
 
 ### A09 — 当前规范、历史说明与验证工具的保证混在一起【中；持续漂移根因】
 
@@ -157,7 +159,7 @@ Agentic 不是已经失去所有边界的单体。实际执行核心、Hub 控�
 4. **资源与配置耦合隐式化**：共享 AppState 可用，但 startup-derived owner 与 mutable Config 没有严格区分。明确生命周期，不急于依赖注入框架。
 5. **实验成熟度没有同步工程约束**：Android/Browser/历史 docs 的独立探索不能自动等同正式支持。明确状态，再决定保留或退出。
 
-优先级不是按文件长度排列：A01/A02 先建立真实合同；A04/A03/A05 是安全与状态边界；A06 先澄清保证再决策；A07 定义恢复等级；A08 限定本地职责；A09 为持续维护提供约束。可并行的验证与文档工作见路线图。
+优先级不是按文件长度排列：A01/A02 先建立并补齐真实合同；A04/A03/A05 收稳安全与状态边界；A06 按已确认D04/D05澄清具体保证、保留现有默认及实际拓扑；A07 按D06分层；A09 约束持续维护。A08 转独立 Console 维护，不是核心完成前置。可并行的验证与文档工作见路线图。
 
 ## 5. 未采纳的扩大范围
 

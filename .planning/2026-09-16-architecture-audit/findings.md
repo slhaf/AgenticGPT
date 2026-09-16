@@ -43,3 +43,12 @@
 - CI 的 cargo test --workspace 已运行 existing Rust fixed surface/deterministic corpus；缺口是跨 surface 语义一致性，不是没有任何runtime corpus gate。
 - agents-minimal.yaml 应先确认是否为受支持artifact，再决定保留后的gate或退出；不为无消费者历史文件强制增加维护负担。
 - 无证据要求不采用：所有纯函数塞进apply-patch、全部Agent Room工具远端化、强制Console联网、签名/provenance新专题、Room实现阻塞Hub身份修复、存储重构阻塞已有合同修复。
+
+## 用户确认（后续会话，取代先前未决建议）
+- D01–D08 正式记录于 docs/architecture/decisions.md。Room远端需求已确认，Hub未同步为实现遗漏；先前“仅选定远端consumer才立项”不再适用。
+- 支持一次协调升级；公开发布须有迁移文档/步骤，不刻意保留旧alias/shim/双轨；不因迁移授权删除数据。
+- 自用可控环境与具体副作用控制并存，不简单二选完全可信/强敌对。本轮保留sandbox、policy override与权限模型。
+- 用户真实部署含Neko/container/共享目录/Unix socket；无需重新证明这些环境存在，具体权限/peer/token机制仍待拓扑盘点。
+- 正确性事实尽量可靠，history/确认结果/error有retention，audit/report可best-effort；接受Hub OAuth/pending/cache重启失效，不全量durable。
+- Android Attention继续独立维护；Console本地和remote产品均不计本轮核心重构完成条件。核心优先Agent/Hub/Protocol/Room。
+- 本轮是文档决策同步，不是生产代码实现；目标内部目录形状等由实际seam细化。
