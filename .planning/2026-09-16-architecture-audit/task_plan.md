@@ -4,10 +4,10 @@
 以现有实现为依据，为“Agent 的受控执行基础设施”形成现状、诊断、目标边界、工程规则及渐进重构计划。仅修改规划与架构文档，不改生产代码。
 
 ## Next Step
-核验路线图依赖、正式文档链接和独立审阅反馈，记录证据并完成最终提交。
+本轮文档任务已完成。后续从 refactoring-plan.md 的 WP0 行为基线开始；公开兼容、权限及产品范围决策另行确认，不自动启动代码重构。
 
 ## Current Phase
-Phase 3
+Complete
 
 ## Phases
 ### Phase 1: 调查与诊断
@@ -25,10 +25,11 @@ Phase 3
 - **Status:** complete
 
 ### Phase 3: 渐进计划与核验
-- [ ] 制定分批重构、兼容约束、验证门槛与回退策略
-- [ ] 核验文档证据、引用、覆盖面及相互一致性
-- [ ] 提交最终计划及核验记录
-- **Status:** in_progress
+- [x] 制定分批重构、兼容约束、验证门槛与回退策略
+- [x] 核验文档证据、引用、覆盖面及相互一致性
+- [x] 提交最终计划及核验记录
+- [x] 清理临时指针，保留正式证据与勘误，不留下临时脚本
+- **Status:** complete
 
 ## Decisions Made
 - 调查分为执行端、Hub、Console、协议与工程部署四个独立切片。只读 scout 提交证据；Main 整合现状/诊断，两位文档执行者分别拥有目标/工程规则与路线图。
@@ -41,3 +42,4 @@ Phase 3
 | Error | Resolution |
 |---|---|
 | 猜测的 skill 绝对路径不存在 | 使用 skill://planning-with-files/scripts 的工具路径解析成功初始化独立计划 |
+| 根相对路径检查发现 tests/local_control.rs 简称 | 改完整 crates/agentic-gpt/tests/local_control.rs，最终26具体路径全部存在 |

@@ -1,5 +1,7 @@
 # 执行端调查证据
 
+> 原始 scout 调查材料，风险定级与实施建议未全部采纳。Room 的 workspace/room 只是默认，实际支持配置 `repositoryRoot`（`room_repository.rs::repository_root`）；不要按固定路径备份/迁移。显式 policy allow、sandbox 默认关闭、外部 trusted capability 需先澄清威胁模型，不自动定为漏洞或更改默认；不采用先造万能 registry、永久兼容 alias 等建议。正式结论见 `docs/architecture/current-state.md`、`diagnosis.md`、`target-architecture.md`。
+
 ## 1. 覆盖范围与一级模块实际职责
 
 ### 1.1 agentic-gpt 运行时与入口

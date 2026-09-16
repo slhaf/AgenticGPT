@@ -18,3 +18,27 @@
 ## 后续本轮交付检查
 
 正式文档完成后执行本地路径/链接核验、需求覆盖审阅和阶段提交；结果追加于此。
+
+## 文档检查（阶段三进行中）
+- Python Markdown 链接检查：8 文件（6架构文档+双语development）、26本地链接，包括锚点；全部存在。
+- 具体根相对路径检查初次发现路线图的 `tests/local_control.rs` 使用了 Agent 内相对简称；已交给路线图 owner 改完整路径。不是缺少测试文件，实际文件在 `crates/agentic-gpt/tests/`。
+- 目标/规则评审纠正了纯函数归属泛化、Hub工具覆盖过度承诺、Room远端化范围、caller wait与execution deadline混淆、Android/Web权限术语及重复表格。
+
+## 最终核验结果
+- 修订后 Python 检查：8 Markdown 文件，26 本地链接（含锚点），26 个具体根相对路径，全部通过；4种通配/缩略路径不作机器存在性断言。
+- 路线图 Mermaid 中 11 条依赖边通过拓扑排序，无环。Hub 身份、本地 gate/config、合同修复可并行；Room 合同收口独立，Console 本地收口无 Hub 存储前置。
+- 独立 reviewer 的5项问题全部处置，记录在 review.md；raw survey 首部加勘误避免旧结论继续传播。
+- 最终仅提交规划与架构文档、双语开发文档入口和计划指针；没有生产代码/测试/OpenAPI/配置行为修改。
+- 临时核验在 Eval 内存执行，没有留下脚本文件；冗余 hub-survey.json 指针已删除。
+
+## 用户需求覆盖
+| 需求 | 交付 |
+|---|---|
+| 理解现有仓库架构 | current-state：五crate、运行形态、全部一级责任、调用链、数据/安全/部署/Console |
+| 判断主要问题与根因 | diagnosis：A01–A09、证据/影响/根因推断/验收、保留项与非目标 |
+| 适合当前产品的目标架构 | target-architecture：受控执行定位、五crate拓扑、逻辑边界及不采纳方案 |
+| 模块职责/边界/依赖/规范 | target责任表 + engineering-rules放置决策/身份/生命周期/合同/安全/审查 |
+| 长期维护文档 | architecture/README维护规则 + 双语development入口链接 |
+| 渐进、可验证重构 | refactoring-plan：独立工作包、真实依赖、兼容/回退/验证/停止条件，明确未来未执行 |
+
+不作通过声明：Rust/Gradle测试、真实Hub/Agent/浏览器/Android/tunnel、外部Actions importer、ARM运行、竞态/攻击/故障注入。

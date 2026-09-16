@@ -32,3 +32,14 @@
 - 已运行 `cargo metadata --no-deps --format-version 1 --offline`，成功。agentic-gpt 仅依赖两个本地库 protocol/apply-patch；Hub 仅依赖 protocol；browser-host 无本地 crate 依赖。browser-host 是独立进程边界，不是 agent 的 Rust 库依赖。
 - Cargo target 列出执行端四个集成测试入口：config_cli、local_control、standalone_http_mcp、standalone_supervisor；此阶段未执行测试。
 - 已阅读双语 development 文档，当前均介绍构建、CI、三个 release 二进制；适合作为长期架构文档入口。
+
+## 正式结论与调查材料勘误
+- 正式结论以 `docs/architecture/current-state.md`、`diagnosis.md` 为准，survey 文件是原始证据/建议材料，不是全部采纳的规范。
+- 已确认九组诊断：A01多入口合同、A02Room cutover、A03gate、A04Hub身份、A05reload、A06信任保证、A07durability、A08Console成熟度/本地语义、A09文档与验证保证。
+- 独立 reviewer 核实主结论成立；纠正现状调用图：只有 Response 走 store_result/pending，JobUpdate 写cache，RunReport upsert receipt。
+- Room repositoryRoot 可配置，workspace/room 只是默认，原执行调查将默认写成固定路径处不作为部署规范。
+- contract-ops 调查关于 ARM 的负面表述过宽：release 确有 aarch64 cross-build/打包；未运行 ARM 场景不等于未覆盖 ARM 构建。
+- 历史 release/migration 的旧数字本身不算漂移；只修当前指引与当前合同冲突。
+- CI 的 cargo test --workspace 已运行 existing Rust fixed surface/deterministic corpus；缺口是跨 surface 语义一致性，不是没有任何runtime corpus gate。
+- agents-minimal.yaml 应先确认是否为受支持artifact，再决定保留后的gate或退出；不为无消费者历史文件强制增加维护负担。
+- 无证据要求不采用：所有纯函数塞进apply-patch、全部Agent Room工具远端化、强制Console联网、签名/provenance新专题、Room实现阻塞Hub身份修复、存储重构阻塞已有合同修复。

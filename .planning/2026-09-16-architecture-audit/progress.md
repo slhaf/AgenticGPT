@@ -22,3 +22,12 @@
 - 修正草案中“所有纯函数归 apply-patch”、Hub 已有 file/Browser 全表面、强制全部 Room 工具远端化、caller timeout 混同执行期限等不当泛化。
 - 删除目标路径表与规则末尾的重复清单；长期入口链接加入双语 development 文档。
 - 目标与规则是完整规范草案，不是已获用户批准的行为变更；不改生产代码。
+
+## 阶段三：路线图、核验与交付
+- 阶段二提交：`66ef019`。
+- 完成路线图：WP0基线；WP1Hub身份；WP2本地gate/config与Hub接线；WP3所有权/耐久性；WP4-A合同修复；WP-R Room公开合同收口；WP5 Console本地语义。Protocol内部模块组织及Console Hub新产品分别列为可选，不作为合同修复前置。
+- Main移除不必要的串行依赖、强制全部Room远端化/新增version flag/re-export/provenance要求；保留已有消费者需要的明确兼容边界。
+- 独立review核对主结论并提出5项勘误；current-state调用链/Room路径已修，原始调查材料加勘误；全部处置见review.md。
+- 最终机器检查：8文件/26本地链接/26具体路径全部通过；11依赖边无环。没有构建或生产运行验证声明。
+- 核验脚本仅在Eval内存运行；冗余临时JSON指针已删除。正式证据、计划、进度与review保留，用户可从docs/architecture/README.md继续。
+- 本轮完成，仅文档变更；后续代码工作不自动开始。

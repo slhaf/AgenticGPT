@@ -1,5 +1,7 @@
 # 协议与部署调查证据
 
+> 原始 scout 调查材料，保留调查过程，不作为最终规范。审阅勘误优先于下文：P6 的 ARM 表述过宽，release 实际 cross-build 并打包 aarch64，缺少的是本轮运行验证/PR CI 的相应覆盖；已有 Rust fixed surface/corpus 随 cargo test --workspace 进入 CI，不是完全无 gate；agents-minimal 先判定支持状态再决定 gate，不能默认升级为发布要求。P7 中历史 migration/release 旧数字不构成当前漂移，不应改写历史。最终诊断与建议见 `docs/architecture/diagnosis.md` 和本计划 `findings.md`。
+
 ## 1. 覆盖路径、模块与实际职责
 
 ### Workspace

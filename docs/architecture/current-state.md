@@ -105,7 +105,7 @@ agentic-gpt 执行核心
 
 ### 4.1 Hub 远程执行
 
-`routes::process_exec` 或 `mcp_server::call_app_tool` → `agents::request_agent` → `runs::prepare_run` 持久化 command/hash → pending waiter + envelope → Agent `hub::handle_reliable_envelope` → `transport_ledger::accept`/ACK → `local_service::dispatch` → `jobs`/具体能力 → Response/JobUpdate/RunReport → Hub `runs::store_result` 与 pending waiter。
+`routes::process_exec` 或 `mcp_server::call_app_tool` → `agents::request_agent` → `runs::prepare_run` 持久化 command/hash → pending waiter + envelope → Agent `hub::handle_reliable_envelope` → `transport_ledger::accept`/ACK → `local_service::dispatch` → `jobs`/具体能力。回传分为三条路径：Response → Hub `runs::store_result` → pending waiter；JobUpdate → Hub Job cache；RunReport → `runs::upsert_agent_report`。后两条不会直接唤醒该同步 waiter。
 
 Hub request/run 是控制面投递与收据身份；Job 是执行端资源生命周期；connection id 是连接代际；boot generation 是执行端进程代际。它们不能互换。同步等待超时不等于取消远端任务，迟到结果可以到达。当前 Response owner 校验与 waiter 唤醒之间存在缺口，不能把已有 hash 机制理解为所有路径都已严格保证完整性。
 
@@ -150,7 +150,7 @@ Hub replay 未 ACK 的 durable envelope；Agent ledger 按 run/request/hash 区�
 | 审计 | workspace `.agentic-gpt-audit.jsonl` | 含命令/路径等敏感信息；写入/report 存在 best-effort 路径，不能当不可丢失审计保证 |
 | Hub registry/run receipts | hub.sqlite3：agents、notification_endpoints、agent_runs | 单 serve lock；run 24小时保留；不是 Agent Job DB 副本 |
 | Hub连接/pending/Job cache/active Room/confirmation/OAuth | HubState 内存 | Hub 重启丢失；SQLite 存在不意味着同步 waiter 或 token 也持久 |
-| Room内容 | Agent workspace/room + Git | Hub 不持有内容；文件服务不自动承担记忆检索/上下文组装 |
+| Room内容 | Agent 配置的 Room repository + Git（默认 workspace/room；`repositoryRoot` 可配置） | Hub 不持有内容；文件服务不自动承担记忆检索/上下文组装 |
 | Browser lease/kernel | Agent BrowserRuntimeManager 内存/Node child | 进程内命名生命周期，重启不恢复 lease |
 | browser-host socket/pending | 独立 host `/tmp/codex-browser-use` | socket 0660，无等价 local MCP 的 peer UID gate；可访问性依部署权限 |
 | Android Attention | 本地 Room DB `agentic_attention.db` | OS alarm/notification 是副作用，DB 才是 local item 权威；不是 Hub run 数据库 |
