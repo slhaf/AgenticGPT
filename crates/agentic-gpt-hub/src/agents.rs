@@ -329,13 +329,29 @@ async fn handle_agent_message(
             request_id,
             data,
         } => {
-            if let Err(error) =
-                runs::store_result(state, agent_id, run_id.as_deref(), &request_id, &data)
-            {
-                warn!(%agent_id, %request_id, %error, "failed to store agent result");
-            }
-            if let Some(sender) = state.pending.lock().await.remove(&request_id) {
-                let _ = sender.send(data);
+            let Some(run_id) = run_id else {
+                return Err("response_run_id_required".to_string());
+            };
+            let outcome = match runs::store_result(state, agent_id, &run_id, &request_id, &data) {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    warn!(%agent_id, %request_id, %error, "failed to store agent result");
+                    return Err("response_result_store_failed".to_string());
+                }
+            };
+            match outcome {
+                runs::StoreResultOutcome::Unmatched => {
+                    return Err("response_run_mismatch".to_string());
+                }
+                runs::StoreResultOutcome::Conflict => {
+                    return Err("response_result_conflict".to_string());
+                }
+                runs::StoreResultOutcome::Stored { .. }
+                | runs::StoreResultOutcome::Duplicate { .. } => {
+                    if let Some(sender) = state.pending.lock().await.remove(&request_id) {
+                        let _ = sender.send(data);
+                    }
+                }
             }
         }
         AgentMessage::TransportAck {
@@ -826,6 +842,7 @@ mod tests {
     use crate::db::init_db;
     use crate::{HubConfig, McpProfile, NtfyConfig, RemoteConfirmationConfig};
     use agentic_gpt_protocol::{Capabilities, ExecRequest, JobKind, SafeConfigSummary};
+    use axum::body::to_bytes;
     use axum::http::HeaderValue;
     use rusqlite::{params, Connection};
     use std::collections::HashMap;
@@ -972,6 +989,81 @@ mod tests {
             },
         );
         rx
+    }
+    async fn start_response_owner_request(
+        request_id: &str,
+    ) -> (
+        HubState,
+        mpsc::UnboundedReceiver<OutboundAgentMessage>,
+        tokio::task::JoinHandle<std::result::Result<Value, String>>,
+        HubCommandEnvelope,
+    ) {
+        let state = test_state();
+        register_agent(&state, "agent", "secret");
+        register_agent(&state, "foreign", "foreign-secret");
+        let mut outbound = insert_connection(&state, "agent", "current", chrono::Utc::now()).await;
+        let command = HubCommand::Exec {
+            request_id: request_id.to_string(),
+            payload: ExecRequest {
+                agent_id: "agent".to_string(),
+                group: None,
+                program: "printf".to_string(),
+                args: vec!["ok".to_string()],
+                need_confirm: false,
+                confirm_method: None,
+                working_directory: None,
+                wait_seconds: None,
+            },
+        };
+        let request_state = state.clone();
+        let caller =
+            tokio::spawn(async move { request_agent(&request_state, "agent", command, 5).await });
+
+        let OutboundAgentMessage::Text(text) = outbound.recv().await.unwrap() else {
+            panic!("expected command envelope");
+        };
+        let envelope = serde_json::from_str::<HubCommandEnvelope>(&text).unwrap();
+        while runs::get_run(&state, &envelope.run_id)
+            .unwrap()
+            .unwrap()
+            .status
+            != "dispatched"
+        {
+            tokio::task::yield_now().await;
+        }
+        (state, outbound, caller, envelope)
+    }
+
+    async fn post_response(
+        state: &HubState,
+        routed_agent_id: &str,
+        secret: &str,
+        run_id: Option<String>,
+        request_id: String,
+        data: Value,
+    ) -> Response {
+        post_agent_message(
+            State(state.clone()),
+            Path(routed_agent_id.to_string()),
+            Query(SseConnectQuery {
+                connection_id: Some("current".to_string()),
+            }),
+            agent_headers(secret),
+            axum::Json(AgentMessage::Response {
+                run_id,
+                request_id,
+                data,
+            }),
+        )
+        .await
+    }
+
+    async fn rejected_reason(response: Response) -> String {
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["error"]["code"], "agent_message_rejected");
+        value["error"]["message"].as_str().unwrap().to_string()
     }
 
     #[tokio::test]
@@ -1168,6 +1260,192 @@ mod tests {
         let stored = runs::get_run(&state, &run.run_id).unwrap().unwrap();
         assert_eq!(stored.status, "completed");
         assert_eq!(stored.result, Some(json!({ "ok": true })));
+    }
+    #[tokio::test]
+    async fn response_owner_rejects_unmatched_without_consuming_waiter() {
+        for case in ["nonexistent_run", "wrong_request", "missing_run_id"] {
+            let request_id = format!("req_response_owner_unmatched_{case}");
+            let (state, _outbound, caller, envelope) =
+                start_response_owner_request(&request_id).await;
+            let (routed_agent_id, secret, invalid_run_id, invalid_request_id, expected_reason) =
+                match case {
+                    "nonexistent_run" => (
+                        "foreign",
+                        "foreign-secret",
+                        Some(format!("{}-missing", envelope.run_id)),
+                        envelope.request_id.clone(),
+                        "response_run_mismatch",
+                    ),
+                    "wrong_request" => (
+                        "agent",
+                        "secret",
+                        Some(envelope.run_id.clone()),
+                        format!("{}-wrong", envelope.request_id),
+                        "response_run_mismatch",
+                    ),
+                    "missing_run_id" => (
+                        "agent",
+                        "secret",
+                        None,
+                        envelope.request_id.clone(),
+                        "response_run_id_required",
+                    ),
+                    _ => unreachable!(),
+                };
+
+            let response = post_response(
+                &state,
+                routed_agent_id,
+                secret,
+                invalid_run_id,
+                invalid_request_id,
+                json!({ "servers": ["mismatched"] }),
+            )
+            .await;
+            assert_eq!(rejected_reason(response).await, expected_reason);
+            assert!(!caller.is_finished());
+            assert!(runs::get_run(&state, &envelope.run_id)
+                .unwrap()
+                .unwrap()
+                .result
+                .is_none());
+
+            let valid_data = json!({ "servers": [] });
+            let response = post_response(
+                &state,
+                "agent",
+                "secret",
+                Some(envelope.run_id.clone()),
+                envelope.request_id.clone(),
+                valid_data.clone(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(caller.await.unwrap().unwrap(), valid_data);
+
+            let stored = runs::get_run(&state, &envelope.run_id).unwrap().unwrap();
+            assert_eq!(stored.status, "completed");
+            assert_eq!(stored.result, Some(valid_data));
+        }
+    }
+    #[tokio::test]
+    async fn response_owner_rejects_conflict_and_accepts_duplicate() {
+        let (state, _outbound, caller, envelope) =
+            start_response_owner_request("req_response_owner_conflict").await;
+        let canonical = json!({ "servers": ["canonical"] });
+        assert!(matches!(
+            runs::store_result(
+                &state,
+                "agent",
+                &envelope.run_id,
+                &envelope.request_id,
+                &canonical,
+            )
+            .unwrap(),
+            runs::StoreResultOutcome::Stored { .. }
+        ));
+
+        let conflict = json!({ "servers": ["conflict"] });
+        let response = post_response(
+            &state,
+            "agent",
+            "secret",
+            Some(envelope.run_id.clone()),
+            envelope.request_id.clone(),
+            conflict.clone(),
+        )
+        .await;
+        assert_eq!(rejected_reason(response).await, "response_result_conflict");
+        assert!(!caller.is_finished());
+
+        let stored = runs::get_run(&state, &envelope.run_id).unwrap().unwrap();
+        assert_eq!(stored.result, Some(canonical.clone()));
+        let conflict_json: String = state
+            .db
+            .lock()
+            .unwrap()
+            .query_row(
+                "select conflict_json from agent_runs where run_id = ?1",
+                params![envelope.run_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&conflict_json).unwrap(),
+            conflict
+        );
+
+        let response = post_response(
+            &state,
+            "agent",
+            "secret",
+            Some(envelope.run_id.clone()),
+            envelope.request_id.clone(),
+            canonical.clone(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(caller.await.unwrap().unwrap(), canonical);
+    }
+
+    #[tokio::test]
+    async fn response_owner_keeps_waiter_on_store_failure() {
+        let (state, _outbound, caller, envelope) =
+            start_response_owner_request("req_response_owner_store_failure").await;
+        state
+            .db
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "create trigger force_result_write_failure
+                 before update of result_json on agent_runs
+                 begin
+                     select raise(abort, 'forced_result_write_failure');
+                 end;",
+            )
+            .unwrap();
+
+        let data = json!({ "servers": ["retry"] });
+        let response = post_response(
+            &state,
+            "agent",
+            "secret",
+            Some(envelope.run_id.clone()),
+            envelope.request_id.clone(),
+            data.clone(),
+        )
+        .await;
+        assert_eq!(
+            rejected_reason(response).await,
+            "response_result_store_failed"
+        );
+        assert!(!caller.is_finished());
+        assert!(runs::get_run(&state, &envelope.run_id)
+            .unwrap()
+            .unwrap()
+            .result
+            .is_none());
+
+        state
+            .db
+            .lock()
+            .unwrap()
+            .execute_batch("drop trigger force_result_write_failure;")
+            .unwrap();
+        let response = post_response(
+            &state,
+            "agent",
+            "secret",
+            Some(envelope.run_id.clone()),
+            envelope.request_id.clone(),
+            data.clone(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(caller.await.unwrap().unwrap(), data.clone());
+        let stored = runs::get_run(&state, &envelope.run_id).unwrap().unwrap();
+        assert_eq!(stored.status, "completed");
+        assert_eq!(stored.result, Some(data));
     }
 
     #[tokio::test]

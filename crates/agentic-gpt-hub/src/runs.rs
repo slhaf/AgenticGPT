@@ -43,6 +43,13 @@ pub(crate) struct PreparedRun {
     pub(crate) request_id: String,
     pub(crate) command_hash: String,
 }
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum StoreResultOutcome {
+    Stored { command_hash: String },
+    Duplicate { command_hash: String },
+    Conflict,
+    Unmatched,
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct PendingReplay {
@@ -215,7 +222,9 @@ fn update_status(state: &HubState, run_id: &str, status: &str, reason: Option<&s
     let now = Utc::now();
     let conn = state.db.lock().unwrap();
     conn.execute(
-        "update agent_runs set status = ?1, reason = ?2, updated_at = ?3 where run_id = ?4",
+        "update agent_runs
+         set status = ?1, reason = ?2, updated_at = ?3
+         where run_id = ?4 and result_json is null",
         params![status, reason, now, run_id],
     )?;
     Ok(())
@@ -224,63 +233,50 @@ fn update_status(state: &HubState, run_id: &str, status: &str, reason: Option<&s
 pub(crate) fn store_result(
     state: &HubState,
     agent_id: &str,
-    run_id: Option<&str>,
+    run_id: &str,
     request_id: &str,
     result: &Value,
-) -> Result<bool> {
+) -> Result<StoreResultOutcome> {
     let result_json = serde_json::to_string(result)?;
     let result_hash = sha256_hex(&result_json);
     let now = Utc::now();
     let conn = state.db.lock().unwrap();
-    let existing = if let Some(run_id) = run_id {
-        conn.query_row(
-            "select result_hash from agent_runs where run_id = ?1 and request_id = ?2 and agent_id = ?3",
+    let Some((command_hash, existing_result_hash)) = conn
+        .query_row(
+            "select command_hash, result_hash
+             from agent_runs
+             where run_id = ?1 and request_id = ?2 and agent_id = ?3",
             params![run_id, request_id, agent_id],
-            |row| row.get::<_, Option<String>>(0),
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
         )
         .optional()?
-    } else {
-        conn.query_row(
-            "select result_hash from agent_runs where request_id = ?1 and agent_id = ?2 order by created_at desc limit 1",
-            params![request_id, agent_id],
-            |row| row.get::<_, Option<String>>(0),
-        )
-        .optional()?
+    else {
+        return Ok(StoreResultOutcome::Unmatched);
     };
-    if let Some(Some(existing_hash)) = existing {
-        if existing_hash == result_hash {
-            return Ok(true);
-        }
-        let changed = if let Some(run_id) = run_id {
-            conn.execute(
-                "update agent_runs set conflict_json = ?1, updated_at = ?2 where run_id = ?3 and request_id = ?4 and agent_id = ?5",
-                params![result_json, now, run_id, request_id, agent_id],
-            )?
-        } else {
-            conn.execute(
-                "update agent_runs set conflict_json = ?1, updated_at = ?2 where request_id = ?3 and agent_id = ?4",
-                params![result_json, now, request_id, agent_id],
-            )?
-        };
-        return Ok(changed > 0);
-    }
 
-    let changed = if let Some(run_id) = run_id {
-        conn.execute(
-            "update agent_runs
-             set status = 'completed', result_json = ?1, result_hash = ?2, updated_at = ?3
-             where run_id = ?4 and request_id = ?5 and agent_id = ?6",
-            params![result_json, result_hash, now, run_id, request_id, agent_id],
-        )?
-    } else {
-        conn.execute(
-            "update agent_runs
-             set status = 'completed', result_json = ?1, result_hash = ?2, updated_at = ?3
-             where request_id = ?4 and agent_id = ?5",
-            params![result_json, result_hash, now, request_id, agent_id],
-        )?
-    };
-    Ok(changed > 0)
+    match existing_result_hash {
+        Some(existing_hash) if existing_hash == result_hash => {
+            Ok(StoreResultOutcome::Duplicate { command_hash })
+        }
+        Some(_) => {
+            conn.execute(
+                "update agent_runs
+                 set conflict_json = ?1, updated_at = ?2
+                 where run_id = ?3 and request_id = ?4 and agent_id = ?5",
+                params![result_json, now, run_id, request_id, agent_id],
+            )?;
+            Ok(StoreResultOutcome::Conflict)
+        }
+        None => {
+            conn.execute(
+                "update agent_runs
+                 set status = 'completed', result_json = ?1, result_hash = ?2, updated_at = ?3
+                 where run_id = ?4 and request_id = ?5 and agent_id = ?6",
+                params![result_json, result_hash, now, run_id, request_id, agent_id],
+            )?;
+            Ok(StoreResultOutcome::Stored { command_hash })
+        }
+    }
 }
 
 pub(crate) fn upsert_agent_report(
@@ -575,11 +571,80 @@ mod tests {
         let run = prepare_run(&state, "agent", "req_1", &command).unwrap();
         assert!(mark_acked(&state, "agent", &run.run_id, "req_1", &run.command_hash).unwrap());
         let result = serde_json::json!({ "servers": [] });
-        assert!(store_result(&state, "agent", Some(&run.run_id), "req_1", &result).unwrap());
-        assert!(store_result(&state, "agent", Some(&run.run_id), "req_1", &result).unwrap());
+        assert_eq!(
+            store_result(&state, "agent", &run.run_id, "req_1", &result).unwrap(),
+            StoreResultOutcome::Stored {
+                command_hash: run.command_hash.clone()
+            }
+        );
+        assert_eq!(
+            store_result(&state, "agent", &run.run_id, "req_1", &result).unwrap(),
+            StoreResultOutcome::Duplicate {
+                command_hash: run.command_hash.clone()
+            }
+        );
         let stored = get_run(&state, &run.run_id).unwrap().unwrap();
         assert_eq!(stored.status, "completed");
         assert_eq!(stored.result.unwrap(), result);
+    }
+    #[test]
+    fn completed_result_survives_dispatch_and_wait_timeout_updates() {
+        let state = test_state();
+        let command = HubCommand::McpListServers {
+            request_id: "req_completed_guard".to_string(),
+        };
+        let run = prepare_run(&state, "agent", "req_completed_guard", &command).unwrap();
+        assert!(mark_status(
+            &state,
+            "agent",
+            &run.run_id,
+            "req_completed_guard",
+            "running",
+            Some("before_result"),
+        )
+        .unwrap());
+        let result = serde_json::json!({ "servers": ["canonical"] });
+        assert!(matches!(
+            store_result(&state, "agent", &run.run_id, "req_completed_guard", &result,).unwrap(),
+            StoreResultOutcome::Stored { .. }
+        ));
+        let completed = get_run(&state, &run.run_id).unwrap().unwrap();
+        assert_eq!(completed.status, "completed");
+        assert_eq!(completed.result, Some(result.clone()));
+        assert_eq!(completed.reason.as_deref(), Some("before_result"));
+
+        mark_dispatched(&state, &run.run_id).unwrap();
+        let after_dispatch = get_run(&state, &run.run_id).unwrap().unwrap();
+        assert_eq!(after_dispatch.status, completed.status);
+        assert_eq!(after_dispatch.result, completed.result);
+        assert_eq!(after_dispatch.reason, completed.reason);
+        assert_eq!(after_dispatch.updated_at, completed.updated_at);
+
+        mark_timeout(&state, &run.run_id, "late_timeout").unwrap();
+        let after_timeout = get_run(&state, &run.run_id).unwrap().unwrap();
+        assert_eq!(after_timeout.status, completed.status);
+        assert_eq!(after_timeout.result, completed.result);
+        assert_eq!(after_timeout.reason, completed.reason);
+        assert_eq!(after_timeout.updated_at, completed.updated_at);
+
+        let unfinished = prepare_run(
+            &state,
+            "agent",
+            "req_unfinished_guard",
+            &HubCommand::McpListServers {
+                request_id: "req_unfinished_guard".to_string(),
+            },
+        )
+        .unwrap();
+        mark_dispatched(&state, &unfinished.run_id).unwrap();
+        assert_eq!(
+            get_run(&state, &unfinished.run_id).unwrap().unwrap().status,
+            "dispatched"
+        );
+        mark_timeout(&state, &unfinished.run_id, "process_exec_timeout").unwrap();
+        let timed_out = get_run(&state, &unfinished.run_id).unwrap().unwrap();
+        assert_eq!(timed_out.status, "timeout_waiting_result");
+        assert_eq!(timed_out.reason.as_deref(), Some("process_exec_timeout"));
     }
 
     #[test]
