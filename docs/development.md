@@ -2,6 +2,12 @@
 
 This document covers source-based development, local verification, CI, and release publishing. For normal installation and usage, start with the main [README](../README.md).
 
+## Architecture before changes
+
+Start with the [architecture guide](architecture/README.md) (Chinese): current deployment and module boundaries, evidence-backed diagnosis, target architecture draft, engineering rules, and a staged refactoring plan. Agentic is controlled execution infrastructure for upstream agents, not a general Agent Runtime. The guide distinguishes current behavior from proposed rules; no runtime migration is implied by the draft.
+
+Changes to ownership, dependencies, public contracts, permissions, persistence, or deployment must update the relevant architecture document. Historical migration/release notes remain version-specific references, not the current architecture authority.
+
 ## Development from source
 
 During development, replace binary commands with Cargo package commands:

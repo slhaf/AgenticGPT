@@ -14,3 +14,11 @@
 ## 变更边界
 - 不运行真实配置初始化、远程设备或用户数据操作；不改生产代码、安全默认、协议或部署。
 - 历史 migration/release 数字不自动改写为当前值；Console 未实现Hub接入属于成熟度，不作已回归漏洞。
+
+## 阶段二：目标与工程规则
+- 阶段一提交：`e9d2b93`。
+- 两个文档 owner 并行形成目标/工程规则与未来路线图；Main 对目标/规则进行了边界审查并收窄建议。
+- 目标保留五 crate/部署拓扑，优先 crate 内 operation gate、owner/identity、入口投影；明确 Browser host 独立进程、Room资源与 Android Jetpack Room 不同、Console local-only。
+- 修正草案中“所有纯函数归 apply-patch”、Hub 已有 file/Browser 全表面、强制全部 Room 工具远端化、caller timeout 混同执行期限等不当泛化。
+- 删除目标路径表与规则末尾的重复清单；长期入口链接加入双语 development 文档。
+- 目标与规则是完整规范草案，不是已获用户批准的行为变更；不改生产代码。
