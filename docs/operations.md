@@ -98,6 +98,19 @@ By accepted D06 behavior, a Hub restart loses synchronous waiters, OAuth session
 
 To roll back, pause new requests, restore only the old Hub binary, and continue using the current database and Agent ledger. Never overwrite new results with an old database backup. The old binary reopens the Response ownership defect, so rollback is not risk-free.
 
+### Hub connection-generation cutover
+
+Use this procedure when moving to a Hub build with generation-safe WS/SSE connection admission:
+
+1. Pause new Hub calls and drain in-flight requests. If a request cannot be drained, record its `runId` and retain the corresponding Agent transport-ledger entry.
+2. Stop the Hub. Back up the actual configuration and SQLite database, preserving matching `-wal` and `-shm` files when present.
+3. Deploy the verified Hub artifact and restart it. Reconnect each Agent; every SSE reconnect must use a fresh, non-empty `connectionId`.
+4. Verify `/v1/info`, `/v1/agents`, one current Heartbeat/ack path, one stale lifecycle rejection, and one matching stale reliable result. A Hub restart may lose in-memory connections, waiters, and sessions; do not re-execute commands to restore HTTP waits.
+
+No SQL, database/schema, wire, or configuration-format migration is required. The Hub retains only the current in-memory connection per registered Agent; a replacement retires the prior Room lease and stream under the same generation boundary.
+
+To roll back, pause new calls, stop the new Hub, replace only the Hub binary with the previous verified artifact, and continue using the latest database and Agent ledger. Never restore an older database backup over newer results. The previous binary reopens the pre-generation connection race, so rollback restores that risk.
+
 ## v0.9 acceptance checklist
 
 ```bash

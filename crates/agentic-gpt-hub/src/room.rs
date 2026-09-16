@@ -608,7 +608,8 @@ mod tests {
             AgentTransport::WebSocket,
             tx,
         )
-        .await;
+        .await
+        .unwrap();
         rx
     }
 
