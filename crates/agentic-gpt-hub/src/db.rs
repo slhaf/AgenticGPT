@@ -1,5 +1,5 @@
 use anyhow::{bail, Context, Result};
-use rusqlite::Connection;
+use rusqlite::{Connection, TransactionBehavior};
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -45,11 +45,42 @@ pub(crate) fn init_db(conn: &Connection) -> Result<()> {
         );
     }
 
-    let needs_migration = version < CURRENT_SCHEMA_VERSION;
-    if needs_migration {
-        backup_before_migration(conn)?;
+    let staged_backup = if version < CURRENT_SCHEMA_VERSION {
+        stage_backup(conn, "pre-migration")?
+    } else {
+        None
+    };
+    let transaction =
+        match rusqlite::Transaction::new_unchecked(conn, TransactionBehavior::Immediate) {
+            Ok(transaction) => transaction,
+            Err(error) => {
+                discard_staged_backup(staged_backup);
+                return Err(error.into());
+            }
+        };
+    let locked_version = match schema_version(&transaction) {
+        Ok(version) => version,
+        Err(error) => {
+            drop(transaction);
+            discard_staged_backup(staged_backup);
+            return Err(error);
+        }
+    };
+    if locked_version > CURRENT_SCHEMA_VERSION {
+        drop(transaction);
+        discard_staged_backup(staged_backup);
+        bail!(
+            "unsupported hub database schema version {locked_version}; maximum supported {CURRENT_SCHEMA_VERSION}"
+        );
     }
-    let transaction = conn.unchecked_transaction()?;
+    if locked_version >= CURRENT_SCHEMA_VERSION {
+        drop(transaction);
+        discard_staged_backup(staged_backup);
+        return Ok(());
+    }
+    if let Some(staged_backup) = staged_backup {
+        staged_backup.publish()?;
+    }
     transaction.execute_batch(
         "
         create table if not exists agents (
@@ -120,20 +151,53 @@ fn schema_version(conn: &Connection) -> Result<i64> {
     Ok(conn.pragma_query_value(None, "user_version", |row| row.get(0))?)
 }
 
-pub(crate) fn backup_before_migration(conn: &Connection) -> Result<()> {
-    backup_database(conn, "pre-migration")
-}
-
 pub(crate) fn backup_before_retention(conn: &Connection) -> Result<()> {
     backup_database(conn, "pre-retention")
 }
 
+struct StagedBackup {
+    staging_dir: PathBuf,
+    temporary: PathBuf,
+    backup: PathBuf,
+}
+
+impl StagedBackup {
+    fn publish(self) -> Result<()> {
+        if let Err(error) = fs::rename(&self.temporary, &self.backup) {
+            let _ = fs::remove_dir_all(&self.staging_dir);
+            return Err(error.into());
+        }
+        if let Err(error) = fs::remove_dir_all(&self.staging_dir) {
+            return Err(error.into());
+        }
+        sync_parent(&self.backup)?;
+        Ok(())
+    }
+
+    fn discard(self) {
+        let _ = fs::remove_dir_all(&self.staging_dir);
+    }
+}
+
+fn discard_staged_backup(staged: Option<StagedBackup>) {
+    if let Some(staged) = staged {
+        staged.discard();
+    }
+}
+
 fn backup_database(conn: &Connection, label: &str) -> Result<()> {
-    let Some(path) = connection_path(conn)? else {
+    let Some(staged) = stage_backup(conn, label)? else {
         return Ok(());
     };
+    staged.publish()
+}
+
+fn stage_backup(conn: &Connection, label: &str) -> Result<Option<StagedBackup>> {
+    let Some(path) = connection_path(conn)? else {
+        return Ok(None);
+    };
     if !path.exists() || fs::metadata(&path)?.len() == 0 {
-        return Ok(());
+        return Ok(None);
     }
     // VACUUM INTO uses SQLite's consistent snapshot machinery, so concurrent
     // writers cannot leave a partially copied page in the recovery image.
@@ -161,15 +225,11 @@ fn backup_database(conn: &Connection, label: &str) -> Result<()> {
         let _ = fs::remove_dir_all(&staging_dir);
         return Err(error.into());
     }
-    if let Err(error) = fs::rename(&temporary, &backup) {
-        let _ = fs::remove_dir_all(&staging_dir);
-        return Err(error.into());
-    }
-    if let Err(error) = fs::remove_dir_all(&staging_dir) {
-        return Err(error.into());
-    }
-    sync_parent(&backup)?;
-    Ok(())
+    Ok(Some(StagedBackup {
+        staging_dir,
+        temporary,
+        backup,
+    }))
 }
 
 fn connection_path(conn: &Connection) -> Result<Option<PathBuf>> {

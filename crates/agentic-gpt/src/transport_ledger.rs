@@ -142,15 +142,7 @@ pub(crate) fn accept(envelope: &HubCommandEnvelope, agent_id: &str) -> Result<Ac
             }
             existing
         } else {
-            if !legacy_matches_envelope(&existing, envelope, agent_id) {
-                return Ok(AcceptOutcome::LegacyUnowned);
-            }
-            let mut adopted = existing;
-            adopted.agent_id = Some(agent_id.to_string());
-            adopted.reason = Some("legacy_record_adopted_for_explicit_agent".to_string());
-            adopted.conflict = None;
-            append_locked(path, &adopted)?;
-            adopted
+            return Ok(AcceptOutcome::LegacyUnowned);
         };
 
         match existing.status.as_str() {
@@ -416,58 +408,6 @@ fn append_conflict_locked(
             conflict,
         },
     )
-}
-
-fn legacy_matches_envelope(
-    existing: &LedgerRecord,
-    envelope: &HubCommandEnvelope,
-    agent_id: &str,
-) -> bool {
-    existing.agent_id.is_none()
-        && existing.request_id == envelope.request_id
-        && existing.command_hash == envelope.command_hash
-        && existing
-            .command
-            .as_ref()
-            .is_some_and(|command| commands_equal(command, &envelope.command))
-        && command_declares_agent(&envelope.command, agent_id)
-}
-
-fn commands_equal(left: &HubCommand, right: &HubCommand) -> bool {
-    match (serde_json::to_value(left), serde_json::to_value(right)) {
-        (Ok(left), Ok(right)) => left == right,
-        _ => false,
-    }
-}
-
-fn command_declares_agent(command: &HubCommand, agent_id: &str) -> bool {
-    let Ok(value) = serde_json::to_value(command) else {
-        return false;
-    };
-    let mut owners = Vec::new();
-    collect_agent_ids(&value, &mut owners);
-    !owners.is_empty() && owners.iter().all(|owner| owner == agent_id)
-}
-
-fn collect_agent_ids(value: &Value, owners: &mut Vec<String>) {
-    match value {
-        Value::Object(object) => {
-            for (key, value) in object {
-                if key == "agentId" {
-                    if let Some(agent_id) = value.as_str() {
-                        owners.push(agent_id.to_string());
-                    }
-                }
-                collect_agent_ids(value, owners);
-            }
-        }
-        Value::Array(values) => {
-            for value in values {
-                collect_agent_ids(value, owners);
-            }
-        }
-        _ => {}
-    }
 }
 
 fn validate_identity(
@@ -880,7 +820,7 @@ mod tests {
     }
 
     #[test]
-    fn unowned_legacy_is_blocked_but_explicit_agent_can_adopt_exact_envelope() {
+    fn unowned_legacy_is_blocked_including_explicit_agent_target() {
         let _home_lock = TEST_HOME_LOCK.lock();
         let _home = test_home();
         let legacy_command = skills_command("request-legacy");
@@ -924,24 +864,24 @@ mod tests {
                 run_id: adopted.run_id.clone(),
                 request_id: adopted.request_id.clone(),
                 command_hash: adopted.command_hash.clone(),
-                status: "accepted".to_string(),
+                status: "completed".to_string(),
                 agent_id: None,
                 command: Some(adopted_command),
-                result: None,
+                result: Some(serde_json::json!({"legacy": true})),
                 reason: None,
                 conflict: None,
             },
         );
         assert!(matches!(
             accept(&adopted, "agent-a").unwrap(),
-            AcceptOutcome::DuplicateAccepted
+            AcceptOutcome::LegacyUnowned
         ));
         assert_eq!(
             latest_records()
                 .unwrap()
                 .get(&adopted.run_id)
                 .and_then(|record| record.agent_id.as_deref()),
-            Some("agent-a")
+            None
         );
     }
 

@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use std::collections::VecDeque;
-use std::fs;
+use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -9,7 +9,9 @@ use agentic_gpt_protocol::{JobDetail, JobInfo, JobKind, JobListRequest, JobState
 use anyhow::{anyhow, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{DateTime, Duration, Utc};
-use rusqlite::{params, types::Value, Connection, ErrorCode, OptionalExtension, ToSql};
+use rusqlite::{
+    params, types::Value, Connection, ErrorCode, OptionalExtension, ToSql, TransactionBehavior,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -30,6 +32,8 @@ const MAX_STRING_BYTES: usize = 64 * 1024;
 const MAX_ERROR_BYTES: usize = 8 * 1024;
 const MAX_ARGS: usize = 128;
 const MAX_ARG_BYTES: usize = 4 * 1024;
+const HISTORY_SCHEMA_VERSION: i64 = 1;
+const SQLITE_BUSY_TIMEOUT_MS: u64 = 750;
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS jobs (
@@ -143,6 +147,18 @@ struct PendingTerminal {
     detail: JobDetail,
     attempts: u8,
     next_retry_at: DateTime<Utc>,
+}
+
+struct StagedMigrationSnapshot {
+    staging_dir: PathBuf,
+    temporary: PathBuf,
+    backup: PathBuf,
+}
+
+impl StagedMigrationSnapshot {
+    fn cleanup(self) {
+        let _ = fs::remove_dir_all(self.staging_dir);
+    }
 }
 
 pub(crate) struct JobHistoryStore {
@@ -621,28 +637,7 @@ impl JobHistoryStore {
 
     fn initialize(&self) {
         let result = (|| -> Result<()> {
-            if let Some(parent) = self.path.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            let mut connection = match Connection::open(&self.path) {
-                Ok(connection) => connection,
-                Err(error) if is_corruption(&error) => {
-                    self.isolate_corrupt_database()?;
-                    Connection::open(&self.path)?
-                }
-                Err(error) => return Err(error.into()),
-            };
-            connection.busy_timeout(std::time::Duration::from_millis(750))?;
-            if let Err(error) = connection.execute_batch(SCHEMA) {
-                if !is_corruption(&error) {
-                    return Err(error.into());
-                }
-                drop(connection);
-                self.isolate_corrupt_database()?;
-                connection = Connection::open(&self.path)?;
-                connection.busy_timeout(std::time::Duration::from_millis(750))?;
-                connection.execute_batch(SCHEMA)?;
-            }
+            let connection = self.open_initialized_connection()?;
             *self
                 .connection
                 .lock()
@@ -669,33 +664,174 @@ impl JobHistoryStore {
         {
             return Ok(());
         }
-        let mut connection = Connection::open(&self.path)
-            .map_err(|error| anyhow!(error))
-            .and_then(|connection| {
-                connection
-                    .busy_timeout(std::time::Duration::from_millis(750))
-                    .map_err(|error| anyhow!(error))?;
-                Ok(connection)
-            })?;
-        if let Err(error) = connection.execute_batch(SCHEMA) {
-            if !is_corruption(&error) {
-                return Err(anyhow!(error));
-            }
-            drop(connection);
-            self.isolate_corrupt_database()?;
-            connection = Connection::open(&self.path).map_err(|error| anyhow!(error))?;
-            connection
-                .busy_timeout(std::time::Duration::from_millis(750))
-                .map_err(|error| anyhow!(error))?;
-            connection
-                .execute_batch(SCHEMA)
-                .map_err(|error| anyhow!(error))?;
-        }
+        let connection = self.open_initialized_connection()?;
         *self
             .connection
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(connection);
         Ok(())
+    }
+
+    fn open_initialized_connection(&self) -> Result<Connection> {
+        self.prepare_database_file()?;
+        let mut connection = match Connection::open(&self.path) {
+            Ok(connection) => connection,
+            Err(error) if is_corruption(&error) => {
+                self.isolate_corrupt_database()?;
+                self.prepare_database_file()?;
+                Connection::open(&self.path)?
+            }
+            Err(error) => return Err(error.into()),
+        };
+        connection.busy_timeout(std::time::Duration::from_millis(SQLITE_BUSY_TIMEOUT_MS))?;
+        if let Err(error) = self.initialize_schema(&mut connection) {
+            if !is_corruption_error(&error) {
+                return Err(error);
+            }
+            drop(connection);
+            self.isolate_corrupt_database()?;
+            self.prepare_database_file()?;
+            let mut replacement = Connection::open(&self.path)?;
+            replacement.busy_timeout(std::time::Duration::from_millis(SQLITE_BUSY_TIMEOUT_MS))?;
+            self.initialize_schema(&mut replacement)?;
+            connection = replacement;
+        }
+        Ok(connection)
+    }
+
+    fn prepare_database_file(&self) -> Result<()> {
+        if let Some(parent) = self.path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        if self.path.exists() {
+            return Ok(());
+        }
+        let mut options = OpenOptions::new();
+        options.create_new(true).read(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(&self.path) {
+            Ok(file) => {
+                drop(file);
+                Ok(())
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn initialize_schema(&self, connection: &mut Connection) -> Result<()> {
+        let version: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if version > HISTORY_SCHEMA_VERSION {
+            return Err(anyhow!(
+                "unsupported job history schema version {version}; maximum supported {HISTORY_SCHEMA_VERSION}"
+            ));
+        }
+        let staged_snapshot =
+            if version < HISTORY_SCHEMA_VERSION && self.has_legacy_rows(connection)? {
+                Some(self.stage_migration_snapshot(connection)?)
+            } else {
+                None
+            };
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let transaction_version: i64 =
+            match transaction.pragma_query_value(None, "user_version", |row| row.get(0)) {
+                Ok(version) => version,
+                Err(error) => {
+                    drop(transaction);
+                    if let Some(snapshot) = staged_snapshot {
+                        snapshot.cleanup();
+                    }
+                    return Err(error.into());
+                }
+            };
+        if transaction_version > HISTORY_SCHEMA_VERSION {
+            drop(transaction);
+            if let Some(snapshot) = staged_snapshot {
+                snapshot.cleanup();
+            }
+            return Err(anyhow!(
+                "unsupported job history schema version {transaction_version}; maximum supported {HISTORY_SCHEMA_VERSION}"
+            ));
+        }
+        if let Some(snapshot) = staged_snapshot {
+            if transaction_version < HISTORY_SCHEMA_VERSION {
+                self.publish_migration_snapshot(snapshot)?;
+            } else {
+                snapshot.cleanup();
+            }
+        }
+        transaction.execute_batch(SCHEMA)?;
+        transaction.pragma_update(None, "user_version", HISTORY_SCHEMA_VERSION)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    fn has_legacy_rows(&self, connection: &Connection) -> rusqlite::Result<bool> {
+        let has_jobs_table: i64 = connection.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM sqlite_master
+                  WHERE type = 'table' AND name = 'jobs'
+             )",
+            [],
+            |row| row.get(0),
+        )?;
+        if has_jobs_table == 0 {
+            return Ok(false);
+        }
+        let has_rows: i64 =
+            connection.query_row("SELECT EXISTS(SELECT 1 FROM jobs LIMIT 1)", [], |row| {
+                row.get(0)
+            })?;
+        Ok(has_rows != 0)
+    }
+
+    fn stage_migration_snapshot(&self, connection: &Connection) -> Result<StagedMigrationSnapshot> {
+        let mut backup_name = self.path.as_os_str().to_os_string();
+        backup_name.push(".pre-migration.bak");
+        let backup = PathBuf::from(backup_name);
+        let mut staging_name = backup.as_os_str().to_os_string();
+        staging_name.push(format!(".staging-{}", Uuid::new_v4().simple()));
+        let staging_dir = PathBuf::from(staging_name);
+        let mut builder = fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder.create(&staging_dir)?;
+        let temporary = staging_dir.join("snapshot.sqlite");
+        let escaped = temporary.to_string_lossy().replace('\'', "''");
+        let result = (|| -> Result<StagedMigrationSnapshot> {
+            connection.execute_batch(&format!("VACUUM INTO '{escaped}'"))?;
+            set_private_file_mode(&temporary)?;
+            File::open(&temporary)?.sync_all()?;
+            Ok(StagedMigrationSnapshot {
+                staging_dir: staging_dir.clone(),
+                temporary: temporary.clone(),
+                backup: backup.clone(),
+            })
+        })();
+        if result.is_err() {
+            let _ = fs::remove_dir_all(&staging_dir);
+        }
+        result
+    }
+
+    fn publish_migration_snapshot(&self, snapshot: StagedMigrationSnapshot) -> Result<()> {
+        let result = (|| -> Result<()> {
+            fs::rename(&snapshot.temporary, &snapshot.backup)?;
+            fs::remove_dir_all(&snapshot.staging_dir)?;
+            sync_parent(&snapshot.backup)?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_dir_all(&snapshot.staging_dir);
+        }
+        result
     }
 
     fn with_connection<R>(
@@ -879,9 +1015,32 @@ impl JobHistoryStore {
         let isolated = self
             .path
             .with_extension(format!("sqlite3.corrupt-{}", Uuid::new_v4().simple()));
-        fs::rename(&self.path, isolated)?;
+        fs::rename(&self.path, &isolated)?;
+        sync_parent(&isolated)?;
         Ok(())
     }
+}
+
+fn is_corruption_error(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<rusqlite::Error>()
+        .is_some_and(is_corruption)
+}
+
+fn set_private_file_mode(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+fn sync_parent(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        File::open(parent)?.sync_all()?;
+    }
+    Ok(())
 }
 
 fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<JobHistoryRecord> {
@@ -1238,9 +1397,13 @@ mod tests {
     fn schema_is_idempotent_and_indexes_exist() {
         let (store, root) = store("schema");
         assert_eq!(store.health().status, HistoryHealthStatus::Healthy);
+        let database_path = store.path().to_path_buf();
         let second = JobHistoryStore::open(&PrivateStatePaths::for_test(root.clone()));
         let indexes: Vec<String> = second
             .with_connection(|connection| {
+                let version: i64 =
+                    connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+                assert_eq!(version, HISTORY_SCHEMA_VERSION);
                 let mut statement = connection.prepare(
                     "SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_jobs_%'",
                 )?;
@@ -1249,6 +1412,185 @@ mod tests {
             })
             .unwrap();
         assert_eq!(indexes.len(), 5);
+        assert!(!PathBuf::from(format!("{}.pre-migration.bak", database_path.display())).exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&database_path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        cleanup(&root);
+    }
+
+    #[test]
+    fn legacy_rows_are_preserved_and_snapshot_created_during_migration() {
+        let (store, root) = store("legacy-migration");
+        let now = Utc::now();
+        let legacy = info("legacy-row", JobState::Completed, now);
+        assert_eq!(
+            store.upsert_terminal(&detail(legacy)),
+            HistoryWriteOutcome::Persisted
+        );
+        let database_path = store.path().to_path_buf();
+        drop(store);
+        {
+            let connection = Connection::open(&database_path).unwrap();
+            connection
+                .pragma_update(None, "user_version", 0_i64)
+                .unwrap();
+        }
+
+        let migrated = JobHistoryStore::open(&PrivateStatePaths::for_test(root.clone()));
+        assert_eq!(migrated.health().status, HistoryHealthStatus::Healthy);
+        let version: i64 = migrated
+            .with_connection(|connection| {
+                connection.pragma_query_value(None, "user_version", |row| row.get(0))
+            })
+            .unwrap();
+        assert_eq!(version, HISTORY_SCHEMA_VERSION);
+        assert_eq!(
+            migrated.get("legacy-row").unwrap().unwrap().info.job_id,
+            "legacy-row"
+        );
+
+        let backup_path = PathBuf::from(format!("{}.pre-migration.bak", database_path.display()));
+        assert!(backup_path.exists());
+        let backup = Connection::open(&backup_path).unwrap();
+        let backup_version: i64 = backup
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(backup_version, 0);
+        assert_eq!(
+            backup
+                .query_row("SELECT job_id FROM jobs", [], |row| row.get::<_, String>(0))
+                .unwrap(),
+            "legacy-row"
+        );
+        cleanup(&root);
+    }
+
+    #[test]
+    fn future_schema_version_is_refused_without_recovery_or_snapshot() {
+        let (store, root) = store("future-schema");
+        let now = Utc::now();
+        let active = info("future-active", JobState::Running, now);
+        assert_eq!(
+            store.insert_admission(&active),
+            HistoryWriteOutcome::Persisted
+        );
+        let database_path = store.path().to_path_buf();
+        drop(store);
+        {
+            let connection = Connection::open(&database_path).unwrap();
+            connection
+                .execute_batch("CREATE TABLE future_marker (value TEXT)")
+                .unwrap();
+            connection
+                .pragma_update(None, "user_version", HISTORY_SCHEMA_VERSION + 1)
+                .unwrap();
+        }
+
+        let reopened = JobHistoryStore::open(&PrivateStatePaths::for_test(root.clone()));
+        assert_eq!(reopened.health().status, HistoryHealthStatus::Degraded);
+        let error = reopened.ensure_ready().unwrap_err().to_string();
+        assert!(error.contains("unsupported job history schema version"));
+
+        let connection = Connection::open(&database_path).unwrap();
+        let version: i64 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, HISTORY_SCHEMA_VERSION + 1);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT state FROM jobs WHERE job_id = 'future-active'",
+                    [],
+                    |row| { row.get::<_, String>(0) }
+                )
+                .unwrap(),
+            "running"
+        );
+        assert!(connection
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'future_marker'",
+                [],
+                |_| Ok(()),
+            )
+            .is_ok());
+        assert!(!PathBuf::from(format!("{}.pre-migration.bak", database_path.display())).exists());
+        cleanup(&root);
+    }
+
+    #[test]
+    fn failed_migration_rolls_back_and_retry_preserves_legacy_data() {
+        let (store, root) = store("migration-rollback");
+        let legacy = info("rollback-row", JobState::Completed, Utc::now());
+        assert_eq!(
+            store.upsert_terminal(&detail(legacy)),
+            HistoryWriteOutcome::Persisted
+        );
+        let database_path = store.path().to_path_buf();
+        drop(store);
+        {
+            let connection = Connection::open(&database_path).unwrap();
+            connection
+                .execute_batch(
+                    "DROP INDEX idx_jobs_created_job;
+                     CREATE TABLE idx_jobs_created_job (value TEXT);",
+                )
+                .unwrap();
+            connection
+                .pragma_update(None, "user_version", 0_i64)
+                .unwrap();
+        }
+
+        let failed = JobHistoryStore::open(&PrivateStatePaths::for_test(root.clone()));
+        assert_eq!(failed.health().status, HistoryHealthStatus::Degraded);
+        assert!(failed.ensure_ready().is_err());
+        {
+            let connection = Connection::open(&database_path).unwrap();
+            let version: i64 = connection
+                .pragma_query_value(None, "user_version", |row| row.get(0))
+                .unwrap();
+            assert_eq!(version, 0);
+            assert_eq!(
+                connection
+                    .query_row(
+                        "SELECT job_id FROM jobs WHERE job_id = 'rollback-row'",
+                        [],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .unwrap(),
+                "rollback-row"
+            );
+            assert!(connection
+                .query_row(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'idx_jobs_created_job'",
+                    [],
+                    |_| Ok(()),
+                )
+                .is_ok());
+        }
+
+        {
+            let connection = Connection::open(&database_path).unwrap();
+            connection
+                .execute_batch("DROP TABLE idx_jobs_created_job")
+                .unwrap();
+        }
+        failed.ensure_ready().unwrap();
+        assert_eq!(
+            failed.get("rollback-row").unwrap().unwrap().info.job_id,
+            "rollback-row"
+        );
+        let migrated_version: i64 = failed
+            .with_connection(|connection| {
+                connection.pragma_query_value(None, "user_version", |row| row.get(0))
+            })
+            .unwrap();
+        assert_eq!(migrated_version, HISTORY_SCHEMA_VERSION);
         cleanup(&root);
     }
 
