@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use crate::agentic_result::AgenticResult;
-use crate::agents::{cached_job, mcp_list_servers_all_agents, request_agent};
+use crate::agents::dispatch::{cached_job, mcp_list_servers_all_agents, request_agent};
 use crate::notify::{notification_channels, send_user_notification, NotifyRouteError};
 use crate::registry::{registry_entries, registry_entry};
 use crate::room::{request_active_room, RoomRouteError};
@@ -2759,7 +2759,7 @@ mod tests {
             config: Arc::new(test_hub_config()),
             mcp_profile: McpProfile::Full,
             agents: Arc::new(Mutex::new(HashMap::new())),
-            pending: Arc::new(Mutex::new(HashMap::new())),
+            dispatch: Arc::new(crate::agents::dispatch::Dispatch::new()),
             pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
             jobs: Arc::new(Mutex::new(HashMap::new())),
             boot_generations: Arc::new(Mutex::new(HashMap::new())),

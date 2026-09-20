@@ -1,0 +1,944 @@
+use super::*;
+use crate::agents::test_support::*;
+use agentic_gpt_protocol::{
+    AgentConnectionMode, AgentMessage, AgentRole, AgentRunReport, ConfirmationPayload, HubCommand,
+    HubMessage, JobState, SafeConfigSummary,
+};
+use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
+use serde_json::{json, Value};
+use std::collections::HashMap;
+use tokio::sync::mpsc;
+use tokio::time::{timeout, Duration};
+
+use crate::agents::transport::{post_agent_message, SseConnectQuery};
+use crate::registry::registry_entry;
+use crate::runs;
+use crate::state::{AgentTransport, OutboundAgentMessage, PendingConfirmation};
+
+fn generation_config_summary(workspace_root: &str) -> SafeConfigSummary {
+    let mut summary = test_config_summary();
+    summary.workspace_root = workspace_root.to_string();
+    summary
+}
+
+pub(crate) fn generation_hello(
+    role: AgentRole,
+    connection_mode: AgentConnectionMode,
+    boot_generation: &str,
+    workspace_root: &str,
+) -> AgentMessage {
+    AgentMessage::Hello {
+        role,
+        boot_generation: boot_generation.to_string(),
+        connection_mode,
+        config_summary: generation_config_summary(workspace_root),
+        notification_channels: Vec::new(),
+    }
+}
+
+fn generation_report(run_id: &str, request_id: &str) -> AgentMessage {
+    let timestamp = chrono::DateTime::parse_from_rfc3339("2026-09-16T00:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    AgentMessage::RunReport {
+        report: Box::new(AgentRunReport {
+            run_id: run_id.to_string(),
+            request_id: request_id.to_string(),
+            tool_name: "generation.probe".to_string(),
+            source: "tunnel".to_string(),
+            profile: "normal".to_string(),
+            detail: "metadata".to_string(),
+            status: "started".to_string(),
+            started_at: timestamp,
+            updated_at: timestamp,
+            duration_ms: None,
+            job_id: None,
+            exit_code: None,
+            reason: None,
+            arguments: None,
+            result: None,
+            job: None,
+        }),
+    }
+}
+
+fn generation_confirmation(request_id: &str, request_agent_id: &str) -> AgentMessage {
+    AgentMessage::ConfirmationRequest {
+        request_id: request_id.to_string(),
+        agent_id: request_agent_id.to_string(),
+        timeout_seconds: 5,
+        payload: ConfirmationPayload {
+            program: "generation-probe".to_string(),
+            args: Vec::new(),
+            command_preview: "generation probe".to_string(),
+            risk_level: "LOW".to_string(),
+            reason: "generation probe".to_string(),
+            kind: None,
+            server_id: None,
+            tool_name: None,
+        },
+    }
+}
+
+fn generation_pending_confirmation(confirmation_id: &str, request_id: &str) -> PendingConfirmation {
+    let now = chrono::Utc::now();
+    PendingConfirmation {
+        confirmation_id: confirmation_id.to_string(),
+        request_id: request_id.to_string(),
+        agent_id: "agent".to_string(),
+        token_hash: "generation-token-hash".to_string(),
+        command_preview: "generation probe".to_string(),
+        risk_level: "LOW".to_string(),
+        reason: "generation probe".to_string(),
+        created_at: now,
+        expires_at: now + chrono::Duration::seconds(60),
+        resolved: false,
+        decision: None,
+    }
+}
+
+pub(crate) async fn generation_handle(
+    state: &HubState,
+    agent_id: &str,
+    connection_id: &str,
+    message: AgentMessage,
+) -> std::result::Result<(), String> {
+    timeout(
+        Duration::from_secs(5),
+        handle_agent_message(state, agent_id, connection_id, message),
+    )
+    .await
+    .expect("generation handler timed out")
+}
+
+async fn generation_fixture() -> (HubState, mpsc::UnboundedReceiver<OutboundAgentMessage>) {
+    let state = test_state();
+    register_agent(&state, "agent", "secret");
+    let mut old_rx = insert_connection(
+        &state,
+        "agent",
+        "old",
+        chrono::Utc::now() - chrono::Duration::seconds(10),
+    )
+    .await;
+    let (new_tx, new_rx) = mpsc::unbounded_channel();
+    replace_agent_connection(&state, "agent", "new", AgentTransport::Sse, new_tx)
+        .await
+        .unwrap();
+    assert!(matches!(
+        timeout(Duration::from_secs(5), old_rx.recv())
+            .await
+            .expect("replacement close timed out"),
+        Some(OutboundAgentMessage::Close)
+    ));
+    generation_handle(
+        &state,
+        "agent",
+        "new",
+        generation_hello(
+            AgentRole::Room,
+            AgentConnectionMode::CommandCapable,
+            "boot-new",
+            "new",
+        ),
+    )
+    .await
+    .unwrap();
+    (state, new_rx)
+}
+
+pub(crate) async fn generation_snapshot(state: &HubState) -> Value {
+    let connection = {
+        let agents = state.agents.lock().await;
+        let connection = agents.get("agent").unwrap();
+        json!({
+            "connectionId": connection.connection_id,
+            "role": connection.role,
+            "connectionMode": connection.connection_mode,
+            "helloReceived": connection.hello_received,
+            "bootGeneration": connection.boot_generation,
+            "transport": match connection.transport {
+                AgentTransport::WebSocket => "websocket",
+                AgentTransport::Sse => "sse",
+            },
+            "lastSeenAt": connection.last_seen_at,
+            "configSummary": connection.config_summary,
+            "notificationChannels": connection.notification_channels,
+        })
+    };
+    let registry_last_seen = registry_entry(&state, "agent")
+        .unwrap()
+        .and_then(|entry| entry.last_seen_at);
+    let boot_generation = state.boot_generations.lock().await.get("agent").cloned();
+    let jobs = state
+        .jobs
+        .lock()
+        .await
+        .get("agent")
+        .cloned()
+        .unwrap_or_default();
+    let active_room = state.active_room.lock().await.as_ref().map(|active| {
+        json!({
+            "agentId": active.agent_id,
+            "connectionId": active.connection_id,
+        })
+    });
+    let pending_confirmations = state.pending_confirmations.lock().await.len();
+    json!({
+        "connection": connection,
+        "registryLastSeenAt": registry_last_seen,
+        "bootGeneration": boot_generation,
+        "jobs": jobs,
+        "activeRoom": active_room,
+        "pendingConfirmations": pending_confirmations,
+    })
+}
+#[tokio::test]
+async fn changed_boot_generation_marks_only_active_jobs_unknown_after_restart() {
+    let state = test_state();
+    register_agent(&state, "agent", "secret");
+    let _rx = insert_connection(&state, "agent", "current", chrono::Utc::now()).await;
+    state
+        .boot_generations
+        .lock()
+        .await
+        .insert("agent".to_string(), "boot-a".to_string());
+    let running = test_running_job("job_boot-a_running");
+    let mut completed = test_running_job("job_boot-a_completed");
+    completed.state = JobState::Completed;
+    completed.finished_at = Some(completed.updated_at);
+    state.jobs.lock().await.insert(
+        "agent".to_string(),
+        HashMap::from([
+            (running.job_id.clone(), running),
+            (completed.job_id.clone(), completed),
+        ]),
+    );
+
+    handle_agent_message(
+        &state,
+        "agent",
+        "current",
+        AgentMessage::Hello {
+            role: AgentRole::Normal,
+            boot_generation: "boot-b".to_string(),
+            connection_mode: AgentConnectionMode::CommandCapable,
+            config_summary: test_config_summary(),
+            notification_channels: Vec::new(),
+        },
+    )
+    .await
+    .unwrap();
+
+    let jobs = state.jobs.lock().await;
+    let agent_jobs = jobs.get("agent").unwrap();
+    let running = agent_jobs.get("job_boot-a_running").unwrap();
+    assert_eq!(running.state, JobState::UnknownAfterRestart);
+    assert_eq!(
+        running.reject_reason.as_deref(),
+        Some("unknown_after_restart")
+    );
+    assert!(running.finished_at.is_some());
+    assert_eq!(
+        agent_jobs.get("job_boot-a_completed").unwrap().state,
+        JobState::Completed
+    );
+    drop(jobs);
+    assert_eq!(
+        state
+            .boot_generations
+            .lock()
+            .await
+            .get("agent")
+            .map(String::as_str),
+        Some("boot-b")
+    );
+    assert_eq!(
+        state
+            .agents
+            .lock()
+            .await
+            .get("agent")
+            .and_then(|connection| connection.boot_generation.as_deref()),
+        Some("boot-b")
+    );
+}
+#[tokio::test]
+async fn stale_heartbeat_is_rejected_without_touching_current_connection() {
+    let state = test_state();
+    register_agent(&state, "agent", "secret");
+    let previous_seen = chrono::Utc::now() - chrono::Duration::seconds(10);
+    let _rx = insert_connection(&state, "agent", "current", previous_seen).await;
+
+    let response = post_agent_message(
+        State(state.clone()),
+        Path("agent".to_string()),
+        Query(SseConnectQuery::for_test(Some("old".to_string()))),
+        agent_headers("secret"),
+        axum::Json(AgentMessage::Heartbeat {
+            sent_at: chrono::Utc::now(),
+        }),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let agents = state.agents.lock().await;
+    let connection = agents.get("agent").unwrap();
+    assert_eq!(connection.connection_id, "current");
+    assert_eq!(connection.last_seen_at, previous_seen);
+}
+
+#[tokio::test]
+async fn stale_job_update_is_rejected_without_writing_job_cache() {
+    let state = test_state();
+    register_agent(&state, "agent", "secret");
+    let _rx = insert_connection(&state, "agent", "current", chrono::Utc::now()).await;
+
+    let response = post_agent_message(
+        State(state.clone()),
+        Path("agent".to_string()),
+        Query(SseConnectQuery::for_test(Some("old".to_string()))),
+        agent_headers("secret"),
+        axum::Json(AgentMessage::JobUpdate {
+            job: test_running_job("job_oldboot_123"),
+        }),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert!(state.jobs.lock().await.is_empty());
+}
+#[tokio::test]
+async fn expired_connection_cleanup_removes_only_stale_current_entries() {
+    let state = test_state();
+    let old_seen = chrono::Utc::now() - chrono::Duration::seconds(120);
+    let fresh_seen = chrono::Utc::now();
+    let _old_rx = insert_connection(&state, "old-agent", "old", old_seen).await;
+    let _fresh_rx = insert_connection(&state, "fresh-agent", "fresh", fresh_seen).await;
+
+    cleanup_expired_agent_connections_once(&state, chrono::Utc::now()).await;
+
+    let agents = state.agents.lock().await;
+    assert!(!agents.contains_key("old-agent"));
+    assert!(agents.contains_key("fresh-agent"));
+}
+#[tokio::test]
+async fn generation_stale_messages_preserve_current_state() {
+    for case in [
+        "hello_normal",
+        "hello_reporting_only",
+        "hello_room_changed_boot",
+        "heartbeat",
+        "job_update",
+        "run_report",
+        "confirmation_request",
+    ] {
+        let (state, mut new_rx) = generation_fixture().await;
+        if case == "hello_room_changed_boot" {
+            let running = test_running_job("generation_active");
+            let mut completed = test_running_job("generation_terminal");
+            completed.state = JobState::Completed;
+            completed.finished_at = Some(completed.updated_at);
+            state.jobs.lock().await.insert(
+                "agent".to_string(),
+                HashMap::from([
+                    (running.job_id.clone(), running),
+                    (completed.job_id.clone(), completed),
+                ]),
+            );
+        }
+        let before = generation_snapshot(&state).await;
+        let result = match case {
+            "hello_normal" => {
+                generation_handle(
+                    &state,
+                    "agent",
+                    "old",
+                    generation_hello(
+                        AgentRole::Normal,
+                        AgentConnectionMode::CommandCapable,
+                        "boot-old",
+                        "old",
+                    ),
+                )
+                .await
+            }
+            "hello_reporting_only" => {
+                generation_handle(
+                    &state,
+                    "agent",
+                    "old",
+                    generation_hello(
+                        AgentRole::Normal,
+                        AgentConnectionMode::ReportingOnly,
+                        "boot-old",
+                        "old",
+                    ),
+                )
+                .await
+            }
+            "hello_room_changed_boot" => {
+                generation_handle(
+                    &state,
+                    "agent",
+                    "old",
+                    generation_hello(
+                        AgentRole::Room,
+                        AgentConnectionMode::CommandCapable,
+                        "boot-old",
+                        "old",
+                    ),
+                )
+                .await
+            }
+            "heartbeat" => {
+                generation_handle(
+                    &state,
+                    "agent",
+                    "old",
+                    AgentMessage::Heartbeat {
+                        sent_at: chrono::Utc::now(),
+                    },
+                )
+                .await
+            }
+            "job_update" => {
+                generation_handle(
+                    &state,
+                    "agent",
+                    "old",
+                    AgentMessage::JobUpdate {
+                        job: test_running_job("generation_stale_job"),
+                    },
+                )
+                .await
+            }
+            "run_report" => {
+                generation_handle(
+                    &state,
+                    "agent",
+                    "old",
+                    generation_report("stale-report", "stale-report-request"),
+                )
+                .await
+            }
+            "confirmation_request" => {
+                generation_handle(
+                    &state,
+                    "agent",
+                    "old",
+                    generation_confirmation("stale-confirmation", "agent"),
+                )
+                .await
+            }
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            result,
+            Err("stale_connection".to_string()),
+            "stale case {case}"
+        );
+        assert_eq!(
+            generation_snapshot(&state).await,
+            before,
+            "stale case {case} changed current state"
+        );
+        if case == "run_report" {
+            assert!(runs::get_run(&state, "stale-report").unwrap().is_none());
+        }
+        assert!(matches!(
+            new_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+}
+#[tokio::test]
+async fn generation_current_messages_keep_existing_effects() {
+    let state = test_state();
+    register_agent(&state, "agent", "secret");
+    let mut outbound = insert_connection(&state, "agent", "current", chrono::Utc::now()).await;
+
+    generation_handle(
+        &state,
+        "agent",
+        "current",
+        generation_hello(
+            AgentRole::Room,
+            AgentConnectionMode::CommandCapable,
+            "boot-a",
+            "current",
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        state
+            .active_room
+            .lock()
+            .await
+            .as_ref()
+            .map(|active| active.connection_id.as_str()),
+        Some("current")
+    );
+
+    let running = test_running_job("generation_running");
+    let mut completed = test_running_job("generation_completed");
+    completed.state = JobState::Completed;
+    completed.finished_at = Some(completed.updated_at);
+    state.jobs.lock().await.insert(
+        "agent".to_string(),
+        HashMap::from([
+            (running.job_id.clone(), running),
+            (completed.job_id.clone(), completed),
+        ]),
+    );
+    generation_handle(
+        &state,
+        "agent",
+        "current",
+        generation_hello(
+            AgentRole::Room,
+            AgentConnectionMode::CommandCapable,
+            "boot-a",
+            "current",
+        ),
+    )
+    .await
+    .unwrap();
+    {
+        let jobs = state.jobs.lock().await;
+        assert_eq!(jobs["agent"]["generation_running"].state, JobState::Running);
+        assert_eq!(
+            jobs["agent"]["generation_completed"].state,
+            JobState::Completed
+        );
+    }
+
+    generation_handle(
+        &state,
+        "agent",
+        "current",
+        generation_hello(
+            AgentRole::Room,
+            AgentConnectionMode::CommandCapable,
+            "boot-b",
+            "current-new",
+        ),
+    )
+    .await
+    .unwrap();
+    {
+        let jobs = state.jobs.lock().await;
+        assert_eq!(
+            jobs["agent"]["generation_running"].state,
+            JobState::UnknownAfterRestart
+        );
+        assert_eq!(
+            jobs["agent"]["generation_completed"].state,
+            JobState::Completed
+        );
+    }
+
+    let sent_at = chrono::DateTime::parse_from_rfc3339("2026-09-16T00:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    generation_handle(
+        &state,
+        "agent",
+        "current",
+        AgentMessage::Heartbeat { sent_at },
+    )
+    .await
+    .unwrap();
+    let OutboundAgentMessage::Text(text) = timeout(Duration::from_secs(5), outbound.recv())
+        .await
+        .expect("current heartbeat ack timed out")
+        .expect("current heartbeat sender closed")
+    else {
+        panic!("expected heartbeat ack");
+    };
+    assert!(matches!(
+        serde_json::from_str::<HubMessage>(&text).unwrap(),
+        HubMessage::HeartbeatAck {
+            sent_at: ack_sent,
+            ..
+        } if ack_sent == sent_at
+    ));
+
+    generation_handle(
+        &state,
+        "agent",
+        "current",
+        AgentMessage::JobUpdate {
+            job: test_running_job("generation_current_job"),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(state
+        .jobs
+        .lock()
+        .await
+        .get("agent")
+        .is_some_and(|jobs| jobs.contains_key("generation_current_job")));
+
+    generation_handle(
+        &state,
+        "agent",
+        "current",
+        generation_report("generation-current-report", "generation-current-request"),
+    )
+    .await
+    .unwrap();
+    let report = runs::get_run(&state, "generation-current-report")
+        .unwrap()
+        .expect("current report should be stored");
+    assert_eq!(report.status, "started");
+    assert_eq!(report.agent_id, "agent");
+}
+#[tokio::test]
+async fn generation_stale_reliable_messages_do_not_touch_current() {
+    for case in ["response", "transport_ack", "transport_status"] {
+        let (state, mut new_rx) = generation_fixture().await;
+        let command = HubCommand::McpListServers {
+            request_id: format!("generation-{case}-request"),
+        };
+        let run = runs::prepare_run(
+            &state,
+            "agent",
+            &format!("generation-{case}-request"),
+            &command,
+        )
+        .unwrap();
+        let before = generation_snapshot(&state).await;
+        let result = match case {
+            "response" => {
+                generation_handle(
+                    &state,
+                    "agent",
+                    "old",
+                    AgentMessage::Response {
+                        run_id: Some(run.run_id.clone()),
+                        request_id: run.request_id.clone(),
+                        data: json!({ "servers": [] }),
+                    },
+                )
+                .await
+            }
+            "transport_ack" => {
+                generation_handle(
+                    &state,
+                    "agent",
+                    "old",
+                    AgentMessage::TransportAck {
+                        event_id: "generation-event".to_string(),
+                        run_id: run.run_id.clone(),
+                        request_id: run.request_id.clone(),
+                        command_hash: run.command_hash.clone(),
+                    },
+                )
+                .await
+            }
+            "transport_status" => {
+                generation_handle(
+                    &state,
+                    "agent",
+                    "old",
+                    AgentMessage::TransportRunStatus {
+                        run_id: run.run_id.clone(),
+                        request_id: run.request_id.clone(),
+                        status: "started".to_string(),
+                        reason: None,
+                    },
+                )
+                .await
+            }
+            _ => unreachable!(),
+        };
+        assert_eq!(result, Ok(()), "reliable case {case}");
+        assert_eq!(
+            generation_snapshot(&state).await,
+            before,
+            "reliable case {case} touched current state"
+        );
+        let stored = runs::get_run(&state, &run.run_id).unwrap().unwrap();
+        match case {
+            "response" => {
+                assert_eq!(stored.status, "completed");
+                assert_eq!(stored.result, Some(json!({ "servers": [] })));
+            }
+            "transport_ack" => assert_eq!(stored.status, "acked"),
+            "transport_status" => assert_eq!(stored.status, "started"),
+            _ => unreachable!(),
+        }
+        assert!(matches!(
+            new_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+}
+#[tokio::test]
+async fn generation_job_update_and_replace_are_linearized() {
+    let state = test_state();
+    register_agent(&state, "agent", "secret");
+    let _old_rx = insert_connection(&state, "agent", "old", chrono::Utc::now()).await;
+    let jobs = state.jobs.lock().await;
+    let mut update = Box::pin(handle_agent_message(
+        &state,
+        "agent",
+        "old",
+        AgentMessage::JobUpdate {
+            job: test_running_job("generation_linearized_job"),
+        },
+    ));
+    assert!(matches!(
+        futures_util::poll!(update.as_mut()),
+        std::task::Poll::Pending
+    ));
+
+    let (new_tx, _new_rx) = mpsc::unbounded_channel();
+    let mut replacement = Box::pin(replace_agent_connection(
+        &state,
+        "agent",
+        "new",
+        AgentTransport::Sse,
+        new_tx,
+    ));
+    let replacement_poll = futures_util::poll!(replacement.as_mut());
+    let mut replacement_result = match replacement_poll {
+        std::task::Poll::Ready(result) => Some(result),
+        std::task::Poll::Pending => None,
+    };
+    let replacement_finished = replacement_result.is_some();
+    drop(jobs);
+
+    let update_result = timeout(Duration::from_secs(5), update.as_mut())
+        .await
+        .expect("job update timed out");
+    if replacement_result.is_none() {
+        replacement_result = Some(
+            timeout(Duration::from_secs(5), replacement.as_mut())
+                .await
+                .expect("replacement timed out"),
+        );
+    }
+    assert_eq!(replacement_result.unwrap(), Ok(()));
+    if replacement_finished {
+        assert_eq!(update_result, Err("stale_connection".to_string()));
+        assert!(!state
+            .jobs
+            .lock()
+            .await
+            .get("agent")
+            .is_some_and(|jobs| jobs.contains_key("generation_linearized_job")));
+    } else {
+        assert_eq!(update_result, Ok(()));
+        assert!(state
+            .jobs
+            .lock()
+            .await
+            .get("agent")
+            .is_some_and(|jobs| jobs.contains_key("generation_linearized_job")));
+    }
+}
+#[tokio::test]
+async fn generation_replacement_preserves_new_room_on_old_disconnect() {
+    let (state, _new_rx) = generation_fixture().await;
+    state.pending_confirmations.lock().await.insert(
+        "generation-confirmation".to_string(),
+        generation_pending_confirmation(
+            "generation-confirmation",
+            "generation-confirmation-request",
+        ),
+    );
+    let before = generation_snapshot(&state).await;
+
+    assert!(!disconnect_agent(&state, "agent", "old", None).await);
+    assert_eq!(generation_snapshot(&state).await, before);
+    assert!(
+        !state
+            .pending_confirmations
+            .lock()
+            .await
+            .get("generation-confirmation")
+            .unwrap()
+            .resolved
+    );
+
+    assert!(disconnect_agent(&state, "agent", "new", None).await);
+    assert!(state.active_room.lock().await.is_none());
+    let pending = state
+        .pending_confirmations
+        .lock()
+        .await
+        .get("generation-confirmation")
+        .unwrap()
+        .clone();
+    assert!(pending.resolved);
+    assert!(matches!(
+        pending.decision,
+        Some(agentic_gpt_protocol::ConfirmationDecision::ProviderUnavailable)
+    ));
+}
+#[tokio::test]
+async fn generation_expiry_rechecks_current_liveness() {
+    let state = test_state();
+    register_agent(&state, "agent", "secret");
+    let mut outbound = insert_connection(
+        &state,
+        "agent",
+        "current",
+        chrono::Utc::now() - chrono::Duration::seconds(120),
+    )
+    .await;
+    generation_handle(
+        &state,
+        "agent",
+        "current",
+        AgentMessage::Heartbeat {
+            sent_at: chrono::Utc::now(),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        timeout(Duration::from_secs(5), outbound.recv())
+            .await
+            .expect("heartbeat ack timed out"),
+        Some(OutboundAgentMessage::Text(_))
+    ));
+    let fresh_now = chrono::Utc::now();
+    assert!(!disconnect_agent(&state, "agent", "current", Some(fresh_now),).await);
+    assert!(state.agents.lock().await.contains_key("agent"));
+
+    state
+        .agents
+        .lock()
+        .await
+        .get_mut("agent")
+        .unwrap()
+        .last_seen_at = fresh_now - chrono::Duration::seconds(120);
+    assert!(disconnect_agent(&state, "agent", "current", Some(fresh_now),).await);
+    assert!(!state.agents.lock().await.contains_key("agent"));
+
+    let (replaced_state, _new_rx) = generation_fixture().await;
+    assert!(
+        !disconnect_agent(
+            &replaced_state,
+            "agent",
+            "old",
+            Some(chrono::Utc::now() + chrono::Duration::seconds(120)),
+        )
+        .await
+    );
+    assert_eq!(
+        replaced_state
+            .agents
+            .lock()
+            .await
+            .get("agent")
+            .map(|connection| connection.connection_id.as_str()),
+        Some("new")
+    );
+}
+#[tokio::test]
+async fn generation_disconnect_blocks_replacement_until_cleanup_finishes() {
+    let state = test_state();
+    register_agent(&state, "agent", "secret");
+    let _old_rx = insert_connection(&state, "agent", "old", chrono::Utc::now()).await;
+    state.pending_confirmations.lock().await.insert(
+        "generation-old-confirmation".to_string(),
+        generation_pending_confirmation("generation-old-confirmation", "generation-old-request"),
+    );
+    let pending_guard = state.pending_confirmations.lock().await;
+    let mut disconnect = Box::pin(disconnect_agent(&state, "agent", "old", None));
+    assert!(matches!(
+        futures_util::poll!(disconnect.as_mut()),
+        std::task::Poll::Pending
+    ));
+
+    let (new_tx, _new_rx) = mpsc::unbounded_channel();
+    let mut replacement = Box::pin(replace_agent_connection(
+        &state,
+        "agent",
+        "new",
+        AgentTransport::Sse,
+        new_tx,
+    ));
+    assert!(matches!(
+        futures_util::poll!(replacement.as_mut()),
+        std::task::Poll::Pending
+    ));
+    drop(pending_guard);
+
+    assert!(timeout(Duration::from_secs(5), disconnect.as_mut())
+        .await
+        .expect("disconnect cleanup timed out"));
+    timeout(Duration::from_secs(5), replacement.as_mut())
+        .await
+        .expect("replacement registration timed out")
+        .expect("replacement registration rejected");
+    state.pending_confirmations.lock().await.insert(
+        "generation-new-confirmation".to_string(),
+        generation_pending_confirmation("generation-new-confirmation", "generation-new-request"),
+    );
+    assert!(
+        !state
+            .pending_confirmations
+            .lock()
+            .await
+            .get("generation-new-confirmation")
+            .unwrap()
+            .resolved
+    );
+}
+#[tokio::test]
+async fn generation_stale_heartbeat_direct_handler() {
+    let state = test_state();
+    register_agent(&state, "agent", "secret");
+    let mut old_rx = insert_connection(
+        &state,
+        "agent",
+        "old",
+        chrono::Utc::now() - chrono::Duration::seconds(10),
+    )
+    .await;
+    let (new_tx, new_rx) = mpsc::unbounded_channel();
+    replace_agent_connection(&state, "agent", "new", AgentTransport::WebSocket, new_tx)
+        .await
+        .unwrap();
+    assert!(matches!(
+        old_rx.recv().await,
+        Some(OutboundAgentMessage::Close)
+    ));
+    let new_seen = state
+        .agents
+        .lock()
+        .await
+        .get("agent")
+        .map(|connection| connection.last_seen_at)
+        .unwrap();
+
+    let result = handle_agent_message(
+        &state,
+        "agent",
+        "old",
+        AgentMessage::Heartbeat {
+            sent_at: chrono::Utc::now(),
+        },
+    )
+    .await;
+
+    assert_eq!(result, Err("stale_connection".to_string()));
+    assert_eq!(
+        state
+            .agents
+            .lock()
+            .await
+            .get("agent")
+            .map(|connection| connection.last_seen_at),
+        Some(new_seen)
+    );
+    drop(new_rx);
+}

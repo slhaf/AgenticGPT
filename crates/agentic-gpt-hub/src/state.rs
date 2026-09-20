@@ -4,10 +4,9 @@ use agentic_gpt_protocol::{
 };
 use chrono::{DateTime, Utc};
 use rusqlite::Connection;
-use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{mpsc, Mutex};
 
 use crate::{oauth, room, HubConfig};
 
@@ -18,7 +17,7 @@ pub(crate) struct HubState {
     pub(crate) config: Arc<HubConfig>,
     pub(crate) mcp_profile: McpProfile,
     pub(crate) agents: Arc<Mutex<HashMap<String, AgentConnection>>>,
-    pub(crate) pending: Arc<Mutex<HashMap<String, PendingResponse>>>,
+    pub(crate) dispatch: Arc<crate::agents::dispatch::Dispatch>,
     pub(crate) pending_confirmations: Arc<Mutex<HashMap<String, PendingConfirmation>>>,
     pub(crate) jobs: Arc<Mutex<HashMap<String, HashMap<String, JobInfo>>>>,
     pub(crate) boot_generations: Arc<Mutex<HashMap<String, String>>>,
@@ -28,13 +27,6 @@ pub(crate) struct HubState {
     pub(crate) oauth_codes: Arc<Mutex<HashMap<String, oauth::OAuthAuthorizationCode>>>,
     pub(crate) oauth_tokens: Arc<Mutex<HashMap<String, oauth::OAuthAccessToken>>>,
     pub(crate) ntfy_health: Arc<Mutex<Option<crate::notify::NtfyHealthCache>>>,
-}
-
-pub(crate) struct PendingResponse {
-    pub(crate) agent_id: String,
-    pub(crate) request_id: String,
-    pub(crate) command_hash: String,
-    pub(crate) sender: oneshot::Sender<Value>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, clap::ValueEnum)]

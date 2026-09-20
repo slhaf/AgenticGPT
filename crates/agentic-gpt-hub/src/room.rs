@@ -11,7 +11,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::Value;
 
-use crate::agents::request_agent;
+use crate::agents::dispatch::request_agent;
 use crate::routes::{api_error, require_action_auth};
 use crate::state::HubState;
 use crate::utils::random_id;
@@ -481,7 +481,8 @@ pub(crate) async fn release_active_room_for_agent(state: &HubState, agent_id: &s
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agents::{post_agent_message, replace_agent_connection, SseConnectQuery};
+    use crate::agents::lifecycle::replace_agent_connection;
+    use crate::agents::transport::{post_agent_message, SseConnectQuery};
     use crate::db::init_db;
     use crate::registry::{handle_agent_command, AgentCommand};
     use crate::state::{AgentConnection, AgentTransport, OutboundAgentMessage};
@@ -521,7 +522,7 @@ mod tests {
             config: Arc::new(test_hub_config()),
             mcp_profile: McpProfile::Full,
             agents: Arc::new(Mutex::new(HashMap::new())),
-            pending: Arc::new(Mutex::new(HashMap::new())),
+            dispatch: Arc::new(crate::agents::dispatch::Dispatch::new()),
             pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
             jobs: Arc::new(Mutex::new(HashMap::new())),
             boot_generations: Arc::new(Mutex::new(HashMap::new())),

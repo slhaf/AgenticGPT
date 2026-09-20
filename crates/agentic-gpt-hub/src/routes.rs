@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
 
-use crate::agents::{cached_job, mcp_list_servers_all_agents, request_agent};
+use crate::agents::dispatch::{cached_job, mcp_list_servers_all_agents, request_agent};
 use crate::registry::{registry_entries, registry_entry};
 use crate::runs;
 use crate::state::HubState;
@@ -152,7 +152,7 @@ pub(crate) async fn build_hub_info_response(state: &HubState) -> Result<HubInfoR
     let registered_count = entries.len();
     let enabled_count = entries.iter().filter(|entry| entry.enabled).count();
     let online_count = state.agents.lock().await.len();
-    let pending_request_count = state.pending.lock().await.len();
+    let pending_request_count = state.dispatch.pending_count().await;
     let pending_confirmation_count = state
         .pending_confirmations
         .lock()

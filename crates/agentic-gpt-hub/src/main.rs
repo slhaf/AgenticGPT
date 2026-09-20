@@ -170,7 +170,7 @@ async fn serve(
         config: Arc::new(config),
         mcp_profile,
         agents: Arc::new(Mutex::new(HashMap::new())),
-        pending: Arc::new(Mutex::new(HashMap::new())),
+        dispatch: Arc::new(agents::dispatch::Dispatch::new()),
         pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
         jobs: Arc::new(Mutex::new(HashMap::new())),
         boot_generations: Arc::new(Mutex::new(HashMap::new())),
@@ -183,19 +183,22 @@ async fn serve(
     };
     tokio::spawn(cleanup_confirmations(state.clone()));
     tokio::spawn(cleanup_runs(state.clone()));
-    tokio::spawn(agents::cleanup_agent_connections(state.clone()));
+    tokio::spawn(agents::lifecycle::cleanup_agent_connections(state.clone()));
     tokio::spawn(oauth::cleanup_oauth(state.clone()));
     let app = Router::new()
         .route("/v1/info", get(routes::hub_info))
         .route("/v1/agents", get(routes::list_agents))
-        .route("/v1/agents/:agent_id/connect", get(agents::connect_agent))
+        .route(
+            "/v1/agents/:agent_id/connect",
+            get(agents::transport::connect_agent),
+        )
         .route(
             "/v1/agents/:agent_id/events",
-            get(agents::connect_agent_sse),
+            get(agents::transport::connect_agent_sse),
         )
         .route(
             "/v1/agents/:agent_id/messages",
-            post(agents::post_agent_message),
+            post(agents::transport::post_agent_message),
         )
         .route("/v1/runs/:run_id", get(routes::get_run))
         .route(
@@ -839,7 +842,7 @@ mod tests {
             config: Arc::new(test_hub_config()),
             mcp_profile: McpProfile::Full,
             agents: Arc::new(Mutex::new(HashMap::new())),
-            pending: Arc::new(Mutex::new(HashMap::new())),
+            dispatch: Arc::new(agents::dispatch::Dispatch::new()),
             pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
             jobs: Arc::new(Mutex::new(HashMap::new())),
             boot_generations: Arc::new(Mutex::new(HashMap::new())),
@@ -1046,8 +1049,8 @@ mod tests {
     }
 
     #[test]
-    fn skills_commands_have_request_ids_and_run_types() {
-        let mut commands = [
+    fn skills_commands_have_run_types() {
+        let commands = [
             HubCommand::SkillsList {
                 request_id: "req-list".to_string(),
             },
@@ -1128,18 +1131,15 @@ mod tests {
             "skills.run",
         ];
 
-        for index in 0..commands.len() {
-            let command = &mut commands[index];
+        for (index, command) in commands.iter().enumerate() {
             let expected_type = expected[index];
             assert_eq!(crate::runs::command_type(command), expected_type);
-            crate::agents::set_command_request_id(command, "req-new".to_string());
-            assert_eq!(crate::agents::command_request_id(command), "req-new");
         }
     }
 
     #[test]
-    fn bootstrap_commands_have_request_ids_and_run_types() {
-        let mut commands = [
+    fn bootstrap_commands_have_run_types() {
+        let commands = [
             HubCommand::RoomBootstrap {
                 request_id: "req-bootstrap".to_string(),
             },
@@ -1151,11 +1151,8 @@ mod tests {
             },
         ];
         let expected = ["room.bootstrap", "room.bootstrap.read"];
-        for index in 0..commands.len() {
-            let command = &mut commands[index];
+        for (index, command) in commands.iter().enumerate() {
             assert_eq!(crate::runs::command_type(command), expected[index]);
-            crate::agents::set_command_request_id(command, "req-new".to_string());
-            assert_eq!(crate::agents::command_request_id(command), "req-new");
         }
     }
 
