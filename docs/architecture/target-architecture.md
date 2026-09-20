@@ -258,6 +258,23 @@ crates/agentic-gpt-hub/src/
 | 已产生的 confirmation result、关联 Job history 与错误原因 | 实际结果 owner 的 Agent history/Hub receipt（按明确 retention） | status/error/history projection | 不得因 pending session 失效而抹掉已产生结果；audit/telemetry 也不能替代结果事实 |
 | audit/report/telemetry | 各自明确的 evidence/projection durability（当前 audit/report 有 best-effort 成分） | 运维日志、Hub report、TUI/Console 摘要 | telemetry 丢失不得伪装为 command outcome；敏感 args/CWD 不能无界扩散 |
 
+### WP3 durability / recovery 合同（实施基线）
+
+以下是 WP3 的目标合同，不代表故障验收已经通过。持久化成功只证明本层事实，不证明外部副作用可回滚。
+
+| 数据 | durability / 可接受丢失 | retention 与恢复 | 敏感度 / projection |
+|---|---|---|---|
+| Hub run receipt | correctness-critical：先提交 identity/hash/result，再确认或唤醒 waiter | 完成结果沿用 24h 保留窗口；未完成、unknown、冲突及 replay 去重依据不得随 TTL 删除。SQLite 迁移原子提交并记录版本，保留迁移前恢复副本 | command/result 可能含凭据；API 只返回既有授权投影，省略或压缩必须明确标记 |
+| Agent transport ledger | correctness-critical：持锁的条件状态转移；执行前 started、响应前 completed 必须落盘 | 保留现有全局文件及旧记录；不推断旧记录 Agent owner。损坏不能静默跳过后重新执行。压缩保留身份、hash、结果与冲突证据，不引入未经证明的去重过期 | command/result 私密；新记录显式 owner，旧未关联记录不得由任意 Agent 自动重放 |
+| Agent Job history | retained result：已产生结果不能被 best-effort 通知失败跳过 | 保持 30 日 / 512 MiB 既有历史约束；active、unknown 和尚未持久化的终态不可无提示清理。损坏库保留隔离副本，重启 active 为 UnknownAfterRestart | per-Agent private SQLite；结果大小限制及 detailAvailable/truncated 必须诚实 |
+| Hub Job projection | ephemeral：重启、容量或 TTL 淘汰允许 | 上限 4096 条、最后观测 15 分钟淘汰、60 秒后标 stale；定期清理。以 Hub observedAt 而非 Agent 时钟判年龄；缓存淘汰不修改 run/history/Job | 原始 JobInfo 不增加伪造时间；响应另标 live/cached/stale/unknown 及观测时间 |
+| workspace audit / report | best-effort：允许失败、队列丢弃和轮转；不承担执行去重 | audit 持锁写完整行并有界轮转；损坏旧行保留在轮转副本而非当执行记录恢复。report 维持既有有界队列 | args/path/output 可能敏感；不是完整审计或外部副作用证明 |
+| config / secret | correctness-critical：完整旧值或完整新值；不能把半写文件投入运行 | 原子替换、唯一备份、文件和目录同步；setup 多文件提交必须说明并处理恢复边界。加载验证失败不静默降级权限 | 保持既有明确权限与共享部署合同；新私密文件限制访问，禁止意外跟随目标 symlink |
+| Room files / Git | Agent repository authority；Hub 无内容副本 | 延续 repository revision/path/Git 写入合同，不受 Hub restart 或 cache TTL 影响 | 文件 owner/path policy；Git 历史不是所有外部写入的事务回滚 |
+| Browser lease / bridge routes | ephemeral：Agent lease 与独立 host routes 各自进程所有 | 重启失效不等于关闭所有外部 tab；bridge 仅本地共享文件系统，不远程暴露 | socket 0660 依赖真实 UID/GID、目录和 mount；不得套用 Local MCP owner-only 结论 |
+| notification endpoint | Hub SQLite registry authority；投递 best-effort | 与 DB 一同迁移/恢复，不因连接/cache 过期删除注册 | endpoint/token 按现有授权投影；注册成功不证明设备收件 |
+| Console local attention | Android Room authority；OS alarm/notification 是 projection | 保持独立本地恢复合同；Android boot/process-death 验证归 WP5 | 不搬入 Hub，不通过本包伪造已完成恢复验收 |
+
 ### 5.1 运行身份模型
 
 每次跨进程操作的最小逻辑 owner tuple 应可表达：
