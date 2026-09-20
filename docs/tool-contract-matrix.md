@@ -6,6 +6,32 @@ objects remain authoritative. “No use” means the nearest tempting operation
 that this tool deliberately does not perform. Bounds are inclusive unless
 stated otherwise.
 
+## Agent admission and effect boundary (WP2)
+
+This matrix describes public tool contracts; admission is enforced by the
+Agent's internal `RequestContext`/operation gate, not by this document or by
+descriptor annotations. The context records the real ingress and borrowed
+operation name. Namespace/toolset selection and RuntimeModel capability are
+separate checks, and `read_only`/`destructive`/`open_world` remain discovery
+metadata rather than authorization.
+
+Local Unix, Tunnel stdio, worker HTTP MCP, Hub command, and CLI paths retain
+distinct framing/auth/error envelopes. Their Agent audit source prefixes are
+`local:`, `tunnel:`, `http:`, `hub:`, and `localadmin:` respectively. The CLI
+surface is only the four existing local tmux administration operations:
+`tmux.listSessions`, `tmux.attach`, `tmux.createSession`, and
+`tmux.closeSession`; MCP `tmux.sessions`, `tmux.panes`, `tmux.exec`, and
+`tmux.pasteText` are separate MCP operations, not CLI aliases. Shared Skill
+execution and Job result projections remain owned by the Agent
+operation/resource layers.
+
+Normal does not imply Room: Normal may use Room only with an explicit
+`toolsets.room` namespace enablement. Hub retains its existing Room toolset,
+Skills capability/profile, and notifications capability behavior. Actual
+effects remain with policy, path, confirmation, lease, and resource owners;
+external MCP, Browser JavaScript, tmux, tunnel children, and browser-host
+effects are not thereby claimed to have generic OS sandbox coverage.
+
 ## Standalone advertised surface and namespace presets
 
 The V2 advertised surface contains 29 Normal names and 40 Room names. The normal
@@ -41,7 +67,7 @@ fields.
 | `mcp.batch` | Validate/admit 1–16 downstream calls with one aggregate confirmation; no rollback of downstream side effects. | `calls` with `serverId`/`toolName`; optional parent `group`, per-call arguments plus `mode`, `failFast`, waits/deadline. | Parallel default; sequential is explicit; aggregate args/response ≤2 MiB; global/per-server concurrency 8/2. Children inherit the parent group; public results are ordered so correlation ids/indexes stay internal. | Admission is atomic; `failFast` skips only not-started children; ordered child Jobs and aggregate audit remain. | Normal + Room; Hub full mirrors admission, group, and bounds. |
 | `skills.list` | Discover valid workspace skills; no install or execution. | Optional query/limit/active filter. | Bounded summaries. | Invalid/unreadable skills become warnings or omitted; read-only. | Normal + Room; Hub full uses the same Room workspace. |
 | `skills.read` | Read one skill package/resource; no arbitrary workspace file access. | `id`; optional package-relative `path`. | Bounded Markdown/frontmatter/resource. | Invalid/missing skill/resource is typed; read-only. | Normal + Room; Hub full `skills.read` mirrors. |
-| `skills.setActive` | Set active flag only; no execution or permission grant. | `id`, `active`. | Active state persists in Room workspace. | Invalid IDs/skills are typed; state change is audited. | Normal + Room; Hub full exposes `skills.activate`/`skills.deactivate` aliases with split intent. |
+| `skills.setActive` | Set active flag only; no execution or permission grant. | `id`, `active`. | Active state persists in Agent private durable state; workspace package contents remain separate. | Invalid IDs/skills are typed; state change is audited. | Normal + Room; Hub full exposes `skills.activate`/`skills.deactivate` aliases with split intent. |
 | `skills.install` | Start asynchronous skill installation; no inline network payload or arbitrary URL fetch. | `id`, `source`; optional replacement/activation/idempotency. | Returns `installId`; source and package/file bounds apply. | Validate/commit failures are retained; existing skill archive/commit is atomic; use install get/cancel. | Normal + Room; Hub full and HTTP Room install mirror. |
 | `skills.install.get` | Inspect or briefly wait for installation; no new install. | `installId`; optional `waitSeconds`. | Wait maximum 30 seconds; terminal `pollAfterMs` is 0. | Bounded persisted status; missing/expired IDs are typed. | Normal + Room; Hub full/HTTP install get mirror. |
 | `skills.install.cancel` | Request cooperative pre-commit cancellation; no forced rollback after commit. | `installId`. | Idempotent request. | Outcome distinguishes cancelled/terminal/too-late; evidence is retained. | Normal + Room; Hub full/HTTP install cancel mirror. |

@@ -1,8 +1,8 @@
 # 架构诊断与根因判断
 
-状态：调查结论，不是已实施修复；基线 2026-09-16。现状见 [current-state](current-state.md)，实施顺序见 [refactoring-plan](refactoring-plan.md)。
+状态：调查结论与已交付边界并存；基线 2026-09-16，WP2 closure 更新于 2026-09-20。现状见 [current-state](current-state.md)，实施顺序见 [refactoring-plan](refactoring-plan.md)。
 
-后续用户决策见[已确认决策](decisions.md)。下列问题仍描述修复前实现；Room 远端需求已经确认，Console 局部问题保留为独立维护记录，不属于本轮核心重构完成条件。
+后续用户决策见[已确认决策](decisions.md)。A03/A05/A06 的 Agent 入口与配置边界已由 WP2 做窄范围实现并验证；本文件保留其修复前根因与剩余边界，不能把 WP2 证据扩大为 WP3 durability、WP-R Room clean cutover 或未运行的外部组件证明。
 
 ## 1. 总判断
 
@@ -58,11 +58,11 @@ Agentic 不是已经失去所有边界的单体。实际执行核心、Hub 控�
 
 **验证门槛**：真实 Hub Full → 当前 Room Agent 读/维护链及迁移后的公共合同通过；旧入口退出与调用方升级步骤明确；现有文件数据不丢失。不要求继续支持混合旧版本。本轮为静态可达链确认，不是实际双进程复现。
 
-### A03 — tool visibility、capability、authorization 分散【高；结构风险已确认】
+### A03 — tool visibility、capability、authorization 分散【高；WP2 已实现窄 operation gate】
 
-**证据**：Agent `state.rs::RuntimeModel::capabilities`、`stdio_server.rs::{current_tools,tool_is_available,dispatch_with_lifecycle}`、`local_service.rs::{dispatch_inner,require_capability,require_room_toolset}`；`config_cli.rs` toolset enable；`main.rs` CLI tmux 分支。
+**历史证据（WP2 前）**：Agent `state.rs::RuntimeModel::capabilities`、`stdio_server.rs::{current_tools,tool_is_available,dispatch_with_lifecycle}`、`local_service.rs::{dispatch_inner,require_capability,require_room_toolset}`；`config_cli.rs` toolset enable；`main.rs` CLI tmux 分支。
 
-**机制/影响**：MCP 分发中部分 Room/skills 直接调用具体模块，HubCommand 分发则经过另一套 capability gate；广告主要按 toolset。RuntimeModel 声明不支持不等于每条操作路径都检查了相同条件。CLI tmux 又是本机管理路径，确认/审计语义不应靠入口巧合决定。
+**机制/影响（WP2 前历史）**：MCP 分发中部分 Room/skills 直接调用具体模块，HubCommand 分发则经过另一套 capability gate；广告主要按 toolset。RuntimeModel 声明不支持不等于每条操作路径都检查了相同条件。CLI tmux 又是本机管理路径，确认/审计语义不应靠入口巧合决定。
 
 **根因 [推断]**：原本不同用途的“是否展示”“当前部署支持”“是否授权执行”“风险提示”逐渐被各入口当成部分替代品。
 
@@ -70,47 +70,49 @@ Agentic 不是已经失去所有边界的单体。实际执行核心、Hub 控�
 
 **验证门槛**：按 ingress × mode/profile × toolset 选择高风险操作，验证不可见/不可用/需确认/允许的行为及错误。任何安全收紧或权限扩展独立审阅，不能掩藏于搬文件。
 
+**WP2 closure（2026-09-20；有界）**：Agent `operation.rs` 现以不可变 `RequestContext`（真实 ingress、借用 operation）调用同步 `authorize(runtime, config, context)`；Local Unix 由 namespace/toolset gate 约束，Hub 保留既有 Room toolset、Skills capability/profile 与 notifications capability，Normal + explicit Room 仍有效。`local_service` 与 `operation_result` 共享 value/error/slim projection；CLI 仅四个本机 tmux admin 操作。`read_only`/`destructive`/`open_world` annotations 仅为发现/UX 元数据，不是授权。实际效果仍由 policy/path/confirmation/lease/resource owner 负责。
+
+**WP2 evidence/limits**：526 Agent tests passed、1 ignored；Agent/Hub build 与 fmt check 通过（5 个 Browser distribution dead-code warnings）。Local Unix、hidden stdio、HTTP bearer 401/有效 session/SSE、process parity、Skill runs、Normal Room toggle、policy/limits 与 workspace/path reload，以及 Hub loopback WebSocket process/Room skills/CLI tmux/audit/live deny 均有真实证据；external tunnel/cloud、OAuth provider、Browser JS/service、OS sandbox 未运行。
+
 ### A04 — Hub 的连接、run、waiter 所有权未形成同一不变量【高；静态完整性风险】
 
-**证据**：Hub `agents.rs::{handle_socket,post_agent_message,handle_agent_message,request_agent,replace_agent_connection}`、`runs.rs::store_result`、`state.rs::pending`。Response 分支记录 store_result 的 Err，但不依据其 bool 匹配结果决定是否 `pending.remove(request_id)`。WS 与 SSE 对 stale 非可靠消息的检查不完全对称。
+**证据**：Hub `agents/{transport,lifecycle,dispatch}`、`runs.rs::store_result` 与 `state.rs` 的连接/dispatch owners。WP1 已将可靠结果 owner、连接代际和 Hub connection/dispatch ownership 收口；WP2 不改变该 wire/receipt 边界。
 
-**机制/影响**：持久 run 匹配与同步 waiter 完成被分开处理；旧连接的 metadata/JobUpdate 与允许迟到的可靠 Response 没有统一分类门槛。不能从“有 connectionId/hash”推导出所有消息都受相同保护。
+**机制/影响（WP1 前历史）**：持久 run 匹配与同步 waiter 完成曾分开处理；旧连接的 metadata/JobUpdate 与允许迟到的可靠 Response 需要不同分类门槛。不能从“有 connectionId/hash”推导出所有消息都受相同保护。
 
 **根因 [推断]**：request-id rendezvous 先于可靠 envelope/连接代际演化，后增身份字段未回填所有状态转换。
 
-**建议**：明确 `(agent, connection generation)` 与 `(agent, run, request, command hash)` 两类身份；迟到可靠消息可合法完成既有 run，但不能刷新当前连接或消费不匹配 waiter。绑定确认发起 owner；对 RunReport 定义合法状态转移。
+**建议/剩余验证**：继续明确 `(agent, connection generation)` 与 `(agent, run, request, command hash)` 两类身份；迟到可靠消息可合法完成既有 run，但不能刷新当前连接或消费不匹配 waiter。真实 Agent restart/transport-ledger、OAuth、external ntfy 和完整跨进程 executor E2E 仍不由 WP2 证明。
 
-**验证门槛**：错 owner/hash/run、重复与迟到结果、旧 WS Hello/JobUpdate、SSE parity、重连确认、断线 cleanup。需要可重复场景后再作安全影响定级；本轮不声称无条件跨 Agent 攻击成立。
+### A05 — 配置可变性与启动派生资源不一致【高；WP2 已实现 reload/lifetime 边界，WP3 仍待处理】
 
-### A05 — 配置可变性与启动派生资源不一致【高于纯目录整理；静态风险】
+**历史证据（WP2 前）**：Agent `main.rs::{watch_config,config_matches_runtime,build_app_state}`、`state.rs::AppState` 及 Standalone live reload 分支。
 
-**证据**：Agent `main.rs::{watch_config,config_matches_runtime,build_app_state}` 与 Standalone live reload 分支；`state.rs::AppState` 持有 private_state/history/install/browser 等启动派生资源。
-
-**机制/影响**：Hub 模式 watcher 主要检查 mode/profile 后替换整份 Config，而其他形态已有 live-safe subset。agent id、workspace、browser descriptor 等变化不意味着已创建数据库/manager/连接也重建，可能形成新配置与旧资源 owner 混用。
+**机制/影响（WP2 前历史）**：watcher 曾可能替换 startup/ownership 字段，而 private state、job history、skill install、Browser runtime 和连接资源未随 config 整体重建，可能形成新 config 与旧资源 owner 混用。
 
 **根因 [推断]**：配置从单一执行配置演变为身份、部署、资源和热参数集合，热重载没有同步升级为 mutability contract。
 
-**建议**：列字段为 live-safe/startup-only/需专用迁移；统一 reload policy，拒绝需要重启的变更并报告具体字段，而不是隐式部分生效。
+**建议/验证门槛**：明确 startup-only/live-safe/restart-required；正在运行 Job 按原配置快照完成，history/audit/连接身份一致，无法安全热加载的变更应要求 restart。
 
-**验证门槛**：各模式 reload policy/toolset 与修改 agent id/workspace/browser 的对照；正在运行 Job 按原配置快照完成；history/audit/连接身份一致。
+**WP2 closure（有界）**：reload 现在保留既有 startup-derived resources，只应用 policy、limits、mcpServers、toolsets、httpMcp；workspace 未改变时才应用 pathPolicy。identity/mode/profile/workspace/runtime/socket、Browser 配置整体（不只是 `browser.runtime`）、history/install 等 restart-required 变化不重建半套资源；启用 Room 时先准备既有 live root。该 closure 不替代 WP3 durability/retention 盘点。
 
-### A06 — “受控”被不同机制赋予不同保证【高优先级边界澄清；不是自动改安全默认】
+### A06 — “受控”被不同机制赋予不同保证【高优先级边界澄清；WP2 已实现入口 gate，非 OS sandbox】
 
 **证据**：Agent `exec.rs::{preflight,build_command}`、`config.rs::default_config`、`policy.rs`、`mcp.rs` stdio client、`browser_kernel.rs` 与 browser dispatch；browser-host `lib.rs::{handle_client,prepare_socket}`。
 
-**事实**：process 参数路径检查是启发式，bwrap 可选且默认关闭；显式配置规则可覆盖 builtin policy；外部 MCP stdio/Browser Node 不经 process sandbox；browser.repl 接受任意 JS。browser-host socket 0660，未采用 local MCP 的 UID/0700/0600 guard。目录/组/容器挂载仍会影响实际可达性。
+**事实**：process 参数路径检查仍是启发式，bwrap 可选且默认关闭；显式配置规则可覆盖 builtin policy；外部 MCP stdio/Browser Node 不经 process sandbox；browser.repl 接受任意 JS。browser-host socket 0660，目录/组/容器挂载仍影响实际可达性。
 
-**影响**：审批、来源校验、路径校验、风险 annotation、OS 隔离不是同一保证；把任何一种写成“所有执行都已 sandbox”会误导部署者。
+**影响**：审批、来源校验、路径校验、风险 annotation、OS 隔离不是同一保证；任何一种都不能写成“所有执行都已 sandbox”。
 
-**根因 [推断]**：设备能力逐步增加，而信任模型没有按“本机管理员、上层 Agent、配置的外部服务、任意代码桥”分层描述。
+**根因 [推断]**：设备能力逐步增加，而信任模型没有按本机管理员、上层 Agent、配置的外部服务、任意代码桥分层描述。
 
-**已确认方向（D04/D05）**：当前自用可控环境不等于每个脚本/MCP/Browser代码完全可信；保留具体 policy/confirmation/path/lifecycle 控制，准确说明与OS隔离的差别。本轮不二选一扩大为“完全可信”或“强对抗”，不改sandbox默认、policy override或权限模型。用户实际已有Neko/container/共享目录与Unix socket，先盘点拓扑再选择peer/token/权限，不强推owner-only。worker token与tunnel key分别审查，不能用日志脱敏代替argv暴露分析。
+**已确认方向（D04/D05）**：保留 policy/confirmation/path/lifecycle 控制，准确说明与 OS 隔离的差别；不改 sandbox 默认、policy override 或权限模型。Neko/container/共享目录/Unix socket 的实际拓扑先盘点再选 peer/token/权限机制，不强推 owner-only。
 
-**验证门槛**：对应工作包核验既有路径检查、确认、生命周期和真实Browser拓扑访问边界；新隔离强度/不可信provider支持另立工作，不作为本轮前置。本轮未运行这些部署或隔离场景。
+**WP2 closure 与限制**：operation gate 将真实 ingress/context、namespace/toolset 和 capability 与 annotations 分开；它不扩大 generic sandbox，也不把 MCP、Browser JS、tmux、tunnel child 或 browser-host external effect 宣称为 core sandbox 已覆盖。WP2 未运行 external tunnel/cloud、OAuth provider、Browser JavaScript/service 或新的 OS sandbox。
 
 ### A07 — 持久化、等待和投影缺少一致的语义说明【中高；恢复风险】
 
-**证据**：Agent `audit.rs`、`transport_ledger.rs`、`job_history.rs`、`hub.rs` reporting `try_send`、`config.rs::write_config_with_backup`；Hub `state.rs`、`runs.rs`、`agents.rs::request_agent`、`oauth.rs`。
+**证据**：Agent `audit.rs`、`transport_ledger.rs`、`job_history.rs`、`hub.rs` reporting `try_send`、`config.rs::write_config_with_backup`；Hub `state.rs`、`runs.rs`、`agents/{transport,lifecycle,dispatch}` 的 dispatch/receipt 路径、`oauth.rs`。
 
 **机制/影响**：
 

@@ -604,19 +604,29 @@ that cannot be imported, and writes through the normal backup/secret transaction
 
 ## Live reload versus restart
 
-Standalone and Local workers poll the config and atomically apply a valid live subset. Invalid candidates keep the last valid state.
+Standalone, Local, and Hub-connected Agent workers poll the same configuration and
+atomically apply the supported live subset. Invalid candidates keep the last valid state.
+When a candidate changes a restart-owned resource, that resource remains at its previous
+live value until the process is restarted.
 
 | Configuration | Effect |
 | --- | --- |
-| `policy`, `pathPolicy`, `limits`, `mcpServers`, `toolsets.enabled` | Live reload for new admissions/calls and tool discovery |
-| `httpMcp.enabled`, `host`, `port`, `publicUrl`, `allowHosts` | Standalone live rebind; listener identity changes close stateful sessions and discard listener-local OAuth state, so clients must initialize again |
-| `httpMcp.bearerToken` reference or referenced content | Standalone live authentication update without rebind; existing sessions remain valid while the resolved credential is available |
+| `policy`, `limits`, `mcpServers`, `toolsets.enabled` | Shared live reload for new admissions/calls and tool discovery |
+| `pathPolicy` (when `workspaceRoot` is unchanged) | Shared live reload for subsequent path checks |
+| `httpMcp.enabled`, `host`, `port`, `publicUrl`, `allowHosts` | The Standalone HTTP watcher reconciles enablement and endpoint identity; identity changes close stateful sessions and discard listener-local OAuth state, so clients must initialize again |
+| `httpMcp.bearerToken` reference or referenced content | The Standalone HTTP watcher updates authentication without rebinding; existing sessions remain valid while the resolved credential is available |
 | Already-admitted Jobs and already-created downstream calls | Keep their original decision/config |
-| `mode`, `profile`, `agentId`, `workspaceRoot` | Restart required |
+| `workspaceRoot` and its coupled `pathPolicy` | Changing the workspace requires a restart; until then, the previous workspace/path-policy pair remains effective atomically |
+| `mode`, `profile`, `agentId` | Restart required |
+| `browser` | Restart required; the configured Browser runtime is selected at process startup |
 | `room.*` repository, timezone, diary-boundary, and maintenance settings | Restart required; `toolsets.enabled` may expose Room live using the current live Room settings |
 | `tunnel.*` client identity/source/secret | Restart required |
 | `hub`, reporting mode | Restart required for the related connection |
 | Skill install concurrency/startup-owned settings | Restart required |
+
+The shared live subset applies to every Agent worker; only a runtime with a Standalone
+HTTP MCP listener acts on the `httpMcp` listener fields. Local mode has no TCP listener,
+and Hub mode does not turn this configuration section into a Hub ingress.
 
 An unavailable HTTP MCP credential fails closed: the endpoint stops accepting requests and stops
 listening until the reference resolves again. A syntactically or semantically invalid candidate is
@@ -624,7 +634,10 @@ rejected by the watcher and leaves the last-good live configuration in place. A 
 also kept isolated from tunnel and Unix execution; fix the endpoint configuration and let the watcher
 retry. These outcomes never print the reference or token.
 
-The Standalone supervisor emits `restart_required` when a startup identity field changes. Do not assume editing the file switched the existing child tree.
+A shared watcher logs `config changes require restart; fields=...` when a restart-owned
+field changes, including `browser`. The diagnostic names changed fields but never prints
+secret values. The Standalone supervisor additionally emits `restart_required`; Hub mode
+has no supervisor event. Do not assume editing the file switched the existing child tree.
 
 ## Validation and inspection
 

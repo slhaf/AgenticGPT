@@ -4,17 +4,15 @@
 Implement the existing roadmap WP2 ingress/application boundary and safe config reload, using current code seams rather than imposing design patterns. Preserve D01-D08, public transport projections and permission defaults. Keep resource execution/results in Agent.
 
 ## Current Phase
-Discovery — read whole-repository architecture guidance, map current code, then freeze concrete cross-slice contracts before production edits.
+Complete — scoped implementation, regression/build checks, real runtime proof, documentation and temporary-resource cleanup are finished.
 
 ## Next Step
-Combine Main's architecture reading with three read-only slices: local/direct ingress; Hub envelope/metadata; config mutability/resource dependencies.
+WP2 is closed. Start a subsequent work package only when selected, first reading its relevant decisions, target, engineering rules, roadmap and current-code evidence.
 
 ## Phases
-1. Architecture/current-code contract: ingress × profile × operation × effect × auth/audit matrix, config mutability and existing bypass evidence. Commit separately.
-2. Shared operation admission/local ingress: minimal concrete context/gate at existing value layer; migrate stdio/local Unix/HTTP/CLI and Room/Skill/Browser direct routes. Keep resource-specific policy/confirmation in their owners, not duplicated in the gate. Commit coherent caller migration.
-3. Hub ingress: consume the same operation boundary without changing reliable envelope/ledger/ACK/result semantics; keep ReportingOnly restriction. Commit separately if dependency permits a building boundary.
-4. Config lifetime: reuse existing validated live-safe behavior, reject restart-required resource changes without partially updating identity/config. Commit separately; may implement independently once ownership contracts settle.
-5. Verification: meaningful pre-fix regressions where concrete gaps exist, affected tests, actual binary cross-ingress/profile/confirmation/audit and config reload scenarios. Evidence must name which entrypoints were actually exercised. Commit records after proof.
+1. Architecture/current-code contract: completed and committed as `c41a551`.
+2. Integrated operation/config implementation: completed as `d95efd3`. Shared admission, local/direct ingress, Hub adapter, Skill runner, neutral projections, tmux context and safe reload shared Main's module/CLI/config composition, so their coherent implementation commit is atomic.
+3. Verification and evidence: completed with this record. Final Agent tests/builds and real Local/stdio/HTTP/Hub/CLI probes pass; operational/config and architecture/interface docs state the actual contracts and external-service limits.
 
 ## Required scope
 - Minimum RequestContext + operation admission, not a registry/framework/new crate.
@@ -34,7 +32,7 @@ Combine Main's architecture reading with three read-only slices: local/direct in
 - If evidence reveals a real permission/behavior choice not resolved by D01-D08, enumerate it before changing defaults.
 
 ## Verification status
-No WP2 code edited or tests executed yet. Details and failures will be recorded in progress.md.
+Baseline red: two concrete WP2 regressions failed (`artifact://109`). Final integrated `cargo test -p agentic-gpt`: 526 passed, one ignored; Agent/Hub builds and fmt check passed (`artifact://147`), with five Browser distribution dead-code warnings. Real supervised Hub/CLI and Local/stdio/HTTP probes both exited 0. Exact scenarios, fixture-only repairs and unexercised external-service limits are recorded in progress.md. Owned temporary fixtures and drivers were removed after both supervisors exited.
 
 ## Frozen implementation contracts
 - Admission lives in a narrow Agent `operation` module, not a new dispatch executor. Reuse/move the existing RequestIngress and name/namespace/annotation facts; add Hub and Cli variants. RequestContext only carries real ingress and borrowed operation name; RuntimeModel/config come from their existing owners. No invented principal/run/connection fields.
@@ -47,7 +45,7 @@ No WP2 code edited or tests executed yet. Details and failures will be recorded 
 - Config uses one existing live-subset algorithm for Hub/Local/Standalone; only policy, limits, MCP, toolsets, and existing HTTP options apply. pathPolicy applies only if workspaceRoot matches live. Startup fields remain unchanged; Room enabling prepares the live repository; restart drift remains observable. No resource reconstruction.
 
 ## File ownership
-- Admission integration owner: operation.rs, operation_result.rs, stdio_server.rs, local_service.rs, hub.rs, local_control.rs/http_server.rs import migration; Main adds module declarations after workers settle.
+- Admission integration owner: operation.rs, operation_result.rs, stdio_server.rs, local_control.rs/http_server.rs import migration. Hub cutover owner: local_service.rs and hub.rs. Main owns final composition and integration repairs.
 - Skill owner: skills.rs only; implement frozen shared execution API, no adapter edits.
 - Tmux owner: tmux.rs only; implement context/source and shared CLI bodies, report exact main caller patch to Main.
 - Config owner: main.rs reload functions/watchers/tests only; owns all main.rs edits while running. Main later adds module declarations and CLI adapter wiring serially.

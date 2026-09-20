@@ -10,6 +10,47 @@ Hub-native tools, and the Hub-to-Agent protocol.
 The cross-surface use/non-use, conditional-input, bounds, lifecycle, and parity
 matrix is maintained in [`tool-contract-matrix.md`](tool-contract-matrix.md).
 
+## Agent ingress and operation boundary (WP2)
+
+The Agent keeps one narrow internal admission boundary without introducing a
+new framework or registry. Each adapter creates an immutable
+`RequestContext { ingress, operation }`; `operation::authorize(runtime, config,
+context)` checks the real ingress plus namespace/toolset and capability rules.
+Descriptor annotations such as `read_only`, `destructive`, and `open_world`
+remain discovery/client metadata and are never authorization.
+
+Ingress-specific authentication, framing, and error envelopes remain distinct:
+local Unix retains its UID/socket guard and `local:` source prefix; Tunnel
+stdio uses `tunnel:`; worker HTTP MCP retains bearer/Host/Origin/session
+handling and `http:`; Hub WS/SSE retains its protocol envelope/replay and
+`hub:` source; CLI uses `localadmin:`. The CLI gate is intentionally limited
+to the four existing local tmux administration operations. HTTP/MCP, Hub wire,
+and local stdio/Unix result projections may differ at the transport boundary,
+while shared Agent operations use the same value/error and slim Job/Skill
+result layer.
+
+Normal is not an alias for Room: a Normal runtime may use Room only when the
+`room` namespace is explicitly enabled. Hub keeps its existing Room toolset,
+Skills capability/profile, and notification capability rules. Policy, path,
+confirmation, lease, and resource owners still decide actual side effects;
+this boundary does not make Hub an executor or claim generic OS sandboxing.
+
+Reload applies the existing live-safe subset (`policy`, `limits`, `mcpServers`,
+`toolsets`, `httpMcp`; `pathPolicy` only when `workspaceRoot` is unchanged)
+without reconstructing startup-derived resources. Identity/mode/profile,
+workspace/runtime/socket, Browser configuration as a whole (not only
+`browser.runtime`), history/install, and related resource-owner
+changes require restart. Enabling Room prepares the existing live root before
+the new subset is used.
+
+`agentic-gpt local` is the Unix MCP client and uses the ordinary MCP
+operation gate with `local:` provenance. It is distinct from
+`agentic-gpt tmux`, whose CLI-admin gate admits only
+`tmux.listSessions`, `tmux.attach`, `tmux.createSession`, and
+`tmux.closeSession` and records `localadmin:` provenance. MCP
+`tmux.sessions`, `tmux.panes`, `tmux.exec`, and `tmux.pasteText` are not those
+four CLI-admin operations.
+
 ## GPT Actions API
 
 The GPT Actions API is described by `openapi/hub.yaml` and is protected by the Hub API key.

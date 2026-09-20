@@ -1,10 +1,10 @@
 # 渐进重构计划
 
-> **状态：路线图草案；WP1 当前状态见 §1.2。** 本文仍描述尚未交付的工作包、依赖和验收；第 1.2 节只记录 WP1 的有界交付状态，不表示其余实现、协议、配置或产品变更已经落地。
+> **状态：路线图草案；WP1 当前状态见 §1.2，WP2 当前状态见 §1.3。** 本文仍描述尚未交付的工作包、依赖和验收；第 1.2、1.3 节只记录有界交付状态，不表示其余实现、协议、配置或产品变更已经落地。
 >
 > **权威决策：** 本计划按 [D01–D08 用户已确认的架构整理决策](decisions.md) 编排。D01–D08 已确定本轮的产品边界和工程取舍，但不替代实施时对具体合同、权限机制、数据保留或恢复细节的技术设计。
 >
-> **历史调查基线：** 2026-09-16。事实引用来自源码定位和当时的只读调查；这些历史发现不覆盖当前 WP1 交付状态，也不能把当时未执行的路线图 smoke、测试、部署或迁移步骤理解为本次已完成。
+> **历史调查基线：** 2026-09-16。事实引用来自源码定位和当时的只读调查；这些历史发现不覆盖当前 WP1/WP2 交付状态，也不能把当时未执行的路线图 smoke、测试、部署或迁移步骤理解为本次已完成。
 >
 > **阅读前提：** 先读 [现状架构](current-state.md)、[问题诊断](diagnosis.md)、[目标架构](target-architecture.md)、[工程规则](engineering-rules.md) 和 [已确认决策](decisions.md)。本计划不取代接口、配置、运维或开发手册。
 
@@ -56,6 +56,15 @@
 - **[证据]** 集成收口通过 `cargo fmt --all -- --check`、集成 `cargo test -p agentic-gpt-hub` suite 和无 warning 的 `cargo build -p agentic-gpt-hub`；隔离 Hub HTTP/SSE smoke 的结果记录在 [WP1 closure progress](../../.planning/2026-09-20-hub-wp1-closure/progress.md)。该 smoke 使用 simulated Agent peers，覆盖六个有界 confirmation/replacement/callback/timeout/late-receipt 场景；随后在同一临时 SQLite 上真实重启 Hub，确认两条 `completed` `/v1/runs` 记录和 `sessions[]` 结果保留，且 `/v1/info` 的 `pendingRequestCount`、`pendingConfirmationCount`、`cachedJobCount` 均为 0。这是 Hub-side receipt/session retention 与 cleanup 证据，不是所有历史路线图场景的 live 复验，也不是完整真实 Agent executor E2E 证明。
 - **[未验证]** 真实 Agent restart/transport-ledger reconciliation、external ntfy provider 以及完整跨进程 Agent executor/ledger E2E 仍未验证；这些边界不得被当前 Hub smoke 或历史基线测试改写为已完成。
 
+### 1.3 WP2 当前交付状态（2026-09-20）
+
+- **[已完成；窄边界]** `agentic-gpt/src/operation.rs` 现在以不可变 `RequestContext`（真实 ingress + 借用的 operation 名）进入同步 `authorize(runtime, config, context)`。命名空间/toolset、RuntimeModel capability、resource/profile 规则与 descriptor/annotation 元数据分开；annotation 只服务发现/客户端 UX，不是授权依据。没有新增 crate、框架、全局 capability registry 或第二套执行循环。
+- **[已完成；入口职责保留]** Local Unix 使用 namespace/toolset gate；Tunnel stdio、Standalone HTTP、stdio、Hub command、Room/Skill/Browser 路径进入共享 local operation/result 层。Normal profile 显式启用 `toolsets.room` 时仍可走 Room；Hub 保留既有 Room toolset、Skills capability/profile 和 notifications capability 语义。CLI 仅覆盖既有四个本机 tmux 管理操作，审计 source 使用 `localadmin:`；其他入口分别保留 `local:`, `tunnel:`, `http:` 和 `hub:` 前缀。
+- **[已完成；结果与效果]** `local_service`/`operation_result` 负责共享 value/error 与 slim projections；stdio、Hub wire、HTTP/MCP 各自保留 framing、认证、envelope/DTO 和错误外形。Skill 运行继续进入 managed Job；tmux、MCP、Browser、Room 等实际效果仍由 Agent domain/resource owner 和既有 policy/path/confirmation/lease 检查负责，Hub 不成为执行器。
+- **[已完成；配置生命周期]** Reload 只应用此前 live-safe subset（policy、limits、MCP servers、toolsets、HTTP MCP；workspace 未改变时才应用 path policy），并保留旧 startup-derived resources；identity/mode/profile/workspace/runtime/socket/Browser/history/install 等 restart-required 字段不重建资源。启用 Room 时先准备既有 live workspace/repository。
+- **[证据]** `cargo test -p agentic-gpt`：526 passed、1 ignored；Agent/Hub build 与 fmt check 通过（Browser distribution 有 5 个既有 dead-code warnings）。真实二进制证据覆盖 Local Unix、hidden stdio worker、HTTP bearer 负例 401 与有效 session/SSE、process output parity、Skill runs、Normal Room disabled→enabled、policy/limits 及 workspace/path reload health；真实 Hub loopback WebSocket 覆盖 process、Room skills list/search/activate/run（含 invalid-CWD reason）、pending=0、CLI tmux create/close 与 audit、live policy deny（旧 owner/workspace/CWD 不变且不生成 candidate directory），两类 driver 均 exit 0。
+- **[未验证；边界]** 未声称 external tunnel/cloud runtime、OAuth provider flow、Browser JavaScript/service 或新的 OS sandbox 已被真实运行验证；WP3 durability/retention、WP-R 其余 Room 远端合同及未来 remote Room scope 仍按路线图保留。
+
 
 
 ## 2. 当前到目标的落地路径
@@ -67,7 +76,7 @@
 | `crates/agentic-gpt/src/stdio_server.rs`、`crates/agentic-gpt/src/local_control.rs`、`crates/agentic-gpt/src/http_server.rs` | Agent ingress adapters：MCP framing/schema、local peer/auth、HTTP auth/session | 入口只解析、认证、形成 `RequestContext`；操作和策略不在每个 transport 重写 |
 | `crates/agentic-gpt/src/hub.rs`、`crates/agentic-gpt/src/local_service.rs` | Hub envelope adapter + Agent operation core | Hub command 进入同一 operation gate；保留 `run_id/request_id/command_hash`，不复制执行循环 |
 | `crates/agentic-gpt/src/jobs.rs`、`policy.rs`、`confirmation.rs`、`exec.rs`、`file_ops.rs`、`mcp.rs`、`tmux.rs`、`skills*`、Room modules | Agent execution/resource domains | 权限、确认、效果、Job 状态和资源 owner 在 Agent；`apply-patch` 仍只做纯变换 |
-| `crates/agentic-gpt-hub/src/main.rs`、`routes.rs`、`mcp_server.rs`、`agents.rs`、`runs.rs`、`room.rs` | Hub control-plane modules | 统一 owner/connection/run 校验；HTTP 和 Apps MCP 共享应用操作，不调用彼此 transport |
+| `crates/agentic-gpt-hub/src/main.rs`、`routes.rs`、`mcp_server.rs`、`agents/{transport,lifecycle,dispatch}`、`runs.rs`、`room.rs` | Hub control-plane modules | 统一 owner/connection/run 校验；HTTP 和 Apps MCP 共享应用操作，不调用彼此 transport |
 | `crates/agentic-gpt-protocol/src/lib.rs` | 按 domain 的 wire/envelope/contract 内部模块（仍是一个 crate） | 保留 serde 名称、camelCase、消息字段和版本边界；模块化不等于扩大协议职责 |
 | `openapi/hub.yaml`、Agent descriptors、Hub schemars、`tool-contract-matrix.md`、`cases.json` | 各自明确 authority、版本和 parity gate | 先做差异表，再由维护者按证据更新 spec 或增加显式 HTTP adapter；迁移全部 caller 后 clean cutover，迁移步骤随实现交付，不预置新 version/flag |
 | `agentic-browser-host` | 独立高权限 external bridge | 维持用户报告的本地进程/容器/共享目录/Unix socket 拓扑；先盘点实际边界，再选择 peer/auth 机制，不远程暴露 |
@@ -292,7 +301,7 @@ flowchart TD
 
 **历史验证入口（截至 2026-09-16 未执行）**
 
-- Hub `agents.rs`：boot generation、pending replay、stale SSE heartbeat/JobUpdate、matching-run late Response、send failure、ReportingOnly target rejection、过期连接清理。
+- Hub `agents/{transport,lifecycle,dispatch}`：boot generation、pending replay、stale SSE heartbeat/JobUpdate、matching-run late Response、send failure、ReportingOnly target rejection、过期连接清理。
 - Hub `runs.rs`：late idempotent result、stale acked→unknown、Agent report upsert。
 - Hub `main.rs`/`notify.rs`：confirmation action、bearer、safe info summary。
 - Agent `hub.rs`/`transport_ledger.rs`：Hello、reliable envelope、duplicate/hash mismatch、reconcile。
@@ -325,83 +334,45 @@ flowchart TD
 - 任一 mismatch 能唤醒 waiter、改写新连接 metadata 或覆盖已完成事实；停止后续迁移。
 - 需要改变 D04 已确认的权限/安全默认、取消语义、secret 生命周期或部署拓扑才能通过时，停止该包并另立范围；未来 threat model 升级不构成核心包前置。
 
-### WP2：入口应用边界与最小 operation gate
+### WP2：入口应用边界与最小 operation gate（已实现；窄边界）
 **对应正式诊断：** A03（visibility/capability/authorization）、A05（config mutability/derived resource）、A06（不同机制的受控保证）。
 
+**当前状态与证据**
 
-**目的与证据**
+- **[已完成]** `crates/agentic-gpt/src/operation.rs` 提供不可变 `RequestContext`（真实 ingress、借用 operation 名）和同步 `authorize(runtime, config, context)`；`local_service` 与 `operation_result` 共享 value/error 与 slim result 投影。此边界没有新增 crate、通用框架、全局 capability registry、Hub executor 或第二套 dispatch loop。
+- **[已完成]** Local Unix (`agentic-gpt local`) 由 namespace/toolset gate 约束并保留 `local:` provenance；Hub 保留既有 Room toolset、Skills capability/profile 与 notifications capability 语义；Normal profile 在显式启用 `toolsets.room` 时仍允许 Room。CLI (`agentic-gpt tmux`) gate 只承认 `tmux.listSessions`、`tmux.attach`、`tmux.createSession`、`tmux.closeSession` 四个本机管理操作并记录 `localadmin:`；MCP `tmux.sessions/panes/exec/pasteText` 不属于这四个 CLI 操作。`read_only`/`destructive`/`open_world` annotations 只用于描述/发现，不是授权。
+- **[已完成]** stdio、local Unix、HTTP、Hub command、Room/Skill/Browser direct paths 使用真实 ingress context；各 transport 仍拥有自己的 framing、认证、envelope/DTO 和错误投影。tmux、MCP、Browser、Room 的实际效果仍由 Agent domain/resource owner 与既有 policy/path/confirmation/lease 检查负责。
+- **[已完成]** reload 保留 startup-derived resources；只应用既有 live-safe subset（policy、limits、mcpServers、toolsets、httpMcp；workspace 未改变时才应用 pathPolicy），身份、mode/profile、workspace/runtime/socket、Browser 配置整体（不只是 `browser.runtime`）、history/install 等变更要求 restart，并以 `config changes require restart; fields=...` 记录 restart-required 字段。启用 Room 时先准备既有 live root。
+- **[已验证]** `cargo test -p agentic-gpt` 为 526 passed、1 ignored；Agent/Hub build 与 fmt check 通过（Browser distribution 有 5 个 dead-code warnings）。真实 Local Unix、hidden stdio worker、HTTP bearer 401/有效 session/SSE、process output parity、Skill run、Normal Room disabled→enabled、policy/limits 与 workspace/path reload health 已验证；真实 Hub loopback WebSocket 已验证 process、Room skills list/search/activate/run（含 invalid-CWD reason）、pending=0、CLI tmux create/close audit、live policy deny（旧 owner/workspace/CWD 保持且无 candidate directory），两个 driver 均 exit 0。
+- **[未验证]** external tunnel/cloud runtime、OAuth provider flow、Browser JavaScript/service 和新的 OS sandbox 未在本批真实运行；WP3 durability/retention、WP-R 其余 Room 远端合同及未来 remote Room scope 仍未启动/未由本节宣称完成。
 
-- [事实] Agent 的 `RuntimeModel::{hub,tunnel,local}` 和 `Capabilities` 在 `state.rs` 表达有意的 mode/profile 差异；`local_service.rs` 是共享 value-returning operation layer。Local Unix、Tunnel stdio、Standalone HTTP、stdio 和 Hub command 最终应复用它们。
-- [事实] `stdio_server::dispatch_with_lifecycle` 与 `local_service::dispatch_inner` 都维护工具/HubCommand 映射及错误/兼容转换；Agent 与 Hub 又各自维护 tool description、`read_only/destructive/open_world` 列表。这是 metadata/gate 漂移，不能直接判定为重复执行器。
-- [事实] `stdio_server` 的部分 `skills.*`/`room.*` 直达 `skills`/`room_reads`，未统一调用 `local_service::require_capability`；`config_cli` 可直接 enable Room toolset；CLI tmux create/close 绕过 AppState、confirmation、audit；MCP annotations 当前是 consumer metadata，不是 authorization gate。
-- [事实] Hub routes、Apps MCP、stdio/local/HTTP 都是入口适配器；入口不应调用彼此 transport DTO。
-- [事实] Hub whole-config watcher 只检查 mode/profile，可能替换 startup/ownership 字段；Standalone 已有较窄的 live-safe subset。`build_app_state` 创建的 private state、job history、skill install、Browser runtime 和连接资源未随 Hub 热加载整体重建。
-- [推断] 入口差异可能使同一 profile 在不同 surface 获得不同能力、审计或确认语义；配置 reload 可能使 identity、workspace、Browser 和持久化 roots 与新 config 分裂。是否达到安全漏洞等级取决于 threat model 和实际可达配置来源。
+**实现边界**
 
-**范围**
-
-1. 在 Agent crate 内形成最小 `RequestContext + operation gate`：从 ingress 带入 mode/profile/transport/peer/auth/operation/effect，统一检查 toolset visibility、RuntimeModel capability、policy/confirmation 前置条件和 resource owner。它是内部边界，不是新 crate 或大而全 capability registry。
-2. 让 stdio、local Unix、HTTP、Hub command、CLI tmux、Room/Skill/Browser direct route 都在进入 operation core 前经过同一 gate；`local_service`/执行模块仍是唯一 operation result owner。
-3. 保留入口专属职责：stdio 做 MCP framing/schema/resume，HTTP 做 bearer/OAuth/Host/Origin，local Unix 做 UID/socket，Hub 做 envelope/replay，TUI 继续 observer；入口不得互调 transport DTO。
-4. 将 descriptor/annotation 用于发现和 client UX，将真正 authorization/effect gate 与 descriptor 生成分离但共享 operation metadata，避免“广告了 destructive”被误当“已经阻止”。
-5. 对配置字段建立 `startup-only`、`live-safe`、`restart-required` 分类：agent identity、workspace/root、runtime/socket、Browser descriptor、history/install location、Hub connection identity 等派生资源默认视为 startup-only；policy、limits 等能安全重载的子集必须有明确更新顺序和 rollback。若改变 startup-only 字段，显式要求重启，而不是替换一半 `AppState`。
-6. 对 generic process policy、sandbox、MCP stdio、Browser JS 和 tmux 等 external effect 记录真实 trust 边界。按 D04 保持 `policy` 显式 allow 覆盖内置 deny、sandbox 默认 disabled 等安全默认，不扩大公网多租户威胁模型；具体 auth/隔离机制在实际包内按证据细化，不把未来升级设为本包前置。
+1. `RequestContext + operation gate` 是 Agent crate 内部最小边界；ingress 认证/协议适配仍在各入口，runtime capability 与 config toolset 由 gate 分开判断。不造大而全 registry。
+2. stdio、local Unix、HTTP、Hub command、CLI tmux、Room/Skill/Browser direct route 在进入 operation core 前经过该 gate；`local_service`/执行模块仍是 operation result owner。
+3. stdio 做 MCP framing/schema/resume，HTTP 做 bearer/OAuth/Host/Origin，local Unix 做 UID/socket，Hub 做 envelope/replay；入口不得互调 transport DTO。
+4. descriptor/annotation 继续服务发现和 client UX；真正 authorization/effect gate 不由 annotation 推导。
+5. startup-only、live-safe、restart-required 字段按实际 reload 合同分层；不能替换一半 `AppState` 或让 config 与派生资源分裂。
+6. generic process policy、sandbox、MCP stdio、Browser JS、tmux 等 external effects 继续按真实 trust 边界描述；D04 的 policy allow、sandbox 默认和威胁模型范围未改变。
 
 **非目标**
 
 - 不创建永久 capability registry、通用 authorization service、新 crate 或全仓重写。
-- 不因统一 gate 自动扩大 deny、强制打开 sandbox、禁止管理员显式 allow，或改变任何既有 profile 默认值；D04 已决定本轮保持这些语义，未来改变须另立安全变更。
-- 不把 Browser arbitrary JS、MCP downstream server、tmux server、tunnel child 伪装成已经被 Agent generic sandbox 完整隔离；但也不因此删除现有能力。
+- 不因统一 gate 自动扩大 deny、强制打开 sandbox、禁止管理员显式 allow，或改变任何既有 profile 默认值。
+- 不把 Browser arbitrary JS、MCP downstream server、tmux server、tunnel child 伪装成 generic sandbox 已完整隔离；也不因此删除现有能力。
 - 不让 Hub、Console 或 TUI 直接拥有 Agent execution effect；不把 annotations 当安全 enforcement。
 
-**前置依赖**
+**WP2 后续约束**
 
-- WP0 已有 capability/tool/contract baseline；WP2 的本地 gate/config 部分可直接与 WP1、WP3、WP4-A、WP-R 并行，Hub command 接线只等 WP1 owner tuple/connection context。
-- D04 的 policy allow、sandbox 默认和威胁模型范围已确定不变；startup-only/live-safe 分类、CLI tmux confirmation/audit 接线与错误映射属于实施时技术细化，不作为核心包的额外用户审批或未来 threat upgrade 前置。
-- [技术决定] gate 的内部 enum、调用层次、错误映射可自行选择；若仓库已有 shadow/targeted rollout 机制可按需使用，但不得为了本包强制新增 feature flag、第二套 dispatch loop 或兼容双轨。
+- WP2 的 operation/context gate、入口认证/错误投影、共享 Skill/Job result、CLI tmux admin 范围和 config lifetime 已按上面的窄边界交付；不再以“统一 gate”名义扩展权限或创建第二套执行器。
+- 各入口仍保留自己的 framing、auth、wire/HTTP/MCP DTO 和 projection；本节不宣称 Protocol 已取代 Hub wire dispatch，也不把 Hub 变成 Agent executor。
+- policy/path/confirmation/lease/resource owner 继续负责实际效果；external MCP、Browser JS、tmux、tunnel child 和 browser-host 的 trust/隔离强度按真实边界记录。
+- WP3 的 durability/retention enforcement、WP-R 的其余远端 Room 合同与 clean cutover、以及未来 remote Room scope 不因 WP2 closure 自动完成。
 
-**分阶段提交**
+**WP2 回归/停止边界**
 
-1. `docs(runtime): map ingress capabilities and config mutability`：列出每个入口、profile、operation、effect、auth、audit 和 config dependency。
-2. `refactor(agent): add minimal local operation gate around shared value layer`：先迁移 stdio/local/HTTP/CLI 等本地 direct routes，保持 operation result。
-3. `refactor(agent): wire Hub admission after owner contract`：WP1 完成后再迁移 Hub command/remote ingress；按入口逐一迁移，删掉确认无 caller 的重复 mapping。
-4. `fix(config): reject startup-only live reload or rebuild atomically`：明确 restart-required，确保派生资源与 config identity 一致。
-5. `cleanup(runtime): remove obsolete duplicate gates after parity`：所有入口真实场景通过且 caller 已迁移后才删旧 gate，不保留兼容 alias。
-
-**既有验证入口（均未执行）**
-
-- Agent `stdio_server.rs`：固定 29/40 surface、descriptor/schema、`deterministic_tool_contract_corpus_exercises_public_dispatch`、Room/Skill/Browser dispatch 和 lifecycle tests。
-- Agent `local_control.rs`、`http_server.rs/http_oauth.rs`：UID/socket、Bearer、Host/Origin、MCP ingress；`standalone_supervisor.rs`：worker/token/restart/live reload 行为入口。
-- Agent `jobs.rs`、`policy.rs`、`confirmation.rs`、`file_ops.rs`、`mcp.rs`、`tmux.rs`：既有 policy、confirmation、cancel、TOCTOU、batch、downstream 生命周期入口。
-- Hub `routes.rs`、`mcp_server.rs`：HTTP/Apps profile/timeout/error mapping；这些只证明各自入口，不自动证明 cross-ingress parity。
-
-**真实场景验收**
-
-1. 对同一 harmless operation 通过 stdio、local Unix、Standalone HTTP、Hub command 和（若仍公开）CLI 入口执行，确认策略、confirmation、audit、Job/result identity 一致；transport DTO/错误外形可以按入口不同适配。
-2. 对 Tunnel/Local Normal、Hub Normal、Room profile 和 ReportingOnly 分别尝试 Room、skills、bootstrap、notify、Browser、process、MCP、tmux；可见性和实际 gate 一致，ReportingOnly 不接收执行 envelope。
-3. 直接调用曾绕过 `require_capability` 的 Room/Skill/CLI tmux 路径，确认未出现 profile/toolset 交叉放行或漏审计。
-4. 修改 live-safe policy/limits，确认既有资源、identity、history/install root 不变；修改 startup-only workspace/agent/browser/socket 字段，确认得到 restart-required 并且旧资源不与新 config 混用。
-5. 记录 generic process、MCP stdio server、Browser JS、tmux external server、tunnel child 的实际 effect/trust 标记；不因尚未设计未来威胁升级而阻塞本包，也不能把未验证边界写成“已安全”。
-
-**回退、数据与协议兼容**
-
-- 每个入口单独切换，可回退至旧 adapter；operation core、Job history 和审计格式保持可读，避免一次性重写。
-- 配置 reload 失败时保留旧完整 `AppState/config`，不要留下半更新的 identity/root；startup-only 变更不写入派生资源，待重启后整体生效。
-- gate 错误使用现有 operation/HTTP/MCP error mapping；按 D03 迁移全部 caller 后 clean cutover，不在新 gate 中永久复制旧判断、alias 或双轨。
-- D04 已确认的 policy、sandbox、confirmation 默认保持不变；若未来另有安全变更，须单独提供威胁模型、迁移和回退，不作为本计划隐含工作。
-
-**完成门槛**
-
-- 入口矩阵中每个可执行 operation 只有一个内部 gate 和一个 operation result owner；入口间不互调 transport DTO。
-- mode/profile/toolset/authorization/annotation 的区别在文档和 smoke 中清楚可见；所有曾列出的 direct bypass 有测试或真实场景证据。
-- config startup/live 分类与派生 resource ownership 一致；reload 后不会出现 config、identity、workspace、Browser、history/install、socket 分裂。
-- 没有借“统一 gate”扩权、改默认 deny/sandbox 或把 external trust 误报为已验证隔离。
-
-**停止条件**
-
-- 统一 gate 需要新 crate、大 capability registry 或复制 `local_service`；停止并缩小为 crate 内部 operation gate。
-- 任一迁移使受控操作从 deny/confirm 变 allow，或使 audit/confirmation 消失；立即回退该 ingress。
-- live reload 无法原子保持 config 与派生资源一致；改为 restart-required，不继续热替换。
+- 保持 Normal + explicit Room、Hub Room/Skills/notifications capability、四个 CLI tmux local-admin 操作以及 `local:`, `tunnel:`, `http:`, `hub:`/`localadmin:` audit provenance。
+- 若后续改动消费不匹配 owner、让 timeout 冒充取消、使 config 与 startup-derived resources 分裂、把 annotation 当授权，或新增 registry/framework/compat 双轨，应停止并回到对应工作包边界。
 
 ### WP3：资源所有权、retention 与 durability 分层
 **对应正式诊断：** A06（external trust/保证边界）、A07（durability/retention/recovery）；按 D04 保持安全默认和现有威胁模型范围，按 D06 执行 durability 分层，不把全量 Hub durable 化或未来 threat upgrade 设为前置。

@@ -163,6 +163,7 @@ agentic-gpt run
 | `skills` | Skill package/install 限制与网络策略。 |
 | `room` | Room 仓库根目录、时区、日记日界线、维护模式和自动推送策略。 |
 | `tunnel` | Standalone tunnel-client 来源、secret 引用与可选 reporting。 |
+| `browser` | 可选的高级 Browser runtime 覆盖；普通 runtime discovery/provisioning 默认仍自动进行。 |
 | `hub` | 集中式 Hub 连接，或 Standalone 的可选 Hub reporting/ntfy relay。 |
 | `httpMcp` | 可选的 Standalone hidden worker 所有入站 Streamable HTTP MCP endpoint。 |
 
@@ -299,6 +300,38 @@ public-origin editor、secret-reference editor 与 JSON array/`null` allow-host 
 `config import --config PATH [SOURCE]` 会识别已有的 `httpMcp` object，把字段带入同一套
 交互式 editor；用户可在最终一次提交前修正或关闭 endpoint。Review 中 bearer 引用显示为
 `[REDACTED]`，但会显示 `publicUrl`；取消或校验失败不会写入任何内容。
+
+### Browser runtime 覆盖
+
+Browser 是否启用不由 runtime 配置决定，`toolsets.enabled` 仍具有权威性。没有
+`browser` section（或使用 `browser: {}`）时，普通 runtime discovery 不变。显式 descriptor
+用于开发、特殊部署或恢复等高级场景，不是普通 managed-runtime 安装路径。
+`codexCliPath` 可选，因为官方 Browser launcher 只有在可用时才会导出
+`CODEX_CLI_PATH`。配置 `runtime` 时其他 scalar 均必填，所有配置路径必须是绝对路径；
+`nodeModuleDirs` 默认为空列表：
+
+```json
+{
+  "browser": {
+    "runtime": {
+      "appVersion": "<official-runtime-version>",
+      "channel": "<runtime-channel>",
+      "nodeReplPath": "/absolute/path/to/node_repl",
+      "nodePath": "/absolute/path/to/node",
+      "browserClientPath": "/absolute/path/to/browser-client.mjs",
+      "browserServicePath": "/absolute/path/to/browser-service.mjs",
+      "codexHome": "/absolute/path/to/runtime-home",
+      "codexCliPath": "/optional/absolute/path/to/codex-or-compatible-cli",
+      "nodeModuleDirs": ["/absolute/path/to/node_modules"]
+    }
+  }
+}
+```
+
+显式 source 在进程启动时选择并具有权威性：无效 descriptor 会关闭 Browser capability，
+不会回退到 Desktop discovery，但 Agentic 仍会继续启动。修改它需要重启进程。
+`docsRoot` 与 `trustedCodePaths` 由内部派生，不是配置字段。本设置不管理 installer、
+downloader 或 runtime cache。
 
 可直接作为路径组件的 `agentId` 会原样映射为私有状态目录名；历史上较宽松的 Hub identity 仍然兼容，但会使用稳定 hash 目录 key，而不会直接成为文件系统路径组件。
 
@@ -522,26 +555,37 @@ MCP server、policy、path policy、limits、非活动 hub/tunnel/room 数据以
 
 ## 热加载与重启边界
 
-Standalone 与 Local worker 会轮询配置，并原子应用通过验证的 live subset。无效候选会保留上一份有效状态。
+Standalone、Local 以及连接 Hub 的 Agent worker 轮询同一份配置，并原子应用支持的
+live subset。无效候选会保留上一份有效状态；候选修改需要重启的资源时，该资源在进程
+重启前仍保持原来的 live 值。
 
 | 配置 | 行为 |
 | --- | --- |
-| `policy`、`pathPolicy`、`limits`、`mcpServers`、`toolsets.enabled` | 对新 admission/call 与工具发现热加载 |
-| `httpMcp.enabled`、`host`、`port`、`publicUrl`、`allowHosts` | Standalone 热 rebind；listener identity 变化会关闭有状态 session 并丢弃 listener-local OAuth state，客户端必须重新 initialize |
-| `httpMcp.bearerToken` 引用或其解析内容 | Standalone 原地更新认证，无需 rebind；解析凭据可用时保留已有 session |
+| `policy`、`limits`、`mcpServers`、`toolsets.enabled` | 所有 Agent worker 共享热加载，对新 admission/call 与工具发现生效 |
+| `pathPolicy`（`workspaceRoot` 未改变时） | 所有 Agent worker 共享热加载，对后续路径检查生效 |
+| `httpMcp.enabled`、`host`、`port`、`publicUrl`、`allowHosts` | Standalone HTTP watcher 协调启用状态与 endpoint identity；identity 变化会关闭有状态 session 并丢弃 listener-local OAuth state，客户端必须重新 initialize |
+| `httpMcp.bearerToken` 引用或其解析内容 | Standalone HTTP watcher 原地更新认证而不重新绑定；解析凭据可用时保留已有 session |
 | 已接纳 Job 与已创建下游调用 | 保留原决策/配置 |
-| `mode`、`profile`、`agentId`、`workspaceRoot` | 需要重启 |
-| `room.*` 仓库、时区、日界线和 maintenance 设置 | 需要重启；`toolsets.enabled` 可热启用 Room，但使用当前 live Room 配置 |
+| `workspaceRoot` 及其配套 `pathPolicy` | 修改 workspace 需要重启；重启前原 workspace/path-policy 成对原子保留并继续生效 |
+| `mode`、`profile`、`agentId` | 需要重启 |
+| `browser` | 需要重启；配置的 Browser runtime 在进程启动时选择 |
+| `room.*` 仓库、时区、日界线和 maintenance 设置 | 需要重启；`toolsets.enabled` 可热启用 Room，但使用当前 live Room 设置 |
 | `tunnel.*` client identity/source/secret | 需要重启 |
-| `hub`、reporting mode | 对相关连接需要重启 |
+| `hub`、reporting mode | 相关连接需要重启 |
 | Skill install 并发等 startup-owned 设置 | 需要重启 |
 
-HTTP MCP 凭据无法解析时会 fail closed：endpoint 停止接受请求并停止监听，直到引用再次可用。
-语法或语义无效的候选会被 watcher 拒绝并保留 last-good live 配置。监听地址冲突也不会影响
-tunnel 或 Unix execution；修复 endpoint 配置后 watcher 会重试。上述过程
+共享 live subset 适用于每个 Agent worker；只有具有 Standalone HTTP MCP listener 的运行时
+才会处理 `httpMcp` listener 字段。Local 没有 TCP listener，Hub 也不会因此把这个配置
+section 变成 Hub ingress。
+
+HTTP MCP 凭据无法解析时会 fail closed：endpoint 停止接受请求并停止监听，直到引用再次
+可用。语法或语义无效的候选会被 watcher 拒绝并保留 last-good live 配置。监听地址冲突
+也不会影响 tunnel 或 Unix execution；修复 endpoint 配置后 watcher 会重试。上述过程
 不会输出引用或 token。
 
-Standalone supervisor 检测到 startup identity 变化时会输出 `restart_required`。不要把“文件已修改”误认为现有子进程树已经切换。
+共享 watcher 在需要重启的字段变化时记录 `config changes require restart; fields=...`，其中包括
+`browser`。诊断只列出发生变化的字段名，不会输出 secret 值。Standalone supervisor 另外输出
+`restart_required`；Hub 没有 supervisor 事件。不要把“文件已修改”误认为现有子进程树已经切换。
 
 ## 验证与检查
 

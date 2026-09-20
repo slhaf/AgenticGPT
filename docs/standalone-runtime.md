@@ -117,6 +117,16 @@ printf '%s' '{"path":"README.md"}' | \
   --arguments-file -
 ```
 
+The `agentic-gpt local` command is the owner-only Unix MCP client; its calls
+retain `local:` audit provenance. It is distinct from the `agentic-gpt tmux`
+local-admin CLI, which exposes exactly four commands: `list`, `attach`,
+`create`, and `close` (request-context operation names
+`tmux.listSessions`, `tmux.attach`, `tmux.createSession`, and
+`tmux.closeSession`). Those CLI calls use `localadmin:` provenance, do not add
+remote approval semantics, and do not fabricate AppState. The other ingress
+prefixes remain distinct: `tunnel:` for the tunnel, `http:` for HTTP, and
+`hub:` for Hub.
+
 `--arguments` and `--arguments-file PATH|-` accept one JSON object, capped at
 2 MiB. Structured MCP results are written to stdout; logs and typed connection
 errors are written to stderr. A stopped/restarting runtime returns
@@ -372,44 +382,49 @@ The current multi-file mutation boundary is documented in the file contract
 matrix: one complete apply-patch request is staged and validated before its
 optional confirmation and commit.
 
-While the standalone worker is running, edits to `policy`, `pathPolicy`, `limits`,
-`mcpServers`, and `toolsets.enabled` are polled, fully validated, and applied
-atomically to new admissions, calls, and tool discovery. MCP server ids use
-`A-Z`, `a-z`, `0-9`, `.`, `_`, or `-` (maximum 64 bytes);
-`streamable-http` requires an absolute HTTP(S) URL and may optionally use
-structured Bearer auth; `stdio` requires a non-empty command and rejects HTTP
-auth. Invalid config versions keep the last valid live subset. Already admitted
-Jobs and already-created downstream MCP clients retain their original
-decision/server definition and are not cancelled or rerouted by a reload.
-Because downstream clients are currently created per call, no separate reload
-or reconnect command is needed.
+While a Standalone, Local, or Hub-connected Agent worker is running, edits to
+`policy`, `limits`, `mcpServers`, `toolsets.enabled`, and (when `workspaceRoot`
+is unchanged) `pathPolicy` are polled, fully validated, and applied atomically to
+new admissions, calls, and tool discovery. MCP server ids use `A-Z`, `a-z`,
+`0-9`, `.`, `_`, or `-` (maximum 64 bytes); `streamable-http` requires an
+absolute HTTP(S) URL and may optionally use structured Bearer auth; `stdio`
+requires a non-empty command and rejects HTTP auth. Invalid config versions keep
+the last valid live subset. Already admitted Jobs and already-created downstream
+MCP clients retain their original decision/server definition and are not cancelled
+or rerouted by a reload. Because downstream clients are currently created per call,
+no separate reload or reconnect command is needed.
 
-Startup-owned identity, workspace, Room settings, tunnel/client, reporting
-connection, and skill-install concurrency changes remain restart-required and
-are reported by the supervisor. Enabling the `room` namespace live bootstraps
-against the current live Room configuration; restart-required `room.*` edits on
-disk do not change that runtime root until restart. `agent.info.mcp` reports only
-the effective config revision, configured/enabled counts, and client lifecycle;
-it does not expose endpoints.
+Startup-owned identity, workspace root, Room settings, Browser configuration,
+tunnel/client, reporting connection, and skill-install concurrency changes
+remain restart-required. The shared watcher logs
+`config changes require restart; fields=...`; the Standalone supervisor
+additionally emits `restart_required`, while Hub mode has no supervisor event.
+If `workspaceRoot` changes, the previous workspace root and `pathPolicy` remain
+an atomic live pair until restart; a path-policy-only edit can reload only while
+the root is unchanged. Enabling the `room` namespace live bootstraps against the
+current live Room configuration; restart-required `room.*` edits on disk do not
+change that runtime root until restart. `agent.info.mcp` reports only the
+effective config revision, configured/enabled counts, and client lifecycle; it
+does not expose endpoints.
 
-The worker also watches the standalone `httpMcp` subset. Enabling or disabling
-the endpoint, or changing `host`, `port`, `publicUrl`, or `allowHosts`,
-reconciles the listener. A public-origin or listener replacement is a new
+The Standalone worker also watches and reconciles the `httpMcp` subset. Enabling
+or disabling the endpoint, changing the bearer-token reference or resolved
+content, or changing `host`, `port`, `publicUrl`, or `allowHosts` is handled
+without restarting the worker. A public-origin or listener replacement is a new
 listener identity: it closes stateful HTTP sessions and discards listener-local
 OAuth codes and tokens. When the replacement bind address differs, it binds the
 replacement before retiring the old listener. A same-address `allowHosts` or
 `publicUrl` change must retire the old listener before binding the replacement;
 if that replacement bind fails, the old listener is already gone and a later
 retry starts fresh. A bind conflict on a different address keeps a working old
-listener when the old address remains usable and is retried without
-interrupting tunnel or Unix execution. Changing the token reference, or the
-content resolved from it, updates the in-memory direct authenticator without
-rebinding, preserves existing sessions, and atomically revokes OAuth records.
-If the reference cannot be resolved, HTTP authentication fails closed: the
-listener stops listening and accepting requests until the credential becomes
-available again. Invalid candidates retain the last-good live configuration and
-state, and no reference, token, code, or access-token value is logged or
-included in summaries.
+listener when the old address remains usable and is retried without interrupting
+tunnel or Unix execution. Changing the token reference, or the content resolved
+from it, updates the in-memory direct authenticator without rebinding, preserves
+existing sessions, and atomically revokes OAuth records. If the reference cannot
+be resolved, HTTP authentication fails closed: the listener stops listening and
+accepting requests until the credential becomes available again. Invalid
+candidates retain the last-good live configuration and state, and no reference,
+token, code, or access-token value is logged or included in summaries.
 
 `apiKey` accepts only `env:NAME` and `file:PATH`. The resolved value is
 injected into the tunnel-client child environment as
@@ -449,10 +464,12 @@ Supported `config set` keys include:
 - `httpMcp.enabled`, `httpMcp.host`, `httpMcp.port`, `httpMcp.publicUrl`,
   `httpMcp.bearerToken`, `httpMcp.allowHosts`.
 
-The tunnel identity, secret reference, client source/version/hash/cache, and
-CLI profile are startup identity. Editing one while the supervisor is running
-logs `restart_required`; it does not switch the existing child tree. `toolsets.enabled` is
-live configuration and does not require a restart.
+The tunnel identity, secret reference, client source/version/hash/cache, Browser
+configuration, and CLI profile are startup identity. Editing one while the
+Standalone supervisor is running logs `restart_required` with changed field
+names only; Browser changes use the `browser` field name. It does not switch
+the existing child tree, and secret values are never printed.
+`toolsets.enabled` is live configuration and does not require a restart.
 
 ## Tunnel client trust and source selection
 

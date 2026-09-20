@@ -76,6 +76,45 @@ The current WP1 closure evidence is bounded: final cleanup passed `cargo fmt --a
 6. Restart one Agent and verify other machine connectors remain usable.
 7. Confirm audit JSONL is beneath `workspaceRoot` and contains no raw tunnel/MCP secrets.
 
+## Configuration reload and restart diagnostics
+
+The live/restart boundary is shared by Standalone, Local, and Hub-connected Agent
+workers; it is not a Standalone-only feature. While a worker is running, valid
+changes to `policy`, `limits`, `mcpServers`, and `toolsets.enabled` apply
+atomically to subsequent admissions, calls, and tool discovery. `pathPolicy`
+also reloads when `workspaceRoot` is unchanged. If a candidate changes
+`workspaceRoot`, the previous `workspaceRoot` and `pathPolicy` remain effective
+as one atomic pair until restart; do not treat a partial candidate as active.
+
+For a Standalone HTTP MCP listener, verify the reconciler with a controlled
+change to `httpMcp.enabled`, `host`, `port`, `publicUrl`, `allowHosts`, and the
+bearer-token reference or resolved content. Enable/disable and endpoint changes
+reconcile without restarting the worker. A listener-identity change closes
+stateful HTTP sessions and discards listener-local OAuth state, while a token
+change updates direct authentication in place and preserves existing sessions
+while revoking OAuth records. An unresolved credential fails closed; an invalid
+candidate retains the last-good listener; a bind conflict is retried without
+disturbing tunnel or Unix execution.
+
+Changes to startup-owned fields such as `mode`, `profile`, `agentId`,
+`workspaceRoot`, `browser`, Room settings, tunnel/client settings, reporting
+mode, or skill-install concurrency are restart-owned. The shared watcher logs
+`config changes require restart; fields=...` with the changed field names but
+never secret values. The Standalone supervisor additionally emits
+`restart_required`; Hub mode has no supervisor event. Editing the file does not
+switch the existing child tree. Enabling the Room namespace live uses the
+current live Room root; restart-required Room edits do not move that root until
+restart.
+
+The `agentic-gpt local` command is the owner-only Unix MCP client and retains
+`local:` audit provenance. It is distinct from the `agentic-gpt tmux`
+local-admin CLI, which exposes exactly four commands: `list`, `attach`,
+`create`, and `close` (request-context operation names `tmux.listSessions`,
+`tmux.attach`, `tmux.createSession`, and `tmux.closeSession`). Those CLI
+calls use `localadmin:` provenance, do not add remote approval semantics, and
+do not fabricate AppState. Other ingress sources remain `tunnel:`, `http:`,
+and `hub:`.
+
 ## Hub deployment checks
 
 1. Confirm Hub and Agent binaries report the same v0.9 version.

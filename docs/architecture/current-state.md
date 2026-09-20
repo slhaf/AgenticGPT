@@ -1,16 +1,18 @@
 # 现状架构：受控执行核心与多入口控制面
 
-状态：源码调查快照，2026-09-16。目标规则另见 [目标架构](target-architecture.md)，问题判断见 [诊断](diagnosis.md)。文中代码路径均相对仓库根；符号名优先于可能随编辑变化的行号。
+状态：源码调查快照，2026-09-20；WP2 operation/context gate 已实现并有界验证。目标规则另见 [目标架构](target-architecture.md)，问题判断见 [诊断](diagnosis.md)。文中代码路径均相对仓库根；符号名优先于可能随编辑变化的行号。
 
 ## 1. 调查范围和证据等级
 
 本轮覆盖五个 Rust crate 的一级模块、Console 四个 Gradle 模块及平台源集、OpenAPI、合同 corpus/evaluator、CI/release、部署脚本、实验与 UX 示例。重点追踪入口到副作用、确认/取消、断线恢复、持久化与能力边界；不是逐行安全审计，也不宣称所有平台均已运行验证。
 
-证据来自源码、CodeGraph 定位、Cargo metadata 与解析后的 OpenAPI。完整分域记录和核验记录位于 `.planning/2026-09-16-architecture-audit/`。本轮没有启动真实 Hub/Agent/Android/浏览器/tunnel，没有读取用户密钥或 `~/.agentic_gpt`。已存在测试是后续验证入口，不是本轮测试通过证明。
+证据分为历史调查基线与 WP2 closure：历史调查来自源码、CodeGraph 定位、Cargo metadata 与解析后的 OpenAPI，完整分域记录位于 `.planning/2026-09-16-architecture-audit/`；当时没有启动真实 Hub/Agent/Android/浏览器/tunnel。随后 WP2 的实际运行证据见下段；它不替代未覆盖的外部组件、WP3 durability 或 WP-R 远端 Room 证据。
 
-用户后续确认的需求与部署事实见[已确认决策](decisions.md)：Room 能力需要远端提供，Hub 未同步属于实现遗漏；实际已有 Neko/container/共享目录与 Unix socket 部署。这些是用户报告，不是本轮运行验证结果。源码现状不因决策确认而被描述为已修复。
+WP2 closure 已补充真实 Agent/Hub binary evidence：Local Unix、hidden stdio worker、HTTP bearer 401/有效 session/SSE、process output parity、Skill runs、Normal Room disabled→enabled、policy/limits 与 workspace/path reload health，以及 Hub loopback WebSocket 的 process、Room skills list/search/activate/run（含 invalid-CWD reason）、pending 清零、CLI tmux create/close audit 和 live policy deny；两个临时 driver 均 exit 0。该证据不覆盖 external tunnel/cloud、OAuth provider、Browser JavaScript/service、OS sandbox，亦不等同 WP3/WP-R 完成。
 
-规模口径：对已跟踪 `.rs/.kt/.kts/.js/.ts/.py/.sh` 文件统计物理行，含注释、测试、配置和脚本，共 148 文件、91,041 行。执行端 69,497；Hub 9,965；protocol 3,223；apply-patch 1,146；browser-host 866；Console 2,868；其余为示例/实验/脚本。文件大只能说明调查优先级，不能单独证明架构错误。
+用户后续确认的需求与部署事实见[已确认决策](decisions.md)：Room 能力需要远端提供，Hub 未同步属于仍待 WP-R 收口的合同遗漏；实际已有 Neko/container/共享目录与 Unix socket 部署。这些是用户报告，不是 WP2 runtime 证据。
+
+历史规模口径（2026-09-16，未按 WP1/WP2 变更重算）：对已跟踪 `.rs/.kt/.kts/.js/.ts/.py/.sh` 文件统计物理行，含注释、测试、配置和脚本，共 148 文件、91,041 行。执行端 69,497；Hub 9,965；protocol 3,223；apply-patch 1,146；browser-host 866；Console 2,868；其余为示例/实验/脚本。文件大只能说明调查优先级，不能单独证明架构错误。
 
 ## 2. 实际部署与编译边界
 
@@ -58,7 +60,13 @@ agentic-gpt 执行核心
 | Process TUI | 独立观察器 | LocalJobClient 轮询本机 `job.list`；当前不创建/取消 Job |
 | Hub server | 单进程、单 SQLite owner | 公共 API、连接/路由、收据与投影；不是执行器 |
 
-`RuntimeModel` 的 capability 与 `toolsets.enabled` 是不同机制：Hub+Normal 的 skills/bootstrap/Room 能力受限；Local/Tunnel+Normal 可用 skills/bootstrap，Room profile 扩展 Room 能力。Agent-local 固定 surface 测试给出 Normal 29、Room 40 工具，但实时广告还受 toolsets 过滤。Hub Full/Coordinator 是另一组入口 profile，不要求与 Agent-local 工具集合完全相同。当前 visibility、capability 和操作 gate 尚未完全统一，见诊断 A03。
+`RuntimeModel` 的 capability 与 `toolsets.enabled` 是不同机制：Hub+Normal 的 skills/bootstrap/Room 能力受既有 Hub profile/toolset/capability 规则限制；Local/Tunnel+Normal 的 namespace gate 默认不含 Room，但显式启用 `toolsets.room` 后 Normal 仍可使用 Room。Agent-local 固定 surface 测试给出 Normal 29、Room 40 工具，实时广告还受 toolsets 过滤。Hub Full/Coordinator 是另一组入口 profile，不要求与 Agent-local 工具集合完全相同；现在 operation gate 已统一真实 ingress/context 的准入，但 namespace/toolset、capability、annotations 仍是不同层次。
+
+`agentic-gpt local` remains an ordinary Unix MCP client (`local:` provenance and
+normal MCP gates). `agentic-gpt tmux` is a separate CLI-admin path limited to
+`tmux.listSessions`, `tmux.attach`, `tmux.createSession`, and
+`tmux.closeSession` (`localadmin:` provenance); MCP `tmux.sessions/panes/exec/pasteText`
+are not aliases for those four commands.
 
 ## 3. 模块职责地图
 
@@ -69,8 +77,8 @@ agentic-gpt 执行核心
 | 模块组 | 当前职责与边界 |
 |---|---|
 | `main.rs`、`state.rs`、`instance_lock.rs`、`utils.rs` | 启动组装、运行形态、共享状态、单实例和路径基础；main 同时承载 CLI 与热重载 |
-| `stdio_server.rs` | MCP descriptor/schema、toolset 过滤、参数/结果适配、生命周期和部分直接操作分发；被 stdio/Unix/HTTP 复用 |
-| `local_service.rs` | HubCommand 到 value-returning 本地操作映射，部分 capability/Room gate；不是纯粹无协议依赖的应用层 |
+| `stdio_server.rs` | MCP framing/schema、toolset/namespace discovery、参数/结果适配与 lifecycle；调用共享 operation gate，annotation 只作描述/发现 |
+| `local_service.rs`、`operation.rs`、`operation_result.rs` | HubCommand/value-returning operation 映射、不可变 RequestContext、同步 authorize、共享 error/slim result projection；不是 Hub runner，也不反向依赖 stdio transport |
 | `hub.rs`、`transport_ledger.rs` | WS/SSE、Hello/heartbeat、可靠 envelope、ACK/重放、Job/report、确认响应 |
 | `local_control.rs` | Unix listener/client、UID/权限、stale socket inode guard、LocalJobClient |
 | `http_server.rs`、`http_oauth.rs` | worker HTTP MCP、Bearer/PKCE、Host/Origin/resource 边界 |
@@ -93,7 +101,7 @@ agentic-gpt 执行核心
 | 模块 | 当前职责 |
 |---|---|
 | `main.rs`、`state.rs` | CLI/配置/路由/后台清理、HubState；main 还拥有远程确认回调 |
-| `agents.rs` | Agent secret 接入、WS/SSE、连接替换、Hello、消息处理、request_agent/重放 |
+| `agents/{transport,lifecycle,dispatch}` | Agent secret 接入、WS/SSE、连接替换、Hello、消息处理、受 owner 约束的 dispatch/重放 |
 | `routes.rs` | action-key HTTP process/Job/tmux/MCP/运行查询及响应适配 |
 | `mcp_server.rs`、`agentic_result.rs` | Apps JSON-RPC、tool router/schemars、Full/Coordinator、业务 JSON → MCP result |
 | `runs.rs` | command/run 收据、hash/ACK/status/result/conflict、stale 与 retention |
@@ -107,9 +115,9 @@ agentic-gpt 执行核心
 
 ### 4.1 Hub 远程执行
 
-`routes::process_exec` 或 `mcp_server::call_app_tool` → `agents::request_agent` → `runs::prepare_run` 持久化 command/hash → pending waiter + envelope → Agent `hub::handle_reliable_envelope` → `transport_ledger::accept`/ACK → `local_service::dispatch` → `jobs`/具体能力。回传分为三条路径：Response → Hub `runs::store_result` → pending waiter；JobUpdate → Hub Job cache；RunReport → `runs::upsert_agent_report`。后两条不会直接唤醒该同步 waiter。
+`routes::process_exec` 或 `mcp_server::call_app_tool` → Hub agents dispatch/`runs::prepare_run` 持久化 command/hash → pending waiter + envelope → Agent `hub::handle_reliable_envelope` → `transport_ledger::accept`/ACK → `local_service::dispatch`（带真实 Hub `RequestContext`）→ `jobs`/具体能力。Local Unix、stdio、HTTP MCP 也进入同一 Agent operation/result boundary，但各自保留 framing/auth/error envelope；没有“Hub runner 调 stdio server”的反向依赖。回传分为三条路径：Response → Hub `runs::store_result` → pending waiter；JobUpdate → Hub Job cache；RunReport → `runs::upsert_agent_report`。后两条不会直接唤醒该同步 waiter。
 
-Hub request/run 是控制面投递与收据身份；Job 是执行端资源生命周期；connection id 是连接代际；boot generation 是执行端进程代际。它们不能互换。同步等待超时不等于取消远端任务，迟到结果可以到达。当前 Response owner 校验与 waiter 唤醒之间存在缺口，不能把已有 hash 机制理解为所有路径都已严格保证完整性。
+Hub request/run 是控制面投递与收据身份；Job 是执行端资源生命周期；connection id 是连接代际；boot generation 是执行端进程代际。它们不能互换。同步等待超时不等于取消远端任务，迟到结果可以到达；WP1 已收口 owner 校验，但该事实不替代 WP3 durability/retention 工作。
 
 ### 4.2 本地与 Standalone
 
@@ -200,4 +208,4 @@ release 使用 cross 构建 x86_64/aarch64 Linux，每个包三个二进制（ag
 
 ## 9. 结论
 
-已有架构主干值得保留：**一个本地执行核心，多种入口适配，一个轻量远端控制平面，独立协议与少量专用边界**。主要债务发生在入口到操作的 gate/dispatch、跨端合同投影、资源生命周期/耐久级别和当前/历史/实验状态的界线，而不是缺少新的 Agent Runtime。
+已有架构主干值得保留：**一个本地执行核心，多种入口适配，一个轻量远端控制平面，独立协议与少量专用边界**。WP2 已在 Agent crate 内收紧 operation/context gate、入口 provenance 与 config lifetime；剩余债务主要是跨端合同投影、资源生命周期/耐久级别、WP-R Room clean cutover 以及当前/历史/实验状态的界线，而不是缺少新的 Agent Runtime。
