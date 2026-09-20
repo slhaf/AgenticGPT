@@ -336,8 +336,8 @@ fn config_health(state: &AppState, effective: &Config) -> ConfigHealth {
     if disk.validate_mcp_servers().is_err() || disk.validate_http_mcp().is_err() {
         return invalid_config_health(modified_at);
     }
-    let live_subset_matches_disk = live_subset(effective) == live_subset(&disk);
-    let restart_required_fields = restart_fields(effective, &disk);
+    let live_subset_matches_disk = live_subset_matches_disk_for_workspace(effective, &disk);
+    let restart_required_fields = crate::config::restart_required_fields(effective, &disk);
     let mut issues = Vec::new();
     if !live_subset_matches_disk {
         issues.push("config_live_subset_not_applied");
@@ -377,41 +377,18 @@ fn live_subset(config: &Config) -> Value {
     })
 }
 
-fn restart_fields(effective: &Config, disk: &Config) -> Vec<String> {
-    let pairs = [
-        ("mode", effective.mode != disk.mode),
-        ("profile", effective.profile != disk.profile),
-        ("agentId", json!(effective.agent_id) != json!(disk.agent_id)),
-        (
-            "displayName",
-            json!(effective.display_name) != json!(disk.display_name),
-        ),
-        ("hub", json!(effective.hub) != json!(disk.hub)),
-        (
-            "workspaceRoot",
-            json!(effective.workspace_root) != json!(disk.workspace_root),
-        ),
-        (
-            "backupLimit",
-            json!(effective.backup_limit) != json!(disk.backup_limit),
-        ),
-        (
-            "confirmationProvider",
-            json!(effective.confirmation_provider) != json!(disk.confirmation_provider),
-        ),
-        (
-            "confirmationLanguage",
-            json!(effective.confirmation_language) != json!(disk.confirmation_language),
-        ),
-        ("sandbox", json!(effective.sandbox) != json!(disk.sandbox)),
-        ("skills", json!(effective.skills) != json!(disk.skills)),
-        ("room", json!(effective.room) != json!(disk.room)),
-        ("tunnel", json!(effective.tunnel) != json!(disk.tunnel)),
-    ];
-    pairs
-        .into_iter()
-        .filter_map(|(name, differs)| differs.then_some(name.to_string()))
-        .collect()
+fn live_subset_matches_disk_for_workspace(effective: &Config, disk: &Config) -> bool {
+    let effective_subset = live_subset(effective);
+    let mut disk_subset = live_subset(disk);
+    if effective.workspace_root != disk.workspace_root {
+        if let (Some(path_policy), Some(disk_object)) = (
+            effective_subset.get("pathPolicy").cloned(),
+            disk_subset.as_object_mut(),
+        ) {
+            disk_object.insert("pathPolicy".to_string(), path_policy);
+        }
+    }
+    effective_subset == disk_subset
 }
 
 #[cfg(test)]
@@ -552,6 +529,50 @@ mod tests {
         assert_eq!(ntfy["available"], true);
         assert_eq!(ntfy["deliveryHealth"], "unknown");
         let _ = fs::remove_file(disk_path);
+    }
+
+    #[test]
+    fn config_health_ignores_path_policy_drift_with_workspace_restart() {
+        let mut app = state(CapabilityProfile::Normal);
+        let root = std::env::temp_dir().join(format!(
+            "agent-info-path-policy-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let live_workspace = root.join("workspace-live");
+        let candidate_workspace = root.join("workspace-candidate");
+        let live_write_root = live_workspace.join("write");
+        let candidate_write_root = candidate_workspace.join("write");
+        fs::create_dir_all(&live_write_root).unwrap();
+        fs::create_dir_all(&candidate_write_root).unwrap();
+
+        let mut effective = Config::default_config().unwrap();
+        effective.workspace_root = live_workspace;
+        effective.path_policy.write_roots = vec![live_write_root];
+        let mut disk = effective.clone();
+        disk.workspace_root = candidate_workspace;
+        disk.path_policy.write_roots = vec![candidate_write_root];
+        disk.browser.managed.enabled = false;
+        let disk_path = root.join("config.json");
+        fs::write(&disk_path, serde_json::to_vec_pretty(&disk).unwrap()).unwrap();
+        app.config_path = disk_path.clone();
+
+        let health = config_health(&app, &effective);
+        assert_eq!(health.disk_status, "valid");
+        assert!(health.live_subset_matches_disk);
+        assert!(health
+            .restart_required_fields
+            .iter()
+            .any(|field| field == "workspaceRoot"));
+        assert!(health
+            .restart_required_fields
+            .iter()
+            .any(|field| field == "browser"));
+        assert!(!health
+            .issues
+            .iter()
+            .any(|issue| issue == &"config_live_subset_not_applied"));
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[tokio::test]

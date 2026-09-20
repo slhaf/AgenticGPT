@@ -6,13 +6,11 @@ use std::{
 };
 
 use agentic_gpt_protocol::{
-    normalize_job_group, BatchExecRequest, ExecElement, ExecRequest, HubCommand, JobBatchResponse,
-    JobCancelResponse, JobDetail, JobError, JobInfo, JobKind, JobListItem, JobListRequest,
-    JobListResponse, JobResponse, JobState, JobToolResponse, JobWaitResponse, McpBatchResponse,
-    McpBatchToolChildResponse, McpBatchToolResponse,
+    normalize_job_group, BatchExecRequest, ExecElement, ExecRequest, HubCommand, JobInfo, JobKind,
+    JobListRequest, JobState,
 };
 #[cfg(test)]
-use agentic_gpt_protocol::{McpBatchChildResponse, McpBatchStatus};
+use agentic_gpt_protocol::{JobDetail, McpBatchResponse};
 use anyhow::Result;
 use chrono::Utc;
 use rmcp::{
@@ -22,7 +20,7 @@ use rmcp::{
         ListToolsResult, Meta, PaginatedRequestParams, ProtocolVersion, RequestId,
         ServerCapabilities, ServerInfo, ServerJsonRpcMessage, Tool, ToolAnnotations,
     },
-    service::{RequestContext, RoleServer},
+    service::{RequestContext as McpRequestContext, RoleServer},
     transport::{async_rw::AsyncRwTransport, stdio, Transport},
     ServerHandler, ServiceExt,
 };
@@ -32,65 +30,25 @@ use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+#[cfg(test)]
+use crate::config::ToolNamespace;
 use crate::{
-    config::ToolNamespace,
     local_service,
+    operation::{
+        self, tool_is_destructive, tool_is_open_world, tool_is_read_only, tool_namespace,
+        AdmissionError, RequestContext, RequestIngress, TOOL_NAMESPACE_BY_NAME,
+    },
+    operation_result::{
+        rejection_error, slim_cancel_response, slim_job_get_response, slim_job_list_response,
+        slim_mcp_batch_response, slim_mcp_response, slim_process_batch_response,
+        slim_process_response,
+    },
     state::{AppState, CapabilityProfile},
 };
 
 const INSTRUCTIONS: &str = "Agentic GPT local Tunnel worker. Start with agent.info to inspect the active profile, exact workspace/path policy, capacity, confirmation channels, MCP scheduler state, and connection state. Use file.read/search for bounded UTF-8 workspace work and file.edit for Codex apply-patch edits, process.exec/process.batch for process Jobs, mcp.callTool for one downstream MCP Job, mcp.batch for 1..16 atomically admitted child Jobs with one aggregate confirmation and bounded 8/2 concurrency, job.get/list/cancel for lifecycle control, tmux for persistent workspaces, skills for the local skills workspace, bootstrap for Room startup guidance, and browser.acquire/browser.repl for a named persistent Browser SDK JavaScript lease (bindings survive calls); use browser.reset for recovery, browser.release for final cleanup, browser.manual for selected-runtime official docs, and browser.list for bounded lease state. Browser SDK semantics belong in JavaScript. All calls remain subject to path policy, configured confirmation, audit, and bounded waits.";
 const PATCH_SCHEMA_DESCRIPTION: &str = "Codex apply_patch text beginning with *** Begin Patch and ending with *** End Patch; supports Add File, Delete File, Update File, and Move to across multiple files.";
 const BROWSER_REPL_RESULT_MARKER: &str = "__agentic_browser_repl_result";
-
-const TOOL_NAMESPACE_BY_NAME: &[(&str, ToolNamespace)] = &[
-    ("agent.info", ToolNamespace::Agent),
-    ("browser.acquire", ToolNamespace::Browser),
-    ("browser.list", ToolNamespace::Browser),
-    ("browser.manual", ToolNamespace::Browser),
-    ("browser.release", ToolNamespace::Browser),
-    ("browser.repl", ToolNamespace::Browser),
-    ("browser.reset", ToolNamespace::Browser),
-    ("bootstrap", ToolNamespace::Room),
-    ("bootstrap.read", ToolNamespace::Room),
-    ("file.edit", ToolNamespace::File),
-    ("file.read", ToolNamespace::File),
-    ("file.search", ToolNamespace::File),
-    ("job.cancel", ToolNamespace::Job),
-    ("job.get", ToolNamespace::Job),
-    ("job.list", ToolNamespace::Job),
-    ("mcp.batch", ToolNamespace::Mcp),
-    ("mcp.callTool", ToolNamespace::Mcp),
-    ("mcp.list", ToolNamespace::Mcp),
-    ("process.batch", ToolNamespace::Process),
-    ("process.exec", ToolNamespace::Process),
-    ("room.diary.active", ToolNamespace::Room),
-    ("room.diary.read", ToolNamespace::Room),
-    ("room.maintenance.status", ToolNamespace::Room),
-    ("room.maintenance.submit", ToolNamespace::Room),
-    ("room.notebook.read", ToolNamespace::Room),
-    ("room.notebook.recent", ToolNamespace::Room),
-    ("room.notebook.search", ToolNamespace::Room),
-    ("room.state.list", ToolNamespace::Room),
-    ("room.state.read", ToolNamespace::Room),
-    ("skills.install", ToolNamespace::Skills),
-    ("skills.install.cancel", ToolNamespace::Skills),
-    ("skills.install.get", ToolNamespace::Skills),
-    ("skills.list", ToolNamespace::Skills),
-    ("skills.read", ToolNamespace::Skills),
-    ("skills.run", ToolNamespace::Skills),
-    ("skills.setActive", ToolNamespace::Skills),
-    ("tmux.exec", ToolNamespace::Tmux),
-    ("tmux.panes", ToolNamespace::Tmux),
-    ("tmux.pasteText", ToolNamespace::Tmux),
-    ("tmux.sessions", ToolNamespace::Tmux),
-];
-
-fn tool_namespace(name: &str) -> Option<ToolNamespace> {
-    TOOL_NAMESPACE_BY_NAME
-        .iter()
-        .find(|(tool, _)| *tool == name)
-        .map(|(_, namespace)| *namespace)
-}
 
 fn tool_descriptors(toolsets: &crate::config::ToolsetConfig) -> Vec<Tool> {
     let mut tools = TOOL_NAMESPACE_BY_NAME
@@ -100,32 +58,6 @@ fn tool_descriptors(toolsets: &crate::config::ToolsetConfig) -> Vec<Tool> {
         .collect::<Vec<_>>();
     tools.sort_unstable_by(|left, right| left.name.cmp(&right.name));
     tools
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum RequestIngress {
-    TunnelStdio,
-    LocalUnix,
-    Http,
-}
-
-impl RequestIngress {
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::TunnelStdio => "tunnel:stdio",
-            Self::LocalUnix => "local:unix",
-            Self::Http => "http:mcp",
-        }
-    }
-
-    fn source(self, tool: &str) -> String {
-        let prefix = match self {
-            Self::TunnelStdio => "tunnel",
-            Self::LocalUnix => "local",
-            Self::Http => "http",
-        };
-        format!("{prefix}:{tool}")
-    }
 }
 
 pub(crate) async fn serve_stdio(state: AppState) -> Result<()> {
@@ -595,6 +527,17 @@ impl AgentMcpServer {
         arguments: Value,
         terminal_tracker: Arc<HumanTerminalTracker>,
     ) -> Result<Value> {
+        let admission = {
+            let config = self.state.config.read().await;
+            operation::authorize(
+                self.state.runtime,
+                &config,
+                RequestContext::new(self.ingress, name),
+            )
+        };
+        if let Err(error) = admission {
+            return Ok(admission_error_value(error));
+        }
         if tool_namespace(name).is_some() {
             validate_stdio_arguments(name, &arguments)?;
         }
@@ -724,6 +667,7 @@ impl AgentMcpServer {
                         Ok(crate::tmux::create_session(
                             &self.state,
                             agentic_gpt_protocol::TmuxCreateSessionRequest { name, cwd },
+                            RequestContext::new(self.ingress, "tmux.createSession"),
                         )
                         .await)
                     }
@@ -737,6 +681,7 @@ impl AgentMcpServer {
                                 name,
                                 need_confirm: args.need_confirm.unwrap_or(true),
                             },
+                            RequestContext::new(self.ingress, "tmux.closeSession"),
                         )
                         .await)
                     }
@@ -801,6 +746,7 @@ impl AgentMcpServer {
                         submit: args.submit,
                         need_confirm: args.need_confirm.unwrap_or(true),
                     },
+                    RequestContext::new(self.ingress, "tmux.pasteText"),
                 )
                 .await)
             }
@@ -816,6 +762,7 @@ impl AgentMcpServer {
                         wait_ms: args.wait_ms.unwrap_or(300),
                         capture_lines: args.capture_lines.unwrap_or(120),
                     },
+                    RequestContext::new(self.ingress, "tmux.exec"),
                 )
                 .await)
             }
@@ -1273,49 +1220,23 @@ impl AgentMcpServer {
             working_directory: args.working_directory,
             wait_seconds: args.wait_seconds,
         };
-        let program = match crate::skills::resolve_run_program(&self.state, &request).await {
-            Ok(program) => program,
-            Err(error) => return Ok(crate::hub::skill_run_command_error(error)),
-        };
-        let config = self.state.config.read().await.clone();
-        if let Some(working_directory) = request.working_directory.as_deref() {
-            if let Err(reason) =
-                crate::exec::resolve_working_directory(&config, Some(working_directory))
-            {
-                return Ok(json!({
-                    "error": { "code": "invalid_working_directory", "message": reason }
-                }));
-            }
-        }
-        let wait_seconds = request.effective_wait_seconds();
         let request_source = self.ingress.source("skills.run");
-        let info = crate::jobs::start_skill_job_with_hook_and_source(
+        let terminal_event_hook = managed_terminal_event_hook(
+            self.state.runtime.profile,
+            request_source.clone(),
+            terminal_tracker,
+        );
+        match crate::skills::run(
             self.state.clone(),
-            ExecRequest {
-                agent_id: config.agent_id,
-                group: request.group.clone(),
-                program: program.to_string_lossy().to_string(),
-                args: request.args.unwrap_or_default(),
-                need_confirm: false,
-                confirm_method: None,
-                working_directory: request.working_directory,
-                wait_seconds: Some(wait_seconds),
-            },
-            &request.id,
-            &request.path,
+            request,
             &request_source,
-            Some(managed_terminal_event_hook(
-                self.state.runtime.profile,
-                request_source.clone(),
-                terminal_tracker,
-            )),
+            Some(terminal_event_hook),
         )
-        .await;
-        let info = crate::jobs::wait_for_job(&self.state, info, wait_seconds).await;
-        slim_process_response(serde_json::to_value(crate::jobs::response(
-            info.clone(),
-            info.state.is_terminal(),
-        ))?)
+        .await
+        {
+            Ok(response) => slim_process_response(serde_json::to_value(response)?),
+            Err(error) => Ok(crate::skills::skill_run_command_error(error)),
+        }
     }
 
     async fn dispatch_skills_list(&self, arguments: Value) -> Result<Value> {
@@ -1692,7 +1613,7 @@ impl ServerHandler for AgentMcpServer {
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
-        _context: RequestContext<RoleServer>,
+        _context: McpRequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let (value, browser_repl_result) = self.call_with_result(request).await?;
         if let Some(result) = browser_repl_result {
@@ -1710,7 +1631,7 @@ impl ServerHandler for AgentMcpServer {
     async fn list_tools(
         &self,
         _request: Option<PaginatedRequestParams>,
-        _context: RequestContext<RoleServer>,
+        _context: McpRequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
         Ok(ListToolsResult {
             tools: self.current_tools().await,
@@ -2146,7 +2067,17 @@ struct TmuxPasteArgs {
 }
 
 async fn dispatch(server: &AgentMcpServer, command: HubCommand) -> Result<Value> {
-    local_service::dispatch(server.state.clone(), command).await
+    let operation_name = operation::hub_command_name(&command);
+    let context = RequestContext::new(server.ingress, operation_name);
+    local_service::dispatch(server.state.clone(), command, context).await
+}
+fn admission_error_value(error: AdmissionError) -> Value {
+    json!({
+        "error": {
+            "code": error.code(),
+            "message": error.message(),
+        }
+    })
 }
 
 fn job_error(reason: String) -> Value {
@@ -2190,270 +2121,6 @@ fn normalize_stdio_group(group: Option<String>) -> std::result::Result<Option<St
             }
         })
     })
-}
-
-fn elapsed_ms(info: &JobInfo) -> u64 {
-    info.started_at
-        .map(|started_at| (Utc::now() - started_at).num_milliseconds().max(0) as u64)
-        .unwrap_or(0)
-}
-
-fn duration_ms(info: &JobInfo) -> Option<u64> {
-    info.started_at.map(|started_at| {
-        let finished_at = info.finished_at.unwrap_or(info.updated_at);
-        (finished_at - started_at).num_milliseconds().max(0) as u64
-    })
-}
-
-fn rejection_error(reason: &str) -> JobError {
-    let code = reason
-        .split([':', ';'])
-        .next()
-        .map(str::trim)
-        .filter(|code| {
-            !code.is_empty()
-                && code
-                    .chars()
-                    .all(|character| character.is_ascii_alphanumeric() || character == '_')
-        })
-        .unwrap_or("job_rejected")
-        .chars()
-        .take(64)
-        .collect();
-    JobError {
-        code,
-        message: reason.to_string(),
-    }
-}
-
-fn process_error(info: &JobInfo, detail: &JobDetail) -> Option<JobError> {
-    detail.error.clone().or_else(|| {
-        (info.state == JobState::Rejected)
-            .then(|| info.reject_reason.as_deref().map(rejection_error))
-            .flatten()
-    })
-}
-
-fn job_tool_response(
-    detail: &JobDetail,
-    include_identity: bool,
-    aggregate_result_omitted: bool,
-) -> JobToolResponse {
-    let info = &detail.job;
-    let process_like = matches!(info.kind, JobKind::Process | JobKind::Skill);
-    let terminal = info.state.is_terminal();
-    let mut response = JobToolResponse {
-        job_id: info.job_id.clone(),
-        group: include_identity.then(|| info.group.clone()).flatten(),
-        kind: include_identity.then_some(info.kind),
-        state: info.state,
-        elapsed_ms: (!terminal).then(|| elapsed_ms(info)),
-        duration_ms: terminal.then(|| duration_ms(info)).flatten(),
-        exit_code: (terminal && process_like)
-            .then_some(info.exit_code)
-            .flatten()
-            .filter(|code| *code != 0),
-        stdout_tail: if process_like {
-            info.stdout_tail.clone()
-        } else {
-            String::new()
-        },
-        stderr_tail: if process_like {
-            info.stderr_tail.clone()
-        } else {
-            String::new()
-        },
-        truncated: (terminal || !info.state.is_terminal()) && process_like && info.truncated,
-        result: (!process_like && terminal)
-            .then(|| detail.result.clone())
-            .flatten(),
-        error: if terminal {
-            if process_like {
-                process_error(info, detail)
-            } else {
-                detail.error.clone()
-            }
-        } else {
-            None
-        },
-        result_truncated: (!process_like && terminal) && detail.result_truncated,
-        result_bytes: (!process_like && terminal && detail.result_truncated)
-            .then_some(detail.result_bytes)
-            .flatten(),
-        result_sha256: (!process_like && terminal && detail.result_truncated)
-            .then(|| detail.result_sha256.clone())
-            .flatten(),
-        result_preview: (!process_like && terminal && detail.result_truncated)
-            .then(|| detail.result_preview.clone())
-            .flatten(),
-        result_omitted: (!process_like && terminal) && aggregate_result_omitted,
-    };
-    if !process_like {
-        response.stdout_tail.clear();
-        response.stderr_tail.clear();
-        response.truncated = false;
-    }
-    response
-}
-
-pub(crate) fn slim_job_detail_response(detail: JobDetail, include_identity: bool) -> Result<Value> {
-    Ok(serde_json::to_value(job_tool_response(
-        &detail,
-        include_identity,
-        false,
-    ))?)
-}
-
-pub(crate) fn slim_job_get_response(
-    detail: JobDetail,
-    wait_only: bool,
-    wait_seconds: u64,
-) -> Result<Value> {
-    if wait_only && wait_seconds > 0 && !detail.job.state.is_terminal() {
-        return Ok(serde_json::to_value(JobWaitResponse {
-            job_id: detail.job.job_id.clone(),
-            state: detail.job.state,
-            elapsed_ms: elapsed_ms(&detail.job),
-        })?);
-    }
-    slim_job_detail_response(detail, true)
-}
-
-pub(crate) fn slim_process_response(value: Value) -> Result<Value> {
-    let response: JobResponse = serde_json::from_value(value)?;
-    slim_job_detail_response(response.detail, false)
-}
-
-pub(crate) fn slim_mcp_response(value: Value) -> Result<Value> {
-    let response: JobResponse = serde_json::from_value(value)?;
-    slim_job_detail_response(response.detail, false)
-}
-
-pub(crate) fn slim_process_batch_response(response: JobBatchResponse) -> Result<Value> {
-    let jobs = response
-        .jobs
-        .into_iter()
-        .map(|job| {
-            job_tool_response(
-                &JobDetail {
-                    job,
-                    detail_available: true,
-                    result: None,
-                    error: None,
-                    result_truncated: false,
-                    result_bytes: None,
-                    result_sha256: None,
-                    result_preview: None,
-                },
-                false,
-                false,
-            )
-        })
-        .collect();
-    Ok(serde_json::to_value(
-        agentic_gpt_protocol::JobBatchToolResponse {
-            batch_id: response.batch_id,
-            status: response.status,
-            jobs,
-        },
-    )?)
-}
-
-pub(crate) fn slim_job_list_response(page: crate::job_history::JobHistoryPage) -> Result<Value> {
-    let jobs = page
-        .jobs
-        .into_iter()
-        .map(|job| JobListItem {
-            job_id: job.job_id,
-            group: job.group,
-            kind: job.kind,
-            state: job.state,
-            created_at: job.created_at,
-            started_at: job.started_at,
-            finished_at: job.finished_at,
-        })
-        .collect();
-    Ok(serde_json::to_value(JobListResponse {
-        jobs,
-        next_cursor: page.next_cursor,
-    })?)
-}
-
-pub(crate) fn slim_cancel_response(detail: JobDetail) -> Result<Value> {
-    let cancel_outcome = detail
-        .job
-        .cancel_outcome
-        .clone()
-        .unwrap_or_else(|| "unknown".to_string());
-    let error = if matches!(
-        cancel_outcome.as_str(),
-        "cancel_failed" | "notification_failed" | "notification_timeout"
-    ) {
-        detail.error.or_else(|| {
-            Some(JobError {
-                code: cancel_outcome.clone(),
-                message: format!(
-                    "Cancellation did not complete; termination evidence: {}",
-                    detail
-                        .job
-                        .termination_evidence
-                        .as_deref()
-                        .unwrap_or("unknown")
-                ),
-            })
-        })
-    } else {
-        None
-    };
-    Ok(serde_json::to_value(JobCancelResponse {
-        job_id: detail.job.job_id,
-        state: detail.job.state,
-        cancel_outcome,
-        termination_evidence: detail
-            .job
-            .termination_evidence
-            .unwrap_or_else(|| "unknown".to_string()),
-        error,
-    })?)
-}
-
-pub(crate) fn slim_mcp_batch_response(value: Value) -> Result<Value> {
-    let response: McpBatchResponse = serde_json::from_value(value)?;
-    let mut slim = McpBatchToolResponse {
-        status: response.status,
-        error: response.error,
-        results: response
-            .results
-            .into_iter()
-            .map(|child| McpBatchToolChildResponse {
-                job: job_tool_response(&child.detail, false, child.result_omitted),
-            })
-            .collect(),
-    };
-    apply_slim_mcp_batch_budget(&mut slim)?;
-    Ok(serde_json::to_value(slim)?)
-}
-
-fn apply_slim_mcp_batch_budget(response: &mut McpBatchToolResponse) -> Result<()> {
-    let limit = agentic_gpt_protocol::McpBatchRequest::MAX_AGGREGATE_RESULT_BYTES;
-    let mut bytes = serde_json::to_vec(response)?.len();
-    if bytes > limit {
-        for index in (0..response.results.len()).rev() {
-            if response.results[index].job.result.take().is_some() {
-                response.results[index].job.result_omitted = true;
-                bytes = serde_json::to_vec(response)?.len();
-                if bytes <= limit {
-                    break;
-                }
-            }
-        }
-    }
-    if bytes > limit {
-        return Err(anyhow::anyhow!(
-            "mcp_batch_result_too_large_after_clipping: bytes={bytes}; max={limit}"
-        ));
-    }
-    Ok(())
 }
 
 fn from_value<T: DeserializeOwned>(value: Value) -> Result<T> {
@@ -3789,69 +3456,6 @@ fn tool_description(name: &str) -> String {
     }
 }
 
-fn tool_is_read_only(name: &str) -> bool {
-    !matches!(
-        name,
-        "process.exec"
-            | "browser.acquire"
-            | "browser.repl"
-            | "browser.reset"
-            | "browser.release"
-            | "process.batch"
-            | "job.cancel"
-            | "tmux.sessions"
-            | "tmux.pasteText"
-            | "tmux.exec"
-            | "tmux.createSession"
-            | "tmux.closeSession"
-            | "mcp.batch"
-            | "mcp.callTool"
-            | "skills.activate"
-            | "skills.deactivate"
-            | "skills.install"
-            | "skills.install.cancel"
-            | "room.maintenance.submit"
-            | "skills.run"
-            | "file.edit"
-    )
-}
-
-fn tool_is_destructive(name: &str) -> bool {
-    matches!(
-        name,
-        "file.edit"
-            | "browser.repl"
-            | "browser.reset"
-            | "browser.release"
-            | "job.cancel"
-            | "tmux.sessions"
-            | "tmux.closeSession"
-            | "skills.install"
-            | "skills.install.cancel"
-            | "room.maintenance.submit"
-            | "skills.setActive"
-            | "skills.run"
-    )
-}
-
-fn tool_is_open_world(name: &str) -> bool {
-    matches!(
-        name,
-        "process.exec"
-            | "browser.repl"
-            | "process.batch"
-            | "tmux.sessions"
-            | "mcp.batch"
-            | "mcp.callTool"
-            | "tmux.pasteText"
-            | "tmux.exec"
-            | "tmux.createSession"
-            | "tmux.closeSession"
-            | "skills.install"
-            | "skills.run"
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use std::{
@@ -3863,7 +3467,9 @@ mod tests {
         },
     };
 
-    use agentic_gpt_protocol::{AgentMessage, SkillActivationRequest};
+    use agentic_gpt_protocol::{
+        AgentMessage, McpBatchChildResponse, McpBatchStatus, SkillActivationRequest,
+    };
     use rmcp::{
         model::{CallToolRequestParams, Content},
         ServiceExt,
@@ -5683,6 +5289,23 @@ mod tests {
         assert!(result.get("kind").is_none());
         let audit = std::fs::read_to_string(workspace.join(".agentic-gpt-audit.jsonl"))?;
         assert!(audit.contains("\"requestSource\":\"tunnel:skills.run\""));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn wp2_hub_normal_direct_skills_require_capability() -> anyhow::Result<()> {
+        let mut state = test_state(CapabilityProfile::Normal);
+        state.runtime = RuntimeModel::hub(CapabilityProfile::Normal);
+        let server = AgentMcpServer::new(state);
+
+        let listed = server.dispatch("skills.list", json!({})).await?;
+        assert_eq!(listed["error"]["code"], "room_agent_required");
+        assert!(listed.get("skills").is_none());
+        let read = server
+            .dispatch("skills.read", json!({"id": "missing"}))
+            .await?;
+        assert_eq!(read["error"]["code"], "room_agent_required");
+        assert!(read.get("skill").is_none());
         Ok(())
     }
 

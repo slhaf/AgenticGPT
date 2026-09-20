@@ -11,8 +11,9 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     config::{self, HttpMcpConfig},
     http_oauth::{self, HttpMcpAuthState, HttpMcpHostPolicy},
+    operation::RequestIngress,
     state::AppState,
-    stdio_server::{AgentMcpServer, RequestIngress},
+    stdio_server::AgentMcpServer,
     utils::{log_info, log_warn},
 };
 

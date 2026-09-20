@@ -1,6 +1,6 @@
 use agentic_gpt_protocol::{
-    AgentConnectionMode, AgentMessage, AgentRunReport, BoundedJsonValue, ExecRequest, HubCommand,
-    HubCommandEnvelope, HubMessage, JobInfo, SkillRunRequest,
+    AgentConnectionMode, AgentMessage, AgentRunReport, BoundedJsonValue, HubCommand,
+    HubCommandEnvelope, HubMessage, JobInfo,
 };
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
@@ -20,7 +20,9 @@ use uuid::Uuid;
 
 use crate::{
     config::Config,
-    confirmation, exec, jobs, notify, skills, transport_ledger,
+    confirmation, jobs, notify,
+    operation::{hub_command_name, RequestContext, RequestIngress},
+    transport_ledger,
     utils::{
         log_info, log_warn, CONNECT_TIMEOUT_SECS, HEARTBEAT_ACK_TIMEOUT_SECS,
         HEARTBEAT_INTERVAL_SECS, RECONNECT_DELAY_SECS,
@@ -1039,10 +1041,9 @@ pub(crate) async fn handle_hub_command(
     run_id: Option<String>,
 ) -> Result<()> {
     let request_id = command.request_id().to_string();
-    let data = match crate::local_service::dispatch(state.clone(), command).await {
+    let context = RequestContext::new(RequestIngress::Hub, hub_command_name(&command));
+    let data = match crate::local_service::dispatch(state.clone(), command, context).await {
         Ok(data) => data,
-        Err(error) if error.to_string() == "room_toolset_required" => room_toolset_required_error(),
-        Err(error) if error.to_string() == "room_agent_required" => room_agent_required_error(),
         Err(error) => serde_json::json!({
             "error": {
                 "code": "local_dispatch_failed",
@@ -1083,82 +1084,6 @@ fn jobs_from_command_response(data: &serde_json::Value) -> Vec<JobInfo> {
         .ok()
         .into_iter()
         .collect()
-}
-
-pub(crate) async fn run_skill(state: &AppState, request: SkillRunRequest) -> serde_json::Value {
-    let program = match skills::resolve_run_program(state, &request).await {
-        Ok(program) => program,
-        Err(error) => return skill_run_command_error(error),
-    };
-    let config = state.config.read().await.clone();
-    let wait_seconds = request.effective_wait_seconds();
-    if let Some(working_directory) = request.working_directory.as_deref() {
-        if let Err(reason) = exec::resolve_working_directory(&config, Some(working_directory)) {
-            return serde_json::json!({
-                "error": { "code": "invalid_working_directory", "message": reason }
-            });
-        }
-    }
-    let info = jobs::start_skill_job_with_hook_and_source(
-        state.clone(),
-        ExecRequest {
-            agent_id: config.agent_id,
-            group: request.group.clone(),
-            program: program.to_string_lossy().to_string(),
-            args: request.args.unwrap_or_default(),
-            need_confirm: false,
-            confirm_method: None,
-            working_directory: request.working_directory,
-            wait_seconds: Some(wait_seconds),
-        },
-        &request.id,
-        &request.path,
-        "hub:skills.run",
-        None,
-    )
-    .await;
-    let info = jobs::wait_for_job(state, info, wait_seconds).await;
-    let response = jobs::response(info.clone(), info.state.is_terminal());
-    serde_json::to_value(response).unwrap_or_else(|_| {
-        serde_json::json!({
-            "error": { "code": "skills_run_failed", "message": "failed to encode skill run response" }
-        })
-    })
-}
-
-pub(crate) fn skill_run_command_error(error: anyhow::Error) -> serde_json::Value {
-    let message = error.to_string();
-    let code = match message.as_str() {
-        "invalid_id"
-        | "skill_inactive"
-        | "skill_not_runnable"
-        | "invalid_script_path"
-        | "script_path_forbidden"
-        | "script_not_found"
-        | "script_not_executable"
-        | "script_symlink"
-        | "invalid_working_directory" => message.as_str(),
-        _ => "skills_run_failed",
-    };
-    serde_json::json!({ "error": { "code": code, "message": message } })
-}
-
-pub(crate) fn room_toolset_required_error() -> serde_json::Value {
-    serde_json::json!({
-        "error": {
-            "code": "room_toolset_required",
-            "message": "room commands require toolsets.room to be enabled"
-        }
-    })
-}
-
-pub(crate) fn room_agent_required_error() -> serde_json::Value {
-    serde_json::json!({
-        "error": {
-            "code": "room_agent_required",
-            "message": "room commands require profile=room in config"
-        }
-    })
 }
 
 async fn send_response(

@@ -25,6 +25,8 @@ mod local_control;
 mod local_service;
 mod mcp;
 mod notify;
+mod operation;
+mod operation_result;
 mod policy;
 mod private_state;
 mod room_maintenance;
@@ -221,7 +223,7 @@ async fn run_hub(config_path: PathBuf) -> Result<()> {
         browser_runtime,
     )?;
     state.skill_installs.recover(state.clone()).await?;
-    tokio::spawn(watch_config(state.clone()));
+    tokio::spawn(watch_live_config(state.clone(), false, None));
     hub::connect_loop(state).await
 }
 
@@ -270,7 +272,7 @@ async fn run_stdio_worker(
     ));
     let initial_http_mcp = state.config.read().await.http_mcp.clone();
     let (http_updates, http_config) = watch::channel(initial_http_mcp);
-    tokio::spawn(watch_standalone_live_config(
+    tokio::spawn(watch_live_config(
         state.clone(),
         supervised,
         Some(http_updates),
@@ -606,7 +608,7 @@ async fn run_local(config_path: PathBuf) -> Result<()> {
         browser_runtime,
     )?;
     state.skill_installs.recover(state.clone()).await?;
-    tokio::spawn(watch_standalone_live_config(state.clone(), false, None));
+    tokio::spawn(watch_live_config(state.clone(), false, None));
     let listener = local_control::bind(&agent_id).await?;
     log_info(format!(
         "local MCP ingress ready; transport=unix; path={}",
@@ -747,6 +749,22 @@ async fn handle_tui(config_path: PathBuf, language: cli_i18n::UiLanguage) -> Res
 }
 
 async fn handle_tmux(config_path: PathBuf, command: TmuxCommand) -> Result<()> {
+    use operation::{RequestContext, RequestIngress};
+
+    let config = Config::load_or_default(&config_path)?;
+    let operation = match &command {
+        TmuxCommand::List => "tmux.listSessions",
+        TmuxCommand::Attach { .. } => "tmux.attach",
+        TmuxCommand::Create { .. } => "tmux.createSession",
+        TmuxCommand::Close { .. } => "tmux.closeSession",
+    };
+    let context = RequestContext::new(RequestIngress::Cli, operation);
+    operation::authorize(
+        RuntimeModel::local(config.profile.capability_profile()),
+        &config,
+        context,
+    )
+    .map_err(|error| anyhow!(error.to_string()))?;
     match command {
         TmuxCommand::List => println!(
             "{}",
@@ -756,66 +774,28 @@ async fn handle_tmux(config_path: PathBuf, command: TmuxCommand) -> Result<()> {
             .await
             .map_err(|error| anyhow!(error))?,
         TmuxCommand::Create { name, cwd } => {
-            let config = Config::load_or_default(&config_path)?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(
-                    &tmux::create_session_for_config(&config, &name, &cwd).await
-                )?
-            );
+            let result = tmux::create_session_for_cli(
+                &config,
+                agentic_gpt_protocol::TmuxCreateSessionRequest { name, cwd },
+                context,
+            )
+            .await;
+            println!("{}", serde_json::to_string_pretty(&result)?);
         }
-        TmuxCommand::Close { name } => println!(
-            "{}",
-            serde_json::to_string_pretty(&tmux::close_session_local(&name).await)?
-        ),
+        TmuxCommand::Close { name } => {
+            let result = tmux::close_session_for_cli(
+                &config,
+                agentic_gpt_protocol::TmuxCloseSessionRequest {
+                    name,
+                    need_confirm: false,
+                },
+                context,
+            )
+            .await;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
     }
     Ok(())
-}
-
-async fn watch_config(state: AppState) {
-    let mut last_modified = fs::metadata(&state.config_path)
-        .and_then(|meta| meta.modified())
-        .ok();
-    loop {
-        sleep(Duration::from_secs(2)).await;
-        let modified = fs::metadata(&state.config_path)
-            .and_then(|meta| meta.modified())
-            .ok();
-        if modified.is_some() && modified != last_modified {
-            match Config::load(&state.config_path).and_then(|config| {
-                config.validate_mcp_servers()?;
-                Ok(config)
-            }) {
-                Ok(config) => {
-                    if !config_matches_runtime(&config, state.runtime) {
-                        log_warn(
-                            "config reload rejected; mode/profile change requires restart"
-                                .to_string(),
-                        );
-                        continue;
-                    }
-                    let _ = config.ensure_workspace();
-                    log_info(format!(
-                        "config reloaded; agentId={}; workspaceRoot={}; sandbox={}; {}; mcpServers={}",
-                        config.agent_id,
-                        config.workspace_root.display(),
-                        if config.sandbox.enabled {
-                            "enabled"
-                        } else {
-                            "disabled"
-                        },
-                        config.limits.max_active_jobs.resolve().diagnostic(),
-                        config.mcp_servers.len(),
-                    ));
-                    *state.config.write().await = config;
-                    last_modified = modified;
-                }
-                Err(_) => {
-                    log_warn("config reload failed; keeping previous config".to_string());
-                }
-            }
-        }
-    }
 }
 
 fn config_matches_runtime(config: &Config, runtime: RuntimeModel) -> bool {
@@ -827,7 +807,7 @@ fn config_matches_runtime(config: &Config, runtime: RuntimeModel) -> bool {
     config.mode == mode && config.profile.capability_profile() == runtime.profile
 }
 
-async fn watch_standalone_live_config(
+async fn watch_live_config(
     state: AppState,
     supervised: bool,
     http_updates: Option<watch::Sender<config::HttpMcpConfig>>,
@@ -845,12 +825,12 @@ async fn watch_standalone_live_config(
         }
         last_modified = modified;
 
-        let resolved = match reload_standalone_live_config_once(&state).await {
+        let resolved = match reload_live_config_once(&state).await {
             Ok(resolved) => resolved,
             Err(error) => {
                 if !supervised {
                     log_warn(format!(
-                        "standalone live config reload rejected; keeping previous subset; errorCode={}",
+                        "live config reload rejected; keeping previous subset; errorCode={}",
                         error_code(&error.to_string())
                     ));
                 }
@@ -862,7 +842,7 @@ async fn watch_standalone_live_config(
             let _ = updates.send(live.http_mcp.clone());
         }
         log_info(format!(
-            "standalone live config reloaded; {}; policyAllow={}; policyConfirm={}; policyDeny={}; pathWriteRoots={}; pathReadOnlyRoots={}; pathDenyRoots={}; mcpServers={}; httpMcpEnabled={}",
+            "live config reloaded; {}; policyAllow={}; policyConfirm={}; policyDeny={}; pathWriteRoots={}; pathReadOnlyRoots={}; pathDenyRoots={}; mcpServers={}; httpMcpEnabled={}",
             resolved.diagnostic(),
             live.policy.allow.len(),
             live.policy.confirm.len(),
@@ -876,9 +856,7 @@ async fn watch_standalone_live_config(
     }
 }
 
-async fn reload_standalone_live_config_once(
-    state: &AppState,
-) -> Result<config::ResolvedMaxActiveJobs> {
+async fn reload_live_config_once(state: &AppState) -> Result<config::ResolvedMaxActiveJobs> {
     let candidate = Config::load(&state.config_path)?;
     let mut live = state.config.write().await;
     if !config_matches_runtime(&candidate, state.runtime) {
@@ -889,21 +867,29 @@ async fn reload_standalone_live_config_once(
         crate::state::Transport::LocalUnix => candidate.validate_local()?,
         crate::state::Transport::Hub => candidate.validate_mcp_servers()?,
     }
+    let restart_required_fields = config::restart_required_fields(&live, &candidate);
     let live_room_enabled = live.toolsets.is_enabled(config::ToolNamespace::Room);
     let candidate_room_enabled = candidate.toolsets.is_enabled(config::ToolNamespace::Room);
     if candidate_room_enabled && !live_room_enabled {
         room_repository::ensure_repository(&live)?;
     }
-    Ok(apply_standalone_live_subset(&mut live, candidate))
+    let resolved = apply_live_config_subset(&mut live, candidate);
+    if !restart_required_fields.is_empty() {
+        log_warn(format!(
+            "config changes require restart; fields={}",
+            restart_required_fields.join(",")
+        ));
+    }
+    Ok(resolved)
 }
 
-fn apply_standalone_live_subset(
-    live: &mut Config,
-    candidate: Config,
-) -> config::ResolvedMaxActiveJobs {
+fn apply_live_config_subset(live: &mut Config, candidate: Config) -> config::ResolvedMaxActiveJobs {
     let resolved = candidate.limits.max_active_jobs.resolve();
+    let workspace_matches = live.workspace_root == candidate.workspace_root;
     live.policy = candidate.policy;
-    live.path_policy = candidate.path_policy;
+    if workspace_matches {
+        live.path_policy = candidate.path_policy;
+    }
     live.limits = candidate.limits;
     live.mcp_servers = candidate.mcp_servers;
     live.toolsets = candidate.toolsets;
@@ -1345,16 +1331,6 @@ mod tests {
         assert_eq!(config.room.diary_day_boundary_hour, 3);
     }
 
-    #[test]
-    fn room_toolset_required_error_is_structured() {
-        let value = hub::room_toolset_required_error();
-        assert_eq!(value["error"]["code"], "room_toolset_required");
-        assert_eq!(
-            value["error"]["message"],
-            "room commands require toolsets.room to be enabled"
-        );
-    }
-
     fn command_test_state(
         profile: CapabilityProfile,
         workspace_root: PathBuf,
@@ -1431,6 +1407,7 @@ mod tests {
             HubCommand::RoomBootstrap {
                 request_id: "req-disabled".to_string(),
             },
+            operation::RequestContext::new(operation::RequestIngress::Hub, "room.bootstrap"),
         )
         .await
         .unwrap();
@@ -1445,6 +1422,7 @@ mod tests {
             HubCommand::RoomBootstrap {
                 request_id: "req-enabled".to_string(),
             },
+            operation::RequestContext::new(operation::RequestIngress::Hub, "room.bootstrap"),
         )
         .await
         .unwrap();
@@ -1461,9 +1439,16 @@ mod tests {
             request_id: "req-parity".to_string(),
         };
 
-        let direct = local_service::dispatch(state.clone(), command.clone())
-            .await
-            .unwrap();
+        let direct = local_service::dispatch(
+            state.clone(),
+            command.clone(),
+            operation::RequestContext::new(
+                operation::RequestIngress::Hub,
+                operation::hub_command_name(&command),
+            ),
+        )
+        .await
+        .unwrap();
         hub::handle_hub_command(state, command, None).await.unwrap();
         let adapted = recv_response(&mut rx).await;
         assert_eq!(direct, adapted);
@@ -2185,6 +2170,7 @@ mod tests {
         let mut live = Config::default_config().unwrap();
         let original_agent_id = live.agent_id.clone();
         let original_workspace = live.workspace_root.clone();
+        let original_path_policy = live.path_policy.clone();
         let mut candidate = live.clone();
         candidate.agent_id = "must-not-reload".to_string();
         candidate.workspace_root = PathBuf::from("/tmp/must-not-reload");
@@ -2216,7 +2202,7 @@ mod tests {
         );
 
         let candidate_toolsets = candidate.toolsets.clone();
-        let resolved = apply_standalone_live_subset(&mut live, candidate);
+        let resolved = apply_live_config_subset(&mut live, candidate);
 
         assert_eq!(live.agent_id, original_agent_id);
         assert_eq!(live.workspace_root, original_workspace);
@@ -2225,10 +2211,7 @@ mod tests {
             .allow
             .iter()
             .any(|rule| rule.program == "printf"));
-        assert_eq!(
-            live.path_policy.write_roots,
-            vec![PathBuf::from("/tmp/live")]
-        );
+        assert_eq!(live.path_policy, original_path_policy);
         assert_eq!(resolved.resolved, 9);
         assert_eq!(
             live.limits.max_active_jobs,
@@ -2246,6 +2229,130 @@ mod tests {
             Some("https://old.example/mcp"),
             "an already-cloned in-flight definition retains the old endpoint"
         );
+    }
+
+    #[tokio::test]
+    async fn wp2_reload_preserves_live_path_policy_when_workspace_changes() -> anyhow::Result<()> {
+        let root = unique_temp_dir("standalone-live-path-policy-boundary");
+        fs::create_dir_all(&root)?;
+        let config_path = root.join("config.json");
+        let live_workspace = root.join("workspace-live");
+        let candidate_workspace = root.join("workspace-candidate");
+        let live_write_root = live_workspace.join("write");
+        let live_read_only_root = live_workspace.join("read-only");
+        let live_deny_root = live_workspace.join("deny");
+        let candidate_write_root = candidate_workspace.join("write");
+        let candidate_read_only_root = candidate_workspace.join("read-only");
+        let candidate_deny_root = candidate_workspace.join("deny");
+        for path in [
+            &live_write_root,
+            &live_read_only_root,
+            &live_deny_root,
+            &candidate_write_root,
+            &candidate_read_only_root,
+            &candidate_deny_root,
+        ] {
+            fs::create_dir_all(path)?;
+        }
+
+        let (mut state, _rx) =
+            command_test_state(CapabilityProfile::Normal, live_workspace.clone());
+        state.config_path = config_path.clone();
+        state.runtime = RuntimeModel::tunnel(CapabilityProfile::Normal, false);
+
+        let mut initial = state.config.read().await.clone();
+        initial.workspace_root = live_workspace.clone();
+        initial.tunnel = Some(TunnelConfig {
+            tunnel_id: "tunnel_test".to_string(),
+            api_key: "env:AGENTIC_TUNNEL_API_KEY".to_string(),
+            ..TunnelConfig::default()
+        });
+        initial.path_policy = PathPolicyConfig {
+            write_roots: vec![live_write_root],
+            read_only_roots: vec![live_read_only_root],
+            deny_roots: vec![live_deny_root],
+        };
+        let live_path_policy = initial.path_policy.clone();
+        *state.config.write().await = initial.clone();
+
+        let mut candidate = initial;
+        candidate.workspace_root = candidate_workspace;
+        candidate.path_policy = PathPolicyConfig {
+            write_roots: vec![candidate_write_root],
+            read_only_roots: vec![candidate_read_only_root],
+            deny_roots: vec![candidate_deny_root],
+        };
+        candidate.policy.allow.push(Rule {
+            program: "printf".to_string(),
+            args_prefix: Vec::new(),
+        });
+        fs::write(&config_path, serde_json::to_vec_pretty(&candidate)?)?;
+
+        reload_live_config_once(&state).await?;
+
+        let live = state.config.read().await.clone();
+        assert_eq!(live.workspace_root, live_workspace);
+        assert_eq!(live.path_policy, live_path_policy);
+        assert!(live
+            .policy
+            .allow
+            .iter()
+            .any(|rule| rule.program == "printf"));
+
+        let _ = fs::remove_dir_all(root);
+        Ok(())
+    }
+    #[tokio::test]
+    async fn wp2_hub_live_reload_preserves_restart_fields() -> anyhow::Result<()> {
+        let root = unique_temp_dir("hub-live-config-boundary");
+        fs::create_dir_all(&root)?;
+        let config_path = root.join("config.json");
+        let live_workspace = root.join("workspace-live");
+        let candidate_workspace = root.join("workspace-candidate");
+        let live_write_root = live_workspace.join("write");
+        let candidate_write_root = candidate_workspace.join("write");
+        fs::create_dir_all(&live_write_root)?;
+        fs::create_dir_all(&candidate_write_root)?;
+
+        let (mut state, _rx) =
+            command_test_state(CapabilityProfile::Normal, live_workspace.clone());
+        state.config_path = config_path.clone();
+        state.runtime = RuntimeModel::hub(CapabilityProfile::Normal);
+
+        let mut initial = state.config.read().await.clone();
+        initial.mode = RuntimeMode::Hub;
+        initial.workspace_root = live_workspace.clone();
+        initial.hub.agent_secret = "hub-secret".to_string();
+        initial.path_policy.write_roots = vec![live_write_root];
+        let live_hub_url = initial.hub.url.clone();
+        let live_path_policy = initial.path_policy.clone();
+        *state.config.write().await = initial.clone();
+
+        let mut candidate = initial;
+        candidate.hub.url = "http://127.0.0.1:18787".to_string();
+        candidate.workspace_root = candidate_workspace;
+        candidate.path_policy.write_roots = vec![candidate_write_root];
+        candidate.policy.allow.push(Rule {
+            program: "printf".to_string(),
+            args_prefix: Vec::new(),
+        });
+        fs::write(&config_path, serde_json::to_vec_pretty(&candidate)?)?;
+
+        reload_live_config_once(&state).await?;
+
+        let live = state.config.read().await.clone();
+        assert_eq!(live.mode, RuntimeMode::Hub);
+        assert_eq!(live.hub.url, live_hub_url);
+        assert_eq!(live.workspace_root, live_workspace);
+        assert_eq!(live.path_policy, live_path_policy);
+        assert!(live
+            .policy
+            .allow
+            .iter()
+            .any(|rule| rule.program == "printf"));
+
+        let _ = fs::remove_dir_all(root);
+        Ok(())
     }
 
     #[tokio::test]
@@ -2298,7 +2405,7 @@ mod tests {
         );
         valid.limits.max_file_search_context_lines = 20;
         fs::write(&config_path, serde_json::to_vec_pretty(&valid).unwrap()).unwrap();
-        reload_standalone_live_config_once(&state).await.unwrap();
+        reload_live_config_once(&state).await.unwrap();
         let live_after_valid = state.config.read().await.clone();
         assert_eq!(live_after_valid.mcp_servers, valid.mcp_servers);
         assert_eq!(live_after_valid.limits.max_file_search_context_lines, 20);
@@ -2307,7 +2414,7 @@ mod tests {
         let mut invalid = valid;
         invalid.mcp_servers.get_mut("primary").unwrap().transport = "sse".to_string();
         fs::write(&config_path, serde_json::to_vec_pretty(&invalid).unwrap()).unwrap();
-        let error = reload_standalone_live_config_once(&state)
+        let error = reload_live_config_once(&state)
             .await
             .unwrap_err()
             .to_string();
@@ -2349,7 +2456,7 @@ mod tests {
         candidate.toolsets.enable(config::ToolNamespace::Room);
         fs::write(&config_path, serde_json::to_vec_pretty(&candidate)?)?;
 
-        reload_standalone_live_config_once(&state).await?;
+        reload_live_config_once(&state).await?;
 
         let live = state.config.read().await.clone();
         assert_eq!(live.room, initial.room);

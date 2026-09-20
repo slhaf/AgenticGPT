@@ -15,8 +15,9 @@ use tokio::sync::Semaphore;
 use tokio::time::timeout;
 
 use crate::config::Config;
+use crate::operation::RequestIngress;
 use crate::state::AppState;
-use crate::stdio_server::{AgentMcpServer, RequestIngress};
+use crate::stdio_server::AgentMcpServer;
 use crate::utils::{agentic_home, log_warn};
 
 const MAX_SOCKET_PATH_BYTES: usize = 100;

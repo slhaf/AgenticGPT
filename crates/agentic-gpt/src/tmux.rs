@@ -16,6 +16,7 @@ use uuid::Uuid;
 
 use crate::audit::{write_audit, AuditRecord};
 use crate::config::Config;
+use crate::operation::{RequestContext, RequestIngress};
 use crate::policy::{policy_decision_for_profile, PolicyDecision};
 use crate::{confirmation, exec, AppState};
 
@@ -106,25 +107,30 @@ pub(crate) async fn capture_pane(request: TmuxCapturePaneRequest) -> Value {
     }
 }
 
-pub(crate) async fn paste_text(state: &AppState, request: TmuxPasteTextRequest) -> Value {
+pub(crate) async fn paste_text(
+    state: &AppState,
+    request: TmuxPasteTextRequest,
+    context: RequestContext<'_>,
+) -> Value {
     let started = Instant::now();
     let target = request.target.clone();
     let need_confirm = request.need_confirm;
     let submit = request.submit;
+    let request_source = context.source();
     let result = paste_text_inner(state, request).await;
+    let config = state.config.read().await.clone();
     audit_tmux(
-        state,
+        &config,
         "tmux.pasteText",
         vec![target.clone(), format!("submit={submit}")],
         Some(target),
         None,
         need_confirm,
         if need_confirm { "Confirm" } else { "Allow" },
-        "hub:tmux.pasteText",
+        &request_source,
         &result,
         started,
-    )
-    .await;
+    );
     if result.get("error").is_some() {
         result
     } else {
@@ -170,12 +176,17 @@ async fn paste_text_inner(state: &AppState, request: TmuxPasteTextRequest) -> Va
     }
 }
 
-pub(crate) async fn exec(state: &AppState, request: TmuxExecRequest) -> Value {
+pub(crate) async fn exec(
+    state: &AppState,
+    request: TmuxExecRequest,
+    context: RequestContext<'_>,
+) -> Value {
     let started = Instant::now();
     let program = request.program.clone();
     let args = request.args.clone();
     let target = request.target.clone();
     let need_confirm = request.need_confirm;
+    let request_source = context.source();
     let config = state.config.read().await.clone();
     let decision = policy_decision_for_profile(
         &config,
@@ -189,19 +200,19 @@ pub(crate) async fn exec(state: &AppState, request: TmuxExecRequest) -> Value {
         .get("currentPath")
         .and_then(Value::as_str)
         .map(str::to_string);
+    let audit_config = state.config.read().await.clone();
     audit_tmux(
-        state,
+        &audit_config,
         &program,
         args,
         Some(target),
         cwd,
         need_confirm,
         &format!("{decision:?}"),
-        "hub:tmux.exec",
+        &request_source,
         &result,
         started,
-    )
-    .await;
+    );
     slim_exec_response(result)
 }
 
@@ -357,24 +368,29 @@ async fn paste_bytes(target: &str, bytes: Vec<u8>) -> Result<(), TmuxError> {
     pasted.map(|_| ())
 }
 
-pub(crate) async fn create_session(state: &AppState, request: TmuxCreateSessionRequest) -> Value {
+pub(crate) async fn create_session(
+    state: &AppState,
+    request: TmuxCreateSessionRequest,
+    context: RequestContext<'_>,
+) -> Value {
     let started = Instant::now();
     let name = request.name.clone();
     let cwd = request.cwd.clone();
-    let result = create_session_inner(state, request).await;
+    let request_source = context.source();
+    let config = state.config.read().await.clone();
+    let result = create_session_inner(&config, request).await;
     audit_tmux(
-        state,
+        &config,
         "tmux.createSession",
         vec![name.clone()],
         Some(name),
         Some(cwd),
         false,
         "Allow",
-        "hub:tmux.createSession",
+        &request_source,
         &result,
         started,
-    )
-    .await;
+    );
     if result.get("error").is_some() {
         result
     } else {
@@ -385,12 +401,11 @@ pub(crate) async fn create_session(state: &AppState, request: TmuxCreateSessionR
     }
 }
 
-async fn create_session_inner(state: &AppState, request: TmuxCreateSessionRequest) -> Value {
+async fn create_session_inner(config: &Config, request: TmuxCreateSessionRequest) -> Value {
     if let Err(error) = validate_identifier("session", &request.name) {
         return error.value();
     }
-    let config = state.config.read().await.clone();
-    let cwd = match exec::resolve_working_directory(&config, Some(&request.cwd)) {
+    let cwd = match exec::resolve_working_directory(config, Some(&request.cwd)) {
         Ok(cwd) => cwd,
         Err(reason) => return TmuxError::new(&reason, reason.clone()).value(),
     };
@@ -400,48 +415,113 @@ async fn create_session_inner(state: &AppState, request: TmuxCreateSessionReques
     }
 }
 
-pub(crate) async fn create_session_for_config(config: &Config, name: &str, cwd: &str) -> Value {
-    if let Err(error) = validate_identifier("session", name) {
-        return error.value();
+pub(crate) async fn create_session_for_cli(
+    config: &Config,
+    request: TmuxCreateSessionRequest,
+    context: RequestContext<'_>,
+) -> Value {
+    if context.ingress != RequestIngress::Cli {
+        return TmuxError::new(
+            "tmux_cli_context_required",
+            "tmux CLI operations require a CLI request context",
+        )
+        .value();
     }
-    let cwd = match exec::resolve_working_directory(config, Some(cwd)) {
-        Ok(cwd) => cwd,
-        Err(reason) => return TmuxError::new(&reason, reason.clone()).value(),
+    let started = Instant::now();
+    let name = request.name.clone();
+    let cwd = request.cwd.clone();
+    let request_source = context.source();
+    let result = create_session_inner(config, request).await;
+    audit_tmux(
+        config,
+        "tmux.createSession",
+        vec![name.clone()],
+        Some(name),
+        Some(cwd),
+        false,
+        "Allow",
+        &request_source,
+        &result,
+        started,
+    );
+    result
+}
+
+pub(crate) async fn close_session_for_cli(
+    config: &Config,
+    request: TmuxCloseSessionRequest,
+    context: RequestContext<'_>,
+) -> Value {
+    if context.ingress != RequestIngress::Cli {
+        return TmuxError::new(
+            "tmux_cli_context_required",
+            "tmux CLI operations require a CLI request context",
+        )
+        .value();
+    }
+    let started = Instant::now();
+    let request = TmuxCloseSessionRequest {
+        need_confirm: false,
+        ..request
     };
-    match create_session_at(name, &cwd).await {
-        Ok(created) => json!({ "session": name, "cwd": cwd, "created": created }),
+    let name = request.name.clone();
+    let request_source = context.source();
+    let result = match validate_close_session(&request) {
         Err(error) => error.value(),
-    }
+        Ok(()) => close_session_inner(request).await,
+    };
+    audit_tmux(
+        config,
+        "tmux.closeSession",
+        vec![name.clone()],
+        Some(name),
+        None,
+        false,
+        "Allow",
+        &request_source,
+        &result,
+        started,
+    );
+    result
 }
 
-pub(crate) async fn close_session_local(name: &str) -> Value {
-    if let Err(error) = validate_identifier("session", name) {
-        return error.value();
-    }
-    match tmux_output(["kill-session", "-t", name]).await {
-        Ok(_) => json!({ "session": name, "closed": true }),
-        Err(error) => error.value(),
-    }
-}
-
-pub(crate) async fn close_session(state: &AppState, request: TmuxCloseSessionRequest) -> Value {
+pub(crate) async fn close_session(
+    state: &AppState,
+    request: TmuxCloseSessionRequest,
+    context: RequestContext<'_>,
+) -> Value {
     let started = Instant::now();
     let name = request.name.clone();
     let need_confirm = request.need_confirm;
-    let result = close_session_inner(state, request).await;
+    let request_source = context.source();
+    let result = match validate_close_session(&request) {
+        Err(error) => error.value(),
+        Ok(())
+            if request.need_confirm
+                && !confirmed(
+                    state,
+                    "kill-session",
+                    &["-t".to_string(), request.name.clone()],
+                )
+                .await =>
+        {
+            TmuxError::new("confirmation_denied", "tmux close was not approved").value()
+        }
+        Ok(()) => close_session_inner(request).await,
+    };
+    let config = state.config.read().await.clone();
     audit_tmux(
-        state,
+        &config,
         "tmux.closeSession",
         vec![name.clone()],
         Some(name),
         None,
         need_confirm,
         if need_confirm { "Confirm" } else { "Allow" },
-        "hub:tmux.closeSession",
+        &request_source,
         &result,
         started,
-    )
-    .await;
+    );
     if result.get("error").is_some() {
         result
     } else {
@@ -449,20 +529,11 @@ pub(crate) async fn close_session(state: &AppState, request: TmuxCloseSessionReq
     }
 }
 
-async fn close_session_inner(state: &AppState, request: TmuxCloseSessionRequest) -> Value {
-    if let Err(error) = validate_identifier("session", &request.name) {
-        return error.value();
-    }
-    if request.need_confirm
-        && !confirmed(
-            state,
-            "kill-session",
-            &["-t".to_string(), request.name.clone()],
-        )
-        .await
-    {
-        return TmuxError::new("confirmation_denied", "tmux close was not approved").value();
-    }
+fn validate_close_session(request: &TmuxCloseSessionRequest) -> Result<(), TmuxError> {
+    validate_identifier("session", &request.name)
+}
+
+async fn close_session_inner(request: TmuxCloseSessionRequest) -> Value {
     match tmux_output(["kill-session", "-t", &request.name]).await {
         Ok(_) => json!({ "session": request.name, "closed": true }),
         Err(error) => error.value(),
@@ -519,8 +590,8 @@ async fn create_session_at(name: &str, cwd: &Path) -> Result<bool, TmuxError> {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn audit_tmux(
-    state: &AppState,
+fn audit_tmux(
+    config: &Config,
     program: &str,
     args: Vec<String>,
     job_id: Option<String>,
@@ -542,9 +613,8 @@ async fn audit_tmux(
     } else {
         None
     };
-    let config = state.config.read().await.clone();
     let _ = write_audit(
-        &config,
+        config,
         AuditRecord {
             task_id: Some(format!("tmux-{}", Uuid::new_v4())),
             job_id,

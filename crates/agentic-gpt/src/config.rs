@@ -1324,6 +1324,67 @@ impl Config {
     }
 }
 
+pub(crate) fn restart_required_fields(effective: &Config, disk: &Config) -> Vec<String> {
+    let pairs = [
+        ("mode", effective.mode != disk.mode),
+        ("profile", effective.profile != disk.profile),
+        (
+            "agentId",
+            serde_json::json!(effective.agent_id) != serde_json::json!(disk.agent_id),
+        ),
+        (
+            "displayName",
+            serde_json::json!(effective.display_name) != serde_json::json!(disk.display_name),
+        ),
+        (
+            "hub",
+            serde_json::json!(effective.hub) != serde_json::json!(disk.hub),
+        ),
+        (
+            "workspaceRoot",
+            serde_json::json!(effective.workspace_root) != serde_json::json!(disk.workspace_root),
+        ),
+        (
+            "backupLimit",
+            serde_json::json!(effective.backup_limit) != serde_json::json!(disk.backup_limit),
+        ),
+        (
+            "confirmationProvider",
+            serde_json::json!(effective.confirmation_provider)
+                != serde_json::json!(disk.confirmation_provider),
+        ),
+        (
+            "confirmationLanguage",
+            serde_json::json!(effective.confirmation_language)
+                != serde_json::json!(disk.confirmation_language),
+        ),
+        (
+            "sandbox",
+            serde_json::json!(effective.sandbox) != serde_json::json!(disk.sandbox),
+        ),
+        (
+            "browser",
+            serde_json::json!(effective.browser) != serde_json::json!(disk.browser),
+        ),
+        (
+            "skills",
+            serde_json::json!(effective.skills) != serde_json::json!(disk.skills),
+        ),
+        (
+            "room",
+            serde_json::json!(effective.room) != serde_json::json!(disk.room),
+        ),
+        (
+            "tunnel",
+            serde_json::json!(effective.tunnel) != serde_json::json!(disk.tunnel),
+        ),
+    ];
+    pairs
+        .into_iter()
+        .filter_map(|(name, differs)| differs.then_some(name.to_string()))
+        .collect()
+}
+
 #[derive(Debug)]
 pub(crate) struct ConfigImport {
     pub(crate) config: Config,
