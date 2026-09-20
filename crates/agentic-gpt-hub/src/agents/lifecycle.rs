@@ -368,6 +368,7 @@ pub(super) async fn disconnect_agent(
                 .remove(agent_id)
                 .expect("current connection disappeared under agents guard");
             room::release_active_room_if_current(state, agent_id, connection_id).await;
+            confirmation::retire_generation(state, agent_id, connection_id).await;
             Some(removed)
         } else {
             None
@@ -375,7 +376,6 @@ pub(super) async fn disconnect_agent(
     };
     let removed_current_connection = removed_connection.is_some();
     if let Some(connection) = removed_connection {
-        confirmation::retire_generation(state, agent_id, connection_id).await;
         let _ = connection.sender.send(OutboundAgentMessage::Close);
     }
     info!(%agent_id, %connection_id, removedCurrentConnection = removed_current_connection, "agent disconnected");
@@ -417,13 +417,13 @@ pub(crate) async fn replace_agent_connection(
         );
         if let Some(old) = old {
             room::release_active_room_if_current(state, agent_id, &old.connection_id).await;
+            confirmation::retire_generation(state, agent_id, &old.connection_id).await;
             Some(old)
         } else {
             None
         }
     };
     if let Some(old) = old {
-        confirmation::retire_generation(state, agent_id, &old.connection_id).await;
         let _ = old.sender.send(OutboundAgentMessage::Close);
     }
     update_last_seen(state, agent_id).ok();

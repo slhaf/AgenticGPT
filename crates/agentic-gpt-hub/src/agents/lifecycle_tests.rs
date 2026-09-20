@@ -110,6 +110,37 @@ async fn insert_generation_confirmation(
         )
         .await;
 }
+async fn admit_generation_confirmation(
+    state: &HubState,
+    request_id: &str,
+    connection_id: &str,
+) -> crate::confirmation::ConfirmationPublication {
+    let sender = state
+        .agents
+        .snapshot_for_test()
+        .await
+        .get("agent")
+        .expect("agent connection missing")
+        .sender
+        .clone();
+    let AgentMessage::ConfirmationRequest { payload, .. } =
+        generation_confirmation(request_id, "agent")
+    else {
+        unreachable!();
+    };
+    state
+        .confirmations
+        .admit(
+            "agent",
+            connection_id,
+            request_id.to_string(),
+            sender,
+            5,
+            45,
+            payload,
+        )
+        .await
+}
 
 pub(crate) async fn generation_handle(
     state: &HubState,
@@ -363,6 +394,117 @@ async fn wp1_confirmation_callback_claims_response_once() {
     assert!(matches!(
         outbound.try_recv(),
         Err(mpsc::error::TryRecvError::Empty)
+    ));
+}
+#[tokio::test]
+async fn wp1_confirmation_retirement_does_not_claim_reused_generation() {
+    let state = test_state();
+    register_agent(&state, "agent", "secret");
+    let mut old_rx = insert_connection(&state, "agent", "same", chrono::Utc::now()).await;
+    insert_generation_confirmation(
+        &state,
+        "wp1-old-retirement",
+        "wp1-old-request",
+        "same",
+        "wp1-old-token",
+        chrono::Utc::now() + chrono::Duration::seconds(60),
+    )
+    .await;
+    let release_retirement = state.confirmations.pause_next_retirement().await;
+
+    let mut disconnect = Box::pin(disconnect_agent(&state, "agent", "same", None));
+    assert!(matches!(
+        futures_util::poll!(disconnect.as_mut()),
+        std::task::Poll::Pending
+    ));
+
+    let (new_tx, mut new_rx) = mpsc::unbounded_channel();
+    let mut replacement = Box::pin(replace_agent_connection(
+        &state,
+        "agent",
+        "same",
+        AgentTransport::Sse,
+        new_tx,
+    ));
+    let replacement_ready = match futures_util::poll!(replacement.as_mut()) {
+        std::task::Poll::Ready(result) => {
+            assert_eq!(result, Ok(()));
+            true
+        }
+        std::task::Poll::Pending => false,
+    };
+    let mut publication = if replacement_ready {
+        Some(admit_generation_confirmation(&state, "wp1-new-request", "same").await)
+    } else {
+        None
+    };
+
+    release_retirement
+        .send(())
+        .expect("retirement gate receiver dropped");
+    assert!(
+        timeout(Duration::from_secs(5), disconnect.as_mut())
+            .await
+            .expect("disconnect timed out"),
+        "disconnect should remove old generation"
+    );
+    if publication.is_none() {
+        timeout(Duration::from_secs(5), replacement.as_mut())
+            .await
+            .expect("replacement timed out")
+            .expect("replacement should register reused connection id");
+        publication = Some(admit_generation_confirmation(&state, "wp1-new-request", "same").await);
+    }
+    let publication = publication.expect("new confirmation admission missing");
+
+    let response = crate::confirmation::callback(
+        State(state.clone()),
+        Path((publication.confirmation_id.clone(), "allow".to_string())),
+        Query(crate::confirmation::ConfirmationCallbackQuery {
+            token: publication.token,
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let Some(OutboundAgentMessage::Text(text)) = timeout(Duration::from_secs(5), new_rx.recv())
+        .await
+        .expect("new callback response timed out")
+    else {
+        panic!("new callback response sender closed");
+    };
+    assert!(matches!(
+        serde_json::from_str::<HubMessage>(&text).unwrap(),
+        HubMessage::ConfirmationResponse {
+            request_id,
+            decision: agentic_gpt_protocol::ConfirmationDecision::AllowOnce,
+            reason,
+        } if request_id == "wp1-new-request" && reason == "user_allowed"
+    ));
+    assert!(matches!(
+        new_rx.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+
+    let Some(OutboundAgentMessage::Text(text)) = timeout(Duration::from_secs(5), old_rx.recv())
+        .await
+        .expect("old retirement response timed out")
+    else {
+        panic!("old retirement response sender closed");
+    };
+    assert!(matches!(
+        serde_json::from_str::<HubMessage>(&text).unwrap(),
+        HubMessage::ConfirmationResponse {
+            request_id,
+            decision: agentic_gpt_protocol::ConfirmationDecision::ProviderUnavailable,
+            reason,
+        } if request_id == "wp1-old-request" && reason == "provider_unavailable"
+    ));
+    assert!(matches!(
+        timeout(Duration::from_secs(5), old_rx.recv())
+            .await
+            .expect("old close timed out"),
+        Some(OutboundAgentMessage::Close)
     ));
 }
 

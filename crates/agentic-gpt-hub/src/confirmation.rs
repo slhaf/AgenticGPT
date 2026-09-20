@@ -8,6 +8,8 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::HashMap;
+#[cfg(test)]
+use tokio::sync::oneshot;
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::{sleep, Duration};
 use tracing::{info, warn};
@@ -45,12 +47,16 @@ struct ClaimedConfirmation {
 
 pub(crate) struct Confirmations {
     pending: Mutex<HashMap<String, PendingConfirmation>>,
+    #[cfg(test)]
+    retire_gate: Mutex<Option<oneshot::Receiver<()>>>,
 }
 
 impl Confirmations {
     pub(crate) fn new() -> Self {
         Self {
             pending: Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            retire_gate: Mutex::new(None),
         }
     }
 
@@ -108,6 +114,20 @@ impl Confirmations {
             .await
             .get(confirmation_id)
             .is_some_and(|pending| !pending.resolved)
+    }
+    #[cfg(test)]
+    pub(crate) async fn pause_next_retirement(&self) -> oneshot::Sender<()> {
+        let (release, wait) = oneshot::channel();
+        *self.retire_gate.lock().await = Some(wait);
+        release
+    }
+
+    #[cfg(test)]
+    async fn wait_retire_gate(&self) {
+        let wait = self.retire_gate.lock().await.take();
+        if let Some(wait) = wait {
+            let _ = wait.await;
+        }
     }
 
     async fn claim(
@@ -292,6 +312,8 @@ pub(crate) async fn handle_confirmation_request(
 }
 
 pub(crate) async fn retire_generation(state: &HubState, agent_id: &str, connection_id: &str) {
+    #[cfg(test)]
+    state.confirmations.wait_retire_gate().await;
     let claimed = state
         .confirmations
         .claim_generation(agent_id, connection_id)
