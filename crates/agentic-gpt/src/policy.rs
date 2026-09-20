@@ -5,7 +5,9 @@ use anyhow::{anyhow, Result};
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 
-use crate::config::{write_config_with_backup, Config, PathPolicyConfig, Rule};
+use crate::config::{
+    acquire_config_mutation_lock, write_config_with_backup, Config, PathPolicyConfig, Rule,
+};
 use crate::config_cli::{PathCommand, PathRootCommand, PathRootKind, RuleCommand};
 use crate::exec;
 use crate::state::CapabilityProfile;
@@ -120,12 +122,14 @@ pub(crate) fn builtin_rules(profile: CapabilityProfile, decision: PolicyDecision
     }
     rules
 }
+
 pub(crate) fn mutate_rule(
     config_path: PathBuf,
     decision: PolicyDecision,
     command: RuleCommand,
 ) -> Result<()> {
-    let mut config = Config::load_or_default(&config_path)?;
+    let _lock = acquire_config_mutation_lock(&config_path)?;
+    let mut config = Config::load_or_default_locked(&config_path)?;
     let rules = match decision {
         PolicyDecision::Allow => &mut config.policy.allow,
         PolicyDecision::Confirm => &mut config.policy.confirm,
@@ -226,9 +230,9 @@ fn choose_rule_interactively(rules: &[Rule], matches: &[usize]) -> Result<usize>
 fn rule_display(rule: &Rule) -> String {
     command_preview(&rule.program, &rule.args_prefix)
 }
-
 pub(crate) fn mutate_path_policy(config_path: PathBuf, command: PathCommand) -> Result<()> {
-    let mut config = Config::load_or_default(&config_path)?;
+    let _lock = acquire_config_mutation_lock(&config_path)?;
+    let mut config = Config::load_or_default_locked(&config_path)?;
     match command {
         PathCommand::List => {
             println!("{}", serde_json::to_string_pretty(&config.path_policy)?);

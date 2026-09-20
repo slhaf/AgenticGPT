@@ -833,14 +833,14 @@ async fn handle_reliable_envelope(
     tx: &mpsc::UnboundedSender<AgentMessage>,
     envelope: HubCommandEnvelope,
 ) {
-    let outcome = match transport_ledger::accept(&envelope) {
+    let agent_id = state.config.read().await.agent_id.clone();
+    let outcome = match transport_ledger::accept(&envelope, &agent_id) {
         Ok(outcome) => outcome,
         Err(error) => {
             log_warn(format!("transport ledger accept failed: {error}"));
             return;
         }
     };
-    let _ = tx.send(transport_ledger::ack_message(&envelope));
     match outcome {
         transport_ledger::AcceptOutcome::HashMismatch => {
             let _ = tx.send(AgentMessage::TransportRunStatus {
@@ -851,7 +851,26 @@ async fn handle_reliable_envelope(
             });
             return;
         }
+        transport_ledger::AcceptOutcome::OwnerMismatch => {
+            let _ = tx.send(AgentMessage::TransportRunStatus {
+                run_id: envelope.run_id,
+                request_id: envelope.request_id,
+                status: "unknown".to_string(),
+                reason: Some("transport_owner_mismatch".to_string()),
+            });
+            return;
+        }
+        transport_ledger::AcceptOutcome::LegacyUnowned => {
+            let _ = tx.send(AgentMessage::TransportRunStatus {
+                run_id: envelope.run_id,
+                request_id: envelope.request_id,
+                status: "unknown".to_string(),
+                reason: Some("legacy_transport_record_unowned".to_string()),
+            });
+            return;
+        }
         transport_ledger::AcceptOutcome::Completed(result) => {
+            let _ = tx.send(transport_ledger::ack_message(&envelope));
             let _ = tx.send(AgentMessage::Response {
                 run_id: Some(envelope.run_id),
                 request_id: envelope.request_id,
@@ -859,25 +878,72 @@ async fn handle_reliable_envelope(
             });
             return;
         }
-        transport_ledger::AcceptOutcome::DuplicateStarted => return,
         transport_ledger::AcceptOutcome::FirstAccepted
-        | transport_ledger::AcceptOutcome::DuplicateAccepted => {}
+        | transport_ledger::AcceptOutcome::DuplicateAccepted
+        | transport_ledger::AcceptOutcome::DuplicateStarted => {}
     }
-    if let Err(error) = transport_ledger::mark_started(&envelope.run_id) {
-        log_warn(format!("transport ledger mark started failed: {error}"));
-        return;
-    }
-    let command_state = state.clone();
-    tokio::spawn(async move {
-        if let Err(error) =
-            handle_hub_command(command_state, envelope.command, Some(envelope.run_id)).await
-        {
-            log_warn(format!("hub command failed: {error}"));
+    let claim = match transport_ledger::claim_started(
+        &envelope.run_id,
+        &envelope.request_id,
+        &envelope.command_hash,
+        &agent_id,
+    ) {
+        Ok(claim) => claim,
+        Err(error) => {
+            log_warn(format!("transport ledger claim failed: {error}"));
+            let _ = tx.send(AgentMessage::TransportRunStatus {
+                run_id: envelope.run_id,
+                request_id: envelope.request_id,
+                status: "unknown".to_string(),
+                reason: Some("transport_claim_failed".to_string()),
+            });
+            return;
         }
-    });
+    };
+    match claim {
+        transport_ledger::ClaimOutcome::Claimed => {
+            let _ = tx.send(transport_ledger::ack_message(&envelope));
+            let identity = RunIdentity {
+                run_id: envelope.run_id.clone(),
+                request_id: envelope.request_id.clone(),
+                command_hash: envelope.command_hash.clone(),
+                agent_id,
+            };
+            let command_state = state.clone();
+            tokio::spawn(async move {
+                if let Err(error) =
+                    handle_hub_command(command_state, envelope.command, Some(identity)).await
+                {
+                    log_warn(format!("hub command failed: {error}"));
+                }
+            });
+        }
+        transport_ledger::ClaimOutcome::AlreadyStarted => {
+            let _ = tx.send(transport_ledger::ack_message(&envelope));
+        }
+        transport_ledger::ClaimOutcome::Completed(result) => {
+            let _ = tx.send(transport_ledger::ack_message(&envelope));
+            let _ = tx.send(AgentMessage::Response {
+                run_id: Some(envelope.run_id),
+                request_id: envelope.request_id,
+                data: result,
+            });
+        }
+        transport_ledger::ClaimOutcome::Missing
+        | transport_ledger::ClaimOutcome::Unowned
+        | transport_ledger::ClaimOutcome::OwnerMismatch => {
+            let _ = tx.send(AgentMessage::TransportRunStatus {
+                run_id: envelope.run_id,
+                request_id: envelope.request_id,
+                status: "unknown".to_string(),
+                reason: Some("transport_claim_not_owned".to_string()),
+            });
+        }
+    }
 }
 
 async fn reconcile_transport_runs(state: &AppState, tx: &mpsc::UnboundedSender<AgentMessage>) {
+    let agent_id = state.config.read().await.agent_id.clone();
     let records = match transport_ledger::latest_records() {
         Ok(records) => records,
         Err(error) => {
@@ -886,6 +952,11 @@ async fn reconcile_transport_runs(state: &AppState, tx: &mpsc::UnboundedSender<A
         }
     };
     for record in records.into_values() {
+        if record.agent_id.as_deref() != Some(agent_id.as_str()) {
+            // Legacy records and records owned by another Agent remain durable
+            // evidence, but cannot be replayed or disclosed from this process.
+            continue;
+        }
         match record.status.as_str() {
             "completed" => {
                 if let Some(message) = transport_ledger::completed_response(&record) {
@@ -894,17 +965,39 @@ async fn reconcile_transport_runs(state: &AppState, tx: &mpsc::UnboundedSender<A
             }
             "accepted" => {
                 let Some(command) = record.command.clone() else {
+                    let _ = tx.send(AgentMessage::TransportRunStatus {
+                        run_id: record.run_id,
+                        request_id: record.request_id,
+                        status: "unknown".to_string(),
+                        reason: Some("transport_command_missing".to_string()),
+                    });
                     continue;
                 };
-                if let Err(error) = transport_ledger::mark_started(&record.run_id) {
-                    log_warn(format!("transport ledger mark started failed: {error}"));
+                let claim = match transport_ledger::claim_started(
+                    &record.run_id,
+                    &record.request_id,
+                    &record.command_hash,
+                    &agent_id,
+                ) {
+                    Ok(claim) => claim,
+                    Err(error) => {
+                        log_warn(format!("transport ledger claim failed: {error}"));
+                        continue;
+                    }
+                };
+                if !matches!(claim, transport_ledger::ClaimOutcome::Claimed) {
                     continue;
                 }
-                let run_id = record.run_id.clone();
+                let identity = RunIdentity {
+                    run_id: record.run_id.clone(),
+                    request_id: record.request_id.clone(),
+                    command_hash: record.command_hash.clone(),
+                    agent_id: agent_id.clone(),
+                };
                 let command_state = state.clone();
                 tokio::spawn(async move {
                     if let Err(error) =
-                        handle_hub_command(command_state, command, Some(run_id)).await
+                        handle_hub_command(command_state, command, Some(identity)).await
                     {
                         log_warn(format!("hub command failed during reconciliation: {error}"));
                     }
@@ -1035,10 +1128,18 @@ fn parse_http_proxy_addr(proxy: &str) -> Result<String> {
     }
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct RunIdentity {
+    pub(crate) run_id: String,
+    pub(crate) request_id: String,
+    pub(crate) command_hash: String,
+    pub(crate) agent_id: String,
+}
+
 pub(crate) async fn handle_hub_command(
     state: AppState,
     command: HubCommand,
-    run_id: Option<String>,
+    identity: Option<RunIdentity>,
 ) -> Result<()> {
     let request_id = command.request_id().to_string();
     let context = RequestContext::new(RequestIngress::Hub, hub_command_name(&command));
@@ -1051,10 +1152,37 @@ pub(crate) async fn handle_hub_command(
             }
         }),
     };
-    for job in jobs_from_command_response(&data) {
-        send_agent_message(&state, AgentMessage::JobUpdate { job }).await?;
+    if let Some(identity) = identity.as_ref() {
+        if identity.request_id != request_id {
+            return Err(anyhow!("transport_request_id_mismatch"));
+        }
+        transport_ledger::mark_completed(
+            &identity.run_id,
+            &identity.request_id,
+            &identity.command_hash,
+            &identity.agent_id,
+            &data,
+        )?;
     }
-    send_response(&state, run_id.as_deref(), &request_id, data).await
+    let response = AgentMessage::Response {
+        run_id: identity.as_ref().map(|value| value.run_id.clone()),
+        request_id,
+        data: data.clone(),
+    };
+    let mut delivery_error = None;
+    for job in jobs_from_command_response(&data) {
+        if let Err(error) = send_agent_message(&state, AgentMessage::JobUpdate { job }).await {
+            if delivery_error.is_none() {
+                delivery_error = Some(error);
+            }
+        }
+    }
+    if let Err(error) = send_agent_message(&state, response).await {
+        if delivery_error.is_none() {
+            delivery_error = Some(error);
+        }
+    }
+    delivery_error.map_or(Ok(()), Err)
 }
 
 fn jobs_from_command_response(data: &serde_json::Value) -> Vec<JobInfo> {
@@ -1084,26 +1212,6 @@ fn jobs_from_command_response(data: &serde_json::Value) -> Vec<JobInfo> {
         .ok()
         .into_iter()
         .collect()
-}
-
-async fn send_response(
-    state: &AppState,
-    run_id: Option<&str>,
-    request_id: &str,
-    data: serde_json::Value,
-) -> Result<()> {
-    if let Some(run_id) = run_id {
-        transport_ledger::mark_completed(run_id, request_id, &data)?;
-    }
-    send_agent_message(
-        state,
-        AgentMessage::Response {
-            run_id: run_id.map(|value| value.to_string()),
-            request_id: request_id.to_string(),
-            data,
-        },
-    )
-    .await
 }
 
 pub(crate) async fn send_agent_message(state: &AppState, message: AgentMessage) -> Result<()> {

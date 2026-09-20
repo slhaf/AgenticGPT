@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io::Write;
 use std::net::{IpAddr, Ipv6Addr, ToSocketAddrs};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -18,10 +20,11 @@ use serde::{
 use serde_json::Value;
 use std::fmt;
 
+use crate::instance_lock::InstanceLock;
 use crate::mcp::McpServerConfig;
 use crate::policy::{builtin_rules, paths_match, PolicyDecision};
 use crate::state::CapabilityProfile;
-use crate::utils::{agentic_home, ensure_parent, hostname_fallback, DEFAULT_BACKUP_LIMIT};
+use crate::utils::{agentic_home, hostname_fallback, DEFAULT_BACKUP_LIMIT};
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
@@ -876,8 +879,13 @@ impl Config {
             extra: BTreeMap::new(),
         })
     }
-
     pub(crate) fn load(path: &Path) -> Result<Self> {
+        let _lock = acquire_config_mutation_lock(path)?;
+        crate::config_setup::recover_pending_setup_locked(path)?;
+        Self::load_locked(path)
+    }
+
+    pub(crate) fn load_locked(path: &Path) -> Result<Self> {
         let text = fs::read_to_string(path)?;
         let value: Value = serde_json::from_str(&text)?;
         let object = value
@@ -963,8 +971,14 @@ impl Config {
     }
 
     pub(crate) fn load_or_default(path: &Path) -> Result<Self> {
+        let _lock = acquire_config_mutation_lock(path)?;
+        crate::config_setup::recover_pending_setup_locked(path)?;
+        Self::load_or_default_locked(path)
+    }
+
+    pub(crate) fn load_or_default_locked(path: &Path) -> Result<Self> {
         if path.exists() {
-            Self::load(path)
+            Self::load_locked(path)
         } else {
             Self::default_config()
         }
@@ -973,9 +987,9 @@ impl Config {
     /// Best-effort migration reader used only by `config import`.
     ///
     /// Runtime loading deliberately stays strict: this function is the explicit
-    /// boundary where old top-level Hub fields, missing selectors, and malformed
-    /// recognized fields may be dealt with and reported to the user.
     pub(crate) fn import(path: &Path) -> Result<ConfigImport> {
+        let _lock = acquire_config_mutation_lock(path)?;
+        crate::config_setup::recover_pending_setup_locked(path)?;
         let text = fs::read_to_string(path)
             .map_err(|error| anyhow!("config_import_source_read_failed: {error}"))?;
         let value: Value = serde_json::from_str(&text)
@@ -2038,17 +2052,167 @@ pub(crate) fn default_path_policy(workspace_root: &Path) -> PathPolicyConfig {
     }
 }
 
-pub(crate) fn write_config_with_backup(path: &Path, config: &Config) -> Result<()> {
-    let serialized = sparse_config_json(config, false)?;
-    ensure_parent(path)?;
-    if path.exists() {
-        let backup_dir = path.parent().unwrap().join("backups");
-        fs::create_dir_all(&backup_dir)?;
-        let backup = backup_dir.join(format!("config.{}.json", Utc::now().timestamp_millis()));
-        fs::copy(path, backup)?;
-        prune_backups(&backup_dir, config.backup_limit)?;
+pub(crate) fn acquire_config_mutation_lock(path: &Path) -> Result<InstanceLock> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let parent_existed = fs::symlink_metadata(parent).is_ok();
+    let lock = InstanceLock::acquire_blocking(path, ".config.lock", "config")?;
+    if !parent_existed {
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
     }
-    fs::write(path, serialized)?;
+    Ok(lock)
+}
+
+pub(crate) fn write_config_with_backup(path: &Path, config: &Config) -> Result<()> {
+    let serialized = sparse_config_json(config, false)?.into_bytes();
+    let parent = prepare_config_parent(path)?;
+    let existing = match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() {
+                return Err(anyhow!("config_path_symlink_rejected"));
+            }
+            if !metadata.is_file() {
+                return Err(anyhow!("config_path_not_file"));
+            }
+            Some(metadata)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    let mode = existing
+        .as_ref()
+        .map(|metadata| metadata.permissions().mode() & 0o7777)
+        .unwrap_or(0o600);
+    let staged = stage_config_bytes(path, parent, &serialized, mode)?;
+    if existing.is_some() {
+        let backup_dir = parent.join("backups");
+        if let Err(error) = prepare_backup_dir(&backup_dir) {
+            let _ = fs::remove_file(&staged);
+            return Err(error);
+        }
+        let backup = backup_dir.join(format!(
+            "config.{}.{}.json",
+            Utc::now().timestamp_millis(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        if let Err(error) = copy_backup(path, &backup) {
+            let _ = fs::remove_file(&staged);
+            return Err(error);
+        }
+        if let Err(error) = prune_backups(&backup_dir, config.backup_limit)
+            .and_then(|()| sync_directory(&backup_dir))
+        {
+            let _ = fs::remove_file(&staged);
+            return Err(error);
+        }
+    }
+
+    if matches!(
+        fs::symlink_metadata(path),
+        Ok(metadata) if metadata.file_type().is_symlink()
+    ) {
+        let _ = fs::remove_file(&staged);
+        return Err(anyhow!("config_path_symlink_rejected"));
+    }
+    if let Err(error) = fs::rename(&staged, path) {
+        let _ = fs::remove_file(&staged);
+        return Err(error.into());
+    }
+    sync_directory(parent)
+        .map_err(|error| anyhow!("config_commit_sync_failed_after_rename: {error}"))?;
+    Ok(())
+}
+
+fn prepare_config_parent(path: &Path) -> Result<&Path> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let existed = fs::symlink_metadata(parent).is_ok();
+    fs::create_dir_all(parent)?;
+    let metadata = fs::symlink_metadata(parent)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(anyhow!("config_parent_invalid"));
+    }
+    if !existed {
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(parent)
+}
+
+fn prepare_backup_dir(path: &Path) -> Result<()> {
+    let existed = fs::symlink_metadata(path).is_ok();
+    fs::create_dir_all(path)?;
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(anyhow!("config_backup_dir_invalid"));
+    }
+    if !existed {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+fn stage_config_bytes(target: &Path, parent: &Path, bytes: &[u8], mode: u32) -> Result<PathBuf> {
+    let file_name = target
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "config.json".to_string());
+    for _ in 0..128 {
+        let path = parent.join(format!(
+            ".{file_name}.agentic-gpt-tmp-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        let mut file = match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.into()),
+        };
+        let result = (|| -> Result<()> {
+            file.write_all(bytes)?;
+            file.set_permissions(fs::Permissions::from_mode(mode))?;
+            file.sync_all()?;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            let _ = fs::remove_file(&path);
+            return Err(error);
+        }
+        return Ok(path);
+    }
+    Err(anyhow!("config_temp_unavailable"))
+}
+
+fn copy_backup(source: &Path, destination: &Path) -> Result<()> {
+    let mut source_file = fs::File::open(source)?;
+    let mut destination_file = match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(destination)
+    {
+        Ok(file) => file,
+        Err(error) => return Err(error.into()),
+    };
+    if let Err(error) = std::io::copy(&mut source_file, &mut destination_file)
+        .and_then(|_| destination_file.sync_all())
+    {
+        let _ = fs::remove_file(destination);
+        return Err(error.into());
+    }
+    Ok(())
+}
+
+fn sync_directory(path: &Path) -> Result<()> {
+    fs::File::open(path)?.sync_all()?;
     Ok(())
 }
 

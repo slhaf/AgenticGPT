@@ -49,6 +49,18 @@ fn prepare_at(config: &Config, agentic_root: &Path) -> Result<PrepareOutcome> {
         });
     }
 
+    if let Err(error) = sync_dir(&root) {
+        warnings.push(format!("private_state_root_sync_failed: {error}"));
+        return Ok(PrepareOutcome {
+            paths: PrivateStatePaths {
+                root,
+                active_skills: legacy_active,
+                skill_installs: legacy_installs,
+            },
+            warnings,
+        });
+    }
+
     let active_skills = migrate_file(
         "active-skills",
         &legacy_active,
@@ -62,10 +74,18 @@ fn prepare_at(config: &Config, agentic_root: &Path) -> Result<PrepareOutcome> {
         &mut warnings,
     );
 
-    if let Err(error) = fs::remove_dir(&legacy_root) {
-        if error.kind() != std::io::ErrorKind::NotFound
-            && error.kind() != std::io::ErrorKind::DirectoryNotEmpty
-        {
+    match fs::remove_dir(&legacy_root) {
+        Ok(()) => {
+            if let Some(parent) = legacy_root.parent() {
+                if let Err(error) = sync_dir(parent) {
+                    warnings.push(format!("private_state_legacy_root_sync_failed: {error}"));
+                }
+            }
+        }
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound
+                || error.kind() == std::io::ErrorKind::DirectoryNotEmpty => {}
+        Err(error) => {
             warnings.push(format!("private_state_legacy_root_cleanup_failed: {error}"));
         }
     }
@@ -81,21 +101,44 @@ fn prepare_at(config: &Config, agentic_root: &Path) -> Result<PrepareOutcome> {
 }
 
 fn migrate_file(label: &str, source: &Path, target: &Path, warnings: &mut Vec<String>) -> PathBuf {
-    if target.exists() {
-        if source.exists() {
-            if verify_file(source, target).is_ok() {
-                if let Err(error) = fs::remove_file(source) {
+    match fs::symlink_metadata(target) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            warnings.push(format!(
+                "private_state_target_symlink_rejected: {label}; legacy source retained"
+            ));
+            return source.to_path_buf();
+        }
+        Ok(_) => {
+            if fs::symlink_metadata(source).is_ok() {
+                if verify_file(source, target).is_ok() {
+                    if let Some(parent) = target.parent() {
+                        if let Err(error) = sync_file(target).and_then(|_| sync_dir(parent)) {
+                            warnings.push(format!(
+                                "private_state_target_sync_failed: {label}: {error}"
+                            ));
+                            return source.to_path_buf();
+                        }
+                    }
+                    if let Err(error) = remove_file_and_sync(source) {
+                        warnings.push(format!(
+                            "private_state_legacy_cleanup_failed: {label}: {error}"
+                        ));
+                    }
+                } else {
                     warnings.push(format!(
-                        "private_state_legacy_cleanup_failed: {label}: {error}"
+                        "private_state_conflict: {label} target already exists; legacy source retained"
                     ));
                 }
-            } else {
-                warnings.push(format!(
-                    "private_state_conflict: {label} target already exists; legacy source retained"
-                ));
             }
+            return target.to_path_buf();
         }
-        return target.to_path_buf();
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            warnings.push(format!(
+                "private_state_target_check_failed: {label}: {error}"
+            ));
+            return source.to_path_buf();
+        }
     }
     if !source.exists() {
         return target.to_path_buf();
@@ -115,15 +158,17 @@ fn migrate_file(label: &str, source: &Path, target: &Path, warnings: &mut Vec<St
         let attempt = (|| -> Result<()> {
             fs::copy(source, &tmp)?;
             set_private_file(&tmp)?;
+            sync_file(&tmp)?;
             verify_file(source, &tmp)?;
             fs::rename(&tmp, target)?;
+            sync_dir(parent)?;
             Ok(())
         })();
         if attempt.is_err() {
             let _ = fs::remove_file(cleanup);
         }
         attempt?;
-        if let Err(error) = fs::remove_file(source) {
+        if let Err(error) = remove_file_and_sync(source) {
             warnings.push(format!(
                 "private_state_legacy_cleanup_failed: {label}: {error}"
             ));
@@ -139,28 +184,50 @@ fn migrate_file(label: &str, source: &Path, target: &Path, warnings: &mut Vec<St
         }
     }
 }
-
 fn migrate_directory(
     label: &str,
     source: &Path,
     target: &Path,
     warnings: &mut Vec<String>,
 ) -> PathBuf {
-    if target.exists() {
-        if source.exists() {
-            if verify_tree(source, target).is_ok() {
-                if let Err(error) = fs::remove_dir_all(source) {
+    match fs::symlink_metadata(target) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            warnings.push(format!(
+                "private_state_target_symlink_rejected: {label}; legacy source retained"
+            ));
+            return source.to_path_buf();
+        }
+        Ok(_) => {
+            if fs::symlink_metadata(source).is_ok() {
+                if verify_tree(source, target).is_ok() {
+                    if let Some(parent) = target.parent() {
+                        if let Err(error) = sync_dir(parent) {
+                            warnings.push(format!(
+                                "private_state_target_sync_failed: {label}: {error}"
+                            ));
+                            return source.to_path_buf();
+                        }
+                    }
+                    if let Err(error) = remove_dir_and_sync(source) {
+                        warnings.push(format!(
+                            "private_state_legacy_cleanup_failed: {label}: {error}"
+                        ));
+                    }
+                } else {
                     warnings.push(format!(
-                        "private_state_legacy_cleanup_failed: {label}: {error}"
+                        "private_state_conflict: {label} target already exists; legacy source retained"
                     ));
                 }
-            } else {
-                warnings.push(format!(
-                    "private_state_conflict: {label} target already exists; legacy source retained"
-                ));
             }
+            return target.to_path_buf();
         }
-        return target.to_path_buf();
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            warnings.push(format!(
+                "private_state_target_check_failed: {label}: {error}"
+            ));
+            return source.to_path_buf();
+        }
     }
     if !source.exists() {
         return target.to_path_buf();
@@ -175,18 +242,20 @@ fn migrate_directory(
             .parent()
             .ok_or_else(|| anyhow!("private_state_parent_missing"))?;
         ensure_private_dir(parent)?;
-        let tmp = parent.join(format!(".{label}-migrate-{}", Uuid::new_v4().simple()));
+        let tmp = parent.join(format!(".{label}-migrate-{}.tmp", Uuid::new_v4().simple()));
         let attempt = (|| -> Result<()> {
             copy_tree(source, &tmp)?;
             verify_tree(source, &tmp)?;
+            sync_dir(&tmp)?;
             fs::rename(&tmp, target)?;
+            sync_dir(parent)?;
             Ok(())
         })();
         if attempt.is_err() {
             let _ = fs::remove_dir_all(&tmp);
         }
         attempt?;
-        if let Err(error) = fs::remove_dir_all(source) {
+        if let Err(error) = remove_dir_and_sync(source) {
             warnings.push(format!(
                 "private_state_legacy_cleanup_failed: {label}: {error}"
             ));
@@ -222,10 +291,12 @@ fn copy_tree(source: &Path, target: &Path) -> Result<()> {
         } else if metadata.is_file() {
             fs::copy(&source_path, &target_path)?;
             fs::set_permissions(&target_path, metadata.permissions())?;
+            sync_file(&target_path)?;
         } else {
             return Err(anyhow!("migration_special_file_rejected"));
         }
     }
+    sync_dir(target)?;
     Ok(())
 }
 
@@ -302,8 +373,28 @@ fn agent_state_key(agent_id: &str) -> Result<String> {
         .collect::<String>();
     Ok(format!("id-{hex}"))
 }
+fn sync_file(path: &Path) -> Result<()> {
+    fs::File::open(path)?.sync_all()?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn sync_dir(path: &Path) -> Result<()> {
+    fs::File::open(path)?.sync_all()?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn sync_dir(_path: &Path) -> Result<()> {
+    Ok(())
+}
 
 fn ensure_private_dir(path: &Path) -> Result<()> {
+    if let Ok(metadata) = fs::symlink_metadata(path) {
+        if metadata.file_type().is_symlink() {
+            return Err(anyhow!("private_state_directory_symlink"));
+        }
+    }
     fs::create_dir_all(path).map_err(|_| anyhow!("private_state_directory_unavailable"))?;
     #[cfg(unix)]
     {
@@ -320,6 +411,22 @@ fn set_private_file(path: &Path) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(path, fs::Permissions::from_mode(0o600))
             .map_err(|_| anyhow!("private_state_file_unavailable"))?;
+    }
+    Ok(())
+}
+
+fn remove_file_and_sync(path: &Path) -> Result<()> {
+    fs::remove_file(path)?;
+    if let Some(parent) = path.parent() {
+        sync_dir(parent)?;
+    }
+    Ok(())
+}
+
+fn remove_dir_and_sync(path: &Path) -> Result<()> {
+    fs::remove_dir_all(path)?;
+    if let Some(parent) = path.parent() {
+        sync_dir(parent)?;
     }
     Ok(())
 }
@@ -456,6 +563,36 @@ mod tests {
             .warnings
             .iter()
             .any(|warning| warning.starts_with("private_state_conflict: active-skills")));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn migration_rejects_target_symlink_and_preserves_legacy_source() {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_root("target-symlink");
+        let workspace = root.join("workspace");
+        let agentic = root.join("home");
+        let target_root = agentic.join("state/agent/test-agent");
+        fs::create_dir_all(workspace.join("state")).unwrap();
+        fs::create_dir_all(&target_root).unwrap();
+        let outside = root.join("outside-active-skills.json");
+        fs::write(&outside, b"outside").unwrap();
+        symlink(&outside, target_root.join("active-skills.json")).unwrap();
+        let legacy = workspace.join("state/active-skills.json");
+        fs::write(&legacy, b"legacy").unwrap();
+        let config = config_with_workspace(workspace.clone());
+
+        let outcome = prepare_at(&config, &agentic).unwrap();
+
+        assert_eq!(outcome.paths.active_skills, legacy);
+        assert_eq!(fs::read(&legacy).unwrap(), b"legacy");
+        assert_eq!(fs::read(&outside).unwrap(), b"outside");
+        assert!(outcome
+            .warnings
+            .iter()
+            .any(|warning| warning.starts_with("private_state_target_symlink_rejected")));
         let _ = fs::remove_dir_all(root);
     }
 

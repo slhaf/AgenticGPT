@@ -1848,13 +1848,12 @@ mod tests {
             crate::config::ConfirmationProviderConfig::from_legacy("none").unwrap();
         let private_state =
             crate::private_state::PrivateStatePaths::for_test(root.join("private-state"));
+        let job_history = crate::job_history::JobHistoryStore::open(&private_state);
         AppState {
             config_path: PathBuf::from("test-config.json"),
             config: Arc::new(RwLock::new(config)),
             private_state: private_state.clone(),
-            job_history: crate::job_history::JobHistoryStore::disabled(
-                root.join("test-jobs.sqlite3"),
-            ),
+            job_history,
             browser_runtime: None,
             runtime: crate::state::RuntimeModel::hub(crate::state::CapabilityProfile::Room),
             started_at: chrono::Utc::now(),

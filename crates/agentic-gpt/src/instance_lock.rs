@@ -11,6 +11,19 @@ pub(crate) struct InstanceLock {
 
 impl InstanceLock {
     pub(crate) fn acquire(resource: &Path, suffix: &str, kind: &str) -> Result<Self> {
+        Self::acquire_with_mode(resource, suffix, kind, false)
+    }
+
+    pub(crate) fn acquire_blocking(resource: &Path, suffix: &str, kind: &str) -> Result<Self> {
+        Self::acquire_with_mode(resource, suffix, kind, true)
+    }
+
+    fn acquire_with_mode(
+        resource: &Path,
+        suffix: &str,
+        kind: &str,
+        blocking: bool,
+    ) -> Result<Self> {
         if let Some(parent) = resource
             .parent()
             .filter(|path| !path.as_os_str().is_empty())
@@ -26,19 +39,25 @@ impl InstanceLock {
             .write(true)
             .open(&lock_path)
             .with_context(|| format!("failed to open {} lock {}", kind, lock_path.display()))?;
-        match file.try_lock() {
-            Ok(()) => {}
-            Err(TryLockError::WouldBlock) => {
-                return Err(anyhow!(
-                    "another {kind} instance is already running for {} (lock: {})",
-                    resource.display(),
-                    lock_path.display()
-                ));
-            }
-            Err(TryLockError::Error(error)) => {
-                return Err(error).with_context(|| {
-                    format!("failed to acquire {} lock {}", kind, lock_path.display())
-                });
+        if blocking {
+            file.lock().with_context(|| {
+                format!("failed to acquire {} lock {}", kind, lock_path.display())
+            })?;
+        } else {
+            match file.try_lock() {
+                Ok(()) => {}
+                Err(TryLockError::WouldBlock) => {
+                    return Err(anyhow!(
+                        "another {kind} instance is already running for {} (lock: {})",
+                        resource.display(),
+                        lock_path.display()
+                    ));
+                }
+                Err(TryLockError::Error(error)) => {
+                    return Err(error).with_context(|| {
+                        format!("failed to acquire {} lock {}", kind, lock_path.display())
+                    });
+                }
             }
         }
         file.set_len(0)?;

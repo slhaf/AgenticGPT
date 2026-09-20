@@ -405,19 +405,15 @@ mod tests {
         let root =
             std::env::temp_dir().join(format!("agent-info-{}", uuid::Uuid::new_v4().simple()));
         config.workspace_root = root.clone();
-        config.path_policy.write_roots = vec![root];
+        config.path_policy.write_roots = vec![root.clone()];
+        let private_state =
+            crate::private_state::PrivateStatePaths::for_test(root.join(".private-state"));
+        let job_history = crate::job_history::JobHistoryStore::open(&private_state);
         AppState {
             config_path: std::env::temp_dir().join("agent-info-missing-config.json"),
             config: Arc::new(RwLock::new(config)),
-            private_state: crate::private_state::PrivateStatePaths::for_test(
-                std::env::temp_dir().join(format!(
-                    "agentic-test-private-{}",
-                    uuid::Uuid::new_v4().simple()
-                )),
-            ),
-            job_history: crate::job_history::JobHistoryStore::disabled(
-                std::env::temp_dir().join("agentic-agent-info-test-jobs.sqlite3"),
-            ),
+            private_state,
+            job_history,
             browser_runtime: None,
             runtime: crate::state::RuntimeModel::tunnel(profile, false),
             started_at: Utc::now(),

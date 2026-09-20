@@ -11,7 +11,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use uuid::Uuid;
 
@@ -672,16 +673,38 @@ fn reconcile_default_activation(
 fn is_default_active_builtin(id: &str) -> bool {
     id == BUILTIN_INSTALLER_ID
 }
-
 fn write_active_file(path: &Path, active: &ActiveSkillsFile) -> Result<()> {
     let state_dir = path
         .parent()
         .ok_or_else(|| anyhow!("active_state_parent_missing"))?;
     fs::create_dir_all(state_dir)?;
+    let existing_permissions = match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(anyhow!("active_state_target_symlink"));
+        }
+        Ok(metadata) if metadata.is_file() => Some(metadata.permissions()),
+        Ok(_) => return Err(anyhow!("active_state_target_not_regular_file")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
     let tmp = state_dir.join(format!(".active-skills-{}.tmp", Uuid::new_v4().simple()));
-    fs::write(&tmp, serde_json::to_vec_pretty(active)?)?;
-    fs::rename(tmp, path)?;
-    Ok(())
+    let bytes = serde_json::to_vec_pretty(active)?;
+    let attempt = (|| -> Result<()> {
+        let mut file = OpenOptions::new().create_new(true).write(true).open(&tmp)?;
+        file.write_all(&bytes)?;
+        if let Some(permissions) = existing_permissions.clone() {
+            fs::set_permissions(&tmp, permissions)?;
+        }
+        file.sync_all()?;
+        fs::rename(&tmp, path)?;
+        #[cfg(unix)]
+        fs::File::open(state_dir)?.sync_all()?;
+        Ok(())
+    })();
+    if attempt.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    attempt
 }
 
 pub(crate) fn validate_skill_id(id: &str) -> Result<()> {
@@ -721,18 +744,16 @@ mod tests {
         let root = std::env::temp_dir().join(format!("agentic-skills-{}", Uuid::new_v4().simple()));
         let mut config = Config::default_config().unwrap();
         config.workspace_root = root;
+        let private_state =
+            crate::private_state::PrivateStatePaths::for_test(std::env::temp_dir().join(format!(
+                "agentic-test-private-{}",
+                uuid::Uuid::new_v4().simple()
+            )));
         AppState {
             config_path: PathBuf::from("test-config.json"),
             config: Arc::new(RwLock::new(config)),
-            private_state: crate::private_state::PrivateStatePaths::for_test(
-                std::env::temp_dir().join(format!(
-                    "agentic-test-private-{}",
-                    uuid::Uuid::new_v4().simple()
-                )),
-            ),
-            job_history: crate::job_history::JobHistoryStore::disabled(
-                std::env::temp_dir().join("agentic-skills-test-jobs.sqlite3"),
-            ),
+            private_state: private_state.clone(),
+            job_history: crate::job_history::JobHistoryStore::open(&private_state),
             browser_runtime: None,
             runtime: crate::state::RuntimeModel::hub(crate::state::CapabilityProfile::Room),
             started_at: chrono::Utc::now(),

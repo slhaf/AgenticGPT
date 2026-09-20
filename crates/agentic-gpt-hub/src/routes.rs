@@ -302,13 +302,19 @@ pub(crate) async fn list_jobs(
     };
     match request_agent(&state, &query.agent_id, command, 2).await {
         Ok(value) => Json(live_job_value(value)).into_response(),
-        Err(reason) if payload.cursor.is_some() => api_error(
+        Err(reason) if payload.cursor.is_some() => (
             StatusCode::SERVICE_UNAVAILABLE,
-            "job_list_cursor_unavailable",
-            format!(
-                "Agent is unavailable and Hub cache cannot continue an Agent-issued cursor: {reason}"
-            ),
-        ),
+            Json(json!({
+                "error": {
+                    "code": "job_list_cursor_unavailable",
+                    "message": format!(
+                        "Agent is unavailable and Hub cache cannot continue an Agent-issued cursor: {reason}"
+                    )
+                },
+                "freshness": "unknown"
+            })),
+        )
+            .into_response(),
         Err(_) => {
             let mut snapshots = state.job_cache.snapshots(&query.agent_id).await;
             snapshots.retain(|snapshot| {
@@ -377,11 +383,17 @@ pub(crate) async fn get_job(
                 add_cache_metadata(&mut body, std::slice::from_ref(&snapshot));
                 Json(body).into_response()
             }
-            None => api_error(
+            None => (
                 StatusCode::SERVICE_UNAVAILABLE,
-                "job_get_unavailable",
-                reason,
-            ),
+                Json(json!({
+                    "error": {
+                        "code": "job_get_unavailable",
+                        "message": reason
+                    },
+                    "freshness": "unknown"
+                })),
+            )
+                .into_response(),
         },
     }
 }

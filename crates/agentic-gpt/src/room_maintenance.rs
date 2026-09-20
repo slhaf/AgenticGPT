@@ -983,22 +983,16 @@ mod tests {
 
     fn test_state(workspace_root: PathBuf) -> AppState {
         let mut config = Config::default_config().expect("default config");
-        config.workspace_root = workspace_root;
+        config.workspace_root = workspace_root.clone();
+        let private_state = crate::private_state::PrivateStatePaths::for_test(
+            workspace_root.join(".private-state"),
+        );
+        let job_history = crate::job_history::JobHistoryStore::open(&private_state);
         AppState {
             config_path: PathBuf::from("room-maintenance-test-config.json"),
             config: Arc::new(RwLock::new(config)),
-            private_state: crate::private_state::PrivateStatePaths::for_test(
-                std::env::temp_dir().join(format!(
-                    "agentic-room-maintenance-private-{}",
-                    uuid::Uuid::new_v4().simple()
-                )),
-            ),
-            job_history: crate::job_history::JobHistoryStore::disabled(std::env::temp_dir().join(
-                format!(
-                    "agentic-room-maintenance-jobs-{}.sqlite3",
-                    uuid::Uuid::new_v4().simple()
-                ),
-            )),
+            private_state,
+            job_history,
             browser_runtime: None,
             runtime: RuntimeModel::local(CapabilityProfile::Room),
             started_at: Utc::now(),

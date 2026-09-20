@@ -38,7 +38,7 @@ use tokio::{
 
 use crate::{
     audit::{write_mcp_batch_audit, McpBatchAuditRecord},
-    config::{write_config_with_backup, Config},
+    config::{acquire_config_mutation_lock, write_config_with_backup, Config},
     confirmation::{self, McpBatchConfirmationItem},
     jobs,
     jobs::{ManagedMcpSpec, TerminalEventHook},
@@ -117,7 +117,8 @@ impl fmt::Debug for McpServerAuthConfig {
 }
 
 pub(crate) fn mutate_servers(config_path: PathBuf, command: McpConfigCommand) -> Result<()> {
-    let mut config = Config::load_or_default(&config_path)?;
+    let _lock = acquire_config_mutation_lock(&config_path)?;
+    let mut config = Config::load_or_default_locked(&config_path)?;
     match command {
         McpConfigCommand::List => {
             println!("{}", serde_json::to_string_pretty(&config.mcp_servers)?);
@@ -1803,18 +1804,13 @@ mod tests {
                 auth: None,
             },
         );
+        let private_state =
+            crate::private_state::PrivateStatePaths::for_test(root.join("private-state"));
         let state = AppState {
             config_path: root.join("config.json"),
             config: Arc::new(RwLock::new(config)),
-            private_state: crate::private_state::PrivateStatePaths::for_test(
-                std::env::temp_dir().join(format!(
-                    "agentic-test-private-{}",
-                    uuid::Uuid::new_v4().simple()
-                )),
-            ),
-            job_history: crate::job_history::JobHistoryStore::disabled(
-                std::env::temp_dir().join("agentic-mcp-test-jobs.sqlite3"),
-            ),
+            private_state: private_state.clone(),
+            job_history: crate::job_history::JobHistoryStore::open(&private_state),
             browser_runtime: None,
             runtime: crate::state::RuntimeModel::local(crate::state::CapabilityProfile::Normal),
             started_at: chrono::Utc::now(),

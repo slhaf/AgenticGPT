@@ -5769,18 +5769,14 @@ mod tests {
             "---\nid: room\nkind: entrypoint\nname: Room Bootstrap\ndescription: Test bootstrap\nschemaVersion: 1\n---\n",
         )
         .expect("bootstrap entrypoint");
+        let private_state =
+            crate::private_state::PrivateStatePaths::for_test(root.join("private-state"));
+        let job_history = crate::job_history::JobHistoryStore::open(&private_state);
         AppState {
             config_path: PathBuf::from("stdio-test-config.json"),
             config: Arc::new(RwLock::new(config)),
-            private_state: crate::private_state::PrivateStatePaths::for_test(
-                std::env::temp_dir().join(format!(
-                    "agentic-test-private-{}",
-                    uuid::Uuid::new_v4().simple()
-                )),
-            ),
-            job_history: crate::job_history::JobHistoryStore::disabled(
-                std::env::temp_dir().join("agentic-stdio-test-jobs.sqlite3"),
-            ),
+            private_state,
+            job_history,
             browser_runtime: None,
             runtime: RuntimeModel::tunnel(profile, false),
             started_at: chrono::Utc::now(),

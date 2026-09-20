@@ -433,6 +433,13 @@ pub(crate) async fn register_mcp_job(
     if active >= limit {
         return Err(capacity_rejection(active, 1, limit));
     }
+    let admission = state.job_history.insert_admission(&info);
+    if !admission.is_persisted() {
+        let error = admission
+            .error()
+            .unwrap_or("history admission persistence failed");
+        return Err(format!("history_admission_failed: {error}"));
+    }
     jobs.insert(
         job_id,
         ManagedJob {
@@ -468,7 +475,6 @@ pub(crate) async fn register_mcp_job(
             history_terminal_snapshot_at: None,
         },
     );
-    let _ = state.job_history.insert_admission(&info);
     Ok(ManagedMcpRegistration {
         info,
         cancel_requested,
@@ -498,7 +504,7 @@ pub(crate) async fn register_mcp_batch(
     if active.saturating_add(requested) > limit {
         return Err(capacity_rejection(active, requested, limit));
     }
-    let mut registrations = Vec::with_capacity(requested);
+    let mut registrations: Vec<ManagedMcpRegistration> = Vec::with_capacity(requested);
     for spec in specs {
         let group = validated_group(spec.group.as_deref())?;
         let job_id = state.new_job_id();
@@ -534,6 +540,16 @@ pub(crate) async fn register_mcp_batch(
             termination_evidence: None,
         };
         let cancel_requested = Arc::new(AtomicBool::new(false));
+        let admission = state.job_history.insert_admission(&info);
+        if !admission.is_persisted() {
+            for registration in &registrations {
+                jobs.remove(&registration.info.job_id);
+            }
+            let error = admission
+                .error()
+                .unwrap_or("history admission persistence failed");
+            return Err(format!("history_admission_failed: {error}"));
+        }
         jobs.insert(
             job_id,
             ManagedJob {
@@ -569,7 +585,6 @@ pub(crate) async fn register_mcp_batch(
                 history_terminal_snapshot_at: None,
             },
         );
-        let _ = state.job_history.insert_admission(&info);
         registrations.push(ManagedMcpRegistration {
             info,
             cancel_requested,
@@ -655,7 +670,22 @@ pub(crate) async fn attach_mcp_request(
     job.info.state = JobState::Running;
     job.info.started_at = Some(now);
     job.info.updated_at = now;
-    let _ = state.job_history.mark_started(&job.info);
+    let outcome = state.job_history.mark_started(&job.info);
+    if !outcome.is_persisted() {
+        let reason = format!(
+            "history_start_failed: {}",
+            outcome
+                .error()
+                .unwrap_or("history start persistence failed")
+        );
+        job.info.state = JobState::Failed;
+        job.info.updated_at = Utc::now();
+        job.info.finished_at = Some(job.info.updated_at);
+        job.info.reject_reason = Some(reason.clone());
+        job.info.termination_evidence = Some("history_start_failed".to_string());
+        finalize_job(state, job).await;
+        return Err(reason);
+    }
     Ok(())
 }
 
@@ -959,7 +989,7 @@ pub(crate) async fn start_prepared_managed_batch(
     let limit = resolved_job_limit(&config);
     let batch_concurrency = config.limits.max_concurrent_tasks.max(1).min(requested);
     let batch_slots = Arc::new(Semaphore::new(batch_concurrency));
-    let mut registered = Vec::with_capacity(requested);
+    let mut registered: Vec<(_, JobInfo, _, _, _)> = Vec::with_capacity(requested);
     {
         let mut jobs = state.jobs.lock().await;
         refresh_jobs(&state, &mut jobs).await;
@@ -1007,6 +1037,16 @@ pub(crate) async fn start_prepared_managed_batch(
             };
             let stdout = runtime.stdout.clone();
             let stderr = runtime.stderr.clone();
+            let admission = state.job_history.insert_admission(&info);
+            if !admission.is_persisted() {
+                for (_, registered_info, _, _, _) in &registered {
+                    jobs.remove(&registered_info.job_id);
+                }
+                let error = admission
+                    .error()
+                    .unwrap_or("history admission persistence failed");
+                return Err(format!("history_admission_failed: {error}"));
+            }
             jobs.insert(
                 info.job_id.clone(),
                 ManagedJob {
@@ -1018,7 +1058,6 @@ pub(crate) async fn start_prepared_managed_batch(
                     history_terminal_snapshot_at: None,
                 },
             );
-            let _ = state.job_history.insert_admission(&info);
             registered.push((spec, info, stdout, stderr, cancel_requested));
         }
     }
@@ -1110,7 +1149,7 @@ async fn start_process_job_inner(
         config_revision: None,
         terminal_event_hook: options.terminal_event_hook,
     };
-    let capacity_error = {
+    let (capacity_error, history_error) = {
         let mut jobs = state.jobs.lock().await;
         refresh_jobs(&state, &mut jobs).await;
         let active = jobs
@@ -1118,24 +1157,37 @@ async fn start_process_job_inner(
             .filter(|job| job.info.state.is_active())
             .count();
         let limit = resolved_job_limit(&config);
-        let error = (active >= limit).then(|| capacity_rejection(active, 1, limit));
-        jobs.insert(
-            job_id.clone(),
-            ManagedJob {
-                info: info.clone(),
-                detail: ManagedJobDetail::default(),
-                runtime: ManagedJobRuntime::Process(runtime),
-                cancel_requested: cancel_requested.clone(),
-                audit: Some(audit),
-                history_terminal_snapshot_at: None,
-            },
-        );
-        let _ = state.job_history.insert_admission(&info);
-        error
+        let capacity_error = (active >= limit).then(|| capacity_rejection(active, 1, limit));
+        if capacity_error.is_some() {
+            (capacity_error, None)
+        } else {
+            let admission = state.job_history.insert_admission(&info);
+            if !admission.is_persisted() {
+                let error = admission
+                    .error()
+                    .unwrap_or("history admission persistence failed");
+                (None, Some(format!("history_admission_failed: {error}")))
+            } else {
+                jobs.insert(
+                    job_id.clone(),
+                    ManagedJob {
+                        info: info.clone(),
+                        detail: ManagedJobDetail::default(),
+                        runtime: ManagedJobRuntime::Process(runtime),
+                        cancel_requested: cancel_requested.clone(),
+                        audit: Some(audit),
+                        history_terminal_snapshot_at: None,
+                    },
+                );
+                (None, None)
+            }
+        }
     };
     if let Some(reason) = capacity_error {
-        finish_job(&state, &job_id, JobState::Rejected, &reason).await;
-        return get_job_now(&state, &job_id).await.unwrap_or(info);
+        return terminal_without_admission(info, JobState::Rejected, reason);
+    }
+    if let Some(reason) = history_error {
+        return terminal_without_admission(info, JobState::Failed, reason);
     }
     if let Some(reason) = group_error {
         finish_job(&state, &job_id, JobState::Rejected, &reason).await;
@@ -1156,6 +1208,16 @@ async fn start_process_job_inner(
         None,
     ));
     tokio::spawn(monitor_job(state, job_id, None));
+    info
+}
+
+fn terminal_without_admission(mut info: JobInfo, state: JobState, reason: String) -> JobInfo {
+    let now = Utc::now();
+    info.state = state;
+    info.updated_at = now;
+    info.finished_at = Some(now);
+    info.reject_reason = Some(reason);
+    info.termination_evidence = Some("not_started".to_string());
     info
 }
 
@@ -1282,6 +1344,33 @@ async fn run_async_job(
         finish_job(&state, &job_id, JobState::Cancelled, "cancelled").await;
         return;
     }
+    let mut jobs = state.jobs.lock().await;
+    let Some(job) = jobs.get_mut(&job_id) else {
+        return;
+    };
+    if cancel_requested.load(std::sync::atomic::Ordering::Acquire) || !job.info.state.is_active() {
+        drop(jobs);
+        finish_job(&state, &job_id, JobState::Cancelled, "cancelled").await;
+        return;
+    }
+    let now = Utc::now();
+    job.info.state = JobState::Running;
+    job.info.started_at = Some(now);
+    job.info.updated_at = now;
+    let outcome = state.job_history.mark_started(&job.info);
+    if !outcome.is_persisted() {
+        let reason = format!(
+            "history_start_failed: {}",
+            outcome
+                .error()
+                .unwrap_or("history start persistence failed")
+        );
+        drop(jobs);
+        finish_job(&state, &job_id, JobState::Failed, &reason).await;
+        return;
+    }
+    drop(jobs);
+
     let spawned = spawn_process_with_buffers(
         &config,
         &working_directory,
@@ -1306,6 +1395,7 @@ async fn run_async_job(
     };
     let mut jobs = state.jobs.lock().await;
     let Some(job) = jobs.get_mut(&job_id) else {
+        drop(jobs);
         let mut child = child;
         let _ = child.kill().await;
         return;
@@ -1317,11 +1407,6 @@ async fn run_async_job(
         finish_job(&state, &job_id, JobState::Cancelled, "cancelled").await;
         return;
     }
-    let now = Utc::now();
-    job.info.state = JobState::Running;
-    job.info.started_at = Some(now);
-    job.info.updated_at = now;
-    let _ = state.job_history.mark_started(&job.info);
     let ManagedJobRuntime::Process(runtime) = &mut job.runtime else {
         drop(jobs);
         let mut child = child;
@@ -1437,8 +1522,14 @@ async fn finalize_job(state: &AppState, job: &mut ManagedJob) {
     if job.info.state.is_terminal() && job.history_terminal_snapshot_at != Some(job.info.updated_at)
     {
         let detail = job_detail(job);
-        let _ = state.job_history.upsert_terminal(&detail);
-        job.history_terminal_snapshot_at = Some(job.info.updated_at);
+        let outcome = state.job_history.upsert_terminal(&detail);
+        if outcome.is_persisted() {
+            job.history_terminal_snapshot_at = Some(job.info.updated_at);
+        } else {
+            // Keep the hot copy until this exact terminal outcome is durable. A
+            // deferred or failed write is still the only available evidence.
+            job.history_terminal_snapshot_at = None;
+        }
     }
     let Some(context) = job.audit.take() else {
         return;
@@ -1991,11 +2082,23 @@ async fn refresh_job(state: &AppState, job: &mut ManagedJob) {
 
 fn prune_terminal_jobs(state: &AppState, jobs: &mut std::collections::HashMap<String, ManagedJob>) {
     let _ = state.job_history.retry_pending();
+    for job in jobs.values_mut() {
+        if job.info.state.is_terminal()
+            && job.history_terminal_snapshot_at.is_none()
+            && !state.job_history.terminal_pending(&job.info.job_id)
+            && state
+                .job_history
+                .terminal_snapshot_matches(&job.info.job_id, job.info.updated_at)
+        {
+            job.history_terminal_snapshot_at = Some(job.info.updated_at);
+        }
+    }
     let cutoff = Utc::now() - ChronoDuration::minutes(TERMINAL_JOB_HOT_CACHE_MINUTES);
     let mut terminal = jobs
         .iter()
         .filter(|(_, job)| {
             job.info.state.is_terminal()
+                && job.info.state != JobState::UnknownAfterRestart
                 && job.history_terminal_snapshot_at.is_some()
                 && !state.job_history.terminal_pending(&job.info.job_id)
         })
@@ -2051,18 +2154,13 @@ mod tests {
         config.limits.max_active_jobs = crate::config::MaxActiveJobs::Explicit(max_active_jobs);
         config.confirmation_provider =
             crate::config::ConfirmationProviderConfig::from_legacy("none").unwrap();
+        let private_state =
+            crate::private_state::PrivateStatePaths::for_test(root.join("private-state"));
         let state = AppState {
             config_path: root.join("config.json"),
             config: Arc::new(RwLock::new(config)),
-            private_state: crate::private_state::PrivateStatePaths::for_test(
-                std::env::temp_dir().join(format!(
-                    "agentic-test-private-{}",
-                    uuid::Uuid::new_v4().simple()
-                )),
-            ),
-            job_history: crate::job_history::JobHistoryStore::disabled(
-                root.join("disabled-history-parent").join("jobs.sqlite3"),
-            ),
+            private_state: private_state.clone(),
+            job_history: crate::job_history::JobHistoryStore::open(&private_state),
             browser_runtime: None,
             runtime: crate::state::RuntimeModel::hub(crate::state::CapabilityProfile::Normal),
             started_at: Utc::now(),
@@ -2084,9 +2182,7 @@ mod tests {
     }
 
     async fn test_state_with_history(max_active_jobs: usize) -> (AppState, PathBuf) {
-        let (mut state, workspace) = test_state(max_active_jobs).await;
-        state.job_history = crate::job_history::JobHistoryStore::open(&state.private_state);
-        (state, workspace)
+        test_state(max_active_jobs).await
     }
 
     fn synthetic_job(
@@ -2475,7 +2571,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn degraded_history_does_not_change_live_result_or_cancel_truth() {
+    async fn degraded_history_fails_closed_before_process_effect() {
         let (state, workspace) = test_state(1).await;
         let mut state = state;
         state.job_history = crate::job_history::JobHistoryStore::disabled(
@@ -2484,17 +2580,19 @@ mod tests {
                 .join("jobs.sqlite3"),
         );
         let mut request = exec_request("printf", &workspace);
-        request.args = vec!["live-only".to_string()];
-        let terminal = wait_terminal(&state, start_process_job(state.clone(), request).await).await;
-        assert_eq!(terminal.state, JobState::Completed);
-        assert_eq!(terminal.stdout_tail, "live-only");
-        let detail = get_job_detail(&state, &terminal.job_id, 0).await.unwrap();
-        assert_eq!(detail.job.stdout_tail, "live-only");
+        request.args = vec!["must-not-run".to_string()];
+        let terminal = start_process_job(state.clone(), request).await;
+        assert_eq!(terminal.state, JobState::Failed);
+        assert_eq!(terminal.stdout_tail, "");
+        assert!(terminal
+            .reject_reason
+            .as_deref()
+            .is_some_and(|reason| reason.starts_with("history_admission_failed:")));
         assert_eq!(
             state.job_history.health().status,
             crate::job_history::HistoryHealthStatus::Degraded
         );
-        assert!(state.job_history.health().pending_terminal_count > 0);
+        assert_eq!(state.job_history.health().pending_terminal_count, 0);
     }
 
     #[tokio::test]

@@ -10,8 +10,8 @@ use serde::Serialize;
 use crate::{
     cli_i18n::{self, UiLanguage},
     config::{
-        self, normalize_confirmation_language, ordered_config_json, write_config_with_backup,
-        Config, ReportingDetail, RoomMaintenanceMode, ToolNamespace,
+        self, acquire_config_mutation_lock, normalize_confirmation_language, ordered_config_json,
+        write_config_with_backup, Config, ReportingDetail, RoomMaintenanceMode, ToolNamespace,
     },
     config_setup::SetupSeed,
     config_templates::{self, InitInput, InitSummary, RuntimeMode, SecretValue},
@@ -1251,6 +1251,7 @@ pub(crate) fn init_non_interactive(
         .map(|value| SecretValue::new(value.clone()));
 
     let built = config_templates::build_config(input)?;
+    let _lock = acquire_config_mutation_lock(config_path)?;
     write_config_with_backup(config_path, &built.config)?;
     Ok(InitSummary {
         mode: built.mode,
@@ -1487,7 +1488,8 @@ pub(crate) async fn handle_config(
             print_config_keys(section, json, language)?;
         }
         ConfigCommand::Set { key, value } => {
-            let mut config = Config::load_or_default(&config_path)?;
+            let _lock = acquire_config_mutation_lock(&config_path)?;
+            let mut config = Config::load_or_default_locked(&config_path)?;
             apply_config_key(&mut config, &key, &value)?;
             write_config_with_backup(&config_path, &config)?;
         }
@@ -1506,9 +1508,9 @@ pub(crate) async fn handle_config(
     }
     Ok(())
 }
-
 fn handle_toolset(config_path: &Path, command: ToolsetCommand, language: UiLanguage) -> Result<()> {
-    let mut config = Config::load(config_path)?;
+    let _lock = acquire_config_mutation_lock(config_path)?;
+    let mut config = Config::load_locked(config_path)?;
     match command {
         ToolsetCommand::Ls => println!("{}", render_toolsets(&config, language)),
         ToolsetCommand::Enable { namespace } => {

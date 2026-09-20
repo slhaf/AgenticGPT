@@ -1343,19 +1343,18 @@ mod tests {
         };
         config.workspace_root = workspace_root;
         let (tx, rx) = mpsc::unbounded_channel();
+        let private_state =
+            crate::private_state::PrivateStatePaths::for_test(std::env::temp_dir().join(format!(
+                "agentic-test-private-{}",
+                uuid::Uuid::new_v4().simple()
+            )));
+        let job_history = crate::job_history::JobHistoryStore::open(&private_state);
         (
             AppState {
                 config_path: PathBuf::from("test-config.json"),
                 config: Arc::new(RwLock::new(config)),
-                private_state: crate::private_state::PrivateStatePaths::for_test(
-                    std::env::temp_dir().join(format!(
-                        "agentic-test-private-{}",
-                        uuid::Uuid::new_v4().simple()
-                    )),
-                ),
-                job_history: crate::job_history::JobHistoryStore::disabled(
-                    std::env::temp_dir().join("agentic-main-test-jobs.sqlite3"),
-                ),
+                private_state,
+                job_history,
                 browser_runtime: None,
                 runtime: RuntimeModel::hub(profile),
                 started_at: chrono::Utc::now(),

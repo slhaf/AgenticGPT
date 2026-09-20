@@ -1,13 +1,16 @@
 use std::{
     fs::{self, OpenOptions},
+    io::Write,
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Component, Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
 
 use anyhow::{anyhow, Result};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
-use crate::config::write_config_with_backup;
+use crate::config::{acquire_config_mutation_lock, sparse_config_json, write_config_with_backup};
 use crate::config_templates::{
     build_config, InitBuild, InitSummary, PendingAction, SecretValue, SecretWritePlan,
 };
@@ -107,14 +110,187 @@ impl Drop for TemporarySecretFile {
         }
     }
 }
+#[derive(Deserialize, Serialize)]
+struct SetupJournal {
+    secret_path: PathBuf,
+    backup_path: Option<PathBuf>,
+    old_config_hash: Option<String>,
+    new_config_hash: String,
+    old_secret_hash: Option<String>,
+    new_secret_hash: String,
+    old_secret_mode: Option<u32>,
+}
+
+fn setup_journal_path(config_path: &Path) -> Option<PathBuf> {
+    let config_path = lexical_absolute(config_path).ok()?;
+    let parent = config_path.parent()?;
+    let file_name = config_path.file_name()?.to_string_lossy();
+    Some(parent.join(format!(".{file_name}.setup-journal")))
+}
+
+fn bytes_hash(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn path_hash(path: &Path) -> Result<Option<String>> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(anyhow!("config_init_recovery_conflict"));
+            }
+            Ok(Some(bytes_hash(&fs::read(path)?)))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn stage_setup_journal(path: &Path, journal: &SetupJournal) -> Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+    let metadata = fs::symlink_metadata(parent)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(anyhow!("config_init_config_write_failed"));
+    }
+    let bytes = serde_json::to_vec(journal)?;
+    for _ in 0..128 {
+        let temporary = parent.join(format!(
+            ".setup-journal-tmp-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        let mut file = match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temporary)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.into()),
+        };
+        let result = (|| -> Result<()> {
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            let _ = fs::remove_file(&temporary);
+            return Err(error);
+        }
+        if fs::symlink_metadata(path).is_ok() {
+            let _ = fs::remove_file(&temporary);
+            return Err(anyhow!("config_init_recovery_conflict"));
+        }
+        if let Err(error) = fs::rename(&temporary, path) {
+            let _ = fs::remove_file(&temporary);
+            return Err(error.into());
+        }
+        sync_parent(parent)?;
+        return Ok(());
+    }
+    Err(anyhow!("config_init_config_write_failed"))
+}
+
+fn cleanup_setup_journal(path: &Path, journal: &SetupJournal) -> Result<()> {
+    if let Some(backup) = journal.backup_path.as_deref() {
+        match fs::remove_file(backup) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    match fs::remove_file(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    if let Some(parent) = path.parent() {
+        sync_parent(parent)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn recover_pending_setup_locked(config_path: &Path) -> Result<()> {
+    let Some(journal_path) = setup_journal_path(config_path) else {
+        return Ok(());
+    };
+    match fs::symlink_metadata(&journal_path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(anyhow!("config_init_recovery_conflict"));
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    }
+    let bytes = fs::read(&journal_path)?;
+    let journal: SetupJournal =
+        serde_json::from_slice(&bytes).map_err(|_| anyhow!("config_init_recovery_invalid"))?;
+    let config_hash = path_hash(config_path)?;
+    let secret_hash = path_hash(&journal.secret_path)?;
+    if config_hash.as_deref() == Some(journal.new_config_hash.as_str()) {
+        if secret_hash.as_deref() != Some(journal.new_secret_hash.as_str()) {
+            return Err(anyhow!("config_init_recovery_conflict"));
+        }
+        return cleanup_setup_journal(&journal_path, &journal)
+            .map_err(|_| anyhow!("config_init_recovery_cleanup_failed"));
+    }
+    if config_hash.as_ref() != journal.old_config_hash.as_ref() {
+        return Err(anyhow!("config_init_recovery_conflict"));
+    }
+    if secret_hash.as_deref() == Some(journal.new_secret_hash.as_str()) {
+        match (&journal.backup_path, journal.old_secret_hash.as_ref()) {
+            (Some(backup), Some(old_hash)) => {
+                if path_hash(backup)?.as_deref() != Some(old_hash.as_str()) {
+                    return Err(anyhow!("config_init_recovery_conflict"));
+                }
+                let bytes =
+                    fs::read(backup).map_err(|_| anyhow!("config_init_recovery_conflict"))?;
+                atomically_write_secret(
+                    &journal.secret_path,
+                    &bytes,
+                    journal.old_secret_mode.unwrap_or(0o600),
+                )
+                .map_err(|_| anyhow!("config_init_recovery_rollback_failed"))?;
+            }
+            (None, None) => {
+                match fs::remove_file(&journal.secret_path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(_) => return Err(anyhow!("config_init_recovery_rollback_failed")),
+                }
+                if let Some(parent) = journal.secret_path.parent() {
+                    sync_parent(parent)?;
+                }
+            }
+            _ => return Err(anyhow!("config_init_recovery_conflict")),
+        }
+    } else if secret_hash.as_ref() != journal.old_secret_hash.as_ref() {
+        return Err(anyhow!("config_init_recovery_conflict"));
+    }
+    cleanup_setup_journal(&journal_path, &journal)
+        .map_err(|_| anyhow!("config_init_recovery_cleanup_failed"))
+}
 
 static SECRET_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 const SECRET_TEMP_ATTEMPTS: usize = 128;
-
 pub(crate) fn commit_wizard_outcome(
     config_path: &Path,
     outcome: WizardOutcome,
 ) -> Result<InitSummary> {
+    let _lock = acquire_config_mutation_lock(config_path)
+        .map_err(|_| anyhow!("config_init_config_write_failed"))?;
+    recover_pending_setup_locked(config_path)?;
+    if fs::symlink_metadata(config_path)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return Err(anyhow!("config_path_symlink_rejected"));
+    }
     let WizardOutcome {
         build,
         secret_write,
@@ -144,28 +320,97 @@ pub(crate) fn commit_wizard_outcome(
     fs::set_permissions(&parent, fs::Permissions::from_mode(0o700))
         .map_err(|_| anyhow!("config_init_secret_parent_invalid"))?;
 
-    atomically_write_secret(&target, plan.value.expose().as_bytes(), 0o600)
+    let config_bytes = sparse_config_json(&build.config, false)?.into_bytes();
+    let old_config_hash = match fs::read(config_path) {
+        Ok(bytes) => Some(bytes_hash(&bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    let new_secret = plan.value.expose().as_bytes();
+    let old_secret_hash = match &prior {
+        PriorSecretState::Absent => None,
+        PriorSecretState::Existing { bytes, .. } => Some(bytes_hash(bytes)),
+    };
+    let backup_path = match &prior {
+        PriorSecretState::Absent => None,
+        PriorSecretState::Existing { bytes, .. } => {
+            let name = target
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "secret".to_string());
+            let backup = parent.join(format!(
+                ".{name}.setup-backup-{}",
+                uuid::Uuid::new_v4().simple()
+            ));
+            atomically_write_secret(&backup, bytes, 0o600)
+                .map_err(|_| anyhow!("config_init_secret_write_failed"))?;
+            Some(backup)
+        }
+    };
+    let journal_path = setup_journal_path(config_path)
+        .ok_or_else(|| anyhow!("config_init_config_write_failed"))?;
+    let journal = SetupJournal {
+        secret_path: target.clone(),
+        backup_path,
+        old_config_hash,
+        new_config_hash: bytes_hash(&config_bytes),
+        old_secret_hash,
+        new_secret_hash: bytes_hash(new_secret),
+        old_secret_mode: match &prior {
+            PriorSecretState::Existing { mode, .. } => Some(*mode),
+            PriorSecretState::Absent => None,
+        },
+    };
+    if let Err(_error) = stage_setup_journal(&journal_path, &journal) {
+        if let Some(backup) = journal.backup_path.as_deref() {
+            let _ = fs::remove_file(backup);
+        }
+        return Err(anyhow!("config_init_config_write_failed"));
+    }
+
+    if path_hash(config_path)?.as_ref() != journal.old_config_hash.as_ref() {
+        return Err(anyhow!("config_init_recovery_conflict"));
+    }
+    atomically_write_secret(&target, new_secret, 0o600)
         .map_err(|_| anyhow!("config_init_secret_write_failed"))?;
 
-    if write_config_with_backup(config_path, &build.config).is_err() {
-        let rollback_result = match prior {
+    if let Err(error) = write_config_with_backup(config_path, &build.config) {
+        if error
+            .to_string()
+            .starts_with("config_commit_sync_failed_after_rename")
+        {
+            return Err(anyhow!(
+                "config_init_config_commit_sync_failed_after_rename"
+            ));
+        }
+        let rollback_result = match &prior {
             PriorSecretState::Absent => match fs::remove_file(&target) {
                 Ok(()) => Ok(()),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
                 Err(_) => Err(anyhow!("config_init_secret_rollback_failed")),
             },
             PriorSecretState::Existing { bytes, mode } => {
-                atomically_write_secret(&target, &bytes, mode)
+                atomically_write_secret(&target, bytes, *mode)
             }
         };
         return match rollback_result {
-            Ok(()) => Err(anyhow!("config_init_config_write_failed")),
+            Ok(()) => {
+                let cleanup = cleanup_setup_journal(&journal_path, &journal);
+                if cleanup.is_ok() {
+                    Err(anyhow!("config_init_config_write_failed"))
+                } else {
+                    Err(anyhow!(
+                        "config_init_config_write_failed: config_init_recovery_pending"
+                    ))
+                }
+            }
             Err(_) => Err(anyhow!(
                 "config_init_config_write_failed: config_init_secret_rollback_failed"
             )),
         };
     }
-
+    cleanup_setup_journal(&journal_path, &journal)
+        .map_err(|_| anyhow!("config_init_commit_recovery_pending"))?;
     Ok(summary)
 }
 
@@ -229,8 +474,10 @@ fn validate_and_capture_secret_target(path: &Path) -> Result<(PathBuf, PathBuf, 
     if path.as_os_str().is_empty() {
         return Err(anyhow!("config_init_secret_path_invalid"));
     }
-    let target = crate::exec::expand_pathbuf(path)
-        .map_err(|_| anyhow!("config_init_secret_path_invalid"))?;
+    let target = lexical_absolute(
+        &crate::exec::expand_pathbuf(path)
+            .map_err(|_| anyhow!("config_init_secret_path_invalid"))?,
+    )?;
     if target.as_os_str().is_empty()
         || target
             .components()
@@ -327,7 +574,13 @@ fn atomically_write_secret(target: &Path, bytes: &[u8], mode: u32) -> Result<()>
         .map_err(|_| anyhow!("config_init_secret_write_failed"))?;
     drop(file);
     fs::rename(&temporary_path, target).map_err(|_| anyhow!("config_init_secret_write_failed"))?;
+    sync_parent(parent).map_err(|_| anyhow!("config_init_secret_write_failed"))?;
     guard.path = None;
+    Ok(())
+}
+
+fn sync_parent(parent: &Path) -> Result<()> {
+    fs::File::open(parent)?.sync_all()?;
     Ok(())
 }
 
@@ -367,6 +620,81 @@ mod tests {
         session.standalone_mut().provision_secret_now = true;
         session.standalone_mut().secret_value = Some(SecretValue::new(value));
         session.into_wizard_outcome().unwrap()
+    }
+    fn staged_recovery_fixture(label: &str) -> (PathBuf, PathBuf, PathBuf, PathBuf, PathBuf) {
+        let root = fresh_root(label);
+        let config_path = root.join("config.json");
+        let secret_path = root.join("secret");
+        let backup_path = root.join(".secret.setup-backup");
+        let mut old_config = crate::config::Config::default_config().unwrap();
+        old_config.display_name = "old".to_string();
+        crate::config::write_config_with_backup(&config_path, &old_config).unwrap();
+        let old_config_hash = bytes_hash(&fs::read(&config_path).unwrap());
+        let mut new_config = old_config.clone();
+        new_config.display_name = "new".to_string();
+        let new_config_hash =
+            bytes_hash(sparse_config_json(&new_config, false).unwrap().as_bytes());
+
+        fs::write(&secret_path, b"old-secret").unwrap();
+        fs::set_permissions(&secret_path, fs::Permissions::from_mode(0o640)).unwrap();
+        atomically_write_secret(&backup_path, b"old-secret", 0o640).unwrap();
+        let journal_path = setup_journal_path(&config_path).unwrap();
+        let journal = SetupJournal {
+            secret_path: secret_path.clone(),
+            backup_path: Some(backup_path.clone()),
+            old_config_hash: Some(old_config_hash),
+            new_config_hash,
+            old_secret_hash: Some(bytes_hash(b"old-secret")),
+            new_secret_hash: bytes_hash(b"new-secret"),
+            old_secret_mode: Some(0o640),
+        };
+        stage_setup_journal(&journal_path, &journal).unwrap();
+        atomically_write_secret(&secret_path, b"new-secret", 0o600).unwrap();
+        (root, config_path, secret_path, journal_path, backup_path)
+    }
+
+    #[test]
+    fn config_load_does_not_recover_setup_while_mutation_lock_is_held() {
+        let (root, config_path, secret_path, journal_path, backup_path) =
+            staged_recovery_fixture("locked-load");
+        let lock = crate::config::acquire_config_mutation_lock(&config_path).unwrap();
+        let path_for_thread = config_path.clone();
+        let handle = std::thread::spawn(move || crate::config::Config::load(&path_for_thread));
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert_eq!(fs::read(&secret_path).unwrap(), b"new-secret");
+        assert!(journal_path.exists());
+        drop(lock);
+
+        handle.join().unwrap().unwrap();
+        assert_eq!(fs::read(&secret_path).unwrap(), b"old-secret");
+        assert_eq!(
+            fs::metadata(&secret_path).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        assert!(!journal_path.exists());
+        assert!(!backup_path.exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn recovery_restores_crash_state_and_retains_conflicting_evidence() {
+        let (root, config_path, secret_path, journal_path, backup_path) =
+            staged_recovery_fixture("restart-recovery");
+        crate::config::Config::load(&config_path).unwrap();
+        assert_eq!(fs::read(&secret_path).unwrap(), b"old-secret");
+        assert!(!journal_path.exists());
+        assert!(!backup_path.exists());
+        let _ = fs::remove_dir_all(root);
+
+        let (root, config_path, secret_path, journal_path, backup_path) =
+            staged_recovery_fixture("recovery-conflict");
+        fs::write(&config_path, b"external-edit").unwrap();
+        let error = recover_pending_setup_locked(&config_path).unwrap_err();
+        assert_eq!(error.to_string(), "config_init_recovery_conflict");
+        assert_eq!(fs::read(&secret_path).unwrap(), b"new-secret");
+        assert!(journal_path.exists());
+        assert!(backup_path.exists());
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

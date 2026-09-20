@@ -90,7 +90,21 @@ pub(crate) struct HistoryHealth {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum HistoryWriteOutcome {
     Persisted,
-    Deferred,
+    Deferred(String),
+    Failed(String),
+}
+
+impl HistoryWriteOutcome {
+    pub(crate) fn is_persisted(&self) -> bool {
+        matches!(self, Self::Persisted)
+    }
+
+    pub(crate) fn error(&self) -> Option<&str> {
+        match self {
+            Self::Persisted => None,
+            Self::Deferred(error) | Self::Failed(error) => Some(error),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -198,8 +212,9 @@ impl JobHistoryStore {
 
     pub(crate) fn insert_admission(&self, info: &JobInfo) -> HistoryWriteOutcome {
         if let Err(error) = self.ensure_ready() {
-            self.degrade(error);
-            return HistoryWriteOutcome::Deferred;
+            let error = truncate_text(&error.to_string(), MAX_ERROR_BYTES);
+            self.degrade(&error);
+            return HistoryWriteOutcome::Failed(error);
         }
         let bounded = bounded_info(info);
         let result = self.with_connection(|connection| {
@@ -255,8 +270,9 @@ impl JobHistoryStore {
                 HistoryWriteOutcome::Persisted
             }
             Err(error) => {
-                self.degrade(error);
-                HistoryWriteOutcome::Deferred
+                let error = truncate_text(&error.to_string(), MAX_ERROR_BYTES);
+                self.degrade(&error);
+                HistoryWriteOutcome::Failed(error)
             }
         }
     }
@@ -266,11 +282,12 @@ impl JobHistoryStore {
             return HistoryWriteOutcome::Persisted;
         };
         if let Err(error) = self.ensure_ready() {
-            self.degrade(error);
-            return HistoryWriteOutcome::Deferred;
+            let error = truncate_text(&error.to_string(), MAX_ERROR_BYTES);
+            self.degrade(&error);
+            return HistoryWriteOutcome::Failed(error);
         }
         let result = self.with_connection(|connection| {
-            connection.execute(
+            let changed = connection.execute(
                 "UPDATE jobs
                     SET state = ?1, started_at = ?2, updated_at = ?3
                   WHERE job_id = ?4 AND finished_at IS NULL",
@@ -281,6 +298,11 @@ impl JobHistoryStore {
                     &info.job_id,
                 ],
             )?;
+            if changed != 1 {
+                return Err(rusqlite::Error::InvalidParameterName(
+                    "history_admission_missing".to_string(),
+                ));
+            }
             Ok(())
         });
         match result {
@@ -289,8 +311,9 @@ impl JobHistoryStore {
                 HistoryWriteOutcome::Persisted
             }
             Err(error) => {
-                self.degrade(error);
-                HistoryWriteOutcome::Deferred
+                let error = truncate_text(&error.to_string(), MAX_ERROR_BYTES);
+                self.degrade(&error);
+                HistoryWriteOutcome::Failed(error)
             }
         }
     }
@@ -299,9 +322,14 @@ impl JobHistoryStore {
         let bounded = bounded_detail(detail.clone());
         let _ = self.retry_pending();
         if let Err(error) = self.ensure_ready() {
-            self.defer_terminal(bounded, Utc::now());
-            self.degrade(error);
-            return HistoryWriteOutcome::Deferred;
+            let error = truncate_text(&error.to_string(), MAX_ERROR_BYTES);
+            let queued = self.defer_terminal(bounded, Utc::now());
+            self.degrade(&error);
+            return if queued {
+                HistoryWriteOutcome::Deferred(error)
+            } else {
+                HistoryWriteOutcome::Failed(error)
+            };
         }
         let result = self.write_terminal(&bounded);
         match result {
@@ -311,9 +339,14 @@ impl JobHistoryStore {
                 HistoryWriteOutcome::Persisted
             }
             Err(error) => {
-                self.defer_terminal(bounded, Utc::now());
-                self.degrade(error);
-                HistoryWriteOutcome::Deferred
+                let error = truncate_text(&error.to_string(), MAX_ERROR_BYTES);
+                let queued = self.defer_terminal(bounded, Utc::now());
+                self.degrade(&error);
+                if queued {
+                    HistoryWriteOutcome::Deferred(error)
+                } else {
+                    HistoryWriteOutcome::Failed(error)
+                }
             }
         }
     }
@@ -328,6 +361,38 @@ impl JobHistoryStore {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .iter()
             .any(|pending| pending.detail.job.job_id == job_id)
+    }
+
+    pub(crate) fn terminal_snapshot_matches(
+        &self,
+        job_id: &str,
+        updated_at: DateTime<Utc>,
+    ) -> bool {
+        if self.ensure_ready().is_err() {
+            return false;
+        }
+        let updated_at = format_time(updated_at);
+        match self.with_connection(|connection| {
+            connection.query_row(
+                "SELECT 1 FROM jobs
+                  WHERE job_id = ?1
+                    AND updated_at = ?2
+                    AND finished_at IS NOT NULL
+                    AND state NOT IN (
+                        'queued','waiting_confirmation','starting','running','cancel_requested',
+                        'unknown_after_restart'
+                    )",
+                params![job_id, updated_at],
+                |_| Ok(()),
+            )
+        }) {
+            Ok(()) => true,
+            Err(error) if matches!(error, rusqlite::Error::QueryReturnedNoRows) => false,
+            Err(error) => {
+                self.degrade(error);
+                false
+            }
+        }
     }
 
     fn retry_pending_at(&self, now: DateTime<Utc>) -> usize {
@@ -507,15 +572,23 @@ impl JobHistoryStore {
             let cutoff = format_time(now - retention);
             let mut deleted = connection.execute(
                 "DELETE FROM jobs WHERE finished_at IS NOT NULL
-                   AND state NOT IN ('queued','waiting_confirmation','starting','running','cancel_requested')
+                   AND state NOT IN (
+                       'queued','waiting_confirmation','starting','running','cancel_requested',
+                       'unknown_after_restart'
+                   )
                    AND finished_at < ?1",
                 params![cutoff],
             )?;
             loop {
-                let page_count: u64 = connection.query_row("PRAGMA page_count", [], |row| row.get(0))?;
-                let freelist: u64 = connection.query_row("PRAGMA freelist_count", [], |row| row.get(0))?;
-                let page_size: u64 = connection.query_row("PRAGMA page_size", [], |row| row.get(0))?;
-                let logical = page_count.saturating_sub(freelist).saturating_mul(page_size);
+                let page_count: u64 =
+                    connection.query_row("PRAGMA page_count", [], |row| row.get(0))?;
+                let freelist: u64 =
+                    connection.query_row("PRAGMA freelist_count", [], |row| row.get(0))?;
+                let page_size: u64 =
+                    connection.query_row("PRAGMA page_size", [], |row| row.get(0))?;
+                let logical = page_count
+                    .saturating_sub(freelist)
+                    .saturating_mul(page_size);
                 if logical <= cap_bytes {
                     break;
                 }
@@ -523,7 +596,10 @@ impl JobHistoryStore {
                     "DELETE FROM jobs WHERE job_id = (
                         SELECT job_id FROM jobs
                          WHERE finished_at IS NOT NULL
-                           AND state NOT IN ('queued','waiting_confirmation','starting','running','cancel_requested')
+                           AND state NOT IN (
+                               'queued','waiting_confirmation','starting','running','cancel_requested',
+                               'unknown_after_restart'
+                           )
                          ORDER BY finished_at ASC, created_at ASC, job_id ASC LIMIT 1
                     )",
                     [],
@@ -725,8 +801,8 @@ impl JobHistoryStore {
         }
     }
 
-    fn defer_terminal(&self, detail: JobDetail, now: DateTime<Utc>) {
-        let dropped_job_id = {
+    fn defer_terminal(&self, detail: JobDetail, now: DateTime<Utc>) -> bool {
+        let queued = {
             let mut pending = self
                 .pending_terminals
                 .lock()
@@ -736,7 +812,7 @@ impl JobHistoryStore {
                 .find(|pending| pending.detail.job.job_id == detail.job.job_id)
             {
                 existing.detail = detail;
-                None
+                true
             } else {
                 let dropped = if pending.len() >= MAX_PENDING_TERMINALS {
                     pending.pop_front().map(|pending| pending.detail.job.job_id)
@@ -748,12 +824,15 @@ impl JobHistoryStore {
                     attempts: 1,
                     next_retry_at: now + pending_retry_delay(1),
                 });
-                dropped
+                if let Some(job_id) = dropped {
+                    self.record_terminal_drop(&job_id, "pending terminal queue capacity exceeded");
+                    false
+                } else {
+                    true
+                }
             }
         };
-        if let Some(job_id) = dropped_job_id {
-            self.record_terminal_drop(&job_id, "pending terminal queue capacity exceeded");
-        }
+        queued
     }
 
     fn record_terminal_drop(&self, job_id: &str, reason: &str) {
@@ -1285,9 +1364,19 @@ mod tests {
             store.insert_admission(&active),
             HistoryWriteOutcome::Persisted
         );
+        let unknown = info(
+            "unknown",
+            JobState::UnknownAfterRestart,
+            now - Duration::days(31),
+        );
+        assert_eq!(
+            store.upsert_terminal(&detail(unknown)),
+            HistoryWriteOutcome::Persisted
+        );
         store.cleanup(now).unwrap();
         assert!(store.get("old").unwrap().is_none());
         assert!(store.get("active").unwrap().is_some());
+        assert!(store.get("unknown").unwrap().is_some());
         cleanup(&root);
     }
 
@@ -1322,10 +1411,12 @@ mod tests {
                 JobState::Completed,
                 Utc::now(),
             ));
-            assert_eq!(
-                store.upsert_terminal(&snapshot),
-                HistoryWriteOutcome::Deferred
-            );
+            let outcome = store.upsert_terminal(&snapshot);
+            if index < MAX_PENDING_TERMINALS {
+                assert!(matches!(outcome, HistoryWriteOutcome::Deferred(_)));
+            } else {
+                assert!(matches!(outcome, HistoryWriteOutcome::Failed(_)));
+            }
         }
         let health = store.health();
         assert_eq!(health.status, HistoryHealthStatus::Degraded);
@@ -1334,7 +1425,6 @@ mod tests {
         assert!(health.last_error.is_some());
         let _ = fs::remove_dir_all(root);
     }
-
     #[test]
     fn pending_terminal_retries_use_backoff_and_have_a_finite_budget() {
         let (store, root) = store("retry-budget");
@@ -1342,10 +1432,10 @@ mod tests {
             .with_connection(|connection| connection.execute_batch("PRAGMA query_only = ON"))
             .unwrap();
         let snapshot = detail(info("retry-me", JobState::Completed, Utc::now()));
-        assert_eq!(
+        assert!(matches!(
             store.upsert_terminal(&snapshot),
-            HistoryWriteOutcome::Deferred
-        );
+            HistoryWriteOutcome::Deferred(_)
+        ));
         let first_retry_at = {
             let pending = store.pending_terminals.lock().unwrap();
             assert_eq!(pending.len(), 1);
@@ -1384,10 +1474,10 @@ mod tests {
             .with_connection(|connection| connection.execute_batch("PRAGMA query_only = ON"))
             .unwrap();
         let snapshot = detail(info("pending", JobState::Completed, Utc::now()));
-        assert_eq!(
+        assert!(matches!(
             store.upsert_terminal(&snapshot),
-            HistoryWriteOutcome::Deferred
-        );
+            HistoryWriteOutcome::Deferred(_)
+        ));
         let retry_at = store.pending_terminals.lock().unwrap()[0].next_retry_at;
         store
             .with_connection(|connection| connection.execute_batch("PRAGMA query_only = OFF"))

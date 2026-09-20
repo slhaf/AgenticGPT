@@ -4,7 +4,7 @@
 Execute the existing roadmap WP3 end to end on completed WP1/WP2. Read relevant architecture docs first, then choose concrete implementation from actual code. User allows planning records committed with each phase. Deduplicate real repeated flows where useful; LOC reduction and design patterns are not forced acceptance targets.
 
 ## Current phase
-Authority inventory complete; implementation contracts frozen below. No WP3 production edits or validation run yet.
+Hub implementation committed as `d8456e9` after 89 passing regressions and real capacity/late-result/retention/migration probes; actual TTL observation continues. Agent source is in integrated compiler correction, followed by real restart/corruption/config/audit probes. Browser deployment/access boundary is verified without changing its permissions or authentication.
 
 ## Required scope
 1. Authority matrix: run receipts, Job history/cache, transport ledger, audit, config/secrets, Room files, Browser leases, notification endpoints and Console local attention. Record owner/source vs projection, sensitivity, retention, allowed loss and recovery.
