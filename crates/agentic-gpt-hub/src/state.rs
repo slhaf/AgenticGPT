@@ -16,7 +16,7 @@ pub(crate) struct HubState {
     pub(crate) db: Arc<StdMutex<Connection>>,
     pub(crate) config: Arc<HubConfig>,
     pub(crate) mcp_profile: McpProfile,
-    pub(crate) agents: Arc<Mutex<HashMap<String, AgentConnection>>>,
+    pub(crate) agents: Arc<crate::agents::lifecycle::Connections>,
     pub(crate) dispatch: Arc<crate::agents::dispatch::Dispatch>,
     pub(crate) pending_confirmations: Arc<Mutex<HashMap<String, PendingConfirmation>>>,
     pub(crate) jobs: Arc<Mutex<HashMap<String, HashMap<String, JobInfo>>>>,

@@ -169,7 +169,7 @@ async fn serve(
         db: Arc::new(StdMutex::new(conn)),
         config: Arc::new(config),
         mcp_profile,
-        agents: Arc::new(Mutex::new(HashMap::new())),
+        agents: Arc::new(agents::lifecycle::Connections::new()),
         dispatch: Arc::new(agents::dispatch::Dispatch::new()),
         pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
         jobs: Arc::new(Mutex::new(HashMap::new())),
@@ -691,12 +691,7 @@ async fn send_confirmation_response(
     let Ok(text) = serde_json::to_string(&message) else {
         return;
     };
-    let sender = {
-        let agents = state.agents.lock().await;
-        agents
-            .get(agent_id)
-            .map(|connection| connection.sender.clone())
-    };
+    let sender = state.agents.sender(agent_id).await;
     if let Some(sender) = sender {
         let _ = sender.send(OutboundAgentMessage::Text(text));
     }
@@ -841,7 +836,7 @@ mod tests {
             db: Arc::new(StdMutex::new(conn)),
             config: Arc::new(test_hub_config()),
             mcp_profile: McpProfile::Full,
-            agents: Arc::new(Mutex::new(HashMap::new())),
+            agents: Arc::new(agents::lifecycle::Connections::new()),
             dispatch: Arc::new(agents::dispatch::Dispatch::new()),
             pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
             jobs: Arc::new(Mutex::new(HashMap::new())),

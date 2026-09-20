@@ -1,6 +1,6 @@
 use agentic_gpt_protocol::{
-    AgentConnectionMode, AgentRole, BootstrapReadRequest, HubCommand, NotebookAppendRequest,
-    NotebookCurrentRequest, NotebookRecentRequest, NotebookRemoveRequest, NotebookSearchRequest,
+    AgentRole, BootstrapReadRequest, HubCommand, NotebookAppendRequest, NotebookCurrentRequest,
+    NotebookRecentRequest, NotebookRemoveRequest, NotebookSearchRequest,
     NotebookSelectExactRequest, NotebookUpdateRequest, SkillActivationRequest,
     SkillInstallCancelRequest, SkillInstallGetRequest, SkillInstallRequest, SkillReadRequest,
     SkillRunRequest, SkillSearchRequest,
@@ -11,7 +11,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::Value;
 
-use crate::agents::dispatch::request_agent;
+use crate::agents::dispatch::request_room;
 use crate::routes::{api_error, require_action_auth};
 use crate::state::HubState;
 use crate::utils::random_id;
@@ -393,29 +393,7 @@ pub(crate) async fn request_active_room(
     command: HubCommand,
     timeout_secs: u64,
 ) -> std::result::Result<Value, RoomRouteError> {
-    let active = state
-        .active_room
-        .lock()
-        .await
-        .clone()
-        .ok_or(RoomRouteError::NotActive)?;
-    let valid = {
-        let agents = state.agents.lock().await;
-        agents
-            .get(&active.agent_id)
-            .map(|connection| {
-                connection.connection_id == active.connection_id
-                    && connection.connection_mode == AgentConnectionMode::CommandCapable
-                    && connection.role == AgentRole::Room
-            })
-            .unwrap_or(false)
-    };
-    if !valid {
-        return Err(RoomRouteError::StateConflict);
-    }
-    request_agent(state, &active.agent_id, command, timeout_secs)
-        .await
-        .map_err(RoomRouteError::Timeout)
+    request_room(state, command, timeout_secs).await
 }
 
 pub(crate) async fn register_connection_role(
@@ -487,7 +465,7 @@ mod tests {
     use crate::registry::{handle_agent_command, AgentCommand};
     use crate::state::{AgentConnection, AgentTransport, OutboundAgentMessage};
     use crate::{HubConfig, McpProfile, RemoteConfirmationConfig};
-    use agentic_gpt_protocol::{AgentMessage, HubCommand, HubCommandEnvelope};
+    use agentic_gpt_protocol::{AgentConnectionMode, AgentMessage, HubCommand, HubCommandEnvelope};
     use axum::body::to_bytes;
     use axum::extract::{Path, Query, State};
     use axum::http::{HeaderMap, HeaderValue, StatusCode};
@@ -521,7 +499,7 @@ mod tests {
             db: Arc::new(StdMutex::new(conn)),
             config: Arc::new(test_hub_config()),
             mcp_profile: McpProfile::Full,
-            agents: Arc::new(Mutex::new(HashMap::new())),
+            agents: Arc::new(crate::agents::lifecycle::Connections::new()),
             dispatch: Arc::new(crate::agents::dispatch::Dispatch::new()),
             pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
             jobs: Arc::new(Mutex::new(HashMap::new())),
@@ -546,21 +524,24 @@ mod tests {
         role: AgentRole,
     ) -> mpsc::UnboundedReceiver<OutboundAgentMessage> {
         let (tx, rx) = mpsc::unbounded_channel();
-        state.agents.lock().await.insert(
-            agent_id.to_string(),
-            AgentConnection {
-                connection_id: connection_id.to_string(),
-                sender: tx,
-                last_seen_at: Utc::now(),
-                role,
-                connection_mode: AgentConnectionMode::CommandCapable,
-                hello_received: true,
-                boot_generation: Some("testboot".to_string()),
-                transport: AgentTransport::WebSocket,
-                config_summary: None,
-                notification_channels: Vec::new(),
-            },
-        );
+        state
+            .agents
+            .insert_for_test(
+                agent_id,
+                AgentConnection {
+                    connection_id: connection_id.to_string(),
+                    sender: tx,
+                    last_seen_at: Utc::now(),
+                    role,
+                    connection_mode: AgentConnectionMode::CommandCapable,
+                    hello_received: true,
+                    boot_generation: Some("testboot".to_string()),
+                    transport: AgentTransport::WebSocket,
+                    config_summary: None,
+                    notification_channels: Vec::new(),
+                },
+            )
+            .await;
         rx
     }
 

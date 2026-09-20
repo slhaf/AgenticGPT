@@ -20,7 +20,7 @@ use crate::registry::{registry_entries, registry_entry};
 use crate::runs;
 use crate::state::HubState;
 use crate::utils::{constant_time_equal, random_id};
-use crate::{default_config_summary, notify, MAX_WAIT_SECONDS, REQUEST_TIMEOUT_SECS};
+use crate::{notify, MAX_WAIT_SECONDS, REQUEST_TIMEOUT_SECS};
 
 #[derive(Deserialize)]
 pub(crate) struct AgentIdQuery {
@@ -151,7 +151,7 @@ pub(crate) async fn build_hub_info_response(state: &HubState) -> Result<HubInfoR
     let entries = registry_entries(state)?;
     let registered_count = entries.len();
     let enabled_count = entries.iter().filter(|entry| entry.enabled).count();
-    let online_count = state.agents.lock().await.len();
+    let online_count = state.agents.online_count().await;
     let pending_request_count = state.dispatch.pending_count().await;
     let pending_confirmation_count = state
         .pending_confirmations
@@ -199,24 +199,24 @@ pub(crate) async fn list_agents(State(state): State<HubState>, headers: HeaderMa
         Ok(entries) => entries,
         Err(error) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "db_error", error),
     };
-    let online = state.agents.lock().await;
-    let agents = entries
+    let agents = state
+        .agents
+        .list_agents(&entries)
+        .await
         .into_iter()
-        .filter(|entry| entry.enabled)
         .map(|entry| {
-            let status = online.get(&entry.agent_id);
             json!({
                 "agentId": entry.agent_id,
                 "alias": entry.alias,
                 "displayName": entry.display_name,
-                "online": status.is_some(),
-                "transport": status.map(|s| match s.transport {
+                "online": entry.online,
+                "transport": entry.transport.map(|transport| match transport {
                     crate::state::AgentTransport::WebSocket => "websocket",
                     crate::state::AgentTransport::Sse => "sse",
                 }),
-                "lastSeenAt": status.map(|s| s.last_seen_at).or(entry.last_seen_at),
+                "lastSeenAt": entry.last_seen_at,
                 "capabilities": entry.capabilities,
-                "configSummary": status.and_then(|s| s.config_summary.clone()).unwrap_or_else(default_config_summary)
+                "configSummary": entry.config_summary,
             })
         })
         .collect::<Vec<_>>();

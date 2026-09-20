@@ -11,7 +11,6 @@ use chrono::{DateTime, Utc};
 use rusqlite::params;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::collections::HashMap;
 use tokio::time::{timeout, Duration};
 
 use crate::agents::dispatch::request_agent;
@@ -132,34 +131,7 @@ pub(crate) async fn android_notify_register(
 
 pub(crate) async fn notification_channels(state: &HubState) -> Result<Vec<NotificationChannel>> {
     let entries = registry_entries(state)?;
-    let by_id = entries
-        .into_iter()
-        .map(|entry| (entry.agent_id.clone(), entry))
-        .collect::<HashMap<_, _>>();
-    let online = state.agents.lock().await;
-    let mut channels = Vec::new();
-    for (agent_id, connection) in online.iter() {
-        let Some(entry) = by_id.get(agent_id) else {
-            continue;
-        };
-        if !entry.enabled {
-            continue;
-        }
-        let alias = entry.alias.as_deref().unwrap_or(&entry.agent_id);
-        for channel in &connection.notification_channels {
-            if channel.kind == "freedesktop" {
-                channels.push(NotificationChannel {
-                    key: format!("agent::{alias}::freedesktop"),
-                    display_name: format!("{} desktop notification", entry.display_name),
-                    available: true,
-                    kind: "freedesktop".to_string(),
-                    supports_actions: channel.supports_actions,
-                    reason: None,
-                    agent_id: Some(entry.agent_id.clone()),
-                });
-            }
-        }
-    }
+    let mut channels = state.agents.notification_channels(&entries).await;
 
     let ntfy_state = ntfy_channel_state(state).await;
     channels.push(NotificationChannel {
@@ -508,6 +480,7 @@ mod tests {
     use axum::extract::{Path, Query, State};
     use axum::http::{HeaderValue, StatusCode};
     use rusqlite::Connection;
+    use std::collections::HashMap;
     use std::sync::{Arc, Mutex as StdMutex};
     use tokio::sync::{mpsc, Mutex};
 
@@ -539,7 +512,7 @@ mod tests {
             db: Arc::new(StdMutex::new(conn)),
             config: Arc::new(test_hub_config()),
             mcp_profile: McpProfile::Full,
-            agents: Arc::new(Mutex::new(HashMap::new())),
+            agents: Arc::new(crate::agents::lifecycle::Connections::new()),
             dispatch: Arc::new(crate::agents::dispatch::Dispatch::new()),
             pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
             jobs: Arc::new(Mutex::new(HashMap::new())),
@@ -564,21 +537,24 @@ mod tests {
         role: AgentRole,
     ) -> mpsc::UnboundedReceiver<OutboundAgentMessage> {
         let (tx, rx) = mpsc::unbounded_channel();
-        state.agents.lock().await.insert(
-            agent_id.to_string(),
-            AgentConnection {
-                connection_id: connection_id.to_string(),
-                sender: tx,
-                last_seen_at: Utc::now(),
-                role,
-                connection_mode: agentic_gpt_protocol::AgentConnectionMode::CommandCapable,
-                hello_received: true,
-                boot_generation: Some("testboot".to_string()),
-                transport: AgentTransport::WebSocket,
-                config_summary: None,
-                notification_channels: Vec::new(),
-            },
-        );
+        state
+            .agents
+            .insert_for_test(
+                agent_id,
+                AgentConnection {
+                    connection_id: connection_id.to_string(),
+                    sender: tx,
+                    last_seen_at: Utc::now(),
+                    role,
+                    connection_mode: agentic_gpt_protocol::AgentConnectionMode::CommandCapable,
+                    hello_received: true,
+                    boot_generation: Some("testboot".to_string()),
+                    transport: AgentTransport::WebSocket,
+                    config_summary: None,
+                    notification_channels: Vec::new(),
+                },
+            )
+            .await;
         rx
     }
 
@@ -627,22 +603,25 @@ mod tests {
             AgentRole::Normal,
         )
         .await;
+        let mut connection = state
+            .agents
+            .snapshot_for_test()
+            .await
+            .remove("agentic-gpt-slhaf-laptop")
+            .unwrap();
+        connection.notification_channels.push(NotificationChannel {
+            key: "agent::agentic-gpt-slhaf-laptop::freedesktop".to_string(),
+            display_name: "Desktop".to_string(),
+            available: true,
+            kind: "freedesktop".to_string(),
+            supports_actions: false,
+            reason: None,
+            agent_id: Some("agentic-gpt-slhaf-laptop".to_string()),
+        });
         state
             .agents
-            .lock()
-            .await
-            .get_mut("agentic-gpt-slhaf-laptop")
-            .unwrap()
-            .notification_channels
-            .push(NotificationChannel {
-                key: "agent::agentic-gpt-slhaf-laptop::freedesktop".to_string(),
-                display_name: "Desktop".to_string(),
-                available: true,
-                kind: "freedesktop".to_string(),
-                supports_actions: false,
-                reason: None,
-                agent_id: Some("agentic-gpt-slhaf-laptop".to_string()),
-            });
+            .insert_for_test("agentic-gpt-slhaf-laptop", connection)
+            .await;
 
         let channels = notification_channels(&state).await.unwrap();
         assert!(channels

@@ -1,6 +1,4 @@
-use agentic_gpt_protocol::{
-    AgentConnectionMode, AgentMessage, HubCommand, HubCommandEnvelope, JobInfo,
-};
+use agentic_gpt_protocol::{AgentMessage, HubCommand, HubCommandEnvelope, JobInfo};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use tokio::sync::{mpsc, oneshot, Mutex};
@@ -133,24 +131,29 @@ pub(crate) async fn request_agent(
     command: HubCommand,
     timeout_secs: u64,
 ) -> std::result::Result<Value, String> {
+    let target = lifecycle::resolve_command_target(state, agent_id).await?;
+    request_target(state, target, command, timeout_secs).await
+}
+
+pub(crate) async fn request_room(
+    state: &HubState,
+    command: HubCommand,
+    timeout_secs: u64,
+) -> std::result::Result<Value, crate::room::RoomRouteError> {
+    let target = lifecycle::resolve_room_target(state).await?;
+    request_target(state, target, command, timeout_secs)
+        .await
+        .map_err(crate::room::RoomRouteError::Timeout)
+}
+
+async fn request_target(
+    state: &HubState,
+    target: lifecycle::DispatchTarget,
+    command: HubCommand,
+    timeout_secs: u64,
+) -> std::result::Result<Value, String> {
     let request_id = command.request_id();
-    let sender = {
-        let agents = state.agents.lock().await;
-        match agents.get(agent_id) {
-            Some(connection)
-                if connection.connection_mode == AgentConnectionMode::CommandCapable =>
-            {
-                if connection.hello_received {
-                    Ok((connection.connection_id.clone(), connection.sender.clone()))
-                } else {
-                    Err("agent_not_ready".to_string())
-                }
-            }
-            Some(_) => Err("agent_reporting_only".to_string()),
-            None => Err("agent_offline".to_string()),
-        }
-    }?;
-    let run = runs::prepare_run(state, agent_id, request_id, &command)
+    let run = runs::prepare_run(state, &target.agent_id, request_id, &command)
         .map_err(|error| error.to_string())?;
     let text = envelope_text(&run.run_id, &run.request_id, &run.command_hash, command)
         .map_err(|error| error.to_string())?;
@@ -161,15 +164,20 @@ pub(crate) async fn request_agent(
     state.dispatch.pending.lock().await.insert(
         run_id.clone(),
         PendingResponse {
-            agent_id: agent_id.to_string(),
+            agent_id: target.agent_id.clone(),
             request_id: run_request_id,
             command_hash,
             sender: tx,
         },
     );
-    if sender.1.send(OutboundAgentMessage::Text(text)).is_err() {
+    if target
+        .sender
+        .send(OutboundAgentMessage::Text(text))
+        .is_err()
+    {
         state.dispatch.pending.lock().await.remove(&run_id);
-        let _ = lifecycle::disconnect_agent(state, agent_id, &sender.0, None).await;
+        let _ =
+            lifecycle::disconnect_agent(state, &target.agent_id, &target.connection_id, None).await;
         return Err("agent_offline".to_string());
     }
     if let Err(error) = runs::mark_dispatched(state, &run_id) {
@@ -225,14 +233,7 @@ pub(crate) async fn mcp_list_servers_all_agents(
     state: &HubState,
 ) -> std::result::Result<Value, String> {
     let entries = registry_entries(state).map_err(|error| error.to_string())?;
-    let online_agent_ids = {
-        let online = state.agents.lock().await;
-        entries
-            .into_iter()
-            .filter(|entry| entry.enabled && online.contains_key(&entry.agent_id))
-            .map(|entry| (entry.agent_id, entry.display_name))
-            .collect::<Vec<_>>()
-    };
+    let online_agent_ids = state.agents.online_agents(&entries).await;
 
     let mut agents = Vec::new();
     for (agent_id, display_name) in online_agent_ids {

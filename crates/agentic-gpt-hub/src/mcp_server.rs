@@ -33,7 +33,7 @@ use crate::room::{request_active_room, RoomRouteError};
 use crate::runs;
 use crate::state::{HubState, McpProfile};
 use crate::utils::random_id;
-use crate::{default_config_summary, MAX_WAIT_SECONDS, REQUEST_TIMEOUT_SECS};
+use crate::{MAX_WAIT_SECONDS, REQUEST_TIMEOUT_SECS};
 
 const MCP_INSTRUCTIONS: &str = "Agentic GPT Hub exposes domain-specific job creation plus one generic lifecycle. Use process.exec for one managed process and process.batch for multiple managed processes; both wait briefly and return Job envelopes. Use mcp.callTool for one downstream MCP Job and mcp.batch for 1..16 atomically admitted child Jobs with one aggregate confirmation, ordered results, global/per-server concurrency bounds, and optional fail-fast scheduling. Use job.get with waitSeconds to inspect or briefly wait, job.list for bounded filtered discovery, and job.cancel for kind-aware cancellation evidence. Use tmux as the persistent shared workspace for stateful development, iterative debugging, TUIs, and user-agent handoff. For tmux work, discover the workspace with tmux.listSessions and tmux.listPanes, inspect it with tmux.capturePane, then use tmux.exec for shell panes or tmux.pasteText for non-shell panes. At Room start, call room.bootstrap, then room.bootstrap.read for relevant guides. Room skills are managed only by the active Room Agent; skills.run returns the same Job envelope and is followed through job.get/job.cancel. Commands remain subject to Agentic local policy, path policy, confirmation, capacity, and audit.";
 const COORDINATOR_INSTRUCTIONS: &str = "Agentic GPT Hub coordinator profile. This connector exposes only Hub-native agent status, retained run history, current job snapshots, and notification tools. It never dispatches execution, job-control, tmux, downstream MCP, skills, bootstrap, diary, or notebook commands to an Agent.";
@@ -633,21 +633,22 @@ impl AgenticMcpServer {
     async fn list_agents(&self) -> Result<CallToolResult, ErrorData> {
         let entries = registry_entries(&self.state)
             .map_err(|error| mcp_internal_error("db_error", error.to_string()))?;
-        let online = self.state.agents.lock().await;
-        let agents = entries
+        let agents = self
+            .state
+            .agents
+            .list_agents(&entries)
+            .await
             .into_iter()
-            .filter(|entry| entry.enabled)
             .map(|entry| {
-                let status = online.get(&entry.agent_id);
                 json!({
                     "agentId": entry.agent_id,
                     "alias": entry.alias,
                     "displayName": entry.display_name,
-                    "online": status.is_some(),
-                    "connectionMode": status.map(|s| s.connection_mode.label()),
-                    "lastSeenAt": status.map(|s| s.last_seen_at).or(entry.last_seen_at),
+                    "online": entry.online,
+                    "connectionMode": entry.connection_mode.map(|mode| mode.label()),
+                    "lastSeenAt": entry.last_seen_at,
                     "capabilities": entry.capabilities,
-                    "configSummary": status.and_then(|s| s.config_summary.clone()).unwrap_or_else(default_config_summary)
+                    "configSummary": entry.config_summary,
                 })
             })
             .collect::<Vec<_>>();
@@ -2758,7 +2759,7 @@ mod tests {
             db: Arc::new(StdMutex::new(conn)),
             config: Arc::new(test_hub_config()),
             mcp_profile: McpProfile::Full,
-            agents: Arc::new(Mutex::new(HashMap::new())),
+            agents: Arc::new(crate::agents::lifecycle::Connections::new()),
             dispatch: Arc::new(crate::agents::dispatch::Dispatch::new()),
             pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
             jobs: Arc::new(Mutex::new(HashMap::new())),

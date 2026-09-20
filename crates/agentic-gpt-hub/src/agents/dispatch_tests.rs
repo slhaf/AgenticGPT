@@ -588,7 +588,7 @@ async fn failed_request_send_removes_current_connection() {
     let result = request_agent(&state, "agent", command, 1).await;
 
     assert_eq!(result.unwrap_err(), "agent_offline");
-    assert!(!state.agents.lock().await.contains_key("agent"));
+    assert!(!state.agents.snapshot_for_test().await.contains_key("agent"));
     let run_id: String = state
         .db
         .lock()
@@ -605,13 +605,14 @@ async fn failed_request_send_removes_current_connection() {
 async fn reporting_only_connection_is_not_a_command_target() {
     let state = test_state();
     let _rx = insert_connection(&state, "agent", "reporting", chrono::Utc::now()).await;
-    state
+    let mut connection = state
         .agents
-        .lock()
+        .snapshot_for_test()
         .await
-        .get_mut("agent")
-        .unwrap()
-        .connection_mode = AgentConnectionMode::ReportingOnly;
+        .remove("agent")
+        .unwrap();
+    connection.connection_mode = AgentConnectionMode::ReportingOnly;
+    state.agents.insert_for_test("agent", connection).await;
     let command = HubCommand::Exec {
         request_id: "req_reporting_only".to_string(),
         payload: ExecRequest {

@@ -548,7 +548,7 @@ mod tests {
                 },
             }),
             mcp_profile: McpProfile::Full,
-            agents: Arc::new(Mutex::new(HashMap::new())),
+            agents: Arc::new(crate::agents::lifecycle::Connections::new()),
             dispatch: Arc::new(crate::agents::dispatch::Dispatch::new()),
             pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
             jobs: Arc::new(Mutex::new(HashMap::new())),

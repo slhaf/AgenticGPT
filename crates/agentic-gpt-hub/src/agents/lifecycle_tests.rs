@@ -2,7 +2,7 @@ use super::*;
 use crate::agents::test_support::*;
 use agentic_gpt_protocol::{
     AgentConnectionMode, AgentMessage, AgentRole, AgentRunReport, ConfirmationPayload, HubCommand,
-    HubMessage, JobState, SafeConfigSummary,
+    HubCommandEnvelope, HubMessage, JobState, NotebookCurrentRequest, SafeConfigSummary,
 };
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -147,10 +147,104 @@ async fn generation_fixture() -> (HubState, mpsc::UnboundedReceiver<OutboundAgen
     .unwrap();
     (state, new_rx)
 }
+#[tokio::test]
+async fn room_dispatch_keeps_validated_generation_during_replacement() {
+    let state = test_state();
+    register_agent(&state, "agent", "secret");
+    let mut old_rx = insert_connection(&state, "agent", "old", chrono::Utc::now()).await;
+    {
+        let mut current = state.agents.current.lock().await;
+        current.get_mut("agent").unwrap().role = AgentRole::Room;
+    }
+    crate::room::register_connection_role(&state, "agent", "old", AgentRole::Room)
+        .await
+        .unwrap();
+
+    let command = HubCommand::RoomNotebookCurrent {
+        request_id: "room-generation-request".to_string(),
+        payload: NotebookCurrentRequest {
+            scope: "agentic".to_string(),
+        },
+    };
+    let mut request = Box::pin(crate::room::request_active_room(&state, command, 1));
+    let active_guard = state.active_room.lock().await;
+    assert!(matches!(
+        futures_util::poll!(request.as_mut()),
+        std::task::Poll::Pending
+    ));
+
+    let (new_tx, mut new_rx) = mpsc::unbounded_channel();
+    let mut replacement = Box::pin(replace_agent_connection(
+        &state,
+        "agent",
+        "new",
+        AgentTransport::WebSocket,
+        new_tx,
+    ));
+    assert!(matches!(
+        futures_util::poll!(replacement.as_mut()),
+        std::task::Poll::Pending
+    ));
+    drop(active_guard);
+
+    let request_poll = futures_util::poll!(request.as_mut());
+    assert!(
+        matches!(request_poll, std::task::Poll::Pending),
+        "request poll: {request_poll:?}"
+    );
+    assert_eq!(
+        futures_util::poll!(replacement.as_mut()),
+        std::task::Poll::Ready(Ok(()))
+    );
+
+    let OutboundAgentMessage::Text(text) = old_rx.recv().await.unwrap() else {
+        panic!("expected Room command on validated generation");
+    };
+    let envelope = serde_json::from_str::<HubCommandEnvelope>(&text).unwrap();
+    let data = json!({ "current": null, "warnings": [] });
+    let response = post_agent_message(
+        State(state.clone()),
+        Path("agent".to_string()),
+        Query(SseConnectQuery::for_test(Some("old".to_string()))),
+        agent_headers("secret"),
+        axum::Json(AgentMessage::Response {
+            run_id: Some(envelope.run_id.clone()),
+            request_id: envelope.request_id.clone(),
+            data: data.clone(),
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        timeout(Duration::from_secs(5), request.as_mut())
+            .await
+            .expect("Room request timed out")
+            .unwrap(),
+        data
+    );
+
+    generation_handle(
+        &state,
+        "agent",
+        "new",
+        generation_hello(
+            AgentRole::Room,
+            AgentConnectionMode::CommandCapable,
+            "boot-new",
+            "new",
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        new_rx.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+}
 
 pub(crate) async fn generation_snapshot(state: &HubState) -> Value {
     let connection = {
-        let agents = state.agents.lock().await;
+        let agents = state.agents.current.lock().await;
         let connection = agents.get("agent").unwrap();
         json!({
             "connectionId": connection.connection_id,
@@ -257,6 +351,7 @@ async fn changed_boot_generation_marks_only_active_jobs_unknown_after_restart() 
     assert_eq!(
         state
             .agents
+            .current
             .lock()
             .await
             .get("agent")
@@ -283,7 +378,7 @@ async fn stale_heartbeat_is_rejected_without_touching_current_connection() {
     .await;
 
     assert_eq!(response.status(), StatusCode::CONFLICT);
-    let agents = state.agents.lock().await;
+    let agents = state.agents.current.lock().await;
     let connection = agents.get("agent").unwrap();
     assert_eq!(connection.connection_id, "current");
     assert_eq!(connection.last_seen_at, previous_seen);
@@ -319,7 +414,7 @@ async fn expired_connection_cleanup_removes_only_stale_current_entries() {
 
     cleanup_expired_agent_connections_once(&state, chrono::Utc::now()).await;
 
-    let agents = state.agents.lock().await;
+    let agents = state.agents.current.lock().await;
     assert!(!agents.contains_key("old-agent"));
     assert!(agents.contains_key("fresh-agent"));
 }
@@ -810,17 +905,18 @@ async fn generation_expiry_rechecks_current_liveness() {
     ));
     let fresh_now = chrono::Utc::now();
     assert!(!disconnect_agent(&state, "agent", "current", Some(fresh_now),).await);
-    assert!(state.agents.lock().await.contains_key("agent"));
+    assert!(state.agents.current.lock().await.contains_key("agent"));
 
     state
         .agents
+        .current
         .lock()
         .await
         .get_mut("agent")
         .unwrap()
         .last_seen_at = fresh_now - chrono::Duration::seconds(120);
     assert!(disconnect_agent(&state, "agent", "current", Some(fresh_now),).await);
-    assert!(!state.agents.lock().await.contains_key("agent"));
+    assert!(!state.agents.current.lock().await.contains_key("agent"));
 
     let (replaced_state, _new_rx) = generation_fixture().await;
     assert!(
@@ -835,6 +931,7 @@ async fn generation_expiry_rechecks_current_liveness() {
     assert_eq!(
         replaced_state
             .agents
+            .current
             .lock()
             .await
             .get("agent")
@@ -914,6 +1011,7 @@ async fn generation_stale_heartbeat_direct_handler() {
     ));
     let new_seen = state
         .agents
+        .current
         .lock()
         .await
         .get("agent")
@@ -934,6 +1032,7 @@ async fn generation_stale_heartbeat_direct_handler() {
     assert_eq!(
         state
             .agents
+            .current
             .lock()
             .await
             .get("agent")

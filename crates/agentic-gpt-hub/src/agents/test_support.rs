@@ -32,7 +32,7 @@ pub(super) fn test_state() -> HubState {
             },
         }),
         mcp_profile: McpProfile::Full,
-        agents: Arc::new(Mutex::new(HashMap::new())),
+        agents: Arc::new(crate::agents::lifecycle::Connections::new()),
         dispatch: Arc::new(crate::agents::dispatch::Dispatch::new()),
         pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
         jobs: Arc::new(Mutex::new(HashMap::new())),
@@ -137,20 +137,23 @@ pub(super) async fn insert_connection(
     last_seen_at: chrono::DateTime<chrono::Utc>,
 ) -> mpsc::UnboundedReceiver<OutboundAgentMessage> {
     let (tx, rx) = mpsc::unbounded_channel();
-    state.agents.lock().await.insert(
-        agent_id.to_string(),
-        AgentConnection {
-            connection_id: connection_id.to_string(),
-            sender: tx,
-            last_seen_at,
-            role: AgentRole::Normal,
-            connection_mode: AgentConnectionMode::CommandCapable,
-            hello_received: true,
-            boot_generation: Some("testboot".to_string()),
-            transport: AgentTransport::Sse,
-            config_summary: None,
-            notification_channels: Vec::new(),
-        },
-    );
+    state
+        .agents
+        .insert_for_test(
+            agent_id,
+            AgentConnection {
+                connection_id: connection_id.to_string(),
+                sender: tx,
+                last_seen_at,
+                role: AgentRole::Normal,
+                connection_mode: AgentConnectionMode::CommandCapable,
+                hello_received: true,
+                boot_generation: Some("testboot".to_string()),
+                transport: AgentTransport::Sse,
+                config_summary: None,
+                notification_channels: Vec::new(),
+            },
+        )
+        .await;
     rx
 }

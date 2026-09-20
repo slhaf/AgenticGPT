@@ -10,6 +10,143 @@ use crate::runs;
 use crate::state::{AgentConnection, AgentTransport, HubState, OutboundAgentMessage};
 use crate::{discard_agent_confirmations, handle_confirmation_request, room};
 
+pub(crate) struct Connections {
+    current: tokio::sync::Mutex<std::collections::HashMap<String, AgentConnection>>,
+}
+
+pub(crate) struct AgentListEntry {
+    pub(crate) agent_id: String,
+    pub(crate) alias: Option<String>,
+    pub(crate) display_name: String,
+    pub(crate) capabilities: agentic_gpt_protocol::Capabilities,
+    pub(crate) online: bool,
+    pub(crate) transport: Option<AgentTransport>,
+    pub(crate) connection_mode: Option<AgentConnectionMode>,
+    pub(crate) last_seen_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub(crate) config_summary: agentic_gpt_protocol::SafeConfigSummary,
+}
+
+impl Connections {
+    pub(crate) fn new() -> Self {
+        Self {
+            current: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    pub(crate) async fn online_count(&self) -> usize {
+        self.current.lock().await.len()
+    }
+
+    pub(crate) async fn sender(
+        &self,
+        agent_id: &str,
+    ) -> Option<mpsc::UnboundedSender<OutboundAgentMessage>> {
+        self.current
+            .lock()
+            .await
+            .get(agent_id)
+            .map(|connection| connection.sender.clone())
+    }
+
+    pub(crate) async fn list_agents(
+        &self,
+        entries: &[agentic_gpt_protocol::AgentRegistryEntry],
+    ) -> Vec<AgentListEntry> {
+        let current = self.current.lock().await;
+        entries
+            .iter()
+            .filter(|entry| entry.enabled)
+            .map(|entry| {
+                let connection = current.get(&entry.agent_id);
+                AgentListEntry {
+                    agent_id: entry.agent_id.clone(),
+                    alias: entry.alias.clone(),
+                    display_name: entry.display_name.clone(),
+                    capabilities: entry.capabilities.clone(),
+                    online: connection.is_some(),
+                    transport: connection.map(|connection| connection.transport),
+                    connection_mode: connection.map(|connection| connection.connection_mode),
+                    last_seen_at: connection
+                        .map(|connection| connection.last_seen_at)
+                        .or(entry.last_seen_at),
+                    config_summary: connection
+                        .and_then(|connection| connection.config_summary.clone())
+                        .unwrap_or_else(crate::default_config_summary),
+                }
+            })
+            .collect()
+    }
+
+    pub(crate) async fn online_agents(
+        &self,
+        entries: &[agentic_gpt_protocol::AgentRegistryEntry],
+    ) -> Vec<(String, String)> {
+        let current = self.current.lock().await;
+        entries
+            .iter()
+            .filter(|entry| entry.enabled && current.contains_key(&entry.agent_id))
+            .map(|entry| (entry.agent_id.clone(), entry.display_name.clone()))
+            .collect()
+    }
+
+    pub(crate) async fn notification_channels(
+        &self,
+        entries: &[agentic_gpt_protocol::AgentRegistryEntry],
+    ) -> Vec<agentic_gpt_protocol::NotificationChannel> {
+        let by_id = entries
+            .iter()
+            .map(|entry| (entry.agent_id.as_str(), entry))
+            .collect::<std::collections::HashMap<_, _>>();
+        let current = self.current.lock().await;
+        let mut channels = Vec::new();
+        for (agent_id, connection) in current.iter() {
+            let Some(entry) = by_id.get(agent_id.as_str()) else {
+                continue;
+            };
+            if !entry.enabled {
+                continue;
+            }
+            let alias = entry.alias.as_deref().unwrap_or(&entry.agent_id);
+            for channel in &connection.notification_channels {
+                if channel.kind == "freedesktop" {
+                    channels.push(agentic_gpt_protocol::NotificationChannel {
+                        key: format!("agent::{alias}::freedesktop"),
+                        display_name: format!("{} desktop notification", entry.display_name),
+                        available: true,
+                        kind: "freedesktop".to_string(),
+                        supports_actions: channel.supports_actions,
+                        reason: None,
+                        agent_id: Some(entry.agent_id.clone()),
+                    });
+                }
+            }
+        }
+        channels
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn insert_for_test(&self, agent_id: &str, connection: AgentConnection) {
+        self.current
+            .lock()
+            .await
+            .insert(agent_id.to_string(), connection);
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn snapshot_for_test(
+        &self,
+    ) -> std::collections::HashMap<String, AgentConnection> {
+        self.current.lock().await.clone()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct DispatchTarget {
+    pub(super) agent_id: String,
+    pub(super) connection_id: String,
+    pub(super) sender: mpsc::UnboundedSender<OutboundAgentMessage>,
+}
+
 const AGENT_CONNECTION_SWEEP_SECS: u64 = 15;
 const AGENT_CONNECTION_TTL_SECS: i64 = 60;
 
@@ -24,7 +161,7 @@ pub(super) async fn handle_agent_message(
     parsed: AgentMessage,
 ) -> std::result::Result<(), String> {
     let reliable = is_reliable_agent_message(&parsed);
-    let mut agents = state.agents.lock().await;
+    let mut agents = state.agents.current.lock().await;
     let is_current = agents
         .get(agent_id)
         .map(|connection| connection.connection_id == connection_id)
@@ -217,7 +354,7 @@ pub(super) async fn disconnect_agent(
     expiry_check_at: Option<chrono::DateTime<chrono::Utc>>,
 ) -> bool {
     let removed_current_connection = {
-        let mut agents = state.agents.lock().await;
+        let mut agents = state.agents.current.lock().await;
         let should_remove = agents.get(agent_id).is_some_and(|connection| {
             connection.connection_id == connection_id
                 && expiry_check_at.is_none_or(|now| {
@@ -248,7 +385,7 @@ pub(crate) async fn replace_agent_connection(
     if connection_id.is_empty() {
         return Err("invalid_connection_id");
     }
-    let mut agents = state.agents.lock().await;
+    let mut agents = state.agents.current.lock().await;
     if agents
         .get(agent_id)
         .is_some_and(|connection| connection.connection_id == connection_id)
@@ -290,7 +427,7 @@ pub(crate) async fn cleanup_expired_agent_connections_once(
     now: chrono::DateTime<chrono::Utc>,
 ) {
     let expired = {
-        let agents = state.agents.lock().await;
+        let agents = state.agents.current.lock().await;
         agents
             .iter()
             .filter(|(_, connection)| {
@@ -313,6 +450,63 @@ pub(crate) async fn cleanup_expired_agent_connections_once(
         }
     }
 }
+pub(super) async fn resolve_command_target(
+    state: &HubState,
+    agent_id: &str,
+) -> std::result::Result<DispatchTarget, String> {
+    let current = state.agents.current.lock().await;
+    command_target(&current, agent_id)
+}
+
+fn command_target(
+    current: &std::collections::HashMap<String, AgentConnection>,
+    agent_id: &str,
+) -> std::result::Result<DispatchTarget, String> {
+    let Some(connection) = current.get(agent_id) else {
+        return Err("agent_offline".to_string());
+    };
+    if connection.connection_mode == AgentConnectionMode::ReportingOnly {
+        return Err("agent_reporting_only".to_string());
+    }
+    if !connection.hello_received {
+        return Err("agent_not_ready".to_string());
+    }
+    Ok(DispatchTarget {
+        agent_id: agent_id.to_string(),
+        connection_id: connection.connection_id.clone(),
+        sender: connection.sender.clone(),
+    })
+}
+
+pub(super) async fn resolve_room_target(
+    state: &HubState,
+) -> std::result::Result<DispatchTarget, room::RoomRouteError> {
+    let current = state.agents.current.lock().await;
+    let active = state
+        .active_room
+        .lock()
+        .await
+        .clone()
+        .ok_or(room::RoomRouteError::NotActive)?;
+    let Some(connection) = current.get(&active.agent_id) else {
+        return Err(room::RoomRouteError::StateConflict);
+    };
+    if connection.connection_id != active.connection_id
+        || connection.role != AgentRole::Room
+        || connection.connection_mode != AgentConnectionMode::CommandCapable
+    {
+        return Err(room::RoomRouteError::StateConflict);
+    }
+    if !connection.hello_received {
+        return Err(room::RoomRouteError::Timeout("agent_not_ready".to_string()));
+    }
+    Ok(DispatchTarget {
+        agent_id: active.agent_id,
+        connection_id: connection.connection_id.clone(),
+        sender: connection.sender.clone(),
+    })
+}
+
 async fn mark_cached_jobs_unknown_after_restart(state: &HubState, agent_id: &str) {
     let mut jobs = state.jobs.lock().await;
     let Some(agent_jobs) = jobs.get_mut(agent_id) else {

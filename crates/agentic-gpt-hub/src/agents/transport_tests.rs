@@ -99,7 +99,7 @@ async fn generation_sse_rejects_duplicate_and_empty_ids() {
     assert_eq!(
         state
             .agents
-            .lock()
+            .snapshot_for_test()
             .await
             .get("agent")
             .map(|connection| connection.connection_id.as_str()),
