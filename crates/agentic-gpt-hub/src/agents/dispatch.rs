@@ -1,4 +1,4 @@
-use agentic_gpt_protocol::{AgentMessage, HubCommand, HubCommandEnvelope, JobInfo};
+use agentic_gpt_protocol::{AgentMessage, HubCommand, HubCommandEnvelope};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use tokio::sync::{mpsc, oneshot, Mutex};
@@ -275,13 +275,12 @@ pub(crate) async fn mcp_list_servers_all_agents(
     Ok(json!({ "agents": agents }))
 }
 
-pub(crate) async fn cached_job(state: &HubState, agent_id: &str, job_id: &str) -> Option<JobInfo> {
-    state
-        .jobs
-        .lock()
-        .await
-        .get(agent_id)
-        .and_then(|jobs| jobs.get(job_id).cloned())
+pub(crate) async fn cached_job(
+    state: &HubState,
+    agent_id: &str,
+    job_id: &str,
+) -> Option<crate::state::JobCacheSnapshot> {
+    state.job_cache.snapshot(agent_id, job_id).await
 }
 
 #[cfg(test)]

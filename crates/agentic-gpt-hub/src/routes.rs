@@ -13,7 +13,6 @@ use axum::Json;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::HashMap;
 
 use crate::agents::dispatch::{cached_job, mcp_list_servers_all_agents, request_agent};
 use crate::registry::{registry_entries, registry_entry};
@@ -154,8 +153,7 @@ pub(crate) async fn build_hub_info_response(state: &HubState) -> Result<HubInfoR
     let online_count = state.agents.online_count().await;
     let pending_request_count = state.dispatch.pending_count().await;
     let pending_confirmation_count = state.confirmations.pending_count().await;
-    let cached_job_count = state.jobs.lock().await.values().map(HashMap::len).sum();
-
+    let cached_job_count = state.job_cache.count().await;
     let remote = &state.config.remote_confirmation;
     let ntfy = &remote.ntfy;
     Ok(HubInfoResponse {
@@ -303,7 +301,7 @@ pub(crate) async fn list_jobs(
         payload: payload.clone(),
     };
     match request_agent(&state, &query.agent_id, command, 2).await {
-        Ok(value) => Json(value).into_response(),
+        Ok(value) => Json(live_job_value(value)).into_response(),
         Err(reason) if payload.cursor.is_some() => api_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "job_list_cursor_unavailable",
@@ -312,32 +310,32 @@ pub(crate) async fn list_jobs(
             ),
         ),
         Err(_) => {
-            let mut jobs = state
-                .jobs
-                .lock()
-                .await
-                .get(&query.agent_id)
-                .map(|jobs| jobs.values().cloned().collect::<Vec<_>>())
-                .unwrap_or_default();
-            jobs.retain(|job| {
+            let mut snapshots = state.job_cache.snapshots(&query.agent_id).await;
+            snapshots.retain(|snapshot| {
                 payload
                     .group
                     .as_ref()
-                    .is_none_or(|group| job.group.as_deref() == Some(group.as_str()))
+                    .is_none_or(|group| snapshot.job.group.as_deref() == Some(group.as_str()))
             });
-            jobs.retain(|job| payload.kind.is_none_or(|kind| job.kind == kind));
-            jobs.retain(|job| payload.state.is_none_or(|state| job.state == state));
-            jobs.sort_by(|left, right| {
+            snapshots.retain(|snapshot| payload.kind.is_none_or(|kind| snapshot.job.kind == kind));
+            snapshots.retain(|snapshot| payload.state.is_none_or(|state| snapshot.job.state == state));
+            snapshots.sort_by(|left, right| {
                 right
+                    .job
                     .created_at
-                    .cmp(&left.created_at)
-                    .then_with(|| right.job_id.cmp(&left.job_id))
+                    .cmp(&left.job.created_at)
+                    .then_with(|| right.job.job_id.cmp(&left.job.job_id))
             });
-            jobs.truncate(payload.effective_limit());
-            Json(json!({
-                "jobs": jobs.into_iter().map(job_list_item).collect::<Vec<_>>()
-            }))
-            .into_response()
+            snapshots.truncate(payload.effective_limit());
+            let mut body = json!({
+                "jobs": snapshots
+                    .iter()
+                    .cloned()
+                    .map(|snapshot| job_list_item(snapshot.job))
+                    .collect::<Vec<_>>()
+            });
+            add_cache_metadata(&mut body, &snapshots);
+            Json(body).into_response()
         }
     }
 }
@@ -366,16 +364,19 @@ pub(crate) async fn get_job(
     };
     let timeout_seconds = query.wait_seconds.unwrap_or(0).min(MAX_WAIT_SECONDS) + 2;
     match request_agent(&state, &query.agent_id, command, timeout_seconds).await {
-        Ok(value) => Json(value).into_response(),
+        Ok(value) => Json(live_job_value(value)).into_response(),
         Err(reason) => match cached_job(&state, &query.agent_id, &job_id).await {
-            Some(job) => Json(json!({
-                "error": {
-                    "code": "job_get_unavailable",
-                    "message": reason
-                },
-                "cached": job_list_item(job)
-            }))
-            .into_response(),
+            Some(snapshot) => {
+                let mut body = json!({
+                    "error": {
+                        "code": "job_get_unavailable",
+                        "message": reason
+                    },
+                    "cached": job_list_item(snapshot.job.clone())
+                });
+                add_cache_metadata(&mut body, std::slice::from_ref(&snapshot));
+                Json(body).into_response()
+            }
             None => api_error(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "job_get_unavailable",
@@ -394,6 +395,50 @@ fn job_list_item(job: JobInfo) -> JobListItem {
         created_at: job.created_at,
         started_at: job.started_at,
         finished_at: job.finished_at,
+    }
+}
+
+fn live_job_value(mut value: serde_json::Value) -> serde_json::Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "freshness".to_string(),
+            serde_json::Value::String(crate::state::JobFreshness::Live.label().to_string()),
+        );
+        object.insert(
+            "observedAt".to_string(),
+            serde_json::Value::String(Utc::now().to_rfc3339()),
+        );
+    }
+    value
+}
+
+fn add_cache_metadata(value: &mut serde_json::Value, snapshots: &[crate::state::JobCacheSnapshot]) {
+    let freshness = if snapshots.is_empty() {
+        crate::state::JobFreshness::Unknown
+    } else if snapshots
+        .iter()
+        .any(|snapshot| snapshot.freshness == crate::state::JobFreshness::Unknown)
+    {
+        crate::state::JobFreshness::Unknown
+    } else if snapshots
+        .iter()
+        .any(|snapshot| snapshot.freshness == crate::state::JobFreshness::Stale)
+    {
+        crate::state::JobFreshness::Stale
+    } else {
+        crate::state::JobFreshness::Cached
+    };
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "freshness".to_string(),
+            serde_json::Value::String(freshness.label().to_string()),
+        );
+        if let Some(observed_at) = snapshots.iter().map(|snapshot| snapshot.observed_at).max() {
+            object.insert(
+                "observedAt".to_string(),
+                serde_json::Value::String(observed_at.to_rfc3339()),
+            );
+        }
     }
 }
 
@@ -416,9 +461,18 @@ pub(crate) async fn cancel_job(
         },
     };
     match request_agent(&state, &query.agent_id, command, 5).await {
-        Ok(value) if value.get("error").is_none() => Json(value).into_response(),
-        Ok(value) => Json(value).into_response(),
-        Err(reason) => api_error(StatusCode::BAD_GATEWAY, "job_cancel_unavailable", reason),
+        Ok(value) => Json(live_job_value(value)).into_response(),
+        Err(reason) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({
+                "error": {
+                    "code": "job_cancel_unavailable",
+                    "message": reason
+                },
+                "freshness": "unknown"
+            })),
+        )
+            .into_response(),
     }
 }
 

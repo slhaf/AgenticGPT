@@ -1,4 +1,4 @@
-use agentic_gpt_protocol::{AgentConnectionMode, AgentMessage, AgentRole, HubMessage, JobState};
+use agentic_gpt_protocol::{AgentConnectionMode, AgentMessage, AgentRole, HubMessage};
 use serde_json::json;
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
@@ -177,6 +177,9 @@ pub(super) async fn handle_agent_message(
     }
 
     let mut confirmation_publication = None;
+    let current_boot_generation = agents
+        .get(agent_id)
+        .and_then(|connection| connection.boot_generation.clone());
     let replay_sender = match parsed {
         AgentMessage::Hello {
             boot_generation,
@@ -243,13 +246,19 @@ pub(super) async fn handle_agent_message(
             None
         }
         AgentMessage::JobUpdate { job } => {
+            if job.agent_id != agent_id {
+                warn!(%agent_id, jobAgentId = %job.agent_id, "rejected JobUpdate for another agent");
+                return Err("job_agent_id_mismatch".to_string());
+            }
             state
-                .jobs
-                .lock()
-                .await
-                .entry(agent_id.to_string())
-                .or_default()
-                .insert(job.job_id.clone(), job);
+                .job_cache
+                .record(
+                    agent_id,
+                    connection_id,
+                    current_boot_generation.as_deref(),
+                    job,
+                )
+                .await;
             None
         }
         AgentMessage::RunReport { report } => {
@@ -367,6 +376,10 @@ pub(super) async fn disconnect_agent(
             let removed = agents
                 .remove(agent_id)
                 .expect("current connection disappeared under agents guard");
+            state
+                .job_cache
+                .mark_connection_stale(agent_id, connection_id)
+                .await;
             room::release_active_room_if_current(state, agent_id, connection_id).await;
             confirmation::retire_generation(state, agent_id, connection_id).await;
             Some(removed)
@@ -416,6 +429,10 @@ pub(crate) async fn replace_agent_connection(
             },
         );
         if let Some(old) = old {
+            state
+                .job_cache
+                .mark_connection_stale(agent_id, &old.connection_id)
+                .await;
             room::release_active_room_if_current(state, agent_id, &old.connection_id).await;
             confirmation::retire_generation(state, agent_id, &old.connection_id).await;
             Some(old)
@@ -521,21 +538,8 @@ pub(super) async fn resolve_room_target(
         sender: connection.sender.clone(),
     })
 }
-
 async fn mark_cached_jobs_unknown_after_restart(state: &HubState, agent_id: &str) {
-    let mut jobs = state.jobs.lock().await;
-    let Some(agent_jobs) = jobs.get_mut(agent_id) else {
-        return;
-    };
-    let now = chrono::Utc::now();
-    for job in agent_jobs.values_mut() {
-        if job.state.is_active() {
-            job.state = JobState::UnknownAfterRestart;
-            job.updated_at = now;
-            job.finished_at = Some(now);
-            job.reject_reason = Some("unknown_after_restart".to_string());
-        }
-    }
+    state.job_cache.mark_unknown_after_restart(agent_id).await;
 }
 
 #[cfg(test)]

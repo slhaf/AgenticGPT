@@ -163,7 +163,7 @@ async fn serve(
         agents: Arc::new(agents::lifecycle::Connections::new()),
         dispatch: Arc::new(agents::dispatch::Dispatch::new()),
         confirmations: Arc::new(confirmation::Confirmations::new()),
-        jobs: Arc::new(Mutex::new(HashMap::new())),
+        job_cache: Arc::new(state::JobCache::new()),
         boot_generations: Arc::new(Mutex::new(HashMap::new())),
         active_room: Arc::new(Mutex::new(None)),
         http: reqwest::Client::new(),
@@ -174,6 +174,7 @@ async fn serve(
     };
     tokio::spawn(confirmation::cleanup(state.clone()));
     tokio::spawn(cleanup_runs(state.clone()));
+    tokio::spawn(cleanup_job_cache(state.clone()));
     tokio::spawn(agents::lifecycle::cleanup_agent_connections(state.clone()));
     tokio::spawn(oauth::cleanup_oauth(state.clone()));
     let app = Router::new()
@@ -291,6 +292,13 @@ async fn serve(
     Ok(())
 }
 
+async fn cleanup_job_cache(state: HubState) {
+    loop {
+        sleep(Duration::from_secs(15)).await;
+        state.job_cache.sweep(Utc::now()).await;
+    }
+}
+
 async fn cleanup_runs(state: HubState) {
     loop {
         sleep(Duration::from_secs(30)).await;
@@ -375,27 +383,97 @@ impl HubConfig {
     }
 
     fn load_or_default(path: &PathBuf) -> Result<Self> {
-        if path.exists() {
-            let text = std::fs::read_to_string(path)
-                .with_context(|| format!("read hub config {}", path.display()))?;
-            Ok(serde_json::from_str(&text)
-                .with_context(|| format!("parse hub config {}", path.display()))?)
-        } else {
-            Ok(Self::default_config())
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                anyhow::bail!("refusing symlinked hub config path {}", path.display())
+            }
+            Ok(_) => {
+                let text = std::fs::read_to_string(path)
+                    .with_context(|| format!("read hub config {}", path.display()))?;
+                Ok(serde_json::from_str(&text)
+                    .with_context(|| format!("parse hub config {}", path.display()))?)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Ok(Self::default_config())
+            }
+            Err(error) => Err(error.into()),
         }
     }
 
     fn write_if_missing(&self, path: &PathBuf) -> Result<()> {
-        if path.exists() {
-            return Ok(());
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() {
+                    anyhow::bail!("refusing symlinked hub config path {}", path.display());
+                }
+                return Ok(());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
         }
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(path, serde_json::to_string_pretty(self)?)?;
-        Ok(())
+        let temp = unique_config_sibling(path);
+        let mut options = std::fs::OpenOptions::new();
+        options.create_new(true).write(true).read(true);
+        set_private_file_mode(&mut options);
+        let payload = serde_json::to_vec_pretty(self)?;
+        {
+            let mut file = options.open(&temp)?;
+            std::io::Write::write_all(&mut file, &payload)?;
+            file.sync_all()?;
+        }
+        match std::fs::hard_link(&temp, path) {
+            Ok(()) => {
+                std::fs::File::open(path)?.sync_all()?;
+                sync_config_parent(path)?;
+                std::fs::remove_file(&temp)?;
+                Ok(())
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let _ = std::fs::remove_file(&temp);
+                match std::fs::symlink_metadata(path) {
+                    Ok(metadata) if metadata.file_type().is_symlink() => {
+                        anyhow::bail!("refusing symlinked hub config path {}", path.display())
+                    }
+                    Ok(_) => Ok(()),
+                    Err(error) => Err(error.into()),
+                }
+            }
+            Err(error) => {
+                let _ = std::fs::remove_file(&temp);
+                Err(error.into())
+            }
+        }
     }
 }
+
+fn unique_config_sibling(path: &std::path::Path) -> PathBuf {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let mut value = path.as_os_str().to_os_string();
+    value.push(format!(".tmp.{}.{}", std::process::id(), nonce));
+    PathBuf::from(value)
+}
+
+fn sync_config_parent(path: &std::path::Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::File::open(parent)?.sync_all()?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_private_file_mode(options: &mut std::fs::OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+    options.mode(0o600);
+}
+
+#[cfg(not(unix))]
+fn set_private_file_mode(_options: &mut std::fs::OpenOptions) {}
 
 #[cfg(test)]
 mod tests {
@@ -429,7 +507,7 @@ mod tests {
             agents: Arc::new(agents::lifecycle::Connections::new()),
             dispatch: Arc::new(agents::dispatch::Dispatch::new()),
             confirmations: Arc::new(confirmation::Confirmations::new()),
-            jobs: Arc::new(Mutex::new(HashMap::new())),
+            job_cache: Arc::new(state::JobCache::new()),
             boot_generations: Arc::new(Mutex::new(HashMap::new())),
             active_room: Arc::new(Mutex::new(None)),
             http: reqwest::Client::new(),

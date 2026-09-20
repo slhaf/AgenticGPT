@@ -447,15 +447,16 @@ fn decode_args<T: for<'de> Deserialize<'de>>(value: Value) -> Result<T, String> 
 }
 
 async fn snapshot_job_list(state: &HubState, agent_id: &str) -> Value {
-    let mut jobs = state
-        .jobs
-        .lock()
-        .await
-        .get(agent_id)
-        .map(|jobs| jobs.values().cloned().collect::<Vec<_>>())
-        .unwrap_or_default();
-    jobs.sort_by_key(|job| std::cmp::Reverse(job.updated_at));
-    json!({ "jobs": jobs })
+    let snapshots = state.job_cache.snapshots(agent_id).await;
+    let mut value = json!({
+        "jobs": snapshots
+            .iter()
+            .cloned()
+            .map(|snapshot| snapshot.job)
+            .collect::<Vec<_>>()
+    });
+    add_cache_metadata(&mut value, &snapshots);
+    value
 }
 
 async fn snapshot_job_list_filtered(
@@ -471,34 +472,40 @@ async fn snapshot_job_list_filtered(
                 "message": format!(
                     "Agent is unavailable and Hub cache cannot continue an Agent-issued cursor: {unavailable_reason}"
                 )
-            }
+            },
+            "freshness": "unknown"
         });
     }
-    let mut jobs = state
-        .jobs
-        .lock()
-        .await
-        .get(agent_id)
-        .map(|jobs| jobs.values().cloned().collect::<Vec<_>>())
-        .unwrap_or_default();
-    jobs.retain(|job| {
+    let mut snapshots = state.job_cache.snapshots(agent_id).await;
+    snapshots.retain(|snapshot| {
         request
             .group
             .as_ref()
-            .is_none_or(|group| job.group.as_deref() == Some(group.as_str()))
+            .is_none_or(|group| snapshot.job.group.as_deref() == Some(group.as_str()))
     });
-    jobs.retain(|job| request.kind.is_none_or(|kind| job.kind == kind));
-    jobs.retain(|job| request.state.is_none_or(|state| job.state == state));
-    jobs.sort_by(|left, right| {
+    snapshots.retain(|snapshot| request.kind.is_none_or(|kind| snapshot.job.kind == kind));
+    snapshots.retain(|snapshot| {
+        request
+            .state
+            .is_none_or(|state| snapshot.job.state == state)
+    });
+    snapshots.sort_by(|left, right| {
         right
+            .job
             .created_at
-            .cmp(&left.created_at)
-            .then_with(|| right.job_id.cmp(&left.job_id))
+            .cmp(&left.job.created_at)
+            .then_with(|| right.job.job_id.cmp(&left.job.job_id))
     });
-    jobs.truncate(request.effective_limit());
-    json!({
-        "jobs": jobs.into_iter().map(job_list_item).collect::<Vec<_>>()
-    })
+    snapshots.truncate(request.effective_limit());
+    let mut value = json!({
+        "jobs": snapshots
+            .iter()
+            .cloned()
+            .map(|snapshot| job_list_item(snapshot.job))
+            .collect::<Vec<_>>()
+    });
+    add_cache_metadata(&mut value, &snapshots);
+    value
 }
 
 fn job_list_item(job: JobInfo) -> JobListItem {
@@ -513,21 +520,70 @@ fn job_list_item(job: JobInfo) -> JobListItem {
     }
 }
 
+fn live_job_value(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("freshness".to_string(), json!("live"));
+        object.insert(
+            "observedAt".to_string(),
+            json!(chrono::Utc::now().to_rfc3339()),
+        );
+    }
+    value
+}
+
+fn add_cache_metadata(value: &mut Value, snapshots: &[crate::state::JobCacheSnapshot]) {
+    let freshness = if snapshots.is_empty() {
+        crate::state::JobFreshness::Unknown
+    } else if snapshots
+        .iter()
+        .any(|snapshot| snapshot.freshness == crate::state::JobFreshness::Unknown)
+    {
+        crate::state::JobFreshness::Unknown
+    } else if snapshots
+        .iter()
+        .any(|snapshot| snapshot.freshness == crate::state::JobFreshness::Stale)
+    {
+        crate::state::JobFreshness::Stale
+    } else {
+        crate::state::JobFreshness::Cached
+    };
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "freshness".to_string(),
+            Value::String(freshness.label().to_string()),
+        );
+        if let Some(observed_at) = snapshots.iter().map(|snapshot| snapshot.observed_at).max() {
+            object.insert(
+                "observedAt".to_string(),
+                Value::String(observed_at.to_rfc3339()),
+            );
+        }
+    }
+}
+
 async fn cached_job_summary(state: &HubState, agent_id: &str, job_id: &str) -> Option<Value> {
     cached_job(state, agent_id, job_id)
         .await
-        .and_then(|job| serde_json::to_value(job_list_item(job)).ok())
+        .and_then(|snapshot| {
+            let mut value = serde_json::to_value(job_list_item(snapshot.job.clone())).ok()?;
+            add_cache_metadata(&mut value, std::slice::from_ref(&snapshot));
+            Some(value)
+        })
 }
 
 async fn snapshot_job_get(state: &HubState, agent_id: &str, job_id: &str) -> Value {
     match cached_job(state, agent_id, job_id).await {
-        Some(job) => json!({
-            "job": job,
-            "detailAvailable": false,
-            "resultTruncated": false
-        }),
+        Some(snapshot) => {
+            let mut value = json!({
+                "job": snapshot.job.clone(),
+                "detailAvailable": false,
+                "resultTruncated": false
+            });
+            add_cache_metadata(&mut value, std::slice::from_ref(&snapshot));
+            value
+        }
         None => {
-            json!({ "error": { "code": "job_not_found", "message": "Job was not found" } })
+            json!({ "error": { "code": "job_not_found", "message": "Job was not found" }, "freshness": "unknown" })
         }
     }
 }
@@ -824,7 +880,7 @@ impl AgenticMcpServer {
             payload: payload.clone(),
         };
         let value = match request_agent(&self.state, &params.agent_id, command, 2).await {
-            Ok(value) => value,
+            Ok(value) => live_job_value(value),
             Err(reason) => {
                 snapshot_job_list_filtered(&self.state, &params.agent_id, &payload, &reason).await
             }
@@ -850,7 +906,7 @@ impl AgenticMcpServer {
         };
         let value =
             match request_agent(&self.state, &params.agent_id, command, wait_seconds + 2).await {
-                Ok(value) => value,
+                Ok(value) => live_job_value(value),
                 Err(reason) => {
                     let cached =
                         cached_job_summary(&self.state, &params.agent_id, &params.job_id).await;
@@ -858,9 +914,16 @@ impl AgenticMcpServer {
                         "error": {
                             "code": "job_get_unavailable",
                             "message": reason
-                        }
+                        },
+                        "freshness": "unknown"
                     });
                     if let Some(cached) = cached {
+                        if let Some(freshness) = cached.get("freshness").cloned() {
+                            value["freshness"] = freshness;
+                        }
+                        if let Some(observed_at) = cached.get("observedAt").cloned() {
+                            value["observedAt"] = observed_at;
+                        }
                         value["cached"] = cached;
                     }
                     value
@@ -883,17 +946,26 @@ impl AgenticMcpServer {
             },
         };
         let value = match request_agent(&self.state, &params.agent_id, command, 5).await {
-            Ok(value) if value.get("error").is_none() => value,
-            Ok(value) => value,
+            Ok(value) => live_job_value(value),
             Err(reason) => {
                 let cached = snapshot_job_get(&self.state, &params.agent_id, &params.job_id).await;
-                json!({
+                let freshness = cached
+                    .get("freshness")
+                    .cloned()
+                    .unwrap_or_else(|| json!("unknown"));
+                let observed_at = cached.get("observedAt").cloned();
+                let mut value = json!({
                     "error": {
                         "code": "job_cancel_unavailable",
                         "message": reason
                     },
-                    "cached": cached
-                })
+                    "cached": cached,
+                    "freshness": freshness
+                });
+                if let Some(observed_at) = observed_at {
+                    value["observedAt"] = observed_at;
+                }
+                value
             }
         };
         Ok(result_from_value(value))
@@ -2762,7 +2834,7 @@ mod tests {
             agents: Arc::new(crate::agents::lifecycle::Connections::new()),
             dispatch: Arc::new(crate::agents::dispatch::Dispatch::new()),
             confirmations: Arc::new(crate::confirmation::Confirmations::new()),
-            jobs: Arc::new(Mutex::new(HashMap::new())),
+            job_cache: Arc::new(crate::state::JobCache::new()),
             boot_generations: Arc::new(Mutex::new(HashMap::new())),
             active_room: Arc::new(Mutex::new(None)),
             http: reqwest::Client::new(),

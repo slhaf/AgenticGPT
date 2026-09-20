@@ -27,6 +27,10 @@ pub(crate) struct AgentRun {
     pub(crate) status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) result: Option<Value>,
+    /// Whether the authoritative result payload is still retained in Hub storage.
+    pub(crate) result_retained: bool,
+    /// True when a completed result payload was compacted after its retention window.
+    pub(crate) result_omitted: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) arguments: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -327,10 +331,11 @@ pub(crate) fn store_result(
         return Ok(StoreResultOutcome::Unmatched);
     };
 
-    if let Some(existing_result_json) = existing_result_json {
-        let existing_result_hash =
-            existing_result_hash.unwrap_or_else(|| sha256_hex(&existing_result_json));
-        if existing_result_hash == result_hash {
+    if existing_result_json.is_some() || existing_result_hash.is_some() {
+        let canonical_hash = existing_result_hash
+            .or_else(|| existing_result_json.as_deref().map(sha256_hex))
+            .expect("result JSON or hash is present");
+        if canonical_hash == result_hash {
             return Ok(StoreResultOutcome::Duplicate { command_hash });
         }
         conn.execute(
@@ -432,19 +437,22 @@ pub(crate) fn upsert_agent_report(
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
-    if let Some((Some(existing_result_json), existing_result_hash)) = existing_result {
-        let existing_result_hash =
-            existing_result_hash.unwrap_or_else(|| sha256_hex(&existing_result_json));
-        if result_hash
-            .as_ref()
-            .is_some_and(|incoming| incoming != &existing_result_hash)
-        {
-            conn.execute(
-                "update agent_runs set conflict_json = ?1, updated_at = ?2 where run_id = ?3",
-                params![result, now, report.run_id],
-            )?;
+    if let Some((existing_result_json, existing_result_hash)) = existing_result {
+        if existing_result_json.is_some() || existing_result_hash.is_some() {
+            let canonical_hash = existing_result_hash
+                .or_else(|| existing_result_json.as_deref().map(sha256_hex))
+                .expect("result JSON or hash is present");
+            if result_hash
+                .as_ref()
+                .is_some_and(|incoming| incoming != &canonical_hash)
+            {
+                conn.execute(
+                    "update agent_runs set conflict_json = ?1, updated_at = ?2 where run_id = ?3",
+                    params![result, now, report.run_id],
+                )?;
+            }
+            return Ok(());
         }
-        return Ok(());
     }
     if matches!(existing_status.as_deref(), Some("unknown" | "not_sent")) {
         return Ok(());
@@ -501,18 +509,26 @@ pub(crate) fn upsert_agent_report(
     )?;
     Ok(())
 }
-
 pub(crate) fn get_run(state: &HubState, run_id: &str) -> Result<Option<AgentRun>> {
     let conn = state.db.lock().unwrap();
     conn.query_row(
         "select run_id, request_id, agent_id, command_type, command_hash, source, profile, detail,
-                status, result_json, arguments_json, job_json, reason, created_at, updated_at
+                status, result_json, result_hash, arguments_json, job_json, reason, created_at,
+                updated_at, expires_at
          from agent_runs where run_id = ?1",
         params![run_id],
         |row| {
             let result_json: Option<String> = row.get(9)?;
-            let arguments_json: Option<String> = row.get(10)?;
-            let job_json: Option<String> = row.get(11)?;
+            let result_hash: Option<String> = row.get(10)?;
+            let arguments_json: Option<String> = row.get(11)?;
+            let job_json: Option<String> = row.get(12)?;
+            let status: String = row.get(8)?;
+            let expires_at: Option<DateTime<Utc>> = row.get(16)?;
+            let result_retained = result_json.is_some();
+            let result_omitted = !result_retained
+                && result_hash.is_some()
+                && status == "completed"
+                && expires_at.is_some_and(|value| value <= Utc::now());
             Ok(AgentRun {
                 run_id: row.get(0)?,
                 request_id: row.get(1)?,
@@ -522,13 +538,15 @@ pub(crate) fn get_run(state: &HubState, run_id: &str) -> Result<Option<AgentRun>
                 source: row.get(5)?,
                 profile: row.get(6)?,
                 detail: row.get(7)?,
-                status: row.get(8)?,
+                status,
                 result: result_json.and_then(|json| serde_json::from_str(&json).ok()),
+                result_retained,
+                result_omitted,
                 arguments: arguments_json.and_then(|json| serde_json::from_str(&json).ok()),
                 job: job_json.and_then(|json| serde_json::from_str(&json).ok()),
-                reason: row.get(12)?,
-                created_at: row.get(13)?,
-                updated_at: row.get(14)?,
+                reason: row.get(13)?,
+                created_at: row.get(14)?,
+                updated_at: row.get(15)?,
             })
         },
     )
@@ -548,10 +566,9 @@ pub(crate) fn list_runs(
         let conn = state.db.lock().unwrap();
         let mut stmt = conn.prepare(
             "select run_id from agent_runs
-             where (expires_at is null or expires_at > ?1)
              order by created_at desc limit 1000",
         )?;
-        let rows = stmt.query_map(params![Utc::now()], |row| row.get::<_, String>(0))?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
         rows.collect::<std::result::Result<Vec<_>, _>>()?
     };
     let mut runs = Vec::new();
@@ -596,8 +613,34 @@ pub(crate) fn mark_stale_acked_unknown(
 
 pub(crate) fn prune_expired(state: &HubState) -> Result<usize> {
     let conn = state.db.lock().unwrap();
+    // Keep every identity/status/hash tombstone. Only completed payloads with no
+    // conflict evidence are compacted after the existing 24-hour window.
+    let expiring: i64 = conn.query_row(
+        "select count(*) from agent_runs
+         where expires_at is not null
+           and expires_at <= ?1
+           and status = 'completed'
+           and result_json is not null
+           and result_hash is not null
+           and conflict_json is null",
+        params![Utc::now()],
+        |row| row.get(0),
+    )?;
+    if expiring == 0 {
+        return Ok(0);
+    }
+    crate::db::backup_before_retention(&conn)?;
     conn.execute(
-        "delete from agent_runs where expires_at is not null and expires_at <= ?1",
+        "update agent_runs
+         set result_json = null,
+             arguments_json = null,
+             job_json = null
+         where expires_at is not null
+           and expires_at <= ?1
+           and status = 'completed'
+           and result_json is not null
+           and result_hash is not null
+           and conflict_json is null",
         params![Utc::now()],
     )
     .map_err(|error| anyhow!(error))
@@ -636,7 +679,7 @@ mod tests {
             agents: Arc::new(crate::agents::lifecycle::Connections::new()),
             dispatch: Arc::new(crate::agents::dispatch::Dispatch::new()),
             confirmations: Arc::new(crate::confirmation::Confirmations::new()),
-            jobs: Arc::new(Mutex::new(HashMap::new())),
+            job_cache: Arc::new(crate::state::JobCache::new()),
             boot_generations: Arc::new(Mutex::new(HashMap::new())),
             active_room: Arc::new(Mutex::new(None)),
             http: reqwest::Client::new(),
