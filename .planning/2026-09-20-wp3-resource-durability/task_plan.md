@@ -4,7 +4,7 @@
 Execute the existing roadmap WP3 end to end on completed WP1/WP2. Read relevant architecture docs first, then choose concrete implementation from actual code. User allows planning records committed with each phase. Deduplicate real repeated flows where useful; LOC reduction and design patterns are not forced acceptance targets.
 
 ## Current phase
-All implementation and runtime acceptance scenarios are complete, including strict legacy ownership and both SQLite concurrent-upgrade guards. Final workspace validation passed663 tests with1 ignored and only existing Browser warnings. Source follow-up and final documentation/API/planning commits are being recorded; temporary probe cleanup is the remaining delivery step.
+Completed. Source phases: `0f5422b`, `d8456e9`, `90947b2`, `dd7be73`. All WP3 runtime acceptance scenarios and final workspace validation passed (663 tests,1 ignored; existing Browser warnings only). Deployment/API/architecture records are updated; isolated probe processes/containers exited and temporary scripts, databases and baseline binaries were removed. Verification limits remain explicit in progress.md.
 
 ## Required scope
 1. Authority matrix: run receipts, Job history/cache, transport ledger, audit, config/secrets, Room files, Browser leases, notification endpoints and Console local attention. Record owner/source vs projection, sensitivity, retention, allowed loss and recovery.

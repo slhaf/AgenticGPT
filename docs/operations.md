@@ -156,6 +156,62 @@ No SQL, database/schema, wire, or configuration-format migration is required. Th
 
 To roll back, pause new calls, stop the new Hub, replace only the Hub binary with the previous verified artifact, and continue using the latest database and Agent ledger. Never restore an older database backup over newer results. The previous binary reopens the pre-generation connection race, so rollback restores that risk.
 
+### WP3 storage recovery and rollback
+
+Storage recovery is not an effect rollback procedure. Before restoring any
+Hub database, Agent configuration, transport ledger, or audit file, stop every
+process that owns it (Hub and the affected Agent) and keep a read-only copy of
+the current data. Do not restore an older copy over newer deduplication,
+result, conflict, or unknown evidence.
+
+Hub SQLite uses a transactional schema migration at `user_version=1`. Before a
+migration or completed-result retention compaction, Hub creates a private
+consistent snapshot beside the database as `.pre-migration.bak` or
+`.pre-retention.bak`. Preserve the current database and matching `-wal`/`-shm`
+files before any manual operation. Prefer rolling back only the binary while
+continuing with the newest database; use an older snapshot only as a deliberate
+data-recovery operation after comparing run identities and preserving the
+newer database for evidence. A restored snapshot cannot retract a command
+already delivered to an Agent or undo an external side effect.
+
+Agent Job history migration is separate from Hub receipt migration. Version 1
+adopts unambiguous legacy rows transactionally and refuses a future schema
+version without quarantining or rewriting the database. Before migration,
+preserve the private `<jobs.sqlite3>.pre-migration.bak`; newly created history
+uses mode `0600` under a private mode-`0700` parent. Do not restore an older
+history database over newer Job or deduplication evidence.
+
+Completed runs older than 24 hours have their payloads compacted only when
+they have canonical result hashes and no conflict evidence. Identity, status,
+hash, tombstone, replay, and unknown/conflict evidence remains protected.
+`resultRetained` and `resultOmitted` distinguish an available payload from a
+compacted payload; omission is not deletion of the run identity and is not
+evidence of cancellation.
+
+Agent config writes retain bounded private backups under `backups/` and use a
+setup journal for secret-reference replacement. If journal hashes or file
+types do not describe one of the expected before/after states, startup fails
+closed with a recovery conflict. Stop the Agent, preserve the journal and
+current files, and resolve the conflict from verified copies; do not delete
+the journal, force a side, or expose secret contents in diagnostics.
+
+The transport ledger is owner-bound and file-locked. A corrupt record or torn
+final line fails closed and preserves raw bytes in its private `.recovery`
+sidecar; compaction may leave the prior ledger in `.backup`. Keep those raw
+artifacts for diagnosis and do not drop or truncate the ledger to make startup
+pass. Legacy unowned records remain `LegacyUnowned`: they are not
+auto-reconciled, executed, or used to disclose a result. Recovery is an
+operator-led review of preserved raw records and newer owner-bound evidence;
+never delete or truncate deduplication evidence to bypass an ownership error.
+
+Agent audit JSONL is best-effort and rotates at 8 MiB, retaining the current
+file and one `.1` backup. A rotation or write failure is audit loss, not proof
+that a command, result, or side effect is absent. After any restore, reconnect
+the owning processes and inspect run/Job state; `unknown_after_restart`,
+`unknown`, `detached`, and a local waiter timeout must not be converted into
+`cancelled` without independent termination evidence.
+
+
 ## v0.9 acceptance checklist
 
 ```bash

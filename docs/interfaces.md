@@ -81,6 +81,43 @@ Core endpoints:
 
 `/v1/agents` returns one safe config summary per enabled local agent. When an agent is online, the summary includes coarse sandbox mode, confirmation provider, path policy roots, configured command policy rules, and builtin command policy rules. Path roots are display paths such as `workspace`, `~/Documents`, or `/tmp`; private home paths should be shortened with `~` where possible. Offline agents may return an `unknown` summary because the Hub does not persist the last local config summary. Local confirmation prompts can use English or Simplified Chinese via `confirmationLanguage` (`en` or `zh-CN`).
 
+### Hub Job authority, freshness, and retention
+
+The Agent's managed Job history is the execution-side authority. Hub `JobInfo`
+entries and the Hub Job cache are projections used for routing and observation;
+they do not prove that a local process is still running or that a side effect
+was undone. A Hub cache entry is bounded to 4,096 Jobs, expires 15 minutes
+after its `observedAt`, and is classified as `stale` after 60 seconds. A
+15-second sweep removes expired entries, and capacity eviction removes the
+oldest observation. Evicting an active projection has no effect on the Agent
+Job or the authoritative Hub run receipt.
+
+Hub HTTP `job.list`, `job.get`, and `job.cancel`, plus the corresponding
+Apps MCP Job inspection/control responses, expose top-level `freshness` and
+`observedAt` metadata. Direct live Job envelopes from other command endpoints
+may omit these projection fields; their Agent Job payload remains authoritative.
+`live` is a response from the Agent, `cached` is a usable Hub projection within
+its freshness window, `stale` is an older projection, and `unknown` means that
+no usable current fact is available (including after restart reconciliation).
+These fields describe the response projection; they are not fields on Agent
+`JobInfo`. A cache-only `job.get` is degraded evidence, not a fresh wait, and
+the Hub does not invent continuation for an Agent-issued cursor.
+
+Hub run receipts remain the durable control-plane identity for a dispatched
+command. After the 24-hour run retention window, only eligible completed
+payloads are compacted: `runId`, request/agent identity, command hash, status,
+and conflict/unknown/tombstone evidence remain. The identity/hash evidence
+needed for replay and deduplication remains protected; unknown and conflict
+records are not compacted. `AgentRun` therefore reports `resultRetained` and
+`resultOmitted` separately; an omitted payload is not evidence that the command
+did not run.
+
+Wait or transport timeout is not remote cancellation. It ends the local wait
+only; a late matching receipt or result can still arrive. Cancellation is
+reported only from observed termination evidence, and a cache snapshot or
+missing response never permits an inference that the remote Job stopped.
+
+
 ## ChatGPT Apps MCP endpoint
 
 `/mcp` is the Apps-friendly MCP endpoint. It is protected by the Hub OAuth shim and forwards MCP requests to the configured local agent and local MCP server.
@@ -280,5 +317,19 @@ Each SSE connection must use a fresh, non-empty `connectionId`; the same current
 
 `Hello`, `Heartbeat`, `HeartbeatAck`, confirmation messages, and `JobUpdate` remain best-effort lifecycle messages in V1. `process.exec`, `process.batch`, `job.get`, and `job.cancel` are reliable request/response commands. `Hello.bootGeneration` changes cause active cached Jobs to become `unknown_after_restart`; terminal Jobs remain retained and side effects are never replayed.
 
-On agent restart, the local ledger is reconciled as follows: completed runs resend their result, accepted-but-not-started runs continue execution from the stored command, and started/running runs without a completed result report `unknown` instead of replaying side effects. The Hub also marks acked runs without a status/result as `unknown` after a timeout so callers can query a terminal state via `/v1/runs/{runId}`.
-The reconciliation paragraph above is the intended contract, not evidence that this WP1 closure exercised a real Agent restart and transport-ledger recovery. Real Agent/ledger restart E2E remains unverified.
+On Agent restart, the transport ledger is the durable command/result authority:
+owner-bound completed records can resend their matching result, and
+owner-bound accepted records can resume from the stored command; started/running
+records without a completed result become `unknown` rather than replaying a side
+effect. Claims
+are locked and bound to their explicit `agentId`; a foreign owner cannot adopt
+the record. Legacy unowned records remain `LegacyUnowned`: they are not
+auto-reconciled, executed, or used to disclose a result. Recovery is an
+operator-led review of the preserved raw record and newer owner-bound
+evidence; never delete deduplication evidence to make startup pass.
+
+Ledger parsing or a torn final line fails closed. The raw offending bytes are
+preserved in a private `.recovery` sidecar, and compaction keeps a private
+`.backup`; neither is a reason to delete or reset the ledger. The Hub marks
+acked runs without a status/result as `unknown` after its timeout, but neither
+that state nor a missing cache proves that an Agent stopped.

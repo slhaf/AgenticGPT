@@ -265,8 +265,8 @@ crates/agentic-gpt-hub/src/
 | 数据 | durability / 可接受丢失 | retention 与恢复 | 敏感度 / projection |
 |---|---|---|---|
 | Hub run receipt | correctness-critical：先提交 identity/hash/result，再确认或唤醒 waiter | 完成结果沿用 24h 保留窗口；未完成、unknown、冲突及 replay 去重依据不得随 TTL 删除。SQLite 迁移原子提交并记录版本，保留迁移前恢复副本 | command/result 可能含凭据；API 只返回既有授权投影，省略或压缩必须明确标记 |
-| Agent transport ledger | correctness-critical：持锁的条件状态转移；执行前 started、响应前 completed 必须落盘 | 保留现有全局文件及旧记录；不推断旧记录 Agent owner。损坏不能静默跳过后重新执行。压缩保留身份、hash、结果与冲突证据，不引入未经证明的去重过期 | command/result 私密；新记录显式 owner，旧未关联记录不得由任意 Agent 自动重放 |
-| Agent Job history | retained result：已产生结果不能被 best-effort 通知失败跳过 | 保持 30 日 / 512 MiB 既有历史约束；active、unknown 和尚未持久化的终态不可无提示清理。损坏库保留隔离副本，重启 active 为 UnknownAfterRestart | per-Agent private SQLite；结果大小限制及 detailAvailable/truncated 必须诚实 |
+| Agent transport ledger | correctness-critical：持锁的条件状态转移；执行前 started、响应前 completed 必须落盘 | 保留全局文件及旧记录；不凭 run/request/hash 或旧 command 的 agentId 推断历史执行 owner。所有未关联旧记录保持 LegacyUnowned，启动扫描和新 envelope 均不自动执行/披露其结果；旧全局扫描可能跨 Agent 执行，payload 目标不能补证实际 owner。损坏 fail-closed；压缩保留身份、hash、结果与冲突，不设置去重过期 | command/result 私密；新记录显式 owner，旧记录恢复需人工核对而非清空去重依据 |
+| Agent Job history | retained result：已产生结果不能被 best-effort 通知失败跳过 | 保持 30 日 / 512 MiB 既有历史约束；active、unknown 和尚未持久化的终态不可无提示清理。schema1 事务迁移保留旧行与私有迁移前快照，拒绝未来版本而不隔离/重建；真正损坏库保留隔离副本，重启 active 为 UnknownAfterRestart | per-Agent private SQLite；新库 0600、private root 0700；结果大小限制及 detailAvailable/truncated 必须诚实 |
 | Hub Job projection | ephemeral：重启、容量或 TTL 淘汰允许 | 上限 4096 条、最后观测 15 分钟淘汰、60 秒后标 stale；定期清理。以 Hub observedAt 而非 Agent 时钟判年龄；缓存淘汰不修改 run/history/Job | 原始 JobInfo 不增加伪造时间；响应另标 live/cached/stale/unknown 及观测时间 |
 | workspace audit / report | best-effort：允许失败、队列丢弃和轮转；不承担执行去重 | audit 持锁写完整行并有界轮转；损坏旧行保留在轮转副本而非当执行记录恢复。report 维持既有有界队列 | args/path/output 可能敏感；不是完整审计或外部副作用证明 |
 | config / secret | correctness-critical：完整旧值或完整新值；不能把半写文件投入运行 | 原子替换、唯一备份、文件和目录同步；setup 多文件提交必须说明并处理恢复边界。加载验证失败不静默降级权限 | 保持既有明确权限与共享部署合同；新私密文件限制访问，禁止意外跟随目标 symlink |

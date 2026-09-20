@@ -229,6 +229,47 @@ Agent-issued cursor and reports cached `job.get` data only as degraded evidence,
 not as a fresh wait result. Batch admission still rejects the whole batch before
 starting any child when preflight, policy, confirmation, or capacity fails.
 
+### Storage authority and recovery boundaries
+
+The private Agent Job database (`jobs.sqlite3`) retains terminal history for
+30 days subject to its logical soft cap. Its version-1 migration adopts
+unambiguous legacy rows transactionally and refuses a future schema version
+without quarantining or rewriting the database. Before migration it creates a
+private `<jobs.sqlite3>.pre-migration.bak`; a newly created database is mode
+`0600` under a private mode-`0700` parent. The live Job registry and hot cache
+are projections; after an Agent restart, active Jobs are represented as
+`unknown_after_restart` and are not replayed for side effects. History
+retention or a Hub cache eviction does not roll back a process, MCP call, or
+other external effect.
+
+Reliable Hub commands use the Agent transport ledger as their local
+deduplication and result authority. Each claim is file-locked and carries an
+explicit owner; a record owned by another Agent is rejected. Unowned legacy
+records remain `LegacyUnowned`: they are not automatically reconciled,
+executed, or used to disclose a result. Recovery is an operator-led review of
+the preserved raw record and newer owner-bound evidence; never delete or
+replace deduplication evidence to bypass a corruption or ownership error.
+Malformed JSON or a torn final line fails closed and preserves the raw bytes in
+a private `.recovery` sidecar. Compaction may retain the prior raw ledger in a
+private `.backup`; do not delete or replace these artifacts to bypass a
+corruption error.
+
+Configuration replacement stages and syncs a private temporary file, then
+renames it into place. Replacing an existing config first stores a private
+backup under its `backups/` directory, bounded by `backupLimit`. Setup of
+secret references also uses a private setup journal. If hashes, file types, or
+the journal state do not match an expected before/after pair, recovery fails
+closed with a conflict rather than choosing a side or overwriting user data.
+Stop the owning Agent before manually restoring a config or secret; never
+paste secret values into commands, logs, or support output.
+
+Workspace audit JSONL is bounded at 8 MiB. Rotation keeps the current file and
+one `.1` backup and is best effort; audit loss is observable logging loss, not
+proof that an operation or result did not occur. A wait timeout, missing
+receipt, or cache omission likewise cannot be interpreted as remote
+cancellation or effect rollback.
+
+
 Tunnel, HTTP, and local Unix ingress do not expose Hub aggregation or notification tools. They use
 the same local policy, path-policy, confirmation, audit, and ManagedJob lifecycle as Hub execution
 while keeping the Hub out of the command path. The top-level `mcpServers` block is different: it

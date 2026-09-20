@@ -141,7 +141,18 @@ Room：仓库根/软链接/Git/scaffold 检查 → bounded diary/notebook/state 
 
 distribution/runtime 发现并验证外部资产 → BrowserRuntimeContext/Manager → acquire(name) 创建 NodeReplKernel → bootstrap 外部 browser-client → 同 lease repl 串行执行 → reset/release/idle reaper → turn-ended/shutdown。lease 只在进程内，不是重启可恢复 session。
 
-独立 browser-host 的 framed JSON 路由和 pending id 映射服务浏览器扩展；它不是上述 manager 的同名重复实现。仓库未包含 browser-client/service 的 JS 源码，本轮无法证明其内部副作用边界。
+独立 browser-host 的 framed JSON 路由和 pending id 映射服务浏览器扩展（`crates/agentic-browser-host/src/lib.rs::run`、`prepare_socket`、`Host::handle_client_message`）；它不是上述 manager 的同名重复实现。仓库未包含 browser-client/service 的 JS 源码，本轮无法证明其内部副作用边界。
+
+#### 4.5.1 外部资源生命周期保证（源码锚点）
+
+下列是当前 checkout 能证明的控制流保证，不是对下游实现或副作用回滚的保证：
+
+- **下游 MCP（`mcp.rs::start_managed_call`、`run_managed_call`、`client`、`close_client`）：** Job 先登记，再经过授权/并发门控；stdio 使用 `TokioChildProcess` 启动 `sh -lc <configured command>`，由 RMCP transport 持有 child 的 stdio；HTTP 则无本地 child。调用结果来自下游 response，超时/取消会发送取消通知并尝试关闭 client；没有观察到终态时会记录 detached/timeout。请求一旦发出，不能据此证明下游副作用已回滚。
+- **Browser（`browser_kernel.rs::NodeReplKernel`；`browser_manager.rs::BrowserRuntimeManager`）：** acquire 创建 Node child、bootstrap 外部 browser-client 并登记进程内命名 lease；repl 在 lease lifecycle 下串行调用 JS，reset 执行 turn-ended、JS reset 和重新 bootstrap，release/idle reaper 关闭 kernel 后移除 lease。`browser-client/service` 源码不在仓库，故返回值只能证明调用观察，不证明浏览器副作用回滚；丢失响应表示结果未知，不等于副作用未发生。
+- **tmux（`tmux.rs::create_session_at`、`tmux_output`、`close_session_inner`）：** Agent 调用外部 `tmux` server 创建/查询/控制 session；短命 CLI child 只承载命令输出，server/session 不由 Agent child Job 持有。`closeSession` 请求 `kill-session` 并记录 audit，但内存 audit/返回丢失不能证明持久 server 或 pane 中的副作用已停止或回滚。
+- **Standalone tunnel（`supervisor.rs::run_loop`、`spawn_tunnel`、`terminate`）：** supervisor 持运行锁，启动 tunnel-client（stdin 为 null、stdout/stderr 供日志读取），由 tunnel-client 再连接/启动隐藏 stdio worker；健康检查就绪后运行，退出/超时按有限退避重启，关闭时对本地 process group 发 TERM/KILL。该 owner 只覆盖本地进程链，不证明远端 tunnel 或已发出的下游操作结果。
+
+因此，启动成功、调用返回、控制面 terminal state 与实际 side effect 是四个不同层次。网络/进程断线导致的 lost response 只能把结果标为 **unknown**；不得把它改写成“调用失败且没有副作用”，也不能把内存 lease/audit 当成 downstream rollback 或 kill persistent server 的证据。
 
 ### 4.6 确认、断线与恢复
 
@@ -156,13 +167,13 @@ Hub replay 未 ACK 的 durable envelope；Agent ledger 按 run/request/hash 区�
 | 实际 child、Process/MCP Job | Agent jobs + 私有 jobs.sqlite3 | 历史有 retention/大小上限；恢复 active 为 unknown，不保证副作用回滚 |
 | Agent 私有安装/激活状态 | `~/.agentic_gpt/state/agent/<id>/` | 与 workspace 内容分离，部分旧状态迁移；启动时派生 owner |
 | 本地 MCP socket | `~/.agentic_gpt/runtime/agent/<id>/mcp.sock` | 0700 parent/0600 socket、同 UID、stale inode guard |
-| 可靠 command ledger | `~/.agentic_gpt/transport-runs.jsonl` | append-only command/result 去重；当前不在每-agent 私有根中，需独立明确 retention/并发/耐久边界 |
-| 审计 | workspace `.agentic-gpt-audit.jsonl` | 含命令/路径等敏感信息；写入/report 存在 best-effort 路径，不能当不可丢失审计保证 |
-| Hub registry/run receipts | hub.sqlite3：agents、notification_endpoints、agent_runs | 单 serve lock；run 24小时保留；不是 Agent Job DB 副本 |
-| Hub连接/pending/Job cache/active Room/confirmation/OAuth | HubState 内存 | Hub 重启丢失；SQLite 存在不意味着同步 waiter 或 token 也持久 |
+| 可靠 command ledger | 全局、显式 owner、加锁并同步的 ledger | corrupt raw evidence fail-closed；按阈值 compaction；不因 identity expiry 删除 |
+| 审计 | workspace `.agentic-gpt-audit.jsonl` | 单文件 8 MiB + one backup；best-effort 写入/report，不能当不可丢失审计保证 |
+| Hub registry/run receipts | hub.sqlite3：agents、notification_endpoints、agent_runs | schema 1 + transaction backups；24 小时只适用于 eligible completed payload；protected hash/unknown/conflict tombstones 保留 |
+| Hub连接/pending/Job cache/active Room/confirmation/OAuth | HubState 内存 | cache 上限 4096；metadata TTL 15 分钟/60 秒；Hub 重启丢失内存等待与 token，SQLite 存在不等于同步 waiter 或 token 持久 |
 | Room内容 | Agent 配置的 Room repository + Git（默认 workspace/room；`repositoryRoot` 可配置） | Hub 不持有内容；文件服务不自动承担记忆检索/上下文组装 |
-| Browser lease/kernel | Agent BrowserRuntimeManager 内存/Node child | 进程内命名生命周期，重启不恢复 lease |
-| browser-host socket/pending | 独立 host `/tmp/codex-browser-use` | socket 0660，无等价 local MCP 的 peer UID gate；可访问性依部署权限 |
+| Browser lease/kernel | Agent BrowserRuntimeManager 内存/Node child | 进程内命名生命周期，重启不恢复 lease；JS 返回/审计不证明下游副作用回滚 |
+| browser-host socket/pending | 独立 host `/tmp/codex-browser-use` | 当前只读部署检查确认 image/mount、host/Chromium UID/GID `1000:1000`、socket `0660`、同一 socket inode 且无 ACL xattr；Agent service context 为 root `0:0`。精确生产 mode 的 primitive smoke 允许 `1000:1000`、`1001:1000`，拒绝 `1001:1001` (`EACCES`)，并确认 stdin close 清理调用方 socket；这验证 Unix 可达性/清理，不是认证或下游副作用回滚证明 |
 | Android Attention | 本地 Room DB `agentic_attention.db` | OS alarm/notification 是副作用，DB 才是 local item 权威；不是 Hub run 数据库 |
 
 配置、Job history、command ledger、审计、report 各有不同失败与恢复语义。当前没有一个统一且严格的“所有数据可靠持久化”承诺。

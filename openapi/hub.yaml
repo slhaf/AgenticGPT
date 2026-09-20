@@ -163,17 +163,25 @@ paths:
             default: 0
       responses:
         "200":
-          description: Current Job state and bounded output.
+          description: Current Job state and bounded output, or a cache-only degraded snapshot when the Agent is unavailable.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/JobDetail"
+                oneOf:
+                  - $ref: "#/components/schemas/JobToolResponse"
+                  - $ref: "#/components/schemas/JobCacheFallbackResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
         "500":
           $ref: "#/components/responses/InternalError"
+        "503":
+          description: Agent unavailable without a cached Job snapshot.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobGetUnavailableResponse"
   /v1/jobs/{jobId}/cancel:
     post:
       operationId: cancelJob
@@ -192,11 +200,11 @@ paths:
             type: string
       responses:
         "200":
-          description: Job state after the cancellation request.
+          description: Job cancellation outcome and observed termination evidence.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/JobDetail"
+                $ref: "#/components/schemas/JobCancelResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
@@ -1405,6 +1413,8 @@ components:
         - commandType
         - commandHash
         - status
+        - resultRetained
+        - resultOmitted
         - createdAt
         - updatedAt
       additionalProperties: false
@@ -1432,7 +1442,13 @@ components:
             - unknown
             - failed
         result:
-          description: Completed command result, when available.
+          description: Completed command result when the authoritative payload is retained; omitted after eligible retention compaction.
+        resultRetained:
+          type: boolean
+          description: True when the authoritative result payload is retained in Hub storage.
+        resultOmitted:
+          type: boolean
+          description: True when an eligible completed payload was compacted while its run identity and result hash remain retained.
         reason:
           type:
             - string
@@ -3139,6 +3155,10 @@ components:
         terminationEvidence:
           type: string
           description: Bounded evidence describing the local/remote event actually observed.
+    JobFreshness:
+      type: string
+      enum: [live, cached, stale, unknown]
+      description: Freshness of the Hub Job response projection, not a JobInfo field.
     JobError:
       type: object
       required: [code, message]
@@ -3148,6 +3168,101 @@ components:
           type: string
         message:
           type: string
+    JobToolResponse:
+      type: object
+      required: [jobId, state, freshness, observedAt]
+      additionalProperties: false
+      properties:
+        jobId:
+          type: string
+        group:
+          type: string
+        kind:
+          $ref: "#/components/schemas/JobKind"
+        state:
+          $ref: "#/components/schemas/JobState"
+        elapsedMs:
+          type: integer
+          minimum: 0
+        durationMs:
+          type: integer
+          minimum: 0
+        exitCode:
+          type: integer
+        stdoutTail:
+          type: string
+        stderrTail:
+          type: string
+        truncated:
+          type: boolean
+        result:
+          description: Retained bounded result for a terminal non-process Job.
+        error:
+          $ref: "#/components/schemas/JobError"
+        resultTruncated:
+          type: boolean
+        resultBytes:
+          type: integer
+          minimum: 0
+        resultSha256:
+          type: string
+        resultPreview:
+          type: string
+        freshness:
+          $ref: "#/components/schemas/JobFreshness"
+        observedAt:
+          type: string
+          format: date-time
+    JobGetUnavailableResponse:
+      type: object
+      required: [error, freshness]
+      additionalProperties: false
+      properties:
+        error:
+          $ref: "#/components/schemas/JobError"
+        cached:
+          $ref: "#/components/schemas/JobListItem"
+        freshness:
+          $ref: "#/components/schemas/JobFreshness"
+        observedAt:
+          type: string
+          format: date-time
+    JobCacheFallbackResponse:
+      type: object
+      required: [error, cached, freshness, observedAt]
+      additionalProperties: false
+      properties:
+        error:
+          $ref: "#/components/schemas/JobError"
+        cached:
+          $ref: "#/components/schemas/JobListItem"
+        freshness:
+          $ref: "#/components/schemas/JobFreshness"
+        observedAt:
+          type: string
+          format: date-time
+    JobCancelResponse:
+      type: object
+      required: [jobId, state, cancelOutcome, terminationEvidence, freshness, observedAt]
+      additionalProperties: false
+      properties:
+        jobId:
+          type: string
+        state:
+          $ref: "#/components/schemas/JobState"
+        cancelOutcome:
+          type: string
+          description: Bounded kind-specific cancellation outcome.
+        terminationEvidence:
+          type: string
+          description: Bounded evidence describing the local or remote event actually observed.
+        error:
+          $ref: "#/components/schemas/JobError"
+        freshness:
+          $ref: "#/components/schemas/JobFreshness"
+        observedAt:
+          type: string
+          format: date-time
     JobDetail:
       type: object
       required: [job, detailAvailable, resultTruncated]
@@ -3172,6 +3287,11 @@ components:
         resultPreview:
           type: string
           description: UTF-8-safe bounded preview for an omitted oversized result.
+        freshness:
+          $ref: "#/components/schemas/JobFreshness"
+        observedAt:
+          type: string
+          format: date-time
     JobResponse:
       type: object
       required:
@@ -3212,6 +3332,11 @@ components:
         resultPreview:
           type: string
           description: UTF-8-safe bounded preview for an omitted oversized result.
+        freshness:
+          $ref: "#/components/schemas/JobFreshness"
+        observedAt:
+          type: string
+          format: date-time
     ProcessBatchResponse:
       oneOf:
         - $ref: "#/components/schemas/JobBatchResponse"
@@ -3336,13 +3461,41 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/JobInfo"
+    JobListItem:
+      type: object
+      required: [jobId, kind, state, createdAt]
+      additionalProperties: false
+      properties:
+        jobId:
+          type: string
+        group:
+          type: string
+        kind:
+          $ref: "#/components/schemas/JobKind"
+        state:
+          $ref: "#/components/schemas/JobState"
+        createdAt:
+          type: string
+          format: date-time
+        startedAt:
+          type: string
+          format: date-time
+        finishedAt:
+          type: string
+          format: date-time
     JobListResponse:
       type: object
-      required:
-        - jobs
+      required: [jobs, freshness]
       additionalProperties: false
       properties:
         jobs:
           type: array
           items:
-            $ref: "#/components/schemas/JobInfo"
+            $ref: "#/components/schemas/JobListItem"
+        nextCursor:
+          type: string
+        freshness:
+          $ref: "#/components/schemas/JobFreshness"
+        observedAt:
+          type: string
+          format: date-time

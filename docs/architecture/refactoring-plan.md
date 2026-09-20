@@ -374,18 +374,29 @@ flowchart TD
 - 保持 Normal + explicit Room、Hub Room/Skills/notifications capability、四个 CLI tmux local-admin 操作以及 `local:`, `tunnel:`, `http:`, `hub:`/`localadmin:` audit provenance。
 - 若后续改动消费不匹配 owner、让 timeout 冒充取消、使 config 与 startup-derived resources 分裂、把 annotation 当授权，或新增 registry/framework/compat 双轨，应停止并回到对应工作包边界。
 
-### WP3：资源所有权、retention 与 durability 分层
+### WP3：资源所有权、retention 与 durability 分层（已完成；分层保证）
 **对应正式诊断：** A06（external trust/保证边界）、A07（durability/retention/recovery）；按 D04 保持安全默认和现有威胁模型范围，按 D06 执行 durability 分层，不把全量 Hub durable 化或未来 threat upgrade 设为前置。
 
 
 **目的与证据**
 
-- [事实] Hub SQLite `agent_runs` 保留约 24 小时的 command/hash/ack/status/result/conflict/reason；Hub agents/notification endpoints 持久化 registry/endpoint，而 pending、Job cache、active Room、confirmation、OAuth maps 在内存。
-- [事实] Agent `job_history` 是每 Agent 私有 SQLite，具有 `UnknownAfterRestart`、30 日/512 MiB/结果大小上限和 corrupt DB 恢复；`transport-runs.jsonl` 是可靠传输 ledger，但当前未见 cap/rotation/compaction；workspace audit JSONL 也未见统一 lock/fsync/rotation。
+- [事实] Hub SQLite schema version 1 以事务迁移并保留私有恢复快照；`agent_runs` 沿用 24 小时的可压缩完成结果窗口，但 identity/hash、unknown、未完成及冲突证据不随 TTL 删除。`resultRetained/resultOmitted` 明示 payload 保留状态；registry/notification endpoint 仍由 Hub DB 持有，session/waiter/cache 不持久化。
+- [事实] Agent 私有 Job history 保持 30 日/512 MiB 的普通终态约束并保护 active/unknown；关键 admission/start 失败时不执行副作用，未持久化终态不被 hot-cache 清理。全局 ledger 显式 owner、阻塞文件锁、条件 claim 和 sync，损坏 fail-closed 并保留原文；完成 transition 可压缩但不设置去重身份过期。audit 持锁追加、8 MiB 加一份轮转备份，仍是 best-effort。
 - [事实] Room repository/Git/maintenance 是 Agent 资源 owner；Hub active Room 只有 lease。BrowserRuntimeManager 的 lease 只在进程内；browser-host bridge 是独立进程/socket。
-- [事实] Console Android attention 的权威是 Android Room；AlarmManager/Notification 不保存完整事实。`agentic-browser-host` 固定 `/tmp/codex-browser-use`，socket mode 0660，源码没有 Agent secret/peer UID 校验；其与 Local MCP 的边界需结合用户报告的真实共享部署拓扑盘点，不能预先假定 owner-only 或判定共享拓扑不支持。
-- [推断] Hub cache 无 TTL/上限会造成易失 projection 增长；不同 retention/durability 等级可能使“已记录”被误解为“可靠审计/执行事实”。config/audit/ledger 的 crash、并发 append、隐私和恢复语义没有本次运行证据。
-- [未验证] 未执行 Hub/Agent 重启、DB/JSONL fault injection、备份恢复、browser-host shared-volume、Android process death/boot、真实 external MCP/Browser 资源副作用。
+- [事实] Console Android attention 仍以 Android Room 为权威。实际 Neko Docker、宿主机及 systemd-nspawn Agent 已只读核对：Chromium/native host UID/GID 1000:1000、Agent 为 root，同一共享 socket inode，目录 0755、socket 0660，无 ACL xattr。保留现有文件系统访问机制，不新增 token、owner-only gate 或远程 bridge。
+- [已验证] Hub cache 全局最多 4096 项，Hub observation 60 秒后 stale、15 分钟 TTL、15 秒周期清理；HTTP/MCP 区分 live/cached/stale/unknown。实际容量和 TTL 淘汰不删除 durable receipt；缺失缓存的 unknown metadata 漏项在验收中修复。
+- [边界] 不承诺全量 durable 或外部副作用回滚。未模拟硬件断电、交互式 wizard 每个 syscall 的强杀、Android boot/process death；后者仍归 WP5。新 Neko 检查只读，不把 socket primitive smoke 称作完整浏览器页面操作验收。
+
+**完成证据（2026-09-20）**
+
+- 分阶段源码/合同提交：`0f5422b` authority matrix、`d8456e9` Hub cache/receipt、`90947b2` Agent admission/config/ledger/history/audit、`dd7be73` SQLite 迁移竞争与严格 legacy owner；部署/API 文档与最终记录单独收尾提交。临时探针、数据库与基线二进制已清理。
+- `cargo fmt --all -- --check`、`cargo build --workspace`、`cargo test --workspace` 通过：663 passed、1 ignored；构建保留 5 个既有 Browser distribution dead-code warnings，无新增 warning。OpenAPI YAML 解析、300 个本地引用及已观测 GET 响应字段检查通过，未宣称运行外部完整 OpenAPI validator。
+- 实际 Hub/Agent：Hub 失联期间完成结果写入 ledger，重连补交；Agent SIGKILL 后 active Job 为 UnknownAfterRestart，Hub restart 保留 receipts；Agent Room scaffold 内容/owner 不变，private history root 为 0700。
+- 实际 4100 Job projection 输入受限为 4096，60 秒变 stale、15 分钟淘汰为零且原 receipt 保留。计时探针在最后 unknown label 断言发现错误；修复后独立真实请求确认 empty-cache unknown，未把首次计时脚本记为全程成功。
+- 故障前后对照：旧 config 中断写入留下零字节文件，新 staged-write SIGKILL 保留完整旧值；12 个并发修改旧实现仅留 1 条，新实现保留 12 条。真实 CLI 恢复旧 config/新 secret、清理已提交 journal、保留冲突备份；这些是磁盘 crash-state 场景而非逐 syscall wizard 强杀。
+- 旧 torn-ledger 会再次执行 touch；新实现保留原文/recovery 且不重放。真实 ledger 压缩将 1805 个历史/证据行收敛为 630 行（含新运行），保留 600 个结果及 unknown/unowned/不同结果/冲突；真实 Job 触发 audit 轮转。SQLite 阻塞结果写入中强杀 Hub 后完整性和 admission hash 保留，重启重放成功；完成 payload 压缩后的相同 hash 幂等、不同 hash 冲突和私有恢复快照均已实际验证。
+- Agent history 的真实新建/旧库迁移/未来版本/迁移失败场景通过：新库 schema1/0600、旧行与私有快照保留；未来版本及失败迁移不覆盖数据且不执行进程。并发 writer 在 staging 开始后提交未来版本，Hub/Agent 均在 IMMEDIATE 事务内复查并拒绝降级，保留既有恢复备份。真实 SSE 验证所有 ownerless legacy（包括精确目标一致的 accepted/completed）不执行、不 ACK、不披露结果，原 ledger 不变。
+- 实际部署只读 `bridge.getStatus` 成功；隔离共享 Docker volume 上以目录 0755/socket 0660 验证同 UID 和共享 GID 可达、不同 UID/GID 为 EACCES，stdin close 清理 socket。MCP/Browser/tmux/tunnel 的启动、结果与外部效果保证分开记录于 current-state 与部署文档。
 
 **范围**
 
@@ -417,7 +428,7 @@ flowchart TD
 4. `refactor(storage): add retention and recovery for JSONL/SQLite projections`：保留 owner/hash/conflict/unknown 证据，兼容旧文件。
 5. `docs(deploy): document browser-host and external adapter trust boundaries`：记录实际 Neko/container/共享目录/Unix socket 拓扑及未定边界；在 peer/auth 机制确定前不扩大网络暴露，不把真实共享部署改列为不支持。
 
-**既有验证入口（均未执行）**
+**验证入口（核心已执行；证据边界见上）**
 
 - Hub `runs.rs`、`db.rs`、`instance_lock.rs`：run TTL、schema/alias、单进程锁、replay/unknown。
 - Agent `job_history.rs`、`transport_ledger.rs`、`audit.rs`、`private_state.rs`：history retention/restart/corrupt recovery、ledger、audit/state path/permissions。
