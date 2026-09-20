@@ -1,10 +1,10 @@
 # 渐进重构计划
 
-> **状态：计划草案，未执行。** 本文只描述未来可执行的工作包、依赖和验收；本轮只同步路线图，不实施代码、协议、配置或产品变更，也不表示任何实现已经批准或落地。
+> **状态：路线图草案；WP1 当前状态见 §1.2。** 本文仍描述尚未交付的工作包、依赖和验收；第 1.2 节只记录 WP1 的有界交付状态，不表示其余实现、协议、配置或产品变更已经落地。
 >
 > **权威决策：** 本计划按 [D01–D08 用户已确认的架构整理决策](decisions.md) 编排。D01–D08 已确定本轮的产品边界和工程取舍，但不替代实施时对具体合同、权限机制、数据保留或恢复细节的技术设计。
 >
-> **调查基线：** 2026-09-16。事实引用来自源码定位和本次只读调查；本路线图未执行实现或验证，不能把计划中的 smoke、测试、部署或迁移步骤理解为已经完成。
+> **历史调查基线：** 2026-09-16。事实引用来自源码定位和当时的只读调查；这些历史发现不覆盖当前 WP1 交付状态，也不能把当时未执行的路线图 smoke、测试、部署或迁移步骤理解为本次已完成。
 >
 > **阅读前提：** 先读 [现状架构](current-state.md)、[问题诊断](diagnosis.md)、[目标架构](target-architecture.md)、[工程规则](engineering-rules.md) 和 [已确认决策](decisions.md)。本计划不取代接口、配置、运维或开发手册。
 
@@ -31,6 +31,8 @@
 - **[未验证]**：本次只读调查未运行的场景、外部组件或部署行为。
 - **[用户决策]**：D01–D08 已记录在 `decisions.md`；只有超出这些边界、改变公开行为/权限/数据用途或扩大产品范围的新取舍才需要新增确认，不重复审批已确认原则。
 - **[技术决定]**：在不改变 D01–D08 合同的情况下，维护者可自行选择实现细节；具体合同、retention、auth 和恢复机制在所属工作包实际碰到时按证据细化。
+
+
 ## 1.1 与正式诊断编号的对应
 
 本计划统一使用 `diagnosis.md` 的正式编号 **A01–A09**；调查报告中的严重度/P 编号仅是原材料索引，不作为本路线图的风险编号。A 编号表示需要核验或处理的主题，不表示每项都是已证实漏洞。
@@ -46,6 +48,13 @@
 | A07 | 持久化、等待和投影缺少一致语义说明 | WP1、WP3 | 按 D06 分层 durability、retention、freshness 和恢复状态；不把 best-effort 当 durable，接受 Hub 临时状态重启失效 |
 | A08 | Console 原型/本地能力与远端控制定位不清 | 独立维护参考 WP5、WP5-O | Android attention 保持 local-only；Console Hub 是独立产品，均不进入核心 DAG、里程碑或完成门槛 |
 | A09 | 当前规范、历史说明与验证工具保证混在一起 | WP0、WP4-A、WP4-B、全局核验 | 明确 authority/状态；历史版本不因旧就判 bug，evaluator 不冒充 runtime 验证 |
+## 1.2 WP1 当前交付状态（2026-09-20）
+
+- **[已完成]** 先前的 owner、connection-generation 和 control-boundary 交付按当前维护者记录接受完成；这包括可靠 Response owner、连接代际隔离以及 Hub connection/dispatch ownership 的边界收口。它们不再是本节的待办，也不改变仍未验证的外部场景边界。
+- **[已完成]** 当前 WP1 closure 冻结 confirmation/run 合同：`ConfirmationRequest` 不携带 `runId`；一次 confirmation 由 captured `(agentId, connectionId, requestId, sender)` owner 负责，callback 不按裸 Agent id 重选连接。控制面 waiter timeout 只结束本地等待，不取消远端工作；迟到 ACK/status/Response 仍可带来新的远端知识并单调推进 run receipt。`not_sent` 仅表示已证明的 channel-send failure，并排除 replay。
+- **[已完成]** Hub transport receipt 的状态语义与概念状态词分开：本合同涉及的 receipt statuses 包括 `created`、`dispatched`、`acked`、`started`、`running`、`failed`、`unknown`、`completed`、`timeout_waiting_result`、`not_sent`，但这不是 AgentReport 或 Job statuses 的封闭全集。`wait_expired`、`remote_unknown`、`sent_no_ack`、`acked_running` 和 `cancel_requested` 仅用于说明观察/等待语义，不是新增 wire 或 persisted status。
+- **[证据]** 集成收口通过 `cargo fmt --all -- --check`、集成 `cargo test -p agentic-gpt-hub` suite 和无 warning 的 `cargo build -p agentic-gpt-hub`；隔离 Hub HTTP/SSE smoke 的结果记录在 [WP1 closure progress](../../.planning/2026-09-20-hub-wp1-closure/progress.md)。该 smoke 使用 simulated Agent peers，覆盖六个有界 confirmation/replacement/callback/timeout/late-receipt 场景；随后在同一临时 SQLite 上真实重启 Hub，确认两条 `completed` `/v1/runs` 记录和 `sessions[]` 结果保留，且 `/v1/info` 的 `pendingRequestCount`、`pendingConfirmationCount`、`cachedJobCount` 均为 0。这是 Hub-side receipt/session retention 与 cleanup 证据，不是所有历史路线图场景的 live 复验，也不是完整真实 Agent executor E2E 证明。
+- **[未验证]** 真实 Agent restart/transport-ledger reconciliation、external ntfy provider 以及完整跨进程 Agent executor/ledger E2E 仍未验证；这些边界不得被当前 Hub smoke 或历史基线测试改写为已完成。
 
 
 
@@ -92,7 +101,7 @@ flowchart TD
 以下清单是核心工作包的共同不可回归门槛；WP5/WP5-O 的独立参考工作只在自身维护或另立产品时适用，不构成核心完成条件。除非 D01–D08 之外出现新的明确决策，重构不得改变这些语义：
 
 1. **权限不放宽。** 未经决策不得因统一 gate、路由迁移、schema 兼容或 profile 重构增加 process、file、MCP、tmux、skill、Room、Browser 或 notification 能力。
-2. **等待不是取消。** Hub/HTTP/MCP 的 waiter timeout 只结束控制面等待；不得把它写成已取消远端 Job。应区分 `wait_expired`、`remote_unknown`、`cancel_requested` 和真正的 terminal result。
+2. **等待不是取消。** Hub/HTTP/MCP 的 waiter timeout 只结束控制面等待；不得把它写成已取消远端 Job。`wait_expired`、`remote_unknown`、`cancel_requested` 等是概念词，不是新增 wire 或 persisted status；应与真正的 terminal result 区分。
 3. **身份分离。** `run_id`、`request_id`、`connection_id`、Agent identity、Job identity 不互相替代；late/duplicate result 必须校验 owner tuple，不能仅凭全局 request id 唤醒 waiter。
 4. **代际隔离。** 当前 connection 的 metadata、Heartbeat、Job projection、RunReport 与旧 connection 的可靠补交是不同路径；旧连接不能借迟到消息改写新连接状态。
 5. **真实状态与 projection 明确。** Hub Job cache、run receipt、Agent Job history、transport ledger、audit、Console Room/Alarm 都要标明 authoritative、projection、ephemeral、stale 或 unknown；缓存不得被当作执行事实。
@@ -242,7 +251,7 @@ flowchart TD
 **对应正式诊断：** A04（Hub connection/run/waiter owner）；只处理已定位的不变量和未验证竞态，不预先宣称远程漏洞。
 
 
-**目的与证据**
+**历史调查基线（2026-09-16）**
 
 - [事实] Hub `state.rs` 分开保存 Agent registry、当前 connection、pending waiter、Job cache、boot generation、active Room、confirmation 和 run receipt；`agents::request_agent` 目前将 waiter 放入全局 `pending[request_id]`。
 - [事实] SSE `post_agent_message` 会拒绝 stale 的非可靠消息，但 WS socket reader 调用统一 handler 时没有同等的 current connection 门槛；旧连接的 Hello/Heartbeat/JobUpdate/RunReport 竞态影响尚未被真实复现。
@@ -257,8 +266,8 @@ flowchart TD
 1. 引入 crate 内部最小 `ConnectionHandle`/owner validator 概念，至少绑定 `agent_id、connection_id、mode、role`；不新造全局 capability registry。
 2. 将 pending value 绑定 `(agent_id, run_id, request_id, command_hash)`，Response 只有 owner tuple 匹配且 durable result 为合法的新结果/幂等重复时才能唤醒 waiter。无 run id 的旧路径不得服务新的受控执行；迁移全部 caller 后按 D03 clean cutover，不以旧 compat、alias 或新 version 协商掩盖 owner 缺失。
 3. 统一 non-reliable 与 reliable inbound 规则：当前代际才可更新 Heartbeat、Hello metadata、Job projection、非可靠 report；旧代际只可补交与 DB 中完全匹配的可靠结果/ACK/status，且不能改当前连接属性。
-4. 绑定 confirmation 到 connection/run/request；断线应以明确的终止结果结束原 waiter，callback 不得按裸 Agent id 投递给无关新连接。
-5. 区分 `not_sent`、`sent_no_ack`、`acked_running`、`wait_expired`、`remote_unknown` 和 `cancel_requested`；确认 Hub waiter timeout 不会取消远端 Job。
+4. Confirmation owner 绑定 captured `agent_id、connection_id、request_id、sender`；`ConfirmationRequest` 不携带 `run_id`，断线和 callback 都不得按裸 Agent id 投递给无关新连接，也不得为 confirmation 发明 run identity。替换、断线、callback、timeout 和 publish failure 竞争同一 terminal claim；可写时向原 sender 发送一次 `ProviderUnavailable(provider_unavailable)`，失败 transport 仍由 Agent disconnect drain 兜底。
+5. 区分 Hub transport receipt statuses 与概念观察/等待词：本合同涉及的 statuses 包括 `created`、`dispatched`、`acked`、`started`、`running`、`failed`、`unknown`、`completed`、`timeout_waiting_result`、`not_sent`，但不构成 AgentReport 或 Job statuses 的封闭全集；后者可描述 `sent_no_ack`、`acked_running`、`wait_expired`、`remote_unknown`、`cancel_requested`，但不新增 wire 或 persisted status。`not_sent` 仅表示已证明的 channel-send failure 且排除 replay；waiter timeout 不取消远端 Job，迟到 remote knowledge 仍可推进 receipt。
 
 **非目标**
 
@@ -277,19 +286,19 @@ flowchart TD
 
 1. `refactor(hub): add connection handle and owner validation`：先覆盖入站校验和诊断，不迁移公共 API。
 2. `fix(hub): bind pending responses to run owner`：Response/ACK/status 使用完整 tuple；mismatch 进入 conflict/error，不消费别的 waiter。
-3. `fix(hub): close confirmation waiters by connection generation`：断线、替换和 callback 使用相同 connection/run/request owner。
+3. `fix(hub): close confirmation waiters by connection generation`：断线、替换和 callback 使用相同的 connection/request owner；`ConfirmationRequest` 无 `run_id`，不得为 confirmation 发明 run identity。
 4. `refactor(hub): separate wait timeout from remote execution state`：补齐原因/状态 projection；保持 late result 可验证落库。
 5. `cleanup(hub): migrate callers and retire unowned response fallback`：迁移结束后移除无 owner 的隐式路径；不建立旧 compat 双轨或新增 version 字段。
 
-**既有验证入口（均未执行）**
+**历史验证入口（截至 2026-09-16 未执行）**
 
 - Hub `agents.rs`：boot generation、pending replay、stale SSE heartbeat/JobUpdate、matching-run late Response、send failure、ReportingOnly target rejection、过期连接清理。
 - Hub `runs.rs`：late idempotent result、stale acked→unknown、Agent report upsert。
 - Hub `main.rs`/`notify.rs`：confirmation action、bearer、safe info summary。
 - Agent `hub.rs`/`transport_ledger.rs`：Hello、reliable envelope、duplicate/hash mismatch、reconcile。
-- 现有验证不覆盖 old WS reader、mismatched Response 消费 waiter、confirmation disconnect waiter，必须用真实场景补证据，而不是把现有 SSE 测试宣称为完整证明。
+- 历史基线验证不覆盖 old WS reader、mismatched Response 消费 waiter、confirmation disconnect waiter；当前 WP1 有界证据见 §1.2，不能把它扩大为完整 Agent/ledger 或所有路线图场景证明。
 
-**真实场景验收**
+**真实场景验收（历史路线图清单；WP1 当前证据见 §1.2）**
 
 1. 建立同一 Agent 的新旧 WS/SSE connection，替换后让旧连接发送 Hello、Heartbeat、JobUpdate、RunReport；旧非可靠消息不改当前 metadata/cache，日志/状态能说明 stale。
 2. 让旧连接补交一个 DB 中完全匹配 `(agent,run,request,hash)` 的 reliable Response，验收一次完成或幂等，不重复执行；再发送 foreign/mismatched tuple，验收不消费当前 waiter、不覆盖已完成结果。
@@ -308,7 +317,7 @@ flowchart TD
 
 - 所有 inbound message 都有 documented owner rule；WS/SSE 不再因入口不同而拥有不同的安全语义。
 - Response mismatch 不会消费无关 waiter；可靠 late result 仍能完成合法 run；confirmation 与 connection generation 闭环。
-- run 状态可区分等待、远端效果和 unknown；验证清单中所有“未验证”项有真实 smoke 结果或明确保留为未验证并阻止删除旧保护。
+- run 状态可区分等待、远端效果和 unknown；WP1 当前有集成回归、六 case 的 simulated-peer Hub HTTP/SSE smoke，以及同一临时 SQLite 的 Hub restart retention/cleanup 证据。真实 Agent restart/transport-ledger、OAuth/Room 和 external ntfy 仍明确未验证；本状态不声称所有历史路线图场景已 live-tested。
 
 **停止条件**
 

@@ -4,11 +4,11 @@
 Finish the remaining Hub confirmation ownership and run/wait lifecycle seams in one coordinated implementation batch. Preserve wire/permissions and established error projections; prove changed behavior with regressions and a real isolated Hub scenario.
 
 ## Current Phase
-Contract discovery — in_progress.
+Complete — integrated ownership/run fixes, review-discovered retirement correction, regression/live verification, cleanup and documentation delivered.
 
 ## Phases
 1. Contract discovery: verify Hub/Agent confirmation and durable run transitions; freeze cross-slice interfaces. Commit execution contracts separately.
-2. Implementation: independent confirmation/lifecycle and run/dispatch ownership slices; integration owner Main. Skip worker validation while editing; validate integrated code. Separate focused commits for the two implementation slices.
+2. Implementation: independent confirmation/lifecycle and run/dispatch ownership slices; integration owner Main. Skip worker validation while editing; validate integrated code. Commit the integrated implementation atomically because the shared HubState constructor migration also touches the run tests; do not manufacture a broken intermediate revision or stage synthetic source.
 3. Joint verification: regressions and real Hub callback/reconnect/late-response smoke, targeted Agent confirmation checks where affected; record exact results and conclude WP1 status from evidence.
 
 ## Constraints
@@ -45,3 +45,5 @@ Reproduce the concrete races/state regressions before their fixes where practica
 - Both implementation workers first write baseline-compiling wp1_* regressions using only current APIs, report ready, then wait for Main's red-run result before production edits. Workers skip formatter/linter/build/tests/commits.
 - Confirmation worker owns all shared HubState fixture migrations except runs.rs, which run worker migrates to confirmations: Arc::new(crate::confirmation::Confirmations::new()). No concurrent edits to the same file.
 - Main owns contracts/records, targeted red/green commands, live smoke, final integration and per-phase commits.
+- Integration clarification: a valid late started/running observation, like a late ACK, advances created/dispatched/timeout_waiting_result/acked to that remote progress; it never recreates a caller waiter. timeout_waiting_result is not an absorbing state. Repeated same-level progress is an idempotent no-op; only new information changes observation time.
+- Final review correction linearizes old confirmation retirement with connection removal/replacement under the same current-connection guard used by admission. This prevents reused caller-supplied IDs from letting old retirement claim a new confirmation. Test-only scheduling gate reproduces the old 409/new-claim failure and verifies corrected callback 200/AllowOnce behavior.

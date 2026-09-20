@@ -5,7 +5,7 @@ This page records minimum checks for reproducible deployment. Standalone is the 
 ## Repository verification
 
 ```bash
-cargo fmt --all --check
+cargo fmt --all -- --check
 cargo check --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
@@ -62,6 +62,10 @@ curl -fsS -H 'Authorization: Bearer test-key' http://127.0.0.1:18787/v1/info
 
 Expected JSON includes `service`, `version`, `remoteConfirmation`, `agents`, `counts`, and `generatedAt`.
 
+### WP1 closure evidence boundary
+
+The current WP1 closure evidence is bounded: final cleanup passed `cargo fmt --all -- --check`, the integrated `cargo test -p agentic-gpt-hub` suite, and `cargo build -p agentic-gpt-hub` without warnings. An isolated Hub HTTP/SSE smoke used simulated Agent peers to exercise six confirmation, replacement, callback, timeout, and late-receipt cases. After that smoke, a real Hub restart against the same temporary SQLite database preserved two `completed` `/v1/runs` records and `sessions[]`, while `/v1/info` reported zero `pendingRequestCount`, `pendingConfirmationCount`, and `cachedJobCount`. This demonstrates Hub-side receipt/session cleanup and retention only; it did not execute a real Agent or transport-ledger restart and is not full end-to-end proof of every historical roadmap scenario. External ntfy provider behavior remains unverified; a local/mock callback path is not equivalent evidence.
+
 ## Standalone deployment checks
 
 1. Confirm `agentic-gpt --version` is the intended release.
@@ -94,6 +98,8 @@ Use this procedure when moving to a Hub build with the Response ownership fix:
 
 No SQL, database/schema, configuration-format, or Room-file migration is required. A missing `runId`, previously accepted leniently, is now rejected. The rejection uses `error.code=agent_message_rejected` and one of these fixed reasons: `response_run_id_required`, `response_run_mismatch`, `response_result_conflict`, `response_result_store_failed`, or `response_waiter_owner_mismatch`.
 
+The `runId` requirement above applies to reliable command `Response` messages, not confirmations. A confirmation request carries no run id; its decision is owned by the captured connection/request and original sender. A local control-plane wait timeout is not remote cancellation: late matching ACK/status/Response may still advance the run receipt, while `not_sent` means only channel-send failure and is never replayed.
+
 By accepted D06 behavior, a Hub restart loses synchronous waiters, OAuth sessions, and pending sessions. Do not re-execute commands to restore HTTP waits. Durable SQLite results and the Agent ledger remain.
 
 To roll back, pause new requests, restore only the old Hub binary, and continue using the current database and Agent ledger. Never overwrite new results with an old database backup. The old binary reopens the Response ownership defect, so rollback is not risk-free.
@@ -114,7 +120,7 @@ To roll back, pause new calls, stop the new Hub, replace only the Hub binary wit
 ## v0.9 acceptance checklist
 
 ```bash
-cargo fmt --all --check
+cargo fmt --all -- --check
 cargo check --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
@@ -162,7 +168,8 @@ Before a Hub release tag, validate [`openapi/hub.yaml`](../openapi/hub.yaml) wit
 - Tunnel, Hub, Agent, and ntfy credentials never appear in argv, safe summaries, reports, or audit payloads.
 - OpenAPI exposes only GPT Actions endpoints; OAuth and confirmation callbacks stay outside it.
 - Safe summaries contain counts/coarse modes, not secrets or complete private path lists.
-- Local confirmation denial or timeout is final.
+- Agent-local confirmation denial or confirmation-decision timeout is final; this is distinct from a Hub/HTTP/MCP waiter timeout.
 - Long work uses managed Jobs and bounded waits.
+- A bounded Hub/HTTP/MCP waiter timeout ends only the local wait, not the remote Job. Late remote knowledge may update the run receipt; `not_sent` is only a proven channel-send failure and is excluded from replay.
 - Standalone reporting is optional and reporting-only, never a hidden shared command dependency.
 - Invalid live config keeps the last valid subset; startup identity changes require restart.
