@@ -14,7 +14,7 @@ use tokio::time::{timeout, Duration};
 use crate::agents::transport::{post_agent_message, SseConnectQuery};
 use crate::registry::registry_entry;
 use crate::runs;
-use crate::state::{AgentTransport, OutboundAgentMessage, PendingConfirmation};
+use crate::state::{AgentTransport, OutboundAgentMessage};
 
 fn generation_config_summary(workspace_root: &str) -> SafeConfigSummary {
     let mut summary = test_config_summary();
@@ -81,21 +81,34 @@ fn generation_confirmation(request_id: &str, request_agent_id: &str) -> AgentMes
     }
 }
 
-fn generation_pending_confirmation(confirmation_id: &str, request_id: &str) -> PendingConfirmation {
-    let now = chrono::Utc::now();
-    PendingConfirmation {
-        confirmation_id: confirmation_id.to_string(),
-        request_id: request_id.to_string(),
-        agent_id: "agent".to_string(),
-        token_hash: "generation-token-hash".to_string(),
-        command_preview: "generation probe".to_string(),
-        risk_level: "LOW".to_string(),
-        reason: "generation probe".to_string(),
-        created_at: now,
-        expires_at: now + chrono::Duration::seconds(60),
-        resolved: false,
-        decision: None,
-    }
+async fn insert_generation_confirmation(
+    state: &HubState,
+    confirmation_id: &str,
+    request_id: &str,
+    connection_id: &str,
+    token: &str,
+    expires_at: chrono::DateTime<chrono::Utc>,
+) {
+    let sender = state
+        .agents
+        .snapshot_for_test()
+        .await
+        .get("agent")
+        .expect("agent connection missing")
+        .sender
+        .clone();
+    state
+        .confirmations
+        .insert_for_test(
+            confirmation_id,
+            request_id,
+            "agent",
+            connection_id,
+            token,
+            expires_at,
+            sender,
+        )
+        .await;
 }
 
 pub(crate) async fn generation_handle(
@@ -241,6 +254,117 @@ async fn room_dispatch_keeps_validated_generation_during_replacement() {
         Err(mpsc::error::TryRecvError::Empty)
     ));
 }
+#[tokio::test]
+async fn wp1_confirmation_callback_does_not_route_to_replacement_generation() {
+    let state = test_state();
+    register_agent(&state, "agent", "secret");
+    let mut old_rx = insert_connection(&state, "agent", "old", chrono::Utc::now()).await;
+    let token = "wp1-callback-token";
+    insert_generation_confirmation(
+        &state,
+        "wp1-confirmation",
+        "wp1-confirmation-request",
+        "old",
+        token,
+        chrono::Utc::now() + chrono::Duration::seconds(60),
+    )
+    .await;
+
+    let (new_tx, mut new_rx) = mpsc::unbounded_channel();
+    replace_agent_connection(&state, "agent", "new", AgentTransport::Sse, new_tx)
+        .await
+        .unwrap();
+
+    let response = crate::confirmation::callback(
+        State(state.clone()),
+        Path(("wp1-confirmation".to_string(), "allow".to_string())),
+        Query(crate::confirmation::ConfirmationCallbackQuery {
+            token: token.to_string(),
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+
+    let old_message = timeout(Duration::from_secs(5), old_rx.recv())
+        .await
+        .expect("retirement response timed out")
+        .expect("retirement response sender closed");
+    let OutboundAgentMessage::Text(text) = old_message else {
+        panic!("retirement must notify the old confirmation owner");
+    };
+    assert!(matches!(
+        serde_json::from_str::<HubMessage>(&text).unwrap(),
+        HubMessage::ConfirmationResponse {
+            request_id,
+            decision: agentic_gpt_protocol::ConfirmationDecision::ProviderUnavailable,
+            reason,
+        } if request_id == "wp1-confirmation-request" && reason == "provider_unavailable"
+    ));
+    assert!(matches!(
+        timeout(Duration::from_secs(5), old_rx.recv())
+            .await
+            .expect("retirement close timed out"),
+        Some(OutboundAgentMessage::Close)
+    ));
+    assert!(matches!(
+        new_rx.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+}
+#[tokio::test]
+async fn wp1_confirmation_callback_claims_response_once() {
+    let state = test_state();
+    register_agent(&state, "agent", "secret");
+    let mut outbound = insert_connection(&state, "agent", "current", chrono::Utc::now()).await;
+    let token = "wp1-single-claim-token";
+    insert_generation_confirmation(
+        &state,
+        "wp1-single-claim",
+        "wp1-single-claim-request",
+        "current",
+        token,
+        chrono::Utc::now() + chrono::Duration::seconds(60),
+    )
+    .await;
+
+    let first = crate::confirmation::callback(
+        State(state.clone()),
+        Path(("wp1-single-claim".to_string(), "allow".to_string())),
+        Query(crate::confirmation::ConfirmationCallbackQuery {
+            token: token.to_string(),
+        }),
+    )
+    .await;
+    assert_eq!(first.status(), StatusCode::OK);
+    let second = crate::confirmation::callback(
+        State(state.clone()),
+        Path(("wp1-single-claim".to_string(), "allow".to_string())),
+        Query(crate::confirmation::ConfirmationCallbackQuery {
+            token: token.to_string(),
+        }),
+    )
+    .await;
+    assert_eq!(second.status(), StatusCode::CONFLICT);
+
+    let Some(OutboundAgentMessage::Text(text)) = timeout(Duration::from_secs(5), outbound.recv())
+        .await
+        .expect("callback response timed out")
+    else {
+        panic!("callback response sender closed");
+    };
+    assert!(matches!(
+        serde_json::from_str::<HubMessage>(&text).unwrap(),
+        HubMessage::ConfirmationResponse {
+            request_id,
+            decision: agentic_gpt_protocol::ConfirmationDecision::AllowOnce,
+            reason,
+        } if request_id == "wp1-single-claim-request" && reason == "user_allowed"
+    ));
+    assert!(matches!(
+        outbound.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+}
 
 pub(crate) async fn generation_snapshot(state: &HubState) -> Value {
     let connection = {
@@ -278,7 +402,7 @@ pub(crate) async fn generation_snapshot(state: &HubState) -> Value {
             "connectionId": active.connection_id,
         })
     });
-    let pending_confirmations = state.pending_confirmations.lock().await.len();
+    let pending_confirmations = state.confirmations.pending_count().await;
     json!({
         "connection": connection,
         "registryLastSeenAt": registry_last_seen,
@@ -840,36 +964,33 @@ async fn generation_job_update_and_replace_are_linearized() {
 #[tokio::test]
 async fn generation_replacement_preserves_new_room_on_old_disconnect() {
     let (state, _new_rx) = generation_fixture().await;
-    state.pending_confirmations.lock().await.insert(
-        "generation-confirmation".to_string(),
-        generation_pending_confirmation(
-            "generation-confirmation",
-            "generation-confirmation-request",
-        ),
-    );
+    insert_generation_confirmation(
+        &state,
+        "generation-confirmation",
+        "generation-confirmation-request",
+        "new",
+        "generation-token",
+        chrono::Utc::now() + chrono::Duration::seconds(60),
+    )
+    .await;
     let before = generation_snapshot(&state).await;
 
     assert!(!disconnect_agent(&state, "agent", "old", None).await);
     assert_eq!(generation_snapshot(&state).await, before);
-    assert!(
-        !state
-            .pending_confirmations
-            .lock()
-            .await
-            .get("generation-confirmation")
-            .unwrap()
-            .resolved
-    );
+    let pending = state
+        .confirmations
+        .snapshot_for_test("generation-confirmation")
+        .await
+        .unwrap();
+    assert!(!pending.resolved);
 
     assert!(disconnect_agent(&state, "agent", "new", None).await);
     assert!(state.active_room.lock().await.is_none());
     let pending = state
-        .pending_confirmations
-        .lock()
+        .confirmations
+        .snapshot_for_test("generation-confirmation")
         .await
-        .get("generation-confirmation")
-        .unwrap()
-        .clone();
+        .unwrap();
     assert!(pending.resolved);
     assert!(matches!(
         pending.decision,
@@ -937,57 +1058,6 @@ async fn generation_expiry_rechecks_current_liveness() {
             .get("agent")
             .map(|connection| connection.connection_id.as_str()),
         Some("new")
-    );
-}
-#[tokio::test]
-async fn generation_disconnect_blocks_replacement_until_cleanup_finishes() {
-    let state = test_state();
-    register_agent(&state, "agent", "secret");
-    let _old_rx = insert_connection(&state, "agent", "old", chrono::Utc::now()).await;
-    state.pending_confirmations.lock().await.insert(
-        "generation-old-confirmation".to_string(),
-        generation_pending_confirmation("generation-old-confirmation", "generation-old-request"),
-    );
-    let pending_guard = state.pending_confirmations.lock().await;
-    let mut disconnect = Box::pin(disconnect_agent(&state, "agent", "old", None));
-    assert!(matches!(
-        futures_util::poll!(disconnect.as_mut()),
-        std::task::Poll::Pending
-    ));
-
-    let (new_tx, _new_rx) = mpsc::unbounded_channel();
-    let mut replacement = Box::pin(replace_agent_connection(
-        &state,
-        "agent",
-        "new",
-        AgentTransport::Sse,
-        new_tx,
-    ));
-    assert!(matches!(
-        futures_util::poll!(replacement.as_mut()),
-        std::task::Poll::Pending
-    ));
-    drop(pending_guard);
-
-    assert!(timeout(Duration::from_secs(5), disconnect.as_mut())
-        .await
-        .expect("disconnect cleanup timed out"));
-    timeout(Duration::from_secs(5), replacement.as_mut())
-        .await
-        .expect("replacement registration timed out")
-        .expect("replacement registration rejected");
-    state.pending_confirmations.lock().await.insert(
-        "generation-new-confirmation".to_string(),
-        generation_pending_confirmation("generation-new-confirmation", "generation-new-request"),
-    );
-    assert!(
-        !state
-            .pending_confirmations
-            .lock()
-            .await
-            .get("generation-new-confirmation")
-            .unwrap()
-            .resolved
     );
 }
 #[tokio::test]

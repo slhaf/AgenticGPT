@@ -501,7 +501,7 @@ mod tests {
             mcp_profile: McpProfile::Full,
             agents: Arc::new(crate::agents::lifecycle::Connections::new()),
             dispatch: Arc::new(crate::agents::dispatch::Dispatch::new()),
-            pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
+            confirmations: Arc::new(crate::confirmation::Confirmations::new()),
             jobs: Arc::new(Mutex::new(HashMap::new())),
             boot_generations: Arc::new(Mutex::new(HashMap::new())),
             active_room: Arc::new(Mutex::new(None)),

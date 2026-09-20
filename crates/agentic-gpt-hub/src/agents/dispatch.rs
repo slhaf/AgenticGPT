@@ -176,6 +176,9 @@ async fn request_target(
         .is_err()
     {
         state.dispatch.pending.lock().await.remove(&run_id);
+        if let Err(error) = runs::mark_not_sent(state, &run_id, "agent_offline") {
+            warn!(runId = %run_id, %error, "failed to mark run not sent");
+        }
         let _ =
             lifecycle::disconnect_agent(state, &target.agent_id, &target.connection_id, None).await;
         return Err("agent_offline".to_string());

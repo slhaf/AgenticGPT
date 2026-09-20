@@ -1,6 +1,5 @@
 use agentic_gpt_protocol::{
-    AgentConnectionMode, AgentRole, ConfirmationDecision, JobInfo, NotificationChannel,
-    SafeConfigSummary,
+    AgentConnectionMode, AgentRole, JobInfo, NotificationChannel, SafeConfigSummary,
 };
 use chrono::{DateTime, Utc};
 use rusqlite::Connection;
@@ -18,7 +17,7 @@ pub(crate) struct HubState {
     pub(crate) mcp_profile: McpProfile,
     pub(crate) agents: Arc<crate::agents::lifecycle::Connections>,
     pub(crate) dispatch: Arc<crate::agents::dispatch::Dispatch>,
-    pub(crate) pending_confirmations: Arc<Mutex<HashMap<String, PendingConfirmation>>>,
+    pub(crate) confirmations: Arc<crate::confirmation::Confirmations>,
     pub(crate) jobs: Arc<Mutex<HashMap<String, HashMap<String, JobInfo>>>>,
     pub(crate) boot_generations: Arc<Mutex<HashMap<String, String>>>,
     pub(crate) active_room: Arc<Mutex<Option<room::ActiveRoomConnection>>>,
@@ -70,19 +69,4 @@ pub(crate) enum AgentTransport {
 pub(crate) enum OutboundAgentMessage {
     Text(String),
     Close,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct PendingConfirmation {
-    pub(crate) confirmation_id: String,
-    pub(crate) request_id: String,
-    pub(crate) agent_id: String,
-    pub(crate) token_hash: String,
-    pub(crate) command_preview: String,
-    pub(crate) risk_level: String,
-    pub(crate) reason: String,
-    pub(crate) created_at: DateTime<Utc>,
-    pub(crate) expires_at: DateTime<Utc>,
-    pub(crate) resolved: bool,
-    pub(crate) decision: Option<ConfirmationDecision>,
 }

@@ -153,13 +153,7 @@ pub(crate) async fn build_hub_info_response(state: &HubState) -> Result<HubInfoR
     let enabled_count = entries.iter().filter(|entry| entry.enabled).count();
     let online_count = state.agents.online_count().await;
     let pending_request_count = state.dispatch.pending_count().await;
-    let pending_confirmation_count = state
-        .pending_confirmations
-        .lock()
-        .await
-        .values()
-        .filter(|confirmation| !confirmation.resolved)
-        .count();
+    let pending_confirmation_count = state.confirmations.pending_count().await;
     let cached_job_count = state.jobs.lock().await.values().map(HashMap::len).sum();
 
     let remote = &state.config.remote_confirmation;

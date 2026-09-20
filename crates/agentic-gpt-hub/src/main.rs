@@ -1,5 +1,6 @@
 mod agentic_result;
 mod agents;
+mod confirmation;
 mod db;
 mod instance_lock;
 mod mcp_server;
@@ -13,20 +14,17 @@ mod state;
 mod utils;
 
 use agentic_gpt_protocol::{
-    ConfirmationDecision, ConfirmationPayload, HubMessage, SafeBuiltinPolicyRules,
-    SafeConfigSummary, SafePathPolicySummary, SafePolicyRules, SafeSandboxSummary,
+    SafeBuiltinPolicyRules, SafeConfigSummary, SafePathPolicySummary, SafePolicyRules,
+    SafeSandboxSummary,
 };
 use anyhow::{Context, Result};
-use axum::extract::{Path, Query, State};
-use axum::http::{Request, StatusCode};
-use axum::response::{IntoResponse, Response};
+use axum::http::Request;
 use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::Router;
 use chrono::Utc;
 use clap::{Parser, Subcommand};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -40,13 +38,11 @@ use tracing::{info, warn};
 use crate::db::{init_db, open_db};
 use crate::registry::handle_agent_command;
 use crate::routes::api_error;
-use crate::state::{HubState, McpProfile, OutboundAgentMessage, PendingConfirmation};
-use crate::utils::{constant_time_equal, random_id, random_token, sha256_hex};
+use crate::state::{HubState, McpProfile};
 
 const REQUEST_TIMEOUT_SECS: u64 = 35;
 const MAX_WAIT_SECONDS: u64 = 30;
 const DEFAULT_REMOTE_CONFIRM_TIMEOUT_SECS: u64 = 45;
-const MAX_COMMAND_PREVIEW_CHARS: usize = 1000;
 
 #[derive(Parser)]
 #[command(name = "agentic-gpt-hub")]
@@ -108,11 +104,6 @@ struct NtfyConfig {
     callback_base_url: String,
 }
 
-#[derive(Deserialize)]
-struct ConfirmationCallbackQuery {
-    token: String,
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -171,7 +162,7 @@ async fn serve(
         mcp_profile,
         agents: Arc::new(agents::lifecycle::Connections::new()),
         dispatch: Arc::new(agents::dispatch::Dispatch::new()),
-        pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
+        confirmations: Arc::new(confirmation::Confirmations::new()),
         jobs: Arc::new(Mutex::new(HashMap::new())),
         boot_generations: Arc::new(Mutex::new(HashMap::new())),
         active_room: Arc::new(Mutex::new(None)),
@@ -181,7 +172,7 @@ async fn serve(
         oauth_tokens: Arc::new(Mutex::new(HashMap::new())),
         ntfy_health: Arc::new(Mutex::new(None)),
     };
-    tokio::spawn(cleanup_confirmations(state.clone()));
+    tokio::spawn(confirmation::cleanup(state.clone()));
     tokio::spawn(cleanup_runs(state.clone()));
     tokio::spawn(agents::lifecycle::cleanup_agent_connections(state.clone()));
     tokio::spawn(oauth::cleanup_oauth(state.clone()));
@@ -203,7 +194,7 @@ async fn serve(
         .route("/v1/runs/:run_id", get(routes::get_run))
         .route(
             "/v1/confirmations/:confirmation_id/:decision",
-            post(confirmation_callback),
+            post(confirmation::callback),
         )
         .route("/v1/process/exec", post(routes::process_exec))
         .route("/v1/process/batch", post(routes::process_batch))
@@ -300,103 +291,6 @@ async fn serve(
     Ok(())
 }
 
-async fn handle_confirmation_request(
-    state: HubState,
-    agent_id: String,
-    request_id: String,
-    timeout_seconds: u64,
-    payload: ConfirmationPayload,
-) -> Result<()> {
-    let remote = &state.config.remote_confirmation;
-    if !remote.enabled || remote.provider != "ntfy" {
-        send_confirmation_response(
-            &state,
-            &agent_id,
-            &request_id,
-            ConfirmationDecision::ProviderUnavailable,
-            "remote_confirmation_disabled",
-        )
-        .await;
-        return Ok(());
-    }
-    if remote.ntfy.topic.trim().is_empty()
-        || remote.ntfy.server_url.trim().is_empty()
-        || remote.ntfy.callback_base_url.trim().is_empty()
-    {
-        send_confirmation_response(
-            &state,
-            &agent_id,
-            &request_id,
-            ConfirmationDecision::ProviderUnavailable,
-            "ntfy_not_configured",
-        )
-        .await;
-        return Ok(());
-    }
-
-    let confirmation_id = random_id("confirm");
-    let token = random_token();
-    let token_hash = sha256_hex(&token);
-    let created_at = Utc::now();
-    let timeout_seconds = timeout_seconds.max(1).min(remote.timeout_seconds.max(1));
-    let expires_at = created_at + chrono::Duration::seconds(timeout_seconds as i64);
-    let command_preview = truncate_chars(&payload.command_preview, MAX_COMMAND_PREVIEW_CHARS);
-    let pending = PendingConfirmation {
-        confirmation_id: confirmation_id.clone(),
-        request_id: request_id.clone(),
-        agent_id: agent_id.clone(),
-        token_hash,
-        command_preview: command_preview.clone(),
-        risk_level: payload.risk_level.clone(),
-        reason: payload.reason.clone(),
-        created_at,
-        expires_at,
-        resolved: false,
-        decision: None,
-    };
-    state
-        .pending_confirmations
-        .lock()
-        .await
-        .insert(confirmation_id.clone(), pending);
-
-    match publish_ntfy(
-        &state,
-        &confirmation_id,
-        &token,
-        &agent_id,
-        &payload,
-        &command_preview,
-    )
-    .await
-    {
-        Ok(()) => {
-            info!(
-                %agent_id,
-                %confirmation_id,
-                "remote confirmation notification sent"
-            );
-        }
-        Err(error) => {
-            warn!(%agent_id, %confirmation_id, %error, "remote confirmation notification failed");
-            state
-                .pending_confirmations
-                .lock()
-                .await
-                .remove(&confirmation_id);
-            send_confirmation_response(
-                &state,
-                &agent_id,
-                &request_id,
-                ConfirmationDecision::ProviderUnavailable,
-                "ntfy_publish_failed",
-            )
-            .await;
-        }
-    }
-    Ok(())
-}
-
 async fn cleanup_runs(state: HubState) {
     loop {
         sleep(Duration::from_secs(30)).await;
@@ -411,310 +305,6 @@ async fn cleanup_runs(state: HubState) {
             Ok(_) => {}
             Err(error) => warn!(%error, "run cleanup failed"),
         }
-    }
-}
-
-async fn publish_ntfy(
-    state: &HubState,
-    confirmation_id: &str,
-    token: &str,
-    agent_id: &str,
-    payload: &ConfirmationPayload,
-    command_preview: &str,
-) -> Result<()> {
-    let remote = &state.config.remote_confirmation;
-    let ntfy = &remote.ntfy;
-    let server_url = ntfy.server_url.trim_end_matches('/');
-    let callback_base = ntfy.callback_base_url.trim_end_matches('/');
-    let message = format!(
-        "Agent {agent_id} wants to run:\n{command_preview}\n\nReason: {}\nRisk: {}",
-        payload.reason, payload.risk_level
-    );
-    let actions = ntfy_confirmation_actions(
-        callback_base,
-        confirmation_id,
-        token,
-        payload.kind.as_deref(),
-    );
-    let body = json!({
-        "topic": ntfy.topic,
-        "title": "AgenticGPT confirmation",
-        "message": message,
-        "priority": 5,
-        "tags": ["warning"],
-        "actions": actions
-    });
-    let response = state.http.post(server_url).json(&body).send().await?;
-    if response.status().is_success() {
-        Ok(())
-    } else {
-        Err(anyhow::anyhow!("ntfy returned {}", response.status()))
-    }
-}
-
-fn ntfy_confirmation_actions(
-    callback_base: &str,
-    confirmation_id: &str,
-    token: &str,
-    kind: Option<&str>,
-) -> serde_json::Value {
-    let allow_url =
-        format!("{callback_base}/v1/confirmations/{confirmation_id}/allow?token={token}");
-    let allow_mcp_30m_url = format!(
-        "{callback_base}/v1/confirmations/{confirmation_id}/allow-mcp-server-30m?token={token}"
-    );
-    let deny_url = format!("{callback_base}/v1/confirmations/{confirmation_id}/deny?token={token}");
-    if matches!(kind, Some("mcpTool" | "mcpBatchSingleServer")) {
-        json!([
-            {
-                "action": "http",
-                "label": "Allow once",
-                "url": allow_url,
-                "method": "POST",
-                "clear": true
-            },
-            {
-                "action": "http",
-                "label": "Allow MCP 30m",
-                "url": allow_mcp_30m_url,
-                "method": "POST",
-                "clear": true
-            },
-            {
-                "action": "http",
-                "label": "Deny",
-                "url": deny_url,
-                "method": "POST",
-                "clear": true
-            }
-        ])
-    } else {
-        json!([
-            {
-                "action": "http",
-                "label": "Allow",
-                "url": allow_url,
-                "method": "POST",
-                "clear": true
-            },
-            {
-                "action": "http",
-                "label": "Deny",
-                "url": deny_url,
-                "method": "POST",
-                "clear": true
-            }
-        ])
-    }
-}
-
-async fn confirmation_callback(
-    State(state): State<HubState>,
-    Path((confirmation_id, decision)): Path<(String, String)>,
-    Query(query): Query<ConfirmationCallbackQuery>,
-) -> Response {
-    let decision = match decision.as_str() {
-        "allow" => ConfirmationDecision::AllowOnce,
-        "allow-mcp-server-15m" | "allow_mcp_server_15m" => ConfirmationDecision::AllowMcpServer15m,
-        "allow-mcp-server-30m" | "allow_mcp_server_30m" => ConfirmationDecision::AllowMcpServer30m,
-        "deny" => ConfirmationDecision::Deny,
-        _ => {
-            return api_error(
-                StatusCode::NOT_FOUND,
-                "confirmation_not_found",
-                "Unknown confirmation callback action",
-            )
-        }
-    };
-    let token_hash = sha256_hex(&query.token);
-    let (agent_id, request_id, status, command_preview, risk_level, confirm_reason, created_at) = {
-        let mut confirmations = state.pending_confirmations.lock().await;
-        let Some(pending) = confirmations.get_mut(&confirmation_id) else {
-            return api_error(
-                StatusCode::NOT_FOUND,
-                "confirmation_not_found",
-                "Confirmation was not found",
-            );
-        };
-        if pending.resolved && Utc::now() >= pending.expires_at {
-            return api_error(
-                StatusCode::GONE,
-                "confirmation_expired",
-                "Confirmation has expired",
-            );
-        }
-        if pending.resolved {
-            return api_error(
-                StatusCode::CONFLICT,
-                "confirmation_resolved",
-                "Confirmation has already been resolved",
-            );
-        }
-        if Utc::now() >= pending.expires_at {
-            pending.resolved = true;
-            pending.decision = Some(ConfirmationDecision::Expired);
-            (
-                pending.agent_id.clone(),
-                pending.request_id.clone(),
-                StatusCode::GONE,
-                pending.command_preview.clone(),
-                pending.risk_level.clone(),
-                pending.reason.clone(),
-                pending.created_at,
-            )
-        } else if !constant_time_equal(&token_hash, &pending.token_hash) {
-            return api_error(
-                StatusCode::FORBIDDEN,
-                "callback_token_invalid",
-                "Invalid confirmation token",
-            );
-        } else {
-            pending.resolved = true;
-            pending.decision = Some(decision.clone());
-            (
-                pending.agent_id.clone(),
-                pending.request_id.clone(),
-                StatusCode::OK,
-                pending.command_preview.clone(),
-                pending.risk_level.clone(),
-                pending.reason.clone(),
-                pending.created_at,
-            )
-        }
-    };
-
-    if status == StatusCode::GONE {
-        send_confirmation_response(
-            &state,
-            &agent_id,
-            &request_id,
-            ConfirmationDecision::Expired,
-            "expired",
-        )
-        .await;
-        return api_error(
-            StatusCode::GONE,
-            "confirmation_expired",
-            "Confirmation has expired",
-        );
-    }
-
-    let reason = match decision {
-        ConfirmationDecision::AllowOnce => "user_allowed",
-        ConfirmationDecision::AllowMcpServer15m => "user_allowed_mcp_server_15m",
-        ConfirmationDecision::AllowMcpServer30m => "user_allowed_mcp_server_30m",
-        ConfirmationDecision::Deny => "user_denied",
-        _ => "resolved",
-    };
-    send_confirmation_response(&state, &agent_id, &request_id, decision.clone(), reason).await;
-    info!(
-        %agent_id,
-        %confirmation_id,
-        ?decision,
-        %risk_level,
-        reason = %confirm_reason,
-        %created_at,
-        commandPreview = %command_preview,
-        "confirmation resolved by callback"
-    );
-    Json(json!({
-        "status": "accepted",
-        "decision": decision_wire_value(&decision)
-    }))
-    .into_response()
-}
-
-async fn cleanup_confirmations(state: HubState) {
-    loop {
-        sleep(Duration::from_secs(2)).await;
-        let expired = {
-            let now = Utc::now();
-            let mut confirmations = state.pending_confirmations.lock().await;
-            confirmations
-                .values_mut()
-                .filter(|pending| !pending.resolved && now >= pending.expires_at)
-                .map(|pending| {
-                    pending.resolved = true;
-                    pending.decision = Some(ConfirmationDecision::Timeout);
-                    (
-                        pending.agent_id.clone(),
-                        pending.request_id.clone(),
-                        pending.confirmation_id.clone(),
-                        pending.command_preview.clone(),
-                        pending.risk_level.clone(),
-                    )
-                })
-                .collect::<Vec<_>>()
-        };
-        for (agent_id, request_id, confirmation_id, command_preview, risk_level) in expired {
-            info!(
-                %agent_id,
-                %confirmation_id,
-                %risk_level,
-                commandPreview = %command_preview,
-                "confirmation timed out"
-            );
-            send_confirmation_response(
-                &state,
-                &agent_id,
-                &request_id,
-                ConfirmationDecision::Timeout,
-                "timeout",
-            )
-            .await;
-        }
-    }
-}
-
-async fn discard_agent_confirmations(state: &HubState, agent_id: &str) {
-    let mut confirmations = state.pending_confirmations.lock().await;
-    for pending in confirmations.values_mut() {
-        if pending.agent_id == agent_id && !pending.resolved {
-            pending.resolved = true;
-            pending.decision = Some(ConfirmationDecision::ProviderUnavailable);
-        }
-    }
-}
-
-async fn send_confirmation_response(
-    state: &HubState,
-    agent_id: &str,
-    request_id: &str,
-    decision: ConfirmationDecision,
-    reason: &str,
-) {
-    let message = HubMessage::ConfirmationResponse {
-        request_id: request_id.to_string(),
-        decision,
-        reason: reason.to_string(),
-    };
-    let Ok(text) = serde_json::to_string(&message) else {
-        return;
-    };
-    let sender = state.agents.sender(agent_id).await;
-    if let Some(sender) = sender {
-        let _ = sender.send(OutboundAgentMessage::Text(text));
-    }
-}
-
-fn truncate_chars(value: &str, max_chars: usize) -> String {
-    let mut output = value.chars().take(max_chars).collect::<String>();
-    if value.chars().count() > max_chars {
-        output.push_str("...");
-    }
-    output
-}
-
-fn decision_wire_value(decision: &ConfirmationDecision) -> &'static str {
-    match decision {
-        ConfirmationDecision::AllowOnce => "allow_once",
-        ConfirmationDecision::AllowMcpServer15m => "allow_mcp_server_15m",
-        ConfirmationDecision::AllowMcpServer30m => "allow_mcp_server_30m",
-        ConfirmationDecision::Deny => "deny",
-        ConfirmationDecision::Timeout => "timeout",
-        ConfirmationDecision::ProviderUnavailable => "provider_unavailable",
-        ConfirmationDecision::CallbackTokenInvalid => "callback_token_invalid",
-        ConfirmationDecision::Expired => "expired",
     }
 }
 
@@ -838,7 +428,7 @@ mod tests {
             mcp_profile: McpProfile::Full,
             agents: Arc::new(agents::lifecycle::Connections::new()),
             dispatch: Arc::new(agents::dispatch::Dispatch::new()),
-            pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
+            confirmations: Arc::new(confirmation::Confirmations::new()),
             jobs: Arc::new(Mutex::new(HashMap::new())),
             boot_generations: Arc::new(Mutex::new(HashMap::new())),
             active_room: Arc::new(Mutex::new(None)),
@@ -974,7 +564,7 @@ mod tests {
 
     #[test]
     fn ntfy_mcp_confirmation_stays_within_three_action_limit() {
-        let actions = ntfy_confirmation_actions(
+        let actions = confirmation::ntfy_confirmation_actions(
             "https://hub.example",
             "confirm-1",
             "token-1",

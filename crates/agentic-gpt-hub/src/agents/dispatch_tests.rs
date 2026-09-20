@@ -638,3 +638,76 @@ async fn reporting_only_connection_is_not_a_command_target() {
         .unwrap();
     assert_eq!(run_count, 0);
 }
+#[tokio::test]
+async fn wp1_send_failure_marks_not_sent_and_excludes_replay() {
+    let state = test_state();
+    let rx = insert_connection(&state, "agent", "current", chrono::Utc::now()).await;
+    drop(rx);
+    let command = HubCommand::Exec {
+        request_id: "req_wp1_send_failure".to_string(),
+        payload: ExecRequest {
+            agent_id: "agent".to_string(),
+            group: None,
+            program: "printf".to_string(),
+            args: vec!["offline".to_string()],
+            need_confirm: false,
+            confirm_method: None,
+            working_directory: None,
+            wait_seconds: None,
+        },
+    };
+
+    let result = request_agent(&state, "agent", command, 1).await;
+    assert_eq!(result.unwrap_err(), "agent_offline");
+
+    let run_id: String = state
+        .db
+        .lock()
+        .unwrap()
+        .query_row(
+            "select run_id from agent_runs where request_id = ?1",
+            params!["req_wp1_send_failure"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let stored = runs::get_run(&state, &run_id).unwrap().unwrap();
+    assert_eq!(stored.status, "not_sent");
+    assert_eq!(stored.reason.as_deref(), Some("agent_offline"));
+
+    let (tx, mut replay_rx) = mpsc::unbounded_channel();
+    send_pending_replays(&state, "agent", &tx).await;
+    assert!(matches!(
+        replay_rx.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+}
+
+#[tokio::test]
+async fn wp1_unknown_transport_status_is_mismatch_without_mutation() {
+    let state = test_state();
+    let command = HubCommand::McpListServers {
+        request_id: "req_wp1_unknown_status".to_string(),
+    };
+    let run = runs::prepare_run(&state, "agent", command.request_id(), &command).unwrap();
+    runs::mark_dispatched(&state, &run.run_id).unwrap();
+    let before = runs::get_run(&state, &run.run_id).unwrap().unwrap();
+
+    let error = handle_reliable_message(
+        &state,
+        "agent",
+        AgentMessage::TransportRunStatus {
+            run_id: run.run_id.clone(),
+            request_id: run.request_id.clone(),
+            status: "completed".to_string(),
+            reason: Some("wire_completed".to_string()),
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error, "transport_status_run_mismatch");
+
+    let after = runs::get_run(&state, &run.run_id).unwrap().unwrap();
+    assert_eq!(after.status, before.status);
+    assert_eq!(after.reason, before.reason);
+    assert_eq!(after.updated_at, before.updated_at);
+}

@@ -8,7 +8,7 @@ use crate::agents::dispatch;
 use crate::registry::update_last_seen;
 use crate::runs;
 use crate::state::{AgentConnection, AgentTransport, HubState, OutboundAgentMessage};
-use crate::{discard_agent_confirmations, handle_confirmation_request, room};
+use crate::{confirmation, room};
 
 pub(crate) struct Connections {
     current: tokio::sync::Mutex<std::collections::HashMap<String, AgentConnection>>,
@@ -35,17 +35,6 @@ impl Connections {
 
     pub(crate) async fn online_count(&self) -> usize {
         self.current.lock().await.len()
-    }
-
-    pub(crate) async fn sender(
-        &self,
-        agent_id: &str,
-    ) -> Option<mpsc::UnboundedSender<OutboundAgentMessage>> {
-        self.current
-            .lock()
-            .await
-            .get(agent_id)
-            .map(|connection| connection.sender.clone())
     }
 
     pub(crate) async fn list_agents(
@@ -187,6 +176,7 @@ pub(super) async fn handle_agent_message(
         return dispatch::handle_reliable_message(state, agent_id, parsed).await;
     }
 
+    let mut confirmation_publication = None;
     let replay_sender = match parsed {
         AgentMessage::Hello {
             boot_generation,
@@ -294,21 +284,22 @@ pub(super) async fn handle_agent_message(
                 let _ = sender.send(OutboundAgentMessage::Text(text));
                 return Err("agent_id_mismatch".to_string());
             }
-            let state = state.clone();
-            let agent_id = agent_id.to_string();
-            tokio::spawn(async move {
-                if let Err(error) = handle_confirmation_request(
-                    state,
+            let connection = agents
+                .get(agent_id)
+                .expect("current connection disappeared under agents guard");
+            let publication = state
+                .confirmations
+                .admit(
                     agent_id,
+                    &connection.connection_id,
                     request_id,
+                    connection.sender.clone(),
                     timeout_seconds,
+                    state.config.remote_confirmation.timeout_seconds,
                     payload,
                 )
-                .await
-                {
-                    warn!(%error, "confirmation request failed");
-                }
-            });
+                .await;
+            confirmation_publication = Some(publication);
             None
         }
         AgentMessage::Response { .. }
@@ -318,6 +309,15 @@ pub(super) async fn handle_agent_message(
         }
     };
     drop(agents);
+    if let Some(publication) = confirmation_publication {
+        let state = state.clone();
+        tokio::spawn(async move {
+            if let Err(error) = confirmation::handle_confirmation_request(state, publication).await
+            {
+                warn!(%error, "confirmation request failed");
+            }
+        });
+    }
     if let Some(sender) = replay_sender {
         dispatch::send_pending_replays(state, agent_id, &sender).await;
     }
@@ -353,7 +353,7 @@ pub(super) async fn disconnect_agent(
     connection_id: &str,
     expiry_check_at: Option<chrono::DateTime<chrono::Utc>>,
 ) -> bool {
-    let removed_current_connection = {
+    let removed_connection = {
         let mut agents = state.agents.current.lock().await;
         let should_remove = agents.get(agent_id).is_some_and(|connection| {
             connection.connection_id == connection_id
@@ -364,17 +364,24 @@ pub(super) async fn disconnect_agent(
                 })
         });
         if should_remove {
-            agents.remove(agent_id);
+            let removed = agents
+                .remove(agent_id)
+                .expect("current connection disappeared under agents guard");
             room::release_active_room_if_current(state, agent_id, connection_id).await;
-            discard_agent_confirmations(state, agent_id).await;
-            true
+            Some(removed)
         } else {
-            false
+            None
         }
     };
+    let removed_current_connection = removed_connection.is_some();
+    if let Some(connection) = removed_connection {
+        confirmation::retire_generation(state, agent_id, connection_id).await;
+        let _ = connection.sender.send(OutboundAgentMessage::Close);
+    }
     info!(%agent_id, %connection_id, removedCurrentConnection = removed_current_connection, "agent disconnected");
     removed_current_connection
 }
+
 pub(crate) async fn replace_agent_connection(
     state: &HubState,
     agent_id: &str,
@@ -385,30 +392,38 @@ pub(crate) async fn replace_agent_connection(
     if connection_id.is_empty() {
         return Err("invalid_connection_id");
     }
-    let mut agents = state.agents.current.lock().await;
-    if agents
-        .get(agent_id)
-        .is_some_and(|connection| connection.connection_id == connection_id)
-    {
-        return Err("connection_id_in_use");
-    }
-    let old = agents.insert(
-        agent_id.to_string(),
-        AgentConnection {
-            connection_id: connection_id.to_string(),
-            sender,
-            last_seen_at: chrono::Utc::now(),
-            role: AgentRole::Normal,
-            connection_mode: AgentConnectionMode::CommandCapable,
-            hello_received: false,
-            boot_generation: None,
-            transport,
-            config_summary: None,
-            notification_channels: Vec::new(),
-        },
-    );
+    let old = {
+        let mut agents = state.agents.current.lock().await;
+        if agents
+            .get(agent_id)
+            .is_some_and(|connection| connection.connection_id == connection_id)
+        {
+            return Err("connection_id_in_use");
+        }
+        let old = agents.insert(
+            agent_id.to_string(),
+            AgentConnection {
+                connection_id: connection_id.to_string(),
+                sender,
+                last_seen_at: chrono::Utc::now(),
+                role: AgentRole::Normal,
+                connection_mode: AgentConnectionMode::CommandCapable,
+                hello_received: false,
+                boot_generation: None,
+                transport,
+                config_summary: None,
+                notification_channels: Vec::new(),
+            },
+        );
+        if let Some(old) = old {
+            room::release_active_room_if_current(state, agent_id, &old.connection_id).await;
+            Some(old)
+        } else {
+            None
+        }
+    };
     if let Some(old) = old {
-        room::release_active_room_if_current(state, agent_id, &old.connection_id).await;
+        confirmation::retire_generation(state, agent_id, &old.connection_id).await;
         let _ = old.sender.send(OutboundAgentMessage::Close);
     }
     update_last_seen(state, agent_id).ok();
