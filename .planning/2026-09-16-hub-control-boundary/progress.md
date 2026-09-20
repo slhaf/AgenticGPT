@@ -1,0 +1,17 @@
+# Hub control-boundary progress
+
+## 2026-09-16
+- Approved inline plan loaded; dedicated `.planning/2026-09-16-hub-control-boundary/` ledger created.
+- Confirmed branch `refactor/architecture-cleanup`, clean production baseline, and existing `.codegraph` index.
+- LSP references completed for request_agent, connect_agent, handle_agent_message, replace_agent_connection, disconnect_agent, and HubState. Scouts independently confirmed the boundary and caller inventory; CodeGraph remains stale on the pre-rename agents.rs path.
+- Renamed `agents.rs` to `agents/mod.rs` with LSP. An early skeleton overwrite briefly replaced the restored source; recovered exact HEAD content before extraction and logged this as a tooling mistake, with no user production edits lost.
+- Extracted transport, lifecycle, dispatch, and test-support implementations. `agents/mod.rs` now only declares child modules. Dispatch owns private PendingResponse and `HubState.dispatch`; protocol `HubCommand::request_id()` is used directly; duplicate Hub getters/setter and their main tests were removed.
+- Migrated production route/import/cleanup callers and all HubState literals with `dispatch: Arc<Dispatch>`. `cargo check -p agentic-gpt-hub` passed.
+- Split existing agent tests into lifecycle_tests.rs, dispatch_tests.rs, and transport_tests.rs; moved shared fixtures to test_support.rs; migrated SSE query construction through the test-only constructor.
+- Stage One verification: `cargo fmt --all -- --check` passed; `cargo test -p agentic-gpt-hub` passed with 74 tests.
+- Stage One committed as `b86e98c` (`refactor(hub): separate agent transport and dispatch ownership`). Planning directories remain intentionally untracked.
+- Stage Two added private `Connections.current`, typed `AgentListEntry` plus list/online/notification projections, sender/online count reads, and cfg(test) insertion/snapshot hooks. Lifecycle admission/replacement/expiry now exclusively use `current`; routes, MCP listing, notifications, confirmation responses, and all fixtures consume owner APIs.
+- Stage Two added lifecycle-only `DispatchTarget` resolvers. Room resolves current generation plus active lease atomically under `current -> active_room`, and dispatch sends through the captured sender/connection ID. Send failure disconnects only the captured generation. `room::request_active_room` remains the public compatibility boundary and delegates to `dispatch::request_room`.
+- Added `room_dispatch_keeps_validated_generation_during_replacement`: deterministic Tokio mutex poll queue captures the old Room sender, replaces the current connection, ACKs the old run through the reliable POST path, then verifies the new Hello produces no replay.
+- Stage Two targeted test passed; full `cargo test -p agentic-gpt-hub` passed with 75 tests; `cargo fmt --all -- --check` passed; final `cargo build -p agentic-gpt-hub` passed without warnings.
+- Real adapter smoke passed against a temporary isolated DB/config and supervisor-managed Hub: WebSocket auth/heartbeat/process.exec, SSE heartbeat/process.exec, `mcp.batch` with two calls, Room notebook dispatch, `/v1/agents` transport projection, and notification channel projection. Output: `{"infoRegistered":3,"multiTool":true,"notificationChannels":4,"onlineAgents":["room-agent","sse-agent","ws-agent"],"roomDispatch":true,"sseHeartbeat":true,"wsHeartbeat":true}`. Temporary artifacts and service were stopped/removed.
