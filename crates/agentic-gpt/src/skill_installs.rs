@@ -237,7 +237,7 @@ impl InstallManager {
         }
         let revision = initial.status.revision;
         let notified = self.changed.notified();
-        let _ = timeout(Duration::from_secs(wait_seconds.min(30)), notified).await;
+        let _ = timeout(Duration::from_secs(wait_seconds), notified).await;
         let latest = self.load_record(&config, &request.install_id).await?;
         if latest.status.revision > revision || is_terminal(latest.status.status) {
             return Ok(latest.status);

@@ -1352,7 +1352,9 @@ impl SkillInstallGetRequest {
     pub const MAX_WAIT_SECONDS: u64 = 30;
 
     pub fn effective_wait_seconds(&self) -> u64 {
-        self.wait_seconds.unwrap_or(Self::DEFAULT_WAIT_SECONDS)
+        self.wait_seconds
+            .unwrap_or(Self::DEFAULT_WAIT_SECONDS)
+            .min(Self::MAX_WAIT_SECONDS)
     }
 }
 
@@ -1446,7 +1448,9 @@ impl SkillRunRequest {
     pub const MAX_WAIT_SECONDS: u64 = 30;
 
     pub fn effective_wait_seconds(&self) -> u64 {
-        self.wait_seconds.unwrap_or(Self::DEFAULT_WAIT_SECONDS)
+        self.wait_seconds
+            .unwrap_or(Self::DEFAULT_WAIT_SECONDS)
+            .min(Self::MAX_WAIT_SECONDS)
     }
 }
 
@@ -2885,6 +2889,28 @@ mod tmux_tests {
             serde_json::to_value(install).unwrap()["type"],
             "skills.install"
         );
+    }
+    #[test]
+    fn skill_wait_seconds_are_bounded_without_overflow() {
+        let wait_values = [0, 30, 31, u64::MAX];
+        let expected_values = [0, 30, 30, 30];
+
+        for (&wait_seconds, &expected) in wait_values.iter().zip(expected_values.iter()) {
+            let get: SkillInstallGetRequest = serde_json::from_value(serde_json::json!({
+                "installId": "install-1",
+                "waitSeconds": wait_seconds
+            }))
+            .unwrap();
+            assert_eq!(get.effective_wait_seconds(), expected);
+
+            let run: SkillRunRequest = serde_json::from_value(serde_json::json!({
+                "id": "demo",
+                "path": "scripts/check.sh",
+                "waitSeconds": wait_seconds
+            }))
+            .unwrap();
+            assert_eq!(run.effective_wait_seconds(), expected);
+        }
     }
 
     #[test]
