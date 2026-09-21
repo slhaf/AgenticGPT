@@ -37,13 +37,11 @@ jobs:
       - name: Test workspace
         run: cargo test --workspace
 
-      - name: Install Python YAML parser
-        run: python3 -m pip install pyyaml
+      - name: Build runtime binaries for contract parity
+        run: cargo build -p agentic-gpt -p agentic-gpt-hub
 
-      - name: Validate OpenAPI YAML
-        run: |
-          python3 - <<'PY'
-          import yaml
-          yaml.safe_load(open('openapi/hub.yaml'))
-          print('openapi yaml ok')
-          PY
+      - name: Install contract parity dependencies
+        run: python3 -m pip install "PyYAML" "jsonschema[format]>=4.25,<5"
+
+      - name: Run live contract parity gate
+        run: python3 scripts/check_contract_parity.py
