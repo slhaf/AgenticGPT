@@ -4,7 +4,7 @@
 Execute the existing roadmap WP3 end to end on completed WP1/WP2. Read relevant architecture docs first, then choose concrete implementation from actual code. User allows planning records committed with each phase. Deduplicate real repeated flows where useful; LOC reduction and design patterns are not forced acceptance targets.
 
 ## Current phase
-Completed. Source phases: `0f5422b`, `d8456e9`, `90947b2`, `dd7be73`. All WP3 runtime acceptance scenarios and final workspace validation passed (663 tests,1 ignored; existing Browser warnings only). Deployment/API/architecture records are updated; isolated probe processes/containers exited and temporary scripts, databases and baseline binaries were removed. Verification limits remain explicit in progress.md.
+Post-delivery review completed; WP3 is reopened for two concrete corrections before the recommended transition to WP4-A: atomic durable batch admission (process and MCP paths) and Agent migration snapshot cleanup on write-lock acquisition failure. This review changed no production code. Prior 663-test and successful runtime evidence remain valid for their exercised paths, but did not cover these failures. WP4 has not started.
 
 ## Required scope
 1. Authority matrix: run receipts, Job history/cache, transport ledger, audit, config/secrets, Room files, Browser leases, notification endpoints and Console local attention. Record owner/source vs projection, sensitivity, retention, allowed loss and recovery.
@@ -20,6 +20,7 @@ Completed. Source phases: `0f5422b`, `d8456e9`, `90947b2`, `dd7be73`. All WP3 ru
 3. Implement critical write/migration/recovery changes and retention/compaction in owned storage slices, only after interfaces are frozen. Keep intermediate commits buildable; atomic shared composition when necessary.
 4. Exercise actual isolated Hub/Agent restart, cache eviction, late/conflict, interrupted/concurrent/corrupt writes, state permissions and Room ownership. Verify browser-host same-user/different-user/shared-container access where actual topology is available; report unreachable prerequisites precisely rather than claiming proof.
 5. Record actual external-effect guarantees, final docs/evidence and phase commits. Cleanup is appended only after smoke proof.
+6. Review delayed advisor concerns against final source and actual verification chronology; reproduce remaining error paths, record dispositions and determine whether WP3 needs correction before proceeding to WP4-A. This review does not initiate WP4 or restore retired Room APIs.
 
 ## Frozen constraints
 - D01–D08 apply. No new generic storage framework, global durability, sandbox-default/policy-override change, protocol compatibility shims or remote Browser bridge.

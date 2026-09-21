@@ -374,7 +374,7 @@ flowchart TD
 - 保持 Normal + explicit Room、Hub Room/Skills/notifications capability、四个 CLI tmux local-admin 操作以及 `local:`, `tunnel:`, `http:`, `hub:`/`localadmin:` audit provenance。
 - 若后续改动消费不匹配 owner、让 timeout 冒充取消、使 config 与 startup-derived resources 分裂、把 annotation 当授权，或新增 registry/framework/compat 双轨，应停止并回到对应工作包边界。
 
-### WP3：资源所有权、retention 与 durability 分层（已完成；分层保证）
+### WP3：资源所有权、retention 与 durability 分层（主体已交付；补审发现待修缺口）
 **对应正式诊断：** A06（external trust/保证边界）、A07（durability/retention/recovery）；按 D04 保持安全默认和现有威胁模型范围，按 D06 执行 durability 分层，不把全量 Hub durable 化或未来 threat upgrade 设为前置。
 
 
@@ -387,7 +387,7 @@ flowchart TD
 - [已验证] Hub cache 全局最多 4096 项，Hub observation 60 秒后 stale、15 分钟 TTL、15 秒周期清理；HTTP/MCP 区分 live/cached/stale/unknown。实际容量和 TTL 淘汰不删除 durable receipt；缺失缓存的 unknown metadata 漏项在验收中修复。
 - [边界] 不承诺全量 durable 或外部副作用回滚。未模拟硬件断电、交互式 wizard 每个 syscall 的强杀、Android boot/process death；后者仍归 WP5。新 Neko 检查只读，不把 socket primitive smoke 称作完整浏览器页面操作验收。
 
-**完成证据（2026-09-20）**
+**已交付证据与补审（2026-09-20）**
 
 - 分阶段源码/合同提交：`0f5422b` authority matrix、`d8456e9` Hub cache/receipt、`90947b2` Agent admission/config/ledger/history/audit、`dd7be73` SQLite 迁移竞争与严格 legacy owner；部署/API 文档与最终记录单独收尾提交。临时探针、数据库与基线二进制已清理。
 - `cargo fmt --all -- --check`、`cargo build --workspace`、`cargo test --workspace` 通过：663 passed、1 ignored；构建保留 5 个既有 Browser distribution dead-code warnings，无新增 warning。OpenAPI YAML 解析、300 个本地引用及已观测 GET 响应字段检查通过，未宣称运行外部完整 OpenAPI validator。
@@ -397,6 +397,9 @@ flowchart TD
 - 旧 torn-ledger 会再次执行 touch；新实现保留原文/recovery 且不重放。真实 ledger 压缩将 1805 个历史/证据行收敛为 630 行（含新运行），保留 600 个结果及 unknown/unowned/不同结果/冲突；真实 Job 触发 audit 轮转。SQLite 阻塞结果写入中强杀 Hub 后完整性和 admission hash 保留，重启重放成功；完成 payload 压缩后的相同 hash 幂等、不同 hash 冲突和私有恢复快照均已实际验证。
 - Agent history 的真实新建/旧库迁移/未来版本/迁移失败场景通过：新库 schema1/0600、旧行与私有快照保留；未来版本及失败迁移不覆盖数据且不执行进程。并发 writer 在 staging 开始后提交未来版本，Hub/Agent 均在 IMMEDIATE 事务内复查并拒绝降级，保留既有恢复备份。真实 SSE 验证所有 ownerless legacy（包括精确目标一致的 accepted/completed）不执行、不 ACK、不披露结果，原 ledger 不变。
 - 实际部署只读 `bridge.getStatus` 成功；隔离共享 Docker volume 上以目录 0755/socket 0660 验证同 UID 和共享 GID 可达、不同 UID/GID 为 EACCES，stdin close 清理 socket。MCP/Browser/tmux/tunnel 的启动、结果与外部效果保证分开记录于 current-state 与部署文档。
+- [补审待修] process/MCP batch 的后续 admission 写入失败时只撤销内存登记，此前 SQLite 行仍保留。真实 process.batch 已复现：整批拒绝且无命令执行，仍残留 queued 行，重启后变成 unknown_after_restart；MCP 同型路径已源码确认。需要批量持久化的事务原子性，不依赖数据库失败后的补偿删除。
+- [补审待修] Agent history 生成迁移快照后，IMMEDIATE 写锁获取错误的 `?` 路径未清理 staging。真实 Agent 故障注入保留一个32768字节副本，目录0700/文件0600、原库不变；属于私有数据残留/资源泄漏，不是已证实的外泄。应补获取锁失败的清理及回归。既有663测试与成功路径证据不覆盖此分支。
+- [交付顺序] 建议先修正上述两类 WP3 缺口再切到 WP4-A；这不是新增 WP4-A 架构依赖，WP4-B 仍为后置可选，WP-R 仍是独立核心包。本轮补审未修改生产代码。
 
 **范围**
 
