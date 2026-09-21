@@ -226,60 +226,78 @@ impl JobHistoryStore {
         }
     }
 
-    pub(crate) fn insert_admission(&self, info: &JobInfo) -> HistoryWriteOutcome {
+    pub(crate) fn insert_admissions<'a>(
+        &self,
+        infos: impl IntoIterator<Item = &'a JobInfo>,
+    ) -> HistoryWriteOutcome {
         if let Err(error) = self.ensure_ready() {
             let error = truncate_text(&error.to_string(), MAX_ERROR_BYTES);
             self.degrade(&error);
             return HistoryWriteOutcome::Failed(error);
         }
-        let bounded = bounded_info(info);
-        let result = self.with_connection(|connection| {
-            let args_json = serde_json::to_string(&bounded.args)
-                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-            connection.execute(
-                "INSERT OR IGNORE INTO jobs (
-                    job_id, agent_id, group_name, batch_id, batch_call_id, batch_index,
-                    kind, state, created_at, started_at, updated_at, finished_at,
-                    program, args_json, working_directory, command_preview, exit_code,
-                    stdout_tail, stderr_tail, truncated, reject_reason, skill_id, skill_path,
-                    installed_digest, mcp_server_id, mcp_tool_name, cancel_requested,
-                    cancel_outcome, termination_evidence, detail_json, detail_bytes
-                ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,
-                          ?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,NULL,NULL)",
-                params![
-                    bounded.job_id,
-                    bounded.agent_id,
-                    bounded.group,
-                    bounded.batch_id,
-                    bounded.batch_call_id,
-                    bounded.batch_index.map(|value| value as i64),
-                    kind_label(bounded.kind),
-                    bounded.state.label(),
-                    format_time(bounded.created_at),
-                    bounded.started_at.map(format_time),
-                    format_time(bounded.updated_at),
-                    bounded.finished_at.map(format_time),
-                    bounded.program,
-                    args_json,
-                    bounded.working_directory,
-                    bounded.command_preview,
-                    bounded.exit_code,
-                    bounded.stdout_tail,
-                    bounded.stderr_tail,
-                    bounded.truncated as i64,
-                    bounded.reject_reason,
-                    bounded.skill_id,
-                    bounded.skill_path,
-                    bounded.installed_digest,
-                    bounded.mcp_server_id,
-                    bounded.mcp_tool_name,
-                    bounded.cancel_requested as i64,
-                    bounded.cancel_outcome,
-                    bounded.termination_evidence,
-                ],
-            )?;
+        let result = (|| -> rusqlite::Result<()> {
+            let mut guard = self
+                .connection
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let connection = guard.as_mut().ok_or_else(|| {
+                rusqlite::Error::InvalidParameterName("history_database_unavailable".to_string())
+            })?;
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            {
+                let mut statement = transaction.prepare_cached(
+                    "INSERT OR IGNORE INTO jobs (
+                        job_id, agent_id, group_name, batch_id, batch_call_id, batch_index,
+                        kind, state, created_at, started_at, updated_at, finished_at,
+                        program, args_json, working_directory, command_preview, exit_code,
+                        stdout_tail, stderr_tail, truncated, reject_reason, skill_id, skill_path,
+                        installed_digest, mcp_server_id, mcp_tool_name, cancel_requested,
+                        cancel_outcome, termination_evidence, detail_json, detail_bytes
+                    ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,
+                              ?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,NULL,NULL)",
+                )?;
+                for info in infos {
+                    let bounded = bounded_info(info);
+                    let args_json = serde_json::to_string(&bounded.args).map_err(|error| {
+                        rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+                    })?;
+                    statement.execute(params![
+                        bounded.job_id,
+                        bounded.agent_id,
+                        bounded.group,
+                        bounded.batch_id,
+                        bounded.batch_call_id,
+                        bounded.batch_index.map(|value| value as i64),
+                        kind_label(bounded.kind),
+                        bounded.state.label(),
+                        format_time(bounded.created_at),
+                        bounded.started_at.map(format_time),
+                        format_time(bounded.updated_at),
+                        bounded.finished_at.map(format_time),
+                        bounded.program,
+                        args_json,
+                        bounded.working_directory,
+                        bounded.command_preview,
+                        bounded.exit_code,
+                        bounded.stdout_tail,
+                        bounded.stderr_tail,
+                        bounded.truncated as i64,
+                        bounded.reject_reason,
+                        bounded.skill_id,
+                        bounded.skill_path,
+                        bounded.installed_digest,
+                        bounded.mcp_server_id,
+                        bounded.mcp_tool_name,
+                        bounded.cancel_requested as i64,
+                        bounded.cancel_outcome,
+                        bounded.termination_evidence,
+                    ])?;
+                }
+            }
+            transaction.commit()?;
             Ok(())
-        });
+        })();
         match result {
             Ok(()) => {
                 self.healthy();
@@ -736,7 +754,24 @@ impl JobHistoryStore {
             } else {
                 None
             };
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        self.commit_migration(connection, staged_snapshot)
+    }
+
+    fn commit_migration(
+        &self,
+        connection: &mut Connection,
+        staged_snapshot: Option<StagedMigrationSnapshot>,
+    ) -> Result<()> {
+        let transaction = match connection.transaction_with_behavior(TransactionBehavior::Immediate)
+        {
+            Ok(transaction) => transaction,
+            Err(error) => {
+                if let Some(snapshot) = staged_snapshot {
+                    snapshot.cleanup();
+                }
+                return Err(error.into());
+            }
+        };
         let transaction_version: i64 =
             match transaction.pragma_query_value(None, "user_version", |row| row.get(0)) {
                 Ok(version) => version,
@@ -1477,7 +1512,7 @@ mod tests {
         let now = Utc::now();
         let active = info("future-active", JobState::Running, now);
         assert_eq!(
-            store.insert_admission(&active),
+            store.insert_admissions([&active]),
             HistoryWriteOutcome::Persisted
         );
         let database_path = store.path().to_path_buf();
@@ -1520,6 +1555,54 @@ mod tests {
             )
             .is_ok());
         assert!(!PathBuf::from(format!("{}.pre-migration.bak", database_path.display())).exists());
+        cleanup(&root);
+    }
+
+    #[test]
+    fn migration_lock_failure_cleans_staged_snapshot_without_replacing_files() {
+        let (store, root) = store("migration-lock-cleanup");
+        let legacy = info("lock-row", JobState::Completed, Utc::now());
+        assert_eq!(
+            store.upsert_terminal(&detail(legacy)),
+            HistoryWriteOutcome::Persisted
+        );
+        let database_path = store.path().to_path_buf();
+        let backup_path = PathBuf::from(format!("{}.pre-migration.bak", database_path.display()));
+        let previous_backup = b"previous migration backup".to_vec();
+        fs::write(&backup_path, &previous_backup).unwrap();
+        store
+            .with_connection(|connection| connection.pragma_update(None, "user_version", 0_i64))
+            .unwrap();
+        let database_before = fs::read(&database_path).unwrap();
+
+        let snapshot = {
+            let guard = store
+                .connection
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let connection = guard.as_ref().unwrap();
+            store.stage_migration_snapshot(connection).unwrap()
+        };
+        let peer = Connection::open(&database_path).unwrap();
+        peer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let result = {
+            let mut guard = store
+                .connection
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let connection = guard.as_mut().unwrap();
+            store.commit_migration(connection, Some(snapshot))
+        };
+        assert!(result.is_err());
+        peer.execute_batch("ROLLBACK").unwrap();
+
+        assert_eq!(fs::read(&database_path).unwrap(), database_before);
+        assert_eq!(fs::read(&backup_path).unwrap(), previous_backup);
+        let backup_prefix = format!("{}.staging-", backup_path.display());
+        assert!(!fs::read_dir(&root)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .any(|entry| entry.path().to_string_lossy().starts_with(&backup_prefix)));
         cleanup(&root);
     }
 
@@ -1595,16 +1678,64 @@ mod tests {
     }
 
     #[test]
+    fn admission_batch_rolls_back_on_later_insert_failure_and_retries() {
+        let (store, root) = store("admission-batch-rollback");
+        let now = Utc::now();
+        let existing = info("existing", JobState::Running, now);
+        assert_eq!(
+            store.insert_admissions([&existing]),
+            HistoryWriteOutcome::Persisted
+        );
+        store
+            .with_connection(|connection| {
+                connection.execute_batch(
+                    "CREATE TRIGGER fail_second_admission
+                     BEFORE INSERT ON jobs
+                     WHEN NEW.job_id = 'batch-second'
+                     BEGIN
+                         SELECT RAISE(ABORT, 'second admission blocked');
+                     END;",
+                )
+            })
+            .unwrap();
+
+        let first = info("batch-first", JobState::Running, now);
+        let second = info("batch-second", JobState::Running, now);
+        let outcome = store.insert_admissions([&first, &second]);
+        assert!(matches!(
+            outcome,
+            HistoryWriteOutcome::Failed(error) if error.contains("second admission blocked")
+        ));
+        assert!(store.get("batch-first").unwrap().is_none());
+        assert!(store.get("batch-second").unwrap().is_none());
+        assert!(store.get("existing").unwrap().is_some());
+
+        store
+            .with_connection(|connection| {
+                connection.execute_batch("DROP TRIGGER fail_second_admission")
+            })
+            .unwrap();
+        assert_eq!(
+            store.insert_admissions([&first, &second]),
+            HistoryWriteOutcome::Persisted
+        );
+        assert!(store.get("batch-first").unwrap().is_some());
+        assert!(store.get("batch-second").unwrap().is_some());
+        assert!(store.get("existing").unwrap().is_some());
+        cleanup(&root);
+    }
+
+    #[test]
     fn admission_and_terminal_upsert_are_idempotent() {
         let (store, root) = store("upsert");
         let now = Utc::now();
         let admitted = info("job-1", JobState::Running, now);
         assert_eq!(
-            store.insert_admission(&admitted),
+            store.insert_admissions([&admitted]),
             HistoryWriteOutcome::Persisted
         );
         assert_eq!(
-            store.insert_admission(&admitted),
+            store.insert_admissions([&admitted]),
             HistoryWriteOutcome::Persisted
         );
         let mut terminal = info("job-1", JobState::Completed, now);
@@ -1670,7 +1801,7 @@ mod tests {
         let mut active = info("active", JobState::Running, now);
         active.started_at = Some(now - Duration::seconds(10));
         assert_eq!(
-            store.insert_admission(&active),
+            store.insert_admissions([&active]),
             HistoryWriteOutcome::Persisted
         );
         let terminal = info("terminal", JobState::Completed, now);
@@ -1703,7 +1834,7 @@ mod tests {
             HistoryWriteOutcome::Persisted
         );
         assert_eq!(
-            store.insert_admission(&active),
+            store.insert_admissions([&active]),
             HistoryWriteOutcome::Persisted
         );
         let unknown = info(
@@ -1827,7 +1958,7 @@ mod tests {
 
         let admission = info("new-admission", JobState::Running, Utc::now());
         assert_eq!(
-            store.insert_admission(&admission),
+            store.insert_admissions([&admission]),
             HistoryWriteOutcome::Persisted
         );
         assert_eq!(store.health().status, HistoryHealthStatus::Degraded);
@@ -1855,7 +1986,7 @@ mod tests {
             HistoryWriteOutcome::Persisted
         );
         assert_eq!(
-            store.insert_admission(&active),
+            store.insert_admissions([&active]),
             HistoryWriteOutcome::Persisted
         );
         store

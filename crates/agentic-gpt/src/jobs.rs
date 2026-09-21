@@ -433,7 +433,7 @@ pub(crate) async fn register_mcp_job(
     if active >= limit {
         return Err(capacity_rejection(active, 1, limit));
     }
-    let admission = state.job_history.insert_admission(&info);
+    let admission = state.job_history.insert_admissions([&info]);
     if !admission.is_persisted() {
         let error = admission
             .error()
@@ -504,13 +504,12 @@ pub(crate) async fn register_mcp_batch(
     if active.saturating_add(requested) > limit {
         return Err(capacity_rejection(active, requested, limit));
     }
-    let mut registrations: Vec<ManagedMcpRegistration> = Vec::with_capacity(requested);
+    let mut staged: Vec<(ManagedMcpSpec, JobInfo, Arc<AtomicBool>)> = Vec::with_capacity(requested);
     for spec in specs {
         let group = validated_group(spec.group.as_deref())?;
-        let job_id = state.new_job_id();
         let info = JobInfo {
-            agent_id: spec.agent_id,
-            job_id: job_id.clone(),
+            agent_id: spec.agent_id.clone(),
+            job_id: state.new_job_id(),
             group,
             batch_id: spec.batch_id.clone(),
             batch_call_id: spec.batch_call_id.clone(),
@@ -540,16 +539,20 @@ pub(crate) async fn register_mcp_batch(
             termination_evidence: None,
         };
         let cancel_requested = Arc::new(AtomicBool::new(false));
-        let admission = state.job_history.insert_admission(&info);
-        if !admission.is_persisted() {
-            for registration in &registrations {
-                jobs.remove(&registration.info.job_id);
-            }
-            let error = admission
-                .error()
-                .unwrap_or("history admission persistence failed");
-            return Err(format!("history_admission_failed: {error}"));
-        }
+        staged.push((spec, info, cancel_requested));
+    }
+    let admission = state
+        .job_history
+        .insert_admissions(staged.iter().map(|(_, info, _)| info));
+    if !admission.is_persisted() {
+        let error = admission
+            .error()
+            .unwrap_or("history admission persistence failed");
+        return Err(format!("history_admission_failed: {error}"));
+    }
+    let mut registrations: Vec<ManagedMcpRegistration> = Vec::with_capacity(requested);
+    for (spec, info, cancel_requested) in staged {
+        let job_id = info.job_id.clone();
         jobs.insert(
             job_id,
             ManagedJob {
@@ -989,7 +992,13 @@ pub(crate) async fn start_prepared_managed_batch(
     let limit = resolved_job_limit(&config);
     let batch_concurrency = config.limits.max_concurrent_tasks.max(1).min(requested);
     let batch_slots = Arc::new(Semaphore::new(batch_concurrency));
-    let mut registered: Vec<(_, JobInfo, _, _, _)> = Vec::with_capacity(requested);
+    let mut registered: Vec<(
+        ManagedProcessSpec,
+        JobInfo,
+        Arc<Mutex<TailBuffer>>,
+        Arc<Mutex<TailBuffer>>,
+        Arc<AtomicBool>,
+    )> = Vec::with_capacity(requested);
     {
         let mut jobs = state.jobs.lock().await;
         refresh_jobs(&state, &mut jobs).await;
@@ -1012,7 +1021,27 @@ pub(crate) async fn start_prepared_managed_batch(
                 None,
             );
             let runtime = process_runtime(None);
-            let cancel_requested = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let cancel_requested = Arc::new(AtomicBool::new(false));
+            let stdout = runtime.stdout.clone();
+            let stderr = runtime.stderr.clone();
+            registered.push((spec, info, stdout, stderr, cancel_requested));
+        }
+        let admission = state
+            .job_history
+            .insert_admissions(registered.iter().map(|(_, info, _, _, _)| info));
+        if !admission.is_persisted() {
+            let error = admission
+                .error()
+                .unwrap_or("history admission persistence failed");
+            return Err(format!("history_admission_failed: {error}"));
+        }
+        for (spec, info, stdout, stderr, cancel_requested) in &registered {
+            let runtime = ManagedProcessRuntime {
+                child: None,
+                stdout: stdout.clone(),
+                stderr: stderr.clone(),
+                skill_lease: None,
+            };
             let audit = ManagedAuditContext {
                 config: config.clone(),
                 request_source: spec.request_source.clone(),
@@ -1035,18 +1064,6 @@ pub(crate) async fn start_prepared_managed_batch(
                 config_revision: None,
                 terminal_event_hook: spec.terminal_event_hook.clone(),
             };
-            let stdout = runtime.stdout.clone();
-            let stderr = runtime.stderr.clone();
-            let admission = state.job_history.insert_admission(&info);
-            if !admission.is_persisted() {
-                for (_, registered_info, _, _, _) in &registered {
-                    jobs.remove(&registered_info.job_id);
-                }
-                let error = admission
-                    .error()
-                    .unwrap_or("history admission persistence failed");
-                return Err(format!("history_admission_failed: {error}"));
-            }
             jobs.insert(
                 info.job_id.clone(),
                 ManagedJob {
@@ -1058,7 +1075,6 @@ pub(crate) async fn start_prepared_managed_batch(
                     history_terminal_snapshot_at: None,
                 },
             );
-            registered.push((spec, info, stdout, stderr, cancel_requested));
         }
     }
     let mut infos = Vec::with_capacity(registered.len());
@@ -1161,7 +1177,7 @@ async fn start_process_job_inner(
         if capacity_error.is_some() {
             (capacity_error, None)
         } else {
-            let admission = state.job_history.insert_admission(&info);
+            let admission = state.job_history.insert_admissions([&info]);
             if !admission.is_persisted() {
                 let error = admission
                     .error()
@@ -2184,6 +2200,78 @@ mod tests {
     async fn test_state_with_history(max_active_jobs: usize) -> (AppState, PathBuf) {
         test_state(max_active_jobs).await
     }
+    fn install_process_batch_admission_failure_trigger(state: &AppState) {
+        let connection = rusqlite::Connection::open(state.job_history.path()).unwrap();
+        connection
+            .execute_batch(
+                "DROP TRIGGER IF EXISTS test_process_batch_admission_failure;
+                 CREATE TRIGGER test_process_batch_admission_failure
+                 BEFORE INSERT ON jobs
+                 WHEN NEW.program = '__history_trigger_failure__'
+                 BEGIN
+                     SELECT RAISE(ABORT, 'test process batch admission failure');
+                 END;",
+            )
+            .unwrap();
+    }
+
+    fn install_mcp_batch_admission_failure_trigger(state: &AppState) {
+        let connection = rusqlite::Connection::open(state.job_history.path()).unwrap();
+        connection
+            .execute_batch(
+                "DROP TRIGGER IF EXISTS test_mcp_batch_admission_failure;
+                 CREATE TRIGGER test_mcp_batch_admission_failure
+                 BEFORE INSERT ON jobs
+                 WHEN NEW.mcp_tool_name = '__history_trigger_failure__'
+                 BEGIN
+                     SELECT RAISE(ABORT, 'test MCP batch admission failure');
+                 END;",
+            )
+            .unwrap();
+    }
+
+    fn remove_batch_admission_failure_triggers(state: &AppState) {
+        let connection = rusqlite::Connection::open(state.job_history.path()).unwrap();
+        connection
+            .execute_batch(
+                "DROP TRIGGER IF EXISTS test_process_batch_admission_failure;
+                 DROP TRIGGER IF EXISTS test_mcp_batch_admission_failure;",
+            )
+            .unwrap();
+    }
+
+    fn history_rows_after_reopen(state: &AppState) -> Vec<JobInfo> {
+        crate::job_history::JobHistoryStore::open(&state.private_state)
+            .list(&JobListRequest {
+                group: None,
+                kind: None,
+                state: None,
+                limit: Some(100),
+                cursor: None,
+            })
+            .unwrap()
+            .jobs
+    }
+
+    fn mcp_spec(tool_name: &str) -> ManagedMcpSpec {
+        ManagedMcpSpec {
+            agent_id: "test-agent".to_string(),
+            group: Some("batch-group".to_string()),
+            batch_id: Some("batch-test".to_string()),
+            batch_call_id: Some(format!("call-{tool_name}")),
+            batch_index: Some(0),
+            server_id: "test-server".to_string(),
+            tool_name: tool_name.to_string(),
+            request_source: "test:mcp.batch".to_string(),
+            argument_keys: Vec::new(),
+            argument_key_count: 0,
+            argument_keys_truncated: false,
+            argument_bytes: 2,
+            argument_sha256: "sha256:test".to_string(),
+            config_revision: "test-revision".to_string(),
+            terminal_event_hook: None,
+        }
+    }
 
     fn synthetic_job(
         job_id: &str,
@@ -2268,6 +2356,96 @@ mod tests {
         let second = wait_terminal(&state, second).await;
         assert_eq!(second.state, JobState::Completed);
         assert_eq!(second.stdout_tail, "done");
+    }
+
+    #[tokio::test]
+    async fn process_batch_admission_failure_is_atomic_before_spawn() {
+        let (state, workspace) = test_state(2).await;
+        let marker = workspace.join("process-batch-must-not-run");
+        let mut first_request = exec_request("touch", &workspace);
+        first_request.args = vec![marker.to_string_lossy().to_string()];
+        let second_request = exec_request("__history_trigger_failure__", &workspace);
+        let specs = vec![
+            ManagedProcessSpec {
+                request: first_request,
+                working_directory: workspace.clone(),
+                decision: PolicyDecision::Allow,
+                confirmation_result: None,
+                request_source: "test:process.batch".to_string(),
+                terminal_event_hook: None,
+            },
+            ManagedProcessSpec {
+                request: second_request,
+                working_directory: workspace.clone(),
+                decision: PolicyDecision::Allow,
+                confirmation_result: None,
+                request_source: "test:process.batch".to_string(),
+                terminal_event_hook: None,
+            },
+        ];
+        install_process_batch_admission_failure_trigger(&state);
+
+        let error = start_prepared_managed_batch(state.clone(), specs)
+            .await
+            .unwrap_err();
+        assert!(error.starts_with("history_admission_failed:"));
+        assert!(state.jobs.lock().await.is_empty());
+        assert!(!marker.exists());
+        assert!(history_rows_after_reopen(&state).is_empty());
+
+        remove_batch_admission_failure_triggers(&state);
+        let retry = start_prepared_managed_batch(
+            state.clone(),
+            vec![
+                ManagedProcessSpec {
+                    request: exec_request("true", &workspace),
+                    working_directory: workspace.clone(),
+                    decision: PolicyDecision::Allow,
+                    confirmation_result: None,
+                    request_source: "test:process.batch".to_string(),
+                    terminal_event_hook: None,
+                },
+                ManagedProcessSpec {
+                    request: exec_request("true", &workspace),
+                    working_directory: workspace.clone(),
+                    decision: PolicyDecision::Allow,
+                    confirmation_result: None,
+                    request_source: "test:process.batch".to_string(),
+                    terminal_event_hook: None,
+                },
+            ],
+        )
+        .await
+        .unwrap();
+        assert_eq!(retry.len(), 2);
+        for info in retry {
+            assert_eq!(wait_terminal(&state, info).await.state, JobState::Completed);
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_batch_admission_failure_is_atomic_before_registration() {
+        let (state, _workspace) = test_state(2).await;
+        let mut second = mcp_spec("__history_trigger_failure__");
+        second.batch_index = Some(1);
+        install_mcp_batch_admission_failure_trigger(&state);
+
+        let error = match register_mcp_batch(&state, vec![mcp_spec("first-tool"), second]).await {
+            Ok(_) => panic!("MCP batch admission unexpectedly succeeded"),
+            Err(error) => error,
+        };
+        assert!(error.starts_with("history_admission_failed:"));
+        assert!(state.jobs.lock().await.is_empty());
+        assert!(history_rows_after_reopen(&state).is_empty());
+
+        remove_batch_admission_failure_triggers(&state);
+        let mut retry_second = mcp_spec("second-tool");
+        retry_second.batch_index = Some(1);
+        let registrations = register_mcp_batch(&state, vec![mcp_spec("first-tool"), retry_second])
+            .await
+            .unwrap();
+        assert_eq!(registrations.len(), 2);
+        assert_eq!(state.jobs.lock().await.len(), 2);
     }
 
     #[tokio::test]
@@ -2481,7 +2659,7 @@ mod tests {
             now - chrono::Duration::seconds(1),
         );
         for info in [&persisted_old, &persisted_new] {
-            let _ = state.job_history.insert_admission(info);
+            let _ = state.job_history.insert_admissions([info]);
             let _ = state
                 .job_history
                 .upsert_terminal(&synthetic_detail(info.clone()));

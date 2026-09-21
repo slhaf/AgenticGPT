@@ -4,7 +4,7 @@
 Execute the existing roadmap WP3 end to end on completed WP1/WP2. Read relevant architecture docs first, then choose concrete implementation from actual code. User allows planning records committed with each phase. Deduplicate real repeated flows where useful; LOC reduction and design patterns are not forced acceptance targets.
 
 ## Current phase
-Post-delivery review completed; WP3 is reopened for two concrete corrections before the recommended transition to WP4-A: atomic durable batch admission (process and MCP paths) and Agent migration snapshot cleanup on write-lock acquisition failure. This review changed no production code. Prior 663-test and successful runtime evidence remain valid for their exercised paths, but did not cover these failures. WP4 has not started.
+Both WP3 corrections are implemented and verified. Atomic process/MCP batch persistence and migration lock-timeout cleanup have four new behavioral regressions; actual Agent probes proved rollback/restart/healthy retry and cleanup/preserved backup/migration retry. Workspace tests passed667 with1 ignored. Source and final documentation/cleanup commits are being recorded; WP4 remains untouched.
 
 ## Required scope
 1. Authority matrix: run receipts, Job history/cache, transport ledger, audit, config/secrets, Room files, Browser leases, notification endpoints and Console local attention. Record owner/source vs projection, sensitivity, retention, allowed loss and recovery.
@@ -21,6 +21,7 @@ Post-delivery review completed; WP3 is reopened for two concrete corrections bef
 4. Exercise actual isolated Hub/Agent restart, cache eviction, late/conflict, interrupted/concurrent/corrupt writes, state permissions and Room ownership. Verify browser-host same-user/different-user/shared-container access where actual topology is available; report unreachable prerequisites precisely rather than claiming proof.
 5. Record actual external-effect guarantees, final docs/evidence and phase commits. Cleanup is appended only after smoke proof.
 6. Review delayed advisor concerns against final source and actual verification chronology; reproduce remaining error paths, record dispositions and determine whether WP3 needs correction before proceeding to WP4-A. This review does not initiate WP4 or restore retired Room APIs.
+7. Correct the shared admission owner and both batch callers; cover partial-write rollback, restart behavior and migration lock-timeout cleanup, then update completion evidence. Prior successful proofs are not substitutes for these error paths.
 
 ## Frozen constraints
 - D01–D08 apply. No new generic storage framework, global durability, sandbox-default/policy-override change, protocol compatibility shims or remote Browser bridge.
@@ -50,3 +51,5 @@ If a material decision requires user confirmation and the user has not replied i
 - Config: narrow atomic/backup/sync changes, not a generic storage framework; setup recovery is a specific multi-file transaction, not claimed atomicity from independent renames. Private-state migration retains source until verified durable target.
 - Ownership: Hub cache worker owns cache owner, consumers and Hub main cache wiring; Hub storage worker owns db/runs and coordinates any main.rs config-only edit. Agent ledger worker owns transport_ledger/hub. Agent config worker owns config/setup/config CLI policy/MCP mutation edges as required. Agent history/audit worker owns job_history/jobs/audit/private_state/skills. No worker changes protocol or another owner's file without Main contract update.
 - All writing workers skip builds/tests/format/lint while concurrent. Main integrates, runs validation and actual smoke, then commits each coherent phase.
+- Repair contract: replace insert_admission with insert_admissions accepting an iterator of borrowed JobInfo references; migrate all callers and tests, no compatibility alias or extra cloned-vector allocation. One transaction commits every row or none; single-job calls use a one-item array. jobs.rs stages both batch registrations privately and publishes to the locked in-memory map only after persistence succeeds.
+- Repair ownership: history worker exclusively owns job_history.rs (transaction API, snapshot cleanup, storage regressions); jobs worker exclusively owns jobs.rs (all callers, process/MCP batch staging, caller regressions). Main performs the shared LSP rename before fan-out. Both workers skip all validation and commits.
