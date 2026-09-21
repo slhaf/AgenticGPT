@@ -110,58 +110,87 @@ fn job_tool_response(
     response
 }
 
-pub(crate) fn slim_job_detail_response(detail: JobDetail, include_identity: bool) -> Result<Value> {
+fn slim_job_detail_value(detail: &JobDetail, include_identity: bool) -> Result<Value> {
     Ok(serde_json::to_value(job_tool_response(
-        &detail,
+        detail,
         include_identity,
         false,
     ))?)
+}
+
+fn push_job_snapshot(snapshots: Option<&mut Vec<JobInfo>>, job: JobInfo) {
+    if let Some(snapshots) = snapshots {
+        snapshots.push(job);
+    }
 }
 
 pub(crate) fn slim_job_get_response(
     detail: JobDetail,
     wait_only: bool,
     wait_seconds: u64,
+    snapshots: Option<&mut Vec<JobInfo>>,
 ) -> Result<Value> {
     if wait_only && wait_seconds > 0 && !detail.job.state.is_terminal() {
-        return Ok(serde_json::to_value(JobWaitResponse {
+        let value = serde_json::to_value(JobWaitResponse {
             job_id: detail.job.job_id.clone(),
             state: detail.job.state,
             elapsed_ms: elapsed_ms(&detail.job),
-        })?);
+        })?;
+        push_job_snapshot(snapshots, detail.job);
+        return Ok(value);
     }
-    slim_job_detail_response(detail, true)
+    let value = slim_job_detail_value(&detail, true)?;
+    push_job_snapshot(snapshots, detail.job);
+    Ok(value)
 }
 
-pub(crate) fn slim_process_response(value: Value) -> Result<Value> {
-    let response: JobResponse = serde_json::from_value(value)?;
-    slim_job_detail_response(response.detail, false)
+pub(crate) fn slim_process_response(
+    response: JobResponse,
+    snapshots: Option<&mut Vec<JobInfo>>,
+) -> Result<Value> {
+    slim_job_response(response, false, snapshots)
 }
 
-pub(crate) fn slim_mcp_response(value: Value) -> Result<Value> {
-    let response: JobResponse = serde_json::from_value(value)?;
-    slim_job_detail_response(response.detail, false)
+pub(crate) fn slim_mcp_response(
+    response: JobResponse,
+    snapshots: Option<&mut Vec<JobInfo>>,
+) -> Result<Value> {
+    slim_job_response(response, false, snapshots)
 }
 
-pub(crate) fn slim_process_batch_response(response: JobBatchResponse) -> Result<Value> {
+fn slim_job_response(
+    response: JobResponse,
+    include_identity: bool,
+    snapshots: Option<&mut Vec<JobInfo>>,
+) -> Result<Value> {
+    let value = slim_job_detail_value(&response.detail, include_identity)?;
+    push_job_snapshot(snapshots, response.detail.job);
+    Ok(value)
+}
+
+pub(crate) fn slim_process_batch_response(
+    response: JobBatchResponse,
+    mut snapshots: Option<&mut Vec<JobInfo>>,
+) -> Result<Value> {
     let jobs = response
         .jobs
         .into_iter()
         .map(|job| {
-            job_tool_response(
-                &JobDetail {
-                    job,
-                    detail_available: true,
-                    result: None,
-                    error: None,
-                    result_truncated: false,
-                    result_bytes: None,
-                    result_sha256: None,
-                    result_preview: None,
-                },
-                false,
-                false,
-            )
+            let detail = JobDetail {
+                job,
+                detail_available: true,
+                result: None,
+                error: None,
+                result_truncated: false,
+                result_bytes: None,
+                result_sha256: None,
+                result_preview: None,
+            };
+            let response = job_tool_response(&detail, false, false);
+            if let Some(snapshots) = snapshots.as_deref_mut() {
+                snapshots.push(detail.job);
+            }
+            response
         })
         .collect();
     Ok(serde_json::to_value(
@@ -171,6 +200,30 @@ pub(crate) fn slim_process_batch_response(response: JobBatchResponse) -> Result<
             jobs,
         },
     )?)
+}
+
+pub(crate) fn slim_mcp_batch_response(
+    response: McpBatchResponse,
+    mut snapshots: Option<&mut Vec<JobInfo>>,
+) -> Result<Value> {
+    let mut slim = McpBatchToolResponse {
+        status: response.status,
+        error: response.error,
+        results: response
+            .results
+            .into_iter()
+            .map(|child| {
+                let result_omitted = child.result_omitted;
+                let job = job_tool_response(&child.detail, false, result_omitted);
+                if let Some(snapshots) = snapshots.as_deref_mut() {
+                    snapshots.push(child.detail.job);
+                }
+                McpBatchToolChildResponse { job }
+            })
+            .collect(),
+    };
+    apply_slim_mcp_batch_budget(&mut slim)?;
+    Ok(serde_json::to_value(slim)?)
 }
 
 pub(crate) fn slim_job_list_response(page: crate::job_history::JobHistoryPage) -> Result<Value> {
@@ -193,7 +246,10 @@ pub(crate) fn slim_job_list_response(page: crate::job_history::JobHistoryPage) -
     })?)
 }
 
-pub(crate) fn slim_cancel_response(detail: JobDetail) -> Result<Value> {
+pub(crate) fn slim_cancel_response(
+    detail: JobDetail,
+    snapshots: Option<&mut Vec<JobInfo>>,
+) -> Result<Value> {
     let cancel_outcome = detail
         .job
         .cancel_outcome
@@ -219,33 +275,19 @@ pub(crate) fn slim_cancel_response(detail: JobDetail) -> Result<Value> {
     } else {
         None
     };
-    Ok(serde_json::to_value(JobCancelResponse {
-        job_id: detail.job.job_id,
+    let value = serde_json::to_value(JobCancelResponse {
+        job_id: detail.job.job_id.clone(),
         state: detail.job.state,
         cancel_outcome,
         termination_evidence: detail
             .job
             .termination_evidence
+            .clone()
             .unwrap_or_else(|| "unknown".to_string()),
         error,
-    })?)
-}
-
-pub(crate) fn slim_mcp_batch_response(value: Value) -> Result<Value> {
-    let response: McpBatchResponse = serde_json::from_value(value)?;
-    let mut slim = McpBatchToolResponse {
-        status: response.status,
-        error: response.error,
-        results: response
-            .results
-            .into_iter()
-            .map(|child| McpBatchToolChildResponse {
-                job: job_tool_response(&child.detail, false, child.result_omitted),
-            })
-            .collect(),
-    };
-    apply_slim_mcp_batch_budget(&mut slim)?;
-    Ok(serde_json::to_value(slim)?)
+    })?;
+    push_job_snapshot(snapshots, detail.job);
+    Ok(value)
 }
 
 fn apply_slim_mcp_batch_budget(response: &mut McpBatchToolResponse) -> Result<()> {

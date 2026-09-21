@@ -1,4 +1,4 @@
-use agentic_gpt_protocol::{normalize_job_group, HubCommand};
+use agentic_gpt_protocol::{normalize_job_group, HubCommand, JobInfo};
 use anyhow::Result;
 
 use crate::{
@@ -16,10 +16,14 @@ use crate::{
 ///
 /// Transport adapters own their envelopes and acknowledgements. This module owns shared admission,
 /// operation execution, and result/error shapes for Hub and local stdio callers.
+/// When supplied by a Hub command adapter, `snapshots` receives authoritative
+/// JobInfo values from the typed operation result during projection. Other ingress
+/// callers pass `None` and incur no snapshot allocation or cloning.
 pub(crate) async fn dispatch(
     state: AppState,
     command: HubCommand,
     context: RequestContext<'_>,
+    snapshots: Option<&mut Vec<JobInfo>>,
 ) -> Result<serde_json::Value> {
     let admission = {
         let config = state.config.read().await;
@@ -28,7 +32,7 @@ pub(crate) async fn dispatch(
     if let Err(error) = admission {
         return Ok(admission_error_value(error));
     }
-    dispatch_inner(state, command, context).await
+    dispatch_inner(state, command, context, snapshots).await
 }
 
 fn admission_error_value(error: AdmissionError) -> serde_json::Value {
@@ -44,6 +48,7 @@ async fn dispatch_inner(
     state: AppState,
     command: HubCommand,
     context: RequestContext<'_>,
+    mut snapshots: Option<&mut Vec<JobInfo>>,
 ) -> Result<serde_json::Value> {
     match command {
         HubCommand::Exec { mut payload, .. } => {
@@ -57,7 +62,7 @@ async fn dispatch_inner(
                 jobs::ManagedJobOptions::for_source(context.source()),
             )
             .await;
-            slim_process_response(serde_json::to_value(response)?)
+            slim_process_response(response, snapshots.as_deref_mut())
         }
         HubCommand::ProcessBatch { mut payload, .. } => {
             payload.group = match normalize_hub_group(payload.group) {
@@ -66,7 +71,7 @@ async fn dispatch_inner(
             };
             let request_source = context.source();
             match jobs::start_process_batch(state, payload, request_source, None).await {
-                Ok(response) => slim_process_batch_response(response),
+                Ok(response) => slim_process_batch_response(response, snapshots.as_deref_mut()),
                 Err(reason) => Ok(serde_json::json!({
                     "error": {"code": "process_batch_rejected", "message": reason}
                 })),
@@ -87,7 +92,12 @@ async fn dispatch_inner(
         HubCommand::JobGet { payload, .. } => {
             let wait_seconds = payload.wait_seconds.unwrap_or(0).min(30);
             match jobs::get_job_detail(&state, &payload.job_id, wait_seconds).await {
-                Ok(job) => slim_job_get_response(job, payload.wait_only, wait_seconds),
+                Ok(job) => slim_job_get_response(
+                    job,
+                    payload.wait_only,
+                    wait_seconds,
+                    snapshots.as_deref_mut(),
+                ),
                 Err(reason) => Ok(serde_json::json!({
                     "error": {"code": reason.clone(), "message": reason}
                 })),
@@ -95,7 +105,7 @@ async fn dispatch_inner(
         }
         HubCommand::JobCancel { payload, .. } => {
             match jobs::cancel_job(&state, &payload.job_id).await {
-                Ok(job) => slim_cancel_response(job),
+                Ok(job) => slim_cancel_response(job, snapshots.as_deref_mut()),
                 Err(reason) => Ok(serde_json::json!({
                     "error": {"code": reason, "message": reason}
                 })),
@@ -128,7 +138,7 @@ async fn dispatch_inner(
             };
             let request_source = context.source();
             match mcp::call_tool(&state, payload, &request_source, None).await {
-                Ok(result) => slim_mcp_response(result),
+                Ok(response) => slim_mcp_response(response, snapshots.as_deref_mut()),
                 Err(error) => Ok(serde_json::json!({
                     "error": { "code": "mcp_call_tool_failed", "message": error.to_string() }
                 })),
@@ -141,7 +151,7 @@ async fn dispatch_inner(
             };
             let request_source = context.source();
             match mcp::batch(&state, payload, &request_source, None).await {
-                Ok(result) => slim_mcp_batch_response(result),
+                Ok(response) => slim_mcp_batch_response(response, snapshots.as_deref_mut()),
                 Err(error) => Ok(serde_json::json!({
                     "error": { "code": "mcp_batch_failed", "message": error.to_string() }
                 })),
@@ -205,7 +215,7 @@ async fn dispatch_inner(
             };
             let request_source = context.source();
             match skills::run(state.clone(), payload, &request_source, None).await {
-                Ok(response) => slim_process_response(serde_json::to_value(response)?),
+                Ok(response) => slim_process_response(response, snapshots),
                 Err(error) => Ok(skills::skill_run_command_error(error)),
             }
         }

@@ -1142,16 +1142,23 @@ pub(crate) async fn handle_hub_command(
     identity: Option<RunIdentity>,
 ) -> Result<()> {
     let request_id = command.request_id().to_string();
+    let mut snapshots = Vec::new();
     let context = RequestContext::new(RequestIngress::Hub, hub_command_name(&command));
-    let data = match crate::local_service::dispatch(state.clone(), command, context).await {
-        Ok(data) => data,
-        Err(error) => serde_json::json!({
-            "error": {
-                "code": "local_dispatch_failed",
-                "message": error.to_string()
+    let data =
+        match crate::local_service::dispatch(state.clone(), command, context, Some(&mut snapshots))
+            .await
+        {
+            Ok(data) => data,
+            Err(error) => {
+                snapshots.clear();
+                serde_json::json!({
+                    "error": {
+                        "code": "local_dispatch_failed",
+                        "message": error.to_string()
+                    }
+                })
             }
-        }),
-    };
+        };
     if let Some(identity) = identity.as_ref() {
         if identity.request_id != request_id {
             return Err(anyhow!("transport_request_id_mismatch"));
@@ -1170,7 +1177,8 @@ pub(crate) async fn handle_hub_command(
         data: data.clone(),
     };
     let mut delivery_error = None;
-    for job in jobs_from_command_response(&data) {
+    for job in snapshots {
+        let job = job_for_reporting(&state, job);
         if let Err(error) = send_agent_message(&state, AgentMessage::JobUpdate { job }).await {
             if delivery_error.is_none() {
                 delivery_error = Some(error);
@@ -1183,35 +1191,6 @@ pub(crate) async fn handle_hub_command(
         }
     }
     delivery_error.map_or(Ok(()), Err)
-}
-
-fn jobs_from_command_response(data: &serde_json::Value) -> Vec<JobInfo> {
-    if let Some(job) = data
-        .get("job")
-        .cloned()
-        .and_then(|value| serde_json::from_value(value).ok())
-    {
-        return vec![job];
-    }
-    if data.get("batchId").is_some() {
-        if let Some(jobs) = data.get("jobs").and_then(serde_json::Value::as_array) {
-            return jobs
-                .iter()
-                .filter_map(|value| serde_json::from_value(value.clone()).ok())
-                .collect();
-        }
-        if let Some(results) = data.get("results").and_then(serde_json::Value::as_array) {
-            return results
-                .iter()
-                .filter_map(|value| value.get("job"))
-                .filter_map(|value| serde_json::from_value(value.clone()).ok())
-                .collect();
-        }
-    }
-    serde_json::from_value::<JobInfo>(data.clone())
-        .ok()
-        .into_iter()
-        .collect()
 }
 
 pub(crate) async fn send_agent_message(state: &AppState, message: AgentMessage) -> Result<()> {
@@ -1230,55 +1209,6 @@ pub(crate) async fn send_agent_message(state: &AppState, message: AgentMessage) 
 #[cfg(test)]
 mod reporting_tests {
     use super::*;
-
-    #[test]
-    fn command_response_job_extraction_skips_lists_and_covers_creation_shapes() {
-        let now = Utc::now();
-        let job = JobInfo {
-            agent_id: "agent".to_string(),
-            job_id: "job_boot_1".to_string(),
-            group: None,
-            batch_id: None,
-            batch_call_id: None,
-            batch_index: None,
-            kind: agentic_gpt_protocol::JobKind::Process,
-            state: agentic_gpt_protocol::JobState::Running,
-            created_at: now,
-            started_at: Some(now),
-            updated_at: now,
-            finished_at: None,
-            program: Some("sleep".to_string()),
-            args: vec!["1".to_string()],
-            working_directory: None,
-            command_preview: Some("sleep 1".to_string()),
-            exit_code: None,
-            stdout_tail: String::new(),
-            stderr_tail: String::new(),
-            truncated: false,
-            reject_reason: None,
-            skill_id: None,
-            skill_path: None,
-            installed_digest: None,
-            mcp_server_id: None,
-            mcp_tool_name: None,
-            cancel_requested: false,
-            cancel_outcome: None,
-            termination_evidence: None,
-        };
-        let wrapped = serde_json::json!({"job": job});
-        assert_eq!(jobs_from_command_response(&wrapped).len(), 1);
-        let batch = serde_json::json!({"batchId": "batch_1", "jobs": [job]});
-        assert_eq!(jobs_from_command_response(&batch).len(), 1);
-        let mcp_batch = serde_json::json!({
-            "batchId": "batch_2",
-            "results": [{"index": 0, "job": job, "detailAvailable": true, "resultTruncated": false}]
-        });
-        assert_eq!(jobs_from_command_response(&mcp_batch).len(), 1);
-        let direct = serde_json::to_value(&job).unwrap();
-        assert_eq!(jobs_from_command_response(&direct).len(), 1);
-        let list = serde_json::json!({"jobs": [job]});
-        assert!(jobs_from_command_response(&list).is_empty());
-    }
 
     #[test]
     fn oversized_report_json_becomes_a_hash_record() {

@@ -248,16 +248,15 @@ pub(crate) async fn call_tool(
     payload: McpCallToolRequest,
     request_source: &str,
     terminal_event_hook: Option<TerminalEventHook>,
-) -> Result<Value> {
-    let response = start_managed_call_with_factory(
+) -> Result<JobResponse> {
+    start_managed_call_with_factory(
         state,
         payload,
         request_source,
         terminal_event_hook,
         production_client_factory(),
     )
-    .await?;
-    Ok(serde_json::to_value(response)?)
+    .await
 }
 
 pub(crate) async fn batch(
@@ -265,16 +264,15 @@ pub(crate) async fn batch(
     payload: McpBatchRequest,
     request_source: &str,
     terminal_event_hook: Option<TerminalEventHook>,
-) -> Result<Value> {
-    let response = start_managed_batch_with_factory(
+) -> Result<McpBatchResponse> {
+    start_managed_batch_with_factory(
         state,
         payload,
         request_source,
         terminal_event_hook,
         production_client_factory(),
     )
-    .await?;
-    Ok(serde_json::to_value(response)?)
+    .await
 }
 
 pub(crate) async fn batch_slim(
@@ -282,16 +280,15 @@ pub(crate) async fn batch_slim(
     payload: McpBatchRequest,
     request_source: &str,
     terminal_event_hook: Option<TerminalEventHook>,
-) -> Result<Value> {
-    let response = start_managed_batch_without_aggregate_budget(
+) -> Result<McpBatchResponse> {
+    start_managed_batch_without_aggregate_budget(
         state,
         payload,
         request_source,
         terminal_event_hook,
         production_client_factory(),
     )
-    .await?;
-    Ok(serde_json::to_value(response)?)
+    .await
 }
 
 async fn start_managed_batch_with_factory(

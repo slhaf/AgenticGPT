@@ -49,6 +49,15 @@ use crate::{
 const INSTRUCTIONS: &str = "Agentic GPT local Tunnel worker. Start with agent.info to inspect the active profile, exact workspace/path policy, capacity, confirmation channels, MCP scheduler state, and connection state. Use file.read/search for bounded UTF-8 workspace work and file.edit for Codex apply-patch edits, process.exec/process.batch for process Jobs, mcp.callTool for one downstream MCP Job, mcp.batch for 1..16 atomically admitted child Jobs with one aggregate confirmation and bounded 8/2 concurrency, job.get/list/cancel for lifecycle control, tmux for persistent workspaces, skills for the local skills workspace, bootstrap for Room startup guidance, and browser.acquire/browser.repl for a named persistent Browser SDK JavaScript lease (bindings survive calls); use browser.reset for recovery, browser.release for final cleanup, browser.manual for selected-runtime official docs, and browser.list for bounded lease state. Browser SDK semantics belong in JavaScript. All calls remain subject to path policy, configured confirmation, audit, and bounded waits.";
 const PATCH_SCHEMA_DESCRIPTION: &str = "Codex apply_patch text beginning with *** Begin Patch and ending with *** End Patch; supports Add File, Delete File, Update File, and Move to across multiple files.";
 const BROWSER_REPL_RESULT_MARKER: &str = "__agentic_browser_repl_result";
+fn wait_seconds_schema(default: u64, description: &'static str) -> Value {
+    json!({
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 30,
+        "default": default,
+        "description": description,
+    })
+}
 
 fn tool_descriptors(toolsets: &crate::config::ToolsetConfig) -> Vec<Tool> {
     let mut tools = TOOL_NAMESPACE_BY_NAME
@@ -853,7 +862,7 @@ impl AgentMcpServer {
                 )
                 .await
                 {
-                    Ok(value) => slim_mcp_response(value),
+                    Ok(value) => slim_mcp_response(value, None),
                     Err(error) => Ok(structured_error_from_reason(
                         "mcp_call_tool_failed",
                         error.to_string(),
@@ -897,7 +906,7 @@ impl AgentMcpServer {
                 )
                 .await
                 {
-                    Ok(value) => slim_mcp_batch_response(value),
+                    Ok(value) => slim_mcp_batch_response(value, None),
                     Err(error) => Ok(structured_error_from_reason(
                         "mcp_batch_failed",
                         error.to_string(),
@@ -1112,14 +1121,14 @@ impl AgentMcpServer {
             },
         )
         .await;
-        slim_process_response(serde_json::to_value(response)?)
+        slim_process_response(response, None)
     }
 
     async fn dispatch_job_get(&self, arguments: Value) -> Result<Value> {
         let args: JobGetArgs = from_value(arguments)?;
         let wait_seconds = args.wait_seconds.unwrap_or(0).min(30);
         match crate::jobs::get_job_detail(&self.state, &args.job_id, wait_seconds).await {
-            Ok(job) => slim_job_get_response(job, args.wait_only, wait_seconds),
+            Ok(job) => slim_job_get_response(job, args.wait_only, wait_seconds, None),
             Err(reason) => Ok(job_error(reason)),
         }
     }
@@ -1166,7 +1175,7 @@ impl AgentMcpServer {
         )
         .await
         {
-            Ok(response) => slim_process_batch_response(response),
+            Ok(response) => slim_process_batch_response(response, None),
             Err(reason) => Ok(structured_error_value("process_batch_rejected", reason)),
         }
     }
@@ -1174,7 +1183,7 @@ impl AgentMcpServer {
     async fn dispatch_job_cancel(&self, arguments: Value) -> Result<Value> {
         let args: JobCancelArgs = from_value(arguments)?;
         match crate::jobs::cancel_job(&self.state, &args.job_id).await {
-            Ok(job) => slim_cancel_response(job),
+            Ok(job) => slim_cancel_response(job, None),
             Err(reason) => Ok(job_error(reason)),
         }
     }
@@ -1234,7 +1243,7 @@ impl AgentMcpServer {
         )
         .await
         {
-            Ok(response) => slim_process_response(serde_json::to_value(response)?),
+            Ok(response) => slim_process_response(response, None),
             Err(error) => Ok(crate::skills::skill_run_command_error(error)),
         }
     }
@@ -2069,7 +2078,7 @@ struct TmuxPasteArgs {
 async fn dispatch(server: &AgentMcpServer, command: HubCommand) -> Result<Value> {
     let operation_name = operation::hub_command_name(&command);
     let context = RequestContext::new(server.ingress, operation_name);
-    local_service::dispatch(server.state.clone(), command, context).await
+    local_service::dispatch(server.state.clone(), command, context, None).await
 }
 fn admission_error_value(error: AdmissionError) -> Value {
     json!({
@@ -2973,7 +2982,10 @@ fn properties_for(name: &str) -> Map<String, Value> {
             add("jobId", string("Managed Job id."));
             add(
                 "waitSeconds",
-                json!({"type":"integer","minimum":0,"maximum":30,"default":5,"description":"Bounded wait in seconds."}),
+                wait_seconds_schema(
+                    0,
+                    "Bounded wait in seconds; defaults to 0 and is capped at 30.",
+                ),
             );
             add(
                 "waitOnly",
@@ -3249,7 +3261,13 @@ fn properties_for(name: &str) -> Map<String, Value> {
         }
         "skills.install.get" => {
             add("installId", string("Installation job id."));
-            add("waitSeconds", number("Bounded status wait, capped at 30."));
+            add(
+                "waitSeconds",
+                wait_seconds_schema(
+                    5,
+                    "Bounded status wait in seconds; defaults to 5 and is capped at 30.",
+                ),
+            );
         }
         "skills.install.cancel" => add("installId", string("Installation job id.")),
         "skills.run" => {
@@ -3266,7 +3284,13 @@ fn properties_for(name: &str) -> Map<String, Value> {
             );
             add("args", strings("Script argument vector."));
             add("workingDirectory", string("Optional working directory."));
-            add("waitSeconds", number("Bounded inline wait, capped at 30."));
+            add(
+                "waitSeconds",
+                wait_seconds_schema(
+                    5,
+                    "Bounded inline wait in seconds; defaults to 5 and is capped at 30.",
+                ),
+            );
         }
         "room.maintenance.status" => {}
         "room.maintenance.submit" => {
@@ -4866,29 +4890,32 @@ mod tests {
             result_sha256: None,
             result_preview: None,
         };
-        let value = slim_mcp_batch_response(serde_json::to_value(McpBatchResponse {
-            batch_id: "batch_test".to_string(),
-            status: McpBatchStatus::Completed,
-            completed_inline: true,
-            poll_after_ms: 0,
-            results: vec![
-                McpBatchChildResponse {
-                    index: 0,
-                    id: Some("truncated".to_string()),
-                    result_omitted: false,
-                    detail: truncated_detail,
-                },
-                McpBatchChildResponse {
-                    index: 1,
-                    id: Some("retained".to_string()),
-                    result_omitted: false,
-                    detail: retained_detail,
-                },
-            ],
-            aggregate_truncated: false,
-            aggregate_bytes: None,
-            error: None,
-        })?)?;
+        let value = slim_mcp_batch_response(
+            McpBatchResponse {
+                batch_id: "batch_test".to_string(),
+                status: McpBatchStatus::Completed,
+                completed_inline: true,
+                poll_after_ms: 0,
+                results: vec![
+                    McpBatchChildResponse {
+                        index: 0,
+                        id: Some("truncated".to_string()),
+                        result_omitted: false,
+                        detail: truncated_detail,
+                    },
+                    McpBatchChildResponse {
+                        index: 1,
+                        id: Some("retained".to_string()),
+                        result_omitted: false,
+                        detail: retained_detail,
+                    },
+                ],
+                aggregate_truncated: false,
+                aggregate_bytes: None,
+                error: None,
+            },
+            None,
+        )?;
         assert!(value.get("batchId").is_none());
         assert!(value.get("completedInline").is_none());
         assert!(value.get("pollAfterMs").is_none());

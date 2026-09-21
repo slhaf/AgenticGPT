@@ -37,6 +37,19 @@ use crate::{MAX_WAIT_SECONDS, REQUEST_TIMEOUT_SECS};
 
 const MCP_INSTRUCTIONS: &str = "Agentic GPT Hub exposes domain-specific job creation plus one generic lifecycle. Use process.exec for one managed process and process.batch for multiple managed processes; both wait briefly and return Job envelopes. Use mcp.callTool for one downstream MCP Job and mcp.batch for 1..16 atomically admitted child Jobs with one aggregate confirmation, ordered results, global/per-server concurrency bounds, and optional fail-fast scheduling. Use job.get with waitSeconds to inspect or briefly wait, job.list for bounded filtered discovery, and job.cancel for kind-aware cancellation evidence. Use tmux as the persistent shared workspace for stateful development, iterative debugging, TUIs, and user-agent handoff. For tmux work, discover the workspace with tmux.listSessions and tmux.listPanes, inspect it with tmux.capturePane, then use tmux.exec for shell panes or tmux.pasteText for non-shell panes. At Room start, call room.bootstrap, then room.bootstrap.read for relevant guides. Room skills are managed only by the active Room Agent; skills.run returns the same Job envelope and is followed through job.get/job.cancel. Commands remain subject to Agentic local policy, path policy, confirmation, capacity, and audit.";
 const COORDINATOR_INSTRUCTIONS: &str = "Agentic GPT Hub coordinator profile. This connector exposes only Hub-native agent status, retained run history, current job snapshots, and notification tools. It never dispatches execution, job-control, tmux, downstream MCP, skills, bootstrap, diary, or notebook commands to an Agent.";
+fn default_job_wait_seconds() -> u64 {
+    0
+}
+
+fn default_standard_wait_seconds() -> u64 {
+    5
+}
+fn default_wait_only() -> bool {
+    false
+}
+fn default_job_list_limit() -> usize {
+    50
+}
 const COORDINATOR_TOOLS: &[&str] = &[
     "hub.info",
     "agent.list",
@@ -1311,7 +1324,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "room.notebook.append",
-        description = "Append one durable Room notebook passage; ANCHOR updates current state for its scope."
+        description = "Transitional legacy Room notebook append; currently rejected with room_legacy_surface_removed pending WP-R."
     )]
     async fn room_notebook_append(
         &self,
@@ -1356,7 +1369,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "room.notebook.recent",
-        description = "Read recent Room notebook passages; read-only."
+        description = "Transitional legacy Room notebook recent read; currently rejected with room_legacy_surface_removed pending WP-R."
     )]
     async fn room_notebook_recent(
         &self,
@@ -1391,7 +1404,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "room.notebook.selectExact",
-        description = "Read Room notebook passages for one exact Room-local date; read-only."
+        description = "Transitional legacy Room notebook exact-date read; currently rejected with room_legacy_surface_removed pending WP-R."
     )]
     async fn room_notebook_select_exact(
         &self,
@@ -1421,7 +1434,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "room.notebook.search",
-        description = "Search Room notebook passages by bounded substring fields; read-only."
+        description = "Transitional legacy Room notebook search; currently rejected with room_legacy_surface_removed pending WP-R."
     )]
     async fn room_notebook_search(
         &self,
@@ -1451,7 +1464,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "room.notebook.current",
-        description = "Read recoverable current Room notebook state for one scope; read-only."
+        description = "Transitional legacy Room notebook current-state read; currently rejected with room_legacy_surface_removed pending WP-R."
     )]
     async fn room_notebook_current(
         &self,
@@ -1479,7 +1492,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "room.notebook.update",
-        description = "Update editable fields of one Room notebook passage; scope and datetime stay immutable."
+        description = "Transitional legacy Room notebook update; currently rejected with room_legacy_surface_removed pending WP-R."
     )]
     async fn room_notebook_update(
         &self,
@@ -1515,7 +1528,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "room.notebook.remove",
-        description = "Remove one Room notebook passage; destructive."
+        description = "Transitional legacy Room notebook removal; currently rejected with room_legacy_surface_removed pending WP-R."
     )]
     async fn room_notebook_remove(
         &self,
@@ -1541,7 +1554,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "room.diary.append",
-        description = "Append one durable Room diary entry to the current logical diary day."
+        description = "Transitional legacy Room diary append; currently rejected with room_legacy_surface_removed pending WP-R."
     )]
     async fn room_diary_append(
         &self,
@@ -1570,7 +1583,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "room.diary.recent",
-        description = "Read recent Room diary entries; read-only."
+        description = "Transitional legacy Room diary recent read; currently rejected with room_legacy_surface_removed pending WP-R."
     )]
     async fn room_diary_recent(
         &self,
@@ -1599,7 +1612,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "room.diary.selectExact",
-        description = "Read Room diary entries for one exact Room-local logical date; read-only."
+        description = "Transitional legacy Room diary exact-date read; currently rejected with room_legacy_surface_removed pending WP-R."
     )]
     async fn room_diary_select_exact(
         &self,
@@ -2009,7 +2022,8 @@ struct ExecArgs {
     #[serde(default)]
     #[schemars(
         range(min = 0, max = 30),
-        description = "Bounded inline wait in seconds, default 5 and capped at 30."
+        default = "default_standard_wait_seconds",
+        description = "Bounded inline wait in seconds; defaults to 5 and is capped at 30."
     )]
     wait_seconds: Option<u64>,
 }
@@ -2044,7 +2058,11 @@ struct BatchExecArgs {
     )]
     working_directory: Option<String>,
     #[serde(default)]
-    #[schemars(description = "Bounded inline wait in seconds, default 5 and capped at 30.")]
+    #[schemars(
+        range(min = 0, max = 30),
+        default = "default_standard_wait_seconds",
+        description = "Bounded inline wait in seconds; defaults to 5 and is capped at 30."
+    )]
     wait_seconds: Option<u64>,
 }
 
@@ -2082,11 +2100,16 @@ struct JobGetArgs {
     #[schemars(description = "Managed Job id.")]
     job_id: String,
     #[serde(default)]
-    #[schemars(description = "Maximum seconds to wait for an update, capped at 30.")]
+    #[schemars(
+        range(min = 0, max = 30),
+        default = "default_job_wait_seconds",
+        description = "Bounded wait in seconds; defaults to 0 and is capped at 30."
+    )]
     wait_seconds: Option<u64>,
     #[serde(default)]
     #[schemars(
-        description = "While waiting, suppress active intermediate detail; terminal completion still returns normal detail."
+        default = "default_wait_only",
+        description = "While waiting, suppress active intermediate detail; defaults to false; terminal completion still returns normal detail."
     )]
     wait_only: Option<bool>,
 }
@@ -2106,7 +2129,11 @@ struct JobListArgs {
     #[schemars(description = "Optional Job state filter.")]
     state: Option<String>,
     #[serde(default)]
-    #[schemars(description = "Maximum retained Jobs, default 50 and capped at 100.")]
+    #[schemars(
+        range(min = 1, max = 100),
+        default = "default_job_list_limit",
+        description = "Maximum retained Jobs; defaults to 50 and is capped at 100."
+    )]
     limit: Option<usize>,
     #[serde(default)]
     #[schemars(description = "Opaque cursor returned by a prior job.list response.")]
@@ -2248,7 +2275,11 @@ struct McpCallToolArgs {
     )]
     arguments: Option<Value>,
     #[serde(default)]
-    #[schemars(description = "Bounded inline wait in seconds, default 5 and capped at 30.")]
+    #[schemars(
+        range(min = 0, max = 30),
+        default = "default_standard_wait_seconds",
+        description = "Bounded inline wait in seconds; defaults to 5 and is capped at 30."
+    )]
     wait_seconds: Option<u64>,
     #[serde(default)]
     #[schemars(
@@ -2312,7 +2343,8 @@ struct McpBatchArgs {
     #[serde(default)]
     #[schemars(
         range(min = 0, max = 30),
-        description = "Bounded inline wait in seconds, default 5 and capped at 30."
+        default = "default_standard_wait_seconds",
+        description = "Bounded inline wait in seconds; defaults to 5 and is capped at 30."
     )]
     wait_seconds: Option<u64>,
     #[serde(default)]
@@ -2646,7 +2678,11 @@ impl SkillInstallFileArgs {
 struct SkillInstallGetArgs {
     install_id: String,
     #[serde(default)]
-    #[schemars(description = "Seconds to wait for a newer status revision, 0-30. Defaults to 5.")]
+    #[schemars(
+        range(min = 0, max = 30),
+        default = "default_standard_wait_seconds",
+        description = "Bounded status wait in seconds; defaults to 5 and is capped at 30."
+    )]
     wait_seconds: Option<u64>,
 }
 
@@ -2670,7 +2706,11 @@ struct SkillRunArgs {
     #[serde(default)]
     working_directory: Option<String>,
     #[serde(default)]
-    #[schemars(description = "Bounded inline wait in seconds, 0-30. Defaults to 5.")]
+    #[schemars(
+        range(min = 0, max = 30),
+        default = "default_standard_wait_seconds",
+        description = "Bounded inline wait in seconds; defaults to 5 and is capped at 30."
+    )]
     wait_seconds: Option<u64>,
 }
 

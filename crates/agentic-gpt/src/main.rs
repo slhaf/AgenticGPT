@@ -1407,6 +1407,7 @@ mod tests {
                 request_id: "req-disabled".to_string(),
             },
             operation::RequestContext::new(operation::RequestIngress::Hub, "room.bootstrap"),
+            None,
         )
         .await
         .unwrap();
@@ -1422,6 +1423,7 @@ mod tests {
                 request_id: "req-enabled".to_string(),
             },
             operation::RequestContext::new(operation::RequestIngress::Hub, "room.bootstrap"),
+            None,
         )
         .await
         .unwrap();
@@ -1445,6 +1447,7 @@ mod tests {
                 operation::RequestIngress::Hub,
                 operation::hub_command_name(&command),
             ),
+            None,
         )
         .await
         .unwrap();
