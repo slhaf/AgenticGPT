@@ -4,7 +4,7 @@
 Execute the existing roadmap WP3 end to end on completed WP1/WP2. Read relevant architecture docs first, then choose concrete implementation from actual code. User allows planning records committed with each phase. Deduplicate real repeated flows where useful; LOC reduction and design patterns are not forced acceptance targets.
 
 ## Current phase
-Both WP3 corrections are implemented and verified. Atomic process/MCP batch persistence and migration lock-timeout cleanup have four new behavioral regressions; actual Agent probes proved rollback/restart/healthy retry and cleanup/preserved backup/migration retry. Workspace tests passed667 with1 ignored. Source and final documentation/cleanup commits are being recorded; WP4 remains untouched.
+Completed after corrective commit `35b50ce`. Both reviewed defects are fixed with four behavioral regressions, successful real Agent failure/retry probes, and a no-findings boundary review. Workspace tests passed667 with1 ignored; all16 history tests passed again after a test-only compiler quick fix. Documentation reflects the corrected guarantees and limitations; temporary probe artifacts are removed. WP4 has not started.
 
 ## Required scope
 1. Authority matrix: run receipts, Job history/cache, transport ledger, audit, config/secrets, Room files, Browser leases, notification endpoints and Console local attention. Record owner/source vs projection, sensitivity, retention, allowed loss and recovery.

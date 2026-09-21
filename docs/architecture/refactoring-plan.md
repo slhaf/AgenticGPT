@@ -374,7 +374,7 @@ flowchart TD
 - 保持 Normal + explicit Room、Hub Room/Skills/notifications capability、四个 CLI tmux local-admin 操作以及 `local:`, `tunnel:`, `http:`, `hub:`/`localadmin:` audit provenance。
 - 若后续改动消费不匹配 owner、让 timeout 冒充取消、使 config 与 startup-derived resources 分裂、把 annotation 当授权，或新增 registry/framework/compat 双轨，应停止并回到对应工作包边界。
 
-### WP3：资源所有权、retention 与 durability 分层（主体已交付；补审发现待修缺口）
+### WP3：资源所有权、retention 与 durability 分层（已完成；补审缺口已修复验证）
 **对应正式诊断：** A06（external trust/保证边界）、A07（durability/retention/recovery）；按 D04 保持安全默认和现有威胁模型范围，按 D06 执行 durability 分层，不把全量 Hub durable 化或未来 threat upgrade 设为前置。
 
 
@@ -389,17 +389,17 @@ flowchart TD
 
 **已交付证据与补审（2026-09-20）**
 
-- 分阶段源码/合同提交：`0f5422b` authority matrix、`d8456e9` Hub cache/receipt、`90947b2` Agent admission/config/ledger/history/audit、`dd7be73` SQLite 迁移竞争与严格 legacy owner；部署/API 文档与最终记录单独收尾提交。临时探针、数据库与基线二进制已清理。
-- `cargo fmt --all -- --check`、`cargo build --workspace`、`cargo test --workspace` 通过：663 passed、1 ignored；构建保留 5 个既有 Browser distribution dead-code warnings，无新增 warning。OpenAPI YAML 解析、300 个本地引用及已观测 GET 响应字段检查通过，未宣称运行外部完整 OpenAPI validator。
+- 分阶段源码/合同提交：`0f5422b` authority matrix、`d8456e9` Hub cache/receipt、`90947b2` Agent admission/config/ledger/history/audit、`dd7be73` SQLite 迁移竞争与严格 legacy owner；`e8b531a` 记录补审，`35b50ce` 修复批量持久化原子性与迁移锁失败清理。部署/API 文档及最终记录另行提交；原验收与补丁探针、隔离数据库、注入库和基线二进制均已清理。
+- 最新 `cargo fmt --all -- --check`、`cargo build -p agentic-gpt`、`cargo test --workspace` 通过：667 passed、1 ignored；测试专用 unused_mut 经 LSP 修正后，16 个 job_history 回归再次通过，剩余为既有 Browser distribution warnings。此前 OpenAPI YAML 解析、300 个本地引用及已观测 GET 响应字段检查通过；本补丁不改 wire/API，未宣称运行外部完整 OpenAPI validator。
 - 实际 Hub/Agent：Hub 失联期间完成结果写入 ledger，重连补交；Agent SIGKILL 后 active Job 为 UnknownAfterRestart，Hub restart 保留 receipts；Agent Room scaffold 内容/owner 不变，private history root 为 0700。
 - 实际 4100 Job projection 输入受限为 4096，60 秒变 stale、15 分钟淘汰为零且原 receipt 保留。计时探针在最后 unknown label 断言发现错误；修复后独立真实请求确认 empty-cache unknown，未把首次计时脚本记为全程成功。
 - 故障前后对照：旧 config 中断写入留下零字节文件，新 staged-write SIGKILL 保留完整旧值；12 个并发修改旧实现仅留 1 条，新实现保留 12 条。真实 CLI 恢复旧 config/新 secret、清理已提交 journal、保留冲突备份；这些是磁盘 crash-state 场景而非逐 syscall wizard 强杀。
 - 旧 torn-ledger 会再次执行 touch；新实现保留原文/recovery 且不重放。真实 ledger 压缩将 1805 个历史/证据行收敛为 630 行（含新运行），保留 600 个结果及 unknown/unowned/不同结果/冲突；真实 Job 触发 audit 轮转。SQLite 阻塞结果写入中强杀 Hub 后完整性和 admission hash 保留，重启重放成功；完成 payload 压缩后的相同 hash 幂等、不同 hash 冲突和私有恢复快照均已实际验证。
 - Agent history 的真实新建/旧库迁移/未来版本/迁移失败场景通过：新库 schema1/0600、旧行与私有快照保留；未来版本及失败迁移不覆盖数据且不执行进程。并发 writer 在 staging 开始后提交未来版本，Hub/Agent 均在 IMMEDIATE 事务内复查并拒绝降级，保留既有恢复备份。真实 SSE 验证所有 ownerless legacy（包括精确目标一致的 accepted/completed）不执行、不 ACK、不披露结果，原 ledger 不变。
 - 实际部署只读 `bridge.getStatus` 成功；隔离共享 Docker volume 上以目录 0755/socket 0660 验证同 UID 和共享 GID 可达、不同 UID/GID 为 EACCES，stdin close 清理 socket。MCP/Browser/tmux/tunnel 的启动、结果与外部效果保证分开记录于 current-state 与部署文档。
-- [补审待修] process/MCP batch 的后续 admission 写入失败时只撤销内存登记，此前 SQLite 行仍保留。真实 process.batch 已复现：整批拒绝且无命令执行，仍残留 queued 行，重启后变成 unknown_after_restart；MCP 同型路径已源码确认。需要批量持久化的事务原子性，不依赖数据库失败后的补偿删除。
-- [补审待修] Agent history 生成迁移快照后，IMMEDIATE 写锁获取错误的 `?` 路径未清理 staging。真实 Agent 故障注入保留一个32768字节副本，目录0700/文件0600、原库不变；属于私有数据残留/资源泄漏，不是已证实的外泄。应补获取锁失败的清理及回归。既有663测试与成功路径证据不覆盖此分支。
-- [交付顺序] 建议先修正上述两类 WP3 缺口再切到 WP4-A；这不是新增 WP4-A 架构依赖，WP4-B 仍为后置可选，WP-R 仍是独立核心包。本轮补审未修改生产代码。
+- [补审已修] process/MCP batch 现在一次事务提交所有 admission，成功后才登记内存/启动执行。存储层与两个 caller 的回归覆盖后项写入失败及重试；真实 process.batch 验证原有历史跨重启保持不变、没有孤立 queued/unknown 行或执行副作用，解除故障后容量为2的两项任务正常完成。MCP 验证到注册边界，不新增完整外部服务器场景的宣称。
+- [补审已修] Agent history 在迁移写锁获取失败时清理已生成的 staging。确定性的 busy 回归及真实 Agent 注入均验证无临时目录遗留、原库和旧备份字节不变；释放锁后迁移/执行重试成功。不将错误返回清理等同于进程强杀或硬件故障后的清理。
+- [交付顺序] 独立修复边界复核无新发现，WP3 恢复完成状态；下一主包为 WP4-A，WP4-B 仍后置可选，WP-R 仍为独立核心包。本次未启动 WP4、未改变实际部署。
 
 **范围**
 

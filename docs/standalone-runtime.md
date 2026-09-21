@@ -242,6 +242,18 @@ are projections; after an Agent restart, active Jobs are represented as
 retention or a Hub cache eviction does not roll back a process, MCP call, or
 other external effect.
 
+Process and MCP batch admission rows commit in one SQLite transaction before
+their children enter the live registry. A persistence failure leaves no partial
+batch admissions and starts no child execution; existing history is preserved.
+This is admission atomicity, not transactional execution or rollback of external
+effects after an admitted batch starts.
+
+If acquiring the migration write lock fails after a snapshot has been staged,
+the Agent removes that staging snapshot without replacing the previous recovery
+backup. A later attempt can retry migration after the writer releases its lock.
+This handled-error cleanup does not claim cleanup after an abrupt process kill
+or hardware failure.
+
 Reliable Hub commands use the Agent transport ledger as their local
 deduplication and result authority. Each claim is file-locked and carries an
 explicit owner; a record owned by another Agent is rejected. Unowned legacy
