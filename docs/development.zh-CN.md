@@ -23,10 +23,20 @@ cargo run -p agentic-gpt -- run
 ```bash
 cargo fmt --all --check
 cargo check --workspace
-cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-python3 -c "import yaml; yaml.safe_load(open('openapi/hub.yaml')); print('openapi yaml ok')"
+cargo build -p agentic-gpt -p agentic-gpt-hub
+python3 -m venv target/contract-venv
+target/contract-venv/bin/python -m pip install "PyYAML" "jsonschema[format]>=4.25,<5"
+target/contract-venv/bin/python scripts/check_contract_parity.py
+cargo clippy --workspace --all-targets -- -D warnings
 ```
+
+Parity gate 默认使用已构建的 `target/debug/agentic-gpt` 与
+`target/debug/agentic-gpt-hub`，也可通过 `--agent-bin PATH` 和
+`--hub-bin PATH` 指定二进制。它会运行隔离的 loopback/private-home 进程；
+schema 验证与 live behavior 是分开的检查。合同环境故意放在被忽略的
+`target/contract-venv` 下。严格 clippy 在 runtime 检查之后运行；本流程不
+宣称已有 clippy finding 已解决，也不宣称 CI 全部通过。
 
 ## 构建和发布
 
@@ -66,9 +76,11 @@ GitHub Actions 会在 push 和 pull request 到 `main` 时运行 CI：
 
 - `cargo fmt --all --check`
 - `cargo check --workspace`
-- `cargo clippy --workspace --all-targets -- -D warnings`
 - `cargo test --workspace`
-- 解析 `openapi/hub.yaml`，确认 OpenAPI YAML 可读取
+- `cargo build -p agentic-gpt -p agentic-gpt-hub`
+- 创建被忽略的 `target/contract-venv`，安装 `PyYAML` 与 `jsonschema[format]>=4.25,<5`。
+- 使用已构建二进制和隔离的 loopback/private-home 进程运行 `python3 scripts/check_contract_parity.py`。
+- runtime/schema gate 之后运行严格的 `cargo clippy --workspace --all-targets -- -D warnings`；本文不宣称已有 finding 已解决，也不宣称 CI 全部通过。
 
 ## 说明
 

@@ -7,15 +7,28 @@ This page records minimum checks for reproducible deployment. Standalone is the 
 ```bash
 cargo fmt --all -- --check
 cargo check --workspace
-cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-python3 - <<'PY'
-import yaml
-with open('openapi/hub.yaml') as f:
-    yaml.safe_load(f)
-print('openapi yaml ok')
-PY
+cargo build -p agentic-gpt -p agentic-gpt-hub
+python3 -m venv target/contract-venv
+target/contract-venv/bin/python -m pip install "PyYAML" "jsonschema[format]>=4.25,<5"
+target/contract-venv/bin/python scripts/check_contract_parity.py
+cargo clippy --workspace --all-targets -- -D warnings
 ```
+
+The parity checker is the current cross-surface schema/live gate. With no
+options it uses `target/debug/agentic-gpt` and `target/debug/agentic-gpt-hub`;
+`--agent-bin PATH` and `--hub-bin PATH` select explicit binaries. It runs
+isolated loopback/private-home processes and tears them down; schema validation
+and live behavior are reported as separate obligations. The contract
+environment lives under ignored `target/contract-venv`; install its PyYAML and
+`jsonschema[format]>=4.25,<5` dependencies before invoking the gate.
+
+Strict clippy intentionally runs after the runtime/schema checks. A successful
+parity run does not imply that clippy passes, and existing findings are not
+suppressed or treated as an all-green claim. The optional
+`scripts/evaluate_tool_contracts.py` prediction-shape probe is not a substitute
+for this gate or for the deterministic Agent corpus; its `--strict` flag only
+fails on missing/mismatched predictions.
 
 ## Local/Standalone smoke test (primary)
 
@@ -36,7 +49,7 @@ agentic-gpt local call agent.info --arguments '{}'
 
 Expected:
 
-- Normal exposes 23 tools; Room exposes 34.
+- Normal exposes 29 tools; Room exposes 40.
 - `agent.info.connections.localMcp.status` is `ready`.
 - Runtime directory is `0700`, socket is `0600`, and only the same UID is accepted.
 - `job.*`, `process.batch`, `mcp.callTool`, and `mcp.batch` are present.
@@ -203,7 +216,6 @@ pass. Legacy unowned records remain `LegacyUnowned`: they are not
 auto-reconciled, executed, or used to disclose a result. Recovery is an
 operator-led review of preserved raw records and newer owner-bound evidence;
 never delete or truncate deduplication evidence to bypass an ownership error.
-
 Agent audit JSONL is best-effort and rotates at 8 MiB, retaining the current
 file and one `.1` backup. A rotation or write failure is audit loss, not proof
 that a command, result, or side effect is absent. After any restore, reconnect
@@ -213,6 +225,10 @@ the owning processes and inspect run/Job state; `unknown_after_restart`,
 
 
 ## v0.9 acceptance checklist
+This section is historical v0.9 release evidence, not the current contract or
+current verification entrypoint. Preserve its recorded version/counts when
+consulting that release; use the repository verification and current smoke
+sections above for present artifacts.
 
 ```bash
 cargo fmt --all -- --check

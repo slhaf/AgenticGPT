@@ -164,18 +164,27 @@ room.state.list, room.state.read
 room.maintenance.status, room.maintenance.submit
 ```
 
-Legacy JSONL Room names are not advertised or executed by the Agent. The legacy protocol and
-Hub HTTP/MCP forwarding rows remain only as compatibility residue for the separate Hub parity
-workstream.
+Legacy JSONL Room names are not advertised or executed by the Agent. The legacy
+protocol and Hub HTTP/MCP forwarding rows remain only as compatibility residue
+for the separate Hub parity workstream. If forwarded to the current Agent,
+legacy mutations are rejected with `room_legacy_surface_removed`; they do not
+produce a successful Room mutation. Remote legacy execution remains a separate
+WP-R deliverable.
 
 Managed `mcp.callTool` uses the same Job registry and capacity limit as
 process and skill Jobs. Its `waitSeconds` defaults to 5 and is capped at 30;
 `timeoutSeconds` is an absolute confirmation/connect/request deadline that
 defaults to 300 and is capped at 900. Arguments must be a JSON object and their
 serialized size is capped at 256 KiB. Results up to 512 KiB are retained in
-`JobDetail.result`; larger results set `resultTruncated=true` and retain only
-byte count, SHA-256, and an 8 KiB UTF-8-safe preview. A downstream
+the flat `JobToolResponse.result`; larger results set `resultTruncated=true` and
+retain only byte count, SHA-256, and an 8 KiB UTF-8-safe preview. A downstream
 `isError=true` result is retained while the Job state becomes `failed`.
+
+Skill installation lookup and skill execution use the same bounded wait
+contract: `waitSeconds` defaults to 5 and is capped at 30. A wait timeout only
+ends the local wait; it does not implicitly cancel an installation or Job.
+Use `skills.install.cancel` or `job.cancel` explicitly when cancellation is
+required.
 
 `mcp.batch` accepts 1–16 ordered calls. Every call is fully validated before
 capacity admission or confirmation; invalid input and insufficient shared Job
@@ -218,12 +227,13 @@ every response.
 
 Terminal Job history is retained in the per-agent private `jobs.sqlite3` store
 for 30 days subject to the logical soft cap, while a short live hot cache serves
-recent results. `job.get` falls back to retained history by `jobId`;
-`waitOnly=true` suppresses active intermediate detail while a bounded wait is in
-progress and returns normal detail once terminal. `job.list` supports exact
-`group`/kind/state filters plus stable opaque cursor pagination ordered by
-`createdAt DESC, jobId DESC`. Hub full and HTTP forwarding preserve those fields
-while the Agent is available. Hub cache fallback can filter a first page by
+recent results. `job.get` falls back to retained history by `jobId`; its
+`waitSeconds` defaults to 0 and is capped at 30, and `waitOnly=true` suppresses
+active intermediate detail while a bounded wait is in progress and returns
+normal detail once terminal. `job.list` has a default limit of 50, capped at
+100, and supports exact `group`/kind/state filters plus stable opaque cursor
+pagination ordered by `createdAt DESC, jobId DESC`. Hub full and HTTP forwarding
+preserve those fields while the Agent is available.
 group/kind/state, but it explicitly refuses to invent continuation for an
 Agent-issued cursor and reports cached `job.get` data only as degraded evidence,
 not as a fresh wait result. Batch admission still rejects the whole batch before

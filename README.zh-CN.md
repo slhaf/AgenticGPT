@@ -291,13 +291,14 @@ agentic-gpt run
 - Custom GPT Actions：导入 [`openapi/hub.yaml`](openapi/hub.yaml)，Bearer auth 使用 `AGENTIC_GPT_API_KEY`。
 - ChatGPT Apps MCP：连接 `https://<your-hub-domain>/mcp`。
 
-Hub 原生工具和转发执行使用相同的 Managed Job envelope；运行中的任务通过 `job.get` 查询、通过 `job.cancel` 取消。
+Hub 原生工具和转发执行使用相同的 Managed Job lifecycle projection。运行中的任务通过
+`job.get` 查询、通过 `job.cancel` 取消。
 
 ## Managed Job 与安全边界
 
 - V2 Normal surface 有 29 个工具，Room surface 有 40 个工具；profile preset 选择 namespace，显式 `toolsets.enabled` 仍可进一步缩小 surface。
-- `process.exec`、`skills.run`、`mcp.callTool` 返回 `JobResponse`。
-- `mcp.batch` 接受 1–16 个有序调用，只确认一次，并执行全局/单 server 并发限制。
+- `process.exec`、`skills.run`、`mcp.callTool` 返回扁平的 `JobToolResponse`；`process.batch` 返回 `JobBatchToolResponse`。
+- `mcp.batch` 返回带有按输入顺序排列的子 Job projection 的扁平 `McpBatchToolResponse`，接受 1–16 个调用，只确认一次，并执行全局/单 server 并发限制。
 - MCP 单调用参数上限 256 KiB，保留结果上限 512 KiB；批次 aggregate 参数与结果各上限 2 MiB。
 - 审计记录 bounded metadata、hash、状态与终止证据，不记录原始 MCP 参数/结果。
 - 执行前使用 `agent.info` 查看 profile、路径策略、容量、确认、MCP 配置摘要和连接状态。

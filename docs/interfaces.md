@@ -55,25 +55,29 @@ four CLI-admin operations.
 
 The GPT Actions API is described by `openapi/hub.yaml` and is protected by the Hub API key.
 
+`openapi/hub.yaml` is the supported current OpenAPI artifact. The checked-in
+`openapi/agents-minimal.yaml` is historical/noncanonical reference material,
+not a runtime or CI gate; readers should not import it for the current API.
+
 Core endpoints:
 
 - `GET /v1/info`: safe Hub runtime summary.
 - `GET /v1/agents`: enabled local agents with online status and safe config summaries.
-- `POST /v1/process/exec`: start one managed process and wait briefly. The response is always a Job envelope and supports optional `workingDirectory` and bounded `waitSeconds`.
-- `POST /v1/process/batch`: atomically admit a managed process batch with batch-level `workingDirectory`, per-element overrides, one confirmation decision, and ordered child Jobs.
-- `GET /v1/jobs?agentId=...`: list active or recently retained Jobs with optional kind/state/limit filters.
-- `GET /v1/jobs/{jobId}?agentId=...&waitSeconds=...`: inspect or briefly wait for one Job.
+- `POST /v1/process/exec`: start one managed process and wait briefly. The response is a flat `JobToolResponse` and supports optional `workingDirectory` and bounded `waitSeconds`.
+- `POST /v1/process/batch`: atomically admit a managed process batch with batch-level `workingDirectory`, per-element overrides, and one confirmation decision. The response is a flat `JobBatchToolResponse` with ordered child Job projections.
+- `GET /v1/jobs?agentId=...`: list active or recently retained Jobs with optional kind/state/limit filters. `limit` defaults to 50 and is capped at 100; opaque `cursor` pagination is preserved while the Agent is available.
+- `GET /v1/jobs/{jobId}?agentId=...&waitSeconds=...`: inspect or briefly wait for one Job. `waitSeconds` defaults to 0 and is capped at 30; `waitOnly=true` suppresses active intermediate detail while waiting.
 - `POST /v1/jobs/{jobId}/cancel?agentId=...`: request kind-aware cancellation and return outcome/termination evidence.
 - `POST /v1/mcp/servers`: list MCP servers configured inside one local agent, or omit `agentId` to group MCP servers for all currently connected agents.
 - `POST /v1/mcp/tools`: list tools exposed by one MCP server.
-- `POST /v1/mcp/callTool`: start one managed downstream MCP tool Job through the selected local agent. `waitSeconds` defaults to 5 and is capped at 30; `timeoutSeconds` defaults to 300 and is capped at 900.
-- `POST /v1/mcp/batch`: atomically admit 1–16 ordered downstream MCP child Jobs. It uses one aggregate confirmation, parallel or sequential mode, optional safe fail-fast scheduling, shared global/per-server concurrency limits, and a 2 MiB aggregate response budget.
+- `POST /v1/mcp/callTool`: start one managed downstream MCP tool Job through the selected local agent. The response is a flat `JobToolResponse`; `waitSeconds` defaults to 5 and is capped at 30; a wait timeout does not cancel the Job. `timeoutSeconds` defaults to 300 and is capped at 900.
+- `POST /v1/mcp/batch`: atomically admit 1–16 ordered downstream MCP child Jobs. The response is a flat `McpBatchToolResponse`; it uses one aggregate confirmation, parallel or sequential mode, optional safe fail-fast scheduling, shared global/per-server concurrency limits, and a 2 MiB aggregate response budget.
 - `GET /v1/runs/{runId}`: inspect persisted status and optional late result for one Hub-to-Agent command run.
 - `POST /v1/room/skills/list`, `/read`, `/search`, `/active`, `/activate`, `/deactivate`: discover workspace skills through the active Room Agent and maintain local active skill state. These endpoints do not take `agentId`.
 - `POST /v1/room/skills/install`: asynchronously install one skill from public GitHub, HTTPS file entries, or inline UTF-8/base64 files. The response returns an `installId` before network work begins.
-- `POST /v1/room/skills/install/get`: query an installation with bounded long polling (`waitSeconds`, default 5, maximum 30); terminal responses set `pollAfterMs` to `0`.
+- `POST /v1/room/skills/install/get`: query an installation with bounded long polling. `waitSeconds` defaults to 5 and is capped at 30; a wait timeout does not cancel installation; terminal responses set `pollAfterMs` to `0`.
 - `POST /v1/room/skills/install/cancel`: request idempotent cooperative cancellation before atomic commit.
-- `POST /v1/room/skills/run`: run an executable active workspace skill script under `scripts/`. It returns terminal Job output inline when possible, otherwise the same `jobId` used by `job.get` and `job.cancel`. These endpoints do not take `agentId`.
+- `POST /v1/room/skills/run`: run an executable active workspace skill script under `scripts/`. `waitSeconds` defaults to 5 and is capped at 30; a wait timeout does not cancel the Job. It returns terminal Job output inline when possible, otherwise the same `jobId` used by `job.get` and `job.cancel`. These endpoints do not take `agentId`.
 - `POST /v1/room/bootstrap`: load the active Room Agent's repeated session entrypoint and deterministic guide manifest. It has no request body or `agentId`.
 - `POST /v1/room/bootstrap/read`: read one valid bootstrap guide by its frontmatter `id`. It has no `agentId`.
 
@@ -117,6 +121,26 @@ only; a late matching receipt or result can still arrive. Cancellation is
 reported only from observed termination evidence, and a cache snapshot or
 missing response never permits an inference that the remote Job stopped.
 
+### Current Room boundary and coordinated request projection
+
+The current Agent does not execute the legacy JSONL Room commands forwarded by
+the Hub. Calls such as `room.notebook.append`, `room.notebook.update`, and
+`room.diary.append` are rejected with `room_legacy_surface_removed`; this is an
+intentional transitional outcome, not a successful `200` mutation. The current
+Agent surface is the semantic Room read/bootstrap/maintenance surface described
+in [`standalone-runtime.md`](standalone-runtime.md). Remote legacy execution
+and migration remain a separate WP-R deliverable.
+
+When a caller adopts the corrected request projection, upgrade the paired Hub
+and Agent artifacts together and refresh the imported contract from
+[`../openapi/hub.yaml`](../openapi/hub.yaml). For Notebook append, send the
+required `scope` and `content`; `significance` defaults to `NORMAL`, while
+`datetime`, `abstract`, and `tags` are optional. For Notebook
+`selectExact`, send the required `date` (with optional `scope` and `limit`).
+Treat these as coordinated request-shape changes: do not invent a release
+version, compatibility alias, or command that is not supplied by the
+artifacts. Validate schema/import behavior separately from live dispatch.
+
 
 ## ChatGPT Apps MCP endpoint
 
@@ -124,18 +148,18 @@ missing response never permits an inference that the remote Job stopped.
 
 All `/mcp` `tools/call` responses use the Hub `AgenticResult` envelope, which is directly compatible with the ChatGPT Apps / MCP tool result shape. Hub-native JSON is exposed as `structuredContent` plus a JSON text content block; a top-level `error` makes the MCP tool result `isError=true`.
 
-`mcp.callTool` no longer passes a downstream result envelope through at the Hub top level. It returns a managed `JobResponse`. A terminal downstream result is retained under `result`; downstream `isError=true` produces a failed Job while retaining that result. Serialized arguments are capped at 256 KiB. Serialized results up to 512 KiB are retained; larger results are omitted and replaced by `resultBytes`, `resultSha256`, and a UTF-8-safe `resultPreview`. Active calls are inspected with `job.get` and cancelled with `job.cancel`.
+`mcp.callTool` no longer passes a downstream result envelope through at the Hub top level. It returns a flat `JobToolResponse`; a terminal downstream result is retained under `result`, and downstream `isError=true` produces a failed Job while retaining that result. Serialized arguments are capped at 256 KiB. Serialized results up to 512 KiB are retained; larger results are omitted and replaced by `resultBytes`, `resultSha256`, and a UTF-8-safe `resultPreview`. Active calls are inspected with `job.get` and cancelled with `job.cancel`.
 
-`mcp.batch` returns `McpBatchResponse` with child details in original input
-order. Validation and capacity admission happen before confirmation and before
-any child starts. Parallel mode uses the shared scheduler (eight globally, two
-per server); sequential mode waits for each child terminal state. With
-`failFast=true`, only not-yet-started children become `skipped`; already-started
-calls are not cancelled. Single-server batches can receive temporary server
-allow actions, while multi-server confirmation remains batch-scoped. Each
-child is an ordinary MCP Job with `batchId`, optional `batchCallId`, and
-`batchIndex`, so later inspection and cancellation use the same `job.*`
-lifecycle.
+`mcp.batch` returns a flat `McpBatchToolResponse` with ordered child Job
+projections in `results`. Validation and capacity admission happen before
+confirmation and before any child starts. Parallel mode uses the shared
+scheduler (eight globally, two per server); sequential mode waits for each
+child terminal state. With `failFast=true`, only not-yet-started children
+become `skipped`; already-started calls are not cancelled. Single-server
+batches can receive temporary server allow actions, while multi-server
+confirmation remains batch-scoped. Each child is an ordinary MCP Job with
+`batchId`, optional `batchCallId`, and `batchIndex`, so later inspection and
+cancellation use the same `job.*` lifecycle.
 
 Cancellation is evidence-based. Agentic sends MCP `notifications/cancelled`
 with the exact downstream request id. If no downstream terminal response is

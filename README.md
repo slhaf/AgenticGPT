@@ -317,13 +317,15 @@ writes the current nested Hub schema with the usual backup transaction.
 - Custom GPT Actions: import [`openapi/hub.yaml`](openapi/hub.yaml) and use `AGENTIC_GPT_API_KEY` as Bearer auth.
 - ChatGPT Apps MCP: connect to `https://<your-hub-domain>/mcp`.
 
-Hub-native and forwarded execution use the same managed Job envelopes. Active work is inspected with `job.get` and cancelled with `job.cancel`.
+Hub-native and forwarded execution use the same managed Job lifecycle
+projections. Active work is inspected with `job.get` and cancelled with
+`job.cancel`.
 
 ## Managed Jobs and safety boundaries
 
 - The V2 advertised surface contains 29 Normal names and 40 Room names; profile presets select namespaces, and explicit `toolsets.enabled` can narrow that surface.
-- `process.exec`, `skills.run`, and `mcp.callTool` return `JobResponse`.
-- `mcp.batch` accepts 1–16 ordered calls, uses one aggregate confirmation, and enforces global/per-server concurrency.
+- `process.exec`, `skills.run`, and `mcp.callTool` return flat `JobToolResponse`; `process.batch` returns `JobBatchToolResponse`.
+- `mcp.batch` returns a flat `McpBatchToolResponse` with ordered child Job projections, accepts 1–16 calls, uses one aggregate confirmation, and enforces global/per-server concurrency.
 - MCP arguments are JSON objects capped at 256 KiB per call; retained results are capped at 512 KiB; aggregate batch arguments/results are capped at 2 MiB.
 - Audit records contain bounded metadata, hashes, states, and termination evidence rather than raw MCP arguments/results.
 - Use `agent.info` before execution to inspect the active profile, path policy, capacity, confirmation, MCP configuration summary, and connection state.

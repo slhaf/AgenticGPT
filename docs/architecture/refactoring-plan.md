@@ -467,10 +467,10 @@ flowchart TD
 - 无法区分 authoritative result 与 cache/audit/report；停止对外宣称“durable”。
 - browser-host 需要在 peer/auth 未决时远程暴露才能通过验收；停止该暴露/部署整合并在所属包细化机制，不以此阻塞其他核心工作包，也不把真实共享拓扑直接判为不支持。
 
-### WP4-A：合同 parity、文档与 CI 契约（WP0 后可独立）
+### WP4-A：合同 parity、文档与 CI 契约（已完成；严格 lint 债务另列）
 **对应正式诊断：** A01（合同 parity）、A09（规范/历史/验证工具分层）；本包先修跨 surface 合同与验证边界，不等待 WP3 storage 或 WP4-B 模块搬家。
 
-**目的与证据**
+**目的与证据（启动前诊断快照；当前结果见下方验收记录）**
 
 - [事实] `agentic-gpt-protocol/src/lib.rs` 承载大量命令、消息、Room、Skill、Job、notify、envelope 和测试；它的职责仍应是 wire DTO/纯契约，而不是 I/O/业务服务。本包不改其内部文件组织。
 - [事实] Protocol、Agent descriptor、Hub schemars、OpenAPI、工具矩阵和 cases 是多个手工 projection，没有统一语义比较；但 CI 的 Rust `cargo test --workspace` 已包含现有 fixed surface/deterministic corpus，缺口是跨 surface 语义检查，而不是“CI 没跑这些 Rust gate”。
@@ -507,13 +507,13 @@ flowchart TD
 4. `ci(contract): add cross-surface semantic gates`：与 `cargo test --workspace` 中现有 Rust gate 互补，明确 prediction probe 仅 shape。
 5. `docs(contract): classify current entry points and historical baselines`：由技术维护者判断需更新/标基线/迁移的文档；不改写历史事实。
 
-**既有验证入口（均未执行）**
+**验证入口**
 
-- `cargo test --workspace`：已有 Rust fixed surface、deterministic corpus、Protocol optional timestamp、Hub/Agent descriptor/dispatch 等测试；本任务未运行。
+- `cargo test --workspace`：保留 Rust fixed surface、deterministic corpus、Protocol optional timestamp、Hub/Agent descriptor/dispatch 等行为验证。
 - Agent `stdio_server.rs` 的 fixed surface/schema/`deterministic_tool_contract_corpus_exercises_public_dispatch`、Protocol serde/skill wait tests。
-- Hub `mcp_server.rs` profile/descriptor/response/schema tests；Hub `main.rs` OpenAPI path/schema tests；`routes.rs` 实际 HTTP DTO。
+- Hub `mcp_server.rs` profile/descriptor/response/schema tests；`routes.rs` 实际 HTTP DTO；原 OpenAPI 字符串存在性测试已由真实 schema/runtime gate 替代。
 - `python3 scripts/evaluate_tool_contracts.py --cases tests/tool-contract-cases/cases.json` 只能比较 prediction shape，即使 `--predictions --strict` 也不替代 runtime corpus。
-- CI 当前已执行 Rust checks/tests 和 `hub.yaml` YAML load；`agents-minimal.yaml` 尚未确认有 consumer，因此不把它强制纳入 CI。确认保留支持后再补 parse/resolve/语义 parity；确认无 consumer 则退场，不新增 gate。
+- `python3 scripts/check_contract_parity.py`：严格验证当前 `hub.yaml` 的全部 local refs、schema、实际 operation response，以及隔离真实 Agent/Hub 的跨入口语义。CI 显式构建两个 binary，安装 PyYAML/jsonschema format 支持后运行；严格 Clippy 保留在后续独立步骤。`agents-minimal.yaml` 明确为历史、非规范、不再维护的产物，当前导入迁移至 `hub.yaml`，不增加无消费者 gate。
 
 **真实场景验收**
 
@@ -530,6 +530,18 @@ flowchart TD
 - Skill wait 从接受超限改为 clamp/reject 时，按选定 runtime 合同执行并交付 caller 迁移步骤；不能让已有请求因隐式转换产生未记录的远端副作用。
 - CI gate 可先报告基线再 blocking；切换依据是已确认差异和真实场景，不因 gate 未覆盖 provider/provenance 而扩张范围。
 
+**实施与验收记录（2026-09-21）**
+
+- 完成 Job 的 optional `startedAt`、list 默认50/范围1..100及分页、get 默认0及 `waitOnly`、cancel/freshness/error 投影；HTTP process/MCP/Skill 创建与批处理按实际平铺响应建模，删除六个已无 operation 消费者的旧嵌套包装 schema。未改 wire 字段、路径、工具名或权限默认。
+- Notebook append/selectExact 的输入对齐实际解码规则；合法输入当前明确返回 legacy-removal400，缺少必需字段返回已声明的422 text/plain。没有把“能解码”冒充远端 Room 能力已实现；该能力仍归 WP-R。
+- 集成实跑发现 Agent 内部仍从旧嵌套 JSON 提取 Job 快照。现从 typed operation result 移交权威 `JobInfo` 到既有 `JobUpdate` 路径，保留 reporting 隐私策略；非 Hub 入口不收集快照，不增加额外复制、后台上报机制或持久性承诺。
+- Skill pure helpers 默认5、上限30，保留0立返；实跑 run/install-get 的缺省、0、30、31、u64::MAX，超限均约30秒返回而任务仍在运行。随后显式取消取得真实取消结果；此前 runtime 本已在下游 cap30，本次补齐 helper/descriptor 合同。
+- 最终 `cargo fmt --all -- --check`、Agent/Hub build 通过；`cargo test --workspace` **664 passed、1 ignored**。新增边界回归，删除三个 OpenAPI 源码字符串测试及一个过时嵌套响应提取测试。
+- 真实跨入口 gate **exit0**：local Unix MCP、Standalone HTTP MCP、Hub Full/Coordinator、实际确认后的下游 MCP single/batch、Room Skill、分页/waitOnly/cancel、Notebook400/422、断线缓存与不可用分支均通过。实际未启动的拒绝 JobInfo 无 `startedAt`、无伪造缓存执行详情；全部107 schema及local refs通过。错误 state/timestamp、旧 descriptor、缺失422声明和未被运行路径触及的坏引用均被负向验证拒绝。
+- prediction-shape probe 的18/18 strict成功、17/18宽松成功、同一17/18 strict失败已分别实跑；输出明确 `runtimeValidation:not-performed`。当前主入口/双语开发文档已同步，历史发布记录未批量改写。
+- **完整 CI 仍非全绿**：严格 `cargo clippy --workspace --all-targets -- -D warnings` 仍报告既有 OAuth helpers、confirmation/cache、Browser、Job/ledger 等问题；本次引入的两处冗余借用已修正，没有 lint 豁免。真实生产隧道、SSH 部署和 Actions 产品导入器未执行；本包采用严格 validator 加真实本机 HTTP/MCP 验收。
+- 详细时序和证据见 `.planning/2026-09-21-wp4a-contract-parity/`。WP-R、WP4-B 均按用户意图保留为后续独立工作包。
+
 **完成门槛**
 
 - WP0 的每条 drift 已修复、明确接受或按 D03 clean cutover 迁移；不存在 schema 合法但 runtime 不可达的未说明合同。
@@ -541,7 +553,7 @@ flowchart TD
 - 只能依靠 prediction probe、静态 YAML parse 或单端 Rust test 证明跨端合同；停止补齐真实 decode/dispatch/response。
 - 需要新增 version field、feature flag、永久 alias 或双轨才能掩盖未知 caller；停止 cutover，先获得 caller 证据并迁移，而不是增加兼容机制。
 
-### WP4-B：Protocol crate 内部模块组织（后置可选）
+### WP4-B：Protocol crate 内部模块组织（用户已选择后续实施）
 **对应正式诊断：** A09（规范/验证边界）；这是纯内部组织包，不计入核心 WP0/WP1/WP2/WP3/WP4-A/WP-R 完成条件，也不应阻塞 WP4-A 合同修复。
 
 **目的与证据**

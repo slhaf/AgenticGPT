@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-The root Cargo workspace contains three Rust crates: `crates/agentic-gpt` (Linux local-agent CLI), `crates/agentic-gpt-hub` (HTTP/WebSocket hub), and `crates/agentic-gpt-protocol` (shared wire types). API contracts live in `openapi/`; operational and development notes are in `docs/`; release helpers are in `scripts/`.
+The root Cargo workspace contains five Rust crates: `crates/agentic-gpt` (Linux local-agent CLI), `crates/agentic-gpt-hub` (HTTP/WebSocket hub), `crates/agentic-gpt-protocol` (shared wire types), `crates/agentic-apply-patch`, and `crates/agentic-browser-host`. API contracts live in `openapi/`; operational and development notes are in `docs/`; release helpers are in `scripts/`.
 
 `console/` is a separate Kotlin Multiplatform/Compose project. Shared UI and domain code belongs in `console/shared/src/commonMain`; platform integrations belong in `androidMain`, `jvmMain`, `jsMain`, or `wasmJsMain`. Host applications live in `androidApp`, `desktopApp`, and `webApp`. Keep generated output (`target/`, `console/build/`, `dist/`) out of commits.
 
@@ -11,6 +11,7 @@ The root Cargo workspace contains three Rust crates: `crates/agentic-gpt` (Linux
 - `cargo check --workspace`: type-check all Rust crates quickly.
 - `cargo test --workspace`: run the full Rust test suite.
 - `cargo fmt --all -- --check`: enforce CI formatting.
+- `python3 scripts/check_contract_parity.py`: run the live cross-surface contract gate after building the Agent/Hub binaries and installing its Python dependencies; see `docs/operations.md` for the isolated environment setup.
 - `cargo run -p agentic-gpt-hub -- init`: initialize a development hub.
 - `cargo run -p agentic-gpt -- run`: launch the local agent.
 - `cd console && ./gradlew :desktopApp:run`: run the desktop console.

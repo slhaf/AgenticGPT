@@ -23,10 +23,21 @@ cargo run -p agentic-gpt -- run
 ```bash
 cargo fmt --all --check
 cargo check --workspace
-cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-python3 -c "import yaml; yaml.safe_load(open('openapi/hub.yaml')); print('openapi yaml ok')"
+cargo build -p agentic-gpt -p agentic-gpt-hub
+python3 -m venv target/contract-venv
+target/contract-venv/bin/python -m pip install "PyYAML" "jsonschema[format]>=4.25,<5"
+target/contract-venv/bin/python scripts/check_contract_parity.py
+cargo clippy --workspace --all-targets -- -D warnings
 ```
+
+The parity gate uses the built `target/debug/agentic-gpt` and
+`target/debug/agentic-gpt-hub` by default, or explicit `--agent-bin PATH` and
+`--hub-bin PATH` values. It runs isolated loopback/private-home processes;
+schema validation and live behavior are separate checks. The contract
+environment is intentionally under ignored `target/contract-venv`.
+Strict clippy runs after the runtime checks; this sequence makes no claim that
+existing clippy findings are resolved or that CI is all green.
 
 ## Build and release
 
@@ -59,16 +70,17 @@ Release archives contain all three binaries for one target:
 - `agentic-gpt-aarch64-unknown-linux-gnu.tar.gz`
 - `SHA256SUMS`
 
-
 ## CI
 
 GitHub Actions runs CI on pushes and pull requests to `main`:
 
 - `cargo fmt --all --check`
 - `cargo check --workspace`
-- `cargo clippy --workspace --all-targets -- -D warnings`
 - `cargo test --workspace`
-- OpenAPI YAML parsing for `openapi/hub.yaml`
+- `cargo build -p agentic-gpt -p agentic-gpt-hub`
+- Create ignored `target/contract-venv` and install `PyYAML` plus `jsonschema[format]>=4.25,<5`.
+- Run `python3 scripts/check_contract_parity.py` against the built binaries and isolated loopback/private-home processes.
+- Run strict `cargo clippy --workspace --all-targets -- -D warnings` after the runtime/schema gate; this documentation does not claim that existing findings are resolved or that CI is all green.
 
 ## Notes
 

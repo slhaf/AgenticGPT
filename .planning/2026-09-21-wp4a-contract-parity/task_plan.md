@@ -4,7 +4,7 @@
 Implement WP4-A end to end from current post-WP3 source, aligning supported public contract projections and runtime behavior, bounding Skill waits, and adding useful cross-surface verification. User also wants WP-R and WP4-B implemented later; they are separate packages, not omitted or folded into this work.
 
 ## Current phase
-Baseline complete; implementation contracts frozen in findings.md. Main selected projection corrections preserving Job wait default0, bounded Skill helper normalization preserving default5, a live/schema parity gate, and explicit historical classification of the unconsumed minimal OpenAPI artifact. No WP4-A runtime proof is claimed yet. Independent file owners implement while Main prepares integration validation.
+WP4-A implementation and acceptance complete. Baselinec8341ca, Skill normalizationd67dfce, projection/snapshot repair3020f61 and strict CI gate119acd0 are committed; final docs/evidence closeout records the completed package. Final workspace tests passed664/ignored1, format/build passed, real cross-surface gate exited0, and actual Skill wait/cancel boundaries passed. Owned temporary fixtures are removed. Strict pre-existing Clippy failures remain documented, so full CI is not claimed green. WP-R and WP4-B remain separate next packages.
 
 ## Scope and phases
 1. Rebuild current authority/consumer/diff/verification matrix; distinguish fixed WP3 items from active drift. Commit baseline.
