@@ -1,0 +1,7 @@
+# RoomContractDocs findings
+
+- WP-R current remote contract is exactly nine operations: room.diary.active/read, room.notebook.recent/search/read, room.state.list/read, room.maintenance.status/submit. Hub routes and OpenAPI must use POST /v1/room/<namespace>/<action>, active Room lease only, nested request body matching current Agent Protocol DTOs.
+- Current Agent DTOs are authoritative: read bounds (notebook limit 1..100 default 20, search query nonempty <=256 Unicode chars, Markdown <=512 KiB), diary layer/period rules, safe Notebook/State paths; maintenance submit items 1..5 unique slots, waitSeconds 0..30 default 0, local/workflow semantics, no separate wait/cancel/confirmation API.
+- Hub error projection remains room_not_active 404, room_state_conflict 409, transport timeout 504; Agent semantic errors follow existing room_value_response projections. Hub owns routing/receipts only and may retain bounded generic run results; no content authority.
+- Existing OpenAPI has seven legacy Notebook paths/schemas around paths ~579-744/components ~1999-2143. Current docs describe semantic Agent local surface plus legacy Hub residue and need clean cutover/migration guidance. Historical migration/release docs are excluded.
+- Operations migration doc needs real coordinated upgrade/migration/backup/verification/rollback steps based on actual config layout/binaries, no invented versions or service commands. Console local remains untouched; old append/update/remove etc. are not silently mapped to maintenance.
