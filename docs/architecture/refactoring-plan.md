@@ -58,7 +58,7 @@
 - **[证据]** 集成收口通过 `cargo fmt --all -- --check`、集成 `cargo test -p agentic-gpt-hub` suite 和无 warning 的 `cargo build -p agentic-gpt-hub`；隔离 Hub HTTP/SSE smoke 的结果记录在 [WP1 closure progress](../../.planning/2026-09-20-hub-wp1-closure/progress.md)。该 smoke 使用 simulated Agent peers，覆盖六个有界 confirmation/replacement/callback/timeout/late-receipt 场景；随后在同一临时 SQLite 上真实重启 Hub，确认两条 `completed` `/v1/runs` 记录和 `sessions[]` 结果保留，且 `/v1/info` 的 `pendingRequestCount`、`pendingConfirmationCount`、`cachedJobCount` 均为 0。这是 Hub-side receipt/session retention 与 cleanup 证据，不是所有历史路线图场景的 live 复验，也不是完整真实 Agent executor E2E 证明。
 - **[未验证]** 真实 Agent restart/transport-ledger reconciliation、external ntfy provider 以及完整跨进程 Agent executor/ledger E2E 仍未验证；这些边界不得被当前 Hub smoke 或历史基线测试改写为已完成。
 
-### 1.3 WP2 当前交付状态（2026-09-20）
+## 1.3 WP2 当前交付状态（2026-09-20）
 
 - **[已完成；窄边界]** `agentic-gpt/src/operation.rs` 现在以不可变 `RequestContext`（真实 ingress + 借用的 operation 名）进入同步 `authorize(runtime, config, context)`。命名空间/toolset、RuntimeModel capability、resource/profile 规则与 descriptor/annotation 元数据分开；annotation 只服务发现/客户端 UX，不是授权依据。没有新增 crate、框架、全局 capability registry 或第二套执行循环。
 - **[已完成；入口职责保留]** Local Unix 使用 namespace/toolset gate；Tunnel stdio、Standalone HTTP、stdio、Hub command、Room/Skill/Browser 路径共享 gate 与相应 resource owners/部分结果投影，但 direct branches 与 HubCommand 路仍是不同的 Agent 内部映射。Normal profile 显式启用 `toolsets.room` 时仍可走 Room；Hub 保留既有 Room toolset、Skills capability/profile 与 notifications capability 语义。CLI 仅覆盖既有四个本机 tmux 管理操作，审计 source 使用 `localadmin:`；其他入口分别保留 `local:`, `tunnel:`, `http:` 和 `hub:` 前缀。
@@ -80,7 +80,7 @@
 | **3. 合适的目标** | `target-architecture.md` §§1–8 与 D01–D08 保留五 crate、一个 Agent 执行核心、Hub 控制面、Agent-owned Room、纯 Protocol/apply-patch 和独立 Console。 | WP2 的 `RequestContext`/authorize、WP3 分层、WP4-A parity、WP-R 九项远端 Room 是目标的有界落地，不等于目标目录或逻辑 `OperationRequest` 已存在。 | `stdio_server` 直路与 `local_service` HubCommand 路并存；Job 的 admission/执行 config lifetime 需先定语义。归属：Agent operation/config snapshot seam；不借此新增 universal dispatcher/framework。 |
 | **4. 职责与依赖方向** | `engineering-rules.md` placement matrix、R-01–R-25、Cargo manifests 和 current/target ownership map 给出 owner、依赖方向、durability、projection 与 clean-cutover 规则。 | Hub 仍不导入 Agent 资源或 Room 内容；apply-patch 纯算法；browser-host 独立进程；现有 WPs 保留 run/request/connection/lease 分离。 | `AppState`/`HubState` 是宽 composition object；Hub route helper 反向承载中性 helper，Agent wire DTO 兼作内部 union。归属：条件化 Agent ownership、Hub neutral projection、WP4-B；不按文件大小拆 crate。 |
 | **5. 耐久 feature placement 指引** | `engineering-rules.md` §§1、6、9、10 和本计划 §3/§5 给出 Process/File/MCP/Browser/Room/Console/TUI 的放置、authority、projection 和迁移规则；WP4-A gate 与 WP-R 文档提供具体例证。 | 这些是可复用规则，不是每条路径都已机械证明；现有 release/contract gate 仍按各自 owner 工作。 | operation/name/descriptor/schema/projection inventory、release/version authority 和 tag preflight 仍手工分散。归属：release/inventory 条件包与文档状态同步；不得强制 universal schema。 |
-| **6. 渐进且可验证的计划** | 本文件 §§1–7 已给出 WP0/1/2/3/4-A/R 的依赖、提交、回退、接受和停止条件，并保留 WP4-B、WP-T、WP5、WP5-O 的独立边界。 | WP1/WP2/WP3/WP4-A/WP-R 是有界完成记录；WP4-B 待 Protocol 内部组织，WP-T 标准未决，WP5 local-only 独立维护，WP5-O 为未来产品。 | 计划历史段落仍有“下一包/未启动”时序；尚无 residual structural package 的条件触发器。归属：本计划状态同步 + 下列条件化包；未来顺序不是运行时结果。 |
+| **6. 渐进且可验证的计划** | 本文件 §§1–7 已给出 WP0/1/2/3/4-A/R 的依赖、提交、回退、接受和停止条件，并保留 WP4-B、WP-T、WP5、WP5-O 的独立边界。 | WP1/WP2/WP3/WP4-A/WP-R 是有界完成记录；WP4-B 待 Protocol 内部组织，WP-T 标准未决，WP5 local-only 独立维护，WP5-O 为未来产品。 | 历史“下一包/未启动”语句须按日期阅读；§4 末的条件化结构包已列触发条件、owner 与验收，但尚未立项实施，顺序不是运行时结果。 |
 
 ### 1.4.2 当前工作包状态索引
 

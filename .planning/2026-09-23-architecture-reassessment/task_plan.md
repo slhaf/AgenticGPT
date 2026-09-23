@@ -15,7 +15,7 @@ Reassess the whole Agentic repository against the original six outcomes: actual 
 1. Scope — complete: freeze original goals, repository coverage and evidence format; committed planning baseline `e0db2d8`.
 2. Investigation — complete: five parallel read-only reports plus Main manifest and source spot-check; evidence and six-goal matrix recorded in findings.md. No runtime verification claimed.
 3. Synthesis — complete: cross-slice evidence reconciled into current snapshot, diagnosis, target/rules and conditional plan; bilingual config lifetime overclaim corrected. Documentation-only.
-4. Delivery — in_progress: independent consistency review, verify references/scope/document consistency, commit reviewed documents and ledger. No claim of runtime verification in this read-only review.
+4. Delivery — complete: independent review's two status contradictions corrected; nine changed documentation files passed relative-link existence and numbered heading-order checks, `git diff --check` passed. Documentation and findings committed; no new runtime tests claimed.
 
 ## Evidence contract
 Every finding: exact source paths/symbols, concrete responsibility/dependency or duplication, consequence, root-cause hypothesis clearly labeled, what to preserve, smallest justified next action, verification criterion. File length alone is not a defect. Missing docs are not proof of missing code. Historical closed issues are not current findings.
