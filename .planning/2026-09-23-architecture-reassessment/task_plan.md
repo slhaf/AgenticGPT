@@ -12,9 +12,9 @@ Reassess the whole Agentic repository against the original six outcomes: actual 
 - Main owns integration, cross-slice decisions, shared planning and commits. Scouts provide source-grounded reports and skip all validation/build/lint/tests.
 
 ## Phases
-1. Scope — complete: freeze original goals, repository coverage and evidence format; commit planning baseline.
-2. Investigation — in_progress: parallel Agent core, execution domains, Hub/Protocol, Console/supporting surfaces, existing architecture coverage. Each distinguishes fact, inference, unverified, preserved design and genuine problem.
-3. Synthesis — pending: reconcile dependency seams, update current architecture assessment and specify bounded follow-up work with structural and behavioral acceptance.
+1. Scope — complete: freeze original goals, repository coverage and evidence format; committed planning baseline `e0db2d8`.
+2. Investigation — complete: five parallel read-only reports plus Main manifest and source spot-check; evidence and six-goal matrix recorded in findings.md. No runtime verification claimed.
+3. Synthesis — in_progress: reconcile dependency seams, update current architecture assessment and specify bounded follow-up work with structural and behavioral acceptance.
 4. Delivery — pending: verify references/scope/document consistency, commit reviewed documents and ledger. No claim of runtime verification in this read-only review.
 
 ## Evidence contract
