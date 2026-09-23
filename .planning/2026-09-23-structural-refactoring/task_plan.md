@@ -10,8 +10,8 @@ Implement the source-grounded structural seams identified in the 2026-09-23 whol
 - Main owns integration, reproducible behavior proof, cross-slice contracts, validation and each phase commit. Parallel workers own disjoint files and skip formatters/linters/build/tests/commits.
 
 ## Phase status
-1. Contract/baseline — in_progress: freeze independent file ownership and cross-cutover APIs, reproduce Job config sampling using an actual deterministic scenario before altering semantics; commit baseline.
-2. Independent implementation — pending: Agent operation family, Hub neutral projection/Apps registry, Protocol WP4-B, Android local transition, release preflight/version inventory. Source/config Job lifecycle follows its reproduction and is isolated to Agent config/jobs/main/supervisor. No concurrent same-file edits.
+1. Contract/baseline — complete: independent file ownership and cross-cutover APIs frozen; deterministic pre-fix Job reload scenario reproduced Rejected vs Completed (artifact://569); baseline plan committed `0b46d64`.
+2. Independent implementation — in_progress: Agent operation family, Hub neutral projection/Apps registry, Protocol WP4-B, Android local transition, release preflight and Agent Job config snapshot in disjoint owned files. Workers skip validation.
 3. Integration — pending: apply dependent Agent ownership changes after the config seam, migrate callers and docs, run targeted smoke/behavior checks and one project-wide validation pass, commit coherent implementation boundaries.
 4. Delivery — pending: post-smoke cleanup, independent code review, bounded limitations, final phase commit and evidence ledger.
 
