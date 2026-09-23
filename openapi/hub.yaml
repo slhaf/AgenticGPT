@@ -576,170 +576,310 @@ paths:
           $ref: "#/components/responses/NotFound"
         "502":
           $ref: "#/components/responses/BadGateway"
-  /v1/room/notebook/append:
+  /v1/room/diary/active:
     post:
-      operationId: roomNotebookAppend
-      description: Transitional legacy Room notebook append; currently rejected with room_legacy_surface_removed pending WP-R. No successful legacy execution is advertised.
+      operationId: roomDiaryActive
+      description: Read the active daily, weekly, and monthly Room diary documents from the active Room Agent. The response is bounded and may include a typed missing, unreadable, or invalid-UTF-8 result for an individual layer; no agentId is accepted.
       x-openai-isConsequential: false
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/NotebookAppendRequest"
+              $ref: "#/components/schemas/RoomDiaryActiveRequest"
       responses:
-        "422":
-          description: JSON body extraction failed before Room dispatch (for example, a required field was omitted).
+        "200":
+          description: Active Room diary layer results.
           content:
-            text/plain:
+            application/json:
               schema:
-                type: string
+                $ref: "#/components/schemas/RoomDiaryActiveResponse"
         "400":
           $ref: "#/components/responses/BadRequest"
-        "409":
-          $ref: "#/components/responses/Conflict"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          description: JSON body extraction failed before Room dispatch.
+          content:
+            text/plain:
+              schema:
+                type: string
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+  /v1/room/diary/read:
+    post:
+      operationId: roomDiaryRead
+      description: Read one exact Room diary document by validated layer and period. Daily accepts current or YYYY-MM-DD; weekly and monthly accept current or an ordered YYYY-MM-DD--YYYY-MM-DD range. No agentId is accepted.
+      x-openai-isConsequential: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RoomDiaryReadRequest"
+      responses:
+        "200":
+          description: One bounded Room diary layer result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoomDiaryReadResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          description: JSON body extraction failed before Room dispatch.
+          content:
+            text/plain:
+              schema:
+                type: string
         "504":
           $ref: "#/components/responses/GatewayTimeout"
   /v1/room/notebook/recent:
     post:
       operationId: roomNotebookRecent
-      description: Transitional legacy Room notebook recent read; currently rejected with room_legacy_surface_removed pending WP-R. No successful legacy execution is advertised.
+      description: Read bounded recent previews of current Room Notebook Markdown documents. This public name now uses the current Markdown DTO, not the retired passage-oriented JSONL contract; no agentId is accepted.
       x-openai-isConsequential: false
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/NotebookRecentRequest"
+              $ref: "#/components/schemas/RoomNotebookRecentRequest"
       responses:
+        "200":
+          description: Bounded recent Notebook Markdown previews and optional warnings.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoomNotebookResultsResponse"
         "400":
           $ref: "#/components/responses/BadRequest"
-        "409":
-          $ref: "#/components/responses/Conflict"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
-        "504":
-          $ref: "#/components/responses/GatewayTimeout"
-  /v1/room/notebook/selectExact:
-    post:
-      operationId: roomNotebookSelectExact
-      description: Transitional legacy Room notebook exact-date read; currently rejected with room_legacy_surface_removed pending WP-R. No successful legacy execution is advertised.
-      x-openai-isConsequential: false
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/NotebookSelectExactRequest"
-      responses:
+        "409":
+          $ref: "#/components/responses/Conflict"
         "422":
-          description: JSON body extraction failed before Room dispatch (for example, a required field was omitted).
+          description: JSON body extraction failed before Room dispatch.
           content:
             text/plain:
               schema:
                 type: string
-        "400":
-          $ref: "#/components/responses/BadRequest"
-        "409":
-          $ref: "#/components/responses/Conflict"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "404":
-          $ref: "#/components/responses/NotFound"
         "504":
           $ref: "#/components/responses/GatewayTimeout"
   /v1/room/notebook/search:
     post:
       operationId: roomNotebookSearch
-      description: Transitional legacy Room notebook search; currently rejected with room_legacy_surface_removed pending WP-R. No successful legacy execution is advertised.
+      description: Search current Room Notebook Markdown by a bounded case-insensitive substring over relative paths, H1 titles, and bodies. This public name now uses the current Markdown DTO, not the retired passage-oriented JSONL contract; no agentId is accepted.
       x-openai-isConsequential: false
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/NotebookSearchRequest"
+              $ref: "#/components/schemas/RoomNotebookSearchRequest"
       responses:
+        "200":
+          description: Bounded matching Notebook Markdown previews and optional warnings.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoomNotebookResultsResponse"
         "400":
           $ref: "#/components/responses/BadRequest"
-        "409":
-          $ref: "#/components/responses/Conflict"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          description: JSON body extraction failed before Room dispatch.
+          content:
+            text/plain:
+              schema:
+                type: string
         "504":
           $ref: "#/components/responses/GatewayTimeout"
-  /v1/room/notebook/current:
+  /v1/room/notebook/read:
     post:
-      operationId: roomNotebookCurrent
-      description: Transitional legacy Room notebook current-state read; currently rejected with room_legacy_surface_removed pending WP-R. No successful legacy execution is advertised.
+      operationId: roomNotebookRead
+      description: Read one exact bounded Markdown document under the validated Room Notebook root. Paths outside Notebook or non-Markdown paths are rejected; no agentId is accepted.
       x-openai-isConsequential: false
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/NotebookCurrentRequest"
+              $ref: "#/components/schemas/RoomNotebookReadRequest"
       responses:
+        "200":
+          description: One bounded Room Notebook Markdown document.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoomNotebookReadResponse"
         "400":
           $ref: "#/components/responses/BadRequest"
-        "409":
-          $ref: "#/components/responses/Conflict"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          description: JSON body extraction failed before Room dispatch.
+          content:
+            text/plain:
+              schema:
+                type: string
         "504":
           $ref: "#/components/responses/GatewayTimeout"
-  /v1/room/notebook/update:
+  /v1/room/state/list:
     post:
-      operationId: roomNotebookUpdate
-      description: Transitional legacy Room notebook update; currently rejected with room_legacy_surface_removed pending WP-R. No successful legacy execution is advertised.
+      operationId: roomStateList
+      description: List deterministic non-symlink Markdown entities directly under State/entities in the active Room repository. No agentId is accepted.
       x-openai-isConsequential: false
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/NotebookUpdateRequest"
+              $ref: "#/components/schemas/RoomStateListRequest"
       responses:
+        "200":
+          description: Sorted bounded Room state entity list.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoomStateListResponse"
         "400":
           $ref: "#/components/responses/BadRequest"
-        "409":
-          $ref: "#/components/responses/Conflict"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          description: JSON body extraction failed before Room dispatch.
+          content:
+            text/plain:
+              schema:
+                type: string
         "504":
           $ref: "#/components/responses/GatewayTimeout"
-  /v1/room/notebook/remove:
+  /v1/room/state/read:
     post:
-      operationId: roomNotebookRemove
-      description: Transitional legacy Room notebook removal; currently rejected with room_legacy_surface_removed pending WP-R. No successful legacy execution is advertised.
+      operationId: roomStateRead
+      description: Read one exact bounded Markdown Room state entity by filename stem under State/entities. Arbitrary repository paths are rejected; no agentId is accepted.
       x-openai-isConsequential: false
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/NotebookRemoveRequest"
+              $ref: "#/components/schemas/RoomStateReadRequest"
       responses:
+        "200":
+          description: One bounded Room state Markdown document.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoomStateReadResponse"
         "400":
           $ref: "#/components/responses/BadRequest"
-        "409":
-          $ref: "#/components/responses/Conflict"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          description: JSON body extraction failed before Room dispatch.
+          content:
+            text/plain:
+              schema:
+                type: string
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+  /v1/room/maintenance/status:
+    post:
+      operationId: roomMaintenanceStatus
+      description: Inspect current Room maintenance readiness, repository state, schema/scaffold support, executor and workflow availability, synchronization heads, and all five semantic slot occupancies. This operation is read-only and does not initialize or mutate the repository; no agentId is accepted.
+      x-openai-isConsequential: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RoomMaintenanceStatusRequest"
+      responses:
+        "200":
+          description: Current Room maintenance status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoomMaintenanceStatusResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          description: JSON body extraction failed before Room dispatch.
+          content:
+            text/plain:
+              schema:
+                type: string
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+  /v1/room/maintenance/submit:
+    post:
+      operationId: roomMaintenanceSubmit
+      description: Apply one to five unique validated Room maintenance slot requests in local or workflow mode. waitSeconds is a bounded wait for workflow consumption and fast-forward; a wait timeout does not cancel the maintenance submission. The operation uses existing Agent repository, path, Git, lock, executor, and controlled-maintenance authority; no implicit confirmation or agentId is accepted.
+      x-openai-isConsequential: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RoomMaintenanceSubmitRequest"
+      responses:
+        "200":
+          description: Room maintenance application or workflow submission result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoomMaintenanceSubmitResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          description: JSON body extraction failed before Room dispatch.
+          content:
+            text/plain:
+              schema:
+                type: string
         "504":
           $ref: "#/components/responses/GatewayTimeout"
   /v1/room/bootstrap:
@@ -1991,91 +2131,115 @@ components:
           type:
             - string
             - "null"
-    PassageSignificance:
+    RoomDiaryLayer:
       type: string
       enum:
-        - NORMAL
-        - ANCHOR
-    NotebookAppendRequest:
+        - daily
+        - weekly
+        - monthly
+    RoomDiaryLayerIssue:
+      type: string
+      enum:
+        - missing
+        - unreadable
+        - invalid_utf8
+    RoomDiaryLayerResult:
       type: object
       required:
-        - scope
-        - content
-      additionalProperties: false
-      properties:
-        datetime:
-          type: string
-          description: Optional ISO-8601 datetime. Stored as UTC; file partitioning uses configured room timezone.
-        scope:
-          type: string
-          pattern: ^[A-Za-z0-9_.-]+$
-          description: Path-safe scope. Must not contain '..'.
-        significance:
-          $ref: "#/components/schemas/PassageSignificance"
-          default: NORMAL
-        abstract:
-          type: string
-        content:
-          type: string
-        tags:
-          type: array
-          items:
-            type: string
-    NotebookAppendResponse:
-      type: object
-      required:
-        - id
+        - layer
+        - period
         - path
-        - created
-        - warnings
+        - available
       additionalProperties: false
       properties:
-        id:
+        layer:
+          $ref: "#/components/schemas/RoomDiaryLayer"
+        period:
           type: string
         path:
           type: string
-        created:
+        available:
           type: boolean
-        warnings:
-          type: array
-          items:
-            type: string
-    NotebookRecentRequest:
+        content:
+          type: string
+          maxLength: 524288
+          description: Bounded Markdown content when available.
+        issue:
+          $ref: "#/components/schemas/RoomDiaryLayerIssue"
+    RoomDiaryActiveRequest:
       type: object
       additionalProperties: false
-      properties:
-        scope:
-          type: string
-          pattern: ^[A-Za-z0-9_.-]+$
-        days:
-          type: integer
-          minimum: 1
-          maximum: 30
-          default: 5
-        significance:
-          $ref: "#/components/schemas/PassageSignificance"
-        limit:
-          type: integer
-          minimum: 1
-          maximum: 100
-    NotebookSelectExactRequest:
+      description: Empty request object; the active daily, weekly, and monthly layers are selected by the Agent.
+    RoomDiaryActiveResponse:
       type: object
       required:
-        - date
+        - daily
+        - weekly
+        - monthly
       additionalProperties: false
       properties:
-        date:
+        daily:
+          $ref: "#/components/schemas/RoomDiaryLayerResult"
+        weekly:
+          $ref: "#/components/schemas/RoomDiaryLayerResult"
+        monthly:
+          $ref: "#/components/schemas/RoomDiaryLayerResult"
+    RoomDiaryReadRequest:
+      type: object
+      required:
+        - layer
+        - period
+      additionalProperties: false
+      properties:
+        layer:
+          $ref: "#/components/schemas/RoomDiaryLayer"
+        period:
           type: string
-          format: date
-          description: Room-local calendar date in YYYY-MM-DD format.
-        scope:
+          pattern: '^(current|\d{4}-\d{2}-\d{2}(--\d{4}-\d{2}-\d{2})?)$'
+          description: current, a daily YYYY-MM-DD date, or an ordered weekly/monthly YYYY-MM-DD--YYYY-MM-DD range. Layer-specific validation remains authoritative.
+    RoomDiaryReadResponse:
+      type: object
+      required:
+        - document
+      additionalProperties: false
+      properties:
+        document:
+          $ref: "#/components/schemas/RoomDiaryLayerResult"
+    RoomNotebookPreview:
+      type: object
+      required:
+        - path
+        - title
+        - contentPreview
+        - truncated
+        - effectiveAt
+      additionalProperties: false
+      properties:
+        path:
           type: string
-          pattern: ^[A-Za-z0-9_.-]+$
+          description: Validated repository-relative Markdown path under Notebook/.
+        title:
+          type: string
+        contentPreview:
+          type: string
+          maxLength: 2000
+          description: Bounded Markdown preview.
+        truncated:
+          type: boolean
+        effectiveAt:
+          type: string
+          format: date-time
+    RoomNotebookRecentRequest:
+      type: object
+      additionalProperties: false
+      properties:
         limit:
           type: integer
           minimum: 1
           maximum: 100
-    NotebookSearchRequest:
+          default: 20
+          description: Maximum bounded recent Notebook previews.
+    RoomNotebookSearchRequest:
       type: object
       required:
         - query
@@ -2083,175 +2247,327 @@ components:
       properties:
         query:
           type: string
-        scope:
-          type: string
-          pattern: ^[A-Za-z0-9_.-]+$
+          minLength: 1
+          maxLength: 256
+          description: Non-empty case-insensitive substring over Notebook paths, H1 titles, and bodies.
         limit:
           type: integer
           minimum: 1
           maximum: 100
-    NotebookCurrentRequest:
+          default: 20
+          description: Maximum bounded matching Notebook previews.
+    RoomNotebookReadRequest:
       type: object
       required:
-        - scope
+        - path
       additionalProperties: false
       properties:
-        scope:
+        path:
           type: string
-          pattern: ^[A-Za-z0-9_.-]+$
-    NotebookUpdateRequest:
+          minLength: 11
+          pattern: '^Notebook/.+\.md$'
+          description: Exact validated Notebook-relative Markdown path; symlinks, escapes, and non-Markdown paths are rejected.
+    RoomNotebookReadResponse:
       type: object
       required:
-        - id
-      additionalProperties: false
-      properties:
-        id:
-          type: string
-        significance:
-          $ref: "#/components/schemas/PassageSignificance"
-        abstract:
-          type: string
-        content:
-          type: string
-        tags:
-          type: array
-          items:
-            type: string
-      description: Updates editable passage fields. Datetime and scope are immutable; at least one editable field must be supplied.
-    NotebookUpdateResponse:
-      type: object
-      required:
-        - updated
-        - id
-        - warnings
-      additionalProperties: false
-      properties:
-        updated:
-          type: boolean
-        id:
-          type: string
-        warnings:
-          type: array
-          items:
-            type: string
-    NotebookRemoveRequest:
-      type: object
-      required:
-        - id
-      additionalProperties: false
-      properties:
-        id:
-          type: string
-    NotebookRemoveResponse:
-      type: object
-      required:
-        - removed
-        - id
-        - warnings
-      additionalProperties: false
-      properties:
-        removed:
-          type: boolean
-        id:
-          type: string
-        warnings:
-          type: array
-          items:
-            type: string
-    NotebookPassagePreview:
-      type: object
-      required:
-        - id
-        - datetime
-        - scope
-        - significance
-        - abstract
-        - contentPreview
-        - tags
-        - displayMode
-        - truncated
-      additionalProperties: false
-      properties:
-        id:
-          type: string
-        datetime:
-          type: string
-        scope:
-          type: string
-        significance:
-          $ref: "#/components/schemas/PassageSignificance"
-        abstract:
-          type: string
-        contentPreview:
-          type: string
-        tags:
-          type: array
-          items:
-            type: string
-        displayMode:
-          type: string
-          enum:
-            - full
-            - anchor
-            - abstract
-            - search
-        truncated:
-          type: boolean
-    NotebookPassagesResponse:
-      type: object
-      required:
-        - passages
-        - warnings
-      additionalProperties: false
-      properties:
-        passages:
-          type: array
-          items:
-            $ref: "#/components/schemas/NotebookPassagePreview"
-        warnings:
-          type: array
-          items:
-            type: string
-    NotebookCurrent:
-      type: object
-      required:
-        - scope
-        - updatedAt
-        - sourcePassageId
-        - abstract
+        - path
         - content
-        - tags
       additionalProperties: false
       properties:
-        scope:
-          type: string
-        updatedAt:
-          type: string
-        sourcePassageId:
-          type: string
-        abstract:
+        path:
           type: string
         content:
           type: string
-        tags:
-          type: array
-          items:
-            type: string
-    NotebookCurrentResponse:
+          maxLength: 524288
+          description: Bounded Markdown content.
+    RoomNotebookResultsResponse:
       type: object
       required:
-        - current
-        - warnings
+        - documents
       additionalProperties: false
       properties:
-        current:
-          anyOf:
-            - $ref: "#/components/schemas/NotebookCurrent"
-            - type: "null"
+        documents:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/RoomNotebookPreview"
         warnings:
+          type: array
+          maxItems: 32
+          items:
+            type: string
+    RoomStateListRequest:
+      type: object
+      additionalProperties: false
+      description: Empty request object; State/entities is selected by the Agent.
+    RoomStateEntity:
+      type: object
+      required:
+        - entity
+        - path
+      additionalProperties: false
+      properties:
+        entity:
+          type: string
+        path:
+          type: string
+    RoomStateListResponse:
+      type: object
+      required:
+        - entities
+      additionalProperties: false
+      properties:
+        entities:
+          type: array
+          items:
+            $ref: "#/components/schemas/RoomStateEntity"
+    RoomStateReadRequest:
+      type: object
+      required:
+        - entity
+      additionalProperties: false
+      properties:
+        entity:
+          type: string
+          minLength: 1
+          description: One safe filename stem resolved under State/entities; arbitrary repository paths are rejected.
+    RoomStateReadResponse:
+      type: object
+      required:
+        - path
+        - content
+      additionalProperties: false
+      properties:
+        path:
+          type: string
+        content:
+          type: string
+          maxLength: 524288
+          description: Bounded Markdown content.
+    RoomMaintenanceSlot:
+      type: string
+      enum:
+        - diary.daily
+        - diary.weekly
+        - diary.monthly
+        - notebook
+        - entity
+    RoomMaintenanceRequestItem:
+      type: object
+      required:
+        - slot
+        - payload
+      additionalProperties: false
+      properties:
+        slot:
+          $ref: "#/components/schemas/RoomMaintenanceSlot"
+        payload:
+          description: Slot-specific JSON payload validated by the existing Room maintenance executor.
+    RoomMaintenanceExecutionMode:
+      type: string
+      enum:
+        - local
+        - workflow
+    RoomMaintenanceSubmitRequest:
+      type: object
+      required:
+        - items
+      additionalProperties: false
+      properties:
+        items:
+          type: array
+          minItems: 1
+          maxItems: 5
+          description: One to five unique semantic slots; duplicate slots are rejected before mutation.
+          items:
+            $ref: "#/components/schemas/RoomMaintenanceRequestItem"
+        mode:
+          $ref: "#/components/schemas/RoomMaintenanceExecutionMode"
+          description: Optional execution-mode override; absent uses configured Room maintenance mode.
+        waitSeconds:
+          type: integer
+          minimum: 0
+          maximum: 30
+          default: 0
+          description: Bounded workflow-consumption/fast-forward wait. A wait timeout does not cancel submission.
+    RoomMaintenanceSubmissionState:
+      type: string
+      enum:
+        - applied
+        - submitted
+        - failed
+    RoomMaintenanceSyncOutcome:
+      type: string
+      enum:
+        - not_requested
+        - succeeded
+        - failed
+        - unavailable
+        - pending
+    RoomMaintenanceSubmitResponse:
+      type: object
+      required:
+        - mode
+        - state
+        - localApplied
+        - sync
+      additionalProperties: false
+      properties:
+        mode:
+          $ref: "#/components/schemas/RoomMaintenanceExecutionMode"
+        state:
+          $ref: "#/components/schemas/RoomMaintenanceSubmissionState"
+        localApplied:
+          type: boolean
+        sync:
+          $ref: "#/components/schemas/RoomMaintenanceSyncOutcome"
+        revision:
+          type: string
+    RoomMaintenanceStatusRequest:
+      type: object
+      additionalProperties: false
+      description: Empty request object; the active Room repository is selected by the Agent.
+    RoomMaintenanceRepositoryStatus:
+      type: object
+      required:
+        - root
+        - initialized
+        - topLevel
+      additionalProperties: false
+      properties:
+        root:
+          type: string
+        initialized:
+          type: boolean
+        topLevel:
+          type: boolean
+        branch:
+          type: string
+        head:
+          type: string
+        clean:
+          type: boolean
+    RoomMaintenanceSchemaStatus:
+      type: object
+      required:
+        - supported
+        - ready
+      additionalProperties: false
+      properties:
+        schemaVersion:
+          type: integer
+          format: int32
+          minimum: 0
+        supported:
+          type: boolean
+        ready:
+          type: boolean
+    RoomMaintenanceScaffoldStatus:
+      type: object
+      required:
+        - ready
+      additionalProperties: false
+      properties:
+        ready:
+          type: boolean
+        missingPaths:
           type: array
           items:
             type: string
+    RoomMaintenanceLocalExecutorStatus:
+      type: object
+      required:
+        - ready
+      additionalProperties: false
+      properties:
+        ready:
+          type: boolean
+    RoomMaintenanceWorkflowStatus:
+      type: object
+      required:
+        - available
+        - ready
+      additionalProperties: false
+      properties:
+        available:
+          type: boolean
+        ready:
+          type: boolean
+    RoomMaintenanceRemoteStatus:
+      type: object
+      required:
+        - configured
+        - available
+      additionalProperties: false
+      properties:
+        configured:
+          type: boolean
+        available:
+          type: boolean
+    RoomMaintenanceSyncStatus:
+      type: object
+      required:
+        - upstreamAvailable
+      additionalProperties: false
+      properties:
+        upstreamAvailable:
+          type: boolean
+        inSync:
+          type: boolean
+        localHead:
+          type: string
+        upstreamHead:
+          type: string
+    RoomMaintenanceSlotStatus:
+      type: object
+      required:
+        - slot
+        - occupied
+      additionalProperties: false
+      properties:
+        slot:
+          $ref: "#/components/schemas/RoomMaintenanceSlot"
+        occupied:
+          type: boolean
+    RoomMaintenanceStatusResponse:
+      type: object
+      required:
+        - repository
+        - schema
+        - scaffold
+        - localExecutor
+        - configuredMode
+        - autoPush
+        - workflow
+        - remote
+        - sync
+        - slots
+      additionalProperties: false
+      properties:
+        repository:
+          $ref: "#/components/schemas/RoomMaintenanceRepositoryStatus"
+        schema:
+          $ref: "#/components/schemas/RoomMaintenanceSchemaStatus"
+        scaffold:
+          $ref: "#/components/schemas/RoomMaintenanceScaffoldStatus"
+        localExecutor:
+          $ref: "#/components/schemas/RoomMaintenanceLocalExecutorStatus"
+        configuredMode:
+          $ref: "#/components/schemas/RoomMaintenanceExecutionMode"
+        autoPush:
+          type: boolean
+        workflow:
+          $ref: "#/components/schemas/RoomMaintenanceWorkflowStatus"
+        remote:
+          $ref: "#/components/schemas/RoomMaintenanceRemoteStatus"
+        sync:
+          $ref: "#/components/schemas/RoomMaintenanceSyncStatus"
+        slots:
+          type: array
+          minItems: 5
+          maxItems: 5
+          items:
+            $ref: "#/components/schemas/RoomMaintenanceSlotStatus"
     BootstrapDocumentKind:
       type: string
       enum:

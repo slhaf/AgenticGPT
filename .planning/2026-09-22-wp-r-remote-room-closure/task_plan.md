@@ -10,14 +10,14 @@ Implement the approved WP-R contract in docs/architecture/refactoring-plan.md194
 
 ## Phases
 1. Baseline and contract — complete: mapped current nine Agent operations and remote/caller seams; exact interface/ownership and migration inputs frozen in findings.md.
-2. Implementation — in_progress: four disjoint owners implement Protocol/Agent, Hub Rust, OpenAPI/current docs and the existing runtime gate; Main integrates and commits coherent slices.
-3. Verification — pending: build and exercise actual Hub/Room/Normal agents, current operation results and safety/lifecycle errors; update broken existing tests only as necessary, no bulk test expansion.
-4. Delivery — pending: record real migration/rollback/data boundaries, current docs and acceptance evidence; commit. Add cleanup work only after smoke proves implementation.
+2. Implementation — complete: coordinated Protocol/Agent/Hub cutover, OpenAPI/current docs and live gate implementation integrated; final source build passed.
+3. Verification — complete: actual live gate exit 0; workspace tests 667 passed/1 ignored; formatting check passed. Strict existing Clippy debt remains documented, not suppressed.
+4. Delivery — in_progress: migration/rollback/current architecture updated; post-smoke temporary artifact cleanup complete; recording phase commits and acceptance evidence.
 
 ## Acceptance
 - Current required read and maintenance operations have actual remote decode/dispatch/response evidence and bounded Agent-owned content.
 - No active Room, Normal, ReportingOnly and stale connection cannot become unintended write/read targets.
-- Agent path/symlink/Git/lock/expected-change/confirmation and existing maintenance lifecycle remain authoritative; timeout is not cancellation.
+- Agent path/symlink/Git/lock/expected-change and existing controlled maintenance lifecycle remain authoritative; no new generic process-confirmation channel; timeout is not cancellation.
 - Current Full/Coordinator/Agent surfaces and OpenAPI/callers are consistent. Legacy paths retire only with replacement functionality and live/caller migration evidence.
 - Preserve Room files/Git/journal on upgrades/rollback; no deletion migration, invented version/feature negotiation, shim or dual execution.
 - No production SSH/tunnel deployment. Strict pre-existing Clippy debt stays separate; do not suppress or silently include broad lint cleanup.

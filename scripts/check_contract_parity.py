@@ -37,6 +37,158 @@ TIMEOUT = 8.0
 POLL = 0.05
 DIAGNOSTIC_BYTES = 4000
 
+ROOM_OPERATIONS: tuple[dict[str, Any], ...] = (
+    {
+        "name": "room.diary.active",
+        "path": "/v1/room/diary/active",
+        "operation_id": "roomDiaryActive",
+        "request_schema": "RoomDiaryActiveRequest",
+        "response_schema": "RoomDiaryActiveResponse",
+        "required": (),
+        "payload": {},
+    },
+    {
+        "name": "room.diary.read",
+        "path": "/v1/room/diary/read",
+        "operation_id": "roomDiaryRead",
+        "request_schema": "RoomDiaryReadRequest",
+        "response_schema": "RoomDiaryReadResponse",
+        "required": ("layer", "period"),
+        "payload": {"layer": "daily", "period": "current"},
+    },
+    {
+        "name": "room.notebook.recent",
+        "path": "/v1/room/notebook/recent",
+        "operation_id": "roomNotebookRecent",
+        "request_schema": "RoomNotebookRecentRequest",
+        "response_schema": "RoomNotebookResultsResponse",
+        "required": (),
+        "payload": {},
+    },
+    {
+        "name": "room.notebook.search",
+        "path": "/v1/room/notebook/search",
+        "operation_id": "roomNotebookSearch",
+        "request_schema": "RoomNotebookSearchRequest",
+        "response_schema": "RoomNotebookResultsResponse",
+        "required": ("query",),
+        "payload": {"query": "parity"},
+    },
+    {
+        "name": "room.notebook.read",
+        "path": "/v1/room/notebook/read",
+        "operation_id": "roomNotebookRead",
+        "request_schema": "RoomNotebookReadRequest",
+        "response_schema": "RoomNotebookReadResponse",
+        "required": ("path",),
+        "payload": {"path": "Notebook/contract.md"},
+    },
+    {
+        "name": "room.state.list",
+        "path": "/v1/room/state/list",
+        "operation_id": "roomStateList",
+        "request_schema": "RoomStateListRequest",
+        "response_schema": "RoomStateListResponse",
+        "required": (),
+        "payload": {},
+    },
+    {
+        "name": "room.state.read",
+        "path": "/v1/room/state/read",
+        "operation_id": "roomStateRead",
+        "request_schema": "RoomStateReadRequest",
+        "response_schema": "RoomStateReadResponse",
+        "required": ("entity",),
+        "payload": {"entity": "parity"},
+    },
+    {
+        "name": "room.maintenance.status",
+        "path": "/v1/room/maintenance/status",
+        "operation_id": "roomMaintenanceStatus",
+        "request_schema": "RoomMaintenanceStatusRequest",
+        "response_schema": "RoomMaintenanceStatusResponse",
+        "required": (),
+        "payload": {},
+    },
+    {
+        "name": "room.maintenance.submit",
+        "path": "/v1/room/maintenance/submit",
+        "operation_id": "roomMaintenanceSubmit",
+        "request_schema": "RoomMaintenanceSubmitRequest",
+        "response_schema": "RoomMaintenanceSubmitResponse",
+        "required": ("items",),
+        "payload": {
+            "items": [
+                {
+                    "slot": "notebook",
+                    "payload": {
+                        "path": "Notebook/mcp.md",
+                        "title": "MCP parity",
+                        "body": "Full MCP Room dispatch",
+                    },
+                }
+            ],
+            "mode": "local",
+            "waitSeconds": 0,
+        },
+    },
+)
+ROOM_OPERATION_BY_NAME = {item["name"]: item for item in ROOM_OPERATIONS}
+ROOM_OPERATION_NAMES = set(ROOM_OPERATION_BY_NAME)
+ROOM_RETIRED_NAMES = {
+    "room.notebook.append",
+    "room.notebook.selectExact",
+    "room.notebook.current",
+    "room.notebook.update",
+    "room.notebook.remove",
+    "room.diary.append",
+    "room.diary.recent",
+    "room.diary.selectExact",
+}
+ROOM_RETIRED_PATHS = {
+    "/v1/room/notebook/append",
+    "/v1/room/notebook/selectExact",
+    "/v1/room/notebook/current",
+    "/v1/room/notebook/update",
+    "/v1/room/notebook/remove",
+    "/v1/room/diary/append",
+    "/v1/room/diary/recent",
+    "/v1/room/diary/selectExact",
+}
+ROOM_FIXTURE_PAYLOAD = {
+    "items": [
+        {
+            "slot": "diary.daily",
+            "payload": {
+                "summary": "Remote parity daily",
+                "entries": [{"text": "Hub to Agent", "tags": ["parity"]}],
+            },
+        },
+        {
+            "slot": "diary.weekly",
+            "payload": {"summary": "Remote parity weekly", "entries": []},
+        },
+        {
+            "slot": "diary.monthly",
+            "payload": {"summary": "Remote parity monthly", "entries": []},
+        },
+        {
+            "slot": "notebook",
+            "payload": {
+                "path": "Notebook/contract.md",
+                "title": "Contract parity",
+                "body": "Hub remote Room",
+            },
+        },
+        {
+            "slot": "entity",
+            "payload": {"entity": "parity", "content": "Room state parity"},
+        },
+    ],
+    "mode": "local",
+    "waitSeconds": 0,
+}
+
 ACTIVE_PROCESSES: list["ManagedProcess"] = []
 
 class GateError(RuntimeError):
@@ -450,6 +602,65 @@ def descriptor_map(tools: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     return {str(tool.get("name")): tool for tool in tools}
 
 
+def assert_room_tool_semantics(
+    tools: list[dict[str, Any]], label: str, require_defaults: bool = False
+) -> None:
+    descriptors = descriptor_map(tools)
+    missing = ROOM_OPERATION_NAMES.difference(descriptors)
+    if missing:
+        fail(label, f"missing current Room descriptors: {sorted(missing)}")
+    retired = ROOM_RETIRED_NAMES.intersection(descriptors)
+    if retired:
+        fail(label, f"retired Room descriptors still advertised: {sorted(retired)}")
+    for spec in ROOM_OPERATIONS:
+        name = spec["name"]
+        descriptor = descriptors[name]
+        schema = descriptor.get("inputSchema", {})
+        required = set(schema.get("required", []))
+        if required != set(spec["required"]):
+            fail(label, f"{name} required fields changed: {sorted(required)}")
+        properties = schema.get("properties", {})
+        if "agentId" in properties:
+            fail(label, f"{name} unexpectedly exposes an agentId selector")
+        annotations = descriptor.get("annotations", {})
+        read_only = name != "room.maintenance.submit"
+        if annotations.get("readOnlyHint") is not read_only:
+            fail(label, f"{name} readOnlyHint is not {read_only}")
+        if annotations.get("destructiveHint") is not (not read_only):
+            fail(label, f"{name} destructiveHint is not {not read_only}")
+        if annotations.get("openWorldHint") is not False:
+            fail(label, f"{name} openWorldHint is not false")
+        if name in {"room.notebook.recent", "room.notebook.search"}:
+            limit = properties.get("limit", {})
+            if (
+                limit.get("minimum") != 1
+                or limit.get("maximum") != 100
+                or (require_defaults and limit.get("default") != 20)
+            ):
+                fail(label, f"{name} limit is not default20/clamped1..100")
+        if name == "room.notebook.search":
+            query = properties.get("query", {})
+            if require_defaults:
+                if query.get("minLength") != 1 or query.get("maxLength") != 256:
+                    fail(label, "room.notebook.search query bounds are not 1..256")
+            elif (
+                ("minLength" in query and query.get("minLength") != 1)
+                or ("maxLength" in query and query.get("maxLength") != 256)
+            ):
+                fail(label, "room.notebook.search declared query bounds are not 1..256")
+        if name == "room.maintenance.submit":
+            items = properties.get("items", {})
+            if items.get("minItems") != 1 or items.get("maxItems") != 5:
+                fail(label, "room.maintenance.submit items bounds are not 1..5")
+            wait_seconds = properties.get("waitSeconds", {})
+            if (
+                wait_seconds.get("minimum") != 0
+                or wait_seconds.get("maximum") != 30
+                or wait_seconds.get("default") != 0
+            ):
+                fail(label, "room.maintenance.submit waitSeconds is not default0/clamped0..30")
+
+
 def assert_tool_semantics(tools: list[dict[str, Any]], label: str, hub: bool = False) -> None:
     descriptors = descriptor_map(tools)
     for name in ("job.get", "job.list", "job.cancel"):
@@ -648,26 +859,91 @@ def require_schema_contract(document: dict[str, Any], schemas: dict[str, Any]) -
     required = set(job_info.get("required", []))
     if "startedAt" in required:
         fail("schema/contract", "JobInfo.startedAt is incorrectly required for queued jobs")
-    list_parameters = document["paths"]["/v1/jobs"]["get"]["parameters"]
+    paths = document.get("paths", {})
+    list_parameters = paths.get("/v1/jobs", {}).get("get", {}).get("parameters", [])
     list_by_name = {item["name"]: item for item in list_parameters}
     list_limit = list_by_name["limit"]["schema"]
     if list_limit.get("default") != 50 or list_limit.get("minimum") != 1 or list_limit.get("maximum") != 100:
         fail("schema/contract", "HTTP job list limit is not default50/clamped1..100")
-    get_parameters = document["paths"]["/v1/jobs/{jobId}"]["get"]["parameters"]
+    get_parameters = paths.get("/v1/jobs/{jobId}", {}).get("get", {}).get("parameters", [])
     get_by_name = {item["name"]: item for item in get_parameters}
     wait_schema = get_by_name["waitSeconds"]["schema"]
     if wait_schema.get("default") != 0 or wait_schema.get("minimum") != 0 or wait_schema.get("maximum") != 30:
         fail("schema/contract", "HTTP job get waitSeconds is not default0/clamped0..30")
     if "waitOnly" not in get_by_name or get_by_name["waitOnly"]["schema"].get("default") is not False:
         fail("schema/contract", "HTTP job get waitOnly=false is not declared")
-    append = schemas.get("NotebookAppendRequest", {})
-    if set(append.get("required", [])) != {"scope", "content"}:
-        fail("schema/contract", "NotebookAppendRequest must require exactly scope and content")
-    if append.get("properties", {}).get("significance", {}).get("default") != "NORMAL":
-        fail("schema/contract", "NotebookAppendRequest significance default is not NORMAL")
-    exact = schemas.get("NotebookSelectExactRequest", {})
-    if set(exact.get("required", [])) != {"date"} or "date" not in exact.get("properties", {}):
-        fail("schema/contract", "NotebookSelectExactRequest must require date")
+
+    for path in ROOM_RETIRED_PATHS:
+        if path in paths:
+            fail("schema/contract", f"retired Room HTTP path is still advertised: {path}")
+    for spec in ROOM_OPERATIONS:
+        path = spec["path"]
+        operation = paths.get(path, {}).get("post")
+        if not isinstance(operation, dict):
+            fail("schema/contract", f"current Room HTTP path is missing: {path}")
+        if operation.get("requestBody", {}).get("required") is not True:
+            fail("schema/contract", f"{path} JSON request body is not required")
+        if operation.get("operationId") != spec["operation_id"]:
+            fail("schema/contract", f"{path} operationId is not {spec['operation_id']}")
+        if any(parameter.get("name") == "agentId" for parameter in operation.get("parameters", [])):
+            fail("schema/contract", f"{path} exposes an agentId selector parameter")
+        body_schema = (
+            operation.get("requestBody", {})
+            .get("content", {})
+            .get("application/json", {})
+            .get("schema")
+        )
+        if body_schema is None:
+            fail("schema/contract", f"{path} has no JSON request schema")
+        body_schema = resolve_local_ref(document, body_schema)
+        if not isinstance(body_schema, dict):
+            fail("schema/contract", f"{path} request schema is malformed")
+        if body_schema.get("properties", {}).get("agentId") is not None:
+            fail("schema/contract", f"{path} request exposes an agentId selector")
+        request_schema = schemas.get(spec["request_schema"])
+        if not isinstance(request_schema, dict):
+            fail("schema/contract", f"OpenAPI schema {spec['request_schema']} is missing")
+        if set(body_schema.get("required", [])) != set(spec["required"]):
+            fail("schema/contract", f"{path} resolved request required fields changed")
+        if set(request_schema.get("required", [])) != set(spec["required"]):
+            fail("schema/contract", f"{spec['request_schema']} required fields changed")
+        success = resolve_local_ref(document, operation.get("responses", {}).get("200", {}))
+        if not isinstance(success, dict):
+            fail("schema/contract", f"{path} success response is malformed")
+        success_schema = resolve_local_ref(
+            document,
+            success.get("content", {}).get("application/json", {}).get("schema"),
+        )
+        if not isinstance(success_schema, dict) or not success_schema:
+            fail("schema/contract", f"{path} success response schema is missing")
+        if not isinstance(schemas.get(spec["response_schema"]), dict):
+            fail("schema/contract", f"OpenAPI schema {spec['response_schema']} is missing")
+
+    recent = schemas["RoomNotebookRecentRequest"]["properties"]["limit"]
+    search = schemas["RoomNotebookSearchRequest"]["properties"]
+    search_limit = search["limit"]
+    if (
+        recent.get("default") != 20
+        or recent.get("minimum") != 1
+        or recent.get("maximum") != 100
+        or search_limit.get("default") != 20
+        or search_limit.get("minimum") != 1
+        or search_limit.get("maximum") != 100
+    ):
+        fail("schema/contract", "Room Notebook limit is not default20/clamped1..100")
+    if search["query"].get("minLength") != 1 or search["query"].get("maxLength") != 256:
+        fail("schema/contract", "RoomNotebookSearchRequest query bounds are not 1..256")
+    submit = schemas["RoomMaintenanceSubmitRequest"]
+    items = submit["properties"]["items"]
+    if items.get("minItems") != 1 or items.get("maxItems") != 5:
+        fail("schema/contract", "RoomMaintenanceSubmitRequest items bounds are not 1..5")
+    wait_seconds = submit["properties"]["waitSeconds"]
+    if (
+        wait_seconds.get("default") != 0
+        or wait_seconds.get("minimum") != 0
+        or wait_seconds.get("maximum") != 30
+    ):
+        fail("schema/contract", "RoomMaintenanceSubmitRequest waitSeconds is not default0/clamped0..30")
 
 
 def json_result(value: dict[str, Any], scenario: str) -> Any:
@@ -881,6 +1157,54 @@ def start_hub_agent(binary: Path, root: Path, profile: str, agent_id: str, hub_u
     process = ManagedProcess([str(binary), "run", "--config", str(config)], env, f"Hub Agent {profile}")
     reports.append(f"START Hub Agent {profile} ({agent_id})")
     return process, config, env
+def start_reporting_agent(
+    binary: Path,
+    root: Path,
+    agent_id: str,
+    hub_url: str,
+    secret: str,
+    reports: list[str],
+) -> tuple[ManagedProcess, Path, dict[str, str]]:
+    config, _, env = init_agent(binary, root, "standalone", "room", agent_id)
+    try:
+        data = json.loads(config.read_text())
+        data["hub"] = {
+            "url": hub_url,
+            "transport": "websocket",
+            "agentSecret": secret,
+        }
+        data["tunnel"] = {
+            "tunnelId": f"contract-parity-reporting-{agent_id}",
+            "apiKey": "env:CONTRACT_PARITY_REPORTING_TUNNEL_KEY",
+            "client": {"autoDownload": False},
+            "hubReporting": {"enabled": True, "detail": "metadata"},
+        }
+        config.write_text(json.dumps(data, indent=2) + "\n")
+    except (OSError, TypeError, json.JSONDecodeError) as error:
+        fail("Hub ReportingOnly fixture", f"could not configure reporting Agent: {error}")
+    env = dict(
+        env,
+        CONTRACT_PARITY_REPORTING_TUNNEL_KEY="unused-local-reporting-key",
+        AGENTIC_GPT_SUPERVISOR_TOKEN="contract-parity-reporting-supervisor",
+    )
+    process = ManagedProcess(
+        [
+            str(binary),
+            "stdio-worker",
+            "--config",
+            str(config),
+            "--profile",
+            "room",
+            "--supervisor-token",
+            "contract-parity-reporting-supervisor",
+        ],
+        env,
+        "Hub ReportingOnly Room Agent",
+        stdin=subprocess.PIPE,
+    )
+    reports.append(f"START Hub ReportingOnly Room Agent ({agent_id})")
+    return process, config, env
+
 
 
 
@@ -896,6 +1220,92 @@ def hub_json(port: int, api_key: str, method: str, path: str, body: Any | None, 
     )
     value = response.json(scenario) if response.body else None
     return response, value
+def room_repository_root(config_path: Path) -> Path:
+    try:
+        config = json.loads(config_path.read_text())
+        workspace = Path(config["workspaceRoot"])
+        configured = (config.get("room") or {}).get("repositoryRoot")
+        if configured:
+            candidate = Path(os.path.expanduser(str(configured)))
+            return candidate if candidate.is_absolute() else workspace / candidate
+        return workspace / "room"
+    except (OSError, KeyError, TypeError, json.JSONDecodeError) as error:
+        fail("Room repository", f"could not resolve repository root: {error}")
+
+
+def git_stdout(root: Path, env: dict[str, str], args: list[str], scenario: str) -> str:
+    result = run_checked(["git", "-C", str(root), *args], env, scenario)
+    return result.stdout.strip()
+
+
+def room_http_call(
+    port: int,
+    api_key: str,
+    document: dict[str, Any],
+    schemas: dict[str, Any],
+    name: str,
+    payload: dict[str, Any],
+    scenario: str,
+    expected_status: int = 200,
+) -> tuple[HttpResponse, dict[str, Any]]:
+    spec = ROOM_OPERATION_BY_NAME[name]
+    validate_instance(document, schemas, spec["request_schema"], payload, f"{scenario} request")
+    response, value = hub_json(port, api_key, "POST", spec["path"], payload, scenario)
+    if response.status != expected_status:
+        fail(scenario, f"HTTP {response.status}: {value}")
+    if not isinstance(value, dict):
+        fail(scenario, f"response is not an object: {value}")
+    validate_operation_response(
+        document,
+        spec["path"],
+        "post",
+        expected_status,
+        value,
+        scenario,
+    )
+    if expected_status == 200:
+        validate_instance(document, schemas, spec["response_schema"], value, f"{scenario} response")
+    return response, value
+
+
+def room_mcp_call(
+    port: int,
+    api_key: str,
+    session: str,
+    request_id: int,
+    document: dict[str, Any],
+    schemas: dict[str, Any],
+    name: str,
+    payload: dict[str, Any],
+    scenario: str,
+) -> dict[str, Any]:
+    spec = ROOM_OPERATION_BY_NAME[name]
+    validate_instance(document, schemas, spec["request_schema"], payload, f"{scenario} request")
+    message = mcp_call(
+        port,
+        api_key,
+        session,
+        request_id,
+        "tools/call",
+        {"name": name, "arguments": payload},
+        scenario,
+    )
+    value = json_result(message, scenario)
+    if not isinstance(value, dict):
+        fail(scenario, f"response is not an object: {value}")
+    validate_instance(document, schemas, spec["response_schema"], value, f"{scenario} response")
+    return value
+
+
+def wait_for_agent_offline(port: int, api_key: str, agent_id: str, scenario: str) -> None:
+    def offline() -> bool:
+        response, value = hub_json(port, api_key, "GET", "/v1/agents", None, scenario)
+        if response.status != 200:
+            return False
+        return not any(item.get("agentId") == agent_id and item.get("online") is True for item in value.get("agents", []))
+
+    wait_until(offline, scenario, f"disconnected Agent {agent_id}")
+
 
 
 def wait_for_agent(port: int, api_key: str, agent_id: str, scenario: str,
@@ -957,7 +1367,7 @@ def confirmed_hub_json(port: int, api_key: str, method: str, path: str, body: An
 
 def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
                      document: dict[str, Any], schemas: dict[str, Any], reports: list[str]) -> None:
-    local_process = http_process = normal_process = room_process = coordinator_process = None
+    local_process = http_process = normal_process = room_process = reporting_process = coordinator_process = None
     hub_process = None
     confirmation: ConfirmationReceiver | None = None
     try:
@@ -967,6 +1377,8 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
         )
         assert_tool_semantics(local_tools, "Agent local descriptor")
         assert_tool_semantics(http_tools, "Agent HTTP descriptor")
+        assert_room_tool_semantics(local_tools, "Agent local current Room descriptors")
+        assert_room_tool_semantics(http_tools, "Agent HTTP current Room descriptors")
         assert_skill_semantics(local_tools, "Agent local Skill descriptors")
         assert_skill_semantics(http_tools, "Agent HTTP Skill descriptors")
         if descriptor_map(local_tools).keys() != descriptor_map(http_tools).keys():
@@ -1043,6 +1455,7 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
         )
         full_tools = full_tools_message.get("result", {}).get("tools", [])
         assert_tool_semantics(full_tools, "Hub Full descriptor", hub=True)
+        assert_room_tool_semantics(full_tools, "Hub Full current Room descriptor", require_defaults=True)
         assert_skill_semantics(full_tools, "Hub Full Skill descriptors")
         reports.append("PASS Hub Full MCP tools/list metadata")
 
@@ -1164,8 +1577,9 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
         )
         coordinator_tools = coordinator_tools_message.get("result", {}).get("tools", [])
         names = tool_names(coordinator_tools)
-        if "process.exec" in names or "job.get" in names or "room.notebook.append" in names:
-            fail("Hub Coordinator profile", "hidden execution or Room tool leaked into tools/list")
+        leaked = ROOM_OPERATION_NAMES.intersection(names) | ROOM_RETIRED_NAMES.intersection(names)
+        if "process.exec" in names or "job.get" in names or leaked:
+            fail("Hub Coordinator profile", f"hidden execution or Room tool leaked into tools/list: {sorted(leaked)}")
         hidden = mcp_call(
             coordinator_port,
             coordinator_key,
@@ -1178,7 +1592,19 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
         hidden_error = hidden.get("error", {}).get("message", "") if isinstance(hidden.get("error"), dict) else ""
         if "tool_unavailable_for_profile: process.exec" not in hidden_error:
             fail("Hub Coordinator hidden call", f"hidden execution was not rejected by profile guard: {hidden}")
-        reports.append("PASS Hub Coordinator profile hides and rejects execution calls")
+        for request_id, spec in enumerate(ROOM_OPERATIONS, start=20):
+            hidden_room = mcp_call(
+                coordinator_port,
+                coordinator_key,
+                coordinator_session,
+                request_id,
+                "tools/call",
+                {"name": spec["name"], "arguments": json.loads(json.dumps(spec["payload"]))},
+                f"Hub Coordinator hidden {spec['name']}",
+            )
+            if f"tool_unavailable_for_profile: {spec['name']}" not in json.dumps(hidden_room, sort_keys=True):
+                fail(f"Hub Coordinator hidden {spec['name']}", f"current Room call was not rejected: {hidden_room}")
+        reports.append("PASS Hub Coordinator profile hides and rejects execution and all nine current Room calls")
 
         completed_request = {
             "agentId": normal_id,
@@ -1534,41 +1960,417 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
         if len(minimum_body.get("jobs", [])) != 1:
             fail("Hub Job list minimum1", f"expected one job after lower clamp, got {len(minimum_body.get('jobs', []))}")
         reports.append("PASS Hub HTTP Jobs: completed/active lifecycle, waitOnly bounds, cancellation evidence, typed group error, 50/100/1 pages, and cursor")
+        for retired_path in sorted(ROOM_RETIRED_PATHS):
+            retired_response = http_request(
+                hub_port,
+                "POST",
+                retired_path,
+                {},
+                {"Authorization": f"Bearer {hub_key}"},
+                f"Retired Room HTTP path {retired_path}",
+            )
+            retired_text = retired_response.body.decode("utf-8", errors="replace")
+            if retired_response.status != 404 or "room_legacy_surface_removed" in retired_text:
+                fail(
+                    f"Retired Room HTTP path {retired_path}",
+                    f"legacy route remained reachable instead of being absent: HTTP {retired_response.status}, {retired_text!r}",
+                )
+        reports.append("PASS retired Room HTTP routes are absent while retained recent/search routes use current contracts")
 
-        notebook_payload = {"scope": "parity", "content": "legacy-removal-probe"}
-        validate_instance(document, schemas, "NotebookAppendRequest", notebook_payload, "Room notebook append request")
-        notebook_response, notebook_body = hub_json(
-            hub_port, hub_key, "POST", "/v1/room/notebook/append", notebook_payload, "Room notebook append legacy rejection"
-        )
-        if notebook_response.status != 400 or notebook_body.get("error", {}).get("code") != "room_legacy_surface_removed":
-            fail("Room notebook append legacy rejection", f"expected explicit 400 removal error, got {notebook_response.status}: {notebook_body}")
-        validate_operation_response(document, "/v1/room/notebook/append", "post", 400, notebook_body, "Room notebook append legacy rejection")
-        exact_payload = {"date": "2026-09-21", "scope": "parity"}
-        validate_instance(document, schemas, "NotebookSelectExactRequest", exact_payload, "Room notebook selectExact request")
-        exact_response, exact_body = hub_json(
-            hub_port, hub_key, "POST", "/v1/room/notebook/selectExact", exact_payload, "Room notebook selectExact legacy rejection"
-        )
-        if exact_response.status != 400 or exact_body.get("error", {}).get("code") != "room_legacy_surface_removed":
-            fail("Room notebook selectExact legacy rejection", f"expected explicit 400 removal error, got {exact_response.status}: {exact_body}")
-        validate_operation_response(document, "/v1/room/notebook/selectExact", "post", 400, exact_body, "Room notebook selectExact legacy rejection")
 
-        for notebook_path, incomplete_payload in (
-            ("/v1/room/notebook/append", {"scope": "parity"}),
-            ("/v1/room/notebook/selectExact", {"year": 2026, "month": 9, "day": 21}),
+        room_root = room_repository_root(room_config)
+        if room_root == hub_root:
+            fail("Room repository ownership", "Hub and Agent Room roots unexpectedly coincide")
+        _, status_body = room_http_call(
+            hub_port,
+            hub_key,
+            document,
+            schemas,
+            "room.maintenance.status",
+            {},
+            "Room HTTP maintenance.status before fixture",
+        )
+        if (
+            status_body.get("repository", {}).get("initialized") is not True
+            or status_body.get("schema", {}).get("ready") is not True
+            or status_body.get("scaffold", {}).get("ready") is not True
         ):
-            scenario = f"{notebook_path} missing required field"
-            missing_response = http_request(
-                hub_port, "POST", notebook_path, incomplete_payload,
-                {"Authorization": f"Bearer {hub_key}"}, scenario,
+            fail("Room HTTP maintenance.status before fixture", f"real scaffold status was not ready: {status_body}")
+
+        _, fixture_body = room_http_call(
+            hub_port,
+            hub_key,
+            document,
+            schemas,
+            "room.maintenance.submit",
+            json.loads(json.dumps(ROOM_FIXTURE_PAYLOAD)),
+            "Room HTTP maintenance.submit local fixture",
+        )
+        if (
+            fixture_body.get("mode") != "local"
+            or fixture_body.get("state") != "applied"
+            or fixture_body.get("localApplied") is not True
+            or fixture_body.get("sync") != "not_requested"
+            or not fixture_body.get("revision")
+        ):
+            fail("Room HTTP maintenance.submit local fixture", f"real local apply lacked revision/sync evidence: {fixture_body}")
+        fixture_head = git_stdout(room_root, room_env, ["rev-parse", "HEAD"], "Room Agent repository revision")
+        if fixture_body.get("revision") != fixture_head:
+            fail("Room Agent repository revision", f"submit revision did not match Agent HEAD: {fixture_body}, {fixture_head}")
+        expected_room_files = {
+            "Diary/Daily/current.md": "Remote parity daily",
+            "Diary/Weekly/current.md": "Remote parity weekly",
+            "Diary/Monthly/current.md": "Remote parity monthly",
+            "Notebook/contract.md": "# Contract parity\n\nHub remote Room\n",
+            "State/entities/parity.md": "Room state parity\n",
+        }
+        for relative, expected in expected_room_files.items():
+            try:
+                content = (room_root / relative).read_text()
+            except OSError as error:
+                fail("Room Agent repository content", f"missing {relative}: {error}")
+            if expected not in content:
+                fail("Room Agent repository content", f"{relative} did not contain expected fixture content: {content!r}")
+            if (hub_root / relative).exists():
+                fail("Hub Room ownership", f"Hub unexpectedly created Room content at {relative}")
+        if any((hub_root / name).exists() for name in ("Diary", "Notebook", "State", "maintenance")):
+            fail("Hub Room ownership", "Hub root contains a Room content or maintenance tree")
+        reports.append("PASS Hub HTTP maintenance.submit performed real local Room apply with Agent HEAD/content ownership")
+
+        http_room_values: dict[str, dict[str, Any]] = {}
+        for spec in ROOM_OPERATIONS:
+            payload = json.loads(json.dumps(spec["payload"]))
+            _, value = room_http_call(
+                hub_port,
+                hub_key,
+                document,
+                schemas,
+                spec["name"],
+                payload,
+                f"Room HTTP {spec['name']}",
             )
-            missing_text = missing_response.body.decode("utf-8")
-            media_type = missing_response.headers.get("content-type", "").split(";", 1)[0].strip()
-            if missing_response.status != 422 or media_type != "text/plain":
-                fail(scenario, f"expected HTTP 422 text/plain: {missing_response.status}, {media_type}, {missing_text!r}")
-            validate_operation_response(
-                document, notebook_path, "post", 422, missing_text, scenario, media_type=media_type,
+            http_room_values[spec["name"]] = value
+        daily = http_room_values["room.diary.active"].get("daily", {})
+        diary_read = http_room_values["room.diary.read"].get("document", {})
+        notebook_recent = http_room_values["room.notebook.recent"].get("documents", [])
+        notebook_search = http_room_values["room.notebook.search"].get("documents", [])
+        malformed_path = "/v1/room/notebook/read"
+        malformed_payload: dict[str, Any] = {}
+        assert_rejected(
+            document,
+            schemas,
+            "RoomNotebookReadRequest",
+            malformed_payload,
+            "Room HTTP notebook.read malformed request",
+        )
+        malformed_response = http_request(
+            hub_port,
+            "POST",
+            malformed_path,
+            malformed_payload,
+            {"Authorization": f"Bearer {hub_key}"},
+            "Room HTTP notebook.read malformed request",
+        )
+        malformed_text = malformed_response.body.decode("utf-8", errors="replace")
+        malformed_media_type = malformed_response.headers.get("content-type", "").split(";", 1)[0].strip()
+        if malformed_response.status != 422 or malformed_media_type != "text/plain":
+            fail(
+                "Room HTTP notebook.read malformed request",
+                f"expected HTTP 422 text/plain: {malformed_response.status}, {malformed_media_type}, {malformed_text!r}",
             )
-        reports.append("PASS Room notebook append/selectExact valid decoding, explicit legacy 400, and declared text/plain 422")
+        validate_operation_response(
+            document,
+            malformed_path,
+            "post",
+            422,
+            malformed_text,
+            "Room HTTP notebook.read malformed request",
+            media_type=malformed_media_type,
+        )
+        reports.append("PASS current Room HTTP malformed request retained declared 422 text/plain extraction proof")
+        selector_path = "/v1/room/diary/active"
+        selector_payload = {"agentId": "foreign"}
+        assert_rejected(
+            document,
+            schemas,
+            "RoomDiaryActiveRequest",
+            selector_payload,
+            "Room HTTP diary.active foreign selector",
+        )
+        selector_response = http_request(
+            hub_port,
+            "POST",
+            selector_path,
+            selector_payload,
+            {"Authorization": f"Bearer {hub_key}"},
+            "Room HTTP diary.active foreign selector",
+        )
+        selector_text = selector_response.body.decode("utf-8", errors="replace")
+        selector_media_type = selector_response.headers.get("content-type", "").split(";", 1)[0].strip()
+        if selector_response.status != 422 or selector_media_type != "text/plain":
+            fail(
+                "Room HTTP diary.active foreign selector",
+                f"expected HTTP 422 text/plain instead of selector dispatch: {selector_response.status}, {selector_media_type}, {selector_text!r}",
+            )
+        validate_operation_response(
+            document,
+            selector_path,
+            "post",
+            422,
+            selector_text,
+            "Room HTTP diary.active foreign selector",
+            media_type=selector_media_type,
+        )
+        reports.append("PASS current Room HTTP rejected foreign agentId selector before active-Room dispatch")
+
+        notebook_read = http_room_values["room.notebook.read"]
+        state_entities = http_room_values["room.state.list"].get("entities", [])
+        state_read = http_room_values["room.state.read"]
+        maintenance_status = http_room_values["room.maintenance.status"]
+        if (
+            daily.get("available") is not True
+            or "Remote parity daily" not in daily.get("content", "")
+            or "Remote parity daily" not in diary_read.get("content", "")
+            or notebook_read.get("content") != expected_room_files["Notebook/contract.md"]
+            or not any(item.get("path") == "Notebook/contract.md" for item in notebook_recent)
+            or not any(item.get("path") == "Notebook/contract.md" for item in notebook_search)
+            or not any(item.get("entity") == "parity" for item in state_entities)
+            or state_read.get("content") != expected_room_files["State/entities/parity.md"]
+            or maintenance_status.get("repository", {}).get("head") != fixture_head
+        ):
+            fail(
+                "Room HTTP current operations",
+                f"Agent-owned read content/revision was not returned: {http_room_values}",
+            )
+        reports.append("PASS Hub HTTP all nine current Room operations returned typed Agent-owned reads/status")
+
+        invalid_read_payload = {"path": "Notebook/../outside.md"}
+        _, invalid_read = room_http_call(
+            hub_port,
+            hub_key,
+            document,
+            schemas,
+            "room.notebook.read",
+            invalid_read_payload,
+            "Room HTTP notebook.read invalid path",
+            expected_status=400,
+        )
+        if invalid_read.get("error", {}).get("code") != "room_repository_path_invalid":
+            fail("Room HTTP notebook.read invalid path", f"Agent path rejection was not preserved: {invalid_read}")
+
+        dirty_path = room_root / "unrelated-dirty.md"
+        dirty_path.write_text("dirty parity probe\n")
+        try:
+            dirty_payload = {
+                "items": [
+                    {
+                        "slot": "notebook",
+                        "payload": {
+                            "path": "Notebook/dirty.md",
+                            "title": "Dirty",
+                            "body": "must reject",
+                        },
+                    }
+                ],
+                "mode": "local",
+                "waitSeconds": 0,
+            }
+            _, dirty_body = room_http_call(
+                hub_port,
+                hub_key,
+                document,
+                schemas,
+                "room.maintenance.submit",
+                dirty_payload,
+                "Room HTTP maintenance.submit dirty rejection",
+                expected_status=400,
+            )
+        finally:
+            dirty_path.unlink(missing_ok=True)
+        if (
+            dirty_body.get("error", {}).get("code") != "room_maintenance_failed"
+            or "room_maintenance_repository_dirty" not in dirty_body.get("error", {}).get("message", "")
+        ):
+            fail("Room HTTP maintenance.submit dirty rejection", f"Agent dirty-repository rejection was not preserved: {dirty_body}")
+        reports.append("PASS Agent-owned Room invalid-path and dirty-repository rejection stayed behind Hub HTTP projection")
+
+        mcp_room_values: dict[str, dict[str, Any]] = {}
+        for request_id, spec in enumerate(ROOM_OPERATIONS, start=50):
+            payload = json.loads(json.dumps(spec["payload"]))
+            mcp_room_values[spec["name"]] = room_mcp_call(
+                hub_port,
+                hub_key,
+                full_session,
+                request_id,
+                document,
+                schemas,
+                spec["name"],
+                payload,
+                f"Hub Full MCP {spec['name']}",
+            )
+        if (
+            "Remote parity daily" not in mcp_room_values["room.diary.read"].get("document", {}).get("content", "")
+            or mcp_room_values["room.notebook.read"].get("content") != expected_room_files["Notebook/contract.md"]
+            or not any(item.get("entity") == "parity" for item in mcp_room_values["room.state.list"].get("entities", []))
+            or mcp_room_values["room.maintenance.submit"].get("state") != "applied"
+            or mcp_room_values["room.maintenance.submit"].get("localApplied") is not True
+            or not mcp_room_values["room.maintenance.submit"].get("revision")
+        ):
+            fail("Hub Full MCP current Room operations", f"MCP did not return real current Room values: {mcp_room_values}")
+        if not (room_root / "Notebook/mcp.md").is_file() or (hub_root / "Notebook/mcp.md").exists():
+            fail("Hub Full MCP maintenance ownership", "MCP submit did not mutate only the Agent-owned repository")
+        reports.append("PASS Hub Full MCP dispatched all nine current Room operations and real local maintenance")
+
+        room_process.stop()
+        room_process = None
+        wait_for_agent_offline(hub_port, hub_key, room_id, "Hub Room disconnect before lifecycle checks")
+        inactive_response, inactive_body = room_http_call(
+            hub_port,
+            hub_key,
+            document,
+            schemas,
+            "room.notebook.read",
+            {"path": "Notebook/contract.md"},
+            "Room HTTP no active Room",
+            expected_status=404,
+        )
+        if inactive_response.status != 404 or inactive_body.get("error", {}).get("code") != "room_not_active":
+            fail("Room HTTP no active Room", f"404 did not identify inactive Room (not a missing route): {inactive_body}")
+        reports.append("PASS no active Room returned typed room_not_active without falling back to connected Normal Agent")
+
+        reporting_id, reporting_secret = "parity-reporting-room", "parity-reporting-room-secret"
+        register_hub_agent(
+            hub_binary,
+            hub_root / "hub.db",
+            hub_config,
+            hub_env,
+            reporting_id,
+            "Parity ReportingOnly Room",
+            reporting_secret,
+        )
+        reporting_process, reporting_config, reporting_env = start_reporting_agent(
+            agent_binary,
+            root / "reporting-room",
+            reporting_id,
+            f"http://127.0.0.1:{hub_port}",
+            reporting_secret,
+            reports,
+        )
+        wait_for_agent(hub_port, hub_key, reporting_id, "Hub ReportingOnly Room connection", reporting_process)
+        reporting_response, reporting_body = room_http_call(
+            hub_port,
+            hub_key,
+            document,
+            schemas,
+            "room.notebook.read",
+            {"path": "Notebook/contract.md"},
+            "Room HTTP ReportingOnly no fallback",
+            expected_status=404,
+        )
+        if reporting_response.status != 404 or reporting_body.get("error", {}).get("code") != "room_not_active":
+            fail(
+                "Room HTTP ReportingOnly no fallback",
+                f"ReportingOnly Room became a route target instead of room_not_active: {reporting_body}",
+            )
+        reports.append("PASS online ReportingOnly Room did not activate or become an HTTP fallback target")
+        reporting_process.stop()
+        reporting_process = None
+        wait_for_agent_offline(hub_port, hub_key, reporting_id, "Hub ReportingOnly Room disconnect")
+
+        room_process = ManagedProcess(
+            [str(agent_binary), "run", "--config", str(room_config)],
+            room_env,
+            "Hub Agent room reconnect",
+        )
+        reports.append(f"START Hub Agent room reconnect ({room_id})")
+        wait_for_agent(hub_port, hub_key, room_id, "Hub Room reconnect", room_process)
+        _, reconnected_read = room_http_call(
+            hub_port,
+            hub_key,
+            document,
+            schemas,
+            "room.notebook.read",
+            {"path": "Notebook/contract.md"},
+            "Room HTTP Room reconnect retained content",
+        )
+        if reconnected_read.get("content") != expected_room_files["Notebook/contract.md"]:
+            fail("Room HTTP Room reconnect retained content", f"reconnected Room read changed repository content: {reconnected_read}")
+        reports.append("PASS same real Room identity reconnected with a new lease and retained Agent repository content")
+
+        room_process.stop()
+        room_process = None
+        wait_for_agent_offline(hub_port, hub_key, room_id, "Hub Room disconnect before workflow")
+        origin = root / "room-origin.git"
+        git_env = dict(room_env, GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL="/dev/null")
+        run_checked(["git", "init", "--bare", "-b", "main", str(origin)], git_env, "Room workflow bare origin init")
+        run_checked(["git", "-C", str(room_root), "remote", "add", "origin", str(origin)], git_env, "Room workflow origin add")
+        run_checked(["git", "-C", str(room_root), "push", "-u", "origin", "main"], git_env, "Room workflow origin seed")
+        room_config_data = json.loads(room_config.read_text())
+        room_config_data.setdefault("room", {}).setdefault("maintenance", {})["mode"] = "workflow"
+        room_config.write_text(json.dumps(room_config_data, indent=2) + "\n")
+        room_process = ManagedProcess(
+            [str(agent_binary), "run", "--config", str(room_config)],
+            room_env,
+            "Hub Agent room workflow reconnect",
+        )
+        reports.append(f"START Hub Agent room workflow reconnect ({room_id})")
+        wait_for_agent(hub_port, hub_key, room_id, "Hub Room workflow reconnect", room_process)
+        workflow_payload = {
+            "items": [
+                {
+                    "slot": "notebook",
+                    "payload": {
+                        "path": "Notebook/workflow.md",
+                        "title": "Workflow parity",
+                        "body": "bounded wait",
+                    },
+                }
+            ],
+            "mode": "workflow",
+            "waitSeconds": 1,
+        }
+        _, workflow_body = room_http_call(
+            hub_port,
+            hub_key,
+            document,
+            schemas,
+            "room.maintenance.submit",
+            workflow_payload,
+            "Room HTTP maintenance.submit workflow bounded wait",
+        )
+        workflow_request = room_root / "maintenance/notebook/maintenance.json"
+        origin_request = run_checked(
+            [
+                "git",
+                "--git-dir",
+                str(origin),
+                "ls-tree",
+                "-r",
+                "--name-only",
+                "main",
+                "--",
+                "maintenance/notebook/maintenance.json",
+            ],
+            git_env,
+            "Room workflow origin request",
+        ).stdout.strip()
+        if origin_request != "maintenance/notebook/maintenance.json":
+            fail("Room HTTP maintenance.submit workflow bounded wait", f"bare origin did not retain the submitted request: {origin_request!r}")
+        if (
+            workflow_body.get("mode") != "workflow"
+            or workflow_body.get("state") != "submitted"
+            or workflow_body.get("localApplied") is not False
+            or workflow_body.get("sync") != "pending"
+            or workflow_body.get("revision") is not None
+            or not workflow_request.is_file()
+            or (room_root / "Notebook/workflow.md").exists()
+        ):
+            fail("Room HTTP maintenance.submit workflow bounded wait", f"workflow wait was not submitted/not-cancelled: {workflow_body}")
+        reports.append("PASS Room workflow submit returned submitted/pending after bounded wait and left request for worker (not cancelled)")
+        room_process.stop()
+        room_process = None
+        wait_for_agent_offline(hub_port, hub_key, room_id, "Hub Room disconnect after workflow")
+
 
         normal_process.stop()
         normal_process = None
@@ -1653,7 +2455,15 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
             fail("Hub cached never-started JobInfo", f"snapshot fabricated start/detail or lost rejection: {rejected_snapshot}")
         reports.append("PASS actual never-started JobInfo validates without a fabricated startedAt or cached execution detail")
     finally:
-        for process in (coordinator_process, normal_process, room_process, hub_process, http_process, local_process):
+        for process in (
+            coordinator_process,
+            normal_process,
+            reporting_process,
+            room_process,
+            hub_process,
+            http_process,
+            local_process,
+        ):
             if process is not None:
                 process.stop()
         if confirmation is not None:
@@ -1680,7 +2490,7 @@ def main() -> int:
         print("contract parity gate: PASS")
         for report in reports:
             print(report)
-        print("LIMITATION standalone HTTP MCP listener is exercised; production tunnel transport is intentionally not claimed")
+        print("LIMITATION standalone HTTP MCP and local standalone ReportingOnly WebSocket fixtures are exercised; production tunnel executable transport is intentionally not claimed (Hub generation tests cover replacement races)")
         return 0
     except GateError as error:
         print(f"contract parity gate: FAIL {error}", file=sys.stderr)
