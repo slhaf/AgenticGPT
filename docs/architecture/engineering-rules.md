@@ -1,6 +1,6 @@
 # 工程规则（技术草案）
 
-> **状态：技术草案，受已确认的 D01–D08 约束。** 本文是给 coding agent、reviewer 和维护者的放置/依赖/边界规则，不是已经完成的重构清单。目标模块目录可能尚不存在；若规则与当前代码冲突，先按现状记录并准备一次协调升级的迁移，不要偷偷引入 shim 或权限变化。
+> **状态：技术草案，受已确认的 D01–D08 约束。** 本文是给 coding agent、reviewer 和维护者的放置/依赖/边界规则，不是已经完成的重构清单。目标模块目录、逻辑分层和示例路径可能尚不存在，均须视为 illustrative/conditional placement；若规则与当前代码冲突，先按现状记录并准备一次协调升级的迁移，不要偷偷引入 shim 或权限变化。
 >
 > 适用决策： [D01](decisions.md#d01--room-是受控资源不是-agent-记忆运行时) · [D02](decisions.md#d02--room-远端能力必须补齐) · [D03](decisions.md#d03--一次升级明确迁移不刻意维持旧兼容) · [D04](decisions.md#d04--自用部署背景与具体副作用控制并存) · [D05](decisions.md#d05--browser-host-先盘点实际拓扑再收紧机制) · [D06](decisions.md#d06--持久化按正确性与用途分层) · [D07](decisions.md#d07--console-与本轮核心重构解耦) · [D08](decisions.md#d08--不借架构重构扩张范围)。这些决策确定产品边界和工程取舍，不表示代码已经实现；剩余事项是实施细节，不是再次请求用户选择。
 >
@@ -33,11 +33,15 @@
 其他纯逻辑？
   └─ 是 → 放回所属 domain/module；不要因“纯”就跨 crate
 跨进程 wire DTO、serde 名称、run/request/hash、必要纯验证？
-  └─ 是 → agentic-gpt-protocol
+  └─ 是 → `agentic-gpt-protocol`（仅跨 Hub↔Agent wire boundary）
+Agent 内部 operation identity、admission、value/error semantics？
+  └─ 是 → `agentic-gpt` operation/local_service 与实际 resource owner；仅内部复用不新增 Protocol command
 Agent 本地 process/file/MCP/tmux/Skill/Room/Browser/confirmation 副作用？
-  └─ 是 → agentic-gpt operation core/resource adapter
+  └─ 是 → `agentic-gpt` operation core/resource adapter
+Hub 中立 command/projection/freshness/owner helper？
+  └─ 是 → `agentic-gpt-hub` neutral control/projection module；不得依赖 HTTP/MCP adapter
 Hub auth/registry/connection/dispatch/confirmation coordination/run receipt/projection？
-  └─ 是 → agentic-gpt-hub
+  └─ 是 → `agentic-gpt-hub`
 浏览器 extension/native messaging bridge 进程？
   └─ 是 → agentic-browser-host（独立协议/权限）
 UI state、平台 repository/scheduler/client adapter？
@@ -54,9 +58,10 @@ UI state、平台 repository/scheduler/client adapter？
 |---|---|---|---|
 | `agentic-gpt-protocol` | 外部 serde/纯类型依赖；当前无 workspace 内部 crate | 被 Hub 和 Agent 序列化/反序列化 | I/O、DB、网络、spawn、policy、confirmation、业务资源服务 |
 | `agentic-apply-patch` | 纯解析/错误/文本依赖；当前无 workspace 内部 crate | 被 Agent `file_ops` 调用纯 parse/compute/apply | filesystem、Git、path policy、secret、audit、confirmation |
-| `agentic-gpt` ingress | 同 crate ingress support 和 Protocol DTOs | 通过 operation core + authorization/confirmation gate 调用本地操作 | 直接依赖 apply-patch/resource executor；调用另一个 transport 的 DTO/loop；绕过 gate 直接 spawn/写文件/下游调用 |
-| `agentic-gpt` operation/execution | 同 crate policy/jobs/resources/durability | 拥有 Agent 本地效果和生命周期 | Hub DB/Hub registry、Console state、Browser-host 内部状态 |
-| `agentic-gpt-hub` ingress/control | Hub 内部模块、Protocol request/response 类型 | auth、registry、connection、dispatch、receipt、projection；通过 protocol 投递 Agent | spawn shell、打开 Agent 文件、直接 tmux/MCP/Browser/Room I/O |
+| `agentic-gpt` ingress | 同 crate ingress support 和必要 Protocol wire DTOs | 通过 Agent internal operation seam + authorization/confirmation gate 调用本地操作；仅跨进程命令在边界解码 | 直接依赖 apply-patch/resource executor；调用另一个 transport 的 DTO/loop；把内部 operation 强行做成 Protocol command；绕过 gate 直接 spawn/写文件/下游调用 |
+| `agentic-gpt` operation/execution | 同 crate policy/jobs/resources/durability；Protocol 仅在 wire adapter 边界 | 拥有 Agent 本地效果和生命周期；Agent-local operation 不要求 Protocol enum | Hub DB/Hub registry、Console state、Browser-host 内部状态；把 wire DTO 当内部万能 union |
+| `agentic-gpt-hub` HTTP/Apps MCP ingress | Hub 内部 auth/profile/control helpers、Protocol request/response 类型 | HTTP `routes` 负责 auth/status/OpenAPI，Apps `mcp_server` 负责 OAuth/profile/schemars/JSON-RPC/result projection；均通过 neutral Hub control/dispatch 投递 | 互调另一 ingress、spawn shell、打开 Agent 文件、直接 tmux/MCP/Browser/Room I/O |
+| `agentic-gpt-hub` neutral control/projection | 同 crate 的 transport-neutral value/owner/freshness helpers | 共享 command construction、receipt-independent projection、Job freshness/Room neutral result；供 HTTP/MCP adapter 消费 | 依赖 Axum response、Apps MCP schema、Agent executor 或把一个 surface DTO 当万能 DTO |
 | `agentic-browser-host` | 进程内 bridge 依赖；无 workspace Agent crate | stdin/stdout + 本地 framed socket ↔ extension | 读取 Agent state、共享 BrowserManager lease、远程暴露未认证 bridge |
 | Console common | common UI/state/port 依赖 | 消费真实 platform adapter 或远程 status projection | 直接使用 Android Room/AlarmManager、直接放 API secret、假定 Hub 已连接 |
 | Console platform app | 平台 SDK + common | Android local attention 或明确的 Hub client adapter | 将本地 OS side effect 当远端 authority、把 placeholder 当能力 |
@@ -64,11 +69,13 @@ UI state、平台 repository/scheduler/client adapter？
 
 当前 Cargo 事实是：`agentic-gpt → protocol + apply-patch`，`agentic-gpt-hub → protocol`，Protocol/apply-patch/browser-host 无 workspace 内部 crate 依赖。Console 当前不编译依赖 Rust protocol 或网络实现。目录迁移不得改变这条方向，除非有独立 compile/deploy/security 论证。
 
+Job/Skill 状态必须保持窄 owner：Agent `jobs` 拥有运行中的 Process/Skill/MCP Job admission、取消和终态；`job_history` 拥有 Job 历史持久化；`skills`/`skill_installs` 拥有包、安装 journal、digest 和 activation lease；Hub `runs` 拥有 dispatch receipt，Hub `JobCache` 只是 projection。Skill run 可以复用 Process Job，但 `SkillInstallStatus` 不得并入 `JobState`，也不得让通用 repository/state abstraction 抹平不同 retention 或副作用。
+
 ## 3. 分层规则：适配器薄，操作核心唯一，资源 owner 明确
 
 ### R-01：入口适配器只处理入口问题
 
-入口适配器可以做 framing、decode、认证、profile/toolset 可见性、connection generation、参数 schema 和错误 projection；然后生成带 `RequestContext` 的 operation request。它不得自己实现另一套 policy、Job、文件提交、MCP client、Room 写入或 Browser lifecycle。
+入口适配器可以做 framing、decode、认证、profile/toolset 可见性、connection generation、参数 schema 和错误 projection；然后生成带 `RequestContext` 的 operation request。它不得自己实现另一套 policy、Job、文件提交、MCP client、Room 写入或 Browser lifecycle。这里是目标放置规则，不是声称当前所有入口都已经走同一个函数。
 
 适用入口：
 
@@ -84,9 +91,22 @@ UI state、平台 repository/scheduler/client adapter？
 
 ### R-02：共享 operation core，不复制执行器
 
-Local、Standalone 和 Hub agent 当前复用真正的 `jobs`、`exec`、`policy`、`confirmation`、`file_ops`、`mcp`、`tmux`、Room/Skill/Browser 实现；差异来自 `RuntimeModel`、Transport、profile 和 capability。新增入口应接入共享 operation layer，而不是新增 `run_*_again`。
+Local、Standalone 和 Hub agent 当前复用真正的 `jobs`、`exec`、`policy`、`confirmation`、`file_ops`、`mcp`、`tmux`、Room/Skill/Browser 实现；差异来自 `RuntimeModel`、Transport、profile 和 capability。新增入口应接入共享 operation/resource owner，而不是新增 `run_*_again`。
 
-`stdio_server::dispatch_with_lifecycle` 与 `local_service::dispatch_inner` 的现状重复是映射/metadata/gate 漂移问题，不是允许增加第三套执行器的理由。优先收敛 value/error operation；删除旧分支必须在所有 caller、descriptor、HTTP/MCP projection 和回归验证迁移后进行。
+当前 Agent routing 仍是部分收敛：`stdio_server::dispatch_with_lifecycle` 保留直接资源分支，并将选定 `HubCommand` trampoline 交给 `local_service::dispatch`；Hub ingress 直接使用 `local_service`。这些路径共享 authorize gate 和资源 owner，当前没有复现行为失败或发现第二套 executor；剩余是结构性 `[推断]` 的 change-locality/projection drift。收敛时一次迁移一个 operation family，保留 ingress-specific framing/auth/error，不把 universal dispatcher 当验收前提。
+
+`stdio_server::dispatch_with_lifecycle` 与 `local_service::dispatch_inner` 的现状差异是映射/metadata/gate 边界问题，不是允许增加第三套执行器的理由。优先收敛 value/error operation；删除旧分支必须在所有 caller、descriptor、HTTP/MCP projection 和回归验证迁移后进行。
+
+### R-02a：Agent 内部 operation 与 Protocol wire 分离
+
+- 仅 Agent-local 的 operation 放在 `operation.rs`/`local_service.rs` 与实际资源 owner，经过现有 context/authorization gate；不要为内部复用添加 `HubCommand`、serde tag、OpenAPI path 或 Apps-MCP tool。
+- 只有跨 Hub↔Agent 进程的 operation 才在 Protocol 增加 wire DTO/command/envelope；Protocol 提供稳定 wire identity、serde 名称和纯 metadata，不拥有 Agent admission、Job、文件/MCP/tmux/Room/Skill/Browser effect。
+- Agent-local operation mapping 与 Protocol wire mapping 在边界显式转换；Apps-MCP 公共工具名是另一个 adapter namespace。共享窄 identity/effect/lifecycle 语义，不要求一套 DTO 或一个 universal dispatch。
+
+### R-02b：Hub 中立 projection 与入口 adapter 分离
+
+- Hub neutral control/projection helper 可放在现有 Hub crate 内，负责不依赖 HTTP/MCP 表面 schema 的 command construction、owner/freshness、receipt-neutral Job/Room values。
+- HTTP `routes` 保留 action auth、HTTP status/body、OpenAPI projection；Apps MCP `mcp_server` 保留 OAuth/profile/schemars、JSON-RPC 和 `AgenticResult` projection。两者不得互相调用或通过对方 DTO 复用，也不得直接触碰 Agent effects。
 
 ### R-03：共享窄语义，不制造万能 schema/registry
 
@@ -315,7 +335,7 @@ Android/Desktop/Web: platform HTTP/WS/SSE client + secure token storage
 Hub: existing auth/route/receipt/agent semantics
 ```
 
-必须区分 local attention 与 remote run/job：不得将 Hub item 写成 `LocalMock`、将 token field 接上就显示 connected、或把 Android scheduler 当远端 acknowledgement。Android 的平台安全存储、TLS/cleartext/连接生命周期，以及 Web 的 CORS 等属于未来 remote console 产品接入时的独立设计；在此之前 placeholder/unavailable 必须诚实展示，不构成本轮核心完成门槛。
+必须区分 local attention 与 remote run/job：不得将 Hub item 写成 `LocalMock`、将 token field 接上就显示 connected、或把 Android scheduler 当远端 acknowledgement。`console/settings.gradle.kts` 是独立 Gradle root；根 Rust CI/release 不覆盖 Android/桌面/Web 行为，也不把 Console 编译依赖或 Linux artifact 责任带入核心。Android 的平台安全存储、TLS/cleartext/连接生命周期，以及 Web 的 CORS 等属于未来 remote console 产品接入时的独立设计；在此之前 placeholder/unavailable 必须诚实展示，不构成本轮核心完成门槛。
 
 ### R-17：TUI、CLI 与 Demo
 
@@ -373,6 +393,8 @@ Browser host：当前 `/tmp/codex-browser-use` socket 0660 且没有同等 peer 
 
 不得 whole-config reload 后留下旧 private state、history、Browser manager、transport sender 与新 identity/root 不一致。无法证明 live-safe 的字段默认归 startup-only。
 
+当前 config snapshot 选择是 pending decision，不得在重排模块时暗中选边：`jobs.rs::start_process_job_inner` 在 admission/audit 处捕获 config，而 `run_async_job` 后续仍从 `state.config` 读取 policy/CWD/preflight；`docs/configuration.md` 现明确记录不存在统一的 admission-time config snapshot guarantee，并指出异步路径可能重新读取 live config。该差异是 source-level 风险，尚未复现 reload interleaving 行为失败。先由 owner 记录单一 snapshot 规则，再用 deterministic reload scenario 验证；在此之前不把任何一侧写成已实现的普遍保证。
+
 ## 8. 协议、合同和迁移规则
 
 ### R-23：先找 authority，再改 contract
@@ -387,7 +409,7 @@ Browser host：当前 `/tmp/codex-browser-use` socket 0660 且没有同等 peer 
 | HTTP Actions | `routes.rs` 的实际 DTO/response adapter + `openapi/hub.yaml` | optionality、slim response、分页、error/status、import compatibility |
 | Docs/matrix/evaluator | 明确为 review/probe | 不把文档或宽松 prediction probe 当 runtime proof |
 
-例如，Protocol `JobInfo.started_at` 可选、Agent slim list 可能有 `nextCursor`、实际 `job.get`/cancel response 与旧 OpenAPI 字段不同；应做显式 HTTP adapter 或在一次升级中更新合同，不能因“Protocol 有类型”直接宣称 parity。Room 历史 `selectExact` 的 year/month/day Actions shape、passage/date 与 append/update/remove drift 已在 WP-R clean cutover 中退出当前合同；当前九个语义 operation 使用 current DTO，`recent/search` 使用当前 Markdown 语义，不能让 Protocol 悄悄吸收 legacy shape。
+WP4-A 前的 A01 Job/OpenAPI drift（`startedAt` optionality、分页/等待字段、cancel response 等）是**历史基线示例**，不是当前行为失败；当前变更应以各 surface authority 与 `scripts/check_contract_parity.py` 的 bounded schema/live gate 为依据。Room 的历史 `selectExact` year/month/day Actions shape、passage/date 与 append/update/remove drift 已在 WP-R clean cutover 中退出当前合同；当前九个语义 operation 使用 current DTO，`recent/search` 使用当前 Markdown 语义，不能让 Protocol 悄悄吸收 legacy shape。
 
 ### R-24：多入口 parity gate 是必需的
 
@@ -404,6 +426,10 @@ Browser host：当前 `/tmp/codex-browser-use` socket 0660 且没有同等 peer 
 
 Parity gate 可以输出每个 surface 的差异，不要求所有 surface 共享同一 schema；差异必须是有意、可测试、可由迁移文档解释的。只跑 YAML parse、只读 docs matrix、只比较 prediction tool/arguments 都不能证明 runtime parity。
 
+当前 `scripts/check_contract_parity.py` 是 CI 中的行为/合同 gate，已超出单纯 YAML parse：它校验 local refs/schema、选定 response/descriptor 并运行 loopback/private-home live checks。它不证明 strict 外部 Actions importer、外部 Apps client、生产 tunnel/cloud、完整 Protocol-wire lifecycle 或 Android/Console/Browser service。`evaluate_tool_contracts.py` 与 matrix 只作 prediction/review probe。
+
+tag-triggered release workflow 与 branch/PR CI 分开，只负责 cross Linux packaging、三 binary archive 和 `SHA256SUMS`；未自动证明 parity gate、ARM runtime、artifact/version pairing 或外部部署。若未来增加 release preflight，应明确 owner/输入/阻断边界，不把 Console、示例、实验或外部服务强行纳入 Rust release。
+
 ### R-25：公开合同只能通过 clean cutover 迁移
 
 - 破坏性变化在一次协调升级中迁移全部 caller、descriptor、OpenAPI/Protocol 投影、docs 和 release artifact，并随同一代码批次提供可执行迁移文档；文档说明版本/产物组合、接口/配置变化、备份、升级顺序、验证及回退边界。
@@ -417,10 +443,10 @@ Reviewer 和 coding agent 在合并前逐项标记 `是/否/不适用 + 证据�
 
 ### A. 放置与依赖
 
-- [ ] 是否选对 owner（Agent/Hub/Protocol/apply-patch/browser-host/Console/TUI）？
+- [ ] 是否选对 owner（Agent/Hub/Protocol/apply-patch/browser-host/Console/TUI），并区分 Agent-local operation 与 Protocol wire operation？
 - [ ] 是否保持 `Hub → protocol`、`Agent → protocol + apply-patch` 的编译方向？
 - [ ] 是否避免 Hub→Agent crate、Browser host→Agent state、Console→Rust runtime 的隐式编译依赖？
-- [ ] 是否在现有 crate 内先收敛模块，而不是先造 service/crate/万能 registry？
+- [ ] 是否在现有 crate 内先收敛模块，而不是先造 service/crate/万能 registry；Hub neutral projection 是否未依赖 HTTP/MCP adapter？
 - [ ] 入口代码是否只做 framing/auth/schema/error projection，没有复制 executor？
 
 ### B. 所有权与生命周期
@@ -429,7 +455,7 @@ Reviewer 和 coding agent 在合并前逐项标记 `是/否/不适用 + 证据�
 - [ ] 是否区分 principal、agent/connection、run/request/event/job、Room/Browser lease？
 - [ ] 是否绑定 owner tuple 并验证 stale/duplicate/foreign result？
 - [ ] wait timeout 是否仍与 remote cancel、unknown、terminal evidence 分开？
-- [ ] 是否保持单一 Agent execution core，而不是 Local/Standalone/Hub 三套实现？
+- [ ] 是否保持单一 Agent execution core，而不是 Local/Standalone/Hub 三套实现；当前 partial routing 是否被标为结构风险而非行为故障？
 
 ### C. 安全与权限
 
@@ -445,17 +471,17 @@ Reviewer 和 coding agent 在合并前逐项标记 `是/否/不适用 + 证据�
 
 - [ ] 是否先定位每个 surface 的 authority，而没有把 Protocol 当万能 schema？
 - [ ] 是否比较 name、camelCase、defaults、optional、bounds、response/status/error/lifecycle？
-- [ ] 是否更新各自 authority 的 HTTP/OpenAPI、Hub MCP、Agent descriptor、Protocol、docs 和 cases/验证入口，并在确有需要时记录版本？
+- [ ] 是否更新各自 authority 的 HTTP/OpenAPI、Hub MCP、Agent descriptor、Protocol、docs 和 cases/验证入口，并在确有需要时记录版本；WP4-A 前的 Job/OpenAPI 例子是否标为历史？
 - [ ] 是否迁移全部受影响 caller、明确一次升级/迁移文档、回退边界并移除 obsolete path；没有永久 alias/shim 或双轨执行？
 - [ ] 是否将 Console placeholder、`unavailable`、`cached/stale` 与真实 integration 分开？
 
 ### E. 部署与文档
 
-- [ ] startup-only/live-safe config 是否分开；是否需要 restart？
+- [ ] startup-only/live-safe config 是否分开；是否需要 restart；Job admission 与 async execution 的 config snapshot 选择是否已记录并验证或明确 pending？
 - [ ] 是否检查 local socket、Browser host、TLS/proxy/public base、CORS/Origin、文件权限和容器/共享 volume 信任？
 - [ ] 是否更新 `docs/architecture/` 中受影响的职责/依赖/所有权，而没有把目标写成现状？
 - [ ] 是否记录未调查盲点和所需真实跨进程/设备/发布验证？
-- [ ] 是否只声称实际运行过的验证；未运行 build/test/smoke 不得写成通过？
+- [ ] 是否只声称实际运行过的验证；未运行 build/test/smoke 不得写成通过；release、外部 importer、生产 tunnel、ARM 和 Console 设备边界是否分别标注？
 
 ## 10. 常见错误与替代写法
 
@@ -476,12 +502,15 @@ Reviewer 和 coding agent 在合并前逐项标记 `是/否/不适用 + 证据�
 以下门槛属于后续实现和主线核验的证据要求，不是新的用户确认事项；第 3 项所述 WP-R closure 已实现并通过当前 live gate；其余未通过前不能将目标段落当作落地证明：
 
 1. Hub↔Agent 真实 WS/SSE 断线、重连、旧连接、late/duplicate/mismatched Response、run receipt 与 Agent ledger 的跨进程验证。
-2. Agent-local 29/40 surface、Hub Full/Coordinator、HTTP/OpenAPI、Protocol wire 的 descriptor/schema/response/lifecycle parity 检查；不是单一万能 schema。
+2. [已完成；有界] WP4-A 的当前本地 Agent-local/Hub Full/Coordinator/HTTP/OpenAPI/Protocol wire descriptor/schema/response/lifecycle gate 已有实现与证据；剩余 scope 仍包括 strict 外部 importer、完整 Protocol-wire lifecycle 和 release/tag 组合，不是单一万能 schema，也不把历史 Job/OpenAPI drift 例子当作当前失败。
 3. [已完成] D02 要求的 Room 远端读与维护能力、各 surface 合同/权限/错误/lifecycle 和真实 HTTP/Apps/WS E2E；WP-R 已一次升级迁移全部 caller、移除 obsolete path、保护现有文件数据并提供迁移文档，当前 live gate 已验证九个 operation。维护继续使用 Agent 既有 safeguards/controlled-maintenance authority，不新增流程 confirmation gate；生产 tunnel/GitHub 部署不在证据范围内。
 4. process sandbox/preflight、MCP stdio、Browser JS、tmux、tunnel child 的 effect/trust/confirmation 审查；本轮不改变 sandbox 默认、policy override 或权限模型。
 5. Browser host 在 Neko/shared-volume/container/Unix socket 实际拓扑中的 peer/auth、权限与生命周期检查；拓扑本身受支持，机制在盘点后选定，不预选 owner-only，且不得无授权网络暴露。
 6. Console Android local-only attention 的独立维护与真实 placeholder/unavailable 展示；remote console、approval board、exec ledger 另立产品，不是核心重构完成门槛。
 7. config startup/live reload、atomic persistence、correctness/history/observability 分层、pending confirmation/OAuth/cache 的易失语义、已产生 confirmation result/Job history/error retention、secret projection 和 release contract/artifact checks 的明确验收；provenance/signing 是另行决定的发布专题。
+
+8. Agent operation routing remains a structural residual: shared gate/resource owner is present, but stdio direct branches and HubCommand trampolines are not one universal dispatcher. No behavior failure is claimed; any cleanup must migrate one operation family and verify each projection.
+9. Release/tag packaging, artifact/version pairing, strict external importers, production tunnel/cloud, ARM runtime, external Browser/MCP effects and Console device behavior require separate owner evidence; the Rust parity gate does not cover them.
 
 这些仍是后续实现和主线核验入口，不是本次文档对全局测试的通过声明。历史调查本轮仅运行 Cargo metadata 和静态合同检查，未运行当时列出的 Cargo/Gradle 构建或测试、lint/formatter、真实 Hub/Agent/Android/Browser/tunnel、ARM release 或外部 Actions importer；随后 WP-R closure 的 live gate 已 exit 0，主线另报告 workspace Cargo test 667 passed/1 ignored。上述证据不构成生产 tunnel/GitHub 部署、其余架构门槛或外部组件通过声明。
 

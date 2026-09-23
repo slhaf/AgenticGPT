@@ -1,10 +1,10 @@
 # 渐进重构计划
 
-> **状态：路线图草案；WP1 当前状态见 §1.2，WP2 当前状态见 §1.3。** 本文仍描述尚未交付的工作包、依赖和验收；第 1.2、1.3 节只记录有界交付状态，不表示其余实现、协议、配置或产品变更已经落地。
+> **状态（2026-09-23）：全仓复审中的有界核心交付 + 条件化路线图。** WP1、WP2、WP3、WP4-A、WP-R 各自的边界已有独立交付记录；这只表示相应边界的实现和证据，不表示整个目标架构、所有入口、部署或产品已经完成。全仓六项原始结果、文档覆盖、结构缺口和后续条件见 §1.4；本文件仍保留未开始工作包的依赖与验收。
 >
 > **权威决策：** 本计划按 [D01–D08 用户已确认的架构整理决策](decisions.md) 编排。D01–D08 已确定本轮的产品边界和工程取舍，但不替代实施时对具体合同、权限机制、数据保留或恢复细节的技术设计。
 >
-> **历史调查基线：** 2026-09-16。事实引用来自源码定位和当时的只读调查；这些历史发现不覆盖当前 WP1/WP2 交付状态，也不能把当时未执行的路线图 smoke、测试、部署或迁移步骤理解为本次已完成。
+> **历史调查基线：** 2026-09-16。事实引用来自源码定位和当时的只读调查；这些历史发现不覆盖后来记录的 WP1/WP2/WP3/WP4-A/WP-R 有界交付，也不能把当时未执行的路线图 smoke、测试、部署或迁移步骤理解为本次已完成。历史段落保留作根因证据，当前状态以 §1.4 和各包的 dated evidence 为准。
 >
 > **阅读前提：** 先读 [现状架构](current-state.md)、[问题诊断](diagnosis.md)、[目标架构](target-architecture.md)、[工程规则](engineering-rules.md) 和 [已确认决策](decisions.md)。本计划不取代接口、配置、运维或开发手册。
 
@@ -19,9 +19,9 @@
 - `agentic-gpt-protocol` 只拥有 wire DTO、枚举、envelope 身份和必要的纯契约规则；不吸收 I/O、数据库、执行器或业务服务。
 - `agentic-apply-patch` 保持纯独立算法；文件策略、路径锁、revision、确认和提交继续在 Agent 的 `file_ops`。
 - `agentic-browser-host` 是独立的浏览器扩展 bridge 进程，不伪装成 Agent 的 Browser SDK、lease 或核心执行器。
-- stdio、HTTP、local Unix socket、Hub WS/SSE/MCP 是入口适配器，共享应用操作，不互相调用对方的 transport DTO；TUI/Console 是交互适配器。
+- stdio、HTTP、local Unix socket、Hub WS/SSE/MCP 是入口适配器；它们共享已明确的 gate/resource owners 和部分结果投影，但 routing、认证、framing、错误/DTO projection 仍可不同，入口不互调对方的 transport DTO；TUI/Console 是交互适配器。
 - Android attention 是现有 local-only 功能，权威数据在 Android 本地 Room，OS alarm/notification 只是副作用；不自动发展 Hub reminder/task scheduler。
-- Room 保留受控文件、文档与维护能力，但不是长期推理记忆、上下文管理或通用 memory subsystem；远端 Room 能力由核心 WP-R 补齐。
+- Room 保留受控文件、文档与维护能力，但不是长期推理记忆、上下文管理或通用 memory subsystem；当前所需远端读/maintenance 闭环已由 2026-09-22 完成的 WP-R 收口，未来新增能力仍需独立证据，不自动扩大范围。
 - 公开合同若需破坏性调整，部署按一次协调升级处理：迁移仓库内全部 caller，并在实现交付时同时提供真实可执行的迁移步骤。不得预置长期 alias、shim、双轨执行或新的 version/feature 协商机制。
 
 ### 状态标记
@@ -39,15 +39,17 @@
 
 | 正式诊断 | 主题（以 `diagnosis.md` 为准） | 主要工作包 | 计划中的处理边界 |
 |---|---|---|---|
-| A01 | 多份公共合同缺少语义一致性门槛 | WP0、WP4-A | 先冻结差异，再以真实 decode/dispatch/response 选择技术上的 adapter 或 spec cutover；一次升级迁移全部 caller |
-| A02 | Room 接口 cutover 未跨端完成 | WP0、WP-R | WP0 记录断裂；核心 WP-R 补齐所需远端读与维护语义、完成 Hub→Protocol→Agent 闭环，并 clean cutover，不等待另立远端项目 |
-| A03 | tool visibility、capability、authorization 分散 | WP2 | 最小 crate 内 operation gate；不造大 capability registry，不改变既定权限默认 |
-| A04 | Hub 连接、run、waiter 所有权未形成同一不变量 | WP1 | 绑定 connection/run/request/hash owner；区分可靠迟到结果与当前连接状态 |
-| A05 | 配置可变性与启动派生资源不一致 | WP2、WP3 | 分层 startup-only/live-safe/restart-required，避免 config 与派生资源分裂 |
-| A06 | “受控”被不同机制赋予不同保证 | WP2、WP3 | 按 D04 保持安全默认、不升级公网多租户威胁模型；记录 policy/sandbox/external trust，具体 auth 机制在遇到时细化 |
-| A07 | 持久化、等待和投影缺少一致语义说明 | WP1、WP3 | 按 D06 分层 durability、retention、freshness 和恢复状态；不把 best-effort 当 durable，接受 Hub 临时状态重启失效 |
-| A08 | Console 原型/本地能力与远端控制定位不清 | 独立维护参考 WP5、WP5-O | Android attention 保持 local-only；Console Hub 是独立产品，均不进入核心 DAG、里程碑或完成门槛 |
-| A09 | 当前规范、历史说明与验证工具保证混在一起 | WP0、WP4-A、WP4-B、全局核验 | 明确 authority/状态；历史版本不因旧就判 bug，evaluator 不冒充 runtime 验证 |
+| A01 | 多份公共合同缺少语义一致性门槛 | WP0、WP4-A（WP4-A 已完成其有界 parity 修复） | 先冻结差异，再以真实 decode/dispatch/response 选择技术上的 adapter 或 spec cutover；一次升级迁移全部 caller；外部 importer/发布链仍单独标为未验证 |
+| A02 | Room 接口 cutover 未跨端完成 | WP0、WP-R（WP-R 已于 2026-09-22 完成当前九项能力） | WP0 保留历史断裂证据；WP-R 已完成所需远端读与 maintenance 语义及 clean cutover；不得据旧段落重新声明 A02 当前未修复 |
+| A03 | tool visibility、capability、authorization 分散 | WP2（已完成窄边界） | 保留最小 crate 内 operation gate；后续只在有证据时整理操作映射，不造大 capability registry，不改变既定权限默认 |
+| A04 | Hub 连接、run、waiter 所有权未形成同一不变量 | WP1（已完成有界边界） | 保留 connection/run/request/hash owner；真实 Agent restart/ledger 和全部外部场景仍是未验证边界 |
+| A05 | 配置可变性与启动派生资源不一致 | WP2、WP3（基础边界已交付） | 保留 startup-only/live-safe/restart-required；Agent Job 的 admission/config snapshot 仍是条件化结构缺口，不先称为复现故障 |
+| A06 | “受控”被不同机制赋予不同保证 | WP2、WP3（已完成各自边界） | 按 D04 保持安全默认、不升级公网多租户威胁模型；继续区分 policy/sandbox/external trust，具体 auth 机制在遇到时按证据细化 |
+| A07 | 持久化、等待和投影缺少一致语义说明 | WP1、WP3（已完成各自边界） | 按 D06 分层 durability、retention、freshness 和恢复状态；外部副作用、Android 恢复及未执行部署仍未验证 |
+| A08 | Console 原型/本地能力与远端控制定位不清 | 独立维护参考 WP5、WP5-O | Android attention 保持 local-only；Console Hub 是未来独立产品，均不进入核心 DAG、里程碑或完成门槛 |
+| A09 | 当前规范、历史说明与验证工具保证混在一起 | WP0、WP4-A、WP4-B、全局核验 | WP4-A 已收口部分 parity/验证边界；WP4-B 与文档状态同步仍是独立后续，不把 evaluator 当 runtime 验证 |
+
+
 ## 1.2 WP1 当前交付状态（2026-09-20）
 
 - **[已完成]** 先前的 owner、connection-generation 和 control-boundary 交付按当前维护者记录接受完成；这包括可靠 Response owner、连接代际隔离以及 Hub connection/dispatch ownership 的边界收口。它们不再是本节的待办，也不改变仍未验证的外部场景边界。
@@ -59,11 +61,43 @@
 ### 1.3 WP2 当前交付状态（2026-09-20）
 
 - **[已完成；窄边界]** `agentic-gpt/src/operation.rs` 现在以不可变 `RequestContext`（真实 ingress + 借用的 operation 名）进入同步 `authorize(runtime, config, context)`。命名空间/toolset、RuntimeModel capability、resource/profile 规则与 descriptor/annotation 元数据分开；annotation 只服务发现/客户端 UX，不是授权依据。没有新增 crate、框架、全局 capability registry 或第二套执行循环。
-- **[已完成；入口职责保留]** Local Unix 使用 namespace/toolset gate；Tunnel stdio、Standalone HTTP、stdio、Hub command、Room/Skill/Browser 路径进入共享 local operation/result 层。Normal profile 显式启用 `toolsets.room` 时仍可走 Room；Hub 保留既有 Room toolset、Skills capability/profile 和 notifications capability 语义。CLI 仅覆盖既有四个本机 tmux 管理操作，审计 source 使用 `localadmin:`；其他入口分别保留 `local:`, `tunnel:`, `http:` 和 `hub:` 前缀。
-- **[已完成；结果与效果]** `local_service`/`operation_result` 负责共享 value/error 与 slim projections；stdio、Hub wire、HTTP/MCP 各自保留 framing、认证、envelope/DTO 和错误外形。Skill 运行继续进入 managed Job；tmux、MCP、Browser、Room 等实际效果仍由 Agent domain/resource owner 和既有 policy/path/confirmation/lease 检查负责，Hub 不成为执行器。
+- **[已完成；入口职责保留]** Local Unix 使用 namespace/toolset gate；Tunnel stdio、Standalone HTTP、stdio、Hub command、Room/Skill/Browser 路径共享 gate 与相应 resource owners/部分结果投影，但 direct branches 与 HubCommand 路仍是不同的 Agent 内部映射。Normal profile 显式启用 `toolsets.room` 时仍可走 Room；Hub 保留既有 Room toolset、Skills capability/profile 与 notifications capability 语义。CLI 仅覆盖既有四个本机 tmux 管理操作，审计 source 使用 `localadmin:`；其他入口分别保留 `local:`, `tunnel:`, `http:` 和 `hub:` 前缀。
+- **[已完成；结果与效果]** `local_service`/`operation_result` 负责选定 shared value/error 与 slim projections；stdio、Hub wire、HTTP/MCP 各自保留 framing、认证、envelope/DTO 和错误外形，direct Agent branches 也可保留 typed resource projection。Skill 运行继续进入 managed Job；tmux、MCP、Browser、Room 等实际效果仍由 Agent domain/resource owner 和既有 policy/path/confirmation/lease 检查负责，Hub 不成为执行器。
 - **[已完成；配置生命周期]** Reload 只应用此前 live-safe subset（policy、limits、MCP servers、toolsets、HTTP MCP；workspace 未改变时才应用 path policy），并保留旧 startup-derived resources；identity/mode/profile/workspace/runtime/socket/Browser/history/install 等 restart-required 字段不重建资源。启用 Room 时先准备既有 live workspace/repository。
 - **[证据]** `cargo test -p agentic-gpt`：526 passed、1 ignored；Agent/Hub build 与 fmt check 通过（Browser distribution 有 5 个既有 dead-code warnings）。真实二进制证据覆盖 Local Unix、hidden stdio worker、HTTP bearer 负例 401 与有效 session/SSE、process output parity、Skill runs、Normal Room disabled→enabled、policy/limits 及 workspace/path reload health；真实 Hub loopback WebSocket 覆盖 process、Room skills list/search/activate/run（含 invalid-CWD reason）、pending=0、CLI tmux create/close 与 audit、live policy deny（旧 owner/workspace/CWD 不变且不生成 candidate directory），两类 driver 均 exit 0。
-- **[未验证；边界]** 未声称 external tunnel/cloud runtime、OAuth provider flow、Browser JavaScript/service 或新的 OS sandbox 已被真实运行验证；WP3 durability/retention、WP-R 其余 Room 远端合同及未来 remote Room scope 仍按路线图保留。
+- **[未验证；历史状态说明（2026-09-20）]** 当时未声称 external tunnel/cloud runtime、OAuth provider flow、Browser JavaScript/service 或新的 OS sandbox 已被真实运行验证；WP3/WP-R 后续已有独立完成记录，但这些外部场景与未来 remote Room scope 仍不因 WP2 closure 自动获得证据。
+
+## 1.4 全仓复审状态与缺口矩阵（2026-09-23）
+
+本节是当前导航入口，不重述第 4 节七百余行工作包。`[文档已达成]` 表示已有架构分析、规则或历史证据；`[实现/证据]` 只采用已记录的有界结果；`[缺口]` 是残余结构、状态同步或未验证边界。任何“已完成”均只指其工作包边界，不能外推为全仓目标已实现。本轮只改文档，未实施生产代码、协议、配置、迁移或验证。
+
+### 1.4.1 六项原始结果
+
+| 原始结果 | [文档已达成] 与现有证据 | [实现/证据] 当前边界 | [缺口] 与归属 |
+|---|---|---|---|
+| **1. 实际全仓架构** | `current-state.md` §§2–8、根 `Cargo.toml` 五 crate 图、Agent/Hub/Protocol 资源图，以及 Console Gradle/CI 盘点已覆盖主要组成、owner、入口和部署约束。 | 五 crate 依赖方向为 Agent→Protocol+apply-patch、Hub→Protocol；Console、browser-host、OpenAPI、脚本和实验树保持独立。WP2/WP3/WP-R 等已有记录只证明所列路径。 | 外部 Browser client/service、生产 tunnel/SSH/GitHub、Android OS 行为、外部 Actions importer 和完整 Console 生命周期仍未验证。归属：文档状态同步、Browser/Console/release 维护者；不据缺证声称不存在。 |
+| **2. 问题与根因** | `diagnosis.md` A01–A09 保留机制、推断根因、保护结构和验证阈值；本计划 §3 保留不可回归行为。 | A03/A05/A06、A04 及 A01/A02/A07 的相关边界已有 WP2/WP1/WP3/WP4-A/WP-R 的有界闭环记录；源码复审另发现操作双路、配置快照、AppState/HubState 与投影登记风险。 | A01/A02/A07/A09 的历史文字需持续标注“基线/已收口/残余”；新结构风险都是 `[推断]`，未复现即不得改写为故障。归属：诊断状态同步、条件化 Agent/Hub 包。 |
+| **3. 合适的目标** | `target-architecture.md` §§1–8 与 D01–D08 保留五 crate、一个 Agent 执行核心、Hub 控制面、Agent-owned Room、纯 Protocol/apply-patch 和独立 Console。 | WP2 的 `RequestContext`/authorize、WP3 分层、WP4-A parity、WP-R 九项远端 Room 是目标的有界落地，不等于目标目录或逻辑 `OperationRequest` 已存在。 | `stdio_server` 直路与 `local_service` HubCommand 路并存；Job 的 admission/执行 config lifetime 需先定语义。归属：Agent operation/config snapshot seam；不借此新增 universal dispatcher/framework。 |
+| **4. 职责与依赖方向** | `engineering-rules.md` placement matrix、R-01–R-25、Cargo manifests 和 current/target ownership map 给出 owner、依赖方向、durability、projection 与 clean-cutover 规则。 | Hub 仍不导入 Agent 资源或 Room 内容；apply-patch 纯算法；browser-host 独立进程；现有 WPs 保留 run/request/connection/lease 分离。 | `AppState`/`HubState` 是宽 composition object；Hub route helper 反向承载中性 helper，Agent wire DTO 兼作内部 union。归属：条件化 Agent ownership、Hub neutral projection、WP4-B；不按文件大小拆 crate。 |
+| **5. 耐久 feature placement 指引** | `engineering-rules.md` §§1、6、9、10 和本计划 §3/§5 给出 Process/File/MCP/Browser/Room/Console/TUI 的放置、authority、projection 和迁移规则；WP4-A gate 与 WP-R 文档提供具体例证。 | 这些是可复用规则，不是每条路径都已机械证明；现有 release/contract gate 仍按各自 owner 工作。 | operation/name/descriptor/schema/projection inventory、release/version authority 和 tag preflight 仍手工分散。归属：release/inventory 条件包与文档状态同步；不得强制 universal schema。 |
+| **6. 渐进且可验证的计划** | 本文件 §§1–7 已给出 WP0/1/2/3/4-A/R 的依赖、提交、回退、接受和停止条件，并保留 WP4-B、WP-T、WP5、WP5-O 的独立边界。 | WP1/WP2/WP3/WP4-A/WP-R 是有界完成记录；WP4-B 待 Protocol 内部组织，WP-T 标准未决，WP5 local-only 独立维护，WP5-O 为未来产品。 | 计划历史段落仍有“下一包/未启动”时序；尚无 residual structural package 的条件触发器。归属：本计划状态同步 + 下列条件化包；未来顺序不是运行时结果。 |
+
+### 1.4.2 当前工作包状态索引
+
+| 工作包 | 当前状态（仅限边界） | 证据/剩余边界 |
+|---|---|---|
+| WP0 | 文档基线职责；不把它写成结构迁移完成 | §4 WP0 的 baseline、A02 fracture 和未验证输入仍保留；不代表所有 baseline smoke 已执行 |
+| WP1 | **已完成（有界，2026-09-20）** | §1.2 与 §4 WP1；Hub-side owner/receipt/confirmation 证据成立，真实 Agent restart/ledger、OAuth/ntfy 等仍未验证 |
+| WP2 | **已完成（窄边界，2026-09-20）** | §1.3 与 §4 WP2；operation gate/config reload 记录成立，Agent config snapshot 语义仍需条件化 proof |
+| WP3 | **已完成（2026-09-20）** | §4 WP3；durability/retention/cache/recovery 有界证据成立，外部效果与 Android boot/process death 不在其中 |
+| WP4-A | **已完成（2026-09-21）** | §4 WP4-A；本地 cross-surface gate 与合同修复有证据，生产 tunnel/SSH、外部 importer、严格 Clippy 不因此变成已完成 |
+| WP-R | **已完成（2026-09-22）** | §4 WP-R；当前九项 Room read/maintenance clean cutover 有证据，Hub 不持有内容；不重新打开 A02 |
+| WP4-B | **待实施；Protocol 内部组织** | 仍为同一 crate 内可选/后置维护；必须先有 caller/serde proof，不计入核心完成门槛 |
+| WP-T | **标准未决；独立** | 只保留用户意图，不先删测试或设比例/覆盖率目标 |
+| WP5 | **独立 local-only 维护参考** | Android transition/restore 可另立包，不进入 Rust 核心 DAG |
+| WP5-O | **未来独立 Console 产品** | 当前 placeholder；不把 Console Hub、Android Internet 或远端 approval/exec ledger 并入核心 |
+
+状态索引只用于纠正导航和 chronology；它不替代各包的接受、停止和未验证清单，也不声称本轮运行了任何验证。
 
 
 
@@ -74,9 +108,9 @@
 | 当前实现/入口 | 目标内部边界 | 迁移原则 |
 |---|---|---|
 | `crates/agentic-gpt/src/stdio_server.rs`、`crates/agentic-gpt/src/local_control.rs`、`crates/agentic-gpt/src/http_server.rs` | Agent ingress adapters：MCP framing/schema、local peer/auth、HTTP auth/session | 入口只解析、认证、形成 `RequestContext`；操作和策略不在每个 transport 重写 |
-| `crates/agentic-gpt/src/hub.rs`、`crates/agentic-gpt/src/local_service.rs` | Hub envelope adapter + Agent operation core | Hub command 进入同一 operation gate；保留 `run_id/request_id/command_hash`，不复制执行循环 |
+| `crates/agentic-gpt/src/hub.rs`、`crates/agentic-gpt/src/local_service.rs` | Hub envelope adapter + Agent operation core | Hub command 进入 operation gate 和选定的 common resource owner；direct Agent branches 保持显式映射；保留 `run_id/request_id/command_hash`，不复制执行循环 |
 | `crates/agentic-gpt/src/jobs.rs`、`policy.rs`、`confirmation.rs`、`exec.rs`、`file_ops.rs`、`mcp.rs`、`tmux.rs`、`skills*`、Room modules | Agent execution/resource domains | 权限、确认、效果、Job 状态和资源 owner 在 Agent；`apply-patch` 仍只做纯变换 |
-| `crates/agentic-gpt-hub/src/main.rs`、`routes.rs`、`mcp_server.rs`、`agents/{transport,lifecycle,dispatch}`、`runs.rs`、`room.rs` | Hub control-plane modules | 统一 owner/connection/run 校验；HTTP 和 Apps MCP 共享应用操作，不调用彼此 transport |
+| `crates/agentic-gpt-hub/src/main.rs`、`routes.rs`、`mcp_server.rs`、`agents/{transport,lifecycle,dispatch}`、`runs.rs`、`room.rs` | Hub control-plane modules | HTTP 与 Apps MCP 在各自 auth/DTO/projection 后汇入 Hub control operations；共享 owner/connection/run 校验，不调用彼此 transport |
 | `crates/agentic-gpt-protocol/src/lib.rs` | 按 domain 的 wire/envelope/contract 内部模块（仍是一个 crate） | 保留 serde 名称、camelCase、消息字段和版本边界；模块化不等于扩大协议职责 |
 | `openapi/hub.yaml`、Agent descriptors、Hub schemars、`tool-contract-matrix.md`、`cases.json` | 各自明确 authority、版本和 parity gate | 先做差异表，再由维护者按证据更新 spec 或增加显式 HTTP adapter；迁移全部 caller 后 clean cutover，迁移步骤随实现交付，不预置新 version/flag |
 | `agentic-browser-host` | 独立高权限 external bridge | 维持用户报告的本地进程/容器/共享目录/Unix socket 拓扑；先盘点实际边界，再选择 peer/auth 机制，不远程暴露 |
@@ -124,7 +158,7 @@ flowchart TD
 
 ## 4. 工作包
 
-### WP0：契约/行为基线（第一道门）
+### WP0：契约/行为基线（文档基线职责；非结构迁移完成）
 **对应正式诊断：** A01（合同 parity）、A02（记录并输入 Room cutover）、A09（规范/验证边界）；本包只冻结事实和验证输入，不实现 Room 迁移。
 
 **目的与证据**
@@ -265,7 +299,7 @@ flowchart TD
 - 最终 `cargo test --workspace`：667 passed、1 ignored；Agent/Hub build 通过。严格 Clippy 仍失败于既有 browser/confirmation/Job 等债务，未压制告警或混入宽泛清理。
 - Room 内容 authority 仍在 Agent；Hub 没有 Room repository/content store，但既有 generic run receipt 可以持有 bounded result。WP-T 标准仍未决定，WP4-B 仍为独立后续包。
 
-### WP1：Hub 身份与连接生命周期
+### WP1：Hub 身份与连接生命周期（有界边界已完成；下文保留历史基线与剩余未验证）
 **对应正式诊断：** A04（Hub connection/run/waiter owner）；只处理已定位的不变量和未验证竞态，不预先宣称远程漏洞。
 
 
@@ -308,7 +342,7 @@ flowchart TD
 4. `refactor(hub): separate wait timeout from remote execution state`：补齐原因/状态 projection；保持 late result 可验证落库。
 5. `cleanup(hub): migrate callers and retire unowned response fallback`：迁移结束后移除无 owner 的隐式路径；不建立旧 compat 双轨或新增 version 字段。
 
-**历史验证入口（截至 2026-09-16 未执行）**
+**历史验证入口（启动时基线；截至 2026-09-16 未执行）**
 
 - Hub `agents/{transport,lifecycle,dispatch}`：boot generation、pending replay、stale SSE heartbeat/JobUpdate、matching-run late Response、send failure、ReportingOnly target rejection、过期连接清理。
 - Hub `runs.rs`：late idempotent result、stale acked→unknown、Agent report upsert。
@@ -353,7 +387,7 @@ flowchart TD
 - **[已完成]** stdio、local Unix、HTTP、Hub command、Room/Skill/Browser direct paths 使用真实 ingress context；各 transport 仍拥有自己的 framing、认证、envelope/DTO 和错误投影。tmux、MCP、Browser、Room 的实际效果仍由 Agent domain/resource owner 与既有 policy/path/confirmation/lease 检查负责。
 - **[已完成]** reload 保留 startup-derived resources；只应用既有 live-safe subset（policy、limits、mcpServers、toolsets、httpMcp；workspace 未改变时才应用 pathPolicy），身份、mode/profile、workspace/runtime/socket、Browser 配置整体（不只是 `browser.runtime`）、history/install 等变更要求 restart，并以 `config changes require restart; fields=...` 记录 restart-required 字段。启用 Room 时先准备既有 live root。
 - **[已验证]** `cargo test -p agentic-gpt` 为 526 passed、1 ignored；Agent/Hub build 与 fmt check 通过（Browser distribution 有 5 个 dead-code warnings）。真实 Local Unix、hidden stdio worker、HTTP bearer 401/有效 session/SSE、process output parity、Skill run、Normal Room disabled→enabled、policy/limits 与 workspace/path reload health 已验证；真实 Hub loopback WebSocket 已验证 process、Room skills list/search/activate/run（含 invalid-CWD reason）、pending=0、CLI tmux create/close audit、live policy deny（旧 owner/workspace/CWD 保持且无 candidate directory），两个 driver 均 exit 0。
-- **[未验证]** external tunnel/cloud runtime、OAuth provider flow、Browser JavaScript/service 和新的 OS sandbox 未在本批真实运行；WP3 durability/retention、WP-R 其余 Room 远端合同及未来 remote Room scope 仍未启动/未由本节宣称完成。
+- **[未验证；历史状态说明（2026-09-20）]** 当时未声称 external tunnel/cloud runtime、OAuth provider flow、Browser JavaScript/service 或新的 OS sandbox 已被真实运行验证；当时尚未有 WP3/WP-R 的后续 closure 记录，后续已在各自 dated sections 记录有界完成。外部场景与未来 remote Room scope 仍未因此获得证据。
 
 **实现边界**
 
@@ -376,7 +410,7 @@ flowchart TD
 - WP2 的 operation/context gate、入口认证/错误投影、共享 Skill/Job result、CLI tmux admin 范围和 config lifetime 已按上面的窄边界交付；不再以“统一 gate”名义扩展权限或创建第二套执行器。
 - 各入口仍保留自己的 framing、auth、wire/HTTP/MCP DTO 和 projection；本节不宣称 Protocol 已取代 Hub wire dispatch，也不把 Hub 变成 Agent executor。
 - policy/path/confirmation/lease/resource owner 继续负责实际效果；external MCP、Browser JS、tmux、tunnel child 和 browser-host 的 trust/隔离强度按真实边界记录。
-- WP3 的 durability/retention enforcement、WP-R 的其余远端 Room 合同与 clean cutover、以及未来 remote Room scope 不因 WP2 closure 自动完成。
+- WP3 的 durability/retention enforcement 与 WP-R 的当前远端 Room clean cutover 已有各自 dated completion record；WP2 closure 不扩大它们的保证范围。未来 remote Room scope、外部效果与 Console recovery 仍不自动进入核心。
 
 **WP2 回归/停止边界**
 
@@ -408,7 +442,7 @@ flowchart TD
 - 实际部署只读 `bridge.getStatus` 成功；隔离共享 Docker volume 上以目录 0755/socket 0660 验证同 UID 和共享 GID 可达、不同 UID/GID 为 EACCES，stdin close 清理 socket。MCP/Browser/tmux/tunnel 的启动、结果与外部效果保证分开记录于 current-state 与部署文档。
 - [补审已修] process/MCP batch 现在一次事务提交所有 admission，成功后才登记内存/启动执行。存储层与两个 caller 的回归覆盖后项写入失败及重试；真实 process.batch 验证原有历史跨重启保持不变、没有孤立 queued/unknown 行或执行副作用，解除故障后容量为2的两项任务正常完成。MCP 验证到注册边界，不新增完整外部服务器场景的宣称。
 - [补审已修] Agent history 在迁移写锁获取失败时清理已生成的 staging。确定性的 busy 回归及真实 Agent 注入均验证无临时目录遗留、原库和旧备份字节不变；释放锁后迁移/执行重试成功。不将错误返回清理等同于进程强杀或硬件故障后的清理。
-- [交付顺序] 独立修复边界复核无新发现，WP3 恢复完成状态；下一主包为 WP4-A，WP4-B 仍后置可选，WP-R 仍为独立核心包。本次未启动 WP4、未改变实际部署。
+- **[历史交付顺序（2026-09-20）]** 独立修复边界复核无新发现；当时下一主包为 WP4-A，WP4-B 后置可选，WP-R 仍是待收口的独立核心包。后续 WP4-A（2026-09-21）与 WP-R（2026-09-22）已有独立完成记录；本条不构成当前待办，也不表示本任务启动生产变更。
 
 **范围**
 
@@ -542,14 +576,14 @@ flowchart TD
 **实施与验收记录（2026-09-21）**
 
 - 完成 Job 的 optional `startedAt`、list 默认50/范围1..100及分页、get 默认0及 `waitOnly`、cancel/freshness/error 投影；HTTP process/MCP/Skill 创建与批处理按实际平铺响应建模，删除六个已无 operation 消费者的旧嵌套包装 schema。未改 wire 字段、路径、工具名或权限默认。
-- Notebook append/selectExact 的输入对齐实际解码规则；合法输入当前明确返回 legacy-removal400，缺少必需字段返回已声明的422 text/plain。没有把“能解码”冒充远端 Room 能力已实现；该能力仍归 WP-R。
+- **[历史基线结果（2026-09-21；WP-R 后续已完成）]** Notebook append/selectExact 的输入对齐当时实际解码规则；合法输入当时明确返回 `legacy-removal400`，缺少必需字段返回已声明的 422 text/plain。该记录没有把“能解码”冒充远端 Room 能力；随后 WP-R 于 2026-09-22 收口当前九项能力。
 - 集成实跑发现 Agent 内部仍从旧嵌套 JSON 提取 Job 快照。现从 typed operation result 移交权威 `JobInfo` 到既有 `JobUpdate` 路径，保留 reporting 隐私策略；非 Hub 入口不收集快照，不增加额外复制、后台上报机制或持久性承诺。
 - Skill pure helpers 默认5、上限30，保留0立返；实跑 run/install-get 的缺省、0、30、31、u64::MAX，超限均约30秒返回而任务仍在运行。随后显式取消取得真实取消结果；此前 runtime 本已在下游 cap30，本次补齐 helper/descriptor 合同。
 - 最终 `cargo fmt --all -- --check`、Agent/Hub build 通过；`cargo test --workspace` **664 passed、1 ignored**。新增边界回归，删除三个 OpenAPI 源码字符串测试及一个过时嵌套响应提取测试。
 - 真实跨入口 gate **exit0**：local Unix MCP、Standalone HTTP MCP、Hub Full/Coordinator、实际确认后的下游 MCP single/batch、Room Skill、分页/waitOnly/cancel、Notebook400/422、断线缓存与不可用分支均通过。实际未启动的拒绝 JobInfo 无 `startedAt`、无伪造缓存执行详情；全部107 schema及local refs通过。错误 state/timestamp、旧 descriptor、缺失422声明和未被运行路径触及的坏引用均被负向验证拒绝。
 - prediction-shape probe 的18/18 strict成功、17/18宽松成功、同一17/18 strict失败已分别实跑；输出明确 `runtimeValidation:not-performed`。当前主入口/双语开发文档已同步，历史发布记录未批量改写。
 - **完整 CI 仍非全绿**：严格 `cargo clippy --workspace --all-targets -- -D warnings` 仍报告既有 OAuth helpers、confirmation/cache、Browser、Job/ledger 等问题；本次引入的两处冗余借用已修正，没有 lint 豁免。真实生产隧道、SSH 部署和 Actions 产品导入器未执行；本包采用严格 validator 加真实本机 HTTP/MCP 验收。
-- 详细时序和证据见 `.planning/2026-09-21-wp4a-contract-parity/`。WP-R、WP4-B 均按用户意图保留为后续独立工作包。
+- **[历史交付顺序（2026-09-21）]** 详细时序和证据见 `.planning/2026-09-21-wp4a-contract-parity/`；当时 WP-R、WP4-B 均按用户意图保留为后续独立工作包，后续 WP-R 已于 2026-09-22 完成，WP4-B 仍为独立后置包。
 
 **完成门槛**
 
@@ -623,9 +657,8 @@ flowchart TD
 
 ### WP-T：测试必要性与维护成本清理（后续独立包；标准待定）
 
-- 用户于2026-09-22提出：后续单设工作包，清理必要性低的测试内容；当前先实施WP-R。
-- 本次仅记录意图。测试评价标准后续参照常见实践再讨论，不在此预先确定删除清单、比例、覆盖率或代码量目标，也不把当前行数统计视为测试价值判断。
-- 不混入WP-R能力交付或WP4-B内部模块整理；与WP4-B的具体先后顺序尚未决定。
+- 用户于 2026-09-22 提出后续单设工作包，清理必要性低的测试内容；原文“当前先实施 WP-R”是当时的交付顺序，WP-R 已有 2026-09-22 独立完成记录。
+- 本节仅记录意图。测试评价标准后续参照常见实践再讨论，不预先确定删除清单、比例、覆盖率或代码量目标，也不把当前行数统计视为测试价值判断；不混入 WP-R 能力交付或 WP4-B 内部模块整理。
 - 本节不授权立即批量删除测试，也不改变当前工作包已确认的行为验证与安全边界要求。
 
 ### WP5：Console/Android local-only 独立维护参考（不属核心）
@@ -656,6 +689,73 @@ flowchart TD
 - 独立产品不得把 Console 变成 Agent executor、Hub scheduler、provider orchestrator 或长期 memory；远端投影不得冒充本地Attention权威，也不得以UI loading/HTTP 200冒充执行完成。
 - 在产品立项、公共合同、认证和实际跨平台 smoke 未齐前，保持 placeholder；上述独立工作不能阻塞 WP0/WP1/WP2/WP3/WP4-A/WP-R。
 
+### 复审提出的条件化后续包（均未开始；不自动排队）
+
+本组只把复审中的源码风险转成可回退、可停止的候选边界；它们不是已交付结果，也不是全部必做的里程碑。只有对应的 caller/行为证据达到触发条件才立项；未触发时保留现有结构。每个包都必须遵守 D01–D08、现有 WP 完成证据和第 3 节保护清单。
+
+#### A-OPCFG：Agent operation / config snapshot seam（条件包）
+
+- **来源与触发：** `crates/agentic-gpt/src/stdio_server.rs` 的 direct branches 与 `local_service.rs` 的 `HubCommand` 路共享 gate/resource owner 但不是一个 universal dispatcher；`jobs.rs::start_process_job_inner` 保存 admission config，而 `run_async_job` 再读 live config；`config::restart_required_fields`、`main` watcher 与 `supervisor` watcher 也各有分类。只有静态 caller map 确认需要改变共享 family，或 deterministic reload 场景证明语义不一致，才进入实现。
+- **非目标：** 不创建 universal dispatcher、第二执行器、全局 capability registry、新 crate 或 Protocol-as-internal-schema；不改 ingress auth、HTTP/MCP/Hub envelope、权限默认、startup-derived resource ownership 或 D03 兼容策略。
+- **依赖：** 以 WP2 已完成的 `RequestContext + authorize` 为基线，先冻结一类 operation 的 adapter/owner map，再选一条 config lifetime 规则；不得把未复现的 source risk 写成漏洞，也不要求 WP4-B、Console 或远端产品。
+- **结构验收：** 选定 family 的共享 admission/execution 入口唯一且保留 ingress-specific hook/projection；Hub wire 到 Agent internal call 是显式 adapter；startup-only/live-safe/restart-required 只由一个分类 authority 驱动，Job 的命名 snapshot 边界贯穿 policy/preflight/spawn/audit。
+- **行为验收：** stdio、Local Unix、Standalone HTTP、Hub 对该 family 继续到同一 resource owner，只有 framing/auth/result projection 有意不同；在 admission 与 worker start 之间 reload 的 deterministic 场景验证 chosen snapshot 语义，startup 字段变更仍要求 restart，不能把 waiter timeout 变成取消。
+- **未验证：** 当前 config interleaving 是源码级 `[推断]`，未被本轮复现；external tunnel/cloud、OAuth、Browser JS 和 OS sandbox 仍不属于本包证明。
+
+#### A-OWN：Agent Job / Skill / Room narrow ownership（proof-gated 条件包）
+
+- **来源与触发：** `state::AppState` 聚合 config、Jobs、Room、Skill、Browser 与 transport handles；`jobs.rs` 同时承载 common terminalization、Process/MCP effect adapters 与 `SkillLeaseManager`；`jobs → skill_installs::package_sha256`、`skills ↔ skill_installs` 和 Room write lock 暗示窄 owner seam。只有 caller graph 和 fixture/lock痛点证明收益时，按一个 domain 立项。
+- **非目标：** 不拆 crate、不引入 DI framework/universal repository、不合并 `JobState` 与 `SkillInstallStatus`、不把 Process/MCP cancellation 做成同一 effect、不把 Room 文件/Git/lease 移到 Hub，也不把 `AppState` 一次性重写。
+- **依赖：** 先完成 A-OPCFG 的 config lifetime 决定（若触及 Job）；保留 WP3 Job history/durability、WP-R Room authority、WP2 gate；每个子 seam 必须先有 source-level owner map 和最小迁移顺序，可与 Hub projection/WP4-B 独立。
+- **结构验收：** `build_app_state` 仍是唯一 composition root；迁移 domain 函数只接收所需 handles。Job common registry/finalization/history/audit 保持一份，Process/MCP termination effect 分开；Skill owner 提供 package metadata/activation/read/lease，InstallManager 保持安装记录/恢复，Room modules 继续独占 repository write lock。
+- **行为验收：** Process/MCP/Skill 的 admission、terminal、cancel、lease/recovery 和 Job projection 保持现语义；Room maintenance 仍串行且 Agent-owned；不新增 wire/HTTP/MCP shape，不让安装记录伪装 Job history，不改变 history/cache/ledger retention。
+- **未验证：** 宽 `AppState` 是维护/fixture 风险而非已证故障；未运行新的 narrow-context 行为、并发、crash 或外部 MCP/Browser/tmux 场景。证明不足即停止拆分。
+
+#### H-PROJ：Hub neutral Job/info/projection 与 Apps registry（条件包）
+
+- **来源与触发：** Hub `routes.rs` 与 `mcp_server.rs` 各自做 Job live/cache/freshness projection；`mcp_server::hub_info` 反向调用 route helper，Room/notify/oauth/confirmation 也依赖 HTTP helper；Apps MCP 同时有 generated router、manual dispatch、profile allowlist 和 effect annotation inventory。先以一个 Job/info projection 或一个 Apps operation 验证重复变更成本，再扩大。
+- **非目标：** 不让 HTTP 调 MCP 或反之，不合并 HTTP/MCP auth/status/error/DTO，不让 neutral module 依赖 route handler，不统一 Apps names 与 Hub wire names，不引入 Hub executor、Agent resource import、Room content store 或 universal schema。
+- **依赖：** 消费 WP1 owner/receipt/freshness 与 WP4-A current `hub.yaml`/parity gate；保留 distinct HTTP API-key 与 Apps OAuth/profile contracts；先迁移 neutral typed projection，再考虑 Apps registry，二者不要求同步改 Protocol。
+- **结构验收：** neutral info/Job projection 不依赖 Axum response；两入口共同调用同一 `request_agent`/`request_room` 和 freshness decision，但保留各自 edge mapping；Apps advertised/callable/profile/effect sets 有一份可检查的 current inventory，Coordinator policy 仍是显式安全规则。
+- **行为验收：** HTTP 与 Apps MCP 对 process/job/mcp/Room representative calls 继续共享 command、owner、wait/freshness/receipt 语义，同时保留 HTTP status/body 与 MCP `AgenticResult`/error 外形；工具遗漏在 descriptor、manual call 或 profile 场景可被 targeted check 发现。
+- **未验证：** 当前重复投影是 `[推断]` 的维护风险；没有 external Apps client、OAuth provider、生产 WS/SSE 或完整 cross-surface runtime proof。静态 inventory 不能冒充 live parity。
+
+#### WP4-B：Protocol crate 内部模块组织（条件化后置包）
+
+- **来源与触发：** `crates/agentic-gpt-protocol/src/lib.rs` 集中 wire DTO、envelope、Room/Skill/Job/MCP/notify helper；这是导航/ownership 风险，不是 Protocol purity 或 wire bug。现有 WP4-B §4 细则保留为唯一实施说明，只有 caller map 与 domain 切分方案稳定才开始。
+- **非目标：** 不新造 crate/service、I/O、DB、executor、provider、memory、reasoning loop、capability registry、deprecated alias、version/feature negotiation；不把 Protocol 变成 Agent internal universal API。
+- **依赖：** WP4-A authority/parity closure；不依赖 Console Hub、Room content migration 或 WP-T；与 A-OPCFG/H-PROJ 仅在共享 caller 发生冲突时协调。
+- **结构验收：** 仍是一个纯 Protocol crate，模块按 wire domain 组织、五 crate 依赖方向不变、所有 caller cleanly migrated；可保留普通 facade 但不以兼容 alias 掩盖未知 caller。
+- **行为验收：** representative Hello/envelope/Job/Room/MCP/Skill/notify serde names/defaults/bounds/bytes 与 persisted identities 不变；现有 Agent/Hub dispatch 与 parity checks 继续证明各自 authority，而不是由拆文件本身证明。
+- **未验证：** 模块移动后的 serde round-trip、dependent-crate 编译和潜在外部 caller 尚未验证；任何一项不明即保留现状。WP4-B 未完成不阻塞核心路线。
+
+#### WP5-L：Android local attention transition（独立维护包）
+
+- **来源与触发：** Console Android 的 `AttentionListStateHolder` 与 `AttentionRuntimeCoordinator` 都驱动 Room/scheduler/notification；`AttentionScheduler.snooze(itemId,duration)` 的 payload 不足且 Android 实现可 degraded；boot restore 对 overdue rows 的查询边界需要明确。只有 Android maintainer 取得设备/OS reproduction 证据才实施。
+- **非目标：** 不添加 Internet、Hub DTO/client/token、远端 scheduler、Rust 依赖、Console Hub 产品或长期 memory；不把 `AttentionSourceKind.Hub` 预留值当成接入，不改变 Agent Room。
+- **依赖：** 独立于 WP1/WP2/WP3/WP4-A/WP-R/WP-T；先决定 overdue policy、scheduler failure/degraded semantics 和 local retention，再迁移 UI/receiver/boot callers。
+- **结构验收：** create/action/snooze/fire/restore 经一个 Android-local transition owner；scheduler 输入能表达重排所需 item；Room repository 是 authority，OS effects 可失败可重建，fake/mock adapter contract 明确且不污染生产。
+- **行为验收：** 设备或合适 OS smoke 覆盖 create→Room→alarm、fire→Triggered/notification、done/ack/cancel、snooze/reschedule 以及 future/overdue process-death/boot；任何 degraded result 都不伪装为已调度。
+- **未验证：** 本复审未运行 Gradle/Android OS/device；boot/process death、exact alarm、notification permission 和 overdue behavior 都是未验证证据，不能成为核心完成条件。
+
+#### REL：Release gate / version / inventory（条件包）
+
+- **来源与触发：** `.github/workflows/ci.yml` 运行 parity gate，而 tag release workflow 直接打包；Rust crate、OpenAPI 和 Console 有独立版本号，开发/迁移文档仍有历史 tag 示例。只有 release owner 需要可发布保证时立项，不改运行时。
+- **非目标：** 不把 Console/example/experiment 并入 Rust tarball，不改变五 crate/部署拓扑，不创造协议 version negotiation，不将未运行的 GitHub/生产发布写成证据，不把 prediction evaluator 变成 runtime gate。
+- **依赖：** 复用 WP4-A `scripts/check_contract_parity.py` 及现有 artifact inventory；先书面确定 Rust tag↔binary、OpenAPI contract、Console package 的独立 authority，再选择 release preflight dependency 或等价 gate。
+- **结构验收：** tag publication 依赖选定 parity/schema/artifact/version preflight；归档仍精确列出当前三种 Linux binary（按现有 target），历史 release docs 保持标注，current inventory 能指出每个 artifact/contract/version owner。
+- **行为验收：** deliberate parity/version/inventory failure blocks publication；passing preflight yields the same artifact names/checksums and no topology change。只验证发布脚本本身不足以证明外部 CI policy。
+- **未验证：** 未运行 GitHub Actions、cross build、tag/package pairing、外部 Actions importer 或 production deployment；本包不得声称 release gate 已接入。
+
+#### DOC-SYNC：文档状态同步（条件化维护包）
+
+- **来源与触发：** 本计划、`current-state`、`diagnosis`、`target`、`engineering-rules`、README/index、operations 和 release notes 的日期/“future/current/history”标签在不同 WP closure 后会漂移；本节 §1.4 先提供本计划内导航，出现新 closure 或 contract authority 变化时再做同步。
+- **非目标：** 不删除历史根因/旧数字，不改 D01–D08，不把 target logical modules 当现有目录，不用文档替换 runtime proof，不在本包新建 alias/version/production code。
+- **依赖：** 以 dated package evidence、source authority 和 Main 的单一整合 pass 为前置；各文档 owner 只更新状态标签、交叉链接和 residual boundary，保留原始证据段落。
+- **结构验收：** 六项原始结果各有 evidence/remaining gap/owner；WP status ledger 与 package headings 不互相矛盾；历史路线图段落显式带日期，WP4-B/WP-T/WP5/WP5-O 不被误标为核心完成或核心缺口。
+- **行为验收：** maintainer 针对一个新 Room operation、Job field 或 Console local change，能从矩阵找到 owner、dependency direction、authority/projection、caller migration 和 targeted proof；文档不能诱导 Hub-owned Room、第二 Agent executor、Protocol universal schema 或 Console Hub core dependency。
+- **未验证：** 文档同步本身不证明任何 runtime；外部部署、Android OS、Browser client、Actions importer 和全部 public callers 仍按各自包保留 `[未验证]`。
+
 ## 5. 已确认决策与实施时技术细化
 
 ### 5.1 D01–D08（已确认，不重复审批）
@@ -663,7 +763,7 @@ flowchart TD
 | 决策 | 对本路线图的约束 |
 |---|---|
 | **D01 Room 是受控资源** | Room 提供受控文档读取、写入和维护；上层 Agent 决定内容与时机，Agentic 执行端 repository 持有文件/Git/生命周期，不新增长期记忆、上下文管理或 reasoning loop。 |
-| **D02 远端 Room 必须补齐** | WP-R 是核心 Hub→Protocol→Agent 合同修复，覆盖所需读与 maintenance 语义；不以“是否需要远端”或另立项目为前置，也不以隐藏工具/永久 unsupported 代替实现。 |
+| **D02 远端 Room 必须补齐** | WP-R 是核心 Hub→Protocol→Agent 合同修复；当前九项所需读与 maintenance 语义已于 2026-09-22 完成并保持 Agent 内容 authority。新增能力仍按源码、caller 和真实证据细化，不以隐藏工具/永久 unsupported 代替实现。 |
 | **D03 一次升级、明确迁移** | 用户可协调 Hub、Agent 和 caller 一次升级；迁移全部 caller，破坏性实现随同交付可执行迁移步骤。不得预置 alias、shim、双轨执行、协议协商或新的 version/feature 机制。 |
 | **D04 自用环境仍控制具体副作用** | 保留 policy、confirmation、path boundary 和 lifecycle；本轮不改变既定安全默认、不扩大公网多租户威胁模型。 |
 | **D05 保留真实 Browser 拓扑** | Neko、container、共享目录和 Unix socket 是受支持的实际部署约束；先盘点进程/用户/UID/GID/挂载与访问链，再选择 peer/token/权限机制，不为 owner-only 形式目标破坏协作或把共享拓扑列为不支持。 |
@@ -689,8 +789,9 @@ flowchart TD
 
 ## 6. 总体验收、发布顺序与全局停止条件
 
-### 6.1 核心里程碑与并行安排
+### 6.1 核心里程碑与并行安排（原始历史路线图；当前状态见 §1.4）
 
+以下五项保留原始依赖和发布门槛，便于解释已完成包的先后关系；它们不是当前“全部尚未开始”的清单，也不是新的运行时结果。当前已完成、待实施、独立和未验证边界以 §1.4.2 为准。
 1. **M0（WP0）**：完成 contract/behavior baseline、A02 Room fracture evidence、A01/A09 authority 与未验证项记录；只冻结事实，不实施生产迁移。
 2. **M-core-parallel（WP1、WP2、WP3、WP4-A、WP-R）**：M0 后按 DAG 并行推进。WP1 收口 identity/connection owner；WP2 先做本地 gate/config；WP3 先做 authority/durability inventory；WP4-A 处理 cross-surface parity；WP-R 同步补齐远端 Room 合同与 Agent repository seam。WP-R 是核心包，不是可选工作。
 3. **M-core-seams**：按真实依赖收口 WP2 Hub admission、WP3 retention/recovery enforcement、WP4-A semantic gate，以及消费 WP1 owner/lease 规则的 WP-R Hub adapter；任何一个 seam 不把 Console 或未来 threat upgrade 变成前置。
@@ -702,8 +803,8 @@ WP5/WP5-O 不列入核心里程碑；它们的独立维护/产品参考见第 4 
 ### 6.2 核心最终完成门槛
 
 - `current → target` 的模块路径、依赖方向和资源 authority 可由维护者沿路径复核；核心范围没有新 service/crate、大 capability registry、provider orchestration、reasoning loop 或长期上下文管理。
-- 核心工作包 WP0/WP1/WP2/WP3/WP4-A/WP-R 均达到各自门槛：公共合同有唯一 authority，入口/profile/gate 语义可复核，Hub/Agent run、job、connection identity 分离，Room 远端 read/maintenance 真实贯通且 Hub 不持有内容。
-- D03 的一次升级 clean cutover 已迁移全部 caller；被替代路径已清理或有明确、有边界的退场，真实迁移文档步骤与实现同批交付。当前计划不写不存在的命令、版本号或双轨/version 方案。
+- 核心发布候选仍须按适用范围检查 WP0 baseline、各工作包完成门槛、D03 clean cutover、真实 Room parity 和迁移步骤；§1.4 所列 WP1/WP2/WP3/WP4-A/WP-R 的已完成记录不能替代尚未证明的外部场景、结构条件或发布 gate。
+- 对已完成的 WP4-A/WP-R 公开合同，D03 的一次升级 clean cutover 已迁移其受影响 caller；未来破坏性变更仍必须迁移全部相关 caller，被替代路径有明确、有边界的退场，真实迁移文档步骤与实现同批交付。当前计划不写不存在的命令、版本号或双轨/version 方案。
 - D04 安全默认和威胁模型范围按本轮决策保持不变（不是待决前置）；D05 的 Neko/container/共享目录/Unix socket 实际拓扑未被破坏，具体 peer/token/权限机制按真实盘点落地；external MCP/Browser/tmux trust 与 audit/report/cache 的保证范围诚实标记。
 - D06按正确性事实、可保留历史、best-effort观测和易失会话分别验收：run/job结果与身份/幂等尽量可靠，history/已产确认结果/error按retention保留，audit/report不冒充结果；Hub OAuth/pending/cache重启失效可接受，不把全量持久化作为完成条件。
 - 核心完成不要求 WP4-B、WP5 或 WP5-O；但不得破坏既有 Console local-only 行为。只有能防止行为、边界、状态转换、权限或合同回归的永久检查才保留，计划本身不代表任何检查已通过。
@@ -724,10 +825,10 @@ WP5/WP5-O 不列入核心里程碑；它们的独立维护/产品参考见第 4 
 
 ## 7. 本轮文档任务的 Main 核验点
 
-本文件是未来工作的路线图；本轮仅同步文档，未实施代码、协议、配置、迁移或验证。Main 在合并架构文档时应核验：
+本文件同时保留已完成边界的 dated evidence、历史路线图和条件化后续包；本轮仅同步文档，未实施代码、协议、配置、迁移或验证。Main 在合并架构文档时应核验：
 
-1. `decisions.md` 的 D01–D08 与本计划一致：Room 受控资源且远端能力由 WP-R 核心补齐，D03 clean cutover/迁移文档要求、D04 默认不变、D05 真实共享拓扑、D06 分层与 Hub 临时状态失效、D07 Console 解耦、D08 不扩范围均没有被改写。
-2. WP0/WP1/WP2/WP3/WP4-A/WP-R 的证据、依赖、提交边界、完成/停止条件允许真实并行；WP-R 不含另立项目或“限选能力”前置，不以隐藏/永久 unsupported 替代修复。
+1. `decisions.md` 的 D01–D08 与本计划一致：Room 受控资源且当前九项远端读/maintenance 已由 WP-R 收口，D03 clean cutover/迁移文档要求、D04 默认不变、D05 真实共享拓扑、D06 分层与 Hub 临时状态失效、D07 Console 解耦、D08 不扩范围均没有被改写。
+2. §1.4.2 的 WP0/WP1/WP2/WP3/WP4-A/WP-R 状态与各包 dated evidence 一致；原始 DAG 可解释历史依赖，但不把已完成边界、条件化包、WP-T 或 Console 独立工作混成一个完成结论。
 3. WP5/WP5-O 仅保留独立参考，不出现在核心 DAG、里程碑或最终完成门槛；既有 Console 行为保护不被误写成 Console 产品交付。
 4. 具体 retention、OAuth/pending/cache、browser-host peer/auth、公开 names/paths 和 Room operation shape 仍留在所属包按证据细化；没有虚构迁移命令、版本号、协议协商或测试结果。
 5. 后续实现 PR 必须逐包提供 targeted validation 与真实场景证据，最后才由维护者按核心里程碑运行适用的全仓/release gate；本文件不应被误读为“测试已通过”或“代码已落地”。

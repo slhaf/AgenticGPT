@@ -12,7 +12,18 @@
 4. [工程规则](engineering-rules.md)：代码放置、依赖、协议、安全、生命周期与审查规则。
 5. [渐进重构计划](refactoring-plan.md)：每批前置条件、非目标、验收和回退约束。
 
-现状与诊断的调查基线为 2026-09-16。[已确认决策](decisions.md)中的产品和工程取舍已获用户确认；目标模块设计和具体实现仍是受这些决策约束的技术草案，不表示代码已完成迁移。重构计划是未来工作清单，本阶段只更新文档。既有接口可按一次升级 clean cutover，但必须迁移调用方并随实现交付迁移文档，不刻意维持兼容双轨。
+截至 2026-09-23，本目录进入“历史基线 + 已完成有界包 + 当前复审”状态：WP1、WP2、WP3、WP4-A 与 WP-R 已分别记录其有界实现和证据；这不等于全局目标架构已经迁移。`diagnosis.md` 同时保留修复前 A01–A09 的机制与根因，并标注闭环和残余边界。`target-architecture.md` 与 `engineering-rules.md` 仍是目标/技术规则，`refactoring-plan.md` 是含完成状态的路线图；WP4-B（Protocol 内部组织）仍待处理，WP-T 标准仍未决定。Console Android local Attention 继续独立维护，remote Console 是未来产品，不是核心 Rust 完成条件。本轮只做文档同步，不新增运行验证声明。既有接口可按一次升级 clean cutover，但必须迁移调用方并随实现交付迁移文档，不刻意维持兼容双轨。
+
+## 2026-09-23 复审导航
+
+| 原始目标 | 当前结论 | 主要入口 |
+|---|---|---|
+| 实际全仓架构 | 五个 Rust crate、独立 Console、OpenAPI、脚本/CI、部署及实验/示例边界均纳入；外部 tunnel、Browser client/service、Android OS 等仍按证据边界标注 | [现状架构](current-state.md) |
+| 问题与根因 | A01–A09 的历史证据保留；已完成包不再作为现行缺陷，当前结构残余单列并标明推断与验证门槛 | [问题诊断](diagnosis.md) |
+| 合适目标 | 保留 Agent 执行核心、Hub 控制面、Protocol/apply-patch/browser-host 与部署拓扑；不预设新 crate、通用 dispatcher 或推理/记忆运行时 | [目标架构](target-architecture.md) |
+| 职责、依赖与规则 | 以资源事实所有者、入口适配器、跨进程合同和持久化层级约束放置；HTTP/MCP 认证与投影仍各自负责 | [工程规则](engineering-rules.md) |
+| 持久开发指导 | 新能力按 owner、ingress、effect、authority、迁移与证据逐项盘点；Room 内容仍归 Agent，Hub 只持 lease/receipt/projection | [工程规则](engineering-rules.md) · [已确认决策](decisions.md) |
+| 渐进、可验证的计划 | 已完成包与未来包/独立 Console 工作分开；下一结构工作须有窄范围 owner、行为验收和回退边界 | [渐进重构计划](refactoring-plan.md) |
 
 ## 事实、推断与决策
 

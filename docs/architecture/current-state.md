@@ -1,18 +1,32 @@
 # 现状架构：受控执行核心与多入口控制面
 
-状态：源码调查快照，2026-09-20；WP2 operation/context gate 已实现并有界验证；WP-R 九个当前 Room operation 已完成 clean cutover，并通过当前 live gate。目标规则另见 [目标架构](target-architecture.md)，问题判断见 [诊断](diagnosis.md)。文中代码路径均相对仓库根；符号名优先于可能随编辑变化的行号。
+状态：源码调查快照与全仓架构再评估，2026-09-23；WP1/WP2/WP3/WP4-A/WP-R 的既定边界修复均按各自范围完成并保留有界证据，WP4-B（Protocol 内部组织）待处理，WP-T 标准未决；Console local attention 维护独立，remote Console 是未来产品。WP2 operation/context gate 与 WP-R 九个当前 Room operation 的 clean cutover 已有当前 live evidence；目标规则另见 [目标架构](target-architecture.md)，问题判断见 [诊断](diagnosis.md)。文中代码路径均相对仓库根；符号名优先于可能随编辑变化的行号。
 
 ## 1. 调查范围和证据等级
 
-本轮覆盖五个 Rust crate 的一级模块、Console 四个 Gradle 模块及平台源集、OpenAPI、合同 corpus/evaluator、CI/release、部署脚本、实验与 UX 示例。重点追踪入口到副作用、确认/取消、断线恢复、持久化与能力边界；不是逐行安全审计，也不宣称所有平台均已运行验证。
+本轮覆盖根 `Cargo.toml` 声明的五个 Rust crate 一级模块、独立 `console/` Gradle root 的四个模块及平台源集、OpenAPI、合同 corpus/evaluator、CI/release、部署脚本、实验与 UX 示例。重点追踪入口到副作用、确认/取消、断线恢复、持久化与能力边界；不是逐行安全审计，也不宣称所有平台均已运行验证。Console、OpenAPI、脚本和示例的仓库存在不等于它们进入 Rust 编译图或 Linux release。
 
-证据分为历史调查基线与后续 closure：历史调查来自源码、CodeGraph 定位、Cargo metadata 与解析后的 OpenAPI，完整分域记录位于 `.planning/2026-09-16-architecture-audit/`；当时没有启动真实 Hub/Agent/Android/浏览器/tunnel。WP2/WP-R 的实际运行证据见下段；它们不替代未覆盖的外部组件、WP3 durability 或生产 tunnel/GitHub 部署证据。
+证据分为历史调查基线与后续 closure：历史调查来自源码、CodeGraph 定位、Cargo metadata 与解析后的 OpenAPI，完整分域记录位于 `.planning/2026-09-16-architecture-audit/`；当时没有启动真实 Hub/Agent/Android/浏览器/tunnel。WP1/WP2/WP3/WP4-A/WP-R 的完成状态按各自 closure 记录保留；下段列出的运行证据只覆盖所标明的 Agent/Hub 场景，不替代外部组件、生产 tunnel/GitHub、Android/Console 或 ARM release 验证。
 
-WP2 closure 已补充真实 Agent/Hub binary evidence：Local Unix、hidden stdio worker、HTTP bearer 401/有效 session/SSE、process output parity、Skill runs、Normal Room disabled→enabled、policy/limits 与 workspace/path reload health，以及 Hub loopback WebSocket 的 process、Room skills list/search/activate/run（含 invalid-CWD reason）、pending 清零、CLI tmux create/close audit 和 live policy deny；两个临时 driver 均 exit 0。该证据不覆盖 external tunnel/cloud、OAuth provider、Browser JavaScript/service、OS sandbox，亦不等同 WP3 durability 完成。WP-R 后续 live gate 已通过九个 HTTP/Full MCP、Coordinator reject、active lease/reconnect 和 local/workflow maintenance 场景；这不构成生产 tunnel/GitHub 部署声明。
+WP2 closure 已补充真实 Agent/Hub binary evidence：Local Unix、hidden stdio worker、HTTP bearer 401/有效 session/SSE、process output parity、Skill runs、Normal Room disabled→enabled、policy/limits 与 workspace/path reload health，以及 Hub loopback WebSocket 的 process、Room skills list/search/activate/run（含 invalid-CWD reason）、pending 清零、CLI tmux create/close audit 和 live policy deny；两个临时 driver 均 exit 0。该证据不覆盖 external tunnel/cloud、OAuth provider、Browser JavaScript/service、OS sandbox；WP3 durability/retention 有独立 closure，不能由这组 WP2 场景代替。WP-R 后续 live gate 已通过九个 HTTP/Full MCP、Coordinator reject、active lease/reconnect 和 local/workflow maintenance 场景；这不构成生产 tunnel/GitHub 部署声明。
 
 用户后续确认的需求与部署事实见[已确认决策](decisions.md)：Room 能力需要远端提供；WP-R 已将九个当前 Room operation 收口到远端公共面并完成 legacy surface clean cutover，Hub 未同步不再是当前合同遗漏。实际已有 Neko/container/共享目录与 Unix socket 部署仍是用户报告，不是 WP2 runtime 证据。
 
 历史规模口径（2026-09-16，未按 WP1/WP2 变更重算）：对已跟踪 `.rs/.kt/.kts/.js/.ts/.py/.sh` 文件统计物理行，含注释、测试、配置和脚本，共 148 文件、91,041 行。执行端 69,497；Hub 9,965；protocol 3,223；apply-patch 1,146；browser-host 866；Console 2,868；其余为示例/实验/脚本。文件大只能说明调查优先级，不能单独证明架构错误。
+
+### 1.1 当前覆盖与工作包状态
+
+| 范围 | 当前记录 | 证据边界 |
+|---|---|---|
+| WP1 | Hub connection/run/waiter owner tuple 与 bounded closure 已完成 | simulated peer/Hub-side 证据不等于完整 Agent restart、transport-ledger 或 external ntfy/provider E2E |
+| WP2 | Agent operation/context gate、provenance、config live subset 已完成并有界运行证据 | 不覆盖 external tunnel/cloud、OAuth provider、Browser JS/service 或 OS sandbox |
+| WP3 | durability/retention 与 recovery 分层已完成 | 不把持久化事实当作外部副作用回滚；跨部署/设备恢复仍按边界核验 |
+| WP4-A | 当前本地 cross-surface contract/parity gate 与已修复投影已完成 | strict 外部 Actions importer、外部 Apps client、完整 Protocol lifecycle parity 和 release preflight 未由本快照证明 |
+| WP-R | 九个当前 Room operation 的 Hub→Protocol→Agent clean cutover 已完成，当前 live gate 已通过 | 不构成生产 tunnel/GitHub/外部 Room repository 部署证明 |
+| WP4-B / WP-T | Protocol 内部组织仍是条件性后置工作；测试/标准取舍未决 | 目标目录和标准不能写成已交付 |
+| Console | Android local attention 是独立维护面；remote Console 是未来产品 | 根 Rust CI/release 不覆盖 Console Android/桌面/Web 行为，且本快照未运行 Gradle/设备验证 |
+
+此表是当前状态索引，不把目标文档的建议目录、规则或未验证边界改写为实现事实。
 
 ## 2. 实际部署与编译边界
 
@@ -77,8 +91,8 @@ are not aliases for those four commands.
 | 模块组 | 当前职责与边界 |
 |---|---|
 | `main.rs`、`state.rs`、`instance_lock.rs`、`utils.rs` | 启动组装、运行形态、共享状态、单实例和路径基础；main 同时承载 CLI 与热重载 |
-| `stdio_server.rs` | MCP framing/schema、toolset/namespace discovery、参数/结果适配与 lifecycle；调用共享 operation gate，annotation 只作描述/发现 |
-| `local_service.rs`、`operation.rs`、`operation_result.rs` | HubCommand/value-returning operation 映射、不可变 RequestContext、同步 authorize、共享 error/slim result projection；不是 Hub runner，也不反向依赖 stdio transport |
+| `stdio_server.rs` | MCP framing/schema、toolset/namespace discovery、参数/结果适配与 lifecycle；当前同时存在直接资源分支与经 `local_service::dispatch` 的选定 `HubCommand` trampoline，调用共享 operation gate，annotation 只作描述/发现 |
+| `local_service.rs`、`operation.rs`、`operation_result.rs` | HubCommand/value-returning operation 映射、不可变 RequestContext、同步 authorize、共享 error/slim result projection；承接 Hub ingress，但不是 Hub runner，也不反向依赖 stdio transport |
 | `hub.rs`、`transport_ledger.rs` | WS/SSE、Hello/heartbeat、可靠 envelope、ACK/重放、Job/report、确认响应 |
 | `local_control.rs` | Unix listener/client、UID/权限、stale socket inode guard、LocalJobClient |
 | `http_server.rs`、`http_oauth.rs` | worker HTTP MCP、Bearer/PKCE、Host/Origin/resource 边界 |
@@ -95,6 +109,10 @@ are not aliases for those four commands.
 | `config.rs`、`config_cli.rs`、`config_setup/`、`config_templates.rs`、`config_tui/` | 配置加载/import/default/修改、向导 draft/validation/review/commit、secret 写入；并非新执行核心 |
 | `tui/`、`cli_i18n.rs`、`notify.rs`、`agent_info.rs` | 展示/输入/终端恢复、本地化、桌面通知、诊断摘要 |
 | `private_state.rs`、`audit.rs` | 私有状态目录与迁移、workspace append-only 审计；耐久等级不同于 Job history/transport ledger |
+
+### 3.1.1 Agent operation routing（当前）
+
+当前 Agent operation routing 是**部分收敛而非一个 universal dispatcher**：`stdio_server::dispatch_with_lifecycle` 对部分资源操作直接分支，并把选定的 `HubCommand` trampoline 转给 `local_service::dispatch`；Hub ingress 则直接进入 `local_service`。两条路径共享 WP2 的 `RequestContext`/`authorize` gate 与同一批资源 owner，因此源码没有显示出两套独立 executor；本轮也没有复现行为失败。剩余问题是结构性的 `[推断]`：内部 operation 的变更位置、wire command 映射和各入口 projection 仍可能漂移。后续若收敛，应按一个 operation family 一次迁移 caller、descriptor 和 projection，不把仅 Agent-local 的操作强行新增为 Protocol wire command。
 
 ### 3.2 Hub
 
@@ -115,9 +133,9 @@ are not aliases for those four commands.
 
 ### 4.1 Hub 远程执行
 
-`routes::process_exec` 或 `mcp_server::call_app_tool` → Hub agents dispatch/`runs::prepare_run` 持久化 command/hash → pending waiter + envelope → Agent `hub::handle_reliable_envelope` → `transport_ledger::accept`/ACK → `local_service::dispatch`（带真实 Hub `RequestContext`）→ `jobs`/具体能力。Local Unix、stdio、HTTP MCP 也进入同一 Agent operation/result boundary，但各自保留 framing/auth/error envelope；没有“Hub runner 调 stdio server”的反向依赖。回传分为三条路径：Response → Hub `runs::store_result` → pending waiter；JobUpdate → Hub Job cache；RunReport → `runs::upsert_agent_report`。后两条不会直接唤醒该同步 waiter。
+`routes::process_exec` 或 `mcp_server::call_app_tool` → Hub agents dispatch/`runs::prepare_run` 持久化 command/hash → pending waiter + envelope → Agent `hub::handle_reliable_envelope` → `transport_ledger::accept`/ACK → `local_service::dispatch`（带真实 Hub `RequestContext`）→ `jobs`/具体能力。Local Unix、worker HTTP 和部分 stdio 路径共享 Agent `RequestContext`/authorization/resource boundary，但当前 stdio 并非所有操作都经同一个 `local_service` branch；各 ingress 仍保留 framing/auth/error envelope。没有“Hub runner 调 stdio server”的反向依赖。回传分为三条路径：Response → Hub `runs::store_result` → pending waiter；JobUpdate → Hub Job cache；RunReport → `runs::upsert_agent_report`。后两条不会直接唤醒该同步 waiter。
 
-Hub request/run 是控制面投递与收据身份；Job 是执行端资源生命周期；connection id 是连接代际；boot generation 是执行端进程代际。它们不能互换。同步等待超时不等于取消远端任务，迟到结果可以到达；WP1 已收口 owner 校验，但该事实不替代 WP3 durability/retention 工作。
+Hub request/run 是控制面投递与收据身份；Job 是执行端资源生命周期；connection id 是连接代际；boot generation 是执行端进程代际。它们不能互换。同步等待超时不等于取消远端任务，迟到结果可以到达；WP1 已收口 owner 校验，WP3 已分别收口 durability/retention，但任一边界都不替代另一边的证据。
 
 ### 4.2 本地与 Standalone
 
@@ -130,6 +148,7 @@ Hub request/run 是控制面投递与收据身份；Job 是执行端资源生命
 Process：policy/CWD/preflight → Deny 或 cancellable confirmation → 可选 sandbox command → child/输出 tail/monitor → terminal snapshot/audit/report。Skill 先校验激活包、脚本路径与 lease，再进入同一 Process Job。
 
 MCP：server/tool/args 校验与配置快照 → managed Job/批量准入 → confirmation/temporary allow → global/per-server semaphore → HTTP 或 stdio 下游 → 响应/timeout/cancel/detached。batch fail-fast 不回滚已经发生的副作用。配置的 stdio MCP server 与 Browser Node 不是自动由 process bwrap 包裹的子执行器。
+配置生命周期存在一个尚未定案的源码 seam：`jobs.rs::start_process_job_inner` 在 admission/audit 处捕获 config，而 `run_async_job` 后续仍从 `state.config` 读取 policy/CWD/preflight；`docs/configuration.md` 现明确记录不存在统一的 admission-time config snapshot guarantee，并指出异步路径可能重新读取 live config。这里记录的是 source-level discrepancy 与 reload interleaving 风险，不是已复现的行为失败；在模块搬迁前仍需确定并记录单一 snapshot 规则及其 deterministic reload 验证。
 
 ### 4.4 文件与 Room
 
@@ -189,11 +208,10 @@ Hub replay 未 ACK 的 durable envelope；Agent ledger 按 run/request/hash 区�
 
 ## 7. Console、示例与实验的成熟度
 
-Console Gradle 模块为 shared/androidApp/desktopApp/webApp。
+Console 的四个 Gradle 模块位于独立 `console/` build root；根 Cargo workspace、Rust CI 与 Linux release 不把 Console 编译为 Rust 依赖或打入 Linux archive。shared/common 只提供 UI/domain ports，Android 才拥有真实 local attention side effects；remote Console 仍是独立未来产品。
 
 - shared 有 Compose 导航、Attention domain/repository/scheduler 端口和 UI；平台 actual 主要提供 Platform 信息，不是完整多平台能力适配。
 - Android 的 `AndroidAgenticApp` 组装 Room repository、AndroidAttentionScheduler、state holder、通知/权限/runtime coordinator。UI action → state holder → Room/AlarmManager；Receiver/AlarmActivity → coordinator → DB/notification；boot/app startup → restoreFutureItems。
-- Android 的 mock 指数据来源；注入的 scheduler 会产生真实本地通知/闹钟。Hub URL/token 表单只保存在 Compose state，测试按钮无网络实现；Manifest 没有 INTERNET，不存在已接入的 Hub 控制链。
 - Desktop/Web main → shared App → AgenticPlaceholderApp。是 UI 壳，不具备 Android Attention 或远端控制 parity。缺失功能是成熟度事实，不自动等于回归缺陷。
 - Hub Android notification 注册明确返回 deliveryImplemented=false；这与 Android 本地闹钟不是同一能力。
 - `example/agentic-tui-ux-demo` 是独立 workspace 的内存 UX 原型，不写真实配置、不联网。生产 config TUI 有真实验证/提交/secret 写入，Process TUI 走 Unix MCP，不能合并原型状态为生产模型。
@@ -211,12 +229,12 @@ Console Gradle 模块为 shared/androidApp/desktopApp/webApp。
 | Hub HTTP/Actions | routes/room 的实际 DTO 与 response adapter | openapi/hub.yaml 当前已投影九个 WP-R Room operation；live gate 已验证对应 route/dispatch projection |
 | 文档与模型预测评估 | matrix/corpus/示例 | evaluator 仅比预测 tool/参数 shape，不执行 runtime |
 
-CI 包含 Rust fmt/check/clippy/test，以及 hub.yaml 的 YAML 解析；解析成功不证明 OpenAPI 语义、响应和 live dispatch 一致。第二份 agents-minimal.yaml 未见主要构建消费路径。
+`.github/workflows/ci.yml` 当前执行 `fmt`、workspace `check`、`clippy`、`test`，构建 Agent/Hub 后安装 `PyYAML`/`jsonschema` 并运行 `scripts/check_contract_parity.py`；该 gate 不等于所有外部 importer、生产 tunnel/cloud、Android/Console 或 Browser service 的验证。`openapi/hub.yaml` 是当前 HTTP artifact；`openapi/agents-minimal.yaml` 明确标为 historical/noncanonical，不是 CI/runtime gate。`docs/tool-contract-matrix.md` 与 `evaluate_tool_contracts.py` 仍是 review/prediction 辅助，不能替代 live gate。
 
-release 使用 cross 构建 x86_64/aarch64 Linux，每个包三个二进制（agent、hub、browser-host），生成 SHA256SUMS。Console、示例、实验不是这个发布链的一部分。Hub 是单节点 SQLite 控制平面，没有多实例 HA 的现状证据。TLS/反向代理、public base URL、WS/SSE、tunnel-client、tmux、bwrap 与外部浏览器资产均是部署约束，重构不能默认删除。
+tag-triggered `.github/workflows/release.yml` 另行调用 `scripts/dist-linux.sh`，以 cross 生成 `x86_64`/`aarch64` Linux 的 `agentic-gpt`、`agentic-gpt-hub`、`agentic-browser-host` 三个 binary 并写 `SHA256SUMS`；当前 release workflow 不自动继承 CI parity gate，也未证明 ARM 运行、外部 Actions importer、生产部署或 Console 发布。Hub 是单节点 SQLite 控制平面，没有多实例 HA 的现状证据。TLS/反向代理、public base URL、WS/SSE、tunnel-client、tmux、bwrap 与外部浏览器资产均是部署约束，重构不能默认删除。
 
-历史 migration/release 文档记录旧版本本身合理；当前 operations 的工具计数、上下文中的 crate 数等与现状冲突，才需要在后续规范维护中收敛。
+历史 migration/release 文档记录旧版本本身合理；WP4-A 前的 Job/OpenAPI drift 例子在诊断、目标和规则中应标为历史基线，不能被当成当前行为失败。当前 operations 的工具计数、上下文中的 crate 数等与现状冲突，才需要在后续规范维护中收敛。
 
 ## 9. 结论
 
-已有架构主干值得保留：**一个本地执行核心，多种入口适配，一个轻量远端控制平面，独立协议与少量专用边界**。WP2 已在 Agent crate 内收紧 operation/context gate、入口 provenance 与 config lifetime；WP-R Room clean cutover 与 live gate 已完成，剩余债务主要是（WP-R 之外的）跨端合同投影、资源生命周期/耐久级别以及当前/历史/实验状态的界线，而不是缺少新的 Agent Runtime。
+已有架构主干值得保留：**一个本地执行核心，多种入口适配，一个轻量远端控制平面，独立协议与少量专用边界**。WP1/WP2/WP3/WP4-A/WP-R 的 bounded repairs 不改变这一判断；WP4-B（Protocol 内部组织）仍待处理，WP-T 标准未决，Console local maintenance 独立且 remote Console 是未来产品。当前剩余债务是部分 Agent operation routing 的结构收敛、窄 owner/投影边界、配置 snapshot 决策与跨端/发布/外部验证边界，而不是缺少新的 Agent Runtime，也不是已复现的统一行为故障。

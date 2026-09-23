@@ -43,3 +43,7 @@
 - Keep effect-specific lifecycles (Job Process/MCP, Skill install, Room maintenance, Browser lease, external tmux); no generic executor or universal repository/path/security/status framework.
 - Do not infer Browser-host peer authentication from mode 0660 or try an owner-only redesign that breaks documented shared container topology. Production tunnel/GitHub/Android behavior and external Actions importer remain unverified.
 - External/special surfaces are classified, not omitted: Console Android local Attention; Desktop/Web explicit placeholders; OpenAPI current vs agents-minimal historical; Python parity vs prediction evaluator; CI/release; UX demo and Chrome POC reference-only.
+
+## Main source spot-checks
+- `.github/workflows/ci.yml:3–7,28–47` runs on `main` pushes/PRs and includes Rust checks plus live parity. `.github/workflows/release.yml:3–6,28–48` runs on version tags and builds/packages/publishes three binaries without a reference to that CI result or its own gate. Therefore a tag-only release is not structurally guarded by current parity; no release run or actual publication failure was observed.
+- `docs/configuration.md:632` and `configuration.zh-CN.md:578` asserted all admitted Jobs retain original config. Source checks at `jobs.rs:1117,1143–1145,1216–1225,1301–1326` support only separate admission and async reads, not a universal snapshot guarantee; corrected both doc rows to say interleaving remains unverified, before any production semantic change.

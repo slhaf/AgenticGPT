@@ -629,7 +629,7 @@ live value until the process is restarted.
 | `pathPolicy` (when `workspaceRoot` is unchanged) | Shared live reload for subsequent path checks |
 | `httpMcp.enabled`, `host`, `port`, `publicUrl`, `allowHosts` | The Standalone HTTP watcher reconciles enablement and endpoint identity; identity changes close stateful sessions and discard listener-local OAuth state, so clients must initialize again |
 | `httpMcp.bearerToken` reference or referenced content | The Standalone HTTP watcher updates authentication without rebinding; existing sessions remain valid while the resolved credential is available |
-| Already-admitted Jobs and already-created downstream calls | Keep their original decision/config |
+| Already-admitted Jobs and already-created downstream calls | No universal admission-time config snapshot guarantee. Process/Skill Job admission records one config for capacity/audit, but its asynchronous execution path can read the live config again for policy, working directory, preflight, and confirmation; downstream calls have their own resource-specific snapshots. A reload between these stages has not been runtime-tested; do not assume the admission decision/config governs every later effect. |
 | `workspaceRoot` and its coupled `pathPolicy` | Changing the workspace requires a restart; until then, the previous workspace/path-policy pair remains effective atomically |
 | `mode`, `profile`, `agentId` | Restart required |
 | `browser` | Restart required; the configured Browser runtime is selected at process startup |
