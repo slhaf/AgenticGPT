@@ -274,6 +274,138 @@ impl McpProfile {
     }
 }
 
+pub(crate) mod projection {
+    use agentic_gpt_protocol::{
+        HubInfoAgents, HubInfoCounts, HubInfoRemoteConfirmation, HubInfoResponse, JobInfo,
+        JobListItem, JobListRequest,
+    };
+    use anyhow::Result;
+    use chrono::Utc;
+    use serde_json::Value;
+
+    use super::{HubState, JobCacheSnapshot, JobFreshness};
+    use crate::{notify, registry, MAX_WAIT_SECONDS, REQUEST_TIMEOUT_SECS};
+
+    pub(crate) fn job_list_item(job: JobInfo) -> JobListItem {
+        JobListItem {
+            job_id: job.job_id,
+            group: job.group,
+            kind: job.kind,
+            state: job.state,
+            created_at: job.created_at,
+            started_at: job.started_at,
+            finished_at: job.finished_at,
+        }
+    }
+
+    pub(crate) fn filter_cached_jobs(
+        snapshots: &mut Vec<JobCacheSnapshot>,
+        request: &JobListRequest,
+    ) {
+        snapshots.retain(|snapshot| {
+            request
+                .group
+                .as_ref()
+                .is_none_or(|group| snapshot.job.group.as_deref() == Some(group.as_str()))
+        });
+        snapshots.retain(|snapshot| request.kind.is_none_or(|kind| snapshot.job.kind == kind));
+        snapshots.retain(|snapshot| {
+            request
+                .state
+                .is_none_or(|state| snapshot.job.state == state)
+        });
+        snapshots.sort_by(|left, right| {
+            right
+                .job
+                .created_at
+                .cmp(&left.job.created_at)
+                .then_with(|| right.job.job_id.cmp(&left.job.job_id))
+        });
+        snapshots.truncate(request.effective_limit());
+    }
+
+    pub(crate) fn live_job_value(mut value: Value) -> Value {
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                "freshness".to_string(),
+                Value::String(JobFreshness::Live.label().to_string()),
+            );
+            object.insert(
+                "observedAt".to_string(),
+                Value::String(Utc::now().to_rfc3339()),
+            );
+        }
+        value
+    }
+
+    pub(crate) fn add_cache_metadata(value: &mut Value, snapshots: &[JobCacheSnapshot]) {
+        let freshness = if snapshots.is_empty() {
+            JobFreshness::Unknown
+        } else if snapshots
+            .iter()
+            .any(|snapshot| snapshot.freshness == JobFreshness::Unknown)
+        {
+            JobFreshness::Unknown
+        } else if snapshots
+            .iter()
+            .any(|snapshot| snapshot.freshness == JobFreshness::Stale)
+        {
+            JobFreshness::Stale
+        } else {
+            JobFreshness::Cached
+        };
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                "freshness".to_string(),
+                Value::String(freshness.label().to_string()),
+            );
+            if let Some(observed_at) = snapshots.iter().map(|snapshot| snapshot.observed_at).max() {
+                object.insert(
+                    "observedAt".to_string(),
+                    Value::String(observed_at.to_rfc3339()),
+                );
+            }
+        }
+    }
+
+    pub(crate) async fn build_hub_info_response(state: &HubState) -> Result<HubInfoResponse> {
+        let entries = registry::registry_entries(state)?;
+        let registered_count = entries.len();
+        let enabled_count = entries.iter().filter(|entry| entry.enabled).count();
+        let online_count = state.agents.online_count().await;
+        let pending_request_count = state.dispatch.pending_count().await;
+        let pending_confirmation_count = state.confirmations.pending_count().await;
+        let cached_job_count = state.job_cache.count().await;
+        let remote = &state.config.remote_confirmation;
+        let ntfy = &remote.ntfy;
+        Ok(HubInfoResponse {
+            service: "agentic-gpt-hub".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            public_base_url: state.public_base_url.clone(),
+            request_timeout_seconds: REQUEST_TIMEOUT_SECS,
+            max_wait_seconds: MAX_WAIT_SECONDS,
+            remote_confirmation: HubInfoRemoteConfirmation {
+                enabled: remote.enabled,
+                provider: remote.provider.clone(),
+                timeout_seconds: remote.timeout_seconds,
+                ntfy_configured: !notify::ntfy_not_configured(ntfy)
+                    && !ntfy.callback_base_url.trim().is_empty(),
+            },
+            agents: HubInfoAgents {
+                registered_count,
+                enabled_count,
+                online_count,
+            },
+            counts: HubInfoCounts {
+                pending_request_count,
+                pending_confirmation_count,
+                cached_job_count,
+            },
+            generated_at: Utc::now(),
+        })
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct AgentConnection {
     pub(crate) connection_id: String,

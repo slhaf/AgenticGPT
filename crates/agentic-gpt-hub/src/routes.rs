@@ -1,25 +1,25 @@
 use agentic_gpt_protocol::{
-    normalize_job_group, BatchExecRequest, ExecRequest, HubCommand, HubInfoAgents, HubInfoCounts,
-    HubInfoRemoteConfirmation, HubInfoResponse, JobCancelRequest, JobGetRequest, JobInfo, JobKind,
-    JobListItem, JobListRequest, JobState, McpBatchRequest, McpCallToolRequest,
+    normalize_job_group, BatchExecRequest, ExecRequest, HubCommand, JobCancelRequest,
+    JobGetRequest, JobKind, JobListRequest, JobState, McpBatchRequest, McpCallToolRequest,
     McpListServersRequest, McpListToolsRequest, TmuxCapturePaneRequest, TmuxCloseSessionRequest,
     TmuxCreateSessionRequest, TmuxExecRequest, TmuxListPanesRequest, TmuxPasteTextRequest,
 };
-use anyhow::Result;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::agents::dispatch::{cached_job, mcp_list_servers_all_agents, request_agent};
 use crate::registry::{registry_entries, registry_entry};
 use crate::runs;
-use crate::state::HubState;
+use crate::state::{
+    projection::{add_cache_metadata, filter_cached_jobs, job_list_item, live_job_value},
+    HubState,
+};
 use crate::utils::{constant_time_equal, random_id};
-use crate::{notify, MAX_WAIT_SECONDS, REQUEST_TIMEOUT_SECS};
+use crate::{MAX_WAIT_SECONDS, REQUEST_TIMEOUT_SECS};
 
 #[derive(Deserialize)]
 pub(crate) struct AgentIdQuery {
@@ -140,47 +140,10 @@ pub(crate) async fn hub_info(State(state): State<HubState>, headers: HeaderMap) 
         return response;
     }
 
-    match build_hub_info_response(&state).await {
+    match crate::state::projection::build_hub_info_response(&state).await {
         Ok(response) => Json(response).into_response(),
         Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "db_error", error),
     }
-}
-
-pub(crate) async fn build_hub_info_response(state: &HubState) -> Result<HubInfoResponse> {
-    let entries = registry_entries(state)?;
-    let registered_count = entries.len();
-    let enabled_count = entries.iter().filter(|entry| entry.enabled).count();
-    let online_count = state.agents.online_count().await;
-    let pending_request_count = state.dispatch.pending_count().await;
-    let pending_confirmation_count = state.confirmations.pending_count().await;
-    let cached_job_count = state.job_cache.count().await;
-    let remote = &state.config.remote_confirmation;
-    let ntfy = &remote.ntfy;
-    Ok(HubInfoResponse {
-        service: "agentic-gpt-hub".to_string(),
-        version: env!("CARGO_PKG_VERSION").to_string(),
-        public_base_url: state.public_base_url.clone(),
-        request_timeout_seconds: REQUEST_TIMEOUT_SECS,
-        max_wait_seconds: MAX_WAIT_SECONDS,
-        remote_confirmation: HubInfoRemoteConfirmation {
-            enabled: remote.enabled,
-            provider: remote.provider.clone(),
-            timeout_seconds: remote.timeout_seconds,
-            ntfy_configured: !notify::ntfy_not_configured(ntfy)
-                && !ntfy.callback_base_url.trim().is_empty(),
-        },
-        agents: HubInfoAgents {
-            registered_count,
-            enabled_count,
-            online_count,
-        },
-        counts: HubInfoCounts {
-            pending_request_count,
-            pending_confirmation_count,
-            cached_job_count,
-        },
-        generated_at: Utc::now(),
-    })
 }
 
 pub(crate) async fn list_agents(State(state): State<HubState>, headers: HeaderMap) -> Response {
@@ -317,22 +280,7 @@ pub(crate) async fn list_jobs(
             .into_response(),
         Err(_) => {
             let mut snapshots = state.job_cache.snapshots(&query.agent_id).await;
-            snapshots.retain(|snapshot| {
-                payload
-                    .group
-                    .as_ref()
-                    .is_none_or(|group| snapshot.job.group.as_deref() == Some(group.as_str()))
-            });
-            snapshots.retain(|snapshot| payload.kind.is_none_or(|kind| snapshot.job.kind == kind));
-            snapshots.retain(|snapshot| payload.state.is_none_or(|state| snapshot.job.state == state));
-            snapshots.sort_by(|left, right| {
-                right
-                    .job
-                    .created_at
-                    .cmp(&left.job.created_at)
-                    .then_with(|| right.job.job_id.cmp(&left.job.job_id))
-            });
-            snapshots.truncate(payload.effective_limit());
+            filter_cached_jobs(&mut snapshots, &payload);
             let mut body = json!({
                 "jobs": snapshots
                     .iter()
@@ -395,62 +343,6 @@ pub(crate) async fn get_job(
             )
                 .into_response(),
         },
-    }
-}
-
-fn job_list_item(job: JobInfo) -> JobListItem {
-    JobListItem {
-        job_id: job.job_id,
-        group: job.group,
-        kind: job.kind,
-        state: job.state,
-        created_at: job.created_at,
-        started_at: job.started_at,
-        finished_at: job.finished_at,
-    }
-}
-
-fn live_job_value(mut value: serde_json::Value) -> serde_json::Value {
-    if let Some(object) = value.as_object_mut() {
-        object.insert(
-            "freshness".to_string(),
-            serde_json::Value::String(crate::state::JobFreshness::Live.label().to_string()),
-        );
-        object.insert(
-            "observedAt".to_string(),
-            serde_json::Value::String(Utc::now().to_rfc3339()),
-        );
-    }
-    value
-}
-
-fn add_cache_metadata(value: &mut serde_json::Value, snapshots: &[crate::state::JobCacheSnapshot]) {
-    let freshness = if snapshots.is_empty() {
-        crate::state::JobFreshness::Unknown
-    } else if snapshots
-        .iter()
-        .any(|snapshot| snapshot.freshness == crate::state::JobFreshness::Unknown)
-    {
-        crate::state::JobFreshness::Unknown
-    } else if snapshots
-        .iter()
-        .any(|snapshot| snapshot.freshness == crate::state::JobFreshness::Stale)
-    {
-        crate::state::JobFreshness::Stale
-    } else {
-        crate::state::JobFreshness::Cached
-    };
-    if let Some(object) = value.as_object_mut() {
-        object.insert(
-            "freshness".to_string(),
-            serde_json::Value::String(freshness.label().to_string()),
-        );
-        if let Some(observed_at) = snapshots.iter().map(|snapshot| snapshot.observed_at).max() {
-            object.insert(
-                "observedAt".to_string(),
-                serde_json::Value::String(observed_at.to_rfc3339()),
-            );
-        }
     }
 }
 

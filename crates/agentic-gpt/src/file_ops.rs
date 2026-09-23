@@ -238,20 +238,39 @@ pub(crate) fn resolve_absent_path(
     })
 }
 
+fn path_policy_error(error: exec::PathRootNormalizationError) -> FileError {
+    let message = match error {
+        exec::PathRootNormalizationError::Expansion(_) => "path root could not be expanded",
+        exec::PathRootNormalizationError::Resolution(_) => "path root could not be resolved",
+    };
+    FileError::new("path_policy_error", message)
+}
+
 fn check_policy(
     config: &Config,
     resolved: &Path,
     access: Access,
 ) -> std::result::Result<(), FileError> {
-    let write_roots = normalized_roots(
+    let write_roots = exec::normalize_roots(
         config
             .path_policy
             .write_roots
             .iter()
-            .chain(std::iter::once(&config.workspace_root)),
-    )?;
-    let read_roots = normalized_roots(config.path_policy.read_only_roots.iter())?;
-    let deny_roots = normalized_roots(config.path_policy.deny_roots.iter())?;
+            .map(PathBuf::as_path)
+            .chain(std::iter::once(config.workspace_root.as_path())),
+    )
+    .map_err(path_policy_error)?;
+    let read_roots = exec::normalize_roots(
+        config
+            .path_policy
+            .read_only_roots
+            .iter()
+            .map(PathBuf::as_path),
+    )
+    .map_err(path_policy_error)?;
+    let deny_roots =
+        exec::normalize_roots(config.path_policy.deny_roots.iter().map(PathBuf::as_path))
+            .map_err(path_policy_error)?;
     if deny_roots.iter().any(|root| resolved.starts_with(root)) {
         return Err(FileError::new(
             "path_denied",
@@ -276,20 +295,6 @@ fn check_policy(
         ));
     }
     Ok(())
-}
-
-fn normalized_roots<'a>(
-    roots: impl Iterator<Item = &'a PathBuf>,
-) -> std::result::Result<Vec<PathBuf>, FileError> {
-    roots
-        .map(|root| {
-            let expanded = exec::expand_pathbuf(root).map_err(|_| {
-                FileError::new("path_policy_error", "path root could not be expanded")
-            })?;
-            exec::canonicalize_existing_or_parent(&expanded)
-                .map_err(|_| FileError::new("path_policy_error", "path root could not be resolved"))
-        })
-        .collect()
 }
 
 fn is_reserved_path(config: &Config, path: &Path) -> bool {

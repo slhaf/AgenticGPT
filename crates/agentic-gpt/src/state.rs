@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
 
 use crate::{browser_manager::BrowserRuntimeManager, browser_runtime::BrowserRuntimeDescriptor};
-use crate::{config::Config, confirmation, jobs};
+use crate::{config::Config, confirmation, jobs, skills};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Transport {
@@ -186,7 +186,7 @@ pub(crate) struct AppState {
     #[allow(dead_code)] // Serialized Room maintenance starts using this in Phase 3.
     pub(crate) room_repository_writes: Arc<Mutex<()>>,
     pub(crate) skills_writes: Arc<Mutex<()>>,
-    pub(crate) skill_leases: Arc<jobs::SkillLeaseManager>,
+    pub(crate) skill_leases: Arc<skills::SkillLeaseManager>,
     pub(crate) skill_installs: Arc<crate::skill_installs::InstallManager>,
 }
 

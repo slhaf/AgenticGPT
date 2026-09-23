@@ -40,8 +40,7 @@ use crate::{
     },
     operation_result::{
         rejection_error, slim_cancel_response, slim_job_get_response, slim_job_list_response,
-        slim_mcp_batch_response, slim_mcp_response, slim_process_batch_response,
-        slim_process_response,
+        slim_mcp_batch_response, slim_mcp_response, slim_process_response,
     },
     state::{AppState, CapabilityProfile},
 };
@@ -536,6 +535,17 @@ impl AgentMcpServer {
         arguments: Value,
         terminal_tracker: Arc<HumanTerminalTracker>,
     ) -> Result<Value> {
+        if name == "process.exec" {
+            return self
+                .dispatch_process_exec(arguments, terminal_tracker)
+                .await;
+        }
+        if name == "process.batch" {
+            return self
+                .dispatch_process_batch(arguments, terminal_tracker)
+                .await;
+        }
+
         let admission = {
             let config = self.state.config.read().await;
             operation::authorize(
@@ -647,14 +657,6 @@ impl AgentMcpServer {
                     },
                 )
                 .await)
-            }
-            "process.exec" => {
-                self.dispatch_process_exec(arguments, terminal_tracker)
-                    .await
-            }
-            "process.batch" => {
-                self.dispatch_process_batch(arguments, terminal_tracker)
-                    .await
             }
             "job.get" => self.dispatch_job_get(arguments).await,
             "job.cancel" => self.dispatch_job_cancel(arguments).await,
@@ -1091,37 +1093,31 @@ impl AgentMcpServer {
         arguments: Value,
         terminal_tracker: Arc<HumanTerminalTracker>,
     ) -> Result<Value> {
-        let args: ProcessExecArgs = from_value(arguments)?;
-        let group = match normalize_stdio_group(args.group) {
-            Ok(group) => group,
-            Err(error) => return Ok(error),
-        };
-        let config = self.state.config.read().await.clone();
-        let request_source = self.ingress.source("process.exec");
-        let terminal_event_hook = managed_terminal_event_hook(
-            self.state.runtime.profile,
-            request_source.clone(),
-            terminal_tracker,
-        );
-        let response = crate::jobs::start_and_wait_process(
-            self.state.clone(),
-            ExecRequest {
-                agent_id: config.agent_id,
-                group,
-                program: args.program,
-                args: args.args,
-                need_confirm: args.need_confirm,
-                confirm_method: None,
-                working_directory: args.working_directory,
-                wait_seconds: args.wait_seconds,
-            },
-            crate::jobs::ManagedJobOptions {
-                terminal_event_hook: Some(terminal_event_hook),
-                ..crate::jobs::ManagedJobOptions::for_source(request_source)
-            },
-        )
-        .await;
-        slim_process_response(response, None)
+        let context = RequestContext::new(self.ingress, "process.exec");
+        let request_source = context.source();
+        let profile = self.state.runtime.profile;
+        local_service::dispatch_process(self.state.clone(), context, None, move |config| {
+            validate_stdio_arguments("process.exec", &arguments)?;
+            let args: ProcessExecArgs = from_value(arguments)?;
+            Ok(local_service::ProcessCall::Exec {
+                request: ExecRequest {
+                    agent_id: config.agent_id.clone(),
+                    group: args.group,
+                    program: args.program,
+                    args: args.args,
+                    need_confirm: args.need_confirm,
+                    confirm_method: None,
+                    working_directory: args.working_directory,
+                    wait_seconds: args.wait_seconds,
+                },
+                terminal_event_hook: Some(managed_terminal_event_hook(
+                    profile,
+                    request_source.clone(),
+                    terminal_tracker,
+                )),
+            })
+        })
+        .await
     }
 
     async fn dispatch_job_get(&self, arguments: Value) -> Result<Value> {
@@ -1138,46 +1134,39 @@ impl AgentMcpServer {
         arguments: Value,
         terminal_tracker: Arc<HumanTerminalTracker>,
     ) -> Result<Value> {
-        let args: ProcessBatchArgs = from_value(arguments)?;
-        let group = match normalize_stdio_group(args.group) {
-            Ok(group) => group,
-            Err(error) => return Ok(error),
-        };
-        let config = self.state.config.read().await.clone();
-        let request_source = self.ingress.source("process.batch");
-        let terminal_event_hook = managed_terminal_event_hook(
-            self.state.runtime.profile,
-            request_source.clone(),
-            terminal_tracker,
-        );
-        let request = BatchExecRequest {
-            agent_id: config.agent_id,
-            group,
-            elements: args
-                .elements
-                .into_iter()
-                .map(|element| ExecElement {
-                    program: element.program,
-                    args: element.args,
-                    working_directory: element.working_directory,
-                })
-                .collect(),
-            need_confirm: args.need_confirm,
-            confirm_method: None,
-            working_directory: args.working_directory,
-            wait_seconds: args.wait_seconds,
-        };
-        match crate::jobs::start_process_batch(
-            self.state.clone(),
-            request,
-            request_source,
-            Some(terminal_event_hook),
-        )
+        let context = RequestContext::new(self.ingress, "process.batch");
+        let request_source = context.source();
+        let profile = self.state.runtime.profile;
+        local_service::dispatch_process(self.state.clone(), context, None, move |config| {
+            validate_stdio_arguments("process.batch", &arguments)?;
+            let args: ProcessBatchArgs = from_value(arguments)?;
+            let request = BatchExecRequest {
+                agent_id: config.agent_id.clone(),
+                group: args.group,
+                elements: args
+                    .elements
+                    .into_iter()
+                    .map(|element| ExecElement {
+                        program: element.program,
+                        args: element.args,
+                        working_directory: element.working_directory,
+                    })
+                    .collect(),
+                need_confirm: args.need_confirm,
+                confirm_method: None,
+                working_directory: args.working_directory,
+                wait_seconds: args.wait_seconds,
+            };
+            Ok(local_service::ProcessCall::Batch {
+                request,
+                terminal_event_hook: Some(managed_terminal_event_hook(
+                    profile,
+                    request_source.clone(),
+                    terminal_tracker,
+                )),
+            })
+        })
         .await
-        {
-            Ok(response) => slim_process_batch_response(response, None),
-            Err(reason) => Ok(structured_error_value("process_batch_rejected", reason)),
-        }
     }
 
     async fn dispatch_job_cancel(&self, arguments: Value) -> Result<Value> {
@@ -2091,15 +2080,6 @@ fn admission_error_value(error: AdmissionError) -> Value {
 
 fn job_error(reason: String) -> Value {
     json!({"error": {"code": reason, "message": reason}})
-}
-
-fn structured_error_value(default_code: &str, message: impl Into<String>) -> Value {
-    json!({
-        "error": {
-            "code": default_code,
-            "message": message.into()
-        }
-    })
 }
 
 fn structured_error_from_reason(default_code: &str, message: impl Into<String>) -> Value {
@@ -3495,8 +3475,8 @@ mod tests {
     use super::*;
     use crate::{
         config::{Config, ToolsetConfig},
-        jobs::SkillLeaseManager,
         skill_installs::InstallManager,
+        skills::SkillLeaseManager,
         state::RuntimeModel,
     };
 

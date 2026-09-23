@@ -539,7 +539,9 @@ mod tests {
     #[tokio::test]
     async fn hub_info_reports_safe_runtime_summary() {
         let state = test_state();
-        let response = routes::build_hub_info_response(&state).await.unwrap();
+        let response = state::projection::build_hub_info_response(&state)
+            .await
+            .unwrap();
         let value = serde_json::to_value(response).unwrap();
         let text = serde_json::to_string(&value).unwrap();
 

@@ -282,11 +282,8 @@ pub(crate) fn paths_match(left: &Path, right: &Path) -> bool {
     if left == right {
         return true;
     }
-    match (
-        exec::expand_pathbuf(left).and_then(|path| exec::canonicalize_existing_or_parent(&path)),
-        exec::expand_pathbuf(right).and_then(|path| exec::canonicalize_existing_or_parent(&path)),
-    ) {
-        (Ok(left), Ok(right)) => left == right,
-        _ => false,
+    match exec::normalize_roots([left, right].into_iter()) {
+        Ok(normalized) => normalized.len() == 1,
+        Err(_) => false,
     }
 }

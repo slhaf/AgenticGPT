@@ -14,6 +14,8 @@ use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
+use tokio::sync::{Mutex, OwnedRwLockReadGuard, RwLock};
 use uuid::Uuid;
 
 use crate::{config::Config, exec, jobs, state::AppState};
@@ -22,6 +24,45 @@ const DEFAULT_LIMIT: usize = 20;
 const MAX_LIMIT: usize = 100;
 const BUILTIN_INSTALLER_ID: &str = "skill-installer";
 const MAX_RESOURCE_BYTES: u64 = 1024 * 1024;
+
+#[derive(Clone, Default)]
+pub(crate) struct SkillLeaseManager {
+    locks: Arc<Mutex<std::collections::HashMap<String, Arc<RwLock<()>>>>>,
+}
+
+pub(crate) struct SkillLease {
+    _guard: OwnedRwLockReadGuard<()>,
+}
+
+impl SkillLeaseManager {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    async fn lock_for(&self, id: &str) -> Arc<RwLock<()>> {
+        let mut locks = self.locks.lock().await;
+        locks
+            .entry(id.to_string())
+            .or_insert_with(|| Arc::new(RwLock::new(())))
+            .clone()
+    }
+
+    pub(crate) async fn try_shared(&self, id: &str) -> Option<SkillLease> {
+        self.lock_for(id)
+            .await
+            .try_read_owned()
+            .ok()
+            .map(|guard| SkillLease { _guard: guard })
+    }
+
+    pub(crate) async fn acquire_exclusive(
+        &self,
+        id: &str,
+        deadline: tokio::time::Duration,
+    ) -> Result<tokio::sync::OwnedRwLockWriteGuard<()>, tokio::time::error::Elapsed> {
+        tokio::time::timeout(deadline, self.lock_for(id).await.write_owned()).await
+    }
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -725,6 +766,39 @@ pub(crate) fn skills_root(config: &Config) -> PathBuf {
     config.workspace_root.join("skills")
 }
 
+pub(crate) fn package_sha256(config: &Config, id: &str) -> Result<String> {
+    let root = skills_root(config).join(id);
+    let mut files = Vec::new();
+    collect_files(&root, &root, &mut files)?;
+    files.sort();
+    let mut digest = Sha256::new();
+    for file in files {
+        digest.update(file.as_bytes());
+        digest.update(fs::read(root.join(&file))?);
+    }
+    let digest = digest.finalize();
+    Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+fn collect_files(base: &Path, current: &Path, files: &mut Vec<String>) -> Result<()> {
+    for entry in fs::read_dir(current)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            collect_files(base, &entry.path(), files)?;
+        } else if entry.file_type()?.is_file() {
+            files.push(
+                entry
+                    .path()
+                    .strip_prefix(base)
+                    .map_err(|_| anyhow!("package_invalid"))?
+                    .to_string_lossy()
+                    .replace('\\', "/"),
+            );
+        }
+    }
+    Ok(())
+}
+
 pub(crate) async fn is_active(state: &AppState, id: &str) -> Result<bool> {
     let config = state.config.read().await.clone();
     let active = read_active_file(&config, &state.private_state.active_skills)?;
@@ -768,7 +842,7 @@ mod tests {
             mcp_concurrency: Arc::new(crate::jobs::McpConcurrency::new()),
             room_repository_writes: Arc::new(Mutex::new(())),
             skills_writes: Arc::new(Mutex::new(())),
-            skill_leases: Arc::new(crate::jobs::SkillLeaseManager::new()),
+            skill_leases: Arc::new(crate::skills::SkillLeaseManager::new()),
             skill_installs: Arc::new(crate::skill_installs::InstallManager::new()),
         }
     }

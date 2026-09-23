@@ -1,8 +1,12 @@
-use agentic_gpt_protocol::{normalize_job_group, HubCommand, JobInfo};
+use agentic_gpt_protocol::{
+    normalize_job_group, BatchExecRequest, ExecRequest, HubCommand, JobInfo,
+};
 use anyhow::Result;
 
 use crate::{
-    bootstrap, jobs, mcp, notify,
+    bootstrap,
+    config::Config,
+    jobs, mcp, notify,
     operation::{self, AdmissionError, RequestContext},
     operation_result::{
         slim_cancel_response, slim_job_get_response, slim_job_list_response,
@@ -11,6 +15,74 @@ use crate::{
     },
     room_maintenance, room_reads, skills, tmux, AppState,
 };
+
+pub(crate) enum ProcessCall {
+    Exec {
+        request: ExecRequest,
+        terminal_event_hook: Option<jobs::TerminalEventHook>,
+    },
+    Batch {
+        request: BatchExecRequest,
+        terminal_event_hook: Option<jobs::TerminalEventHook>,
+    },
+}
+
+pub(crate) async fn dispatch_process<F>(
+    state: AppState,
+    context: RequestContext<'_>,
+    mut snapshots: Option<&mut Vec<JobInfo>>,
+    build: F,
+) -> Result<serde_json::Value>
+where
+    F: FnOnce(&Config) -> Result<ProcessCall>,
+{
+    let call = {
+        let config = state.config.read().await;
+        if let Err(error) = operation::authorize(state.runtime, &config, context) {
+            return Ok(admission_error_value(error));
+        }
+        build(&config)?
+    };
+    let request_source = context.source();
+    match call {
+        ProcessCall::Exec {
+            mut request,
+            terminal_event_hook,
+        } => {
+            request.group = match normalize_group(request.group) {
+                Ok(group) => group,
+                Err(error) => return Ok(error),
+            };
+            let response = jobs::start_and_wait_process(
+                state,
+                request,
+                jobs::ManagedJobOptions {
+                    terminal_event_hook,
+                    ..jobs::ManagedJobOptions::for_source(request_source)
+                },
+            )
+            .await;
+            slim_process_response(response, snapshots.as_deref_mut())
+        }
+        ProcessCall::Batch {
+            mut request,
+            terminal_event_hook,
+        } => {
+            request.group = match normalize_group(request.group) {
+                Ok(group) => group,
+                Err(error) => return Ok(error),
+            };
+            match jobs::start_process_batch(state, request, request_source, terminal_event_hook)
+                .await
+            {
+                Ok(response) => slim_process_batch_response(response, snapshots.as_deref_mut()),
+                Err(reason) => Ok(serde_json::json!({
+                    "error": {"code": "process_batch_rejected", "message": reason}
+                })),
+            }
+        }
+    }
+}
 
 /// Value-returning local operation layer shared by transport adapters.
 ///
@@ -25,14 +97,36 @@ pub(crate) async fn dispatch(
     context: RequestContext<'_>,
     snapshots: Option<&mut Vec<JobInfo>>,
 ) -> Result<serde_json::Value> {
-    let admission = {
-        let config = state.config.read().await;
-        operation::authorize(state.runtime, &config, context)
-    };
-    if let Err(error) = admission {
-        return Ok(admission_error_value(error));
+    match command {
+        HubCommand::Exec { payload, .. } => {
+            dispatch_process(state, context, snapshots, move |_| {
+                Ok(ProcessCall::Exec {
+                    request: payload,
+                    terminal_event_hook: None,
+                })
+            })
+            .await
+        }
+        HubCommand::ProcessBatch { payload, .. } => {
+            dispatch_process(state, context, snapshots, move |_| {
+                Ok(ProcessCall::Batch {
+                    request: payload,
+                    terminal_event_hook: None,
+                })
+            })
+            .await
+        }
+        command => {
+            let admission = {
+                let config = state.config.read().await;
+                operation::authorize(state.runtime, &config, context)
+            };
+            if let Err(error) = admission {
+                return Ok(admission_error_value(error));
+            }
+            dispatch_inner(state, command, context, snapshots).await
+        }
     }
-    dispatch_inner(state, command, context, snapshots).await
 }
 
 fn admission_error_value(error: AdmissionError) -> serde_json::Value {
@@ -51,34 +145,8 @@ async fn dispatch_inner(
     mut snapshots: Option<&mut Vec<JobInfo>>,
 ) -> Result<serde_json::Value> {
     match command {
-        HubCommand::Exec { mut payload, .. } => {
-            payload.group = match normalize_hub_group(payload.group) {
-                Ok(group) => group,
-                Err(error) => return Ok(error),
-            };
-            let response = jobs::start_and_wait_process(
-                state,
-                payload,
-                jobs::ManagedJobOptions::for_source(context.source()),
-            )
-            .await;
-            slim_process_response(response, snapshots.as_deref_mut())
-        }
-        HubCommand::ProcessBatch { mut payload, .. } => {
-            payload.group = match normalize_hub_group(payload.group) {
-                Ok(group) => group,
-                Err(error) => return Ok(error),
-            };
-            let request_source = context.source();
-            match jobs::start_process_batch(state, payload, request_source, None).await {
-                Ok(response) => slim_process_batch_response(response, snapshots.as_deref_mut()),
-                Err(reason) => Ok(serde_json::json!({
-                    "error": {"code": "process_batch_rejected", "message": reason}
-                })),
-            }
-        }
         HubCommand::JobList { mut payload, .. } => {
-            payload.group = match normalize_hub_group(payload.group) {
+            payload.group = match normalize_group(payload.group) {
                 Ok(group) => group,
                 Err(error) => return Ok(error),
             };
@@ -132,7 +200,7 @@ async fn dispatch_inner(
             })),
         },
         HubCommand::McpCallTool { mut payload, .. } => {
-            payload.group = match normalize_hub_group(payload.group) {
+            payload.group = match normalize_group(payload.group) {
                 Ok(group) => group,
                 Err(error) => return Ok(error),
             };
@@ -145,7 +213,7 @@ async fn dispatch_inner(
             }
         }
         HubCommand::McpBatch { mut payload, .. } => {
-            payload.group = match normalize_hub_group(payload.group) {
+            payload.group = match normalize_group(payload.group) {
                 Ok(group) => group,
                 Err(error) => return Ok(error),
             };
@@ -233,7 +301,7 @@ async fn dispatch_inner(
             map_install_result(state.skill_installs.cancel(&state, payload).await)
         }
         HubCommand::SkillsRun { mut payload, .. } => {
-            payload.group = match normalize_hub_group(payload.group) {
+            payload.group = match normalize_group(payload.group) {
                 Ok(group) => group,
                 Err(error) => return Ok(error),
             };
@@ -243,10 +311,13 @@ async fn dispatch_inner(
                 Err(error) => Ok(skills::skill_run_command_error(error)),
             }
         }
+        HubCommand::Exec { .. } | HubCommand::ProcessBatch { .. } => {
+            unreachable!("process commands are dispatched before dispatch_inner")
+        }
     }
 }
 
-fn normalize_hub_group(
+fn normalize_group(
     group: Option<String>,
 ) -> std::result::Result<Option<String>, serde_json::Value> {
     normalize_job_group(group.as_deref()).map_err(|error| {

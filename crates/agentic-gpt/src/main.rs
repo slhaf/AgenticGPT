@@ -572,7 +572,7 @@ fn build_app_state(
         mcp_concurrency: Arc::new(jobs::McpConcurrency::new()),
         room_repository_writes: Arc::new(Mutex::new(())),
         skills_writes: Arc::new(Mutex::new(())),
-        skill_leases: Arc::new(jobs::SkillLeaseManager::new()),
+        skill_leases: Arc::new(skills::SkillLeaseManager::new()),
         skill_installs: Arc::new(skill_installs::InstallManager::with_concurrency(
             skill_installs_root,
             max_concurrent_skill_installs,
@@ -1369,7 +1369,7 @@ mod tests {
                 mcp_concurrency: Arc::new(crate::jobs::McpConcurrency::new()),
                 room_repository_writes: Arc::new(Mutex::new(())),
                 skills_writes: Arc::new(Mutex::new(())),
-                skill_leases: Arc::new(jobs::SkillLeaseManager::new()),
+                skill_leases: Arc::new(skills::SkillLeaseManager::new()),
                 skill_installs: Arc::new(skill_installs::InstallManager::new()),
             },
             rx,

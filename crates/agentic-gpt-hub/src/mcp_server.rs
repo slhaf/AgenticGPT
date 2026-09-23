@@ -1,16 +1,15 @@
 use agentic_gpt_protocol::{
     normalize_job_group, BatchExecRequest, BootstrapReadRequest, ExecElement, ExecRequest,
-    HubCommand, JobCancelRequest, JobGetRequest, JobInfo, JobKind, JobListItem, JobListRequest,
-    JobState, McpBatchCall, McpBatchMode, McpBatchRequest, McpCallToolRequest, McpListToolsRequest,
-    NotificationAction, RoomDiaryActiveRequest, RoomDiaryLayer, RoomDiaryReadRequest,
-    RoomMaintenanceExecutionMode, RoomMaintenanceRequestItem, RoomMaintenanceSlot,
-    RoomMaintenanceStatusRequest, RoomMaintenanceSubmitRequest, RoomNotebookReadRequest,
-    RoomNotebookRecentRequest, RoomNotebookSearchRequest, RoomStateListRequest,
-    RoomStateReadRequest, SkillActivationRequest, SkillInstallCancelRequest, SkillInstallFile,
-    SkillInstallGetRequest, SkillInstallRequest, SkillInstallSource, SkillReadRequest,
-    SkillRunRequest, SkillSearchRequest, TmuxCapturePaneRequest, TmuxCloseSessionRequest,
-    TmuxCreateSessionRequest, TmuxExecRequest, TmuxListPanesRequest, TmuxPasteTextRequest,
-    UserNotifySendRequest,
+    HubCommand, JobCancelRequest, JobGetRequest, JobKind, JobListRequest, JobState, McpBatchCall,
+    McpBatchMode, McpBatchRequest, McpCallToolRequest, McpListToolsRequest, NotificationAction,
+    RoomDiaryActiveRequest, RoomDiaryLayer, RoomDiaryReadRequest, RoomMaintenanceExecutionMode,
+    RoomMaintenanceRequestItem, RoomMaintenanceSlot, RoomMaintenanceStatusRequest,
+    RoomMaintenanceSubmitRequest, RoomNotebookReadRequest, RoomNotebookRecentRequest,
+    RoomNotebookSearchRequest, RoomStateListRequest, RoomStateReadRequest, SkillActivationRequest,
+    SkillInstallCancelRequest, SkillInstallFile, SkillInstallGetRequest, SkillInstallRequest,
+    SkillInstallSource, SkillReadRequest, SkillRunRequest, SkillSearchRequest,
+    TmuxCapturePaneRequest, TmuxCloseSessionRequest, TmuxCreateSessionRequest, TmuxExecRequest,
+    TmuxListPanesRequest, TmuxPasteTextRequest, UserNotifySendRequest,
 };
 use axum::extract::{Request, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -32,7 +31,13 @@ use crate::notify::{notification_channels, send_user_notification, NotifyRouteEr
 use crate::registry::{registry_entries, registry_entry};
 use crate::room::{request_active_room, RoomRouteError};
 use crate::runs;
-use crate::state::{HubState, McpProfile};
+use crate::state::{
+    projection::{
+        add_cache_metadata, build_hub_info_response, filter_cached_jobs, job_list_item,
+        live_job_value,
+    },
+    HubState, McpProfile,
+};
 use crate::utils::random_id;
 use crate::{MAX_WAIT_SECONDS, REQUEST_TIMEOUT_SECS};
 const ROOM_TRANSPORT_MARGIN_SECS: u64 = 5;
@@ -88,8 +93,17 @@ impl AgenticMcpServer {
         }
     }
 
-    fn allows_tool(&self, name: &str) -> bool {
+    fn profile_allows_tool(&self, name: &str) -> bool {
         self.profile == McpProfile::Full || COORDINATOR_TOOLS.contains(&name)
+    }
+
+    fn generated_tool(&self, name: &str) -> bool {
+        self.tool_router.get(name).is_some()
+    }
+
+    // Profile filtering narrows the generated router; annotations only describe callable tools.
+    fn allows_tool(&self, name: &str) -> bool {
+        self.profile_allows_tool(name) && self.generated_tool(name)
     }
 
     fn instructions(&self) -> &'static str {
@@ -267,7 +281,10 @@ async fn call_app_tool(server: &AgenticMcpServer, params: Value) -> Result<Value
         .and_then(Value::as_str)
         .ok_or_else(|| "tools/call params.name is required".to_string())?;
     if !server.allows_tool(name) {
-        return Err(format!("tool_unavailable_for_profile: {name}"));
+        if !server.profile_allows_tool(name) {
+            return Err(format!("tool_unavailable_for_profile: {name}"));
+        }
+        return Err(format!("Unknown tool: {name}"));
     }
     let arguments = object
         .get("arguments")
@@ -490,26 +507,7 @@ async fn snapshot_job_list_filtered(
         });
     }
     let mut snapshots = state.job_cache.snapshots(agent_id).await;
-    snapshots.retain(|snapshot| {
-        request
-            .group
-            .as_ref()
-            .is_none_or(|group| snapshot.job.group.as_deref() == Some(group.as_str()))
-    });
-    snapshots.retain(|snapshot| request.kind.is_none_or(|kind| snapshot.job.kind == kind));
-    snapshots.retain(|snapshot| {
-        request
-            .state
-            .is_none_or(|state| snapshot.job.state == state)
-    });
-    snapshots.sort_by(|left, right| {
-        right
-            .job
-            .created_at
-            .cmp(&left.job.created_at)
-            .then_with(|| right.job.job_id.cmp(&left.job.job_id))
-    });
-    snapshots.truncate(request.effective_limit());
+    filter_cached_jobs(&mut snapshots, request);
     let mut value = json!({
         "jobs": snapshots
             .iter()
@@ -519,59 +517,6 @@ async fn snapshot_job_list_filtered(
     });
     add_cache_metadata(&mut value, &snapshots);
     value
-}
-
-fn job_list_item(job: JobInfo) -> JobListItem {
-    JobListItem {
-        job_id: job.job_id,
-        group: job.group,
-        kind: job.kind,
-        state: job.state,
-        created_at: job.created_at,
-        started_at: job.started_at,
-        finished_at: job.finished_at,
-    }
-}
-
-fn live_job_value(mut value: Value) -> Value {
-    if let Some(object) = value.as_object_mut() {
-        object.insert("freshness".to_string(), json!("live"));
-        object.insert(
-            "observedAt".to_string(),
-            json!(chrono::Utc::now().to_rfc3339()),
-        );
-    }
-    value
-}
-
-fn add_cache_metadata(value: &mut Value, snapshots: &[crate::state::JobCacheSnapshot]) {
-    let freshness = if snapshots.is_empty() {
-        crate::state::JobFreshness::Unknown
-    } else if snapshots
-        .iter()
-        .any(|snapshot| snapshot.freshness == crate::state::JobFreshness::Unknown)
-    {
-        crate::state::JobFreshness::Unknown
-    } else if snapshots
-        .iter()
-        .any(|snapshot| snapshot.freshness == crate::state::JobFreshness::Stale)
-    {
-        crate::state::JobFreshness::Stale
-    } else {
-        crate::state::JobFreshness::Cached
-    };
-    if let Some(object) = value.as_object_mut() {
-        object.insert(
-            "freshness".to_string(),
-            Value::String(freshness.label().to_string()),
-        );
-        if let Some(observed_at) = snapshots.iter().map(|snapshot| snapshot.observed_at).max() {
-            object.insert(
-                "observedAt".to_string(),
-                Value::String(observed_at.to_rfc3339()),
-            );
-        }
-    }
 }
 
 async fn cached_job_summary(state: &HubState, agent_id: &str, job_id: &str) -> Option<Value> {
@@ -687,7 +632,7 @@ impl AgenticMcpServer {
         description = "Inspect Hub runtime health and bounded capacity summaries; read-only."
     )]
     async fn hub_info(&self) -> Result<CallToolResult, ErrorData> {
-        let info = crate::routes::build_hub_info_response(&self.state)
+        let info = build_hub_info_response(&self.state)
             .await
             .map_err(|error| mcp_internal_error("db_error", error.to_string()))?;
         Ok(ok_json(serde_json::to_value(info).map_err(|error| {

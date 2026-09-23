@@ -595,7 +595,7 @@ impl InstallManager {
                 warnings: detail.warnings,
             },
             source: record.status.source.clone(),
-            package_sha256: package_sha256(&config, &record.request.id)?,
+            package_sha256: skills::package_sha256(&config, &record.request.id)?,
         };
         let _ = fs::remove_dir_all(&staging);
         remove_commit_journal(&self.records_root, install_id);
@@ -1603,38 +1603,6 @@ fn validate_install_id(install_id: &str) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn package_sha256(config: &crate::config::Config, id: &str) -> Result<String> {
-    let root = skills::skills_root(config).join(id);
-    let mut files = Vec::new();
-    collect_files(&root, &root, &mut files)?;
-    files.sort();
-    let mut digest = Sha256::new();
-    for file in files {
-        digest.update(file.as_bytes());
-        digest.update(fs::read(root.join(&file))?);
-    }
-    Ok(format_digest(digest.finalize()))
-}
-
-fn collect_files(base: &Path, current: &Path, files: &mut Vec<String>) -> Result<()> {
-    for entry in fs::read_dir(current)? {
-        let entry = entry?;
-        if entry.file_type()?.is_dir() {
-            collect_files(base, &entry.path(), files)?;
-        } else if entry.file_type()?.is_file() {
-            files.push(
-                entry
-                    .path()
-                    .strip_prefix(base)
-                    .map_err(|_| anyhow!("package_invalid"))?
-                    .to_string_lossy()
-                    .replace('\\', "/"),
-            );
-        }
-    }
-    Ok(())
-}
-
 fn normalize_package_path(path: &str) -> Result<PathBuf> {
     if path.is_empty() || path.len() > MAX_PATH_BYTES || path.contains('\0') || path.contains('\\')
     {
@@ -1868,7 +1836,7 @@ mod tests {
             mcp_concurrency: Arc::new(crate::jobs::McpConcurrency::new()),
             room_repository_writes: Arc::new(Mutex::new(())),
             skills_writes: Arc::new(Mutex::new(())),
-            skill_leases: Arc::new(crate::jobs::SkillLeaseManager::new()),
+            skill_leases: Arc::new(crate::skills::SkillLeaseManager::new()),
             skill_installs: Arc::new(InstallManager::for_test(
                 private_state.skill_installs.clone(),
             )),

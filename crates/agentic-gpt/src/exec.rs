@@ -155,7 +155,29 @@ struct ExpandedPathPolicy {
     read_only_roots: Vec<PathBuf>,
     deny_roots: Vec<PathBuf>,
 }
+#[derive(Debug)]
+pub(crate) enum PathRootNormalizationError {
+    Expansion(anyhow::Error),
+    Resolution(anyhow::Error),
+}
 
+impl std::fmt::Display for PathRootNormalizationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Expansion(error) | Self::Resolution(error) => {
+                std::fmt::Display::fmt(error, formatter)
+            }
+        }
+    }
+}
+
+impl std::error::Error for PathRootNormalizationError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Expansion(error) | Self::Resolution(error) => Some(error.as_ref()),
+        }
+    }
+}
 fn expanded_path_policy(config: &Config) -> Result<ExpandedPathPolicy> {
     Ok(ExpandedPathPolicy {
         write_roots: normalize_roots(
@@ -163,18 +185,27 @@ fn expanded_path_policy(config: &Config) -> Result<ExpandedPathPolicy> {
                 .path_policy
                 .write_roots
                 .iter()
-                .chain(std::iter::once(&config.workspace_root)),
+                .map(PathBuf::as_path)
+                .chain(std::iter::once(config.workspace_root.as_path())),
         )?,
-        read_only_roots: normalize_roots(config.path_policy.read_only_roots.iter())?,
-        deny_roots: normalize_roots(config.path_policy.deny_roots.iter())?,
+        read_only_roots: normalize_roots(
+            config
+                .path_policy
+                .read_only_roots
+                .iter()
+                .map(PathBuf::as_path),
+        )?,
+        deny_roots: normalize_roots(config.path_policy.deny_roots.iter().map(PathBuf::as_path))?,
     })
 }
-
-fn normalize_roots<'a>(roots: impl Iterator<Item = &'a PathBuf>) -> Result<Vec<PathBuf>> {
+pub(crate) fn normalize_roots<'a>(
+    roots: impl Iterator<Item = &'a Path>,
+) -> std::result::Result<Vec<PathBuf>, PathRootNormalizationError> {
     let mut normalized = Vec::new();
     for root in roots {
-        let expanded = expand_pathbuf(root)?;
-        let normalized_root = canonicalize_existing_or_parent(&expanded)?;
+        let expanded = expand_pathbuf(root).map_err(PathRootNormalizationError::Expansion)?;
+        let normalized_root = canonicalize_existing_or_parent(&expanded)
+            .map_err(PathRootNormalizationError::Resolution)?;
         if !normalized
             .iter()
             .any(|existing| existing == &normalized_root)

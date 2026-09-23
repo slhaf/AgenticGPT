@@ -15,7 +15,7 @@ use rmcp::{model::RequestId, service::Peer, RoleClient};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Child;
-use tokio::sync::{Mutex, OwnedRwLockReadGuard, OwnedSemaphorePermit, RwLock, Semaphore};
+use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 use tokio::time::{sleep, Instant};
 
 use crate::{
@@ -23,6 +23,7 @@ use crate::{
     config::Config,
     confirmation, exec,
     policy::{policy_decision_for_profile, PolicyDecision},
+    skills::{package_sha256, SkillLease},
     utils::{command_preview, JOB_TAIL_MAX},
     AppState,
 };
@@ -245,7 +246,7 @@ pub(crate) struct ManagedMcpRegistration {
 }
 
 struct ManagedAuditContext {
-    config: Config,
+    config: Arc<Config>,
     request_source: String,
     need_confirm: bool,
     policy_decision: String,
@@ -266,46 +267,6 @@ struct ManagedAuditContext {
     config_revision: Option<String>,
     terminal_event_hook: Option<TerminalEventHook>,
 }
-
-#[derive(Clone, Default)]
-pub(crate) struct SkillLeaseManager {
-    locks: Arc<Mutex<std::collections::HashMap<String, Arc<RwLock<()>>>>>,
-}
-
-pub(crate) struct SkillLease {
-    _guard: OwnedRwLockReadGuard<()>,
-}
-
-impl SkillLeaseManager {
-    pub(crate) fn new() -> Self {
-        Self::default()
-    }
-
-    async fn lock_for(&self, id: &str) -> Arc<RwLock<()>> {
-        let mut locks = self.locks.lock().await;
-        locks
-            .entry(id.to_string())
-            .or_insert_with(|| Arc::new(RwLock::new(())))
-            .clone()
-    }
-
-    pub(crate) async fn try_shared(&self, id: &str) -> Option<SkillLease> {
-        self.lock_for(id)
-            .await
-            .try_read_owned()
-            .ok()
-            .map(|guard| SkillLease { _guard: guard })
-    }
-
-    pub(crate) async fn acquire_exclusive(
-        &self,
-        id: &str,
-        deadline: tokio::time::Duration,
-    ) -> Result<tokio::sync::OwnedRwLockWriteGuard<()>, tokio::time::error::Elapsed> {
-        tokio::time::timeout(deadline, self.lock_for(id).await.write_owned()).await
-    }
-}
-
 #[derive(Debug, Default)]
 pub(crate) struct TailBuffer {
     data: std::collections::VecDeque<u8>,
@@ -342,7 +303,8 @@ pub(crate) async fn start_managed_process_job(
     request: ExecRequest,
     options: ManagedJobOptions,
 ) -> JobInfo {
-    start_process_job_inner(state, request, None, options, None, None).await
+    let config = Arc::new(state.config.read().await.clone());
+    start_process_job_inner(state, request, config, None, options, None, None).await
 }
 
 #[cfg(test)]
@@ -363,18 +325,19 @@ pub(crate) async fn start_skill_job_with_hook_and_source(
     request_source: &str,
     terminal_event_hook: Option<TerminalEventHook>,
 ) -> JobInfo {
-    let config = state.config.read().await.clone();
+    let config = Arc::new(state.config.read().await.clone());
     let lease = state.skill_leases.try_shared(skill_id).await;
     let lease_available = lease.is_some();
     start_process_job_inner(
         state,
         request,
+        config.clone(),
         lease,
         ManagedJobOptions {
             request_source: request_source.to_string(),
             skill_id: Some(skill_id.to_string()),
             skill_path: Some(skill_path.to_string()),
-            installed_digest: crate::skill_installs::package_sha256(&config, skill_id).ok(),
+            installed_digest: package_sha256(&config, skill_id).ok(),
             terminal_event_hook,
         },
         None,
@@ -388,7 +351,7 @@ pub(crate) async fn register_mcp_job(
     spec: ManagedMcpSpec,
 ) -> Result<ManagedMcpRegistration, String> {
     let group = validated_group(spec.group.as_deref())?;
-    let config = state.config.read().await.clone();
+    let config = Arc::new(state.config.read().await.clone());
     let job_id = state.new_job_id();
     let now = Utc::now();
     let info = JobInfo {
@@ -491,7 +454,7 @@ pub(crate) async fn register_mcp_batch(
     for spec in &specs {
         validated_group(spec.group.as_deref())?;
     }
-    let config = state.config.read().await.clone();
+    let config = Arc::new(state.config.read().await.clone());
     let requested = specs.len();
     let limit = resolved_job_limit(&config);
     let now = Utc::now();
@@ -868,7 +831,7 @@ pub(crate) async fn start_process_batch(
             jobs: Vec::new(),
         });
     }
-    let config = state.config.read().await.clone();
+    let config = Arc::new(state.config.read().await.clone());
     let mut prepared = Vec::with_capacity(request.elements.len());
     for (index, element) in request.elements.into_iter().enumerate() {
         let working_directory = element
@@ -945,7 +908,7 @@ pub(crate) async fn start_process_batch(
             terminal_event_hook: terminal_event_hook.clone(),
         })
         .collect::<Vec<_>>();
-    let mut jobs = start_prepared_managed_batch(state.clone(), specs).await?;
+    let mut jobs = start_prepared_managed_batch(state.clone(), config, specs).await?;
     let deadline = Instant::now() + std::time::Duration::from_secs(wait_seconds);
     loop {
         let mut all_terminal = true;
@@ -977,8 +940,11 @@ pub(crate) async fn start_process_batch(
     })
 }
 
+/// `config` is captured by the caller during batch preflight and remains the
+/// effective configuration for admission and every queued worker.
 pub(crate) async fn start_prepared_managed_batch(
     state: AppState,
+    config: Arc<Config>,
     specs: Vec<ManagedProcessSpec>,
 ) -> Result<Vec<JobInfo>, String> {
     if specs.is_empty() {
@@ -987,7 +953,6 @@ pub(crate) async fn start_prepared_managed_batch(
     for spec in &specs {
         validated_group(spec.request.group.as_deref())?;
     }
-    let config = state.config.read().await.clone();
     let requested = specs.len();
     let limit = resolved_job_limit(&config);
     let batch_concurrency = config.limits.max_concurrent_tasks.max(1).min(requested);
@@ -1082,6 +1047,7 @@ pub(crate) async fn start_prepared_managed_batch(
         let runner_state = state.clone();
         let runner_job_id = info.job_id.clone();
         let runner_slots = batch_slots.clone();
+        let runner_config = config.clone();
         tokio::spawn(async move {
             let permit = runner_slots
                 .acquire_owned()
@@ -1091,6 +1057,7 @@ pub(crate) async fn start_prepared_managed_batch(
             run_async_job(
                 runner_state.clone(),
                 runner_job_id.clone(),
+                runner_config,
                 spec.request,
                 stdout,
                 stderr,
@@ -1109,12 +1076,12 @@ pub(crate) async fn start_prepared_managed_batch(
 async fn start_process_job_inner(
     state: AppState,
     request: ExecRequest,
+    config: Arc<Config>,
     skill_lease: Option<SkillLease>,
     options: ManagedJobOptions,
     prepared: Option<(std::path::PathBuf, PolicyDecision)>,
     initial_terminal: Option<(JobState, String)>,
 ) -> JobInfo {
-    let config = state.config.read().await.clone();
     let job_id = state.new_job_id();
     let now = Utc::now();
     let group_error = validated_group(request.group.as_deref()).err();
@@ -1216,6 +1183,7 @@ async fn start_process_job_inner(
     tokio::spawn(run_async_job(
         state.clone(),
         job_id.clone(),
+        config,
         request,
         stdout,
         stderr,
@@ -1287,10 +1255,12 @@ fn process_runtime(skill_lease: Option<SkillLease>) -> ManagedProcessRuntime {
     }
 }
 
+/// `config` is the admission snapshot; workers must not reload live state here.
 #[allow(clippy::too_many_arguments)]
 async fn run_async_job(
     state: AppState,
     job_id: String,
+    config: Arc<Config>,
     request: ExecRequest,
     stdout: Arc<Mutex<TailBuffer>>,
     stderr: Arc<Mutex<TailBuffer>>,
@@ -1298,7 +1268,6 @@ async fn run_async_job(
     prepared: Option<(std::path::PathBuf, PolicyDecision)>,
     prepared_confirmation_result: Option<String>,
 ) {
-    let config = state.config.read().await.clone();
     let (working_directory, decision) = if let Some(prepared) = prepared {
         prepared
     } else {
@@ -2191,7 +2160,7 @@ mod tests {
             mcp_concurrency: Arc::new(crate::jobs::McpConcurrency::new()),
             room_repository_writes: Arc::new(Mutex::new(())),
             skills_writes: Arc::new(Mutex::new(())),
-            skill_leases: Arc::new(SkillLeaseManager::new()),
+            skill_leases: Arc::new(crate::skills::SkillLeaseManager::new()),
             skill_installs: Arc::new(crate::skill_installs::InstallManager::new()),
         };
         (state, workspace)
@@ -2357,6 +2326,28 @@ mod tests {
         assert_eq!(second.state, JobState::Completed);
         assert_eq!(second.stdout_tail, "done");
     }
+    #[tokio::test(flavor = "current_thread")]
+    async fn admitted_process_keeps_policy_snapshot_across_reload() {
+        let (state, workspace) = test_state(1).await;
+        let mut request = exec_request("printf", &workspace);
+        request.args = vec!["admitted".to_string()];
+        let admitted = start_process_job(state.clone(), request).await;
+        assert!(admitted.started_at.is_none());
+
+        state
+            .config
+            .write()
+            .await
+            .policy
+            .deny
+            .push(crate::config::Rule {
+                program: "printf".to_string(),
+                args_prefix: Vec::new(),
+            });
+        let finished = wait_terminal(&state, admitted).await;
+        assert_eq!(finished.state, JobState::Completed);
+        assert_eq!(finished.stdout_tail, "admitted");
+    }
 
     #[tokio::test]
     async fn process_batch_admission_failure_is_atomic_before_spawn() {
@@ -2383,9 +2374,10 @@ mod tests {
                 terminal_event_hook: None,
             },
         ];
+        let config = Arc::new(state.config.read().await.clone());
         install_process_batch_admission_failure_trigger(&state);
 
-        let error = start_prepared_managed_batch(state.clone(), specs)
+        let error = start_prepared_managed_batch(state.clone(), config.clone(), specs)
             .await
             .unwrap_err();
         assert!(error.starts_with("history_admission_failed:"));
@@ -2396,6 +2388,7 @@ mod tests {
         remove_batch_admission_failure_triggers(&state);
         let retry = start_prepared_managed_batch(
             state.clone(),
+            config,
             vec![
                 ManagedProcessSpec {
                     request: exec_request("true", &workspace),
@@ -2775,7 +2768,7 @@ mod tests {
 
     #[tokio::test]
     async fn skill_leases_still_block_updates() {
-        let manager = SkillLeaseManager::new();
+        let manager = crate::skills::SkillLeaseManager::new();
         let shared = manager.try_shared("demo").await.unwrap();
         assert!(manager
             .acquire_exclusive("demo", Duration::from_millis(20))
