@@ -1,9 +1,10 @@
 use agentic_gpt_protocol::{
-    AgentRole, BootstrapReadRequest, HubCommand, NotebookAppendRequest, NotebookCurrentRequest,
-    NotebookRecentRequest, NotebookRemoveRequest, NotebookSearchRequest,
-    NotebookSelectExactRequest, NotebookUpdateRequest, SkillActivationRequest,
-    SkillInstallCancelRequest, SkillInstallGetRequest, SkillInstallRequest, SkillReadRequest,
-    SkillRunRequest, SkillSearchRequest,
+    AgentRole, BootstrapReadRequest, HubCommand, RoomDiaryActiveRequest, RoomDiaryReadRequest,
+    RoomMaintenanceStatusRequest, RoomMaintenanceSubmitRequest, RoomNotebookReadRequest,
+    RoomNotebookRecentRequest, RoomNotebookSearchRequest, RoomStateListRequest,
+    RoomStateReadRequest, SkillActivationRequest, SkillInstallCancelRequest,
+    SkillInstallGetRequest, SkillInstallRequest, SkillReadRequest, SkillRunRequest,
+    SkillSearchRequest,
 };
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
@@ -16,6 +17,8 @@ use crate::routes::{api_error, require_action_auth};
 use crate::state::HubState;
 use crate::utils::random_id;
 use crate::REQUEST_TIMEOUT_SECS;
+
+const ROOM_TRANSPORT_MARGIN_SECS: u64 = 5;
 
 #[derive(Clone, Debug)]
 pub(crate) struct ActiveRoomConnection {
@@ -30,19 +33,38 @@ pub(crate) enum RoomRouteError {
     Timeout(String),
 }
 
-pub(crate) async fn room_notebook_append(
+pub(crate) async fn room_diary_active(
     State(state): State<HubState>,
     headers: HeaderMap,
-    Json(payload): Json<NotebookAppendRequest>,
+    Json(payload): Json<RoomDiaryActiveRequest>,
 ) -> Response {
     forward_room_command(
         state,
         headers,
-        HubCommand::RoomNotebookAppend {
+        HubCommand::RoomDiaryActive {
             request_id: random_id("req"),
             payload,
         },
-        "room_notebook_append_timeout",
+        "room_diary_active_timeout",
+        REQUEST_TIMEOUT_SECS,
+    )
+    .await
+}
+
+pub(crate) async fn room_diary_read(
+    State(state): State<HubState>,
+    headers: HeaderMap,
+    Json(payload): Json<RoomDiaryReadRequest>,
+) -> Response {
+    forward_room_command(
+        state,
+        headers,
+        HubCommand::RoomDiaryRead {
+            request_id: random_id("req"),
+            payload,
+        },
+        "room_diary_read_timeout",
+        REQUEST_TIMEOUT_SECS,
     )
     .await
 }
@@ -50,7 +72,7 @@ pub(crate) async fn room_notebook_append(
 pub(crate) async fn room_notebook_recent(
     State(state): State<HubState>,
     headers: HeaderMap,
-    Json(payload): Json<NotebookRecentRequest>,
+    Json(payload): Json<RoomNotebookRecentRequest>,
 ) -> Response {
     forward_room_command(
         state,
@@ -60,23 +82,7 @@ pub(crate) async fn room_notebook_recent(
             payload,
         },
         "room_notebook_recent_timeout",
-    )
-    .await
-}
-
-pub(crate) async fn room_notebook_select_exact(
-    State(state): State<HubState>,
-    headers: HeaderMap,
-    Json(payload): Json<NotebookSelectExactRequest>,
-) -> Response {
-    forward_room_command(
-        state,
-        headers,
-        HubCommand::RoomNotebookSelectExact {
-            request_id: random_id("req"),
-            payload,
-        },
-        "room_notebook_select_exact_timeout",
+        REQUEST_TIMEOUT_SECS,
     )
     .await
 }
@@ -84,7 +90,7 @@ pub(crate) async fn room_notebook_select_exact(
 pub(crate) async fn room_notebook_search(
     State(state): State<HubState>,
     headers: HeaderMap,
-    Json(payload): Json<NotebookSearchRequest>,
+    Json(payload): Json<RoomNotebookSearchRequest>,
 ) -> Response {
     forward_room_command(
         state,
@@ -94,57 +100,99 @@ pub(crate) async fn room_notebook_search(
             payload,
         },
         "room_notebook_search_timeout",
+        REQUEST_TIMEOUT_SECS,
     )
     .await
 }
 
-pub(crate) async fn room_notebook_current(
+pub(crate) async fn room_notebook_read(
     State(state): State<HubState>,
     headers: HeaderMap,
-    Json(payload): Json<NotebookCurrentRequest>,
+    Json(payload): Json<RoomNotebookReadRequest>,
 ) -> Response {
     forward_room_command(
         state,
         headers,
-        HubCommand::RoomNotebookCurrent {
+        HubCommand::RoomNotebookRead {
             request_id: random_id("req"),
             payload,
         },
-        "room_notebook_current_timeout",
+        "room_notebook_read_timeout",
+        REQUEST_TIMEOUT_SECS,
     )
     .await
 }
 
-pub(crate) async fn room_notebook_update(
+pub(crate) async fn room_state_list(
     State(state): State<HubState>,
     headers: HeaderMap,
-    Json(payload): Json<NotebookUpdateRequest>,
+    Json(payload): Json<RoomStateListRequest>,
 ) -> Response {
     forward_room_command(
         state,
         headers,
-        HubCommand::RoomNotebookUpdate {
+        HubCommand::RoomStateList {
             request_id: random_id("req"),
             payload,
         },
-        "room_notebook_update_timeout",
+        "room_state_list_timeout",
+        REQUEST_TIMEOUT_SECS,
     )
     .await
 }
 
-pub(crate) async fn room_notebook_remove(
+pub(crate) async fn room_state_read(
     State(state): State<HubState>,
     headers: HeaderMap,
-    Json(payload): Json<NotebookRemoveRequest>,
+    Json(payload): Json<RoomStateReadRequest>,
 ) -> Response {
     forward_room_command(
         state,
         headers,
-        HubCommand::RoomNotebookRemove {
+        HubCommand::RoomStateRead {
             request_id: random_id("req"),
             payload,
         },
-        "room_notebook_remove_timeout",
+        "room_state_read_timeout",
+        REQUEST_TIMEOUT_SECS,
+    )
+    .await
+}
+
+pub(crate) async fn room_maintenance_status(
+    State(state): State<HubState>,
+    headers: HeaderMap,
+    Json(payload): Json<RoomMaintenanceStatusRequest>,
+) -> Response {
+    forward_room_command(
+        state,
+        headers,
+        HubCommand::RoomMaintenanceStatus {
+            request_id: random_id("req"),
+            payload,
+        },
+        "room_maintenance_status_timeout",
+        REQUEST_TIMEOUT_SECS,
+    )
+    .await
+}
+
+pub(crate) async fn room_maintenance_submit(
+    State(state): State<HubState>,
+    headers: HeaderMap,
+    Json(payload): Json<RoomMaintenanceSubmitRequest>,
+) -> Response {
+    let timeout_secs = REQUEST_TIMEOUT_SECS
+        .max(u64::from(payload.effective_wait_seconds()) + ROOM_TRANSPORT_MARGIN_SECS);
+    forward_room_command(
+        state,
+        headers,
+        HubCommand::RoomMaintenanceSubmit {
+            request_id: random_id("req"),
+            payload,
+        },
+        "room_maintenance_submit_timeout",
+        timeout_secs,
     )
     .await
 }
@@ -157,6 +205,7 @@ pub(crate) async fn skills_list(State(state): State<HubState>, headers: HeaderMa
             request_id: random_id("req"),
         },
         "skills_list_timeout",
+        REQUEST_TIMEOUT_SECS,
     )
     .await
 }
@@ -169,6 +218,7 @@ pub(crate) async fn room_bootstrap(State(state): State<HubState>, headers: Heade
             request_id: random_id("req"),
         },
         "room_bootstrap_timeout",
+        REQUEST_TIMEOUT_SECS,
     )
     .await
 }
@@ -186,6 +236,7 @@ pub(crate) async fn room_bootstrap_read(
             payload,
         },
         "room_bootstrap_read_timeout",
+        REQUEST_TIMEOUT_SECS,
     )
     .await
 }
@@ -203,6 +254,7 @@ pub(crate) async fn skills_read(
             payload,
         },
         "skills_read_timeout",
+        REQUEST_TIMEOUT_SECS,
     )
     .await
 }
@@ -220,6 +272,7 @@ pub(crate) async fn skills_search(
             payload,
         },
         "skills_search_timeout",
+        REQUEST_TIMEOUT_SECS,
     )
     .await
 }
@@ -232,6 +285,7 @@ pub(crate) async fn skills_active(State(state): State<HubState>, headers: Header
             request_id: random_id("req"),
         },
         "skills_active_timeout",
+        REQUEST_TIMEOUT_SECS,
     )
     .await
 }
@@ -249,6 +303,7 @@ pub(crate) async fn skills_activate(
             payload,
         },
         "skills_activate_timeout",
+        REQUEST_TIMEOUT_SECS,
     )
     .await
 }
@@ -266,6 +321,7 @@ pub(crate) async fn skills_deactivate(
             payload,
         },
         "skills_deactivate_timeout",
+        REQUEST_TIMEOUT_SECS,
     )
     .await
 }
@@ -283,6 +339,7 @@ pub(crate) async fn skills_install(
             payload,
         },
         "skills_install_timeout",
+        REQUEST_TIMEOUT_SECS,
     )
     .await
 }
@@ -300,6 +357,7 @@ pub(crate) async fn skills_install_get(
             payload,
         },
         "skills_install_get_timeout",
+        REQUEST_TIMEOUT_SECS,
     )
     .await
 }
@@ -317,6 +375,7 @@ pub(crate) async fn skills_install_cancel(
             payload,
         },
         "skills_install_cancel_timeout",
+        REQUEST_TIMEOUT_SECS,
     )
     .await
 }
@@ -334,6 +393,7 @@ pub(crate) async fn skills_run(
             payload,
         },
         "skills_run_timeout",
+        REQUEST_TIMEOUT_SECS,
     )
     .await
 }
@@ -343,11 +403,12 @@ async fn forward_room_command(
     headers: HeaderMap,
     command: HubCommand,
     timeout_code: &'static str,
+    timeout_secs: u64,
 ) -> Response {
     if let Err(response) = require_action_auth(&state, &headers) {
         return response;
     }
-    match request_active_room(&state, command, REQUEST_TIMEOUT_SECS).await {
+    match request_active_room(&state, command, timeout_secs).await {
         Ok(value) => room_value_response(value),
         Err(RoomRouteError::NotActive) => api_error(
             StatusCode::NOT_FOUND,
@@ -377,6 +438,8 @@ fn room_value_response(value: Value) -> Response {
     let status = match code {
         "target_exists" | "idempotency_conflict" | "room_state_conflict" => StatusCode::CONFLICT,
         "not_found"
+        | "room_notebook_not_found"
+        | "room_state_entity_not_found"
         | "skill_not_found"
         | "install_not_found"
         | "bootstrap_not_found"
@@ -674,10 +737,10 @@ mod tests {
         let _rx2 = replace_connection(&state, "room", "new-no-hello").await;
         let result = request_active_room(
             &state,
-            HubCommand::RoomNotebookCurrent {
+            HubCommand::RoomNotebookRead {
                 request_id: "req".to_string(),
-                payload: NotebookCurrentRequest {
-                    scope: "agentic".to_string(),
+                payload: RoomNotebookReadRequest {
+                    path: "Notebook/topic.md".to_string(),
                 },
             },
             1,
@@ -707,10 +770,10 @@ mod tests {
         let state = test_state();
         let result = request_active_room(
             &state,
-            HubCommand::RoomNotebookCurrent {
+            HubCommand::RoomNotebookRead {
                 request_id: "req".to_string(),
-                payload: NotebookCurrentRequest {
-                    scope: "agentic".to_string(),
+                payload: RoomNotebookReadRequest {
+                    path: "Notebook/topic.md".to_string(),
                 },
             },
             1,
@@ -720,36 +783,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_remove_room_api_without_active_room_returns_not_active() {
+    async fn read_and_maintenance_room_api_without_active_room_returns_not_active() {
         let state = test_state();
-        let update = request_active_room(
+        let read = request_active_room(
             &state,
-            HubCommand::RoomNotebookUpdate {
-                request_id: "req-update".to_string(),
-                payload: NotebookUpdateRequest {
-                    id: "psg_missing".to_string(),
-                    significance: None,
-                    abstract_text: Some("updated".to_string()),
-                    content: None,
-                    tags: None,
+            HubCommand::RoomNotebookRead {
+                request_id: "req-read".to_string(),
+                payload: RoomNotebookReadRequest {
+                    path: "Notebook/missing.md".to_string(),
                 },
             },
             1,
         )
         .await;
-        assert_eq!(update.unwrap_err(), RoomRouteError::NotActive);
-        let remove = request_active_room(
+        assert_eq!(read.unwrap_err(), RoomRouteError::NotActive);
+        let maintenance = request_active_room(
             &state,
-            HubCommand::RoomNotebookRemove {
-                request_id: "req-remove".to_string(),
-                payload: NotebookRemoveRequest {
-                    id: "psg_missing".to_string(),
-                },
+            HubCommand::RoomMaintenanceStatus {
+                request_id: "req-status".to_string(),
+                payload: RoomMaintenanceStatusRequest {},
             },
             1,
         )
         .await;
-        assert_eq!(remove.unwrap_err(), RoomRouteError::NotActive);
+        assert_eq!(maintenance.unwrap_err(), RoomRouteError::NotActive);
     }
 
     #[tokio::test]
@@ -781,11 +838,11 @@ mod tests {
             HeaderValue::from_static("Bearer test-api-key"),
         );
         let task = tokio::spawn(async move {
-            room_notebook_current(
+            room_notebook_read(
                 State(request_state),
                 action_headers,
-                Json(NotebookCurrentRequest {
-                    scope: "agentic".to_string(),
+                Json(RoomNotebookReadRequest {
+                    path: "Notebook/topic.md".to_string(),
                 }),
             )
             .await
@@ -796,10 +853,10 @@ mod tests {
         let envelope = serde_json::from_str::<HubCommandEnvelope>(&text).unwrap();
         assert!(matches!(
             &envelope.command,
-            HubCommand::RoomNotebookCurrent { .. }
+            HubCommand::RoomNotebookRead { .. }
         ));
 
-        let response_data = json!({ "current": null, "warnings": [] });
+        let response_data = json!({ "path": "Notebook/topic.md", "content": "# Topic" });
         let mut agent_headers = HeaderMap::new();
         agent_headers.insert("x-agent-secret", HeaderValue::from_static("test-secret"));
         let query: SseConnectQuery =
@@ -844,10 +901,10 @@ mod tests {
         let _rx = insert_connection(&state, "normal", "conn1", AgentRole::Normal).await;
         let result = request_active_room(
             &state,
-            HubCommand::RoomNotebookCurrent {
+            HubCommand::RoomNotebookRead {
                 request_id: "req".to_string(),
-                payload: NotebookCurrentRequest {
-                    scope: "agentic".to_string(),
+                payload: RoomNotebookReadRequest {
+                    path: "Notebook/topic.md".to_string(),
                 },
             },
             1,

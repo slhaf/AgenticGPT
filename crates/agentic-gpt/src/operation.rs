@@ -220,20 +220,9 @@ fn operation_namespace(operation: &str) -> Option<ToolNamespace> {
         return Some(namespace);
     }
     match operation {
-        "bootstrap"
-        | "bootstrap.read"
-        | "room.bootstrap"
-        | "room.bootstrap.read"
-        | "room.notebook.append"
-        | "room.notebook.recent"
-        | "room.notebook.selectExact"
-        | "room.notebook.search"
-        | "room.notebook.current"
-        | "room.notebook.update"
-        | "room.notebook.remove"
-        | "room.diary.append"
-        | "room.diary.recent"
-        | "room.diary.selectExact" => Some(ToolNamespace::Room),
+        "bootstrap" | "bootstrap.read" | "room.bootstrap" | "room.bootstrap.read" => {
+            Some(ToolNamespace::Room)
+        }
         "tmux.listSessions" | "tmux.listPanes" | "tmux.capturePane" | "tmux.createSession"
         | "tmux.closeSession" => Some(ToolNamespace::Tmux),
         "mcp.listServers" | "mcp.listTools" => Some(ToolNamespace::Mcp),
@@ -244,26 +233,25 @@ fn operation_namespace(operation: &str) -> Option<ToolNamespace> {
     }
 }
 
+fn is_current_room_operation(operation: &str) -> bool {
+    matches!(
+        operation,
+        "room.diary.active"
+            | "room.diary.read"
+            | "room.notebook.recent"
+            | "room.notebook.search"
+            | "room.notebook.read"
+            | "room.state.list"
+            | "room.state.read"
+            | "room.maintenance.status"
+            | "room.maintenance.submit"
+    )
+}
+
 fn is_hub_room_toolset_operation(operation: &str) -> bool {
     matches!(
         operation,
         "room.bootstrap" | "room.bootstrap.read" | "bootstrap" | "bootstrap.read"
-    )
-}
-
-fn is_legacy_room_operation(operation: &str) -> bool {
-    matches!(
-        operation,
-        "room.notebook.append"
-            | "room.notebook.recent"
-            | "room.notebook.selectExact"
-            | "room.notebook.search"
-            | "room.notebook.current"
-            | "room.notebook.update"
-            | "room.notebook.remove"
-            | "room.diary.append"
-            | "room.diary.recent"
-            | "room.diary.selectExact"
     )
 }
 
@@ -285,10 +273,6 @@ pub(crate) fn authorize(
         });
     }
 
-    if context.ingress == RequestIngress::Hub && is_legacy_room_operation(operation) {
-        return Ok(());
-    }
-
     if operation == "user.notify.deliver" {
         if runtime.capabilities().notifications {
             return Ok(());
@@ -303,6 +287,16 @@ pub(crate) fn authorize(
             return Err(AdmissionError::UnknownOperation {
                 operation: operation.to_string(),
             });
+        }
+        if is_current_room_operation(operation) {
+            if runtime.profile != crate::state::CapabilityProfile::Room {
+                return Err(AdmissionError::CapabilityRequired);
+            }
+            if !config.toolsets.is_enabled(ToolNamespace::Room) {
+                return Err(AdmissionError::ToolsetDisabled {
+                    namespace: ToolNamespace::Room,
+                });
+            }
         }
         if is_hub_room_toolset_operation(operation)
             && !config.toolsets.is_enabled(ToolNamespace::Room)
@@ -352,16 +346,15 @@ pub(crate) fn hub_command_name(command: &HubCommand) -> &'static str {
         HubCommand::McpCallTool { .. } => "mcp.callTool",
         HubCommand::McpBatch { .. } => "mcp.batch",
         HubCommand::UserNotifyDeliver { .. } => "user.notify.deliver",
-        HubCommand::RoomNotebookAppend { .. } => "room.notebook.append",
+        HubCommand::RoomDiaryActive { .. } => "room.diary.active",
+        HubCommand::RoomDiaryRead { .. } => "room.diary.read",
         HubCommand::RoomNotebookRecent { .. } => "room.notebook.recent",
-        HubCommand::RoomNotebookSelectExact { .. } => "room.notebook.selectExact",
         HubCommand::RoomNotebookSearch { .. } => "room.notebook.search",
-        HubCommand::RoomNotebookCurrent { .. } => "room.notebook.current",
-        HubCommand::RoomNotebookUpdate { .. } => "room.notebook.update",
-        HubCommand::RoomNotebookRemove { .. } => "room.notebook.remove",
-        HubCommand::RoomDiaryAppend { .. } => "room.diary.append",
-        HubCommand::RoomDiaryRecent { .. } => "room.diary.recent",
-        HubCommand::RoomDiarySelectExact { .. } => "room.diary.selectExact",
+        HubCommand::RoomNotebookRead { .. } => "room.notebook.read",
+        HubCommand::RoomStateList { .. } => "room.state.list",
+        HubCommand::RoomStateRead { .. } => "room.state.read",
+        HubCommand::RoomMaintenanceStatus { .. } => "room.maintenance.status",
+        HubCommand::RoomMaintenanceSubmit { .. } => "room.maintenance.submit",
         HubCommand::RoomBootstrap { .. } => "room.bootstrap",
         HubCommand::RoomBootstrapRead { .. } => "room.bootstrap.read",
         HubCommand::Bootstrap { .. } => "bootstrap",
@@ -425,5 +418,24 @@ mod tests {
             RequestContext::new(RequestIngress::Hub, "room.not-a-tool"),
         )
         .is_err());
+    }
+    #[test]
+    fn normal_hub_cannot_acquire_room_capability_by_operation_name() {
+        let mut config = Config::default_config().expect("default config");
+        config.toolsets.enable(ToolNamespace::Room);
+        for operation in [
+            "room.diary.active",
+            "room.notebook.recent",
+            "room.state.list",
+            "room.maintenance.status",
+        ] {
+            let error = authorize(
+                RuntimeModel::hub(CapabilityProfile::Normal),
+                &config,
+                RequestContext::new(RequestIngress::Hub, operation),
+            )
+            .expect_err("Normal Hub must not admit Room operations");
+            assert_eq!(error.code(), "room_agent_required");
+        }
     }
 }

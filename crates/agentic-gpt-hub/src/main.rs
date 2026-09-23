@@ -222,19 +222,21 @@ async fn serve(
             "/v1/notify/android/register",
             post(notify::android_notify_register),
         )
-        .route("/v1/room/notebook/append", post(room::room_notebook_append))
+        .route("/v1/room/diary/active", post(room::room_diary_active))
+        .route("/v1/room/diary/read", post(room::room_diary_read))
         .route("/v1/room/notebook/recent", post(room::room_notebook_recent))
-        .route(
-            "/v1/room/notebook/selectExact",
-            post(room::room_notebook_select_exact),
-        )
         .route("/v1/room/notebook/search", post(room::room_notebook_search))
+        .route("/v1/room/notebook/read", post(room::room_notebook_read))
+        .route("/v1/room/state/list", post(room::room_state_list))
+        .route("/v1/room/state/read", post(room::room_state_read))
         .route(
-            "/v1/room/notebook/current",
-            post(room::room_notebook_current),
+            "/v1/room/maintenance/status",
+            post(room::room_maintenance_status),
         )
-        .route("/v1/room/notebook/update", post(room::room_notebook_update))
-        .route("/v1/room/notebook/remove", post(room::room_notebook_remove))
+        .route(
+            "/v1/room/maintenance/submit",
+            post(room::room_maintenance_submit),
+        )
         .route("/v1/room/bootstrap", post(room::room_bootstrap))
         .route("/v1/room/bootstrap/read", post(room::room_bootstrap_read))
         .route("/v1/room/skills/list", post(room::skills_list))

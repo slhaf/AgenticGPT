@@ -1066,7 +1066,7 @@ impl AgentMcpServer {
                     from_value(arguments)?;
                 match crate::room_maintenance::status(&self.state, request).await {
                     Ok(response) => Ok(serde_json::to_value(response)?),
-                    Err(error) => Ok(room_maintenance_error("status", error)),
+                    Err(error) => Ok(local_service::room_maintenance_error("status", error)),
                 }
             }
             "room.maintenance.submit" => {
@@ -1074,7 +1074,7 @@ impl AgentMcpServer {
                     from_value(arguments)?;
                 match crate::room_maintenance::submit(&self.state, request).await {
                     Ok(response) => Ok(serde_json::to_value(response)?),
-                    Err(error) => Ok(room_maintenance_error("submit", error)),
+                    Err(error) => Ok(local_service::room_maintenance_error("submit", error)),
                 }
             }
             "room.state.read" => {
@@ -2100,16 +2100,6 @@ fn structured_error_value(default_code: &str, message: impl Into<String>) -> Val
             "message": message.into()
         }
     })
-}
-
-fn room_maintenance_error(operation: &str, error: impl std::fmt::Display) -> Value {
-    let reason = error.to_string();
-    let detail = reason.chars().take(384).collect::<String>();
-    let message = format!("room maintenance {operation} failed: {detail}")
-        .chars()
-        .take(512)
-        .collect::<String>();
-    structured_error_value("room_maintenance_failed", message)
 }
 
 fn structured_error_from_reason(default_code: &str, message: impl Into<String>) -> Value {
@@ -3588,9 +3578,8 @@ mod tests {
             .iter()
             .all(|tool| !tool.name.starts_with("room.") && !tool.name.starts_with("bootstrap")));
 
-        // These names remain dispatch-only compatibility paths and must never
-        // leak into the advertised MCP surface. Legacy JSONL Room names are
-        // retained only by the separate Hub compatibility boundary.
+        // Dispatch-only aliases must never leak into the advertised MCP
+        // surface.
         for alias in [
             "file.batch",
             "browser.read",
@@ -3607,14 +3596,6 @@ mod tests {
             "tmux.listSessions",
             "tmux.listPanes",
             "tmux.capturePane",
-            "room.diary.append",
-            "room.diary.recent",
-            "room.diary.selectExact",
-            "room.notebook.append",
-            "room.notebook.current",
-            "room.notebook.remove",
-            "room.notebook.selectExact",
-            "room.notebook.update",
         ] {
             assert!(
                 !expected_room.contains(alias),

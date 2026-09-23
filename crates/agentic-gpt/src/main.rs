@@ -917,7 +917,7 @@ mod tests {
     use crate::exec::PreparedBatchElement;
     use crate::mcp::McpServerConfig;
     use agentic_gpt_protocol::{
-        AgentMessage, BootstrapReadRequest, HubCommand, NotebookAppendRequest, PassageSignificance,
+        AgentMessage, BootstrapReadRequest, HubCommand, RoomDiaryActiveRequest,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::mpsc;
@@ -1509,30 +1509,45 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn room_mode_rejects_legacy_jsonl_commands() {
-        let workspace = unique_temp_dir("room-legacy-rejected").join("workspace");
+    async fn normal_hub_rejects_current_room_commands_without_room_profile() {
+        let workspace = unique_temp_dir("normal-room-command-rejected").join("workspace");
         fs::create_dir_all(&workspace).unwrap();
-        let (state, mut rx) = command_test_state(CapabilityProfile::Room, workspace);
+        let (state, mut rx) = command_test_state(CapabilityProfile::Normal, workspace);
 
         hub::handle_hub_command(
             state,
-            HubCommand::RoomNotebookAppend {
-                request_id: "req-legacy".to_string(),
-                payload: NotebookAppendRequest {
-                    datetime: None,
-                    scope: "agentic".to_string(),
-                    significance: PassageSignificance::Anchor,
-                    abstract_text: None,
-                    content: "legacy".to_string(),
-                    tags: Vec::new(),
-                },
+            HubCommand::RoomDiaryActive {
+                request_id: "req-room".to_string(),
+                payload: RoomDiaryActiveRequest::default(),
             },
             None,
         )
         .await
         .unwrap();
         let response = recv_response(&mut rx).await;
-        assert_eq!(response["error"]["code"], "room_legacy_surface_removed");
+        assert_eq!(response["error"]["code"], "room_agent_required");
+    }
+
+    #[tokio::test]
+    async fn room_mode_dispatches_current_diary_command() {
+        let workspace = unique_temp_dir("room-current-diary").join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let (state, mut rx) = command_test_state(CapabilityProfile::Room, workspace);
+
+        hub::handle_hub_command(
+            state,
+            HubCommand::RoomDiaryActive {
+                request_id: "req-room-diary".to_string(),
+                payload: RoomDiaryActiveRequest::default(),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        let response = recv_response(&mut rx).await;
+        assert_eq!(response["daily"]["path"], "Diary/Daily/current.md");
+        assert_eq!(response["daily"]["available"], false);
+        assert_eq!(response["daily"]["issue"], "missing");
     }
 
     #[test]

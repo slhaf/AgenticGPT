@@ -1,11 +1,12 @@
 use agentic_gpt_protocol::{
-    normalize_job_group, BatchExecRequest, BootstrapReadRequest, DiaryAppendRequest,
-    DiaryRecentRequest, DiarySelectExactRequest, ExecElement, ExecRequest, HubCommand,
-    JobCancelRequest, JobGetRequest, JobInfo, JobKind, JobListItem, JobListRequest, JobState,
-    McpBatchCall, McpBatchMode, McpBatchRequest, McpCallToolRequest, McpListToolsRequest,
-    NotebookAppendRequest, NotebookCurrentRequest, NotebookRecentRequest, NotebookRemoveRequest,
-    NotebookSearchRequest, NotebookSelectExactRequest, NotebookUpdateRequest, NotificationAction,
-    PassageSignificance, SkillActivationRequest, SkillInstallCancelRequest, SkillInstallFile,
+    normalize_job_group, BatchExecRequest, BootstrapReadRequest, ExecElement, ExecRequest,
+    HubCommand, JobCancelRequest, JobGetRequest, JobInfo, JobKind, JobListItem, JobListRequest,
+    JobState, McpBatchCall, McpBatchMode, McpBatchRequest, McpCallToolRequest, McpListToolsRequest,
+    NotificationAction, RoomDiaryActiveRequest, RoomDiaryLayer, RoomDiaryReadRequest,
+    RoomMaintenanceExecutionMode, RoomMaintenanceRequestItem, RoomMaintenanceSlot,
+    RoomMaintenanceStatusRequest, RoomMaintenanceSubmitRequest, RoomNotebookReadRequest,
+    RoomNotebookRecentRequest, RoomNotebookSearchRequest, RoomStateListRequest,
+    RoomStateReadRequest, SkillActivationRequest, SkillInstallCancelRequest, SkillInstallFile,
     SkillInstallGetRequest, SkillInstallRequest, SkillInstallSource, SkillReadRequest,
     SkillRunRequest, SkillSearchRequest, TmuxCapturePaneRequest, TmuxCloseSessionRequest,
     TmuxCreateSessionRequest, TmuxExecRequest, TmuxListPanesRequest, TmuxPasteTextRequest,
@@ -34,6 +35,7 @@ use crate::runs;
 use crate::state::{HubState, McpProfile};
 use crate::utils::random_id;
 use crate::{MAX_WAIT_SECONDS, REQUEST_TIMEOUT_SECS};
+const ROOM_TRANSPORT_MARGIN_SECS: u64 = 5;
 
 const MCP_INSTRUCTIONS: &str = "Agentic GPT Hub exposes domain-specific job creation plus one generic lifecycle. Use process.exec for one managed process and process.batch for multiple managed processes; both wait briefly and return Job envelopes. Use mcp.callTool for one downstream MCP Job and mcp.batch for 1..16 atomically admitted child Jobs with one aggregate confirmation, ordered results, global/per-server concurrency bounds, and optional fail-fast scheduling. Use job.get with waitSeconds to inspect or briefly wait, job.list for bounded filtered discovery, and job.cancel for kind-aware cancellation evidence. Use tmux as the persistent shared workspace for stateful development, iterative debugging, TUIs, and user-agent handoff. For tmux work, discover the workspace with tmux.listSessions and tmux.listPanes, inspect it with tmux.capturePane, then use tmux.exec for shell panes or tmux.pasteText for non-shell panes. At Room start, call room.bootstrap, then room.bootstrap.read for relevant guides. Room skills are managed only by the active Room Agent; skills.run returns the same Job envelope and is followed through job.get/job.cancel. Commands remain subject to Agentic local policy, path policy, confirmation, capacity, and audit.";
 const COORDINATOR_INSTRUCTIONS: &str = "Agentic GPT Hub coordinator profile. This connector exposes only Hub-native agent status, retained run history, current job snapshots, and notification tools. It never dispatches execution, job-control, tmux, downstream MCP, skills, bootstrap, diary, or notebook commands to an Agent.";
@@ -46,6 +48,12 @@ fn default_standard_wait_seconds() -> u64 {
 }
 fn default_wait_only() -> bool {
     false
+}
+fn default_room_wait_seconds() -> u8 {
+    0
+}
+fn default_room_notebook_limit() -> usize {
+    20
 }
 fn default_job_list_limit() -> usize {
     50
@@ -113,7 +121,7 @@ fn decorate_tool_descriptors(tool_router: &mut ToolRouter<AgenticMcpServer>) {
             name,
             "job.cancel"
                 | "tmux.closeSession"
-                | "room.notebook.remove"
+                | "room.maintenance.submit"
                 | "skills.install"
                 | "skills.install.cancel"
                 | "skills.run"
@@ -147,10 +155,7 @@ fn tool_is_read_only(name: &str) -> bool {
             | "mcp.batch"
             | "mcp.callTool"
             | "user.notify.send"
-            | "room.notebook.append"
-            | "room.notebook.update"
-            | "room.notebook.remove"
-            | "room.diary.append"
+            | "room.maintenance.submit"
             | "skills.activate"
             | "skills.deactivate"
             | "skills.install"
@@ -349,9 +354,14 @@ async fn call_app_tool(server: &AgenticMcpServer, params: Value) -> Result<Value
                 .user_notify_send(Parameters(decode_args(arguments)?))
                 .await
         }
-        "room.notebook.append" => {
+        "room.diary.active" => {
             server
-                .room_notebook_append(Parameters(decode_args(arguments)?))
+                .room_diary_active(Parameters(decode_args(arguments)?))
+                .await
+        }
+        "room.diary.read" => {
+            server
+                .room_diary_read(Parameters(decode_args(arguments)?))
                 .await
         }
         "room.notebook.recent" => {
@@ -359,44 +369,34 @@ async fn call_app_tool(server: &AgenticMcpServer, params: Value) -> Result<Value
                 .room_notebook_recent(Parameters(decode_args(arguments)?))
                 .await
         }
-        "room.notebook.selectExact" => {
-            server
-                .room_notebook_select_exact(Parameters(decode_args(arguments)?))
-                .await
-        }
         "room.notebook.search" => {
             server
                 .room_notebook_search(Parameters(decode_args(arguments)?))
                 .await
         }
-        "room.notebook.current" => {
+        "room.notebook.read" => {
             server
-                .room_notebook_current(Parameters(decode_args(arguments)?))
+                .room_notebook_read(Parameters(decode_args(arguments)?))
                 .await
         }
-        "room.notebook.update" => {
+        "room.state.list" => {
             server
-                .room_notebook_update(Parameters(decode_args(arguments)?))
+                .room_state_list(Parameters(decode_args(arguments)?))
                 .await
         }
-        "room.notebook.remove" => {
+        "room.state.read" => {
             server
-                .room_notebook_remove(Parameters(decode_args(arguments)?))
+                .room_state_read(Parameters(decode_args(arguments)?))
                 .await
         }
-        "room.diary.append" => {
+        "room.maintenance.status" => {
             server
-                .room_diary_append(Parameters(decode_args(arguments)?))
+                .room_maintenance_status(Parameters(decode_args(arguments)?))
                 .await
         }
-        "room.diary.recent" => {
+        "room.maintenance.submit" => {
             server
-                .room_diary_recent(Parameters(decode_args(arguments)?))
-                .await
-        }
-        "room.diary.selectExact" => {
-            server
-                .room_diary_select_exact(Parameters(decode_args(arguments)?))
+                .room_maintenance_submit(Parameters(decode_args(arguments)?))
                 .await
         }
         "room.bootstrap" => server.room_bootstrap().await,
@@ -1323,320 +1323,232 @@ impl AgenticMcpServer {
     }
 
     #[tool(
-        name = "room.notebook.append",
-        description = "Transitional legacy Room notebook append; currently rejected with room_legacy_surface_removed pending WP-R."
+        name = "room.diary.active",
+        description = "Read the active daily, weekly, and monthly Room diary documents; read-only, semantic, and bounded."
     )]
-    async fn room_notebook_append(
+    async fn room_diary_active(
         &self,
-        params: Parameters<RoomNotebookAppendArgs>,
+        _params: Parameters<RoomDiaryActiveArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let params = params.0;
-        let payload = NotebookAppendRequest {
-            datetime: params
-                .datetime
-                .map(|value| {
-                    chrono::DateTime::parse_from_rfc3339(&value)
-                        .map(|datetime| datetime.with_timezone(&chrono::Utc))
-                        .map_err(|error| mcp_invalid_params("invalid_datetime", error.to_string()))
-                })
-                .transpose()?,
-            scope: params.scope,
-            significance: params
-                .significance
-                .as_deref()
-                .map(parse_significance)
-                .transpose()?
-                .unwrap_or_default(),
-            abstract_text: params.abstract_text,
-            content: params.content,
-            tags: params.tags.unwrap_or_default(),
-        };
         let value = request_active_room(
             &self.state,
-            HubCommand::RoomNotebookAppend {
+            HubCommand::RoomDiaryActive {
                 request_id: random_id("req"),
-                payload: payload.clone(),
+                payload: RoomDiaryActiveRequest {},
             },
             REQUEST_TIMEOUT_SECS,
         )
         .await
-        .unwrap_or_else(room_route_error_value);
-        Ok(result_from_value(slim_room_response(
-            "room.notebook.append",
-            value,
-        )))
+        .unwrap_or_else(|error| {
+            room_route_error_value_with_timeout(error, "room_diary_active_timeout")
+        });
+        Ok(result_from_value(value))
+    }
+
+    #[tool(
+        name = "room.diary.read",
+        description = "Read one exact Room diary document by validated semantic layer and period; read-only, semantic, and bounded."
+    )]
+    async fn room_diary_read(
+        &self,
+        params: Parameters<RoomDiaryReadArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let params = params.0;
+        let payload = RoomDiaryReadRequest {
+            layer: params.layer.into(),
+            period: params.period,
+        };
+        let value = request_active_room(
+            &self.state,
+            HubCommand::RoomDiaryRead {
+                request_id: random_id("req"),
+                payload,
+            },
+            REQUEST_TIMEOUT_SECS,
+        )
+        .await
+        .unwrap_or_else(|error| {
+            room_route_error_value_with_timeout(error, "room_diary_read_timeout")
+        });
+        Ok(result_from_value(value))
     }
 
     #[tool(
         name = "room.notebook.recent",
-        description = "Transitional legacy Room notebook recent read; currently rejected with room_legacy_surface_removed pending WP-R."
+        description = "Read bounded recent Room notebook Markdown previews; read-only, semantic, and bounded semantic discovery."
     )]
     async fn room_notebook_recent(
         &self,
         params: Parameters<RoomNotebookRecentArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let params = params.0;
-        let payload = NotebookRecentRequest {
-            scope: params.scope,
-            days: params.days,
-            significance: params
-                .significance
-                .as_deref()
-                .map(parse_significance)
-                .transpose()?,
-            limit: params.limit,
+        let payload = RoomNotebookRecentRequest {
+            limit: params.0.limit,
         };
         let value = request_active_room(
             &self.state,
             HubCommand::RoomNotebookRecent {
                 request_id: random_id("req"),
-                payload: payload.clone(),
+                payload,
             },
             REQUEST_TIMEOUT_SECS,
         )
         .await
-        .unwrap_or_else(room_route_error_value);
-        Ok(result_from_value(slim_room_response(
-            "room.notebook.recent",
-            value,
-        )))
-    }
-
-    #[tool(
-        name = "room.notebook.selectExact",
-        description = "Transitional legacy Room notebook exact-date read; currently rejected with room_legacy_surface_removed pending WP-R."
-    )]
-    async fn room_notebook_select_exact(
-        &self,
-        params: Parameters<RoomNotebookSelectExactArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let params = params.0;
-        let payload = NotebookSelectExactRequest {
-            date: params.date,
-            scope: params.scope,
-            limit: params.limit,
-        };
-        let value = request_active_room(
-            &self.state,
-            HubCommand::RoomNotebookSelectExact {
-                request_id: random_id("req"),
-                payload: payload.clone(),
-            },
-            REQUEST_TIMEOUT_SECS,
-        )
-        .await
-        .unwrap_or_else(room_route_error_value);
-        Ok(result_from_value(slim_room_response(
-            "room.notebook.selectExact",
-            value,
-        )))
+        .unwrap_or_else(|error| {
+            room_route_error_value_with_timeout(error, "room_notebook_recent_timeout")
+        });
+        Ok(result_from_value(value))
     }
 
     #[tool(
         name = "room.notebook.search",
-        description = "Transitional legacy Room notebook search; currently rejected with room_legacy_surface_removed pending WP-R."
+        description = "Search Room notebook Markdown by bounded case-insensitive substring fields; read-only, semantic, and bounded discovery."
     )]
     async fn room_notebook_search(
         &self,
         params: Parameters<RoomNotebookSearchArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let params = params.0;
-        let payload = NotebookSearchRequest {
+        let payload = RoomNotebookSearchRequest {
             query: params.query,
-            scope: params.scope,
             limit: params.limit,
         };
         let value = request_active_room(
             &self.state,
             HubCommand::RoomNotebookSearch {
                 request_id: random_id("req"),
-                payload: payload.clone(),
+                payload,
             },
             REQUEST_TIMEOUT_SECS,
         )
         .await
-        .unwrap_or_else(room_route_error_value);
-        Ok(result_from_value(slim_room_response(
-            "room.notebook.search",
-            value,
-        )))
+        .unwrap_or_else(|error| {
+            room_route_error_value_with_timeout(error, "room_notebook_search_timeout")
+        });
+        Ok(result_from_value(value))
     }
 
     #[tool(
-        name = "room.notebook.current",
-        description = "Transitional legacy Room notebook current-state read; currently rejected with room_legacy_surface_removed pending WP-R."
+        name = "room.notebook.read",
+        description = "Read one exact Room notebook Markdown document under the validated Notebook root; read-only, semantic, and bounded."
     )]
-    async fn room_notebook_current(
+    async fn room_notebook_read(
         &self,
-        params: Parameters<RoomNotebookCurrentArgs>,
+        params: Parameters<RoomNotebookReadArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let params = params.0;
-        let payload = NotebookCurrentRequest {
-            scope: params.scope,
+        let payload = RoomNotebookReadRequest {
+            path: params.0.path,
         };
         let value = request_active_room(
             &self.state,
-            HubCommand::RoomNotebookCurrent {
+            HubCommand::RoomNotebookRead {
                 request_id: random_id("req"),
-                payload: payload.clone(),
+                payload,
             },
             REQUEST_TIMEOUT_SECS,
         )
         .await
-        .unwrap_or_else(room_route_error_value);
-        Ok(result_from_value(slim_room_response(
-            "room.notebook.current",
-            value,
-        )))
+        .unwrap_or_else(|error| {
+            room_route_error_value_with_timeout(error, "room_notebook_read_timeout")
+        });
+        Ok(result_from_value(value))
     }
 
     #[tool(
-        name = "room.notebook.update",
-        description = "Transitional legacy Room notebook update; currently rejected with room_legacy_surface_removed pending WP-R."
+        name = "room.state.list",
+        description = "List deterministic Room state entity documents; read-only, semantic, and bounded."
     )]
-    async fn room_notebook_update(
+    async fn room_state_list(
         &self,
-        params: Parameters<RoomNotebookUpdateArgs>,
+        _params: Parameters<RoomStateListArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let params = params.0;
-        let payload = NotebookUpdateRequest {
-            id: params.id,
-            significance: params
-                .significance
-                .as_deref()
-                .map(parse_significance)
-                .transpose()?,
-            abstract_text: params.abstract_text,
-            content: params.content,
-            tags: params.tags,
+        let value = request_active_room(
+            &self.state,
+            HubCommand::RoomStateList {
+                request_id: random_id("req"),
+                payload: RoomStateListRequest {},
+            },
+            REQUEST_TIMEOUT_SECS,
+        )
+        .await
+        .unwrap_or_else(|error| {
+            room_route_error_value_with_timeout(error, "room_state_list_timeout")
+        });
+        Ok(result_from_value(value))
+    }
+
+    #[tool(
+        name = "room.state.read",
+        description = "Read one exact Room state entity Markdown document by validated entity name; read-only, semantic, and bounded."
+    )]
+    async fn room_state_read(
+        &self,
+        params: Parameters<RoomStateReadArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let payload = RoomStateReadRequest {
+            entity: params.0.entity,
         };
         let value = request_active_room(
             &self.state,
-            HubCommand::RoomNotebookUpdate {
+            HubCommand::RoomStateRead {
                 request_id: random_id("req"),
-                payload: payload.clone(),
+                payload,
             },
             REQUEST_TIMEOUT_SECS,
         )
         .await
-        .unwrap_or_else(room_route_error_value);
-        Ok(result_from_value(slim_room_response(
-            "room.notebook.update",
-            value,
-        )))
+        .unwrap_or_else(|error| {
+            room_route_error_value_with_timeout(error, "room_state_read_timeout")
+        });
+        Ok(result_from_value(value))
     }
 
     #[tool(
-        name = "room.notebook.remove",
-        description = "Transitional legacy Room notebook removal; currently rejected with room_legacy_surface_removed pending WP-R."
+        name = "room.maintenance.status",
+        description = "Inspect Room maintenance readiness, repository state, schema/scaffold support, executor configuration, workflow/remote availability, synchronization heads, and deterministic occupancy for all five semantic slots; read-only and non-destructive."
     )]
-    async fn room_notebook_remove(
+    async fn room_maintenance_status(
         &self,
-        params: Parameters<RoomNotebookRemoveArgs>,
+        _params: Parameters<RoomMaintenanceStatusArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let params = params.0;
-        let payload = NotebookRemoveRequest { id: params.id };
         let value = request_active_room(
             &self.state,
-            HubCommand::RoomNotebookRemove {
+            HubCommand::RoomMaintenanceStatus {
                 request_id: random_id("req"),
-                payload: payload.clone(),
+                payload: RoomMaintenanceStatusRequest {},
             },
             REQUEST_TIMEOUT_SECS,
         )
         .await
-        .unwrap_or_else(room_route_error_value);
-        Ok(result_from_value(slim_room_response(
-            "room.notebook.remove",
-            value,
-        )))
+        .unwrap_or_else(|error| {
+            room_route_error_value_with_timeout(error, "room_maintenance_status_timeout")
+        });
+        Ok(result_from_value(value))
     }
 
     #[tool(
-        name = "room.diary.append",
-        description = "Transitional legacy Room diary append; currently rejected with room_legacy_surface_removed pending WP-R."
+        name = "room.maintenance.submit",
+        description = "Apply one to five unique Room maintenance slot requests after exact validation; destructive but confined to the validated Room repository, with optional local/workflow mode and bounded workflow wait; not open-world."
     )]
-    async fn room_diary_append(
+    async fn room_maintenance_submit(
         &self,
-        params: Parameters<RoomDiaryAppendArgs>,
+        params: Parameters<RoomMaintenanceSubmitArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let params = params.0;
-        let payload = DiaryAppendRequest {
-            tags: params.tags.unwrap_or_default(),
-            entry: params.entry,
-        };
+        let payload = params.0.into_protocol();
+        let timeout_secs = REQUEST_TIMEOUT_SECS
+            .max(u64::from(payload.effective_wait_seconds()) + ROOM_TRANSPORT_MARGIN_SECS);
         let value = request_active_room(
             &self.state,
-            HubCommand::RoomDiaryAppend {
+            HubCommand::RoomMaintenanceSubmit {
                 request_id: random_id("req"),
-                payload: payload.clone(),
+                payload,
             },
-            REQUEST_TIMEOUT_SECS,
+            timeout_secs,
         )
         .await
-        .unwrap_or_else(room_route_error_value);
-        Ok(result_from_value(slim_room_response(
-            "room.diary.append",
-            value,
-        )))
-    }
-
-    #[tool(
-        name = "room.diary.recent",
-        description = "Transitional legacy Room diary recent read; currently rejected with room_legacy_surface_removed pending WP-R."
-    )]
-    async fn room_diary_recent(
-        &self,
-        params: Parameters<RoomDiaryRecentArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let params = params.0;
-        let payload = DiaryRecentRequest {
-            days: params.days,
-            limit: params.limit,
-        };
-        let value = request_active_room(
-            &self.state,
-            HubCommand::RoomDiaryRecent {
-                request_id: random_id("req"),
-                payload: payload.clone(),
-            },
-            REQUEST_TIMEOUT_SECS,
-        )
-        .await
-        .unwrap_or_else(room_route_error_value);
-        Ok(result_from_value(slim_room_response(
-            "room.diary.recent",
-            value,
-        )))
-    }
-
-    #[tool(
-        name = "room.diary.selectExact",
-        description = "Transitional legacy Room diary exact-date read; currently rejected with room_legacy_surface_removed pending WP-R."
-    )]
-    async fn room_diary_select_exact(
-        &self,
-        params: Parameters<RoomDiarySelectExactArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let params = params.0;
-        let payload = DiarySelectExactRequest {
-            date: params.date,
-            limit: params.limit,
-        };
-        let value = request_active_room(
-            &self.state,
-            HubCommand::RoomDiarySelectExact {
-                request_id: random_id("req"),
-                payload: payload.clone(),
-            },
-            REQUEST_TIMEOUT_SECS,
-        )
-        .await
-        .unwrap_or_else(room_route_error_value);
-        Ok(result_from_value(slim_room_response(
-            "room.diary.selectExact",
-            value,
-        )))
+        .unwrap_or_else(|error| {
+            room_route_error_value_with_timeout(error, "room_maintenance_submit_timeout")
+        });
+        Ok(result_from_value(value))
     }
 
     #[tool(
@@ -1713,7 +1625,7 @@ impl AgenticMcpServer {
             REQUEST_TIMEOUT_SECS,
         )
         .await
-        .unwrap_or_else(room_route_error_value);
+        .unwrap_or_else(|error| room_route_error_value_with_timeout(error, "skills_list_timeout"));
         Ok(result_from_value(slim_skills_list_response(value)))
     }
 
@@ -2391,149 +2303,183 @@ impl From<UserNotifyActionArgs> for NotificationAction {
 }
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
-struct RoomNotebookAppendArgs {
-    #[serde(default)]
-    #[schemars(
-        description = "Optional ISO-8601 datetime. Stored as UTC; file partitioning uses the configured room timezone."
-    )]
-    datetime: Option<String>,
-    #[schemars(
-        description = "Path-safe notebook namespace such as agentic or monopoly; used for current state and filtering."
-    )]
-    scope: String,
-    #[serde(default)]
-    #[schemars(
-        description = "Optional significance: NORMAL by default, or ANCHOR to update current state for the scope."
-    )]
-    significance: Option<String>,
-    #[serde(rename = "abstract", default)]
-    #[schemars(
-        description = "Optional short summary; omitted values are derived from the content."
-    )]
-    abstract_text: Option<String>,
-    #[schemars(description = "Full recoverable passage content.")]
-    content: String,
-    #[serde(default)]
-    #[schemars(description = "Optional labels included in simple search.")]
-    tags: Option<Vec<String>>,
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RoomDiaryActiveArgs {}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+enum RoomDiaryLayerArgs {
+    Daily,
+    Weekly,
+    Monthly,
+}
+
+impl From<RoomDiaryLayerArgs> for RoomDiaryLayer {
+    fn from(value: RoomDiaryLayerArgs) -> Self {
+        match value {
+            RoomDiaryLayerArgs::Daily => Self::Daily,
+            RoomDiaryLayerArgs::Weekly => Self::Weekly,
+            RoomDiaryLayerArgs::Monthly => Self::Monthly,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RoomDiaryReadArgs {
+    #[schemars(description = "Room diary temporal layer.")]
+    layer: RoomDiaryLayerArgs,
+    #[schemars(
+        pattern(r"^(current|\d{4}-\d{2}-\d{2}(--\d{4}-\d{2}-\d{2})?)$"),
+        description = "Room-local logical period: daily uses current or YYYY-MM-DD; weekly/monthly use current or YYYY-MM-DD--YYYY-MM-DD."
+    )]
+    period: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RoomNotebookRecentArgs {
     #[serde(default)]
-    #[schemars(description = "Optional path-safe notebook scope filter.")]
-    scope: Option<String>,
-    #[serde(default)]
     #[schemars(
-        description = "Number of recent room-timezone calendar days to scan. Defaults to 5 and is capped at 30."
+        range(min = 1, max = 100),
+        default = "default_room_notebook_limit",
+        description = "Maximum bounded recent Notebook previews returned; defaults to 20."
     )]
-    days: Option<u32>,
-    #[serde(default)]
-    #[schemars(description = "Optional significance filter: NORMAL or ANCHOR.")]
-    significance: Option<String>,
-    #[serde(default)]
-    #[schemars(description = "Maximum passages returned, capped by the server.")]
     limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
-struct RoomNotebookSelectExactArgs {
-    #[schemars(description = "Room-local calendar date in YYYY-MM-DD format.")]
-    date: String,
-    #[serde(default)]
-    #[schemars(description = "Optional path-safe notebook scope filter.")]
-    scope: Option<String>,
-    #[serde(default)]
-    #[schemars(description = "Maximum passages returned, capped by the server.")]
-    limit: Option<usize>,
-}
-
-#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RoomNotebookSearchArgs {
     #[schemars(
-        description = "Case-insensitive substring query over abstract, content, scope, and tags."
+        length(min = 1, max = 256),
+        description = "Case-insensitive bounded substring query over Notebook paths, H1 titles, and bodies."
     )]
     query: String,
     #[serde(default)]
-    #[schemars(description = "Optional path-safe notebook scope filter.")]
-    scope: Option<String>,
-    #[serde(default)]
-    #[schemars(description = "Maximum passages returned, capped by the server.")]
+    #[schemars(
+        range(min = 1, max = 100),
+        default = "default_room_notebook_limit",
+        description = "Maximum bounded Notebook previews returned; defaults to 20."
+    )]
     limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
-struct RoomNotebookCurrentArgs {
-    #[schemars(description = "Path-safe notebook scope whose current state should be returned.")]
-    scope: String,
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RoomNotebookReadArgs {
+    #[schemars(
+        description = "Exact Notebook-relative Markdown path returned or discovered under Notebook/; arbitrary repository paths are rejected."
+    )]
+    path: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
-struct RoomNotebookUpdateArgs {
-    #[schemars(description = "Passage id returned by append, recent, search, or selectExact.")]
-    id: String,
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RoomStateListArgs {}
+
+#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RoomStateReadArgs {
+    #[schemars(
+        description = "State entity filename stem resolved under State/entities/; arbitrary repository paths are rejected."
+    )]
+    entity: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RoomMaintenanceStatusArgs {}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum RoomMaintenanceSlotArgs {
+    #[serde(rename = "diary.daily")]
+    DiaryDaily,
+    #[serde(rename = "diary.weekly")]
+    DiaryWeekly,
+    #[serde(rename = "diary.monthly")]
+    DiaryMonthly,
+    Notebook,
+    Entity,
+}
+
+impl From<RoomMaintenanceSlotArgs> for RoomMaintenanceSlot {
+    fn from(value: RoomMaintenanceSlotArgs) -> Self {
+        match value {
+            RoomMaintenanceSlotArgs::DiaryDaily => Self::DiaryDaily,
+            RoomMaintenanceSlotArgs::DiaryWeekly => Self::DiaryWeekly,
+            RoomMaintenanceSlotArgs::DiaryMonthly => Self::DiaryMonthly,
+            RoomMaintenanceSlotArgs::Notebook => Self::Notebook,
+            RoomMaintenanceSlotArgs::Entity => Self::Entity,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+enum RoomMaintenanceModeArgs {
+    Local,
+    Workflow,
+}
+
+impl From<RoomMaintenanceModeArgs> for RoomMaintenanceExecutionMode {
+    fn from(value: RoomMaintenanceModeArgs) -> Self {
+        match value {
+            RoomMaintenanceModeArgs::Local => Self::Local,
+            RoomMaintenanceModeArgs::Workflow => Self::Workflow,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RoomMaintenanceItemArgs {
+    #[schemars(description = "Unique Room semantic slot to maintain.")]
+    slot: RoomMaintenanceSlotArgs,
+    #[schemars(
+        description = "Slot-specific maintenance payload; validated by the Room maintenance executor."
+    )]
+    payload: Value,
+}
+
+#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RoomMaintenanceSubmitArgs {
+    #[schemars(
+        length(min = 1, max = 5),
+        description = "One to five maintenance requests; each slot may appear at most once. The set is validated against the Room repository before any mutation."
+    )]
+    items: Vec<RoomMaintenanceItemArgs>,
     #[serde(default)]
     #[schemars(
-        description = "Optional new significance: NORMAL or ANCHOR. Scope and datetime cannot be changed."
+        description = "Optional execution mode override; local applies in the validated Room repository, workflow submits through the configured Room workflow."
     )]
-    significance: Option<String>,
-    #[serde(rename = "abstract", default)]
-    #[schemars(description = "Optional new short summary used in timelines and previews.")]
-    abstract_text: Option<String>,
-    #[serde(default)]
-    #[schemars(description = "Optional new full recoverable passage content.")]
-    content: Option<String>,
-    #[serde(default)]
-    #[schemars(description = "Optional replacement tag list included in simple search.")]
-    tags: Option<Vec<String>>,
-}
-
-#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
-struct RoomNotebookRemoveArgs {
-    #[schemars(
-        description = "Passage id returned by append, recent, search, or selectExact. Removal is physical in V1."
-    )]
-    id: String,
-}
-
-#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
-struct RoomDiaryAppendArgs {
-    #[serde(default)]
-    #[schemars(description = "Optional labels included with the diary entry.")]
-    tags: Option<Vec<String>>,
-    #[schemars(description = "Diary entry text to append.")]
-    entry: String,
-}
-
-#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
-struct RoomDiaryRecentArgs {
+    mode: Option<RoomMaintenanceModeArgs>,
     #[serde(default)]
     #[schemars(
-        description = "Number of recent logical diary days to scan. Defaults to 3 and is capped at 30."
+        range(min = 0, max = 30),
+        default = "default_room_wait_seconds",
+        description = "Optional bounded wait for workflow consumption and local fast-forward, from 0 through 30 seconds."
     )]
-    days: Option<u32>,
-    #[serde(default)]
-    #[schemars(description = "Maximum diary entries returned, capped by the server.")]
-    limit: Option<usize>,
+    wait_seconds: Option<u8>,
 }
 
-#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
-struct RoomDiarySelectExactArgs {
-    #[schemars(description = "Room-local logical diary date in YYYY-MM-DD format.")]
-    date: String,
-    #[serde(default)]
-    #[schemars(description = "Maximum diary entries returned, capped by the server.")]
-    limit: Option<usize>,
+impl RoomMaintenanceSubmitArgs {
+    fn into_protocol(self) -> RoomMaintenanceSubmitRequest {
+        RoomMaintenanceSubmitRequest {
+            items: self
+                .items
+                .into_iter()
+                .map(|item| RoomMaintenanceRequestItem {
+                    slot: item.slot.into(),
+                    payload: item.payload,
+                })
+                .collect(),
+            mode: self.mode.map(RoomMaintenanceExecutionMode::from),
+            wait_seconds: self.wait_seconds,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
@@ -2730,26 +2676,6 @@ fn remove_empty_warnings(value: &mut Value) {
     }
 }
 
-fn slim_room_response(tool: &str, mut value: Value) -> Value {
-    remove_empty_warnings(&mut value);
-    let Some(object) = value.as_object_mut() else {
-        return value;
-    };
-    match tool {
-        "room.notebook.append" => {
-            object.remove("path");
-            object.remove("created");
-        }
-        "room.diary.append" => {
-            object.remove("path");
-            object.remove("created");
-            object.remove("createdAt");
-        }
-        _ => {}
-    }
-    value
-}
-
 fn slim_skills_list_response(mut value: Value) -> Value {
     remove_empty_warnings(&mut value);
     if let Some(skills) = value.get_mut("skills").and_then(Value::as_array_mut) {
@@ -2785,17 +2711,6 @@ fn room_route_error_value_with_timeout(error: RoomRouteError, timeout_code: &'st
 fn parse_job_group(value: Option<String>) -> Result<Option<String>, ErrorData> {
     normalize_job_group(value.as_deref())
         .map_err(|error| mcp_invalid_params(error.code(), error.message()))
-}
-
-fn parse_significance(value: &str) -> Result<PassageSignificance, ErrorData> {
-    match value {
-        "NORMAL" => Ok(PassageSignificance::Normal),
-        "ANCHOR" => Ok(PassageSignificance::Anchor),
-        _ => Err(mcp_invalid_params(
-            "invalid_significance",
-            "significance must be NORMAL or ANCHOR",
-        )),
-    }
 }
 
 fn mcp_invalid_params(code: &'static str, message: impl ToString) -> ErrorData {
@@ -2898,9 +2813,14 @@ mod tests {
             "tmux.listPanes",
             "tmux.capturePane",
             "hub.run.get",
+            "room.diary.active",
+            "room.diary.read",
+            "room.notebook.recent",
             "room.notebook.search",
-            "room.diary.recent",
-            "room.diary.selectExact",
+            "room.notebook.read",
+            "room.state.list",
+            "room.state.read",
+            "room.maintenance.status",
             "room.bootstrap",
             "room.bootstrap.read",
             "skills.list",
@@ -2922,10 +2842,7 @@ mod tests {
             "mcp.batch",
             "mcp.callTool",
             "user.notify.send",
-            "room.notebook.append",
-            "room.notebook.update",
-            "room.notebook.remove",
-            "room.diary.append",
+            "room.maintenance.submit",
             "skills.activate",
             "skills.deactivate",
             "skills.install",
@@ -2973,6 +2890,25 @@ mod tests {
         .await
         .unwrap_err();
         assert!(error.contains("tool_unavailable_for_profile"));
+        for name in [
+            "room.diary.active",
+            "room.diary.read",
+            "room.notebook.recent",
+            "room.notebook.search",
+            "room.notebook.read",
+            "room.state.list",
+            "room.state.read",
+            "room.maintenance.status",
+            "room.maintenance.submit",
+        ] {
+            let error = call_app_tool(&server, json!({ "name": name, "arguments": {} }))
+                .await
+                .unwrap_err();
+            assert!(
+                error.contains("tool_unavailable_for_profile"),
+                "{name}: {error}"
+            );
+        }
         let run_count: i64 = server
             .state
             .db
@@ -2995,6 +2931,22 @@ mod tests {
         assert!(names.iter().any(|name| name == "process.exec"));
         assert!(names.iter().any(|name| name == "mcp.batch"));
         assert!(names.iter().any(|name| name == "hub.job.list"));
+        for name in [
+            "room.diary.active",
+            "room.diary.read",
+            "room.notebook.recent",
+            "room.notebook.search",
+            "room.notebook.read",
+            "room.state.list",
+            "room.state.read",
+            "room.maintenance.status",
+            "room.maintenance.submit",
+        ] {
+            assert!(
+                names.iter().any(|candidate| candidate == name),
+                "missing {name}"
+            );
+        }
     }
 
     #[test]
@@ -3153,19 +3105,17 @@ mod tests {
     }
 
     #[test]
-    fn room_notebook_mcp_input_schemas_do_not_include_agent_id() {
+    fn room_mcp_input_schemas_do_not_include_agent_id() {
         let schemas = [
-            serde_json::to_string(&rmcp::schemars::schema_for!(RoomNotebookAppendArgs)).unwrap(),
+            serde_json::to_string(&rmcp::schemars::schema_for!(RoomDiaryActiveArgs)).unwrap(),
+            serde_json::to_string(&rmcp::schemars::schema_for!(RoomDiaryReadArgs)).unwrap(),
             serde_json::to_string(&rmcp::schemars::schema_for!(RoomNotebookRecentArgs)).unwrap(),
-            serde_json::to_string(&rmcp::schemars::schema_for!(RoomNotebookSelectExactArgs))
-                .unwrap(),
             serde_json::to_string(&rmcp::schemars::schema_for!(RoomNotebookSearchArgs)).unwrap(),
-            serde_json::to_string(&rmcp::schemars::schema_for!(RoomNotebookCurrentArgs)).unwrap(),
-            serde_json::to_string(&rmcp::schemars::schema_for!(RoomNotebookUpdateArgs)).unwrap(),
-            serde_json::to_string(&rmcp::schemars::schema_for!(RoomNotebookRemoveArgs)).unwrap(),
-            serde_json::to_string(&rmcp::schemars::schema_for!(RoomDiaryAppendArgs)).unwrap(),
-            serde_json::to_string(&rmcp::schemars::schema_for!(RoomDiaryRecentArgs)).unwrap(),
-            serde_json::to_string(&rmcp::schemars::schema_for!(RoomDiarySelectExactArgs)).unwrap(),
+            serde_json::to_string(&rmcp::schemars::schema_for!(RoomNotebookReadArgs)).unwrap(),
+            serde_json::to_string(&rmcp::schemars::schema_for!(RoomStateListArgs)).unwrap(),
+            serde_json::to_string(&rmcp::schemars::schema_for!(RoomStateReadArgs)).unwrap(),
+            serde_json::to_string(&rmcp::schemars::schema_for!(RoomMaintenanceStatusArgs)).unwrap(),
+            serde_json::to_string(&rmcp::schemars::schema_for!(RoomMaintenanceSubmitArgs)).unwrap(),
             serde_json::to_string(&rmcp::schemars::schema_for!(BootstrapReadArgs)).unwrap(),
             serde_json::to_string(&rmcp::schemars::schema_for!(SkillReadArgs)).unwrap(),
             serde_json::to_string(&rmcp::schemars::schema_for!(SkillSearchArgs)).unwrap(),

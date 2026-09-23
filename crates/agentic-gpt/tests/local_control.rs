@@ -99,16 +99,6 @@ fn run_local_e2e(root: &Path) -> Result<(), String> {
     let tools: Value = serde_json::from_slice(&tools.stdout).map_err(|error| error.to_string())?;
     let tools = tools.as_array().ok_or("tool list is not an array")?;
     let removed_tool = ["file", "batch"].join(".");
-    let legacy_room_tools = [
-        "room.diary.append",
-        "room.diary.recent",
-        "room.diary.selectExact",
-        "room.notebook.append",
-        "room.notebook.current",
-        "room.notebook.remove",
-        "room.notebook.selectExact",
-        "room.notebook.update",
-    ];
     if !tools.iter().any(|tool| tool["name"] == "agent.info")
         || tools.iter().any(|tool| tool["name"] == removed_tool)
         || tools
@@ -118,11 +108,6 @@ fn run_local_e2e(root: &Path) -> Result<(), String> {
         || tools
             .iter()
             .any(|tool| tool["name"] == "room.maintenance.submit")
-        || legacy_room_tools.iter().any(|name| {
-            tools
-                .iter()
-                .any(|tool| tool["name"].as_str() == Some(*name))
-        })
     {
         return Err("unexpected local tool surface".to_string());
     }
@@ -224,11 +209,6 @@ fn run_local_e2e(root: &Path) -> Result<(), String> {
         || !enabled_tools
             .iter()
             .any(|tool| tool["name"] == "room.maintenance.submit")
-        || legacy_room_tools.iter().any(|name| {
-            enabled_tools
-                .iter()
-                .any(|tool| tool["name"].as_str() == Some(*name))
-        })
     {
         return Err("enabled Room tool surface mismatch".to_string());
     }
@@ -270,11 +250,6 @@ fn run_local_e2e(root: &Path) -> Result<(), String> {
         || disabled_tools
             .iter()
             .any(|tool| tool["name"] == "room.maintenance.submit")
-        || legacy_room_tools.iter().any(|name| {
-            disabled_tools
-                .iter()
-                .any(|tool| tool["name"].as_str() == Some(*name))
-        })
     {
         return Err("disabled Room tool surface mismatch".to_string());
     }

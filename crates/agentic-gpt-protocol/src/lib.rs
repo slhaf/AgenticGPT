@@ -454,222 +454,6 @@ pub struct UserNotifyDeliveryResponse {
     pub reason: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum PassageSignificance {
-    #[default]
-    Normal,
-    Anchor,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct Passage {
-    pub id: String,
-    pub datetime: DateTime<Utc>,
-    pub scope: String,
-    pub significance: PassageSignificance,
-    #[serde(rename = "abstract")]
-    pub abstract_text: String,
-    pub content: String,
-    #[serde(default)]
-    pub tags: Vec<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PassagePreview {
-    pub id: String,
-    pub datetime: DateTime<Utc>,
-    pub scope: String,
-    pub significance: PassageSignificance,
-    #[serde(rename = "abstract")]
-    pub abstract_text: String,
-    pub content_preview: String,
-    pub tags: Vec<String>,
-    pub display_mode: String,
-    pub truncated: bool,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NotebookCurrent {
-    pub scope: String,
-    pub updated_at: DateTime<Utc>,
-    pub source_passage_id: String,
-    #[serde(rename = "abstract")]
-    pub abstract_text: String,
-    pub content: String,
-    pub tags: Vec<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NotebookAppendRequest {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub datetime: Option<DateTime<Utc>>,
-    pub scope: String,
-    #[serde(default)]
-    pub significance: PassageSignificance,
-    #[serde(rename = "abstract", default, skip_serializing_if = "Option::is_none")]
-    pub abstract_text: Option<String>,
-    pub content: String,
-    #[serde(default)]
-    pub tags: Vec<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NotebookAppendResponse {
-    pub id: String,
-    pub path: String,
-    pub created: bool,
-    pub warnings: Vec<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NotebookRecentRequest {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scope: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub days: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub significance: Option<PassageSignificance>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub limit: Option<usize>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NotebookSelectExactRequest {
-    pub date: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scope: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub limit: Option<usize>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NotebookSearchRequest {
-    pub query: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scope: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub limit: Option<usize>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NotebookCurrentRequest {
-    pub scope: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NotebookUpdateRequest {
-    pub id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub significance: Option<PassageSignificance>,
-    #[serde(rename = "abstract", default, skip_serializing_if = "Option::is_none")]
-    pub abstract_text: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tags: Option<Vec<String>>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NotebookUpdateResponse {
-    pub updated: bool,
-    pub id: String,
-    pub warnings: Vec<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NotebookRemoveRequest {
-    pub id: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NotebookRemoveResponse {
-    pub removed: bool,
-    pub id: String,
-    pub warnings: Vec<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NotebookPassagesResponse {
-    pub passages: Vec<PassagePreview>,
-    pub warnings: Vec<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NotebookCurrentResponse {
-    pub current: Option<NotebookCurrent>,
-    pub warnings: Vec<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DiaryEntry {
-    pub id: String,
-    pub created_at: DateTime<Utc>,
-    pub date: String,
-    pub time_hint: String,
-    #[serde(default)]
-    pub tags: Vec<String>,
-    pub entry: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DiaryAppendRequest {
-    #[serde(default)]
-    pub tags: Vec<String>,
-    pub entry: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DiaryAppendResponse {
-    pub id: String,
-    pub path: String,
-    pub created_at: DateTime<Utc>,
-    pub date: String,
-    pub created: bool,
-    pub warnings: Vec<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DiaryRecentRequest {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub days: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub limit: Option<usize>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DiarySelectExactRequest {
-    pub date: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub limit: Option<usize>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DiaryEntriesResponse {
-    pub entries: Vec<DiaryEntry>,
-    pub warnings: Vec<String>,
-}
-
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RoomDiaryLayer {
@@ -700,7 +484,7 @@ pub struct RoomDiaryLayerResult {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RoomDiaryActiveRequest {}
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -712,7 +496,7 @@ pub struct RoomDiaryActiveResponse {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RoomDiaryReadRequest {
     pub layer: RoomDiaryLayer,
     pub period: String,
@@ -735,14 +519,14 @@ pub struct RoomNotebookPreview {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RoomNotebookRecentRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<usize>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RoomNotebookSearchRequest {
     pub query: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -750,7 +534,7 @@ pub struct RoomNotebookSearchRequest {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RoomNotebookReadRequest {
     pub path: String,
 }
@@ -771,7 +555,7 @@ pub struct RoomNotebookResultsResponse {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RoomStateListRequest {}
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -788,7 +572,7 @@ pub struct RoomStateListResponse {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RoomStateReadRequest {
     pub entity: String,
 }
@@ -2076,55 +1860,50 @@ pub enum HubCommand {
         request_id: String,
         payload: UserNotifyDeliveryRequest,
     },
-    #[serde(rename = "room.notebook.append")]
-    RoomNotebookAppend {
+    #[serde(rename = "room.diary.active")]
+    RoomDiaryActive {
         request_id: String,
-        payload: NotebookAppendRequest,
+        payload: RoomDiaryActiveRequest,
+    },
+    #[serde(rename = "room.diary.read")]
+    RoomDiaryRead {
+        request_id: String,
+        payload: RoomDiaryReadRequest,
     },
     #[serde(rename = "room.notebook.recent")]
     RoomNotebookRecent {
         request_id: String,
-        payload: NotebookRecentRequest,
-    },
-    #[serde(rename = "room.notebook.selectExact")]
-    RoomNotebookSelectExact {
-        request_id: String,
-        payload: NotebookSelectExactRequest,
+        payload: RoomNotebookRecentRequest,
     },
     #[serde(rename = "room.notebook.search")]
     RoomNotebookSearch {
         request_id: String,
-        payload: NotebookSearchRequest,
+        payload: RoomNotebookSearchRequest,
     },
-    #[serde(rename = "room.notebook.current")]
-    RoomNotebookCurrent {
+    #[serde(rename = "room.notebook.read")]
+    RoomNotebookRead {
         request_id: String,
-        payload: NotebookCurrentRequest,
+        payload: RoomNotebookReadRequest,
     },
-    #[serde(rename = "room.notebook.update")]
-    RoomNotebookUpdate {
+    #[serde(rename = "room.state.list")]
+    RoomStateList {
         request_id: String,
-        payload: NotebookUpdateRequest,
+        payload: RoomStateListRequest,
     },
-    #[serde(rename = "room.notebook.remove")]
-    RoomNotebookRemove {
+    #[serde(rename = "room.state.read")]
+    RoomStateRead {
         request_id: String,
-        payload: NotebookRemoveRequest,
+        payload: RoomStateReadRequest,
     },
-    #[serde(rename = "room.diary.append")]
-    RoomDiaryAppend {
+    #[serde(rename = "room.maintenance.status")]
+    RoomMaintenanceStatus {
         request_id: String,
-        payload: DiaryAppendRequest,
+        payload: RoomMaintenanceStatusRequest,
     },
-    #[serde(rename = "room.diary.recent")]
-    RoomDiaryRecent {
+    #[serde(rename = "room.maintenance.submit")]
+    RoomMaintenanceSubmit {
         request_id: String,
-        payload: DiaryRecentRequest,
-    },
-    #[serde(rename = "room.diary.selectExact")]
-    RoomDiarySelectExact {
-        request_id: String,
-        payload: DiarySelectExactRequest,
+        payload: RoomMaintenanceSubmitRequest,
     },
     #[serde(rename = "room.bootstrap")]
     RoomBootstrap { request_id: String },
@@ -2206,16 +1985,15 @@ impl HubCommand {
             | Self::McpCallTool { request_id, .. }
             | Self::McpBatch { request_id, .. }
             | Self::UserNotifyDeliver { request_id, .. }
-            | Self::RoomNotebookAppend { request_id, .. }
+            | Self::RoomDiaryActive { request_id, .. }
+            | Self::RoomDiaryRead { request_id, .. }
             | Self::RoomNotebookRecent { request_id, .. }
-            | Self::RoomNotebookSelectExact { request_id, .. }
             | Self::RoomNotebookSearch { request_id, .. }
-            | Self::RoomNotebookCurrent { request_id, .. }
-            | Self::RoomNotebookUpdate { request_id, .. }
-            | Self::RoomNotebookRemove { request_id, .. }
-            | Self::RoomDiaryAppend { request_id, .. }
-            | Self::RoomDiaryRecent { request_id, .. }
-            | Self::RoomDiarySelectExact { request_id, .. }
+            | Self::RoomNotebookRead { request_id, .. }
+            | Self::RoomStateList { request_id, .. }
+            | Self::RoomStateRead { request_id, .. }
+            | Self::RoomMaintenanceStatus { request_id, .. }
+            | Self::RoomMaintenanceSubmit { request_id, .. }
             | Self::RoomBootstrap { request_id }
             | Self::RoomBootstrapRead { request_id, .. }
             | Self::Bootstrap { request_id }
@@ -2968,6 +2746,102 @@ mod tmux_tests {
             "bootstrap.read"
         );
     }
+    #[test]
+    fn current_room_commands_use_nested_payloads_and_public_names() {
+        let commands = [
+            (
+                HubCommand::RoomDiaryActive {
+                    request_id: "diary-active".to_string(),
+                    payload: RoomDiaryActiveRequest::default(),
+                },
+                "room.diary.active",
+            ),
+            (
+                HubCommand::RoomDiaryRead {
+                    request_id: "diary-read".to_string(),
+                    payload: RoomDiaryReadRequest {
+                        layer: RoomDiaryLayer::Daily,
+                        period: "current".to_string(),
+                    },
+                },
+                "room.diary.read",
+            ),
+            (
+                HubCommand::RoomNotebookRecent {
+                    request_id: "notebook-recent".to_string(),
+                    payload: RoomNotebookRecentRequest::default(),
+                },
+                "room.notebook.recent",
+            ),
+            (
+                HubCommand::RoomNotebookSearch {
+                    request_id: "notebook-search".to_string(),
+                    payload: RoomNotebookSearchRequest {
+                        query: "room".to_string(),
+                        limit: Some(3),
+                    },
+                },
+                "room.notebook.search",
+            ),
+            (
+                HubCommand::RoomNotebookRead {
+                    request_id: "notebook-read".to_string(),
+                    payload: RoomNotebookReadRequest {
+                        path: "Notebook/topic.md".to_string(),
+                    },
+                },
+                "room.notebook.read",
+            ),
+            (
+                HubCommand::RoomStateList {
+                    request_id: "state-list".to_string(),
+                    payload: RoomStateListRequest::default(),
+                },
+                "room.state.list",
+            ),
+            (
+                HubCommand::RoomStateRead {
+                    request_id: "state-read".to_string(),
+                    payload: RoomStateReadRequest {
+                        entity: "project".to_string(),
+                    },
+                },
+                "room.state.read",
+            ),
+            (
+                HubCommand::RoomMaintenanceStatus {
+                    request_id: "maintenance-status".to_string(),
+                    payload: RoomMaintenanceStatusRequest::default(),
+                },
+                "room.maintenance.status",
+            ),
+            (
+                HubCommand::RoomMaintenanceSubmit {
+                    request_id: "maintenance-submit".to_string(),
+                    payload: RoomMaintenanceSubmitRequest {
+                        items: vec![RoomMaintenanceRequestItem {
+                            slot: RoomMaintenanceSlot::Entity,
+                            payload: serde_json::json!({
+                                "entity": "project",
+                                "content": "body"
+                            }),
+                        }],
+                        mode: Some(RoomMaintenanceExecutionMode::Local),
+                        wait_seconds: Some(0),
+                    },
+                },
+                "room.maintenance.submit",
+            ),
+        ];
+
+        for (command, name) in commands {
+            let request_id = command.request_id().to_string();
+            let value = serde_json::to_value(command).unwrap();
+            assert_eq!(value["type"], name);
+            assert_eq!(value["requestId"], request_id);
+            assert!(value["payload"].is_object());
+        }
+    }
 
     #[test]
     fn bootstrap_resource_omits_only_absent_truncation_line() {
@@ -3047,7 +2921,7 @@ mod tmux_tests {
                 load_policy: BootstrapLoadPolicy::Contextual,
                 priority: 80,
                 load_when: vec!["continued context".to_string()],
-                tool_bindings: vec!["room.diary.recent".to_string()],
+                tool_bindings: vec!["room.diary.active".to_string()],
                 tags: vec!["continuity".to_string()],
                 path: "guides/diary.md".to_string(),
                 size_bytes: 10,
@@ -3065,7 +2939,7 @@ mod tmux_tests {
             "text/markdown"
         );
         assert_eq!(value["guides"][0]["loadPolicy"], "contextual");
-        assert_eq!(value["guides"][0]["toolBindings"][0], "room.diary.recent");
+        assert_eq!(value["guides"][0]["toolBindings"][0], "room.diary.active");
         assert_eq!(value["totalGuides"], 1);
         assert_eq!(value["returnedGuides"], 1);
 

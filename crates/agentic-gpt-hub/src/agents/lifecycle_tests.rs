@@ -2,7 +2,7 @@ use super::*;
 use crate::agents::test_support::*;
 use agentic_gpt_protocol::{
     AgentConnectionMode, AgentMessage, AgentRole, AgentRunReport, ConfirmationPayload, HubCommand,
-    HubCommandEnvelope, HubMessage, JobState, NotebookCurrentRequest, SafeConfigSummary,
+    HubCommandEnvelope, HubMessage, JobState, RoomNotebookReadRequest, SafeConfigSummary,
 };
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -203,10 +203,10 @@ async fn room_dispatch_keeps_validated_generation_during_replacement() {
         .await
         .unwrap();
 
-    let command = HubCommand::RoomNotebookCurrent {
+    let command = HubCommand::RoomNotebookRead {
         request_id: "room-generation-request".to_string(),
-        payload: NotebookCurrentRequest {
-            scope: "agentic".to_string(),
+        payload: RoomNotebookReadRequest {
+            path: "Notebook/topic.md".to_string(),
         },
     };
     let mut request = Box::pin(crate::room::request_active_room(&state, command, 1));
