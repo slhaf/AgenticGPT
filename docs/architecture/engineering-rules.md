@@ -93,7 +93,7 @@ Job/Skill 状态必须保持窄 owner：Agent `jobs` 拥有运行中的 Process/
 
 Local、Standalone 和 Hub agent 当前复用真正的 `jobs`、`exec`、`policy`、`confirmation`、`file_ops`、`mcp`、`tmux`、Room/Skill/Browser 实现；差异来自 `RuntimeModel`、Transport、profile 和 capability。新增入口应接入共享 operation/resource owner，而不是新增 `run_*_again`。
 
-当前 Agent routing 仍是部分收敛：`stdio_server::dispatch_with_lifecycle` 保留直接资源分支，并将选定 `HubCommand` trampoline 交给 `local_service::dispatch`；Hub ingress 直接使用 `local_service`。这些路径共享 authorize gate 和资源 owner，当前没有复现行为失败或发现第二套 executor；剩余是结构性 `[推断]` 的 change-locality/projection drift。收敛时一次迁移一个 operation family，保留 ingress-specific framing/auth/error，不把 universal dispatcher 当验收前提。
+当前 Agent routing 已对 Process family 窄收敛：`stdio_server` 的 Process Exec/Batch 经 `local_service::dispatch_process` 进入同一 admission/Job path；其他 operation family 仍保留直接资源分支或选定 `HubCommand` trampoline，Hub ingress 直接使用 `local_service`。这些路径共享 authorize gate 和资源 owner，当前没有复现行为失败或发现第二套 executor；剩余是结构性 `[推断]` 的 change-locality/projection drift。收敛时一次迁移一个 operation family，保留 ingress-specific framing/auth/error，不把 universal dispatcher 当验收前提。
 
 `stdio_server::dispatch_with_lifecycle` 与 `local_service::dispatch_inner` 的现状差异是映射/metadata/gate 边界问题，不是允许增加第三套执行器的理由。优先收敛 value/error operation；删除旧分支必须在所有 caller、descriptor、HTTP/MCP projection 和回归验证迁移后进行。
 
@@ -105,7 +105,7 @@ Local、Standalone 和 Hub agent 当前复用真正的 `jobs`、`exec`、`policy
 
 ### R-02b：Hub 中立 projection 与入口 adapter 分离
 
-- Hub neutral control/projection helper 可放在现有 Hub crate 内，负责不依赖 HTTP/MCP 表面 schema 的 command construction、owner/freshness、receipt-neutral Job/Room values。
+- Hub neutral control/projection helper 已在现有 Hub crate 的 `state::projection` 形成，负责不依赖 HTTP/MCP 表面 schema 的 command construction、owner/freshness、receipt-neutral Job/Room values；`routes.rs` 与 `mcp_server.rs` 共同消费 Job/info projection。
 - HTTP `routes` 保留 action auth、HTTP status/body、OpenAPI projection；Apps MCP `mcp_server` 保留 OAuth/profile/schemars、JSON-RPC 和 `AgenticResult` projection。两者不得互相调用或通过对方 DTO 复用，也不得直接触碰 Agent effects。
 
 ### R-03：共享窄语义，不制造万能 schema/registry
@@ -120,7 +120,7 @@ Local、Standalone 和 Hub agent 当前复用真正的 `jobs`、`exec`、`policy
 
 不可因此强迫以下 authority 使用同一输入/输出 schema：
 
-1. Protocol `lib.rs`：Hub↔Agent wire authority；
+1. Protocol root facade + 私有 wire domain modules（`envelopes`、`identity_config`、`mcp`、`notification_tmux`、`process_jobs`、`room`、`skill_bootstrap`）：Hub↔Agent wire authority；
 2. Agent `stdio_server.rs`：Agent-local live toolset、descriptor、conditional validation authority；
 3. Hub `mcp_server.rs`：Apps `/mcp` rmcp/schemars authority；
 4. `routes.rs` + `openapi/hub.yaml`：HTTP/Actions DTO 与其静态 contract authority；
@@ -321,11 +321,11 @@ Room 代码必须按资源 owner 放置。以下是技术布局建议，不表�
 
 **当前事实边界**：
 
-- Android `AndroidAgenticApp` 组装 Room attention repository、Android scheduler、notification/runtime coordinator；Android Room 是 local attention source of truth。
-- AlarmManager、Notification、boot receiver 和 action receiver 是 OS side effects/recovery path，不是另一数据库。
+- Android `AndroidAgenticApp` 组装 Room attention repository、Android scheduler、notification/runtime coordinator；`AttentionRuntimeCoordinator` 实现 `AttentionTransitionOwner`，`AttentionTransitionPolicy` 统一 UI、receiver、alarm、boot transition，Android Room 是 local attention source of truth。
+- AlarmManager、Notification、boot receiver 和 action receiver 是 OS side effects/recovery path，不是另一数据库；overdue restore 使用 atomic claim，scheduler snooze 必须接收完整 item payload。
 - `AttentionSourceKind.Hub` 只是模型预留；没有 Hub producer/client/ack lifecycle。
 - `HubConnectionCard`/Android settings 的连接字段和测试按钮是 placeholder；`console/shared` 没有网络 client、Bearer、Hub protocol，`AndroidManifest.xml` 未声明 `INTERNET` 权限。
-- Desktop/Web 当前启动 UI shell，不拥有 Android attention/Hub parity。
+- Desktop/Web 当前启动 UI shell，不拥有 Android attention/Hub parity；`:shared:jvmTest` 17-task BUILD SUCCESSFUL 仅证明 shared policy/common Kotlin compile，Android app host test/assemble、Room/OS 与 device/emulator smoke 仍需单独验证。
 
 **未来新增 Hub client 的正确放置**：
 
@@ -379,7 +379,7 @@ Browser host：当前 `/tmp/codex-browser-use` socket 0660 且没有同等 peer 
 
 ### R-21：路径、symlink、OS effect
 
-- 文件资源先 canonicalize，再检查 workspace/write roots、reserved paths、symlink 和 revision；写前后均 revalidate。
+- 文件资源先 canonicalize，再检查 workspace/write roots、reserved paths、symlink 和 revision；配置的 write/read-only/deny roots 统一由共享 `exec::normalize_roots` expansion/canonicalization/dedup 处理，写前后均 revalidate；Expansion/Resolution failure stage 必须保留。
 - generic process 的 path-looking argument 检查只是 preflight；环境变量、间接路径、任意脚本、网络和 inherited environment 不能被描述成受 roots 完整约束。
 - MCP stdio、Browser Node/JS、tmux server、tunnel child、Git/Room maintenance 都要声明 owner、effect 和 trust；不使用空泛“sandboxed”标签。
 - 新增 network call 需说明 DNS/redirect/rebinding、TLS、Host/Origin、timeout/cancel、secret、返回值大小和 audit；不把一次连接成功当作安全证明。
@@ -393,7 +393,7 @@ Browser host：当前 `/tmp/codex-browser-use` socket 0660 且没有同等 peer 
 
 不得 whole-config reload 后留下旧 private state、history、Browser manager、transport sender 与新 identity/root 不一致。无法证明 live-safe 的字段默认归 startup-only。
 
-当前 config snapshot 选择是 pending decision，不得在重排模块时暗中选边：`jobs.rs::start_process_job_inner` 在 admission/audit 处捕获 config，而 `run_async_job` 后续仍从 `state.config` 读取 policy/CWD/preflight；`docs/configuration.md` 现明确记录不存在统一的 admission-time config snapshot guarantee，并指出异步路径可能重新读取 live config。该差异是 source-level 风险，尚未复现 reload interleaving 行为失败。先由 owner 记录单一 snapshot 规则，再用 deterministic reload scenario 验证；在此之前不把任何一侧写成已实现的普遍保证。
+当前 Agent Process/Skill admission 与 managed batch 已统一采用 admission-time `Arc<Config>` snapshot，queued workers 不重新读取 live policy；后续 admission 才使用 reload 后 config。startup supervisor watcher 保持独立，不与 Job snapshot 合并。字段分类变化仍须 deterministic reload scenario 验证；无法证明 live-safe 的字段默认要求 restart。
 
 ## 8. 协议、合同和迁移规则
 
@@ -403,7 +403,7 @@ Browser host：当前 `/tmp/codex-browser-use` socket 0660 且没有同等 peer 
 
 | Surface | Authority | Review 必查 |
 |---|---|---|
-| Hub↔Agent WS/SSE | `agentic-gpt-protocol/src/lib.rs` | serde/camelCase、hash/id、状态、replay、owner |
+| Hub↔Agent WS/SSE | `agentic-gpt-protocol/src/lib.rs` root facade + 私有 wire domain modules | serde/camelCase、hash/id、状态、replay、owner |
 | Agent-local MCP | `agentic-gpt/src/stdio_server.rs` | live toolset、descriptor、required/default/bounds、conditional validation |
 | Hub Apps MCP | `agentic-gpt-hub/src/mcp_server.rs` | rmcp/schemars、Full/Coordinator、native/forwarded result |
 | HTTP Actions | `routes.rs` 的实际 DTO/response adapter + `openapi/hub.yaml` | optionality、slim response、分页、error/status、import compatibility |
@@ -428,7 +428,7 @@ Parity gate 可以输出每个 surface 的差异，不要求所有 surface 共�
 
 当前 `scripts/check_contract_parity.py` 是 CI 中的行为/合同 gate，已超出单纯 YAML parse：它校验 local refs/schema、选定 response/descriptor 并运行 loopback/private-home live checks。它不证明 strict 外部 Actions importer、外部 Apps client、生产 tunnel/cloud、完整 Protocol-wire lifecycle 或 Android/Console/Browser service。`evaluate_tool_contracts.py` 与 matrix 只作 prediction/review probe。
 
-tag-triggered release workflow 与 branch/PR CI 分开，只负责 cross Linux packaging、三 binary archive 和 `SHA256SUMS`；未自动证明 parity gate、ARM runtime、artifact/version pairing 或外部部署。若未来增加 release preflight，应明确 owner/输入/阻断边界，不把 Console、示例、实验或外部服务强行纳入 Rust release。
+tag-triggered release workflow 的 preflight 固定 same-SHA checkout，并校验 release tag、Agent/Hub Cargo version 精确匹配、fmt/check/test/build 与 bounded contract parity，然后才进入 cross Linux packaging、三 binary archive 和 `SHA256SUMS`；当前本地 `v0.9.1` preflight/parity 已在可达镜像环境通过，故意 mismatch guard 也已覆盖。strict Clippy 既有 CI debt 不属于该 preflight；hosted publication、ARM runtime、artifact/version pairing on hosted runners、外部部署仍未验证。
 
 ### R-25：公开合同只能通过 clean cutover 迁移
 
@@ -477,7 +477,7 @@ Reviewer 和 coding agent 在合并前逐项标记 `是/否/不适用 + 证据�
 
 ### E. 部署与文档
 
-- [ ] startup-only/live-safe config 是否分开；是否需要 restart；Job admission 与 async execution 的 config snapshot 选择是否已记录并验证或明确 pending？
+- [ ] startup-only/live-safe config 是否分开；是否需要 restart；Job admission 与 async execution 的已实现 `Arc<Config>` snapshot 规则是否经 deterministic reload regression 记录并验证，后续字段变化是否重新核验？
 - [ ] 是否检查 local socket、Browser host、TLS/proxy/public base、CORS/Origin、文件权限和容器/共享 volume 信任？
 - [ ] 是否更新 `docs/architecture/` 中受影响的职责/依赖/所有权，而没有把目标写成现状？
 - [ ] 是否记录未调查盲点和所需真实跨进程/设备/发布验证？
@@ -499,20 +499,20 @@ Reviewer 和 coding agent 在合并前逐项标记 `是/否/不适用 + 证据�
 
 ## 11. 实施门槛与剩余核验项
 
-以下门槛属于后续实现和主线核验的证据要求，不是新的用户确认事项；第 3 项所述 WP-R closure 已实现并通过当前 live gate；其余未通过前不能将目标段落当作落地证明：
+以下门槛属于后续实现和主线核验的证据要求，不是新的用户确认事项；WP-R closure 已实现并通过当前 live gate，Agent/Hub/Protocol 的本轮窄 source seams 与 bounded release preflight 也已有记录；其余外部/平台边界仍不能由这些结果代替：
 
 1. Hub↔Agent 真实 WS/SSE 断线、重连、旧连接、late/duplicate/mismatched Response、run receipt 与 Agent ledger 的跨进程验证。
 2. [已完成；有界] WP4-A 的当前本地 Agent-local/Hub Full/Coordinator/HTTP/OpenAPI/Protocol wire descriptor/schema/response/lifecycle gate 已有实现与证据；剩余 scope 仍包括 strict 外部 importer、完整 Protocol-wire lifecycle 和 release/tag 组合，不是单一万能 schema，也不把历史 Job/OpenAPI drift 例子当作当前失败。
 3. [已完成] D02 要求的 Room 远端读与维护能力、各 surface 合同/权限/错误/lifecycle 和真实 HTTP/Apps/WS E2E；WP-R 已一次升级迁移全部 caller、移除 obsolete path、保护现有文件数据并提供迁移文档，当前 live gate 已验证九个 operation。维护继续使用 Agent 既有 safeguards/controlled-maintenance authority，不新增流程 confirmation gate；生产 tunnel/GitHub 部署不在证据范围内。
 4. process sandbox/preflight、MCP stdio、Browser JS、tmux、tunnel child 的 effect/trust/confirmation 审查；本轮不改变 sandbox 默认、policy override 或权限模型。
 5. Browser host 在 Neko/shared-volume/container/Unix socket 实际拓扑中的 peer/auth、权限与生命周期检查；拓扑本身受支持，机制在盘点后选定，不预选 owner-only，且不得无授权网络暴露。
-6. Console Android local-only attention 的独立维护与真实 placeholder/unavailable 展示；remote console、approval board、exec ledger 另立产品，不是核心重构完成门槛。
+6. Console Android local-only attention 的独立维护与真实 placeholder/unavailable 展示；source-level transition owner、atomic overdue claim 和 payload-aware snooze 已实现，`:shared:jvmTest` 17-task BUILD SUCCESSFUL 仅覆盖 shared policy/common Kotlin compile；Android Gradle/app host/assemble、Room/OS/device 行为仍待核验；remote console、approval board、exec ledger 另立产品，不是核心重构完成门槛。
 7. config startup/live reload、atomic persistence、correctness/history/observability 分层、pending confirmation/OAuth/cache 的易失语义、已产生 confirmation result/Job history/error retention、secret projection 和 release contract/artifact checks 的明确验收；provenance/signing 是另行决定的发布专题。
 
-8. Agent operation routing remains a structural residual: shared gate/resource owner is present, but stdio direct branches and HubCommand trampolines are not one universal dispatcher. No behavior failure is claimed; any cleanup must migrate one operation family and verify each projection.
-9. Release/tag packaging, artifact/version pairing, strict external importers, production tunnel/cloud, ARM runtime, external Browser/MCP effects and Console device behavior require separate owner evidence; the Rust parity gate does not cover them.
+8. Agent operation routing remains a structural residual: Process Exec/Batch now share `dispatch_process`, but other stdio direct branches and HubCommand trampolines are not one universal dispatcher. No behavior failure is claimed; any cleanup must migrate one operation family and verify each projection.
+9. Release/tag source preflight and bounded local parity pass are recorded; hosted publication/live gate, artifact/version pairing on hosted runners, strict external importers, production tunnel/cloud, ARM runtime, external Browser/MCP effects and Console device behavior require separate owner evidence; the Rust parity gate does not cover them.
 
-这些仍是后续实现和主线核验入口，不是本次文档对全局测试的通过声明。历史调查本轮仅运行 Cargo metadata 和静态合同检查，未运行当时列出的 Cargo/Gradle 构建或测试、lint/formatter、真实 Hub/Agent/Android/Browser/tunnel、ARM release 或外部 Actions importer；随后 WP-R closure 的 live gate 已 exit 0，主线另报告 workspace Cargo test 667 passed/1 ignored。上述证据不构成生产 tunnel/GitHub 部署、其余架构门槛或外部组件通过声明。
+这些仍是后续实现和主线核验入口，不是本次文档对全局测试的通过声明。**历史调查说明（2026-09-23 前）**：当时仅运行 Cargo metadata 和静态合同检查，未运行当时列出的 Cargo/Gradle 构建或测试、lint/formatter、真实 Hub/Agent/Android/Browser/tunnel、ARM release 或外部 Actions importer。**当前整合证据**：Rust `cargo check --workspace`、targeted admitted-process reload regression、`cargo test --workspace`（668 passed、1 ignored）已通过；本地 bounded release preflight/parity 已通过。上述结果不构成生产 tunnel/GitHub 发布、hosted cross-build/ARM、Android OS/device 或外部组件通过声明。
 
 ## 12. 保留项与不采用的做法
 

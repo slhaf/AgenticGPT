@@ -7,13 +7,15 @@ Implement the source-grounded structural seams identified in the 2026-09-23 whol
 - Source and original six-goal reassessment: `.planning/2026-09-23-architecture-reassessment/findings.md`, `docs/architecture/refactoring-plan.md` conditional packages.
 - User explicitly authorizes implementation and internal Protocol organization. WP-T test cleanup standards remain undecided; no opportunistic mass test deletion.
 - Preserve unrelated existing change in `.planning/2026-09-22-wp-r-remote-room-closure/room-contractdocs-findings.md`. No production deployment or destructive user-data migration.
-- Main owns integration, reproducible behavior proof, cross-slice contracts, validation and each phase commit. Parallel workers own disjoint files and skip formatters/linters/build/tests/commits.
+- Main owns integration, reproducible behavior proof, cross-slice contracts, validation and a commit for each coherent delivery phase. Parallel workers own disjoint files and skip formatters/linters/build/tests/commits. Independent work is split into separately committed Rust, release, and Android subphases; architecture/status documentation is the integration subphase, rather than one mixed implementation commit.
 
 ## Phase status
-1. Contract/baseline — complete: independent file ownership and cross-cutover APIs frozen; deterministic pre-fix Job reload scenario reproduced Rejected vs Completed (artifact://569); baseline plan committed `0b46d64`.
-2. Independent implementation — in_progress: Agent operation family, Hub neutral projection/Apps registry, Protocol WP4-B, Android local transition, release preflight and Agent Job config snapshot in disjoint owned files. Workers skip validation.
-3. Integration — pending: apply dependent Agent ownership changes after the config seam, migrate callers and docs, run targeted smoke/behavior checks and one project-wide validation pass, commit coherent implementation boundaries.
-4. Delivery — pending: post-smoke cleanup, independent code review, bounded limitations, final phase commit and evidence ledger.
+1. Contract/baseline — complete: independent file ownership and cross-cutover APIs frozen (`0b46d64`); deterministic pre-fix Job reload scenario reproduced Rejected vs Completed (`07f42df`, artifact://569).
+2. Rust ownership subphase — complete and committed `4381e82`: Agent Process/config/Skill/path, Hub neutral projection/Apps membership and Protocol WP4-B. `cargo check --workspace`, targeted reload regression, `cargo test --workspace` (668 passed, 1 ignored), and bounded live parity passed.
+3. Release gate subphase — complete and committed `3603ffc`: same-SHA tag preflight and version authority documentation. Local mismatched-tag rejection and matching `v0.9.1` full preflight/live gate passed (artifact://643); hosted GitHub publishing/cross-build not run.
+4. Android local subphase — source complete and committed `7ecb87d`: one transition owner, atomic overdue claim, explicit hard failure/typed overdue and persisted visible degraded semantics. `:shared:jvmTest` passed after final policy (artifact://694); focused independent review found no remaining patch-introduced issue. Android app host/assemble/OS/device remain unavailable because SDK empty and no attached device.
+5. Integration documentation/evidence — in_progress: update existing configuration/architecture status, affected caller contract notes and bounded evidence; commit once source cutovers and review freeze.
+6. Delivery cleanup — pending: after smoke, remove owned throwaway probe/worktree, verify staging excludes user change, record proof and limits in final ledger/commit.
 
 ## Cross-slice contracts
 - Protocol writer may reorganize only `crates/agentic-gpt-protocol`, retaining its existing root public names, serde tags/defaults/bytes and dependency set. No API rename or new wire feature. Other writers consume current root names unchanged. Pure `HubCommand::wire_name()` is optional but, if added, tell Main before Hub/Agent callers migrate.

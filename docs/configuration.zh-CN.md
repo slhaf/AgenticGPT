@@ -575,7 +575,7 @@ live subset。无效候选会保留上一份有效状态；候选修改需要重
 | `pathPolicy`（`workspaceRoot` 未改变时） | 所有 Agent worker 共享热加载，对后续路径检查生效 |
 | `httpMcp.enabled`、`host`、`port`、`publicUrl`、`allowHosts` | Standalone HTTP watcher 协调启用状态与 endpoint identity；identity 变化会关闭有状态 session 并丢弃 listener-local OAuth state，客户端必须重新 initialize |
 | `httpMcp.bearerToken` 引用或其解析内容 | Standalone HTTP watcher 原地更新认证而不重新绑定；解析凭据可用时保留已有 session |
-| 已接纳 Job 与已创建下游调用 | 不保证统一的 admission 时配置快照。Process/Skill Job 准入会为容量/审计记录配置，但异步执行路径仍可能重新读取 live 配置，用于 policy、工作目录、preflight 与确认；下游调用按各自资源路径取快照。准入与执行之间穿插 reload 的行为尚未运行验证，不能假定原决策/配置控制所有后续副作用。 |
+| 已接纳 Process/Skill Job 与已创建下游调用 | Process 与 Skill Job 从准入开始保留同一份有效配置，贯穿容量、审计、包摘要、policy、工作目录、preflight、确认和异步执行。Process batch 的 preflight/确认、prepared admission 与排队 worker 使用同一份配置；后续新准入使用热加载后的配置。下游 MCP 调用保留各自资源专属快照，这不是全部操作的统一快照规则。 |
 | `workspaceRoot` 及其配套 `pathPolicy` | 修改 workspace 需要重启；重启前原 workspace/path-policy 成对原子保留并继续生效 |
 | `mode`、`profile`、`agentId` | 需要重启 |
 | `browser` | 需要重启；配置的 Browser runtime 在进程启动时选择 |
