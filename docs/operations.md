@@ -130,13 +130,122 @@ and `hub:`.
 
 ## Hub deployment checks
 
-1. Confirm Hub and Agent binaries report the same v0.9 version.
+1. Confirm the Hub and Agent binaries are the intended paired artifacts by
+   recording `agentic-gpt --version` and `agentic-gpt-hub --version` output,
+   artifact paths, and checksums. Do not substitute a release number or
+   service name for this pairing check.
 2. Confirm `/v1/info` responds through public HTTPS.
 3. Confirm `/v1/agents` shows expected command-capable Agents online.
 4. Run one harmless command through `/v1/process/exec`.
 5. Start and inspect one Job through `/v1/jobs/{jobId}`.
 6. Validate `/mcp` and refresh Actions schema when the contract changed.
 7. If Standalone reporting is enabled, confirm reporting-only connections reject Hub execution.
+
+### WP-R current Room contract cutover
+
+Use this clean cutover when adopting the current nine-operation Room contract.
+It changes the Hub/Protocol/Agent request and response projection; it does not
+migrate Room content into Hub or add a compatibility alias.
+
+1. **Inventory the paired artifacts.** Record `agentic-gpt --version` and
+   `agentic-gpt-hub --version`, the exact binary paths, and checksums. Keep the
+   Hub and Agent artifacts as one verified pair. Restart them with the same
+   existing process invocation used by the deployment (`agentic-gpt run` for
+   the Agent and `agentic-gpt-hub ... serve` for the Hub); this procedure does
+   not invent a system-service command.
+2. **Record effective configuration and owners.** Set `AGENT_CONFIG` to the
+   actual Agent config path (the default is `~/.agentic_gpt/config.json`) and
+   inspect `agentic-gpt config show --config "$AGENT_CONFIG"` for
+   `workspaceRoot`, `room.repositoryRoot`, `mode`, and `profile`. The Room
+   repository is `room.repositoryRoot` or `<workspaceRoot>/room`. Record the
+   actual Hub `--db` and `--config` paths (the defaults are
+   `~/.agentic_gpt/hub.sqlite3` and `~/.agentic_gpt/hub.json`; deployments may
+   set `AGENTIC_GPT_HUB_DB` and `AGENTIC_GPT_HUB_CONFIG`).
+3. **Quiesce both sides.** Pause new Hub HTTP/MCP calls, drain in-flight calls,
+   and record any undrained `runId` values and corresponding Agent transport
+   ledger entries. Stop the Hub and the affected Agent using the existing
+   deployment process. A waiter timeout is not cancellation; do not replay a
+   command merely because its HTTP wait ended.
+4. **Back up before replacement.** Preserve the Agent config with its file
+   mode, the complete configured Room repository including `.git`, and the
+   Agent audit/transport files required by the deployment. A Git bundle of all
+   refs plus a filesystem copy of the Room root is useful for verification.
+   Preserve the Hub config and SQLite database together with matching `-wal`
+   and `-shm` files when present. Keep backups read-only and label them with
+   the artifact pair; never overwrite a newer database or Room repository with
+   an older copy.
+
+For a concrete operator backup, set `BACKUP_DIR` to a protected destination
+and use the recorded paths rather than a guessed service layout:
+
+```bash
+mkdir -p "$BACKUP_DIR"
+cp -a "$AGENT_CONFIG" "$BACKUP_DIR/agent-config.json"
+cp -a "$ROOM_ROOT" "$BACKUP_DIR/room"
+git -C "$ROOM_ROOT" bundle create "$BACKUP_DIR/room.git.bundle" --all
+cp -a "$HUB_CONFIG" "$BACKUP_DIR/hub.json"
+cp -a "$HUB_DB" "$BACKUP_DIR/hub.sqlite3"
+test ! -e "$HUB_DB-wal" || cp -a "$HUB_DB-wal" "$BACKUP_DIR/hub.sqlite3-wal"
+test ! -e "$HUB_DB-shm" || cp -a "$HUB_DB-shm" "$BACKUP_DIR/hub.sqlite3-shm"
+```
+
+Also copy `<workspaceRoot>/.agentic-gpt-audit.jsonl` when present and the
+owner-bound `~/.agentic_gpt/transport-runs.jsonl` plus its `.lock`, `.recovery`,
+and `.backup` evidence when present. If `HOME` or the Agent home is relocated,
+use the actual `agentic_home` location from the deployment; never infer
+transport state from the Hub database.
+5. **Deploy and reconnect.** Replace the Hub and Agent binaries as one pair,
+   retain the existing config paths, and restart with the existing arguments
+   and secret references. Reconnect the command-capable Room Agent first; a
+   Normal, ReportingOnly, stale, or unready connection must not become the
+   Room target. Do not add a version field, feature flag, alias, or dual
+   execution path.
+6. **Verify the current contract.** Confirm `GET /v1/info` and
+   `/v1/agents`, then inspect Full MCP `tools/list` for the nine current Room
+   names (and no retired names) and Coordinator `tools/list` for their absence.
+   Through
+   the authenticated HTTP API, exercise `/v1/room/diary/active`,
+   `/v1/room/diary/read`, `/v1/room/notebook/recent`,
+   `/v1/room/notebook/search`, `/v1/room/notebook/read`,
+   `/v1/room/state/list`, `/v1/room/state/read`,
+   `/v1/room/maintenance/status`, and
+   `/v1/room/maintenance/submit` with current camelCase DTO bodies and no
+   `agentId`.
+   Check 422 `text/plain` extraction for a missing required JSON field, 400
+   JSON for semantic validation, 404 for no active Room, 409 for lease
+   conflict, and 504 for a transport wait timeout. Verify successful reads
+   are bounded Agent-owned content; Hub receipts are only bounded result
+   projections.
+7. **Verify maintenance ownership.** On a disposable or explicitly approved
+   Room repository, submit one documented semantic slot/payload through
+   `room.maintenance.submit` in `local` mode and verify the returned state,
+   revision, request-residue cleanup, and Git change are limited to the
+   declared target. A disposable local smoke can use the existing Notebook
+   payload shape, for example
+   `{"items":[{"slot":"notebook","payload":{"path":"Notebook/wp-r-smoke.md","title":"WP-R smoke","body":"bounded smoke"}}],"mode":"local","waitSeconds":0}`;
+   use a repository and target that are explicitly disposable or approved.
+   For workflow mode, verify `submitted`/`pending` versus observed sync
+   outcomes and confirm that `waitSeconds` 0–30 only bounds the wait; it never
+   cancels the request. Do not use retired append/update/remove shapes as a
+   maintenance test.
+8. **Migrate callers and cut over.** Update imported OpenAPI consumers and
+   internal callers to the nine current operations. `recent` and `search`
+   retain their names but consume current Markdown preview/results; old
+   passage/JSONL shapes and old append/update/remove/date-selection semantics
+   are not silently translated. Remove old callers only after the current
+   route, MCP descriptor, Agent dispatch, and repository-owner checks pass.
+
+**Rollback boundary.** If verification fails, pause new calls, stop the new
+pair, preserve all current Hub/Agent/Room evidence, and restore only the
+previous verified binaries (and unchanged config if necessary). Keep the
+latest Hub database, `-wal`/`-shm`, Room `.git`, maintenance journal, audit,
+and transport ledgers; do not restore an older database or Room copy over
+newer results. Reconnect the previous pair and re-check `/v1/info`,
+`/v1/agents`, active Room lease safety, and the recorded `runId` values.
+Binary rollback cannot retract a maintenance commit or an already-delivered
+external effect; any content correction must use the existing Agent/Git and
+controlled-maintenance authority. There is no destructive data migration to
+undo.
 
 ### Hub Response ownership cutover
 

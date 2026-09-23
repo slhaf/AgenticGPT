@@ -292,10 +292,10 @@ Room 代码必须按资源 owner 放置。以下是技术布局建议，不表�
 **Room 规则**：
 
 - Hub 不读写 Room 文件，不把 Notebook/Diary 内容放入长期 Hub memory；Room 文档是受控资源，不是 context manager、memory store 或 reasoning loop。
-- D02 要求产品所需的 Room 读与维护能力具有 Hub→Protocol→Agent 的远端公共面。远端与本地在 operation、权限、错误和生命周期上对齐，但不要求同一 transport envelope 或输入/输出 schema；各 surface 用明确 adapter 表达差异。
-- Room maintenance 是真实副作用：本地操作可能写文件、创建 worktree/archive、运行 executor、提交 Git，并可由 `auto_push` 产生或使用 Git remote；workflow 也可以使用本地 request/Git。每项都要经过相应 gate 并留下结果 evidence，不得把 preflight 写成纯校验或编造 ACID transaction。
-- 当前 Hub Full `RoomNotebook*`/`RoomDiary*` 与 Agent surface 的分叉是实现遗漏，不是永久 unsupported 设计。一次升级时迁移全部 caller、descriptor、OpenAPI/Protocol 与文档，移除被替代旧路径；不得将旧 append/update 静默伪装成不等价 maintenance，也不得添加长期透明 alias/shim。
-- Room `selectExact`、append 等字段若跨 surface 不一致，必须在对应边界显式适配并记录迁移，不得让 Protocol 悄悄吸收 Actions legacy shape。
+- D02 要求产品所需的 Room 读与维护能力具有 Hub→Protocol→Agent 的远端公共面；WP-R 已将当前合同收口为九个语义 operation。远端与本地在 operation、权限、错误和生命周期上对齐，但不要求同一 transport envelope 或输入/输出 schema；各 surface 用明确 adapter 表达差异。
+- Room maintenance 是真实副作用：本地操作可能写文件、创建 worktree/archive、运行 executor、提交 Git，并可由 `auto_push` 产生或使用 Git remote；workflow 也可以使用本地 request/Git。每项复用 Agent 既有 policy、path/symlink/Git/lock/clean-tree/expected-change/executor/controlled-maintenance authority gate 并留下结果 evidence，不得另造流程 confirmation gate，不得把 preflight 写成纯校验或编造 ACID transaction。
+- WP-R 已将 Hub Full/HTTP/Protocol/Agent 的 `RoomNotebook*`/`RoomDiary*` surface 收口为九个当前语义 operation；一次升级已迁移 caller、descriptor、OpenAPI/Protocol 与文档并移除被替代旧路径。旧 append/update 不静默伪装成不等价 maintenance，也没有长期透明 alias/shim；历史分叉描述仅作为调查基线。
+- 当前 `notebook.recent/search` 采用 current Markdown DTO 语义；旧 `selectExact`、passage/date、append/update/remove shape 不做静默映射，调用方须使用明确的当前 operation 或 maintenance payload，并按迁移记录处理。
 
 ### R-16：Console 与 Android attention
 
@@ -387,7 +387,7 @@ Browser host：当前 `/tmp/codex-browser-use` socket 0660 且没有同等 peer 
 | HTTP Actions | `routes.rs` 的实际 DTO/response adapter + `openapi/hub.yaml` | optionality、slim response、分页、error/status、import compatibility |
 | Docs/matrix/evaluator | 明确为 review/probe | 不把文档或宽松 prediction probe 当 runtime proof |
 
-例如，Protocol `JobInfo.started_at` 可选、Agent slim list 可能有 `nextCursor`、实际 `job.get`/cancel response 与旧 OpenAPI 字段不同；应做显式 HTTP adapter 或在一次升级中更新合同，不能因“Protocol 有类型”直接宣称 parity。Room `selectExact` 的 year/month/day Actions shape 与 Protocol `date` 也必须在 HTTP 边界适配并随迁移记录，不能让 Protocol 悄悄吸收 legacy shape。
+例如，Protocol `JobInfo.started_at` 可选、Agent slim list 可能有 `nextCursor`、实际 `job.get`/cancel response 与旧 OpenAPI 字段不同；应做显式 HTTP adapter 或在一次升级中更新合同，不能因“Protocol 有类型”直接宣称 parity。Room 历史 `selectExact` 的 year/month/day Actions shape、passage/date 与 append/update/remove drift 已在 WP-R clean cutover 中退出当前合同；当前九个语义 operation 使用 current DTO，`recent/search` 使用当前 Markdown 语义，不能让 Protocol 悄悄吸收 legacy shape。
 
 ### R-24：多入口 parity gate 是必需的
 
@@ -473,17 +473,17 @@ Reviewer 和 coding agent 在合并前逐项标记 `是/否/不适用 + 证据�
 
 ## 11. 实施门槛与剩余核验项
 
-以下门槛属于后续实现和主线核验的证据要求，不是新的用户确认事项；未通过前不能将目标段落当作落地证明：
+以下门槛属于后续实现和主线核验的证据要求，不是新的用户确认事项；第 3 项所述 WP-R closure 已实现并通过当前 live gate；其余未通过前不能将目标段落当作落地证明：
 
 1. Hub↔Agent 真实 WS/SSE 断线、重连、旧连接、late/duplicate/mismatched Response、run receipt 与 Agent ledger 的跨进程验证。
 2. Agent-local 29/40 surface、Hub Full/Coordinator、HTTP/OpenAPI、Protocol wire 的 descriptor/schema/response/lifecycle parity 检查；不是单一万能 schema。
-3. D02 要求的 Room 远端读与维护能力、各 surface 合同/权限/错误/lifecycle 和真实 HTTP/Apps/WS E2E；一次升级迁移全部 caller、移除 obsolete path、保护现有文件数据并随实现提供迁移文档。未纳入公共合同的内部 helper 可保持 local，但不得把必需能力隐藏或标为永久 unsupported，也不要求同一 transport schema。
+3. [已完成] D02 要求的 Room 远端读与维护能力、各 surface 合同/权限/错误/lifecycle 和真实 HTTP/Apps/WS E2E；WP-R 已一次升级迁移全部 caller、移除 obsolete path、保护现有文件数据并提供迁移文档，当前 live gate 已验证九个 operation。维护继续使用 Agent 既有 safeguards/controlled-maintenance authority，不新增流程 confirmation gate；生产 tunnel/GitHub 部署不在证据范围内。
 4. process sandbox/preflight、MCP stdio、Browser JS、tmux、tunnel child 的 effect/trust/confirmation 审查；本轮不改变 sandbox 默认、policy override 或权限模型。
 5. Browser host 在 Neko/shared-volume/container/Unix socket 实际拓扑中的 peer/auth、权限与生命周期检查；拓扑本身受支持，机制在盘点后选定，不预选 owner-only，且不得无授权网络暴露。
 6. Console Android local-only attention 的独立维护与真实 placeholder/unavailable 展示；remote console、approval board、exec ledger 另立产品，不是核心重构完成门槛。
 7. config startup/live reload、atomic persistence、correctness/history/observability 分层、pending confirmation/OAuth/cache 的易失语义、已产生 confirmation result/Job history/error retention、secret projection 和 release contract/artifact checks 的明确验收；provenance/signing 是另行决定的发布专题。
 
-这些是后续实现和主线核验入口，不是本次文档已通过的测试。本轮运行了 Cargo metadata 和静态合同检查，但未运行 Cargo/Gradle 构建或测试、lint/formatter、真实 Hub/Agent/Android/Browser/tunnel、ARM release 或外部 Actions importer，因此不作相应通过声明。
+这些仍是后续实现和主线核验入口，不是本次文档对全局测试的通过声明。历史调查本轮仅运行 Cargo metadata 和静态合同检查，未运行当时列出的 Cargo/Gradle 构建或测试、lint/formatter、真实 Hub/Agent/Android/Browser/tunnel、ARM release 或外部 Actions importer；随后 WP-R closure 的 live gate 已 exit 0，主线另报告 workspace Cargo test 667 passed/1 ignored。上述证据不构成生产 tunnel/GitHub 部署、其余架构门槛或外部组件通过声明。
 
 ## 12. 保留项与不采用的做法
 

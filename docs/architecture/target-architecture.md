@@ -341,13 +341,13 @@ Agent Browser 路径（`browser_distribution` → `browser_runtime` → `browser
 
 ### 6.5 Room
 
-Room 是受控文件/文档资源，不是通用 memory；D02 已确定所需 Room 读与维护能力必须补齐远端公共面：
+Room 是受控文件/文档资源，不是通用 memory；D02 已确定所需 Room 读与维护能力必须补齐远端公共面，WP-R 已将其收口为九个当前语义 operation：`diary.active/read`、`notebook.recent/search/read`、`state.list/read`、`maintenance.status/submit`：
 
 - **建议模块边界（仅技术布局，不表示代码已搬）**：`room/mod.rs` 作为模块入口，按真实 seam 划分 `repository`（repository-relative path、root、symlink、schema/scaffold、Git readiness）、`read/{diary,notebook,state}`（各资源的 bounded read）和 `maintenance`（semantic slot、预期变更、worktree/tar preflight、受控写入/提交）。
-- Room maintenance 是真实副作用链：本地操作可能写入文件、创建 worktree 或 archive、运行 executor、提交 Git，并可由 `auto_push` 产生或使用 Git remote；workflow 也可以采用本地 request/Git。应逐项记录 policy、confirmation、path/lifecycle gate 和结果 evidence，不能把 preflight 写成纯校验或编造 ACID transaction。
-- Hub `room.rs` 只拥有 active Room `(agent_id, connection_id)` lease、路由与结果/错误投影；Hub 不打开 Room 文件，不把内容装入长期 `HubState`。实际内容、文件/Git 副作用和提交事实仍由 Agent Room repository 所有。
-- Hub→Protocol→Agent 必须覆盖产品要求的 Room 远端读与维护语义；远端与本地应在 operation、权限、错误和生命周期上对齐，但不要求机械复制 transport envelope 或同一输入/输出 schema。各入口应有明确的 surface adapter/parity 记录。
-- 当前 Hub Full profile 与 Agent `local_service` 的 `RoomNotebook*`/`RoomDiary*` 分叉是待修复的合同遗漏，不是永久 unsupported 设计，也不意味着删除 Room repository。一次升级时迁移全部仓库 caller、descriptor、HTTP/OpenAPI、Protocol 与文档，移除被替代旧路径；不得把旧 append/update 静默伪装成不等价 maintenance，也不得添加长期透明 alias/shim。
+- Room maintenance 是真实副作用链：本地操作可能写入文件、创建 worktree 或 archive、运行 executor、提交 Git，并可由 `auto_push` 产生或使用 Git remote；workflow 也可以采用本地 request/Git。应复用 Agent 已有的 policy、path/symlink/Git/lock/clean-tree/expected-change/executor/controlled-maintenance authority gate 并留下结果 evidence；不得另造流程 confirmation gate，不能把 preflight 写成纯校验或编造 ACID transaction。
+- Hub `room.rs` 只拥有 active Room `(agent_id, connection_id)` lease、路由与结果/错误投影；Hub 不打开 Room 文件，不把内容装入长期 `HubState`。通用 run receipt 可以保留有界 operation result，但不构成 Room 内容 authority；实际内容、文件/Git 副作用和提交事实仍由 Agent Room repository 所有。
+- WP-R 已由 Hub→Protocol→Agent 的九个当前语义 operation 覆盖产品要求的 Room 远端读与维护语义；远端与本地应在 operation、权限、错误和生命周期上对齐，但不要求机械复制 transport envelope 或同一输入/输出 schema。各入口应有明确的 surface adapter/parity 记录，且该实现已通过当前 live gate。
+- WP-R 已将 Hub Full/HTTP/Protocol/Agent surface 收口到上述九个 operation；`recent/search` 保留公共 operation 名称但采用当前 Markdown DTO 语义。旧 JSONL/legacy HubCommand 路径已在 caller、descriptor、OpenAPI/Protocol 与文档迁移后退出当前 contract，旧 passage/date/append/update/remove 语义不做静默映射，也不添加长期透明 alias/shim。旧分叉描述仅保留为历史调查基线；当前 live gate 已通过，不构成生产 tunnel/GitHub 部署声明。
 
 ### 6.6 Console、Android attention 与 TUI
 
@@ -370,7 +370,7 @@ Room 是受控文件/文档资源，不是通用 memory；D02 已确定所需 Ro
 - lifecycle（wait、cancel、late result、unknown）；
 - 迁移影响、发布/部署组合和回退边界；不要求各 transport 使用同一 schema。
 
-当前调查已发现 HTTP OpenAPI 与实际 Job/Room DTO 存在 `startedAt` optionality、`nextCursor`、`group/cursor/waitOnly`、cancel response、Notebook date 等漂移；这些是后续显式修复项，不得被“Protocol 已有类型”自动覆盖。`openapi/agents-minimal.yaml` 也不得因存在即宣称被 CI/runtime 使用。
+当前调查仍发现 HTTP OpenAPI 与实际 Job DTO 存在 `startedAt` optionality、`nextCursor`、`group/cursor/waitOnly`、cancel response 等漂移；这些非 WP-R 项仍需显式修复，不得被“Protocol 已有类型”自动覆盖。WP-R Room 九个 operation 的 OpenAPI/HTTP projection 已更新并通过 live gate，包含当前 `recent/search` Markdown 语义。`openapi/agents-minimal.yaml` 也不得因存在即宣称被 CI/runtime 使用。
 
 ### 7.2 公开合同与 clean cutover
 
@@ -414,14 +414,14 @@ startup-only identity/root/resource 字段与 live-safe policy/limits 字段必�
 
 ## 9. 剩余实施细节（随工作包细化）
 
-以下事项不是新的用户选择，也不是当前代码已完成的声明；实现者应在 D01–D08 约束下，依据真实 seam、消费者和部署证据细化：
+以下事项不是新的用户选择；第 4 项记录已完成的 WP-R closure，其余事项也不是当前代码已完成的声明；实现者应在 D01–D08 约束下，依据真实 seam、消费者和部署证据细化：
 
 1. Browser host 在 Neko/container/共享目录/Unix socket 拓扑中的具体 peer/auth、组/文件权限或 token 机制，以及对应的部署检查；不预选 owner-only，也不允许无授权网络暴露。
 2. generic Process、MCP stdio、Browser JS、tmux 和 tunnel child 的 effect/trust 分类及其逐操作的 policy/confirmation/evidence 表达；本轮不改变 sandbox 默认、policy override 或权限模型，不扩大公网多租户威胁模型。
 3. operation core 的最小 `RequestContext`/authorization helper 接口；不预设一个跨所有 projection 的万能 registry。
-4. Room 远端读与维护操作的精确输入/输出、错误、权限、生命周期和 surface adapter；一次升级所需的 caller 迁移、旧路径移除、数据保护与真实 Hub↔Agent E2E 步骤。远端需求本身已确定，不能以“暂不支持”代替实现。
+4. WP-R 九个当前 Room operation 的精确输入/输出、错误、权限、生命周期和 surface adapter 已实现，caller/descriptor/OpenAPI/Protocol/文档迁移已完成，并通过当前 live gate；维护仍以 Agent 既有 safeguards/controlled-maintenance authority 为准，不新增流程 confirmation gate。生产 tunnel/GitHub 部署不在该证据范围内。
 5. HTTP/OpenAPI、Hub Apps MCP、Agent-local descriptors、Protocol wire 的 parity checker 与各自 authority 的变更顺序；不要求同一 transport schema。
 6. Console 本地 Attention 的独立维护细节；remote console、approval board、exec ledger 的 transport、token/TLS/CORS 和 status projection 只有在另立产品时再设计，不作为核心完成门槛。
 7. config startup/live 字段清单，以及 correctness/history/observability 各层的 durability、retention、secret projection、crash/recovery 规则；OAuth/pending confirmation/cache 可在 Hub 重启失效，但已产生的 confirmation result、Job history 和错误原因按 owner/retention 尽量保留。
 
-以上决策已确认，但本文仍是目标/技术草案，不是实现证明。coding agent 必须按当前代码和安全边界实施，不能把目标段落当作已落地 API；破坏性改动须随真实实现交付迁移文档和实际验证证据。
+以上决策已确认；WP-R 当前 Room contract 已实现并通过 live gate，但本文仍是其他领域的目标/技术草案，不是全局实现证明。coding agent 必须按当前代码和安全边界实施，不能把未落地的目标段落当作 API；破坏性改动须随真实实现交付迁移文档和实际验证证据。

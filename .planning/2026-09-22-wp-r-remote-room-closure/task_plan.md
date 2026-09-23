@@ -12,7 +12,7 @@ Implement the approved WP-R contract in docs/architecture/refactoring-plan.md194
 1. Baseline and contract — complete: mapped current nine Agent operations and remote/caller seams; exact interface/ownership and migration inputs frozen in findings.md.
 2. Implementation — complete: coordinated Protocol/Agent/Hub cutover, OpenAPI/current docs and live gate implementation integrated; final source build passed.
 3. Verification — complete: actual live gate exit 0; workspace tests 667 passed/1 ignored; formatting check passed. Strict existing Clippy debt remains documented, not suppressed.
-4. Delivery — in_progress: migration/rollback/current architecture updated; post-smoke temporary artifact cleanup complete; recording phase commits and acceptance evidence.
+4. Delivery — complete: migration/rollback/current architecture updated; post-smoke temporary artifact cleanup complete; final documentation and acceptance ledger delivered in the closure commit.
 
 ## Acceptance
 - Current required read and maintenance operations have actual remote decode/dispatch/response evidence and bounded Agent-owned content.

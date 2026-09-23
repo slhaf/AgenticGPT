@@ -11,14 +11,14 @@ runtime/schema authorities for current behavior. This matrix is descriptive:
 the prediction-shape probe at `scripts/evaluate_tool_contracts.py` cannot prove
 schema validity or dispatch.
 
-When upgrading a caller to the corrected Room request projection, coordinate
-the Hub/Agent artifacts and refresh the imported schema from
-[`../openapi/hub.yaml`](../openapi/hub.yaml). `room.notebook.append` requires
-`scope` and `content`; `significance` defaults to `NORMAL`, while `datetime`,
-`abstract`, and `tags` are optional. `room.notebook.selectExact` requires
-`date`. These are request-shape changes, not a claim that the current Agent
-executes the legacy commands; current legacy calls return
-`room_legacy_surface_removed` and remain assigned to WP-R.
+For current remote Room callers, coordinate the paired Hub and Agent artifacts
+and refresh the imported schema from [`../openapi/hub.yaml`](../openapi/hub.yaml).
+The nine current Room operations use the existing semantic Agent DTOs and
+camelCase JSON bodies: Diary active/read, Notebook recent/search/read, State
+list/read, and maintenance status/submit. Empty requests use `{}`; no remote
+Room operation accepts `agentId`. `room.notebook.recent` and
+`room.notebook.search` now return current Markdown previews/results, not the
+retired passage-oriented JSONL shape.
 
 ## Agent admission and effect boundary (WP2)
 
@@ -92,19 +92,21 @@ fields.
 | `tmux.pasteText` | Paste into non-shell pane/TUI; no shell execution. | `target`, `text`; optional `submit`, confirmation. | Text/history bounded. | Shell panes are rejected; pane state remains otherwise unchanged. | Normal + Room; Hub full mirrors. |
 | `bootstrap` | Load Room bootstrap entrypoint/guide manifest; no generic file read or file creation. | No fields. | Bounded guide summaries and package revision. | Missing/invalid package is typed/warned; read-only and retry-safe. | Room only standalone; Hub full has `bootstrap` and `room.bootstrap` routes. |
 | `bootstrap.read` | Read one validated bootstrap guide; no arbitrary path. | `id`. | Bounded Markdown/frontmatter. | Unknown/invalid/duplicate guide is `guide_not_found`; read-only. | Room only standalone; Hub full has `bootstrap.read` and `room.bootstrap.read`. |
-| `room.diary.active` | Read the active Daily, Weekly, and Monthly Room diary documents; no mutation. | No fields. | Three bounded Markdown layer results; each reports a validated path and availability. | Missing, unreadable, or invalid-UTF-8 documents are reported per layer; read-only and retry-safe. | Room only standalone; no legacy JSONL alias. |
-| `room.diary.read` | Read one exact Room diary document by semantic layer and period; no arbitrary path. | `layer`, `period`; period is `current`, a daily date, or an ordered weekly/monthly range. | One bounded Markdown document. | Invalid periods are rejected; missing or unreadable documents are returned as typed layer issues. | Room only standalone; no legacy JSONL alias. |
-| `room.notebook.recent` | Read bounded recent Room notebook Markdown previews; no mutation. | Optional `limit`. | Limit defaults to 20 and is bounded to 1–100; previews are capped. | Missing or malformed documents become bounded warnings; read-only discovery. | Room only standalone; no legacy JSONL alias. |
-| `room.notebook.search` | Search Room notebook Markdown by a case-insensitive substring; no mutation. | Required `query`; optional `limit`. | Query is capped at 256 characters; limit defaults to 20 and is bounded to 1–100. | Empty or oversized queries and invalid limits are typed validation errors; read-only. | Room only standalone; no legacy JSONL alias. |
-| `room.notebook.read` | Read one exact Room notebook Markdown document; no arbitrary repository path. | Required validated Notebook-relative `.md` `path`. | One bounded Markdown document. | Unsafe, non-Markdown, missing, or oversized paths are typed; read-only. | Room only standalone; no legacy JSONL alias. |
-| `room.state.list` | List deterministic Room state entity documents; no mutation. | No fields. | Returns sorted `.md` entities under `State/entities`. | Symlinks and non-files are skipped; malformed repository roots are typed; read-only. | Room only standalone; no legacy JSONL alias. |
-| `room.state.read` | Read one exact Room state entity Markdown document; no arbitrary path. | Required safe entity filename stem `entity`. | One bounded Markdown document under `State/entities`. | Unsafe, missing, or oversized entities are typed; read-only. | Room only standalone; no legacy JSONL alias. |
-| `room.maintenance.status` | Inspect Room repository, scaffold, executor, workflow, remote, sync, and slot readiness; no mutation. | No fields. | Bounded status, heads, missing paths, and five-slot occupancy. | Read-only; readiness dimensions remain independent and failures are typed. | Room only standalone; mutations use `room.maintenance.submit`. |
-| `room.maintenance.submit` | Apply one to five validated Room maintenance requests through the repository-owned executor. | `items` with unique `slot`/`payload`; optional `mode` and `waitSeconds`. | Items are bounded to 1–5; mode is `local` or `workflow`; wait is capped at 30 seconds. | Admission, local apply, semantic commit, and remote/workflow sync are reported independently; destructive but repository-confined. | Room only standalone; replaces legacy JSONL mutations. |
+| `room.diary.active` | Read the active Daily, Weekly, and Monthly Room diary documents; no mutation. | Empty JSON object. | Three bounded Markdown layer results; each reports a validated path, availability, and optional typed issue. | Missing, unreadable, or invalid-UTF-8 documents are reported per layer; read-only and retry-safe. | Standalone Room + Hub Full active-Room route; Coordinator hidden/rejects. |
+| `room.diary.read` | Read one exact Room diary document by semantic layer and period; no arbitrary path. | `layer`, `period`; period is `current`, a daily date, or an ordered weekly/monthly range. | One bounded Markdown document. | Invalid periods are rejected; missing or unreadable documents are returned as typed layer issues. | Standalone Room + Hub Full active-Room route; Coordinator hidden/rejects. |
+| `room.notebook.recent` | Read bounded recent current Room Notebook Markdown previews; no mutation. | Optional `limit`. | Limit defaults to 20 and is bounded to 1–100; previews are capped. | Missing or malformed documents become bounded warnings; read-only discovery. The public name now uses the current Markdown DTO, not the retired passage/JSONL shape. | Standalone Room + Hub Full active-Room route; Coordinator hidden/rejects. |
+| `room.notebook.search` | Search current Room Notebook Markdown by a case-insensitive substring; no mutation. | Required `query`; optional `limit`. | Query is non-empty and capped at 256 Unicode characters; limit defaults to 20 and is bounded to 1–100. | Empty or oversized queries and invalid limits are typed validation errors; read-only. The public name now uses the current Markdown DTO, not the retired passage/JSONL shape. | Standalone Room + Hub Full active-Room route; Coordinator hidden/rejects. |
+| `room.notebook.read` | Read one exact current Room Notebook Markdown document; no arbitrary repository path. | Required validated Notebook-relative `.md` `path`. | One bounded Markdown document; content is capped at 512 KiB. | Unsafe, non-Markdown, missing, or oversized paths are typed; read-only. | Standalone Room + Hub Full active-Room route; Coordinator hidden/rejects. |
+| `room.state.list` | List deterministic Room state entity documents; no mutation. | Empty JSON object. | Returns sorted `.md` entities under `State/entities`. | Symlinks and non-files are skipped; malformed repository roots are typed; read-only. | Standalone Room + Hub Full active-Room route; Coordinator hidden/rejects. |
+| `room.state.read` | Read one exact Room state entity Markdown document; no arbitrary path. | Required safe entity filename stem `entity`. | One bounded Markdown document under `State/entities`; content is capped at 512 KiB. | Unsafe, missing, or oversized entities are typed; read-only. | Standalone Room + Hub Full active-Room route; Coordinator hidden/rejects. |
+| `room.maintenance.status` | Inspect Room repository, scaffold, executor, workflow, remote, sync, and slot readiness; no mutation. | Empty JSON object. | Bounded status, heads, missing paths, and five-slot occupancy. | Read-only; readiness dimensions remain independent and failures are typed. | Standalone Room + Hub Full active-Room route; Coordinator hidden/rejects. |
+| `room.maintenance.submit` | Apply one to five validated Room maintenance requests through the repository-owned executor. | `items` with unique `slot`/`payload`; optional `mode` and `waitSeconds`. | Items are bounded to 1–5; mode is `local` or `workflow`; wait defaults to 0 and is capped at 30 seconds. | Admission, local apply, semantic commit, and remote/workflow sync are reported independently; destructive but repository-confined. A wait timeout does not cancel maintenance and there is no separate wait API. | Standalone Room + Hub Full active-Room route; Coordinator hidden/rejects. |
 
-The legacy JSONL Room commands are intentionally absent from this standalone table. Their
-protocol variants and Hub HTTP/MCP forwarding remain below as compatibility residue for the
-separate Hub parity workstream; the Agent does not execute them.
+The nine current Room names are one semantic contract across local Agent MCP,
+Hub Full MCP, and the nine `/v1/room/<namespace>/<action>` POST routes. Hub
+selects only the captured active Room lease and owns routing/receipts, not Room
+files or content. A generic run receipt may contain a bounded operation result,
+but it is not a Room content authority.
 
 ## Hub full and coordinator surfaces
 
@@ -127,13 +129,23 @@ active Room Agent and do not take it.
 | `tmux.createSession`, `tmux.closeSession` | Create/close persistent workspace; no generic process lifecycle. | `agentId`, name/cwd; close may confirm. | Policy-checked cwd; reuse preferred. | Close destructive; no implicit data recovery. | Full only; same local semantics. |
 | `mcp.listServers`, `mcp.listTools` | Discover downstream MCP routing/schema before a managed call. | `mcp.listServers` may omit `agentId` to group connected agents; listTools requires `agentId`,`serverId`. | Bounded metadata. | Read-only timeout/agent errors. | Full only; HTTP `/v1/mcp/servers|tools` mirrors. |
 | `room.bootstrap`, `room.bootstrap.read` | Active Room bootstrap manifest/guide access; no arbitrary file read. | Read requires guide `id`; no `agentId`. | Same package bounds/revision as standalone Room bootstrap. | Room inactive/invalid/not-found errors are explicit and read-only. | Full only; standalone names omit `room.` prefix. |
-| `room.diary.append`, `room.diary.recent`, `room.diary.selectExact` | Legacy JSONL Room forwarding for Hub parity only; not a standalone Agent surface. | Append requires `entry` (optional `tags`); selectExact requires `date` (optional `limit`); no `agentId`. | Hub request projection is bounded; append/selectExact are not current Agent execution paths. | Current Agent rejects legacy commands with `room_legacy_surface_removed`; WP-R owns any future implementation/migration. | Hub compatibility residue only; never advertised by standalone Agent. |
-| `room.notebook.append`, `room.notebook.current`, `room.notebook.recent`, `room.notebook.remove`, `room.notebook.search`, `room.notebook.selectExact`, `room.notebook.update` | Legacy JSONL Room forwarding for Hub parity only; not a standalone Agent surface. | Append requires `scope`/`content`; `significance` defaults `NORMAL`, `datetime`/`abstract`/`tags` optional. `selectExact` requires `date`; no `agentId`. | Hub request projection is bounded; append/update/remove/selectExact are not current Agent execution paths. | Current Agent rejects legacy commands with `room_legacy_surface_removed`; WP-R owns any future implementation/migration. | Hub compatibility residue only; never advertised by standalone Agent. |
+| `room.diary.active`, `room.diary.read` | Read active or exact semantic Diary Markdown through the captured active Room lease; no mutation or arbitrary path access. | `diary.active` uses `{}`; `diary.read` requires `layer` and `period`; no `agentId`. | Bounded layer results; daily/weekly/monthly period rules are enforced by the Agent. | Active Room absent is `room_not_active` (404), lease conflict is `room_state_conflict` (409), transport wait is 504, and Agent semantic errors remain JSON errors. | Full only; Coordinator hides and rejects Room tools. HTTP `/v1/room/diary/active|read` mirrors. |
+| `room.notebook.recent`, `room.notebook.search`, `room.notebook.read` | Read current Notebook Markdown previews, search current Markdown, or read one exact validated document through the active Room lease. | `recent` optional `limit`; `search` requires `query` plus optional `limit`; `read` requires `path`; no `agentId`. | Limit defaults 20 and is 1–100; search query is non-empty and ≤256 Unicode characters; Markdown content is bounded to 512 KiB. `recent`/`search` return current Markdown DTOs, not retired passage/JSONL results. | Missing/malformed files become bounded warnings where specified; unsafe paths and validation errors are typed. Active lease/transport statuses follow the current Room projection. | Full only; Coordinator hides and rejects Room tools. HTTP `/v1/room/notebook/recent|search|read` mirrors. |
+| `room.state.list`, `room.state.read` | List or read bounded non-symlink Markdown entities under the Agent-owned `State/entities` root. | `list` uses `{}`; `read` requires safe entity stem `entity`; no `agentId`. | Sorted entity list; read content is bounded to 512 KiB. | Unsafe/missing entities and malformed roots are typed; active lease/transport statuses follow the current Room projection. | Full only; Coordinator hides and rejects Room tools. HTTP `/v1/room/state/list|read` mirrors. |
+| `room.maintenance.status` | Inspect Agent-owned repository, schema/scaffold, executor, workflow/remote, sync, and five-slot readiness; no mutation. | `{}`; no `agentId`. | Bounded status and optional heads/missing paths. | Read-only; readiness dimensions stay independent and errors remain explicit. Active lease/transport statuses follow the current Room projection. | Full only; Coordinator hides and rejects Room tools. HTTP `/v1/room/maintenance/status` mirrors. |
+| `room.maintenance.submit` | Apply explicit semantic maintenance through the existing Agent repository owner; not a passage append/update/remove alias. | `items` (1–5 unique `slot`/`payload`); optional `mode` (`local`/`workflow`) and `waitSeconds` (0–30); no `agentId`. | Wait defaults to 0; local/workflow result and sync outcomes remain distinct. A wait timeout does not cancel maintenance; no separate wait API or new confirmation gate is implied. | Existing lock, clean-tree, path, expected-change, executor, Git, and workflow controls remain authoritative. Active lease/transport statuses follow the current Room projection. | Full only; Coordinator hides and rejects Room tools. HTTP `/v1/room/maintenance/submit` mirrors. |
 | `bootstrap`, `bootstrap.read` | Full-profile transport-neutral aliases for Room bootstrap. | Read requires `id`; no `agentId`. | Same package bounds/revision. | Same bootstrap errors; read-only. | Full only; aliases are intentional bootstrap names, not compatibility for removed tools. |
 | `skills.list`, `skills.read`, `skills.search`, `skills.active` | Active Room skill discovery/read/search. | Read/search fields as applicable; no `agentId`. | Bounded summaries/content. | Invalid/missing/stale skills are explicit. | Full only; HTTP Room skills endpoints mirror. |
 | `skills.activate`, `skills.deactivate` | Change active skill state only; no execution/permission grant. | `id`; no `agentId`. | Idempotent state operation. | Stale/missing deactivation is allowed and reported. | Full only; standalone `skills.setActive` combines intent. |
 | `skills.install`, `skills.install.get`, `skills.install.cancel` | Asynchronous active-Room installation lifecycle. | Install requires `id`,`source`; get/cancel require `installId`; no `agentId`. | Wait default 5, maximum 30; wait timeout does not cancel; cancellation is explicit. | Cooperative cancellation/atomic commit evidence. | Full only; HTTP Room install endpoints mirror. |
 | `skills.run` | Run active skill executable as managed Job. | `id`,`path`; optional `group`, args/cwd/wait; no `agentId`. | Wait default 5, maximum 30; wait timeout does not cancel; use `job.cancel`. | Same Job/policy/cancellation contract as standalone. | Full only; HTTP Room run mirrors group and lifecycle semantics. |
+
+For the nine HTTP routes, malformed JSON or missing required request fields
+are `422 text/plain` extractor responses. Authenticated semantic responses use
+the existing JSON projection: inactive Room `room_not_active` is 404, lease
+conflict `room_state_conflict` is 409, transport wait is 504, and other
+Agent-side semantic validation remains 400 unless an existing selected
+not-found/conflict mapping applies.
 
 ## Review rules
 
@@ -148,5 +160,8 @@ active Room Agent and do not take it.
   or other external side effect.
 - Standalone V2 surface counts are Normal 29 / Room 40. They are profile preset counts, not a
   guarantee after explicit toolset selection.
-- Legacy JSONL names remain documented only in the Hub compatibility rows above; standalone
-  aliases and Hub full/coordinator profile membership are intentionally different.
+- Retired JSONL/passages names are not part of the current standalone, Hub Full,
+  or Coordinator contract. They must not be hidden behind current names or
+  silently mapped to maintenance; callers either adopt an explicit semantic
+  `room.maintenance.submit` payload or remove the old call. Historical release
+  and migration documents preserve history only.

@@ -24,3 +24,4 @@
 - Final cargo test --workspace passed 667 tests across 13 suites, one ignored (artifact://480). cargo fmt --all -- --check passed. Strict Clippy failed on existing browser, confirmation, Job freshness and test-helper debt (artifact://479); no suppression or unrelated broad cleanup.
 - Committed coordinated runtime cutover as 581c2ce. Production tunnel/SSH and hosted GitHub workflow were intentionally not exercised; workflow proof uses private local bare origin, and generation races use existing Rust coverage.
 - After smoke success, removed owned Python bytecode and the recreated private venv. Supervised processes are exited/failed, none running. Earlier /tmp/wpr-uSTFdSHg was already unavailable. Current architecture closure and phase evidence are being committed separately.
+- Committed public OpenAPI and the passing live gate with verification ledger as dfdb77c. Existing gate was extended; no parallel test framework or test-removal policy introduced.

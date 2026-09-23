@@ -164,12 +164,34 @@ room.state.list, room.state.read
 room.maintenance.status, room.maintenance.submit
 ```
 
-Legacy JSONL Room names are not advertised or executed by the Agent. The legacy
-protocol and Hub HTTP/MCP forwarding rows remain only as compatibility residue
-for the separate Hub parity workstream. If forwarded to the current Agent,
-legacy mutations are rejected with `room_legacy_surface_removed`; they do not
-produce a successful Room mutation. Remote legacy execution remains a separate
-WP-R deliverable.
+The same nine semantic Room names are the current contract for local Unix MCP,
+Tunnel stdio, and Hub Full MCP/HTTP. Hub Full forwards
+`room.diary.active/read`, `room.notebook.recent/search/read`,
+`room.state.list/read`, and `room.maintenance.status/submit` through the
+captured active Room lease; the matching HTTP routes are
+`POST /v1/room/<namespace>/<action>` and accept no `agentId`. Coordinator
+advertises and dispatches none of these Room operations.
+
+Room reads remain bounded and Agent-owned: Notebook `limit` defaults to 20 and
+is 1–100, search queries are non-empty and at most 256 Unicode characters,
+Diary periods are semantic layer/date values, and Notebook/State Markdown reads
+reject content above 512 KiB. `room.notebook.recent` and
+`room.notebook.search` use current Markdown previews/results despite retaining
+their public names; they are not passage/JSONL operations.
+
+`room.maintenance.status` is read-only. `room.maintenance.submit` accepts one
+to five unique slots, optional `local`/`workflow` mode, and `waitSeconds` from
+0 through 30 (default 0). A workflow wait timeout only ends the wait and does
+not cancel maintenance. Existing Agent path, lock, clean-tree, expected-change,
+executor, and Git controls remain authoritative; no separate wait API or new
+confirmation gate is added.
+
+Hub owns only authentication, active-lease routing, and bounded run receipts.
+A generic receipt may retain a bounded operation result, but it is not a Room
+content authority or replica. Retired JSONL append/update/remove and
+passage/date-selection callers are not silently mapped to maintenance; migrate
+them to explicit semantic slot/payload requests or remove them. Historical
+release/migration records are history, not an active error contract.
 
 Managed `mcp.callTool` uses the same Job registry and capacity limit as
 process and skill Jobs. Its `waitSeconds` defaults to 5 and is capped at 30;

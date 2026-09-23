@@ -1,16 +1,16 @@
 # 现状架构：受控执行核心与多入口控制面
 
-状态：源码调查快照，2026-09-20；WP2 operation/context gate 已实现并有界验证。目标规则另见 [目标架构](target-architecture.md)，问题判断见 [诊断](diagnosis.md)。文中代码路径均相对仓库根；符号名优先于可能随编辑变化的行号。
+状态：源码调查快照，2026-09-20；WP2 operation/context gate 已实现并有界验证；WP-R 九个当前 Room operation 已完成 clean cutover，并通过当前 live gate。目标规则另见 [目标架构](target-architecture.md)，问题判断见 [诊断](diagnosis.md)。文中代码路径均相对仓库根；符号名优先于可能随编辑变化的行号。
 
 ## 1. 调查范围和证据等级
 
 本轮覆盖五个 Rust crate 的一级模块、Console 四个 Gradle 模块及平台源集、OpenAPI、合同 corpus/evaluator、CI/release、部署脚本、实验与 UX 示例。重点追踪入口到副作用、确认/取消、断线恢复、持久化与能力边界；不是逐行安全审计，也不宣称所有平台均已运行验证。
 
-证据分为历史调查基线与 WP2 closure：历史调查来自源码、CodeGraph 定位、Cargo metadata 与解析后的 OpenAPI，完整分域记录位于 `.planning/2026-09-16-architecture-audit/`；当时没有启动真实 Hub/Agent/Android/浏览器/tunnel。随后 WP2 的实际运行证据见下段；它不替代未覆盖的外部组件、WP3 durability 或 WP-R 远端 Room 证据。
+证据分为历史调查基线与后续 closure：历史调查来自源码、CodeGraph 定位、Cargo metadata 与解析后的 OpenAPI，完整分域记录位于 `.planning/2026-09-16-architecture-audit/`；当时没有启动真实 Hub/Agent/Android/浏览器/tunnel。WP2/WP-R 的实际运行证据见下段；它们不替代未覆盖的外部组件、WP3 durability 或生产 tunnel/GitHub 部署证据。
 
-WP2 closure 已补充真实 Agent/Hub binary evidence：Local Unix、hidden stdio worker、HTTP bearer 401/有效 session/SSE、process output parity、Skill runs、Normal Room disabled→enabled、policy/limits 与 workspace/path reload health，以及 Hub loopback WebSocket 的 process、Room skills list/search/activate/run（含 invalid-CWD reason）、pending 清零、CLI tmux create/close audit 和 live policy deny；两个临时 driver 均 exit 0。该证据不覆盖 external tunnel/cloud、OAuth provider、Browser JavaScript/service、OS sandbox，亦不等同 WP3/WP-R 完成。
+WP2 closure 已补充真实 Agent/Hub binary evidence：Local Unix、hidden stdio worker、HTTP bearer 401/有效 session/SSE、process output parity、Skill runs、Normal Room disabled→enabled、policy/limits 与 workspace/path reload health，以及 Hub loopback WebSocket 的 process、Room skills list/search/activate/run（含 invalid-CWD reason）、pending 清零、CLI tmux create/close audit 和 live policy deny；两个临时 driver 均 exit 0。该证据不覆盖 external tunnel/cloud、OAuth provider、Browser JavaScript/service、OS sandbox，亦不等同 WP3 durability 完成。WP-R 后续 live gate 已通过九个 HTTP/Full MCP、Coordinator reject、active lease/reconnect 和 local/workflow maintenance 场景；这不构成生产 tunnel/GitHub 部署声明。
 
-用户后续确认的需求与部署事实见[已确认决策](decisions.md)：Room 能力需要远端提供，Hub 未同步属于仍待 WP-R 收口的合同遗漏；实际已有 Neko/container/共享目录与 Unix socket 部署。这些是用户报告，不是 WP2 runtime 证据。
+用户后续确认的需求与部署事实见[已确认决策](decisions.md)：Room 能力需要远端提供；WP-R 已将九个当前 Room operation 收口到远端公共面并完成 legacy surface clean cutover，Hub 未同步不再是当前合同遗漏。实际已有 Neko/container/共享目录与 Unix socket 部署仍是用户报告，不是 WP2 runtime 证据。
 
 历史规模口径（2026-09-16，未按 WP1/WP2 变更重算）：对已跟踪 `.rs/.kt/.kts/.js/.ts/.py/.sh` 文件统计物理行，含注释、测试、配置和脚本，共 148 文件、91,041 行。执行端 69,497；Hub 9,965；protocol 3,223；apply-patch 1,146；browser-host 866；Console 2,868；其余为示例/实验/脚本。文件大只能说明调查优先级，不能单独证明架构错误。
 
@@ -105,7 +105,7 @@ are not aliases for those four commands.
 | `routes.rs` | action-key HTTP process/Job/tmux/MCP/运行查询及响应适配 |
 | `mcp_server.rs`、`agentic_result.rs` | Apps JSON-RPC、tool router/schemars、Full/Coordinator、业务 JSON → MCP result |
 | `runs.rs` | command/run 收据、hash/ACK/status/result/conflict、stale 与 retention |
-| `room.rs` | 单一 active Room 连接租约、Room/skills 转发；不持有 Room 内容 |
+| `room.rs` | 单一 active Room `(agent_id, connection_id)` 连接租约、九个当前 Room 读/维护操作的转发与 HTTP/MCP 结果投影；通用 run receipt 可保留有界 operation result，但不持有 Room 内容 |
 | `notify.rs` | freedesktop Agent/ntfy 渠道、健康缓存、Android 注册但未实现 delivery |
 | `oauth.rs` | 授权码/PKCE/token 与 MCP Bearer 校验，session 在内存 |
 | `db.rs`、`registry.rs` | SQLite schema/兼容增列、Agent 注册/启停/alias/secret hash |
@@ -135,7 +135,7 @@ MCP：server/tool/args 校验与配置快照 → managed Job/批量准入 → co
 
 File edit：路径/权限/保留路径 → patch parse/transform → 排序 path locks/revision → 临时文件 → 必要确认 → 路径与revision再校验 → commit/audit。apply-patch 只负责算法，不得单独绕过文件权限层调用为公共工具。
 
-Room：仓库根/软链接/Git/scaffold 检查 → bounded diary/notebook/state 读取，或 `room_maintenance::submit` 在写锁下执行预定义语义槽位维护。Hub 只选择 active Room 连接。目前 Hub Full 仍暴露旧 `room.notebook.*`/`room.diary.*` 命令，其中十个 legacy HubCommand 被当前 Agent 明确返回 `room_legacy_surface_removed`。因此“Hub 有 route”不意味着当前端到端 Room surface 可用。
+Room：仓库根/软链接/Git/scaffold 检查 → bounded diary/notebook/state 读取，或 `room_maintenance::submit` 在写锁下执行预定义语义槽位维护。Hub Full/HTTP 通过 captured active Room lease 暴露九个当前语义 operation；Hub 不打开 Room 文件，通用 run receipt 只可保留有界 operation result。历史调查中的旧 `room.notebook.*`/`room.diary.*` 与 `room_legacy_surface_removed` 仅是历史基线；legacy HubCommand 已在 caller/descriptor/OpenAPI/文档迁移后退出当前 contract，不做静默映射。WP-R live gate 已通过，但不构成生产 tunnel/GitHub 部署声明。
 
 ### 4.5 Browser
 
@@ -208,7 +208,7 @@ Console Gradle 模块为 shared/androidApp/desktopApp/webApp。
 | Hub↔Agent wire | protocol 的 Serde 类型 + 双端 dispatch | envelope/hash/重放测试 |
 | Agent-local MCP | stdio_server 的 live descriptor、typed decode、runtime validation | fixed surface 与 deterministic corpus |
 | Hub Apps MCP | mcp_server 的 rmcp/schemars/router/profile | descriptor/dispatcher/profile 测试 |
-| Hub HTTP/Actions | routes/room 的实际 DTO 与 response adapter | openapi/hub.yaml，当前存在具体漂移 |
+| Hub HTTP/Actions | routes/room 的实际 DTO 与 response adapter | openapi/hub.yaml 当前已投影九个 WP-R Room operation；live gate 已验证对应 route/dispatch projection |
 | 文档与模型预测评估 | matrix/corpus/示例 | evaluator 仅比预测 tool/参数 shape，不执行 runtime |
 
 CI 包含 Rust fmt/check/clippy/test，以及 hub.yaml 的 YAML 解析；解析成功不证明 OpenAPI 语义、响应和 live dispatch 一致。第二份 agents-minimal.yaml 未见主要构建消费路径。
@@ -219,4 +219,4 @@ release 使用 cross 构建 x86_64/aarch64 Linux，每个包三个二进制（ag
 
 ## 9. 结论
 
-已有架构主干值得保留：**一个本地执行核心，多种入口适配，一个轻量远端控制平面，独立协议与少量专用边界**。WP2 已在 Agent crate 内收紧 operation/context gate、入口 provenance 与 config lifetime；剩余债务主要是跨端合同投影、资源生命周期/耐久级别、WP-R Room clean cutover 以及当前/历史/实验状态的界线，而不是缺少新的 Agent Runtime。
+已有架构主干值得保留：**一个本地执行核心，多种入口适配，一个轻量远端控制平面，独立协议与少量专用边界**。WP2 已在 Agent crate 内收紧 operation/context gate、入口 provenance 与 config lifetime；WP-R Room clean cutover 与 live gate 已完成，剩余债务主要是（WP-R 之外的）跨端合同投影、资源生命周期/耐久级别以及当前/历史/实验状态的界线，而不是缺少新的 Agent Runtime。

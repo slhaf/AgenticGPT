@@ -80,6 +80,23 @@ Core endpoints:
 - `POST /v1/room/skills/run`: run an executable active workspace skill script under `scripts/`. `waitSeconds` defaults to 5 and is capped at 30; a wait timeout does not cancel the Job. It returns terminal Job output inline when possible, otherwise the same `jobId` used by `job.get` and `job.cancel`. These endpoints do not take `agentId`.
 - `POST /v1/room/bootstrap`: load the active Room Agent's repeated session entrypoint and deterministic guide manifest. It has no request body or `agentId`.
 - `POST /v1/room/bootstrap/read`: read one valid bootstrap guide by its frontmatter `id`. It has no `agentId`.
+- `POST /v1/room/diary/active` and `POST /v1/room/diary/read`: read the active or one validated Diary layer through the captured active Room lease. Requests use `RoomDiaryActiveRequest` or `RoomDiaryReadRequest`; responses are `RoomDiaryActiveResponse` or `RoomDiaryReadResponse`.
+- `POST /v1/room/notebook/recent`, `POST /v1/room/notebook/search`, and `POST /v1/room/notebook/read`: read bounded current Markdown previews, search current Markdown, or read one validated Notebook document. `recent` and `search` use `RoomNotebookResultsResponse`; `read` uses `RoomNotebookReadResponse`.
+- `POST /v1/room/state/list` and `POST /v1/room/state/read`: list or read bounded `State/entities` Markdown documents with `RoomStateListResponse` or `RoomStateReadResponse`.
+- `POST /v1/room/maintenance/status` and `POST /v1/room/maintenance/submit`: inspect repository-owned readiness or submit explicit semantic maintenance requests. Responses are `RoomMaintenanceStatusResponse` and `RoomMaintenanceSubmitResponse`; submit uses the existing local/workflow mode and bounded wait contract.
+
+These nine Room endpoints use the current camelCase Agent request/response DTOs in
+the JSON body. Empty request DTOs still use `{}`; no endpoint accepts an
+`agentId` selector. They resolve and capture the active Room lease, so an absent
+Room is `room_not_active` (404), an inconsistent/replaced lease is
+`room_state_conflict` (409), and a Hub transport wait is a 504 operation timeout.
+Agent semantic errors retain the existing Room JSON error projection. Full MCP
+advertises the same nine names with the current descriptors; Coordinator neither
+advertises nor dispatches Room operations.
+
+Malformed JSON or a missing required request field fails at the Axum JSON
+extractor with HTTP 422 and `text/plain`; Agent semantic validation remains a
+JSON error response under the documented 400/selected 404/409 projection.
 
 `/v1/info` intentionally returns only safe metadata: Hub version, public base URL, timeout settings, remote confirmation status, agent counts, and pending request/Job counts. It must not expose secrets, confirmation callback URLs, or private config values.
 
@@ -123,23 +140,40 @@ missing response never permits an inference that the remote Job stopped.
 
 ### Current Room boundary and coordinated request projection
 
-The current Agent does not execute the legacy JSONL Room commands forwarded by
-the Hub. Calls such as `room.notebook.append`, `room.notebook.update`, and
-`room.diary.append` are rejected with `room_legacy_surface_removed`; this is an
-intentional transitional outcome, not a successful `200` mutation. The current
-Agent surface is the semantic Room read/bootstrap/maintenance surface described
-in [`standalone-runtime.md`](standalone-runtime.md). Remote legacy execution
-and migration remain a separate WP-R deliverable.
+The current Agent semantic Room surface is the authority for the nine remote
+operations listed above. Hub Full forwards those operations through the
+captured active Room lease; it does not read the repository, own Room files,
+interpret Git state, or create a second content store. A generic Hub run receipt
+may retain a bounded operation result for status/late-result inspection, but
+that receipt is not authoritative Room content.
 
-When a caller adopts the corrected request projection, upgrade the paired Hub
-and Agent artifacts together and refresh the imported contract from
-[`../openapi/hub.yaml`](../openapi/hub.yaml). For Notebook append, send the
-required `scope` and `content`; `significance` defaults to `NORMAL`, while
-`datetime`, `abstract`, and `tags` are optional. For Notebook
-`selectExact`, send the required `date` (with optional `scope` and `limit`).
-Treat these as coordinated request-shape changes: do not invent a release
-version, compatibility alias, or command that is not supplied by the
-artifacts. Validate schema/import behavior separately from live dispatch.
+Read bounds are part of the current contract: Notebook `limit` defaults to 20
+and is 1–100; search `query` is non-empty and at most 256 Unicode characters;
+Notebook and State Markdown reads reject content above the existing 512 KiB
+bound; Diary periods are `current`, a strict daily date, or an ordered weekly
+or monthly date range. `room.notebook.recent` and `room.notebook.search` keep
+their public names but now return current Markdown DTOs (`path`, `title`,
+`contentPreview`, `truncated`, `effectiveAt`), not the retired passage/JSONL
+shape.
+
+Maintenance remains explicit and Agent-owned. `room.maintenance.status` is
+read-only. `room.maintenance.submit` accepts one to five unique semantic
+slots, optional `local` or `workflow` mode, and `waitSeconds` from 0 through
+30 (default 0). A workflow wait observes consumption/fast-forward only; a
+timeout ends the wait and does not cancel the submitted maintenance. Existing
+repository, path, symlink, lock, clean-tree, expected-change, executor, and
+Git controls remain in force. There is no separate maintenance wait API and no
+new confirmation promise.
+
+Callers migrating from the retired Room JSONL names must choose an explicit
+current semantic operation. Old append/update/remove or passage/date-selection
+semantics are not silently translated into `room.maintenance.submit`; callers
+that change Room content must construct the documented slot/payload request or
+retire the old call. Upgrade the paired Hub and Agent artifacts together,
+refresh [`../openapi/hub.yaml`](../openapi/hub.yaml), migrate every caller, and
+verify the live active-Room path before removing the old caller. Historical
+release/migration records remain historical and are not an active error or
+compatibility contract.
 
 
 ## ChatGPT Apps MCP endpoint

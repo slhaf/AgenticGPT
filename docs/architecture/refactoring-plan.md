@@ -191,10 +191,10 @@ flowchart TD
 
 - 发现 baseline 与源码/CodeGraph 不一致、无法判断现行 authority 或只能用静态描述推断 runtime 行为时，停止写入“已确认”结论；这不是把已确认的远端 Room 需求退回产品审批。
 
-### WP-R：Room 公开合同收口（核心远端能力补齐）
+### WP-R：Room 公开合同收口（已完成，2026-09-22）
 **对应正式诊断：** A02（Room cutover）。本包是核心合同修复，不是可选项目：按 D02 补齐所需 Room 远端读与维护能力的 Hub→Protocol→Agent 端到端语义，迁移全部 caller 并按 D03 clean cutover。具体 operation shape、错误和权限投影在实现时按证据细化，不改变 Room ownership。
 
-**目的与证据**
+**实施前目的与证据（历史基线）**
 
 - [事实] Hub active Room 只保存 `agent_id + connection_id` 路由租约；Room 文件、Git、schema/scaffold、diary/notebook/state read 和 maintenance 由 Agent repository 持有。
 - [事实] Hub Full 仍广告旧 `RoomNotebook*`/`RoomDiary*` 工具，当前 Agent 对十个旧 command 返回 `room_legacy_surface_removed`；Coordinator 不广告这些工具。
@@ -226,16 +226,16 @@ flowchart TD
 3. `smoke(room): exercise required live Hub-to-Agent paths`：验证真实 decode、dispatch、Agent repository 读/维护和结果 shape。
 4. `cleanup(room): migrate all callers and retire replaced legacy paths`：调用方全部迁移、有 live 证据后清理；同时交付真实迁移文档步骤，不以 unsupported 或隐式 fallback 结束。
 
-**既有验证入口（均未执行）**
+**验证入口（已执行；最终证据见下）**
 
 - Hub `room.rs` active Room/冲突/重连/路由测试和 `mcp_server.rs` Full/Coordinator descriptor/dispatcher tests。
-- Agent `stdio_server.rs` current Room surface、`local_service.rs` legacy error、`room_reads.rs`/`room_repository.rs`/`room_maintenance.rs` 的实际资源入口。
+- Agent `stdio_server.rs` current Room surface、`local_service.rs` current dispatch、`room_reads.rs`/`room_repository.rs`/`room_maintenance.rs` 的实际资源入口。
 - Agent `crates/agentic-gpt/tests/local_control.rs`、Hub routes/OpenAPI tests；它们只能作为 targeted 入口，不能替代跨进程 live smoke。
 
 **真实场景验收**
 
 1. 启动真实 Hub、active Room CommandCapable Agent 和至少一个 Normal Agent；从所需 HTTP/MCP operations 触发 Room read/maintenance，确认无 active Room、非 Room、ReportingOnly 和 stale connection 都得到正确错误。
-2. 对所需读操作确认返回来自 Agent repository 的 bounded 内容；对 maintenance 写操作确认 path/Git/maintenance lock/expected change/confirmation 仍由 Agent 执行，Hub 不产生第二份文件。
+2. 对所需读操作确认返回来自 Agent repository 的 bounded 内容；对 maintenance 写操作确认 path/Git/maintenance lock/expected change 仍由 Agent 执行，沿用受控 maintenance 权限链，不新增通用 process confirmation，Hub 不产生第二份权威文件。
 3. 对替代的旧工具，确认已实现等价 adapter 或随全部 caller 迁移明确退场；不得只靠隐藏、永久 unsupported、空成功或失败伪装成当前工具结果。
 4. 在 caller 迁移后重新列 Full/Coordinator/Agent surface，确认没有 stale advertisement；Console Android local Room 不受该包影响。
 
@@ -255,6 +255,15 @@ flowchart TD
 
 - 只能通过 Hub 持有/解释 Room 文件、静默改变写语义、无 owner fallback、仅隐藏工具或永久 unsupported 来“通过验收”时，停止并回到 ownership/contract 实现，而不是退回“是否需要远端”的产品决策。
 - 没有 live E2E 或 caller 迁移证据却准备删除/退场旧路径时，停止清理；继续补齐实现与迁移证据，不建立旧 compat 双轨或新 version 机制。
+
+**完成证据（2026-09-22）**
+
+- 当前九项能力：`room.diary.active/read`、`room.notebook.recent/search/read`、`room.state.list/read`、`room.maintenance.status/submit`。Hub POST HTTP 与 Full MCP 经当前 Protocol 命令进入 Agent 既有服务；Coordinator 不广告且拒绝调用。没有新增独立 wait API。
+- 十个旧 wire command 及被替代的 HTTP/MCP 路径、DTO/caller 已 clean cutover；旧 append/update 不隐式映射到 maintenance。当前 `recent/search` 使用 Markdown repository 合同。公开 schema 与迁移/回退步骤见 `openapi/hub.yaml`、`docs/operations.md`。
+- 真实 `scripts/check_contract_parity.py` gate exit 0：九项 HTTP/MCP 调用、Agent Git HEAD/文件落盘、非法路径/dirty tree 拒绝、未知 `agentId` 返回 422、无 active Room 与 ReportingOnly 不 fallback、同一 Room identity 重连的新 lease 与内容保留均通过。
+- workflow 使用私有本地 bare Git origin：bounded wait 后返回 submitted/pending，Agent 与 origin 中请求仍在，未误判为取消。未运行生产 GitHub workflow、SSH/tunnel 部署；stale-generation 竞态由既有 Rust 测试覆盖，不冒充生产网络实测。
+- 最终 `cargo test --workspace`：667 passed、1 ignored；Agent/Hub build 通过。严格 Clippy 仍失败于既有 browser/confirmation/Job 等债务，未压制告警或混入宽泛清理。
+- Room 内容 authority 仍在 Agent；Hub 没有 Room repository/content store，但既有 generic run receipt 可以持有 bounded result。WP-T 标准仍未决定，WP4-B 仍为独立后续包。
 
 ### WP1：Hub 身份与连接生命周期
 **对应正式诊断：** A04（Hub connection/run/waiter owner）；只处理已定位的不变量和未验证竞态，不预先宣称远程漏洞。

@@ -484,14 +484,24 @@ Server id 最长 64 字节，只使用字母、数字、`.`、`_`、`-`。`strea
 
 `skills` 控制 package 大小、redirect、timeout、重试/总 deadline、安装/下载并发，以及可选 host allowlist。规范字段是顶层 `skills`；只有缺少顶层字段时才读取 legacy `room.skills`。
 
-`room.timezone` 保留为 Room metadata；V2 read 使用仓库路径，不再使用 legacy JSONL 日期分区。
-`room.diaryDayBoundaryHour` 范围为 0–23，用于新 bootstrap 的 Daily scaffold 逻辑日期。
-`room.repositoryRoot` 可选，默认是 `<workspaceRoot>/room`。嵌套的
-`room.maintenance.mode` 可为 `local` 或 `workflow`，默认 `local`；`room.maintenance.autoPush`
-默认是 `false`。Standalone Room toolset 只暴露 semantic read、`room.maintenance.status`
-和 `room.maintenance.submit`；所有 mutation 都走后者。
-Legacy JSONL Room command 仅保留在 protocol 与 Hub HTTP/MCP compatibility surface，供独立
-Hub parity workstream 使用，不由 Agent advertisement 或 runtime 执行。
+`room.timezone` 保留为 Room metadata；当前读取使用仓库路径，而不是 legacy JSONL
+日期分区。`room.diaryDayBoundaryHour` 范围为 0–23，用于新 bootstrap 的 Daily scaffold
+逻辑日期。`room.repositoryRoot` 可选，默认是 `<workspaceRoot>/room`。嵌套的
+`room.maintenance.mode` 可为 `local` 或 `workflow`，默认 `local`；
+`room.maintenance.autoPush` 默认是 `false`。
+
+Room namespace 的九个语义操作是 Diary active/read、Notebook recent/search/read、
+State list/read，以及 maintenance status/submit。Notebook recent/search 的 `limit`
+默认 20、范围为 1–100；search query 必须非空且不超过 256 个 Unicode 字符；
+Markdown read 限制为 512 KiB。Maintenance submit 接受 1–5 个不重复的 semantic slot，可选
+mode 覆盖；`waitSeconds` 默认 0、上限 30。workflow 等待超时只结束等待，不会取消
+submission；没有隐式 confirmation 或单独的 maintenance wait 操作。
+
+Hub Full 通过 active Room lease 与 `POST /v1/room/<namespace>/<action>` 暴露同一
+九项操作，请求不接受 `agentId`。Hub 不拥有 Room repository，也不创建 content
+replica。旧 JSONL append/update/remove 与 passage/date-selection 调用不会静默映射
+为 maintenance；请迁移到显式 slot/payload request，或删除旧调用。历史 release/migration
+记录只保留历史，不是当前 compatibility contract。
 
 `sandbox.enabled` 启用 bubblewrap；`requiredRuntimePaths` 定义 sandbox 中可见的宿主路径。Sandbox 不能替代命令策略、路径策略或确认。
 
