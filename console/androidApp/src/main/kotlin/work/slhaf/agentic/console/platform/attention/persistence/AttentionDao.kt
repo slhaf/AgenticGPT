@@ -27,6 +27,21 @@ interface AttentionDao {
         nowEpochMillis: Long,
     ): List<AttentionEntity>
 
+    @Query(
+        """
+        SELECT * FROM attention_items
+        WHERE status IN (:statuses) AND dueAtEpochMillis <= :nowEpochMillis
+        ORDER BY dueAtEpochMillis ASC
+        """,
+    )
+    suspend fun queryOverdueForRestore(
+        statuses: List<String>,
+        nowEpochMillis: Long,
+    ): List<AttentionEntity>
+
+    @Query("SELECT * FROM attention_items WHERE sourceKind = :sourceKind")
+    suspend fun queryBySourceKind(sourceKind: String): List<AttentionEntity>
+
     @Query("SELECT COUNT(*) FROM attention_items")
     suspend fun count(): Int
 
@@ -40,41 +55,104 @@ interface AttentionDao {
         """
         UPDATE attention_items
         SET status = :status, actions = '', updatedAtEpochMillis = :updatedAtEpochMillis
-        WHERE id = :id
+        WHERE id = :id AND status IN (:activeStatuses)
         """,
     )
-    suspend fun updateTerminalState(
+    suspend fun updateTerminalStateIfActive(
         id: String,
         status: String,
+        activeStatuses: List<String>,
         updatedAtEpochMillis: Long,
-    )
+    ): Int
 
     @Query(
         """
         UPDATE attention_items
         SET status = :status, updatedAtEpochMillis = :updatedAtEpochMillis
         WHERE id = :id
+          AND status IN (:pendingStatuses)
+          AND dueAtEpochMillis <= :nowEpochMillis
         """,
     )
-    suspend fun markTriggered(
+    suspend fun claimTriggered(
         id: String,
         status: String,
+        pendingStatuses: List<String>,
+        nowEpochMillis: Long,
         updatedAtEpochMillis: Long,
-    )
+    ): Int
 
     @Query(
         """
         UPDATE attention_items
         SET status = :status, dueAtEpochMillis = :dueAtEpochMillis, updatedAtEpochMillis = :updatedAtEpochMillis
-        WHERE id = :id
+        WHERE id = :id AND status IN (:activeStatuses)
         """,
     )
-    suspend fun snooze(
+    suspend fun snoozeIfActive(
         id: String,
         status: String,
         dueAtEpochMillis: Long,
+        activeStatuses: List<String>,
         updatedAtEpochMillis: Long,
+    ): Int
+
+    @Query(
+        """
+        UPDATE attention_items
+        SET status = :failedStatus, actions = '', updatedAtEpochMillis = :updatedAtEpochMillis
+        WHERE id = :id
+          AND status IN (:pendingStatuses)
+          AND dueAtEpochMillis = :dueAtEpochMillis
+          AND updatedAtEpochMillis = :expectedUpdatedAtEpochMillis
+        """,
     )
+    suspend fun markFailedIfPending(
+        id: String,
+        failedStatus: String,
+        pendingStatuses: List<String>,
+        dueAtEpochMillis: Long,
+        expectedUpdatedAtEpochMillis: Long,
+        updatedAtEpochMillis: Long,
+    ): Int
+
+    @Query(
+        """
+        UPDATE attention_items
+        SET status = :degradedStatus, updatedAtEpochMillis = :updatedAtEpochMillis
+        WHERE id = :id
+          AND status IN (:normalPendingStatuses)
+          AND dueAtEpochMillis = :dueAtEpochMillis
+          AND updatedAtEpochMillis = :expectedUpdatedAtEpochMillis
+        """,
+    )
+    suspend fun markDegradedIfPending(
+        id: String,
+        degradedStatus: String,
+        normalPendingStatuses: List<String>,
+        dueAtEpochMillis: Long,
+        expectedUpdatedAtEpochMillis: Long,
+        updatedAtEpochMillis: Long,
+    ): Int
+
+    @Query(
+        """
+        UPDATE attention_items
+        SET status = :waitingStatus, updatedAtEpochMillis = :updatedAtEpochMillis
+        WHERE id = :id
+          AND status = :degradedStatus
+          AND dueAtEpochMillis = :dueAtEpochMillis
+          AND updatedAtEpochMillis = :expectedUpdatedAtEpochMillis
+        """,
+    )
+    suspend fun restoreWaitingIfDegraded(
+        id: String,
+        waitingStatus: String,
+        degradedStatus: String,
+        dueAtEpochMillis: Long,
+        expectedUpdatedAtEpochMillis: Long,
+        updatedAtEpochMillis: Long,
+    ): Int
 
     @Query("DELETE FROM attention_items WHERE sourceKind = :sourceKind")
     suspend fun clearBySourceKind(sourceKind: String)

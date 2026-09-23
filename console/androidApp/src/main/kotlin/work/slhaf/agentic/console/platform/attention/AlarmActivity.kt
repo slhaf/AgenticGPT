@@ -87,7 +87,8 @@ class AlarmActivity : ComponentActivity() {
 
         actionScope.launch {
             try {
-                AttentionRuntimeCoordinator(this@AlarmActivity).handleNotificationIntent(actionIntent)
+                AttentionRuntimeCoordinator(this@AlarmActivity, actionScope)
+                    .handleNotificationIntent(actionIntent)
             } finally {
                 runOnUiThread { finish() }
             }

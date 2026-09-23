@@ -22,26 +22,24 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import work.slhaf.agentic.console.navigation.AgenticNavigationScaffold
-import work.slhaf.agentic.console.platform.attention.AndroidAttentionScheduler
 import work.slhaf.agentic.console.platform.attention.AttentionRuntimeCoordinator
 import work.slhaf.agentic.console.platform.attention.PermissionStateReader
 import work.slhaf.agentic.console.platform.attention.ReminderNotificationService
 import work.slhaf.agentic.console.attention.AttentionListStateHolder
-import work.slhaf.agentic.console.platform.attention.persistence.AndroidRoomAttentionRepository
-import work.slhaf.agentic.console.platform.attention.persistence.AttentionDatabase
 
 @Composable
 fun AndroidAgenticApp() {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
-    val database = remember(context) { AttentionDatabase.create(context) }
-    val repository = remember(database, scope) { AndroidRoomAttentionRepository(database.attentionDao(), scope) }
-    val scheduler = remember(context) { AndroidAttentionScheduler(context) }
-    val stateHolder = remember { AttentionListStateHolder(repository, scheduler, scope) }
+    val runtimeCoordinator = remember(context, scope) {
+        AttentionRuntimeCoordinator(context, scope)
+    }
+    val stateHolder = remember(runtimeCoordinator, scope) {
+        AttentionListStateHolder(runtimeCoordinator, scope)
+    }
     val permissionStateReader = remember(context) { PermissionStateReader(context) }
     val notificationService = remember(context) { ReminderNotificationService(context) }
-    val runtimeCoordinator = remember(context) { AttentionRuntimeCoordinator(context) }
     var permissionState by remember(permissionStateReader) { mutableStateOf(permissionStateReader.read()) }
     val refreshPermissionState = { permissionState = permissionStateReader.read() }
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
@@ -81,7 +79,7 @@ fun AndroidAgenticApp() {
 
     LaunchedEffect(notificationService, runtimeCoordinator) {
         notificationService.ensureChannel()
-        runtimeCoordinator.restoreFutureItems()
+        runtimeCoordinator.restorePendingItems()
         refreshPermissionState()
     }
 

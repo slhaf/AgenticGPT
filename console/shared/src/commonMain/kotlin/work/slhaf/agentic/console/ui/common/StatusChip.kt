@@ -28,6 +28,7 @@ fun StatusChip(status: AttentionStatus, modifier: Modifier = Modifier) {
         AttentionStatus.Waiting -> MaterialTheme.colorScheme.primaryContainer
         AttentionStatus.Triggered -> MaterialTheme.colorScheme.tertiaryContainer
         AttentionStatus.Snoozed -> MaterialTheme.colorScheme.secondaryContainer
+        AttentionStatus.Degraded -> MaterialTheme.colorScheme.errorContainer
         AttentionStatus.Done,
         AttentionStatus.Acknowledged -> MaterialTheme.colorScheme.surfaceVariant
         AttentionStatus.Cancelled,

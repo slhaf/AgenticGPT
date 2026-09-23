@@ -32,7 +32,11 @@ fun AttentionScreen(stateHolder: AttentionListStateHolder) {
     val state by stateHolder.state.collectAsState()
     var filter by remember { mutableStateOf(AttentionFilter.All) }
     val filtered = state.filtered(filter)
-    val waiting = filtered.filter { it.status == AttentionStatus.Waiting || it.status == AttentionStatus.Snoozed }
+    val waiting = filtered.filter {
+        it.status == AttentionStatus.Waiting ||
+            it.status == AttentionStatus.Snoozed ||
+            it.status == AttentionStatus.Degraded
+    }
     val triggered = filtered.filter { it.status == AttentionStatus.Triggered }
     val ended = filtered.filter { it.status in AttentionListUiState.terminalStatuses }
     val timeFormatter = remember { DeviceTimeFormatter() }

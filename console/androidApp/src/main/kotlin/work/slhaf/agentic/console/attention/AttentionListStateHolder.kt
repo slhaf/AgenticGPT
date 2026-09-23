@@ -9,77 +9,49 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import work.slhaf.agentic.console.domain.attention.AttentionDemoData
 import work.slhaf.agentic.console.domain.attention.AttentionItem
-import work.slhaf.agentic.console.domain.attention.AttentionRepository
-import work.slhaf.agentic.console.domain.attention.AttentionScheduler
-import work.slhaf.agentic.console.domain.attention.AttentionSourceKind
 import work.slhaf.agentic.console.domain.attention.AttentionStatus
 import work.slhaf.agentic.console.domain.attention.AttentionType
-import kotlin.time.Clock
-import kotlin.time.Duration
+import work.slhaf.agentic.console.platform.attention.AttentionTransitionOwner
 import kotlin.time.Duration.Companion.minutes
 
 class AttentionListStateHolder(
-    private val repository: AttentionRepository,
-    private val scheduler: AttentionScheduler,
+    private val owner: AttentionTransitionOwner,
     private val scope: CoroutineScope,
 ) {
-    val state: StateFlow<AttentionListUiState> = repository.observeItems()
+    val state: StateFlow<AttentionListUiState> = owner.observeItems()
         .map { AttentionListUiState.from(it) }
         .stateIn(scope, SharingStarted.WhileSubscribed(5_000), AttentionListUiState())
 
     fun markDone(id: String) {
-        scheduler.cancel(id)
-        scope.launch { repository.markDone(id) }
+        scope.launch { owner.markDone(id) }
     }
 
     fun acknowledge(id: String) {
-        scheduler.cancel(id)
-        scope.launch { repository.acknowledge(id) }
+        scope.launch { owner.acknowledge(id) }
     }
 
     fun snooze(id: String) {
-        val duration = 5.minutes
-        val item = state.value.items.firstOrNull { it.id == id }
-        if (item != null) {
-            scheduler.cancel(id)
-            scheduler.schedule(item.snoozedCopy(duration))
-        } else {
-            scheduler.snooze(id, duration)
-        }
-        scope.launch { repository.snooze(id, duration) }
+        scope.launch { owner.snooze(id, 5.minutes) }
     }
 
     fun cancel(id: String) {
-        scheduler.cancel(id)
-        scope.launch { repository.cancel(id) }
+        scope.launch { owner.cancel(id) }
     }
 
     fun createMockReminder() {
-        val item = AttentionDemoData.createMockReminder(afterMinutes = 1)
-        scheduler.schedule(item)
-        scope.launch { repository.create(item) }
+        scope.launch {
+            owner.create(AttentionDemoData.createMockReminder(afterMinutes = 1))
+        }
     }
 
     fun createMockAlarm() {
-        val item = AttentionDemoData.createMockAlarm(afterMinutes = 1)
-        scheduler.schedule(item)
-        scope.launch { repository.create(item) }
+        scope.launch {
+            owner.create(AttentionDemoData.createMockAlarm(afterMinutes = 1))
+        }
     }
 
     fun clearMockData() {
-        state.value.items
-            .filter { it.source.kind == AttentionSourceKind.LocalMock }
-            .forEach { scheduler.cancel(it.id) }
-        scope.launch { repository.clearMockData() }
-    }
-
-    private fun AttentionItem.snoozedCopy(duration: Duration): AttentionItem {
-        val now = Clock.System.now().toEpochMilliseconds()
-        return copy(
-            status = AttentionStatus.Snoozed,
-            dueAtEpochMillis = now + duration.inWholeMilliseconds,
-            updatedAtEpochMillis = now,
-        )
+        scope.launch { owner.clearMockData() }
     }
 }
 
@@ -87,11 +59,19 @@ class AttentionListStateHolder(
 data class AttentionListUiState(
     val items: List<AttentionItem> = emptyList(),
 ) {
-    val waitingCount: Int = items.count { it.status == AttentionStatus.Waiting || it.status == AttentionStatus.Snoozed }
+    val waitingCount: Int = items.count {
+        it.status == AttentionStatus.Waiting ||
+            it.status == AttentionStatus.Snoozed ||
+            it.status == AttentionStatus.Degraded
+    }
     val triggeredCount: Int = items.count { it.status == AttentionStatus.Triggered }
     val endedCount: Int = items.count { it.status in terminalStatuses }
     val nextItem: AttentionItem? = items
-        .filter { it.status == AttentionStatus.Waiting || it.status == AttentionStatus.Snoozed }
+        .filter {
+            it.status == AttentionStatus.Waiting ||
+                it.status == AttentionStatus.Snoozed ||
+                it.status == AttentionStatus.Degraded
+        }
         .minByOrNull { it.dueAtEpochMillis }
 
     fun filtered(filter: AttentionFilter): List<AttentionItem> =

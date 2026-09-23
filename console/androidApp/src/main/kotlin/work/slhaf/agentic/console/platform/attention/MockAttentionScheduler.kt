@@ -4,7 +4,6 @@ import work.slhaf.agentic.console.domain.attention.AttentionItem
 import work.slhaf.agentic.console.domain.attention.AttentionScheduler
 import work.slhaf.agentic.console.domain.attention.ScheduleMode
 import work.slhaf.agentic.console.domain.attention.ScheduleResult
-import kotlin.time.Duration
 
 class MockAttentionScheduler : AttentionScheduler {
     override fun schedule(item: AttentionItem): ScheduleResult =
@@ -21,7 +20,7 @@ class MockAttentionScheduler : AttentionScheduler {
             reason = "Mock only: no Android system schedule is cancelled.",
         )
 
-    override fun snooze(itemId: String, duration: Duration): ScheduleResult =
+    override fun snooze(item: AttentionItem): ScheduleResult =
         ScheduleResult(
             accepted = true,
             mode = ScheduleMode.MockOnly,

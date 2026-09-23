@@ -6,6 +6,7 @@ import android.content.Intent
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 
 class AttentionBootRestoreReceiver : BroadcastReceiver() {
@@ -13,13 +14,15 @@ class AttentionBootRestoreReceiver : BroadcastReceiver() {
         if (intent.action != Intent.ACTION_BOOT_COMPLETED) return
 
         val pendingResult = goAsync()
-        CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        scope.launch {
             try {
-                AttentionRuntimeCoordinator(context).restoreFutureItems()
+                AttentionRuntimeCoordinator(context, scope).restorePendingItems()
             } catch (_: Throwable) {
                 // Boot restore is best-effort and must not crash the app process.
             } finally {
                 pendingResult.finish()
+                scope.cancel()
             }
         }
     }
