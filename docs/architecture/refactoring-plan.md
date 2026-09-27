@@ -8,6 +8,8 @@
 >
 > **阅读前提：** 先读 [现状架构](current-state.md)、[问题诊断](diagnosis.md)、[目标架构](target-architecture.md)、[工程规则](engineering-rules.md) 和 [已确认决策](decisions.md)。本计划不取代接口、配置、运维或开发手册。
 
+> **当前源码定位：** Agent 与 Hub 的实现文件按 owner 移入各自 `src/` 下的子目录；现行路径见 [现状架构 §3](current-state.md#3-模块职责地图)。下文按历史工作包记录的 `src/foo.rs` 路径是迁移前的源码定位，不是当前文件路径；`crate::foo` 模块名及资源 owner 未因物理目录迁移而改变。
+
 ## 1. 目标、边界与状态标记
 
 目标是在保留当前五个 Rust crate 和既有部署拓扑的前提下，先把每个 crate 内的边界收紧，再以小而可回退的提交迁移调用方。五个 crate 是 `agentic-gpt`、`agentic-gpt-hub`、`agentic-gpt-protocol`、`agentic-apply-patch`、`agentic-browser-host`；不因架构整理新造 service、crate 或通用框架。
@@ -80,7 +82,7 @@
 | **3. 合适的目标** | `target-architecture.md` §§1–8 与 D01–D08 保留五 crate、一个 Agent 执行核心、Hub 控制面、Agent-owned Room、纯 Protocol/apply-patch 和独立 Console。 | WP2 的 `RequestContext`/authorize、Process family `dispatch_process`、admission snapshot、WP3 分层、WP4-A parity、WP4-B Protocol facade、WP-R 九项远端 Room 是目标的有界落地，不等于目标目录或逻辑 `OperationRequest` 已存在。 | 其他 operation family 的 stdio 直路与 `local_service` HubCommand 路仍并存；未来字段分类/外部运行时 proof 仍需核验。不借此新增 universal dispatcher/framework。 |
 | **4. 职责与依赖方向** | `engineering-rules.md` placement matrix、R-01–R-25、Cargo manifests 和 current/target ownership map 给出 owner、依赖方向、durability、projection 与 clean-cutover 规则。 | Hub 仍不导入 Agent 资源或 Room 内容；apply-patch 纯算法；browser-host 独立进程；现有 WPs 保留 run/request/connection/lease 分离。`skills.rs`、`state::projection`、Protocol private modules 和 Android transition owner 已对应窄边界。 | `AppState`/`HubState` 仍是宽 composition roots；其他 operation family、inventory 与外部发布/平台证据仍有残余。归属：条件化 Agent ownership、Hub/Release residual；不按文件大小拆 crate。 |
 | **5. 耐久 feature placement 指引** | `engineering-rules.md` §§1、6、9、10 和本计划 §3/§5 给出 Process/File/MCP/Browser/Room/Console/TUI 的放置、authority、projection 和迁移规则；WP4-A gate 与 WP-R 文档提供具体例证。 | 这些是可复用规则；当前 release preflight 已接入 same-SHA/version/fmt/check/test/build/parity 的 bounded local gate，且 strict Clippy debt、hosted publication、ARM 和外部 importer 仍明确排除。 | operation/name/descriptor/schema/projection inventory 仍分层维护，外部 hosted release/consumer evidence 未取得。归属：release/inventory 条件包与文档状态同步；不得强制 universal schema。 |
-| **6. 渐进且可验证的计划** | 本文件 §§1–7 已给出 WP0/1/2/3/4-A/R 的依赖、提交、回退、接受和停止条件；WP4-B 已有实现记录，WP-T、WP5、WP5-O 保留独立边界。 | WP1/WP2/WP3/WP4-A/WP-R 与 WP4-B source-only module organization 有界完成；WP-T 标准未决，WP5 local-only source seam 已实现但 Android runtime evidence pending，WP5-O 为未来产品。 | 历史“下一包/未启动”语句须按日期阅读；§4 末的条件化结构包现在混合已实现窄 seam 与仍 proof-gated residual，顺序不是运行时结果。 |
+| **6. 渐进且可验证的计划** | 本文件 §§1–7 已给出 WP0/1/2/3/4-A/R 的依赖、提交、回退、接受和停止条件；WP4-B 已有实现记录，WP-T、WP5、WP5-O 保留独立边界。 | WP1/WP2/WP3/WP4-A/WP-R 与 WP4-B source-only module organization 有界完成；WP-T 的后续统一测试增删标准已由用户确认并写入根 `AGENTS.md`，不代表测试清理已完成；WP5 local-only source seam 已实现但 Android runtime evidence pending，WP5-O 为未来产品。 | 历史“下一包/未启动”语句须按日期阅读；§4 末的条件化结构包现在混合已实现窄 seam 与仍 proof-gated residual，顺序不是运行时结果。 |
 
 ### 1.4.2 当前工作包状态索引
 
@@ -93,7 +95,7 @@
 | WP4-A | **已完成（2026-09-21）** | §4 WP4-A；本地 cross-surface gate 与合同修复有证据，生产 tunnel/SSH、外部 importer、严格 Clippy 不因此变成已完成 |
 | WP-R | **已完成（2026-09-22）** | §4 WP-R；当前九项 Room read/maintenance clean cutover 有证据，Hub 不持有内容；不重新打开 A02 |
 | WP4-B | **已完成（纯内部组织，2026-09-23）** | Protocol 仍是单一 crate；`lib.rs` root facade + private wire domain modules，wire names/tags/bytes 不变；不计入核心完成门槛，当前 workspace check/test evidence 已记录 |
-| WP-T | **标准未决；独立** | 只保留用户意图，不先删测试或设比例/覆盖率目标 |
+| WP-T | **测试标准已确立；按证据逐项清理** | 根 `AGENTS.md` 约束后续新增及删除测试：只删纯实现变更探针或无独立故障检出点的重复测试；逐项说明断言、潜在故障和保留覆盖，不确定即保留；不设比例/覆盖率目标 |
 | WP5 | **独立 local-only 维护参考；source seam 已实现** | `AttentionTransitionOwner`/Policy、atomic overdue claim、payload-aware snooze 已落地；`:shared:jvmTest` 17-task BUILD SUCCESSFUL 仅覆盖 shared policy/common Kotlin compile；Android app host test/assemble、Room/OS/device evidence 仍 pending，不进入 Rust 核心 DAG |
 | WP5-O | **未来独立 Console 产品** | 当前 placeholder；不把 Console Hub、Android Internet 或远端 approval/exec ledger 并入核心 |
 
@@ -657,11 +659,12 @@ flowchart TD
 - 需要新 crate、I/O、业务 service、强制 re-export/alias 或改变 wire semantics 才能拆分；停止并保留现有集中布局。
 - 任何 caller、serde bytes 或公共合同不明，不能完成模块移动；停止删除旧定义。
 
-### WP-T：测试必要性与维护成本清理（后续独立包；标准待定）
+### WP-T：测试必要性与维护成本清理（用户已确认统一标准；逐项审查）
 
 - 用户于 2026-09-22 提出后续单设工作包，清理必要性低的测试内容；原文“当前先实施 WP-R”是当时的交付顺序，WP-R 已有 2026-09-22 独立完成记录。
-- 本节仅记录意图。测试评价标准后续参照常见实践再讨论，不预先确定删除清单、比例、覆盖率或代码量目标，也不把当前行数统计视为测试价值判断；不混入 WP-R 能力交付或 WP4-B 内部模块整理。
-- 本节不授权立即批量删除测试，也不改变当前工作包已确认的行为验证与安全边界要求。
+- **历史状态：** 当时标准未定，不预设删除清单、比例、覆盖率或代码量目标；这不是新测试标准已在 2026-09-22 生效的证据。
+- **后续用户决策：** 根 `AGENTS.md` 现将行为/边界/错误/状态转换/协议/副作用的独立故障检出作为所有后续测试增删标准。删除前逐项说明断言、所防故障与具名保留覆盖；只验证内部实现变动或没有独立检出点者才可删除；不确定即保留。不会仅按代码覆盖或行数删测，用户承诺的对外文案仍可作为合同测试。
+- 该标准不授权批量删除，也不改变当前工作包已确认的行为验证与安全边界要求。
 
 ### WP5：Console/Android local-only 独立维护参考（源码 transition owner 已实现；不属核心）
 **对应正式诊断：** A08。D07 将 Android Attention 维护与本轮 Agent/Hub/Protocol/Room 核心重构解耦；`AttentionRuntimeCoordinator`/`AttentionTransitionPolicy`、atomic overdue claim 和 payload-aware snooze 已在 source level 收口。`:shared:jvmTest` 17-task BUILD SUCCESSFUL 仅覆盖 shared 纯 `AttentionTransitionPolicy` 测试与 common Kotlin compile；Android app host test/assemble、Room/OS/device evidence 仍 pending。本节不进入核心 DAG、里程碑或完成门槛。

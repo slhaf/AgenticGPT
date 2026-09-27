@@ -77,14 +77,14 @@ Job/Skill 状态必须保持窄 owner：Agent `jobs` 拥有运行中的 Process/
 
 入口适配器可以做 framing、decode、认证、profile/toolset 可见性、connection generation、参数 schema 和错误 projection；然后生成带 `RequestContext` 的 operation request。它不得自己实现另一套 policy、Job、文件提交、MCP client、Room 写入或 Browser lifecycle。这里是目标放置规则，不是声称当前所有入口都已经走同一个函数。
 
-适用入口：
+适用入口（路径分别相对 Agent 或 Hub 的 `src/`；模块名仍是原有 crate-root 名称）：
 
-- Agent `stdio_server.rs` 的 stdio/MCP；
-- Agent `local_control.rs` 的 local Unix；
-- Agent `http_server.rs`/`http_oauth.rs` 的 worker HTTP；
-- Agent `hub.rs` 的 Hub WS/SSE client；
-- Hub `routes.rs` 的 Actions/HTTP；
-- Hub `mcp_server.rs` 的 Apps MCP；
+- Agent `ingress/stdio_server.rs` 的 stdio/MCP；
+- Agent `ingress/local_control.rs` 的 local Unix；
+- Agent `ingress/http_server.rs`/`ingress/http_oauth.rs` 的 worker HTTP；
+- Agent `ingress/hub.rs` 的 Hub WS/SSE client；
+- Hub `ingress/http/routes.rs` 的 Actions/HTTP；
+- Hub `ingress/mcp/mcp_server.rs` 的 Apps MCP；
 - CLI、TUI、Console 平台 client、独立 Browser host。
 
 入口认证是 perimeter gate，不等于 operation authorization；operation core 仍必须根据 mode/profile/toolset/effect/confirmation 判断。
@@ -99,7 +99,7 @@ Local、Standalone 和 Hub agent 当前复用真正的 `jobs`、`exec`、`policy
 
 ### R-02a：Agent 内部 operation 与 Protocol wire 分离
 
-- 仅 Agent-local 的 operation 放在 `operation.rs`/`local_service.rs` 与实际资源 owner，经过现有 context/authorization gate；不要为内部复用添加 `HubCommand`、serde tag、OpenAPI path 或 Apps-MCP tool。
+- 仅 Agent-local 的 operation 放在 `operations/operation.rs`/`operations/local_service.rs` 与实际资源 owner，经过现有 context/authorization gate；不要为内部复用添加 `HubCommand`、serde tag、OpenAPI path 或 Apps-MCP tool。
 - 只有跨 Hub↔Agent 进程的 operation 才在 Protocol 增加 wire DTO/command/envelope；Protocol 提供稳定 wire identity、serde 名称和纯 metadata，不拥有 Agent admission、Job、文件/MCP/tmux/Room/Skill/Browser effect。
 - Agent-local operation mapping 与 Protocol wire mapping 在边界显式转换；Apps-MCP 公共工具名是另一个 adapter namespace。共享窄 identity/effect/lifecycle 语义，不要求一套 DTO 或一个 universal dispatch。
 
@@ -121,9 +121,9 @@ Local、Standalone 和 Hub agent 当前复用真正的 `jobs`、`exec`、`policy
 不可因此强迫以下 authority 使用同一输入/输出 schema：
 
 1. Protocol root facade + 私有 wire domain modules（`envelopes`、`identity_config`、`mcp`、`notification_tmux`、`process_jobs`、`room`、`skill_bootstrap`）：Hub↔Agent wire authority；
-2. Agent `stdio_server.rs`：Agent-local live toolset、descriptor、conditional validation authority；
-3. Hub `mcp_server.rs`：Apps `/mcp` rmcp/schemars authority；
-4. `routes.rs` + `openapi/hub.yaml`：HTTP/Actions DTO 与其静态 contract authority；
+2. Agent `ingress/stdio_server.rs`：Agent-local live toolset、descriptor、conditional validation authority；
+3. Hub `ingress/mcp/mcp_server.rs`：Apps `/mcp` rmcp/schemars authority；
+4. Hub `ingress/http/routes.rs` + `openapi/hub.yaml`：HTTP/Actions DTO 与其静态 contract authority；
 5. `docs/tool-contract-matrix.md`：review aid，不是 runtime authority。
 
 每项跨表面变化必须经过 parity gate（见第 8 节），而不是依赖一个“万能 registry”声称自动一致。

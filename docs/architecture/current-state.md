@@ -86,31 +86,29 @@ are not aliases for those four commands.
 
 ## 3. 模块职责地图
 
-以下路径中的 Agent 前缀为 `crates/agentic-gpt/src/`，Hub 前缀为 `crates/agentic-gpt-hub/src/`。
+以下路径中的 Agent 前缀为 `crates/agentic-gpt/src/`，Hub 前缀为 `crates/agentic-gpt-hub/src/`。两个入口的 `main.rs` 声明 crate-root 模块，实现在下列按 owner 组织的目录；目录迁移不改变 `crate::` 模块名或执行边界。
 
 ### 3.1 执行端
 
 | 模块组 | 当前职责与边界 |
 |---|---|
-| `main.rs`、`state.rs`、`instance_lock.rs`、`utils.rs` | 启动组装、运行形态、共享状态、单实例和路径基础；main 同时承载 CLI 与热重载 |
-| `stdio_server.rs` | MCP framing/schema、toolset/namespace discovery、参数/结果适配与 lifecycle；Process Exec/Batch 通过 `local_service::dispatch_process`，其余资源仍可保留 direct branches，annotation 只作描述/发现 |
-| `local_service.rs`、`operation.rs`、`operation_result.rs` | Process shared adapter、HubCommand/value-returning operation 映射、不可变 RequestContext、同步 authorize、共享 error/slim result projection；承接 Hub ingress，但不是 Hub runner，也不反向依赖 stdio transport |
-| `hub.rs`、`transport_ledger.rs` | WS/SSE、Hello/heartbeat、可靠 envelope、ACK/重放、Job/report、确认响应 |
-| `local_control.rs` | Unix listener/client、UID/权限、stale socket inode guard、LocalJobClient |
-| `http_server.rs`、`http_oauth.rs` | worker HTTP MCP、Bearer/PKCE、Host/Origin/resource 边界 |
-| `supervisor.rs`、`tunnel_distribution.rs` | tunnel/worker 进程链、secret reference、健康、退避重启、下载缓存 |
-| `jobs.rs`、`job_history.rs` | Process/Skill/MCP 准入、等待、取消、输出上限、终态、SQLite 历史与重启 unknown；Process/Skill admission 捕获 Arc<Config>，batch preflight 将同一 snapshot 传给 queued workers |
-| `exec.rs`、`policy.rs`、`confirmation.rs` | process preflight/CWD/path、program rule、可选 bwrap、人工确认及临时 MCP allow；`exec::normalize_roots` 是配置 path-root 的共享归一化入口 |
-| `file_ops.rs` | 文件路径策略、读/搜索、patch 计划、revision/lock/revalidation、暂存提交与审计；复用 `exec::normalize_roots` 并保留 Expansion/Resolution failure stage；调用纯 apply-patch 库 |
-| `mcp.rs` | 下游 HTTP/stdio server、配置快照、call/batch、确认、并发与取消；效果通过 managed Job 观测 |
-| `tmux.rs` | 外部 tmux server/session/pane 观察与控制；session 生命周期不等同 Agent child Job |
-| `skills.rs`、`skill_installs.rs` | `skills.rs` 拥有 Skill package metadata、`package_sha256` 与 activation/shared lease；`skill_installs.rs` 拥有安装 journal/staging/commit/recovery；skill run 复用 Process Job |
-| `bootstrap.rs`、`room_repository.rs`、`room_reads.rs`、`room_maintenance.rs` | 有界 bootstrap/Room 文件资源、Git/scaffold、语义槽位与维护提交；不是 reasoning loop |
-| `browser_distribution.rs`、`browser_runtime.rs` | 签名包/哈希/解包与缓存、descriptor/managed/desktop runtime 发现 |
-| `browser_kernel.rs`、`browser_manager.rs`、`browser_manual.rs` | Node 子进程、命名 lease 串行调用/reset/reaper/release、受限运行时文档读取 |
-| `config.rs`、`config_cli.rs`、`config_setup/`、`config_templates.rs`、`config_tui/` | 配置加载/import/default/修改、向导 draft/validation/review/commit、secret 写入；并非新执行核心 |
-| `tui/`、`cli_i18n.rs`、`notify.rs`、`agent_info.rs` | 展示/输入/终端恢复、本地化、桌面通知、诊断摘要 |
-| `private_state.rs`、`audit.rs` | 私有状态目录与迁移、workspace append-only 审计；耐久等级不同于 Job history/transport ledger |
+| `main.rs`、`runtime/{startup,state,instance_lock,supervisor,tunnel_distribution,agent_info,notify}.rs`、`support/utils.rs` | main 保留模块声明与启动入口；startup 拥有启动组装和热重载，state/instance lock 与 supervisor 拥有运行状态、单实例和 tunnel/worker 进程链 |
+| `ingress/{stdio_server,stdio_transport,stdio_schema}.rs` | MCP 调用分派、stdio framing/resume 和纯工具 descriptor/schema 分属同一入口的明确责任；Process Exec/Batch 通过 `local_service::dispatch_process`，其余资源仍可保留 direct branches，annotation 只作描述/发现 |
+| `operations/{local_service,operation,operation_result}.rs` | Process shared adapter、HubCommand/value-returning operation 映射、不可变 RequestContext、同步 authorize、共享 error/slim result projection；承接 Hub ingress，但不是 Hub runner，也不反向依赖 stdio transport |
+| `ingress/hub.rs`、`storage/transport_ledger.rs` | WS/SSE、Hello/heartbeat、可靠 envelope、ACK/重放、Job/report、确认响应 |
+| `ingress/local_control.rs` | Unix listener/client、UID/权限、stale socket inode guard、LocalJobClient |
+| `ingress/{http_server,http_oauth}.rs` | worker HTTP MCP、Bearer/PKCE、Host/Origin/resource 边界 |
+| `process/jobs.rs`、`storage/job_history.rs` | Process/Skill/MCP 准入、等待、取消、输出上限、终态、SQLite 历史与重启 unknown；Process/Skill admission 捕获 Arc<Config>，batch preflight 将同一 snapshot 传给 queued workers |
+| `process/exec.rs`、`operations/{policy,confirmation}.rs` | process preflight/CWD/path、program rule、可选 bwrap、人工确认及临时 MCP allow；`exec::normalize_roots` 是配置 path-root 的共享归一化入口 |
+| `files/file_ops.rs` | 文件路径策略、读/搜索、patch 计划、revision/lock/revalidation、暂存提交与审计；复用 `exec::normalize_roots` 并保留 Expansion/Resolution failure stage；调用纯 apply-patch 库 |
+| `mcp/mcp.rs` | 下游 HTTP/stdio server、配置快照、call/batch、确认、并发与取消；效果通过 managed Job 观测 |
+| `tmux/tmux.rs` | 外部 tmux server/session/pane 观察与控制；session 生命周期不等同 Agent child Job |
+| `skills/{skills,skill_installs}.rs` | `skills.rs` 拥有 Skill package metadata、`package_sha256` 与 activation/shared lease；`skill_installs.rs` 拥有安装 journal/staging/commit/recovery；skill run 复用 Process Job |
+| `room/{bootstrap,room_repository,room_reads,room_maintenance}.rs` | 有界 bootstrap/Room 文件资源、Git/scaffold、语义槽位与维护提交；不是 reasoning loop |
+| `browser/{browser_distribution,browser_runtime,browser_kernel,browser_manager,browser_manual,browser_discovery}.rs` | 签名包/哈希/解包与缓存、独立的运行时来源发现/组装、Node 子进程与命名 lease |
+| `config/{config,config_cli,config_templates}.rs`、`config/setup/`、`ui/config_tui/` | 配置加载/import/default/修改、向导 draft/validation/review/commit、secret 写入；并非新执行核心 |
+| `ui/{cli,cli_i18n}.rs`、`ui/tui/` | CLI 命令解析与交互调度、展示/输入/终端恢复、本地化 |
+| `storage/{private_state,audit}.rs` | 私有状态目录与迁移、workspace append-only 审计；耐久等级不同于 Job history/transport ledger |
 
 ### 3.1.1 Agent operation routing（当前）
 
@@ -120,16 +118,26 @@ are not aliases for those four commands.
 
 | 模块 | 当前职责 |
 |---|---|
-| `main.rs`、`state.rs` | CLI/配置/路由/后台清理、HubState；main 还拥有远程确认回调 |
-| `agents/{transport,lifecycle,dispatch}` | Agent secret 接入、WS/SSE、连接替换、Hello、消息处理、受 owner 约束的 dispatch/重放 |
-| `routes.rs` | action-key HTTP process/Job/tmux/MCP/运行查询及响应适配 |
-| `mcp_server.rs`、`agentic_result.rs` | Apps JSON-RPC、tool router/schemars、Full/Coordinator、业务 JSON → MCP result |
-| `runs.rs` | command/run 收据、hash/ACK/status/result/conflict、stale 与 retention |
-| `room.rs` | 单一 active Room `(agent_id, connection_id)` 连接租约、九个当前 Room 读/维护操作的转发与 HTTP/MCP 结果投影；通用 run receipt 可保留有界 operation result，但不持有 Room 内容 |
-| `notify.rs` | freedesktop Agent/ntfy 渠道、健康缓存、Android 注册但未实现 delivery |
-| `oauth.rs` | 授权码/PKCE/token 与 MCP Bearer 校验，session 在内存 |
-| `db.rs`、`registry.rs` | SQLite schema/兼容增列、Agent 注册/启停/alias/secret hash |
-| `instance_lock.rs`、`utils.rs` | 同 DB serve 锁、ID/hash/constant-time 比较 |
+| `main.rs`、`runtime/{cli,config,server,state}.rs` | main 保留模块声明与启动入口；CLI/config、HTTP serve/router/后台清理、HubState 分属明确的 runtime owner；server 还组装远程确认回调 |
+| `agents/{transport,lifecycle,dispatch,registry}.rs` | Agent secret 接入、WS/SSE、连接替换、Hello、消息处理、受 owner 约束的 dispatch/重放，以及 Agent 注册/alias/secret hash |
+| `ingress/http/routes.rs` | action-key HTTP process/Job/tmux/MCP/运行查询及响应适配 |
+| `ingress/mcp/{mcp_server,args,transport}.rs`、`support/agentic_result.rs` | Apps 工具 handler/tool router、类型化参数/schema、JSON-RPC framing/auth/Full/Coordinator、业务 JSON → MCP result 各留在 MCP 入口边界 |
+| `storage/runs.rs` | command/run 收据、hash/ACK/status/result/conflict、stale 与 retention |
+| `room/room.rs` | 单一 active Room `(agent_id, connection_id)` 连接租约、九个当前 Room 读/维护操作的转发与 HTTP/MCP 结果投影；通用 run receipt 可保留有界 operation result，但不持有 Room 内容 |
+| `notifications/notify.rs` | freedesktop Agent/ntfy 渠道、健康缓存、Android 注册但未实现 delivery |
+| `ingress/oauth.rs` | 授权码/PKCE/token 与 MCP Bearer 校验，session 在内存 |
+| `storage/db.rs` | SQLite schema/兼容增列 |
+| `runtime/{instance_lock,confirmation}.rs`、`support/utils.rs` | 同 DB serve 锁、确认协调与 ID/hash/constant-time 比较 |
+
+### 3.2.1 混合职责模块的拆分判据
+
+本次只按独立 owner 拆分，不以文件大小、行数或测试数量为目标：
+
+- Agent `main.rs` 中 CLI 命令、启动/热重载、Browser 来源发现分别归 `ui/cli.rs`、`runtime/startup.rs`、`browser/browser_discovery.rs`；stdio resume transport 与纯工具 descriptor/schema 分别归 `ingress/stdio_transport.rs`、`ingress/stdio_schema.rs`。stdio 参数 DTO 仍被 dispatch、validation、conversion 直接消费，未制造第二套入口类型。
+- Agent `config/config.rs` 的模型、加载、验证与原子写入共用私有 helper 和现有调用方；`process/jobs.rs` 的 Process/Skill/MCP 终态、permit、取消与历史共享 ManagedJob；`mcp/mcp.rs` 的下游配置与 call/batch 共享 client/factory、audit 与 Job 状态。三者暂不按大小拆开，避免扩散私有状态或发明转发层。
+- Hub `main.rs` 的 CLI/配置存取与 server/router 各归 `runtime/cli.rs`、`runtime/config.rs`、`runtime/server.rs`；Apps MCP 参数类型/schema 与 JSON-RPC/auth transport 各归 `ingress/mcp/args.rs`、`ingress/mcp/transport.rs`，原 `mcp_server.rs` 保留工具 handler。
+- Hub `storage/runs.rs` 的投递、ACK、状态、结果与 retention 共用 SQL/identity 不变量；`runtime/state.rs` 已在 `state::projection` 有中立投影边界；`room/room.rs` 的 HTTP 转发与 active-room lease 共用路由错误、连接状态和 Room owner。三者不按长度进一步拆分。
+
 ### 3.3 Protocol（当前内部组织）
 
 `crates/agentic-gpt-protocol/src/lib.rs` 现在是 root facade，只声明并 re-export 私有 wire-domain modules：`envelopes`、`identity_config`、`mcp`、`notification_tmux`、`process_jobs`、`room`、`skill_bootstrap`。这些模块继续只拥有 wire DTO、枚举、envelope 与纯契约 helper；root public names、serde tags、camelCase、bytes 和五 crate 依赖方向不因内部组织改变。Protocol 是跨 Hub↔Agent wire authority，不是 Agent-local operation 或所有入口的万能 schema。
