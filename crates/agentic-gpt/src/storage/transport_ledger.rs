@@ -50,6 +50,16 @@ pub(crate) struct LedgerRecord {
     pub(crate) conflict: Option<Value>,
 }
 
+struct ConflictDetails<'a> {
+    run_id: &'a str,
+    request_id: &'a str,
+    command_hash: &'a str,
+    agent_id: &'a str,
+    command: Option<HubCommand>,
+    result: Option<Value>,
+    reason: &'a str,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum AcceptOutcome {
     FirstAccepted,
@@ -78,7 +88,7 @@ pub(crate) enum CompletionOutcome {
 }
 
 pub(crate) fn latest_records() -> Result<HashMap<String, LedgerRecord>> {
-    with_ledger_lock(|path| scan_locked(path))
+    with_ledger_lock(scan_locked)
 }
 
 pub(crate) fn accept(envelope: &HubCommandEnvelope, agent_id: &str) -> Result<AcceptOutcome> {
@@ -114,13 +124,15 @@ pub(crate) fn accept(envelope: &HubCommandEnvelope, agent_id: &str) -> Result<Ac
             append_conflict_locked(
                 path,
                 &existing,
-                &envelope.run_id,
-                &envelope.request_id,
-                &envelope.command_hash,
-                agent_id,
-                Some(envelope.command.clone()),
-                None,
-                "transport_identity_mismatch",
+                ConflictDetails {
+                    run_id: &envelope.run_id,
+                    request_id: &envelope.request_id,
+                    command_hash: &envelope.command_hash,
+                    agent_id,
+                    command: Some(envelope.command.clone()),
+                    result: None,
+                    reason: "transport_identity_mismatch",
+                },
             )?;
             return Ok(AcceptOutcome::HashMismatch);
         }
@@ -130,13 +142,15 @@ pub(crate) fn accept(envelope: &HubCommandEnvelope, agent_id: &str) -> Result<Ac
                 append_conflict_locked(
                     path,
                     &existing,
-                    &envelope.run_id,
-                    &envelope.request_id,
-                    &envelope.command_hash,
-                    agent_id,
-                    Some(envelope.command.clone()),
-                    None,
-                    "transport_owner_mismatch",
+                    ConflictDetails {
+                        run_id: &envelope.run_id,
+                        request_id: &envelope.request_id,
+                        command_hash: &envelope.command_hash,
+                        agent_id,
+                        command: Some(envelope.command.clone()),
+                        result: None,
+                        reason: "transport_owner_mismatch",
+                    },
                 )?;
                 return Ok(AcceptOutcome::OwnerMismatch);
             }
@@ -175,13 +189,15 @@ pub(crate) fn claim_started(
             append_conflict_locked(
                 path,
                 &existing,
-                run_id,
-                request_id,
-                command_hash,
-                agent_id,
-                None,
-                None,
-                "transport_claim_identity_mismatch",
+                ConflictDetails {
+                    run_id,
+                    request_id,
+                    command_hash,
+                    agent_id,
+                    command: None,
+                    result: None,
+                    reason: "transport_claim_identity_mismatch",
+                },
             )?;
             return Ok(ClaimOutcome::OwnerMismatch);
         }
@@ -191,13 +207,15 @@ pub(crate) fn claim_started(
                 append_conflict_locked(
                     path,
                     &existing,
-                    run_id,
-                    request_id,
-                    command_hash,
-                    agent_id,
-                    None,
-                    None,
-                    "transport_claim_owner_mismatch",
+                    ConflictDetails {
+                        run_id,
+                        request_id,
+                        command_hash,
+                        agent_id,
+                        command: None,
+                        result: None,
+                        reason: "transport_claim_owner_mismatch",
+                    },
                 )?;
                 return Ok(ClaimOutcome::OwnerMismatch);
             }
@@ -237,13 +255,15 @@ pub(crate) fn mark_completed(
             append_conflict_locked(
                 path,
                 &existing,
-                run_id,
-                request_id,
-                command_hash,
-                agent_id,
-                existing.command.clone(),
-                Some(result.clone()),
-                "transport_completion_identity_mismatch",
+                ConflictDetails {
+                    run_id,
+                    request_id,
+                    command_hash,
+                    agent_id,
+                    command: existing.command.clone(),
+                    result: Some(result.clone()),
+                    reason: "transport_completion_identity_mismatch",
+                },
             )?;
             return Err(anyhow!("transport_completion_identity_mismatch"));
         }
@@ -251,13 +271,15 @@ pub(crate) fn mark_completed(
             append_conflict_locked(
                 path,
                 &existing,
-                run_id,
-                request_id,
-                command_hash,
-                agent_id,
-                existing.command.clone(),
-                Some(result.clone()),
-                "transport_completion_owner_mismatch",
+                ConflictDetails {
+                    run_id,
+                    request_id,
+                    command_hash,
+                    agent_id,
+                    command: existing.command.clone(),
+                    result: Some(result.clone()),
+                    reason: "transport_completion_owner_mismatch",
+                },
             )?;
             return Err(anyhow!("transport_completion_owner_mismatch"));
         }
@@ -268,13 +290,15 @@ pub(crate) fn mark_completed(
             append_conflict_locked(
                 path,
                 &existing,
-                run_id,
-                request_id,
-                command_hash,
-                agent_id,
-                existing.command.clone(),
-                Some(result.clone()),
-                "transport_completion_result_conflict",
+                ConflictDetails {
+                    run_id,
+                    request_id,
+                    command_hash,
+                    agent_id,
+                    command: existing.command.clone(),
+                    result: Some(result.clone()),
+                    reason: "transport_completion_result_conflict",
+                },
             )?;
             return Err(anyhow!("transport_completion_result_conflict"));
         }
@@ -385,26 +409,20 @@ fn append_locked(path: &Path, record: &LedgerRecord) -> Result<()> {
 fn append_conflict_locked(
     path: &Path,
     canonical: &LedgerRecord,
-    run_id: &str,
-    request_id: &str,
-    command_hash: &str,
-    agent_id: &str,
-    command: Option<HubCommand>,
-    result: Option<Value>,
-    reason: &str,
+    details: ConflictDetails<'_>,
 ) -> Result<()> {
     let conflict = serde_json::to_value(canonical).ok();
     append_locked(
         path,
         &LedgerRecord {
-            run_id: run_id.to_string(),
-            request_id: request_id.to_string(),
-            command_hash: command_hash.to_string(),
+            run_id: details.run_id.to_string(),
+            request_id: details.request_id.to_string(),
+            command_hash: details.command_hash.to_string(),
             status: "conflict".to_string(),
-            agent_id: Some(agent_id.to_string()),
-            command,
-            result,
-            reason: Some(reason.to_string()),
+            agent_id: Some(details.agent_id.to_string()),
+            command: details.command,
+            result: details.result,
+            reason: Some(details.reason.to_string()),
             conflict,
         },
     )
@@ -609,6 +627,27 @@ fn recovery_path(path: &Path) -> PathBuf {
 
 fn recovery_backup_path(path: &Path) -> PathBuf {
     PathBuf::from(format!("{}.backup", path.display()))
+}
+
+fn temporary_path(path: &Path) -> PathBuf {
+    let mut value = TEMP_COUNTER
+        .lock()
+        .expect("transport ledger temp counter poisoned");
+    *value = value.saturating_add(1);
+    PathBuf::from(format!(
+        "{}.tmp-{}-{}",
+        path.display(),
+        std::process::id(),
+        *value
+    ))
+}
+
+fn ledger_path() -> Result<PathBuf> {
+    #[cfg(test)]
+    if let Some(path) = TEST_LEDGER_PATH.with(|current| current.borrow().clone()) {
+        return Ok(path);
+    }
+    Ok(agentic_home()?.join("transport-runs.jsonl"))
 }
 
 #[cfg(test)]
@@ -1024,7 +1063,7 @@ mod tests {
             },
         );
         let before = fs::read(&ledger).unwrap();
-        with_ledger_lock(|path| compact_locked(path)).unwrap();
+        with_ledger_lock(compact_locked).unwrap();
         let after = fs::read(&ledger).unwrap();
         assert!(after.len() < before.len());
         assert!(String::from_utf8_lossy(&after).contains("\"done\":true"));
@@ -1044,25 +1083,4 @@ mod tests {
             .unwrap();
         writeln!(file, "{}", serde_json::to_string(record).unwrap()).unwrap();
     }
-}
-
-fn temporary_path(path: &Path) -> PathBuf {
-    let mut value = TEMP_COUNTER
-        .lock()
-        .expect("transport ledger temp counter poisoned");
-    *value = value.saturating_add(1);
-    PathBuf::from(format!(
-        "{}.tmp-{}-{}",
-        path.display(),
-        std::process::id(),
-        *value
-    ))
-}
-
-fn ledger_path() -> Result<PathBuf> {
-    #[cfg(test)]
-    if let Some(path) = TEST_LEDGER_PATH.with(|current| current.borrow().clone()) {
-        return Ok(path);
-    }
-    Ok(agentic_home()?.join("transport-runs.jsonl"))
 }

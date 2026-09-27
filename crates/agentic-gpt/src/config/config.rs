@@ -1904,13 +1904,9 @@ pub(crate) fn normalize_http_mcp_public_url(public_url: &str) -> Result<String> 
     let parsed = reqwest::Url::parse(value).map_err(|_| anyhow!("http_mcp_public_url_invalid"))?;
     let raw_path = value.find("://").map(|index| {
         let rest = &value[index + 3..];
-        let authority_end = rest
-            .find(|character| matches!(character, '/' | '?' | '#'))
-            .unwrap_or(rest.len());
+        let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
         let suffix = &rest[authority_end..];
-        let path_end = suffix
-            .find(|character| matches!(character, '?' | '#'))
-            .unwrap_or(suffix.len());
+        let path_end = suffix.find(['?', '#']).unwrap_or(suffix.len());
         &suffix[..path_end]
     });
     if parsed.scheme() != "https"
@@ -1958,9 +1954,7 @@ pub(crate) fn resolve_secret_reference(reference: &str) -> Result<String> {
     } else {
         return Err(anyhow!("secret_reference_invalid"));
     };
-    let value = raw
-        .trim_end_matches(|character| character == '\r' || character == '\n')
-        .to_string();
+    let value = raw.trim_end_matches(['\r', '\n']).to_string();
     if value.trim().is_empty() {
         return Err(anyhow!("secret_reference_empty"));
     }
@@ -2196,15 +2190,11 @@ fn stage_config_bytes(target: &Path, parent: &Path, bytes: &[u8], mode: u32) -> 
 
 fn copy_backup(source: &Path, destination: &Path) -> Result<()> {
     let mut source_file = fs::File::open(source)?;
-    let mut destination_file = match fs::OpenOptions::new()
+    let mut destination_file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
-        .open(destination)
-    {
-        Ok(file) => file,
-        Err(error) => return Err(error.into()),
-    };
+        .open(destination)?;
     if let Err(error) = std::io::copy(&mut source_file, &mut destination_file)
         .and_then(|_| destination_file.sync_all())
     {

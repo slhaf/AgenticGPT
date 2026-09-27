@@ -298,15 +298,15 @@ pub(super) async fn handle_agent_message(
                 .expect("current connection disappeared under agents guard");
             let publication = state
                 .confirmations
-                .admit(
+                .admit(confirmation::ConfirmationAdmission {
                     agent_id,
-                    &connection.connection_id,
+                    connection_id: &connection.connection_id,
                     request_id,
-                    connection.sender.clone(),
+                    sender: connection.sender.clone(),
                     timeout_seconds,
-                    state.config.remote_confirmation.timeout_seconds,
+                    provider_timeout_seconds: state.config.remote_confirmation.timeout_seconds,
                     payload,
-                )
+                })
                 .await;
             confirmation_publication = Some(publication);
             None

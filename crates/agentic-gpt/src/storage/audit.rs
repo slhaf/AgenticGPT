@@ -158,8 +158,8 @@ fn append_record_at(audit_path: &Path, record: Vec<u8>) -> Result<()> {
         ));
     }
 
-    let _lock = acquire_audit_lock(&audit_path)?;
-    let current_len = fs::metadata(&audit_path)
+    let _lock = acquire_audit_lock(audit_path)?;
+    let current_len = fs::metadata(audit_path)
         .map(|metadata| metadata.len())
         .unwrap_or(0);
     if current_len.saturating_add(record.len() as u64 + 1) > AUDIT_MAX_BYTES {
@@ -170,15 +170,16 @@ fn append_record_at(audit_path: &Path, record: Vec<u8>) -> Result<()> {
             Err(error) => return Err(error.into()),
         }
         if current_len > 0 {
-            fs::rename(&audit_path, &backup)?;
+            fs::rename(audit_path, &backup)?;
         }
     }
 
     let mut file = OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
-        .open(&audit_path)?;
+        .open(audit_path)?;
     file.seek(SeekFrom::End(0))?;
     let length = file.stream_position()?;
     if length > 0 {
@@ -199,6 +200,7 @@ fn acquire_audit_lock(path: &std::path::Path) -> Result<File> {
     let lock_path = path.with_file_name(".agentic-gpt-audit.jsonl.lock");
     let file = OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(lock_path)?;
@@ -222,6 +224,10 @@ pub(crate) fn write_mcp_batch_audit(config: &Config, record: McpBatchAuditRecord
 }
 
 pub(crate) fn write_file_audit(config: &Config, record: FileAuditRecord) -> Result<()> {
+    append_record(config, serde_json::to_vec(&record)?)
+}
+
+pub(crate) fn write_browser_audit(config: &Config, record: BrowserAuditRecord) -> Result<()> {
     append_record(config, serde_json::to_vec(&record)?)
 }
 
@@ -290,8 +296,4 @@ mod tests {
         }
         let _ = fs::remove_dir_all(root);
     }
-}
-
-pub(crate) fn write_browser_audit(config: &Config, record: BrowserAuditRecord) -> Result<()> {
-    append_record(config, serde_json::to_vec(&record)?)
 }

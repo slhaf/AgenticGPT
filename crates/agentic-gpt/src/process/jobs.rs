@@ -940,6 +940,14 @@ pub(crate) async fn start_process_batch(
     })
 }
 
+type RegisteredProcess = (
+    ManagedProcessSpec,
+    JobInfo,
+    Arc<Mutex<TailBuffer>>,
+    Arc<Mutex<TailBuffer>>,
+    Arc<AtomicBool>,
+);
+
 /// `config` is captured by the caller during batch preflight and remains the
 /// effective configuration for admission and every queued worker.
 pub(crate) async fn start_prepared_managed_batch(
@@ -957,13 +965,7 @@ pub(crate) async fn start_prepared_managed_batch(
     let limit = resolved_job_limit(&config);
     let batch_concurrency = config.limits.max_concurrent_tasks.max(1).min(requested);
     let batch_slots = Arc::new(Semaphore::new(batch_concurrency));
-    let mut registered: Vec<(
-        ManagedProcessSpec,
-        JobInfo,
-        Arc<Mutex<TailBuffer>>,
-        Arc<Mutex<TailBuffer>>,
-        Arc<AtomicBool>,
-    )> = Vec::with_capacity(requested);
+    let mut registered: Vec<RegisteredProcess> = Vec::with_capacity(requested);
     {
         let mut jobs = state.jobs.lock().await;
         refresh_jobs(&state, &mut jobs).await;

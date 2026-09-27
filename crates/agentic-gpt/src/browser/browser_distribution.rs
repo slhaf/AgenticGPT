@@ -12,7 +12,9 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime};
+#[cfg(not(unix))]
+use std::time::SystemTime;
+use std::time::{Duration, Instant};
 use tar::EntryType;
 use tokio::io::AsyncWriteExt;
 use xz2::read::XzDecoder;
@@ -28,6 +30,7 @@ const MAX_METADATA_BYTES: u64 = 64 * 1024;
 const AR_MAGIC: &[u8] = b"!<arch>\n";
 const LOCK_WAIT_TOTAL: Duration = Duration::from_secs(10 * 60);
 const LOCK_POLL: Duration = Duration::from_millis(50);
+#[cfg(not(unix))]
 const LOCK_STALE_AFTER: Duration = Duration::from_secs(30 * 60);
 const MAX_INRELEASE_BYTES: u64 = 256 * 1024;
 const MAX_PACKAGES_BYTES: u64 = 8 * 1024 * 1024;
@@ -563,16 +566,6 @@ pub(crate) async fn provision_managed_browser_runtime_with_fetcher(
         fetcher,
     )
     .await
-}
-
-/// Materialize into the default Agentic cache. This function never downloads or deletes input.
-pub(crate) fn materialize_browser_runtime(
-    package: VerifiedBrowserPackage,
-) -> Result<BrowserRuntimeDescriptor> {
-    let root = dirs::home_dir()
-        .ok_or_else(|| error("browser_runtime_cache_home_unavailable"))?
-        .join(".agentic_gpt/cache/browser-runtime");
-    materialize_browser_runtime_at(&root, package)
 }
 
 pub(crate) fn materialize_browser_runtime_at(
@@ -1229,7 +1222,7 @@ struct Lock {
     path: PathBuf,
     token: Vec<u8>,
     #[cfg(unix)]
-    file: File,
+    _file: File,
 }
 
 fn lock_token() -> Vec<u8> {
@@ -1298,7 +1291,7 @@ fn acquire_unix(
                 return Ok(Lock {
                     path: path.into(),
                     token,
-                    file,
+                    _file: file,
                 });
             }
             Ok(None) => {
@@ -1327,7 +1320,7 @@ async fn acquire_unix_async(
                 return Ok(Lock {
                     path: path.into(),
                     token,
-                    file,
+                    _file: file,
                 });
             }
             Ok(None) => {
@@ -1407,11 +1400,11 @@ impl Lock {
     fn acquire(path: &Path) -> Result<Self> {
         #[cfg(unix)]
         {
-            return acquire_unix(
+            acquire_unix(
                 path,
                 "browser_runtime_cache_lock_timeout",
                 "browser_runtime_cache_lock_unavailable",
-            );
+            )
         }
         #[cfg(not(unix))]
         {
@@ -1456,11 +1449,8 @@ impl Drop for Lock {
     }
 }
 
+#[cfg(not(unix))]
 fn stale_lock(path: &Path) -> bool {
-    #[cfg(target_os = "linux")]
-    if lock_owner_is_gone(path) {
-        return true;
-    }
     let Ok(modified) = fs::metadata(path).and_then(|metadata| metadata.modified()) else {
         return false;
     };
@@ -1469,23 +1459,6 @@ fn stale_lock(path: &Path) -> bool {
         .is_ok_and(|age| age > LOCK_STALE_AFTER)
 }
 
-#[cfg(target_os = "linux")]
-fn lock_owner_is_gone(path: &Path) -> bool {
-    let Ok(text) = fs::read_to_string(path) else {
-        return false;
-    };
-    let Some(pid) = text
-        .lines()
-        .next()
-        .and_then(|line| line.strip_prefix("pid="))
-    else {
-        return false;
-    };
-    let Ok(pid) = pid.parse::<u32>() else {
-        return false;
-    };
-    !Path::new("/proc").join(pid.to_string()).exists()
-}
 #[cfg(test)]
 #[path = "browser_distribution_tests.rs"]
 mod tests;

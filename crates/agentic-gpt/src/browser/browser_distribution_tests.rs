@@ -4,6 +4,7 @@ use super::browser_distribution_verify::{
     AuthenticatedPackagesIndex,
 };
 use super::*;
+use parking_lot::Mutex;
 use pgp::{
     composed::{Deserializable, SignedPublicKey},
     crypto::hash::HashAlgorithm,
@@ -151,17 +152,22 @@ fn authenticated_inrelease_metadata_rejects_duplicates_and_contradictions() {
         "browser_runtime_acquisition_inrelease_metadata_invalid"
     );
 }
+
+type RecordedFetchResponse = (String, u16, Vec<u8>);
+type RecordedPackageResponse = (u16, Vec<u8>);
+type SharedFetchResponses = Arc<Mutex<Vec<RecordedFetchResponse>>>;
+type SharedPackageResponse = Arc<Mutex<Option<RecordedPackageResponse>>>;
+
 #[derive(Clone, Default)]
 struct TestFetcher {
-    responses: Arc<std::sync::Mutex<Vec<(String, u16, Vec<u8>)>>>,
-    package: Arc<std::sync::Mutex<Option<(u16, Vec<u8>)>>>,
+    responses: SharedFetchResponses,
+    package: SharedPackageResponse,
 }
 
 impl TestFetcher {
     fn response(&self, path: &str, status: u16, body: &[u8]) {
         self.responses
             .lock()
-            .unwrap()
             .push((path.to_owned(), status, body.to_vec()));
     }
 }
@@ -171,7 +177,6 @@ impl BrowserDistributionFetcher for TestFetcher {
         let response = self
             .responses
             .lock()
-            .unwrap()
             .iter()
             .find(|(candidate, _, _)| candidate == &path)
             .map(|(_, status, body)| BrowserDistributionResponse {
@@ -190,7 +195,7 @@ impl BrowserDistributionFetcher for TestFetcher {
         _expected_size: u64,
         _expected_sha256: String,
     ) -> BrowserDistributionFuture {
-        let package = self.package.lock().unwrap().clone();
+        let package = self.package.lock().clone();
         Box::pin(async move {
             let Some((status, body)) = package else {
                 return Err(error("browser_runtime_acquisition_http_failed"));
@@ -794,8 +799,6 @@ fn temp() -> PathBuf {
 
 #[test]
 fn target_names_are_frozen() {
-    let _default_entrypoint: fn(VerifiedBrowserPackage) -> Result<BrowserRuntimeDescriptor> =
-        materialize_browser_runtime;
     assert!(valid_component("linux-x64"));
     assert!(valid_component("linux-arm64"));
     assert!(!valid_component("../x"));
@@ -1189,9 +1192,9 @@ fn target_locks_serialize_without_global_lock() {
     let _ = fs::remove_dir_all(root);
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 #[test]
-fn dead_lock_owner_is_recovered_without_waiting_for_age_timeout() {
+fn unix_lock_reuses_existing_path_with_stale_owner_metadata() {
     let root = temp();
     let path = root.join("dead.lock");
     fs::write(&path, b"pid=4294967295\n").unwrap();

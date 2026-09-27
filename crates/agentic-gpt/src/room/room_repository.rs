@@ -405,7 +405,7 @@ pub(crate) fn inspect_repository(config: &Config) -> Result<RepositoryStatus> {
     let clean = if top_level_initialized {
         git_output(&root, &["status", "--porcelain", "--untracked-files=all"])
             .ok()
-            .and_then(|output| output.status.success().then(|| output.stdout.is_empty()))
+            .and_then(|output| output.status.success().then_some(output.stdout.is_empty()))
     } else {
         None
     };

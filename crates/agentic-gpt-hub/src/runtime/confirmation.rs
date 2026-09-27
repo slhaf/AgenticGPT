@@ -40,11 +40,31 @@ pub(crate) struct ConfirmationPublication {
     pub(crate) command_preview: String,
 }
 
+pub(crate) struct ConfirmationAdmission<'a> {
+    pub(crate) agent_id: &'a str,
+    pub(crate) connection_id: &'a str,
+    pub(crate) request_id: String,
+    pub(crate) sender: mpsc::UnboundedSender<OutboundAgentMessage>,
+    pub(crate) timeout_seconds: u64,
+    pub(crate) provider_timeout_seconds: u64,
+    pub(crate) payload: ConfirmationPayload,
+}
+
+#[cfg(test)]
+pub(crate) struct TestConfirmation {
+    pub(crate) confirmation_id: String,
+    pub(crate) request_id: String,
+    pub(crate) agent_id: String,
+    pub(crate) connection_id: String,
+    pub(crate) token: String,
+    pub(crate) expires_at: DateTime<Utc>,
+    pub(crate) sender: mpsc::UnboundedSender<OutboundAgentMessage>,
+}
+
 struct ClaimedConfirmation {
     request_id: String,
     sender: Option<mpsc::UnboundedSender<OutboundAgentMessage>>,
 }
-
 pub(crate) struct Confirmations {
     pending: Mutex<HashMap<String, PendingConfirmation>>,
     #[cfg(test)]
@@ -52,33 +72,19 @@ pub(crate) struct Confirmations {
 }
 
 impl Confirmations {
-    pub(crate) fn new() -> Self {
-        Self {
-            pending: Mutex::new(HashMap::new()),
-            #[cfg(test)]
-            retire_gate: Mutex::new(None),
-        }
-    }
-
-    pub(crate) async fn pending_count(&self) -> usize {
-        self.pending
-            .lock()
-            .await
-            .values()
-            .filter(|pending| !pending.resolved)
-            .count()
-    }
-
     pub(crate) async fn admit(
         &self,
-        agent_id: &str,
-        connection_id: &str,
-        request_id: String,
-        sender: mpsc::UnboundedSender<OutboundAgentMessage>,
-        timeout_seconds: u64,
-        provider_timeout_seconds: u64,
-        payload: ConfirmationPayload,
+        admission: ConfirmationAdmission<'_>,
     ) -> ConfirmationPublication {
+        let ConfirmationAdmission {
+            agent_id,
+            connection_id,
+            request_id,
+            sender,
+            timeout_seconds,
+            provider_timeout_seconds,
+            payload,
+        } = admission;
         let confirmation_id = random_id("confirm");
         let token = random_token();
         let created_at = Utc::now();
@@ -108,6 +114,24 @@ impl Confirmations {
             command_preview,
         }
     }
+
+    pub(crate) fn new() -> Self {
+        Self {
+            pending: Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            retire_gate: Mutex::new(None),
+        }
+    }
+
+    pub(crate) async fn pending_count(&self) -> usize {
+        self.pending
+            .lock()
+            .await
+            .values()
+            .filter(|pending| !pending.resolved)
+            .count()
+    }
+
     async fn is_pending(&self, confirmation_id: &str) -> bool {
         self.pending
             .lock()
@@ -189,25 +213,16 @@ impl Confirmations {
     }
 
     #[cfg(test)]
-    pub(crate) async fn insert_for_test(
-        &self,
-        confirmation_id: &str,
-        request_id: &str,
-        agent_id: &str,
-        connection_id: &str,
-        token: &str,
-        expires_at: DateTime<Utc>,
-        sender: mpsc::UnboundedSender<OutboundAgentMessage>,
-    ) {
+    pub(crate) async fn insert_for_test(&self, confirmation: TestConfirmation) {
         self.pending.lock().await.insert(
-            confirmation_id.to_string(),
+            confirmation.confirmation_id,
             PendingConfirmation {
-                request_id: request_id.to_string(),
-                agent_id: agent_id.to_string(),
-                connection_id: connection_id.to_string(),
-                sender: Some(sender),
-                token_hash: sha256_hex(token),
-                expires_at,
+                request_id: confirmation.request_id,
+                agent_id: confirmation.agent_id,
+                connection_id: confirmation.connection_id,
+                sender: Some(confirmation.sender),
+                token_hash: sha256_hex(&confirmation.token),
+                expires_at: confirmation.expires_at,
                 resolved: false,
                 decision: None,
             },

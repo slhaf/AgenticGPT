@@ -179,6 +179,7 @@ impl NodeReplKernel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use parking_lot::Mutex;
     use rmcp::{
         model::{
             CallToolRequestParams, ClientCapabilities, Content, InitializeRequestParams,
@@ -193,7 +194,7 @@ mod tests {
         path::PathBuf,
         sync::{
             atomic::{AtomicUsize, Ordering},
-            Arc, Mutex,
+            Arc,
         },
     };
 
@@ -240,7 +241,7 @@ mod tests {
         ) -> impl Future<Output = Result<rmcp::model::InitializeResult, rmcp::ErrorData>> + Send + '_
         {
             self.initialize_count.fetch_add(1, Ordering::SeqCst);
-            *self.initialize_protocol.lock().unwrap() = Some(request.protocol_version.clone());
+            *self.initialize_protocol.lock() = Some(request.protocol_version.clone());
             if context.peer.peer_info().is_none() {
                 context.peer.set_peer_info(request);
             }
@@ -252,7 +253,7 @@ mod tests {
             request: CallToolRequestParams,
             context: RequestContext<RoleServer>,
         ) -> impl Future<Output = Result<CallToolResult, rmcp::ErrorData>> + Send + '_ {
-            self.calls.lock().unwrap().push(RecordedCall {
+            self.calls.lock().push(RecordedCall {
                 name: request.name.to_string(),
                 arguments: request.arguments.unwrap_or_default(),
                 meta: Some(context.meta),
@@ -434,16 +435,18 @@ mod tests {
         .unwrap();
 
         kernel.js("1 + 2", 750).await.unwrap();
-        let calls = calls.lock().unwrap();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].name, "js");
-        assert_eq!(
-            calls[0].arguments,
-            Map::from_iter([
-                ("code".to_string(), json!("1 + 2")),
-                ("timeout_ms".to_string(), json!(750_u64)),
-            ])
-        );
+        {
+            let calls = calls.lock();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].name, "js");
+            assert_eq!(
+                calls[0].arguments,
+                Map::from_iter([
+                    ("code".to_string(), json!("1 + 2")),
+                    ("timeout_ms".to_string(), json!(750_u64)),
+                ])
+            );
+        }
         drop(kernel);
         server_task.await.unwrap();
     }
@@ -461,11 +464,13 @@ mod tests {
         .unwrap();
 
         kernel.js("console.log(1)", 100).await.unwrap();
-        let calls = calls.lock().unwrap();
-        assert_eq!(
-            metadata_values(calls[0].meta.as_ref().unwrap()),
-            &json!({"session_id": "session-abc", "turn_id": "turn-xyz"})
-        );
+        {
+            let calls = calls.lock();
+            assert_eq!(
+                metadata_values(calls[0].meta.as_ref().unwrap()),
+                &json!({"session_id": "session-abc", "turn_id": "turn-xyz"})
+            );
+        }
         drop(kernel);
         server_task.await.unwrap();
     }
@@ -483,17 +488,19 @@ mod tests {
         .unwrap();
 
         kernel.turn_ended().await.unwrap();
-        let calls = calls.lock().unwrap();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].name, "turn_ended");
-        assert_eq!(
-            calls[0].arguments,
-            Map::from_iter([
-                ("hook_event_name".to_string(), json!("Stop")),
-                ("session_id".to_string(), json!("session-abc")),
-                ("turn_id".to_string(), json!("turn-xyz")),
-            ])
-        );
+        {
+            let calls = calls.lock();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].name, "turn_ended");
+            assert_eq!(
+                calls[0].arguments,
+                Map::from_iter([
+                    ("hook_event_name".to_string(), json!("Stop")),
+                    ("session_id".to_string(), json!("session-abc")),
+                    ("turn_id".to_string(), json!("turn-xyz")),
+                ])
+            );
+        }
         drop(kernel);
         server_task.await.unwrap();
     }
@@ -511,10 +518,12 @@ mod tests {
         .unwrap();
 
         kernel.reset_js().await.unwrap();
-        let calls = calls.lock().unwrap();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].name, "js_reset");
-        assert!(calls[0].arguments.is_empty());
+        {
+            let calls = calls.lock();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].name, "js_reset");
+            assert!(calls[0].arguments.is_empty());
+        }
         drop(kernel);
         server_task.await.unwrap();
     }
@@ -607,16 +616,18 @@ mod tests {
         kernel.js("second", 20).await.unwrap();
         assert_eq!(initialize_count.load(Ordering::SeqCst), 1);
         assert_eq!(
-            initialize_protocol.lock().unwrap().as_ref(),
+            initialize_protocol.lock().as_ref(),
             Some(&ProtocolVersion::V_2025_06_18)
         );
-        let calls = calls.lock().unwrap();
-        assert_eq!(calls.len(), 2);
-        for call in calls.iter() {
-            assert_eq!(
-                metadata_values(call.meta.as_ref().unwrap()),
-                &json!({"session_id": "session-abc", "turn_id": "turn-xyz"})
-            );
+        {
+            let calls = calls.lock();
+            assert_eq!(calls.len(), 2);
+            for call in calls.iter() {
+                assert_eq!(
+                    metadata_values(call.meta.as_ref().unwrap()),
+                    &json!({"session_id": "session-abc", "turn_id": "turn-xyz"})
+                );
+            }
         }
         drop(kernel);
         server_task.await.unwrap();
@@ -706,28 +717,29 @@ mod tests {
             .await
             .unwrap();
 
-        let calls = calls.lock().unwrap();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].name, "js");
-        assert_eq!(calls[0].arguments["timeout_ms"], json!(20_000_u64));
-        let code = calls[0].arguments["code"].as_str().unwrap();
-        let encoded_path = serde_json::to_string(&raw_path).unwrap();
-        assert!(code.contains(&format!("await import({encoded_path})")));
-        assert!(!code.contains(&raw_path));
-        assert!(code.contains("if (globalThis.agent == null)"));
-        assert!(code.contains("const { setupBrowserRuntime } = await import("));
-        assert!(code.contains("globalThis.agent = await setupBrowserRuntime();"));
-        assert!(code.contains("if (globalThis.browser == null)"));
-        assert!(code.contains("await globalThis.agent.browsers.list()"));
-        assert!(code.contains("browser.family === \"chrome\""));
-        assert!(code.contains(BROWSER_UNAVAILABLE_SENTINEL));
-        assert!(
-            code.contains("globalThis.browser = await globalThis.agent.browsers.get(\"chrome\");")
-        );
-        assert!(code.find("browsers.list").unwrap() < code.find("browsers.get").unwrap());
-        assert!(code.contains(
-            "nodeRepl.write(JSON.stringify({ browserId: globalThis.browser.browserId }));"
-        ));
+        {
+            let calls = calls.lock();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].name, "js");
+            assert_eq!(calls[0].arguments["timeout_ms"], json!(20_000_u64));
+            let code = calls[0].arguments["code"].as_str().unwrap();
+            let encoded_path = serde_json::to_string(&raw_path).unwrap();
+            assert!(code.contains(&format!("await import({encoded_path})")));
+            assert!(!code.contains(&raw_path));
+            assert!(code.contains("if (globalThis.agent == null)"));
+            assert!(code.contains("const { setupBrowserRuntime } = await import("));
+            assert!(code.contains("globalThis.agent = await setupBrowserRuntime();"));
+            assert!(code.contains("if (globalThis.browser == null)"));
+            assert!(code.contains("await globalThis.agent.browsers.list()"));
+            assert!(code.contains("browser.family === \"chrome\""));
+            assert!(code.contains(BROWSER_UNAVAILABLE_SENTINEL));
+            assert!(code
+                .contains("globalThis.browser = await globalThis.agent.browsers.get(\"chrome\");"));
+            assert!(code.find("browsers.list").unwrap() < code.find("browsers.get").unwrap());
+            assert!(code.contains(
+                "nodeRepl.write(JSON.stringify({ browserId: globalThis.browser.browserId }));"
+            ));
+        }
         drop(kernel);
         server_task.await.unwrap();
     }

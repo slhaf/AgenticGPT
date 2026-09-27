@@ -697,13 +697,17 @@ fn run_oauth_scenario(root: &Path) -> Result<(), String> {
     let wrong_form = oauth_authorize_form(
         &endpoint,
         &host,
-        client_id,
-        redirect_uri,
-        state,
-        "agentic:mcp",
-        &challenge,
-        "S256",
-        &resource,
+        OAuthFormRequest {
+            authorization: OAuthAuthorization {
+                client_id,
+                redirect_uri,
+                state,
+                resource: &resource,
+            },
+            scope: "agentic:mcp",
+            code_challenge: &challenge,
+            code_challenge_method: "S256",
+        },
         "wrong-bearer",
     )?;
     require(
@@ -716,13 +720,17 @@ fn run_oauth_scenario(root: &Path) -> Result<(), String> {
     let submitted = oauth_authorize_form(
         &endpoint,
         &host,
-        client_id,
-        redirect_uri,
-        state,
-        "agentic:mcp",
-        &challenge,
-        "S256",
-        &resource,
+        OAuthFormRequest {
+            authorization: OAuthAuthorization {
+                client_id,
+                redirect_uri,
+                state,
+                resource: &resource,
+            },
+            scope: "agentic:mcp",
+            code_challenge: &challenge,
+            code_challenge_method: "S256",
+        },
         initial_token,
     )?;
     require(
@@ -809,11 +817,13 @@ fn run_oauth_scenario(root: &Path) -> Result<(), String> {
     let wrong_client_code = oauth_issue_code(
         &endpoint,
         &host,
-        client_id,
-        redirect_uri,
-        "wrong-client",
+        OAuthAuthorization {
+            client_id,
+            redirect_uri,
+            state: "wrong-client",
+            resource: &resource,
+        },
         verifier,
-        &resource,
         initial_token,
     )?;
     assert_oauth_error(
@@ -836,11 +846,13 @@ fn run_oauth_scenario(root: &Path) -> Result<(), String> {
     let wrong_redirect_code = oauth_issue_code(
         &endpoint,
         &host,
-        client_id,
-        redirect_uri,
-        "wrong-redirect",
+        OAuthAuthorization {
+            client_id,
+            redirect_uri,
+            state: "wrong-redirect",
+            resource: &resource,
+        },
         verifier,
-        &resource,
         initial_token,
     )?;
     assert_oauth_error(
@@ -863,11 +875,13 @@ fn run_oauth_scenario(root: &Path) -> Result<(), String> {
     let wrong_resource_code = oauth_issue_code(
         &endpoint,
         &host,
-        client_id,
-        redirect_uri,
-        "wrong-resource",
+        OAuthAuthorization {
+            client_id,
+            redirect_uri,
+            state: "wrong-resource",
+            resource: &resource,
+        },
         verifier,
-        &resource,
         initial_token,
     )?;
     assert_oauth_error(
@@ -890,11 +904,13 @@ fn run_oauth_scenario(root: &Path) -> Result<(), String> {
     let wrong_token_scope_code = oauth_issue_code(
         &endpoint,
         &host,
-        client_id,
-        redirect_uri,
-        "wrong-token-scope",
+        OAuthAuthorization {
+            client_id,
+            redirect_uri,
+            state: "wrong-token-scope",
+            resource: &resource,
+        },
         verifier,
-        &resource,
         initial_token,
     )?;
     assert_oauth_error(
@@ -918,11 +934,13 @@ fn run_oauth_scenario(root: &Path) -> Result<(), String> {
     let wrong_verifier_code = oauth_issue_code(
         &endpoint,
         &host,
-        client_id,
-        redirect_uri,
-        "wrong-verifier",
+        OAuthAuthorization {
+            client_id,
+            redirect_uri,
+            state: "wrong-verifier",
+            resource: &resource,
+        },
         verifier,
-        &resource,
         initial_token,
     )?;
     assert_oauth_error(
@@ -1016,11 +1034,13 @@ fn run_oauth_scenario(root: &Path) -> Result<(), String> {
     let reuse_code = oauth_issue_code(
         &endpoint,
         &host,
-        client_id,
-        redirect_uri,
-        "reuse",
+        OAuthAuthorization {
+            client_id,
+            redirect_uri,
+            state: "reuse",
+            resource: &resource,
+        },
         verifier,
-        &resource,
         initial_token,
     )?;
     let first_reuse = oauth_token(
@@ -1073,11 +1093,13 @@ fn run_oauth_scenario(root: &Path) -> Result<(), String> {
     let rotation_code = oauth_issue_code(
         &endpoint,
         &host,
-        client_id,
-        redirect_uri,
-        "rotation",
+        OAuthAuthorization {
+            client_id,
+            redirect_uri,
+            state: "rotation",
+            resource: &resource,
+        },
         verifier,
-        &resource,
         initial_token,
     )?;
     let mut config = read_config(&config_path)?;
@@ -1149,11 +1171,13 @@ fn run_oauth_scenario(root: &Path) -> Result<(), String> {
     let audience_code = oauth_issue_code(
         &endpoint,
         &host,
-        client_id,
-        redirect_uri,
-        "audience",
+        OAuthAuthorization {
+            client_id,
+            redirect_uri,
+            state: "audience",
+            resource: &resource,
+        },
         verifier,
-        &resource,
         rotated_token,
     )?;
     assert_oauth_error(
@@ -1620,18 +1644,38 @@ fn form_body(fields: &[(&str, &str)]) -> String {
     serializer.finish()
 }
 
+struct OAuthAuthorization<'a> {
+    client_id: &'a str,
+    redirect_uri: &'a str,
+    state: &'a str,
+    resource: &'a str,
+}
+
+struct OAuthFormRequest<'a> {
+    authorization: OAuthAuthorization<'a>,
+    scope: &'a str,
+    code_challenge: &'a str,
+    code_challenge_method: &'a str,
+}
+
 fn oauth_authorize_form(
     endpoint: &Endpoint,
     host: &str,
-    client_id: &str,
-    redirect_uri: &str,
-    state: &str,
-    scope: &str,
-    code_challenge: &str,
-    code_challenge_method: &str,
-    resource: &str,
+    request: OAuthFormRequest<'_>,
     bearer_token: &str,
 ) -> Result<HttpResponse, String> {
+    let OAuthFormRequest {
+        authorization:
+            OAuthAuthorization {
+                client_id,
+                redirect_uri,
+                state,
+                resource,
+            },
+        scope,
+        code_challenge,
+        code_challenge_method,
+    } = request;
     let body = form_body(&[
         ("response_type", "code"),
         ("client_id", client_id),
@@ -1649,13 +1693,16 @@ fn oauth_authorize_form(
 fn oauth_issue_code(
     endpoint: &Endpoint,
     host: &str,
-    client_id: &str,
-    redirect_uri: &str,
-    state: &str,
+    authorization: OAuthAuthorization<'_>,
     verifier: &str,
-    resource: &str,
     bearer_token: &str,
 ) -> Result<String, String> {
+    let OAuthAuthorization {
+        client_id,
+        redirect_uri,
+        state,
+        resource,
+    } = authorization;
     let challenge = pkce_challenge(verifier);
     let page = http_get(
         endpoint,
@@ -1675,13 +1722,12 @@ fn oauth_issue_code(
     let submitted = oauth_authorize_form(
         endpoint,
         host,
-        client_id,
-        redirect_uri,
-        state,
-        "agentic:mcp",
-        &challenge,
-        "S256",
-        resource,
+        OAuthFormRequest {
+            authorization,
+            scope: "agentic:mcp",
+            code_challenge: &challenge,
+            code_challenge_method: "S256",
+        },
         bearer_token,
     )?;
     require(submitted.status == 303, "fresh authorize submission failed")?;

@@ -23,20 +23,20 @@ fn log_browser_runtime_unavailable(source: &str, stage: &str, error: &anyhow::Er
 pub(crate) type BrowserRuntimeProvisionFuture =
     Pin<Box<dyn Future<Output = Result<browser_runtime::BrowserRuntimeDescriptor>> + Send>>;
 
+pub(crate) type ManagedBrowserRuntimeDiscover =
+    dyn Fn(&Path, &str, &Path) -> Result<browser_runtime::BrowserRuntimeDescriptor> + Send + Sync;
+pub(crate) type DesktopBrowserRuntimeDiscover =
+    dyn Fn(&Path) -> Result<browser_runtime::BrowserRuntimeDescriptor> + Send + Sync;
+
 pub(crate) struct BrowserRuntimeSources {
     pub(crate) managed_cache_root: Arc<dyn Fn() -> Result<PathBuf> + Send + Sync>,
     pub(crate) managed_codex_home: Arc<dyn Fn() -> Result<PathBuf> + Send + Sync>,
     pub(crate) managed_target: Arc<dyn Fn() -> Result<&'static str> + Send + Sync>,
-    pub(crate) managed_discover: Arc<
-        dyn Fn(&Path, &str, &Path) -> Result<browser_runtime::BrowserRuntimeDescriptor>
-            + Send
-            + Sync,
-    >,
+    pub(crate) managed_discover: Arc<ManagedBrowserRuntimeDiscover>,
     pub(crate) managed_provision:
         Arc<dyn Fn(String) -> BrowserRuntimeProvisionFuture + Send + Sync>,
     pub(crate) desktop_registry_path: Arc<dyn Fn() -> Result<PathBuf> + Send + Sync>,
-    pub(crate) desktop_discover:
-        Arc<dyn Fn(&Path) -> Result<browser_runtime::BrowserRuntimeDescriptor> + Send + Sync>,
+    pub(crate) desktop_discover: Arc<DesktopBrowserRuntimeDiscover>,
 }
 
 fn production_browser_runtime_sources() -> BrowserRuntimeSources {

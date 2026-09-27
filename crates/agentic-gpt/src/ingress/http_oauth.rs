@@ -268,7 +268,7 @@ pub(crate) async fn require_host_origin(
     next: Next,
 ) -> Response {
     if let Err(response) = validate_host_origin(request.uri(), request.headers(), &policy) {
-        return response;
+        return *response;
     }
     next.run(request).await
 }
@@ -277,7 +277,7 @@ async fn protected_resource_metadata(State(state): State<HttpMcpAuthState>) -> R
     let Some(public_url) = state.public_url() else {
         return oauth_configuration_required();
     };
-    JsonResponse::new(json!({
+    json_response(json!({
         "resource": format!("{public_url}/mcp"),
         "authorization_servers": [public_url],
         "scopes_supported": [OAUTH_SCOPE],
@@ -290,7 +290,7 @@ async fn authorization_server_metadata(State(state): State<HttpMcpAuthState>) ->
     let Some(public_url) = state.public_url() else {
         return oauth_configuration_required();
     };
-    JsonResponse::new(json!({
+    json_response(json!({
         "issuer": public_url,
         "authorization_endpoint": format!("{public_url}/oauth/authorize"),
         "token_endpoint": format!("{public_url}/oauth/token"),
@@ -470,7 +470,7 @@ async fn token(
             scope: stored.scope.clone(),
         },
     );
-    let mut response = JsonResponse::new(json!(TokenResponse {
+    let mut response = json_response(json!(TokenResponse {
         access_token,
         token_type: "Bearer",
         expires_in: TOKEN_TTL_SECONDS,
@@ -561,10 +561,10 @@ fn is_allowed_chatgpt_redirect_uri(value: &str) -> bool {
     let Ok(url) = Url::parse(value) else {
         return false;
     };
-    let Some(authority) = value.strip_prefix("https://").and_then(|rest| {
-        rest.split(|character| matches!(character, '/' | '?' | '#'))
-            .next()
-    }) else {
+    let Some(authority) = value
+        .strip_prefix("https://")
+        .and_then(|rest| rest.split(['/', '?', '#']).next())
+    else {
         return false;
     };
     if authority != "chatgpt.com"
@@ -661,23 +661,30 @@ fn parse_allowed_authority(value: &str) -> Option<NormalizedAuthority> {
     Some(normalize_authority(value, None))
 }
 
-fn parse_host_header(uri: &Uri, headers: &HeaderMap) -> Result<NormalizedAuthority, Response> {
+fn parse_host_header(uri: &Uri, headers: &HeaderMap) -> Result<NormalizedAuthority, Box<Response>> {
     if let Some(value) = headers.get(header::HOST) {
-        let value = value
-            .to_str()
-            .map_err(|_| bad_request_response("Bad Request: Invalid Host header encoding"))?;
-        let authority = Authority::try_from(value)
-            .map_err(|_| bad_request_response("Bad Request: Invalid Host header"))?;
+        let value = value.to_str().map_err(|_| {
+            boxed_response(bad_request_response(
+                "Bad Request: Invalid Host header encoding",
+            ))
+        })?;
+        let authority = Authority::try_from(value).map_err(|_| {
+            boxed_response(bad_request_response("Bad Request: Invalid Host header"))
+        })?;
         if authority.host().is_empty() {
-            return Err(bad_request_response("Bad Request: Invalid Host header"));
+            return Err(boxed_response(bad_request_response(
+                "Bad Request: Invalid Host header",
+            )));
         }
         return Ok(normalize_authority(authority.host(), authority.port_u16()));
     }
     let authority = uri
         .authority()
-        .ok_or_else(|| bad_request_response("Bad Request: missing Host header"))?;
+        .ok_or_else(|| boxed_response(bad_request_response("Bad Request: missing Host header")))?;
     if authority.host().is_empty() {
-        return Err(bad_request_response("Bad Request: Invalid Host header"));
+        return Err(boxed_response(bad_request_response(
+            "Bad Request: Invalid Host header",
+        )));
     }
     Ok(normalize_authority(authority.host(), authority.port_u16()))
 }
@@ -701,39 +708,51 @@ fn validate_host_origin(
     uri: &Uri,
     headers: &HeaderMap,
     policy: &HttpMcpHostPolicy,
-) -> Result<(), Response> {
+) -> Result<(), Box<Response>> {
     let host = parse_host_header(uri, headers)?;
     if !host_is_allowed(&host, policy.allow_hosts.as_deref()) {
-        return Err(forbidden_response("Forbidden: Host header is not allowed"));
+        return Err(boxed_response(forbidden_response(
+            "Forbidden: Host header is not allowed",
+        )));
     }
     validate_origin_header(headers, policy.public_url.as_deref())
 }
 
-fn validate_origin_header(headers: &HeaderMap, public_url: Option<&str>) -> Result<(), Response> {
+fn validate_origin_header(
+    headers: &HeaderMap,
+    public_url: Option<&str>,
+) -> Result<(), Box<Response>> {
     let Some(value) = headers.get(header::ORIGIN) else {
         return Ok(());
     };
-    let value = value
-        .to_str()
-        .map_err(|_| bad_request_response("Bad Request: Invalid Origin header encoding"))?;
+    let value = value.to_str().map_err(|_| {
+        boxed_response(bad_request_response(
+            "Bad Request: Invalid Origin header encoding",
+        ))
+    })?;
     let origin = Url::parse(value)
-        .map_err(|_| bad_request_response("Bad Request: Invalid Origin header"))?;
-    if origin.username().len() > 0
+        .map_err(|_| boxed_response(bad_request_response("Bad Request: Invalid Origin header")))?;
+    if !origin.username().is_empty()
         || origin.password().is_some()
         || origin.query().is_some()
         || origin.fragment().is_some()
         || !(origin.path().is_empty() || origin.path() == "/")
         || origin.host_str().is_none()
     {
-        return Err(bad_request_response("Bad Request: Invalid Origin header"));
+        return Err(boxed_response(bad_request_response(
+            "Bad Request: Invalid Origin header",
+        )));
     }
     let Some(public_url) = public_url else {
-        return Err(forbidden_response(
+        return Err(boxed_response(forbidden_response(
             "Forbidden: Origin header is not allowed",
-        ));
+        )));
     };
-    let expected = Url::parse(public_url)
-        .map_err(|_| bad_request_response("Bad Request: Invalid configured origin"))?;
+    let expected = Url::parse(public_url).map_err(|_| {
+        boxed_response(bad_request_response(
+            "Bad Request: Invalid configured origin",
+        ))
+    })?;
     let matches = origin.scheme().eq_ignore_ascii_case(expected.scheme())
         && origin.host_str().is_some_and(|host| {
             expected
@@ -744,9 +763,9 @@ fn validate_origin_header(headers: &HeaderMap, public_url: Option<&str>) -> Resu
     if matches {
         Ok(())
     } else {
-        Err(forbidden_response(
+        Err(boxed_response(forbidden_response(
             "Forbidden: Origin header is not allowed",
-        ))
+        )))
     }
 }
 
@@ -760,6 +779,10 @@ fn forbidden_response(message: &str) -> Response {
     let mut response = (StatusCode::FORBIDDEN, message.to_string()).into_response();
     add_no_store_headers(&mut response, false);
     response
+}
+
+fn boxed_response(response: Response) -> Box<Response> {
+    Box::new(response)
 }
 
 fn authorize_page(error: Option<&AuthorizeError>, params: &AuthorizeParams) -> Response {
@@ -861,18 +884,10 @@ fn html_escape(value: &str) -> String {
         .replace('\'', "&#39;")
 }
 
-struct JsonResponse;
-
-impl JsonResponse {
-    fn new(value: serde_json::Value) -> Response {
-        JsonResponse::response(value)
-    }
-
-    fn response(value: serde_json::Value) -> Response {
-        let mut response = axum::Json(value).into_response();
-        add_no_store_headers(&mut response, false);
-        response
-    }
+fn json_response(value: serde_json::Value) -> Response {
+    let mut response = axum::Json(value).into_response();
+    add_no_store_headers(&mut response, false);
+    response
 }
 
 fn oauth_configuration_required() -> Response {

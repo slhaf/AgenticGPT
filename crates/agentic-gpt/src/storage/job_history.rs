@@ -421,7 +421,7 @@ impl JobHistoryStore {
             )
         }) {
             Ok(()) => true,
-            Err(error) if matches!(error, rusqlite::Error::QueryReturnedNoRows) => false,
+            Err(rusqlite::Error::QueryReturnedNoRows) => false,
             Err(error) => {
                 self.degrade(error);
                 false

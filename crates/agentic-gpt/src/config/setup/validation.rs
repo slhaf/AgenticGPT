@@ -456,11 +456,8 @@ fn validate_http_mcp_draft(
         errors.push(error(SetupField::HttpMcpHost, "http_mcp_host_invalid"));
     }
 
-    if seed_error.is_some() && draft.http_mcp_bearer_token.is_none() {
-        errors.push(error(
-            SetupField::HttpMcpBearerToken,
-            seed_error.expect("seed error is present"),
-        ));
+    if let Some(code) = seed_error.filter(|_| draft.http_mcp_bearer_token.is_none()) {
+        errors.push(error(SetupField::HttpMcpBearerToken, code));
     }
 
     let bearer_token = draft

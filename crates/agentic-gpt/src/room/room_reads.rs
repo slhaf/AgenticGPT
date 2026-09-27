@@ -340,10 +340,7 @@ fn normalize_limit(limit: Option<usize>) -> Result<usize> {
 }
 
 fn notebook_paths(root: &Path) -> Result<(Vec<String>, Vec<String>)> {
-    let notebook_root = match room_repository::repository_path(root, "Notebook") {
-        Ok(path) => path,
-        Err(error) => return Err(error),
-    };
+    let notebook_root = room_repository::repository_path(root, "Notebook")?;
     match fs::symlink_metadata(&notebook_root) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok((Vec::new(), Vec::new()))

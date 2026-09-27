@@ -812,10 +812,10 @@ fn git_staged_paths(root: &Path) -> Result<BTreeSet<String>> {
 }
 fn parse_git_paths(bytes: &[u8]) -> Result<BTreeSet<String>> {
     let mut paths = BTreeSet::new();
-    let mut records = bytes
+    let records = bytes
         .split(|byte| *byte == 0)
         .filter(|record| !record.is_empty());
-    while let Some(record) = records.next() {
+    for record in records {
         if record.len() < 4
             || record[0] == b'R'
             || record[0] == b'C'

@@ -98,15 +98,15 @@ async fn insert_generation_confirmation(
         .clone();
     state
         .confirmations
-        .insert_for_test(
-            confirmation_id,
-            request_id,
-            "agent",
-            connection_id,
-            token,
+        .insert_for_test(crate::confirmation::TestConfirmation {
+            confirmation_id: confirmation_id.to_string(),
+            request_id: request_id.to_string(),
+            agent_id: "agent".to_string(),
+            connection_id: connection_id.to_string(),
+            token: token.to_string(),
             expires_at,
             sender,
-        )
+        })
         .await;
 }
 async fn admit_generation_confirmation(
@@ -129,15 +129,15 @@ async fn admit_generation_confirmation(
     };
     state
         .confirmations
-        .admit(
-            "agent",
+        .admit(crate::confirmation::ConfirmationAdmission {
+            agent_id: "agent",
             connection_id,
-            request_id.to_string(),
+            request_id: request_id.to_string(),
             sender,
-            5,
-            45,
+            timeout_seconds: 5,
+            provider_timeout_seconds: 45,
             payload,
-        )
+        })
         .await
 }
 
@@ -528,7 +528,7 @@ pub(crate) async fn generation_snapshot(state: &HubState) -> Value {
             "notificationChannels": connection.notification_channels,
         })
     };
-    let registry_last_seen = registry_entry(&state, "agent")
+    let registry_last_seen = registry_entry(state, "agent")
         .unwrap()
         .and_then(|entry| entry.last_seen_at);
     let boot_generation = state.boot_generations.lock().await.get("agent").cloned();

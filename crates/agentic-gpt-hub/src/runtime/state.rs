@@ -339,11 +339,10 @@ pub(crate) mod projection {
     }
 
     pub(crate) fn add_cache_metadata(value: &mut Value, snapshots: &[JobCacheSnapshot]) {
-        let freshness = if snapshots.is_empty() {
-            JobFreshness::Unknown
-        } else if snapshots
-            .iter()
-            .any(|snapshot| snapshot.freshness == JobFreshness::Unknown)
+        let freshness = if snapshots.is_empty()
+            || snapshots
+                .iter()
+                .any(|snapshot| snapshot.freshness == JobFreshness::Unknown)
         {
             JobFreshness::Unknown
         } else if snapshots

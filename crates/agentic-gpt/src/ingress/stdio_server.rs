@@ -68,6 +68,20 @@ pub(crate) struct AgentMcpServer {
     browser_repl_results: Arc<Mutex<HashMap<String, CallToolResult>>>,
 }
 
+struct BrowserAuditContext {
+    tool: &'static str,
+    lease_name: String,
+    runtime_app_version: Option<String>,
+    title: Option<String>,
+    code_bytes: Option<usize>,
+    code_sha256: Option<String>,
+    timeout_ms: Option<u64>,
+    idle_timeout_seconds: Option<u64>,
+    outcome: String,
+    error_code: Option<String>,
+    started: Instant,
+}
+
 #[derive(Default)]
 enum HumanResponseState {
     #[default]
@@ -1219,19 +1233,19 @@ impl AgentMcpServer {
             },
             None => browser_runtime_unavailable_value(),
         };
-        self.audit_browser(
-            "browser.acquire",
-            name,
+        self.audit_browser(BrowserAuditContext {
+            tool: "browser.acquire",
+            lease_name: name,
             runtime_app_version,
-            None,
-            None,
-            None,
-            None,
-            Some(idle_timeout_seconds),
-            browser_outcome(&value),
-            browser_error_code_from_value(&value),
+            title: None,
+            code_bytes: None,
+            code_sha256: None,
+            timeout_ms: None,
+            idle_timeout_seconds: Some(idle_timeout_seconds),
+            outcome: browser_outcome(&value),
+            error_code: browser_error_code_from_value(&value),
             started,
-        )
+        })
         .await;
         Ok(value)
     }
@@ -1264,19 +1278,19 @@ impl AgentMcpServer {
             },
             None => (browser_runtime_unavailable_value(), None),
         };
-        self.audit_browser(
-            "browser.repl",
-            name,
+        self.audit_browser(BrowserAuditContext {
+            tool: "browser.repl",
+            lease_name: name,
             runtime_app_version,
             title,
-            Some(code_bytes),
+            code_bytes: Some(code_bytes),
             code_sha256,
-            Some(timeout_ms),
-            None,
-            browser_outcome_for_repl(&value),
-            browser_error_code_from_value(&value),
+            timeout_ms: Some(timeout_ms),
+            idle_timeout_seconds: None,
+            outcome: browser_outcome_for_repl(&value),
+            error_code: browser_error_code_from_value(&value),
             started,
-        )
+        })
         .await;
         if let Some(result) = pending_result {
             let marker = self.stash_browser_repl_result(result);
@@ -1306,19 +1320,19 @@ impl AgentMcpServer {
             },
             None => browser_runtime_unavailable_value(),
         };
-        self.audit_browser(
-            "browser.reset",
-            name,
+        self.audit_browser(BrowserAuditContext {
+            tool: "browser.reset",
+            lease_name: name,
             runtime_app_version,
-            None,
-            None,
-            None,
-            None,
-            None,
-            browser_outcome(&value),
-            browser_error_code_from_value(&value),
+            title: None,
+            code_bytes: None,
+            code_sha256: None,
+            timeout_ms: None,
+            idle_timeout_seconds: None,
+            outcome: browser_outcome(&value),
+            error_code: browser_error_code_from_value(&value),
             started,
-        )
+        })
         .await;
         Ok(value)
     }
@@ -1338,19 +1352,19 @@ impl AgentMcpServer {
             },
             None => browser_runtime_unavailable_value(),
         };
-        self.audit_browser(
-            "browser.release",
-            name,
+        self.audit_browser(BrowserAuditContext {
+            tool: "browser.release",
+            lease_name: name,
             runtime_app_version,
-            None,
-            None,
-            None,
-            None,
-            None,
-            browser_outcome(&value),
-            browser_error_code_from_value(&value),
+            title: None,
+            code_bytes: None,
+            code_sha256: None,
+            timeout_ms: None,
+            idle_timeout_seconds: None,
+            outcome: browser_outcome(&value),
+            error_code: browser_error_code_from_value(&value),
             started,
-        )
+        })
         .await;
         Ok(value)
     }
@@ -1386,20 +1400,20 @@ impl AgentMcpServer {
         }))
     }
 
-    async fn audit_browser(
-        &self,
-        tool: &str,
-        lease_name: String,
-        runtime_app_version: Option<String>,
-        title: Option<String>,
-        code_bytes: Option<usize>,
-        code_sha256: Option<String>,
-        timeout_ms: Option<u64>,
-        idle_timeout_seconds: Option<u64>,
-        outcome: String,
-        error_code: Option<String>,
-        started: Instant,
-    ) {
+    async fn audit_browser(&self, context: BrowserAuditContext) {
+        let BrowserAuditContext {
+            tool,
+            lease_name,
+            runtime_app_version,
+            title,
+            code_bytes,
+            code_sha256,
+            timeout_ms,
+            idle_timeout_seconds,
+            outcome,
+            error_code,
+            started,
+        } = context;
         let config = self.state.config.read().await.clone();
         let lease_name = bounded_browser_text(&lease_name, 128);
         let runtime_app_version = runtime_app_version

@@ -77,7 +77,7 @@ where
             match jobs::start_process_batch(state, request, request_source, terminal_event_hook)
                 .await
             {
-                Ok(response) => slim_process_batch_response(response, snapshots.as_deref_mut()),
+                Ok(response) => slim_process_batch_response(response, snapshots),
                 Err(reason) => Ok(serde_json::json!({
                     "error": {"code": "process_batch_rejected", "message": reason}
                 })),

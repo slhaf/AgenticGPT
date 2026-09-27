@@ -296,6 +296,18 @@ pub(crate) enum OptionalSectionDraft {
     HubReporting(HubReportingDraft),
 }
 
+struct StandaloneSeed<'a> {
+    tunnel_id: Option<String>,
+    tunnel_api_key: Option<String>,
+    http_mcp_enabled: Option<bool>,
+    http_mcp_host: Option<String>,
+    http_mcp_port: Option<u16>,
+    http_mcp_public_url: Option<String>,
+    http_mcp_bearer_token: Option<SecretValue>,
+    http_mcp_allow_hosts: Option<String>,
+    imported_http_mcp: Option<&'a HttpMcpConfig>,
+}
+
 impl OptionalSectionDraft {
     pub(crate) fn section(&self) -> OptionalSection {
         match self {
@@ -361,17 +373,18 @@ impl SetupSession {
             .and_then(|config| config.tunnel.as_ref())
             .map(|tunnel| tunnel.api_key.clone());
         let imported_http_mcp = imported_base.as_ref().map(|config| &config.http_mcp);
-        let (standalone, tunnel_seed_error, http_mcp_seed_error) = StandaloneDraft::from_seed(
-            seed.tunnel_id.or(imported_tunnel_id),
-            seed.tunnel_api_key.or(imported_tunnel_api_key),
-            seed.http_mcp_enabled,
-            seed.http_mcp_host,
-            seed.http_mcp_port,
-            seed.http_mcp_public_url,
-            seed.http_mcp_bearer_token,
-            seed.http_mcp_allow_hosts,
-            imported_http_mcp,
-        );
+        let (standalone, tunnel_seed_error, http_mcp_seed_error) =
+            StandaloneDraft::from_seed(StandaloneSeed {
+                tunnel_id: seed.tunnel_id.or(imported_tunnel_id),
+                tunnel_api_key: seed.tunnel_api_key.or(imported_tunnel_api_key),
+                http_mcp_enabled: seed.http_mcp_enabled,
+                http_mcp_host: seed.http_mcp_host,
+                http_mcp_port: seed.http_mcp_port,
+                http_mcp_public_url: seed.http_mcp_public_url,
+                http_mcp_bearer_token: seed.http_mcp_bearer_token,
+                http_mcp_allow_hosts: seed.http_mcp_allow_hosts,
+                imported_http_mcp,
+            });
         let imported_hub = imported_base.as_ref().map(|config| &config.hub);
         let hub = HubDraft {
             hub_url: seed
@@ -551,17 +564,18 @@ impl SetupSession {
 }
 
 impl StandaloneDraft {
-    fn from_seed(
-        tunnel_id: Option<String>,
-        tunnel_api_key: Option<String>,
-        http_mcp_enabled: Option<bool>,
-        http_mcp_host: Option<String>,
-        http_mcp_port: Option<u16>,
-        http_mcp_public_url: Option<String>,
-        http_mcp_bearer_token: Option<SecretValue>,
-        http_mcp_allow_hosts: Option<String>,
-        imported_http_mcp: Option<&HttpMcpConfig>,
-    ) -> (Self, Option<&'static str>, Option<&'static str>) {
+    fn from_seed(seed: StandaloneSeed<'_>) -> (Self, Option<&'static str>, Option<&'static str>) {
+        let StandaloneSeed {
+            tunnel_id,
+            tunnel_api_key,
+            http_mcp_enabled,
+            http_mcp_host,
+            http_mcp_port,
+            http_mcp_public_url,
+            http_mcp_bearer_token,
+            http_mcp_allow_hosts,
+            imported_http_mcp,
+        } = seed;
         let mut draft = Self {
             tunnel_id: tunnel_id.unwrap_or_default(),
             secret_source: TunnelSecretSource::File,
