@@ -1467,7 +1467,7 @@ fn spawn_worker_with_public_url(
         ));
     }
     fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
-    let agent_id = format!("standalone-http-mcp-{}", Uuid::new_v4().simple());
+    let agent_id = format!("http-mcp-{}", Uuid::new_v4().simple());
     let mut config: Value =
         serde_json::from_slice(&fs::read(&config_path).map_err(|error| error.to_string())?)
             .map_err(|error| error.to_string())?;

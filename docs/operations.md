@@ -31,6 +31,11 @@ isolated loopback/private-home processes and tears them down; schema validation
 and live behavior are separate obligations. Passing the parity gate does not
 substitute for the earlier strict Clippy check.
 
+The standalone HTTP MCP integration fixture uses short, UUID-unique agent IDs:
+its local Unix MCP socket is rooted under `HOME/.agentic_gpt`, and the runtime
+rejects socket paths longer than 100 bytes. When changing the fixture, check
+the full socket path against the CI runner's home directory.
+
 ## Local/Standalone smoke test (primary)
 
 Set `mode=local` when tunnel credentials are unavailable; use `mode=standalone` to validate the full recommended path. Both start with `agentic-gpt run`.
