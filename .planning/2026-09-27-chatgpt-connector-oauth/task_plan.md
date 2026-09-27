@@ -5,7 +5,7 @@ Compare current official ChatGPT Custom Connector OAuth requirements with HTTP M
 
 ## Phases
 1. Research — complete: official contract, server route inventory, demonstrated mismatch and conditional deployment blocker.
-2. Verification — in_progress: worker HTTP OAuth smoke, documented results and stage commit.
+2. Verification — complete: real-worker integration test passed; public ChatGPT connection not observable from local environment. Research and verification committed separately.
 
 ## Decisions
 - Official OpenAI sources govern ChatGPT behavior; preserve MCP protocol and existing authentication safety.
