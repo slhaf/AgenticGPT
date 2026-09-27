@@ -60,7 +60,7 @@ impl Connections {
                         .or(entry.last_seen_at),
                     config_summary: connection
                         .and_then(|connection| connection.config_summary.clone())
-                        .unwrap_or_else(crate::default_config_summary),
+                        .unwrap_or_else(crate::config::default_config_summary),
                 }
             })
             .collect()

@@ -8,10 +8,13 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::{mpsc, Mutex};
 
-use super::super::state::{AgentConnection, AgentTransport, HubState, OutboundAgentMessage};
+use super::super::state::{
+    AgentConnection, AgentTransport, HubState, McpProfile, OutboundAgentMessage,
+};
+use crate::config::RemoteConfirmationConfig;
 use crate::db::init_db;
 use crate::utils::sha256_hex;
-use crate::{HubConfig, McpProfile, NtfyConfig, RemoteConfirmationConfig};
+use crate::{HubConfig, NtfyConfig};
 
 pub(super) fn test_state() -> HubState {
     let conn = Connection::open_in_memory().unwrap();

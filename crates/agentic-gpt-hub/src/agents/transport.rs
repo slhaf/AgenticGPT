@@ -13,8 +13,8 @@ use tokio::time::Duration;
 use tracing::{info, warn};
 
 use crate::agents::lifecycle;
-use crate::api_error;
 use crate::registry::registry_entry;
+use crate::routes::api_error;
 use crate::state::{AgentTransport, HubState, OutboundAgentMessage};
 use crate::utils::{constant_time_equal, random_id, sha256_hex};
 

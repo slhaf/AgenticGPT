@@ -524,10 +524,11 @@ mod tests {
     use super::*;
     use crate::agents::lifecycle::replace_agent_connection;
     use crate::agents::transport::{post_agent_message, SseConnectQuery};
+    use crate::config::RemoteConfirmationConfig;
     use crate::db::init_db;
     use crate::registry::{handle_agent_command, AgentCommand};
-    use crate::state::{AgentConnection, AgentTransport, OutboundAgentMessage};
-    use crate::{HubConfig, McpProfile, RemoteConfirmationConfig};
+    use crate::state::{AgentConnection, AgentTransport, McpProfile, OutboundAgentMessage};
+    use crate::HubConfig;
     use agentic_gpt_protocol::{AgentConnectionMode, AgentMessage, HubCommand, HubCommandEnvelope};
     use axum::body::to_bytes;
     use axum::extract::{Path, Query, State};

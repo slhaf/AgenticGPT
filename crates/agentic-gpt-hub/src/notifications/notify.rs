@@ -485,9 +485,10 @@ mod tests {
     use tokio::sync::{mpsc, Mutex};
 
     use crate::agents::transport::{post_agent_message, SseConnectQuery};
+    use crate::config::RemoteConfirmationConfig;
     use crate::db::init_db;
-    use crate::state::{AgentConnection, AgentTransport, OutboundAgentMessage};
-    use crate::{HubConfig, McpProfile, RemoteConfirmationConfig};
+    use crate::state::{AgentConnection, AgentTransport, McpProfile, OutboundAgentMessage};
+    use crate::HubConfig;
 
     fn test_hub_config() -> HubConfig {
         HubConfig {

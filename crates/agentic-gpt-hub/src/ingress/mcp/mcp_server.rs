@@ -1,28 +1,33 @@
+mod args;
+pub(crate) mod transport;
+
 use agentic_gpt_protocol::{
     normalize_job_group, BatchExecRequest, BootstrapReadRequest, ExecElement, ExecRequest,
     HubCommand, JobCancelRequest, JobGetRequest, JobKind, JobListRequest, JobState, McpBatchCall,
-    McpBatchMode, McpBatchRequest, McpCallToolRequest, McpListToolsRequest, NotificationAction,
-    RoomDiaryActiveRequest, RoomDiaryLayer, RoomDiaryReadRequest, RoomMaintenanceExecutionMode,
-    RoomMaintenanceRequestItem, RoomMaintenanceSlot, RoomMaintenanceStatusRequest,
-    RoomMaintenanceSubmitRequest, RoomNotebookReadRequest, RoomNotebookRecentRequest,
-    RoomNotebookSearchRequest, RoomStateListRequest, RoomStateReadRequest, SkillActivationRequest,
-    SkillInstallCancelRequest, SkillInstallFile, SkillInstallGetRequest, SkillInstallRequest,
-    SkillInstallSource, SkillReadRequest, SkillRunRequest, SkillSearchRequest,
-    TmuxCapturePaneRequest, TmuxCloseSessionRequest, TmuxCreateSessionRequest, TmuxExecRequest,
-    TmuxListPanesRequest, TmuxPasteTextRequest, UserNotifySendRequest,
+    McpBatchRequest, McpCallToolRequest, McpListToolsRequest, RoomDiaryActiveRequest,
+    RoomDiaryReadRequest, RoomMaintenanceStatusRequest, RoomNotebookReadRequest,
+    RoomNotebookRecentRequest, RoomNotebookSearchRequest, RoomStateListRequest,
+    RoomStateReadRequest, SkillActivationRequest, SkillInstallCancelRequest,
+    SkillInstallGetRequest, SkillInstallRequest, SkillReadRequest, SkillRunRequest,
+    SkillSearchRequest, TmuxCapturePaneRequest, TmuxCloseSessionRequest, TmuxCreateSessionRequest,
+    TmuxExecRequest, TmuxListPanesRequest, TmuxPasteTextRequest, UserNotifySendRequest,
 };
-use axum::extract::{Request, State};
-use axum::http::{HeaderMap, StatusCode};
-use axum::middleware::Next;
-use axum::response::{IntoResponse, Response};
-use axum::Json;
+use args::{
+    AgentIdArgs, BatchExecArgs, BootstrapReadArgs, ExecArgs, HubRunGetArgs, HubRunListArgs,
+    JobGetArgs, JobIdArgs, JobListArgs, McpBatchArgs, McpCallToolArgs, McpListServersArgs,
+    McpListToolsArgs, RoomDiaryActiveArgs, RoomDiaryReadArgs, RoomMaintenanceStatusArgs,
+    RoomMaintenanceSubmitArgs, RoomNotebookReadArgs, RoomNotebookRecentArgs,
+    RoomNotebookSearchArgs, RoomStateListArgs, RoomStateReadArgs, SkillActivationArgs,
+    SkillInstallArgs, SkillInstallCancelArgs, SkillInstallGetArgs, SkillReadArgs, SkillRunArgs,
+    SkillSearchArgs, TmuxCapturePaneArgs, TmuxCloseSessionArgs, TmuxCreateSessionArgs,
+    TmuxExecArgs, TmuxListPanesArgs, TmuxListSessionsArgs, TmuxPasteTextArgs, UserNotifySendArgs,
+};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
     CallToolResult, ErrorData, Meta, ServerCapabilities, ServerInfo, ToolAnnotations,
 };
 use rmcp::{tool, tool_handler, tool_router, ServerHandler};
-use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use crate::agentic_result::AgenticResult;
@@ -229,263 +234,6 @@ fn object_schema() -> Map<String, Value> {
     schema
 }
 
-#[derive(Debug, Deserialize)]
-struct JsonRpcRequest {
-    id: Option<Value>,
-    method: String,
-    #[serde(default)]
-    params: Option<Value>,
-}
-
-pub(crate) async fn mcp_get(State(state): State<HubState>) -> Response {
-    let server = AgenticMcpServer::new(state);
-    Json(json!({
-        "name": "agentic-gpt-hub",
-        "profile": server.profile.label(),
-        "tools": app_tool_descriptors(&server)
-    }))
-    .into_response()
-}
-
-pub(crate) async fn mcp_post(State(state): State<HubState>, Json(rpc): Json<Value>) -> Response {
-    let request = match serde_json::from_value::<JsonRpcRequest>(rpc) {
-        Ok(request) => request,
-        Err(error) => return rpc_error(None, -32700, format!("Invalid JSON-RPC request: {error}")),
-    };
-    let id = request.id.clone();
-    let server = AgenticMcpServer::new(state);
-    match request.method.as_str() {
-        "initialize" => rpc_result(
-            id,
-            json!({
-                "protocolVersion": negotiated_protocol_version(request.params.as_ref()),
-                "capabilities": { "tools": {} },
-                "serverInfo": {
-                    "name": "agentic-gpt-hub",
-                    "title": "Agentic GPT Hub",
-                    "version": env!("CARGO_PKG_VERSION")
-                },
-                "instructions": server.instructions(),
-                "profile": server.profile.label()
-            }),
-        ),
-        "notifications/initialized" => StatusCode::ACCEPTED.into_response(),
-        "ping" => rpc_result(id, json!({})),
-        "tools/list" => rpc_result(id, json!({ "tools": app_tool_descriptors(&server) })),
-        "tools/call" => {
-            match call_app_tool(&server, request.params.unwrap_or_else(|| json!({}))).await {
-                Ok(result) => rpc_result(id, result),
-                Err(error) => rpc_error(id, -32602, error),
-            }
-        }
-        _ => rpc_error(id, -32601, "Method not found"),
-    }
-}
-
-async fn call_app_tool(server: &AgenticMcpServer, params: Value) -> Result<Value, String> {
-    let object = params
-        .as_object()
-        .ok_or_else(|| "tools/call params must be an object".to_string())?;
-    let name = object
-        .get("name")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "tools/call params.name is required".to_string())?;
-    if !server.allows_tool(name) {
-        if !server.profile_allows_tool(name) {
-            return Err(format!("tool_unavailable_for_profile: {name}"));
-        }
-        return Err(format!("Unknown tool: {name}"));
-    }
-    let arguments = object
-        .get("arguments")
-        .cloned()
-        .unwrap_or_else(|| json!({}));
-    let result = match name {
-        "agent.list" => server.list_agents().await,
-        "process.exec" => server.exec(Parameters(decode_args(arguments)?)).await,
-        "process.batch" => server.batch_exec(Parameters(decode_args(arguments)?)).await,
-        "job.list" => server.job_list(Parameters(decode_args(arguments)?)).await,
-        "job.get" => server.job_get(Parameters(decode_args(arguments)?)).await,
-        "job.cancel" => server.job_cancel(Parameters(decode_args(arguments)?)).await,
-        "tmux.listSessions" => {
-            server
-                .tmux_list_sessions(Parameters(decode_args(arguments)?))
-                .await
-        }
-        "tmux.listPanes" => {
-            server
-                .tmux_list_panes(Parameters(decode_args(arguments)?))
-                .await
-        }
-        "tmux.capturePane" => {
-            server
-                .tmux_capture_pane(Parameters(decode_args(arguments)?))
-                .await
-        }
-        "tmux.pasteText" => {
-            server
-                .tmux_paste_text(Parameters(decode_args(arguments)?))
-                .await
-        }
-        "tmux.exec" => server.tmux_exec(Parameters(decode_args(arguments)?)).await,
-        "tmux.createSession" => {
-            server
-                .tmux_create_session(Parameters(decode_args(arguments)?))
-                .await
-        }
-        "tmux.closeSession" => {
-            server
-                .tmux_close_session(Parameters(decode_args(arguments)?))
-                .await
-        }
-        "mcp.listServers" => {
-            server
-                .mcp_list_servers(Parameters(decode_args(arguments)?))
-                .await
-        }
-        "mcp.listTools" => {
-            server
-                .mcp_list_tools(Parameters(decode_args(arguments)?))
-                .await
-        }
-        "mcp.callTool" => {
-            server
-                .mcp_call_tool(Parameters(decode_args(arguments)?))
-                .await
-        }
-        "mcp.batch" => server.mcp_batch(Parameters(decode_args(arguments)?)).await,
-        "hub.info" => server.hub_info().await,
-        "user.notify.channels" => server.user_notify_channels().await,
-        "hub.run.get" => {
-            server
-                .hub_run_get(Parameters(decode_args(arguments)?))
-                .await
-        }
-        "hub.run.list" => {
-            server
-                .hub_run_list(Parameters(decode_args(arguments)?))
-                .await
-        }
-        "hub.job.list" => {
-            server
-                .hub_job_list(Parameters(decode_args(arguments)?))
-                .await
-        }
-        "hub.job.get" => {
-            server
-                .hub_job_get(Parameters(decode_args(arguments)?))
-                .await
-        }
-        "user.notify.send" => {
-            server
-                .user_notify_send(Parameters(decode_args(arguments)?))
-                .await
-        }
-        "room.diary.active" => {
-            server
-                .room_diary_active(Parameters(decode_args(arguments)?))
-                .await
-        }
-        "room.diary.read" => {
-            server
-                .room_diary_read(Parameters(decode_args(arguments)?))
-                .await
-        }
-        "room.notebook.recent" => {
-            server
-                .room_notebook_recent(Parameters(decode_args(arguments)?))
-                .await
-        }
-        "room.notebook.search" => {
-            server
-                .room_notebook_search(Parameters(decode_args(arguments)?))
-                .await
-        }
-        "room.notebook.read" => {
-            server
-                .room_notebook_read(Parameters(decode_args(arguments)?))
-                .await
-        }
-        "room.state.list" => {
-            server
-                .room_state_list(Parameters(decode_args(arguments)?))
-                .await
-        }
-        "room.state.read" => {
-            server
-                .room_state_read(Parameters(decode_args(arguments)?))
-                .await
-        }
-        "room.maintenance.status" => {
-            server
-                .room_maintenance_status(Parameters(decode_args(arguments)?))
-                .await
-        }
-        "room.maintenance.submit" => {
-            server
-                .room_maintenance_submit(Parameters(decode_args(arguments)?))
-                .await
-        }
-        "room.bootstrap" => server.room_bootstrap().await,
-        "room.bootstrap.read" => {
-            server
-                .room_bootstrap_read(Parameters(decode_args(arguments)?))
-                .await
-        }
-        "bootstrap" => server.bootstrap().await,
-        "bootstrap.read" => {
-            server
-                .bootstrap_read(Parameters(decode_args(arguments)?))
-                .await
-        }
-        "skills.list" => server.skills_list().await,
-        "skills.read" => {
-            server
-                .skills_read(Parameters(decode_args(arguments)?))
-                .await
-        }
-        "skills.search" => {
-            server
-                .skills_search(Parameters(decode_args(arguments)?))
-                .await
-        }
-        "skills.active" => server.skills_active().await,
-        "skills.activate" => {
-            server
-                .skills_activate(Parameters(decode_args(arguments)?))
-                .await
-        }
-        "skills.deactivate" => {
-            server
-                .skills_deactivate(Parameters(decode_args(arguments)?))
-                .await
-        }
-        "skills.install" => {
-            server
-                .skills_install(Parameters(decode_args(arguments)?))
-                .await
-        }
-        "skills.install.get" => {
-            server
-                .skills_install_get(Parameters(decode_args(arguments)?))
-                .await
-        }
-        "skills.install.cancel" => {
-            server
-                .skills_install_cancel(Parameters(decode_args(arguments)?))
-                .await
-        }
-        "skills.run" => server.skills_run(Parameters(decode_args(arguments)?)).await,
-        _ => return Err(format!("Unknown tool: {name}")),
-    }
-    .map_err(|error| error.to_string())?;
-    serde_json::to_value(result).map_err(|error| error.to_string())
-}
-
-fn decode_args<T: for<'de> Deserialize<'de>>(value: Value) -> Result<T, String> {
-    serde_json::from_value(value).map_err(|error| format!("Invalid tool arguments: {error}"))
-}
-
 async fn snapshot_job_list(state: &HubState, agent_id: &str) -> Value {
     let snapshots = state.job_cache.snapshots(agent_id).await;
     let mut value = json!({
@@ -554,73 +302,6 @@ async fn snapshot_job_get(state: &HubState, agent_id: &str, job_id: &str) -> Val
             json!({ "error": { "code": "job_not_found", "message": "Job was not found" }, "freshness": "unknown" })
         }
     }
-}
-
-fn app_tool_descriptors(server: &AgenticMcpServer) -> Vec<Value> {
-    server
-        .tool_router
-        .list_all()
-        .into_iter()
-        .filter(|tool| server.allows_tool(tool.name.as_ref()))
-        .map(|tool| {
-            let mut value = serde_json::to_value(tool).unwrap_or_else(|_| json!({}));
-            if let Some(object) = value.as_object_mut() {
-                let security_schemes = json!([{ "type": "oauth2", "scopes": ["agentic:mcp"] }]);
-                object.insert("securitySchemes".to_string(), security_schemes.clone());
-                object
-                    .entry("_meta".to_string())
-                    .or_insert_with(|| json!({}));
-                if let Some(meta) = object.get_mut("_meta").and_then(Value::as_object_mut) {
-                    meta.insert("securitySchemes".to_string(), security_schemes);
-                    meta.insert(
-                        "openai/toolInvocation/invoking".to_string(),
-                        json!("Running…"),
-                    );
-                    meta.insert("openai/toolInvocation/invoked".to_string(), json!("Done"));
-                }
-            }
-            value
-        })
-        .collect()
-}
-
-fn negotiated_protocol_version(params: Option<&Value>) -> &'static str {
-    match params
-        .and_then(|params| params.get("protocolVersion"))
-        .and_then(Value::as_str)
-    {
-        Some("2025-03-26") => "2025-03-26",
-        Some("2025-06-18") => "2025-06-18",
-        _ => "2025-06-18",
-    }
-}
-
-fn rpc_result(id: Option<Value>, result: Value) -> Response {
-    Json(json!({ "jsonrpc": "2.0", "id": id.unwrap_or(Value::Null), "result": result }))
-        .into_response()
-}
-
-fn rpc_error(id: Option<Value>, code: i64, message: impl ToString) -> Response {
-    Json(json!({
-        "jsonrpc": "2.0",
-        "id": id.unwrap_or(Value::Null),
-        "error": { "code": code, "message": message.to_string() }
-    }))
-    .into_response()
-}
-
-pub(crate) async fn require_auth_on_mcp_path(
-    State(state): State<HubState>,
-    headers: HeaderMap,
-    request: Request,
-    next: Next,
-) -> Response {
-    if request.uri().path().starts_with("/mcp")
-        && !crate::oauth::is_valid_mcp_bearer(&state, &headers).await
-    {
-        return crate::oauth::mcp_unauthorized_response(&state, &headers);
-    }
-    next.run(request).await
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -1813,805 +1494,6 @@ impl AgenticMcpServer {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
-struct AgentIdArgs {
-    #[schemars(
-        description = "Target local agent id. Room notebook tools do not use agentId; they route to the active Room Agent."
-    )]
-    agent_id: String,
-}
-
-#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
-struct HubRunGetArgs {
-    #[schemars(description = "Run id returned by a timed-out Hub request.")]
-    run_id: String,
-}
-
-#[derive(Debug, Default, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
-struct HubRunListArgs {
-    #[serde(default)]
-    #[schemars(description = "Optional agent id filter.")]
-    agent_id: Option<String>,
-    #[serde(default)]
-    #[schemars(description = "Optional source filter such as hub or tunnel.")]
-    source: Option<String>,
-    #[serde(default)]
-    #[schemars(
-        description = "Optional status filter such as started, completed, failed, or timeout_waiting_result."
-    )]
-    status: Option<String>,
-    #[serde(default)]
-    #[schemars(description = "Only include records created within this many seconds.")]
-    since_seconds: Option<u64>,
-    #[serde(default)]
-    #[schemars(description = "Result count, default 20 and capped at 100.")]
-    limit: Option<usize>,
-}
-
-#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
-struct ExecArgs {
-    #[schemars(description = "Target local agent id.")]
-    agent_id: String,
-    #[serde(default)]
-    #[schemars(description = "Optional human-readable workstream key inherited by the Job.")]
-    group: Option<String>,
-    #[schemars(
-        description = "Executable name or path. For shell syntax, use bash or sh with args such as ['-lc', '...']."
-    )]
-    program: String,
-    #[serde(default)]
-    #[schemars(
-        description = "Argument vector passed directly to the program; this is not a shell-split string."
-    )]
-    args: Option<Vec<String>>,
-    #[serde(default)]
-    #[schemars(
-        description = "Request confirmation before execution. Local policy may still allow, confirm, or deny regardless of this flag."
-    )]
-    need_confirm: Option<bool>,
-    #[serde(default)]
-    #[schemars(
-        description = "Optional per-request confirmation provider override. Omit or use default to follow local agent config."
-    )]
-    confirm_method: Option<String>,
-    #[serde(default)]
-    #[schemars(
-        description = "Process working directory. Relative values resolve from the agent workspace root; prefer this over cd in shell commands."
-    )]
-    working_directory: Option<String>,
-    #[serde(default)]
-    #[schemars(
-        range(min = 0, max = 30),
-        default = "default_standard_wait_seconds",
-        description = "Bounded inline wait in seconds; defaults to 5 and is capped at 30."
-    )]
-    wait_seconds: Option<u64>,
-}
-
-#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
-struct BatchExecArgs {
-    #[schemars(description = "Target local agent id.")]
-    agent_id: String,
-    #[serde(default)]
-    #[schemars(
-        description = "Optional human-readable workstream key inherited by every child Job."
-    )]
-    group: Option<String>,
-    #[schemars(
-        description = "Commands to run. Each element can override the top-level workingDirectory."
-    )]
-    elements: Vec<BatchExecElementArgs>,
-    #[serde(default)]
-    #[schemars(
-        description = "Request confirmation for the batch. Local policy may still allow, confirm, or deny regardless of this flag."
-    )]
-    need_confirm: Option<bool>,
-    #[serde(default)]
-    #[schemars(
-        description = "Optional per-request confirmation provider override for all batch elements."
-    )]
-    confirm_method: Option<String>,
-    #[serde(default)]
-    #[schemars(
-        description = "Default process working directory for all batch elements. Relative values resolve from the agent workspace root."
-    )]
-    working_directory: Option<String>,
-    #[serde(default)]
-    #[schemars(
-        range(min = 0, max = 30),
-        default = "default_standard_wait_seconds",
-        description = "Bounded inline wait in seconds; defaults to 5 and is capped at 30."
-    )]
-    wait_seconds: Option<u64>,
-}
-
-#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
-struct BatchExecElementArgs {
-    #[schemars(description = "Executable name or path for this batch element.")]
-    program: String,
-    #[serde(default)]
-    #[schemars(description = "Argument vector passed directly to the program.")]
-    args: Option<Vec<String>>,
-    #[serde(default)]
-    #[schemars(
-        description = "Per-element process working directory. Overrides the batch workingDirectory."
-    )]
-    working_directory: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
-struct JobIdArgs {
-    #[schemars(description = "Target local agent id.")]
-    agent_id: String,
-    #[schemars(
-        description = "Managed Job id returned by process.exec, process.batch, or skills.run."
-    )]
-    job_id: String,
-}
-
-#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
-struct JobGetArgs {
-    #[schemars(description = "Target local agent id.")]
-    agent_id: String,
-    #[schemars(description = "Managed Job id.")]
-    job_id: String,
-    #[serde(default)]
-    #[schemars(
-        range(min = 0, max = 30),
-        default = "default_job_wait_seconds",
-        description = "Bounded wait in seconds; defaults to 5 and is capped at 30."
-    )]
-    wait_seconds: Option<u64>,
-    #[serde(default)]
-    #[schemars(
-        default = "default_wait_only",
-        description = "While waiting, suppress active intermediate detail; defaults to false; terminal completion still returns normal detail."
-    )]
-    wait_only: Option<bool>,
-}
-
-#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
-struct JobListArgs {
-    #[schemars(description = "Target local agent id.")]
-    agent_id: String,
-    #[serde(default)]
-    #[schemars(description = "Exact human-readable workstream filter.")]
-    group: Option<String>,
-    #[serde(default)]
-    #[schemars(description = "Optional Job kind: process, skill, or mcp.")]
-    kind: Option<String>,
-    #[serde(default)]
-    #[schemars(description = "Optional Job state filter.")]
-    state: Option<String>,
-    #[serde(default)]
-    #[schemars(
-        range(min = 1, max = 100),
-        default = "default_job_list_limit",
-        description = "Maximum retained Jobs; defaults to 50 and is capped at 100."
-    )]
-    limit: Option<usize>,
-    #[serde(default)]
-    #[schemars(description = "Opaque cursor returned by a prior job.list response.")]
-    cursor: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
-struct TmuxListSessionsArgs {
-    #[schemars(description = "Target local agent id.")]
-    agent_id: String,
-}
-
-#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
-struct TmuxListPanesArgs {
-    #[schemars(description = "Target local agent id.")]
-    agent_id: String,
-    #[serde(default)]
-    #[schemars(description = "Optional tmux session name to scope pane listing.")]
-    session: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
-struct TmuxCapturePaneArgs {
-    #[schemars(description = "Target local agent id.")]
-    agent_id: String,
-    #[schemars(description = "tmux target such as session:window.pane or a pane id like %0.")]
-    target: String,
-    #[serde(default)]
-    #[schemars(
-        description = "Number of recent tmux history lines to capture. Defaults to 160 and caps at 5000."
-    )]
-    lines: Option<u32>,
-}
-
-#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
-struct TmuxPasteTextArgs {
-    #[schemars(description = "Target local agent id.")]
-    agent_id: String,
-    #[schemars(description = "tmux target such as session:window.pane or a pane id like %0.")]
-    target: String,
-    #[schemars(description = "Text to paste into the tmux pane.")]
-    text: String,
-    #[serde(default)]
-    #[schemars(description = "Append Enter after pasting the text. Defaults to false.")]
-    submit: Option<bool>,
-    #[serde(default)]
-    #[schemars(description = "Request local confirmation before pasting. Defaults to true.")]
-    need_confirm: Option<bool>,
-}
-
-#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
-struct TmuxExecArgs {
-    #[schemars(description = "Target local agent id.")]
-    agent_id: String,
-    #[schemars(description = "Shell pane target such as session:window.pane or %0.")]
-    target: String,
-    #[schemars(description = "Program or shell builtin to execute as one command.")]
-    program: String,
-    #[serde(default)]
-    #[schemars(description = "Structured argument vector; shell operators are not interpreted.")]
-    args: Vec<String>,
-    #[serde(default)]
-    #[schemars(description = "Force local confirmation in addition to configured policy.")]
-    need_confirm: Option<bool>,
-    #[serde(default)]
-    #[schemars(
-        description = "Milliseconds to wait before returning the post-submit pane snapshot. Defaults to 300 and caps at 5000."
-    )]
-    wait_ms: Option<u64>,
-    #[serde(default)]
-    #[schemars(
-        description = "Number of tmux history lines to include in the post-submit snapshot. Defaults to 120, caps at 5000, and 0 disables the snapshot."
-    )]
-    capture_lines: Option<u32>,
-}
-
-#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
-struct TmuxCreateSessionArgs {
-    #[schemars(description = "Target local agent id.")]
-    agent_id: String,
-    #[schemars(description = "tmux session name.")]
-    name: String,
-    #[schemars(description = "Session cwd, subject to the local agent path policy.")]
-    cwd: String,
-}
-
-#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
-struct TmuxCloseSessionArgs {
-    #[schemars(description = "Target local agent id.")]
-    agent_id: String,
-    #[schemars(description = "tmux session name.")]
-    name: String,
-    #[serde(default)]
-    #[schemars(description = "Request local confirmation before closing. Defaults to true.")]
-    need_confirm: Option<bool>,
-}
-
-#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
-struct McpListServersArgs {
-    #[serde(default)]
-    #[schemars(
-        description = "Optional target local agent id. Omit to list MCP servers for all currently connected agents."
-    )]
-    agent_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
-struct McpListToolsArgs {
-    #[schemars(description = "Target local agent id.")]
-    agent_id: String,
-    #[schemars(description = "MCP server id returned by mcp.listServers.")]
-    server_id: String,
-}
-
-#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
-struct McpCallToolArgs {
-    #[schemars(description = "Target local agent id.")]
-    agent_id: String,
-    #[serde(default)]
-    #[schemars(description = "Optional human-readable workstream key inherited by the Job.")]
-    group: Option<String>,
-    #[schemars(description = "MCP server id returned by mcp.listServers.")]
-    server_id: String,
-    #[schemars(description = "Tool name returned by mcp.listTools.")]
-    tool_name: String,
-    #[serde(default)]
-    #[schemars(
-        description = "JSON object arguments forwarded to the MCP tool; maximum serialized size 256 KiB."
-    )]
-    arguments: Option<Value>,
-    #[serde(default)]
-    #[schemars(
-        range(min = 0, max = 30),
-        default = "default_standard_wait_seconds",
-        description = "Bounded inline wait in seconds; defaults to 5 and is capped at 30."
-    )]
-    wait_seconds: Option<u64>,
-    #[serde(default)]
-    #[schemars(
-        description = "Absolute downstream execution deadline in seconds, default 300 and capped at 900."
-    )]
-    timeout_seconds: Option<u64>,
-}
-
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "snake_case")]
-enum McpBatchModeArgs {
-    #[default]
-    Parallel,
-    Sequential,
-}
-
-impl From<McpBatchModeArgs> for McpBatchMode {
-    fn from(value: McpBatchModeArgs) -> Self {
-        match value {
-            McpBatchModeArgs::Parallel => Self::Parallel,
-            McpBatchModeArgs::Sequential => Self::Sequential,
-        }
-    }
-}
-
-#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
-struct McpBatchCallArgs {
-    #[schemars(description = "Configured MCP server id.")]
-    server_id: String,
-    #[schemars(description = "Downstream MCP tool name.")]
-    tool_name: String,
-    #[serde(default)]
-    #[schemars(description = "JSON object arguments; maximum serialized size 256 KiB per call.")]
-    arguments: Option<Value>,
-}
-
-#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
-struct McpBatchArgs {
-    #[schemars(description = "Target local agent id.")]
-    agent_id: String,
-    #[serde(default)]
-    #[schemars(
-        description = "Optional human-readable workstream key inherited by every child Job."
-    )]
-    group: Option<String>,
-    #[schemars(
-        length(min = 1, max = 16),
-        description = "Ordered 1..16 downstream MCP calls; aggregate serialized arguments are capped at 2 MiB."
-    )]
-    calls: Vec<McpBatchCallArgs>,
-    #[serde(default)]
-    #[schemars(description = "Execution mode: parallel by default, or sequential.")]
-    mode: Option<McpBatchModeArgs>,
-    #[serde(default)]
-    #[schemars(
-        description = "When true, prevent not-yet-started children from starting after a hard child failure; already-started calls are never cancelled."
-    )]
-    fail_fast: Option<bool>,
-    #[serde(default)]
-    #[schemars(
-        range(min = 0, max = 30),
-        default = "default_standard_wait_seconds",
-        description = "Bounded inline wait in seconds; defaults to 5 and is capped at 30."
-    )]
-    wait_seconds: Option<u64>,
-    #[serde(default)]
-    #[schemars(
-        range(min = 1, max = 900),
-        description = "Per-child downstream execution deadline in seconds after scheduling, default 300 and capped at 900."
-    )]
-    timeout_seconds: Option<u64>,
-}
-
-#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
-struct UserNotifySendArgs {
-    #[schemars(description = "Notification channel key returned by user.notify.channels.")]
-    channel: String,
-    #[schemars(description = "Notification title.")]
-    title: String,
-    #[schemars(description = "Notification body.")]
-    body: String,
-    #[serde(default)]
-    #[schemars(description = "Optional notification actions. Phase A does not deliver actions.")]
-    actions: Option<Vec<UserNotifyActionArgs>>,
-    #[serde(default)]
-    #[schemars(description = "Optional priority such as low, normal, high, urgent, or alarm.")]
-    priority: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
-struct UserNotifyActionArgs {
-    #[schemars(description = "Stable action id. Android ack will report this as actionId.")]
-    id: String,
-    #[schemars(description = "Human-readable action label.")]
-    label: String,
-}
-
-impl From<UserNotifyActionArgs> for NotificationAction {
-    fn from(value: UserNotifyActionArgs) -> Self {
-        Self {
-            id: value.id,
-            label: value.label,
-        }
-    }
-}
-
-#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct RoomDiaryActiveArgs {}
-
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "lowercase")]
-enum RoomDiaryLayerArgs {
-    Daily,
-    Weekly,
-    Monthly,
-}
-
-impl From<RoomDiaryLayerArgs> for RoomDiaryLayer {
-    fn from(value: RoomDiaryLayerArgs) -> Self {
-        match value {
-            RoomDiaryLayerArgs::Daily => Self::Daily,
-            RoomDiaryLayerArgs::Weekly => Self::Weekly,
-            RoomDiaryLayerArgs::Monthly => Self::Monthly,
-        }
-    }
-}
-
-#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct RoomDiaryReadArgs {
-    #[schemars(description = "Room diary temporal layer.")]
-    layer: RoomDiaryLayerArgs,
-    #[schemars(
-        pattern(r"^(current|\d{4}-\d{2}-\d{2}(--\d{4}-\d{2}-\d{2})?)$"),
-        description = "Room-local logical period: daily uses current or YYYY-MM-DD; weekly/monthly use current or YYYY-MM-DD--YYYY-MM-DD."
-    )]
-    period: String,
-}
-
-#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct RoomNotebookRecentArgs {
-    #[serde(default)]
-    #[schemars(
-        range(min = 1, max = 100),
-        default = "default_room_notebook_limit",
-        description = "Maximum bounded recent Notebook previews returned; defaults to 20."
-    )]
-    limit: Option<usize>,
-}
-
-#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct RoomNotebookSearchArgs {
-    #[schemars(
-        length(min = 1, max = 256),
-        description = "Case-insensitive bounded substring query over Notebook paths, H1 titles, and bodies."
-    )]
-    query: String,
-    #[serde(default)]
-    #[schemars(
-        range(min = 1, max = 100),
-        default = "default_room_notebook_limit",
-        description = "Maximum bounded Notebook previews returned; defaults to 20."
-    )]
-    limit: Option<usize>,
-}
-
-#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct RoomNotebookReadArgs {
-    #[schemars(
-        description = "Exact Notebook-relative Markdown path returned or discovered under Notebook/; arbitrary repository paths are rejected."
-    )]
-    path: String,
-}
-
-#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct RoomStateListArgs {}
-
-#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct RoomStateReadArgs {
-    #[schemars(
-        description = "State entity filename stem resolved under State/entities/; arbitrary repository paths are rejected."
-    )]
-    entity: String,
-}
-
-#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct RoomMaintenanceStatusArgs {}
-
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "snake_case")]
-enum RoomMaintenanceSlotArgs {
-    #[serde(rename = "diary.daily")]
-    DiaryDaily,
-    #[serde(rename = "diary.weekly")]
-    DiaryWeekly,
-    #[serde(rename = "diary.monthly")]
-    DiaryMonthly,
-    Notebook,
-    Entity,
-}
-
-impl From<RoomMaintenanceSlotArgs> for RoomMaintenanceSlot {
-    fn from(value: RoomMaintenanceSlotArgs) -> Self {
-        match value {
-            RoomMaintenanceSlotArgs::DiaryDaily => Self::DiaryDaily,
-            RoomMaintenanceSlotArgs::DiaryWeekly => Self::DiaryWeekly,
-            RoomMaintenanceSlotArgs::DiaryMonthly => Self::DiaryMonthly,
-            RoomMaintenanceSlotArgs::Notebook => Self::Notebook,
-            RoomMaintenanceSlotArgs::Entity => Self::Entity,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "lowercase")]
-enum RoomMaintenanceModeArgs {
-    Local,
-    Workflow,
-}
-
-impl From<RoomMaintenanceModeArgs> for RoomMaintenanceExecutionMode {
-    fn from(value: RoomMaintenanceModeArgs) -> Self {
-        match value {
-            RoomMaintenanceModeArgs::Local => Self::Local,
-            RoomMaintenanceModeArgs::Workflow => Self::Workflow,
-        }
-    }
-}
-
-#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct RoomMaintenanceItemArgs {
-    #[schemars(description = "Unique Room semantic slot to maintain.")]
-    slot: RoomMaintenanceSlotArgs,
-    #[schemars(
-        description = "Slot-specific maintenance payload; validated by the Room maintenance executor."
-    )]
-    payload: Value,
-}
-
-#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct RoomMaintenanceSubmitArgs {
-    #[schemars(
-        length(min = 1, max = 5),
-        description = "One to five maintenance requests; each slot may appear at most once. The set is validated against the Room repository before any mutation."
-    )]
-    items: Vec<RoomMaintenanceItemArgs>,
-    #[serde(default)]
-    #[schemars(
-        description = "Optional execution mode override; local applies in the validated Room repository, workflow submits through the configured Room workflow."
-    )]
-    mode: Option<RoomMaintenanceModeArgs>,
-    #[serde(default)]
-    #[schemars(
-        range(min = 0, max = 30),
-        default = "default_room_wait_seconds",
-        description = "Optional bounded wait for workflow consumption and local fast-forward, from 0 through 30 seconds."
-    )]
-    wait_seconds: Option<u8>,
-}
-
-impl RoomMaintenanceSubmitArgs {
-    fn into_protocol(self) -> RoomMaintenanceSubmitRequest {
-        RoomMaintenanceSubmitRequest {
-            items: self
-                .items
-                .into_iter()
-                .map(|item| RoomMaintenanceRequestItem {
-                    slot: item.slot.into(),
-                    payload: item.payload,
-                })
-                .collect(),
-            mode: self.mode.map(RoomMaintenanceExecutionMode::from),
-            wait_seconds: self.wait_seconds,
-        }
-    }
-}
-
-#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
-struct BootstrapReadArgs {
-    #[schemars(description = "Guide id returned by room.bootstrap.")]
-    id: String,
-}
-
-#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
-struct SkillReadArgs {
-    #[schemars(description = "Skill id, matching one workspace skills/ directory name.")]
-    id: String,
-    #[serde(default)]
-    #[schemars(
-        description = "Optional package-relative file path. Omit to read the legacy SKILL.md response."
-    )]
-    path: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
-struct SkillSearchArgs {
-    #[schemars(
-        description = "Case-insensitive substring query over id, frontmatter, tags, and SKILL.md content."
-    )]
-    query: String,
-    #[serde(default)]
-    #[schemars(description = "Maximum skills returned. Defaults to 20 and caps at 100.")]
-    limit: Option<usize>,
-}
-
-#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
-struct SkillActivationArgs {
-    #[schemars(description = "Skill id, matching one workspace skills/ directory name.")]
-    id: String,
-}
-
-#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
-struct SkillInstallArgs {
-    #[schemars(description = "Target skill id. One installation job targets exactly one id.")]
-    id: String,
-    #[schemars(description = "GitHub, HTTPS-file, or inline-content source descriptor.")]
-    source: SkillInstallSourceArgs,
-    #[serde(default)]
-    #[schemars(
-        description = "Archive an existing workspace skill before replacement. Defaults to false."
-    )]
-    replace_existing: bool,
-    #[serde(default)]
-    #[schemars(
-        description = "Optional explicit activation choice; new skills default active and replacement preserves its prior state."
-    )]
-    activate_after_install: Option<bool>,
-    #[serde(default)]
-    #[schemars(
-        description = "Optional idempotency key for safe retries of the same install request."
-    )]
-    idempotency_key: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(
-    tag = "type",
-    rename_all = "lowercase",
-    rename_all_fields = "camelCase"
-)]
-enum SkillInstallSourceArgs {
-    Github {
-        #[serde(default)]
-        repository: Option<String>,
-        #[serde(default)]
-        url: Option<String>,
-        #[serde(rename = "ref", default)]
-        ref_name: Option<String>,
-        #[serde(default)]
-        path: Option<String>,
-    },
-    Files {
-        files: Vec<SkillInstallFileArgs>,
-    },
-}
-
-impl SkillInstallSourceArgs {
-    fn into_protocol(self) -> SkillInstallSource {
-        match self {
-            Self::Github {
-                repository,
-                url,
-                ref_name,
-                path,
-            } => SkillInstallSource::Github {
-                repository,
-                url,
-                ref_name,
-                path,
-            },
-            Self::Files { files } => SkillInstallSource::Files {
-                files: files
-                    .into_iter()
-                    .map(SkillInstallFileArgs::into_protocol)
-                    .collect(),
-            },
-        }
-    }
-}
-
-#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
-struct SkillInstallFileArgs {
-    path: String,
-    #[serde(default)]
-    url: Option<String>,
-    #[serde(default)]
-    content: Option<String>,
-    #[serde(default)]
-    content_base64: Option<String>,
-    #[serde(default)]
-    sha256: Option<String>,
-    #[serde(default)]
-    executable: Option<bool>,
-}
-
-impl SkillInstallFileArgs {
-    fn into_protocol(self) -> SkillInstallFile {
-        SkillInstallFile {
-            path: self.path,
-            url: self.url,
-            content: self.content,
-            content_base64: self.content_base64,
-            sha256: self.sha256,
-            executable: self.executable,
-        }
-    }
-}
-
-#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
-struct SkillInstallGetArgs {
-    install_id: String,
-    #[serde(default)]
-    #[schemars(
-        range(min = 0, max = 30),
-        default = "default_standard_wait_seconds",
-        description = "Bounded status wait in seconds; defaults to 5 and is capped at 30."
-    )]
-    wait_seconds: Option<u64>,
-}
-
-#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
-struct SkillInstallCancelArgs {
-    install_id: String,
-}
-
-#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
-struct SkillRunArgs {
-    id: String,
-    #[schemars(description = "Package-relative executable path under scripts/.")]
-    path: String,
-    #[serde(default)]
-    #[schemars(description = "Optional human-readable workstream key inherited by the Job.")]
-    group: Option<String>,
-    #[serde(default)]
-    args: Option<Vec<String>>,
-    #[serde(default)]
-    working_directory: Option<String>,
-    #[serde(default)]
-    #[schemars(
-        range(min = 0, max = 30),
-        default = "default_standard_wait_seconds",
-        description = "Bounded inline wait in seconds; defaults to 5 and is capped at 30."
-    )]
-    wait_seconds: Option<u64>,
-}
-
 fn ok_json(value: Value) -> CallToolResult {
     AgenticResult::from_native_value(value).into_call_tool_result()
 }
@@ -2706,10 +1588,13 @@ fn notify_route_error_message(error: &NotifyRouteError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::RemoteConfirmationConfig;
     use crate::db::init_db;
-    use crate::{HubConfig, McpProfile, RemoteConfirmationConfig};
+    use crate::state::McpProfile;
+    use crate::HubConfig;
     use axum::body::to_bytes;
     use axum::extract::State;
+    use axum::Json;
     use rusqlite::Connection;
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex as StdMutex};
@@ -2810,7 +1695,7 @@ mod tests {
         let mut state = test_state();
         state.mcp_profile = McpProfile::Coordinator;
         let server = AgenticMcpServer::new(state);
-        let mut names = app_tool_descriptors(&server)
+        let mut names = transport::app_tool_descriptors(&server)
             .into_iter()
             .filter_map(|tool| tool.get("name").and_then(Value::as_str).map(str::to_string))
             .collect::<Vec<_>>();
@@ -2835,7 +1720,7 @@ mod tests {
         let mut state = test_state();
         state.mcp_profile = McpProfile::Coordinator;
         let server = AgenticMcpServer::new(state);
-        let error = call_app_tool(
+        let error = transport::call_app_tool(
             &server,
             json!({ "name": "process.exec", "arguments": { "agentId": "agent" } }),
         )
@@ -2853,7 +1738,7 @@ mod tests {
             "room.maintenance.status",
             "room.maintenance.submit",
         ] {
-            let error = call_app_tool(&server, json!({ "name": name, "arguments": {} }))
+            let error = transport::call_app_tool(&server, json!({ "name": name, "arguments": {} }))
                 .await
                 .unwrap_err();
             assert!(
@@ -2874,7 +1759,7 @@ mod tests {
     #[test]
     fn full_profile_keeps_bootstrap_aliases_and_execution_surface() {
         let server = AgenticMcpServer::new(test_state());
-        let names = app_tool_descriptors(&server)
+        let names = transport::app_tool_descriptors(&server)
             .into_iter()
             .filter_map(|tool| tool.get("name").and_then(Value::as_str).map(str::to_string))
             .collect::<Vec<_>>();
@@ -2904,7 +1789,7 @@ mod tests {
     #[test]
     fn mcp_batch_descriptor_freezes_bounds_and_side_effect_annotations() {
         let server = AgenticMcpServer::new(test_state());
-        let tools = app_tool_descriptors(&server);
+        let tools = transport::app_tool_descriptors(&server);
         let batch = tools
             .iter()
             .find(|tool| tool.get("name").and_then(Value::as_str) == Some("mcp.batch"))
@@ -2941,7 +1826,7 @@ mod tests {
     #[test]
     fn skill_install_and_run_tools_are_exposed_with_stable_annotations() {
         let server = AgenticMcpServer::new(test_state());
-        let tools = app_tool_descriptors(&server);
+        let tools = transport::app_tool_descriptors(&server);
         let mut names = tools
             .iter()
             .filter_map(|tool| tool.get("name").and_then(Value::as_str))
@@ -2983,9 +1868,10 @@ mod tests {
     #[tokio::test]
     async fn every_advertised_tool_is_accepted_by_apps_dispatcher() {
         let server = AgenticMcpServer::new(test_state());
-        for tool in app_tool_descriptors(&server) {
+        for tool in transport::app_tool_descriptors(&server) {
             let name = tool["name"].as_str().unwrap();
-            let result = call_app_tool(&server, json!({ "name": name, "arguments": {} })).await;
+            let result =
+                transport::call_app_tool(&server, json!({ "name": name, "arguments": {} })).await;
             if let Err(error) = result {
                 assert!(
                     !error.starts_with("Unknown tool:"),
@@ -3001,7 +1887,7 @@ mod tests {
             ("room.bootstrap", json!({})),
             ("room.bootstrap.read", json!({ "id": "missing" })),
         ] {
-            let response = mcp_post(
+            let response = transport::mcp_post(
                 State(test_state()),
                 Json(json!({
                     "jsonrpc": "2.0",
@@ -3097,7 +1983,7 @@ mod tests {
 
     #[tokio::test]
     async fn mcp_tools_call_wire_response_uses_agentic_result_shape() {
-        let response = mcp_post(
+        let response = transport::mcp_post(
             State(test_state()),
             Json(json!({
                 "jsonrpc": "2.0",

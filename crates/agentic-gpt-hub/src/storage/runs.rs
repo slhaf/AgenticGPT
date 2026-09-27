@@ -648,8 +648,10 @@ pub(crate) fn prune_expired(state: &HubState) -> Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::RemoteConfirmationConfig;
     use crate::db::init_db;
-    use crate::{HubConfig, McpProfile, NtfyConfig, RemoteConfirmationConfig};
+    use crate::state::McpProfile;
+    use crate::{HubConfig, NtfyConfig};
     use agentic_gpt_protocol::{AgentRunReport, BoundedJsonValue};
     use rusqlite::Connection;
     use std::collections::HashMap;
