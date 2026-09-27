@@ -101,12 +101,12 @@ are not aliases for those four commands.
 | `process/jobs.rs`、`storage/job_history.rs` | Process/Skill/MCP 准入、等待、取消、输出上限、终态、SQLite 历史与重启 unknown；Process/Skill admission 捕获 Arc<Config>，batch preflight 将同一 snapshot 传给 queued workers |
 | `process/exec.rs`、`operations/{policy,confirmation}.rs` | process preflight/CWD/path、program rule、可选 bwrap、人工确认及临时 MCP allow；`exec::normalize_roots` 是配置 path-root 的共享归一化入口 |
 | `files/file_ops.rs` | 文件路径策略、读/搜索、patch 计划、revision/lock/revalidation、暂存提交与审计；复用 `exec::normalize_roots` 并保留 Expansion/Resolution failure stage；调用纯 apply-patch 库 |
-| `mcp/mcp.rs` | 下游 HTTP/stdio server、配置快照、call/batch、确认、并发与取消；效果通过 managed Job 观测 |
+| `mcp/{mcp,batch}.rs`、`config/mcp_servers.rs` | 下游 MCP 单次调用/client/Job 衔接与 batch 预检/调度/聚合分属不同生命周期；持久 MCP server 配置及校验归配置 owner，实际 Job 与取消状态仍归 `process/jobs.rs` |
 | `tmux/tmux.rs` | 外部 tmux server/session/pane 观察与控制；session 生命周期不等同 Agent child Job |
 | `skills/{skills,skill_installs}.rs` | `skills.rs` 拥有 Skill package metadata、`package_sha256` 与 activation/shared lease；`skill_installs.rs` 拥有安装 journal/staging/commit/recovery；skill run 复用 Process Job |
 | `room/{bootstrap,room_repository,room_reads,room_maintenance}.rs` | 有界 bootstrap/Room 文件资源、Git/scaffold、语义槽位与维护提交；不是 reasoning loop |
-| `browser/{browser_distribution,browser_runtime,browser_kernel,browser_manager,browser_manual,browser_discovery}.rs` | 签名包/哈希/解包与缓存、独立的运行时来源发现/组装、Node 子进程与命名 lease |
-| `config/{config,config_cli,config_templates}.rs`、`config/setup/`、`ui/config_tui/` | 配置加载/import/default/修改、向导 draft/validation/review/commit、secret 写入；并非新执行核心 |
+| `browser/{browser_distribution,browser_distribution_verify,browser_runtime,browser_kernel,browser_manager,browser_manual,browser_discovery}.rs` | 独立的仓库签名/包索引验证、获取/解包/缓存/激活、运行时来源发现、Node 子进程和命名 lease 各按自身 owner 保留 |
+| `config/{config,config_cli,config_keys,config_templates,mcp_servers}.rs`、`config/setup/`、`ui/config_tui/` | 配置模型/加载、独立的键合同/赋值注册表、CLI init/命令、MCP server 配置及向导 draft/validation/review/commit 分别归相应 owner；磁盘合同不变 |
 | `ui/{cli,cli_i18n}.rs`、`ui/tui/` | CLI 命令解析与交互调度、展示/输入/终端恢复、本地化 |
 | `storage/{private_state,audit}.rs` | 私有状态目录与迁移、workspace append-only 审计；耐久等级不同于 Job history/transport ledger |
 
@@ -123,7 +123,7 @@ are not aliases for those four commands.
 | `ingress/http/routes.rs` | action-key HTTP process/Job/tmux/MCP/运行查询及响应适配 |
 | `ingress/mcp/{mcp_server,args,transport}.rs`、`support/agentic_result.rs` | Apps 工具 handler/tool router、类型化参数/schema、JSON-RPC framing/auth/Full/Coordinator、业务 JSON → MCP result 各留在 MCP 入口边界 |
 | `storage/runs.rs` | command/run 收据、hash/ACK/status/result/conflict、stale 与 retention |
-| `room/room.rs` | 单一 active Room `(agent_id, connection_id)` 连接租约、九个当前 Room 读/维护操作的转发与 HTTP/MCP 结果投影；通用 run receipt 可保留有界 operation result，但不持有 Room 内容 |
+| `room/{http,control}.rs`、`room/room.rs` | HTTP handlers/status projection 与中立 active Room `(agent_id, connection_id)` 租约/路由分离；`room.rs` 只声明子模块并保留跨 owner 测试；Hub 不持有 Room 内容或 run receipt owner |
 | `notifications/notify.rs` | freedesktop Agent/ntfy 渠道、健康缓存、Android 注册但未实现 delivery |
 | `ingress/oauth.rs` | 授权码/PKCE/token 与 MCP Bearer 校验，session 在内存 |
 | `storage/db.rs` | SQLite schema/兼容增列 |
@@ -134,9 +134,55 @@ are not aliases for those four commands.
 本次只按独立 owner 拆分，不以文件大小、行数或测试数量为目标：
 
 - Agent `main.rs` 中 CLI 命令、启动/热重载、Browser 来源发现分别归 `ui/cli.rs`、`runtime/startup.rs`、`browser/browser_discovery.rs`；stdio resume transport 与纯工具 descriptor/schema 分别归 `ingress/stdio_transport.rs`、`ingress/stdio_schema.rs`。stdio 参数 DTO 仍被 dispatch、validation、conversion 直接消费，未制造第二套入口类型。
-- Agent `config/config.rs` 的模型、加载、验证与原子写入共用私有 helper 和现有调用方；`process/jobs.rs` 的 Process/Skill/MCP 终态、permit、取消与历史共享 ManagedJob；`mcp/mcp.rs` 的下游配置与 call/batch 共享 client/factory、audit 与 Job 状态。三者暂不按大小拆开，避免扩散私有状态或发明转发层。
+- Agent `mcp/mcp.rs` 的 managed single-call/client lifecycle 与 `mcp/batch.rs` 的 batch 预检、整体确认、调度和聚合审计有不同变化原因；共享 client factory 不是共享可变 client，Job/取消权威仍在 `process/jobs.rs`。`config/mcp_servers.rs` 统一持久 MCP server 模型/校验/修改，迁移配置及状态调用方，不在 MCP 执行模块保留转发；配置核心 `config/config.rs` 的通用加载/验证/备份仍同一 owner。
+- Agent `config/config_cli.rs` 的 Clap/init 命令流与 `config/config_keys.rs` 的键名/元数据/解析/赋值注册表分离；Browser 的可信仓库元数据验签/Packages 包选择归 `browser/browser_distribution_verify.rs`，HTTP 获取、归档物化、cache 与 lock 仍归 `browser/browser_distribution.rs`。其余大模块只在 owner/lifecycle 连续时保持完整。
 - Hub `main.rs` 的 CLI/配置存取与 server/router 各归 `runtime/cli.rs`、`runtime/config.rs`、`runtime/server.rs`；Apps MCP 参数类型/schema 与 JSON-RPC/auth transport 各归 `ingress/mcp/args.rs`、`ingress/mcp/transport.rs`，原 `mcp_server.rs` 保留工具 handler。
-- Hub `storage/runs.rs` 的投递、ACK、状态、结果与 retention 共用 SQL/identity 不变量；`runtime/state.rs` 已在 `state::projection` 有中立投影边界；`room/room.rs` 的 HTTP 转发与 active-room lease 共用路由错误、连接状态和 Room owner。三者不按长度进一步拆分。
+- Hub `storage/runs.rs` 的投递、ACK、状态、结果与 retention 共用 SQL/identity 不变量；`runtime/state.rs` 已在 `state::projection` 有中立投影边界。复审后 `room/room.rs` 的 HTTP 合同与 active-room 租约有不同调用方和变化原因，改为 `room/http.rs` 与 `room/control.rs`：共享 `HubState` 并不构成同一生命周期，`RoomRouteError` 保留中立控制语义，连接代际与 run/waiter owner 仍在 `agents`/`runs`。
+
+### 3.2.2 Hub 超过 800 非测试实现行的复审
+
+计数按 `crates/agentic-gpt-hub/src/**/*.rs` 逐文件计算物理行数（保留空行/注释），剔除完整 `#[cfg(test)]` 项及纯测试文件；内联非测试模块也单独核查。800 行仅触发复审，不是拆分指标。迁移前后满足阈值的文件均为：
+
+| Hub 文件（相对 `src/`） | 非测试行 | 结论与 owner |
+|---|---:|---|
+| `ingress/mcp/args.rs` | 811 | 不拆：类型化 Apps MCP 参数/schema/默认值/转换均为入口 DTO，不能按工具数量推出独立生命周期。 |
+| `ingress/mcp/mcp_server.rs` | 1587 | 不拆：已与 JSON-RPC transport、参数模块分离；余下 tool router/profile 与 handler/result projection 同属 Apps MCP 适配器，工具族并无自己的状态 owner。 |
+
+`room/room.rs` 迁移前为 521 非测试行，仍因 HTTP 合同与 active lease 的不同 owner 而拆；迁移后 `room/http.rs` 439、`room/control.rs` 86，`room/room.rs` 仅保留模块声明及跨 owner 测试。不存在超过阈值的内联非测试模块。测试单独审查：`agents/lifecycle_tests.rs` 1285 行已是外置的连接代际测试模块，断连/替换/可靠回执场景属同一 lifecycle，保持完整；`room/room.rs` 的内嵌跨 owner 测试约 402 行，验证 HTTP 映射与租约交互，不据测试长度拆生产代码或删除测试。
+
+### 3.2.3 Agent 超过 800 非测试实现行的逐项复审
+
+对 `crates/agentic-gpt/src/**/*.rs` 逐文件计数：保留空行/注释，跳过完整 `#[cfg(test)]` 项和仅含测试的外置模块，内联非测试模块另查；旧值取迁移前提交，现值取本轮实现。阈值只触发 owner/lifecycle 复审。迁移前 **24** 个文件触发，迁移后 **23** 个；下表列出前后任一时点触发者（路径相对 Agent `src/`，`<800` 表示迁移后低于阈值）：
+
+| 文件 | 旧→现非测试行 | 结论与变化 owner |
+|---|---:|---|
+| `browser/browser_distribution.rs` | 1921→1488 | 拆出可信仓库验签/包索引；其余获取、cache、物化、锁和激活共享验证后包的生命周期。 |
+| `config/config.rs` | 2233→2236 | 保留通用配置模型、加载/import、校验、原子写入；MCP 专属配置已经另归 owner。 |
+| `config/config_cli.rs` | 1601→<800 | 键注册表移至 `config_keys.rs`；这里只处理 init/Clap/命令流。 |
+| `config/config_keys.rs` | —→1174 | 新 owner：键名、类型、解析、setter 和说明共同定义一个配置键合同，不再拆静态表与赋值规则。 |
+| `config/setup/model.rs` | 863→863 | setup state 与转换同一 draft 状态机。 |
+| `config/setup/validation.rs` | 1056→1056 | 跨字段校验、MCP draft 转换、错误映射及 InitInput 属同一次 setup 准入。 |
+| `files/file_ops.rs` | 1662→1662 | 路径策略、revision/revalidation 与原子文件效果共同约束读、搜索、写和 edit。 |
+| `ingress/http_oauth.rs` | 912→912 | OAuth discovery、callback、token 和持久会话同一认证生命周期。 |
+| `ingress/hub.rs` | 1208→1208 | Hub transport/命令回传共享 request context 与重连/reporting 规则。 |
+| `ingress/stdio_schema.rs` | 886→886 | 一套 stdio 工具 descriptor/schema 与校验合同。 |
+| `ingress/stdio_server.rs` | 2380→2380 | 同一 Agent MCP 入口和 dispatch/lifecycle；transport、schema 已各有模块，测试长度单独处理。 |
+| `mcp/mcp.rs` | 1569→<800 | 拆出持久配置 owner 与 batch 编排，余下单次调用/client/Job 交互同一运行生命周期。 |
+| `operations/confirmation.rs` | 871→871 | provider、pending response、临时 MCP allow 与取消同一确认策略生命周期。 |
+| `process/jobs.rs` | 2095→2095 | Process/Skill/MCP 共用 ManagedJob admission、终态、取消与 history owner；不造另一套 executor。 |
+| `room/bootstrap.rs` | 807→807 | Room bootstrap 探测、路径安全、扫描预算、哈希/revision 和 warning 同一只读响应。 |
+| `room/room_maintenance.rs` | 954→954 | 一次 Room 维护的计划、提交和清理事务。 |
+| `room/room_repository.rs` | 1027→1027 | repository 路径/锁/revision 与文件持久化是同一保护边界。 |
+| `runtime/supervisor.rs` | 950→950 | worker/tunnel 启停、重启与回收属于一次监督生命周期。 |
+| `skills/skill_installs.rs` | 1788→1788 | 安装下载、暂存、提交、租约及恢复是一条安装事务。 |
+| `skills/skills.rs` | 807→807 | 发现、包信任、active/lease 与 Skill 运行共享 Skill registry 规则。 |
+| `storage/job_history.rs` | 1364→1364 | durable history 的查询、retention、退化/修复共享持久化事务。 |
+| `tmux/tmux.rs` | 861→861 | Session/pane 命令共享目标检查、执行与输出合同。 |
+| `ui/cli_i18n.rs` | 1001→1001 | 语言词条与查找/render 共同维护 CLI 文案合同。 |
+| `ui/config_tui/app.rs` | 2683→2683 | 跨页输入、review/edit/commit 共享 ConfigTuiApp/SetupSession；仅搬方法不产生新 owner。 |
+| `ui/config_tui/pages.rs` | 4923→4923 | 页渲染、focus/inspector 与 review 共用 TuiState/SetupSession 投影；单拆 MCP 页面会割裂编辑 controller。 |
+
+新 `mcp/batch.rs` 758 行、`config/mcp_servers.rs` 162 行、`browser/browser_distribution_verify.rs` 446 行，均按职责而非阈值拆出；没有超过阈值的内联非测试模块。测试组织独立审查：`ingress/stdio_server_tests.rs`（原内嵌约 2405 行）、`mcp/mcp_tests.rs`（约 1459 行）、`browser/browser_distribution_tests.rs`（约 1201 行）移为同一父模块下的外置测试，保留私有访问与全部断言；config 与 browser manager 的内嵌测试约 905 行，分别仍围绕配置持久化与 fake-kernel lease 状态，未因大小移动或删除。
 
 ### 3.3 Protocol（当前内部组织）
 
