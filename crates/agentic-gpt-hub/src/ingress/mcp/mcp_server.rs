@@ -34,7 +34,7 @@ use crate::agentic_result::AgenticResult;
 use crate::agents::dispatch::{cached_job, mcp_list_servers_all_agents, request_agent};
 use crate::notify::{notification_channels, send_user_notification, NotifyRouteError};
 use crate::registry::{registry_entries, registry_entry};
-use crate::room::{request_active_room, RoomRouteError};
+use crate::room::control::{request_active_room, RoomRouteError};
 use crate::runs;
 use crate::state::{
     projection::{

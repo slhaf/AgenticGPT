@@ -139,11 +139,11 @@ pub(crate) async fn request_room(
     state: &HubState,
     command: HubCommand,
     timeout_secs: u64,
-) -> std::result::Result<Value, crate::room::RoomRouteError> {
+) -> std::result::Result<Value, crate::room::control::RoomRouteError> {
     let target = lifecycle::resolve_room_target(state).await?;
     request_target(state, target, command, timeout_secs)
         .await
-        .map_err(crate::room::RoomRouteError::Timeout)
+        .map_err(crate::room::control::RoomRouteError::Timeout)
 }
 
 async fn request_target(

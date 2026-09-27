@@ -199,7 +199,7 @@ async fn room_dispatch_keeps_validated_generation_during_replacement() {
         let mut current = state.agents.current.lock().await;
         current.get_mut("agent").unwrap().role = AgentRole::Room;
     }
-    crate::room::register_connection_role(&state, "agent", "old", AgentRole::Room)
+    crate::room::control::register_connection_role(&state, "agent", "old", AgentRole::Room)
         .await
         .unwrap();
 
@@ -209,7 +209,9 @@ async fn room_dispatch_keeps_validated_generation_during_replacement() {
             path: "Notebook/topic.md".to_string(),
         },
     };
-    let mut request = Box::pin(crate::room::request_active_room(&state, command, 1));
+    let mut request = Box::pin(crate::room::control::request_active_room(
+        &state, command, 1,
+    ));
     let active_guard = state.active_room.lock().await;
     assert!(matches!(
         futures_util::poll!(request.as_mut()),

@@ -94,39 +94,57 @@ pub(crate) async fn serve(
             "/v1/notify/android/register",
             post(notify::android_notify_register),
         )
-        .route("/v1/room/diary/active", post(room::room_diary_active))
-        .route("/v1/room/diary/read", post(room::room_diary_read))
-        .route("/v1/room/notebook/recent", post(room::room_notebook_recent))
-        .route("/v1/room/notebook/search", post(room::room_notebook_search))
-        .route("/v1/room/notebook/read", post(room::room_notebook_read))
-        .route("/v1/room/state/list", post(room::room_state_list))
-        .route("/v1/room/state/read", post(room::room_state_read))
+        .route("/v1/room/diary/active", post(room::http::room_diary_active))
+        .route("/v1/room/diary/read", post(room::http::room_diary_read))
+        .route(
+            "/v1/room/notebook/recent",
+            post(room::http::room_notebook_recent),
+        )
+        .route(
+            "/v1/room/notebook/search",
+            post(room::http::room_notebook_search),
+        )
+        .route(
+            "/v1/room/notebook/read",
+            post(room::http::room_notebook_read),
+        )
+        .route("/v1/room/state/list", post(room::http::room_state_list))
+        .route("/v1/room/state/read", post(room::http::room_state_read))
         .route(
             "/v1/room/maintenance/status",
-            post(room::room_maintenance_status),
+            post(room::http::room_maintenance_status),
         )
         .route(
             "/v1/room/maintenance/submit",
-            post(room::room_maintenance_submit),
+            post(room::http::room_maintenance_submit),
         )
-        .route("/v1/room/bootstrap", post(room::room_bootstrap))
-        .route("/v1/room/bootstrap/read", post(room::room_bootstrap_read))
-        .route("/v1/room/skills/list", post(room::skills_list))
-        .route("/v1/room/skills/read", post(room::skills_read))
-        .route("/v1/room/skills/search", post(room::skills_search))
-        .route("/v1/room/skills/active", post(room::skills_active))
-        .route("/v1/room/skills/activate", post(room::skills_activate))
-        .route("/v1/room/skills/deactivate", post(room::skills_deactivate))
-        .route("/v1/room/skills/install", post(room::skills_install))
+        .route("/v1/room/bootstrap", post(room::http::room_bootstrap))
+        .route(
+            "/v1/room/bootstrap/read",
+            post(room::http::room_bootstrap_read),
+        )
+        .route("/v1/room/skills/list", post(room::http::skills_list))
+        .route("/v1/room/skills/read", post(room::http::skills_read))
+        .route("/v1/room/skills/search", post(room::http::skills_search))
+        .route("/v1/room/skills/active", post(room::http::skills_active))
+        .route(
+            "/v1/room/skills/activate",
+            post(room::http::skills_activate),
+        )
+        .route(
+            "/v1/room/skills/deactivate",
+            post(room::http::skills_deactivate),
+        )
+        .route("/v1/room/skills/install", post(room::http::skills_install))
         .route(
             "/v1/room/skills/install/get",
-            post(room::skills_install_get),
+            post(room::http::skills_install_get),
         )
         .route(
             "/v1/room/skills/install/cancel",
-            post(room::skills_install_cancel),
+            post(room::http::skills_install_cancel),
         )
-        .route("/v1/room/skills/run", post(room::skills_run))
+        .route("/v1/room/skills/run", post(room::http::skills_run))
         .route(
             "/mcp",
             get(mcp_server::transport::mcp_get).post(mcp_server::transport::mcp_post),

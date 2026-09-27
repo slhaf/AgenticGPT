@@ -249,7 +249,7 @@ pub(crate) struct HubState {
     pub(crate) confirmations: Arc<crate::confirmation::Confirmations>,
     pub(crate) job_cache: Arc<JobCache>,
     pub(crate) boot_generations: Arc<Mutex<HashMap<String, String>>>,
-    pub(crate) active_room: Arc<Mutex<Option<room::ActiveRoomConnection>>>,
+    pub(crate) active_room: Arc<Mutex<Option<room::control::ActiveRoomConnection>>>,
     pub(crate) http: reqwest::Client,
     pub(crate) public_base_url: Option<String>,
     pub(crate) oauth_codes: Arc<Mutex<HashMap<String, oauth::OAuthAuthorizationCode>>>,

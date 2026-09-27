@@ -350,10 +350,10 @@ async fn register_connection_mode(
     connection_mode: AgentConnectionMode,
 ) -> std::result::Result<(), &'static str> {
     if connection_mode == AgentConnectionMode::ReportingOnly {
-        room::release_active_room_for_agent(state, agent_id).await;
+        room::control::release_active_room_for_agent(state, agent_id).await;
         return Ok(());
     }
-    room::register_connection_role(state, agent_id, connection_id, role).await
+    room::control::register_connection_role(state, agent_id, connection_id, role).await
 }
 
 pub(super) async fn disconnect_agent(
@@ -380,7 +380,7 @@ pub(super) async fn disconnect_agent(
                 .job_cache
                 .mark_connection_stale(agent_id, connection_id)
                 .await;
-            room::release_active_room_if_current(state, agent_id, connection_id).await;
+            room::control::release_active_room_if_current(state, agent_id, connection_id).await;
             confirmation::retire_generation(state, agent_id, connection_id).await;
             Some(removed)
         } else {
@@ -433,7 +433,8 @@ pub(crate) async fn replace_agent_connection(
                 .job_cache
                 .mark_connection_stale(agent_id, &old.connection_id)
                 .await;
-            room::release_active_room_if_current(state, agent_id, &old.connection_id).await;
+            room::control::release_active_room_if_current(state, agent_id, &old.connection_id)
+                .await;
             confirmation::retire_generation(state, agent_id, &old.connection_id).await;
             Some(old)
         } else {
@@ -512,25 +513,27 @@ fn command_target(
 
 pub(super) async fn resolve_room_target(
     state: &HubState,
-) -> std::result::Result<DispatchTarget, room::RoomRouteError> {
+) -> std::result::Result<DispatchTarget, room::control::RoomRouteError> {
     let current = state.agents.current.lock().await;
     let active = state
         .active_room
         .lock()
         .await
         .clone()
-        .ok_or(room::RoomRouteError::NotActive)?;
+        .ok_or(room::control::RoomRouteError::NotActive)?;
     let Some(connection) = current.get(&active.agent_id) else {
-        return Err(room::RoomRouteError::StateConflict);
+        return Err(room::control::RoomRouteError::StateConflict);
     };
     if connection.connection_id != active.connection_id
         || connection.role != AgentRole::Room
         || connection.connection_mode != AgentConnectionMode::CommandCapable
     {
-        return Err(room::RoomRouteError::StateConflict);
+        return Err(room::control::RoomRouteError::StateConflict);
     }
     if !connection.hello_received {
-        return Err(room::RoomRouteError::Timeout("agent_not_ready".to_string()));
+        return Err(room::control::RoomRouteError::Timeout(
+            "agent_not_ready".to_string(),
+        ));
     }
     Ok(DispatchTarget {
         agent_id: active.agent_id,
