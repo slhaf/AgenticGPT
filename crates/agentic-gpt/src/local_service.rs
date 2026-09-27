@@ -158,7 +158,7 @@ async fn dispatch_inner(
             }
         }
         HubCommand::JobGet { payload, .. } => {
-            let wait_seconds = payload.wait_seconds.unwrap_or(0).min(30);
+            let wait_seconds = payload.effective_wait_seconds();
             match jobs::get_job_detail(&state, &payload.job_id, wait_seconds).await {
                 Ok(job) => slim_job_get_response(
                     job,

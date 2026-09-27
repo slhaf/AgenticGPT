@@ -166,7 +166,7 @@ paths:
   /v1/jobs/{jobId}:
     get:
       operationId: getJob
-      description: Inspect or briefly wait for one Job. waitSeconds defaults to 0 and is capped at 30; waitOnly defaults to false; cached state is used if the Agent is temporarily unavailable.
+      description: Inspect or briefly wait for one Job. waitSeconds defaults to 5 and is capped at 30; explicit 0 polls without waiting; waitOnly defaults to false; cached state is used if the Agent is temporarily unavailable.
       x-openai-isConsequential: false
       parameters:
         - name: jobId
@@ -186,7 +186,7 @@ paths:
             type: integer
             minimum: 0
             maximum: 30
-            default: 0
+            default: 5
         - name: waitOnly
           in: query
           required: false

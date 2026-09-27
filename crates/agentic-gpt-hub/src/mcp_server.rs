@@ -39,13 +39,23 @@ use crate::state::{
     HubState, McpProfile,
 };
 use crate::utils::random_id;
-use crate::{MAX_WAIT_SECONDS, REQUEST_TIMEOUT_SECS};
+use crate::REQUEST_TIMEOUT_SECS;
 const ROOM_TRANSPORT_MARGIN_SECS: u64 = 5;
 
 const MCP_INSTRUCTIONS: &str = "Agentic GPT Hub exposes domain-specific job creation plus one generic lifecycle. Use process.exec for one managed process and process.batch for multiple managed processes; both wait briefly and return Job envelopes. Use mcp.callTool for one downstream MCP Job and mcp.batch for 1..16 atomically admitted child Jobs with one aggregate confirmation, ordered results, global/per-server concurrency bounds, and optional fail-fast scheduling. Use job.get with waitSeconds to inspect or briefly wait, job.list for bounded filtered discovery, and job.cancel for kind-aware cancellation evidence. Use tmux as the persistent shared workspace for stateful development, iterative debugging, TUIs, and user-agent handoff. For tmux work, discover the workspace with tmux.listSessions and tmux.listPanes, inspect it with tmux.capturePane, then use tmux.exec for shell panes or tmux.pasteText for non-shell panes. At Room start, call room.bootstrap, then room.bootstrap.read for relevant guides. Room skills are managed only by the active Room Agent; skills.run returns the same Job envelope and is followed through job.get/job.cancel. Commands remain subject to Agentic local policy, path policy, confirmation, capacity, and audit.";
 const COORDINATOR_INSTRUCTIONS: &str = "Agentic GPT Hub coordinator profile. This connector exposes only Hub-native agent status, retained run history, current job snapshots, and notification tools. It never dispatches execution, job-control, tmux, downstream MCP, skills, bootstrap, diary, or notebook commands to an Agent.";
 fn default_job_wait_seconds() -> u64 {
-    0
+    JobGetRequest::DEFAULT_WAIT_SECONDS
+}
+
+fn job_get_payload(params: &JobGetArgs) -> JobGetRequest {
+    let mut payload = JobGetRequest {
+        job_id: params.job_id.clone(),
+        wait_only: params.wait_only.unwrap_or(false),
+        wait_seconds: params.wait_seconds,
+    };
+    payload.wait_seconds = Some(payload.effective_wait_seconds());
+    payload
 }
 
 fn default_standard_wait_seconds() -> u64 {
@@ -853,14 +863,11 @@ impl AgenticMcpServer {
     async fn job_get(&self, params: Parameters<JobGetArgs>) -> Result<CallToolResult, ErrorData> {
         let params = params.0;
         self.ensure_agent_enabled(&params.agent_id)?;
-        let wait_seconds = params.wait_seconds.unwrap_or(0).min(MAX_WAIT_SECONDS);
+        let payload = job_get_payload(&params);
+        let wait_seconds = payload.effective_wait_seconds();
         let command = HubCommand::JobGet {
             request_id: random_id("req"),
-            payload: JobGetRequest {
-                job_id: params.job_id.clone(),
-                wait_only: params.wait_only.unwrap_or(false),
-                wait_seconds: Some(wait_seconds),
-            },
+            payload,
         };
         let value =
             match request_agent(&self.state, &params.agent_id, command, wait_seconds + 2).await {
@@ -1960,7 +1967,7 @@ struct JobGetArgs {
     #[schemars(
         range(min = 0, max = 30),
         default = "default_job_wait_seconds",
-        description = "Bounded wait in seconds; defaults to 0 and is capped at 30."
+        description = "Bounded wait in seconds; defaults to 5 and is capped at 30."
     )]
     wait_seconds: Option<u64>,
     #[serde(default)]
@@ -3112,5 +3119,28 @@ mod tests {
         assert_eq!(value["result"]["content"][0]["type"], "text");
         assert_eq!(value["result"]["structuredContent"]["agents"], json!([]));
         assert_eq!(value["result"]["isError"], false);
+    }
+
+    #[test]
+    fn job_get_descriptor_and_wait_normalization_match_protocol_contract() {
+        assert_eq!(
+            default_job_wait_seconds(),
+            JobGetRequest::DEFAULT_WAIT_SECONDS
+        );
+        let schema = serde_json::to_string(&rmcp::schemars::schema_for!(JobGetArgs)).unwrap();
+        assert!(schema.contains("\"default\":5"));
+        assert!(schema.contains("\"maximum\":30"));
+
+        for (wait_seconds, expected) in [(None, 5), (Some(0), 0), (Some(31), 30)] {
+            let params = JobGetArgs {
+                agent_id: "agent".to_string(),
+                job_id: "job".to_string(),
+                wait_seconds,
+                wait_only: None,
+            };
+            let payload = job_get_payload(&params);
+            assert_eq!(payload.wait_seconds, Some(expected));
+            assert_eq!(payload.effective_wait_seconds(), expected);
+        }
     }
 }

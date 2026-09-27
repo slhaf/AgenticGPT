@@ -6,8 +6,8 @@ use std::{
 };
 
 use agentic_gpt_protocol::{
-    normalize_job_group, BatchExecRequest, ExecElement, ExecRequest, HubCommand, JobInfo, JobKind,
-    JobListRequest, JobState,
+    normalize_job_group, BatchExecRequest, ExecElement, ExecRequest, HubCommand, JobGetRequest,
+    JobInfo, JobKind, JobListRequest, JobState,
 };
 #[cfg(test)]
 use agentic_gpt_protocol::{JobDetail, McpBatchResponse};
@@ -1121,8 +1121,8 @@ impl AgentMcpServer {
     }
 
     async fn dispatch_job_get(&self, arguments: Value) -> Result<Value> {
-        let args: JobGetArgs = from_value(arguments)?;
-        let wait_seconds = args.wait_seconds.unwrap_or(0).min(30);
+        let args: JobGetRequest = from_value(arguments)?;
+        let wait_seconds = args.effective_wait_seconds();
         match crate::jobs::get_job_detail(&self.state, &args.job_id, wait_seconds).await {
             Ok(job) => slim_job_get_response(job, args.wait_only, wait_seconds, None),
             Err(reason) => Ok(job_error(reason)),
@@ -1670,16 +1670,6 @@ struct ProcessExecArgs {
     need_confirm: bool,
     #[serde(default)]
     wait_seconds: Option<u64>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct JobGetArgs {
-    job_id: String,
-    #[serde(default)]
-    wait_seconds: Option<u64>,
-    #[serde(default)]
-    wait_only: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2953,8 +2943,8 @@ fn properties_for(name: &str) -> Map<String, Value> {
             add(
                 "waitSeconds",
                 wait_seconds_schema(
-                    0,
-                    "Bounded wait in seconds; defaults to 0 and is capped at 30.",
+                    JobGetRequest::DEFAULT_WAIT_SECONDS,
+                    "Bounded wait in seconds; defaults to 5 and is capped at 30.",
                 ),
             );
             add(
@@ -4644,6 +4634,43 @@ mod tests {
         assert!(rejected.get("pollAfterMs").is_none());
         Ok(())
     }
+    #[tokio::test]
+    async fn job_get_omitted_waits_for_running_process_but_zero_is_nonblocking(
+    ) -> anyhow::Result<()> {
+        let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
+        let started = server
+            .dispatch(
+                "process.exec",
+                json!({"program": "sleep", "args": ["2"], "waitSeconds": 0}),
+            )
+            .await?;
+        let job_id = started["jobId"].as_str().unwrap().to_string();
+
+        for _ in 0..100 {
+            let state = server
+                .dispatch("job.get", json!({"jobId": job_id, "waitSeconds": 0}))
+                .await?;
+            if is_active_job_state(state["state"].as_str().unwrap()) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        let explicit_zero = server
+            .dispatch("job.get", json!({"jobId": job_id, "waitSeconds": 0}))
+            .await?;
+        assert!(
+            is_active_job_state(explicit_zero["state"].as_str().unwrap()),
+            "explicit zero wait must return the still-running process"
+        );
+
+        let omitted = server.dispatch("job.get", json!({"jobId": job_id})).await?;
+        assert_eq!(
+            omitted["state"], "completed",
+            "omitted wait must use the five-second default"
+        );
+        Ok(())
+    }
 
     #[tokio::test]
     async fn slim_job_shapes_group_and_wait_only_are_exact() -> anyhow::Result<()> {
@@ -4799,6 +4826,18 @@ mod tests {
             );
         }
         let get = serde_json::to_value(tool_descriptor("job.get")).unwrap();
+        assert_eq!(
+            get["inputSchema"]["properties"]["waitSeconds"]["default"],
+            5
+        );
+        assert_eq!(
+            get["inputSchema"]["properties"]["waitSeconds"]["minimum"],
+            0
+        );
+        assert_eq!(
+            get["inputSchema"]["properties"]["waitSeconds"]["maximum"],
+            30
+        );
         assert_eq!(
             get["inputSchema"]["properties"]["waitOnly"]["default"],
             false

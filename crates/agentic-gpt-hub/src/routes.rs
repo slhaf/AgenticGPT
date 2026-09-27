@@ -19,7 +19,7 @@ use crate::state::{
     HubState,
 };
 use crate::utils::{constant_time_equal, random_id};
-use crate::{MAX_WAIT_SECONDS, REQUEST_TIMEOUT_SECS};
+use crate::REQUEST_TIMEOUT_SECS;
 
 #[derive(Deserialize)]
 pub(crate) struct AgentIdQuery {
@@ -45,6 +45,16 @@ pub(crate) struct JobGetQuery {
     wait_seconds: Option<u64>,
     #[serde(default)]
     wait_only: bool,
+}
+
+fn job_get_payload(job_id: String, query: &JobGetQuery) -> JobGetRequest {
+    let mut payload = JobGetRequest {
+        job_id,
+        wait_only: query.wait_only,
+        wait_seconds: query.wait_seconds,
+    };
+    payload.wait_seconds = Some(payload.effective_wait_seconds());
+    payload
 }
 
 #[derive(Deserialize)]
@@ -306,17 +316,12 @@ pub(crate) async fn get_job(
     if let Err(response) = require_agent_enabled(&state, &query.agent_id) {
         return response;
     }
+    let payload = job_get_payload(job_id.clone(), &query);
+    let timeout_seconds = payload.effective_wait_seconds() + 2;
     let command = HubCommand::JobGet {
         request_id: random_id("req"),
-        payload: JobGetRequest {
-            job_id: job_id.clone(),
-            wait_only: query.wait_only,
-            wait_seconds: query
-                .wait_seconds
-                .map(|seconds| seconds.min(MAX_WAIT_SECONDS)),
-        },
+        payload,
     };
-    let timeout_seconds = query.wait_seconds.unwrap_or(0).min(MAX_WAIT_SECONDS) + 2;
     match request_agent(&state, &query.agent_id, command, timeout_seconds).await {
         Ok(value) => Json(live_job_value(value)).into_response(),
         Err(reason) => match cached_job(&state, &query.agent_id, &job_id).await {
@@ -746,4 +751,24 @@ pub(crate) fn api_error(
         }),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn get_job_normalizes_wait_and_request_timeout_without_dispatching() {
+        for (wait_seconds, expected) in [(None, 5), (Some(0), 0), (Some(30), 30), (Some(31), 30)] {
+            let query = JobGetQuery {
+                agent_id: "agent".to_string(),
+                wait_seconds,
+                wait_only: true,
+            };
+            let payload = job_get_payload("job".to_string(), &query);
+            assert_eq!(payload.wait_seconds, Some(expected));
+            assert!(payload.wait_only);
+            assert_eq!(payload.effective_wait_seconds() + 2, expected + 2);
+        }
+    }
 }

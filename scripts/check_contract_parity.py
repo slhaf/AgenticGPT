@@ -259,8 +259,24 @@ def json_load_stdout(result: subprocess.CompletedProcess[str], scenario: str) ->
 
 
 def make_env(root: Path, extra: dict[str, str] | None = None) -> dict[str, str]:
+    data_home = root / "data-home"
+    cache_home = root / "cache-home"
+    runtime_dir = root / "runtime"
+    temp_dir = root / "tmp"
+    for directory in (data_home, cache_home, runtime_dir, temp_dir):
+        directory.mkdir(parents=True, exist_ok=True)
+    runtime_dir.chmod(0o700)
     env = os.environ.copy()
-    env.update({"HOME": str(root / "home"), "XDG_CONFIG_HOME": str(root / "config-home")})
+    env.update(
+        {
+            "HOME": str(root / "home"),
+            "XDG_CONFIG_HOME": str(root / "config-home"),
+            "XDG_DATA_HOME": str(data_home),
+            "XDG_CACHE_HOME": str(cache_home),
+            "XDG_RUNTIME_DIR": str(runtime_dir),
+            "TMPDIR": str(temp_dir),
+        }
+    )
     if extra:
         env.update(extra)
     return env
@@ -674,8 +690,8 @@ def assert_tool_semantics(tools: list[dict[str, Any]], label: str, hub: bool = F
         fail(label, "job.get waitSeconds minimum is not 0")
     if get_props.get("waitSeconds", {}).get("maximum") != 30:
         fail(label, "job.get waitSeconds maximum is not 30")
-    if get_props.get("waitSeconds", {}).get("default") != 0:
-        fail(label, "job.get waitSeconds default is not 0")
+    if get_props.get("waitSeconds", {}).get("default") != 5:
+        fail(label, "job.get waitSeconds default is not 5")
     if get_props.get("waitOnly", {}).get("default") is not False:
         fail(label, "job.get waitOnly default is not false")
     if list_props.get("limit", {}).get("minimum") != 1 or list_props.get("limit", {}).get("maximum") != 100:
@@ -868,8 +884,8 @@ def require_schema_contract(document: dict[str, Any], schemas: dict[str, Any]) -
     get_parameters = paths.get("/v1/jobs/{jobId}", {}).get("get", {}).get("parameters", [])
     get_by_name = {item["name"]: item for item in get_parameters}
     wait_schema = get_by_name["waitSeconds"]["schema"]
-    if wait_schema.get("default") != 0 or wait_schema.get("minimum") != 0 or wait_schema.get("maximum") != 30:
-        fail("schema/contract", "HTTP job get waitSeconds is not default0/clamped0..30")
+    if wait_schema.get("default") != 5 or wait_schema.get("minimum") != 0 or wait_schema.get("maximum") != 30:
+        fail("schema/contract", "HTTP job get waitSeconds is not default5/clamped0..30")
     if "waitOnly" not in get_by_name or get_by_name["waitOnly"]["schema"].get("default") is not False:
         fail("schema/contract", "HTTP job get waitOnly=false is not declared")
 
@@ -1653,26 +1669,26 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
             fail("Hub HTTP active sleep", f"sleep30 was not active: {active}")
 
         started = time.monotonic()
-        default_get_response, default_get = hub_json(
+        zero_get_response, zero_get = hub_json(
             hub_port,
             hub_key,
             "GET",
-            f"/v1/jobs/{active_id}?" + urlencode({"agentId": normal_id}),
+            f"/v1/jobs/{active_id}?" + urlencode({"agentId": normal_id, "waitSeconds": "0"}),
             None,
-            "Hub HTTP omitted Job get",
+            "Hub HTTP explicit-zero Job get",
         )
-        default_elapsed = time.monotonic() - started
-        if default_get_response.status != 200 or default_elapsed >= 2.0:
-            fail("Hub HTTP omitted Job get", f"active default get was not prompt: {default_get_response.status}, {default_elapsed:.3f}s, {default_get}")
-        validate_operation_response(document, "/v1/jobs/{jobId}", "get", 200, default_get, "Hub HTTP omitted Job get")
+        zero_elapsed = time.monotonic() - started
+        if zero_get_response.status != 200 or zero_elapsed >= 2.0:
+            fail("Hub HTTP explicit-zero Job get", f"active zero-wait get was not prompt: {zero_get_response.status}, {zero_elapsed:.3f}s, {zero_get}")
+        validate_operation_response(document, "/v1/jobs/{jobId}", "get", 200, zero_get, "Hub HTTP explicit-zero Job get")
         if (
-            default_get.get("jobId") != active_id
-            or default_get.get("state") in {"completed", "failed", "cancelled", "rejected", "timed_out"}
-            or default_get.get("freshness") != "live"
-            or not default_get.get("observedAt")
-            or set(default_get) <= {"jobId", "state", "elapsedMs", "freshness", "observedAt"}
+            zero_get.get("jobId") != active_id
+            or zero_get.get("state") in {"completed", "failed", "cancelled", "rejected", "timed_out"}
+            or zero_get.get("freshness") != "live"
+            or not zero_get.get("observedAt")
+            or set(zero_get) <= {"jobId", "state", "elapsedMs", "freshness", "observedAt"}
         ):
-            fail("Hub HTTP omitted Job get", f"normal active detail was compact or terminal: {default_get}")
+            fail("Hub HTTP explicit-zero Job get", f"normal active detail was compact or terminal: {zero_get}")
 
         wait_response, wait_value = hub_json(
             hub_port,
@@ -1727,6 +1743,48 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
             or "durationMs" not in terminal_wait
         ):
             fail("Hub HTTP terminal waitOnly", f"terminal waitOnly remained compact: {terminal_wait}")
+        default_job = job_request(
+            hub_port,
+            hub_key,
+            normal_id,
+            "/usr/bin/sleep",
+            ["2"],
+            "parity-default-wait",
+            0,
+            "Hub HTTP default-wait sleep",
+        )
+        validate_operation_response(document, "/v1/process/exec", "post", 200, default_job, "Hub HTTP default-wait sleep")
+        default_job_id = default_job.get("jobId")
+        if (
+            not default_job_id
+            or default_job.get("state") in {"completed", "failed", "cancelled", "rejected", "timed_out"}
+        ):
+            fail("Hub HTTP default-wait sleep", f"sleep2 was not active: {default_job}")
+
+        started = time.monotonic()
+        omitted_get_response, omitted_get = hub_json(
+            hub_port,
+            hub_key,
+            "GET",
+            f"/v1/jobs/{default_job_id}?" + urlencode({"agentId": normal_id}),
+            None,
+            "Hub HTTP omitted Job get",
+        )
+        omitted_elapsed = time.monotonic() - started
+        if omitted_get_response.status != 200 or omitted_elapsed < 1.0:
+            fail(
+                "Hub HTTP omitted Job get",
+                f"default get did not wait for sleep2 completion: {omitted_get_response.status}, "
+                f"{omitted_elapsed:.3f}s, {omitted_get}",
+            )
+        validate_operation_response(document, "/v1/jobs/{jobId}", "get", 200, omitted_get, "Hub HTTP omitted Job get")
+        if (
+            omitted_get.get("jobId") != default_job_id
+            or omitted_get.get("state") != "completed"
+            or omitted_get.get("freshness") != "live"
+            or not omitted_get.get("observedAt")
+        ):
+            fail("Hub HTTP omitted Job get", f"default get did not return a fresh completed Job: {omitted_get}")
 
         batch_payload = {
             "agentId": normal_id,
@@ -1959,7 +2017,7 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
         validate_operation_response(document, "/v1/jobs", "get", 200, minimum_body, "Hub Job list minimum1")
         if len(minimum_body.get("jobs", [])) != 1:
             fail("Hub Job list minimum1", f"expected one job after lower clamp, got {len(minimum_body.get('jobs', []))}")
-        reports.append("PASS Hub HTTP Jobs: completed/active lifecycle, waitOnly bounds, cancellation evidence, typed group error, 50/100/1 pages, and cursor")
+        reports.append("PASS Hub HTTP Jobs: explicit-zero prompt and omitted-default completion waits, waitOnly bounds, cancellation evidence, typed group error, 50/100/1 pages, and cursor")
         for retired_path in sorted(ROOM_RETIRED_PATHS):
             retired_response = http_request(
                 hub_port,

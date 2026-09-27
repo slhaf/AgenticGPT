@@ -410,6 +410,41 @@ pub struct JobGetRequest {
     pub wait_only: bool,
 }
 
+impl JobGetRequest {
+    pub const DEFAULT_WAIT_SECONDS: u64 = 5;
+    pub const MAX_WAIT_SECONDS: u64 = 30;
+
+    pub fn effective_wait_seconds(&self) -> u64 {
+        self.wait_seconds
+            .unwrap_or(Self::DEFAULT_WAIT_SECONDS)
+            .min(Self::MAX_WAIT_SECONDS)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::JobGetRequest;
+
+    #[test]
+    fn job_get_wait_defaults_and_bounds() {
+        let omitted = JobGetRequest {
+            job_id: "job-1".to_string(),
+            wait_seconds: None,
+            wait_only: false,
+        };
+        assert_eq!(omitted.effective_wait_seconds(), 5);
+
+        for (wait_seconds, expected) in [(0, 0), (5, 5), (30, 30), (31, 30), (u64::MAX, 30)] {
+            let request = JobGetRequest {
+                job_id: "job-1".to_string(),
+                wait_seconds: Some(wait_seconds),
+                wait_only: false,
+            };
+            assert_eq!(request.effective_wait_seconds(), expected);
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JobCancelRequest {
