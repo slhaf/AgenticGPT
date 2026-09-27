@@ -4,31 +4,32 @@ This page records minimum checks for reproducible deployment. Standalone is the 
 
 ## Repository verification
 
+Run the Rust CI checks in the order specified by `.github/workflows/ci.yml`:
+
 ```bash
 cargo fmt --all -- --check
 cargo check --workspace
+cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo build -p agentic-gpt -p agentic-gpt-hub
-python3 -m venv target/contract-venv
-target/contract-venv/bin/python -m pip install "PyYAML" "jsonschema[format]>=4.25,<5"
-target/contract-venv/bin/python scripts/check_contract_parity.py
-cargo clippy --workspace --all-targets -- -D warnings
+python3 -m pip install "PyYAML" "jsonschema[format]>=4.25,<5"
+python3 scripts/check_contract_parity.py
 ```
 
-The parity checker is the current cross-surface schema/live gate. With no
-options it uses `target/debug/agentic-gpt` and `target/debug/agentic-gpt-hub`;
+For an externally managed local Python installation, activate an ignored
+virtual environment before running this sequence:
+
+```bash
+python3 -m venv target/contract-venv
+source target/contract-venv/bin/activate
+```
+
+The parity checker is the cross-surface schema/live gate. With no options it
+uses `target/debug/agentic-gpt` and `target/debug/agentic-gpt-hub`;
 `--agent-bin PATH` and `--hub-bin PATH` select explicit binaries. It runs
 isolated loopback/private-home processes and tears them down; schema validation
-and live behavior are reported as separate obligations. The contract
-environment lives under ignored `target/contract-venv`; install its PyYAML and
-`jsonschema[format]>=4.25,<5` dependencies before invoking the gate.
-
-Strict clippy intentionally runs after the runtime/schema checks. A successful
-parity run does not imply that clippy passes, and existing findings are not
-suppressed or treated as an all-green claim. The optional
-`scripts/evaluate_tool_contracts.py` prediction-shape probe is not a substitute
-for this gate or for the deterministic Agent corpus; its `--strict` flag only
-fails on missing/mismatched predictions.
+and live behavior are separate obligations. Passing the parity gate does not
+substitute for the earlier strict Clippy check.
 
 ## Local/Standalone smoke test (primary)
 
