@@ -1,6 +1,14 @@
+# Historical/noncanonical artifact retained for reference. The supported current
+# OpenAPI import is openapi/hub.yaml. This file is not a CI/runtime gate; external
+# consumers have not been enumerated.
 openapi: 3.1.0
 info:
-  title: Agentic GPT Minimal Agents API
+  title: Agentic GPT Minimal Agents API (historical, noncanonical)
+  description: >-
+    Historical minimal artifact retained for reference only. Readers and
+    importers should use openapi/hub.yaml for the supported current contract.
+    This artifact is not a CI or runtime gate, and no claim is made about
+    external consumers.
   version: 0.1.0
 servers:
   - url: https://agentic-gpt.example.com

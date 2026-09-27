@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Score optional model tool/argument predictions against the local corpus.
+"""Run the optional prediction-shape probe against the local contract corpus.
 
 This runner is deliberately provider-neutral: it reads JSON predictions from a
-file or stdin, performs no network calls, and never reads credentials. It is an
-exploration aid, not a required CI gate.
+file or stdin, performs no network calls, and never reads credentials. It
+compares predicted tool/argument shape only; it does not validate JSON Schema,
+invoke runtime dispatch, or replace the deterministic runtime corpus and live
+parity gate.
 """
 
 from __future__ import annotations
@@ -40,20 +42,40 @@ def shape_matches(expected: Any, actual: Any) -> bool:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description="Prediction-shape probe: compare model tool/argument predictions with corpus fixtures."
+    )
     parser.add_argument("--cases", default=str(DEFAULT_CASES), help="Path to cases.json")
     parser.add_argument(
         "--predictions",
-        help="JSON array/object of predictions, or '-' for stdin; omit to print the corpus contract",
+        help="JSON array/object of predictions, or '-' for stdin; omit to print the prediction-shape corpus contract",
     )
-    parser.add_argument("--strict", action="store_true", help="Exit 1 when a prediction is missing or mismatched")
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help=(
+            "Exit 1 when a prediction is missing or its tool/argument shape mismatches; "
+            "this is not strict JSON Schema or runtime validation"
+        ),
+    )
     args = parser.parse_args()
 
     cases = load_json(args.cases)
     if not isinstance(cases, list):
         raise SystemExit("cases must be a JSON array")
     if args.predictions is None:
-        print(json.dumps({"caseCount": len(cases), "cases": cases}, indent=2, sort_keys=True))
+        print(
+            json.dumps(
+                {
+                    "probe": "prediction-shape",
+                    "runtimeValidation": "not-performed",
+                    "caseCount": len(cases),
+                    "cases": cases,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
         return 0
 
     raw_predictions = load_json(args.predictions)
@@ -82,7 +104,14 @@ def main() -> int:
         )
 
     passed = sum(result["passed"] for result in results)
-    report = {"caseCount": len(results), "passed": passed, "failed": len(results) - passed, "results": results}
+    report = {
+        "probe": "prediction-shape",
+        "runtimeValidation": "not-performed",
+        "caseCount": len(results),
+        "passed": passed,
+        "failed": len(results) - passed,
+        "results": results,
+    }
     print(json.dumps(report, indent=2, sort_keys=True))
     return 1 if args.strict and passed != len(results) else 0
 

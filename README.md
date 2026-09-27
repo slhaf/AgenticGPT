@@ -11,6 +11,8 @@ Recommended — Standalone
 ChatGPT Secure MCP Tunnel
   -> official tunnel-client
   -> agentic-gpt worker
+  -> stdio MCP + owner-only Unix MCP
+  -> optional worker-owned HTTP MCP: http://<host>:<port>/mcp
   -> policy / files / process Jobs / skills / downstream MCP / tmux / Browser runtime
 
 Centralized — Hub
@@ -31,7 +33,8 @@ The historical Cloudflare-only Hub has been removed from `main`; it remains on b
 
 - No VPS, public domain, reverse proxy, Hub database, or shared command router is required.
 - Every machine has an independent connection and restart boundary.
-- The tunnel and owner-only Unix MCP ingress expose the configured toolset surface from the pre-existing Normal/Room names; profile presets are defaults and explicit `toolsets.enabled` selection is authoritative.
+- The tunnel, HTTP, and owner-only Unix MCP ingress expose the configured toolset surface from the pre-existing Normal/Room names; profile presets are defaults and explicit `toolsets.enabled` selection is authoritative.
+- Standalone may additionally enable a worker-owned Streamable HTTP MCP endpoint at fixed `/mcp`; it is disabled by default and supports either direct bearer authentication or the optional ChatGPT connector OAuth flow.
 - Policy, confirmation, audit, live configuration, capacity, and managed Jobs stay local to that machine.
 - A fresh stdio worker can recover a resumed tunnel request that arrives before a new MCP `initialize` handshake.
 
@@ -41,7 +44,7 @@ Hub mode remains useful when you need one public endpoint for many agents, Custo
 
 | Runtime | Best for | Public server | Failure scope | Entrypoint |
 | --- | --- | --- | --- | --- |
-| **Secure MCP Tunnel / Standalone** | Recommended direct deployment | Not required | One tunnel/agent | `agentic-gpt run` (config `mode=standalone`) |
+| **Secure MCP Tunnel / Standalone** | Recommended direct deployment; optional worker-owned HTTP MCP | Not required | One tunnel/agent | `agentic-gpt run` (config `mode=standalone`) |
 | **Hub + Local Agents** | Central routing, Actions, shared history/reporting | Required | Hub is shared | `agentic-gpt-hub serve` + `agentic-gpt run` |
 | **Local Unix MCP** | Development, smoke tests, local automation | Not required | One local worker | `agentic-gpt run` (config `mode=local`) |
 
@@ -206,6 +209,56 @@ agentic-gpt local call agent.info --arguments '{}'
 
 Connect ChatGPT through the Secure MCP Tunnel assigned to this agent. Each machine is configured and started independently.
 
+Optional standalone HTTP MCP is configured independently of the tunnel:
+
+```bash
+agentic-gpt config set httpMcp.bearerToken env:AGENTIC_HTTP_MCP_TOKEN
+agentic-gpt config set httpMcp.host 127.0.0.1
+agentic-gpt config set httpMcp.port 8765
+agentic-gpt config set httpMcp.publicUrl https://mcp.example.com
+agentic-gpt config set httpMcp.allowHosts '["mcp.example.com"]'
+agentic-gpt config set httpMcp.enabled true
+```
+
+The endpoint is always `http://<host>:<port>/mcp`, uses a `file:` or `env:`
+secret reference for its direct bearer, and keeps that direct-bearer mode valid
+when `publicUrl` is absent. `publicUrl` is an optional, non-secret HTTPS origin
+for ChatGPT connector OAuth; it is shown and edited without masking in the
+fullscreen TUI, `config init --non-interactive --http-mcp-public-url ...`, or
+`config set httpMcp.publicUrl ...` (use `null` to clear it). It is an advertised
+external origin only and does not change the local bind host or port.
+
+When `publicUrl` is configured, the standalone listener exposes OAuth discovery
+at `/.well-known/oauth-protected-resource/mcp` plus a root-compatible
+`/.well-known/oauth-protected-resource` alias, and AS/OIDC metadata at
+`/.well-known/oauth-authorization-server` and
+`/.well-known/openid-configuration`. ChatGPT authorization uses
+`/oauth/authorize` and `/oauth/token`, the single `agentic:mcp` scope, and only
+these callback families: `https://chatgpt.com/connector/oauth/<suffix>` or the
+exact `https://chatgpt.com/connector_platform_oauth_redirect`. Codes and access
+tokens are listener-local, in-memory, expiring, and revocable; there are no
+refresh tokens, `offline_access`, dynamic client registration, generic
+registration, or arbitrary redirects. OAuth does not replace direct bearer
+authentication, and the standalone page, tools, and profile semantics are not
+Hub's `Hub API key`, profile, or routing contract.
+
+Host filtering defaults to loopback; `null` or exactly `["*"]` explicitly allows
+every Host, while an empty list or mixed wildcard is rejected. The received
+Host authority must be allowed (including when a reverse proxy or ESA rewrites
+it), and a present `Origin` must match `publicUrl`; absent Origin is allowed for
+server-to-server requests. For ChatGPT OAuth, expose every discovery,
+authorization, token, and `/mcp` route through HTTPS. The origin may remain
+loopback/private; `publicUrl` does not route traffic, and the proxy must put the
+authority it actually sends in `allowHosts`.
+Rebinding or disabling closes stateful sessions and discards listener-local
+OAuth state; direct-token content rotation updates authentication in place and
+revokes OAuth codes/tokens.
+Local mode remains Unix-only. Hub's `/mcp` is a separate OAuth/Hub contract, and
+`mcpServers` remains the downstream registry used by `mcp.*`, not this listener.
+
+See [`docs/configuration.md`](docs/configuration.md) for the full schema, init/import
+editor flow, redaction, and live-reload/last-good behavior.
+
 Complete tunnel-client trust, cache, recovery, reporting, and service-manager guidance is in [`docs/standalone-runtime.md`](docs/standalone-runtime.md).
 
 ## Local-only development
@@ -264,13 +317,15 @@ writes the current nested Hub schema with the usual backup transaction.
 - Custom GPT Actions: import [`openapi/hub.yaml`](openapi/hub.yaml) and use `AGENTIC_GPT_API_KEY` as Bearer auth.
 - ChatGPT Apps MCP: connect to `https://<your-hub-domain>/mcp`.
 
-Hub-native and forwarded execution use the same managed Job envelopes. Active work is inspected with `job.get` and cancelled with `job.cancel`.
+Hub-native and forwarded execution use the same managed Job lifecycle
+projections. Active work is inspected with `job.get` and cancelled with
+`job.cancel`.
 
 ## Managed Jobs and safety boundaries
 
 - The V2 advertised surface contains 29 Normal names and 40 Room names; profile presets select namespaces, and explicit `toolsets.enabled` can narrow that surface.
-- `process.exec`, `skills.run`, and `mcp.callTool` return `JobResponse`.
-- `mcp.batch` accepts 1–16 ordered calls, uses one aggregate confirmation, and enforces global/per-server concurrency.
+- `process.exec`, `skills.run`, and `mcp.callTool` return flat `JobToolResponse`; `process.batch` returns `JobBatchToolResponse`.
+- `mcp.batch` returns a flat `McpBatchToolResponse` with ordered child Job projections, accepts 1–16 calls, uses one aggregate confirmation, and enforces global/per-server concurrency.
 - MCP arguments are JSON objects capped at 256 KiB per call; retained results are capped at 512 KiB; aggregate batch arguments/results are capped at 2 MiB.
 - Audit records contain bounded metadata, hashes, states, and termination evidence rather than raw MCP arguments/results.
 - Use `agent.info` before execution to inspect the active profile, path policy, capacity, confirmation, MCP configuration summary, and connection state.

@@ -1,0 +1,1319 @@
+use agentic_gpt_protocol::{
+    ActiveSkill, ExecRequest, JobResponse, SkillActivationRequest, SkillActivationResponse,
+    SkillDetail, SkillOrigin, SkillPackageSummary, SkillReadRequest, SkillReadResponse,
+    SkillRunRequest, SkillSearchRequest, SkillSummary, SkillsActiveResponse, SkillsListResponse,
+    SkillsSearchResponse,
+};
+use anyhow::{anyhow, Result};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
+use tokio::sync::{Mutex, OwnedRwLockReadGuard, RwLock};
+use uuid::Uuid;
+
+use crate::{config::Config, exec, jobs, state::AppState};
+
+const DEFAULT_LIMIT: usize = 20;
+const MAX_LIMIT: usize = 100;
+const BUILTIN_INSTALLER_ID: &str = "skill-installer";
+const MAX_RESOURCE_BYTES: u64 = 1024 * 1024;
+
+#[derive(Clone, Default)]
+pub(crate) struct SkillLeaseManager {
+    locks: Arc<Mutex<std::collections::HashMap<String, Arc<RwLock<()>>>>>,
+}
+
+pub(crate) struct SkillLease {
+    _guard: OwnedRwLockReadGuard<()>,
+}
+
+impl SkillLeaseManager {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    async fn lock_for(&self, id: &str) -> Arc<RwLock<()>> {
+        let mut locks = self.locks.lock().await;
+        locks
+            .entry(id.to_string())
+            .or_insert_with(|| Arc::new(RwLock::new(())))
+            .clone()
+    }
+
+    pub(crate) async fn try_shared(&self, id: &str) -> Option<SkillLease> {
+        self.lock_for(id)
+            .await
+            .try_read_owned()
+            .ok()
+            .map(|guard| SkillLease { _guard: guard })
+    }
+
+    pub(crate) async fn acquire_exclusive(
+        &self,
+        id: &str,
+        deadline: tokio::time::Duration,
+    ) -> Result<tokio::sync::OwnedRwLockWriteGuard<()>, tokio::time::error::Elapsed> {
+        tokio::time::timeout(deadline, self.lock_for(id).await.write_owned()).await
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ActiveSkillsFile {
+    #[serde(default)]
+    active_skills: Vec<ActiveSkillRecord>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    disabled_defaults: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ActiveSkillRecord {
+    id: String,
+    activated_at: DateTime<Utc>,
+}
+
+#[derive(Clone)]
+struct SkillPackage {
+    id: String,
+    origin: SkillOrigin,
+    read_only: bool,
+    package_root: Option<PathBuf>,
+    skill_md: String,
+    frontmatter: Value,
+    name: Option<String>,
+    description: Option<String>,
+    version: Option<String>,
+    tags: Vec<String>,
+    package_summary: SkillPackageSummary,
+    warnings: Vec<String>,
+}
+
+pub(crate) async fn list(state: &AppState) -> Result<SkillsListResponse> {
+    let config = state.config.read().await.clone();
+    let active = read_active_file(&config, &state.private_state.active_skills)?;
+    let mut warnings = Vec::new();
+    let mut skills = scan_skills(&config, &active, &mut warnings)?
+        .into_values()
+        .map(|package| package.summary(true, active_contains(&active, &package.id)))
+        .collect::<Vec<_>>();
+    skills.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok(SkillsListResponse { skills, warnings })
+}
+
+pub(crate) async fn read(state: &AppState, request: SkillReadRequest) -> Result<SkillReadResponse> {
+    validate_skill_id(&request.id)?;
+    let config = state.config.read().await.clone();
+    let active = read_active_file(&config, &state.private_state.active_skills)?;
+    let package = load_skill(&config, &request.id, active_contains(&active, &request.id))?;
+    let resource = request
+        .path
+        .as_deref()
+        .map(|path| read_resource(&package, path))
+        .transpose()?;
+    Ok(SkillReadResponse {
+        skill: package.detail(active_contains(&active, &request.id)),
+        resource,
+    })
+}
+
+pub(crate) async fn resolve_run_program(
+    state: &AppState,
+    request: &SkillRunRequest,
+) -> Result<PathBuf> {
+    validate_skill_id(&request.id)?;
+    let config = state.config.read().await.clone();
+    let active = read_active_file(&config, &state.private_state.active_skills)?;
+    if !active_contains(&active, &request.id) {
+        return Err(anyhow!("skill_inactive"));
+    }
+    let package = load_skill(&config, &request.id, true)?;
+    if package.origin != SkillOrigin::Workspace || package.read_only {
+        return Err(anyhow!("skill_not_runnable"));
+    }
+    let root = package
+        .package_root
+        .as_ref()
+        .ok_or_else(|| anyhow!("skill_not_runnable"))?;
+    let relative =
+        normalize_resource_path(&request.path).map_err(|_| anyhow!("invalid_script_path"))?;
+    let mut components = relative.components();
+    if components.next() != Some(Component::Normal(std::ffi::OsStr::new("scripts"))) {
+        return Err(anyhow!("script_path_forbidden"));
+    }
+    reject_symlink(root, "script_symlink")?;
+    let mut candidate = root.clone();
+    for component in relative.components() {
+        let Component::Normal(part) = component else {
+            return Err(anyhow!("invalid_script_path"));
+        };
+        candidate.push(part);
+        reject_symlink(&candidate, "script_symlink")?;
+    }
+    let metadata = fs::metadata(&candidate).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            anyhow!("script_not_found")
+        } else {
+            anyhow!("script_read_failed")
+        }
+    })?;
+    if !metadata.is_file() {
+        return Err(anyhow!("script_not_runnable"));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o111 == 0 {
+            return Err(anyhow!("script_not_executable"));
+        }
+    }
+    let canonical_root = fs::canonicalize(root).map_err(|_| anyhow!("skill_not_runnable"))?;
+    let canonical_candidate =
+        fs::canonicalize(&candidate).map_err(|_| anyhow!("script_not_runnable"))?;
+    if !canonical_candidate.starts_with(&canonical_root) {
+        return Err(anyhow!("script_path_forbidden"));
+    }
+    Ok(canonical_candidate)
+}
+
+pub(crate) async fn run(
+    state: AppState,
+    request: SkillRunRequest,
+    request_source: &str,
+    terminal_event_hook: Option<jobs::TerminalEventHook>,
+) -> Result<JobResponse> {
+    let program = resolve_run_program(&state, &request).await?;
+    let config = state.config.read().await.clone();
+    if let Some(working_directory) = request.working_directory.as_deref() {
+        exec::resolve_working_directory(&config, Some(working_directory))
+            .map_err(|reason| anyhow::Error::msg(reason).context("invalid_working_directory"))?;
+    }
+    let wait_seconds = request.effective_wait_seconds();
+    let info = jobs::start_skill_job_with_hook_and_source(
+        state.clone(),
+        ExecRequest {
+            agent_id: config.agent_id,
+            group: request.group,
+            program: program.to_string_lossy().to_string(),
+            args: request.args.unwrap_or_default(),
+            need_confirm: false,
+            confirm_method: None,
+            working_directory: request.working_directory,
+            wait_seconds: Some(wait_seconds),
+        },
+        &request.id,
+        &request.path,
+        request_source,
+        terminal_event_hook,
+    )
+    .await;
+    let info = jobs::wait_for_job(&state, info, wait_seconds).await;
+    let completed_inline = info.state.is_terminal();
+    Ok(jobs::response(info, completed_inline))
+}
+pub(crate) fn skill_run_command_error(error: anyhow::Error) -> serde_json::Value {
+    let message = error.root_cause().to_string();
+    let code = match message.as_str() {
+        "invalid_id"
+        | "skill_inactive"
+        | "skill_not_runnable"
+        | "invalid_script_path"
+        | "script_path_forbidden"
+        | "script_not_found"
+        | "script_not_executable"
+        | "script_symlink"
+        | "invalid_working_directory" => message.as_str(),
+        _ if error
+            .chain()
+            .any(|cause| cause.to_string() == "invalid_working_directory") =>
+        {
+            "invalid_working_directory"
+        }
+        _ => "skills_run_failed",
+    };
+    serde_json::json!({ "error": { "code": code, "message": message } })
+}
+pub(crate) async fn search(
+    state: &AppState,
+    request: SkillSearchRequest,
+) -> Result<SkillsSearchResponse> {
+    let query = request.query.trim();
+    if query.is_empty() {
+        return Err(anyhow!("query_required"));
+    }
+    let query = query.to_lowercase();
+    let limit = request.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
+    let config = state.config.read().await.clone();
+    let active = read_active_file(&config, &state.private_state.active_skills)?;
+    let mut warnings = Vec::new();
+    let mut skills = scan_skills(&config, &active, &mut warnings)?
+        .into_values()
+        .filter(|package| package.matches_query(&query))
+        .map(|package| package.summary(true, active_contains(&active, &package.id)))
+        .collect::<Vec<_>>();
+    skills.sort_by(|left, right| left.id.cmp(&right.id));
+    skills.truncate(limit);
+    Ok(SkillsSearchResponse { skills, warnings })
+}
+
+pub(crate) async fn active(state: &AppState) -> Result<SkillsActiveResponse> {
+    let config = state.config.read().await.clone();
+    let active = read_active_file(&config, &state.private_state.active_skills)?;
+    let mut warnings = Vec::new();
+    let skills = scan_skills(&config, &active, &mut warnings)?;
+    let active_skills = active
+        .active_skills
+        .iter()
+        .map(|record| {
+            let summary = skills
+                .get(&record.id)
+                .map(|package| package.summary(true, true));
+            ActiveSkill {
+                id: record.id.clone(),
+                activated_at: record.activated_at,
+                status: if summary.is_some() {
+                    "active".to_string()
+                } else {
+                    "missing".to_string()
+                },
+                stale: summary.is_none(),
+                summary,
+            }
+        })
+        .collect();
+    Ok(SkillsActiveResponse {
+        active_skills,
+        warnings,
+    })
+}
+
+pub(crate) async fn activate(
+    state: &AppState,
+    request: SkillActivationRequest,
+) -> Result<SkillActivationResponse> {
+    validate_skill_id(&request.id)?;
+    let config = state.config.read().await.clone();
+    load_skill(&config, &request.id, false)?;
+    let _guard = state.skills_writes.lock().await;
+    let mut active = read_active_file(&config, &state.private_state.active_skills)?;
+    let removed_disabled_default = active.disabled_defaults.iter().any(|id| id == &request.id);
+    active.disabled_defaults.retain(|id| id != &request.id);
+    if let Some(record) = active
+        .active_skills
+        .iter()
+        .find(|record| record.id == request.id)
+    {
+        if removed_disabled_default {
+            write_active_file(&state.private_state.active_skills, &active)?;
+        }
+        return Ok(SkillActivationResponse {
+            id: request.id,
+            active: true,
+            changed: false,
+            activated_at: Some(record.activated_at),
+        });
+    }
+    let activated_at = Utc::now();
+    active.active_skills.push(ActiveSkillRecord {
+        id: request.id.clone(),
+        activated_at,
+    });
+    active
+        .active_skills
+        .sort_by(|left, right| left.id.cmp(&right.id));
+    write_active_file(&state.private_state.active_skills, &active)?;
+    Ok(SkillActivationResponse {
+        id: request.id,
+        active: true,
+        changed: true,
+        activated_at: Some(activated_at),
+    })
+}
+
+pub(crate) async fn deactivate(
+    state: &AppState,
+    request: SkillActivationRequest,
+) -> Result<SkillActivationResponse> {
+    validate_skill_id(&request.id)?;
+    let config = state.config.read().await.clone();
+    let _guard = state.skills_writes.lock().await;
+    let mut active = read_active_file(&config, &state.private_state.active_skills)?;
+    let before = active.active_skills.len();
+    active
+        .active_skills
+        .retain(|record| record.id != request.id);
+    let changed = active.active_skills.len() != before;
+    let default_disabled = is_default_active_builtin(&request.id);
+    let tombstone_added =
+        default_disabled && !active.disabled_defaults.iter().any(|id| id == &request.id);
+    if tombstone_added {
+        active.disabled_defaults.push(request.id.clone());
+        active.disabled_defaults.sort();
+    }
+    if changed || tombstone_added {
+        write_active_file(&state.private_state.active_skills, &active)?;
+    }
+    Ok(SkillActivationResponse {
+        id: request.id,
+        active: false,
+        changed,
+        activated_at: None,
+    })
+}
+
+impl SkillPackage {
+    fn summary(&self, _valid: bool, active: bool) -> SkillSummary {
+        SkillSummary {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            description: self.description.clone(),
+            version: self.version.clone(),
+            tags: self.tags.clone(),
+            active,
+            origin: self.origin,
+            read_only: self.read_only,
+            package_summary: self.package_summary.clone(),
+            warnings: self.warnings.clone(),
+        }
+    }
+
+    fn detail(self, active: bool) -> SkillDetail {
+        SkillDetail {
+            id: self.id,
+            skill_md: self.skill_md,
+            frontmatter: self.frontmatter,
+            name: self.name,
+            description: self.description,
+            version: self.version,
+            tags: self.tags,
+            active,
+            origin: self.origin,
+            read_only: self.read_only,
+            package_summary: self.package_summary,
+            warnings: self.warnings,
+        }
+    }
+
+    fn matches_query(&self, query: &str) -> bool {
+        self.id.to_lowercase().contains(query)
+            || self.skill_md.to_lowercase().contains(query)
+            || self.frontmatter.to_string().to_lowercase().contains(query)
+            || self
+                .tags
+                .iter()
+                .any(|tag| tag.to_lowercase().contains(query))
+    }
+}
+
+fn scan_skills(
+    config: &Config,
+    active: &ActiveSkillsFile,
+    warnings: &mut Vec<String>,
+) -> Result<BTreeMap<String, SkillPackage>> {
+    let root = skills_root(config);
+    let mut skills = BTreeMap::new();
+    skills.insert(BUILTIN_INSTALLER_ID.to_string(), builtin_skill_package()?);
+    if !root.exists() {
+        return Ok(skills);
+    }
+    for entry in fs::read_dir(&root)? {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                warnings.push(format!("skill_dir_entry_unreadable: {error}"));
+                continue;
+            }
+        };
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(id) = path.file_name().and_then(|name| name.to_str()) else {
+            warnings.push(format!("skill_dir_name_invalid: {}", path.display()));
+            continue;
+        };
+        if id.starts_with('.') {
+            continue;
+        }
+        if validate_skill_id(id).is_err() {
+            warnings.push(format!("skill_id_invalid: {id}"));
+            continue;
+        }
+        if id == BUILTIN_INSTALLER_ID {
+            warnings.push("skill_id_reserved: skill-installer".to_string());
+            continue;
+        }
+        match load_skill(config, id, active_contains(active, id)) {
+            Ok(package) => {
+                skills.insert(id.to_string(), package);
+            }
+            Err(error) if error.to_string() == "not_found" => {}
+            Err(error) => warnings.push(format!("skill_unreadable: id={id}; error={error}")),
+        }
+    }
+    Ok(skills)
+}
+
+fn load_skill(config: &Config, id: &str, _active: bool) -> Result<SkillPackage> {
+    validate_skill_id(id)?;
+    if id == BUILTIN_INSTALLER_ID {
+        return builtin_skill_package();
+    }
+    let root = skills_root(config);
+    let skill_dir = root.join(id);
+    reject_symlink(&skill_dir, "skill_symlink")?;
+    let skill_md_path = skill_dir.join("SKILL.md");
+    reject_symlink(&skill_md_path, "skill_symlink")?;
+    if !skill_md_path.is_file() {
+        return Err(anyhow!("not_found"));
+    }
+    let skill_md = fs::read_to_string(&skill_md_path)?;
+    let (frontmatter, mut warnings) = parse_frontmatter(&skill_md);
+    let name = string_field(&frontmatter, "name");
+    let description = string_field(&frontmatter, "description");
+    let version = string_field(&frontmatter, "version");
+    let tags = frontmatter
+        .get("tags")
+        .and_then(Value::as_array)
+        .map(|tags| {
+            tags.iter()
+                .filter_map(Value::as_str)
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if frontmatter.get("tags").is_some() && tags.is_empty() {
+        warnings.push("frontmatter_tags_ignored: expected string array".to_string());
+    }
+    Ok(SkillPackage {
+        id: id.to_string(),
+        origin: SkillOrigin::Workspace,
+        read_only: false,
+        package_root: Some(skill_dir.clone()),
+        skill_md,
+        frontmatter,
+        name,
+        description,
+        version,
+        tags,
+        package_summary: SkillPackageSummary {
+            has_assets: skill_dir.join("assets").is_dir(),
+            has_scripts: skill_dir.join("scripts").is_dir(),
+            has_references: skill_dir.join("references").is_dir(),
+        },
+        warnings,
+    })
+}
+
+fn builtin_skill_package() -> Result<SkillPackage> {
+    let skill_md = include_str!("../../skills/skill-installer/SKILL.md").to_string();
+    let (frontmatter, warnings) = parse_frontmatter(&skill_md);
+    Ok(SkillPackage {
+        id: BUILTIN_INSTALLER_ID.to_string(),
+        origin: SkillOrigin::Builtin,
+        read_only: true,
+        package_root: None,
+        name: string_field(&frontmatter, "name"),
+        description: string_field(&frontmatter, "description"),
+        version: string_field(&frontmatter, "version"),
+        tags: frontmatter
+            .get("tags")
+            .and_then(Value::as_array)
+            .map(|tags| {
+                tags.iter()
+                    .filter_map(Value::as_str)
+                    .map(ToString::to_string)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        skill_md,
+        frontmatter,
+        package_summary: SkillPackageSummary::default(),
+        warnings,
+    })
+}
+
+fn read_resource(
+    package: &SkillPackage,
+    path: &str,
+) -> Result<agentic_gpt_protocol::SkillResource> {
+    let relative = normalize_resource_path(path)?;
+    let bytes = if relative == Path::new("SKILL.md") {
+        package.skill_md.as_bytes().to_vec()
+    } else {
+        let root = package
+            .package_root
+            .as_ref()
+            .ok_or_else(|| anyhow!("resource_unavailable"))?;
+        reject_symlink(root, "resource_symlink")?;
+        let mut cursor = root.clone();
+        for component in relative.components() {
+            let Component::Normal(part) = component else {
+                return Err(anyhow!("invalid_resource_path"));
+            };
+            cursor.push(part);
+            reject_symlink(&cursor, "resource_symlink")?;
+        }
+        let metadata = fs::metadata(&cursor).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                anyhow!("resource_not_found")
+            } else {
+                anyhow!("resource_read_failed")
+            }
+        })?;
+        if !metadata.is_file() {
+            return Err(anyhow!("not_a_file"));
+        }
+        if metadata.len() > MAX_RESOURCE_BYTES {
+            return Err(anyhow!("resource_too_large"));
+        }
+        fs::read(cursor).map_err(|_| anyhow!("resource_read_failed"))?
+    };
+    if bytes.len() as u64 > MAX_RESOURCE_BYTES {
+        return Err(anyhow!("resource_too_large"));
+    }
+    let sha256 = hex_sha256(&bytes);
+    let (encoding, content) = match String::from_utf8(bytes.clone()) {
+        Ok(text) => (agentic_gpt_protocol::SkillResourceEncoding::Utf8, text),
+        Err(_) => (
+            agentic_gpt_protocol::SkillResourceEncoding::Base64,
+            BASE64.encode(&bytes),
+        ),
+    };
+    Ok(agentic_gpt_protocol::SkillResource {
+        path: relative.to_string_lossy().replace('\\', "/"),
+        encoding,
+        content,
+        media_type: None,
+        size_bytes: bytes.len() as u64,
+        sha256,
+    })
+}
+
+fn normalize_resource_path(path: &str) -> Result<PathBuf> {
+    if path.is_empty() || path.contains('\0') || path.contains('\\') {
+        return Err(anyhow!("invalid_resource_path"));
+    }
+    let mut relative = PathBuf::new();
+    for component in Path::new(path).components() {
+        match component {
+            Component::Normal(part) => relative.push(part),
+            Component::CurDir
+            | Component::ParentDir
+            | Component::RootDir
+            | Component::Prefix(_) => {
+                return Err(anyhow!("invalid_resource_path"));
+            }
+        }
+    }
+    if relative.as_os_str().is_empty() {
+        return Err(anyhow!("invalid_resource_path"));
+    }
+    Ok(relative)
+}
+
+fn reject_symlink(path: &Path, error: &str) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(anyhow!("{error}")),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(anyhow!("{error}")),
+    }
+}
+
+fn hex_sha256(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn parse_frontmatter(skill_md: &str) -> (Value, Vec<String>) {
+    let mut warnings = Vec::new();
+    let normalized = skill_md.replace("\r\n", "\n");
+    if !normalized.starts_with("---\n") {
+        return (Value::Object(Default::default()), warnings);
+    }
+    let Some(end) = normalized[4..].find("\n---\n") else {
+        warnings.push("frontmatter_unclosed".to_string());
+        return (Value::Object(Default::default()), warnings);
+    };
+    let yaml = &normalized[4..4 + end];
+    match serde_yaml::from_str::<serde_yaml::Value>(yaml) {
+        Ok(value) => match serde_json::to_value(value) {
+            Ok(value) if value.is_object() => (value, warnings),
+            Ok(_) => {
+                warnings.push("frontmatter_ignored: expected object".to_string());
+                (Value::Object(Default::default()), warnings)
+            }
+            Err(error) => {
+                warnings.push(format!("frontmatter_invalid: {error}"));
+                (Value::Object(Default::default()), warnings)
+            }
+        },
+        Err(error) => {
+            warnings.push(format!("frontmatter_invalid: {error}"));
+            (Value::Object(Default::default()), warnings)
+        }
+    }
+}
+
+fn string_field(frontmatter: &Value, key: &str) -> Option<String> {
+    frontmatter
+        .get(key)
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+}
+
+fn active_contains(active: &ActiveSkillsFile, id: &str) -> bool {
+    active.active_skills.iter().any(|record| record.id == id)
+}
+
+fn read_active_file(config: &Config, path: &Path) -> Result<ActiveSkillsFile> {
+    if !path.exists() {
+        let active = ActiveSkillsFile {
+            active_skills: Vec::new(),
+            disabled_defaults: Vec::new(),
+        };
+        return reconcile_default_activation(config, path, active);
+    }
+    let text = fs::read_to_string(path)?;
+    reconcile_default_activation(config, path, serde_json::from_str(&text)?)
+}
+
+fn reconcile_default_activation(
+    _config: &Config,
+    path: &Path,
+    mut active: ActiveSkillsFile,
+) -> Result<ActiveSkillsFile> {
+    if is_default_active_builtin(BUILTIN_INSTALLER_ID)
+        && !active
+            .disabled_defaults
+            .iter()
+            .any(|id| id == BUILTIN_INSTALLER_ID)
+        && !active_contains(&active, BUILTIN_INSTALLER_ID)
+    {
+        active.active_skills.push(ActiveSkillRecord {
+            id: BUILTIN_INSTALLER_ID.to_string(),
+            activated_at: Utc::now(),
+        });
+        active
+            .active_skills
+            .sort_by(|left, right| left.id.cmp(&right.id));
+        write_active_file(path, &active)?;
+    }
+    Ok(active)
+}
+
+fn is_default_active_builtin(id: &str) -> bool {
+    id == BUILTIN_INSTALLER_ID
+}
+fn write_active_file(path: &Path, active: &ActiveSkillsFile) -> Result<()> {
+    let state_dir = path
+        .parent()
+        .ok_or_else(|| anyhow!("active_state_parent_missing"))?;
+    fs::create_dir_all(state_dir)?;
+    let existing_permissions = match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(anyhow!("active_state_target_symlink"));
+        }
+        Ok(metadata) if metadata.is_file() => Some(metadata.permissions()),
+        Ok(_) => return Err(anyhow!("active_state_target_not_regular_file")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    let tmp = state_dir.join(format!(".active-skills-{}.tmp", Uuid::new_v4().simple()));
+    let bytes = serde_json::to_vec_pretty(active)?;
+    let attempt = (|| -> Result<()> {
+        let mut file = OpenOptions::new().create_new(true).write(true).open(&tmp)?;
+        file.write_all(&bytes)?;
+        if let Some(permissions) = existing_permissions.clone() {
+            fs::set_permissions(&tmp, permissions)?;
+        }
+        file.sync_all()?;
+        fs::rename(&tmp, path)?;
+        #[cfg(unix)]
+        fs::File::open(state_dir)?.sync_all()?;
+        Ok(())
+    })();
+    if attempt.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    attempt
+}
+
+pub(crate) fn validate_skill_id(id: &str) -> Result<()> {
+    if id.is_empty() || id == "." || id == ".." {
+        return Err(anyhow!("invalid_id"));
+    }
+    if id
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '.' || ch == '-')
+    {
+        Ok(())
+    } else {
+        Err(anyhow!("invalid_id"))
+    }
+}
+
+pub(crate) fn skills_root(config: &Config) -> PathBuf {
+    config.workspace_root.join("skills")
+}
+
+pub(crate) fn package_sha256(config: &Config, id: &str) -> Result<String> {
+    let root = skills_root(config).join(id);
+    let mut files = Vec::new();
+    collect_files(&root, &root, &mut files)?;
+    files.sort();
+    let mut digest = Sha256::new();
+    for file in files {
+        digest.update(file.as_bytes());
+        digest.update(fs::read(root.join(&file))?);
+    }
+    let digest = digest.finalize();
+    Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+fn collect_files(base: &Path, current: &Path, files: &mut Vec<String>) -> Result<()> {
+    for entry in fs::read_dir(current)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            collect_files(base, &entry.path(), files)?;
+        } else if entry.file_type()?.is_file() {
+            files.push(
+                entry
+                    .path()
+                    .strip_prefix(base)
+                    .map_err(|_| anyhow!("package_invalid"))?
+                    .to_string_lossy()
+                    .replace('\\', "/"),
+            );
+        }
+    }
+    Ok(())
+}
+
+pub(crate) async fn is_active(state: &AppState, id: &str) -> Result<bool> {
+    let config = state.config.read().await.clone();
+    let active = read_active_file(&config, &state.private_state.active_skills)?;
+    Ok(active_contains(&active, id))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{config::Config, state::AppState};
+    use std::collections::HashMap;
+    use std::path::Path;
+    use std::sync::Arc;
+    use tokio::sync::{Mutex, RwLock};
+
+    fn test_state() -> AppState {
+        let root = std::env::temp_dir().join(format!("agentic-skills-{}", Uuid::new_v4().simple()));
+        let mut config = Config::default_config().unwrap();
+        config.workspace_root = root;
+        let private_state =
+            crate::private_state::PrivateStatePaths::for_test(std::env::temp_dir().join(format!(
+                "agentic-test-private-{}",
+                uuid::Uuid::new_v4().simple()
+            )));
+        AppState {
+            config_path: PathBuf::from("test-config.json"),
+            config: Arc::new(RwLock::new(config)),
+            private_state: private_state.clone(),
+            job_history: crate::job_history::JobHistoryStore::open(&private_state),
+            browser_runtime: None,
+            runtime: crate::state::RuntimeModel::hub(crate::state::CapabilityProfile::Room),
+            started_at: chrono::Utc::now(),
+            boot_generation: uuid::Uuid::new_v4().simple().to_string()[..12].to_string(),
+            supervised: false,
+            file_locks: Arc::new(Mutex::new(HashMap::new())),
+            jobs: Arc::new(Mutex::new(HashMap::new())),
+            hub_sender: Arc::new(Mutex::new(None)),
+            reporting_sender: Arc::new(Mutex::new(None)),
+            pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
+            temporary_mcp_allows: Arc::new(Mutex::new(Vec::new())),
+            mcp_concurrency: Arc::new(crate::jobs::McpConcurrency::new()),
+            room_repository_writes: Arc::new(Mutex::new(())),
+            skills_writes: Arc::new(Mutex::new(())),
+            skill_leases: Arc::new(crate::skills::SkillLeaseManager::new()),
+            skill_installs: Arc::new(crate::skill_installs::InstallManager::new()),
+        }
+    }
+
+    async fn workspace_root(state: &AppState) -> PathBuf {
+        state.config.read().await.workspace_root.clone()
+    }
+
+    fn write_skill(root: &Path, id: &str, body: &str) {
+        let dir = root.join("skills").join(id);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("SKILL.md"), body).unwrap();
+    }
+
+    #[tokio::test]
+    async fn list_reads_only_valid_first_level_skills_sorted_with_active() {
+        let state = test_state();
+        let root = workspace_root(&state).await;
+        write_skill(
+            &root,
+            "beta",
+            "---\nname: Beta\ntags: [rust, tools]\n---\nBody",
+        );
+        write_skill(&root, "alpha", "# Alpha");
+        fs::create_dir_all(root.join("skills").join("missing-md")).unwrap();
+
+        activate(
+            &state,
+            SkillActivationRequest {
+                id: "beta".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let response = list(&state).await.unwrap();
+        assert_eq!(
+            response
+                .skills
+                .iter()
+                .map(|skill| skill.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alpha", "beta", BUILTIN_INSTALLER_ID]
+        );
+        assert!(!response.skills[0].active);
+        assert!(response.skills[1].active);
+        assert_eq!(response.skills[1].name.as_deref(), Some("Beta"));
+        assert_eq!(response.skills[1].tags, vec!["rust", "tools"]);
+        assert!(response.skills[2].active);
+        assert_eq!(response.skills[2].origin, SkillOrigin::Builtin);
+        assert!(response.skills[2].read_only);
+    }
+
+    #[tokio::test]
+    async fn read_returns_frontmatter_package_summary_and_warnings() {
+        let state = test_state();
+        let root = workspace_root(&state).await;
+        write_skill(&root, "demo", "---\nname: Demo\n: bad\n---\nBody");
+        fs::create_dir_all(root.join("skills/demo/assets")).unwrap();
+
+        let response = read(
+            &state,
+            SkillReadRequest {
+                id: "demo".to_string(),
+                path: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.skill.id, "demo");
+        assert!(response.skill.skill_md.contains("Body"));
+        assert!(response.skill.package_summary.has_assets);
+        assert!(response
+            .skill
+            .warnings
+            .iter()
+            .any(|warning| warning.starts_with("frontmatter_invalid")));
+    }
+
+    #[tokio::test]
+    async fn search_matches_id_frontmatter_tags_and_body_case_insensitively_with_limit() {
+        let state = test_state();
+        let root = workspace_root(&state).await;
+        write_skill(&root, "alpha", "---\ndescription: Needle\n---\nBody");
+        write_skill(&root, "beta", "---\ntags: [Needle]\n---\nBody");
+        write_skill(&root, "needle-id", "# Title");
+
+        let response = search(
+            &state,
+            SkillSearchRequest {
+                query: "needle".to_string(),
+                limit: Some(2),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.skills.len(), 2);
+        assert_eq!(response.skills[0].id, "alpha");
+        assert_eq!(
+            search(
+                &state,
+                SkillSearchRequest {
+                    query: " ".to_string(),
+                    limit: None,
+                },
+            )
+            .await
+            .unwrap_err()
+            .to_string(),
+            "query_required"
+        );
+    }
+
+    #[tokio::test]
+    async fn active_marks_deleted_skill_stale_without_summary_and_deactivate_cleans_it() {
+        let state = test_state();
+        let root = workspace_root(&state).await;
+        write_skill(&root, "gone", "# Gone");
+        activate(
+            &state,
+            SkillActivationRequest {
+                id: "gone".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        fs::remove_file(root.join("skills/gone/SKILL.md")).unwrap();
+
+        let response = active(&state).await.unwrap();
+        assert_eq!(response.active_skills[0].status, "missing");
+        assert!(response.active_skills[0].stale);
+        assert!(response.active_skills[0].summary.is_none());
+
+        let response = deactivate(
+            &state,
+            SkillActivationRequest {
+                id: "gone".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(response.changed);
+        let active = active(&state).await.unwrap();
+        assert_eq!(active.active_skills.len(), 1);
+        assert_eq!(active.active_skills[0].id, BUILTIN_INSTALLER_ID);
+    }
+
+    #[tokio::test]
+    async fn activation_is_idempotent_and_state_file_only_saves_id_and_time() {
+        let state = test_state();
+        let root = workspace_root(&state).await;
+        write_skill(&root, "demo", "# Demo");
+
+        let first = activate(
+            &state,
+            SkillActivationRequest {
+                id: "demo".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let second = activate(
+            &state,
+            SkillActivationRequest {
+                id: "demo".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(first.changed);
+        assert!(!second.changed);
+        assert_eq!(first.activated_at, second.activated_at);
+        let text = fs::read_to_string(&state.private_state.active_skills).unwrap();
+        assert!(text.contains("activeSkills"));
+        assert!(text.contains("activatedAt"));
+        assert!(!text.contains("summary"));
+    }
+
+    #[tokio::test]
+    async fn builtin_installer_is_default_active_and_deactivation_survives_restart() {
+        let state = test_state();
+        let root = workspace_root(&state).await;
+
+        let first = list(&state).await.unwrap();
+        let installer = first
+            .skills
+            .iter()
+            .find(|skill| skill.id == BUILTIN_INSTALLER_ID)
+            .unwrap();
+        assert!(installer.active);
+        assert_eq!(installer.origin, SkillOrigin::Builtin);
+        assert!(installer.read_only);
+        let detail = read(
+            &state,
+            SkillReadRequest {
+                id: BUILTIN_INSTALLER_ID.to_string(),
+                path: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(detail.skill.origin, SkillOrigin::Builtin);
+        assert!(detail.skill.skill_md.contains("skills.install"));
+        assert_eq!(
+            search(
+                &state,
+                SkillSearchRequest {
+                    query: "installer".to_string(),
+                    limit: None,
+                },
+            )
+            .await
+            .unwrap()
+            .skills
+            .iter()
+            .filter(|skill| skill.id == BUILTIN_INSTALLER_ID)
+            .count(),
+            1
+        );
+
+        write_skill(&root, BUILTIN_INSTALLER_ID, "# shadow");
+        let shadowed = read(
+            &state,
+            SkillReadRequest {
+                id: BUILTIN_INSTALLER_ID.to_string(),
+                path: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(shadowed.skill.skill_md.contains("skills.install"));
+
+        deactivate(
+            &state,
+            SkillActivationRequest {
+                id: BUILTIN_INSTALLER_ID.to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let text = fs::read_to_string(&state.private_state.active_skills).unwrap();
+        assert!(text.contains("disabledDefaults"));
+        assert!(text.contains(BUILTIN_INSTALLER_ID));
+        assert!(
+            !list(&state)
+                .await
+                .unwrap()
+                .skills
+                .iter()
+                .find(|skill| skill.id == BUILTIN_INSTALLER_ID)
+                .unwrap()
+                .active
+        );
+
+        activate(
+            &state,
+            SkillActivationRequest {
+                id: BUILTIN_INSTALLER_ID.to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let text = fs::read_to_string(&state.private_state.active_skills).unwrap();
+        assert!(!text.contains("disabledDefaults"));
+    }
+
+    #[tokio::test]
+    async fn read_supports_bounded_utf8_and_base64_package_resources() {
+        let state = test_state();
+        let root = workspace_root(&state).await;
+        write_skill(&root, "demo", "# Demo");
+        let package_root = root.join("skills/demo");
+        fs::write(package_root.join("notes.txt"), "hello").unwrap();
+        fs::write(package_root.join("data.bin"), [0_u8, 255_u8, 1_u8]).unwrap();
+
+        let text = read(
+            &state,
+            SkillReadRequest {
+                id: "demo".to_string(),
+                path: Some("notes.txt".to_string()),
+            },
+        )
+        .await
+        .unwrap();
+        let resource = text.resource.unwrap();
+        assert_eq!(
+            resource.encoding,
+            agentic_gpt_protocol::SkillResourceEncoding::Utf8
+        );
+        assert_eq!(resource.content, "hello");
+        assert_eq!(resource.size_bytes, 5);
+
+        let binary = read(
+            &state,
+            SkillReadRequest {
+                id: "demo".to_string(),
+                path: Some("data.bin".to_string()),
+            },
+        )
+        .await
+        .unwrap();
+        let resource = binary.resource.unwrap();
+        assert_eq!(
+            resource.encoding,
+            agentic_gpt_protocol::SkillResourceEncoding::Base64
+        );
+        assert_eq!(resource.content, "AP8B");
+        assert_eq!(resource.size_bytes, 3);
+    }
+
+    #[tokio::test]
+    async fn read_rejects_resource_escape_directories_and_symlinks() {
+        let state = test_state();
+        let root = workspace_root(&state).await;
+        write_skill(&root, "demo", "# Demo");
+        let package_root = root.join("skills/demo");
+        fs::create_dir(package_root.join("docs")).unwrap();
+        fs::write(package_root.join("docs/info.txt"), "info").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(root.join("state"), package_root.join("link")).unwrap();
+
+        for path in ["../state/secret", "docs", "link/secret"] {
+            let error = read(
+                &state,
+                SkillReadRequest {
+                    id: "demo".to_string(),
+                    path: Some(path.to_string()),
+                },
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+            assert!(
+                ["invalid_resource_path", "not_a_file", "resource_symlink"]
+                    .contains(&error.as_str()),
+                "unexpected error for {path}: {error}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn run_resolution_requires_active_workspace_executable_under_scripts() {
+        let state = test_state();
+        let root = workspace_root(&state).await;
+        write_skill(&root, "demo", "# Demo");
+        let scripts = root.join("skills/demo/scripts");
+        fs::create_dir_all(&scripts).unwrap();
+        let script = scripts.join("check.sh");
+        fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let request = SkillRunRequest {
+            id: "demo".to_string(),
+            path: "scripts/check.sh".to_string(),
+            group: None,
+            args: None,
+            working_directory: None,
+            wait_seconds: None,
+        };
+        assert_eq!(
+            resolve_run_program(&state, &request)
+                .await
+                .unwrap_err()
+                .to_string(),
+            "skill_inactive"
+        );
+        activate(
+            &state,
+            SkillActivationRequest {
+                id: "demo".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let resolved = resolve_run_program(&state, &request).await.unwrap();
+        assert_eq!(
+            resolved.file_name().and_then(|name| name.to_str()),
+            Some("check.sh")
+        );
+        assert!(resolve_run_program(
+            &state,
+            &SkillRunRequest {
+                id: "demo".to_string(),
+                path: "SKILL.md".to_string(),
+                group: None,
+                args: None,
+                working_directory: None,
+                wait_seconds: None,
+            },
+        )
+        .await
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn run_waits_for_real_skill_job_and_returns_completed_output() {
+        let state = test_state();
+        let root = workspace_root(&state).await;
+        write_skill(&root, "demo", "# Demo");
+        let scripts = root.join("skills/demo/scripts");
+        fs::create_dir_all(&scripts).unwrap();
+        let script = scripts.join("print.sh");
+        fs::write(&script, "#!/bin/sh\nprintf 'skill-output\\n'\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        activate(
+            &state,
+            SkillActivationRequest {
+                id: "demo".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let response = run(
+            state,
+            SkillRunRequest {
+                id: "demo".to_string(),
+                path: "scripts/print.sh".to_string(),
+                group: None,
+                args: None,
+                working_directory: None,
+                wait_seconds: Some(5),
+            },
+            "test:skills.run",
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.status, agentic_gpt_protocol::JobState::Completed);
+        assert!(response.completed_inline);
+        assert_eq!(response.detail.job.stdout_tail, "skill-output\n");
+    }
+
+    #[tokio::test]
+    async fn invalid_id_and_missing_skill_return_clear_errors() {
+        let state = test_state();
+        assert_eq!(
+            read(
+                &state,
+                SkillReadRequest {
+                    id: "../x".to_string(),
+                    path: None,
+                },
+            )
+            .await
+            .unwrap_err()
+            .to_string(),
+            "invalid_id"
+        );
+        assert_eq!(
+            activate(
+                &state,
+                SkillActivationRequest {
+                    id: "missing".to_string()
+                },
+            )
+            .await
+            .unwrap_err()
+            .to_string(),
+            "not_found"
+        );
+    }
+}

@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-The root Cargo workspace contains three Rust crates: `crates/agentic-gpt` (Linux local-agent CLI), `crates/agentic-gpt-hub` (HTTP/WebSocket hub), and `crates/agentic-gpt-protocol` (shared wire types). API contracts live in `openapi/`; operational and development notes are in `docs/`; release helpers are in `scripts/`.
+The root Cargo workspace contains five Rust crates: `crates/agentic-gpt` (Linux local-agent CLI), `crates/agentic-gpt-hub` (HTTP/WebSocket hub), `crates/agentic-gpt-protocol` (shared wire types), `crates/agentic-apply-patch`, and `crates/agentic-browser-host`. API contracts live in `openapi/`; operational and development notes are in `docs/`; release helpers are in `scripts/`.
 
 `console/` is a separate Kotlin Multiplatform/Compose project. Shared UI and domain code belongs in `console/shared/src/commonMain`; platform integrations belong in `androidMain`, `jvmMain`, `jsMain`, or `wasmJsMain`. Host applications live in `androidApp`, `desktopApp`, and `webApp`. Keep generated output (`target/`, `console/build/`, `dist/`) out of commits.
 
@@ -11,6 +11,7 @@ The root Cargo workspace contains three Rust crates: `crates/agentic-gpt` (Linux
 - `cargo check --workspace`: type-check all Rust crates quickly.
 - `cargo test --workspace`: run the full Rust test suite.
 - `cargo fmt --all -- --check`: enforce CI formatting.
+- `python3 scripts/check_contract_parity.py`: run the live cross-surface contract gate after building the Agent/Hub binaries and installing its Python dependencies; see `docs/operations.md` for the isolated environment setup.
 - `cargo run -p agentic-gpt-hub -- init`: initialize a development hub.
 - `cargo run -p agentic-gpt -- run`: launch the local agent.
 - `cd console && ./gradlew :desktopApp:run`: run the desktop console.
@@ -24,6 +25,10 @@ Use `rustfmt` defaults and idiomatic Rust naming: `snake_case` functions/modules
 ## Testing Guidelines
 
 Place Rust unit tests beside implementation code in `#[cfg(test)]` modules; use `#[tokio::test]` for async behavior. Kotlin tests belong in the matching source set, such as `commonTest` or `jvmTest`, and test classes should end in `Test`. Add regression tests for bug fixes. No numeric coverage threshold is configured; prioritize policy, protocol, persistence, and transport edge cases.
+
+New tests must demonstrate a distinct, consumer-observable behavior, boundary, error, state transition, protocol contract, or meaningful side effect that existing tests do not already establish. Assert outcomes rather than implementation call order, field forwarding, incidental/unpromised wording, or source layout; preserve exact wording assertions when the wording itself is an external contract. Keep higher-level tests when they prove integration or contract behavior that lower-level tests cannot. Do not use line coverage or similar inputs alone to judge test value.
+
+Before deleting a test, identify its assertions and the failure it could catch. Record why that failure is already detected by named retained tests, or why the test only detects an implementation change without a behavior change. Similar inputs or overlapping coverage alone do not prove redundancy. Preserve tests for distinct boundaries, errors, side effects, and cross-surface contracts; if distinct failure detection cannot be ruled out, retain the test. These rules apply to all future test additions and deletions, not only refactoring.
 
 ## Commit & Pull Request Guidelines
 

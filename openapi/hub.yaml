@@ -42,7 +42,7 @@ paths:
   /v1/process/exec:
     post:
       operationId: processExec
-      description: Start one managed process and wait briefly. The response is always a Job envelope; use getJob for later state/output and cancelJob for cancellation evidence.
+      description: Start one managed process and wait briefly. The response is a flat Job status projection; use getJob for later state/output and cancelJob for cancellation evidence.
       x-openai-isConsequential: false
       requestBody:
         required: true
@@ -52,11 +52,13 @@ paths:
               $ref: "#/components/schemas/ExecRequest"
       responses:
         "200":
-          description: Managed process Job envelope.
+          description: Flat managed process Job status projection or a typed validation/admission error.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/JobResponse"
+                oneOf:
+                  - $ref: "#/components/schemas/JobToolResponse"
+                  - $ref: "#/components/schemas/ErrorResponse"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -70,7 +72,7 @@ paths:
   /v1/process/batch:
     post:
       operationId: processBatch
-      description: Atomically admit multiple managed processes with one confirmation decision. Returns ordered child Jobs; use getJob and cancelJob for lifecycle control.
+      description: Atomically admit multiple managed processes with one confirmation decision. Returns a flat batch status and ordered child Job projections; use getJob and cancelJob for lifecycle control.
       x-openai-isConsequential: false
       requestBody:
         required: true
@@ -80,11 +82,13 @@ paths:
               $ref: "#/components/schemas/BatchExecRequest"
       responses:
         "200":
-          description: Managed process batch Job envelope.
+          description: Flat managed process batch status, ordered child Job projections, or a typed validation/admission error.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ProcessBatchResponse"
+                oneOf:
+                  - $ref: "#/components/schemas/JobBatchToolResponse"
+                  - $ref: "#/components/schemas/ErrorResponse"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -98,7 +102,7 @@ paths:
   /v1/jobs:
     get:
       operationId: listJobs
-      description: List active or recently retained Jobs for one local Agentic agent with optional kind/state filters.
+      description: List active or recently retained Jobs for one local Agentic agent with optional group/kind/state filters and cursor pagination.
       x-openai-isConsequential: false
       parameters:
         - name: agentId
@@ -116,6 +120,14 @@ paths:
           required: false
           schema:
             $ref: "#/components/schemas/JobState"
+        - name: group
+          in: query
+          required: false
+          description: Exact human-readable workstream filter.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 32
         - name: limit
           in: query
           required: false
@@ -123,7 +135,13 @@ paths:
             type: integer
             minimum: 1
             maximum: 100
-            default: 100
+            default: 50
+        - name: cursor
+          in: query
+          required: false
+          description: Opaque cursor returned by a prior listJobs response.
+          schema:
+            type: string
       responses:
         "200":
           description: Active or recently retained Jobs.
@@ -131,16 +149,24 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/JobListResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
+        "503":
+          description: Agent unavailable while continuing an Agent-issued cursor; no cache-generated cursor is returned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobGetUnavailableResponse"
         "500":
           $ref: "#/components/responses/InternalError"
   /v1/jobs/{jobId}:
     get:
       operationId: getJob
-      description: Inspect or briefly wait for one Job. waitSeconds is capped at 30; cached state is used if the Agent is temporarily unavailable.
+      description: Inspect or briefly wait for one Job. waitSeconds defaults to 5 and is capped at 30; explicit 0 polls without waiting; waitOnly defaults to false; cached state is used if the Agent is temporarily unavailable.
       x-openai-isConsequential: false
       parameters:
         - name: jobId
@@ -160,20 +186,37 @@ paths:
             type: integer
             minimum: 0
             maximum: 30
-            default: 0
+            default: 5
+        - name: waitOnly
+          in: query
+          required: false
+          description: While waiting, return only status fields for an active Job; terminal completion returns normal detail.
+          schema:
+            type: boolean
+            default: false
       responses:
         "200":
-          description: Current Job state and bounded output.
+          description: Current Job state and bounded output, or a cache-only degraded snapshot when the Agent is unavailable.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/JobDetail"
+                oneOf:
+                  - $ref: "#/components/schemas/LiveJobToolResponse"
+                  - $ref: "#/components/schemas/JobCacheFallbackResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
         "500":
           $ref: "#/components/responses/InternalError"
+        "503":
+          description: Agent unavailable without a cached Job snapshot.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobGetUnavailableResponse"
   /v1/jobs/{jobId}/cancel:
     post:
       operationId: cancelJob
@@ -192,11 +235,19 @@ paths:
             type: string
       responses:
         "200":
-          description: Job state after the cancellation request.
+          description: Job cancellation outcome and observed termination evidence.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/JobDetail"
+                $ref: "#/components/schemas/JobCancelResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "502":
+          description: Hub could not deliver the cancellation request; freshness records the unavailable projection.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobGetUnavailableResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
@@ -430,7 +481,7 @@ paths:
   /v1/mcp/callTool:
     post:
       operationId: mcpCallTool
-      description: Start a managed downstream MCP tool Job through a local Agentic agent. Returns a bounded JobResponse; use job.get/job.cancel for later result or cancellation evidence.
+      description: Start a managed downstream MCP tool Job through a local Agentic agent. Returns a flat Job status projection; use job.get/job.cancel for later result or cancellation evidence.
       x-openai-isConsequential: false
       requestBody:
         required: true
@@ -440,11 +491,15 @@ paths:
               $ref: "#/components/schemas/McpCallToolRequest"
       responses:
         "200":
-          description: Managed MCP Job envelope after the bounded inline wait.
+          description: Flat downstream MCP Job status projection or a typed validation/admission error.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/JobResponse"
+                oneOf:
+                  - $ref: "#/components/schemas/JobToolResponse"
+                  - $ref: "#/components/schemas/ErrorResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
@@ -454,7 +509,7 @@ paths:
   /v1/mcp/batch:
     post:
       operationId: mcpBatch
-      description: Atomically admit 1..16 managed downstream MCP child Jobs with one aggregate confirmation, bounded global/per-server concurrency, ordered results, and optional fail-fast scheduling.
+      description: Atomically admit 1..16 managed downstream MCP child Jobs with one aggregate confirmation, bounded global/per-server concurrency, ordered flat child Job projections, and optional fail-fast scheduling.
       x-openai-isConsequential: false
       requestBody:
         required: true
@@ -464,13 +519,15 @@ paths:
               $ref: "#/components/schemas/McpBatchRequest"
       responses:
         "200":
-          description: Managed MCP batch response or typed preflight/capacity error.
+          description: Flat managed MCP batch status and ordered child Job projections, or a typed preflight/capacity error.
           content:
             application/json:
               schema:
                 oneOf:
-                  - $ref: "#/components/schemas/McpBatchResponse"
+                  - $ref: "#/components/schemas/McpBatchToolResponse"
                   - $ref: "#/components/schemas/ErrorResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
@@ -519,172 +576,310 @@ paths:
           $ref: "#/components/responses/NotFound"
         "502":
           $ref: "#/components/responses/BadGateway"
-  /v1/room/notebook/append:
+  /v1/room/diary/active:
     post:
-      operationId: roomNotebookAppend
-      description: Append an explicit notebook passage to the active Room Agent. ANCHOR passages update current state for their scope. No agentId is used.
+      operationId: roomDiaryActive
+      description: Read the active daily, weekly, and monthly Room diary documents from the active Room Agent. The response is bounded and may include a typed missing, unreadable, or invalid-UTF-8 result for an individual layer; no agentId is accepted.
       x-openai-isConsequential: false
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/NotebookAppendRequest"
+              $ref: "#/components/schemas/RoomDiaryActiveRequest"
       responses:
         "200":
-          description: Appended room notebook passage.
+          description: Active Room diary layer results.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/NotebookAppendResponse"
+                $ref: "#/components/schemas/RoomDiaryActiveResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          description: JSON body extraction failed before Room dispatch.
+          content:
+            text/plain:
+              schema:
+                type: string
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+  /v1/room/diary/read:
+    post:
+      operationId: roomDiaryRead
+      description: Read one exact Room diary document by validated layer and period. Daily accepts current or YYYY-MM-DD; weekly and monthly accept current or an ordered YYYY-MM-DD--YYYY-MM-DD range. No agentId is accepted.
+      x-openai-isConsequential: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RoomDiaryReadRequest"
+      responses:
+        "200":
+          description: One bounded Room diary layer result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoomDiaryReadResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          description: JSON body extraction failed before Room dispatch.
+          content:
+            text/plain:
+              schema:
+                type: string
         "504":
           $ref: "#/components/responses/GatewayTimeout"
   /v1/room/notebook/recent:
     post:
       operationId: roomNotebookRecent
-      description: Return recent notebook passages from the active Room Agent, with optional scope and significance filters. No agentId is used.
+      description: Read bounded recent previews of current Room Notebook Markdown documents. This public name now uses the current Markdown DTO, not the retired passage-oriented JSONL contract; no agentId is accepted.
       x-openai-isConsequential: false
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/NotebookRecentRequest"
+              $ref: "#/components/schemas/RoomNotebookRecentRequest"
       responses:
         "200":
-          description: Recent room notebook passages.
+          description: Bounded recent Notebook Markdown previews and optional warnings.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/NotebookPassagesResponse"
+                $ref: "#/components/schemas/RoomNotebookResultsResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
-        "504":
-          $ref: "#/components/responses/GatewayTimeout"
-  /v1/room/notebook/selectExact:
-    post:
-      operationId: roomNotebookSelectExact
-      description: Return notebook passages for one exact room-timezone calendar day from the active Room Agent. No agentId is used.
-      x-openai-isConsequential: false
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/NotebookSelectExactRequest"
-      responses:
-        "200":
-          description: Room notebook passages for one room-timezone calendar day.
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          description: JSON body extraction failed before Room dispatch.
           content:
-            application/json:
+            text/plain:
               schema:
-                $ref: "#/components/schemas/NotebookPassagesResponse"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "404":
-          $ref: "#/components/responses/NotFound"
+                type: string
         "504":
           $ref: "#/components/responses/GatewayTimeout"
   /v1/room/notebook/search:
     post:
       operationId: roomNotebookSearch
-      description: Search notebook passages in the active Room Agent by simple substring scan over abstract, content, scope, and tags. No vector search is used in V1.
+      description: Search current Room Notebook Markdown by a bounded case-insensitive substring over relative paths, H1 titles, and bodies. This public name now uses the current Markdown DTO, not the retired passage-oriented JSONL contract; no agentId is accepted.
       x-openai-isConsequential: false
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/NotebookSearchRequest"
+              $ref: "#/components/schemas/RoomNotebookSearchRequest"
       responses:
         "200":
-          description: Matching room notebook passages.
+          description: Bounded matching Notebook Markdown previews and optional warnings.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/NotebookPassagesResponse"
+                $ref: "#/components/schemas/RoomNotebookResultsResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          description: JSON body extraction failed before Room dispatch.
+          content:
+            text/plain:
+              schema:
+                type: string
         "504":
           $ref: "#/components/responses/GatewayTimeout"
-  /v1/room/notebook/current:
+  /v1/room/notebook/read:
     post:
-      operationId: roomNotebookCurrent
-      description: Return current recoverable notebook state for one scope, derived from current state or the latest ANCHOR. No agentId is used.
+      operationId: roomNotebookRead
+      description: Read one exact bounded Markdown document under the validated Room Notebook root. Paths outside Notebook or non-Markdown paths are rejected; no agentId is accepted.
       x-openai-isConsequential: false
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/NotebookCurrentRequest"
+              $ref: "#/components/schemas/RoomNotebookReadRequest"
       responses:
         "200":
-          description: Current recoverable state for a room notebook scope.
+          description: One bounded Room Notebook Markdown document.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/NotebookCurrentResponse"
+                $ref: "#/components/schemas/RoomNotebookReadResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          description: JSON body extraction failed before Room dispatch.
+          content:
+            text/plain:
+              schema:
+                type: string
         "504":
           $ref: "#/components/responses/GatewayTimeout"
-  /v1/room/notebook/update:
+  /v1/room/state/list:
     post:
-      operationId: roomNotebookUpdate
-      description: Update editable fields of one notebook passage in the active Room Agent. Scope and datetime are immutable; current state is refreshed when anchors change.
+      operationId: roomStateList
+      description: List deterministic non-symlink Markdown entities directly under State/entities in the active Room repository. No agentId is accepted.
       x-openai-isConsequential: false
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/NotebookUpdateRequest"
+              $ref: "#/components/schemas/RoomStateListRequest"
       responses:
         "200":
-          description: Updated room notebook passage.
+          description: Sorted bounded Room state entity list.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/NotebookUpdateResponse"
+                $ref: "#/components/schemas/RoomStateListResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          description: JSON body extraction failed before Room dispatch.
+          content:
+            text/plain:
+              schema:
+                type: string
         "504":
           $ref: "#/components/responses/GatewayTimeout"
-  /v1/room/notebook/remove:
+  /v1/room/state/read:
     post:
-      operationId: roomNotebookRemove
-      description: Remove one notebook passage from the active Room Agent storage. If it was current, current state falls back to the latest ANCHOR or becomes null.
+      operationId: roomStateRead
+      description: Read one exact bounded Markdown Room state entity by filename stem under State/entities. Arbitrary repository paths are rejected; no agentId is accepted.
       x-openai-isConsequential: false
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/NotebookRemoveRequest"
+              $ref: "#/components/schemas/RoomStateReadRequest"
       responses:
         "200":
-          description: Removed room notebook passage.
+          description: One bounded Room state Markdown document.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/NotebookRemoveResponse"
+                $ref: "#/components/schemas/RoomStateReadResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          description: JSON body extraction failed before Room dispatch.
+          content:
+            text/plain:
+              schema:
+                type: string
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+  /v1/room/maintenance/status:
+    post:
+      operationId: roomMaintenanceStatus
+      description: Inspect current Room maintenance readiness, repository state, schema/scaffold support, executor and workflow availability, synchronization heads, and all five semantic slot occupancies. This operation is read-only and does not initialize or mutate the repository; no agentId is accepted.
+      x-openai-isConsequential: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RoomMaintenanceStatusRequest"
+      responses:
+        "200":
+          description: Current Room maintenance status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoomMaintenanceStatusResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          description: JSON body extraction failed before Room dispatch.
+          content:
+            text/plain:
+              schema:
+                type: string
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+  /v1/room/maintenance/submit:
+    post:
+      operationId: roomMaintenanceSubmit
+      description: Apply one to five unique validated Room maintenance slot requests in local or workflow mode. waitSeconds is a bounded wait for workflow consumption and fast-forward; a wait timeout does not cancel the maintenance submission. The operation uses existing Agent repository, path, Git, lock, executor, and controlled-maintenance authority; no implicit confirmation or agentId is accepted.
+      x-openai-isConsequential: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RoomMaintenanceSubmitRequest"
+      responses:
+        "200":
+          description: Room maintenance application or workflow submission result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoomMaintenanceSubmitResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "422":
+          description: JSON body extraction failed before Room dispatch.
+          content:
+            text/plain:
+              schema:
+                type: string
         "504":
           $ref: "#/components/responses/GatewayTimeout"
   /v1/room/bootstrap:
@@ -948,7 +1143,7 @@ paths:
   /v1/room/skills/run:
     post:
       operationId: roomSkillsRun
-      description: Run an executable scripts/ file from an active workspace skill through the Room Agent ManagedJob engine. Fast terminal results are returned inline; otherwise use the returned jobId with getJob or cancelJob. No agentId is used.
+      description: Run an executable scripts/ file from an active workspace skill through the Room Agent ManagedJob engine. Returns a flat Job status projection; use getJob or cancelJob for lifecycle evidence. No agentId is used.
       x-openai-isConsequential: true
       requestBody:
         required: true
@@ -958,11 +1153,11 @@ paths:
               $ref: "#/components/schemas/SkillRunRequest"
       responses:
         "200":
-          description: Skill run started or completed inline.
+          description: Flat skill Job status projection.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/JobResponse"
+                $ref: "#/components/schemas/JobToolResponse"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -1405,6 +1600,8 @@ components:
         - commandType
         - commandHash
         - status
+        - resultRetained
+        - resultOmitted
         - createdAt
         - updatedAt
       additionalProperties: false
@@ -1432,7 +1629,13 @@ components:
             - unknown
             - failed
         result:
-          description: Completed command result, when available.
+          description: Completed command result when the authoritative payload is retained; omitted after eligible retention compaction.
+        resultRetained:
+          type: boolean
+          description: True when the authoritative result payload is retained in Hub storage.
+        resultOmitted:
+          type: boolean
+          description: True when an eligible completed payload was compacted while its run identity and result hash remain retained.
         reason:
           type:
             - string
@@ -1928,100 +2131,115 @@ components:
           type:
             - string
             - "null"
-    PassageSignificance:
+    RoomDiaryLayer:
       type: string
       enum:
-        - NORMAL
-        - ANCHOR
-    NotebookAppendRequest:
+        - daily
+        - weekly
+        - monthly
+    RoomDiaryLayerIssue:
+      type: string
+      enum:
+        - missing
+        - unreadable
+        - invalid_utf8
+    RoomDiaryLayerResult:
       type: object
       required:
-        - scope
-        - significance
-        - abstract
-        - content
-      additionalProperties: false
-      properties:
-        datetime:
-          type: string
-          description: Optional ISO-8601 datetime. Stored as UTC; file partitioning uses configured room timezone.
-        scope:
-          type: string
-          pattern: ^[A-Za-z0-9_.-]+$
-          description: Path-safe scope. Must not contain '..'.
-        significance:
-          $ref: "#/components/schemas/PassageSignificance"
-        abstract:
-          type: string
-        content:
-          type: string
-        tags:
-          type: array
-          items:
-            type: string
-    NotebookAppendResponse:
-      type: object
-      required:
-        - id
+        - layer
+        - period
         - path
-        - created
-        - warnings
+        - available
       additionalProperties: false
       properties:
-        id:
+        layer:
+          $ref: "#/components/schemas/RoomDiaryLayer"
+        period:
           type: string
         path:
           type: string
-        created:
+        available:
           type: boolean
-        warnings:
-          type: array
-          items:
-            type: string
-    NotebookRecentRequest:
+        content:
+          type: string
+          maxLength: 524288
+          description: Bounded Markdown content when available.
+        issue:
+          $ref: "#/components/schemas/RoomDiaryLayerIssue"
+    RoomDiaryActiveRequest:
       type: object
       additionalProperties: false
-      properties:
-        scope:
-          type: string
-          pattern: ^[A-Za-z0-9_.-]+$
-        days:
-          type: integer
-          minimum: 1
-          maximum: 30
-          default: 5
-        significance:
-          $ref: "#/components/schemas/PassageSignificance"
-        limit:
-          type: integer
-          minimum: 1
-          maximum: 100
-    NotebookSelectExactRequest:
+      description: Empty request object; the active daily, weekly, and monthly layers are selected by the Agent.
+    RoomDiaryActiveResponse:
       type: object
       required:
-        - year
-        - month
-        - day
+        - daily
+        - weekly
+        - monthly
       additionalProperties: false
       properties:
-        year:
-          type: integer
-        month:
-          type: integer
-          minimum: 1
-          maximum: 12
-        day:
-          type: integer
-          minimum: 1
-          maximum: 31
-        scope:
+        daily:
+          $ref: "#/components/schemas/RoomDiaryLayerResult"
+        weekly:
+          $ref: "#/components/schemas/RoomDiaryLayerResult"
+        monthly:
+          $ref: "#/components/schemas/RoomDiaryLayerResult"
+    RoomDiaryReadRequest:
+      type: object
+      required:
+        - layer
+        - period
+      additionalProperties: false
+      properties:
+        layer:
+          $ref: "#/components/schemas/RoomDiaryLayer"
+        period:
           type: string
-          pattern: ^[A-Za-z0-9_.-]+$
+          pattern: '^(current|\d{4}-\d{2}-\d{2}(--\d{4}-\d{2}-\d{2})?)$'
+          description: current, a daily YYYY-MM-DD date, or an ordered weekly/monthly YYYY-MM-DD--YYYY-MM-DD range. Layer-specific validation remains authoritative.
+    RoomDiaryReadResponse:
+      type: object
+      required:
+        - document
+      additionalProperties: false
+      properties:
+        document:
+          $ref: "#/components/schemas/RoomDiaryLayerResult"
+    RoomNotebookPreview:
+      type: object
+      required:
+        - path
+        - title
+        - contentPreview
+        - truncated
+        - effectiveAt
+      additionalProperties: false
+      properties:
+        path:
+          type: string
+          description: Validated repository-relative Markdown path under Notebook/.
+        title:
+          type: string
+        contentPreview:
+          type: string
+          maxLength: 2000
+          description: Bounded Markdown preview.
+        truncated:
+          type: boolean
+        effectiveAt:
+          type: string
+          format: date-time
+    RoomNotebookRecentRequest:
+      type: object
+      additionalProperties: false
+      properties:
         limit:
           type: integer
           minimum: 1
           maximum: 100
-    NotebookSearchRequest:
+          default: 20
+          description: Maximum bounded recent Notebook previews.
+    RoomNotebookSearchRequest:
       type: object
       required:
         - query
@@ -2029,175 +2247,327 @@ components:
       properties:
         query:
           type: string
-        scope:
-          type: string
-          pattern: ^[A-Za-z0-9_.-]+$
+          minLength: 1
+          maxLength: 256
+          description: Non-empty case-insensitive substring over Notebook paths, H1 titles, and bodies.
         limit:
           type: integer
           minimum: 1
           maximum: 100
-    NotebookCurrentRequest:
+          default: 20
+          description: Maximum bounded matching Notebook previews.
+    RoomNotebookReadRequest:
       type: object
       required:
-        - scope
+        - path
       additionalProperties: false
       properties:
-        scope:
+        path:
           type: string
-          pattern: ^[A-Za-z0-9_.-]+$
-    NotebookUpdateRequest:
+          minLength: 11
+          pattern: '^Notebook/.+\.md$'
+          description: Exact validated Notebook-relative Markdown path; symlinks, escapes, and non-Markdown paths are rejected.
+    RoomNotebookReadResponse:
       type: object
       required:
-        - id
-      additionalProperties: false
-      properties:
-        id:
-          type: string
-        significance:
-          $ref: "#/components/schemas/PassageSignificance"
-        abstract:
-          type: string
-        content:
-          type: string
-        tags:
-          type: array
-          items:
-            type: string
-      description: Updates editable passage fields. Datetime and scope are immutable; at least one editable field must be supplied.
-    NotebookUpdateResponse:
-      type: object
-      required:
-        - updated
-        - id
-        - warnings
-      additionalProperties: false
-      properties:
-        updated:
-          type: boolean
-        id:
-          type: string
-        warnings:
-          type: array
-          items:
-            type: string
-    NotebookRemoveRequest:
-      type: object
-      required:
-        - id
-      additionalProperties: false
-      properties:
-        id:
-          type: string
-    NotebookRemoveResponse:
-      type: object
-      required:
-        - removed
-        - id
-        - warnings
-      additionalProperties: false
-      properties:
-        removed:
-          type: boolean
-        id:
-          type: string
-        warnings:
-          type: array
-          items:
-            type: string
-    NotebookPassagePreview:
-      type: object
-      required:
-        - id
-        - datetime
-        - scope
-        - significance
-        - abstract
-        - contentPreview
-        - tags
-        - displayMode
-        - truncated
-      additionalProperties: false
-      properties:
-        id:
-          type: string
-        datetime:
-          type: string
-        scope:
-          type: string
-        significance:
-          $ref: "#/components/schemas/PassageSignificance"
-        abstract:
-          type: string
-        contentPreview:
-          type: string
-        tags:
-          type: array
-          items:
-            type: string
-        displayMode:
-          type: string
-          enum:
-            - full
-            - anchor
-            - abstract
-            - search
-        truncated:
-          type: boolean
-    NotebookPassagesResponse:
-      type: object
-      required:
-        - passages
-        - warnings
-      additionalProperties: false
-      properties:
-        passages:
-          type: array
-          items:
-            $ref: "#/components/schemas/NotebookPassagePreview"
-        warnings:
-          type: array
-          items:
-            type: string
-    NotebookCurrent:
-      type: object
-      required:
-        - scope
-        - updatedAt
-        - sourcePassageId
-        - abstract
+        - path
         - content
-        - tags
       additionalProperties: false
       properties:
-        scope:
-          type: string
-        updatedAt:
-          type: string
-        sourcePassageId:
-          type: string
-        abstract:
+        path:
           type: string
         content:
           type: string
-        tags:
-          type: array
-          items:
-            type: string
-    NotebookCurrentResponse:
+          maxLength: 524288
+          description: Bounded Markdown content.
+    RoomNotebookResultsResponse:
       type: object
       required:
-        - current
-        - warnings
+        - documents
       additionalProperties: false
       properties:
-        current:
-          anyOf:
-            - $ref: "#/components/schemas/NotebookCurrent"
-            - type: "null"
+        documents:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/RoomNotebookPreview"
         warnings:
+          type: array
+          maxItems: 32
+          items:
+            type: string
+    RoomStateListRequest:
+      type: object
+      additionalProperties: false
+      description: Empty request object; State/entities is selected by the Agent.
+    RoomStateEntity:
+      type: object
+      required:
+        - entity
+        - path
+      additionalProperties: false
+      properties:
+        entity:
+          type: string
+        path:
+          type: string
+    RoomStateListResponse:
+      type: object
+      required:
+        - entities
+      additionalProperties: false
+      properties:
+        entities:
+          type: array
+          items:
+            $ref: "#/components/schemas/RoomStateEntity"
+    RoomStateReadRequest:
+      type: object
+      required:
+        - entity
+      additionalProperties: false
+      properties:
+        entity:
+          type: string
+          minLength: 1
+          description: One safe filename stem resolved under State/entities; arbitrary repository paths are rejected.
+    RoomStateReadResponse:
+      type: object
+      required:
+        - path
+        - content
+      additionalProperties: false
+      properties:
+        path:
+          type: string
+        content:
+          type: string
+          maxLength: 524288
+          description: Bounded Markdown content.
+    RoomMaintenanceSlot:
+      type: string
+      enum:
+        - diary.daily
+        - diary.weekly
+        - diary.monthly
+        - notebook
+        - entity
+    RoomMaintenanceRequestItem:
+      type: object
+      required:
+        - slot
+        - payload
+      additionalProperties: false
+      properties:
+        slot:
+          $ref: "#/components/schemas/RoomMaintenanceSlot"
+        payload:
+          description: Slot-specific JSON payload validated by the existing Room maintenance executor.
+    RoomMaintenanceExecutionMode:
+      type: string
+      enum:
+        - local
+        - workflow
+    RoomMaintenanceSubmitRequest:
+      type: object
+      required:
+        - items
+      additionalProperties: false
+      properties:
+        items:
+          type: array
+          minItems: 1
+          maxItems: 5
+          description: One to five unique semantic slots; duplicate slots are rejected before mutation.
+          items:
+            $ref: "#/components/schemas/RoomMaintenanceRequestItem"
+        mode:
+          $ref: "#/components/schemas/RoomMaintenanceExecutionMode"
+          description: Optional execution-mode override; absent uses configured Room maintenance mode.
+        waitSeconds:
+          type: integer
+          minimum: 0
+          maximum: 30
+          default: 0
+          description: Bounded workflow-consumption/fast-forward wait. A wait timeout does not cancel submission.
+    RoomMaintenanceSubmissionState:
+      type: string
+      enum:
+        - applied
+        - submitted
+        - failed
+    RoomMaintenanceSyncOutcome:
+      type: string
+      enum:
+        - not_requested
+        - succeeded
+        - failed
+        - unavailable
+        - pending
+    RoomMaintenanceSubmitResponse:
+      type: object
+      required:
+        - mode
+        - state
+        - localApplied
+        - sync
+      additionalProperties: false
+      properties:
+        mode:
+          $ref: "#/components/schemas/RoomMaintenanceExecutionMode"
+        state:
+          $ref: "#/components/schemas/RoomMaintenanceSubmissionState"
+        localApplied:
+          type: boolean
+        sync:
+          $ref: "#/components/schemas/RoomMaintenanceSyncOutcome"
+        revision:
+          type: string
+    RoomMaintenanceStatusRequest:
+      type: object
+      additionalProperties: false
+      description: Empty request object; the active Room repository is selected by the Agent.
+    RoomMaintenanceRepositoryStatus:
+      type: object
+      required:
+        - root
+        - initialized
+        - topLevel
+      additionalProperties: false
+      properties:
+        root:
+          type: string
+        initialized:
+          type: boolean
+        topLevel:
+          type: boolean
+        branch:
+          type: string
+        head:
+          type: string
+        clean:
+          type: boolean
+    RoomMaintenanceSchemaStatus:
+      type: object
+      required:
+        - supported
+        - ready
+      additionalProperties: false
+      properties:
+        schemaVersion:
+          type: integer
+          format: int32
+          minimum: 0
+        supported:
+          type: boolean
+        ready:
+          type: boolean
+    RoomMaintenanceScaffoldStatus:
+      type: object
+      required:
+        - ready
+      additionalProperties: false
+      properties:
+        ready:
+          type: boolean
+        missingPaths:
           type: array
           items:
             type: string
+    RoomMaintenanceLocalExecutorStatus:
+      type: object
+      required:
+        - ready
+      additionalProperties: false
+      properties:
+        ready:
+          type: boolean
+    RoomMaintenanceWorkflowStatus:
+      type: object
+      required:
+        - available
+        - ready
+      additionalProperties: false
+      properties:
+        available:
+          type: boolean
+        ready:
+          type: boolean
+    RoomMaintenanceRemoteStatus:
+      type: object
+      required:
+        - configured
+        - available
+      additionalProperties: false
+      properties:
+        configured:
+          type: boolean
+        available:
+          type: boolean
+    RoomMaintenanceSyncStatus:
+      type: object
+      required:
+        - upstreamAvailable
+      additionalProperties: false
+      properties:
+        upstreamAvailable:
+          type: boolean
+        inSync:
+          type: boolean
+        localHead:
+          type: string
+        upstreamHead:
+          type: string
+    RoomMaintenanceSlotStatus:
+      type: object
+      required:
+        - slot
+        - occupied
+      additionalProperties: false
+      properties:
+        slot:
+          $ref: "#/components/schemas/RoomMaintenanceSlot"
+        occupied:
+          type: boolean
+    RoomMaintenanceStatusResponse:
+      type: object
+      required:
+        - repository
+        - schema
+        - scaffold
+        - localExecutor
+        - configuredMode
+        - autoPush
+        - workflow
+        - remote
+        - sync
+        - slots
+      additionalProperties: false
+      properties:
+        repository:
+          $ref: "#/components/schemas/RoomMaintenanceRepositoryStatus"
+        schema:
+          $ref: "#/components/schemas/RoomMaintenanceSchemaStatus"
+        scaffold:
+          $ref: "#/components/schemas/RoomMaintenanceScaffoldStatus"
+        localExecutor:
+          $ref: "#/components/schemas/RoomMaintenanceLocalExecutorStatus"
+        configuredMode:
+          $ref: "#/components/schemas/RoomMaintenanceExecutionMode"
+        autoPush:
+          type: boolean
+        workflow:
+          $ref: "#/components/schemas/RoomMaintenanceWorkflowStatus"
+        remote:
+          $ref: "#/components/schemas/RoomMaintenanceRemoteStatus"
+        sync:
+          $ref: "#/components/schemas/RoomMaintenanceSyncStatus"
+        slots:
+          type: array
+          minItems: 5
+          maxItems: 5
+          items:
+            $ref: "#/components/schemas/RoomMaintenanceSlotStatus"
     BootstrapDocumentKind:
       type: string
       enum:
@@ -2963,6 +3333,11 @@ components:
       properties:
         agentId:
           type: string
+        group:
+          type: string
+          minLength: 1
+          maxLength: 32
+          description: Optional human-readable workstream key inherited by the Job.
         program:
           type: string
         args:
@@ -2999,6 +3374,11 @@ components:
       properties:
         agentId:
           type: string
+        group:
+          type: string
+          minLength: 1
+          maxLength: 32
+          description: Optional human-readable workstream key inherited by every child Job.
         elements:
           type: array
           minItems: 1
@@ -3065,7 +3445,6 @@ components:
         - kind
         - state
         - createdAt
-        - startedAt
         - updatedAt
         - truncated
         - cancelRequested
@@ -3139,6 +3518,10 @@ components:
         terminationEvidence:
           type: string
           description: Bounded evidence describing the local/remote event actually observed.
+    JobFreshness:
+      type: string
+      enum: [live, cached, stale, unknown]
+      description: Freshness of the Hub Job response projection, not a JobInfo field.
     JobError:
       type: object
       required: [code, message]
@@ -3148,6 +3531,108 @@ components:
           type: string
         message:
           type: string
+    JobToolResponse:
+      type: object
+      required: [jobId, state]
+      additionalProperties: false
+      properties:
+        jobId:
+          type: string
+        group:
+          type: string
+        kind:
+          $ref: "#/components/schemas/JobKind"
+        state:
+          $ref: "#/components/schemas/JobState"
+        elapsedMs:
+          type: integer
+          minimum: 0
+        durationMs:
+          type: integer
+          minimum: 0
+        exitCode:
+          type: integer
+        stdoutTail:
+          type: string
+        stderrTail:
+          type: string
+        truncated:
+          type: boolean
+        result:
+          description: Retained bounded result for a terminal non-process Job.
+        error:
+          $ref: "#/components/schemas/JobError"
+        resultTruncated:
+          type: boolean
+        resultBytes:
+          type: integer
+          minimum: 0
+        resultSha256:
+          type: string
+        resultPreview:
+          type: string
+        freshness:
+          $ref: "#/components/schemas/JobFreshness"
+        observedAt:
+          type: string
+          format: date-time
+        resultOmitted:
+          type: boolean
+    LiveJobToolResponse:
+      allOf:
+        - $ref: "#/components/schemas/JobToolResponse"
+        - type: object
+          required: [freshness, observedAt]
+    JobGetUnavailableResponse:
+      type: object
+      required: [error, freshness]
+      additionalProperties: false
+      properties:
+        error:
+          $ref: "#/components/schemas/JobError"
+        cached:
+          $ref: "#/components/schemas/JobListItem"
+        freshness:
+          $ref: "#/components/schemas/JobFreshness"
+        observedAt:
+          type: string
+          format: date-time
+    JobCacheFallbackResponse:
+      type: object
+      required: [error, cached, freshness, observedAt]
+      additionalProperties: false
+      properties:
+        error:
+          $ref: "#/components/schemas/JobError"
+        cached:
+          $ref: "#/components/schemas/JobListItem"
+        freshness:
+          $ref: "#/components/schemas/JobFreshness"
+        observedAt:
+          type: string
+          format: date-time
+    JobCancelResponse:
+      type: object
+      required: [jobId, state, cancelOutcome, terminationEvidence, freshness, observedAt]
+      additionalProperties: false
+      properties:
+        jobId:
+          type: string
+        state:
+          $ref: "#/components/schemas/JobState"
+        cancelOutcome:
+          type: string
+          description: Bounded kind-specific cancellation outcome.
+        terminationEvidence:
+          type: string
+          description: Bounded evidence describing the local or remote event actually observed.
+        error:
+          $ref: "#/components/schemas/JobError"
+        freshness:
+          $ref: "#/components/schemas/JobFreshness"
+        observedAt:
+          type: string
+          format: date-time
     JobDetail:
       type: object
       required: [job, detailAvailable, resultTruncated]
@@ -3172,177 +3657,81 @@ components:
         resultPreview:
           type: string
           description: UTF-8-safe bounded preview for an omitted oversized result.
-    JobResponse:
+        freshness:
+          $ref: "#/components/schemas/JobFreshness"
+        observedAt:
+          type: string
+          format: date-time
+    JobBatchToolResponse:
       type: object
-      required:
-        - status
-        - completedInline
-        - jobId
-        - pollAfterMs
-        - job
-        - detailAvailable
-        - resultTruncated
-      additionalProperties: false
-      properties:
-        status:
-          $ref: "#/components/schemas/JobState"
-        completedInline:
-          type: boolean
-        jobId:
-          type: string
-        pollAfterMs:
-          type: integer
-          minimum: 0
-        job:
-          $ref: "#/components/schemas/JobInfo"
-        detailAvailable:
-          type: boolean
-          description: True when result/error detail came from the live Agent registry.
-        result:
-          description: Retained bounded result. Omitted when the serialized result exceeds 512 KiB.
-        error:
-          $ref: "#/components/schemas/JobError"
-        resultTruncated:
-          type: boolean
-        resultBytes:
-          type: integer
-          minimum: 0
-        resultSha256:
-          type: string
-        resultPreview:
-          type: string
-          description: UTF-8-safe bounded preview for an omitted oversized result.
-    ProcessBatchResponse:
-      oneOf:
-        - $ref: "#/components/schemas/JobBatchResponse"
-        - $ref: "#/components/schemas/JobRejectedResponse"
-    JobRejectedResponse:
-      type: object
-      required:
-        - status
-        - completedInline
-        - pollAfterMs
-        - error
-      additionalProperties: false
-      properties:
-        status:
-          type: string
-          const: rejected
-        completedInline:
-          type: boolean
-          const: true
-        pollAfterMs:
-          type: integer
-          const: 0
-        error:
-          type: object
-          required: [code, message]
-          additionalProperties: false
-          properties:
-            code:
-              type: string
-            message:
-              type: string
-    McpBatchStatus:
-      type: string
-      enum: [running, completed, completed_with_errors, rejected]
-    McpBatchChildResponse:
-      type: object
-      required:
-        - index
-        - job
-        - detailAvailable
-        - resultTruncated
-      additionalProperties: false
-      properties:
-        index:
-          type: integer
-          minimum: 0
-        id:
-          type: string
-        job:
-          $ref: "#/components/schemas/JobInfo"
-        detailAvailable:
-          type: boolean
-        result:
-          description: Retained bounded child result; omitted when clipped by child or aggregate budgets.
-        error:
-          $ref: "#/components/schemas/JobError"
-        resultTruncated:
-          type: boolean
-        resultBytes:
-          type: integer
-          minimum: 0
-        resultSha256:
-          type: string
-        resultPreview:
-          type: string
-    McpBatchResponse:
-      type: object
-      required:
-        - batchId
-        - status
-        - completedInline
-        - pollAfterMs
-        - results
-        - aggregateTruncated
+      required: [batchId, status, jobs]
       additionalProperties: false
       properties:
         batchId:
           type: string
         status:
+          type: string
+          enum: [running, completed, completed_with_errors, rejected]
+        jobs:
+          type: array
+          minItems: 0
+          description: Child Job status projections in original input order.
+          items:
+            $ref: "#/components/schemas/JobToolResponse"
+    McpBatchStatus:
+      type: string
+      enum: [running, completed, completed_with_errors, rejected]
+    McpBatchToolResponse:
+      type: object
+      required: [status, results]
+      additionalProperties: false
+      properties:
+        status:
           $ref: "#/components/schemas/McpBatchStatus"
-        completedInline:
-          type: boolean
-        pollAfterMs:
-          type: integer
-          minimum: 0
+        error:
+          $ref: "#/components/schemas/JobError"
         results:
           type: array
           minItems: 1
           maxItems: 16
-          description: Child responses in original input order.
+          description: Flat child Job status projections in original input order.
           items:
-            $ref: "#/components/schemas/McpBatchChildResponse"
-        aggregateTruncated:
-          type: boolean
-        aggregateBytes:
-          type: integer
-          minimum: 0
-          maximum: 2097152
-        error:
-          $ref: "#/components/schemas/JobError"
-    JobBatchResponse:
+            $ref: "#/components/schemas/JobToolResponse"
+    JobListItem:
       type: object
-      required:
-        - batchId
-        - status
-        - completedInline
-        - pollAfterMs
-        - jobs
+      required: [jobId, kind, state, createdAt]
       additionalProperties: false
       properties:
-        batchId:
+        jobId:
           type: string
-        status:
+        group:
           type: string
-          enum: [running, completed, completed_with_errors]
-        completedInline:
-          type: boolean
-        pollAfterMs:
-          type: integer
-          minimum: 0
-        jobs:
-          type: array
-          items:
-            $ref: "#/components/schemas/JobInfo"
+        kind:
+          $ref: "#/components/schemas/JobKind"
+        state:
+          $ref: "#/components/schemas/JobState"
+        createdAt:
+          type: string
+          format: date-time
+        startedAt:
+          type: string
+          format: date-time
+        finishedAt:
+          type: string
+          format: date-time
     JobListResponse:
       type: object
-      required:
-        - jobs
+      required: [jobs, freshness]
       additionalProperties: false
       properties:
         jobs:
           type: array
           items:
-            $ref: "#/components/schemas/JobInfo"
+            $ref: "#/components/schemas/JobListItem"
+        nextCursor:
+          type: string
+        freshness:
+          $ref: "#/components/schemas/JobFreshness"
+        observedAt:
+          type: string
+          format: date-time

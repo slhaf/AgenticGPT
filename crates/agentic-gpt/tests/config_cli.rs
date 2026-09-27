@@ -568,3 +568,321 @@ fn run_without_config_reports_init_first_and_does_not_create_a_file() {
     assert!(!config.exists(), "run wrote a partial config");
     let _ = fs::remove_dir_all(root);
 }
+
+#[test]
+fn config_keys_http_mcp_section_exposes_editable_contract() {
+    let output = Command::new(binary_path())
+        .args([
+            "--language",
+            "en",
+            "config",
+            "keys",
+            "--section",
+            "http-mcp",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "HTTP MCP keys command failed");
+
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let keys = value["keys"].as_array().unwrap();
+    assert_eq!(keys.len(), 6);
+    for key in [
+        "httpMcp.enabled",
+        "httpMcp.host",
+        "httpMcp.port",
+        "httpMcp.publicUrl",
+        "httpMcp.bearerToken",
+        "httpMcp.allowHosts",
+    ] {
+        assert!(
+            keys.iter().any(|entry| entry["key"] == key),
+            "HTTP MCP key missing from registry: {key}"
+        );
+    }
+
+    let enabled = keys
+        .iter()
+        .find(|entry| entry["key"] == "httpMcp.enabled")
+        .unwrap();
+    assert_eq!(enabled["type"], "boolean");
+    assert_eq!(enabled["nullable"], false);
+    let port = keys
+        .iter()
+        .find(|entry| entry["key"] == "httpMcp.port")
+        .unwrap();
+    assert_eq!(port["type"], "port");
+    let allow_hosts = keys
+        .iter()
+        .find(|entry| entry["key"] == "httpMcp.allowHosts")
+        .unwrap();
+    assert_eq!(allow_hosts["type"], "json-string-array-or-null");
+    assert_eq!(allow_hosts["nullable"], true);
+}
+
+#[test]
+fn non_interactive_init_writes_http_mcp_flags_as_references_and_json() {
+    let root = temp_root("http-mcp-init");
+    fs::create_dir_all(&root).unwrap();
+    let config = root.join("config.json");
+    let token_reference = "env:CONFIG_CLI_HTTP_MCP_TOKEN";
+    let output = Command::new(binary_path())
+        .args(["--language", "en", "config", "--config"])
+        .arg(&config)
+        .args([
+            "init",
+            "--mode",
+            "standalone",
+            "--profile",
+            "normal",
+            "--non-interactive",
+            "--http-mcp-enabled",
+            "true",
+            "--http-mcp-host",
+            "localhost",
+            "--http-mcp-port",
+            "18765",
+            "--http-mcp-public-url",
+            "https://mcp.example.com/",
+            "--http-mcp-bearer-token",
+            token_reference,
+            "--http-mcp-allow-hosts",
+            r#"["localhost","127.0.0.1"]"#,
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "HTTP MCP init command failed");
+
+    let value: Value = serde_json::from_slice(&fs::read(&config).unwrap()).unwrap();
+    assert_eq!(value["httpMcp"]["enabled"], true);
+    assert_eq!(value["httpMcp"]["host"], "localhost");
+    assert_eq!(value["httpMcp"]["publicUrl"], "https://mcp.example.com");
+    assert_eq!(value["httpMcp"]["port"], 18765);
+    assert_eq!(value["httpMcp"]["bearerToken"], token_reference);
+    assert_eq!(
+        value["httpMcp"]["allowHosts"],
+        serde_json::json!(["localhost", "127.0.0.1"])
+    );
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(token_reference));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(token_reference));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn config_set_http_mcp_updates_values_and_rejects_invalid_values_without_writing() {
+    let root = temp_root("http-mcp-set");
+    fs::create_dir_all(&root).unwrap();
+    let config = root.join("config.json");
+    let binary = binary_path();
+
+    let init = Command::new(&binary)
+        .args(["config", "--config"])
+        .arg(&config)
+        .args([
+            "init",
+            "--non-interactive",
+            "--http-mcp-enabled",
+            "true",
+            "--http-mcp-bearer-token",
+            "env:CONFIG_CLI_HTTP_MCP_TOKEN",
+        ])
+        .output()
+        .unwrap();
+    assert!(init.status.success(), "HTTP MCP set fixture init failed");
+
+    for (key, value) in [
+        ("httpMcp.host", "localhost"),
+        ("httpMcp.publicUrl", "https://mcp.example.com/"),
+        ("httpMcp.port", "18766"),
+        ("httpMcp.bearerToken", "env:CONFIG_CLI_HTTP_MCP_TOKEN_NEW"),
+        ("httpMcp.allowHosts", "null"),
+        ("httpMcp.enabled", "false"),
+    ] {
+        let set = Command::new(&binary)
+            .args(["config", "--config"])
+            .arg(&config)
+            .args(["set", key, value])
+            .output()
+            .unwrap();
+        assert!(set.status.success(), "valid HTTP MCP set failed for {key}");
+    }
+
+    let updated: Value = serde_json::from_slice(&fs::read(&config).unwrap()).unwrap();
+    assert_eq!(updated["httpMcp"]["host"], "localhost");
+    assert_eq!(updated["httpMcp"]["port"], 18766);
+    assert_eq!(
+        updated["httpMcp"]["bearerToken"],
+        "env:CONFIG_CLI_HTTP_MCP_TOKEN_NEW"
+    );
+    assert_eq!(updated["httpMcp"]["publicUrl"], "https://mcp.example.com");
+    let clear = Command::new(&binary)
+        .args(["config", "--config"])
+        .arg(&config)
+        .args(["set", "httpMcp.publicUrl", "null"])
+        .output()
+        .unwrap();
+    assert!(clear.status.success(), "publicUrl null clearing failed");
+    let cleared: Value = serde_json::from_slice(&fs::read(&config).unwrap()).unwrap();
+    assert!(cleared["httpMcp"]["publicUrl"].is_null());
+    assert!(cleared["httpMcp"]["allowHosts"].is_null());
+
+    let show = Command::new(&binary)
+        .args(["config", "--config"])
+        .arg(&config)
+        .arg("show")
+        .output()
+        .unwrap();
+    assert!(show.status.success(), "effective HTTP MCP show failed");
+    let effective: Value = serde_json::from_slice(&show.stdout).unwrap();
+    assert_eq!(effective["httpMcp"]["enabled"], false);
+
+    for (key, value) in [
+        ("httpMcp.port", "0"),
+        ("httpMcp.bearerToken", "literal-token-is-not-a-reference"),
+        ("httpMcp.bearerToken", "file:relative-token"),
+        ("httpMcp.allowHosts", "[]"),
+        ("httpMcp.allowHosts", r#"["*","localhost"]"#),
+        ("httpMcp.publicUrl", "http://mcp.example.com/path"),
+        ("httpMcp.allowHosts", r#"["bad/path"]"#),
+    ] {
+        let before = fs::read(&config).unwrap();
+        let set = Command::new(&binary)
+            .args(["--language", "en", "config", "--config"])
+            .arg(&config)
+            .args(["set", key, value])
+            .output()
+            .unwrap();
+        assert!(
+            !set.status.success(),
+            "invalid HTTP MCP set unexpectedly succeeded for {key}={value}"
+        );
+        assert_eq!(
+            fs::read(&config).unwrap(),
+            before,
+            "invalid HTTP MCP set modified the config for {key}={value}"
+        );
+    }
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn config_show_redacts_http_mcp_bearer_reference_but_disk_keeps_it() {
+    let root = temp_root("http-mcp-show-redacted");
+    fs::create_dir_all(&root).unwrap();
+    let config = root.join("config.json");
+    let token_reference = "file:/tmp/config-cli-http-mcp-token";
+
+    let init = Command::new(binary_path())
+        .args(["config", "--config"])
+        .arg(&config)
+        .args([
+            "init",
+            "--non-interactive",
+            "--http-mcp-enabled",
+            "true",
+            "--http-mcp-bearer-token",
+            token_reference,
+        ])
+        .output()
+        .unwrap();
+    assert!(init.status.success(), "HTTP MCP show fixture init failed");
+
+    let disk: Value = serde_json::from_slice(&fs::read(&config).unwrap()).unwrap();
+    assert_eq!(disk["httpMcp"]["bearerToken"], token_reference);
+
+    let show = Command::new(binary_path())
+        .args(["--language", "en", "config", "--config"])
+        .arg(&config)
+        .arg("show")
+        .output()
+        .unwrap();
+    assert!(show.status.success(), "HTTP MCP show command failed");
+    let shown: Value = serde_json::from_slice(&show.stdout).unwrap();
+    assert_eq!(shown["httpMcp"]["bearerToken"], "[REDACTED]");
+    assert!(!String::from_utf8_lossy(&show.stdout).contains(token_reference));
+    assert!(!String::from_utf8_lossy(&show.stderr).contains(token_reference));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn config_import_compatible_round_trip_preserves_http_mcp_fields() {
+    let root = temp_root("http-mcp-import-round-trip");
+    fs::create_dir_all(&root).unwrap();
+    let config = root.join("config.json");
+    let imported_source = root.join("import-source.json");
+    let imported_config = root.join("imported-config.json");
+    let token_reference = "env:CONFIG_CLI_IMPORTED_HTTP_MCP_TOKEN";
+    let init = Command::new(binary_path())
+        .args(["config", "--config"])
+        .arg(&config)
+        .args([
+            "init",
+            "--non-interactive",
+            "--http-mcp-enabled",
+            "true",
+            "--http-mcp-host",
+            "127.0.0.1",
+            "--http-mcp-port",
+            "18767",
+            "--http-mcp-public-url",
+            "https://import.example.com/",
+            "--http-mcp-bearer-token",
+            token_reference,
+            "--http-mcp-allow-hosts",
+            r#"["localhost","127.0.0.1"]"#,
+        ])
+        .output()
+        .unwrap();
+    assert!(init.status.success(), "HTTP MCP import fixture init failed");
+    fs::copy(&config, &imported_source).unwrap();
+
+    // The interactive `config import` wizard intentionally requires a TTY,
+    // but it still parses the source before checking the terminal. Exercise
+    // that stable import boundary without a fragile PTY transcript.
+    let import = Command::new(binary_path())
+        .args(["--language", "en", "config", "--config"])
+        .arg(&imported_config)
+        .args(["import"])
+        .arg(&imported_source)
+        .output()
+        .unwrap();
+    assert!(!import.status.success());
+    assert!(
+        !imported_config.exists(),
+        "non-interactive import wrote a partial config"
+    );
+
+    // Round-trip the materialized import source through the public file loader,
+    // which is the stable non-interactive boundary for this integration suite.
+    let show = Command::new(binary_path())
+        .args(["--language", "en", "config", "--config"])
+        .arg(&imported_source)
+        .arg("show")
+        .output()
+        .unwrap();
+    assert!(
+        show.status.success(),
+        "import-compatible config could not be loaded"
+    );
+    let imported: Value = serde_json::from_slice(&show.stdout).unwrap();
+    assert_eq!(imported["httpMcp"]["enabled"], true);
+    assert_eq!(imported["httpMcp"]["host"], "127.0.0.1");
+    assert_eq!(imported["httpMcp"]["port"], 18767);
+    assert_eq!(imported["httpMcp"]["bearerToken"], "[REDACTED]");
+    assert_eq!(
+        imported["httpMcp"]["publicUrl"],
+        "https://import.example.com"
+    );
+    assert_eq!(
+        imported["httpMcp"]["allowHosts"],
+        serde_json::json!(["localhost", "127.0.0.1"])
+    );
+    let source: Value = serde_json::from_slice(&fs::read(&imported_source).unwrap()).unwrap();
+    assert_eq!(source["httpMcp"]["bearerToken"], token_reference);
+
+    let _ = fs::remove_dir_all(root);
+}

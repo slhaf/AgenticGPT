@@ -111,6 +111,7 @@ Review 会隐藏密钥，可跳回 Basic、Connection 或可选 section 编辑�
 | --- | --- | --- | --- |
 | 公共 identity/workspace/policy | 必需 | 必需 | 必需 |
 | `tunnel` | 必需 | 忽略 | 忽略 |
+| `httpMcp` | 可选，仅在 Standalone 中生效 | 忽略 | 忽略 |
 | `hub`（`url`、`transport`、`agentSecret`） | 仅可选 Hub reporting/ntfy relay 使用 | 忽略 | 必需 |
 | 公开 Hub/VPS | 不需要 | 不需要 | 需要 |
 | 启动命令 | `agentic-gpt run` | `agentic-gpt run` | `agentic-gpt run` |
@@ -162,7 +163,175 @@ agentic-gpt run
 | `skills` | Skill package/install 限制与网络策略。 |
 | `room` | Room 仓库根目录、时区、日记日界线、维护模式和自动推送策略。 |
 | `tunnel` | Standalone tunnel-client 来源、secret 引用与可选 reporting。 |
+| `browser` | 可选的高级 Browser runtime 覆盖；普通 runtime discovery/provisioning 默认仍自动进行。 |
 | `hub` | 集中式 Hub 连接，或 Standalone 的可选 Hub reporting/ntfy relay。 |
+| `httpMcp` | 可选的 Standalone hidden worker 所有入站 Streamable HTTP MCP endpoint。 |
+
+## Standalone HTTP MCP endpoint
+
+Standalone 可以由 hidden worker 提供可选的入站 MCP endpoint：
+
+```text
+http://<host>:<port>/mcp
+```
+
+它默认关闭，并且独立于 tunnel transport 与 Hub。配置形状与默认值如下：
+
+```json
+{
+  "httpMcp": {
+    "enabled": false,
+    "host": "127.0.0.1",
+    "port": 8765,
+    "publicUrl": null,
+    "bearerToken": "",
+    "allowHosts": ["localhost", "127.0.0.1", "::1"]
+  }
+}
+```
+
+路径固定为 `/mcp`，不能通过配置修改。没有 `publicUrl` 时，endpoint 接受配置的
+`Authorization: Bearer ...` 凭据，保持直接本地使用；配置 `publicUrl` 后，另外
+提供 Standalone ChatGPT connector OAuth contract：
+
+- `GET /.well-known/oauth-protected-resource/mcp` 是 canonical path-specific
+  protected-resource metadata；`GET /.well-known/oauth-protected-resource` 是根路径
+ 兼容 alias。
+- `GET /.well-known/oauth-authorization-server` 与
+  `GET /.well-known/openid-configuration` 是 authorization-server/OpenID alias。
+- `GET|POST /oauth/authorize` 与 `POST /oauth/token` 实现唯一 `agentic:mcp`
+  scope 的 authorization-code flow。
+
+`publicUrl` 必须是非空 HTTPS origin，不能包含 userinfo、除空路径或 `/` 之外的
+path、query 或 fragment；末尾 `/` 会被规范化。它只是公布的外部 origin，不是
+路由或 proxy 覆盖：`host` 与 `port` 仍是本地 bind 坐标，origin 可以保持
+loopback/private。`publicUrl` 不是 secret，在 `config show`、Review、诊断和 TUI
+中始终显示且不隐藏；`bearerToken` 仍是 secret 引用，解析后的值不会暴露。
+
+connector 只接受以下精确 ChatGPT callback family：
+`https://chatgpt.com/connector/oauth/<suffix>` 或精确的
+`https://chatgpt.com/connector_platform_oauth_redirect`。只接受 `agentic:mcp`；
+不提供 refresh token、`offline_access`、dynamic client registration、generic
+registration 或任意 redirect。authorization code 与 access token 是 opaque、
+listener-local 的内存记录，有过期、单次 code 消费和 listener 替换/token 内容
+轮换时撤销机制。Standalone authorization 页面以及 tool/profile surface 使用
+Standalone 语义，不是 Hub 的 `Hub API key`、profile 或 routing contract。
+
+OAuth 路由与 `/mcp` 共用 listener Host 防护。缺失或 malformed Host 会被拒绝，
+不允许的 authority 返回 forbidden；不带 port 的 allowlist 项匹配任意 port，
+带 port 的项目必须精确匹配。`null` 与严格等于 `["*"]` 仍是明确的全量放行值。
+如果存在 `Origin`，必须精确匹配配置的 `publicUrl`；缺失 Origin 的
+server-to-server 请求仍然有效，不添加 permissive CORS。未配置 `publicUrl` 时，
+直接 bearer 失败仍使用普通 Bearer challenge；配置后，MCP challenge 指向
+path-specific protected-resource metadata URL。
+
+rmcp transport 使用有状态的 Streamable HTTP/SSE：客户端必须先初始化 session；
+listener rebind 或关闭会终止 session，客户端必须重新 initialize。直接 bearer
+内容轮换会原地更新认证并保留既有 session，同时原子撤销 OAuth 记录。无效候选
+保留上一次有效 listener 及其 state。
+
+`allowHosts` 是 HTTP MCP transport 使用的 DNS-rebinding 防护：
+
+- 默认列表只允许 `localhost`、`127.0.0.1` 和 `::1`。
+- 非空合法 host/authority 列表只允许列表中的请求。
+- `null` 或严格等于 `["*"]` 时明确允许任意 Host 值；wildcard 不能与其他项混用。
+- 空数组会被拒绝，不会被解释为全量允许。
+- malformed authority、wildcard 混用以及其他非法值都会被拒绝。
+
+非 loopback listener 应显式填写 authority allowlist，或有意使用上述两个全量放行值。
+`host` 必须是可 bind 的非空值，且不能含空白或控制字符；`port` 必须在 `1..=65535`
+范围内。
+
+`bearerToken` 永远是 secret 引用，不能填写 literal credential。只有 endpoint disabled
+时才允许为空；启用后必须使用以下一种形式：
+
+- `file:/absolute/path`（会去除末尾一个 LF 或 CRLF）；
+- `env:VARIABLE_NAME`。
+
+引用值必须可用、非空且不含控制字符。配置校验会拒绝明文、格式错误的引用，以及缺少
+引用的 enabled endpoint。解析后的 token 只保留在内存中。`config show`、Review、诊断、
+日志和 `agent.info` 都会同时隐藏引用和解析值；文件或环境中的 secret 由外部 secret
+管理流程负责配置与轮换。
+
+### 使用 CLI 配置 HTTP MCP
+
+受控 registry 在 `http-mcp` section 中提供这些键：
+
+```bash
+agentic-gpt config set httpMcp.bearerToken env:AGENTIC_HTTP_MCP_TOKEN
+agentic-gpt config set httpMcp.host 127.0.0.1
+agentic-gpt config set httpMcp.port 8765
+agentic-gpt config set httpMcp.publicUrl https://mcp.example.com
+agentic-gpt config set httpMcp.allowHosts '["mcp.example.com"]'
+agentic-gpt config set httpMcp.enabled true
+```
+
+要明确关闭 Host 过滤，可使用 JSON `null` 或 `["*"]`；要让 OAuth 路由 fail closed
+并回到本地直接 bearer 模式，请清除可选 origin：
+
+```bash
+agentic-gpt config set httpMcp.allowHosts null
+agentic-gpt config set httpMcp.allowHosts '["*"]'
+agentic-gpt config set httpMcp.publicUrl null
+```
+
+`allowHosts` 是 JSON array 或 `null`，不是逗号分隔字符串。`publicUrl` 必须是 HTTPS
+origin；`config set` 会在写入前校验完整候选值。被拒绝的值不会修改配置或 backup。
+`config mcp` 仍专门管理下游 `mcpServers` registry，不配置这个入站 listener。
+
+确定性部署可使用 `config init --non-interactive` 的全部 endpoint flags：
+
+```bash
+agentic-gpt config init --non-interactive \
+  --mode standalone \
+  --http-mcp-enabled true \
+  --http-mcp-host 127.0.0.1 \
+  --http-mcp-port 8765 \
+  --http-mcp-public-url https://mcp.example.com \
+  --http-mcp-bearer-token env:AGENTIC_HTTP_MCP_TOKEN \
+  --http-mcp-allow-hosts '["mcp.example.com"]'
+```
+
+这些 flags 仍须通过 HTTPS origin、secret 引用和 allow-host 规则；启用 endpoint 却没有
+token 引用时，会在写入 config 或 backup 前失败。交互式 `config init` 会把同样的 flags
+作为 Connection 字段的可编辑初始值。HTTP MCP enabled toggle、host/port、非 secret 的
+public-origin editor、secret-reference editor 与 JSON array/`null` allow-host editor
+都可在 Review 前修改；public-origin 输入为空时会清除它。
+`config import --config PATH [SOURCE]` 会识别已有的 `httpMcp` object，把字段带入同一套
+交互式 editor；用户可在最终一次提交前修正或关闭 endpoint。Review 中 bearer 引用显示为
+`[REDACTED]`，但会显示 `publicUrl`；取消或校验失败不会写入任何内容。
+
+### Browser runtime 覆盖
+
+Browser 是否启用不由 runtime 配置决定，`toolsets.enabled` 仍具有权威性。没有
+`browser` section（或使用 `browser: {}`）时，普通 runtime discovery 不变。显式 descriptor
+用于开发、特殊部署或恢复等高级场景，不是普通 managed-runtime 安装路径。
+`codexCliPath` 可选，因为官方 Browser launcher 只有在可用时才会导出
+`CODEX_CLI_PATH`。配置 `runtime` 时其他 scalar 均必填，所有配置路径必须是绝对路径；
+`nodeModuleDirs` 默认为空列表：
+
+```json
+{
+  "browser": {
+    "runtime": {
+      "appVersion": "<official-runtime-version>",
+      "channel": "<runtime-channel>",
+      "nodeReplPath": "/absolute/path/to/node_repl",
+      "nodePath": "/absolute/path/to/node",
+      "browserClientPath": "/absolute/path/to/browser-client.mjs",
+      "browserServicePath": "/absolute/path/to/browser-service.mjs",
+      "codexHome": "/absolute/path/to/runtime-home",
+      "codexCliPath": "/optional/absolute/path/to/codex-or-compatible-cli",
+      "nodeModuleDirs": ["/absolute/path/to/node_modules"]
+    }
+  }
+}
+```
+
+显式 source 在进程启动时选择并具有权威性：无效 descriptor 会关闭 Browser capability，
+不会回退到 Desktop discovery，但 Agentic 仍会继续启动。修改它需要重启进程。
+`docsRoot` 与 `trustedCodePaths` 由内部派生，不是配置字段。本设置不管理 installer、
+downloader 或 runtime cache。
 
 可直接作为路径组件的 `agentId` 会原样映射为私有状态目录名；历史上较宽松的 Hub identity 仍然兼容，但会使用稳定 hash 目录 key，而不会直接成为文件系统路径组件。
 
@@ -315,14 +484,24 @@ Server id 最长 64 字节，只使用字母、数字、`.`、`_`、`-`。`strea
 
 `skills` 控制 package 大小、redirect、timeout、重试/总 deadline、安装/下载并发，以及可选 host allowlist。规范字段是顶层 `skills`；只有缺少顶层字段时才读取 legacy `room.skills`。
 
-`room.timezone` 保留为 Room metadata；V2 read 使用仓库路径，不再使用 legacy JSONL 日期分区。
-`room.diaryDayBoundaryHour` 范围为 0–23，用于新 bootstrap 的 Daily scaffold 逻辑日期。
-`room.repositoryRoot` 可选，默认是 `<workspaceRoot>/room`。嵌套的
-`room.maintenance.mode` 可为 `local` 或 `workflow`，默认 `local`；`room.maintenance.autoPush`
-默认是 `false`。Standalone Room toolset 只暴露 semantic read、`room.maintenance.status`
-和 `room.maintenance.submit`；所有 mutation 都走后者。
-Legacy JSONL Room command 仅保留在 protocol 与 Hub HTTP/MCP compatibility surface，供独立
-Hub parity workstream 使用，不由 Agent advertisement 或 runtime 执行。
+`room.timezone` 保留为 Room metadata；当前读取使用仓库路径，而不是 legacy JSONL
+日期分区。`room.diaryDayBoundaryHour` 范围为 0–23，用于新 bootstrap 的 Daily scaffold
+逻辑日期。`room.repositoryRoot` 可选，默认是 `<workspaceRoot>/room`。嵌套的
+`room.maintenance.mode` 可为 `local` 或 `workflow`，默认 `local`；
+`room.maintenance.autoPush` 默认是 `false`。
+
+Room namespace 的九个语义操作是 Diary active/read、Notebook recent/search/read、
+State list/read，以及 maintenance status/submit。Notebook recent/search 的 `limit`
+默认 20、范围为 1–100；search query 必须非空且不超过 256 个 Unicode 字符；
+Markdown read 限制为 512 KiB。Maintenance submit 接受 1–5 个不重复的 semantic slot，可选
+mode 覆盖；`waitSeconds` 默认 0、上限 30。workflow 等待超时只结束等待，不会取消
+submission；没有隐式 confirmation 或单独的 maintenance wait 操作。
+
+Hub Full 通过 active Room lease 与 `POST /v1/room/<namespace>/<action>` 暴露同一
+九项操作，请求不接受 `agentId`。Hub 不拥有 Room repository，也不创建 content
+replica。旧 JSONL append/update/remove 与 passage/date-selection 调用不会静默映射
+为 maintenance；请迁移到显式 slot/payload request，或删除旧调用。历史 release/migration
+记录只保留历史，不是当前 compatibility contract。
 
 `sandbox.enabled` 启用 bubblewrap；`requiredRuntimePaths` 定义 sandbox 中可见的宿主路径。Sandbox 不能替代命令策略、路径策略或确认。
 
@@ -335,9 +514,9 @@ agentic-gpt config keys [--section <SECTION>] [--json]
 ```
 
 文本形式按 `runtime`、`identity`、`hub`、`confirmation`、`sandbox`、`limits`、`skills`、`room`、
-`tunnel` 分组；`--section` 只显示其中一个分组。`--json` 返回机器可读的类型、是否可为
-null、示例、双语说明和别名元数据。`config set`
-只接受 registry 中的键；结构化 policy 与 MCP 集合应使用专用命令。
+`tunnel` 和 `http-mcp` 分组；`--section` 只显示其中一个分组。`--json` 返回机器可读的类型、
+是否可为 null、示例、双语说明和别名元数据。`config set` 只接受 registry 中的键；结构化
+policy 与 MCP 集合应使用专用命令。
 
 注册键后的值是一个 shell 参数。因此 JSON 列表必须加引号。`room.repositoryRoot` 可为 null，
 使用字面量 JSON 值 `null` 可以清除它并恢复 workspace 默认目录。
@@ -359,6 +538,7 @@ registry 包含以下常用 scalar：
 - `room.repositoryRoot`、`room.timezone`、`room.diaryDayBoundaryHour`
 - `room.maintenance.mode`、`room.maintenance.autoPush`
 - 文档列出的 `skills.*` scalar/list 字段
+- `httpMcp.enabled`、`httpMcp.host`、`httpMcp.port`、`httpMcp.publicUrl`、`httpMcp.bearerToken`、`httpMcp.allowHosts`
 
 结构化策略与 MCP 修改使用 `config allow/confirm/deny`、`config path`、`config mcp`。
 上面的 `config toolset` 命令用于管理 namespace 选择。复杂 JSON（包括 `toolsets.enabled`）
@@ -385,19 +565,37 @@ MCP server、policy、path policy、limits、非活动 hub/tunnel/room 数据以
 
 ## 热加载与重启边界
 
-Standalone 与 Local worker 会轮询配置，并原子应用通过验证的 live subset。无效候选会保留上一份有效状态。
+Standalone、Local 以及连接 Hub 的 Agent worker 轮询同一份配置，并原子应用支持的
+live subset。无效候选会保留上一份有效状态；候选修改需要重启的资源时，该资源在进程
+重启前仍保持原来的 live 值。
 
 | 配置 | 行为 |
 | --- | --- |
-| `policy`、`pathPolicy`、`limits`、`mcpServers`、`toolsets.enabled` | 对新 admission/call 与工具发现热加载 |
-| 已接纳 Job 与已创建下游调用 | 保留原决策/配置 |
-| `mode`、`profile`、`agentId`、`workspaceRoot` | 需要重启 |
-| `room.*` 仓库、时区、日界线和 maintenance 设置 | 需要重启；`toolsets.enabled` 可热启用 Room，但使用当前 live Room 配置 |
+| `policy`、`limits`、`mcpServers`、`toolsets.enabled` | 所有 Agent worker 共享热加载，对新 admission/call 与工具发现生效 |
+| `pathPolicy`（`workspaceRoot` 未改变时） | 所有 Agent worker 共享热加载，对后续路径检查生效 |
+| `httpMcp.enabled`、`host`、`port`、`publicUrl`、`allowHosts` | Standalone HTTP watcher 协调启用状态与 endpoint identity；identity 变化会关闭有状态 session 并丢弃 listener-local OAuth state，客户端必须重新 initialize |
+| `httpMcp.bearerToken` 引用或其解析内容 | Standalone HTTP watcher 原地更新认证而不重新绑定；解析凭据可用时保留已有 session |
+| 已接纳 Process/Skill Job 与已创建下游调用 | Process 与 Skill Job 从准入开始保留同一份有效配置，贯穿容量、审计、包摘要、policy、工作目录、preflight、确认和异步执行。Process batch 的 preflight/确认、prepared admission 与排队 worker 使用同一份配置；后续新准入使用热加载后的配置。下游 MCP 调用保留各自资源专属快照，这不是全部操作的统一快照规则。 |
+| `workspaceRoot` 及其配套 `pathPolicy` | 修改 workspace 需要重启；重启前原 workspace/path-policy 成对原子保留并继续生效 |
+| `mode`、`profile`、`agentId` | 需要重启 |
+| `browser` | 需要重启；配置的 Browser runtime 在进程启动时选择 |
+| `room.*` 仓库、时区、日界线和 maintenance 设置 | 需要重启；`toolsets.enabled` 可热启用 Room，但使用当前 live Room 设置 |
 | `tunnel.*` client identity/source/secret | 需要重启 |
-| `hub`、reporting mode | 对相关连接需要重启 |
+| `hub`、reporting mode | 相关连接需要重启 |
 | Skill install 并发等 startup-owned 设置 | 需要重启 |
 
-Standalone supervisor 检测到 startup identity 变化时会输出 `restart_required`。不要把“文件已修改”误认为现有子进程树已经切换。
+共享 live subset 适用于每个 Agent worker；只有具有 Standalone HTTP MCP listener 的运行时
+才会处理 `httpMcp` listener 字段。Local 没有 TCP listener，Hub 也不会因此把这个配置
+section 变成 Hub ingress。
+
+HTTP MCP 凭据无法解析时会 fail closed：endpoint 停止接受请求并停止监听，直到引用再次
+可用。语法或语义无效的候选会被 watcher 拒绝并保留 last-good live 配置。监听地址冲突
+也不会影响 tunnel 或 Unix execution；修复 endpoint 配置后 watcher 会重试。上述过程
+不会输出引用或 token。
+
+共享 watcher 在需要重启的字段变化时记录 `config changes require restart; fields=...`，其中包括
+`browser`。诊断只列出发生变化的字段名，不会输出 secret 值。Standalone supervisor 另外输出
+`restart_required`；Hub 没有 supervisor 事件。不要把“文件已修改”误认为现有子进程树已经切换。
 
 ## 验证与检查
 

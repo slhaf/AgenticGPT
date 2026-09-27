@@ -12,6 +12,7 @@ path = "src/main.rs"
 agentic-apply-patch = { path = "../agentic-apply-patch" }
 agentic-gpt-protocol.workspace = true
 anyhow.workspace = true
+axum = "0.7"
 base64 = "0.22"
 chrono.workspace = true
 chrono-tz.workspace = true
@@ -24,7 +25,8 @@ crossterm.workspace = true
 ignore = "=0.4.31"
 libc = "0.2"
 notify-rust = "4.11"
-rmcp = { version = "1.7.0", default-features = false, features = ["client", "server", "macros", "transport-io", "transport-streamable-http-client", "transport-streamable-http-client-reqwest", "transport-child-process"] }
+parking_lot = "0.12"
+rmcp = { version = "1.7.0", default-features = false, features = ["client", "server", "macros", "transport-io", "transport-streamable-http-client", "transport-streamable-http-client-reqwest", "transport-streamable-http-server", "transport-child-process"] }
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "stream"] }
 pgp = { version = "0.20.0", default-features = false }
 regex = "=1.13.1"
@@ -36,6 +38,8 @@ serde_yaml.workspace = true
 sha2 = "0.10"
 similar = "=3.1.1"
 tokio.workspace = true
+tokio-util = "0.7"
+url = "2"
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
 tar = "0.4"
 urlencoding = "2.1"

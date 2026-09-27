@@ -27,6 +27,7 @@ enum class AttentionStatus {
     Waiting,
     Triggered,
     Snoozed,
+    Degraded,
     Done,
     Acknowledged,
     Cancelled,

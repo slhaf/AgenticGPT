@@ -6,18 +6,21 @@ import android.content.Intent
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 
 class ReminderNotificationActionReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         val pendingResult = goAsync()
-        CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        scope.launch {
             try {
-                AttentionRuntimeCoordinator(context).handleNotificationIntent(intent)
+                AttentionRuntimeCoordinator(context, scope).handleNotificationIntent(intent)
             } catch (_: Throwable) {
                 // Broadcast work must not crash the app process.
             } finally {
                 pendingResult.finish()
+                scope.cancel()
             }
         }
     }

@@ -1,13 +1,16 @@
 package work.slhaf.agentic.console.domain.attention
 
-import kotlin.time.Duration
-
 interface AttentionScheduler {
     fun schedule(item: AttentionItem): ScheduleResult
     fun cancel(itemId: String): ScheduleResult
-    fun snooze(itemId: String, duration: Duration): ScheduleResult
+    fun snooze(item: AttentionItem): ScheduleResult
 }
 
+/**
+ * [accepted] is true only when the requested local scheduling contract is met.
+ * A degraded best-effort OS request is reported with [ScheduleMode.Degraded]
+ * and must not be treated as success.
+ */
 data class ScheduleResult(
     val accepted: Boolean,
     val mode: ScheduleMode,
@@ -20,4 +23,5 @@ enum class ScheduleMode {
     LocalAlarm,
     Degraded,
     Failed,
+    Overdue,
 }

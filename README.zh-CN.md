@@ -11,6 +11,8 @@ Agentic GPT 通过每台机器独立的 Secure MCP Tunnel、可选的集中式 R
 ChatGPT Secure MCP Tunnel
   -> 官方 tunnel-client
   -> agentic-gpt worker
+  -> stdio MCP + owner-only Unix MCP
+  -> 可选的 worker-owned HTTP MCP：http://<host>:<port>/mcp
   -> 策略 / 文件 / Process Job / Skill / 下游 MCP / tmux / Browser runtime
 
 集中式——Hub
@@ -31,7 +33,8 @@ ChatGPT Actions 或 Apps MCP
 
 - 不需要 VPS、公开域名、反向代理、Hub 数据库或共享命令路由器。
 - 每台机器具有独立连接与重启边界。
-- Tunnel 与 owner-only Unix MCP 对同一 profile 暴露一致的 29 个 Normal 工具或 40 个 Room 工具。
+- Standalone 还可以启用 worker-owned 的 Streamable HTTP MCP endpoint，路径固定为 `/mcp`；默认关闭，可使用直接 bearer authentication，也可选择 ChatGPT connector OAuth 流程。
+- Tunnel、HTTP 与 owner-only Unix MCP 对同一 profile 暴露一致的 29 个 Normal 工具或 40 个 Room 工具。
 - 策略、确认、审计、热配置、容量和 Managed Job 都保留在本机。
 - fresh stdio worker 即使先收到旧逻辑会话续发的请求、尚未收到新的 MCP `initialize`，也能自动恢复而不退出。
 
@@ -41,7 +44,7 @@ ChatGPT Actions 或 Apps MCP
 
 | 模式 | 适用场景 | 是否需要公开服务器 | 故障范围 | 启动入口 |
 | --- | --- | --- | --- | --- |
-| **Secure MCP Tunnel / Standalone** | 推荐的直接部署 | 不需要 | 单个 tunnel/Agent | `agentic-gpt run`（配置 `mode=standalone`） |
+| **Secure MCP Tunnel / Standalone** | 推荐的直接部署；可选 worker-owned HTTP MCP | 不需要 | 单个 tunnel/Agent | `agentic-gpt run`（配置 `mode=standalone`） |
 | **Hub + Local Agent** | 集中路由、Actions、共享历史/报告 | 需要 | Hub 是共享依赖 | `agentic-gpt-hub serve` + `agentic-gpt run` |
 | **Local Unix MCP** | 开发、smoke test、本地自动化 | 不需要 | 单个本地 worker | `agentic-gpt run`（配置 `mode=local`） |
 
@@ -185,6 +188,53 @@ agentic-gpt local call agent.info --arguments '{}'
 
 在 ChatGPT 中连接分配给该 Agent 的 Secure MCP Tunnel。每台机器独立配置、独立启动。
 
+可选的 Standalone HTTP MCP 与 tunnel 独立配置：
+
+```bash
+agentic-gpt config set httpMcp.bearerToken env:AGENTIC_HTTP_MCP_TOKEN
+agentic-gpt config set httpMcp.host 127.0.0.1
+agentic-gpt config set httpMcp.port 8765
+agentic-gpt config set httpMcp.publicUrl https://mcp.example.com
+agentic-gpt config set httpMcp.allowHosts '["mcp.example.com"]'
+agentic-gpt config set httpMcp.enabled true
+```
+
+endpoint 始终是 `http://<host>:<port>/mcp`，直接 bearer 使用 `file:` 或
+`env:` secret 引用；即使没有 `publicUrl`，这种直接 bearer 模式仍然有效。
+`publicUrl` 是可选、非 secret 的 HTTPS origin，用于 ChatGPT connector OAuth；
+它在全屏 TUI、`config init --non-interactive --http-mcp-public-url ...` 或
+`config set httpMcp.publicUrl ...` 中可显示并编辑且不会隐藏（用 `null` 清除）。
+它只用于公布外部 origin，不会改变本地 bind host 或 port。
+
+配置 `publicUrl` 后，Standalone 会提供 OAuth discovery：
+`/.well-known/oauth-protected-resource/mcp` 以及兼容根路径的
+`/.well-known/oauth-protected-resource` alias，还有
+`/.well-known/oauth-authorization-server` 和
+`/.well-known/openid-configuration` 两个 AS/OIDC metadata alias。
+ChatGPT authorization 使用 `/oauth/authorize` 与 `/oauth/token`、唯一的
+`agentic:mcp` scope，并且只接受以下 callback family：
+`https://chatgpt.com/connector/oauth/<suffix>`，或精确的
+`https://chatgpt.com/connector_platform_oauth_redirect`。code 与 access token
+只在当前 listener 内存中保存，有过期和撤销机制；不提供 refresh token、
+`offline_access`、dynamic client registration、generic registration 或任意
+redirect。OAuth 不会替代直接 bearer authentication；Standalone 的页面、
+工具与 profile 语义也不是 Hub 的 `Hub API key`、profile 或 routing contract。
+
+Host 过滤默认限于 loopback；`null` 或严格等于 `["*"]` 明确允许任意 Host，
+空数组或 wildcard 混用会被拒绝。必须允许实际收到的 Host authority（包括
+反向代理或 ESA 改写 Host 的情况）；如果存在 `Origin`，必须精确匹配
+`publicUrl`，缺少 Origin 的 server-to-server 请求仍然允许。ChatGPT OAuth
+部署必须通过 HTTPS 转发 discovery、authorization、token 和 `/mcp` 全部
+路由；origin 可以保持 loopback/private。`publicUrl` 不负责路由，代理必须
+把实际发送的 authority 放入 `allowHosts`。rebind 或关闭会终止有状态
+session 并丢弃 listener-local OAuth state；直接 token 内容轮换会原地更新
+认证，同时撤销 OAuth code/token。
+Local 模式仍然只有 Unix ingress。Hub 的 `/mcp` 是独立的 OAuth/Hub contract，
+`mcpServers` 仍是 `mcp.*` 使用的下游 registry，不是这个入站 listener。
+
+完整 schema、init/import 编辑流程、脱敏以及 live-reload/last-good 语义见
+[`docs/configuration.zh-CN.md`](docs/configuration.zh-CN.md)。
+
 Tunnel-client 信任、缓存、恢复、报告和 service manager 说明见 [`docs/standalone-runtime.md`](docs/standalone-runtime.md)。
 
 ## 仅本地开发
@@ -241,13 +291,14 @@ agentic-gpt run
 - Custom GPT Actions：导入 [`openapi/hub.yaml`](openapi/hub.yaml)，Bearer auth 使用 `AGENTIC_GPT_API_KEY`。
 - ChatGPT Apps MCP：连接 `https://<your-hub-domain>/mcp`。
 
-Hub 原生工具和转发执行使用相同的 Managed Job envelope；运行中的任务通过 `job.get` 查询、通过 `job.cancel` 取消。
+Hub 原生工具和转发执行使用相同的 Managed Job lifecycle projection。运行中的任务通过
+`job.get` 查询、通过 `job.cancel` 取消。
 
 ## Managed Job 与安全边界
 
 - V2 Normal surface 有 29 个工具，Room surface 有 40 个工具；profile preset 选择 namespace，显式 `toolsets.enabled` 仍可进一步缩小 surface。
-- `process.exec`、`skills.run`、`mcp.callTool` 返回 `JobResponse`。
-- `mcp.batch` 接受 1–16 个有序调用，只确认一次，并执行全局/单 server 并发限制。
+- `process.exec`、`skills.run`、`mcp.callTool` 返回扁平的 `JobToolResponse`；`process.batch` 返回 `JobBatchToolResponse`。
+- `mcp.batch` 返回带有按输入顺序排列的子 Job projection 的扁平 `McpBatchToolResponse`，接受 1–16 个调用，只确认一次，并执行全局/单 server 并发限制。
 - MCP 单调用参数上限 256 KiB，保留结果上限 512 KiB；批次 aggregate 参数与结果各上限 2 MiB。
 - 审计记录 bounded metadata、hash、状态与终止证据，不记录原始 MCP 参数/结果。
 - 执行前使用 `agent.info` 查看 profile、路径策略、容量、确认、MCP 配置摘要和连接状态。

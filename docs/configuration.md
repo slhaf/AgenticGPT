@@ -129,6 +129,7 @@ collections. Configure those after initialization with `config mcp` and `config 
 | --- | --- | --- | --- |
 | Common identity/workspace/policy | Required | Required | Required |
 | `tunnel` | Required | Ignored | Ignored |
+| `httpMcp` | Optional, active only in Standalone | Ignored | Ignored |
 | `hub` (`url`, `transport`, `agentSecret`) | Used only for optional Hub reporting/ntfy relay | Ignored | Required |
 | Public Hub/VPS | Not required | Not required | Required |
 | Startup command | `agentic-gpt run` | `agentic-gpt run` | `agentic-gpt run` |
@@ -182,6 +183,162 @@ profile room`). An explicit `toolsets.enabled` selection remains authoritative.
 | `tunnel` | Standalone tunnel-client source, secret reference, and optional reporting. |
 | `browser` | Optional advanced explicit Browser runtime override; ordinary runtime discovery/provisioning is otherwise automatic. |
 | `hub` | Centralized Hub connection or optional standalone Hub reporting/ntfy relay. |
+| `httpMcp` | Optional Standalone worker-owned inbound Streamable HTTP MCP endpoint. |
+
+## Standalone HTTP MCP endpoint
+
+Standalone can expose an optional inbound MCP endpoint from the hidden worker:
+
+```text
+http://<host>:<port>/mcp
+```
+
+It is disabled by default and is independent of both the tunnel transport and Hub. The
+configuration shape and defaults are:
+
+```json
+{
+  "httpMcp": {
+    "enabled": false,
+    "host": "127.0.0.1",
+    "port": 8765,
+    "publicUrl": null,
+    "bearerToken": "",
+    "allowHosts": ["localhost", "127.0.0.1", "::1"]
+  }
+}
+```
+
+The path is fixed at `/mcp`; it cannot be changed through configuration. When
+`publicUrl` is absent, the endpoint accepts the configured
+`Authorization: Bearer ...` credential for direct local use. When `publicUrl`
+is present, it additionally exposes the standalone ChatGPT connector OAuth
+contract:
+
+- `GET /.well-known/oauth-protected-resource/mcp` is the canonical
+  path-specific protected-resource metadata; `GET
+  /.well-known/oauth-protected-resource` is a root-compatible alias.
+- `GET /.well-known/oauth-authorization-server` and `GET
+  /.well-known/openid-configuration` are authorization-server/OpenID aliases.
+- `GET|POST /oauth/authorize` and `POST /oauth/token` implement the
+  authorization-code flow with the single `agentic:mcp` scope.
+
+The configured value must be a non-empty HTTPS origin with no userinfo, path
+other than empty or `/`, query, or fragment. A trailing slash is normalized.
+It is an advertised external origin, not a routing or proxy override: `host`
+and `port` remain the local bind coordinates, and the origin may remain
+loopback/private. `publicUrl` is non-secret and is never masked in `config
+show`, Review, diagnostics, or the TUI; `bearerToken` remains a secret
+reference and its resolved value is never exposed.
+
+The connector accepts only ChatGPT callback URIs in these exact families:
+`https://chatgpt.com/connector/oauth/<suffix>` or
+`https://chatgpt.com/connector_platform_oauth_redirect`. It accepts only
+`agentic:mcp`; there are no refresh tokens, `offline_access`, dynamic client
+registration, generic registration, or arbitrary redirects. Authorization codes
+and access tokens are opaque, listener-local in-memory records with expiry,
+one-use code consumption, and revocation on listener replacement or bearer
+content rotation. The standalone authorization page and tool/profile surface
+are standalone semantics; they do not use Hub's `Hub API key`, profile, or
+routing contract.
+
+OAuth routes and `/mcp` share listener Host protection. Missing or malformed
+Host is rejected, and a disallowed authority is forbidden; an allowlist entry
+without a port matches any port, while a port-bearing entry matches exactly.
+`null` and exactly `["*"]` remain explicit allow-all values. If `Origin` is
+present it must exactly match the configured `publicUrl`; absent Origin remains
+valid for server-to-server requests, and no permissive CORS is added. With no
+`publicUrl`, failed direct bearer authentication keeps a plain Bearer
+challenge; with one configured, the MCP challenge points to the
+path-specific protected-resource metadata URL.
+
+The rmcp transport is stateful Streamable HTTP/SSE: clients must initialize a
+session, and a listener rebind or disable closes its sessions so the client
+must initialize again. Direct bearer content rotation updates authentication
+in place and preserves existing sessions while atomically revoking OAuth
+records. Invalid candidates retain the last-good listener and its state.
+
+`allowHosts` is the DNS-rebinding protection applied by the HTTP MCP transport:
+
+- The default list permits only `localhost`, `127.0.0.1`, and `::1`.
+- A non-empty list of valid host/authority entries restricts requests to those entries.
+- `null` or exactly `["*"]` explicitly allows every Host value. The wildcard cannot be
+  mixed with another entry.
+- An empty array is rejected; it is not an implicit allow-all value.
+- Malformed authority entries, wildcard mixtures, and other invalid values are rejected.
+
+For a non-loopback listener, choose an explicit authority allowlist or deliberately use
+one of the two full-allow values. `host` must be a non-empty bindable host without
+whitespace or control characters, and `port` must be in `1..=65535`.
+
+`bearerToken` is a secret reference, never a literal credential. It must be empty only
+when the endpoint is disabled; an enabled endpoint requires one of:
+
+- `file:/absolute/path` (one trailing LF or CRLF is removed);
+- `env:VARIABLE_NAME`.
+
+The referenced value must be available, non-empty, and free of control characters.
+Configuration validation rejects plaintext, malformed references, and an enabled
+endpoint without a reference. Resolved token content is kept in memory only. Config
+show, review, diagnostics, logs, and `agent.info` redact both the reference and the
+resolved value; provisioning and rotating the underlying file/environment remains an
+external secret-management operation.
+
+### Configure HTTP MCP with the CLI
+
+The controlled registry is exposed under the `http-mcp` section:
+
+```bash
+agentic-gpt config keys --section http-mcp
+agentic-gpt config set httpMcp.bearerToken env:AGENTIC_HTTP_MCP_TOKEN
+agentic-gpt config set httpMcp.host 127.0.0.1
+agentic-gpt config set httpMcp.port 8765
+agentic-gpt config set httpMcp.publicUrl https://mcp.example.com
+agentic-gpt config set httpMcp.allowHosts '["mcp.example.com"]'
+agentic-gpt config set httpMcp.enabled true
+```
+
+To explicitly disable Host filtering, use either JSON `null` or `["*"]`; to
+make the OAuth routes fail closed and return to direct-bearer local use,
+clear the optional origin:
+
+```bash
+agentic-gpt config set httpMcp.allowHosts null
+agentic-gpt config set httpMcp.allowHosts '["*"]'
+agentic-gpt config set httpMcp.publicUrl null
+```
+
+`allowHosts` is a JSON array or `null`, not a comma-delimited string.
+`publicUrl` must be an HTTPS origin; `config set` validates the complete
+candidate before writing. A rejected value leaves both the configuration and
+its backup unchanged. `config mcp` remains reserved for the downstream
+`mcpServers` registry and does not configure this inbound listener.
+
+For deterministic provisioning, `config init --non-interactive` accepts all endpoint
+fields as flags:
+
+```bash
+agentic-gpt config init --non-interactive \
+  --mode standalone \
+  --http-mcp-enabled true \
+  --http-mcp-host 127.0.0.1 \
+  --http-mcp-port 8765 \
+  --http-mcp-public-url https://mcp.example.com \
+  --http-mcp-bearer-token env:AGENTIC_HTTP_MCP_TOKEN \
+  --http-mcp-allow-hosts '["mcp.example.com"]'
+```
+
+The flags must still obey the HTTPS-origin, secret-reference, and allow-host
+rules; enabling without a token reference fails before any config or backup is
+written. In interactive `config init`, the same flags seed editable Connection
+fields. The HTTP MCP enabled toggle, bind host/port, non-secret public-origin
+editor, secret-reference editor, and JSON array/`null` allow-host editor can be
+changed before Review; an empty public-origin value clears it. `config import
+--config PATH [SOURCE]` recognizes an existing `httpMcp` object, seeds these
+fields into the same interactive editor, and lets the operator correct or
+disable it before the single final commit. Review shows the bearer reference as
+`[REDACTED]` but displays `publicUrl`; cancellation or validation failure writes
+nothing.
 
 Path-safe `agentId` values map directly to the private state directory name. Wider legacy Hub identities remain supported and use a stable hashed directory key instead of becoming a filesystem path component.
 
@@ -368,15 +525,29 @@ Server ids are at most 64 bytes and use letters, digits, `.`, `_`, or `-`. `stre
 
 `skills` controls package sizes, redirects, timeouts, retry/deadline limits, install/download concurrency, and optional host allowlisting. The canonical block is top-level `skills`; legacy `room.skills` is read only when the top-level block is absent.
 
-`room.timezone` is retained Room metadata; V2 reads use repository paths rather than the
-legacy JSONL date partitioning. `room.diaryDayBoundaryHour` is 0–23 and controls the logical
-date written into a newly bootstrapped Daily scaffold.
-`room.repositoryRoot` is optional and defaults to `<workspaceRoot>/room`. The nested
-`room.maintenance.mode` is `local` or `workflow` and defaults to `local`; `room.maintenance.autoPush`
-defaults to `false`. The standalone Room toolset exposes semantic reads plus
-`room.maintenance.status` and `room.maintenance.submit`; all mutations use the latter.
-Legacy JSONL Room commands remain only in the protocol and Hub HTTP/MCP compatibility surface
-for the separate Hub parity workstream and are not advertised or executed by the Agent.
+`room.timezone` is retained Room metadata; current reads use repository paths
+rather than legacy JSONL date partitioning. `room.diaryDayBoundaryHour` is 0–23
+and controls the logical date written into a newly bootstrapped Daily scaffold.
+`room.repositoryRoot` is optional and defaults to `<workspaceRoot>/room`. The
+nested `room.maintenance.mode` is `local` or `workflow` and defaults to
+`local`; `room.maintenance.autoPush` defaults to `false`.
+
+The Room namespace exposes the nine semantic operations: Diary active/read,
+Notebook recent/search/read, State list/read, and maintenance status/submit.
+Notebook recent/search `limit` defaults to 20 and is capped at 100; search queries
+must be non-empty and at most 256 Unicode characters; Markdown reads are
+512 KiB. Maintenance submit accepts one to five unique semantic slots and an
+optional mode override; `waitSeconds` defaults to 0 and is capped at 30. A
+workflow wait timeout does not cancel the submission, and there is no implicit
+confirmation or separate maintenance wait operation.
+
+Hub Full exposes the same nine operations through active-Room routing and
+`POST /v1/room/<namespace>/<action>`; these requests contain no `agentId`.
+Hub does not own the configured repository or create a content replica.
+Retired JSONL append/update/remove and passage/date-selection callers are not
+silently mapped to maintenance; migrate them to explicit slot/payload requests
+or remove them. Historical release/migration records are not an active
+compatibility contract.
 
 `sandbox.enabled` activates bubblewrap. `requiredRuntimePaths` lists host paths made available inside the sandbox. Sandbox does not replace command policy, path policy, or confirmation.
 
@@ -390,9 +561,9 @@ agentic-gpt config keys [--section <SECTION>] [--json]
 ```
 
 The text form groups keys by `runtime`, `identity`, `hub`, `confirmation`, `sandbox`, `limits`, `skills`,
-`room`, and `tunnel`; `--section` filters to one of those names. `--json` returns machine-readable
-metadata including the value type, nullability, example, bilingual descriptions, and aliases. Only keys in this registry are accepted by
-`config set`; structured policy and MCP collections use their dedicated commands.
+`room`, `tunnel`, and `http-mcp`; `--section` filters to one of those names. `--json` returns machine-readable
+metadata including the value type, nullability, example, bilingual descriptions, and aliases. Only keys in this
+registry are accepted by `config set`; structured policy and MCP collections use their dedicated commands.
 
 The value is one shell argument after the registered key. JSON list values therefore need shell
 quoting. `room.repositoryRoot` is nullable: use the literal JSON value `null` to clear it and
@@ -415,6 +586,7 @@ The registry includes common scalar values such as:
 - `room.repositoryRoot`, `room.timezone`, `room.diaryDayBoundaryHour`
 - `room.maintenance.mode`, `room.maintenance.autoPush`
 - the documented `skills.*` scalar/list fields
+- `httpMcp.enabled`, `httpMcp.host`, `httpMcp.port`, `httpMcp.publicUrl`, `httpMcp.bearerToken`, `httpMcp.allowHosts`
 
 Use `config allow/confirm/deny`, `config path`, and `config mcp` for structured policy/MCP changes.
 The exact `config toolset` commands above manage namespace selection. Complex JSON, including
@@ -446,19 +618,40 @@ that cannot be imported, and writes through the normal backup/secret transaction
 
 ## Live reload versus restart
 
-Standalone and Local workers poll the config and atomically apply a valid live subset. Invalid candidates keep the last valid state.
+Standalone, Local, and Hub-connected Agent workers poll the same configuration and
+atomically apply the supported live subset. Invalid candidates keep the last valid state.
+When a candidate changes a restart-owned resource, that resource remains at its previous
+live value until the process is restarted.
 
 | Configuration | Effect |
 | --- | --- |
-| `policy`, `pathPolicy`, `limits`, `mcpServers`, `toolsets.enabled` | Live reload for new admissions/calls and tool discovery |
-| Already-admitted Jobs and already-created downstream calls | Keep their original decision/config |
-| `mode`, `profile`, `agentId`, `workspaceRoot` | Restart required |
+| `policy`, `limits`, `mcpServers`, `toolsets.enabled` | Shared live reload for new admissions/calls and tool discovery |
+| `pathPolicy` (when `workspaceRoot` is unchanged) | Shared live reload for subsequent path checks |
+| `httpMcp.enabled`, `host`, `port`, `publicUrl`, `allowHosts` | The Standalone HTTP watcher reconciles enablement and endpoint identity; identity changes close stateful sessions and discard listener-local OAuth state, so clients must initialize again |
+| `httpMcp.bearerToken` reference or referenced content | The Standalone HTTP watcher updates authentication without rebinding; existing sessions remain valid while the resolved credential is available |
+| Already-admitted Process/Skill Jobs and already-created downstream calls | Process and Skill Jobs retain the effective configuration captured at admission through capacity, audit, package digest, policy, working directory, preflight, confirmation, and asynchronous execution. Process batches use the same captured configuration for preflight/confirmation, prepared admission, and queued workers. Later admissions use the reloaded live configuration. Downstream MCP calls retain their own resource-specific snapshots; this is not a universal snapshot rule for every operation. |
+| `workspaceRoot` and its coupled `pathPolicy` | Changing the workspace requires a restart; until then, the previous workspace/path-policy pair remains effective atomically |
+| `mode`, `profile`, `agentId` | Restart required |
+| `browser` | Restart required; the configured Browser runtime is selected at process startup |
 | `room.*` repository, timezone, diary-boundary, and maintenance settings | Restart required; `toolsets.enabled` may expose Room live using the current live Room settings |
 | `tunnel.*` client identity/source/secret | Restart required |
 | `hub`, reporting mode | Restart required for the related connection |
 | Skill install concurrency/startup-owned settings | Restart required |
 
-The Standalone supervisor emits `restart_required` when a startup identity field changes. Do not assume editing the file switched the existing child tree.
+The shared live subset applies to every Agent worker; only a runtime with a Standalone
+HTTP MCP listener acts on the `httpMcp` listener fields. Local mode has no TCP listener,
+and Hub mode does not turn this configuration section into a Hub ingress.
+
+An unavailable HTTP MCP credential fails closed: the endpoint stops accepting requests and stops
+listening until the reference resolves again. A syntactically or semantically invalid candidate is
+rejected by the watcher and leaves the last-good live configuration in place. A bind conflict is
+also kept isolated from tunnel and Unix execution; fix the endpoint configuration and let the watcher
+retry. These outcomes never print the reference or token.
+
+A shared watcher logs `config changes require restart; fields=...` when a restart-owned
+field changes, including `browser`. The diagnostic names changed fields but never prints
+secret values. The Standalone supervisor additionally emits `restart_required`; Hub mode
+has no supervisor event. Do not assume editing the file switched the existing child tree.
 
 ## Validation and inspection
 
