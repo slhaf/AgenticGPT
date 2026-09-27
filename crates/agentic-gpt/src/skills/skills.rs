@@ -514,7 +514,7 @@ fn load_skill(config: &Config, id: &str, _active: bool) -> Result<SkillPackage> 
 }
 
 fn builtin_skill_package() -> Result<SkillPackage> {
-    let skill_md = include_str!("../skills/skill-installer/SKILL.md").to_string();
+    let skill_md = include_str!("../../skills/skill-installer/SKILL.md").to_string();
     let (frontmatter, warnings) = parse_frontmatter(&skill_md);
     Ok(SkillPackage {
         id: BUILTIN_INSTALLER_ID.to_string(),

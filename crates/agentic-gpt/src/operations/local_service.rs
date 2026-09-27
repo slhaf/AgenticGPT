@@ -13,7 +13,9 @@ use crate::{
         slim_mcp_batch_response, slim_mcp_response, slim_process_batch_response,
         slim_process_response,
     },
-    room_maintenance, room_reads, skills, tmux, AppState,
+    room_maintenance, room_reads, skills,
+    state::AppState,
+    tmux,
 };
 
 pub(crate) enum ProcessCall {

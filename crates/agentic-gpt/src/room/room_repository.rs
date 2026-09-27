@@ -29,67 +29,67 @@ const SCAFFOLD_DATE_TOKEN: &str = "{{LOGICAL_DATE}}";
 const SCAFFOLD_FILES: &[(&str, &str)] = &[
     (
         "room.json",
-        include_str!("../assets/room-scaffold/room.json"),
+        include_str!("../../assets/room-scaffold/room.json"),
     ),
     (
         "Diary/Daily/current.md",
-        include_str!("../assets/room-scaffold/Diary/Daily/current.md"),
+        include_str!("../../assets/room-scaffold/Diary/Daily/current.md"),
     ),
     (
         "Diary/Weekly/current.md",
-        include_str!("../assets/room-scaffold/Diary/Weekly/current.md"),
+        include_str!("../../assets/room-scaffold/Diary/Weekly/current.md"),
     ),
     (
         "Diary/Monthly/current.md",
-        include_str!("../assets/room-scaffold/Diary/Monthly/current.md"),
+        include_str!("../../assets/room-scaffold/Diary/Monthly/current.md"),
     ),
     (
         "Notebook/.gitkeep",
-        include_str!("../assets/room-scaffold/Notebook/.gitkeep"),
+        include_str!("../../assets/room-scaffold/Notebook/.gitkeep"),
     ),
     (
         "State/entities/.gitkeep",
-        include_str!("../assets/room-scaffold/State/entities/.gitkeep"),
+        include_str!("../../assets/room-scaffold/State/entities/.gitkeep"),
     ),
     (
         "manual/diary.md",
-        include_str!("../assets/room-scaffold/manual/diary.md"),
+        include_str!("../../assets/room-scaffold/manual/diary.md"),
     ),
     (
         "manual/notebook.md",
-        include_str!("../assets/room-scaffold/manual/notebook.md"),
+        include_str!("../../assets/room-scaffold/manual/notebook.md"),
     ),
     (
         "manual/entity.md",
-        include_str!("../assets/room-scaffold/manual/entity.md"),
+        include_str!("../../assets/room-scaffold/manual/entity.md"),
     ),
     (
         "maintenance/diary/daily/.gitkeep",
-        include_str!("../assets/room-scaffold/maintenance/diary/daily/.gitkeep"),
+        include_str!("../../assets/room-scaffold/maintenance/diary/daily/.gitkeep"),
     ),
     (
         "maintenance/diary/weekly/.gitkeep",
-        include_str!("../assets/room-scaffold/maintenance/diary/weekly/.gitkeep"),
+        include_str!("../../assets/room-scaffold/maintenance/diary/weekly/.gitkeep"),
     ),
     (
         "maintenance/diary/monthly/.gitkeep",
-        include_str!("../assets/room-scaffold/maintenance/diary/monthly/.gitkeep"),
+        include_str!("../../assets/room-scaffold/maintenance/diary/monthly/.gitkeep"),
     ),
     (
         "maintenance/notebook/.gitkeep",
-        include_str!("../assets/room-scaffold/maintenance/notebook/.gitkeep"),
+        include_str!("../../assets/room-scaffold/maintenance/notebook/.gitkeep"),
     ),
     (
         "maintenance/entity/.gitkeep",
-        include_str!("../assets/room-scaffold/maintenance/entity/.gitkeep"),
+        include_str!("../../assets/room-scaffold/maintenance/entity/.gitkeep"),
     ),
     (
         "scripts/apply_maintenance.py",
-        include_str!("../assets/room-scaffold/scripts/apply_maintenance.py"),
+        include_str!("../../assets/room-scaffold/scripts/apply_maintenance.py"),
     ),
     (
         ".github/workflows/apply-maintenance.yml",
-        include_str!("../assets/room-scaffold/.github/workflows/apply-maintenance.yml"),
+        include_str!("../../assets/room-scaffold/.github/workflows/apply-maintenance.yml"),
     ),
 ];
 

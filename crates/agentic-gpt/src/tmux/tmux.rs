@@ -18,7 +18,8 @@ use crate::audit::{write_audit, AuditRecord};
 use crate::config::Config;
 use crate::operation::{RequestContext, RequestIngress};
 use crate::policy::{policy_decision_for_profile, PolicyDecision};
-use crate::{confirmation, exec, AppState};
+use crate::state::AppState;
+use crate::{confirmation, exec};
 
 const SESSION_FORMAT: &str = "#{session_name}\t#{session_windows}\t#{session_attached}\t#{session_created}\t#{session_activity}";
 const PANE_FORMAT: &str = "#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_id}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_width}\t#{pane_height}\t#{pane_pid}\t#{pane_in_mode}\t#{pane_dead}";

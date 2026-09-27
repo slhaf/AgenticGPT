@@ -42,8 +42,8 @@ use crate::{
     confirmation::{self, McpBatchConfirmationItem},
     jobs,
     jobs::{ManagedMcpSpec, TerminalEventHook},
+    state::AppState,
     utils::bounded_mcp_argument_keys,
-    AppState,
 };
 
 #[derive(Subcommand)]

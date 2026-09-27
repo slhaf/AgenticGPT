@@ -4,6 +4,7 @@ use std::io::{self, Write};
 use clap::error::{ContextKind, ContextValue, ErrorKind};
 use clap::{CommandFactory, FromArgMatches};
 
+use crate::cli::Cli;
 use crate::config_templates::PendingAction;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
@@ -829,7 +830,7 @@ fn localize_command(command: clap::Command, path: &str, language: UiLanguage) ->
 }
 
 pub(crate) fn localized_command(language: UiLanguage) -> clap::Command {
-    let mut command = crate::Cli::command();
+    let mut command = Cli::command();
     // Building first materializes clap's generated help/version arguments and help subtree.  They
     // are then localized by the same recursive walk as derive-owned commands and arguments.
     command.build();
@@ -839,12 +840,12 @@ pub(crate) fn localized_command(language: UiLanguage) -> clap::Command {
 pub(crate) fn parse_cli(
     args: Vec<OsString>,
     env: &impl LocaleSource,
-) -> Result<(crate::Cli, UiLanguage), clap::Error> {
+) -> Result<(Cli, UiLanguage), clap::Error> {
     let choice = prescan_language(&args).unwrap_or(LanguageChoice::Auto);
     let language = resolve_language(choice, env);
     let command = localized_command(language);
     let matches = command.try_get_matches_from(args)?;
-    let cli = crate::Cli::from_arg_matches(&matches)?;
+    let cli = Cli::from_arg_matches(&matches)?;
     Ok((cli, language))
 }
 

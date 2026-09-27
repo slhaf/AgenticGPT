@@ -1602,14 +1602,15 @@ fn tunnel_config(config: &mut Config) -> &mut config::TunnelConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::Parser;
+    use crate::cli::{Cli, Commands};
+    use clap::Parser as _;
 
     #[test]
     fn toolset_commands_dispatch_and_reject_unknown_namespaces() {
-        let cli = crate::Cli::try_parse_from(["agentic-gpt", "config", "toolset", "ls"]).unwrap();
+        let cli = Cli::try_parse_from(["agentic-gpt", "config", "toolset", "ls"]).unwrap();
         assert!(matches!(
             cli.command,
-            crate::Commands::Config {
+            Commands::Config {
                 command: ConfigCommand::Toolset {
                     command: ToolsetCommand::Ls
                 },
@@ -1618,11 +1619,10 @@ mod tests {
         ));
 
         let cli =
-            crate::Cli::try_parse_from(["agentic-gpt", "config", "toolset", "enable", "file"])
-                .unwrap();
+            Cli::try_parse_from(["agentic-gpt", "config", "toolset", "enable", "file"]).unwrap();
         assert!(matches!(
             cli.command,
-            crate::Commands::Config {
+            Commands::Config {
                 command: ConfigCommand::Toolset {
                     command: ToolsetCommand::Enable {
                         namespace: ToolNamespace::File
@@ -1633,11 +1633,10 @@ mod tests {
         ));
 
         let cli =
-            crate::Cli::try_parse_from(["agentic-gpt", "config", "toolset", "disable", "room"])
-                .unwrap();
+            Cli::try_parse_from(["agentic-gpt", "config", "toolset", "disable", "room"]).unwrap();
         assert!(matches!(
             cli.command,
-            crate::Commands::Config {
+            Commands::Config {
                 command: ConfigCommand::Toolset {
                     command: ToolsetCommand::Disable {
                         namespace: ToolNamespace::Room
@@ -1647,14 +1646,10 @@ mod tests {
             }
         ));
 
-        assert!(crate::Cli::try_parse_from([
-            "agentic-gpt",
-            "config",
-            "toolset",
-            "enable",
-            "unknown",
-        ])
-        .is_err());
+        assert!(
+            Cli::try_parse_from(["agentic-gpt", "config", "toolset", "enable", "unknown",])
+                .is_err()
+        );
     }
 
     #[test]

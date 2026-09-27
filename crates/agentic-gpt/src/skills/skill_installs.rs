@@ -24,7 +24,7 @@ use tokio::sync::{Mutex, Notify, OwnedSemaphorePermit, Semaphore};
 use tokio::time::{timeout, Duration};
 use uuid::Uuid;
 
-use crate::{skills, AppState};
+use crate::{skills, state::AppState};
 
 const DEFAULT_POLL_AFTER_MS: u64 = 1_000;
 const MAX_PATH_BYTES: usize = 240;

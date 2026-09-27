@@ -22,12 +22,12 @@ use crate::{
     config::Config,
     confirmation, jobs, notify,
     operation::{hub_command_name, RequestContext, RequestIngress},
+    state::AppState,
     transport_ledger,
     utils::{
         log_info, log_warn, CONNECT_TIMEOUT_SECS, HEARTBEAT_ACK_TIMEOUT_SECS,
         HEARTBEAT_INTERVAL_SECS, RECONNECT_DELAY_SECS,
     },
-    AppState,
 };
 
 pub(crate) async fn connect_loop(state: AppState) -> Result<()> {

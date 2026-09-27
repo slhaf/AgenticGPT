@@ -2243,7 +2243,7 @@ mod tests {
 
     #[test]
     fn checked_in_v09_config_example_is_strict_and_safe_to_copy() {
-        let source = include_str!("../../../config.example.json");
+        let source = include_str!("../../../../config.example.json");
         let mut value: serde_json::Value = serde_json::from_str(source).unwrap();
         value["toolsets"] = serde_json::to_value(ToolsetConfig::normal()).unwrap();
         let path = temp_config_path();
