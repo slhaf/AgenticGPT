@@ -220,7 +220,7 @@ async fn dispatch_inner(
                 Err(error) => return Ok(error),
             };
             let request_source = context.source();
-            match mcp::batch(&state, payload, &request_source, None).await {
+            match mcp::batch::batch(&state, payload, &request_source, None).await {
                 Ok(response) => slim_mcp_batch_response(response, snapshots.as_deref_mut()),
                 Err(error) => Ok(serde_json::json!({
                     "error": { "code": "mcp_batch_failed", "message": error.to_string() }

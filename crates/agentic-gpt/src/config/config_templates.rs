@@ -5,13 +5,13 @@ use std::path::PathBuf;
 use anyhow::{anyhow, Result};
 
 use crate::cli_i18n::UiLanguage;
+use crate::config::mcp_servers::McpServerConfig;
 use crate::config::{
     default_path_policy, normalize_http_mcp_public_url, parse_http_mcp_allow_hosts,
     validate_hub_transport, validate_hub_url_shape, Config, ConfirmationProviderConfig,
     HubReportingConfig, LimitsConfig, PathPolicyConfig, RoomConfig, SandboxConfig, ToolNamespace,
     ToolsetConfig, TunnelClientConfig, TunnelConfig, WorkerProfile,
 };
-use crate::mcp::McpServerConfig;
 use crate::utils::agentic_home;
 
 const STANDALONE_TUNNEL_ID_PLACEHOLDER: &str = "tunnel_replace-me";
@@ -390,7 +390,7 @@ mod tests {
         let mut servers = std::collections::BTreeMap::new();
         servers.insert(
             "local_tools".to_string(),
-            crate::mcp::McpServerConfig {
+            crate::config::mcp_servers::McpServerConfig {
                 enabled: true,
                 transport: "stdio".to_string(),
                 url: Some("node ./server.mjs".to_string()),
@@ -505,7 +505,7 @@ mod tests {
             .insert("futureField".to_string(), serde_json::json!(true));
         base.mcp_servers.insert(
             "imported".to_string(),
-            crate::mcp::McpServerConfig {
+            crate::config::mcp_servers::McpServerConfig {
                 enabled: true,
                 transport: "stdio".to_string(),
                 url: Some("node ./server.mjs".to_string()),

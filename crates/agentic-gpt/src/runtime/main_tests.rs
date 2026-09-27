@@ -4,11 +4,11 @@ use crate::browser_discovery::{
     resolve_browser_runtime, resolve_browser_runtime_with_sources, BrowserRuntimeSources,
 };
 use crate::cli::{read_local_arguments, Cli, Commands, LocalCommand, MAX_LOCAL_ARGUMENT_BYTES};
+use crate::config::mcp_servers::McpServerConfig;
 use crate::config::{Config, RuntimeMode};
 use crate::config::{PathPolicyConfig, Rule, TunnelConfig};
 use crate::config_cli::{PathRootCommand, PathRootKind};
 use crate::exec::PreparedBatchElement;
-use crate::mcp::McpServerConfig;
 use crate::policy::PolicyDecision;
 use crate::startup::{apply_live_config_subset, build_app_state, reload_live_config_once};
 use crate::state::{AppState, BrowserRuntimeContext, CapabilityProfile, RuntimeModel};

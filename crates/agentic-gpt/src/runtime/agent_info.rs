@@ -38,7 +38,8 @@ pub(crate) async fn collect(state: &AppState) -> Value {
     );
     let local_mcp = crate::local_control::status(&config.agent_id, local_mcp_enabled);
     let config_health = config_health(state, &config);
-    let mcp_config_revision = crate::mcp::server_config_revision(&config.mcp_servers);
+    let mcp_config_revision =
+        crate::config::mcp_servers::server_config_revision(&config.mcp_servers);
     let mcp_enabled_count = config
         .mcp_servers
         .values()
@@ -394,7 +395,7 @@ fn live_subset_matches_disk_for_workspace(effective: &Config, disk: &Config) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mcp::McpServerConfig;
+    use crate::config::mcp_servers::McpServerConfig;
     use agentic_gpt_protocol::AgentMessage;
     use std::collections::HashMap;
     use std::sync::Arc;

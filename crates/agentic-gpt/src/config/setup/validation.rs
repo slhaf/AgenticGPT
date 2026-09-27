@@ -270,6 +270,7 @@ mod tests {
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 
+use crate::config::mcp_servers::{self, McpServerAuthConfig, McpServerConfig};
 use crate::config::{
     self, default_room_config, ConfirmationProviderConfig, HttpMcpConfig, HubReportingConfig,
     LimitsConfig, MaxActiveJobs, PathPolicyConfig, ReportingDetail, RoomConfig,
@@ -279,7 +280,6 @@ use crate::config::{
 use crate::config_templates::{
     self, build_config, InitInput, OptionalSection, RuntimeMode, SecretValue, TunnelSecretSource,
 };
-use crate::mcp::{self, McpServerAuthConfig, McpServerConfig};
 
 use super::model::{
     HubDraft, McpServerDraft, OptionalSectionDraft, SetupField, SetupSession, StandaloneDraft,
@@ -834,7 +834,7 @@ fn mcp_servers_from_draft(
             },
         );
     }
-    if let Err(validation_error) = mcp::validate_server_configs(&configs) {
+    if let Err(validation_error) = mcp_servers::validate_server_configs(&configs) {
         let code = validation_error.to_string();
         let (field, safe_code) = if code.starts_with("mcp_server_id_invalid") {
             (SetupField::McpServerId, "config_init_mcp_server_id_invalid")

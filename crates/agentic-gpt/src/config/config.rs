@@ -1,3 +1,6 @@
+#[path = "mcp_servers.rs"]
+pub(crate) mod mcp_servers;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
@@ -20,8 +23,8 @@ use serde::{
 use serde_json::Value;
 use std::fmt;
 
+use self::mcp_servers::McpServerConfig;
 use crate::instance_lock::InstanceLock;
-use crate::mcp::McpServerConfig;
 use crate::policy::{builtin_rules, paths_match, PolicyDecision};
 use crate::state::CapabilityProfile;
 use crate::utils::{agentic_home, hostname_fallback, DEFAULT_BACKUP_LIMIT};
@@ -1284,7 +1287,7 @@ impl Config {
     }
 
     pub(crate) fn validate_mcp_servers(&self) -> Result<()> {
-        crate::mcp::validate_server_configs(&self.mcp_servers)
+        self::mcp_servers::validate_server_configs(&self.mcp_servers)
     }
 
     pub(crate) fn validate_local(&self) -> Result<()> {
@@ -2646,11 +2649,11 @@ mod tests {
         });
         config.mcp_servers.insert(
             "secured".to_string(),
-            crate::mcp::McpServerConfig {
+            crate::config::mcp_servers::McpServerConfig {
                 enabled: true,
                 transport: "streamable-http".to_string(),
                 url: Some("https://example.test/mcp".to_string()),
-                auth: Some(crate::mcp::McpServerAuthConfig::Bearer {
+                auth: Some(crate::config::mcp_servers::McpServerAuthConfig::Bearer {
                     token: "mcp-secret-marker".to_string(),
                 }),
             },

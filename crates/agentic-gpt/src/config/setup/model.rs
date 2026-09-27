@@ -819,10 +819,10 @@ fn optional_drafts_from_config(config: &Config) -> OptionalDrafts {
                     endpoint: server.url.clone().unwrap_or_default(),
                     bearer_auth: matches!(
                         server.auth,
-                        Some(crate::mcp::McpServerAuthConfig::Bearer { .. })
+                        Some(crate::config::mcp_servers::McpServerAuthConfig::Bearer { .. })
                     ),
                     bearer_token: server.auth.as_ref().map(
-                        |crate::mcp::McpServerAuthConfig::Bearer { token }| {
+                        |crate::config::mcp_servers::McpServerAuthConfig::Bearer { token }| {
                             SecretValue::new(token.clone())
                         },
                     ),
@@ -982,7 +982,7 @@ mod tests {
         base.limits.max_concurrent_tasks = 8;
         base.mcp_servers.insert(
             "imported".to_string(),
-            crate::mcp::McpServerConfig {
+            crate::config::mcp_servers::McpServerConfig {
                 enabled: true,
                 transport: "stdio".to_string(),
                 url: Some("node ./server.mjs".to_string()),
