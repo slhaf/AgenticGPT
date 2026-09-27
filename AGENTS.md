@@ -26,6 +26,10 @@ Use `rustfmt` defaults and idiomatic Rust naming: `snake_case` functions/modules
 
 Place Rust unit tests beside implementation code in `#[cfg(test)]` modules; use `#[tokio::test]` for async behavior. Kotlin tests belong in the matching source set, such as `commonTest` or `jvmTest`, and test classes should end in `Test`. Add regression tests for bug fixes. No numeric coverage threshold is configured; prioritize policy, protocol, persistence, and transport edge cases.
 
+New tests must demonstrate a distinct, consumer-observable behavior, boundary, error, state transition, protocol contract, or meaningful side effect that existing tests do not already establish. Assert outcomes rather than implementation call order, field forwarding, fixed wording, or source layout; keep higher-level tests when they prove integration or contract behavior that lower-level tests cannot. Do not use line coverage or similar inputs alone to judge test value.
+
+Before deleting a test, identify its assertions and the failure it could catch. Record why that failure is already detected by named retained tests, or why the test only detects an implementation change without a behavior change. Similar inputs or overlapping coverage alone do not prove redundancy. Preserve tests for distinct boundaries, errors, side effects, and cross-surface contracts; if distinct failure detection cannot be ruled out, retain the test. These rules apply to all future test additions and deletions, not only refactoring.
+
 ## Commit & Pull Request Guidelines
 
 Write short, imperative commit subjects. Existing history accepts both plain subjects (`Add skills support`) and scoped Conventional Commit forms (`feat(hub): ...`, `fix(android): ...`); use a scope when it clarifies the affected component. Keep commits focused. Pull requests should explain motivation and behavior changes, list verification commands, link related issues, and include screenshots for console UI changes. Call out OpenAPI, configuration, security-policy, or migration impacts explicitly.
