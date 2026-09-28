@@ -182,7 +182,7 @@ compatibility contract.
 
 All `/mcp` `tools/call` responses use the Hub `AgenticResult` envelope, which is directly compatible with the ChatGPT Apps / MCP tool result shape. Hub-native JSON is exposed as `structuredContent` plus a JSON text content block; a top-level `error` makes the MCP tool result `isError=true`.
 
-`mcp.callTool` no longer passes a downstream result envelope through at the Hub top level. It returns a flat `JobToolResponse`; a terminal downstream result is retained under `result`, and downstream `isError=true` produces a failed Job while retaining that result. Serialized arguments are capped at 256 KiB. Serialized results up to 512 KiB are retained; larger results are omitted and replaced by `resultBytes`, `resultSha256`, and a UTF-8-safe `resultPreview`. Active calls are inspected with `job.get` and cancelled with `job.cancel`.
+`mcp.callTool` does not pass a downstream result envelope through at the Hub top level. It returns a flat `JobToolResponse`; a terminal downstream result is retained under `result`, and downstream `isError=true` produces a failed Job while retaining that result. Serialized arguments are capped at 256 KiB. Serialized results up to 512 KiB are retained; larger results are omitted and replaced by `resultBytes`, `resultSha256`, and a UTF-8-safe `resultPreview`. Active calls are inspected with `job.get` and cancelled with `job.cancel`. Hub has no native `file.read` or `file.edit` tool. Its generic asynchronous `mcp.callTool` Job bridge is not a typed MCP image-content surface; do not rely on it to preserve file.read image Content blocks.
 
 `mcp.batch` returns a flat `McpBatchToolResponse` with ordered child Job
 projections in `results`. Validation and capacity admission happen before

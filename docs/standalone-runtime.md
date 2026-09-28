@@ -200,7 +200,10 @@ defaults to 300 and is capped at 900. Arguments must be a JSON object and their
 serialized size is capped at 256 KiB. Results up to 512 KiB are retained in
 the flat `JobToolResponse.result`; larger results set `resultTruncated=true` and
 retain only byte count, SHA-256, and an 8 KiB UTF-8-safe preview. A downstream
-`isError=true` result is retained while the Job state becomes `failed`.
+`isError=true` result is retained while the Job state becomes `failed`. Hub has
+no native `file.read` or `file.edit` tools; its generic asynchronous
+`mcp.callTool` bridge returns a Job projection, not a typed image-content
+surface, and must not be relied on to preserve `file.read` image Content blocks.
 
 Skill installation lookup and skill execution use the same bounded wait
 contract: `waitSeconds` defaults to 5 and is capped at 30. A wait timeout only
@@ -325,16 +328,31 @@ and standalone/Hub parity for every Normal, Room, and Hub profile tool.
 
 ### Standalone file tools
 
-`file.read` and `file.search` are bounded UTF-8 operations. They accept paths
-relative to `workspaceRoot` (or absolute paths authorized by `pathPolicy`),
-resolve symlinks before policy checks, and never invoke a shell or external
-search process. Reads return content by default, optionally attach metadata with
-`metadata: true`, support inclusive line ranges, and stop at the last complete
-line before the 256 KiB response bound. A truncated read returns only
-`nextStartLine`; a single line larger than the bound is rejected. Inside Git
-repositories, search honors Git ignore
+`file.search` and text-mode `file.read` are bounded UTF-8 operations. They
+accept paths relative to `workspaceRoot` (or absolute paths authorized by
+`pathPolicy`), resolve symlinks before policy checks, and never invoke a shell
+or external search process. Text reads return content by default, optionally
+attach metadata with `metadata: true`, support inclusive line ranges, and stop
+at the last complete line before the 256 KiB response bound. A truncated read
+returns only `nextStartLine`; a single line larger than the bound is rejected.
+Inside Git repositories, search honors Git ignore
 rules by default and caps its returned match/context payload at 256 KiB while
 also bounding scanned files and bytes.
+
+Binary `file.read` supports PNG, JPEG, WebP, and GIF. An image call returns
+MCP image Content blocks at the top level and JSON `structuredContent` metadata;
+image bytes are not duplicated in the JSON. Static images preserve their PNG,
+JPEG, or WebP encoding; metadata is under `image` with detected `mimeType`
+(`image/png`, `image/jpeg`, or `image/webp`) and
+`width`/`height`. GIF metadata has `sourceMimeType: "image/gif"`, canvas
+`width`/`height`, and ordered `frames` entries with `timestampMs`, output
+`mimeType: "image/png"`, and frame `width`/`height`. GIFs produce at most eight
+frames sampled uniformly over playback duration, including the first and last
+playback endpoints; timestamps are source playback frame-start milliseconds.
+Image/frame decode is limited to 16 Mi pixels and GIF traversal to 64 Mi
+cumulative pixels. Serialized image payload is limited to 8 MiB per `file.read`
+call. Other formats remain text when valid UTF-8, or return the existing typed
+read error; they are not treated as images.
 
 `contextLines` is a non-negative integer with a default of 0. The live maximum
 is `limits.maxFileSearchContextLines` (default 5, configurable from 0 through
@@ -345,21 +363,31 @@ warning, while truncation/skipped-file evidence appears only when it occurs.
 Negative or non-integer values fail argument validation.
 
 `file.read` and `file.search` also accept an ordered `requests` array of up to
-32 per-request shapes. Flat and batch forms are mutually exclusive. Batch
-results preserve input order, isolate failures, and trim result detail before
-collapsing envelopes at the approximately 1 MiB aggregate response bound.
-Search batches retain the 20,000-file and 128 MiB aggregate scan limits in
-addition to each search's ordinary limits.
+32 per-request shapes. Flat and batch forms are mutually exclusive. The
+structured batch `results` retain input order and carry each request's
+zero-based `index`; failures are isolated per item. For mixed image batches,
+top-level MCP Content follows that same order: each item's JSON envelope
+(including its image metadata, when present) is followed immediately by that
+item's image block(s), with GIF frames in chronological order. Text-only
+responses and their existing response bounds are unchanged. Search batches
+retain the 20,000-file and 128 MiB aggregate scan limits in addition to each
+search's ordinary limits.
 
 `file.edit` accepts only `patch` and optional `needConfirm`.
 The patch uses Codex apply-patch syntax and may add, update, delete, or move
-multiple files. Every source and destination is resolved through path policy,
-locked deterministically, checked as UTF-8 and at most 8 MiB, staged and
-validated before one optional confirmation. Source snapshots are revalidated
-immediately before commit. Normal success responses contain only committed
-requested paths and actions; partial failures retain ordered status/error
-evidence. Diffs, resolved paths, changed-line counts, and revisions stay
-internal for confirmation and audit.
+multiple files. Every source and destination is resolved through the existing
+path policy, locked deterministically, checked as UTF-8 and at most 8 MiB,
+staged and validated before one optional confirmation. For an `Add File`, a
+missing parent directory may be created only when the requested path passes
+the unchanged path policy. Newly created empty parents are tracked and cleaned
+up if preflight is rejected or confirmation does not proceed; this does not
+change `Move` behavior or make path checks race-proof. Source snapshots are
+revalidated immediately before commit. Failures before the first physical
+commit write no file contents; after commit begins, there is no cross-file
+rollback guarantee. Normal success responses contain only committed requested
+paths and actions; partial failures retain ordered status/error evidence.
+Diffs, resolved paths, changed-line counts, and revisions stay internal for
+confirmation and audit.
 
 ## Hub MCP profiles
 

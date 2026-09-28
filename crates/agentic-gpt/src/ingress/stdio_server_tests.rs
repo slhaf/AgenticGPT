@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeSet, HashMap},
+    io::Cursor,
     path::PathBuf,
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -10,6 +11,7 @@ use std::{
 use agentic_gpt_protocol::{
     AgentMessage, McpBatchChildResponse, McpBatchStatus, SkillActivationRequest,
 };
+use base64::Engine;
 use rmcp::{
     model::{CallToolRequestParams, Content},
     ServiceExt,
@@ -34,6 +36,64 @@ struct ToolContractCase {
     kind: String,
     arguments: Value,
     expect: Value,
+}
+
+fn encoded_test_image(format: image::ImageFormat) -> anyhow::Result<Vec<u8>> {
+    let pixels = image::RgbImage::from_fn(2, 2, |x, y| {
+        image::Rgb([40 + x as u8 * 20, 90 + y as u8 * 30, 180])
+    });
+    let mut output = Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgb8(pixels).write_to(&mut output, format)?;
+    Ok(output.into_inner())
+}
+
+fn gif_fixture(canvas: (u16, u16), frame: (u16, u16), delays: &[u16]) -> anyhow::Result<Vec<u8>> {
+    let mut output = Vec::new();
+    {
+        let mut encoder =
+            gif::Encoder::new(&mut output, canvas.0, canvas.1, &[0, 0, 0, 255, 255, 255])?;
+        for delay in delays {
+            let frame_data = gif::Frame {
+                width: frame.0,
+                height: frame.1,
+                delay: *delay,
+                buffer: std::borrow::Cow::Owned(vec![
+                    0;
+                    usize::from(frame.0) * usize::from(frame.1)
+                ]),
+                ..gif::Frame::default()
+            };
+            encoder.write_frame(&frame_data)?;
+        }
+    }
+    Ok(output)
+}
+
+fn append_png_chunk(output: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
+    output.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    let crc_start = output.len();
+    output.extend_from_slice(kind);
+    output.extend_from_slice(data);
+    let mut crc = !0_u32;
+    for byte in &output[crc_start..] {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            crc = (crc >> 1) ^ (0xedb8_8320 & (0_u32.wrapping_sub(crc & 1)));
+        }
+    }
+    output.extend_from_slice(&(!crc).to_be_bytes());
+}
+
+fn oversized_png_header() -> anyhow::Result<Vec<u8>> {
+    let valid = encoded_test_image(image::ImageFormat::Png)?;
+    let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+    let mut header = Vec::new();
+    header.extend_from_slice(&4097_u32.to_be_bytes());
+    header.extend_from_slice(&4097_u32.to_be_bytes());
+    header.extend_from_slice(&[8, 2, 0, 0, 0]);
+    append_png_chunk(&mut png, b"IHDR", &header);
+    png.extend_from_slice(&valid[33..]);
+    Ok(png)
 }
 
 #[tokio::test]
@@ -2004,6 +2064,292 @@ async fn in_process_stdio_file_read_batch_descriptor_and_call_contract() -> anyh
 }
 
 #[tokio::test]
+async fn in_process_stdio_file_read_projects_static_and_gif_images() -> anyhow::Result<()> {
+    let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
+    let workspace = server.state.config.read().await.workspace_root.clone();
+    let static_fixtures = [
+        ("sniffed-png.txt", image::ImageFormat::Png, "image/png"),
+        ("sniffed-jpeg.txt", image::ImageFormat::Jpeg, "image/jpeg"),
+        ("sniffed-webp.txt", image::ImageFormat::WebP, "image/webp"),
+    ];
+    let mut expected_static = Vec::new();
+    for (path, format, mime_type) in static_fixtures {
+        let bytes = encoded_test_image(format)?;
+        std::fs::write(workspace.join(path), &bytes)?;
+        expected_static.push((path, mime_type, bytes));
+    }
+    std::fs::write(workspace.join("image-batch.txt"), "between images\n")?;
+    let delays = (1..=12).collect::<Vec<_>>();
+    let gif_bytes = gif_fixture((1, 1), (1, 1), &delays)?;
+    std::fs::write(workspace.join("duration-sampled.gif"), gif_bytes)?;
+
+    let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+    let (client_read, client_write) = split(client_io);
+    let (server_read, server_write) = split(server_io);
+    let server_task = tokio::spawn(async move {
+        let transport = AsyncRwTransport::<RoleServer, _, _>::new_server(server_read, server_write);
+        let running = server
+            .serve(ResumableStdioTransport::new(transport))
+            .await?;
+        let _ = running.waiting().await?;
+        anyhow::Result::<()>::Ok(())
+    });
+    let client = ().serve((client_read, client_write)).await?;
+
+    for (path, mime_type, expected_bytes) in &expected_static {
+        let result = client
+            .call_tool(
+                CallToolRequestParams::new("file.read")
+                    .with_arguments(Map::from_iter([("path".to_string(), json!(path))])),
+            )
+            .await?;
+        let structured = result.structured_content.as_ref().unwrap();
+        assert_eq!(structured["image"]["mimeType"], json!(mime_type));
+        assert!(structured["image"].get("data").is_none());
+        let content = result
+            .content
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[1]["mimeType"], json!(mime_type));
+        let data = content[1]["data"].as_str().unwrap();
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(data)?
+                .as_slice(),
+            expected_bytes.as_slice()
+        );
+        assert!(!structured.to_string().contains(data));
+    }
+
+    let batch = client
+        .call_tool(
+            CallToolRequestParams::new("file.read").with_arguments(Map::from_iter([(
+                "requests".to_string(),
+                json!([
+                    {"path": "sniffed-png.txt"},
+                    {"path": "image-batch.txt"},
+                    {"path": "missing-image-batch.txt"},
+                    {"path": "sniffed-webp.txt"}
+                ]),
+            )])),
+        )
+        .await?;
+    let structured = batch.structured_content.as_ref().unwrap();
+    assert_eq!(structured["results"][0]["index"], 0);
+    assert_eq!(structured["results"][1]["index"], 1);
+    assert_eq!(structured["results"][2]["index"], 2);
+    assert_eq!(structured["results"][3]["index"], 3);
+    assert_eq!(
+        structured["results"][0]["result"]["image"]["mimeType"],
+        "image/png"
+    );
+    assert_eq!(
+        structured["results"][1]["result"]["content"],
+        "between images\n"
+    );
+    assert_eq!(structured["results"][2]["status"], "failed");
+    assert_eq!(
+        structured["results"][3]["result"]["image"]["mimeType"],
+        "image/webp"
+    );
+    let batch_content = batch
+        .content
+        .iter()
+        .map(serde_json::to_value)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    assert_eq!(
+        batch_content
+            .iter()
+            .map(|block| block["type"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["text", "image", "text", "text", "text", "image"]
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(batch_content[0]["text"].as_str().unwrap())?["index"],
+        0
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(batch_content[2]["text"].as_str().unwrap())?["index"],
+        1
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(batch_content[3]["text"].as_str().unwrap())?["index"],
+        2
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(batch_content[4]["text"].as_str().unwrap())?["index"],
+        3
+    );
+    assert!(structured["results"]
+        .to_string()
+        .find(batch_content[1]["data"].as_str().unwrap())
+        .is_none());
+
+    let gif = client
+        .call_tool(
+            CallToolRequestParams::new("file.read").with_arguments(Map::from_iter([(
+                "path".to_string(),
+                json!("duration-sampled.gif"),
+            )])),
+        )
+        .await?;
+    let gif_value = gif.structured_content.as_ref().unwrap();
+    assert_eq!(gif_value["image"]["sourceMimeType"], "image/gif");
+    let frames = gif_value["image"]["frames"].as_array().unwrap();
+    let timestamps = frames
+        .iter()
+        .map(|frame| frame["timestampMs"].as_u64().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(timestamps, [0, 100, 210, 280, 360, 550, 660]);
+    assert_eq!(gif.content.len(), 1 + frames.len());
+    for (block, frame) in gif.content.iter().skip(1).zip(frames) {
+        let block = serde_json::to_value(block)?;
+        assert_eq!(block["type"], "image");
+        assert_eq!(block["mimeType"], frame["mimeType"]);
+        let bytes =
+            base64::engine::general_purpose::STANDARD.decode(block["data"].as_str().unwrap())?;
+        let decoded = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png)?;
+        assert_eq!(decoded.width(), frame["width"].as_u64().unwrap() as u32);
+        assert_eq!(decoded.height(), frame["height"].as_u64().unwrap() as u32);
+    }
+
+    let _ = client.cancel().await;
+    server_task.await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn in_process_stdio_file_read_enforces_image_pixel_and_response_bounds() -> anyhow::Result<()>
+{
+    let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
+    let workspace = server.state.config.read().await.workspace_root.clone();
+    std::fs::write(
+        workspace.join("over-pixel-limit.png"),
+        oversized_png_header()?,
+    )?;
+    std::fs::write(workspace.join("invalid.png"), b"\x89PNG\r\n\x1a\nnot-a-png")?;
+    let mut oversized_invalid = b"\x89PNG\r\n\x1a\n".to_vec();
+    oversized_invalid.resize(6 * 1024 * 1024 + 3, 0);
+    std::fs::write(workspace.join("oversized-invalid.png"), oversized_invalid)?;
+    let mut response_limited = encoded_test_image(image::ImageFormat::Png)?;
+    let iend_start = response_limited.len() - 12;
+    let trailer = response_limited.split_off(iend_start);
+    let mut text_chunk = b"Comment\0".to_vec();
+    text_chunk.resize(6 * 1024 * 1024 - response_limited.len() - 24, b'x');
+    append_png_chunk(&mut response_limited, b"tEXt", &text_chunk);
+    response_limited.extend_from_slice(&trailer);
+    std::fs::write(workspace.join("response-limit.png"), response_limited)?;
+    let cumulative_gif = gif_fixture((4096, 4096), (1, 1), &[1, 1, 1, 1, 1])?;
+    std::fs::write(workspace.join("cumulative-limit.gif"), cumulative_gif)?;
+    std::fs::write(
+        workspace.join("range.png"),
+        encoded_test_image(image::ImageFormat::Png)?,
+    )?;
+
+    let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+    let (client_read, client_write) = split(client_io);
+    let (server_read, server_write) = split(server_io);
+    let server_task = tokio::spawn(async move {
+        let transport = AsyncRwTransport::<RoleServer, _, _>::new_server(server_read, server_write);
+        let running = server
+            .serve(ResumableStdioTransport::new(transport))
+            .await?;
+        let _ = running.waiting().await?;
+        anyhow::Result::<()>::Ok(())
+    });
+    let client = ().serve((client_read, client_write)).await?;
+
+    for (arguments, expected_code) in [
+        (
+            json!({"path":"over-pixel-limit.png"}),
+            "file_image_too_large",
+        ),
+        (json!({"path":"invalid.png"}), "file_invalid_image"),
+        (
+            json!({"path":"oversized-invalid.png"}),
+            "file_image_response_too_large",
+        ),
+        (
+            json!({"path":"response-limit.png"}),
+            "file_image_response_too_large",
+        ),
+        (
+            json!({"path":"cumulative-limit.gif"}),
+            "file_image_too_large",
+        ),
+        (
+            json!({"path":"range.png","startLine":1,"endLine":1}),
+            "file_invalid_line_range",
+        ),
+    ] {
+        let result = client
+            .call_tool(
+                CallToolRequestParams::new("file.read")
+                    .with_arguments(serde_json::from_value(arguments)?),
+            )
+            .await?;
+        assert_eq!(
+            result.structured_content.as_ref().unwrap()["error"]["code"],
+            expected_code
+        );
+        assert!(!result.content.iter().any(|block| {
+            serde_json::to_value(block)
+                .ok()
+                .is_some_and(|value| value["type"] == "image")
+        }));
+    }
+
+    let overflow_text = format!("{}\n", "x".repeat(2_000)).repeat(100);
+    let mut requests = vec![json!({"path":"response-limit.png"})];
+    for index in 0..4 {
+        let path = format!("overflow-text-{index}.txt");
+        std::fs::write(workspace.join(&path), &overflow_text)?;
+        requests.push(json!({"path":path}));
+    }
+    let batch = client
+        .call_tool(
+            CallToolRequestParams::new("file.read").with_arguments(Map::from_iter([(
+                "requests".to_string(),
+                Value::Array(requests),
+            )])),
+        )
+        .await?;
+    let batch_value = batch.structured_content.as_ref().unwrap();
+    assert_eq!(batch_value["status"], "completed_with_errors");
+    assert_eq!(batch_value["results"].as_array().unwrap().len(), 5);
+    assert_eq!(batch_value["results"][0]["index"], 0);
+    assert_eq!(batch_value["results"][0]["status"], "failed");
+    assert_eq!(
+        batch_value["results"][0]["error"]["code"],
+        "file_image_response_too_large"
+    );
+    for index in 0..4 {
+        let result = &batch_value["results"][index + 1];
+        assert_eq!(result["index"], index + 1);
+        assert_eq!(result["status"], "completed");
+        assert_eq!(
+            result["result"]["content"].as_str(),
+            Some(overflow_text.as_str())
+        );
+    }
+
+    assert!(!batch.content.iter().any(|block| {
+        serde_json::to_value(block)
+            .ok()
+            .is_some_and(|value| value["type"] == "image")
+    }));
+
+    let _ = client.cancel().await;
+
+    server_task.await??;
+    Ok(())
+}
+
+#[tokio::test]
 async fn file_search_dispatch_supports_literal_and_regex_queries() -> anyhow::Result<()> {
     let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
     let workspace = server.state.config.read().await.workspace_root.clone();
@@ -2130,6 +2476,151 @@ async fn file_read_and_search_batches_preserve_order_and_isolate_failures() -> a
         )
         .await
         .is_err());
+    Ok(())
+}
+
+#[tokio::test]
+async fn file_edit_add_creates_nested_parents_after_whole_patch_preflight() -> anyhow::Result<()> {
+    let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
+    let workspace = server.state.config.read().await.workspace_root.clone();
+    let result = server
+        .dispatch(
+            "file.edit",
+            json!({"patch":"*** Begin Patch\n*** Add File: nested/deep/created.txt\n+created\n*** Add File: ghost/../normalized/deep/created.txt\n+normalized\n*** End Patch"}),
+        )
+        .await?;
+    assert_eq!(result["status"], "completed");
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("nested/deep/created.txt"))?,
+        "created\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("normalized/deep/created.txt"))?,
+        "normalized\n"
+    );
+    assert!(!workspace.join("ghost").exists());
+
+    let rejected = server
+        .dispatch(
+            "file.edit",
+            json!({"patch":"*** Begin Patch\n*** Add File: preflight/nested/new.txt\n+new\n*** Update File: missing-source.txt\n@@\n-old\n+new\n*** End Patch"}),
+        )
+        .await?;
+    assert_eq!(rejected["error"]["code"], "file_not_found");
+    assert!(!workspace.join("preflight").exists());
+
+    std::fs::write(workspace.join("move-source.txt"), "move\n")?;
+    let move_rejected = server
+        .dispatch(
+            "file.edit",
+            json!({"patch":"*** Begin Patch\n*** Update File: move-source.txt\n*** Move to: missing-move-parent/moved.txt\n@@\n-move\n+moved\n*** End Patch"}),
+        )
+        .await?;
+    assert_eq!(move_rejected["error"]["code"], "file_parent_not_found");
+    assert!(!workspace.join("missing-move-parent").exists());
+
+    server
+        .state
+        .config
+        .write()
+        .await
+        .confirmation_provider
+        .channels
+        .clear();
+    let confirmation_rejected = server
+        .dispatch(
+            "file.edit",
+            json!({"patch":"*** Begin Patch\n*** Add File: confirmation/nested/new.txt\n+new\n*** End Patch","needConfirm":true}),
+        )
+        .await?;
+    assert_eq!(
+        confirmation_rejected["error"]["code"],
+        "file_confirmation_unavailable"
+    );
+    assert!(!workspace.join("confirmation").exists());
+
+    let external_path = workspace.join("external/nested/target.txt");
+    crate::file_ops::inject_external_change(&external_path, b"external\n");
+    let raced = server
+        .dispatch(
+            "file.edit",
+            json!({"patch":"*** Begin Patch\n*** Add File: external/nested/target.txt\n+agent\n*** End Patch"}),
+        )
+        .await?;
+    assert_eq!(raced["error"]["code"], "file_already_exists");
+    assert_eq!(std::fs::read_to_string(&external_path)?, "external\n");
+
+    let failed_path = workspace.join("commit-failure/nested/target.txt");
+    crate::file_ops::inject_commit_failure(&failed_path);
+    let commit_failed = server
+        .dispatch(
+            "file.edit",
+            json!({"patch":"*** Begin Patch\n*** Add File: commit-failure/nested/target.txt\n+agent\n*** End Patch"}),
+        )
+        .await?;
+    assert_eq!(commit_failed["error"]["code"], "file_write_failed");
+    assert!(!workspace.join("commit-failure").exists());
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn file_edit_add_reserves_audit_path_under_symlinked_workspace() -> anyhow::Result<()> {
+    let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
+    let workspace = server.state.config.read().await.workspace_root.clone();
+    let alias = workspace.parent().unwrap().join("workspace-alias");
+    std::os::unix::fs::symlink(&workspace, &alias)?;
+    let mut config = server.state.config.read().await.clone();
+    config.workspace_root = alias.clone();
+    config.path_policy.write_roots = vec![alias];
+    *server.state.config.write().await = config;
+
+    let audit_path = workspace.join(".agentic-gpt-audit.jsonl");
+    assert!(!audit_path.exists());
+    let denied = server
+        .dispatch(
+            "file.edit",
+            json!({"patch":"*** Begin Patch\n*** Add File: .agentic-gpt-audit.jsonl/keep.txt\n+keep\n*** End Patch"}),
+        )
+        .await?;
+    assert_eq!(denied["error"]["code"], "file_reserved_path");
+    assert!(audit_path.is_file());
+    assert!(!audit_path.is_dir());
+    assert!(!audit_path.join("keep.txt").exists());
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn file_edit_add_keeps_path_policy_for_missing_parents_and_symlinks() -> anyhow::Result<()> {
+    let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
+    let workspace = server.state.config.read().await.workspace_root.clone();
+    let real = workspace.join("real");
+    let alias = workspace.join("alias");
+    std::fs::create_dir(&real)?;
+    std::os::unix::fs::symlink(&real, &alias)?;
+    server.state.config.write().await.path_policy.deny_roots = vec![alias.join("blocked/nested")];
+
+    let denied = server
+        .dispatch(
+            "file.edit",
+            json!({"patch":"*** Begin Patch\n*** Add File: real/blocked/nested/new.txt\n+new\n*** End Patch"}),
+        )
+        .await?;
+    assert_eq!(denied["error"]["code"], "path_denied");
+    assert!(!real.join("blocked").exists());
+
+    let outside = workspace.parent().unwrap().join("outside");
+    std::fs::create_dir(&outside)?;
+    std::os::unix::fs::symlink(&outside, workspace.join("escape"))?;
+    let escaped = server
+        .dispatch(
+            "file.edit",
+            json!({"patch":"*** Begin Patch\n*** Add File: escape/new/nested.txt\n+new\n*** End Patch"}),
+        )
+        .await?;
+    assert_eq!(escaped["error"]["code"], "path_denied");
+    assert!(!outside.join("new").exists());
     Ok(())
 }
 

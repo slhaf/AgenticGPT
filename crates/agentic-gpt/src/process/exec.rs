@@ -1,5 +1,6 @@
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::ffi::OsString;
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result};
 use tokio::process::Command;
@@ -217,19 +218,58 @@ pub(crate) fn normalize_roots<'a>(
 }
 
 pub(crate) fn canonicalize_existing_or_parent(path: &Path) -> Result<PathBuf> {
-    if path.exists() {
-        return Ok(path.canonicalize()?);
-    }
-    if let Some(parent) = path.parent() {
-        if parent.exists() {
-            let parent = parent.canonicalize()?;
-            return Ok(path
-                .file_name()
-                .map(|name| parent.join(name))
-                .unwrap_or(parent));
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let mut resolved = PathBuf::new();
+    let mut missing = Vec::<OsString>::new();
+    let mut resolved_is_dir = true;
+
+    for component in absolute.components() {
+        match component {
+            Component::Prefix(prefix) => resolved.push(prefix.as_os_str()),
+            Component::RootDir => resolved.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if missing.pop().is_none() {
+                    if !resolved_is_dir {
+                        return Err(std::io::Error::from(std::io::ErrorKind::NotADirectory).into());
+                    }
+                    if resolved.pop() {
+                        resolved_is_dir = std::fs::metadata(&resolved)?.is_dir();
+                    }
+                }
+            }
+            Component::Normal(name) => {
+                if !resolved_is_dir {
+                    return Err(std::io::Error::from(std::io::ErrorKind::NotADirectory).into());
+                }
+                if missing.is_empty() {
+                    let next = resolved.join(name);
+                    match std::fs::symlink_metadata(&next) {
+                        Ok(_) => {
+                            let metadata = std::fs::metadata(&next)?;
+                            resolved = std::fs::canonicalize(next)?;
+                            resolved_is_dir = metadata.is_dir();
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                            missing.push(name.to_os_string());
+                        }
+                        Err(error) => return Err(error.into()),
+                    }
+                } else {
+                    missing.push(name.to_os_string());
+                }
+            }
         }
     }
-    Ok(path.to_path_buf())
+
+    for component in missing {
+        resolved.push(component);
+    }
+    Ok(resolved)
 }
 
 fn expand_path(value: &str) -> Result<PathBuf> {

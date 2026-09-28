@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::Read;
+use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -23,6 +23,8 @@ use crate::config::Config;
 use crate::exec;
 use crate::state::AppState;
 
+use image::{AnimationDecoder, ImageDecoder, ImageEncoder};
+
 pub(crate) const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
 pub(crate) const MAX_READ_OUTPUT_BYTES: usize = 256 * 1024;
 pub(crate) const MAX_LINE_DISPLAY_BYTES: usize = 4 * 1024;
@@ -34,6 +36,30 @@ pub(crate) const MAX_BATCH_OPERATIONS: usize = 32;
 pub(crate) const MAX_BATCH_SCAN_FILES: usize = 20_000;
 pub(crate) const MAX_BATCH_SCAN_BYTES: u64 = 128 * 1024 * 1024;
 pub(crate) const MAX_BATCH_OUTPUT_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_IMAGE_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_IMAGE_PIXELS: u64 = 16 * 1024 * 1024;
+const MAX_GIF_DECODE_PIXELS: u64 = 64 * 1024 * 1024;
+const MAX_IMAGE_DECODE_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_GIF_DECODER_ALLOC_BYTES: u64 = 3 * MAX_IMAGE_PIXELS * 4;
+
+#[derive(Debug)]
+pub(crate) struct FileImageBlock {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) mime_type: &'static str,
+}
+
+#[derive(Debug)]
+pub(crate) struct ReadOutput {
+    pub(crate) value: Value,
+    pub(crate) images: Vec<FileImageBlock>,
+    pub(crate) encoded_image_bytes: usize,
+}
+
+#[derive(Debug)]
+pub(crate) struct ReadBatchOutput {
+    pub(crate) value: Value,
+    pub(crate) images_by_result: Vec<Vec<FileImageBlock>>,
+}
 
 #[cfg(test)]
 static INJECT_EXTERNAL_CHANGE: Mutex<Option<(PathBuf, Vec<u8>)>> = Mutex::new(None);
@@ -238,6 +264,115 @@ pub(crate) fn resolve_absent_path(
     })
 }
 
+fn resolve_absent_add_path(
+    config: &Config,
+    input: &str,
+) -> std::result::Result<(ResolvedPath, Vec<PathBuf>), FileError> {
+    if input.trim().is_empty() {
+        return Err(FileError::new("file_path_empty", "path must not be empty"));
+    }
+    let raw = PathBuf::from(input);
+    let expanded = exec::expand_pathbuf(&raw)
+        .map_err(|_| FileError::new("file_path_invalid", "path could not be expanded"))?;
+    let candidate = if expanded.is_absolute() {
+        expanded
+    } else {
+        config.workspace_root.join(expanded)
+    };
+    if fs::symlink_metadata(&candidate).is_ok() {
+        return Err(FileError::new(
+            "file_already_exists",
+            "target already exists",
+        ));
+    }
+    let projected = exec::canonicalize_existing_or_parent(&candidate)
+        .map_err(|_| FileError::new("file_parent_not_found", "parent directory was not found"))?;
+    if fs::symlink_metadata(&projected).is_ok() {
+        return Err(FileError::new(
+            "file_already_exists",
+            "target already exists",
+        ));
+    }
+    let parent = projected
+        .parent()
+        .ok_or_else(|| FileError::new("file_parent_not_found", "parent directory was not found"))?;
+    let parents_to_create = missing_parent_directories(parent)?;
+    check_policy(config, &projected, Access::Write)?;
+    if is_reserved_path(config, &projected) {
+        return Err(FileError::new(
+            "file_reserved_path",
+            "Agentic runtime path is reserved",
+        ));
+    }
+    for directory in &parents_to_create {
+        check_policy(config, directory, Access::Write)?;
+        if is_reserved_path(config, directory) {
+            return Err(FileError::new(
+                "file_reserved_path",
+                "Agentic runtime path is reserved",
+            ));
+        }
+    }
+    let reprojected = exec::canonicalize_existing_or_parent(&candidate)
+        .map_err(|_| FileError::new("file_parent_not_found", "parent directory was not found"))?;
+    if reprojected != projected {
+        return Err(FileError::new(
+            "file_symlink_rejected",
+            "target path changed during preflight",
+        ));
+    }
+    Ok((
+        ResolvedPath {
+            input: input.to_string(),
+            requested: projected.clone(),
+            path: projected,
+        },
+        parents_to_create,
+    ))
+}
+
+fn missing_parent_directories(parent: &Path) -> std::result::Result<Vec<PathBuf>, FileError> {
+    let mut missing = Vec::new();
+    let mut current = parent.to_path_buf();
+    loop {
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink()
+                    || !metadata.is_dir()
+                    || fs::canonicalize(&current).ok().as_deref() != Some(current.as_path())
+                {
+                    return Err(FileError::new(
+                        "file_symlink_rejected",
+                        "parent path is not a canonical directory",
+                    ));
+                }
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let next = current.parent().ok_or_else(|| {
+                    FileError::new("file_parent_not_found", "parent directory was not found")
+                })?;
+                if next == current {
+                    return Err(FileError::new(
+                        "file_parent_not_found",
+                        "parent directory was not found",
+                    ));
+                }
+                missing.push(current.clone());
+                current = next.to_path_buf();
+            }
+            Err(_) => {
+                return Err(FileError::new(
+                    "file_parent_not_found",
+                    "parent directory was not found",
+                ))
+            }
+        }
+    }
+    missing.reverse();
+    Ok(missing)
+}
+
 fn path_policy_error(error: exec::PathRootNormalizationError) -> FileError {
     let message = match error {
         exec::PathRootNormalizationError::Expansion(_) => "path root could not be expanded",
@@ -298,19 +433,25 @@ fn check_policy(
 }
 
 fn is_reserved_path(config: &Config, path: &Path) -> bool {
-    path == config.workspace_root.join(".agentic-gpt-audit.jsonl")
+    let audit_path = config.workspace_root.join(".agentic-gpt-audit.jsonl");
+    let audit_path_matches = path.starts_with(&audit_path)
+        || exec::canonicalize_existing_or_parent(&audit_path)
+            .ok()
+            .is_some_and(|canonical| path.starts_with(&canonical));
+    audit_path_matches
         || path
             .file_name()
             .and_then(|name| name.to_str())
             .is_some_and(|name| name.starts_with(".agentic-file-tmp-"))
 }
 
-pub(crate) fn read(
+pub(crate) fn read_with_images(
     resolved: &ResolvedPath,
     include_metadata: bool,
     start_line: Option<usize>,
     end_line: Option<usize>,
-) -> std::result::Result<Value, FileError> {
+    image_budget_bytes: usize,
+) -> std::result::Result<ReadOutput, FileError> {
     let metadata = fs::metadata(&resolved.path)
         .map_err(|_| FileError::new("file_not_found", "path was not found"))?;
     let modified_at = metadata
@@ -338,7 +479,11 @@ pub(crate) fn read(
     });
     if metadata.is_dir() {
         return if include_metadata {
-            Ok(json!({"metadata": metadata_value}))
+            Ok(ReadOutput {
+                value: json!({"metadata": metadata_value}),
+                images: Vec::new(),
+                encoded_image_bytes: 0,
+            })
         } else {
             Err(FileError::new(
                 "file_is_directory",
@@ -364,6 +509,28 @@ pub(crate) fn read(
             ))
         }
     };
+    if let Some(format) = DetectedImageFormat::from_bytes(&bytes) {
+        if start_line.is_some() || end_line.is_some() {
+            return Err(FileError::new(
+                "file_invalid_line_range",
+                "line ranges are not supported for image files",
+            ));
+        }
+        metadata_value["encoding"] = json!("image");
+        return match format {
+            DetectedImageFormat::Gif => {
+                read_gif_image(bytes, metadata_value, include_metadata, image_budget_bytes)
+            }
+            _ => read_static_image(
+                bytes,
+                format,
+                metadata_value,
+                include_metadata,
+                image_budget_bytes,
+            ),
+        };
+    }
+
     let text = String::from_utf8(bytes)
         .map_err(|_| FileError::new("file_not_utf8", "file content is not UTF-8 text"))?;
     let total_lines = line_count(&text);
@@ -385,7 +552,429 @@ pub(crate) fn read(
         metadata_value["totalLines"] = json!(total_lines);
         result["metadata"] = metadata_value;
     }
-    Ok(result)
+    Ok(ReadOutput {
+        value: result,
+        images: Vec::new(),
+        encoded_image_bytes: 0,
+    })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DetectedImageFormat {
+    Png,
+    Jpeg,
+    Webp,
+    Gif,
+}
+
+impl DetectedImageFormat {
+    fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+            Some(Self::Png)
+        } else if bytes.starts_with(b"\xff\xd8\xff") {
+            Some(Self::Jpeg)
+        } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+            Some(Self::Gif)
+        } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+            Some(Self::Webp)
+        } else {
+            None
+        }
+    }
+
+    fn mime_type(self) -> &'static str {
+        match self {
+            Self::Png => "image/png",
+            Self::Jpeg => "image/jpeg",
+            Self::Webp => "image/webp",
+            Self::Gif => "image/gif",
+        }
+    }
+
+    fn image_format(self) -> image::ImageFormat {
+        match self {
+            Self::Png => image::ImageFormat::Png,
+            Self::Jpeg => image::ImageFormat::Jpeg,
+            Self::Webp => image::ImageFormat::WebP,
+            Self::Gif => image::ImageFormat::Gif,
+        }
+    }
+}
+
+fn read_static_image(
+    bytes: Vec<u8>,
+    format: DetectedImageFormat,
+    mut metadata: Value,
+    include_metadata: bool,
+    image_budget_bytes: usize,
+) -> std::result::Result<ReadOutput, FileError> {
+    let encoded_image_bytes = base64_encoded_len(bytes.len()).ok_or_else(|| {
+        FileError::new(
+            "file_image_response_too_large",
+            "image response is too large",
+        )
+    })?;
+    if encoded_image_bytes > image_budget_bytes {
+        return Err(FileError::new(
+            "file_image_response_too_large",
+            "image response exceeds the 8 MiB image payload bound",
+        ));
+    }
+    let (width, height) = validate_static_image(&bytes, format)?;
+    let image = json!({
+        "mimeType": format.mime_type(),
+        "width": width,
+        "height": height,
+    });
+    let mut value = json!({"image": image});
+    if include_metadata {
+        value["metadata"] = metadata.take();
+    }
+    Ok(ReadOutput {
+        value,
+        images: vec![FileImageBlock {
+            bytes,
+            mime_type: format.mime_type(),
+        }],
+        encoded_image_bytes,
+    })
+}
+
+fn validate_static_image(
+    bytes: &[u8],
+    format: DetectedImageFormat,
+) -> std::result::Result<(u32, u32), FileError> {
+    let mut reader = image::ImageReader::with_format(Cursor::new(bytes), format.image_format());
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(u32::MAX);
+    limits.max_image_height = Some(u32::MAX);
+    limits.max_alloc = Some(MAX_IMAGE_DECODE_BYTES);
+    reader.limits(limits);
+    let decoder = reader.into_decoder().map_err(image_decode_error)?;
+    let (width, height) = decoder.dimensions();
+    validate_image_pixels(width, height)?;
+    let output_bytes = decoder.total_bytes();
+    if output_bytes > MAX_IMAGE_DECODE_BYTES {
+        return Err(FileError::new(
+            "file_image_too_large",
+            "decoded image exceeds the 128 MiB allocation bound",
+        ));
+    }
+    let output_len = usize::try_from(output_bytes).map_err(|_| {
+        FileError::new(
+            "file_image_too_large",
+            "decoded image exceeds the addressable allocation bound",
+        )
+    })?;
+    let mut decoded = Vec::new();
+    decoded.try_reserve_exact(output_len).map_err(|_| {
+        FileError::new(
+            "file_image_too_large",
+            "decoded image could not fit within the allocation bound",
+        )
+    })?;
+    decoded.resize(output_len, 0);
+    decoder
+        .read_image(&mut decoded)
+        .map_err(image_decode_error)?;
+    Ok((width, height))
+}
+
+fn validate_image_pixels(width: u32, height: u32) -> std::result::Result<u64, FileError> {
+    let pixels = u64::from(width)
+        .checked_mul(u64::from(height))
+        .filter(|pixels| width > 0 && height > 0 && *pixels <= MAX_IMAGE_PIXELS)
+        .ok_or_else(|| {
+            FileError::new(
+                "file_image_too_large",
+                "image exceeds the 16 megapixel decoded-pixel bound",
+            )
+        })?;
+    Ok(pixels)
+}
+
+fn image_decode_error(error: image::ImageError) -> FileError {
+    if matches!(error, image::ImageError::Limits(_)) {
+        FileError::new(
+            "file_image_too_large",
+            "image decoding exceeded its allocation bounds",
+        )
+    } else {
+        FileError::new(
+            "file_invalid_image",
+            "image content is invalid or unsupported",
+        )
+    }
+}
+
+fn base64_encoded_len(bytes: usize) -> Option<usize> {
+    bytes.checked_add(2)?.checked_div(3)?.checked_mul(4)
+}
+
+struct GifPlan {
+    width: u32,
+    height: u32,
+    frame_count: usize,
+    duration_ms: u64,
+}
+
+fn read_gif_image(
+    bytes: Vec<u8>,
+    mut metadata: Value,
+    include_metadata: bool,
+    image_budget_bytes: usize,
+) -> std::result::Result<ReadOutput, FileError> {
+    let plan = scan_gif(&bytes)?;
+    let sampling = gif_sampling(&plan);
+    let mut decoder = image::codecs::gif::GifDecoder::new(Cursor::new(bytes.as_slice()))
+        .map_err(image_decode_error)?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(u32::MAX);
+    limits.max_image_height = Some(u32::MAX);
+    limits.max_alloc = Some(MAX_GIF_DECODER_ALLOC_BYTES);
+    decoder.set_limits(limits).map_err(image_decode_error)?;
+
+    let mut image_budget_remaining = image_budget_bytes;
+    let mut playback_ms = 0u64;
+    let mut frame_count = 0usize;
+    let mut frames_metadata = Vec::with_capacity(MAX_GIF_SAMPLED_FRAMES);
+    let mut images = Vec::with_capacity(MAX_GIF_SAMPLED_FRAMES);
+    for frame in decoder.into_frames() {
+        let frame = frame.map_err(image_decode_error)?;
+        let (numerator_ms, denominator_ms) = frame.delay().numer_denom_ms();
+        let frame_duration_ms = u64::from(numerator_ms) / u64::from(denominator_ms.max(1));
+        let selected = sampling.selects(
+            frame_count,
+            plan.frame_count,
+            playback_ms,
+            frame_duration_ms,
+        );
+        if selected {
+            let image = frame.into_buffer();
+            let (width, height) = image.dimensions();
+            validate_image_pixels(width, height)?;
+            let raw_budget = base64_raw_capacity(image_budget_remaining);
+            let mut encoded = LimitedBufferWriter::new(raw_budget);
+            let encode_result = image::codecs::png::PngEncoder::new(&mut encoded).write_image(
+                image.as_raw(),
+                width,
+                height,
+                image::ExtendedColorType::Rgba8,
+            );
+            if encoded.exceeded {
+                return Err(FileError::new(
+                    "file_image_response_too_large",
+                    "image response exceeds the 8 MiB image payload bound",
+                ));
+            }
+            encode_result.map_err(|_| {
+                FileError::new(
+                    "file_image_encoding_failed",
+                    "GIF frame could not be encoded",
+                )
+            })?;
+            let encoded_image_bytes = base64_encoded_len(encoded.bytes.len()).ok_or_else(|| {
+                FileError::new(
+                    "file_image_response_too_large",
+                    "image response is too large",
+                )
+            })?;
+            if encoded_image_bytes > image_budget_remaining {
+                return Err(FileError::new(
+                    "file_image_response_too_large",
+                    "image response exceeds the 8 MiB image payload bound",
+                ));
+            }
+            image_budget_remaining -= encoded_image_bytes;
+            frames_metadata.push(json!({
+                "timestampMs": playback_ms,
+                "mimeType": "image/png",
+                "width": width,
+                "height": height,
+            }));
+            images.push(FileImageBlock {
+                bytes: encoded.bytes,
+                mime_type: "image/png",
+            });
+        }
+        playback_ms = playback_ms.checked_add(frame_duration_ms).ok_or_else(|| {
+            FileError::new("file_invalid_image", "GIF playback duration is invalid")
+        })?;
+        frame_count = frame_count.checked_add(1).ok_or_else(|| {
+            FileError::new("file_image_too_large", "GIF contains too many frames")
+        })?;
+    }
+    if frame_count != plan.frame_count || playback_ms != plan.duration_ms || images.is_empty() {
+        return Err(FileError::new(
+            "file_invalid_image",
+            "GIF frame stream did not match its validated header",
+        ));
+    }
+    let encoded_image_bytes = image_budget_bytes - image_budget_remaining;
+    let image = json!({
+        "sourceMimeType": "image/gif",
+        "width": plan.width,
+        "height": plan.height,
+        "frameCount": plan.frame_count,
+        "durationMs": plan.duration_ms,
+        "frames": frames_metadata,
+    });
+    let mut value = json!({"image": image});
+    if include_metadata {
+        value["metadata"] = metadata.take();
+    }
+    Ok(ReadOutput {
+        value,
+        images,
+        encoded_image_bytes,
+    })
+}
+
+fn scan_gif(bytes: &[u8]) -> std::result::Result<GifPlan, FileError> {
+    let mut options = gif::DecodeOptions::new();
+    options.check_frame_consistency(true);
+    options.skip_frame_decoding(true);
+    let mut decoder = options
+        .read_info(Cursor::new(bytes))
+        .map_err(|_| FileError::new("file_invalid_image", "GIF content is invalid"))?;
+    let width = u32::from(decoder.width());
+    let height = u32::from(decoder.height());
+    let canvas_pixels = validate_image_pixels(width, height)?;
+    let mut traversed_pixels = 0u64;
+    let mut frame_count = 0usize;
+    let mut duration_ms = 0u64;
+    loop {
+        let frame_info = decoder
+            .read_next_frame()
+            .map_err(|_| FileError::new("file_invalid_image", "GIF frame data is invalid"))?;
+        let Some((frame_width, frame_height, delay)) =
+            frame_info.map(|frame| (u32::from(frame.width), u32::from(frame.height), frame.delay))
+        else {
+            break;
+        };
+        validate_image_pixels(frame_width, frame_height)?;
+        traversed_pixels = traversed_pixels
+            .checked_add(canvas_pixels)
+            .filter(|pixels| *pixels <= MAX_GIF_DECODE_PIXELS)
+            .ok_or_else(|| {
+                FileError::new(
+                    "file_image_too_large",
+                    "GIF exceeds the 64 megapixel cumulative decode bound",
+                )
+            })?;
+        duration_ms = duration_ms
+            .checked_add(u64::from(delay) * 10)
+            .ok_or_else(|| FileError::new("file_invalid_image", "GIF duration is invalid"))?;
+        frame_count = frame_count.checked_add(1).ok_or_else(|| {
+            FileError::new("file_image_too_large", "GIF contains too many frames")
+        })?;
+    }
+    if frame_count == 0 {
+        return Err(FileError::new(
+            "file_invalid_image",
+            "GIF contains no image frames",
+        ));
+    }
+    Ok(GifPlan {
+        width,
+        height,
+        frame_count,
+        duration_ms,
+    })
+}
+
+const MAX_GIF_SAMPLED_FRAMES: usize = 8;
+
+enum GifSampling {
+    All,
+    Indices(Vec<usize>),
+    Times(Vec<u64>),
+}
+
+impl GifSampling {
+    fn selects(
+        &self,
+        index: usize,
+        frame_count: usize,
+        timestamp_ms: u64,
+        duration_ms: u64,
+    ) -> bool {
+        if index == 0 || index + 1 == frame_count {
+            return true;
+        }
+        match self {
+            Self::All => true,
+            Self::Indices(indices) => indices.contains(&index),
+            Self::Times(times) => times.iter().any(|target| {
+                *target >= timestamp_ms && *target < timestamp_ms.saturating_add(duration_ms)
+            }),
+        }
+    }
+}
+
+fn gif_sampling(plan: &GifPlan) -> GifSampling {
+    if plan.frame_count <= MAX_GIF_SAMPLED_FRAMES {
+        return GifSampling::All;
+    }
+    if plan.duration_ms == 0 {
+        let last = plan.frame_count - 1;
+        let indices = (0..MAX_GIF_SAMPLED_FRAMES)
+            .map(|sample| {
+                ((sample as u128 * last as u128) / (MAX_GIF_SAMPLED_FRAMES - 1) as u128) as usize
+            })
+            .collect();
+        return GifSampling::Indices(indices);
+    }
+    let divisor = (MAX_GIF_SAMPLED_FRAMES - 1) as u64;
+    let times = (1..MAX_GIF_SAMPLED_FRAMES - 1)
+        .map(|sample| plan.duration_ms * sample as u64 / divisor)
+        .collect();
+    GifSampling::Times(times)
+}
+
+struct LimitedBufferWriter {
+    bytes: Vec<u8>,
+    limit: usize,
+    exceeded: bool,
+}
+
+impl LimitedBufferWriter {
+    fn new(limit: usize) -> Self {
+        Self {
+            bytes: Vec::new(),
+            limit,
+            exceeded: false,
+        }
+    }
+}
+
+impl Write for LimitedBufferWriter {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        if self
+            .bytes
+            .len()
+            .checked_add(buffer.len())
+            .is_none_or(|length| length > self.limit)
+        {
+            self.exceeded = true;
+            return Err(std::io::Error::other(
+                "image output exceeds the response bound",
+            ));
+        }
+        self.bytes
+            .try_reserve(buffer.len())
+            .map_err(|_| std::io::Error::other("image output allocation failed"))?;
+        self.bytes.extend_from_slice(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn base64_raw_capacity(encoded_budget: usize) -> usize {
+    encoded_budget / 4 * 3
 }
 
 pub(crate) fn revision(bytes: &[u8]) -> String {
@@ -765,24 +1354,41 @@ pub(crate) struct SearchRequest {
     pub(crate) respect_gitignore: bool,
 }
 
-pub(crate) async fn read_batch(state: &AppState, requests: &[ReadRequest]) -> Value {
+pub(crate) async fn read_batch_with_images(
+    state: &AppState,
+    requests: &[ReadRequest],
+) -> ReadBatchOutput {
     let config = state.config.read().await.clone();
-    let results = requests
-        .iter()
-        .enumerate()
-        .map(|(index, request)| {
-            let value = resolve_path(&config, &request.path, Access::Read).and_then(|resolved| {
-                read(
-                    &resolved,
-                    request.metadata,
-                    request.start_line,
-                    request.end_line,
-                )
-            });
-            envelope(index, value)
-        })
-        .collect::<Vec<_>>();
-    finalize_read_search_batch(results)
+    let mut image_budget_remaining = MAX_IMAGE_RESPONSE_BYTES;
+    let mut images_by_result = Vec::with_capacity(requests.len());
+    let mut results = Vec::with_capacity(requests.len());
+    for (index, request) in requests.iter().enumerate() {
+        let result = resolve_path(&config, &request.path, Access::Read).and_then(|resolved| {
+            read_with_images(
+                &resolved,
+                request.metadata,
+                request.start_line,
+                request.end_line,
+                image_budget_remaining,
+            )
+        });
+        match result {
+            Ok(output) => {
+                image_budget_remaining =
+                    image_budget_remaining.saturating_sub(output.encoded_image_bytes);
+                images_by_result.push(output.images);
+                results.push(envelope(index, Ok(output.value)));
+            }
+            Err(error) => {
+                images_by_result.push(Vec::new());
+                results.push(envelope(index, Err(error)));
+            }
+        }
+    }
+    ReadBatchOutput {
+        value: finalize_read_search_batch(results),
+        images_by_result,
+    }
 }
 
 pub(crate) async fn search_batch(state: &AppState, requests: &[SearchRequest]) -> Value {
@@ -930,6 +1536,7 @@ struct PlannedChange {
     action: &'static str,
     source: Option<ResolvedPath>,
     target: ResolvedPath,
+    parents_to_create: Vec<PathBuf>,
     destination: Option<ResolvedPath>,
     before_bytes: Option<Vec<u8>>,
     before_revision: Option<String>,
@@ -992,7 +1599,7 @@ async fn apply_patch_inner(
         let path = hunk.path().to_string_lossy().to_string();
         match hunk {
             Hunk::AddFile { contents, .. } => {
-                let target = resolve_absent_path(config, &path)?;
+                let (target, parents_to_create) = resolve_absent_add_path(config, &path)?;
                 if contents.len() > MAX_FILE_BYTES as usize {
                     return Err(FileError::new(
                         "file_too_large",
@@ -1008,6 +1615,7 @@ async fn apply_patch_inner(
                     action: "add",
                     source: None,
                     target,
+                    parents_to_create,
                     destination: None,
                     before_bytes: None,
                     before_revision: None,
@@ -1030,6 +1638,7 @@ async fn apply_patch_inner(
                     action: "delete",
                     source: Some(source.clone()),
                     target: source,
+                    parents_to_create: Vec::new(),
                     destination: None,
                     before_revision: Some(revision(&bytes)),
                     before_bytes: Some(bytes),
@@ -1081,6 +1690,7 @@ async fn apply_patch_inner(
                     } else {
                         "update"
                     },
+                    parents_to_create: Vec::new(),
                     source: Some(source.clone()),
                     target,
                     destination,
@@ -1116,8 +1726,20 @@ async fn apply_patch_inner(
                 ));
             }
         }
-        if change.action == "add" || change.action == "move" {
-            revalidate_target(config, &change.target, false)?;
+        match change.action {
+            "add" => revalidate_add_plan(config, &change.target, &change.parents_to_create)?,
+            "move" => revalidate_target(config, &change.target, false)?,
+            _ => {}
+        }
+    }
+
+    let mut owned_parent_dirs = create_missing_parent_directories(config, &changes)?;
+    for change in changes.iter().filter(|change| change.action == "add") {
+        if let Err(error) =
+            revalidate_add_parent_directories(config, &change.target, &change.parents_to_create)
+        {
+            cleanup_owned_parent_directories(&mut owned_parent_dirs);
+            return Err(error);
         }
     }
 
@@ -1132,6 +1754,7 @@ async fn apply_patch_inner(
                         Ok(temp) => change.temp = Some(temp),
                         Err(error) => {
                             cleanup_temps(&mut changes);
+                            cleanup_owned_parent_directories(&mut owned_parent_dirs);
                             return Err(error);
                         }
                     }
@@ -1159,6 +1782,7 @@ async fn apply_patch_inner(
                 .await;
         if confirmation != "allow_once" {
             cleanup_temps(&mut changes);
+            cleanup_owned_parent_directories(&mut owned_parent_dirs);
             let code = if confirmation == "provider_unavailable" {
                 "file_confirmation_unavailable"
             } else {
@@ -1173,19 +1797,32 @@ async fn apply_patch_inner(
         let _ = fs::write(path, contents);
     }
     for change in &changes {
-        if let Some(source) = &change.source {
-            revalidate_target(config, source, true)?;
-            let current = load_edit_source(source)?.0;
-            if Some(revision(&current)) != change.before_revision {
-                cleanup_temps(&mut changes);
-                return Err(FileError::new(
-                    "file_revision_conflict",
-                    "source changed before commit",
-                ));
+        let validation = (|| {
+            if let Some(source) = &change.source {
+                revalidate_target(config, source, true)?;
+                let current = load_edit_source(source)?.0;
+                if Some(revision(&current)) != change.before_revision {
+                    return Err(FileError::new(
+                        "file_revision_conflict",
+                        "source changed before commit",
+                    ));
+                }
             }
-        }
-        if change.action == "add" || change.action == "move" {
-            revalidate_target(config, &change.target, false)?;
+            match change.action {
+                "add" => revalidate_add_parent_directories(
+                    config,
+                    &change.target,
+                    &change.parents_to_create,
+                )?,
+                "move" => revalidate_target(config, &change.target, false)?,
+                _ => {}
+            }
+            Ok(())
+        })();
+        if let Err(error) = validation {
+            cleanup_temps(&mut changes);
+            cleanup_owned_parent_directories(&mut owned_parent_dirs);
+            return Err(error);
         }
     }
 
@@ -1215,6 +1852,7 @@ async fn apply_patch_inner(
         };
         if let Err(error) = result {
             cleanup_temps(&mut changes);
+            cleanup_owned_parent_directories(&mut owned_parent_dirs);
             if committed_count == 0 {
                 return Err(error);
             }
@@ -1450,9 +2088,13 @@ fn commit_create(change: &mut PlannedChange) -> std::result::Result<(), FileErro
         .temp
         .take()
         .ok_or_else(|| FileError::new("file_write_failed", "staged file is missing"))?;
-    fs::hard_link(&temp, &change.target.requested).map_err(|error| {
-        FileError::new("file_write_failed", &format!("file commit failed: {error}"))
-    })?;
+    if let Err(error) = fs::hard_link(&temp, &change.target.requested) {
+        let _ = fs::remove_file(&temp);
+        return Err(FileError::new(
+            "file_write_failed",
+            &format!("file commit failed: {error}"),
+        ));
+    }
     let _ = fs::remove_file(temp);
     Ok(())
 }
@@ -1556,6 +2198,236 @@ fn revalidate_target(
         }
     }
     Ok(())
+}
+
+fn revalidate_add_plan(
+    config: &Config,
+    target: &ResolvedPath,
+    parents_to_create: &[PathBuf],
+) -> std::result::Result<(), FileError> {
+    if fs::symlink_metadata(&target.requested).is_ok() {
+        return Err(FileError::new(
+            "file_already_exists",
+            "target already exists",
+        ));
+    }
+    let projected = exec::canonicalize_existing_or_parent(&target.requested)
+        .map_err(|_| FileError::new("file_parent_not_found", "target parent was not found"))?;
+    if projected != target.path {
+        return Err(FileError::new(
+            "file_symlink_rejected",
+            "target path changed before parent creation",
+        ));
+    }
+    check_policy(config, &target.path, Access::Write)?;
+    if is_reserved_path(config, &target.path) {
+        return Err(FileError::new(
+            "file_reserved_path",
+            "Agentic runtime path is reserved",
+        ));
+    }
+    for directory in parents_to_create {
+        match fs::symlink_metadata(directory) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(_) => {
+                return Err(FileError::new(
+                    "file_symlink_rejected",
+                    "a missing parent changed during preflight",
+                ))
+            }
+            Err(_) => {
+                return Err(FileError::new(
+                    "file_parent_not_found",
+                    "target parent could not be revalidated",
+                ))
+            }
+        }
+        check_policy(config, directory, Access::Write)?;
+        if is_reserved_path(config, directory) {
+            return Err(FileError::new(
+                "file_reserved_path",
+                "Agentic runtime path is reserved",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn revalidate_add_parent_directories(
+    config: &Config,
+    target: &ResolvedPath,
+    parents_to_create: &[PathBuf],
+) -> std::result::Result<(), FileError> {
+    revalidate_target(config, target, false)?;
+    check_policy(config, &target.path, Access::Write)?;
+    if is_reserved_path(config, &target.path) {
+        return Err(FileError::new(
+            "file_reserved_path",
+            "Agentic runtime path is reserved",
+        ));
+    }
+    for directory in parents_to_create {
+        let metadata = fs::symlink_metadata(directory).map_err(|_| {
+            FileError::new(
+                "file_parent_not_found",
+                "created parent directory is no longer available",
+            )
+        })?;
+        if metadata.file_type().is_symlink()
+            || !metadata.is_dir()
+            || fs::canonicalize(directory).ok().as_deref() != Some(directory.as_path())
+        {
+            return Err(FileError::new(
+                "file_symlink_rejected",
+                "created parent directory changed before commit",
+            ));
+        }
+        check_policy(config, directory, Access::Write)?;
+        if is_reserved_path(config, directory) {
+            return Err(FileError::new(
+                "file_reserved_path",
+                "Agentic runtime path is reserved",
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+struct OwnedParentDirectory {
+    path: PathBuf,
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+}
+
+fn create_missing_parent_directories(
+    config: &Config,
+    changes: &[PlannedChange],
+) -> std::result::Result<Vec<OwnedParentDirectory>, FileError> {
+    let mut directories = changes
+        .iter()
+        .filter(|change| change.action == "add")
+        .flat_map(|change| change.parents_to_create.iter().cloned())
+        .collect::<Vec<_>>();
+    directories.sort_by(|left, right| {
+        left.components()
+            .count()
+            .cmp(&right.components().count())
+            .then_with(|| left.cmp(right))
+    });
+    directories.dedup();
+    let mut owned = Vec::new();
+    for directory in directories {
+        if let Err(error) = fs::create_dir(&directory) {
+            cleanup_owned_parent_directories(&mut owned);
+            let code = if error.kind() == std::io::ErrorKind::AlreadyExists {
+                "file_symlink_rejected"
+            } else {
+                "file_write_failed"
+            };
+            return Err(FileError::new(
+                code,
+                &format!("parent directory could not be created: {error}"),
+            ));
+        }
+        let metadata = match fs::symlink_metadata(&directory) {
+            Ok(metadata)
+                if metadata.is_dir()
+                    && !metadata.file_type().is_symlink()
+                    && fs::canonicalize(&directory).ok().as_deref()
+                        == Some(directory.as_path()) =>
+            {
+                metadata
+            }
+            _ => {
+                cleanup_owned_parent_directories(&mut owned);
+                return Err(FileError::new(
+                    "file_symlink_rejected",
+                    "created parent directory did not resolve to its planned path",
+                ));
+            }
+        };
+        owned.push(owned_parent_directory(&directory, &metadata));
+        if let Err(error) = validate_created_parent_directory(config, &directory) {
+            cleanup_owned_parent_directories(&mut owned);
+            return Err(error);
+        }
+    }
+    Ok(owned)
+}
+
+fn owned_parent_directory(path: &Path, metadata: &fs::Metadata) -> OwnedParentDirectory {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        OwnedParentDirectory {
+            path: path.to_path_buf(),
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        OwnedParentDirectory {
+            path: path.to_path_buf(),
+        }
+    }
+}
+
+fn validate_created_parent_directory(
+    config: &Config,
+    directory: &Path,
+) -> std::result::Result<(), FileError> {
+    let metadata = fs::symlink_metadata(directory).map_err(|_| {
+        FileError::new(
+            "file_parent_not_found",
+            "created parent directory could not be verified",
+        )
+    })?;
+    if !metadata.is_dir()
+        || metadata.file_type().is_symlink()
+        || fs::canonicalize(directory).ok().as_deref() != Some(directory)
+    {
+        return Err(FileError::new(
+            "file_symlink_rejected",
+            "created parent directory changed before commit",
+        ));
+    }
+    check_policy(config, directory, Access::Write)?;
+    if is_reserved_path(config, directory) {
+        return Err(FileError::new(
+            "file_reserved_path",
+            "Agentic runtime path is reserved",
+        ));
+    }
+    Ok(())
+}
+
+fn cleanup_owned_parent_directories(directories: &mut Vec<OwnedParentDirectory>) {
+    for directory in directories.iter().rev() {
+        let Ok(metadata) = fs::symlink_metadata(&directory.path) else {
+            continue;
+        };
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            continue;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if metadata.dev() != directory.device || metadata.ino() != directory.inode {
+                continue;
+            }
+        }
+        #[cfg(not(unix))]
+        if fs::canonicalize(&directory.path).ok().as_deref() != Some(directory.path.as_path()) {
+            continue;
+        }
+        let _ = fs::remove_dir(&directory.path);
+    }
+    directories.clear();
 }
 
 fn stage_temp(
@@ -1746,6 +2618,28 @@ mod tests {
         config
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn add_preflight_reserves_audit_path_under_symlinked_workspace() {
+        let root = std::env::temp_dir().join(format!(
+            "file-audit-alias-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let real_workspace = root.join("workspace");
+        fs::create_dir_all(&real_workspace).unwrap();
+        let workspace_alias = root.join("workspace-alias");
+        std::os::unix::fs::symlink(&real_workspace, &workspace_alias).unwrap();
+        let config = config(&workspace_alias);
+        let audit_path = real_workspace.join(".agentic-gpt-audit.jsonl");
+        assert!(!audit_path.exists());
+
+        let error =
+            resolve_absent_add_path(&config, ".agentic-gpt-audit.jsonl/keep.txt").unwrap_err();
+        assert_eq!(error.code, "file_reserved_path");
+        assert!(!audit_path.exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[test]
     fn reads_metadata_without_exposing_revision_and_preserves_newlines() {
         let root =
@@ -1754,7 +2648,9 @@ mod tests {
         let path = root.join("sample.txt");
         fs::write(&path, "one\r\ntwo\n").unwrap();
         let resolved = resolve_path(&config(&root), "sample.txt", Access::Read).unwrap();
-        let value = read(&resolved, true, None, None).unwrap();
+        let value = read_with_images(&resolved, true, None, None, MAX_IMAGE_RESPONSE_BYTES)
+            .unwrap()
+            .value;
         assert_eq!(value["content"], "one\r\ntwo\n");
         assert_eq!(value["metadata"]["totalLines"], 2);
         assert!(value.get("revision").is_none());
@@ -1767,7 +2663,9 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         fs::write(root.join("sample.txt"), "a\nβ\nccc\n").unwrap();
         let resolved = resolve_path(&config(&root), "sample.txt", Access::Read).unwrap();
-        let value = read(&resolved, true, Some(2), Some(2)).unwrap();
+        let value = read_with_images(&resolved, true, Some(2), Some(2), MAX_IMAGE_RESPONSE_BYTES)
+            .unwrap()
+            .value;
         assert_eq!(value["content"], "β\n");
         assert_eq!(value["metadata"]["totalLines"], 3);
         let _ = fs::remove_dir_all(root);
@@ -1795,7 +2693,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            read(&read_resolved, false, None, None).unwrap()["content"],
+            read_with_images(&read_resolved, false, None, None, MAX_IMAGE_RESPONSE_BYTES,)
+                .unwrap()
+                .value["content"],
             "a"
         );
         assert_eq!(
@@ -1825,11 +2725,15 @@ mod tests {
         fs::write(root.join("binary.dat"), [0_u8, 159, 146, 150]).unwrap();
         let resolved = resolve_path(&config(&root), "binary.dat", Access::Read).unwrap();
         assert_eq!(
-            read(&resolved, false, None, None).unwrap_err().code,
+            read_with_images(&resolved, false, None, None, MAX_IMAGE_RESPONSE_BYTES,)
+                .unwrap_err()
+                .code,
             "file_not_utf8"
         );
         assert_eq!(
-            read(&resolved, true, None, None).unwrap_err().code,
+            read_with_images(&resolved, true, None, None, MAX_IMAGE_RESPONSE_BYTES,)
+                .unwrap_err()
+                .code,
             "file_not_utf8"
         );
         let _ = fs::remove_dir_all(root);
@@ -1847,11 +2751,15 @@ mod tests {
         .unwrap();
         let resolved = resolve_path(&config(&root), "large.txt", Access::Read).unwrap();
         assert_eq!(
-            read(&resolved, false, None, None).unwrap_err().code,
+            read_with_images(&resolved, false, None, None, MAX_IMAGE_RESPONSE_BYTES,)
+                .unwrap_err()
+                .code,
             "file_too_large"
         );
         assert_eq!(
-            read(&resolved, true, None, None).unwrap_err().code,
+            read_with_images(&resolved, true, None, None, MAX_IMAGE_RESPONSE_BYTES,)
+                .unwrap_err()
+                .code,
             "file_too_large"
         );
         let _ = fs::remove_dir_all(root);
@@ -2238,6 +3146,7 @@ mod tests {
         let mut change = PlannedChange {
             action: "move",
             source: Some(source.clone()),
+            parents_to_create: Vec::new(),
             target: destination.clone(),
             destination: Some(destination.clone()),
             before_bytes: Some(b"source\n".to_vec()),

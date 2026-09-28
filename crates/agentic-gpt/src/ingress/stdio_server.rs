@@ -16,13 +16,14 @@ use agentic_gpt_protocol::{
 #[cfg(test)]
 use agentic_gpt_protocol::{JobDetail, McpBatchResponse};
 use anyhow::Result;
+use base64::Engine;
 use chrono::Utc;
 #[cfg(test)]
 use rmcp::model::Meta;
 use rmcp::{
     model::{
-        CallToolRequestParams, CallToolResult, ErrorData, ListToolsResult, PaginatedRequestParams,
-        ServerCapabilities, ServerInfo, Tool,
+        CallToolRequestParams, CallToolResult, Content, ErrorData, ListToolsResult,
+        PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
     },
     service::{RequestContext as McpRequestContext, RoleServer},
     transport::{async_rw::AsyncRwTransport, stdio},
@@ -240,11 +241,11 @@ impl AgentMcpServer {
             reported_arguments,
             started_at,
         );
-        let mut value = match self
+        let (mut value, file_read_result) = match self
             .dispatch_with_lifecycle(&name, arguments, terminal_tracker.clone())
             .await
         {
-            Ok(value) => value,
+            Ok(result) => result,
             Err(error) => {
                 let lifecycle = format!(
                     "mcp_tool; ingress={}; run={}; tool={name}; profile={}; status=failed; durationMs={}; errorCode={}",
@@ -270,6 +271,7 @@ impl AgentMcpServer {
             }
         };
         let browser_repl_result = self.take_browser_repl_result(&mut value);
+        let special_result = browser_repl_result.or(file_read_result);
         let job: Option<agentic_gpt_protocol::JobInfo> = value
             .get("job")
             .cloned()
@@ -340,7 +342,7 @@ impl AgentMcpServer {
             reason,
             job,
         );
-        Ok((value, browser_repl_result))
+        Ok((value, special_result))
     }
 
     #[cfg(test)]
@@ -349,7 +351,7 @@ impl AgentMcpServer {
         let result = self
             .dispatch_with_lifecycle(name, arguments, terminal_tracker.clone())
             .await;
-        let result = result.map(|mut value| {
+        let result = result.map(|(mut value, _)| {
             let _ = self.take_browser_repl_result(&mut value);
             value
         });
@@ -368,16 +370,18 @@ impl AgentMcpServer {
         name: &str,
         arguments: Value,
         terminal_tracker: Arc<HumanTerminalTracker>,
-    ) -> Result<Value> {
+    ) -> Result<(Value, Option<CallToolResult>)> {
         if name == "process.exec" {
             return self
                 .dispatch_process_exec(arguments, terminal_tracker)
-                .await;
+                .await
+                .map(|value| (value, None));
         }
         if name == "process.batch" {
             return self
                 .dispatch_process_batch(arguments, terminal_tracker)
-                .await;
+                .await
+                .map(|value| (value, None));
         }
 
         let admission = {
@@ -389,13 +393,14 @@ impl AgentMcpServer {
             )
         };
         if let Err(error) = admission {
-            return Ok(admission_error_value(error));
+            return Ok((admission_error_value(error), None));
         }
         if tool_namespace(name).is_some() {
             validate_stdio_arguments(name, &arguments)?;
         }
         let request_id = request_id();
-        match name {
+        let mut file_read_result = None;
+        let result = match name {
             "agent.info" => {
                 let _: EmptyArgs = from_value(arguments)?;
                 Ok(crate::agent_info::collect(&self.state).await)
@@ -410,33 +415,57 @@ impl AgentMcpServer {
                 let args: FileReadArgs = from_value(arguments)?;
                 validate_file_read_args(&args)?;
                 if let Some(requests) = args.requests {
-                    return Ok(crate::file_ops::read_batch(
+                    let output = crate::file_ops::read_batch_with_images(
                         &self.state,
                         &requests.into_iter().map(Into::into).collect::<Vec<_>>(),
                     )
-                    .await);
-                }
-                let config = self.state.config.read().await.clone();
-                let path = args.path.expect("validated single file.read path");
-                match crate::file_ops::resolve_path(&config, &path, crate::file_ops::Access::Read) {
-                    Ok(resolved) => crate::file_ops::to_result(crate::file_ops::read(
-                        &resolved,
-                        args.metadata.unwrap_or(false),
-                        args.start_line,
-                        args.end_line,
-                    )),
-                    Err(error) => Ok(error.value()),
+                    .await;
+                    let (value, special_result) =
+                        ordered_file_read_result(output.value, output.images_by_result, true);
+                    file_read_result = special_result;
+                    Ok(value)
+                } else {
+                    let config = self.state.config.read().await.clone();
+                    let path = args.path.expect("validated single file.read path");
+                    match crate::file_ops::resolve_path(
+                        &config,
+                        &path,
+                        crate::file_ops::Access::Read,
+                    ) {
+                        Ok(resolved) => match crate::file_ops::read_with_images(
+                            &resolved,
+                            args.metadata.unwrap_or(false),
+                            args.start_line,
+                            args.end_line,
+                            crate::file_ops::MAX_IMAGE_RESPONSE_BYTES,
+                        ) {
+                            Ok(output) => {
+                                let (value, special_result) = ordered_file_read_result(
+                                    output.value,
+                                    vec![output.images],
+                                    false,
+                                );
+                                file_read_result = special_result;
+                                Ok(value)
+                            }
+                            Err(error) => Ok(error.value()),
+                        },
+                        Err(error) => Ok(error.value()),
+                    }
                 }
             }
             "file.search" => {
                 let args: FileSearchArgs = from_value(arguments)?;
                 validate_file_search_args(&args)?;
                 if let Some(requests) = args.requests {
-                    return Ok(crate::file_ops::search_batch(
-                        &self.state,
-                        &requests.into_iter().map(Into::into).collect::<Vec<_>>(),
-                    )
-                    .await);
+                    return Ok((
+                        crate::file_ops::search_batch(
+                            &self.state,
+                            &requests.into_iter().map(Into::into).collect::<Vec<_>>(),
+                        )
+                        .await,
+                        None,
+                    ));
                 }
                 let config = self.state.config.read().await.clone();
                 let resolved = crate::file_ops::resolve_path(
@@ -674,7 +703,7 @@ impl AgentMcpServer {
                 let args: McpCallArgs = from_value(arguments)?;
                 let group = match normalize_stdio_group(args.group) {
                     Ok(group) => group,
-                    Err(error) => return Ok(error),
+                    Err(error) => return Ok((error, None)),
                 };
                 let config = self.state.config.read().await.clone();
                 let request_source = self.ingress.source("mcp.callTool");
@@ -709,7 +738,7 @@ impl AgentMcpServer {
                 let args: McpBatchArgs = from_value(arguments)?;
                 let group = match normalize_stdio_group(args.group) {
                     Ok(group) => group,
-                    Err(error) => return Ok(error),
+                    Err(error) => return Ok((error, None)),
                 };
                 let config = self.state.config.read().await.clone();
                 let request_source = self.ingress.source("mcp.batch");
@@ -919,7 +948,8 @@ impl AgentMcpServer {
                 Ok(serde_json::to_value(response)?)
             }
             _ => Err(anyhow::anyhow!("unknown agent tool: {name}")),
-        }
+        };
+        result.map(|value| (value, file_read_result))
     }
 
     async fn dispatch_process_exec(
@@ -1447,8 +1477,8 @@ impl ServerHandler for AgentMcpServer {
         request: CallToolRequestParams,
         _context: McpRequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
-        let (value, browser_repl_result) = self.call_with_result(request).await?;
-        if let Some(result) = browser_repl_result {
+        let (value, special_result) = self.call_with_result(request).await?;
+        if let Some(result) = special_result {
             return Ok(result);
         }
         let is_error = value.get("error").is_some();
@@ -1488,6 +1518,226 @@ impl ServerHandler for AgentMcpServer {
             ))
             .with_instructions(INSTRUCTIONS)
     }
+}
+
+fn ordered_file_read_result(
+    value: Value,
+    images_by_result: Vec<Vec<crate::file_ops::FileImageBlock>>,
+    is_batch: bool,
+) -> (Value, Option<CallToolResult>) {
+    if is_batch {
+        return ordered_file_read_batch_result(value, images_by_result);
+    }
+    if !images_by_result.iter().any(|images| !images.is_empty()) {
+        return (value, None);
+    }
+
+    let mut content = vec![Content::text(value.to_string())];
+    for images in images_by_result {
+        for image in images {
+            content.push(Content::image(
+                base64::engine::general_purpose::STANDARD.encode(image.bytes),
+                image.mime_type,
+            ));
+        }
+    }
+
+    let mut result = CallToolResult::structured(value.clone());
+    result.content = content;
+    let serialized_bytes = serde_json::to_vec(&result)
+        .map(|serialized| serialized.len())
+        .unwrap_or(usize::MAX);
+    if serialized_bytes > crate::file_ops::MAX_IMAGE_RESPONSE_BYTES {
+        return (
+            json!({
+                "error": {
+                    "code": "file_image_response_too_large",
+                    "message": "serialized MCP image response exceeds the 8 MiB bound"
+                }
+            }),
+            None,
+        );
+    }
+    (value, Some(result))
+}
+
+fn ordered_file_read_batch_result(
+    mut value: Value,
+    mut images_by_result: Vec<Vec<crate::file_ops::FileImageBlock>>,
+) -> (Value, Option<CallToolResult>) {
+    if !images_by_result.iter().any(|images| !images.is_empty()) {
+        return (value, None);
+    }
+    let Some(result_count) = value["results"].as_array().map(Vec::len) else {
+        return (value, None);
+    };
+    images_by_result.resize_with(result_count, Vec::new);
+    images_by_result.truncate(result_count);
+
+    let image_costs = batch_image_serialized_costs(&images_by_result);
+    let mut include_images = vec![false; result_count];
+    let mut image_bytes = 0usize;
+    let mut serialized_bytes = batch_text_result_serialized_size(&value);
+    for index in 0..result_count {
+        if images_by_result[index].is_empty() {
+            continue;
+        }
+        let cost = image_costs[index].unwrap_or(usize::MAX);
+        let fits = serialized_bytes
+            .checked_add(image_bytes)
+            .and_then(|bytes| bytes.checked_add(cost))
+            .is_some_and(|bytes| bytes <= crate::file_ops::MAX_IMAGE_RESPONSE_BYTES);
+        if fits {
+            include_images[index] = true;
+            image_bytes += cost;
+        } else {
+            fail_batch_image_result(&mut value, index, &mut serialized_bytes);
+        }
+    }
+
+    while serialized_bytes
+        .checked_add(image_bytes)
+        .is_none_or(|bytes| bytes > crate::file_ops::MAX_IMAGE_RESPONSE_BYTES)
+    {
+        let Some(index) = largest_included_image_group(&include_images, &image_costs) else {
+            return (value, None);
+        };
+        include_images[index] = false;
+        image_bytes = image_bytes.saturating_sub(image_costs[index].unwrap_or(usize::MAX));
+        fail_batch_image_result(&mut value, index, &mut serialized_bytes);
+    }
+    if !include_images.iter().any(|include| *include) {
+        return (value, None);
+    }
+
+    loop {
+        let result = build_ordered_batch_image_result(&value, &images_by_result, &include_images);
+        let actual_size = serde_json::to_vec(&result)
+            .map(|serialized| serialized.len())
+            .unwrap_or(usize::MAX);
+        if actual_size <= crate::file_ops::MAX_IMAGE_RESPONSE_BYTES {
+            return (value, Some(result));
+        }
+        let Some(index) = largest_included_image_group(&include_images, &image_costs) else {
+            return (value, None);
+        };
+        include_images[index] = false;
+        fail_batch_image_result(&mut value, index, &mut serialized_bytes);
+    }
+}
+
+fn batch_text_result_serialized_size(value: &Value) -> usize {
+    let Some(results) = value["results"].as_array() else {
+        return usize::MAX;
+    };
+    let mut result = CallToolResult::structured(value.clone());
+    result.content = results
+        .iter()
+        .map(|item| Content::text(item.to_string()))
+        .collect();
+    serde_json::to_vec(&result)
+        .map(|serialized| serialized.len())
+        .unwrap_or(usize::MAX)
+}
+
+fn batch_image_serialized_costs(
+    images_by_result: &[Vec<crate::file_ops::FileImageBlock>],
+) -> Vec<Option<usize>> {
+    let mut block_overhead = HashMap::<&'static str, usize>::new();
+    images_by_result
+        .iter()
+        .map(|images| {
+            images.iter().try_fold(0usize, |total, image| {
+                let encoded_bytes = image
+                    .bytes
+                    .len()
+                    .checked_add(2)?
+                    .checked_div(3)?
+                    .checked_mul(4)?;
+                let overhead = if let Some(overhead) = block_overhead.get(image.mime_type) {
+                    *overhead
+                } else {
+                    let serialized =
+                        serde_json::to_vec(&Content::image(String::new(), image.mime_type)).ok()?;
+                    let overhead = serialized.len().checked_sub(2)?.checked_add(1)?;
+                    block_overhead.insert(image.mime_type, overhead);
+                    overhead
+                };
+                total.checked_add(encoded_bytes)?.checked_add(overhead)
+            })
+        })
+        .collect()
+}
+
+fn fail_batch_image_result(value: &mut Value, index: usize, serialized_bytes: &mut usize) {
+    let previous = value["results"][index].clone();
+    let replacement = json!({
+        "index": previous["index"],
+        "status": "failed",
+        "error": {
+            "code": "file_image_response_too_large",
+            "message": "image omitted to keep the ordered batch response within the 8 MiB bound"
+        }
+    });
+    let previous_result_bytes = serialized_json_size(&previous);
+    let replacement_result_bytes = serialized_json_size(&replacement);
+    let previous_text_bytes = serialized_json_size(&Content::text(previous.to_string()));
+    let replacement_text_bytes = serialized_json_size(&Content::text(replacement.to_string()));
+    let mut adjusted_size = (*serialized_bytes)
+        .checked_sub(previous_result_bytes)
+        .and_then(|size| size.checked_sub(previous_text_bytes))
+        .and_then(|size| size.checked_add(replacement_result_bytes))
+        .and_then(|size| size.checked_add(replacement_text_bytes));
+    let completed_with_errors = json!("completed_with_errors");
+    if value["status"] != completed_with_errors {
+        adjusted_size = adjusted_size
+            .and_then(|size| size.checked_sub(serialized_json_size(&value["status"])))
+            .and_then(|size| size.checked_add(serialized_json_size(&completed_with_errors)));
+        value["status"] = completed_with_errors;
+    }
+    value["results"][index] = replacement;
+    *serialized_bytes = adjusted_size.unwrap_or(usize::MAX);
+}
+
+fn serialized_json_size<T: serde::Serialize>(value: &T) -> usize {
+    serde_json::to_vec(value)
+        .map(|serialized| serialized.len())
+        .unwrap_or(usize::MAX)
+}
+
+fn largest_included_image_group(
+    include_images: &[bool],
+    image_costs: &[Option<usize>],
+) -> Option<usize> {
+    include_images
+        .iter()
+        .enumerate()
+        .filter(|(_, include)| **include)
+        .max_by_key(|(index, _)| image_costs[*index].unwrap_or(usize::MAX))
+        .map(|(index, _)| index)
+}
+
+fn build_ordered_batch_image_result(
+    value: &Value,
+    images_by_result: &[Vec<crate::file_ops::FileImageBlock>],
+    include_images: &[bool],
+) -> CallToolResult {
+    let results = value["results"].as_array().expect("batch result array");
+    let mut content = Vec::new();
+    for (index, item) in results.iter().enumerate() {
+        content.push(Content::text(item.to_string()));
+        if include_images.get(index).copied().unwrap_or(false) {
+            for image in &images_by_result[index] {
+                content.push(Content::image(
+                    base64::engine::general_purpose::STANDARD.encode(&image.bytes),
+                    image.mime_type,
+                ));
+            }
+        }
+    }
+    let mut result = CallToolResult::structured(value.clone());
+    result.content = content;
+    result
 }
 
 #[derive(Debug, Deserialize)]

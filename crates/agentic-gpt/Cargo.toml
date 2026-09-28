@@ -20,9 +20,11 @@ clap.workspace = true
 dirs = "6.0"
 futures-util.workspace = true
 globset = "=0.4.19"
+gif = "=0.13.1"
 ratatui.workspace = true
 crossterm.workspace = true
 ignore = "=0.4.31"
+image = { version = "=0.25.8", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 libc = "0.2"
 notify-rust = "4.11"
 parking_lot = "0.12"
