@@ -2343,6 +2343,43 @@ async fn in_process_stdio_file_read_enforces_image_pixel_and_response_bounds() -
             .is_some_and(|value| value["type"] == "image")
     }));
 
+    std::fs::write(
+        workspace.join("tiny-after-limit.png"),
+        encoded_test_image(image::ImageFormat::Png)?,
+    )?;
+    let recovered = client
+        .call_tool(
+            CallToolRequestParams::new("file.read").with_arguments(Map::from_iter([(
+                "requests".to_string(),
+                json!([
+                    {"path": "response-limit.png"},
+                    {"path": "tiny-after-limit.png"}
+                ]),
+            )])),
+        )
+        .await?;
+    let recovered_value = recovered.structured_content.as_ref().unwrap();
+    assert_eq!(recovered_value["status"], "completed_with_errors");
+    assert_eq!(recovered_value["results"][0]["status"], "failed");
+    assert_eq!(
+        recovered_value["results"][0]["error"]["code"],
+        "file_image_response_too_large"
+    );
+    assert_eq!(recovered_value["results"][1]["status"], "completed");
+    assert_eq!(
+        recovered_value["results"][1]["result"]["image"]["mimeType"],
+        "image/png"
+    );
+    let recovered_images = recovered
+        .content
+        .iter()
+        .filter_map(|block| serde_json::to_value(block).ok())
+        .filter(|block| block["type"] == "image")
+        .collect::<Vec<_>>();
+    assert_eq!(recovered_images.len(), 1);
+    assert_eq!(recovered_images[0]["mimeType"], "image/png");
+    assert!(serde_json::to_vec(&recovered)?.len() <= crate::file_ops::MAX_IMAGE_RESPONSE_BYTES);
+
     let _ = client.cancel().await;
 
     server_task.await??;

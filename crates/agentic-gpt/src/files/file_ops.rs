@@ -1359,7 +1359,7 @@ pub(crate) async fn read_batch_with_images(
     requests: &[ReadRequest],
 ) -> ReadBatchOutput {
     let config = state.config.read().await.clone();
-    let mut image_budget_remaining = MAX_IMAGE_RESPONSE_BYTES;
+    let mut image_budget_used = 0usize;
     let mut images_by_result = Vec::with_capacity(requests.len());
     let mut results = Vec::with_capacity(requests.len());
     for (index, request) in requests.iter().enumerate() {
@@ -1369,15 +1369,55 @@ pub(crate) async fn read_batch_with_images(
                 request.metadata,
                 request.start_line,
                 request.end_line,
-                image_budget_remaining,
+                MAX_IMAGE_RESPONSE_BYTES,
             )
         });
         match result {
             Ok(output) => {
-                image_budget_remaining =
-                    image_budget_remaining.saturating_sub(output.encoded_image_bytes);
-                images_by_result.push(output.images);
-                results.push(envelope(index, Ok(output.value)));
+                while image_budget_used.saturating_add(output.encoded_image_bytes)
+                    > MAX_IMAGE_RESPONSE_BYTES
+                {
+                    let largest = images_by_result
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(position, images): (usize, &Vec<FileImageBlock>)| {
+                            let bytes = images.iter().try_fold(0usize, |total, image| {
+                                total.checked_add(base64_encoded_len(image.bytes.len())?)
+                            })?;
+                            (bytes > 0).then_some((position, bytes))
+                        })
+                        .max_by_key(|(_, bytes)| *bytes);
+                    let Some((position, bytes)) =
+                        largest.filter(|(_, bytes)| *bytes > output.encoded_image_bytes)
+                    else {
+                        break;
+                    };
+                    images_by_result[position].clear();
+                    image_budget_used -= bytes;
+                    results[position] = envelope(
+                        position,
+                        Err(FileError::new(
+                            "file_image_response_too_large",
+                            "image omitted to keep the ordered batch response within the 8 MiB bound",
+                        )),
+                    );
+                }
+                if image_budget_used.saturating_add(output.encoded_image_bytes)
+                    > MAX_IMAGE_RESPONSE_BYTES
+                {
+                    images_by_result.push(Vec::new());
+                    results.push(envelope(
+                        index,
+                        Err(FileError::new(
+                            "file_image_response_too_large",
+                            "image omitted to keep the ordered batch response within the 8 MiB bound",
+                        )),
+                    ));
+                } else {
+                    image_budget_used += output.encoded_image_bytes;
+                    images_by_result.push(output.images);
+                    results.push(envelope(index, Ok(output.value)));
+                }
             }
             Err(error) => {
                 images_by_result.push(Vec::new());
