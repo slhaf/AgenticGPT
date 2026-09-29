@@ -112,7 +112,7 @@ agentic-gpt 执行核心
 | `ui/{cli,cli_i18n}.rs`、`ui/tui/` | CLI 命令解析与交互调度、展示/输入/终端恢复、本地化 |
 | `storage/{private_state,audit}.rs` | 私有状态目录与迁移、workspace append-only 审计；耐久等级不同于 Process history/transport ledger |
 
-### 3.1.1 Agent operation routing（当前）
+### 3.1.1 Agent 操作路由（当前）
 
 当前 Agent operation routing 是**按已收口 family 部分共享，而非一个 universal dispatcher**：`stdio_server::dispatch_with_lifecycle` 的 Process Exec/Batch 进入 `local_service::dispatch_process`，由同一 config admission/gate 与 Process runtime 完成；其他资源仍可保留 direct branches，Hub ingress 则进入 `local_service::dispatch`。共享 WP2 `RequestContext`/`authorize` gate 与同一批资源 owner，因此源码没有显示出两套独立 executor；剩余问题是非 Process family 的结构性 `[推断]`，不可写成当前行为故障。后续收敛仍按一个 operation family 一次迁移 caller、descriptor 和 projection，不把仅 Agent-local 的操作强行新增为 Protocol wire command。
 

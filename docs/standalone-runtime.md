@@ -389,7 +389,7 @@ Tunnel 身份、secret reference、client 来源/版本/hash/cache、Browser 配
 修改这些值只会记录包含变更字段名称的 `restart_required`；Browser 变更使用 `browser` 字段名，不会切换现有子进程树，也绝不会打印 secret 值。
 `toolsets.enabled` 属于实时配置，不需要重启。
 
-## Tunnel client 的信任与来源选择
+## 隧道客户端的信任与来源选择
 
 未设置 executable override 时，release manifest 会为受支持的 Linux 目标固定 OpenAI tunnel-client `v0.0.10`：
 

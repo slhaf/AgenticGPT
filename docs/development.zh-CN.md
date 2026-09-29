@@ -118,7 +118,7 @@ git push origin "v${rust_version}"
 - `agentic-gpt-aarch64-unknown-linux-gnu.tar.gz`
 - `SHA256SUMS`
 
-## CI
+## 持续集成（CI）
 
 GitHub Actions 会在 push 和 pull request 到 `main` 时运行 CI：
 

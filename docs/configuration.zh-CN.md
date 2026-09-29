@@ -123,7 +123,7 @@ Review 会隐藏密钥，可跳回 Basic、Connection 或可选 section 编辑�
 
 所有模式的 JSON 类型仍保留嵌套 `hub` section，便于同一配置在不同 runtime 之间切换。Standalone 与 Local 的命令链路不经过 Hub。Standalone 只有在启用 `tunnel.hubReporting.enabled` 或使用 Hub-backed `ntfy` 确认时才会使用 Hub 字段；显式配置的非活动 section 会保留。
 
-## Standalone-first 配置
+## 优先采用 Standalone 的配置
 
 ```bash
 agentic-gpt config init
@@ -172,7 +172,7 @@ agentic-gpt run
 | `hub` | 集中式 Hub 连接，或 Standalone 的可选 Hub reporting/ntfy relay。 |
 | `httpMcp` | 可选的 Standalone hidden worker 所有入站 Streamable HTTP MCP endpoint。 |
 
-## Standalone HTTP MCP endpoint
+## Standalone 入站 HTTP MCP 端点
 
 Standalone 可以由 hidden worker 提供可选的入站 MCP endpoint：
 
@@ -440,7 +440,7 @@ agentic-gpt config path deny add ~/.secrets
 
 `workspaceRoot` 始终视为可写。Denied roots 覆盖 writable/read-only roots。Symlink 会解析，最终目标必须留在有效策略边界内。
 
-## Limits
+## 资源限制
 
 ```json
 {

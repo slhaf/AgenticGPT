@@ -494,7 +494,7 @@ flowchart TD
 **验证入口（核心已执行；证据边界见上）**
 
 - Hub `runs.rs`、`db.rs`、`instance_lock.rs`：run TTL、schema/alias、单进程锁、replay/unknown。
-- Agent `job_history.rs`、`transport_ledger.rs`、`audit.rs`、`private_state.rs`：history retention/restart/corrupt recovery、ledger、audit/state path/permissions。
+- Agent 当前的 `storage/process_history.rs`（WP3 历史记录中称 `job_history.rs`）、`storage/transport_ledger.rs`、`audit.rs`、`storage/private_state.rs`：历史保留／重启／损坏恢复、ledger、审计与私有状态权限；按现行源码路径复验时仍须定位实际测试。
 - Agent `config.rs`、`config_cli.rs`、`config_setup/`：config backup/secret commit；`file_ops.rs`、Room repository：path/symlink/revision/Git 写入保护。
 - Browser `browser_manager.rs`/runtime/distribution 和 `agentic-browser-host/src/lib.rs`：lease/provenance/bridge framing/socket；Console Android Room/runtime coordinator 仅是独立 local-only 参考，不属于 WP3 核心验收。
 
@@ -711,20 +711,20 @@ flowchart TD
 
 本组把复审中的源码风险与已落地的窄 source seam 分开记录为可回退、可停止的边界；它们不是全仓完成结论，也不是全部必做的里程碑。A-OPCFG、A-OWN、H-PROJ、WP4-B、WP5-L、REL 的当前状态以各条标记为准；仍 proof-gated 的残余只有在对应 caller/行为/部署证据达到触发条件时继续推进。每个包都必须遵守 D01–D08、现有 WP 完成证据和第 3 节保护清单。
 
-#### A-OPCFG：Agent operation / config snapshot seam（Process family 已实现；其余 family proof-gated）
+#### A-OPCFG：Agent 操作与配置快照边界（Process 操作族已实现；其余操作族需证据触发）
 
 - **来源与当前状态：** `crates/agentic-gpt/src/stdio_server.rs` 的 Process Exec/Batch 与 `local_service::dispatch_process` 共享 gate/resource owner；`jobs.rs` 的 Process/Skill admission 与 managed batch 使用 admission-time `Arc<Config>` snapshot，queued workers 不重新读取 live policy。其他 direct branches 与 HubCommand 路仍不是 universal dispatcher；`config::restart_required_fields`、main watcher 与 supervisor watcher 的职责保持分开。
 - **非目标：** 不创建 universal dispatcher、第二执行器、全局 capability registry、新 crate 或 Protocol-as-internal-schema；不改 ingress auth、HTTP/MCP/Hub envelope、权限默认、startup-derived resource ownership 或 D03 兼容策略。
 - **证据与剩余边界：** admitted-process reload regression 已验证 snapshot 跨 reload，Rust workspace check/test 通过；后续 operation family、字段分类变化仍按 deterministic reload 核验。external tunnel/cloud、OAuth、Browser JS 和 OS sandbox 不属于本包证明。
 
 
-#### A-OWN：Agent Job / Skill / Room narrow ownership（Skill/path seam 已实现；进一步 contexts proof-gated）
+#### A-OWN：Agent Job、Skill 与 Room 的窄职责边界（Skill/路径边界已实现；进一步上下文拆分需证据触发）
 
 - **来源与当前状态：** `state::AppState` 仍聚合 config、Jobs、Room、Skill、Browser 与 transport handles；`jobs.rs` 保留 common terminalization、Process/MCP effect adapters，但 `SkillLeaseManager` 与 `package_sha256` 已由 `skills.rs` 持有；`skill_installs.rs` 持有 install journal/staging/commit/recovery，并调用 Skill digest/activation seam。宽组合根与 Room write lock 仍是残余风险，非已证故障。
 - **非目标：** 不拆 crate、不引入 DI framework/universal repository、不合并 `JobState` 与 `SkillInstallStatus`、不把 Process/MCP cancellation 做成同一 effect、不把 Room 文件/Git/lease 移到 Hub，也不把 `AppState` 一次性重写。
 - **证据与剩余边界：** Skill digest/lease owner 与 Process/Skill/Batch snapshot 已有 source/runtime evidence；进一步窄 contexts 仍需 caller graph、fixture/lock、concurrency/crash 或外部 MCP/Browser/tmux 证据，证明不足即停止拆分。
 
-#### H-PROJ：Hub neutral Job/info/projection 与 Apps registry（neutral projection 已实现；inventory/外部 proof 保留）
+#### H-PROJ：Hub 中立 Job/信息投影与 Apps 注册表（中立投影已实现；清单和外部验证仍待完成）
 
 - **来源与当前状态：** Hub `state::projection` 提供 Job live/cache/freshness 与 Hub info neutral helpers，`routes.rs` 与 `mcp_server.rs` 消费同一 projection；generated tool router 与 profile allowlist（含 Coordinator）取交集后才可见/可调用。HTTP/MCP auth/status/error/schema 仍 distinct，Apps inventory 与 `runs::command_type`/Agent command names 仍分别维护。
 - **非目标：** 不让 HTTP 调 MCP 或反之，不合并 HTTP/MCP auth/status/error/DTO，不让 neutral module 依赖 route handler，不统一 Apps names 与 Hub wire names，不引入 Hub executor、Agent resource import、Room content store 或 universal schema。
@@ -736,7 +736,7 @@ flowchart TD
 - **非目标：** 不新造 crate/service、I/O、DB、executor、provider、memory、reasoning loop、capability registry、deprecated alias、version/feature negotiation；不把 Protocol 变成 Agent internal universal API。
 - **证据：** workspace check/test 与 bounded local parity 通过，已知 callers 迁移、wire names/tags/bytes 不变；hosted consumer/importer 与外部部署不由此获得 proof。本包已完成，不阻塞核心路线。
 
-#### WP5-L：Android local attention transition（source owner 已实现；Android runtime proof pending）
+#### WP5-L：Android 本地提醒状态迁移（源码职责已实现；Android 运行时验证待完成）
 
 - **来源与当前状态：** `AttentionRuntimeCoordinator` 实现 `AttentionTransitionOwner`，`AttentionTransitionPolicy` 统一 UI/receiver/alarm/boot；`AttentionDao::queryOverdueForRestore` + atomic `claimTriggered` 覆盖 overdue restore，scheduler `snooze(item)` 接收完整 payload。ExactRequired 缺 exact 权限时失败，不请求 inexact alarm；ExactPreferred 请求 inexact fallback 时通过 Room CAS 保存可见 `Degraded` 状态，并可在后续 exact 成功后恢复 Waiting。原双 orchestrator、缺 payload 与未来 due-only restore seam 已在 source level 收口。
 - **非目标：** 不添加 Internet、Hub DTO/client/token、远端 scheduler、Rust 依赖、Console Hub 产品或长期 memory；不把 `AttentionSourceKind.Hub` 预留值当成接入，不改变 Agent Room。
