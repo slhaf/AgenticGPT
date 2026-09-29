@@ -2939,6 +2939,7 @@ async fn file_edit_later_commit_failure_reports_prior_and_skipped_changes() -> a
     let workspace = server.state.config.read().await.workspace_root.clone();
     std::fs::write(workspace.join("unchanged.txt"), "same\n")?;
     crate::file_ops::inject_commit_failure(&workspace.join("failed.txt"));
+    crate::file_ops::inject_commit_failure(&workspace.join("second_failed.txt"));
     let result = server
         .dispatch(
             "file.edit",
@@ -2981,6 +2982,15 @@ async fn file_edit_later_commit_failure_reports_prior_and_skipped_changes() -> a
     assert_eq!(audit_lines[2]["outcome"], "failed");
     assert_eq!(audit_lines[2]["errorCode"], "file_write_failed");
     assert_eq!(audit_lines[3]["outcome"], "skipped-not-attempted");
+
+    let second_failure = server
+        .dispatch(
+            "file.edit",
+            json!({"patch":"*** Begin Patch\n*** Add File: second_failed.txt\n+second\n*** End Patch"}),
+        )
+        .await?;
+    assert_eq!(second_failure["error"]["code"], "file_write_failed");
+    assert!(!workspace.join("second_failed.txt").exists());
     Ok(())
 }
 
