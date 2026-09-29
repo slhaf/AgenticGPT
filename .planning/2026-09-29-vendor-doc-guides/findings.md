@@ -1,0 +1,14 @@
+# Source findings
+
+- Google developer documentation style guide: https://developers.google.com/style — project-specific rules take precedence; clarity and consistency over mechanical adherence. Highlights: https://developers.google.com/style/highlights — direct address, active voice, descriptive links, steps as numbered lists, readable code/text.
+- Microsoft Writing Style Guide: https://learn.microsoft.com/style-guide/welcome/ — publicly available technology writing and terminology guide.
+- GitHub Docs style guide: https://docs.github.com/en/contributing/style-guide-and-content-model/style-guide — clarity and user meaning outrank rigid stylistic consistency; product-specific guidance, fallback to Microsoft for generic style.
+- OpenAI developer API docs via Context7: `/websites/developers_openai`, GPT Actions OpenAPI examples. No general public editorial style guide confirmed yet; avoid interpreting prompt-writing guidance as human documentation standards.
+- Google task-doc specifics: https://developers.google.com/style/headings (descriptive heading hierarchy and task headings), https://developers.google.com/style/procedures (numbered action sequences), https://developers.google.com/style/prescriptive-documentation (recommend one suitable route rather than unranked options). These are editorial guidelines, not API conformance requirements.
+- Gemini function descriptions: https://ai.google.dev/gemini-api/docs/function-calling#best-practices is separate API-tool integration guidance; clear tool descriptions and validation matter but do not prescribe README structure.
+- Google timelessness: https://developers.google.com/style/timeless-documentation — evergreen docs avoid vague "new/currently/latest"; explicitly version/date-scope release history.
+- OpenAI engineering guide: https://cdn.openai.com/business-guides-and-resources/building-an-ai-native-engineering-team.pdf pp.16-17 — teams choose doc organization and templates; review external/critical docs for correctness. Not a README template.
+- OpenAI tool writing: https://developers.openai.com/plugins/plan/tools — user-goal description, schema, limits and failure behavior; model-facing metadata, not general prose style.
+- Anthropic tool definitions: https://platform.claude.com/docs/en/agents-and-tools/tool-use/define-tools — description states what/when/parameters/caveats; optional schema-valid examples.
+- MCP project contribution guide: https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/CONTRIBUTING.md — accuracy, sample/link tests, navigation. Its protocol specification https://modelcontextprotocol.io/specification/2025-11-25/server/tools separately defines machine tool metadata.
+- GitHub content design: https://docs.github.com/en/contributing/writing-for-github-docs/content-design-principles — reader goals, just enough documentation, clarity and correctness.
