@@ -11,7 +11,7 @@
 ### 1.1 目标
 
 Agentic 的长期定位仍是 **Agent 的受控执行基础设施**：在明确的入口、身份、策略和确认边界内，提供进程、文件、下游 MCP、终端、Browser、Skill、Room 资源访问，以及 Job 生命周期和运行观测。
-本目标稿与历史诊断编号的交叉索引：A01（多入口合同）→§7；A02（Room 接口收口）→§6.5、§7.2；A03（可见性/能力/准入）→§2.4、§3、§6.1；A04（Hub 身份/连接）→§5、§7；A05（配置热重载）→§7.3；A06（信任保证）→§6.1、§6.3、§6.4、§9；A07（耐久性/投影）→§5；A08（Console）→§3.4、§6.6；A09（规范/验证漂移）→§7、[工程规则](engineering-rules.md)。[历史诊断](../archive/architecture-diagnosis-2026-09-23.md)仅提供调查证据与根因背景，不是当前缺陷清单；这些编号是交叉索引，不表示目标已经落地。
+本目标稿与历史诊断编号的交叉索引：A01（多入口合同）→§7；A02（Room 接口收口）→§6.5、§7.2；A03（可见性/能力/准入）→§2.4、§3、§6.1；A04（Hub 身份/连接）→§5、§7；A05（配置热重载）→§7.3；A06（信任保证）→§6.1、§6.3、§6.4、§9；A07（耐久性/投影）→§5；A08（Console）→§3.4、§6.6；A09（规范/验证漂移）→§7、[工程规则](engineering-rules.md)。[历史诊断](../architecture-diagnosis-2026-09-23.md)保留证据和根因，不是当前缺陷清单。
 
 
 目标架构采用三类职责的组合，而不是再造一套完整 Agent Runtime：
@@ -115,7 +115,7 @@ Console Kotlin modules      （当前不编译依赖 Rust protocol/network clien
  
 4. **TUI/CLI**：生产 Process TUI 通过 Local Unix Process API 观察状态/列表，并按需读取输出与结果；它是客户端，不是执行器。配置 TUI 的 commit 是配置/secret 写入适配器。WP2 已为 tmux CLI 的四项本机管理操作（list、attach、create、close）设置显式 CLI 准入：当前实现会调用 `operation::authorize`，其 CLI 分支只按四个精确 operation 名称作 allowlist；CLI 路径不构造 `AppState`，因此不等于通常的 `AppState` policy/confirmation 流程。这不扩展为通用 CLI executor，也不移除其他 CLI 功能。
 
-当前 Process API 的 status/list 仅返回 metadata，output/result 通过独立接口按需读取；breaking upgrade 与旧数据库边界见[Process cutover 说明](../process-cutover.md)。目标描述不得恢复旧 `job.list` surface。
+当前 Process API 的 status/list 仅返回 metadata，output/result 通过独立接口按需读取；breaking upgrade 与旧数据库边界见[Process cutover 说明](../../process-cutover.md)。目标描述不得恢复旧 `job.list` surface。
 5. **Console**：当前 Android attention 是由 Room、AlarmManager 和 Notification 构成的仅本地链路；Hub connection field/按钮只是 placeholder，不存在 Console→Hub 调用边。remote console、approval board、exec ledger 不属于本轮核心依赖；未来若作为独立产品接入，必须新增明确的 HTTP/WS/SSE client adapter、认证和状态 projection，不能因接入 token field 就宣称已经集成。
 6. **Browser**：Agent 的 `BrowserRuntimeManager`/Node kernel 与 `agentic-browser-host` extension bridge 是两个不同运行时边界。若二者需要交互，必须显式经过 bridge contract；不得凭共同的“Browser”命名推断它们共享 lease 或执行状态。
 

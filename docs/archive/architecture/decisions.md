@@ -2,7 +2,7 @@
 
 状态：**用户确认于 2026-09-16；复审同步于 2026-09-23；归档与当前状态同步于 2026-09-29。** 本记录确定本轮产品边界和工程取舍，不表示全局目标架构已经完成，也不批准尚未讨论的具体协议、权限或数据变更。WP1、WP2、WP3、WP4-A 与 WP-R 的有界实现及证据，以及本轮 Process/Job admission snapshot、Process adapter、Skill/path owner、Hub neutral projection、Protocol 内部 facade、Android local Attention transition owner 和 release preflight 的窄边界，已在路线图和现状/诊断文档中分别记录；完成这些包不等于所有结构整理、外部部署或 Console 工作已完成。本地完整 release preflight/live contract gate 已通过；`:shared:jvmTest` 于 2026-09-23 在 17 个 Gradle tasks 下 BUILD SUCCESSFUL，仅覆盖 shared 纯 `AttentionTransitionPolicy` 测试与 common Kotlin compile，不覆盖 Android app/Room/OS；Android app host test/assemble 仍受 SDK/Maven TLS 阻断，设备/模拟器及 hosted publication/cross-build/ARM/external importer 仍未验证。
 
-适用范围：[目标架构](target-architecture.md)、[工程规则](engineering-rules.md)、[重构计划](refactoring-plan.md)。此前草案中与本记录冲突的“待用户选择”或额外完成条件不再适用。`current-state.md` 记录当前事实；[归档诊断](../archive/architecture-diagnosis-2026-09-23.md)保留修复前的历史根因、已完成闭环及复审残余边界。目标架构、工程规则和路线图中未标为已完成的内容仍是技术草案或后续工作。WP4-B（Protocol 内部组织）已于 2026-09-23 以私有 wire domain modules + root facade 完成；WP-T 测试增删标准已按根目录 `AGENTS.md` 确立（截至 2026-09-29），逐项审查与清理尚未完成；Console Android local Attention 的 source transition owner 已实现但 Android host/device/OS 证据仍待补，remote Console 是未来产品。任何完成状态都不替代具体运行证据，也不改变既有五 crate、独立 browser-host、Hub/Agent 资源所有权和部署拓扑。
+适用范围：[目标架构](target-architecture.md)、[工程规则](engineering-rules.md)、[重构计划](refactoring-plan.md)。此前草案中与本记录冲突的“待用户选择”或额外完成条件不再适用。`current-state.md` 记录当前事实；[归档诊断](../architecture-diagnosis-2026-09-23.md)保留修复前的历史根因、已完成闭环及复审残余边界。目标架构、工程规则和路线图中未标为已完成的内容仍是技术草案或后续工作。WP4...
 
 ## D01 — Room 是受控资源，不是 Agent 记忆运行时
 

@@ -11,7 +11,7 @@ v0.9 将 process-shaped managed session 替换为统一、区分 kind 的 Job �
 
 1. 停止该 Agent runtime。
 2. 备份配置、workspace audit 和本地管理状态。
-3. 对照 [`config.example.json`](../config.example.json) 与 [`configuration.zh-CN.md`](configuration.zh-CN.md) 检查配置。
+3. 对照 [`config.example.json`](../../config.example.json) 与 [`configuration.zh-CN.md`](../configuration.zh-CN.md) 检查配置。
 4. 启动 v0.9 前迁移 limits 对象。
 
 Hub 模式还需要在替换任一侧之前停止 Hub，并备份 Hub 数据库与配置。
@@ -69,7 +69,7 @@ Hub 模式还需要在替换任一侧之前停止 Hub，并备份 Hub 数据库�
 - `mcp.callTool` 返回 managed `JobResponse`，不再 raw passthrough
 - 新增 `/v1/mcp/batch`
 
-Custom GPT 必须替换为 v0.9 的 [`openapi/hub.yaml`](../openapi/hub.yaml)，不要保留缓存的 v0.8 schema。
+Custom GPT 必须替换为 v0.9 的 [`openapi/hub.yaml`](../../openapi/hub.yaml)，不要保留缓存的 v0.8 schema。
 
 ## 响应迁移
 

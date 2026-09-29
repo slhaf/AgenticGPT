@@ -2,11 +2,11 @@
 
 状态：本页是源码现状快照，以 2026-09-29 的代码为准。WP1/WP2/WP3/WP4-A/WP-R 的有界边界修复，以及 Agent Process、Hub projection、Protocol 内部模块、Skill/路径、Android 本地状态转换和 release preflight 等窄源码边界，均按各自证据范围记录；这些完成项不代表全局目标架构已经实现。
 
-WP-T 的测试增删标准已确立，见根目录 [`AGENTS.md`](../../AGENTS.md)；清理仍须逐项按该标准核验。Console 远程版仍属未来范围。本页不把早先的 Rust 工作区测试计数作为当前通过声明。
+WP-T 的测试增删标准已确立，见根目录 [`AGENTS.md`](../../../AGENTS.md)；清理仍须逐项按该标准核验。Console 远程版仍属未来范围。本页不把早先的 Rust 工作区测试计数作为当前通过声明。
 
 2026-09-23 的本地镜像 release preflight 记录不表示本次文档更新或合同 cutover 已完整验证；GitHub 托管发布、交叉编译和 ARM 运行仍未验证。`:shared:jvmTest` 于 2026-09-23 有 17 项任务的成功运行记录，仅覆盖 shared 测试与 common Kotlin 编译，不覆盖 Android app、Room 或 OS。Android app host 测试/assemble 因 SDK/网络边界，设备/模拟器因设备缺失仍待补证；严格 Clippy 的既有债务不属于 release preflight，外部 tunnel、Browser client/service 和 Actions importer 也未验证。
 
-目标规则见[目标架构](target-architecture.md)，历史问题与根因见[归档诊断](../archive/architecture-diagnosis-2026-09-23.md)，该诊断不作为当前缺陷清单。文中代码路径均相对仓库根；优先使用符号而非易变行号定位。
+目标规则见[目标架构](target-architecture.md)，历史问题与根因见[归档诊断](../architecture-diagnosis-2026-09-23.md)，该诊断不作为当前缺陷清单。文中代码路径均相对仓库根；优先使用符号而非易变行号定位。
 
 ## 1. 调查范围和证据等级
 
@@ -81,7 +81,7 @@ agentic-gpt 执行核心
 | Hub Agent | agent 进程持 AppState/run lock | Hub WS/SSE command-capable；本地执行，不是 Hub 进程执行 |
 | Process TUI | 独立观察器 | Local Unix Process API 读取进程状态与列表；按需读取输出/结果，不在 TUI 自行执行 |
 
-当前 Process surface 已替代旧 Job API：MCP `process.status/list/output/result/cancel`，Hub MCP `hub.process.status/list`，HTTP `GET /v1/process`、`GET /v1/process/{processId}`、其 `/output` 和 `/result` 子路径，以及 `POST .../cancel`。status/list 只返回 metadata；output/result 通过独立读取接口按上限取回。历史/升级边界见[Process cutover 说明](../process-cutover.md)。
+当前 Process surface 已替代旧 Job API：MCP `process.status/list/output/result/cancel`，Hub MCP `hub.process.status/list`，HTTP `GET /v1/process`、`GET /v1/process/{processId}`、其 `/output` 和 `/result` 子路径，以及 `POST .../cancel`。status/list 只返回 metadata；output/result 通过独立读取接口按上限取回。历史/升级边界见[Process cutover 说明](../../process-cutover.md)。
 
 `RuntimeModel` 的 capability 与 `toolsets.enabled` 是不同机制：Hub+Normal 的 skills/bootstrap/Room 能力受既有 Hub profile/toolset/capability 规则限制；Local/Tunnel+Normal 的 namespace gate 默认不含 Room，但显式启用 `toolsets.room` 后 Normal 仍可使用 Room。Agent-local 固定 surface 测试给出 Normal 29、Room 40 工具，实时广告还受 toolsets 过滤。Hub Full/Coordinator 是另一组入口 profile，不要求与 Agent-local 工具集合完全相同；现在 operation gate 已统一真实 ingress/context 的准入，但 namespace/toolset、capability、annotations 仍是不同层次。
 

@@ -11,7 +11,7 @@ For every Agent:
 
 1. Stop that Agent runtime.
 2. Back up its config, workspace audit, and locally managed state.
-3. Compare the config with [`config.example.json`](../config.example.json) and [`configuration.md`](configuration.md).
+3. Compare the config with [`config.example.json`](../../config.example.json) and [`configuration.md`](../configuration.md).
 4. Migrate the limits object before starting v0.9.
 
 For Hub mode, also stop the Hub and back up its database/config before replacing either side.
@@ -71,7 +71,7 @@ These changes apply only to Hub/Actions callers:
 | raw `POST /v1/mcp/callTool` result | managed `JobResponse` |
 | — | `POST /v1/mcp/batch` |
 
-Replace the Actions schema with the v0.9 [`openapi/hub.yaml`](../openapi/hub.yaml); do not keep a cached v0.8 schema.
+Replace the Actions schema with the v0.9 [`openapi/hub.yaml`](../../openapi/hub.yaml); do not keep a cached v0.8 schema.
 
 ## Response migration
 

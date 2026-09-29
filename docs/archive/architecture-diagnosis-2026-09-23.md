@@ -3,11 +3,11 @@
 > **归档记录（2026-09-29）**
 > - **归档状态：** 已归档；本文保留历史调查基线、A01–A09 根因判断与 R01–R06 源级复审，不作为当前行为的唯一依据。
 > - **版本范围：** 非发布版本；对应 2026-09-16 历史基线及 2026-09-23 复审。
-> - **当前权威：** 当前结构见[现状架构](../architecture/current-state.md)，用户已确认边界见[已确认决策](../architecture/decisions.md)，日常残余及触发条件见[重构计划](../architecture/refactoring-plan.md)。
+> - **当前权威：** 当前结构见[现状架构](architecture/current-state.md)，用户已确认边界见[已确认决策](architecture/decisions.md)，日常残余及触发条件见[重构计划](architecture/refactoring-plan.md)。
 
-状态：历史调查结论、已交付边界与 2026-09-23 复审并存；历史基线为 2026-09-16，WP2 closure 为 2026-09-20，WP3、WP4-A、WP-R 与本轮结构收口的有界状态以[重构计划](../architecture/refactoring-plan.md)和[现状架构](../architecture/current-state.md)为准。本文不把完成包扩展成全局目标架构完成。
+状态：历史调查结论、已交付边界与 2026-09-23 复审并存；历史基线为 2026-09-16，WP2 closure 为 2026-09-20，WP3、WP4-A、WP-R 与本轮结构收口的有界状态以[重构计划](architecture/refactoring-plan.md)和[现状架构](architecture/current-state.md)为准。本文不把完成包扩展成全局目标架构完成。
 
-后续用户决策见[已确认决策](../architecture/decisions.md)。A01/A02/A04/A07/A09 的基线段落保留修复前机制与根因，但各节新增当前闭环/残余说明；A03/A05/A06 保留 WP2 的窄 operation/config/security 边界。Process routing、Job config snapshot、Hub neutral projection、Protocol domain modules、Skill/path ownership、Android transition 与 release preflight 已有当前源码闭环；本地 bounded live gate 已通过，但证据仍不能替代 hosted release publication/live parity、外部部署、Console OS 或完整跨进程场景。当前非 Process Agent branches 仍可能保留局部 routing/projection，不应读成一个 universal dispatcher。
+后续用户决策见[已确认决策](architecture/decisions.md)。A01/A02/A04/A07/A09 的基线段落保留修复前机制与根因，但各节新增当前闭环/残余说明；A03/A05/A06 保留 WP2 的窄 operation/config/security 边界。Process routing、Job config snapshot、Hub neutral projection、Protocol domain modules、Skill/path ownership、Android transition 与 release preflight 已有当前源码闭环；本地 bounded live gate 已通过，但证据仍不能替代 hosted release publication/live parity、外部部署、Console OS 或完整跨进程场景。当前非 Process Agent branches 仍可能保留局部 routing/projection，不应读成一个 universal dispatcher。
 
 本文件用“历史基线”“[推断]”“[未验证]”“当前残余”区分证据等级。没有运行竞态、攻击或真实多进程场景，不声称这些风险已完成复现。
 
@@ -180,7 +180,7 @@ Agentic 不是已经失去所有边界的单体。实际执行核心、Hub 控�
 4. **资源与配置耦合隐式化**：共享 AppState 可用，但 startup-derived owner 与 mutable Config 没有严格区分。明确生命周期，不急于依赖注入框架。
 5. **实验成熟度没有同步工程约束**：Android/Browser/历史 docs 的独立探索不能自动等同正式支持。明确状态，再决定保留或退出。
 
-优先级不是按文件长度排列：A01/A02/A04/A05/A07/A09 的历史基线已有对应闭环或残余说明，不再作为 blanket open defects；当前应按第 6 节 R01–R06 的已实现 seam、结构残余与证据边界逐项核验，再按[工程规则](../architecture/engineering-rules.md)和[重构计划](../architecture/refactoring-plan.md)提供行为证据。A08 归独立 Console 维护，不是核心完成前置；WP-T 测试增删标准已确立，逐项清理仍未完成；WP5-O 仍是未来产品。
+优先级不是按文件长度排列：A01/A02/A04/A05/A07/A09 的历史基线已有对应闭环或残余说明，不再作为 blanket open defects；当前应按第 6 节 R01–R06 的已实现 seam、结构残余与证据边界逐项核验，再按[工程规则](architecture/engineering-rules.md)和[重构计划](architecture/refactoring-plan.md)提供行为证据。A08 归独立 Console 维护，不是核心完成前置；WP-T 测试增删标准已确立，逐项清理仍未完成；WP5-O 仍是未来产品。
 
 ## 5. 未采纳的扩大范围
 
@@ -192,7 +192,7 @@ Agentic 不是已经失去所有边界的单体。实际执行核心、Hub 控�
 
 ## 6. 2026-09-23 当前结构残余（源级分析）
 
-本节是当前复审提出的结构风险、已收口 seam 和条件性后续边界，不是把历史机制静默删除，也不是把未验证外部行为写成通过。实施/维护前仍须按[目标架构](../architecture/target-architecture.md)、[工程规则](../architecture/engineering-rules.md)和[重构计划](../architecture/refactoring-plan.md)核对源码与行为证据。
+本节是当前复审提出的结构风险、已收口 seam 和条件性后续边界，不是把历史机制静默删除，也不是把未验证外部行为写成通过。实施/维护前仍须按[目标架构](architecture/target-architecture.md)、[工程规则](architecture/engineering-rules.md)和[重构计划](architecture/refactoring-plan.md)核对源码与行为证据。
 
 ### R01 — Agent direct/Hub 路由：Process family 已共享 adapter，其余局部映射仍是结构残余
 

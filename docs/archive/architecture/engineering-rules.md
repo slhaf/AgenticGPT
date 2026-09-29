@@ -5,7 +5,7 @@
 > 适用决策： [D01](decisions.md#d01--room-是受控资源不是-agent-记忆运行时) · [D02](decisions.md#d02--room-远端能力必须补齐) · [D03](decisions.md#d03--一次升级明确迁移不刻意维持旧兼容) · [D04](decisions.md#d04--自用部署背景与具体副作用控制并存) · [D05](decisions.md#d05--browser-host-先盘点实际拓扑再收紧机制) · [D06](decisions.md#d06--持久化按正确性与用途分层) · [D07](decisions.md#d07--console-与本轮核心重构解耦) · [D08](decisions.md#d08--不借架构重构扩张范围)。这些决策确定产品边界和工程取舍，不表示代码已经实现；剩余事项是实施细节，不是再次请求用户选择。
 >
 > 事实引用来自本轮只读调查记录：`.planning/2026-09-16-architecture-audit/execution-survey.md`、`contract-ops-survey.md`、`hub-survey.md`、`hub-supplement.md`、`console-survey.md`、`verification.md`，以及已建立的 CodeGraph 索引。调查中未验证的行为在此标为“待核验”，不得写成通过或已集成。
-正式现状见[现状架构](current-state.md)，目标边界见[目标架构](target-architecture.md)；A01–A09 的历史调查证据与根因见[归档诊断](../archive/architecture-diagnosis-2026-09-23.md)，它不是当前缺陷清单。诊断编号是历史审查交叉索引，不代表规则已由代码实现。
+正式现状见[现状架构](current-state.md)，目标边界见[目标架构](target-architecture.md)；A01–A09 的历史调查证据与根因见[归档诊断](../architecture-diagnosis-2026-09-23.md)，它不是当前缺陷清单。诊断编号是历史审查交叉索引，不代表规则已由代码实现。
 
 
 ## 1. 使用方式：先判断“谁拥有事实和副作用”
@@ -70,7 +70,7 @@ UI state、平台 repository/scheduler/client adapter？
 当前 Cargo 事实是：`agentic-gpt → protocol + apply-patch`，`agentic-gpt-hub → protocol`，Protocol/apply-patch/browser-host 无 workspace 内部 crate 依赖。Console 当前不编译依赖 Rust protocol 或网络实现。目录迁移不得改变这条方向，除非有独立 compile/deploy/security 论证。
 
 Process/Skill 状态必须保持窄 owner：Agent Process runtime 拥有 Process/Skill/MCP admission、取消和终态；`process.sqlite3` 持有可查询的 Process 历史；`skills`/`skill_installs` 拥有包、安装 journal、digest 和 activation lease；Hub `runs` 拥有 dispatch receipt，Hub Process cache 只是 projection。内部 managed Job 是执行记录而非另一个公共 Process 权威。Skill run 可以复用 Process lifecycle，但 `SkillInstallStatus` 不得并入执行状态，也不得让通用 repository/state abstraction 抹平不同 retention 或副作用。
-当前对外称 Process API，而不是 Job API：status/list 只投影 metadata，output/result 独立按需读取；当前 cutover 与存储边界见[Process cutover 说明](../process-cutover.md)。对内可以保留 managed Job 作为 Process runtime 的执行机制，不将其当作另一份公共 authority。
+当前对外称 Process API，而不是 Job API：status/list 只投影 metadata，output/result 独立按需读取；当前 cutover 与存储边界见[Process cutover 说明](../../process-cutover.md)。对内可以保留 managed Job 作为 Process runtime 的执行机制，不将其当作另一份公共 authority。
 
 ## 3. 分层规则：适配器薄，操作核心唯一，资源 owner 明确
 

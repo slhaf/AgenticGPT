@@ -1,6 +1,6 @@
 # Agentic GPT
 
-[根目录 README（中文）](README.md)
+[English README](README.md)
 
 Agentic GPT 通过每台机器独立的 Secure MCP Tunnel、可选的集中式 Rust Hub，或仅本机可访问的 Unix MCP socket，将 ChatGPT 连接到 Linux 机器。
 
@@ -148,7 +148,6 @@ agentic-gpt config toolset disable <namespace>
 
 可用工具 namespace 为 `agent`、`file`、`mcp`、`process`、`skills`、`tmux`、`browser` 和 `room`。逻辑上的 `room` namespace 包含 `bootstrap`、`bootstrap.read` 以及所有 `room.*` 工具。也可以直接编辑 JSON 中的 `toolsets.enabled`；有效修改会热加载，无需重启；无效候选配置会保留上一次有效选择。
 
-
 ### 2. 通过引用保存 tunnel 密钥
 
 ```bash
@@ -294,20 +293,6 @@ Hub 中继的 `ntfy` 是可选能力，只有在 Hub 模式或配置了 Standalo
 
 字段定义与热加载行为见[配置说明](docs/configuration.zh-CN.md)。
 
-以下仅描述历史上的 v0.8 → v0.9 升级；其中的 Job API 名称不是当前进程生命周期的使用指南。
-
-## 从 v0.8 升级
-
-v0.9 是一个有意引入不兼容变更的版本：
-
-- `limits.maxActiveSessions` → `limits.maxActiveJobs`
-- 移除 `sessionIdleTimeoutSecs`
-- 受管 `session.*` 以及 `process.get/list/kill` 改为 `job.get/list/cancel`
-- `process.batchExec` 改为 `process.batch`
-- `mcp.callTool` 返回受管 `JobResponse`
-
-Standalone/Local 部署可独立升级 `agentic-gpt`。Hub 部署必须协调升级 Hub 与已连接的 Agent，因为 v0.9 线级协议与 v0.8 不兼容。完整步骤见 [v0.9 迁移说明](docs/migration-v0.9.zh-CN.md)。
-
 ## 更多文档
 
 - [配置说明](docs/configuration.zh-CN.md)：运行时选择、主要配置块、密钥引用与热加载/重启边界。
@@ -315,10 +300,6 @@ Standalone/Local 部署可独立升级 `agentic-gpt`。Hub 部署必须协调升
 - [接口索引](docs/interfaces.md)：Hub HTTP、Actions、Apps MCP、协议与直接 MCP surface。
 - [工具契约矩阵](docs/tool-contract-matrix.md)：Normal/Room/Hub 工具契约、边界与 surface parity 矩阵。
 - [运维指南](docs/operations.md)：本地验证、Standalone-first 部署检查、Hub 检查与安全不变量。
-- [v0.9 迁移说明](docs/migration-v0.9.zh-CN.md)：按 runtime 划分的 v0.8 → v0.9 迁移。
-- [v0.10 迁移说明](docs/migration-v0.10.zh-CN.md)：统一文件读取/搜索请求与 apply-patch 迁移。
-- [v0.9.1 发布说明](docs/release-notes-v0.9.1.zh-CN.md)：v0.9.1 发布边界与验证摘要。
-- [v0.9.0 发布说明](docs/release-notes-v0.9.0.md)：v0.9.0 变更与验证摘要。
 - [开发文档](docs/development.zh-CN.md)：开发、CI 与发布。
 
 ## 构建与发布
@@ -341,7 +322,6 @@ git push origin "v${rust_version}"
 - 对 shell、网络工具和陌生 MCP server 优先要求确认。
 - 使用有界的 `process.output`/`process.result` 获取结果，避免 HTTP/MCP 请求无限期阻塞。
 - Hub 公开部署时必须使用 HTTPS。
-- 不要让 v0.9 读取尚未迁移的 v0.8 limits 对象。
 
 ## 许可证
 
