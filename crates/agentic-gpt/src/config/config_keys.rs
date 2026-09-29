@@ -382,20 +382,20 @@ pub(crate) static CONFIG_KEYS: &[ConfigKeySpec] = &[
         Limits,
         NonNegativeInteger,
         false,
-        "Maximum concurrently running child Jobs within one process.batch call.",
-        "单次 process.batch 中同时运行的子 Job 最大数量。",
+        "Maximum concurrently running child processes within one process.batch call.",
+        "单次 process.batch 中同时运行的子进程最大数量。",
         "4",
         set_max_concurrent_tasks
     ),
     config_key!(
-        "limits.maxActiveJobs",
+        "limits.maxActiveProcesses",
         Limits,
         AutoOrNonNegativeInteger,
         false,
-        "Total active Job capacity: auto or a non-negative integer.",
-        "活动 Job 总容量：auto 或非负整数。",
+        "Total active Process capacity: auto or a non-negative integer.",
+        "活动 Process 总容量：auto 或非负整数。",
         "auto",
-        set_max_active_jobs
+        set_max_active_processes
     ),
     config_key!(
         "limits.maxFileSearchContextLines",
@@ -970,8 +970,8 @@ fn set_max_concurrent_tasks(config: &mut Config, value: &str) -> Result<()> {
     Ok(())
 }
 
-fn set_max_active_jobs(config: &mut Config, value: &str) -> Result<()> {
-    config.limits.max_active_jobs = config::parse_max_active_jobs(value)?;
+fn set_max_active_processes(config: &mut Config, value: &str) -> Result<()> {
+    config.limits.max_active_processes = config::parse_max_active_processes(value)?;
     Ok(())
 }
 

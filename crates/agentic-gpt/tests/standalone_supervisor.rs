@@ -117,9 +117,9 @@ fn run_smoke(
     config["mode"] = Value::String("standalone".to_string());
     config["profile"] = Value::String(profile.to_string());
     config["toolsets"]["enabled"] = if profile == "room" {
-        json!(["agent", "file", "mcp", "process", "job", "skills", "tmux", "room"])
+        json!(["agent", "file", "mcp", "process", "skills", "tmux", "room"])
     } else {
-        json!(["agent", "file", "mcp", "process", "job", "skills", "tmux"])
+        json!(["agent", "file", "mcp", "process", "skills", "tmux"])
     };
     config["agentId"] = Value::String(agent_id.clone());
     config["workspaceRoot"] = Value::String(workspace.to_string_lossy().into_owned());
@@ -443,7 +443,7 @@ fn run_live_reload(root: &Path) -> Result<(), String> {
     config["policy"]["deny"] = json!([
         { "program": "/usr/bin/printf", "argsPrefix": [] }
     ]);
-    config["limits"]["maxActiveJobs"] = json!(1);
+    config["limits"]["maxActiveProcesses"] = json!(1);
     config["mcpServers"] = json!({
         "primary": {
             "enabled": true,
@@ -696,7 +696,7 @@ fn run_live_reload(root: &Path) -> Result<(), String> {
     }));
 
     config["policy"]["deny"] = json!([]);
-    config["limits"]["maxActiveJobs"] = json!(1);
+    config["limits"]["maxActiveProcesses"] = json!(1);
     config["mcpServers"]["primary"]["transport"] = json!("streamable-http");
     config["mcpServers"]["primary"]["enabled"] = json!(false);
     config["mcpServers"]
@@ -721,16 +721,16 @@ fn run_live_reload(root: &Path) -> Result<(), String> {
         "process.exec",
         json!({ "program": "/bin/sleep", "args": ["5"], "waitSeconds": 0 }),
     )?;
-    let active_job_id = active["result"]["structuredContent"]["jobId"]
+    let active_process_id = active["result"]["structuredContent"]["processId"]
         .as_str()
-        .ok_or("active Job id missing")?
+        .ok_or("active process id missing")?
         .to_string();
     let active_state = active["result"]["structuredContent"]["state"]
         .as_str()
-        .ok_or("active Job state missing")?;
+        .ok_or("active process state missing")?;
     assert!(matches!(active_state, "starting" | "running"));
 
-    config["limits"]["maxActiveJobs"] = json!(0);
+    config["limits"]["maxActiveProcesses"] = json!(0);
     write_config(&config_path, &config)?;
     thread::sleep(Duration::from_millis(2300));
     let rejected = call_tool(
@@ -743,10 +743,10 @@ fn run_live_reload(root: &Path) -> Result<(), String> {
     let reason = rejected["result"]["structuredContent"]["error"]["message"]
         .as_str()
         .ok_or("capacity rejection reason missing")?;
-    assert!(reason.starts_with("max_active_jobs_reached; "));
+    assert!(reason.starts_with("max_active_processes_reached; "));
     assert!(reason.contains("active=1; requested=1; limit=0"));
 
-    config["limits"]["maxActiveJobs"] = json!(2);
+    config["limits"]["maxActiveProcesses"] = json!(2);
     write_config(&config_path, &config)?;
     thread::sleep(Duration::from_millis(2300));
     let admitted = call_tool(
@@ -765,8 +765,8 @@ fn run_live_reload(root: &Path) -> Result<(), String> {
         &mut stdin,
         &mut stdout,
         7,
-        "job.cancel",
-        json!({ "jobId": active_job_id }),
+        "process.cancel",
+        json!({ "processId": active_process_id }),
     )?;
     drop(stdin);
     stop_child_gracefully(&mut worker, Duration::from_secs(5));
@@ -777,10 +777,10 @@ fn run_live_reload(root: &Path) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     assert!(!human_logs.contains("status=started"));
     assert!(!human_logs.contains("runId="));
-    assert!(!human_logs.contains("jobId="));
+    assert!(!human_logs.contains("processId="));
     assert!(human_logs.contains("status=active"));
-    assert_eq!(human_logs.matches("managed_job;").count(), 1);
-    assert!(!human_logs.contains(&active_job_id));
+    assert_eq!(human_logs.matches("managed_process;").count(), 1);
+    assert!(!human_logs.contains(&active_process_id));
     for line in human_logs.lines().filter(|line| line.contains("run=")) {
         let run_id = line
             .split("run=")

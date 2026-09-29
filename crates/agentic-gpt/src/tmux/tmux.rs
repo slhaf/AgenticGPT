@@ -595,7 +595,7 @@ fn audit_tmux(
     config: &Config,
     program: &str,
     args: Vec<String>,
-    job_id: Option<String>,
+    target_id: Option<String>,
     working_directory: Option<String>,
     need_confirm: bool,
     policy_decision: &str,
@@ -618,7 +618,7 @@ fn audit_tmux(
         config,
         AuditRecord {
             task_id: Some(format!("tmux-{}", Uuid::new_v4())),
-            job_id,
+            target_id,
             batch_id: None,
             batch_call_id: None,
             batch_index: None,

@@ -8,8 +8,9 @@ use super::notification_tmux::{
     TmuxCloseSessionRequest, TmuxCreateSessionRequest, TmuxExecRequest, TmuxListPanesRequest,
     TmuxPasteTextRequest, UserNotifyDeliveryRequest,
 };
-use super::process_jobs::{
-    BatchExecRequest, ExecRequest, JobCancelRequest, JobGetRequest, JobInfo, JobListRequest,
+use super::process::{
+    ProcessBatchExecRequest, ProcessCancelRequest, ProcessExecRequest, ProcessInfo,
+    ProcessListRequest, ProcessOutputRequest, ProcessResultRequest, ProcessStatusRequest,
 };
 use super::room::{
     RoomDiaryActiveRequest, RoomDiaryReadRequest, RoomMaintenanceStatusRequest,
@@ -32,27 +33,37 @@ pub enum HubCommand {
     #[serde(rename = "process.exec")]
     Exec {
         request_id: String,
-        payload: ExecRequest,
+        payload: ProcessExecRequest,
     },
     #[serde(rename = "process.batch")]
     ProcessBatch {
         request_id: String,
-        payload: BatchExecRequest,
+        payload: ProcessBatchExecRequest,
     },
-    #[serde(rename = "job.list")]
-    JobList {
+    #[serde(rename = "process.list")]
+    ProcessList {
         request_id: String,
-        payload: JobListRequest,
+        payload: ProcessListRequest,
     },
-    #[serde(rename = "job.get")]
-    JobGet {
+    #[serde(rename = "process.status")]
+    ProcessStatus {
         request_id: String,
-        payload: JobGetRequest,
+        payload: ProcessStatusRequest,
     },
-    #[serde(rename = "job.cancel")]
-    JobCancel {
+    #[serde(rename = "process.cancel")]
+    ProcessCancel {
         request_id: String,
-        payload: JobCancelRequest,
+        payload: ProcessCancelRequest,
+    },
+    #[serde(rename = "process.output")]
+    ProcessOutput {
+        request_id: String,
+        payload: ProcessOutputRequest,
+    },
+    #[serde(rename = "process.result")]
+    ProcessResult {
+        request_id: String,
+        payload: ProcessResultRequest,
     },
     #[serde(rename = "tmux.listSessions")]
     TmuxListSessions { request_id: String },
@@ -218,9 +229,11 @@ impl HubCommand {
         match self {
             Self::Exec { request_id, .. }
             | Self::ProcessBatch { request_id, .. }
-            | Self::JobList { request_id, .. }
-            | Self::JobGet { request_id, .. }
-            | Self::JobCancel { request_id, .. }
+            | Self::ProcessList { request_id, .. }
+            | Self::ProcessStatus { request_id, .. }
+            | Self::ProcessCancel { request_id, .. }
+            | Self::ProcessOutput { request_id, .. }
+            | Self::ProcessResult { request_id, .. }
             | Self::TmuxListSessions { request_id }
             | Self::TmuxListPanes { request_id, .. }
             | Self::TmuxCapturePane { request_id, .. }
@@ -288,8 +301,9 @@ pub enum AgentMessage {
         #[serde(rename = "sentAt")]
         sent_at: DateTime<Utc>,
     },
-    JobUpdate {
-        job: JobInfo,
+    #[serde(rename = "process.update")]
+    ProcessUpdate {
+        process: ProcessInfo,
     },
     RunReport {
         report: Box<AgentRunReport>,

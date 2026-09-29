@@ -1,8 +1,9 @@
 use agentic_gpt_protocol::{
-    normalize_job_group, BatchExecRequest, ExecRequest, HubCommand, JobCancelRequest,
-    JobGetRequest, JobKind, JobListRequest, JobState, McpBatchRequest, McpCallToolRequest,
-    McpListServersRequest, McpListToolsRequest, TmuxCapturePaneRequest, TmuxCloseSessionRequest,
-    TmuxCreateSessionRequest, TmuxExecRequest, TmuxListPanesRequest, TmuxPasteTextRequest,
+    HubCommand, McpBatchRequest, McpCallToolRequest, McpListServersRequest, McpListToolsRequest,
+    ProcessBatchExecRequest, ProcessCancelRequest, ProcessExecRequest, ProcessListRequest,
+    ProcessOutputRequest, ProcessResultRequest, ProcessStatusRequest, TmuxCapturePaneRequest,
+    TmuxCloseSessionRequest, TmuxCreateSessionRequest, TmuxExecRequest, TmuxListPanesRequest,
+    TmuxPasteTextRequest,
 };
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -11,11 +12,13 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::agents::dispatch::{cached_job, mcp_list_servers_all_agents, request_agent};
+use crate::agents::dispatch::{cached_process, mcp_list_servers_all_agents, request_agent};
 use crate::registry::{registry_entries, registry_entry};
 use crate::runs;
 use crate::state::{
-    projection::{add_cache_metadata, filter_cached_jobs, job_list_item, live_job_value},
+    projection::{
+        add_cache_metadata, filter_cached_processes, live_process_value, process_list_item,
+    },
     HubState,
 };
 use crate::utils::{constant_time_equal, random_id};
@@ -29,32 +32,35 @@ pub(crate) struct AgentIdQuery {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct JobListQuery {
+pub(crate) struct ProcessListQuery {
     agent_id: String,
     group: Option<String>,
-    kind: Option<JobKind>,
-    state: Option<JobState>,
+    kind: Option<agentic_gpt_protocol::ProcessKind>,
+    state: Option<agentic_gpt_protocol::ProcessState>,
     limit: Option<usize>,
     cursor: Option<String>,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct JobGetQuery {
+pub(crate) struct ProcessStatusQuery {
     agent_id: String,
     wait_seconds: Option<u64>,
-    #[serde(default)]
-    wait_only: bool,
 }
 
-fn job_get_payload(job_id: String, query: &JobGetQuery) -> JobGetRequest {
-    let mut payload = JobGetRequest {
-        job_id,
-        wait_only: query.wait_only,
-        wait_seconds: query.wait_seconds,
-    };
-    payload.wait_seconds = Some(payload.effective_wait_seconds());
-    payload
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ProcessOutputQuery {
+    agent_id: String,
+    cursor: Option<String>,
+    max_bytes: Option<usize>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ProcessResultQuery {
+    agent_id: String,
+    max_bytes: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -144,6 +150,39 @@ struct ErrorDetail {
     code: &'static str,
     message: String,
 }
+fn unavailable_process_value(
+    process_id: &str,
+    code: &'static str,
+    reason: String,
+    snapshot: Option<&crate::state::ProcessCacheSnapshot>,
+) -> serde_json::Value {
+    let mut body = json!({
+        "processId": process_id,
+        "status": "unavailable",
+        "error": { "code": code, "message": reason },
+        "freshness": "unknown"
+    });
+    if let Some(snapshot) = snapshot {
+        body["cached"] = json!(process_list_item(snapshot.process.clone()));
+        add_cache_metadata(&mut body, std::slice::from_ref(snapshot));
+    }
+    body
+}
+
+fn cached_process_status_value(
+    process_id: &str,
+    code: &'static str,
+    reason: String,
+    snapshot: &crate::state::ProcessCacheSnapshot,
+) -> serde_json::Value {
+    let mut body = json!({
+        "processId": process_id,
+        "error": { "code": code, "message": reason },
+        "cached": process_list_item(snapshot.process.clone())
+    });
+    add_cache_metadata(&mut body, std::slice::from_ref(snapshot));
+    body
+}
 
 pub(crate) async fn hub_info(State(state): State<HubState>, headers: HeaderMap) -> Response {
     if let Err(response) = require_action_auth(&state, &headers) {
@@ -206,7 +245,7 @@ pub(crate) async fn get_run(
 pub(crate) async fn process_exec(
     State(state): State<HubState>,
     headers: HeaderMap,
-    Json(payload): Json<ExecRequest>,
+    Json(payload): Json<ProcessExecRequest>,
 ) -> Response {
     if let Err(response) = require_action_auth(&state, &headers) {
         return response;
@@ -227,7 +266,7 @@ pub(crate) async fn process_exec(
 pub(crate) async fn process_batch(
     State(state): State<HubState>,
     headers: HeaderMap,
-    Json(payload): Json<BatchExecRequest>,
+    Json(payload): Json<ProcessBatchExecRequest>,
 ) -> Response {
     if let Err(response) = require_action_auth(&state, &headers) {
         return response;
@@ -245,10 +284,10 @@ pub(crate) async fn process_batch(
     }
 }
 
-pub(crate) async fn list_jobs(
+pub(crate) async fn list_processes(
     State(state): State<HubState>,
     headers: HeaderMap,
-    Query(query): Query<JobListQuery>,
+    Query(query): Query<ProcessListQuery>,
 ) -> Response {
     if let Err(response) = require_action_auth(&state, &headers) {
         return response;
@@ -256,30 +295,31 @@ pub(crate) async fn list_jobs(
     if let Err(response) = require_agent_enabled(&state, &query.agent_id) {
         return response;
     }
-    let group = match normalize_job_group(query.group.as_deref()) {
+    let group = match agentic_gpt_protocol::normalize_process_group(query.group.as_deref()) {
         Ok(group) => group,
         Err(error) => {
             return api_error(StatusCode::BAD_REQUEST, error.code(), error.message());
         }
     };
-    let payload = JobListRequest {
+    let payload = ProcessListRequest {
         group,
         kind: query.kind,
         state: query.state,
         limit: query.limit,
         cursor: query.cursor,
     };
-    let command = HubCommand::JobList {
+    let command = HubCommand::ProcessList {
         request_id: random_id("req"),
         payload: payload.clone(),
     };
     match request_agent(&state, &query.agent_id, command, 2).await {
-        Ok(value) => Json(live_job_value(value)).into_response(),
+        Ok(value) => Json(live_process_value(value)).into_response(),
         Err(reason) if payload.cursor.is_some() => (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({
+                "status": "unavailable",
                 "error": {
-                    "code": "job_list_cursor_unavailable",
+                    "code": "process_list_cursor_unavailable",
                     "message": format!(
                         "Agent is unavailable and Hub cache cannot continue an Agent-issued cursor: {reason}"
                     )
@@ -289,13 +329,13 @@ pub(crate) async fn list_jobs(
         )
             .into_response(),
         Err(_) => {
-            let mut snapshots = state.job_cache.snapshots(&query.agent_id).await;
-            filter_cached_jobs(&mut snapshots, &payload);
+            let mut snapshots = state.process_cache.snapshots(&query.agent_id).await;
+            filter_cached_processes(&mut snapshots, &payload);
             let mut body = json!({
-                "jobs": snapshots
+                "processes": snapshots
                     .iter()
                     .cloned()
-                    .map(|snapshot| job_list_item(snapshot.job))
+                    .map(|snapshot| process_list_item(snapshot.process))
                     .collect::<Vec<_>>()
             });
             add_cache_metadata(&mut body, &snapshots);
@@ -304,11 +344,11 @@ pub(crate) async fn list_jobs(
     }
 }
 
-pub(crate) async fn get_job(
+pub(crate) async fn get_process_status(
     State(state): State<HubState>,
     headers: HeaderMap,
-    Path(job_id): Path<String>,
-    Query(query): Query<JobGetQuery>,
+    Path(process_id): Path<String>,
+    Query(query): Query<ProcessStatusQuery>,
 ) -> Response {
     if let Err(response) = require_action_auth(&state, &headers) {
         return response;
@@ -316,45 +356,154 @@ pub(crate) async fn get_job(
     if let Err(response) = require_agent_enabled(&state, &query.agent_id) {
         return response;
     }
-    let payload = job_get_payload(job_id.clone(), &query);
+    let payload = ProcessStatusRequest {
+        process_id: process_id.clone(),
+        wait_seconds: query.wait_seconds,
+    };
     let timeout_seconds = payload.effective_wait_seconds() + 2;
-    let command = HubCommand::JobGet {
+    let command = HubCommand::ProcessStatus {
         request_id: random_id("req"),
         payload,
     };
     match request_agent(&state, &query.agent_id, command, timeout_seconds).await {
-        Ok(value) => Json(live_job_value(value)).into_response(),
-        Err(reason) => match cached_job(&state, &query.agent_id, &job_id).await {
-            Some(snapshot) => {
-                let mut body = json!({
-                    "error": {
-                        "code": "job_get_unavailable",
-                        "message": reason
-                    },
-                    "cached": job_list_item(snapshot.job.clone())
-                });
-                add_cache_metadata(&mut body, std::slice::from_ref(&snapshot));
-                Json(body).into_response()
-            }
+        Ok(value) => Json(live_process_value(value)).into_response(),
+        Err(reason) => match cached_process(&state, &query.agent_id, &process_id).await {
+            Some(snapshot) => Json(cached_process_status_value(
+                &process_id,
+                "process_status_unavailable",
+                reason,
+                &snapshot,
+            ))
+            .into_response(),
             None => (
                 StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({
-                    "error": {
-                        "code": "job_get_unavailable",
-                        "message": reason
-                    },
-                    "freshness": "unknown"
-                })),
+                Json(unavailable_process_value(
+                    &process_id,
+                    "process_status_unavailable",
+                    reason,
+                    None,
+                )),
             )
                 .into_response(),
         },
     }
 }
+fn process_agent_error_status(code: &str) -> StatusCode {
+    match code {
+        "invalid_process_output_cursor"
+        | "process_output_cursor_ahead_of_output"
+        | "process_output_max_bytes_too_small_for_next_unit" => StatusCode::BAD_REQUEST,
+        "process_not_found" | "process_lost_after_restart" => StatusCode::NOT_FOUND,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
 
-pub(crate) async fn cancel_job(
+fn process_agent_error_response(value: &serde_json::Value) -> Option<Response> {
+    if value.get("processId").is_some()
+        && value.get("status").is_some()
+        && value.get("resultAvailable").is_some()
+    {
+        return None;
+    }
+    let error = value.get("error")?.as_object();
+    let code = error
+        .and_then(|error| error.get("code"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("agent_process_error");
+    let message = error
+        .and_then(|error| error.get("message"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(code);
+    Some(
+        (
+            process_agent_error_status(code),
+            Json(json!({ "error": { "code": code, "message": message } })),
+        )
+            .into_response(),
+    )
+}
+
+fn process_success_response(value: serde_json::Value) -> Response {
+    process_agent_error_response(&value).unwrap_or_else(|| Json(value).into_response())
+}
+
+pub(crate) async fn get_process_output(
     State(state): State<HubState>,
     headers: HeaderMap,
-    Path(job_id): Path<String>,
+    Path(process_id): Path<String>,
+    Query(query): Query<ProcessOutputQuery>,
+) -> Response {
+    if let Err(response) = require_action_auth(&state, &headers) {
+        return response;
+    }
+    if let Err(response) = require_agent_enabled(&state, &query.agent_id) {
+        return response;
+    }
+    let command = HubCommand::ProcessOutput {
+        request_id: random_id("req"),
+        payload: ProcessOutputRequest {
+            process_id: process_id.clone(),
+            cursor: query.cursor,
+            max_bytes: query.max_bytes,
+        },
+    };
+    match request_agent(&state, &query.agent_id, command, 5).await {
+        Ok(value) => process_success_response(value),
+        Err(reason) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(unavailable_process_value(
+                &process_id,
+                "process_output_unavailable",
+                reason,
+                cached_process(&state, &query.agent_id, &process_id)
+                    .await
+                    .as_ref(),
+            )),
+        )
+            .into_response(),
+    }
+}
+
+pub(crate) async fn get_process_result(
+    State(state): State<HubState>,
+    headers: HeaderMap,
+    Path(process_id): Path<String>,
+    Query(query): Query<ProcessResultQuery>,
+) -> Response {
+    if let Err(response) = require_action_auth(&state, &headers) {
+        return response;
+    }
+    if let Err(response) = require_agent_enabled(&state, &query.agent_id) {
+        return response;
+    }
+    let command = HubCommand::ProcessResult {
+        request_id: random_id("req"),
+        payload: ProcessResultRequest {
+            process_id: process_id.clone(),
+            max_bytes: query.max_bytes,
+        },
+    };
+    match request_agent(&state, &query.agent_id, command, 5).await {
+        Ok(value) => process_success_response(value),
+        Err(reason) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(unavailable_process_value(
+                &process_id,
+                "process_result_unavailable",
+                reason,
+                cached_process(&state, &query.agent_id, &process_id)
+                    .await
+                    .as_ref(),
+            )),
+        )
+            .into_response(),
+    }
+}
+
+pub(crate) async fn cancel_process(
+    State(state): State<HubState>,
+    headers: HeaderMap,
+    Path(process_id): Path<String>,
     Query(query): Query<AgentIdQuery>,
 ) -> Response {
     if let Err(response) = require_action_auth(&state, &headers) {
@@ -363,19 +512,21 @@ pub(crate) async fn cancel_job(
     if let Err(response) = require_agent_enabled(&state, &query.agent_id) {
         return response;
     }
-    let command = HubCommand::JobCancel {
+    let command = HubCommand::ProcessCancel {
         request_id: random_id("req"),
-        payload: JobCancelRequest {
-            job_id: job_id.clone(),
+        payload: ProcessCancelRequest {
+            process_id: process_id.clone(),
         },
     };
     match request_agent(&state, &query.agent_id, command, 5).await {
-        Ok(value) => Json(live_job_value(value)).into_response(),
+        Ok(value) => Json(live_process_value(value)).into_response(),
         Err(reason) => (
             StatusCode::BAD_GATEWAY,
             Json(json!({
+                "processId": process_id,
+                "status": "unavailable",
                 "error": {
-                    "code": "job_cancel_unavailable",
+                    "code": "process_cancel_unavailable",
                     "message": reason
                 },
                 "freshness": "unknown"
@@ -758,17 +909,101 @@ mod tests {
     use super::*;
 
     #[test]
-    fn get_job_normalizes_wait_and_request_timeout_without_dispatching() {
+    fn process_status_wait_is_bounded_by_protocol_defaults() {
         for (wait_seconds, expected) in [(None, 5), (Some(0), 0), (Some(30), 30), (Some(31), 30)] {
-            let query = JobGetQuery {
+            let query = ProcessStatusQuery {
                 agent_id: "agent".to_string(),
                 wait_seconds,
-                wait_only: true,
             };
-            let payload = job_get_payload("job".to_string(), &query);
-            assert_eq!(payload.wait_seconds, Some(expected));
-            assert!(payload.wait_only);
-            assert_eq!(payload.effective_wait_seconds() + 2, expected + 2);
+            let payload = ProcessStatusRequest {
+                process_id: "process".to_string(),
+                wait_seconds: query.wait_seconds,
+            };
+            assert_eq!(payload.effective_wait_seconds(), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn process_agent_errors_become_declared_http_errors() {
+        for (code, expected_status) in [
+            ("invalid_process_output_cursor", StatusCode::BAD_REQUEST),
+            (
+                "process_output_cursor_ahead_of_output",
+                StatusCode::BAD_REQUEST,
+            ),
+            ("process_not_found", StatusCode::NOT_FOUND),
+            ("process_lost_after_restart", StatusCode::NOT_FOUND),
+            (
+                "process_output_snapshot_invalid",
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+        ] {
+            let response = process_success_response(json!({
+                "error": { "code": code, "message": "Agent rejected the request" }
+            }));
+            assert_eq!(response.status(), expected_status, "{code}");
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["error"]["code"], code);
+            assert_eq!(body["error"]["message"], "Agent rejected the request");
+        }
+
+        let valid_unavailable_result = json!({
+            "processId": "process-1",
+            "status": "unavailable",
+            "resultAvailable": false,
+            "error": { "code": "process_result_not_ready", "message": "Process has not completed" }
+        });
+        let response = process_success_response(valid_unavailable_result.clone());
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            valid_unavailable_result
+        );
+    }
+
+    #[test]
+    fn unavailable_process_detail_responses_expose_metadata_without_payloads() {
+        let now = chrono::Utc::now();
+        let process: agentic_gpt_protocol::ProcessInfo =
+            serde_json::from_value(serde_json::json!({
+                "agentId": "agent",
+                "processId": "process-1",
+                "kind": "command",
+                "state": "completed",
+                "createdAt": now.to_rfc3339(),
+                "updatedAt": now.to_rfc3339(),
+                "captureStatus": "complete"
+            }))
+            .unwrap();
+        let snapshot = crate::state::ProcessCacheSnapshot {
+            process,
+            observed_at: now,
+            freshness: crate::state::ProcessFreshness::Stale,
+        };
+
+        for code in ["process_output_unavailable", "process_result_unavailable"] {
+            let value = unavailable_process_value(
+                "process-1",
+                code,
+                "Agent is unavailable".to_string(),
+                Some(&snapshot),
+            );
+            assert_eq!(value["processId"], "process-1");
+            assert_eq!(value["status"], "unavailable");
+            assert_eq!(value["error"]["code"], code);
+            assert_eq!(value["cached"]["processId"], "process-1");
+            assert_eq!(value["freshness"], "stale");
+            assert!(value["observedAt"].is_string());
+            for field in ["stdout", "stderr", "result"] {
+                assert!(value.get(field).is_none());
+                assert!(value["cached"].get(field).is_none());
+            }
         }
     }
 }

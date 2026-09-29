@@ -1,5 +1,6 @@
 use agentic_gpt_protocol::{
-    AgentConnectionMode, AgentRole, JobInfo, JobState, NotificationChannel, SafeConfigSummary,
+    AgentConnectionMode, AgentRole, NotificationChannel, ProcessInfo, ProcessState,
+    SafeConfigSummary,
 };
 use chrono::{DateTime, Utc};
 use rusqlite::Connection;
@@ -9,19 +10,19 @@ use tokio::sync::{mpsc, Mutex};
 
 use crate::{oauth, room, HubConfig};
 
-pub(crate) const JOB_CACHE_CAPACITY: usize = 4096;
-pub(crate) const JOB_CACHE_TTL_SECS: i64 = 15 * 60;
-pub(crate) const JOB_CACHE_STALE_SECS: i64 = 60;
+pub(crate) const PROCESS_CACHE_CAPACITY: usize = 4096;
+pub(crate) const PROCESS_CACHE_TTL_SECS: i64 = 15 * 60;
+pub(crate) const PROCESS_CACHE_STALE_SECS: i64 = 60;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum JobFreshness {
+pub(crate) enum ProcessFreshness {
     Live,
     Cached,
     Stale,
     Unknown,
 }
 
-impl JobFreshness {
+impl ProcessFreshness {
     pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Live => "live",
@@ -33,15 +34,15 @@ impl JobFreshness {
 }
 
 #[derive(Clone)]
-pub(crate) struct JobCacheSnapshot {
-    pub(crate) job: JobInfo,
+pub(crate) struct ProcessCacheSnapshot {
+    pub(crate) process: ProcessInfo,
     pub(crate) observed_at: DateTime<Utc>,
-    pub(crate) freshness: JobFreshness,
+    pub(crate) freshness: ProcessFreshness,
 }
 
 #[derive(Clone)]
-struct JobCacheEntry {
-    job: JobInfo,
+struct ProcessCacheEntry {
+    process: ProcessInfo,
     observed_at: DateTime<Utc>,
     connection_id: String,
     boot_generation: Option<String>,
@@ -50,18 +51,18 @@ struct JobCacheEntry {
 }
 
 #[derive(Default)]
-struct JobCacheInner {
-    entries: HashMap<(String, String), JobCacheEntry>,
+struct ProcessCacheInner {
+    entries: HashMap<(String, String), ProcessCacheEntry>,
 }
 
-pub(crate) struct JobCache {
-    inner: Mutex<JobCacheInner>,
+pub(crate) struct ProcessCache {
+    inner: Mutex<ProcessCacheInner>,
 }
 
-impl JobCache {
+impl ProcessCache {
     pub(crate) fn new() -> Self {
         Self {
-            inner: Mutex::new(JobCacheInner::default()),
+            inner: Mutex::new(ProcessCacheInner::default()),
         }
     }
 
@@ -70,10 +71,16 @@ impl JobCache {
         agent_id: &str,
         connection_id: &str,
         boot_generation: Option<&str>,
-        job: JobInfo,
+        process: ProcessInfo,
     ) {
-        self.record_at(agent_id, connection_id, boot_generation, job, Utc::now())
-            .await;
+        self.record_at(
+            agent_id,
+            connection_id,
+            boot_generation,
+            process,
+            Utc::now(),
+        )
+        .await;
     }
 
     async fn record_at(
@@ -81,22 +88,24 @@ impl JobCache {
         agent_id: &str,
         connection_id: &str,
         boot_generation: Option<&str>,
-        job: JobInfo,
+        process: ProcessInfo,
         observed_at: DateTime<Utc>,
     ) {
-        let key = (agent_id.to_string(), job.job_id.clone());
+        let key = (agent_id.to_string(), process.process_id.clone());
         let mut inner = self.inner.lock().await;
         Self::sweep_locked(&mut inner, observed_at);
         if let Some(existing) = inner.entries.get(&key) {
             let generation_changed = existing.boot_generation.as_deref() != boot_generation;
-            if (existing.job.state.is_terminal() && job.state.is_active())
-                || (generation_changed && existing.job.state.is_active() && job.state.is_active())
-                || job.updated_at < existing.job.updated_at
+            if (existing.process.state.is_terminal() && process.state.is_active())
+                || (generation_changed
+                    && existing.process.state.is_active()
+                    && process.state.is_active())
+                || process.updated_at < existing.process.updated_at
             {
                 return;
             }
         }
-        if !inner.entries.contains_key(&key) && inner.entries.len() >= JOB_CACHE_CAPACITY {
+        if !inner.entries.contains_key(&key) && inner.entries.len() >= PROCESS_CACHE_CAPACITY {
             if let Some(oldest) = inner
                 .entries
                 .iter()
@@ -108,8 +117,8 @@ impl JobCache {
         }
         inner.entries.insert(
             key,
-            JobCacheEntry {
-                job,
+            ProcessCacheEntry {
+                process,
                 observed_at,
                 connection_id: connection_id.to_string(),
                 boot_generation: boot_generation.map(str::to_string),
@@ -131,62 +140,66 @@ impl JobCache {
     pub(crate) async fn mark_unknown_after_restart(&self, agent_id: &str) {
         let mut inner = self.inner.lock().await;
         for ((entry_agent_id, _), entry) in &mut inner.entries {
-            if entry_agent_id == agent_id && entry.job.state.is_active() {
-                entry.job.state = JobState::UnknownAfterRestart;
-                entry.job.reject_reason = Some("unknown_after_restart".to_string());
+            if entry_agent_id == agent_id && entry.process.state.is_active() {
+                entry.process.state = ProcessState::UnknownAfterRestart;
+                entry.process.reject_reason = Some("unknown_after_restart".to_string());
                 entry.unknown = true;
                 entry.stale = true;
             }
         }
     }
 
-    pub(crate) async fn snapshot(&self, agent_id: &str, job_id: &str) -> Option<JobCacheSnapshot> {
+    pub(crate) async fn snapshot(
+        &self,
+        agent_id: &str,
+        process_id: &str,
+    ) -> Option<ProcessCacheSnapshot> {
         let now = Utc::now();
-        self.snapshot_at(agent_id, job_id, now).await
+        self.snapshot_at(agent_id, process_id, now).await
     }
 
     async fn snapshot_at(
         &self,
         agent_id: &str,
-        job_id: &str,
+        process_id: &str,
         now: DateTime<Utc>,
-    ) -> Option<JobCacheSnapshot> {
+    ) -> Option<ProcessCacheSnapshot> {
         let mut inner = self.inner.lock().await;
         Self::sweep_locked(&mut inner, now);
         inner
             .entries
-            .get(&(agent_id.to_string(), job_id.to_string()))
-            .map(|entry| JobCacheSnapshot {
-                job: entry.job.clone(),
+            .get(&(agent_id.to_string(), process_id.to_string()))
+            .map(|entry| ProcessCacheSnapshot {
+                process: entry.process.clone(),
                 observed_at: entry.observed_at,
                 freshness: Self::freshness(entry, now),
             })
     }
 
-    pub(crate) async fn snapshots(&self, agent_id: &str) -> Vec<JobCacheSnapshot> {
+    pub(crate) async fn snapshots(&self, agent_id: &str) -> Vec<ProcessCacheSnapshot> {
         let now = Utc::now();
         self.snapshots_at(agent_id, now).await
     }
 
-    async fn snapshots_at(&self, agent_id: &str, now: DateTime<Utc>) -> Vec<JobCacheSnapshot> {
+    async fn snapshots_at(&self, agent_id: &str, now: DateTime<Utc>) -> Vec<ProcessCacheSnapshot> {
         let mut inner = self.inner.lock().await;
         Self::sweep_locked(&mut inner, now);
         let mut snapshots = inner
             .entries
             .iter()
             .filter(|((entry_agent_id, _), _)| entry_agent_id == agent_id)
-            .map(|(_, entry)| JobCacheSnapshot {
-                job: entry.job.clone(),
+            .map(|(_, entry)| ProcessCacheSnapshot {
+                process: entry.process.clone(),
                 observed_at: entry.observed_at,
                 freshness: Self::freshness(entry, now),
             })
             .collect::<Vec<_>>();
         snapshots.sort_by(|left, right| {
             right
-                .job
+                .process
                 .updated_at
-                .cmp(&left.job.updated_at)
-                .then_with(|| right.job.job_id.cmp(&left.job.job_id))
+                .cmp(&left.process.updated_at)
+                .then_with(|| right.process.process_id.cmp(&left.process.process_id))
         });
         snapshots
     }
@@ -202,21 +215,22 @@ impl JobCache {
         Self::sweep_locked(&mut inner, now);
     }
 
-    fn freshness(entry: &JobCacheEntry, now: DateTime<Utc>) -> JobFreshness {
+    fn freshness(entry: &ProcessCacheEntry, now: DateTime<Utc>) -> ProcessFreshness {
         if entry.unknown {
-            JobFreshness::Unknown
+            ProcessFreshness::Unknown
         } else if entry.stale
-            || now.signed_duration_since(entry.observed_at).num_seconds() >= JOB_CACHE_STALE_SECS
+            || now.signed_duration_since(entry.observed_at).num_seconds()
+                >= PROCESS_CACHE_STALE_SECS
         {
-            JobFreshness::Stale
+            ProcessFreshness::Stale
         } else {
-            JobFreshness::Cached
+            ProcessFreshness::Cached
         }
     }
 
-    fn sweep_locked(inner: &mut JobCacheInner, now: DateTime<Utc>) {
+    fn sweep_locked(inner: &mut ProcessCacheInner, now: DateTime<Utc>) {
         inner.entries.retain(|_, entry| {
-            now.signed_duration_since(entry.observed_at).num_seconds() < JOB_CACHE_TTL_SECS
+            now.signed_duration_since(entry.observed_at).num_seconds() < PROCESS_CACHE_TTL_SECS
         });
     }
 
@@ -226,10 +240,16 @@ impl JobCache {
         agent_id: &str,
         connection_id: &str,
         boot_generation: Option<&str>,
-        job: JobInfo,
+        process: ProcessInfo,
     ) {
-        self.record_at(agent_id, connection_id, boot_generation, job, Utc::now())
-            .await;
+        self.record_at(
+            agent_id,
+            connection_id,
+            boot_generation,
+            process,
+            Utc::now(),
+        )
+        .await;
     }
 
     #[cfg(test)]
@@ -247,7 +267,7 @@ pub(crate) struct HubState {
     pub(crate) agents: Arc<crate::agents::lifecycle::Connections>,
     pub(crate) dispatch: Arc<crate::agents::dispatch::Dispatch>,
     pub(crate) confirmations: Arc<crate::confirmation::Confirmations>,
-    pub(crate) job_cache: Arc<JobCache>,
+    pub(crate) process_cache: Arc<ProcessCache>,
     pub(crate) boot_generations: Arc<Mutex<HashMap<String, String>>>,
     pub(crate) active_room: Arc<Mutex<Option<room::control::ActiveRoomConnection>>>,
     pub(crate) http: reqwest::Client,
@@ -276,59 +296,64 @@ impl McpProfile {
 
 pub(crate) mod projection {
     use agentic_gpt_protocol::{
-        HubInfoAgents, HubInfoCounts, HubInfoRemoteConfirmation, HubInfoResponse, JobInfo,
-        JobListItem, JobListRequest,
+        HubInfoAgents, HubInfoCounts, HubInfoRemoteConfirmation, HubInfoResponse, ProcessInfo,
+        ProcessListItem, ProcessListRequest,
     };
     use anyhow::Result;
     use chrono::Utc;
     use serde_json::Value;
 
-    use super::{HubState, JobCacheSnapshot, JobFreshness};
+    use super::{HubState, ProcessCacheSnapshot, ProcessFreshness};
     use crate::{notify, registry, MAX_WAIT_SECONDS, REQUEST_TIMEOUT_SECS};
 
-    pub(crate) fn job_list_item(job: JobInfo) -> JobListItem {
-        JobListItem {
-            job_id: job.job_id,
-            group: job.group,
-            kind: job.kind,
-            state: job.state,
-            created_at: job.created_at,
-            started_at: job.started_at,
-            finished_at: job.finished_at,
+    pub(crate) fn process_list_item(process: ProcessInfo) -> ProcessListItem {
+        ProcessListItem {
+            process_id: process.process_id,
+            group: process.group,
+            kind: process.kind,
+            state: process.state,
+            created_at: process.created_at,
+            started_at: process.started_at,
+            finished_at: process.finished_at,
+            capture_status: process.capture_status,
         }
     }
 
-    pub(crate) fn filter_cached_jobs(
-        snapshots: &mut Vec<JobCacheSnapshot>,
-        request: &JobListRequest,
+    pub(crate) fn filter_cached_processes(
+        snapshots: &mut Vec<ProcessCacheSnapshot>,
+        request: &ProcessListRequest,
     ) {
         snapshots.retain(|snapshot| {
             request
                 .group
                 .as_ref()
-                .is_none_or(|group| snapshot.job.group.as_deref() == Some(group.as_str()))
+                .is_none_or(|group| snapshot.process.group.as_deref() == Some(group.as_str()))
         });
-        snapshots.retain(|snapshot| request.kind.is_none_or(|kind| snapshot.job.kind == kind));
+        snapshots.retain(|snapshot| {
+            request
+                .kind
+                .is_none_or(|kind| snapshot.process.kind == kind)
+        });
         snapshots.retain(|snapshot| {
             request
                 .state
-                .is_none_or(|state| snapshot.job.state == state)
+                .is_none_or(|state| snapshot.process.state == state)
         });
         snapshots.sort_by(|left, right| {
             right
-                .job
+                .process
                 .created_at
-                .cmp(&left.job.created_at)
-                .then_with(|| right.job.job_id.cmp(&left.job.job_id))
+                .cmp(&left.process.created_at)
+                .then_with(|| right.process.process_id.cmp(&left.process.process_id))
         });
         snapshots.truncate(request.effective_limit());
     }
 
-    pub(crate) fn live_job_value(mut value: Value) -> Value {
+    pub(crate) fn live_process_value(mut value: Value) -> Value {
         if let Some(object) = value.as_object_mut() {
             object.insert(
                 "freshness".to_string(),
-                Value::String(JobFreshness::Live.label().to_string()),
+                Value::String(ProcessFreshness::Live.label().to_string()),
             );
             object.insert(
                 "observedAt".to_string(),
@@ -338,20 +363,20 @@ pub(crate) mod projection {
         value
     }
 
-    pub(crate) fn add_cache_metadata(value: &mut Value, snapshots: &[JobCacheSnapshot]) {
+    pub(crate) fn add_cache_metadata(value: &mut Value, snapshots: &[ProcessCacheSnapshot]) {
         let freshness = if snapshots.is_empty()
             || snapshots
                 .iter()
-                .any(|snapshot| snapshot.freshness == JobFreshness::Unknown)
+                .any(|snapshot| snapshot.freshness == ProcessFreshness::Unknown)
         {
-            JobFreshness::Unknown
+            ProcessFreshness::Unknown
         } else if snapshots
             .iter()
-            .any(|snapshot| snapshot.freshness == JobFreshness::Stale)
+            .any(|snapshot| snapshot.freshness == ProcessFreshness::Stale)
         {
-            JobFreshness::Stale
+            ProcessFreshness::Stale
         } else {
-            JobFreshness::Cached
+            ProcessFreshness::Cached
         };
         if let Some(object) = value.as_object_mut() {
             object.insert(
@@ -374,7 +399,7 @@ pub(crate) mod projection {
         let online_count = state.agents.online_count().await;
         let pending_request_count = state.dispatch.pending_count().await;
         let pending_confirmation_count = state.confirmations.pending_count().await;
-        let cached_job_count = state.job_cache.count().await;
+        let cached_process_count = state.process_cache.count().await;
         let remote = &state.config.remote_confirmation;
         let ntfy = &remote.ntfy;
         Ok(HubInfoResponse {
@@ -398,7 +423,7 @@ pub(crate) mod projection {
             counts: HubInfoCounts {
                 pending_request_count,
                 pending_confirmation_count,
-                cached_job_count,
+                cached_process_count,
             },
             generated_at: Utc::now(),
         })
@@ -434,17 +459,17 @@ pub(crate) enum OutboundAgentMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agentic_gpt_protocol::{JobKind, JobState};
+    use agentic_gpt_protocol::{ProcessCaptureStatus, ProcessKind, ProcessState};
 
-    fn job(job_id: &str, state: JobState, updated_at: DateTime<Utc>) -> JobInfo {
-        JobInfo {
+    fn process(process_id: &str, state: ProcessState, updated_at: DateTime<Utc>) -> ProcessInfo {
+        ProcessInfo {
             agent_id: "agent".to_string(),
-            job_id: job_id.to_string(),
+            process_id: process_id.to_string(),
             group: None,
             batch_id: None,
             batch_call_id: None,
             batch_index: None,
-            kind: JobKind::Process,
+            kind: ProcessKind::Command,
             state,
             created_at: updated_at,
             started_at: None,
@@ -455,9 +480,6 @@ mod tests {
             working_directory: None,
             command_preview: None,
             exit_code: None,
-            stdout_tail: String::new(),
-            stderr_tail: String::new(),
-            truncated: false,
             reject_reason: None,
             skill_id: None,
             skill_path: None,
@@ -467,12 +489,14 @@ mod tests {
             cancel_requested: false,
             cancel_outcome: None,
             termination_evidence: None,
+            capture_status: ProcessCaptureStatus::NotStarted,
+            capture_error: None,
         }
     }
 
     #[tokio::test]
-    async fn job_cache_age_generation_and_ordering_are_truthful() {
-        let cache = JobCache::new();
+    async fn process_cache_age_generation_and_ordering_are_truthful() {
+        let cache = ProcessCache::new();
         let observed_at = Utc::now();
         let updated_at = observed_at - chrono::Duration::seconds(10);
         cache
@@ -480,65 +504,70 @@ mod tests {
                 "agent",
                 "connection",
                 Some("boot-a"),
-                job("job", JobState::Running, updated_at),
+                process("process", ProcessState::Running, updated_at),
                 observed_at,
             )
             .await;
         let snapshot = cache
             .snapshot_at(
                 "agent",
-                "job",
-                observed_at + chrono::Duration::seconds(JOB_CACHE_STALE_SECS),
+                "process",
+                observed_at + chrono::Duration::seconds(PROCESS_CACHE_STALE_SECS),
             )
             .await
             .unwrap();
-        assert_eq!(snapshot.freshness, JobFreshness::Stale);
-        assert_eq!(snapshot.job.updated_at, updated_at);
+        assert_eq!(snapshot.freshness, ProcessFreshness::Stale);
+        assert_eq!(snapshot.process.updated_at, updated_at);
 
         cache.mark_unknown_after_restart("agent").await;
-        let snapshot = cache.snapshot("agent", "job").await.unwrap();
-        assert_eq!(snapshot.freshness, JobFreshness::Unknown);
-        assert_eq!(snapshot.job.state, JobState::UnknownAfterRestart);
-        assert_eq!(snapshot.job.updated_at, updated_at);
-        assert!(snapshot.job.finished_at.is_none());
+        let snapshot = cache.snapshot("agent", "process").await.unwrap();
+        assert_eq!(snapshot.freshness, ProcessFreshness::Unknown);
+        assert_eq!(snapshot.process.state, ProcessState::UnknownAfterRestart);
+        assert_eq!(snapshot.process.updated_at, updated_at);
+        assert!(snapshot.process.finished_at.is_none());
 
         cache
             .record(
                 "agent",
                 "connection",
                 Some("boot-a"),
-                job(
-                    "job",
-                    JobState::Running,
+                process(
+                    "process",
+                    ProcessState::Running,
                     Utc::now() + chrono::Duration::seconds(1),
                 ),
             )
             .await;
         assert_eq!(
-            cache.snapshot("agent", "job").await.unwrap().job.state,
-            JobState::UnknownAfterRestart
+            cache
+                .snapshot("agent", "process")
+                .await
+                .unwrap()
+                .process
+                .state,
+            ProcessState::UnknownAfterRestart
         );
     }
 
     #[tokio::test]
-    async fn job_cache_capacity_is_bounded() {
-        let cache = JobCache::new();
+    async fn process_cache_capacity_is_bounded() {
+        let cache = ProcessCache::new();
         let start = Utc::now();
-        for index in 0..=JOB_CACHE_CAPACITY {
+        for index in 0..=PROCESS_CACHE_CAPACITY {
             cache
                 .record_at(
                     "agent",
                     "connection",
                     None,
-                    job(
-                        &format!("job-{index}"),
-                        JobState::Completed,
+                    process(
+                        &format!("process-{index}"),
+                        ProcessState::Completed,
                         start + chrono::Duration::seconds(index as i64),
                     ),
                     start,
                 )
                 .await;
         }
-        assert_eq!(cache.count().await, JOB_CACHE_CAPACITY);
+        assert_eq!(cache.count().await, PROCESS_CACHE_CAPACITY);
     }
 }

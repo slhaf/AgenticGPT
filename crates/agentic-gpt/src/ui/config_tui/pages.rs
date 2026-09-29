@@ -2078,11 +2078,11 @@ fn push_limits_form(
     );
     lines.push(Line::raw(""));
     lines.push(subsection_heading_line(
-        optional_field_label(SetupField::MaxActiveJobs, language),
+        optional_field_label(SetupField::MaxActiveProcesses, language),
         theme,
     ));
 
-    let auto_focus = optional_choice_index(section, draft, SetupField::MaxActiveJobs, "auto")
+    let auto_focus = optional_choice_index(section, draft, SetupField::MaxActiveProcesses, "auto")
         .unwrap_or(usize::MAX);
     let auto_focused = state.focus == auto_focus;
     if auto_focused {
@@ -2091,19 +2091,20 @@ fn push_limits_form(
     lines.push(choice_row_line(
         t(language, "Auto", "自动"),
         auto_focused,
-        optional_choice_selected(draft, SetupField::MaxActiveJobs, "auto"),
+        optional_choice_selected(draft, SetupField::MaxActiveProcesses, "auto"),
         21,
         theme,
     ));
 
-    let custom_focus = optional_choice_index(section, draft, SetupField::MaxActiveJobs, "custom")
-        .unwrap_or(usize::MAX);
+    let custom_focus =
+        optional_choice_index(section, draft, SetupField::MaxActiveProcesses, "custom")
+            .unwrap_or(usize::MAX);
     let custom_focused = state.focus == custom_focus;
     if custom_focused {
         *focused_line = lines.len();
     }
-    let custom_cursor = editing_cursor(state, SetupField::MaxActiveJobs);
-    let configured = optional_field_value(draft, SetupField::MaxActiveJobs);
+    let custom_cursor = editing_cursor(state, SetupField::MaxActiveProcesses);
+    let configured = optional_field_value(draft, SetupField::MaxActiveProcesses);
     let custom_value = if custom_cursor.is_some() {
         state
             .editing
@@ -2119,14 +2120,20 @@ fn push_limits_form(
         t(language, "Custom", "自定义"),
         custom_value,
         custom_focused,
-        optional_choice_selected(draft, SetupField::MaxActiveJobs, "custom"),
+        optional_choice_selected(draft, SetupField::MaxActiveProcesses, "custom"),
         custom_cursor.is_some(),
         custom_cursor,
         21,
         5,
         theme,
     ));
-    push_optional_error(lines, errors, SetupField::MaxActiveJobs, language, theme);
+    push_optional_error(
+        lines,
+        errors,
+        SetupField::MaxActiveProcesses,
+        language,
+        theme,
+    );
     lines.push(Line::raw(""));
 
     lines.push(subsection_heading_line(
@@ -2198,7 +2205,7 @@ fn optional_choice_selected(draft: &OptionalSectionDraft, field: SetupField, cho
         SetupField::ConfirmationLanguage => {
             crate::config::normalize_confirmation_language(&value) == choice
         }
-        SetupField::MaxActiveJobs => match choice {
+        SetupField::MaxActiveProcesses => match choice {
             "auto" => value.trim() == "auto",
             "custom" => value.trim() != "auto",
             _ => false,
@@ -2599,11 +2606,11 @@ pub(super) fn optional_focus_items(
         OptionalSection::Limits => vec![
             OptionalFocusItem::Field(SetupField::MaxConcurrentTasks),
             OptionalFocusItem::Choice {
-                field: SetupField::MaxActiveJobs,
+                field: SetupField::MaxActiveProcesses,
                 value: "auto",
             },
             OptionalFocusItem::Choice {
-                field: SetupField::MaxActiveJobs,
+                field: SetupField::MaxActiveProcesses,
                 value: "custom",
             },
             OptionalFocusItem::Field(SetupField::MaxFileSearchContextLines),
@@ -3286,11 +3293,11 @@ fn optional_center_inspector_body(
                     "• freedesktop → ntfy",
                 ],
                 OptionalSection::Limits => &[
-                    "Control Process batch concurrency, total active Job capacity, and file-search context.",
+                    "Control Process batch concurrency, total active process capacity, and file-search context.",
                     "",
                     "Defaults:",
                     "• Process batch concurrency: 2",
-                    "• Active Jobs: auto",
+                    "• Active processes: auto",
                     "• File-search context: 5 lines",
                 ],
                 OptionalSection::Sandbox => &[
@@ -3322,7 +3329,7 @@ fn optional_center_inspector_body(
                     "Default: managed version 0.0.10 with auto-download enabled.",
                 ],
                 OptionalSection::HubReporting => &[
-                    "Control optional run and Job reporting from Standalone to the Hub.",
+                    "Control optional run and Process reporting from Standalone to the Hub.",
                     "Default: off; metadata hides tool arguments, results, and command/output details.",
                 ],
             },
@@ -3345,11 +3352,11 @@ fn optional_center_inspector_body(
                     "• freedesktop → ntfy",
                 ],
                 OptionalSection::Limits => &[
-                    "控制 Process 批处理并发、活动 Job 总容量和文件搜索上下文。",
+                    "控制 Process 批处理并发、活动进程总容量和文件搜索上下文。",
                     "",
                     "默认值：",
                     "• Process 批处理并发：2",
-                    "• 活动 Job：auto",
+                    "• 活动进程：auto",
                     "• 文件搜索上下文：5 行",
                 ],
                 OptionalSection::Sandbox => &[
@@ -3381,7 +3388,7 @@ fn optional_center_inspector_body(
                     "默认使用托管版本 0.0.10，并开启自动下载。",
                 ],
                 OptionalSection::HubReporting => &[
-                    "控制 Standalone 向 Hub 上报运行和 Job 信息。",
+                    "控制 Standalone 向 Hub 上报运行和 Process 信息。",
                     "默认关闭；metadata 会隐藏工具参数、结果以及命令和输出细节。",
                 ],
             },
@@ -3446,19 +3453,19 @@ fn optional_form_inspector_body(
                     "If this section stays Default, final config follows the current Config TUI interface language.",
                 ],
                 SetupField::MaxConcurrentTasks => &[
-                    "Maximum number of child Process Jobs from one batch that may run at once.",
+                    "Maximum number of child processes from one batch that may run at once.",
                     "Default: 2. A configured 0 still runs one child at a time.",
                     "",
-                    "This does not raise the total active Job capacity controlled by Max active jobs.",
+                    "This does not raise the total active process capacity controlled by Max active processes.",
                 ],
-                SetupField::MaxActiveJobs => &[
-                    "Total number of managed Jobs that may be active at once.",
+                SetupField::MaxActiveProcesses => &[
+                    "Total number of managed processes that may be active at once.",
                     "Default: auto.",
                     "",
                     "Auto behavior:",
                     "• ceil(available CPU core count × 1.5)",
                     "• clamped to 6–24",
-                    "• explicit 0 rejects new Jobs",
+                    "• explicit 0 rejects new processes",
                 ],
                 SetupField::MaxFileSearchContextLines => &[
                     "Number of surrounding lines included for each file-search hit.",
@@ -3480,11 +3487,11 @@ fn optional_form_inspector_body(
                 ],
                 SetupField::Toolsets => &[
                     "Select the built-in tool namespaces enabled for this configuration.",
-                    "The list includes agent, file, mcp, process, job, skills, tmux, and room.",
+                    "The list includes agent, file, mcp, process, skills, tmux, browser, and room.",
                     "Use Space to toggle a namespace and J/K to change selection priority.",
                 ],
                 SetupField::McpServerId => &[
-                    "Stable server ID used in MCP requests, confirmations, Jobs, and audit records.",
+                    "Stable server ID used in MCP requests, confirmations, processes, and audit records.",
                     "",
                     "Rules:",
                     "• 1–64 bytes and unique",
@@ -3577,7 +3584,7 @@ fn optional_form_inspector_body(
                     "A custom download URL requires this value.",
                 ],
                 SetupField::HubReportingEnabled => &[
-                    "Enable reporting of Standalone Tunnel runs and Jobs to the Hub.",
+                    "Enable reporting of Standalone Tunnel runs and processes to the Hub.",
                     "Default: off.",
                 ],
                 SetupField::HubReportingDetail => &[
@@ -3585,7 +3592,7 @@ fn optional_form_inspector_body(
                     "",
                     "Levels:",
                     "• metadata: hide tool arguments/results and command, cwd, stdout/stderr details",
-                    "• full: include bounded arguments/results and full Job details",
+                    "• full: include bounded arguments/results and full process details",
                 ],
                 _ => &["Edit the staged value; validation remains authoritative."],
             },
@@ -3635,19 +3642,19 @@ fn optional_form_inspector_body(
                     "如果此区块保持 Default，最终配置会跟随当前 Config TUI 的界面语言。",
                 ],
                 SetupField::MaxConcurrentTasks => &[
-                    "单个 Process 批处理中，同时运行的子 Job 数上限。",
+                    "单个 Process 批处理中，同时运行的子进程数上限。",
                     "默认 2；即使配置为 0，运行时仍会按 1 个并发处理。",
                     "",
-                    "它不会提高 Max active jobs 控制的活动 Job 总容量。",
+                    "它不会提高 Max active processes 控制的活动进程总容量。",
                 ],
-                SetupField::MaxActiveJobs => &[
-                    "允许同时处于活动状态的托管 Job 总数。",
+                SetupField::MaxActiveProcesses => &[
+                    "允许同时处于活动状态的托管进程总数。",
                     "默认 auto。",
                     "",
                     "Auto 行为：",
                     "• ceil(可用 CPU 核心数量 × 1.5)",
                     "• 结果限制在 6–24",
-                    "• 显式设为 0 会拒绝新的 Job",
+                    "• 显式设为 0 会拒绝新的进程",
                 ],
                 SetupField::MaxFileSearchContextLines => &[
                     "每个文件搜索命中项附带的上下文行数。",
@@ -3669,11 +3676,11 @@ fn optional_form_inspector_body(
                 ],
                 SetupField::Toolsets => &[
                     "选择此配置启用的内置工具命名空间。",
-                    "列表包含 agent、file、mcp、process、job、skills、tmux 和 room。",
+                    "列表包含 agent、file、mcp、process、skills、tmux、browser 和 room。",
                     "使用 Space 切换命名空间，使用 J/K 调整选中顺序。",
                 ],
                 SetupField::McpServerId => &[
-                    "MCP 请求、确认、Job 和审计记录中使用的稳定服务 ID。",
+                    "MCP 请求、确认、进程和审计记录中使用的稳定服务 ID。",
                     "",
                     "规则：",
                     "• 1–64 字节且不能重复",
@@ -3828,7 +3835,7 @@ fn optional_field_label(field: SetupField, language: UiLanguage) -> &'static str
         SetupField::ConfirmationChannels => t(language, "Fallback channels", "降级通道"),
         SetupField::ConfirmationLanguage => t(language, "Language", "语言"),
         SetupField::MaxConcurrentTasks => t(language, "Max concurrent tasks", "最大并发任务"),
-        SetupField::MaxActiveJobs => t(language, "Max active jobs", "最大活动作业"),
+        SetupField::MaxActiveProcesses => t(language, "Max active processes", "最大活动进程"),
         SetupField::MaxFileSearchContextLines => {
             t(language, "File-search context lines", "文件搜索上下文行数")
         }
@@ -3888,7 +3895,7 @@ pub(super) fn optional_field_value(draft: &OptionalSectionDraft, field: SetupFie
         },
         OptionalSectionDraft::Limits(value) => match field {
             SetupField::MaxConcurrentTasks => value.max_concurrent_tasks.clone(),
-            SetupField::MaxActiveJobs => value.max_active_jobs.clone(),
+            SetupField::MaxActiveProcesses => value.max_active_processes.clone(),
             SetupField::MaxFileSearchContextLines => value.max_file_search_context_lines.clone(),
             _ => String::new(),
         },
@@ -3951,7 +3958,7 @@ pub(super) fn set_optional_field(
         },
         OptionalSectionDraft::Limits(draft) => match field {
             SetupField::MaxConcurrentTasks => draft.max_concurrent_tasks = value,
-            SetupField::MaxActiveJobs => draft.max_active_jobs = value,
+            SetupField::MaxActiveProcesses => draft.max_active_processes = value,
             SetupField::MaxFileSearchContextLines => draft.max_file_search_context_lines = value,
             _ => {}
         },
@@ -4634,11 +4641,11 @@ fn review_complex_lines(
             lines
         }
         ReviewEditorKind::AutoCustom => {
-            let configured = optional_field_value(draft, SetupField::MaxActiveJobs);
+            let configured = optional_field_value(draft, SetupField::MaxActiveProcesses);
             let editing = state
                 .editing
                 .as_ref()
-                .filter(|edit| edit.field == SetupField::MaxActiveJobs);
+                .filter(|edit| edit.field == SetupField::MaxActiveProcesses);
             let custom_value = if let Some(edit) = editing {
                 edit.buffer.as_str()
             } else if configured != "auto" {
@@ -4664,7 +4671,7 @@ fn review_complex_lines(
                 5,
                 theme,
             ));
-            if let Some(error) = errors.get(&SetupField::MaxActiveJobs) {
+            if let Some(error) = errors.get(&SetupField::MaxActiveProcesses) {
                 lines.push(inline_error_line(&localized_error(error, language), theme));
             }
             lines
@@ -4806,7 +4813,7 @@ fn review_item_label(label_key: &str, language: UiLanguage) -> &'static str {
         "confirmation_channels" => t(language, "Fallback channels", "降级通道"),
         "confirmation_language" => t(language, "Language", "语言"),
         "max_concurrent_tasks" => t(language, "Max concurrent tasks", "最大并发任务"),
-        "max_active_jobs" => t(language, "Max active jobs", "最大活动作业"),
+        "max_active_processes" => t(language, "Max active processes", "最大活动进程"),
         "max_file_search_context_lines" => {
             t(language, "File-search context lines", "文件搜索上下文行数")
         }

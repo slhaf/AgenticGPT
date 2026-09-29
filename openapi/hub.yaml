@@ -42,22 +42,22 @@ paths:
   /v1/process/exec:
     post:
       operationId: processExec
-      description: Start one managed process and wait briefly. The response is a flat Job status projection; use getJob for later state/output and cancelJob for cancellation evidence.
+      description: Start one managed process and wait briefly. Complete inline output and result are included only when the serialized creation response fits within 8192 bytes; overflow output uses a shared stdout/stderr preview capped at 2048 bytes. Use process status/output/result/cancel routes for lifecycle follow-up.
       x-openai-isConsequential: false
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/ExecRequest"
+              $ref: "#/components/schemas/ProcessExecRequest"
       responses:
         "200":
-          description: Flat managed process Job status projection or a typed validation/admission error.
+          description: Managed process creation status with bounded inline completion evidence or a typed validation/admission error.
           content:
             application/json:
               schema:
                 oneOf:
-                  - $ref: "#/components/schemas/JobToolResponse"
+                  - $ref: "#/components/schemas/ProcessResponse"
                   - $ref: "#/components/schemas/ErrorResponse"
         "400":
           $ref: "#/components/responses/BadRequest"
@@ -72,22 +72,22 @@ paths:
   /v1/process/batch:
     post:
       operationId: processBatch
-      description: Atomically admit multiple managed processes with one confirmation decision. Returns a flat batch status and ordered child Job projections; use getJob and cancelJob for lifecycle control.
+      description: Atomically admit multiple managed processes under one confirmation decision. The full batch response shares an 8192-byte inline budget and bounded output previews; use process status/output/result/cancel routes for lifecycle control.
       x-openai-isConsequential: false
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/BatchExecRequest"
+              $ref: "#/components/schemas/ProcessBatchExecRequest"
       responses:
         "200":
-          description: Flat managed process batch status, ordered child Job projections, or a typed validation/admission error.
+          description: Managed process batch status and ordered child process responses, or a typed validation/admission error.
           content:
             application/json:
               schema:
                 oneOf:
-                  - $ref: "#/components/schemas/JobBatchToolResponse"
+                  - $ref: "#/components/schemas/ProcessBatchResponse"
                   - $ref: "#/components/schemas/ErrorResponse"
         "400":
           $ref: "#/components/responses/BadRequest"
@@ -99,10 +99,10 @@ paths:
           $ref: "#/components/responses/InternalError"
         "504":
           $ref: "#/components/responses/GatewayTimeout"
-  /v1/jobs:
+  /v1/process:
     get:
-      operationId: listJobs
-      description: List active or recently retained Jobs for one local Agentic agent with optional group/kind/state filters and cursor pagination.
+      operationId: listProcesses
+      description: List active or recently retained managed processes for one local Agentic agent with optional group/kind/state filters and cursor pagination. If the Agent is unavailable, cached status metadata is returned with explicit freshness; cursors issued by the Agent cannot be continued from cache.
       x-openai-isConsequential: false
       parameters:
         - name: agentId
@@ -114,12 +114,12 @@ paths:
           in: query
           required: false
           schema:
-            $ref: "#/components/schemas/JobKind"
+            $ref: "#/components/schemas/ProcessKind"
         - name: state
           in: query
           required: false
           schema:
-            $ref: "#/components/schemas/JobState"
+            $ref: "#/components/schemas/ProcessState"
         - name: group
           in: query
           required: false
@@ -139,16 +139,16 @@ paths:
         - name: cursor
           in: query
           required: false
-          description: Opaque cursor returned by a prior listJobs response.
+          description: Opaque cursor returned by a prior process.list response.
           schema:
             type: string
       responses:
         "200":
-          description: Active or recently retained Jobs.
+          description: Active or recently retained process status metadata, with freshness.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/JobListResponse"
+                $ref: "#/components/schemas/ProcessListResponse"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -160,16 +160,16 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/JobGetUnavailableResponse"
+                $ref: "#/components/schemas/ProcessListUnavailableResponse"
         "500":
           $ref: "#/components/responses/InternalError"
-  /v1/jobs/{jobId}:
+  /v1/process/{processId}:
     get:
-      operationId: getJob
-      description: Inspect or briefly wait for one Job. waitSeconds defaults to 5 and is capped at 30; explicit 0 polls without waiting; waitOnly defaults to false; cached state is used if the Agent is temporarily unavailable.
+      operationId: getProcessStatus
+      description: Inspect or briefly wait for managed process status only. Status never includes stdout, stderr, or result data; cached metadata is explicitly marked when the Agent is unavailable.
       x-openai-isConsequential: false
       parameters:
-        - name: jobId
+        - name: processId
           in: path
           required: true
           schema:
@@ -187,22 +187,15 @@ paths:
             minimum: 0
             maximum: 30
             default: 5
-        - name: waitOnly
-          in: query
-          required: false
-          description: While waiting, return only status fields for an active Job; terminal completion returns normal detail.
-          schema:
-            type: boolean
-            default: false
       responses:
         "200":
-          description: Current Job state and bounded output, or a cache-only degraded snapshot when the Agent is unavailable.
+          description: Current process status, or explicitly cache-only status when the Agent is unavailable.
           content:
             application/json:
               schema:
                 oneOf:
-                  - $ref: "#/components/schemas/LiveJobToolResponse"
-                  - $ref: "#/components/schemas/JobCacheFallbackResponse"
+                  - $ref: "#/components/schemas/ProcessStatusResponse"
+                  - $ref: "#/components/schemas/ProcessCacheFallbackResponse"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -212,18 +205,115 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
         "503":
-          description: Agent unavailable without a cached Job snapshot.
+          description: Agent unavailable without a cached process status.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/JobGetUnavailableResponse"
-  /v1/jobs/{jobId}/cancel:
+                $ref: "#/components/schemas/ProcessUnavailableResponse"
+  /v1/process/{processId}/output:
+    get:
+      operationId: getProcessOutput
+      description: Read a non-consuming output page from both process streams. Cursor offsets are raw-byte coordinates; the response preserves invalid UTF-8 with base64 encoding and explicitly reports retention gaps and EOF.
+      x-openai-isConsequential: false
+      parameters:
+        - name: processId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: agentId
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: cursor
+          in: query
+          required: false
+          description: Opaque process-bound cursor for two absolute raw-byte stream offsets; omission starts from zero and reports any retention gaps.
+          schema:
+            type: string
+        - name: maxBytes
+          in: query
+          required: false
+          description: Maximum aggregate encoded bytes in the page; defaults to 8192 and is capped at 32768.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 32768
+            default: 8192
+      responses:
+        "200":
+          description: Lossless stdout and stderr page with cursor, gap, capture, and EOF evidence.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProcessOutputResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          description: Agent unavailable; output is never synthesized from Hub metadata cache.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProcessUnavailableResponse"
+  /v1/process/{processId}/result:
+    get:
+      operationId: getProcessResult
+      description: Read an explicitly retained structured result or an accurate unavailable status. Hub metadata cache never supplies process result content, and oversized or unretained results are never represented as partial JSON.
+      x-openai-isConsequential: false
+      parameters:
+        - name: processId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: agentId
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: maxBytes
+          in: query
+          description: Maximum retained result payload bytes to include; defaults to 8192 and is capped at 524288.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 524288
+            default: 8192
+      responses:
+        "200":
+          description: Retained structured result or explicit unavailable result status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProcessResultResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          description: Agent unavailable; result content is never synthesized from Hub metadata cache.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProcessUnavailableResponse"
+  /v1/process/{processId}/cancel:
     post:
-      operationId: cancelJob
-      description: Request kind-aware cancellation for one Job and return cancellation outcome and termination evidence.
+      operationId: cancelProcess
+      description: Request kind-aware cancellation for one managed process and return observed termination evidence.
       x-openai-isConsequential: true
       parameters:
-        - name: jobId
+        - name: processId
           in: path
           required: true
           schema:
@@ -235,19 +325,19 @@ paths:
             type: string
       responses:
         "200":
-          description: Job cancellation outcome and observed termination evidence.
+          description: Process cancellation outcome and observed termination evidence.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/JobCancelResponse"
+                $ref: "#/components/schemas/ProcessCancelResponse"
         "400":
           $ref: "#/components/responses/BadRequest"
         "502":
-          description: Hub could not deliver the cancellation request; freshness records the unavailable projection.
+          description: Hub could not deliver the cancellation request.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/JobGetUnavailableResponse"
+                $ref: "#/components/schemas/ProcessUnavailableResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
@@ -481,7 +571,7 @@ paths:
   /v1/mcp/callTool:
     post:
       operationId: mcpCallTool
-      description: Start a managed downstream MCP tool Job through a local Agentic agent. Returns a flat Job status projection; use job.get/job.cancel for later result or cancellation evidence.
+      description: Start a managed downstream MCP tool process through a local Agentic agent. Returns its process status and bounded inline result; use process.result/process.cancel for later result or cancellation evidence.
       x-openai-isConsequential: false
       requestBody:
         required: true
@@ -491,12 +581,12 @@ paths:
               $ref: "#/components/schemas/McpCallToolRequest"
       responses:
         "200":
-          description: Flat downstream MCP Job status projection or a typed validation/admission error.
+          description: Downstream MCP process creation status or a typed validation/admission error.
           content:
             application/json:
               schema:
                 oneOf:
-                  - $ref: "#/components/schemas/JobToolResponse"
+                  - $ref: "#/components/schemas/ProcessResponse"
                   - $ref: "#/components/schemas/ErrorResponse"
         "400":
           $ref: "#/components/responses/BadRequest"
@@ -509,7 +599,7 @@ paths:
   /v1/mcp/batch:
     post:
       operationId: mcpBatch
-      description: Atomically admit 1..16 managed downstream MCP child Jobs with one aggregate confirmation, bounded global/per-server concurrency, ordered flat child Job projections, and optional fail-fast scheduling.
+      description: Atomically admit 1..16 managed downstream MCP child processes with one aggregate confirmation, bounded global/per-server concurrency, ordered child status projections, and optional fail-fast scheduling.
       x-openai-isConsequential: false
       requestBody:
         required: true
@@ -519,7 +609,7 @@ paths:
               $ref: "#/components/schemas/McpBatchRequest"
       responses:
         "200":
-          description: Flat managed MCP batch status and ordered child Job projections, or a typed preflight/capacity error.
+          description: Managed MCP batch status and ordered child process projections, or a typed preflight/capacity error.
           content:
             application/json:
               schema:
@@ -1143,7 +1233,7 @@ paths:
   /v1/room/skills/run:
     post:
       operationId: roomSkillsRun
-      description: Run an executable scripts/ file from an active workspace skill through the Room Agent ManagedJob engine. Returns a flat Job status projection; use getJob or cancelJob for lifecycle evidence. No agentId is used.
+      description: Run an executable scripts/ file from an active workspace skill through the Room Agent managed process engine. Returns a flattened creation response; use process.status, process.output, or process.cancel for lifecycle evidence. No agentId is used.
       x-openai-isConsequential: true
       requestBody:
         required: true
@@ -1153,11 +1243,11 @@ paths:
               $ref: "#/components/schemas/SkillRunRequest"
       responses:
         "200":
-          description: Flat skill Job status projection.
+          description: Flattened skill process creation response.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/JobToolResponse"
+                $ref: "#/components/schemas/ProcessResponse"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -1563,14 +1653,14 @@ components:
           required:
             - pendingRequestCount
             - pendingConfirmationCount
-            - cachedJobCount
+            - cachedProcessCount
           additionalProperties: false
           properties:
             pendingRequestCount:
               type: integer
             pendingConfirmationCount:
               type: integer
-            cachedJobCount:
+            cachedProcessCount:
               type: integer
         generatedAt:
           type: string
@@ -1616,6 +1706,18 @@ components:
           type: string
         commandHash:
           type: string
+        source:
+          type: string
+        profile:
+          type: string
+        detail:
+          type: string
+        arguments:
+          description: Agent-reported argument details when retained.
+        processId:
+          type: string
+        process:
+          $ref: "#/components/schemas/ProcessInfo"
         status:
           type: string
           enum:
@@ -1642,8 +1744,10 @@ components:
             - "null"
         createdAt:
           type: string
+          format: date-time
         updatedAt:
           type: string
+          format: date-time
     ListAgentsResponse:
       type: object
       required:
@@ -1938,7 +2042,7 @@ components:
           minimum: 0
           maximum: 30
           default: 5
-          description: Bounded inline wait before returning the Job envelope.
+          description: Bounded inline wait before returning the managed process response.
         timeoutSeconds:
           type: integer
           minimum: 1
@@ -2014,7 +2118,7 @@ components:
           minimum: 0
           maximum: 30
           default: 5
-          description: Bounded inline wait for the ordered child Job response.
+          description: Bounded inline wait for the ordered child process response.
         timeoutSeconds:
           type: integer
           minimum: 1
@@ -3322,7 +3426,7 @@ components:
           type: boolean
         activatedAt:
           type: string
-    ExecRequest:
+    ProcessExecRequest:
       type: object
       required:
         - agentId
@@ -3337,7 +3441,7 @@ components:
           type: string
           minLength: 1
           maxLength: 32
-          description: Optional human-readable workstream key inherited by the Job.
+          description: Optional human-readable workstream key inherited by this managed process.
         program:
           type: string
         args:
@@ -3363,8 +3467,8 @@ components:
           minimum: 0
           maximum: 30
           default: 5
-          description: Bounded inline wait. The Job remains inspectable when it is still active after this interval.
-    BatchExecRequest:
+          description: Bounded inline wait. The process remains inspectable when still active after this interval.
+    ProcessBatchExecRequest:
       type: object
       required:
         - agentId
@@ -3378,7 +3482,7 @@ components:
           type: string
           minLength: 1
           maxLength: 32
-          description: Optional human-readable workstream key inherited by every child Job.
+          description: Optional human-readable workstream key inherited by every child process.
         elements:
           type: array
           minItems: 1
@@ -3417,11 +3521,11 @@ components:
           minimum: 0
           maximum: 30
           default: 5
-          description: Bounded inline wait for all admitted child Jobs.
-    JobKind:
+          description: Bounded inline wait for all admitted child processes.
+    ProcessKind:
       type: string
-      enum: [process, skill, mcp]
-    JobState:
+      enum: [command, skill, mcp]
+    ProcessState:
       type: string
       enum:
         - queued
@@ -3437,37 +3541,31 @@ components:
         - detached
         - unknown_after_restart
         - skipped
-    JobInfo:
+    ProcessCaptureStatus:
+      type: string
+      enum: [not_started, capturing, complete, incomplete, not_applicable]
+    ProcessInfo:
       type: object
-      required:
-        - agentId
-        - jobId
-        - kind
-        - state
-        - createdAt
-        - updatedAt
-        - truncated
-        - cancelRequested
-      additionalProperties: false
+      description: Metadata-only managed process status. It never contains stdout, stderr, or result bodies.
+      required: [agentId, processId, kind, state, createdAt, updatedAt, captureStatus]
       properties:
         agentId:
           type: string
-        jobId:
+        processId:
+          type: string
+        group:
           type: string
         batchId:
           type: string
-          description: Coordinator batch id when this Job was created by mcp.batch.
         batchCallId:
           type: string
-          description: Optional caller-provided batch call id.
         batchIndex:
           type: integer
           minimum: 0
-          description: Zero-based input-order index within mcp.batch.
         kind:
-          $ref: "#/components/schemas/JobKind"
+          $ref: "#/components/schemas/ProcessKind"
         state:
-          $ref: "#/components/schemas/JobState"
+          $ref: "#/components/schemas/ProcessState"
         createdAt:
           type: string
           format: date-time
@@ -3492,12 +3590,6 @@ components:
           type: string
         exitCode:
           type: integer
-        stdoutTail:
-          type: string
-        stderrTail:
-          type: string
-        truncated:
-          type: boolean
         rejectReason:
           type: string
         skillId:
@@ -3518,11 +3610,15 @@ components:
         terminationEvidence:
           type: string
           description: Bounded evidence describing the local/remote event actually observed.
-    JobFreshness:
+        captureStatus:
+          $ref: "#/components/schemas/ProcessCaptureStatus"
+        captureError:
+          type: string
+    ProcessFreshness:
       type: string
       enum: [live, cached, stale, unknown]
-      description: Freshness of the Hub Job response projection, not a JobInfo field.
-    JobError:
+      description: Freshness of the Hub process metadata projection, not a ProcessInfo field.
+    ProcessError:
       type: object
       required: [code, message]
       additionalProperties: false
@@ -3531,19 +3627,308 @@ components:
           type: string
         message:
           type: string
-    JobToolResponse:
+    ProcessListItem:
       type: object
-      required: [jobId, state]
+      required: [processId, kind, state, createdAt, captureStatus]
       additionalProperties: false
       properties:
-        jobId:
+        processId:
           type: string
         group:
           type: string
         kind:
-          $ref: "#/components/schemas/JobKind"
+          $ref: "#/components/schemas/ProcessKind"
         state:
-          $ref: "#/components/schemas/JobState"
+          $ref: "#/components/schemas/ProcessState"
+        createdAt:
+          type: string
+          format: date-time
+        startedAt:
+          type: string
+          format: date-time
+        finishedAt:
+          type: string
+          format: date-time
+        captureStatus:
+          $ref: "#/components/schemas/ProcessCaptureStatus"
+    ProcessListResponse:
+      type: object
+      required: [processes, freshness]
+      additionalProperties: false
+      properties:
+        processes:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProcessListItem"
+        nextCursor:
+          type: string
+        freshness:
+          $ref: "#/components/schemas/ProcessFreshness"
+        observedAt:
+          type: string
+          format: date-time
+    ProcessStatusResponse:
+      allOf:
+        - $ref: "#/components/schemas/ProcessInfo"
+        - type: object
+          required: [freshness, observedAt]
+          properties:
+            waitElapsedMs:
+              type: integer
+              minimum: 0
+            freshness:
+              $ref: "#/components/schemas/ProcessFreshness"
+            observedAt:
+              type: string
+              format: date-time
+      unevaluatedProperties: false
+    ProcessCacheFallbackResponse:
+      type: object
+      required: [processId, error, cached, freshness, observedAt]
+      additionalProperties: false
+      properties:
+        processId:
+          type: string
+        error:
+          $ref: "#/components/schemas/ProcessError"
+        cached:
+          $ref: "#/components/schemas/ProcessListItem"
+        freshness:
+          $ref: "#/components/schemas/ProcessFreshness"
+        observedAt:
+          type: string
+          format: date-time
+    ProcessListUnavailableResponse:
+      type: object
+      required: [status, error, freshness]
+      additionalProperties: false
+      properties:
+        status:
+          type: string
+          enum: [unavailable]
+        error:
+          $ref: "#/components/schemas/ProcessError"
+        freshness:
+          $ref: "#/components/schemas/ProcessFreshness"
+    ProcessUnavailableResponse:
+      type: object
+      required: [processId, status, error, freshness]
+      additionalProperties: false
+      properties:
+        processId:
+          type: string
+        status:
+          type: string
+          enum: [unavailable]
+        error:
+          $ref: "#/components/schemas/ProcessError"
+        cached:
+          $ref: "#/components/schemas/ProcessListItem"
+        freshness:
+          $ref: "#/components/schemas/ProcessFreshness"
+        observedAt:
+          type: string
+          format: date-time
+    ProcessOutputEncoding:
+      type: string
+      enum: [utf8, base64]
+    ProcessOutputGap:
+      type: object
+      required: [startOffset, endOffset]
+      additionalProperties: false
+      properties:
+        startOffset:
+          type: string
+          pattern: "^[0-9]+$"
+          description: Absolute raw-byte offset encoded as a decimal string.
+        endOffset:
+          type: string
+          pattern: "^[0-9]+$"
+          description: Absolute raw-byte offset encoded as a decimal string.
+    ProcessOutputSegment:
+      type: object
+      required: [data, startOffset, endOffset, encoding]
+      additionalProperties: false
+      properties:
+        data:
+          type: string
+          description: Exact output slice encoded as UTF-8 text or base64 bytes.
+        startOffset:
+          type: string
+          pattern: "^[0-9]+$"
+          description: Absolute raw-byte start offset encoded as a decimal string.
+        endOffset:
+          type: string
+          pattern: "^[0-9]+$"
+          description: Absolute raw-byte end offset encoded as a decimal string.
+        encoding:
+          $ref: "#/components/schemas/ProcessOutputEncoding"
+        gap:
+          $ref: "#/components/schemas/ProcessOutputGap"
+    ProcessOutputResponse:
+      type: object
+      required: [processId, stdout, stderr, nextCursor, hasMore, eof, captureStatus]
+      additionalProperties: false
+      properties:
+        processId:
+          type: string
+        stdout:
+          $ref: "#/components/schemas/ProcessOutputSegment"
+        stderr:
+          $ref: "#/components/schemas/ProcessOutputSegment"
+        nextCursor:
+          type: string
+          description: Opaque process-bound cursor carrying both stream offsets.
+        hasMore:
+          type: boolean
+        eof:
+          type: boolean
+          description: True only when process output capture has actually reached EOF.
+        captureStatus:
+          $ref: "#/components/schemas/ProcessCaptureStatus"
+    ProcessResultStatus:
+      type: string
+      enum: [complete, too_large, unavailable]
+    ProcessResultResponse:
+      type: object
+      required: [processId, status, resultAvailable]
+      additionalProperties: false
+      properties:
+        processId:
+          type: string
+        status:
+          $ref: "#/components/schemas/ProcessResultStatus"
+        resultAvailable:
+          type: boolean
+        result:
+          description: Complete retained JSON result; never a truncated JSON fragment.
+        error:
+          $ref: "#/components/schemas/ProcessError"
+        resultBytes:
+          type: integer
+          minimum: 0
+        resultSha256:
+          type: string
+        resultPreview:
+          type: string
+    ProcessCancelResponse:
+      type: object
+      required: [processId, state, cancelOutcome, terminationEvidence, freshness, observedAt]
+      additionalProperties: false
+      properties:
+        processId:
+          type: string
+        state:
+          $ref: "#/components/schemas/ProcessState"
+        cancelOutcome:
+          type: string
+          description: Bounded kind-specific cancellation outcome.
+        terminationEvidence:
+          type: string
+          description: Bounded evidence describing the local or remote event actually observed.
+        error:
+          $ref: "#/components/schemas/ProcessError"
+        freshness:
+          $ref: "#/components/schemas/ProcessFreshness"
+        observedAt:
+          type: string
+          format: date-time
+    ProcessInlineStream:
+      type: object
+      required: [data, encoding]
+      additionalProperties: false
+      properties:
+        data:
+          type: string
+        encoding:
+          $ref: "#/components/schemas/ProcessOutputEncoding"
+    ProcessInlineOutput:
+      type: object
+      required: [stdout, stderr]
+      additionalProperties: false
+      properties:
+        stdout:
+          $ref: "#/components/schemas/ProcessInlineStream"
+        stderr:
+          $ref: "#/components/schemas/ProcessInlineStream"
+    ProcessOutputPreview:
+      type: object
+      required: [stdout, stderr, truncated]
+      additionalProperties: false
+      properties:
+        stdout:
+          type: string
+        stderr:
+          type: string
+        truncated:
+          type: boolean
+    ProcessResponse:
+      type: object
+      description: Creation status with flattened ProcessInfo fields. Complete inline output/result is included only when the serialized response fits within 8192 bytes; overflow output uses a shared stdout/stderr preview capped at 2048 bytes.
+      allOf:
+        - $ref: "#/components/schemas/ProcessInfo"
+        - type: object
+          required: [status, completedInline, pollAfterMs, resultAvailable]
+          properties:
+            status:
+              $ref: "#/components/schemas/ProcessState"
+            completedInline:
+              type: boolean
+            pollAfterMs:
+              type: integer
+              minimum: 0
+            inlineOutput:
+              $ref: "#/components/schemas/ProcessInlineOutput"
+            outputPreview:
+              $ref: "#/components/schemas/ProcessOutputPreview"
+            result:
+              description: Complete retained structured result, if available.
+            resultStatus:
+              $ref: "#/components/schemas/ProcessResultStatus"
+            resultAvailable:
+              type: boolean
+            resultBytes:
+              type: integer
+              minimum: 0
+            resultSha256:
+              type: string
+            resultPreview:
+              type: string
+            error:
+              $ref: "#/components/schemas/ProcessError"
+      unevaluatedProperties: false
+    ProcessBatchResponse:
+      type: object
+      description: Ordered child responses under a batch-wide 8192-byte complete-inline budget.
+      required: [batchId, status, completedInline, pollAfterMs, processes]
+      additionalProperties: false
+      properties:
+        batchId:
+          type: string
+        status:
+          type: string
+        completedInline:
+          type: boolean
+        pollAfterMs:
+          type: integer
+          minimum: 0
+        processes:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProcessResponse"
+    ProcessToolResponse:
+      type: object
+      required: [processId, state, resultAvailable]
+      additionalProperties: false
+      properties:
+        processId:
+          type: string
+        group:
+          type: string
+        kind:
+          $ref: "#/components/schemas/ProcessKind"
+        state:
+          $ref: "#/components/schemas/ProcessState"
         elapsedMs:
           type: integer
           minimum: 0
@@ -3552,17 +3937,11 @@ components:
           minimum: 0
         exitCode:
           type: integer
-        stdoutTail:
-          type: string
-        stderrTail:
-          type: string
-        truncated:
-          type: boolean
-        result:
-          description: Retained bounded result for a terminal non-process Job.
         error:
-          $ref: "#/components/schemas/JobError"
-        resultTruncated:
+          $ref: "#/components/schemas/ProcessError"
+        resultStatus:
+          $ref: "#/components/schemas/ProcessResultStatus"
+        resultAvailable:
           type: boolean
         resultBytes:
           type: integer
@@ -3571,113 +3950,21 @@ components:
           type: string
         resultPreview:
           type: string
-        freshness:
-          $ref: "#/components/schemas/JobFreshness"
-        observedAt:
-          type: string
-          format: date-time
-        resultOmitted:
-          type: boolean
-    LiveJobToolResponse:
-      allOf:
-        - $ref: "#/components/schemas/JobToolResponse"
-        - type: object
-          required: [freshness, observedAt]
-    JobGetUnavailableResponse:
+    ProcessBatchToolResponse:
       type: object
-      required: [error, freshness]
-      additionalProperties: false
-      properties:
-        error:
-          $ref: "#/components/schemas/JobError"
-        cached:
-          $ref: "#/components/schemas/JobListItem"
-        freshness:
-          $ref: "#/components/schemas/JobFreshness"
-        observedAt:
-          type: string
-          format: date-time
-    JobCacheFallbackResponse:
-      type: object
-      required: [error, cached, freshness, observedAt]
-      additionalProperties: false
-      properties:
-        error:
-          $ref: "#/components/schemas/JobError"
-        cached:
-          $ref: "#/components/schemas/JobListItem"
-        freshness:
-          $ref: "#/components/schemas/JobFreshness"
-        observedAt:
-          type: string
-          format: date-time
-    JobCancelResponse:
-      type: object
-      required: [jobId, state, cancelOutcome, terminationEvidence, freshness, observedAt]
-      additionalProperties: false
-      properties:
-        jobId:
-          type: string
-        state:
-          $ref: "#/components/schemas/JobState"
-        cancelOutcome:
-          type: string
-          description: Bounded kind-specific cancellation outcome.
-        terminationEvidence:
-          type: string
-          description: Bounded evidence describing the local or remote event actually observed.
-        error:
-          $ref: "#/components/schemas/JobError"
-        freshness:
-          $ref: "#/components/schemas/JobFreshness"
-        observedAt:
-          type: string
-          format: date-time
-    JobDetail:
-      type: object
-      required: [job, detailAvailable, resultTruncated]
-      additionalProperties: false
-      properties:
-        job:
-          $ref: "#/components/schemas/JobInfo"
-        detailAvailable:
-          type: boolean
-          description: True when result/error detail came from the live Agent registry; false for Hub cache-only fallback.
-        result:
-          description: Retained bounded result. Omitted when the serialized result exceeds 512 KiB.
-        error:
-          $ref: "#/components/schemas/JobError"
-        resultTruncated:
-          type: boolean
-        resultBytes:
-          type: integer
-          minimum: 0
-        resultSha256:
-          type: string
-        resultPreview:
-          type: string
-          description: UTF-8-safe bounded preview for an omitted oversized result.
-        freshness:
-          $ref: "#/components/schemas/JobFreshness"
-        observedAt:
-          type: string
-          format: date-time
-    JobBatchToolResponse:
-      type: object
-      required: [batchId, status, jobs]
+      required: [batchId, status, results]
       additionalProperties: false
       properties:
         batchId:
           type: string
         status:
           type: string
-          enum: [running, completed, completed_with_errors, rejected]
-        jobs:
+        results:
           type: array
           minItems: 0
-          description: Child Job status projections in original input order.
+          description: Child process status projections in original input order.
           items:
-            $ref: "#/components/schemas/JobToolResponse"
+            $ref: "#/components/schemas/ProcessToolResponse"
     McpBatchStatus:
       type: string
       enum: [running, completed, completed_with_errors, rejected]
@@ -3689,49 +3976,11 @@ components:
         status:
           $ref: "#/components/schemas/McpBatchStatus"
         error:
-          $ref: "#/components/schemas/JobError"
+          $ref: "#/components/schemas/ProcessError"
         results:
           type: array
           minItems: 1
           maxItems: 16
-          description: Flat child Job status projections in original input order.
+          description: Flat child process status projections in original input order.
           items:
-            $ref: "#/components/schemas/JobToolResponse"
-    JobListItem:
-      type: object
-      required: [jobId, kind, state, createdAt]
-      additionalProperties: false
-      properties:
-        jobId:
-          type: string
-        group:
-          type: string
-        kind:
-          $ref: "#/components/schemas/JobKind"
-        state:
-          $ref: "#/components/schemas/JobState"
-        createdAt:
-          type: string
-          format: date-time
-        startedAt:
-          type: string
-          format: date-time
-        finishedAt:
-          type: string
-          format: date-time
-    JobListResponse:
-      type: object
-      required: [jobs, freshness]
-      additionalProperties: false
-      properties:
-        jobs:
-          type: array
-          items:
-            $ref: "#/components/schemas/JobListItem"
-        nextCursor:
-          type: string
-        freshness:
-          $ref: "#/components/schemas/JobFreshness"
-        observedAt:
-          type: string
-          format: date-time
+            $ref: "#/components/schemas/ProcessToolResponse"

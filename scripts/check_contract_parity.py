@@ -308,7 +308,7 @@ def init_agent(binary: Path, root: Path, mode: str, profile: str, agent_id: str,
     config.setdefault("pathPolicy", {})["writeRoots"] = [str(workspace)]
     config["confirmationProvider"] = {"channels": []}
     config["toolsets"] = {
-        "enabled": ["agent", "file", "mcp", "process", "job", "skills", "tmux", "room"]
+        "enabled": ["agent", "file", "mcp", "process", "skills", "tmux", "room"]
     }
     if mode == "hub":
         config["hub"] = {
@@ -677,32 +677,53 @@ def assert_room_tool_semantics(
                 fail(label, "room.maintenance.submit waitSeconds is not default0/clamped0..30")
 
 
-def assert_tool_semantics(tools: list[dict[str, Any]], label: str, hub: bool = False) -> None:
+def assert_tool_semantics(
+    tools: list[dict[str, Any]], label: str, hub: bool = False, coordinator: bool = False
+) -> None:
     descriptors = descriptor_map(tools)
-    for name in ("job.get", "job.list", "job.cancel"):
+    required = {
+        "process.exec", "process.batch", "process.status", "process.list",
+        "process.output", "process.result", "process.cancel",
+    }
+    if hub:
+        required |= {"hub.process.status", "hub.process.list"}
+    if coordinator:
+        required = {"hub.process.status", "hub.process.list"}
+    for name in required:
         if name not in descriptors:
             fail(label, f"missing required descriptor {name}")
-    get_schema = descriptors["job.get"].get("inputSchema", {})
-    list_schema = descriptors["job.list"].get("inputSchema", {})
-    get_props = get_schema.get("properties", {})
+
+    for name in ("process.status", "process.output", "process.result", "process.cancel", "hub.process.status"):
+        if name not in descriptors:
+            continue
+        schema = descriptors[name].get("inputSchema", {})
+        if "processId" not in schema.get("required", []):
+            fail(label, f"{name} processId is not required")
+    status_props = descriptors.get("process.status", {}).get("inputSchema", {}).get("properties", {})
+    wait_seconds = status_props.get("waitSeconds", {})
+    if "process.status" in descriptors and (wait_seconds.get("minimum") != 0 or wait_seconds.get("maximum") != 30):
+        fail(label, "process.status waitSeconds bounds are not 0..30")
+    output_props = descriptors.get("process.output", {}).get("inputSchema", {}).get("properties", {})
+    output_bytes = output_props.get("maxBytes", {})
+    if "process.output" in descriptors and (
+        output_bytes.get("default") != 8192 or output_bytes.get("maximum") != 32768
+    ):
+        fail(label, "process.output maxBytes is not default8192/max32768")
+    list_name = "hub.process.list" if coordinator else "process.list"
+    list_schema = descriptors.get(list_name, {}).get("inputSchema", {})
     list_props = list_schema.get("properties", {})
-    if get_props.get("waitSeconds", {}).get("minimum") != 0:
-        fail(label, "job.get waitSeconds minimum is not 0")
-    if get_props.get("waitSeconds", {}).get("maximum") != 30:
-        fail(label, "job.get waitSeconds maximum is not 30")
-    if get_props.get("waitSeconds", {}).get("default") != 5:
-        fail(label, "job.get waitSeconds default is not 5")
-    if get_props.get("waitOnly", {}).get("default") is not False:
-        fail(label, "job.get waitOnly default is not false")
-    if list_props.get("limit", {}).get("minimum") != 1 or list_props.get("limit", {}).get("maximum") != 100:
-        fail(label, "job.list limit bounds are not 1..100")
-    if list_props.get("limit", {}).get("default") != 50:
-        fail(label, "job.list limit default is not 50")
-    required = set(get_schema.get("required", []))
-    if "jobId" not in required:
-        fail(label, "job.get jobId is not required")
-    if hub and "agentId" not in required:
-        fail(label, "Hub job.get agentId is not required")
+    if coordinator:
+        if "agentId" not in list_schema.get("required", []) or "limit" in list_props:
+            fail(label, "hub.process.list must require agentId and omit limit")
+    else:
+        if list_props.get("limit", {}).get("minimum") != 1 or list_props.get("limit", {}).get("maximum") != 100:
+            fail(label, "process.list limit bounds are not 1..100")
+        if list_props.get("limit", {}).get("default") != 50:
+            fail(label, "process.list limit default is not 50")
+
+    retired = {"job.get", "job.list", "job.cancel", "hub.job.get", "hub.job.list"}
+    if retired.intersection(descriptors):
+        fail(label, f"retired Job tools are still advertised: {sorted(retired.intersection(descriptors))}")
 def assert_skill_semantics(tools: list[dict[str, Any]], label: str) -> None:
     descriptors = descriptor_map(tools)
     for name in ("skills.install.get", "skills.run"):
@@ -749,6 +770,7 @@ PROCESS_MARKERS = (
     "contract-parity-batch-one",
     "contract-parity-batch-two",
 )
+PROCESS_OVERFLOW_MARKER = "overflow-" + "x" * 20000
 
 
 def configure_process_fixture(config_path: Path, http_port: int | None = None,
@@ -760,6 +782,7 @@ def configure_process_fixture(config_path: Path, http_port: int | None = None,
                 {"program": "/usr/bin/printf", "argsPrefix": [marker]}
                 for marker in PROCESS_MARKERS
             ]
+            + [{"program": "/usr/bin/printf", "argsPrefix": [PROCESS_OVERFLOW_MARKER]}]
             + [
                 {"program": "/usr/bin/true", "argsPrefix": []},
                 {"program": "/usr/bin/sleep", "argsPrefix": ["30"]},
@@ -871,23 +894,44 @@ def validate_operation_response(document: dict[str, Any], path: str, method: str
 
 
 def require_schema_contract(document: dict[str, Any], schemas: dict[str, Any]) -> None:
-    job_info = schemas.get("JobInfo", {})
-    required = set(job_info.get("required", []))
-    if "startedAt" in required:
-        fail("schema/contract", "JobInfo.startedAt is incorrectly required for queued jobs")
     paths = document.get("paths", {})
-    list_parameters = paths.get("/v1/jobs", {}).get("get", {}).get("parameters", [])
+    if any(path.startswith("/v1/jobs") for path in paths):
+        fail("schema/contract", "retired /v1/jobs HTTP routes are still advertised")
+    process_paths = {
+        "/v1/process/exec", "/v1/process/batch", "/v1/process",
+        "/v1/process/{processId}", "/v1/process/{processId}/output",
+        "/v1/process/{processId}/result", "/v1/process/{processId}/cancel",
+    }
+    missing = process_paths - set(paths)
+    if missing:
+        fail("schema/contract", f"required process HTTP routes are missing: {sorted(missing)}")
+    list_parameters = paths["/v1/process"]["get"].get("parameters", [])
     list_by_name = {item["name"]: item for item in list_parameters}
     list_limit = list_by_name["limit"]["schema"]
     if list_limit.get("default") != 50 or list_limit.get("minimum") != 1 or list_limit.get("maximum") != 100:
-        fail("schema/contract", "HTTP job list limit is not default50/clamped1..100")
-    get_parameters = paths.get("/v1/jobs/{jobId}", {}).get("get", {}).get("parameters", [])
-    get_by_name = {item["name"]: item for item in get_parameters}
-    wait_schema = get_by_name["waitSeconds"]["schema"]
-    if wait_schema.get("default") != 5 or wait_schema.get("minimum") != 0 or wait_schema.get("maximum") != 30:
-        fail("schema/contract", "HTTP job get waitSeconds is not default5/clamped0..30")
-    if "waitOnly" not in get_by_name or get_by_name["waitOnly"]["schema"].get("default") is not False:
-        fail("schema/contract", "HTTP job get waitOnly=false is not declared")
+        fail("schema/contract", "HTTP process list limit is not default50/clamped1..100")
+    status_parameters = paths["/v1/process/{processId}"]["get"].get("parameters", [])
+    status_by_name = {item["name"]: item for item in status_parameters}
+    if "waitOnly" in status_by_name:
+        fail("schema/contract", "HTTP process status exposes retired waitOnly")
+    wait_schema = status_by_name.get("waitSeconds", {}).get("schema", {})
+    if wait_schema.get("minimum") != 0 or wait_schema.get("maximum") != 30:
+        fail("schema/contract", "HTTP process status waitSeconds is not clamped0..30")
+    output_parameters = paths["/v1/process/{processId}/output"]["get"].get("parameters", [])
+    output_by_name = {item["name"]: item for item in output_parameters}
+    if "cursor" not in output_by_name:
+        fail("schema/contract", "HTTP process output does not declare a cursor")
+    output_bytes = output_by_name.get("maxBytes", {}).get("schema", {})
+    if output_bytes.get("default") != 8192 or output_bytes.get("maximum") != 32768:
+        fail("schema/contract", "HTTP process output maxBytes is not default8192/max32768")
+    for name in (
+        "ProcessExecRequest", "ProcessBatchExecRequest", "ProcessResponse", "ProcessBatchResponse",
+        "ProcessStatusResponse", "ProcessCacheFallbackResponse", "ProcessListResponse",
+        "ProcessOutputSegment", "ProcessOutputResponse", "ProcessResultResponse",
+        "ProcessCancelResponse", "ProcessUnavailableResponse",
+    ):
+        if not isinstance(schemas.get(name), dict):
+            fail("schema/contract", f"OpenAPI process schema {name} is missing")
 
     for path in ROOM_RETIRED_PATHS:
         if path in paths:
@@ -1002,6 +1046,7 @@ def local_surface(binary: Path, config: Path, env: dict[str, str], scenario: str
 def start_local_agent(binary: Path, root: Path, reports: list[str]) -> tuple[ManagedProcess, Path, dict[str, str], list[dict[str, Any]]]:
     config, _, env = init_agent(binary, root, "local", "normal", "parity-local")
     prepare_skill_fixture(config)
+    configure_process_fixture(config)
     process = ManagedProcess([str(binary), "run", "--config", str(config)], env, "Agent local Unix MCP")
     socket_path = Path(env["HOME"]) / ".agentic_gpt" / "runtime" / "agent" / "parity-local" / "mcp.sock"
     wait_until(
@@ -1015,16 +1060,131 @@ def start_local_agent(binary: Path, root: Path, reports: list[str]) -> tuple[Man
     info = info.get("structuredContent", info)
     if info.get("identity", {}).get("transport") != "local-unix":
         fail("Agent local agent.info", f"wrong transport: {info}")
+    local_exec = local_tool(
+        binary,
+        config,
+        "process.exec",
+        {"program": "/usr/bin/printf", "args": [PROCESS_MARKERS[0]], "waitSeconds": 5},
+        env,
+        "Agent local process.exec",
+    )
+    local_exec = local_exec.get("structuredContent", local_exec)
+    local_process_id = local_exec.get("processId")
+    inline_output = local_exec.get("inlineOutput", {})
+    inline_stdout = inline_output.get("stdout", {})
+    if (
+        not local_process_id
+        or local_exec.get("status") != "completed"
+        or inline_stdout.get("data") != PROCESS_MARKERS[0]
+        or inline_stdout.get("encoding") != "utf8"
+        or len(json.dumps(local_exec, separators=(",", ":")).encode()) > 8192
+    ):
+        fail("Agent local process.exec", f"printf did not complete with full inline output: {local_exec}")
+    local_status = local_tool(
+        binary, config, "process.status", {"processId": local_process_id, "waitSeconds": 0}, env,
+        "Agent local process.status",
+    )
+    local_status = local_status.get("structuredContent", local_status)
+    if local_status.get("state") != "completed" or any(key in local_status for key in ("stdout", "stderr", "result")):
+        fail("Agent local process.status", f"terminal status exposed body data: {local_status}")
+    first_page = local_tool(
+        binary, config, "process.output", {"processId": local_process_id, "maxBytes": 8}, env,
+        "Agent local process.output first page",
+    )
+    first_page = first_page.get("structuredContent", first_page)
+    segment = first_page.get("stdout", {})
+    segments = [first_page.get("stdout", {}), first_page.get("stderr", {})]
+    encoded_page_bytes = sum(
+        len(item.get("data", "").encode("utf-8"))
+        for item in segments
+        if isinstance(item, dict)
+    )
+    if (
+        first_page.get("processId") != local_process_id
+        or not segment.get("data")
+        or segment.get("startOffset") != "0"
+        or int(segment.get("endOffset", "0")) <= 0
+        or segment.get("encoding") not in {"utf8", "base64"}
+        or encoded_page_bytes > 8
+        or first_page.get("eof") is not False
+        or first_page.get("hasMore") is not True
+        or "captureStatus" not in first_page
+        or not first_page.get("nextCursor")
+    ):
+        fail("Agent local process.output first page", f"first output page did not advance within aggregate budget: {first_page}")
+    second_page = local_tool(
+        binary, config, "process.output",
+        {"processId": local_process_id, "cursor": first_page["nextCursor"], "maxBytes": 64}, env,
+        "Agent local process.output continuation",
+    )
+    second_page = second_page.get("structuredContent", second_page)
+    if (
+        second_page.get("eof") is not True
+        or second_page.get("hasMore") is not False
+        or second_page.get("nextCursor") == first_page.get("nextCursor")
+    ):
+        fail("Agent local process.output continuation", f"terminal EOF/cursor did not advance: {second_page}")
+    invalid_cursor_rejected = False
+    try:
+        invalid_cursor = local_tool(
+            binary, config, "process.output",
+            {"processId": local_process_id, "cursor": "not-a-valid-cursor", "maxBytes": 8},
+            env, "Agent local process.output invalid cursor",
+        )
+        invalid_cursor_rejected = (
+            invalid_cursor.get("isError") is True
+            or "error" in invalid_cursor
+            or "invalid cursor" in json.dumps(invalid_cursor).lower()
+        )
+    except GateError:
+        invalid_cursor_rejected = True
+    if not invalid_cursor_rejected:
+        fail("Agent local process.output invalid cursor", "invalid cursor was silently treated as a fresh cursor")
+    process_result = local_tool(
+        binary, config, "process.result", {"processId": local_process_id, "maxBytes": 8192}, env, "Agent local process.result",
+    )
+    process_result = process_result.get("structuredContent", process_result)
+    if process_result.get("status") != "unavailable" or process_result.get("resultAvailable") is not False:
+        fail("Agent local process.result", f"command result was not accurately reported unavailable: {process_result}")
+    reports.append("PASS Agent local Unix MCP process status/output cursor and EOF/result retrieval")
+    overflow_response = local_tool(
+        binary,
+        config,
+        "process.exec",
+        {"program": "/usr/bin/printf", "args": [PROCESS_OVERFLOW_MARKER], "waitSeconds": 5},
+        env,
+        "Agent local process.exec overflow",
+    )
+    overflow_response = overflow_response.get("structuredContent", overflow_response)
+    preview = overflow_response.get("outputPreview", {})
+    preview_bytes = (
+        len(preview.get("stdout", "").encode("utf-8"))
+        + len(preview.get("stderr", "").encode("utf-8"))
+    )
+    overflow_process_id = overflow_response.get("processId")
+    if (
+        overflow_response.get("status") != "completed"
+        or overflow_process_id is None
+        or "inlineOutput" in overflow_response
+        or preview.get("truncated") is not True
+        or preview_bytes > 2048
+        or len(json.dumps(overflow_response, separators=(",", ":")).encode()) > 8192
+    ):
+        fail("Agent local process.exec overflow", f"creation overflow preview/aggregate cap was incorrect: {overflow_response}")
     local_tool(binary, config, "skills.setActive", {"id": "demo", "active": True}, env, "Agent local Skill activate")
     skill_value = local_tool(binary, config, "skills.run", {"id": "demo", "path": "scripts/check.sh", "waitSeconds": 0}, env, "Agent local Skill run")
     skill_value = skill_value.get("structuredContent", skill_value)
-    skill_id = skill_value.get("jobId")
+    skill_id = skill_value.get("processId")
     if skill_value.get("state") not in {"starting", "running", "completed"} or not skill_id:
-        fail("Agent local Skill run", f"invalid real Skill Job envelope: {skill_value}")
-    skill_done = local_tool(binary, config, "job.get", {"jobId": skill_id, "waitSeconds": 5}, env, "Agent local Skill completion")
+        fail("Agent local Skill run", f"invalid real Skill process envelope: {skill_value}")
+    skill_done = local_tool(binary, config, "process.status", {"processId": skill_id, "waitSeconds": 5}, env, "Agent local Skill completion")
     skill_done = skill_done.get("structuredContent", skill_done)
-    if skill_done.get("state") != "completed" or "skill-parity" not in skill_done.get("stdoutTail", ""):
-        fail("Agent local Skill completion", f"Skill did not complete with fixture output: {skill_done}")
+    if skill_done.get("state") != "completed" or "stdout" in skill_done or "stderr" in skill_done or "result" in skill_done:
+        fail("Agent local Skill completion", f"status was not metadata-only terminal state: {skill_done}")
+    skill_output = local_tool(binary, config, "process.output", {"processId": skill_id, "maxBytes": 8192}, env, "Agent local Skill output")
+    skill_output = skill_output.get("structuredContent", skill_output)
+    if "skill-parity" not in skill_output.get("stdout", {}).get("data", ""):
+        fail("Agent local Skill output", f"Skill output was not retrievable: {skill_output}")
     install_value = local_tool(binary, config, "skills.install", inline_skill_install_request(), env, "Agent local Skill install")
     install_value = install_value.get("structuredContent", install_value)
     install_id = install_value.get("installId")
@@ -1037,13 +1197,17 @@ def start_local_agent(binary: Path, root: Path, reports: list[str]) -> tuple[Man
         fail("Agent local Skill install get short", f"inline install did not complete: {installed}")
     installed_run = local_tool(binary, config, "skills.run", {"id": "inline", "path": "scripts/check.sh", "waitSeconds": 0}, env, "Agent local installed Skill run")
     installed_run = installed_run.get("structuredContent", installed_run)
-    installed_id = installed_run.get("jobId")
+    installed_id = installed_run.get("processId")
     if not installed_id:
-        fail("Agent local installed Skill run", f"missing installed Skill Job id: {installed_run}")
-    installed_done = local_tool(binary, config, "job.get", {"jobId": installed_id, "waitSeconds": 5}, env, "Agent local installed Skill completion")
+        fail("Agent local installed Skill run", f"missing installed process id: {installed_run}")
+    installed_done = local_tool(binary, config, "process.status", {"processId": installed_id, "waitSeconds": 5}, env, "Agent local installed Skill completion")
     installed_done = installed_done.get("structuredContent", installed_done)
-    if installed_done.get("state") != "completed" or "inline-skill" not in installed_done.get("stdoutTail", ""):
-        fail("Agent local installed Skill completion", f"installed Skill did not complete with fixture output: {installed_done}")
+    if installed_done.get("state") != "completed" or "stdout" in installed_done:
+        fail("Agent local installed Skill completion", f"status was not terminal metadata: {installed_done}")
+    installed_output = local_tool(binary, config, "process.output", {"processId": installed_id, "maxBytes": 8192}, env, "Agent local installed Skill output")
+    installed_output = installed_output.get("structuredContent", installed_output)
+    if "inline-skill" not in installed_output.get("stdout", {}).get("data", ""):
+        fail("Agent local installed Skill output", f"installed Skill output was not retrievable: {installed_output}")
     reports.append("PASS Agent local Unix MCP: tools/list, agent.info, Skill run/completion, inline install/get(0,5), and installed run/completion")
     return process, config, env, tools
 
@@ -1091,28 +1255,34 @@ def start_http_agent(binary: Path, root: Path, reports: list[str]) -> tuple[Mana
     if "error" in activate or activate.get("result", {}).get("isError"):
         fail("Agent HTTP Skill activate", f"real Skill activation returned an error: {activate}")
     skill_value = json_result(mcp_call(port, token, session, 4, "tools/call", {"name": "skills.run", "arguments": {"id": "demo", "path": "scripts/check.sh", "waitSeconds": 0}}, "Agent HTTP Skill run"), "Agent HTTP Skill run")
-    skill_id = skill_value.get("jobId") if isinstance(skill_value, dict) else None
+    skill_id = skill_value.get("processId") if isinstance(skill_value, dict) else None
     if not skill_id or skill_value.get("state") not in {"starting", "running", "completed"}:
-        fail("Agent HTTP Skill run", f"invalid real Skill Job envelope: {skill_value}")
-    skill_done = json_result(mcp_call(port, token, session, 5, "tools/call", {"name": "job.get", "arguments": {"jobId": skill_id, "waitSeconds": 5}}, "Agent HTTP Skill completion"), "Agent HTTP Skill completion")
-    if skill_done.get("state") != "completed" or "skill-parity" not in skill_done.get("stdoutTail", ""):
-        fail("Agent HTTP Skill completion", f"Skill did not complete with fixture output: {skill_done}")
-    install_value = json_result(mcp_call(port, token, session, 6, "tools/call", {"name": "skills.install", "arguments": inline_skill_install_request()}, "Agent HTTP Skill install"), "Agent HTTP Skill install")
+        fail("Agent HTTP Skill run", f"invalid real Skill process envelope: {skill_value}")
+    skill_done = json_result(mcp_call(port, token, session, 5, "tools/call", {"name": "process.status", "arguments": {"processId": skill_id, "waitSeconds": 5}}, "Agent HTTP Skill completion"), "Agent HTTP Skill completion")
+    if skill_done.get("state") != "completed" or "stdout" in skill_done or "result" in skill_done:
+        fail("Agent HTTP Skill completion", f"status was not metadata-only terminal state: {skill_done}")
+    skill_output = json_result(mcp_call(port, token, session, 6, "tools/call", {"name": "process.output", "arguments": {"processId": skill_id, "maxBytes": 8192}}, "Agent HTTP Skill output"), "Agent HTTP Skill output")
+    if "skill-parity" not in skill_output.get("stdout", {}).get("data", ""):
+        fail("Agent HTTP Skill output", f"Skill output was not retrievable: {skill_output}")
+    install_value = json_result(mcp_call(port, token, session, 7, "tools/call", {"name": "skills.install", "arguments": inline_skill_install_request()}, "Agent HTTP Skill install"), "Agent HTTP Skill install")
     install_id = install_value.get("installId") if isinstance(install_value, dict) else None
     if not install_id:
         fail("Agent HTTP Skill install", f"missing real install id: {install_value}")
-    mcp_call(port, token, session, 7, "tools/call", {"name": "skills.install.get", "arguments": {"installId": install_id, "waitSeconds": 0}}, "Agent HTTP Skill install get zero")
-    installed = json_result(mcp_call(port, token, session, 8, "tools/call", {"name": "skills.install.get", "arguments": {"installId": install_id, "waitSeconds": 5}}, "Agent HTTP Skill install get short"), "Agent HTTP Skill install get short")
+    mcp_call(port, token, session, 8, "tools/call", {"name": "skills.install.get", "arguments": {"installId": install_id, "waitSeconds": 0}}, "Agent HTTP Skill install get zero")
+    installed = json_result(mcp_call(port, token, session, 9, "tools/call", {"name": "skills.install.get", "arguments": {"installId": install_id, "waitSeconds": 5}}, "Agent HTTP Skill install get short"), "Agent HTTP Skill install get short")
     if installed.get("status") != "completed" or not isinstance(installed.get("result"), dict):
         fail("Agent HTTP Skill install get short", f"inline install did not complete: {installed}")
-    installed_run = json_result(mcp_call(port, token, session, 9, "tools/call", {"name": "skills.run", "arguments": {"id": "inline", "path": "scripts/check.sh", "waitSeconds": 0}}, "Agent HTTP installed Skill run"), "Agent HTTP installed Skill run")
-    installed_id = installed_run.get("jobId")
+    installed_run = json_result(mcp_call(port, token, session, 10, "tools/call", {"name": "skills.run", "arguments": {"id": "inline", "path": "scripts/check.sh", "waitSeconds": 0}}, "Agent HTTP installed Skill run"), "Agent HTTP installed Skill run")
+    installed_id = installed_run.get("processId")
     if not installed_id:
-        fail("Agent HTTP installed Skill run", f"missing installed Skill Job id: {installed_run}")
-    installed_done = json_result(mcp_call(port, token, session, 10, "tools/call", {"name": "job.get", "arguments": {"jobId": installed_id, "waitSeconds": 5}}, "Agent HTTP installed Skill completion"), "Agent HTTP installed Skill completion")
-    if installed_done.get("state") != "completed" or "inline-skill" not in installed_done.get("stdoutTail", ""):
-        fail("Agent HTTP installed Skill completion", f"installed Skill did not complete with fixture output: {installed_done}")
-    reports.append("PASS Agent standalone streamable HTTP MCP: tools/list, Skill run/completion, inline install/get(0,5), and installed run/completion")
+        fail("Agent HTTP installed Skill run", f"missing installed process id: {installed_run}")
+    installed_done = json_result(mcp_call(port, token, session, 11, "tools/call", {"name": "process.status", "arguments": {"processId": installed_id, "waitSeconds": 5}}, "Agent HTTP installed Skill completion"), "Agent HTTP installed Skill completion")
+    if installed_done.get("state") != "completed" or "stdout" in installed_done:
+        fail("Agent HTTP installed Skill completion", f"status was not terminal metadata: {installed_done}")
+    installed_output = json_result(mcp_call(port, token, session, 12, "tools/call", {"name": "process.output", "arguments": {"processId": installed_id, "maxBytes": 8192}}, "Agent HTTP installed Skill output"), "Agent HTTP installed Skill output")
+    if "inline-skill" not in installed_output.get("stdout", {}).get("data", ""):
+        fail("Agent HTTP installed Skill output", f"installed Skill output was not retrievable: {installed_output}")
+    reports.append("PASS Agent standalone streamable HTTP MCP: tools/list, Skill run/status/result, inline install/get(0,5), and installed run/status/result")
     return process, config, env, port, token, tools
 
 
@@ -1334,8 +1504,8 @@ def wait_for_agent(port: int, api_key: str, agent_id: str, scenario: str,
     wait_until(online, scenario, f"connected Agent {agent_id}", process=process)
 
 
-def job_request(port: int, api_key: str, agent_id: str, program: str, args: list[str], group: str,
-                wait_seconds: int | None = 0, scenario: str = "Hub process.exec") -> dict[str, Any]:
+def process_request(port: int, api_key: str, agent_id: str, program: str, args: list[str], group: str,
+                    wait_seconds: int | None = 0, scenario: str = "Hub process.exec") -> dict[str, Any]:
     payload: dict[str, Any] = {
         "agentId": agent_id,
         "program": program,
@@ -1399,11 +1569,11 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
         assert_skill_semantics(http_tools, "Agent HTTP Skill descriptors")
         if descriptor_map(local_tools).keys() != descriptor_map(http_tools).keys():
             fail("Agent local/HTTP parity", "tools/list names differ")
-        for name in ("job.get", "job.list", "job.cancel", "skills.install.get", "skills.run"):
+        for name in ("process.status", "process.list", "process.output", "process.result", "process.cancel", "skills.install.get", "skills.run"):
             if descriptor_map(local_tools)[name].get("inputSchema") != descriptor_map(http_tools)[name].get("inputSchema"):
                 fail("Agent local/HTTP parity", f"{name} input schemas differ")
 
-        http_session = open_mcp_session(http_port, http_token, "Agent HTTP job call")
+        http_session = open_mcp_session(http_port, http_token, "Agent HTTP process call")
         http_exec = json_result(
             mcp_call(
                 http_port,
@@ -1423,14 +1593,18 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
             ),
             "Agent HTTP process.exec",
         )
-        validate_instance(document, schemas, "JobToolResponse", http_exec, "Agent HTTP process response")
+        http_process_id = http_exec.get("processId")
+        http_inline = http_exec.get("inlineOutput", {})
         if (
-            not isinstance(http_exec, dict)
-            or http_exec.get("state") != "completed"
-            or http_exec.get("stdoutTail") != PROCESS_MARKERS[0]
-            or not http_exec.get("jobId")
+            not http_process_id
+            or http_exec.get("status") != "completed"
+            or http_exec.get("completedInline") is not True
+            or http_inline.get("stdout", {}).get("data") != PROCESS_MARKERS[0]
+            or http_inline.get("stdout", {}).get("encoding") != "utf8"
         ):
-            fail("Agent HTTP process.exec", f"printf did not complete with expected stdout: {http_exec}")
+            fail("Agent HTTP process.exec", f"printf did not complete with full inline output: {http_exec}")
+        if len(json.dumps(http_exec, separators=(",", ":")).encode()) > 8192:
+            fail("Agent HTTP process.exec", f"creation response exceeded the inline response budget: {http_exec}")
         reports.append("PASS Agent local/HTTP descriptor parity and HTTP process printf dispatch")
 
         confirmation = ConfirmationReceiver(
@@ -1496,88 +1670,119 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
             ),
             "Hub Full process.exec printf",
         )
-        validate_instance(document, schemas, "JobToolResponse", full_exec, "Hub Full process.exec response")
-        full_id = full_exec.get("jobId") if isinstance(full_exec, dict) else None
-        if not full_id:
-            fail("Hub Full process.exec printf", f"missing real Job id: {full_exec}")
-        poll_deadline = time.monotonic() + 5
-        poll_request_id = 4
-        while full_exec.get("state") != "completed" and time.monotonic() < poll_deadline:
-            time.sleep(POLL)
-            full_exec = json_result(
-                mcp_call(
-                    hub_port,
-                    hub_key,
-                    full_session,
-                    poll_request_id,
-                    "tools/call",
-                    {
-                        "name": "job.get",
-                        "arguments": {"agentId": normal_id, "jobId": full_id, "waitSeconds": 1},
-                    },
-                    "Hub Full process.exec bounded poll",
-                ),
-                "Hub Full process.exec bounded poll",
-            )
-            poll_request_id += 1
-            validate_instance(document, schemas, "JobToolResponse", full_exec, "Hub Full process.exec poll response")
-        if full_exec.get("state") != "completed" or full_exec.get("stdoutTail") != PROCESS_MARKERS[1]:
-            fail("Hub Full process.exec printf", f"real process did not complete with expected stdout: {full_exec}")
-
-        full_get = json_result(
-            mcp_call(
-                hub_port,
-                hub_key,
-                full_session,
-                5,
-                "tools/call",
-                {
-                    "name": "job.get",
-                    "arguments": {"agentId": normal_id, "jobId": full_id, "waitSeconds": 0},
-                },
-                "Hub Full job.get routed process",
-            ),
-            "Hub Full job.get routed process",
-        )
-        validate_instance(document, schemas, "JobToolResponse", full_get, "Hub Full job.get response")
+        full_id = full_exec.get("processId") if isinstance(full_exec, dict) else None
+        full_inline = full_exec.get("inlineOutput", {}) if isinstance(full_exec, dict) else {}
         if (
-            full_get.get("jobId") != full_id
-            or full_get.get("state") != "completed"
-            or full_get.get("stdoutTail") != PROCESS_MARKERS[1]
-            or full_get.get("freshness") != "live"
-            or not full_get.get("observedAt")
+            not full_id
+            or full_exec.get("status") != "completed"
+            or full_exec.get("completedInline") is not True
+            or full_inline.get("stdout", {}).get("data") != PROCESS_MARKERS[1]
+            or full_inline.get("stdout", {}).get("encoding") != "utf8"
+            or len(json.dumps(full_exec, separators=(",", ":")).encode()) > 8192
         ):
-            fail("Hub Full job.get routed process", f"job.get did not return live completed detail: {full_get}")
+            fail("Hub Full process.exec printf", f"missing complete inline process creation response: {full_exec}")
+        full_status = json_result(
+            mcp_call(
+                hub_port, hub_key, full_session, 4, "tools/call",
+                {"name": "process.status", "arguments": {"agentId": normal_id, "processId": full_id, "waitSeconds": 1}},
+                "Hub Full process.status",
+            ),
+            "Hub Full process.status",
+        )
+        if (
+            full_status.get("processId") != full_id
+            or full_status.get("state") != "completed"
+            or any(key in full_status for key in ("stdout", "stderr", "result"))
+        ):
+            fail("Hub Full process.status", f"status did not return metadata-only completion: {full_status}")
+        full_result = json_result(
+            mcp_call(
+                hub_port, hub_key, full_session, 5, "tools/call",
+                {"name": "process.result", "arguments": {"agentId": normal_id, "processId": full_id, "maxBytes": 8192}},
+                "Hub Full process.result",
+            ),
+            "Hub Full process.result",
+        )
+        if full_result.get("status") != "unavailable" or full_result.get("resultAvailable") is not False:
+            fail("Hub Full process.result", f"command result was not accurately reported unavailable: {full_result}")
+
+        hub_output = json_result(
+            mcp_call(
+                hub_port, hub_key, full_session, 73, "tools/call",
+                {"name": "process.output", "arguments": {"agentId": normal_id, "processId": full_id, "maxBytes": 8192}},
+                "Hub Full process.output",
+            ),
+            "Hub Full process.output",
+        )
+        if (
+            hub_output.get("processId") != full_id
+            or hub_output.get("stdout", {}).get("data") != PROCESS_MARKERS[1]
+            or hub_output.get("eof") is not True
+        ):
+            fail("Hub Full process.output", f"retained command output was not retrieved: {hub_output}")
+
+        http_first_response, http_first = hub_json(
+            hub_port, hub_key, "GET",
+            f"/v1/process/{full_id}/output?" + urlencode({"agentId": normal_id, "maxBytes": 8}),
+            None, "Hub HTTP process.output first page",
+        )
+        if http_first_response.status != 200:
+            fail("Hub HTTP process.output first page", f"HTTP {http_first_response.status}: {http_first}")
+        validate_operation_response(document, "/v1/process/{processId}/output", "get", 200, http_first, "Hub HTTP process.output first page")
+        if (
+            http_first.get("processId") != full_id
+            or http_first.get("stdout", {}).get("startOffset") != "0"
+            or not http_first.get("stdout", {}).get("data")
+            or len(http_first["stdout"]["data"].encode()) > 8
+            or http_first.get("hasMore") is not True
+            or not http_first.get("nextCursor")
+        ):
+            fail("Hub HTTP process.output first page", f"bounded cursor page was not returned: {http_first}")
+        http_next_response, http_next = hub_json(
+            hub_port, hub_key, "GET",
+            f"/v1/process/{full_id}/output?" + urlencode({"agentId": normal_id, "cursor": http_first["nextCursor"], "maxBytes": 64}),
+            None, "Hub HTTP process.output continuation",
+        )
+        if http_next_response.status != 200:
+            fail("Hub HTTP process.output continuation", f"HTTP {http_next_response.status}: {http_next}")
+        validate_operation_response(document, "/v1/process/{processId}/output", "get", 200, http_next, "Hub HTTP process.output continuation")
+        if (
+            http_next.get("stdout", {}).get("startOffset") != http_first["stdout"]["endOffset"]
+            or http_next.get("stdout", {}).get("data") == http_first["stdout"]["data"]
+            or http_next.get("eof") is not True
+            or http_next.get("hasMore") is not False
+        ):
+            fail("Hub HTTP process.output continuation", f"cursor replayed output or missed EOF: {http_next}")
+        http_result_response, http_result = hub_json(
+            hub_port, hub_key, "GET",
+            f"/v1/process/{full_id}/result?" + urlencode({"agentId": normal_id, "maxBytes": 8192}),
+            None, "Hub HTTP process.result",
+        )
+        if http_result_response.status != 200:
+            fail("Hub HTTP process.result", f"HTTP {http_result_response.status}: {http_result}")
+        validate_operation_response(document, "/v1/process/{processId}/result", "get", 200, http_result, "Hub HTTP process.result")
+        if http_result.get("status") != "unavailable" or http_result.get("resultAvailable") is not False or "result" in http_result:
+            fail("Hub HTTP process.result", f"command result was not accurately unavailable: {http_result}")
+        reports.append("PASS Hub MCP and live HTTP process.output cursor/EOF and HTTP process.result")
 
         denied = json_result(
             mcp_call(
-                hub_port,
-                hub_key,
-                full_session,
-                6,
-                "tools/call",
-                {
-                    "name": "process.exec",
-                    "arguments": {
-                        "agentId": normal_id,
-                        "program": "/usr/bin/echo",
-                        "args": ["must-be-denied"],
-                        "needConfirm": False,
-                        "waitSeconds": 5,
-                    },
-                },
+                hub_port, hub_key, full_session, 6, "tools/call",
+                {"name": "process.exec", "arguments": {
+                    "agentId": normal_id, "program": "/usr/bin/echo",
+                    "args": ["must-be-denied"], "needConfirm": False, "waitSeconds": 5,
+                }},
                 "Hub Full policy denied process",
             ),
             "Hub Full policy denied process",
         )
-        validate_instance(document, schemas, "JobToolResponse", denied, "Hub Full policy denied response")
         if (
-            not denied.get("jobId")
-            or denied.get("state") != "rejected"
+            denied.get("status") != "rejected"
+            or not denied.get("processId")
             or denied.get("error", {}).get("code") != "policy_denied"
         ):
-            fail("Hub Full policy denied process", f"policy denial lacked a real rejected Job: {denied}")
-        reports.append("PASS Hub Full process.exec printf completion, live job.get routing, and policy-denied Job evidence")
+            fail("Hub Full policy denied process", f"policy denial lacked rejected process evidence: {denied}")
+        reports.append("PASS Hub Full process.exec completion, metadata-only status, retained result, and policy denial")
 
         coordinator_root = root / "coordinator"
         coordinator_process, coordinator_port, coordinator_config, coordinator_env, coordinator_key = start_hub(
@@ -1592,10 +1797,11 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
             "Hub Coordinator tools/list",
         )
         coordinator_tools = coordinator_tools_message.get("result", {}).get("tools", [])
+        assert_tool_semantics(coordinator_tools, "Hub Coordinator descriptor", hub=True, coordinator=True)
         names = tool_names(coordinator_tools)
         leaked = ROOM_OPERATION_NAMES.intersection(names) | ROOM_RETIRED_NAMES.intersection(names)
-        if "process.exec" in names or "job.get" in names or leaked:
-            fail("Hub Coordinator profile", f"hidden execution or Room tool leaked into tools/list: {sorted(leaked)}")
+        if {"process.exec", "process.batch", "process.status", "process.output", "process.result", "process.cancel", "job.get"}.intersection(names) or leaked:
+            fail("Hub Coordinator profile", f"execution or Room tool leaked into tools/list: {sorted(leaked)}")
         hidden = mcp_call(
             coordinator_port,
             coordinator_key,
@@ -1630,11 +1836,11 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
             "needConfirm": False,
             "waitSeconds": 5,
         }
-        validate_instance(document, schemas, "ExecRequest", completed_request, "Hub HTTP process.exec request")
+        validate_instance(document, schemas, "ProcessExecRequest", completed_request, "Hub HTTP process.exec request")
         invalid_exec = dict(completed_request)
         invalid_exec.pop("needConfirm")
-        assert_rejected(document, schemas, "ExecRequest", invalid_exec, "Hub HTTP process.exec negative request")
-        completed = job_request(
+        assert_rejected(document, schemas, "ProcessExecRequest", invalid_exec, "Hub HTTP process.exec negative request")
+        completed = process_request(
             hub_port,
             hub_key,
             normal_id,
@@ -1645,146 +1851,56 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
             "Hub HTTP completed printf",
         )
         validate_operation_response(document, "/v1/process/exec", "post", 200, completed, "Hub HTTP completed printf")
-        completed_id = completed.get("jobId")
+        completed_id = completed.get("processId")
         if (
             not completed_id
-            or completed.get("state") != "completed"
-            or completed.get("stdoutTail") != PROCESS_MARKERS[2]
+            or completed.get("status") != "completed"
+            or completed.get("completedInline") is not True
+            or completed.get("inlineOutput", {}).get("stdout", {}).get("data") != PROCESS_MARKERS[2]
         ):
-            fail("Hub HTTP completed printf", f"expected completed stdout-bearing Job: {completed}")
+            fail("Hub HTTP completed printf", f"expected complete inline process output: {completed}")
+        if len(json.dumps(completed, separators=(",", ":")).encode()) > 8192:
+            fail("Hub HTTP completed printf", f"creation response exceeded 8192 bytes: {completed}")
 
-        active = job_request(
-            hub_port,
-            hub_key,
-            normal_id,
-            "/usr/bin/sleep",
-            ["30"],
-            "parity-active",
-            0,
-            "Hub HTTP active sleep",
+        active = process_request(
+            hub_port, hub_key, normal_id, "/usr/bin/sleep", ["30"], "parity-active", 0,
+            "Hub HTTP active process",
         )
-        validate_operation_response(document, "/v1/process/exec", "post", 200, active, "Hub HTTP active sleep")
-        active_id = active.get("jobId")
-        if not active_id or active.get("state") in {"completed", "failed", "cancelled", "rejected", "timed_out"}:
-            fail("Hub HTTP active sleep", f"sleep30 was not active: {active}")
+        validate_operation_response(document, "/v1/process/exec", "post", 200, active, "Hub HTTP active process")
+        active_id = active.get("processId")
+        if not active_id or active.get("status") in {"completed", "failed", "cancelled", "rejected", "timed_out"}:
+            fail("Hub HTTP active process", f"sleep30 was not active: {active}")
 
-        started = time.monotonic()
-        zero_get_response, zero_get = hub_json(
-            hub_port,
-            hub_key,
-            "GET",
-            f"/v1/jobs/{active_id}?" + urlencode({"agentId": normal_id, "waitSeconds": "0"}),
-            None,
-            "Hub HTTP explicit-zero Job get",
+        status_response, status_body = hub_json(
+            hub_port, hub_key, "GET",
+            f"/v1/process/{active_id}?" + urlencode({"agentId": normal_id, "waitSeconds": "0"}),
+            None, "Hub HTTP process.status",
         )
-        zero_elapsed = time.monotonic() - started
-        if zero_get_response.status != 200 or zero_elapsed >= 2.0:
-            fail("Hub HTTP explicit-zero Job get", f"active zero-wait get was not prompt: {zero_get_response.status}, {zero_elapsed:.3f}s, {zero_get}")
-        validate_operation_response(document, "/v1/jobs/{jobId}", "get", 200, zero_get, "Hub HTTP explicit-zero Job get")
+        if status_response.status != 200:
+            fail("Hub HTTP process.status", f"HTTP {status_response.status}: {status_body}")
+        validate_operation_response(document, "/v1/process/{processId}", "get", 200, status_body, "Hub HTTP process.status")
         if (
-            zero_get.get("jobId") != active_id
-            or zero_get.get("state") in {"completed", "failed", "cancelled", "rejected", "timed_out"}
-            or zero_get.get("freshness") != "live"
-            or not zero_get.get("observedAt")
-            or set(zero_get) <= {"jobId", "state", "elapsedMs", "freshness", "observedAt"}
+            status_body.get("processId") != active_id
+            or status_body.get("state") in {"completed", "failed", "cancelled", "rejected", "timed_out"}
+            or any(key in status_body for key in ("stdout", "stderr", "result"))
         ):
-            fail("Hub HTTP explicit-zero Job get", f"normal active detail was compact or terminal: {zero_get}")
-
-        wait_response, wait_value = hub_json(
-            hub_port,
-            hub_key,
-            "GET",
-            f"/v1/jobs/{active_id}?" + urlencode({"agentId": normal_id, "waitOnly": "true", "waitSeconds": "1"}),
-            None,
-            "Hub HTTP active waitOnly",
-        )
-        if wait_response.status != 200:
-            fail("Hub HTTP active waitOnly", f"HTTP {wait_response.status}: {wait_value}")
-        validate_operation_response(document, "/v1/jobs/{jobId}", "get", 200, wait_value, "Hub HTTP active waitOnly")
-        if set(wait_value) != {"jobId", "state", "elapsedMs", "freshness", "observedAt"}:
-            fail("Hub HTTP active waitOnly", f"waitOnly leaked normal detail or omitted freshness metadata: {wait_value}")
-        if wait_value.get("jobId") != active_id or wait_value.get("state") in {"completed", "failed", "cancelled", "rejected", "timed_out"}:
-            fail("Hub HTTP active waitOnly", f"waitOnly did not remain active: {wait_value}")
+            fail("Hub HTTP process.status", f"status is not active metadata-only response: {status_body}")
 
         cancel_response, cancel_body = hub_json(
-            hub_port,
-            hub_key,
-            "POST",
-            f"/v1/jobs/{active_id}/cancel?" + urlencode({"agentId": normal_id}),
-            {},
-            "Hub HTTP active cancel",
+            hub_port, hub_key, "POST",
+            f"/v1/process/{active_id}/cancel?" + urlencode({"agentId": normal_id}),
+            {}, "Hub HTTP process.cancel",
         )
         if cancel_response.status != 200:
-            fail("Hub HTTP active cancel", f"HTTP {cancel_response.status}: {cancel_body}")
-        validate_operation_response(document, "/v1/jobs/{jobId}/cancel", "post", 200, cancel_body, "Hub HTTP active cancel")
+            fail("Hub HTTP process.cancel", f"HTTP {cancel_response.status}: {cancel_body}")
+        validate_operation_response(document, "/v1/process/{processId}/cancel", "post", 200, cancel_body, "Hub HTTP process.cancel")
         if (
-            cancel_body.get("jobId") != active_id
+            cancel_body.get("processId") != active_id
             or cancel_body.get("state") != "cancelled"
             or cancel_body.get("cancelOutcome") != "cancelled"
             or not cancel_body.get("terminationEvidence")
-            or "local_process" not in cancel_body.get("terminationEvidence", "")
         ):
-            fail("Hub HTTP active cancel", f"missing observed cancellation evidence: {cancel_body}")
-
-        terminal_wait_response, terminal_wait = hub_json(
-            hub_port,
-            hub_key,
-            "GET",
-            f"/v1/jobs/{active_id}?" + urlencode({"agentId": normal_id, "waitOnly": "true", "waitSeconds": "1"}),
-            None,
-            "Hub HTTP terminal waitOnly",
-        )
-        if terminal_wait_response.status != 200:
-            fail("Hub HTTP terminal waitOnly", f"HTTP {terminal_wait_response.status}: {terminal_wait}")
-        validate_operation_response(document, "/v1/jobs/{jobId}", "get", 200, terminal_wait, "Hub HTTP terminal waitOnly")
-        if (
-            terminal_wait.get("state") != "cancelled"
-            or set(terminal_wait) <= {"jobId", "state", "elapsedMs", "freshness", "observedAt"}
-            or "durationMs" not in terminal_wait
-        ):
-            fail("Hub HTTP terminal waitOnly", f"terminal waitOnly remained compact: {terminal_wait}")
-        default_job = job_request(
-            hub_port,
-            hub_key,
-            normal_id,
-            "/usr/bin/sleep",
-            ["2"],
-            "parity-default-wait",
-            0,
-            "Hub HTTP default-wait sleep",
-        )
-        validate_operation_response(document, "/v1/process/exec", "post", 200, default_job, "Hub HTTP default-wait sleep")
-        default_job_id = default_job.get("jobId")
-        if (
-            not default_job_id
-            or default_job.get("state") in {"completed", "failed", "cancelled", "rejected", "timed_out"}
-        ):
-            fail("Hub HTTP default-wait sleep", f"sleep2 was not active: {default_job}")
-
-        started = time.monotonic()
-        omitted_get_response, omitted_get = hub_json(
-            hub_port,
-            hub_key,
-            "GET",
-            f"/v1/jobs/{default_job_id}?" + urlencode({"agentId": normal_id}),
-            None,
-            "Hub HTTP omitted Job get",
-        )
-        omitted_elapsed = time.monotonic() - started
-        if omitted_get_response.status != 200 or omitted_elapsed < 1.0:
-            fail(
-                "Hub HTTP omitted Job get",
-                f"default get did not wait for sleep2 completion: {omitted_get_response.status}, "
-                f"{omitted_elapsed:.3f}s, {omitted_get}",
-            )
-        validate_operation_response(document, "/v1/jobs/{jobId}", "get", 200, omitted_get, "Hub HTTP omitted Job get")
-        if (
-            omitted_get.get("jobId") != default_job_id
-            or omitted_get.get("state") != "completed"
-            or omitted_get.get("freshness") != "live"
-            or not omitted_get.get("observedAt")
-        ):
-            fail("Hub HTTP omitted Job get", f"default get did not return a fresh completed Job: {omitted_get}")
+            fail("Hub HTTP process.cancel", f"missing observed cancellation evidence: {cancel_body}")
 
         batch_payload = {
             "agentId": normal_id,
@@ -1795,25 +1911,29 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
             "needConfirm": False,
             "waitSeconds": 5,
         }
-        validate_instance(document, schemas, "BatchExecRequest", batch_payload, "Hub HTTP process.batch request")
+        validate_instance(document, schemas, "ProcessBatchExecRequest", batch_payload, "Hub HTTP process.batch request")
         invalid_batch = dict(batch_payload)
         invalid_batch.pop("needConfirm")
-        assert_rejected(document, schemas, "BatchExecRequest", invalid_batch, "Hub HTTP process.batch negative request")
+        assert_rejected(document, schemas, "ProcessBatchExecRequest", invalid_batch, "Hub HTTP process.batch negative request")
         batch_response, batch_body = hub_json(
             hub_port, hub_key, "POST", "/v1/process/batch", batch_payload, "Hub HTTP process.batch"
         )
         if batch_response.status != 200:
             fail("Hub HTTP process.batch", f"HTTP {batch_response.status}: {batch_body}")
         validate_operation_response(document, "/v1/process/batch", "post", 200, batch_body, "Hub HTTP process.batch")
-        batch_jobs = batch_body.get("jobs") if isinstance(batch_body, dict) else None
+        batch_processes = batch_body.get("processes") if isinstance(batch_body, dict) else None
         if (
             batch_body.get("status") != "completed"
-            or not isinstance(batch_jobs, list)
-            or len(batch_jobs) != 2
-            or [job.get("state") for job in batch_jobs] != ["completed", "completed"]
-            or [job.get("stdoutTail") for job in batch_jobs] != [PROCESS_MARKERS[3], PROCESS_MARKERS[4]]
+            or not isinstance(batch_processes, list)
+            or len(batch_processes) != 2
+            or [process.get("status") for process in batch_processes] != ["completed", "completed"]
+            or not all(process.get("processId") for process in batch_processes)
+            or PROCESS_MARKERS[3] not in json.dumps(batch_body)
+            or PROCESS_MARKERS[4] not in json.dumps(batch_body)
         ):
-            fail("Hub HTTP process.batch", f"ordered completed output was not returned: {batch_body}")
+            fail("Hub HTTP process.batch", f"ordered complete process output was not returned: {batch_body}")
+        if len(json.dumps(batch_body, separators=(",", ":")).encode()) > 8192:
+            fail("Hub HTTP process.batch", f"aggregate batch response exceeded 8192 bytes: {batch_body}")
 
         mcp_payload = {
             "agentId": normal_id,
@@ -1832,16 +1952,41 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
         if mcp_response.status != 200:
             fail("Hub HTTP mcp.callTool", f"HTTP {mcp_response.status}: {mcp_body}")
         validate_operation_response(document, "/v1/mcp/callTool", "post", 200, mcp_body, "Hub HTTP mcp.callTool")
-        mcp_info = mcp_body.get("result", {}).get("structuredContent", {}) if isinstance(mcp_body, dict) else {}
+        mcp_process_id = mcp_body.get("processId")
+        if mcp_body.get("state") != "completed" or not mcp_process_id or mcp_body.get("resultAvailable") is not True:
+            fail("Hub HTTP mcp.callTool", f"downstream MCP process was not completed/result-available: {mcp_body}")
+        bounded_result = json_result(
+            mcp_call(
+                hub_port, hub_key, full_session, 7, "tools/call",
+                {"name": "process.result", "arguments": {"agentId": normal_id, "processId": mcp_process_id, "maxBytes": 8192}},
+                "Hub Full bounded MCP result",
+            ),
+            "Hub Full bounded MCP result",
+        )
+        if (
+            bounded_result.get("status") != "too_large"
+            or bounded_result.get("resultAvailable") is not True
+            or bounded_result.get("resultBytes", 0) <= 8192
+            or "result" in bounded_result
+        ):
+            fail("Hub Full bounded MCP result", f"oversized result was not accurately reported: {bounded_result}")
+        mcp_result = json_result(
+            mcp_call(
+                hub_port, hub_key, full_session, 70, "tools/call",
+                {"name": "process.result", "arguments": {"agentId": normal_id, "processId": mcp_process_id, "maxBytes": 524288}},
+                "Hub Full explicit MCP result",
+            ),
+            "Hub Full explicit MCP result",
+        )
+        mcp_info = mcp_result.get("result", {}).get("structuredContent", {})
         mcp_identity = mcp_info.get("identity", {}) if isinstance(mcp_info, dict) else {}
         if (
-            mcp_body.get("state") != "completed"
-            or not mcp_body.get("jobId")
+            mcp_result.get("status") != "complete"
             or mcp_identity.get("agentId") != "parity-http"
             or mcp_identity.get("profile") != "normal"
             or mcp_identity.get("transport") != "tunnel-stdio"
         ):
-            fail("Hub HTTP mcp.callTool", f"downstream identity/result was not real standalone HTTP Agent info: {mcp_body}")
+            fail("Hub Full explicit MCP result", f"downstream identity was not returned by process.result: {mcp_result}")
 
         mcp_batch_payload = {
             "agentId": normal_id,
@@ -1873,13 +2018,31 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
         if mcp_batch_body.get("status") != "completed" or not isinstance(batch_results, list) or len(batch_results) != 2:
             fail("Hub HTTP mcp.batch", f"batch did not complete with two ordered results: {mcp_batch_body}")
         for index, result in enumerate(batch_results):
-            if result.get("state") != "completed" or not result.get("jobId"):
+            if result.get("state") != "completed" or not result.get("processId"):
                 fail("Hub HTTP mcp.batch", f"result {index} did not complete: {mcp_batch_body}")
-        first_content = batch_results[0].get("result", {}).get("structuredContent", {})
-        second_content = batch_results[1].get("result", {}).get("structuredContent", {})
+        first_result = json_result(
+            mcp_call(
+                hub_port, hub_key, full_session, 71, "tools/call",
+                {"name": "process.result", "arguments": {"agentId": normal_id, "processId": batch_results[0]["processId"], "maxBytes": 524288}},
+                "Hub Full first batch MCP result",
+            ),
+            "Hub Full first batch MCP result",
+        )
+        second_result = json_result(
+            mcp_call(
+                hub_port, hub_key, full_session, 72, "tools/call",
+                {"name": "process.result", "arguments": {"agentId": normal_id, "processId": batch_results[1]["processId"], "maxBytes": 524288}},
+                "Hub Full second batch MCP result",
+            ),
+            "Hub Full second batch MCP result",
+        )
+        first_content = first_result.get("result", {}).get("structuredContent", {})
+        second_content = second_result.get("result", {}).get("structuredContent", {})
         identity = first_content.get("identity", {})
         if (
-            batch_results[0]["jobId"] == batch_results[1]["jobId"]
+            batch_results[0]["processId"] == batch_results[1]["processId"]
+            or first_result.get("status") != "complete"
+            or second_result.get("status") != "complete"
             or identity.get("agentId") != "parity-http"
             or identity.get("profile") != "normal"
             or identity.get("transport") != "tunnel-stdio"
@@ -1918,106 +2081,94 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
             fail("Hub Room skills.run", f"HTTP {room_run_response.status}: {room_run_body}")
         validate_operation_response(document, "/v1/room/skills/run", "post", 200, room_run_body, "Hub Room skills.run")
         if (
-            not room_run_body.get("jobId")
+            not room_run_body.get("processId")
             or room_run_body.get("state") != "completed"
-            or "inline-skill" not in room_run_body.get("stdoutTail", "")
+            or "inline-skill" not in json.dumps(room_run_body)
         ):
-            fail("Hub Room skills.run", f"active Room routing did not return completed inline output: {room_run_body}")
+            fail("Hub Room skills.run", f"active Room routing did not return completed inline process result: {room_run_body}")
+        room_process_id = room_run_body["processId"]
+        room_status_response, room_status = hub_json(
+            hub_port, hub_key, "GET",
+            f"/v1/process/{room_process_id}?" + urlencode({"agentId": room_id, "waitSeconds": "0"}),
+            None, "Hub Room process.status",
+        )
+        if room_status_response.status != 200 or any(key in room_status for key in ("stdout", "stderr", "result")):
+            fail("Hub Room process.status", f"status was not metadata-only: {room_status_response.status}, {room_status}")
         reports.append("PASS Hub Room HTTP inline skills install/get/run flat response and active-room routing")
 
         pagination_ids: list[str] = []
         for _ in range(101):
-            value = job_request(
-                hub_port,
-                hub_key,
-                normal_id,
-                "/usr/bin/true",
-                [],
-                "parity-page",
-                0,
-                "Hub Job pagination setup",
+            value = process_request(
+                hub_port, hub_key, normal_id, "/usr/bin/true", [], "parity-page", 0,
+                "Hub process.list pagination setup",
             )
-            validate_operation_response(document, "/v1/process/exec", "post", 200, value, "Hub Job pagination response")
-            if not value.get("jobId"):
-                fail("Hub Job pagination setup", f"pagination Job omitted id: {value}")
-            pagination_ids.append(value["jobId"])
+            validate_operation_response(document, "/v1/process/exec", "post", 200, value, "Hub process.list pagination setup")
+            pagination_id = value.get("processId")
+            if not pagination_id:
+                fail("Hub process.list pagination setup", f"process omitted id: {value}")
+            pagination_ids.append(pagination_id)
 
         bad_group_response, bad_group_body = hub_json(
-            hub_port,
-            hub_key,
-            "GET",
-            "/v1/jobs?" + urlencode({"agentId": normal_id, "group": ""}),
-            None,
-            "Hub Job list typed bad group",
+            hub_port, hub_key, "GET",
+            "/v1/process?" + urlencode({"agentId": normal_id, "group": ""}),
+            None, "Hub process.list typed bad group",
         )
-        if bad_group_response.status != 400 or bad_group_body.get("error", {}).get("code") != "job_group_invalid":
-            fail("Hub Job list typed bad group", f"expected typed 400 group error: {bad_group_response.status}, {bad_group_body}")
-        validate_operation_response(document, "/v1/jobs", "get", 400, bad_group_body, "Hub Job list typed bad group")
+        if bad_group_response.status != 400:
+            fail("Hub process.list typed bad group", f"expected typed 400 group error: {bad_group_response.status}, {bad_group_body}")
+        validate_operation_response(document, "/v1/process", "get", 400, bad_group_body, "Hub process.list typed bad group")
 
         default_response, default_body = hub_json(
-            hub_port,
-            hub_key,
-            "GET",
-            "/v1/jobs?" + urlencode({"agentId": normal_id, "group": "parity-page"}),
-            None,
-            "Hub Job list default50",
+            hub_port, hub_key, "GET",
+            "/v1/process?" + urlencode({"agentId": normal_id, "group": "parity-page"}),
+            None, "Hub process.list default50",
         )
         if default_response.status != 200:
-            fail("Hub Job list default50", f"HTTP {default_response.status}: {default_body}")
-        validate_operation_response(document, "/v1/jobs", "get", 200, default_body, "Hub Job list default50")
-        if len(default_body.get("jobs", [])) != 50:
-            fail("Hub Job list default50", f"expected exactly 50 jobs, got {len(default_body.get('jobs', []))}")
+            fail("Hub process.list default50", f"HTTP {default_response.status}: {default_body}")
+        validate_operation_response(document, "/v1/process", "get", 200, default_body, "Hub process.list default50")
+        if len(default_body.get("processes", [])) != 50:
+            fail("Hub process.list default50", f"expected exactly 50 processes, got {len(default_body.get('processes', []))}")
         cursor = default_body.get("nextCursor")
         if not cursor:
-            fail("Hub Job pagination", "default page omitted nextCursor with 101 real Jobs")
+            fail("Hub process.list", "default page omitted nextCursor with 101 real processes")
         known_ids = set(pagination_ids)
-        page1 = {item["jobId"] for item in default_body["jobs"]}
+        page1 = {item["processId"] for item in default_body["processes"]}
         if len(page1) != 50 or not page1.issubset(known_ids):
-            fail("Hub Job list default50", f"default page was not 50 distinct known Jobs: {page1}")
+            fail("Hub process.list default50", f"default page was not 50 distinct known processes: {page1}")
 
         cursor_response, cursor_body = hub_json(
-            hub_port,
-            hub_key,
-            "GET",
-            "/v1/jobs?" + urlencode({"agentId": normal_id, "group": "parity-page", "cursor": cursor}),
-            None,
-            "Hub Job cursor continuation",
+            hub_port, hub_key, "GET",
+            "/v1/process?" + urlencode({"agentId": normal_id, "group": "parity-page", "cursor": cursor}),
+            None, "Hub process.list cursor continuation",
         )
         if cursor_response.status != 200:
-            fail("Hub Job cursor continuation", f"HTTP {cursor_response.status}: {cursor_body}")
-        validate_operation_response(document, "/v1/jobs", "get", 200, cursor_body, "Hub Job cursor continuation")
-        page2 = {item["jobId"] for item in cursor_body.get("jobs", [])}
+            fail("Hub process.list cursor continuation", f"HTTP {cursor_response.status}: {cursor_body}")
+        validate_operation_response(document, "/v1/process", "get", 200, cursor_body, "Hub process.list cursor continuation")
+        page2 = {item["processId"] for item in cursor_body.get("processes", [])}
         if len(page2) != 50 or not page2.issubset(known_ids) or page1.intersection(page2):
-            fail("Hub Job cursor continuation", f"cursor page was not 50 distinct known non-overlapping Jobs: {page2}")
+            fail("Hub process.list cursor continuation", f"cursor page was not 50 distinct known processes: {page2}")
 
         cap_response, cap_body = hub_json(
-            hub_port,
-            hub_key,
-            "GET",
-            "/v1/jobs?" + urlencode({"agentId": normal_id, "group": "parity-page", "limit": 101}),
-            None,
-            "Hub Job list maximum100",
+            hub_port, hub_key, "GET",
+            "/v1/process?" + urlencode({"agentId": normal_id, "group": "parity-page", "limit": 101}),
+            None, "Hub process.list maximum100",
         )
         if cap_response.status != 200:
-            fail("Hub Job list maximum100", f"HTTP {cap_response.status}: {cap_body}")
-        validate_operation_response(document, "/v1/jobs", "get", 200, cap_body, "Hub Job list maximum100")
-        if len(cap_body.get("jobs", [])) != 100:
-            fail("Hub Job list maximum100", f"expected exactly 100 jobs at cap, got {len(cap_body.get('jobs', []))}")
+            fail("Hub process.list maximum100", f"HTTP {cap_response.status}: {cap_body}")
+        validate_operation_response(document, "/v1/process", "get", 200, cap_body, "Hub process.list maximum100")
+        if len(cap_body.get("processes", [])) != 100:
+            fail("Hub process.list maximum100", f"expected exactly 100 processes, got {len(cap_body.get('processes', []))}")
 
         minimum_response, minimum_body = hub_json(
-            hub_port,
-            hub_key,
-            "GET",
-            "/v1/jobs?" + urlencode({"agentId": normal_id, "group": "parity-page", "limit": 0}),
-            None,
-            "Hub Job list minimum1",
+            hub_port, hub_key, "GET",
+            "/v1/process?" + urlencode({"agentId": normal_id, "group": "parity-page", "limit": 0}),
+            None, "Hub process.list minimum1",
         )
         if minimum_response.status != 200:
-            fail("Hub Job list minimum1", f"HTTP {minimum_response.status}: {minimum_body}")
-        validate_operation_response(document, "/v1/jobs", "get", 200, minimum_body, "Hub Job list minimum1")
-        if len(minimum_body.get("jobs", [])) != 1:
-            fail("Hub Job list minimum1", f"expected one job after lower clamp, got {len(minimum_body.get('jobs', []))}")
-        reports.append("PASS Hub HTTP Jobs: explicit-zero prompt and omitted-default completion waits, waitOnly bounds, cancellation evidence, typed group error, 50/100/1 pages, and cursor")
+            fail("Hub process.list minimum1", f"HTTP {minimum_response.status}: {minimum_body}")
+        validate_operation_response(document, "/v1/process", "get", 200, minimum_body, "Hub process.list minimum1")
+        if len(minimum_body.get("processes", [])) != 1:
+            fail("Hub process.list minimum1", f"expected one process after lower clamp, got {len(minimum_body.get('processes', []))}")
+        reports.append("PASS Hub HTTP process.status/cancel and process.list typed group error, 50/100/1 pages, and cursor")
         for retired_path in sorted(ROOM_RETIRED_PATHS):
             retired_response = http_request(
                 hub_port,
@@ -2440,78 +2591,103 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
             "Hub normal disconnect",
             "normal Agent disconnect",
         )
-        cursor_offline_response, cursor_offline_body = hub_json(
-            hub_port,
-            hub_key,
-            "GET",
-            "/v1/jobs?" + urlencode({"agentId": normal_id, "group": "parity-page", "cursor": cursor}),
-            None,
-            "Hub offline Job list cursor",
-        )
-        if cursor_offline_response.status != 503 or cursor_offline_body.get("error", {}).get("code") != "job_list_cursor_unavailable":
-            fail("Hub offline Job list cursor", f"expected typed 503 cursor-unavailable response: {cursor_offline_response.status}, {cursor_offline_body}")
-        validate_operation_response(document, "/v1/jobs", "get", 503, cursor_offline_body, "Hub offline Job list cursor")
-
         cached_response, cached_body = hub_json(
-            hub_port,
-            hub_key,
-            "GET",
-            f"/v1/jobs/{completed_id}?" + urlencode({"agentId": normal_id}),
-            None,
-            "Hub cached Job get",
+            hub_port, hub_key, "GET",
+            f"/v1/process/{completed_id}?" + urlencode({"agentId": normal_id}),
+            None, "Hub cached process.status",
         )
         if cached_response.status != 200:
-            fail("Hub cached Job get", f"HTTP {cached_response.status}: {cached_body}")
-        validate_operation_response(document, "/v1/jobs/{jobId}", "get", 200, cached_body, "Hub cached Job get")
-        if cached_body.get("freshness") not in {"cached", "stale"} or cached_body.get("cached", {}).get("jobId") != completed_id:
-            fail("Hub cached Job get", f"known observed Job did not use cache fallback: {cached_body}")
-
-        unknown_response, unknown_body = hub_json(
-            hub_port,
-            hub_key,
-            "GET",
-            "/v1/jobs/does-not-exist?" + urlencode({"agentId": normal_id}),
-            None,
-            "Hub unknown Job get",
+            fail("Hub cached process.status", f"HTTP {cached_response.status}: {cached_body}")
+        validate_operation_response(document, "/v1/process/{processId}", "get", 200, cached_body, "Hub cached process.status")
+        if (
+            cached_body.get("processId") != completed_id
+            or cached_body.get("freshness") not in {"cached", "stale"}
+            or any(key in cached_body for key in ("stdout", "stderr", "result"))
+        ):
+            fail("Hub cached process.status", f"cached status exposed output or lost process identity: {cached_body}")
+        cached_mcp_status = json_result(
+            mcp_call(
+                hub_port, hub_key, full_session, 8, "tools/call",
+                {"name": "hub.process.status", "arguments": {"agentId": normal_id, "processId": completed_id}},
+                "Hub Full cached process status",
+            ),
+            "Hub Full cached process status",
         )
-        if unknown_response.status != 503:
-            fail("Hub unknown Job get", f"expected 503, got {unknown_response.status}: {unknown_body}")
-        validate_operation_response(document, "/v1/jobs/{jobId}", "get", 503, unknown_body, "Hub unknown Job get")
+        if (
+            cached_mcp_status.get("freshness") not in {"cached", "stale"}
+            or completed_id not in json.dumps(cached_mcp_status)
+            or any(key in cached_mcp_status for key in ("stdout", "stderr", "result"))
+        ):
+            fail("Hub Full cached process status", f"cache-only MCP status exposed body or lost process identity: {cached_mcp_status}")
+        cached_mcp_list = json_result(
+            mcp_call(
+                hub_port, hub_key, full_session, 9, "tools/call",
+                {"name": "hub.process.list", "arguments": {"agentId": normal_id, "group": "parity-page", "limit": 1}},
+                "Hub Full cached process list",
+            ),
+            "Hub Full cached process list",
+        )
+        if completed_id not in json.dumps(cached_mcp_list) or any(
+            key in json.dumps(cached_mcp_list) for key in ('"stdout"', '"stderr"', '"result"')
+        ):
+            fail("Hub Full cached process list", f"cache-only MCP list did not return status metadata: {cached_mcp_list}")
+
+        output_offline_response, output_offline_body = hub_json(
+            hub_port, hub_key, "GET",
+            f"/v1/process/{completed_id}/output?" + urlencode({"agentId": normal_id}),
+            None, "Hub offline process.output",
+        )
+        if (
+            output_offline_response.status != 503
+            or output_offline_body.get("error", {}).get("code") != "process_output_unavailable"
+            or output_offline_body.get("cached", {}).get("processId") != completed_id
+            or output_offline_body.get("freshness") not in {"cached", "stale"}
+            or output_offline_body.get("result") is not None
+            or any(key in output_offline_body for key in ("stdout", "stderr"))
+        ):
+            fail("Hub offline process.output", f"expected typed body-free unavailable response: {output_offline_response.status}, {output_offline_body}")
+        validate_operation_response(document, "/v1/process/{processId}/output", "get", 503, output_offline_body, "Hub offline process.output")
+
+        result_offline_response, result_offline_body = hub_json(
+            hub_port, hub_key, "GET",
+            f"/v1/process/{completed_id}/result?" + urlencode({"agentId": normal_id}),
+            None, "Hub offline process.result",
+        )
+        if (
+            result_offline_response.status != 503
+            or result_offline_body.get("error", {}).get("code") != "process_result_unavailable"
+            or result_offline_body.get("cached", {}).get("processId") != completed_id
+            or result_offline_body.get("freshness") not in {"cached", "stale"}
+            or result_offline_body.get("result") is not None
+            or any(key in result_offline_body for key in ("stdout", "stderr"))
+        ):
+            fail("Hub offline process.result", f"expected typed body-free unavailable response: {result_offline_response.status}, {result_offline_body}")
+        validate_operation_response(document, "/v1/process/{processId}/result", "get", 503, result_offline_body, "Hub offline process.result")
+        offline_mcp_result = json_result(
+            mcp_call(
+                hub_port, hub_key, full_session, 10, "tools/call",
+                {"name": "process.result", "arguments": {"agentId": normal_id, "processId": completed_id, "maxBytes": 8192}},
+                "Hub Full offline process.result",
+            ),
+            "Hub Full offline process.result",
+        )
+        if offline_mcp_result.get("status") != "unavailable" or offline_mcp_result.get("result") is not None:
+            fail("Hub Full offline process.result", f"MCP did not report unavailable result without body: {offline_mcp_result}")
 
         offline_cancel_response, offline_cancel_body = hub_json(
-            hub_port,
-            hub_key,
-            "POST",
-            f"/v1/jobs/{completed_id}/cancel?" + urlencode({"agentId": normal_id}),
-            {},
-            "Hub offline Job cancel",
+            hub_port, hub_key, "POST",
+            f"/v1/process/{completed_id}/cancel?" + urlencode({"agentId": normal_id}),
+            {}, "Hub offline process.cancel",
         )
-        if offline_cancel_response.status != 502 or offline_cancel_body.get("error", {}).get("code") != "job_cancel_unavailable":
-            fail("Hub offline Job cancel", f"expected typed 502 unavailable, got {offline_cancel_response.status}: {offline_cancel_body}")
-        validate_operation_response(document, "/v1/jobs/{jobId}/cancel", "post", 502, offline_cancel_body, "Hub offline Job cancel")
-        if "cached" in offline_cancel_body or "observedAt" in offline_cancel_body or offline_cancel_body.get("freshness") != "unknown":
-            fail("Hub offline Job cancel", f"unavailable cancellation leaked cached success evidence: {offline_cancel_body}")
-        reports.append("PASS Hub cache-only known Job, unknown/unavailable Job, offline list cursor 503, and offline cancellation typed branches")
-
-        rejected_snapshot = json_result(
-            mcp_call(
-                hub_port, hub_key, full_session, 7, "tools/call",
-                {"name": "hub.job.get", "arguments": {"agentId": normal_id, "jobId": denied["jobId"]}},
-                "Hub cached never-started JobInfo",
-            ),
-            "Hub cached never-started JobInfo",
-        )
-        rejected_info = rejected_snapshot.get("job")
-        validate_instance(document, schemas, "JobInfo", rejected_info, "Hub cached never-started JobInfo")
         if (
-            rejected_info.get("jobId") != denied["jobId"]
-            or rejected_info.get("state") != "rejected"
-            or "startedAt" in rejected_info
-            or rejected_snapshot.get("detailAvailable") is not False
-            or rejected_snapshot.get("freshness") not in {"cached", "stale"}
+            offline_cancel_response.status != 502
+            or offline_cancel_body.get("error", {}).get("code") != "process_cancel_unavailable"
+            or "cached" in offline_cancel_body
+            or "observedAt" in offline_cancel_body
         ):
-            fail("Hub cached never-started JobInfo", f"snapshot fabricated start/detail or lost rejection: {rejected_snapshot}")
-        reports.append("PASS actual never-started JobInfo validates without a fabricated startedAt or cached execution detail")
+            fail("Hub offline process.cancel", f"expected typed unavailable response without cached success: {offline_cancel_response.status}, {offline_cancel_body}")
+        validate_operation_response(document, "/v1/process/{processId}/cancel", "post", 502, offline_cancel_body, "Hub offline process.cancel")
+        reports.append("PASS Hub cache-only process.status and offline output/result/cancel typed unavailable responses")
     finally:
         for process in (
             coordinator_process,

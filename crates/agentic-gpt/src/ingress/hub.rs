@@ -1,6 +1,6 @@
 use agentic_gpt_protocol::{
     AgentConnectionMode, AgentMessage, AgentRunReport, BoundedJsonValue, HubCommand,
-    HubCommandEnvelope, HubMessage, JobInfo,
+    HubCommandEnvelope, HubMessage, ProcessInfo,
 };
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
@@ -20,8 +20,9 @@ use uuid::Uuid;
 
 use crate::{
     config::Config,
-    confirmation, jobs, notify,
+    confirmation, notify,
     operation::{hub_command_name, RequestContext, RequestIngress},
+    process,
     state::AppState,
     transport_ledger,
     utils::{
@@ -265,7 +266,7 @@ async fn connect_reporting_websocket(state: AppState, config: Config) -> Result<
         "hub reporting connected; transport=websocket; agentId={}",
         config.agent_id
     ));
-    send_current_job_snapshots(&state, &event_tx).await;
+    send_current_process_snapshots(&state, &event_tx).await;
     let mut heartbeat = tokio::time::interval(Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut last_heartbeat_ack = Instant::now();
@@ -364,7 +365,7 @@ async fn connect_reporting_sse(state: AppState, config: Config) -> Result<()> {
         "hub reporting connected; transport=sse; agentId={}",
         config.agent_id
     ));
-    send_current_job_snapshots(&state, &event_tx).await;
+    send_current_process_snapshots(&state, &event_tx).await;
     let heartbeat_tx = control_tx.clone();
     let heartbeat = tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
@@ -459,10 +460,10 @@ async fn clear_reporting_senders(
     }
 }
 
-async fn send_current_job_snapshots(state: &AppState, sender: &mpsc::Sender<AgentMessage>) {
-    for job in jobs::current_jobs(state).await {
-        let _ = sender.try_send(AgentMessage::JobUpdate {
-            job: job_for_reporting(state, job),
+async fn send_current_process_snapshots(state: &AppState, sender: &mpsc::Sender<AgentMessage>) {
+    for process in process::current_processes(state).await {
+        let _ = sender.try_send(AgentMessage::ProcessUpdate {
+            process: process_for_reporting(state, process),
         });
     }
 }
@@ -479,7 +480,7 @@ pub(crate) fn report_run_event(
     started_at: DateTime<Utc>,
     result: Option<serde_json::Value>,
     reason: Option<String>,
-    job: Option<JobInfo>,
+    process: Option<ProcessInfo>,
 ) {
     let detail = reporting_detail(state);
     let updated_at = Utc::now();
@@ -490,7 +491,7 @@ pub(crate) fn report_run_event(
     } else {
         None
     };
-    let job_id = job.as_ref().map(|value| value.job_id.clone());
+    let process_id = process.as_ref().map(|value| value.process_id.clone());
     try_send_reporting(
         state,
         AgentMessage::RunReport {
@@ -509,12 +510,12 @@ pub(crate) fn report_run_event(
                 } else {
                     Some((updated_at - started_at).num_milliseconds().max(0) as u64)
                 },
-                job_id,
-                exit_code: job.as_ref().and_then(|value| value.exit_code),
+                process_id,
+                exit_code: process.as_ref().and_then(|value| value.exit_code),
                 reason: reason.map(|value| bounded_reason(&value)),
                 arguments,
                 result,
-                job: if full { job } else { None },
+                process: if full { process } else { None },
             }),
         },
     );
@@ -548,22 +549,22 @@ pub(crate) fn report_tool_arguments(
                 started_at,
                 updated_at: started_at,
                 duration_ms: None,
-                job_id: None,
+                process_id: None,
                 exit_code: None,
                 reason: None,
                 arguments,
                 result: None,
-                job: None,
+                process: None,
             }),
         },
     );
 }
 
-pub(crate) fn report_job(state: &AppState, job: JobInfo) {
+pub(crate) fn report_process(state: &AppState, process: ProcessInfo) {
     try_send_reporting(
         state,
-        AgentMessage::JobUpdate {
-            job: job_for_reporting(state, job),
+        AgentMessage::ProcessUpdate {
+            process: process_for_reporting(state, process),
         },
     );
 }
@@ -582,17 +583,14 @@ fn reporting_detail(state: &AppState) -> String {
         .unwrap_or_else(|| "metadata".to_string())
 }
 
-fn job_for_reporting(state: &AppState, mut job: JobInfo) -> JobInfo {
+fn process_for_reporting(state: &AppState, mut process: ProcessInfo) -> ProcessInfo {
     if reporting_detail(state) == "metadata" {
-        job.program = Some("<redacted>".to_string());
-        job.args.clear();
-        job.working_directory = None;
-        job.command_preview = Some("<redacted>".to_string());
-        job.stdout_tail.clear();
-        job.stderr_tail.clear();
-        job.truncated = false;
+        process.program = Some("<redacted>".to_string());
+        process.args.clear();
+        process.working_directory = None;
+        process.command_preview = Some("<redacted>".to_string());
     }
-    job
+    process
 }
 
 fn try_send_reporting(state: &AppState, message: AgentMessage) {
@@ -1177,9 +1175,11 @@ pub(crate) async fn handle_hub_command(
         data: data.clone(),
     };
     let mut delivery_error = None;
-    for job in snapshots {
-        let job = job_for_reporting(&state, job);
-        if let Err(error) = send_agent_message(&state, AgentMessage::JobUpdate { job }).await {
+    for process in snapshots {
+        let process = process_for_reporting(&state, process);
+        if let Err(error) =
+            send_agent_message(&state, AgentMessage::ProcessUpdate { process }).await
+        {
             if delivery_error.is_none() {
                 delivery_error = Some(error);
             }

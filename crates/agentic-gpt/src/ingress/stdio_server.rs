@@ -10,11 +10,12 @@ use std::{
 };
 
 use agentic_gpt_protocol::{
-    normalize_job_group, BatchExecRequest, ExecElement, ExecRequest, HubCommand, JobGetRequest,
-    JobInfo, JobKind, JobListRequest, JobState,
+    normalize_process_group, HubCommand, ProcessBatchExecRequest, ProcessCancelRequest,
+    ProcessExecElement, ProcessExecRequest, ProcessInfo, ProcessListRequest, ProcessOutputRequest,
+    ProcessResultRequest, ProcessStatusRequest,
 };
 #[cfg(test)]
-use agentic_gpt_protocol::{JobDetail, McpBatchResponse};
+use agentic_gpt_protocol::{McpBatchResponse, ProcessDetail};
 use anyhow::Result;
 use base64::Engine;
 use chrono::Utc;
@@ -41,14 +42,13 @@ use crate::{
     local_service,
     operation::{self, tool_namespace, AdmissionError, RequestContext, RequestIngress},
     operation_result::{
-        rejection_error, slim_cancel_response, slim_job_get_response, slim_job_list_response,
-        slim_mcp_batch_response, slim_mcp_response, slim_process_response,
+        rejection_error, slim_mcp_batch_response, slim_mcp_response, slim_process_response,
     },
     state::{AppState, CapabilityProfile},
 };
 use stdio_schema::{properties_for, tool_descriptor, tool_descriptors};
 
-const INSTRUCTIONS: &str = "Agentic GPT local Tunnel worker. Start with agent.info to inspect the active profile, exact workspace/path policy, capacity, confirmation channels, MCP scheduler state, and connection state. Use file.read/search for bounded UTF-8 workspace work and file.edit for Codex apply-patch edits, process.exec/process.batch for process Jobs, mcp.callTool for one downstream MCP Job, mcp.batch for 1..16 atomically admitted child Jobs with one aggregate confirmation and bounded 8/2 concurrency, job.get/list/cancel for lifecycle control, tmux for persistent workspaces, skills for the local skills workspace, bootstrap for Room startup guidance, and browser.acquire/browser.repl for a named persistent Browser SDK JavaScript lease (bindings survive calls); use browser.reset for recovery, browser.release for final cleanup, browser.manual for selected-runtime official docs, and browser.list for bounded lease state. Browser SDK semantics belong in JavaScript. All calls remain subject to path policy, configured confirmation, audit, and bounded waits.";
+const INSTRUCTIONS: &str = "Agentic GPT local Tunnel worker. Start with agent.info to inspect the active profile, exact workspace/path policy, capacity, confirmation channels, MCP scheduler state, and connection state. Use file.read/search for bounded UTF-8 workspace work and file.edit for Codex apply-patch edits. Use process.exec/process.batch to start managed execution; process.status/list return metadata, process.output returns bounded lossless output pages, process.result retrieves retained MCP results, and process.cancel requests cancellation. mcp.callTool and mcp.batch start downstream MCP processes; skills.run starts an active local skill process. Use tmux for persistent workspaces, skills for the local skills workspace, bootstrap for Room startup guidance, and browser.acquire/browser.repl for a named persistent Browser SDK JavaScript lease (bindings survive calls); use browser.reset for recovery, browser.release for final cleanup, browser.manual for selected-runtime official docs, and browser.list for bounded lease state. Browser SDK semantics belong in JavaScript. All calls remain subject to path policy, configured confirmation, audit, and bounded waits.";
 const BROWSER_REPL_RESULT_MARKER: &str = "__agentic_browser_repl_result";
 
 pub(crate) async fn serve_stdio(state: AppState) -> Result<()> {
@@ -116,8 +116,8 @@ impl HumanTerminalTracker {
         }
     }
 
-    fn record(&self, profile: &str, source: &str, job: &JobInfo) {
-        let message = managed_terminal_event_message(profile, source, job);
+    fn record(&self, profile: &str, source: &str, process: &ProcessInfo) {
+        let message = managed_terminal_event_message(profile, source, process);
         let mut state = self
             .state
             .lock()
@@ -272,13 +272,13 @@ impl AgentMcpServer {
         };
         let browser_repl_result = self.take_browser_repl_result(&mut value);
         let special_result = browser_repl_result.or(file_read_result);
-        let job: Option<agentic_gpt_protocol::JobInfo> = value
-            .get("job")
+        let process: Option<ProcessInfo> = value
+            .get("process")
             .cloned()
             .and_then(|value| serde_json::from_value(value).ok())
             .or_else(|| serde_json::from_value(value.clone()).ok());
-        if let Some(job) = job.as_ref() {
-            crate::hub::report_job(&self.state, job.clone());
+        if let Some(process) = process.as_ref() {
+            crate::hub::report_process(&self.state, process.clone());
         }
         let is_browser_repl = name == "browser.repl";
         let is_error = value.get("error").is_some()
@@ -296,13 +296,13 @@ impl AgentMcpServer {
                 .and_then(Value::as_str)
                 .map(str::to_string)
         };
-        let job_id = job.as_ref().map(|job| job.job_id.as_str());
-        let exit_code = job.as_ref().and_then(|job| job.exit_code);
-        let active = value_has_active_job(&value);
+        let process_id = process.as_ref().map(|process| process.process_id.as_str());
+        let exit_code = process.as_ref().and_then(|process| process.exit_code);
+        let active = value_has_active_process(&value);
         let terminal_failure = value_has_terminal_failure(&value);
         let human_reason = reason
             .clone()
-            .or_else(|| human_failure_reason(&value, job.as_ref()));
+            .or_else(|| human_failure_reason(&value, process.as_ref()));
         let mut lifecycle = format!(
             "mcp_tool; ingress={}; run={}; tool={name}; profile={}; status={}; durationMs={}",
             self.ingress.label(),
@@ -317,8 +317,11 @@ impl AgentMcpServer {
             },
             (Utc::now() - started_at).num_milliseconds().max(0),
         );
-        if let Some(job_id) = job_id {
-            lifecycle.push_str(&format!("; job={}", crate::utils::compact_id(job_id)));
+        if let Some(process_id) = process_id {
+            lifecycle.push_str(&format!(
+                "; process={}",
+                crate::utils::compact_id(process_id)
+            ));
         }
         if let Some(exit_code) = exit_code {
             lifecycle.push_str(&format!("; exitCode={exit_code}"));
@@ -340,7 +343,7 @@ impl AgentMcpServer {
                 Some(value.clone())
             },
             reason,
-            job,
+            process,
         );
         Ok((value, special_result))
     }
@@ -358,7 +361,7 @@ impl AgentMcpServer {
         terminal_tracker.finish_response(
             result
                 .as_ref()
-                .map(|value| !value_has_active_job(value))
+                .map(|value| !value_has_active_process(value))
                 .unwrap_or(true),
             None,
         );
@@ -521,9 +524,11 @@ impl AgentMcpServer {
                 )
                 .await)
             }
-            "job.get" => self.dispatch_job_get(arguments).await,
-            "job.cancel" => self.dispatch_job_cancel(arguments).await,
-            "job.list" => self.dispatch_job_list(arguments).await,
+            "process.status" => self.dispatch_process_status(arguments).await,
+            "process.output" => self.dispatch_process_output(arguments).await,
+            "process.result" => self.dispatch_process_result(arguments).await,
+            "process.cancel" => self.dispatch_process_cancel(arguments).await,
+            "process.list" => self.dispatch_process_list(arguments).await,
             "tmux.sessions" => {
                 let args: TmuxSessionsArgs = from_value(arguments)?;
                 validate_tmux_sessions_args(&args)?;
@@ -964,7 +969,7 @@ impl AgentMcpServer {
             validate_stdio_arguments("process.exec", &arguments)?;
             let args: ProcessExecArgs = from_value(arguments)?;
             Ok(local_service::ProcessCall::Exec {
-                request: ExecRequest {
+                request: ProcessExecRequest {
                     agent_id: config.agent_id.clone(),
                     group: args.group,
                     program: args.program,
@@ -984,15 +989,38 @@ impl AgentMcpServer {
         .await
     }
 
-    async fn dispatch_job_get(&self, arguments: Value) -> Result<Value> {
-        let args: JobGetRequest = from_value(arguments)?;
-        let wait_seconds = args.effective_wait_seconds();
-        match crate::jobs::get_job_detail(&self.state, &args.job_id, wait_seconds).await {
-            Ok(job) => slim_job_get_response(job, args.wait_only, wait_seconds, None),
-            Err(reason) => Ok(job_error(reason)),
+    async fn dispatch_process_status(&self, arguments: Value) -> Result<Value> {
+        let request: ProcessStatusRequest = from_value(arguments)?;
+        match crate::process::get_process_status(&self.state, request).await {
+            Ok(response) => Ok(serde_json::to_value(response)?),
+            Err(reason) => Ok(structured_error_from_reason(
+                "process_status_failed",
+                reason,
+            )),
         }
     }
 
+    async fn dispatch_process_output(&self, arguments: Value) -> Result<Value> {
+        let request: ProcessOutputRequest = from_value(arguments)?;
+        match crate::process::get_process_output(&self.state, request).await {
+            Ok(response) => Ok(serde_json::to_value(response)?),
+            Err(reason) => Ok(structured_error_from_reason(
+                "process_output_failed",
+                reason,
+            )),
+        }
+    }
+
+    async fn dispatch_process_result(&self, arguments: Value) -> Result<Value> {
+        let request: ProcessResultRequest = from_value(arguments)?;
+        match crate::process::get_process_result(&self.state, request).await {
+            Ok(response) => Ok(serde_json::to_value(response)?),
+            Err(reason) => Ok(structured_error_from_reason(
+                "process_result_failed",
+                reason,
+            )),
+        }
+    }
     async fn dispatch_process_batch(
         &self,
         arguments: Value,
@@ -1004,13 +1032,13 @@ impl AgentMcpServer {
         local_service::dispatch_process(self.state.clone(), context, None, move |config| {
             validate_stdio_arguments("process.batch", &arguments)?;
             let args: ProcessBatchArgs = from_value(arguments)?;
-            let request = BatchExecRequest {
+            let request = ProcessBatchExecRequest {
                 agent_id: config.agent_id.clone(),
                 group: args.group,
                 elements: args
                     .elements
                     .into_iter()
-                    .map(|element| ExecElement {
+                    .map(|element| ProcessExecElement {
                         program: element.program,
                         args: element.args,
                         working_directory: element.working_directory,
@@ -1033,34 +1061,26 @@ impl AgentMcpServer {
         .await
     }
 
-    async fn dispatch_job_cancel(&self, arguments: Value) -> Result<Value> {
-        let args: JobCancelArgs = from_value(arguments)?;
-        match crate::jobs::cancel_job(&self.state, &args.job_id).await {
-            Ok(job) => slim_cancel_response(job, None),
-            Err(reason) => Ok(job_error(reason)),
+    async fn dispatch_process_cancel(&self, arguments: Value) -> Result<Value> {
+        let request: ProcessCancelRequest = from_value(arguments)?;
+        match crate::process::cancel_process(&self.state, &request.process_id).await {
+            Ok(response) => Ok(serde_json::to_value(response)?),
+            Err(reason) => Ok(structured_error_from_reason(
+                "process_cancel_failed",
+                reason,
+            )),
         }
     }
 
-    async fn dispatch_job_list(&self, arguments: Value) -> Result<Value> {
-        let args: JobListArgs = from_value(arguments)?;
-        let group = match normalize_stdio_group(args.group) {
+    async fn dispatch_process_list(&self, arguments: Value) -> Result<Value> {
+        let mut request: ProcessListRequest = from_value(arguments)?;
+        request.group = match normalize_stdio_group(request.group) {
             Ok(group) => group,
             Err(error) => return Ok(error),
         };
-        match crate::jobs::list_jobs_page(
-            &self.state,
-            JobListRequest {
-                group,
-                kind: args.kind,
-                state: args.state,
-                limit: args.limit,
-                cursor: args.cursor,
-            },
-        )
-        .await
-        {
-            Ok(page) => slim_job_list_response(page),
-            Err(reason) => Ok(structured_error_from_reason("job_list_failed", reason)),
+        match crate::process::get_process_list(&self.state, request).await {
+            Ok(page) => Ok(serde_json::to_value(page)?),
+            Err(reason) => Ok(structured_error_from_reason("process_list_failed", reason)),
         }
     }
 
@@ -1756,27 +1776,6 @@ struct ProcessExecArgs {
     wait_seconds: Option<u64>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct JobCancelArgs {
-    job_id: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct JobListArgs {
-    #[serde(default)]
-    group: Option<String>,
-    #[serde(default)]
-    kind: Option<JobKind>,
-    #[serde(default)]
-    state: Option<JobState>,
-    #[serde(default)]
-    limit: Option<usize>,
-    #[serde(default)]
-    cursor: Option<String>,
-}
-
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct BatchElementArgs {
@@ -2152,21 +2151,17 @@ fn admission_error_value(error: AdmissionError) -> Value {
     })
 }
 
-fn job_error(reason: String) -> Value {
-    json!({"error": {"code": reason, "message": reason}})
-}
-
 fn structured_error_from_reason(default_code: &str, message: impl Into<String>) -> Value {
     let message = message.into();
     let mut error = rejection_error(&message);
-    if error.code == "job_rejected" {
+    if error.code == "process_rejected" {
         error.code = default_code.to_string();
     }
     json!({"error": error})
 }
 
 fn normalize_stdio_group(group: Option<String>) -> std::result::Result<Option<String>, Value> {
-    normalize_job_group(group.as_deref()).map_err(|error| {
+    normalize_process_group(group.as_deref()).map_err(|error| {
         json!({
             "error": {
                 "code": error.code(),
@@ -2562,56 +2557,66 @@ fn task_id(prefix: &str) -> String {
     format!("{prefix}_{}", Uuid::new_v4().simple())
 }
 
-fn value_has_active_job(value: &Value) -> bool {
-    job_values(value).any(|job| {
-        job.get("state")
+fn value_has_active_process(value: &Value) -> bool {
+    process_values(value).any(|process| {
+        process
+            .get("state")
             .and_then(Value::as_str)
-            .is_some_and(is_active_job_state)
+            .is_some_and(is_active_process_state)
     })
 }
 
 fn value_has_terminal_failure(value: &Value) -> bool {
     value.get("error").is_some()
-        || job_values(value).any(|job| {
-            job.get("state")
+        || process_values(value).any(|process| {
+            process
+                .get("state")
                 .and_then(Value::as_str)
-                .is_some_and(is_failure_job_state)
+                .is_some_and(is_failure_process_state)
         })
 }
 
-fn human_failure_reason(value: &Value, job: Option<&JobInfo>) -> Option<String> {
-    job.and_then(|job| job.reject_reason.clone()).or_else(|| {
-        job_values(value).find_map(|job| {
-            job.get("rejectReason")
-                .and_then(Value::as_str)
-                .map(str::to_string)
+fn human_failure_reason(value: &Value, process: Option<&ProcessInfo>) -> Option<String> {
+    process
+        .and_then(|process| process.reject_reason.clone())
+        .or_else(|| {
+            process_values(value).find_map(|process| {
+                process
+                    .get("rejectReason")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
         })
-    })
 }
 
-fn job_values(value: &Value) -> impl Iterator<Item = &Value> {
-    let wrapped = value.get("job").into_iter();
+fn process_values(value: &Value) -> impl Iterator<Item = &Value> {
+    let wrapped = value.get("process").into_iter();
     let direct = value
-        .get("jobId")
+        .get("processId")
         .and_then(|_| value.get("state"))
         .map(|_| value)
         .into_iter();
-    let batch = value
-        .get("jobs")
+    let processes = value
+        .get("processes")
         .and_then(Value::as_array)
         .into_iter()
         .flatten();
-    wrapped.chain(direct).chain(batch)
+    let results = value
+        .get("results")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten();
+    wrapped.chain(direct).chain(processes).chain(results)
 }
 
-fn is_active_job_state(state: &str) -> bool {
+fn is_active_process_state(state: &str) -> bool {
     matches!(
         state,
         "queued" | "waiting_confirmation" | "starting" | "running" | "cancel_requested"
     )
 }
 
-fn is_failure_job_state(state: &str) -> bool {
+fn is_failure_process_state(state: &str) -> bool {
     matches!(
         state,
         "failed" | "rejected" | "cancelled" | "timed_out" | "unknown_after_restart"
@@ -2632,28 +2637,28 @@ fn managed_terminal_event_hook(
     profile: CapabilityProfile,
     source: impl Into<String>,
     tracker: Arc<HumanTerminalTracker>,
-) -> crate::jobs::TerminalEventHook {
+) -> crate::process::TerminalEventHook {
     let source = source.into();
     let profile = profile.label();
-    Arc::new(move |job| {
-        tracker.record(profile, &source, job);
+    Arc::new(move |process| {
+        tracker.record(profile, &source, process);
     })
 }
 
-fn managed_terminal_event_message(profile: &str, source: &str, job: &JobInfo) -> String {
-    let duration_ms = job
+fn managed_terminal_event_message(profile: &str, source: &str, process: &ProcessInfo) -> String {
+    let duration_ms = process
         .started_at
-        .map(|started_at| (job.updated_at - started_at).num_milliseconds().max(0))
+        .map(|started_at| (process.updated_at - started_at).num_milliseconds().max(0))
         .unwrap_or(0);
     let mut message = format!(
-        "managed_job; source={source}; profile={profile}; status={}; job={}; durationMs={duration_ms}",
-        job.state,
-        crate::utils::compact_id(&job.job_id)
+        "managed_process; source={source}; profile={profile}; status={}; process={}; durationMs={duration_ms}",
+        process.state,
+        crate::utils::compact_id(&process.process_id)
     );
-    if let Some(exit_code) = job.exit_code {
+    if let Some(exit_code) = process.exit_code {
         message.push_str(&format!("; exitCode={exit_code}"));
     }
-    if let Some(reason) = job.reject_reason.as_deref() {
+    if let Some(reason) = process.reject_reason.as_deref() {
         message.push_str(&format!("; errorCode={}", bounded_error_code(reason)));
     }
     message

@@ -1,8 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::process_jobs::JobInfo;
-
+use super::process::ProcessInfo;
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PolicyCounts {
@@ -88,7 +87,7 @@ pub struct SafeConfigSummary {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Capabilities {
-    pub jobs: bool,
+    pub processes: bool,
     pub confirmation: bool,
     pub notification_actions: bool,
 }
@@ -145,7 +144,7 @@ pub struct AgentRunReport {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub job_id: Option<String>,
+    pub process_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -155,7 +154,7 @@ pub struct AgentRunReport {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<BoundedJsonValue>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub job: Option<JobInfo>,
+    pub process: Option<ProcessInfo>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -180,7 +179,7 @@ pub struct HubInfoAgents {
 pub struct HubInfoCounts {
     pub pending_request_count: usize,
     pub pending_confirmation_count: usize,
-    pub cached_job_count: usize,
+    pub cached_process_count: usize,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

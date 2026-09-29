@@ -653,7 +653,7 @@ fn ledger_path() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agentic_gpt_protocol::{ExecRequest, HubCommand};
+    use agentic_gpt_protocol::{HubCommand, ProcessExecRequest};
     use parking_lot::Mutex;
     use std::sync::{Arc, LazyLock};
     use std::thread;
@@ -704,7 +704,7 @@ mod tests {
     fn exec_command(request_id: &str, agent_id: &str) -> HubCommand {
         HubCommand::Exec {
             request_id: request_id.to_string(),
-            payload: ExecRequest {
+            payload: ProcessExecRequest {
                 agent_id: agent_id.to_string(),
                 group: None,
                 program: "true".to_string(),

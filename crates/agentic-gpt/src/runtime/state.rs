@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
 
 use crate::{browser_manager::BrowserRuntimeManager, browser_runtime::BrowserRuntimeDescriptor};
-use crate::{config::Config, confirmation, jobs, skills};
+use crate::{config::Config, confirmation, process, skills};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Transport {
@@ -170,19 +170,19 @@ pub(crate) struct AppState {
     pub(crate) config: Arc<RwLock<Config>>,
     pub(crate) private_state: crate::private_state::PrivateStatePaths,
     #[allow(dead_code)]
-    pub(crate) job_history: std::sync::Arc<crate::job_history::JobHistoryStore>,
+    pub(crate) process_history: std::sync::Arc<crate::process_history::ProcessHistoryStore>,
     pub(crate) browser_runtime: Option<Arc<BrowserRuntimeContext>>,
     pub(crate) runtime: RuntimeModel,
     pub(crate) started_at: DateTime<Utc>,
     pub(crate) boot_generation: String,
     pub(crate) supervised: bool,
     pub(crate) file_locks: Arc<Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>>,
-    pub(crate) jobs: Arc<Mutex<HashMap<String, jobs::ManagedJob>>>,
+    pub(crate) processes: Arc<Mutex<HashMap<String, process::ManagedProcess>>>,
     pub(crate) hub_sender: Arc<Mutex<Option<mpsc::UnboundedSender<AgentMessage>>>>,
     pub(crate) reporting_sender: Arc<Mutex<Option<mpsc::Sender<AgentMessage>>>>,
     pub(crate) pending_confirmations: Arc<Mutex<HashMap<String, oneshot::Sender<String>>>>,
     pub(crate) temporary_mcp_allows: Arc<Mutex<Vec<confirmation::TemporaryMcpAllow>>>,
-    pub(crate) mcp_concurrency: Arc<jobs::McpConcurrency>,
+    pub(crate) mcp_concurrency: Arc<process::McpConcurrency>,
     #[allow(dead_code)] // Serialized Room maintenance starts using this in Phase 3.
     pub(crate) room_repository_writes: Arc<Mutex<()>>,
     pub(crate) skills_writes: Arc<Mutex<()>>,
@@ -191,17 +191,17 @@ pub(crate) struct AppState {
 }
 
 impl AppState {
-    pub(crate) fn new_job_id(&self) -> String {
+    pub(crate) fn new_process_id(&self) -> String {
         format!(
-            "job_{}_{}",
+            "process_{}_{}",
             self.boot_generation,
             uuid::Uuid::new_v4().simple()
         )
     }
 
-    pub(crate) fn job_id_generation<'a>(&self, job_id: &'a str) -> Option<&'a str> {
-        job_id
-            .strip_prefix("job_")
+    pub(crate) fn process_id_generation<'a>(&self, process_id: &'a str) -> Option<&'a str> {
+        process_id
+            .strip_prefix("process_")
             .and_then(|value| value.split_once('_'))
             .map(|(generation, _)| generation)
     }

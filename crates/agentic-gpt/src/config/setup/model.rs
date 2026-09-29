@@ -50,7 +50,7 @@ pub(crate) enum SetupField {
     ConfirmationChannels,
     ConfirmationLanguage,
     MaxConcurrentTasks,
-    MaxActiveJobs,
+    MaxActiveProcesses,
     MaxFileSearchContextLines,
     SandboxEnabled,
     BubblewrapPath,
@@ -180,7 +180,7 @@ pub(crate) struct ConfirmationDraft {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct LimitsDraft {
     pub(crate) max_concurrent_tasks: String,
-    pub(crate) max_active_jobs: String,
+    pub(crate) max_active_processes: String,
     pub(crate) max_file_search_context_lines: String,
 }
 
@@ -757,7 +757,7 @@ pub(crate) fn default_optional_draft_for_profile(
         }),
         OptionalSection::Limits => OptionalSectionDraft::Limits(LimitsDraft {
             max_concurrent_tasks: "2".to_string(),
-            max_active_jobs: "auto".to_string(),
+            max_active_processes: "auto".to_string(),
             max_file_search_context_lines: "5".to_string(),
         }),
         OptionalSection::Sandbox => OptionalSectionDraft::Sandbox(SandboxDraft {
@@ -813,7 +813,7 @@ fn optional_drafts_from_config(config: &Config) -> OptionalDrafts {
         }),
         limits: Some(LimitsDraft {
             max_concurrent_tasks: config.limits.max_concurrent_tasks.to_string(),
-            max_active_jobs: config.limits.max_active_jobs.configured_label(),
+            max_active_processes: config.limits.max_active_processes.configured_label(),
             max_file_search_context_lines: config.limits.max_file_search_context_lines.to_string(),
         }),
         sandbox: Some(SandboxDraft {

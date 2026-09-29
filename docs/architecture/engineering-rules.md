@@ -69,7 +69,8 @@ UI state、平台 repository/scheduler/client adapter？
 
 当前 Cargo 事实是：`agentic-gpt → protocol + apply-patch`，`agentic-gpt-hub → protocol`，Protocol/apply-patch/browser-host 无 workspace 内部 crate 依赖。Console 当前不编译依赖 Rust protocol 或网络实现。目录迁移不得改变这条方向，除非有独立 compile/deploy/security 论证。
 
-Job/Skill 状态必须保持窄 owner：Agent `jobs` 拥有运行中的 Process/Skill/MCP Job admission、取消和终态；`job_history` 拥有 Job 历史持久化；`skills`/`skill_installs` 拥有包、安装 journal、digest 和 activation lease；Hub `runs` 拥有 dispatch receipt，Hub `JobCache` 只是 projection。Skill run 可以复用 Process Job，但 `SkillInstallStatus` 不得并入 `JobState`，也不得让通用 repository/state abstraction 抹平不同 retention 或副作用。
+Process/Skill 状态必须保持窄 owner：Agent Process runtime 拥有 Process/Skill/MCP admission、取消和终态；`process.sqlite3` 持有可查询的 Process 历史；`skills`/`skill_installs` 拥有包、安装 journal、digest 和 activation lease；Hub `runs` 拥有 dispatch receipt，Hub Process cache 只是 projection。内部 managed Job 是执行记录而非另一个公共 Process 权威。Skill run 可以复用 Process lifecycle，但 `SkillInstallStatus` 不得并入执行状态，也不得让通用 repository/state abstraction 抹平不同 retention 或副作用。
+当前对外称 Process API，而不是 Job API：status/list 只投影 metadata，output/result 独立按需读取；当前 cutover 与存储边界见[Process cutover 说明](../process-cutover.md)。对内可以保留 managed Job 作为 Process runtime 的执行机制，不将其当作另一份公共 authority。
 
 ## 3. 分层规则：适配器薄，操作核心唯一，资源 owner 明确
 
@@ -199,23 +200,22 @@ Hub pending waiter 的 value 必须能验证 agent/run/request/hash；Response �
 
 | 数据 | Source of truth | 允许 projection | 禁止误称 |
 |---|---|---|---|
-| Agent policy/profile/roots | Agent validated config + AppState | Hub capability summary、Console capability state | Hub registry 不是本地 authorization |
-| Agent running Job | Agent managed Job runtime | Agent `job_history`、Hub run/report、TUI/Console status | Hub cache 不是本机执行事实 |
+| Agent running Process/Skill/MCP execution | Agent Process runtime | `process.sqlite3` 历史、Hub run/report、TUI/Console 状态及按需读取的 output/result 投影 | Hub cache 不是本机执行事实 |
 | Hub dispatch receipt | Hub SQLite `agent_runs` | HTTP/MCP run response、运维摘要 | receipt 不是副作用证明 |
 | reliable transport | Agent transport ledger + Hub receipt | replay/pending | request id 单独不是 owner |
 | Room content/Git | Agent Room repository | Hub active lease、bounded response | Hub/Console memory 不是 Room authority |
 | Android attention | Android Room | Alarm/Notification/UI | OS alarm 不是数据库，Hub item 不是 LocalMock |
 | Browser lease | Agent BrowserManager；bridge route 若启用则 browser-host | audit/result | 两个进程的 map 不自动一致 |
 | OAuth code/token、pending confirmation、Hub Job cache | 明确标为 Hub ephemeral session/projection | status/error | Hub 重启可使 OAuth/pending/cache 失效；失效不得变成默认批准、远端停止或结果丢失的推断 |
-| 已产生的 confirmation result、关联 Job history 与错误原因 | 实际结果 owner 的 Agent history/Hub receipt（按明确 retention） | status/error/history | pending session 失效不得抹掉已产生结果；audit/telemetry 不能替代结果事实 |
+| 已产生的 confirmation result、关联 Process history 与错误原因 | 实际结果 owner 的 Agent `process.sqlite3`/Hub receipt（按明确 retention） | status/error/history | pending session 失效不得抹掉已产生结果；audit/telemetry 不能替代结果事实 |
 | audit/report | 各自 evidence durability | logs/summary | telemetry 不等于 command outcome |
 
 ### R-10：耐久性等级必须写出来
 
-当前调查显示 Agent job history、transport ledger、workspace audit、Hub receipt 和 reporting channel 的 retention、lock、fsync、大小上限并不相同。新增代码不得把这些统称“已持久化”：
+当前调查显示 Agent Process history、transport ledger、workspace audit、Hub receipt 和 reporting channel 的 retention、lock、fsync、大小上限并不相同。新增代码不得把这些统称“已持久化”：
 
 - 需要可靠恢复/幂等的 command receipt 使用明确的 atomic/lock/hash/replay 设计；
-- Job history 的终态、输出尾部、cancel evidence 遵守 retention/size budget；
+- Process history 的终态与输出/结果保留必须遵守明确的 retention/size budget；
 - audit/report 可以是 best-effort，但必须记录丢失语义，不能作为安全批准或副作用证明；
 - command/result/args/CWD 可能包含秘密，日志、Hub receipt、Console projection 需采用最小字段、redaction 和 retention；
 - config、ledger、audit 变更需说明 crash/partial write/rotation/corrupt recovery，不可只 `append` 后宣称 durable。
@@ -238,7 +238,7 @@ Hub HTTP/Apps MCP/Local/stdio/CLI
   → terminal state/history/audit/report
 ```
 
-当前 `jobs.rs`、`exec.rs`、`policy.rs`、`confirmation.rs` 是实现定位；Hub `routes.rs`/`mcp_server.rs` 只投递/等待/投影，TUI 只观察。
+当前 `process/managed.rs`、`process/exec.rs`、`operations/policy.rs`、`operations/confirmation.rs` 是实现定位；Hub `routes.rs`/`mcp_server.rs` 只投递/等待/投影，TUI 只观察。
 
 **必须遵守**：
 
@@ -339,7 +339,7 @@ Hub: existing auth/route/receipt/agent semantics
 
 ### R-17：TUI、CLI 与 Demo
 
-- 生产 `crates/agentic-gpt/src/tui` 的 Process screen 使用 Local Unix `job.list` 做观察；如果新增 cancel/create，必须走与其他 ingress 相同的 operation gate，不在 TUI 自己 spawn。
+- 生产 `crates/agentic-gpt/src/tui` 的 Process screen 使用 Local Unix Process API 获取状态/列表；状态响应不包含 output/result，按需单独读取。新增 Process 操作必须走与其他 ingress 相同的 operation gate，不在 TUI 自己 spawn。
 - `config_tui` 的 draft/validation/review/commit 是配置和 secret adapter；secret review 必须保持 redaction、0600/atomic/rollback 语义。
 - `example/agentic-tui-ux-demo` 是独立 workspace 的本地内存视觉原型；不得将静态 Hub/process rows、demo state 或测试当作生产 API/运行事实。
 - CLI mode 选择、supervisor、local socket、Hub reporting 的身份/lock 不得因 TUI 复用而混淆。

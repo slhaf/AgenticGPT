@@ -1,38 +1,38 @@
 use agentic_gpt_protocol::{
-    normalize_job_group, BatchExecRequest, ExecRequest, HubCommand, JobInfo,
+    normalize_process_group, HubCommand, ProcessBatchExecRequest, ProcessExecRequest, ProcessInfo,
 };
 use anyhow::Result;
 
 use crate::{
     bootstrap,
     config::Config,
-    jobs, mcp, notify,
+    mcp, notify,
     operation::{self, AdmissionError, RequestContext},
     operation_result::{
-        slim_cancel_response, slim_job_get_response, slim_job_list_response,
         slim_mcp_batch_response, slim_mcp_response, slim_process_batch_response,
-        slim_process_response,
+        slim_process_cancel_response, slim_process_list_response, slim_process_response,
+        slim_process_status_response,
     },
-    room_maintenance, room_reads, skills,
+    process, room_maintenance, room_reads, skills,
     state::AppState,
     tmux,
 };
 
 pub(crate) enum ProcessCall {
     Exec {
-        request: ExecRequest,
-        terminal_event_hook: Option<jobs::TerminalEventHook>,
+        request: ProcessExecRequest,
+        terminal_event_hook: Option<process::TerminalEventHook>,
     },
     Batch {
-        request: BatchExecRequest,
-        terminal_event_hook: Option<jobs::TerminalEventHook>,
+        request: ProcessBatchExecRequest,
+        terminal_event_hook: Option<process::TerminalEventHook>,
     },
 }
 
 pub(crate) async fn dispatch_process<F>(
     state: AppState,
     context: RequestContext<'_>,
-    mut snapshots: Option<&mut Vec<JobInfo>>,
+    mut snapshots: Option<&mut Vec<ProcessInfo>>,
     build: F,
 ) -> Result<serde_json::Value>
 where
@@ -55,12 +55,12 @@ where
                 Ok(group) => group,
                 Err(error) => return Ok(error),
             };
-            let response = jobs::start_and_wait_process(
+            let response = process::start_and_wait_process(
                 state,
                 request,
-                jobs::ManagedJobOptions {
+                process::ProcessOptions {
                     terminal_event_hook,
-                    ..jobs::ManagedJobOptions::for_source(request_source)
+                    ..process::ProcessOptions::for_source(request_source)
                 },
             )
             .await;
@@ -74,7 +74,7 @@ where
                 Ok(group) => group,
                 Err(error) => return Ok(error),
             };
-            match jobs::start_process_batch(state, request, request_source, terminal_event_hook)
+            match process::start_process_batch(state, request, request_source, terminal_event_hook)
                 .await
             {
                 Ok(response) => slim_process_batch_response(response, snapshots),
@@ -90,14 +90,13 @@ where
 ///
 /// Transport adapters own their envelopes and acknowledgements. This module owns shared admission,
 /// operation execution, and result/error shapes for Hub and local stdio callers.
-/// When supplied by a Hub command adapter, `snapshots` receives authoritative
-/// JobInfo values from the typed operation result during projection. Other ingress
+/// ProcessInfo values from typed operation results during projection. Other ingress
 /// callers pass `None` and incur no snapshot allocation or cloning.
 pub(crate) async fn dispatch(
     state: AppState,
     command: HubCommand,
     context: RequestContext<'_>,
-    snapshots: Option<&mut Vec<JobInfo>>,
+    snapshots: Option<&mut Vec<ProcessInfo>>,
 ) -> Result<serde_json::Value> {
     match command {
         HubCommand::Exec { payload, .. } => {
@@ -144,43 +143,54 @@ async fn dispatch_inner(
     state: AppState,
     command: HubCommand,
     context: RequestContext<'_>,
-    mut snapshots: Option<&mut Vec<JobInfo>>,
+    mut snapshots: Option<&mut Vec<ProcessInfo>>,
 ) -> Result<serde_json::Value> {
     match command {
-        HubCommand::JobList { mut payload, .. } => {
-            payload.group = match normalize_group(payload.group) {
-                Ok(group) => group,
-                Err(error) => return Ok(error),
-            };
-            match jobs::list_jobs_page(&state, payload).await {
-                Ok(page) => slim_job_list_response(page),
-                Err(reason) => Ok(serde_json::json!({
-                    "error": { "code": reason.clone(), "message": reason }
-                })),
-            }
-        }
-        HubCommand::JobGet { payload, .. } => {
-            let wait_seconds = payload.effective_wait_seconds();
-            match jobs::get_job_detail(&state, &payload.job_id, wait_seconds).await {
-                Ok(job) => slim_job_get_response(
-                    job,
-                    payload.wait_only,
-                    wait_seconds,
-                    snapshots.as_deref_mut(),
-                ),
+        HubCommand::ProcessOutput { payload, .. } => {
+            match process::get_process_output(&state, payload).await {
+                Ok(response) => Ok(serde_json::to_value(response)?),
                 Err(reason) => Ok(serde_json::json!({
                     "error": {"code": reason.clone(), "message": reason}
                 })),
             }
         }
-        HubCommand::JobCancel { payload, .. } => {
-            match jobs::cancel_job(&state, &payload.job_id).await {
-                Ok(job) => slim_cancel_response(job, snapshots.as_deref_mut()),
+        HubCommand::ProcessResult { payload, .. } => {
+            match process::get_process_result(&state, payload).await {
+                Ok(response) => Ok(serde_json::to_value(response)?),
+                Err(reason) => Ok(serde_json::json!({
+                    "error": {"code": reason.clone(), "message": reason}
+                })),
+            }
+        }
+        HubCommand::ProcessList { mut payload, .. } => {
+            payload.group = match normalize_group(payload.group) {
+                Ok(group) => group,
+                Err(error) => return Ok(error),
+            };
+            match process::get_process_list(&state, payload).await {
+                Ok(page) => slim_process_list_response(page),
+                Err(reason) => Ok(serde_json::json!({
+                    "error": { "code": reason.clone(), "message": reason }
+                })),
+            }
+        }
+        HubCommand::ProcessStatus { payload, .. } => {
+            match process::get_process_status(&state, payload).await {
+                Ok(status) => slim_process_status_response(status, snapshots.as_deref_mut()),
+                Err(reason) => Ok(serde_json::json!({
+                    "error": {"code": reason.clone(), "message": reason}
+                })),
+            }
+        }
+        HubCommand::ProcessCancel { payload, .. } => {
+            match process::cancel_process(&state, &payload.process_id).await {
+                Ok(response) => slim_process_cancel_response(response),
                 Err(reason) => Ok(serde_json::json!({
                     "error": {"code": reason, "message": reason}
                 })),
             }
         }
+
         HubCommand::TmuxListSessions { .. } => Ok(tmux::list_sessions().await),
         HubCommand::TmuxListPanes { payload, .. } => Ok(tmux::list_panes(payload).await),
         HubCommand::TmuxCapturePane { payload, .. } => Ok(tmux::capture_pane(payload).await),
@@ -322,7 +332,7 @@ async fn dispatch_inner(
 fn normalize_group(
     group: Option<String>,
 ) -> std::result::Result<Option<String>, serde_json::Value> {
-    normalize_job_group(group.as_deref()).map_err(|error| {
+    normalize_process_group(group.as_deref()).map_err(|error| {
         serde_json::json!({
             "error": {"code": error.code(), "message": error.message()}
         })

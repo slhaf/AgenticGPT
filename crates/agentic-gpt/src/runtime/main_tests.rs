@@ -445,25 +445,25 @@ fn command_test_state(
             "agentic-test-private-{}",
             uuid::Uuid::new_v4().simple()
         )));
-    let job_history = crate::job_history::JobHistoryStore::open(&private_state);
+    let process_history = crate::process_history::ProcessHistoryStore::open(&private_state);
     (
         AppState {
             config_path: PathBuf::from("test-config.json"),
             config: Arc::new(RwLock::new(config)),
             private_state,
-            job_history,
+            process_history,
             browser_runtime: None,
             runtime: RuntimeModel::hub(profile),
             started_at: chrono::Utc::now(),
             boot_generation: "testboot0001".to_string(),
             supervised: false,
             file_locks: Arc::new(Mutex::new(HashMap::new())),
-            jobs: Arc::new(Mutex::new(HashMap::new())),
+            processes: Arc::new(Mutex::new(HashMap::new())),
             hub_sender: Arc::new(Mutex::new(Some(tx))),
             reporting_sender: Arc::new(Mutex::new(None)),
             pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
             temporary_mcp_allows: Arc::new(Mutex::new(Vec::new())),
-            mcp_concurrency: Arc::new(crate::jobs::McpConcurrency::new()),
+            mcp_concurrency: Arc::new(crate::process::McpConcurrency::new()),
             room_repository_writes: Arc::new(Mutex::new(())),
             skills_writes: Arc::new(Mutex::new(())),
             skill_leases: Arc::new(skills::SkillLeaseManager::new()),
@@ -1282,7 +1282,7 @@ fn standalone_reload_replaces_the_frozen_live_subset() {
         args_prefix: Vec::new(),
     });
     candidate.path_policy.write_roots = vec![PathBuf::from("/tmp/live")];
-    candidate.limits.max_active_jobs = config::MaxActiveJobs::Explicit(9);
+    candidate.limits.max_active_processes = config::MaxActiveProcesses::Explicit(9);
     candidate.limits.max_file_search_context_lines = 20;
     live.mcp_servers.insert(
         "primary".to_string(),
@@ -1317,8 +1317,8 @@ fn standalone_reload_replaces_the_frozen_live_subset() {
     assert_eq!(live.path_policy, original_path_policy);
     assert_eq!(resolved.resolved, 9);
     assert_eq!(
-        live.limits.max_active_jobs,
-        config::MaxActiveJobs::Explicit(9)
+        live.limits.max_active_processes,
+        config::MaxActiveProcesses::Explicit(9)
     );
     assert_eq!(live.limits.max_file_search_context_lines, 20);
     assert_eq!(live.toolsets, candidate_toolsets);

@@ -35,7 +35,7 @@ fn test_state() -> HubState {
         agents: Arc::new(agents::lifecycle::Connections::new()),
         dispatch: Arc::new(agents::dispatch::Dispatch::new()),
         confirmations: Arc::new(confirmation::Confirmations::new()),
-        job_cache: Arc::new(state::JobCache::new()),
+        process_cache: Arc::new(state::ProcessCache::new()),
         boot_generations: Arc::new(Mutex::new(HashMap::new())),
         active_room: Arc::new(Mutex::new(None)),
         http: reqwest::Client::new(),

@@ -211,7 +211,7 @@ fn routing_factory(servers: std::collections::HashMap<String, FakeMcpServer>) ->
     })
 }
 
-async fn managed_test_state(max_active_jobs: usize) -> (AppState, PathBuf) {
+async fn managed_test_state(max_active_processes: usize) -> (AppState, PathBuf) {
     use std::collections::HashMap;
     use tokio::sync::{Mutex, RwLock};
 
@@ -223,7 +223,8 @@ async fn managed_test_state(max_active_jobs: usize) -> (AppState, PathBuf) {
     std::fs::create_dir_all(&workspace).unwrap();
     let mut config = Config::default_config().unwrap();
     config.workspace_root = workspace;
-    config.limits.max_active_jobs = crate::config::MaxActiveJobs::Explicit(max_active_jobs);
+    config.limits.max_active_processes =
+        crate::config::MaxActiveProcesses::Explicit(max_active_processes);
     config.mcp_servers.insert(
         "fake".to_string(),
         McpServerConfig {
@@ -239,19 +240,19 @@ async fn managed_test_state(max_active_jobs: usize) -> (AppState, PathBuf) {
         config_path: root.join("config.json"),
         config: Arc::new(RwLock::new(config)),
         private_state: private_state.clone(),
-        job_history: crate::job_history::JobHistoryStore::open(&private_state),
+        process_history: crate::process_history::ProcessHistoryStore::open(&private_state),
         browser_runtime: None,
         runtime: crate::state::RuntimeModel::local(crate::state::CapabilityProfile::Normal),
         started_at: chrono::Utc::now(),
         boot_generation: "mcpboot00001".to_string(),
         supervised: false,
         file_locks: Arc::new(Mutex::new(HashMap::new())),
-        jobs: Arc::new(Mutex::new(HashMap::new())),
+        processes: Arc::new(Mutex::new(HashMap::new())),
         hub_sender: Arc::new(Mutex::new(None)),
         reporting_sender: Arc::new(Mutex::new(None)),
         pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
         temporary_mcp_allows: Arc::new(Mutex::new(Vec::new())),
-        mcp_concurrency: Arc::new(crate::jobs::McpConcurrency::new()),
+        mcp_concurrency: Arc::new(crate::process::McpConcurrency::new()),
         room_repository_writes: Arc::new(Mutex::new(())),
         skills_writes: Arc::new(Mutex::new(())),
         skill_leases: Arc::new(crate::skills::SkillLeaseManager::new()),
@@ -350,10 +351,13 @@ async fn managed_mcp_fast_result_uses_real_rmcp_transport() {
     .await
     .unwrap();
     assert!(response.completed_inline);
-    assert_eq!(response.status, JobState::Completed);
-    assert_eq!(response.detail.job.kind, agentic_gpt_protocol::JobKind::Mcp);
+    assert_eq!(response.status, ProcessState::Completed);
     assert_eq!(
-        response.detail.result.as_ref().unwrap()["structuredContent"]["ok"],
+        response.process.kind,
+        agentic_gpt_protocol::ProcessKind::Mcp
+    );
+    assert_eq!(
+        response.result.as_ref().unwrap()["structuredContent"]["ok"],
         true
     );
     assert_eq!(
@@ -375,7 +379,7 @@ async fn managed_mcp_fast_result_uses_real_rmcp_transport() {
 }
 
 #[tokio::test]
-async fn managed_mcp_deferred_result_is_retained_for_job_get() {
+async fn managed_mcp_deferred_result_is_retained_for_process_get() {
     let (state, root) = managed_test_state(2).await;
     let response = start_managed_call_with_factory(
         &state,
@@ -388,11 +392,30 @@ async fn managed_mcp_deferred_result_is_retained_for_job_get() {
     .unwrap();
     assert!(!response.completed_inline);
     assert!(response.status.is_active());
-    let detail = crate::jobs::get_job_detail(&state, &response.job_id, 2)
+    let detail = crate::process::get_process_detail(&state, &response.process.process_id, 2)
         .await
         .unwrap();
-    assert_eq!(detail.job.state, JobState::Completed);
+    assert_eq!(detail.process.state, ProcessState::Completed);
+    assert!(detail.result_available);
     assert_eq!(detail.result.unwrap()["structuredContent"]["delayed"], true);
+    let retrieved = crate::process::get_process_result(
+        &state,
+        agentic_gpt_protocol::ProcessResultRequest {
+            process_id: response.process.process_id.clone(),
+            max_bytes: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        &retrieved.status,
+        &agentic_gpt_protocol::ProcessResultStatus::Complete
+    ));
+    assert!(retrieved.result_available);
+    assert_eq!(
+        retrieved.result.unwrap()["structuredContent"]["delayed"],
+        true
+    );
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -433,10 +456,10 @@ async fn managed_mcp_cancel_while_waiting_for_hub_confirmation_cleans_pending_se
         other => panic!("unexpected message: {other:?}"),
     }
     assert_eq!(state.pending_confirmations.lock().await.len(), 1);
-    let cancelled = crate::jobs::cancel_job(&state, &response.job_id)
+    let cancelled = crate::process::cancel_process(&state, &response.process.process_id)
         .await
         .unwrap();
-    assert_eq!(cancelled.job.state, JobState::Cancelled);
+    assert_eq!(cancelled.state, ProcessState::Cancelled);
     for _ in 0..100 {
         if state.pending_confirmations.lock().await.is_empty() {
             break;
@@ -445,10 +468,25 @@ async fn managed_mcp_cancel_while_waiting_for_hub_confirmation_cleans_pending_se
     }
     assert!(state.pending_confirmations.lock().await.is_empty());
     assert!(fake.calls.lock().unwrap().is_empty());
-    let detail = crate::jobs::get_job_detail(&state, &response.job_id, 1)
+    let detail = crate::process::get_process_detail(&state, &response.process.process_id, 1)
         .await
         .unwrap();
-    assert_eq!(detail.job.state, JobState::Cancelled);
+    assert!(!detail.result_available);
+    let result = crate::process::get_process_result(
+        &state,
+        agentic_gpt_protocol::ProcessResultRequest {
+            process_id: response.process.process_id,
+            max_bytes: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        &result.status,
+        &agentic_gpt_protocol::ProcessResultStatus::Unavailable
+    ));
+    assert!(!result.result_available);
+    assert!(result.result.is_none());
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -464,9 +502,9 @@ async fn managed_mcp_tool_error_and_large_result_are_truthful() {
     )
     .await
     .unwrap();
-    assert_eq!(error.status, JobState::Failed);
-    assert_eq!(error.detail.error.as_ref().unwrap().code, "mcp_tool_error");
-    assert_eq!(error.detail.result.as_ref().unwrap()["isError"], true);
+    assert_eq!(error.status, ProcessState::Failed);
+    assert_eq!(error.error.as_ref().unwrap().code, "mcp_tool_error");
+    assert_eq!(error.result.as_ref().unwrap()["isError"], true);
 
     let large = start_managed_call_with_factory(
         &state,
@@ -477,22 +515,35 @@ async fn managed_mcp_tool_error_and_large_result_are_truthful() {
     )
     .await
     .unwrap();
-    assert_eq!(large.status, JobState::Completed);
-    assert!(large.detail.result.is_none());
-    assert!(large.detail.result_truncated);
-    assert!(large.detail.result_bytes.unwrap() > jobs::MAX_MCP_RESULT_BYTES);
+    assert_eq!(large.status, ProcessState::Completed);
+    assert!(large.result.is_none());
+    assert!(matches!(
+        large.result_status.as_ref(),
+        Some(agentic_gpt_protocol::ProcessResultStatus::TooLarge)
+    ));
+    assert!(!large.result_available);
+    assert!(large.result_bytes.unwrap() > crate::process::MAX_MCP_RESULT_BYTES);
     assert!(large
-        .detail
         .result_sha256
         .as_deref()
         .unwrap()
         .starts_with("sha256:"));
-    assert!(large
-        .detail
-        .result_preview
-        .as_deref()
-        .unwrap()
-        .contains("blob"));
+    assert!(large.result_preview.as_deref().unwrap().contains("blob"));
+    let unavailable = crate::process::get_process_result(
+        &state,
+        agentic_gpt_protocol::ProcessResultRequest {
+            process_id: large.process.process_id.clone(),
+            max_bytes: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        &unavailable.status,
+        &agentic_gpt_protocol::ProcessResultStatus::TooLarge
+    ));
+    assert!(!unavailable.result_available);
+    assert!(unavailable.result.is_none());
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -509,9 +560,9 @@ async fn managed_mcp_timeout_sends_exact_cancel_notification() {
     )
     .await
     .unwrap();
-    assert_eq!(response.status, JobState::TimedOut);
+    assert_eq!(response.status, ProcessState::TimedOut);
     assert_eq!(
-        response.detail.job.termination_evidence.as_deref(),
+        response.process.termination_evidence.as_deref(),
         Some("mcp_timeout_cancel_notification_sent")
     );
     assert!(fake.context_cancelled.load(Ordering::Acquire));
@@ -536,23 +587,23 @@ async fn managed_mcp_user_cancel_observes_remote_cancellation() {
     .await
     .unwrap();
     wait_for_fake_request(&fake).await;
-    let cancelling = crate::jobs::cancel_job(&state, &response.job_id)
+    let cancelling = crate::process::cancel_process(&state, &response.process.process_id)
         .await
         .unwrap();
     assert!(matches!(
-        cancelling.job.state,
-        JobState::CancelRequested | JobState::Detached
+        cancelling.state,
+        ProcessState::CancelRequested | ProcessState::Detached
     ));
-    let detail = crate::jobs::get_job_detail(&state, &response.job_id, 3)
+    let detail = crate::process::get_process_detail(&state, &response.process.process_id, 3)
         .await
         .unwrap();
-    assert_eq!(detail.job.state, JobState::Detached);
+    assert_eq!(detail.process.state, ProcessState::Detached);
     assert_eq!(
-        detail.job.cancel_outcome.as_deref(),
+        detail.process.cancel_outcome.as_deref(),
         Some("notification_sent")
     );
     assert_eq!(
-        detail.job.termination_evidence.as_deref(),
+        detail.process.termination_evidence.as_deref(),
         Some("transport_or_remote_error_after_cancel")
     );
     assert!(fake.context_cancelled.load(Ordering::Acquire));
@@ -577,19 +628,16 @@ async fn managed_mcp_cancel_without_terminal_evidence_becomes_detached() {
     .await
     .unwrap();
     wait_for_fake_request(&fake).await;
-    let cancelling = crate::jobs::cancel_job(&state, &response.job_id)
+    let cancelling = crate::process::cancel_process(&state, &response.process.process_id)
         .await
         .unwrap();
-    assert_eq!(
-        cancelling.job.cancel_outcome.as_deref(),
-        Some("notification_sent")
-    );
-    let detail = crate::jobs::get_job_detail(&state, &response.job_id, 4)
+    assert_eq!(cancelling.cancel_outcome, "notification_sent");
+    let detail = crate::process::get_process_detail(&state, &response.process.process_id, 4)
         .await
         .unwrap();
-    assert_eq!(detail.job.state, JobState::Detached);
+    assert_eq!(detail.process.state, ProcessState::Detached);
     assert_eq!(
-        detail.job.termination_evidence.as_deref(),
+        detail.process.termination_evidence.as_deref(),
         Some("transport_or_remote_error_after_cancel")
     );
     assert_eq!(fake.cancelled_ids.lock().unwrap().len(), 1);
@@ -620,11 +668,11 @@ async fn managed_mcp_shares_capacity_and_rejects_oversized_arguments() {
     .await
     .unwrap_err()
     .to_string();
-    assert!(capacity.starts_with("max_active_jobs_reached"));
+    assert!(capacity.starts_with("max_active_processes_reached"));
     let oversized = start_managed_call_with_factory(
         &state,
         managed_request(
-            json!({"blob": "x".repeat(jobs::MAX_MCP_ARGUMENT_BYTES + 1)}),
+            json!({"blob": "x".repeat(crate::process::MAX_MCP_ARGUMENT_BYTES + 1)}),
             0,
         ),
         "local:mcp.callTool",
@@ -636,13 +684,16 @@ async fn managed_mcp_shares_capacity_and_rejects_oversized_arguments() {
     .to_string();
     assert!(oversized.starts_with("mcp_tool_arguments_too_large"));
     assert_eq!(
-        crate::jobs::list_jobs(&state, agentic_gpt_protocol::JobListRequest::default(),)
-            .await
-            .len(),
+        crate::process::list_processes(
+            &state,
+            agentic_gpt_protocol::ProcessListRequest::default(),
+        )
+        .await
+        .len(),
         1
     );
-    let _ = crate::jobs::cancel_job(&state, &first.job_id).await;
-    let _ = crate::jobs::get_job_detail(&state, &first.job_id, 3).await;
+    let _ = crate::process::cancel_process(&state, &first.process.process_id).await;
+    let _ = crate::process::get_process_detail(&state, &first.process.process_id, 3).await;
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -750,11 +801,12 @@ async fn mcp_batch_preflight_and_capacity_fail_atomically_before_confirmation() 
     .to_string()
     .starts_with("mcp_batch_arguments_too_large"));
 
-    assert!(
-        crate::jobs::list_jobs(&state, agentic_gpt_protocol::JobListRequest::default(),)
-            .await
-            .is_empty()
-    );
+    assert!(crate::process::list_processes(
+        &state,
+        agentic_gpt_protocol::ProcessListRequest::default(),
+    )
+    .await
+    .is_empty());
     assert!(state.pending_confirmations.lock().await.is_empty());
     assert!(fake.calls.lock().unwrap().is_empty());
 
@@ -768,7 +820,7 @@ async fn mcp_batch_preflight_and_capacity_fail_atomically_before_confirmation() 
     assert!(rejection_records.iter().all(|record| {
         record["tool"] == "mcp.batch"
             && record["outcome"] == "validation_rejected"
-            && record["childJobIds"] == json!([])
+            && record["childProcessIds"] == json!([])
     }));
     assert!(!rejection_audit.contains("\"program\":\"mcp.callTool\""));
 
@@ -793,10 +845,10 @@ async fn mcp_batch_preflight_and_capacity_fail_atomically_before_confirmation() 
     .await
     .unwrap_err()
     .to_string()
-    .starts_with("max_active_jobs_reached"));
-    assert!(crate::jobs::list_jobs(
+    .starts_with("max_active_processes_reached"));
+    assert!(crate::process::list_processes(
         &capacity_state,
-        agentic_gpt_protocol::JobListRequest::default(),
+        agentic_gpt_protocol::ProcessListRequest::default(),
     )
     .await
     .is_empty());
@@ -815,8 +867,11 @@ async fn mcp_batch_preflight_and_capacity_fail_atomically_before_confirmation() 
     assert_eq!(capacity_records.len(), 1);
     assert_eq!(capacity_records[0]["tool"], "mcp.batch");
     assert_eq!(capacity_records[0]["outcome"], "capacity_rejected");
-    assert_eq!(capacity_records[0]["errorCode"], "max_active_jobs_reached");
-    assert_eq!(capacity_records[0]["childJobIds"], json!([]));
+    assert_eq!(
+        capacity_records[0]["errorCode"],
+        "max_active_processes_reached"
+    );
+    assert_eq!(capacity_records[0]["childProcessIds"], json!([]));
     assert!(!capacity_audit.contains("\"program\":\"mcp.callTool\""));
     let _ = std::fs::remove_dir_all(root);
     let _ = std::fs::remove_dir_all(capacity_root);
@@ -861,16 +916,25 @@ async fn mcp_batch_sequential_fail_fast_preserves_order_and_audit_correlation() 
             .collect::<Vec<_>>(),
         vec![Some("first"), Some("second"), Some("third")]
     );
-    assert_eq!(response.results[0].detail.job.state, JobState::Failed);
-    assert_eq!(response.results[1].detail.job.state, JobState::Skipped);
-    assert_eq!(response.results[2].detail.job.state, JobState::Skipped);
+    assert_eq!(
+        response.results[0].process.process.state,
+        ProcessState::Failed
+    );
+    assert_eq!(
+        response.results[1].process.process.state,
+        ProcessState::Skipped
+    );
+    assert_eq!(
+        response.results[2].process.process.state,
+        ProcessState::Skipped
+    );
     for (index, result) in response.results.iter().enumerate() {
         assert_eq!(
-            result.detail.job.batch_id.as_deref(),
+            result.process.process.batch_id.as_deref(),
             Some(response.batch_id.as_str())
         );
-        assert_eq!(result.detail.job.batch_index, Some(index));
-        assert_eq!(result.detail.job.batch_call_id, result.id);
+        assert_eq!(result.process.process.batch_index, Some(index));
+        assert_eq!(result.process.process.batch_call_id, result.id);
     }
     assert_eq!(error.calls.lock().unwrap().len(), 1);
     assert!(fast.calls.lock().unwrap().is_empty());
@@ -970,7 +1034,7 @@ async fn mcp_batch_parallel_enforces_per_server_and_global_concurrency() {
     .await
     .unwrap();
     assert_eq!(response.status, McpBatchStatus::Completed);
-    assert_eq!(tracker.max_active(), jobs::MCP_GLOBAL_CONCURRENCY);
+    assert_eq!(tracker.max_active(), crate::process::MCP_GLOBAL_CONCURRENCY);
     assert_eq!(global_state.mcp_concurrency.active(), 0);
     assert_eq!(global_state.mcp_concurrency.queued(), 0);
     let _ = std::fs::remove_dir_all(root);
@@ -1013,21 +1077,21 @@ async fn mcp_batch_clips_late_results_to_the_aggregate_budget() {
     let retained = response
         .results
         .iter()
-        .filter(|result| result.detail.result.is_some())
+        .filter(|result| result.process.result.is_some())
         .count();
     let clipped = response
         .results
         .iter()
-        .filter(|result| result.detail.result.is_none() && result.result_omitted)
+        .filter(|result| result.process.result.is_none() && result.result_omitted)
         .count();
     assert!(retained > 0);
     assert!(clipped > 0);
-    assert!(response.results.last().unwrap().detail.result.is_none());
+    assert!(response.results.last().unwrap().process.result.is_none());
     assert!(response
         .results
         .last()
         .unwrap()
-        .detail
+        .process
         .result_sha256
         .as_deref()
         .unwrap()
@@ -1188,7 +1252,7 @@ async fn mcp_batch_multi_server_uses_one_non_scoped_confirmation_and_rejects_all
     assert!(response
         .results
         .iter()
-        .all(|result| result.detail.job.state == JobState::Rejected));
+        .all(|result| result.process.process.state == ProcessState::Rejected));
     assert!(first.calls.lock().unwrap().is_empty());
     assert!(second.calls.lock().unwrap().is_empty());
     assert!(!confirmation::temporary_mcp_allowed(&state, "fake").await);
@@ -1237,17 +1301,18 @@ async fn mcp_batch_child_cancel_during_aggregate_confirmation_cancels_all_before
         }
         other => panic!("unexpected message: {other:?}"),
     }
-    let jobs =
-        crate::jobs::list_jobs(&state, agentic_gpt_protocol::JobListRequest::default()).await;
-    assert_eq!(jobs.len(), 2);
-    assert!(jobs
+    let processes =
+        crate::process::list_processes(&state, agentic_gpt_protocol::ProcessListRequest::default())
+            .await;
+    assert_eq!(processes.len(), 2);
+    assert!(processes
         .iter()
-        .all(|job| job.state == JobState::WaitingConfirmation));
-    let cancelled_job_id = jobs[0].job_id.clone();
-    let cancelled = crate::jobs::cancel_job(&state, &cancelled_job_id)
+        .all(|process| process.state == ProcessState::WaitingConfirmation));
+    let cancelled_process_id = processes[0].process_id.clone();
+    let cancelled = crate::process::cancel_process(&state, &cancelled_process_id)
         .await
         .unwrap();
-    assert_eq!(cancelled.job.state, JobState::Cancelled);
+    assert_eq!(cancelled.state, ProcessState::Cancelled);
 
     let response = timeout(Duration::from_secs(5), task)
         .await
@@ -1260,16 +1325,16 @@ async fn mcp_batch_child_cancel_during_aggregate_confirmation_cancels_all_before
     assert!(response
         .results
         .iter()
-        .all(|result| result.detail.job.state == JobState::Cancelled));
+        .all(|result| result.process.process.state == ProcessState::Cancelled));
     let directly_cancelled = response
         .results
         .iter()
-        .find(|result| result.detail.job.job_id == cancelled_job_id)
+        .find(|result| result.process.process.process_id == cancelled_process_id)
         .unwrap();
     assert_eq!(
         directly_cancelled
-            .detail
-            .job
+            .process
+            .process
             .termination_evidence
             .as_deref(),
         Some("local_cancel_before_downstream_request")
@@ -1277,9 +1342,9 @@ async fn mcp_batch_child_cancel_during_aggregate_confirmation_cancels_all_before
     assert!(response
         .results
         .iter()
-        .filter(|result| { result.detail.job.job_id != cancelled_job_id })
+        .filter(|result| result.process.process.process_id != cancelled_process_id)
         .all(|result| {
-            result.detail.job.termination_evidence.as_deref()
+            result.process.process.termination_evidence.as_deref()
                 == Some("aggregate_authorization_decision")
         }));
     for _ in 0..100 {

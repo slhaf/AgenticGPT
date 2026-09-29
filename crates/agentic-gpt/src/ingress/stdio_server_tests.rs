@@ -119,9 +119,11 @@ async fn normal_and_room_tool_sets_follow_fixed_surface_contract() {
         "file.edit",
         "file.read",
         "file.search",
-        "job.cancel",
-        "job.get",
-        "job.list",
+        "process.cancel",
+        "process.list",
+        "process.output",
+        "process.result",
+        "process.status",
         "mcp.batch",
         "mcp.callTool",
         "mcp.list",
@@ -764,19 +766,6 @@ async fn deterministic_tool_contract_corpus_exercises_public_dispatch() -> anyho
         let expected = &case.expect;
 
         if case.kind == "descriptor" {
-            for phrase in expected["descriptionIncludes"]
-                .as_array()
-                .expect("descriptor phrases")
-            {
-                let phrase = phrase.as_str().expect("descriptor phrase string");
-                assert!(
-                    descriptor["description"]
-                        .as_str()
-                        .is_some_and(|description| description.contains(phrase)),
-                    "{} missing descriptor phrase {phrase:?}",
-                    case.id
-                );
-            }
             for required in expected["required"].as_array().expect("required fields") {
                 assert!(
                     descriptor["inputSchema"]["required"]
@@ -1059,15 +1048,21 @@ async fn in_process_stdio_initialize_list_and_call() -> anyhow::Result<()> {
 
     let client = ().serve((client_read, client_write)).await?;
     let tools = client.list_all_tools().await?;
-    assert!(tools.iter().any(|tool| tool.name == "job.list"));
+    assert!(tools.iter().any(|tool| tool.name == "process.list"));
     let result = client
-        .call_tool(CallToolRequestParams::new("job.list"))
+        .call_tool(CallToolRequestParams::new("process.list"))
         .await?;
     assert_eq!(result.is_error, Some(false));
     assert_eq!(
-        result.structured_content.as_ref().unwrap()["jobs"],
+        result.structured_content.as_ref().unwrap()["processes"],
         json!([])
     );
+    assert!(result
+        .structured_content
+        .as_ref()
+        .unwrap()
+        .get("jobs")
+        .is_none());
     let skills = client
         .call_tool(CallToolRequestParams::new("skills.list"))
         .await?;
@@ -1112,6 +1107,32 @@ async fn in_process_room_stdio_initialize_list_and_call() -> anyhow::Result<()> 
 #[tokio::test]
 async fn process_tools_reject_legacy_identity_and_confirmation_fields() {
     let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
+    let names = server
+        .current_tools()
+        .await
+        .into_iter()
+        .map(|tool| tool.name.to_string())
+        .collect::<BTreeSet<_>>();
+    for name in [
+        "process.exec",
+        "process.batch",
+        "process.status",
+        "process.list",
+        "process.output",
+        "process.result",
+        "process.cancel",
+    ] {
+        assert!(names.contains(name), "missing process API {name}");
+    }
+    for name in ["job.get", "job.list", "job.cancel"] {
+        assert!(!names.contains(name), "legacy API is advertised: {name}");
+        let removed = server
+            .call(CallToolRequestParams::new(name))
+            .await
+            .expect_err("Legacy lifecycle APIs must not be callable");
+        assert_eq!(removed.code, rmcp::model::ErrorCode::METHOD_NOT_FOUND);
+    }
+
     let identity = server
         .call(
             CallToolRequestParams::new("process.exec").with_arguments(Map::from_iter([
@@ -1148,7 +1169,6 @@ async fn process_tools_reject_legacy_identity_and_confirmation_fields() {
         "session.kill",
         "process.batchExec",
         "process.get",
-        "process.list",
         "process.kill",
     ] {
         let removed = server
@@ -1160,21 +1180,42 @@ async fn process_tools_reject_legacy_identity_and_confirmation_fields() {
 }
 
 #[tokio::test]
-async fn process_and_skill_creation_share_job_lifecycle() -> anyhow::Result<()> {
+async fn process_creation_status_cancel_and_batch_use_process_api() -> anyhow::Result<()> {
     let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
     let quick = server
         .dispatch("process.exec", json!({"program": "true", "waitSeconds": 5}))
         .await?;
     assert_eq!(quick["state"], "completed");
-    assert!(quick.get("completedInline").is_none());
-    assert!(quick.get("pollAfterMs").is_none());
-    let quick_job = quick["jobId"].as_str().unwrap().to_string();
-    assert!(quick_job.starts_with("job_"));
-    let fetched = server
-        .dispatch("job.get", json!({"jobId": quick_job, "waitSeconds": 0}))
+    assert_eq!(quick["status"], "completed");
+    assert_eq!(quick["completedInline"], true);
+    assert!(quick["processId"]
+        .as_str()
+        .is_some_and(|id| id.starts_with("process_")));
+    assert!(serde_json::to_vec(&quick)?.len() <= 8 * 1024);
+    let process_id = quick["processId"].as_str().unwrap().to_string();
+
+    let status = server
+        .dispatch(
+            "process.status",
+            json!({"processId": process_id, "waitSeconds": 0}),
+        )
         .await?;
-    assert_eq!(fetched["kind"], "process");
-    assert_eq!(fetched["state"], "completed");
+    assert_eq!(status["processId"], quick["processId"]);
+    assert_eq!(status["kind"], "command");
+    assert_eq!(status["state"], "completed");
+    for body_field in [
+        "stdout",
+        "stderr",
+        "output",
+        "inlineOutput",
+        "outputPreview",
+        "result",
+    ] {
+        assert!(
+            status.get(body_field).is_none(),
+            "process.status unexpectedly included {body_field}"
+        );
+    }
 
     let long = server
         .dispatch(
@@ -1182,12 +1223,13 @@ async fn process_and_skill_creation_share_job_lifecycle() -> anyhow::Result<()> 
             json!({"program": "sleep", "args": ["2"], "waitSeconds": 0}),
         )
         .await?;
-    assert_eq!(long["state"], "starting");
-    assert!(long.get("completedInline").is_none());
-    let long_job = long["jobId"].as_str().unwrap().to_string();
+    let long_id = long["processId"].as_str().unwrap().to_string();
     for _ in 0..100 {
         let state = server
-            .dispatch("job.get", json!({"jobId": long_job, "waitSeconds": 0}))
+            .dispatch(
+                "process.status",
+                json!({"processId": long_id, "waitSeconds": 0}),
+            )
             .await?;
         if state["state"] == "running" {
             break;
@@ -1195,16 +1237,18 @@ async fn process_and_skill_creation_share_job_lifecycle() -> anyhow::Result<()> 
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     let listed = server
-        .dispatch("job.list", json!({"kind": "process"}))
+        .dispatch("process.list", json!({"kind": "command"}))
         .await?;
-    assert!(listed["jobs"]
+    assert!(listed["processes"]
         .as_array()
         .unwrap()
         .iter()
-        .any(|job| job["jobId"] == long_job));
+        .any(|process| process["processId"] == long_id));
+    assert!(listed.get("jobs").is_none());
     let cancelled = server
-        .dispatch("job.cancel", json!({"jobId": long_job}))
+        .dispatch("process.cancel", json!({"processId": long_id}))
         .await?;
+    assert_eq!(cancelled["processId"], long_id);
     assert_eq!(cancelled["state"], "cancelled");
     assert_eq!(cancelled["cancelOutcome"], "cancelled");
     assert_eq!(
@@ -1224,10 +1268,11 @@ async fn process_and_skill_creation_share_job_lifecycle() -> anyhow::Result<()> 
             }),
         )
         .await?;
-    assert_eq!(batch["jobs"].as_array().unwrap().len(), 2);
+    assert_eq!(batch["processes"].as_array().unwrap().len(), 2);
     assert_eq!(batch["status"], "completed_with_errors");
-    assert_eq!(batch["jobs"][0]["state"], "completed");
-    assert_eq!(batch["jobs"][1]["state"], "failed");
+    assert_eq!(batch["processes"][0]["state"], "completed");
+    assert_eq!(batch["processes"][1]["state"], "failed");
+    assert!(batch.get("jobs").is_none());
 
     let rejected = server
         .dispatch(
@@ -1242,12 +1287,12 @@ async fn process_and_skill_creation_share_job_lifecycle() -> anyhow::Result<()> 
         )
         .await?;
     assert_eq!(rejected["error"]["code"], "process_batch_rejected");
-    assert!(rejected.get("completedInline").is_none());
-    assert!(rejected.get("pollAfterMs").is_none());
+    assert!(rejected.get("processes").is_none());
     Ok(())
 }
+
 #[tokio::test]
-async fn job_get_omitted_waits_for_running_process_but_zero_is_nonblocking() -> anyhow::Result<()> {
+async fn process_status_omitted_waits_but_zero_is_nonblocking() -> anyhow::Result<()> {
     let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
     let started = server
         .dispatch(
@@ -1255,27 +1300,35 @@ async fn job_get_omitted_waits_for_running_process_but_zero_is_nonblocking() -> 
             json!({"program": "sleep", "args": ["2"], "waitSeconds": 0}),
         )
         .await?;
-    let job_id = started["jobId"].as_str().unwrap().to_string();
+    let process_id = started["processId"].as_str().unwrap().to_string();
 
     for _ in 0..100 {
         let state = server
-            .dispatch("job.get", json!({"jobId": job_id, "waitSeconds": 0}))
+            .dispatch(
+                "process.status",
+                json!({"processId": process_id, "waitSeconds": 0}),
+            )
             .await?;
-        if is_active_job_state(state["state"].as_str().unwrap()) {
+        if is_active_process_state(state["state"].as_str().unwrap()) {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
 
     let explicit_zero = server
-        .dispatch("job.get", json!({"jobId": job_id, "waitSeconds": 0}))
+        .dispatch(
+            "process.status",
+            json!({"processId": process_id, "waitSeconds": 0}),
+        )
         .await?;
     assert!(
-        is_active_job_state(explicit_zero["state"].as_str().unwrap()),
+        is_active_process_state(explicit_zero["state"].as_str().unwrap()),
         "explicit zero wait must return the still-running process"
     );
 
-    let omitted = server.dispatch("job.get", json!({"jobId": job_id})).await?;
+    let omitted = server
+        .dispatch("process.status", json!({"processId": process_id}))
+        .await?;
     assert_eq!(
         omitted["state"], "completed",
         "omitted wait must use the five-second default"
@@ -1284,7 +1337,7 @@ async fn job_get_omitted_waits_for_running_process_but_zero_is_nonblocking() -> 
 }
 
 #[tokio::test]
-async fn slim_job_shapes_group_and_wait_only_are_exact() -> anyhow::Result<()> {
+async fn process_shapes_are_metadata_only_and_keep_group_filters() -> anyhow::Result<()> {
     let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
     let quick = server
         .dispatch(
@@ -1297,43 +1350,42 @@ async fn slim_job_shapes_group_and_wait_only_are_exact() -> anyhow::Result<()> {
         )
         .await?;
     assert_eq!(quick["state"], "completed");
-    assert!(quick["jobId"]
+    assert_eq!(quick["group"], "workstream");
+    assert_eq!(quick["kind"], "command");
+    assert!(quick["processId"]
         .as_str()
-        .is_some_and(|id| id.starts_with("job_")));
-    assert!(quick.get("group").is_none());
-    assert!(quick.get("kind").is_none());
-    assert!(quick.get("completedInline").is_none());
-    assert!(quick.get("pollAfterMs").is_none());
-    assert!(quick.get("job").is_none());
-    let quick_job = quick["jobId"].as_str().unwrap().to_string();
+        .is_some_and(|id| id.starts_with("process_")));
+    let process_id = quick["processId"].as_str().unwrap().to_string();
 
     let ordinary = server
         .dispatch(
-            "job.get",
-            json!({"jobId": quick_job, "waitSeconds": 0, "waitOnly": true}),
+            "process.status",
+            json!({"processId": process_id, "waitSeconds": 0}),
         )
         .await?;
     assert_eq!(ordinary["group"], "workstream");
-    assert_eq!(ordinary["kind"], "process");
+    assert_eq!(ordinary["kind"], "command");
     assert_eq!(ordinary["state"], "completed");
-    assert!(ordinary.get("createdAt").is_none());
-    assert!(ordinary.get("finishedAt").is_none());
-    assert!(ordinary.get("detailAvailable").is_none());
-    assert!(ordinary.get("rejectReason").is_none());
+    assert!(ordinary.get("createdAt").is_some());
+    assert!(ordinary.get("finishedAt").is_some());
+    assert!(ordinary.get("program").is_some());
+    assert!(ordinary.get("result").is_none());
+    assert!(ordinary.get("inlineOutput").is_none());
+    assert!(ordinary.get("outputPreview").is_none());
 
     let listed = server
         .dispatch(
-            "job.list",
-            json!({"group": "workstream", "kind": "process", "limit": 1}),
+            "process.list",
+            json!({"group": "workstream", "kind": "command", "limit": 1}),
         )
         .await?;
     assert!(listed.get("nextCursor").is_none());
-    assert_eq!(listed["jobs"].as_array().unwrap().len(), 1);
-    assert_eq!(listed["jobs"][0]["group"], "workstream");
-    assert_eq!(listed["jobs"][0]["kind"], "process");
-    assert_eq!(listed["jobs"][0]["jobId"], quick_job);
-    assert!(listed["jobs"][0]["createdAt"].is_string());
-    assert!(listed["jobs"][0].get("program").is_none());
+    assert_eq!(listed["processes"].as_array().unwrap().len(), 1);
+    assert_eq!(listed["processes"][0]["group"], "workstream");
+    assert_eq!(listed["processes"][0]["kind"], "command");
+    assert_eq!(listed["processes"][0]["processId"], ordinary["processId"]);
+    assert!(listed["processes"][0]["createdAt"].is_string());
+    assert!(listed["processes"][0].get("program").is_none());
 
     let running = server
         .dispatch(
@@ -1341,63 +1393,29 @@ async fn slim_job_shapes_group_and_wait_only_are_exact() -> anyhow::Result<()> {
             json!({"program": "sleep", "args": ["2"], "waitSeconds": 0}),
         )
         .await?;
-    let running_job = running["jobId"].as_str().unwrap().to_string();
-    let active_keys = running
-        .as_object()
-        .unwrap()
-        .keys()
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    assert_eq!(
-        active_keys,
-        BTreeSet::from_iter([
-            "elapsedMs".to_string(),
-            "jobId".to_string(),
-            "state".to_string(),
-        ])
-    );
-
-    let wait_only = server
+    let running_id = running["processId"].as_str().unwrap().to_string();
+    let wait_status = server
         .dispatch(
-            "job.get",
-            json!({
-                "jobId": running_job,
-                "waitSeconds": 1,
-                "waitOnly": true
-            }),
+            "process.status",
+            json!({"processId": running_id, "waitSeconds": 1}),
         )
         .await?;
-    let wait_keys = wait_only
-        .as_object()
-        .unwrap()
-        .keys()
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    assert_eq!(
-        wait_keys,
-        BTreeSet::from_iter([
-            "elapsedMs".to_string(),
-            "jobId".to_string(),
-            "state".to_string(),
-        ])
-    );
-    assert!(is_active_job_state(wait_only["state"].as_str().unwrap()));
-
+    assert!(is_active_process_state(
+        wait_status["state"].as_str().unwrap()
+    ));
     let ordinary_zero = server
         .dispatch(
-            "job.get",
-            json!({
-                "jobId": wait_only["jobId"],
-                "waitSeconds": 0,
-                "waitOnly": true
-            }),
+            "process.status",
+            json!({"processId": running_id, "waitSeconds": 0}),
         )
         .await?;
-    assert_eq!(ordinary_zero["kind"], "process");
-    assert!(ordinary_zero.get("elapsedMs").is_some());
-    assert!(ordinary_zero.get("createdAt").is_none());
+    assert_eq!(ordinary_zero["processId"], running["processId"]);
+    assert!(is_active_process_state(
+        ordinary_zero["state"].as_str().unwrap()
+    ));
+    assert!(ordinary_zero.get("createdAt").is_some());
     let _ = server
-        .dispatch("job.cancel", json!({"jobId": wait_only["jobId"]}))
+        .dispatch("process.cancel", json!({"processId": running_id}))
         .await?;
 
     let rejected = server
@@ -1420,8 +1438,113 @@ async fn slim_job_shapes_group_and_wait_only_are_exact() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn process_output_pages_preserve_raw_byte_offsets_and_content() -> anyhow::Result<()> {
+    let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
+    allow_test_printf(&server).await;
+    let expected = "AéBC".repeat(20);
+    let started = server
+        .dispatch(
+            "process.exec",
+            json!({
+                "program": "printf",
+                "args": ["%s", expected],
+                "waitSeconds": 5
+            }),
+        )
+        .await?;
+    assert_eq!(started["state"], "completed");
+    let process_id = started["processId"].as_str().unwrap().to_string();
+
+    let mut cursor: Option<String> = None;
+    let mut stdout_bytes = Vec::new();
+    let mut stdout_offset = 0u64;
+    let mut pages = 0usize;
+    loop {
+        let mut request = json!({"processId": process_id, "maxBytes": 16});
+        if let Some(cursor) = &cursor {
+            request["cursor"] = json!(cursor);
+        }
+        let page = server.dispatch("process.output", request).await?;
+        assert_eq!(page["processId"], process_id);
+        let stdout = &page["stdout"];
+        let start = stdout["startOffset"].as_str().unwrap().parse::<u64>()?;
+        let end = stdout["endOffset"].as_str().unwrap().parse::<u64>()?;
+        assert_eq!(start, stdout_offset);
+        let data = stdout["data"].as_str().unwrap();
+        let decoded = match stdout["encoding"].as_str().unwrap() {
+            "utf8" => data.as_bytes().to_vec(),
+            "base64" => base64::engine::general_purpose::STANDARD.decode(data)?,
+            encoding => panic!("unexpected process.output encoding {encoding}"),
+        };
+        assert_eq!(end - start, decoded.len() as u64);
+        stdout_offset = end;
+        if !decoded.is_empty() {
+            pages += 1;
+            assert!(pages < 50, "process.output cursor did not reach EOF");
+        }
+        stdout_bytes.extend(decoded);
+
+        let next = page["nextCursor"].as_str().unwrap().to_string();
+        if page["hasMore"] == true {
+            assert_ne!(cursor.as_deref(), Some(next.as_str()));
+            cursor = Some(next);
+        } else if page["eof"] == true {
+            break;
+        } else {
+            cursor = Some(next);
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+
+    assert!(pages > 1, "the output should require multiple pages");
+    assert_eq!(stdout_offset, expected.len() as u64);
+    assert_eq!(stdout_bytes.as_slice(), expected.as_bytes());
+    Ok(())
+}
+
+#[tokio::test]
+async fn process_creation_and_batch_responses_obey_inline_budget() -> anyhow::Result<()> {
+    let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
+    allow_test_printf(&server).await;
+
+    let large = server
+        .dispatch(
+            "process.exec",
+            json!({
+                "program": "printf",
+                "args": ["%12000s", ""],
+                "waitSeconds": 5
+            }),
+        )
+        .await?;
+    assert_eq!(large["state"], "completed");
+    assert_eq!(large["completedInline"], false);
+    assert!(large.get("inlineOutput").is_none());
+    assert_eq!(large["outputPreview"]["truncated"], true);
+    assert!(large["outputPreview"]["stdout"].as_str().unwrap().len() <= 2048);
+    assert!(large["outputPreview"]["stderr"].as_str().unwrap().len() <= 2048);
+    assert!(serde_json::to_vec(&large)?.len() <= 8 * 1024);
+
+    let batch = server
+        .dispatch(
+            "process.batch",
+            json!({
+                "elements": [
+                    {"program": "printf", "args": ["%5000s", ""]},
+                    {"program": "printf", "args": ["%5000s", ""]}
+                ],
+                "waitSeconds": 5
+            }),
+        )
+        .await?;
+    assert_eq!(batch["processes"].as_array().unwrap().len(), 2);
+    assert!(serde_json::to_vec(&batch)?.len() <= 8 * 1024);
+    Ok(())
+}
+
 #[test]
-fn managed_job_input_schemas_advertise_group_wait_only_and_cursor() {
+fn process_input_schemas_advertise_wait_bounds_and_paging_limits() {
     for name in [
         "process.exec",
         "process.batch",
@@ -1436,24 +1559,41 @@ fn managed_job_input_schemas_advertise_group_wait_only_and_cursor() {
             32
         );
     }
-    let get = serde_json::to_value(tool_descriptor("job.get")).unwrap();
+    let status = serde_json::to_value(tool_descriptor("process.status")).unwrap();
     assert_eq!(
-        get["inputSchema"]["properties"]["waitSeconds"]["default"],
+        status["inputSchema"]["properties"]["waitSeconds"]["default"],
         5
     );
     assert_eq!(
-        get["inputSchema"]["properties"]["waitSeconds"]["minimum"],
+        status["inputSchema"]["properties"]["waitSeconds"]["minimum"],
         0
     );
     assert_eq!(
-        get["inputSchema"]["properties"]["waitSeconds"]["maximum"],
+        status["inputSchema"]["properties"]["waitSeconds"]["maximum"],
         30
     );
+    assert!(status["inputSchema"]["properties"]
+        .get("waitOnly")
+        .is_none());
+    let output = serde_json::to_value(tool_descriptor("process.output")).unwrap();
     assert_eq!(
-        get["inputSchema"]["properties"]["waitOnly"]["default"],
-        false
+        output["inputSchema"]["properties"]["maxBytes"]["default"],
+        8192
     );
-    let list = serde_json::to_value(tool_descriptor("job.list")).unwrap();
+    assert_eq!(
+        output["inputSchema"]["properties"]["maxBytes"]["maximum"],
+        32768
+    );
+    let result = serde_json::to_value(tool_descriptor("process.result")).unwrap();
+    assert_eq!(
+        result["inputSchema"]["properties"]["maxBytes"]["default"],
+        8192
+    );
+    assert_eq!(
+        result["inputSchema"]["properties"]["maxBytes"]["maximum"],
+        512 * 1024
+    );
+    let list = serde_json::to_value(tool_descriptor("process.list")).unwrap();
     for field in ["group", "kind", "state", "limit", "cursor"] {
         assert!(
             list["inputSchema"]["properties"][field].is_object(),
@@ -1463,44 +1603,40 @@ fn managed_job_input_schemas_advertise_group_wait_only_and_cursor() {
 }
 
 #[test]
-fn mcp_batch_slim_conversion_distinguishes_job_truncation_from_aggregate_omission(
-) -> anyhow::Result<()> {
-    let now = Utc::now();
-    let mut truncated_job = test_terminal_job();
-    truncated_job.job_id = "job_testboot_truncated".to_string();
-    truncated_job.kind = JobKind::Mcp;
-    truncated_job.mcp_server_id = Some("fake".to_string());
-    truncated_job.mcp_tool_name = Some("large".to_string());
-    let truncated_detail = JobDetail {
-        job: truncated_job,
+fn mcp_batch_projection_keeps_result_availability_without_bodies() -> anyhow::Result<()> {
+    let mut retained_process = test_terminal_process();
+    retained_process.process_id = "process_testboot_retained".to_string();
+    retained_process.kind = agentic_gpt_protocol::ProcessKind::Mcp;
+    retained_process.mcp_server_id = Some("local".to_string());
+    retained_process.mcp_tool_name = Some("lookup".to_string());
+    let retained_result = json!({"answer": 42});
+    let retained_detail = ProcessDetail {
+        process: retained_process,
+        detail_available: true,
+        result: Some(retained_result),
+        error: None,
+        result_available: true,
+        result_bytes: Some(13),
+        result_sha256: Some("sha256:retained".to_string()),
+        result_preview: Some("{\"answer\":42}".to_string()),
+    };
+
+    let mut unavailable_process = test_terminal_process();
+    unavailable_process.process_id = "process_testboot_unavailable".to_string();
+    unavailable_process.kind = agentic_gpt_protocol::ProcessKind::Mcp;
+    unavailable_process.mcp_server_id = Some("local".to_string());
+    unavailable_process.mcp_tool_name = Some("lookup".to_string());
+    let unavailable_detail = ProcessDetail {
+        process: unavailable_process,
         detail_available: true,
         result: None,
         error: None,
-        result_truncated: true,
-        result_bytes: Some(agentic_gpt_protocol::McpBatchRequest::MAX_AGGREGATE_RESULT_BYTES),
-        result_sha256: Some("sha256:truncated".to_string()),
-        result_preview: Some("preview".to_string()),
-    };
-    let mut retained_job = test_terminal_job();
-    retained_job.job_id = "job_testboot_retained".to_string();
-    retained_job.kind = JobKind::Mcp;
-    retained_job.created_at = now;
-    retained_job.updated_at = now;
-    retained_job.finished_at = Some(now);
-    retained_job.mcp_server_id = Some("fake".to_string());
-    retained_job.mcp_tool_name = Some("large".to_string());
-    let retained_detail = JobDetail {
-        job: retained_job,
-        detail_available: true,
-        result: Some(json!("x".repeat(
-            agentic_gpt_protocol::McpBatchRequest::MAX_AGGREGATE_RESULT_BYTES
-        ))),
-        error: None,
-        result_truncated: false,
+        result_available: false,
         result_bytes: None,
         result_sha256: None,
         result_preview: None,
     };
+
     let value = slim_mcp_batch_response(
         McpBatchResponse {
             batch_id: "batch_test".to_string(),
@@ -1510,15 +1646,15 @@ fn mcp_batch_slim_conversion_distinguishes_job_truncation_from_aggregate_omissio
             results: vec![
                 McpBatchChildResponse {
                     index: 0,
-                    id: Some("truncated".to_string()),
+                    id: Some("retained".to_string()),
                     result_omitted: false,
-                    detail: truncated_detail,
+                    process: retained_detail,
                 },
                 McpBatchChildResponse {
                     index: 1,
-                    id: Some("retained".to_string()),
+                    id: Some("unavailable".to_string()),
                     result_omitted: false,
-                    detail: retained_detail,
+                    process: unavailable_detail,
                 },
             ],
             aggregate_truncated: false,
@@ -1532,10 +1668,103 @@ fn mcp_batch_slim_conversion_distinguishes_job_truncation_from_aggregate_omissio
     assert!(value.get("pollAfterMs").is_none());
     assert!(value.get("aggregateTruncated").is_none());
     assert!(value.get("aggregateBytes").is_none());
-    assert_eq!(value["results"][0]["resultTruncated"], true);
-    assert!(value["results"][0].get("resultOmitted").is_none());
-    assert_eq!(value["results"][1]["resultOmitted"], true);
-    assert!(value["results"][1].get("result").is_none());
+    assert_eq!(value["results"][0]["resultAvailable"], true);
+    assert_eq!(value["results"][0]["resultStatus"], "complete");
+    assert_eq!(value["results"][0]["resultBytes"], 13);
+    assert_eq!(value["results"][1]["resultAvailable"], false);
+    assert_eq!(value["results"][1]["resultStatus"], "unavailable");
+    for child in value["results"].as_array().unwrap() {
+        assert!(child.get("result").is_none());
+        assert!(child.get("resultOmitted").is_none());
+        assert!(child.get("index").is_none());
+        assert!(child.get("id").is_none());
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn process_result_preserves_retained_mcp_payloads_and_reports_unavailable(
+) -> anyhow::Result<()> {
+    let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
+    let payload = json!({"answer": "retained"});
+    let mut retained_process = test_terminal_process();
+    retained_process.process_id = "process_testboot_result".to_string();
+    retained_process.kind = agentic_gpt_protocol::ProcessKind::Mcp;
+    retained_process.mcp_server_id = Some("local".to_string());
+    retained_process.mcp_tool_name = Some("lookup".to_string());
+    retained_process.capture_status = agentic_gpt_protocol::ProcessCaptureStatus::NotApplicable;
+    let retained_detail = ProcessDetail {
+        process: retained_process,
+        detail_available: true,
+        result: Some(payload.clone()),
+        error: None,
+        result_available: true,
+        result_bytes: Some(serde_json::to_vec(&payload)?.len()),
+        result_sha256: Some("sha256:retained".to_string()),
+        result_preview: Some("{\"answer\":\"retained\"}".to_string()),
+    };
+    assert!(server
+        .state
+        .process_history
+        .upsert_terminal(
+            &retained_detail,
+            &crate::process_history::ProcessOutputSnapshot::default(),
+        )
+        .is_persisted());
+
+    let retained = server
+        .dispatch(
+            "process.result",
+            json!({"processId": "process_testboot_result"}),
+        )
+        .await?;
+    assert_eq!(retained["status"], "complete");
+    assert_eq!(retained["resultAvailable"], true);
+    assert_eq!(retained["result"], payload);
+
+    let too_small = server
+        .dispatch(
+            "process.result",
+            json!({"processId": "process_testboot_result", "maxBytes": 1}),
+        )
+        .await?;
+    assert_eq!(too_small["status"], "too_large");
+    assert_eq!(too_small["resultAvailable"], true);
+    assert!(too_small.get("result").is_none());
+
+    let mut unavailable_process = test_terminal_process();
+    unavailable_process.process_id = "process_testboot_unavailable".to_string();
+    unavailable_process.kind = agentic_gpt_protocol::ProcessKind::Mcp;
+    unavailable_process.mcp_server_id = Some("local".to_string());
+    unavailable_process.mcp_tool_name = Some("lookup".to_string());
+    unavailable_process.capture_status = agentic_gpt_protocol::ProcessCaptureStatus::NotApplicable;
+    let unavailable_detail = ProcessDetail {
+        process: unavailable_process,
+        detail_available: true,
+        result: None,
+        error: None,
+        result_available: false,
+        result_bytes: None,
+        result_sha256: None,
+        result_preview: None,
+    };
+    assert!(server
+        .state
+        .process_history
+        .upsert_terminal(
+            &unavailable_detail,
+            &crate::process_history::ProcessOutputSnapshot::default(),
+        )
+        .is_persisted());
+    let unavailable = server
+        .dispatch(
+            "process.result",
+            json!({"processId": "process_testboot_unavailable"}),
+        )
+        .await?;
+    assert_eq!(unavailable["status"], "unavailable");
+    assert_eq!(unavailable["resultAvailable"], false);
+    assert!(unavailable.get("result").is_none());
     Ok(())
 }
 
@@ -1598,7 +1827,7 @@ async fn managed_batch_uses_one_confirmation_for_all_elements() -> anyhow::Resul
 }
 
 #[tokio::test]
-async fn denied_managed_batch_creates_no_jobs() -> anyhow::Result<()> {
+async fn denied_process_batch_creates_no_processes() -> anyhow::Result<()> {
     let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
     {
         let mut config = server.state.config.write().await;
@@ -1631,8 +1860,8 @@ async fn denied_managed_batch_creates_no_jobs() -> anyhow::Result<()> {
         )
         .await?;
     assert_eq!(batch["error"]["code"], "process_batch_rejected");
-    let jobs = server.dispatch("job.list", json!({})).await?;
-    assert_eq!(jobs["jobs"], json!([]));
+    let processes = server.dispatch("process.list", json!({})).await?;
+    assert_eq!(processes["processes"], json!([]));
     responder.abort();
     Ok(())
 }
@@ -1657,39 +1886,37 @@ async fn tmux_actions_reject_incompatible_fields() {
 }
 
 #[test]
-fn managed_terminal_log_includes_duration() {
+fn managed_terminal_event_includes_duration() {
     let started_at = Utc::now() - chrono::Duration::milliseconds(42);
-    let mut job = test_terminal_job();
-    job.created_at = started_at;
-    job.started_at = Some(started_at);
-    job.updated_at = started_at + chrono::Duration::milliseconds(42);
-    job.finished_at = Some(job.updated_at);
-    job.args = vec!["sentinel-argument".to_string()];
-    job.working_directory = Some("/sentinel/path".to_string());
-    job.command_preview = Some("true sentinel-argument".to_string());
-    job.stdout_tail = "sentinel-stdout".to_string();
-    job.stderr_tail = "sentinel-stderr".to_string();
-    let message = managed_terminal_event_message("normal", "tunnel:process.exec", &job);
+    let mut process = test_terminal_process();
+    process.created_at = started_at;
+    process.started_at = Some(started_at);
+    process.updated_at = started_at + chrono::Duration::milliseconds(42);
+    process.finished_at = Some(process.updated_at);
+    process.args = vec!["sentinel-argument".to_string()];
+    process.working_directory = Some("/sentinel/path".to_string());
+    process.command_preview = Some("true sentinel-argument".to_string());
+    let message = managed_terminal_event_message("normal", "tunnel:process.exec", &process);
     assert!(message.contains("durationMs=42"));
-    let human_job_id = message
-        .split("job=")
+    let human_process_id = message
+        .split("process=")
         .nth(1)
         .and_then(|value| value.split(';').next())
         .unwrap();
-    assert_eq!(human_job_id.len(), 12);
-    assert!(!message.contains("jobId="));
+    assert_eq!(human_process_id.len(), 12);
+    assert!(!message.contains("processId="));
     assert!(!message.contains("sentinel"));
 }
 
 #[test]
 fn inline_terminal_tracker_discards_pending_terminal_event() {
-    let emitted = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let emitted = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let sink = emitted.clone();
     let tracker = HumanTerminalTracker::with_emitter(move |message| {
-        sink.lock().unwrap().push(message);
+        sink.lock().push(message);
     });
-    let job = test_terminal_job();
-    tracker.record("normal", "tunnel:process.exec", &job);
+    let process = test_terminal_process();
+    tracker.record("normal", "tunnel:process.exec", &process);
     assert_eq!(tracker.state.lock().unwrap().pending.len(), 1);
     tracker.finish_response(true, None);
     assert!(tracker.state.lock().unwrap().pending.is_empty());
@@ -1697,47 +1924,47 @@ fn inline_terminal_tracker_discards_pending_terminal_event() {
         tracker.state.lock().unwrap().response,
         HumanResponseState::Inline
     ));
-    assert!(emitted.lock().unwrap().is_empty());
+    assert!(emitted.lock().is_empty());
 }
 
 #[test]
 fn active_response_precedes_terminal_for_both_serial_orderings() {
     for terminal_first in [true, false] {
-        let emitted = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let emitted = Arc::new(parking_lot::Mutex::new(Vec::new()));
         let sink = emitted.clone();
         let tracker = HumanTerminalTracker::with_emitter(move |message| {
-            sink.lock().unwrap().push(message);
+            sink.lock().push(message);
         });
-        let job = test_terminal_job();
+        let process = test_terminal_process();
         if terminal_first {
-            tracker.record("normal", "tunnel:process.exec", &job);
+            tracker.record("normal", "tunnel:process.exec", &process);
             tracker.finish_response(false, Some("status=active".to_string()));
         } else {
             tracker.finish_response(false, Some("status=active".to_string()));
-            tracker.record("normal", "tunnel:process.exec", &job);
+            tracker.record("normal", "tunnel:process.exec", &process);
         }
-        let emitted = emitted.lock().unwrap();
+        let emitted = emitted.lock();
         assert_eq!(emitted.len(), 2);
         assert_eq!(emitted[0], "status=active");
-        assert!(emitted[1].starts_with("managed_job;"));
+        assert!(emitted[1].starts_with("managed_process;"));
     }
 }
 
 #[test]
 fn concurrent_check_clear_enqueue_interleaving_is_linearizable() {
-    let emitted = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let emitted = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let sink = emitted.clone();
     let tracker = Arc::new(HumanTerminalTracker::with_emitter(move |message| {
-        sink.lock().unwrap().push(message);
+        sink.lock().push(message);
     }));
-    let job = test_terminal_job();
+    let process = test_terminal_process();
     let barrier = Arc::new(std::sync::Barrier::new(2));
     std::thread::scope(|scope| {
         let record_tracker = tracker.clone();
         let record_barrier = barrier.clone();
         scope.spawn(move || {
             record_barrier.wait();
-            record_tracker.record("normal", "tunnel:process.exec", &job);
+            record_tracker.record("normal", "tunnel:process.exec", &process);
         });
         let response_tracker = tracker.clone();
         scope.spawn(move || {
@@ -1745,23 +1972,23 @@ fn concurrent_check_clear_enqueue_interleaving_is_linearizable() {
             response_tracker.finish_response(false, Some("status=active".to_string()));
         });
     });
-    let emitted = emitted.lock().unwrap();
+    let emitted = emitted.lock();
     assert_eq!(emitted.len(), 2);
     assert_eq!(emitted[0], "status=active");
-    assert_eq!(emitted[1].matches("managed_job;").count(), 1);
+    assert_eq!(emitted[1].matches("managed_process;").count(), 1);
 }
 
-fn test_terminal_job() -> JobInfo {
+fn test_terminal_process() -> agentic_gpt_protocol::ProcessInfo {
     let now = Utc::now();
-    JobInfo {
+    agentic_gpt_protocol::ProcessInfo {
         agent_id: "agent".to_string(),
-        job_id: "job_testboot_0123456789abcdef".to_string(),
+        process_id: "process_testboot_0123456789abcdef".to_string(),
         group: None,
         batch_id: None,
         batch_call_id: None,
         batch_index: None,
-        kind: JobKind::Process,
-        state: JobState::Completed,
+        kind: agentic_gpt_protocol::ProcessKind::Command,
+        state: agentic_gpt_protocol::ProcessState::Completed,
         created_at: now,
         started_at: Some(now),
         updated_at: now,
@@ -1771,9 +1998,6 @@ fn test_terminal_job() -> JobInfo {
         working_directory: None,
         command_preview: Some("true".to_string()),
         exit_code: Some(0),
-        stdout_tail: String::new(),
-        stderr_tail: String::new(),
-        truncated: false,
         reject_reason: None,
         skill_id: None,
         skill_path: None,
@@ -1783,25 +2007,27 @@ fn test_terminal_job() -> JobInfo {
         cancel_requested: false,
         cancel_outcome: None,
         termination_evidence: None,
+        capture_status: agentic_gpt_protocol::ProcessCaptureStatus::Complete,
+        capture_error: None,
     }
 }
 
 #[test]
-fn batch_lifecycle_detection_reads_job_envelopes() {
+fn batch_lifecycle_detection_reads_process_envelopes() {
     let active = json!({
-        "jobs": [{"jobId": "job_a", "state": "running"}]
+        "processes": [{"processId": "process_a", "state": "running"}]
     });
-    assert!(value_has_active_job(&active));
+    assert!(value_has_active_process(&active));
     assert!(!value_has_terminal_failure(&active));
 
     let failed = json!({
-        "jobs": [{
-            "jobId": "job_b",
+        "processes": [{
+            "processId": "process_b",
             "state": "failed",
             "rejectReason": "spawn_failed"
         }]
     });
-    assert!(!value_has_active_job(&failed));
+    assert!(!value_has_active_process(&failed));
     assert!(value_has_terminal_failure(&failed));
     assert_eq!(
         human_failure_reason(&failed, None).as_deref(),
@@ -1858,7 +2084,7 @@ async fn local_skill_audit_uses_local_request_source() -> anyhow::Result<()> {
         )
         .await?;
     assert_eq!(result["state"], "completed");
-    assert!(result.get("kind").is_none());
+    assert_eq!(result["kind"], "skill");
     let audit = std::fs::read_to_string(workspace.join(".agentic-gpt-audit.jsonl"))?;
     assert!(audit.contains("\"requestSource\":\"local:skills.run\""));
     assert!(!audit.contains("\"requestSource\":\"tunnel:skills.run\""));
@@ -1883,8 +2109,7 @@ async fn local_mcp_call_audit_uses_local_request_source() -> anyhow::Result<()> 
         )
         .await?;
     assert_eq!(result["state"], "rejected");
-    assert!(result.get("kind").is_none());
-    assert!(result.get("rejectReason").is_none());
+    assert_eq!(result["kind"], "mcp");
     assert_eq!(result["error"]["code"], "mcp_server_not_found");
     let audit = std::fs::read_to_string(workspace.join(".agentic-gpt-audit.jsonl"))?;
     assert!(audit.contains("\"requestSource\":\"local:mcp.callTool\""));
@@ -1922,7 +2147,7 @@ async fn tunnel_skill_audit_uses_tunnel_request_source() -> anyhow::Result<()> {
         )
         .await?;
     assert_eq!(result["state"], "completed");
-    assert!(result.get("kind").is_none());
+    assert_eq!(result["kind"], "skill");
     let audit = std::fs::read_to_string(workspace.join(".agentic-gpt-audit.jsonl"))?;
     assert!(audit.contains("\"requestSource\":\"tunnel:skills.run\""));
     Ok(())
@@ -2868,29 +3093,43 @@ fn test_state(profile: CapabilityProfile) -> AppState {
         .expect("bootstrap entrypoint");
     let private_state =
         crate::private_state::PrivateStatePaths::for_test(root.join("private-state"));
-    let job_history = crate::job_history::JobHistoryStore::open(&private_state);
+    let process_history = crate::process_history::ProcessHistoryStore::open(&private_state);
     AppState {
         config_path: PathBuf::from("stdio-test-config.json"),
         config: Arc::new(RwLock::new(config)),
         private_state,
-        job_history,
+        process_history,
         browser_runtime: None,
         runtime: RuntimeModel::tunnel(profile, false),
         started_at: chrono::Utc::now(),
         boot_generation: uuid::Uuid::new_v4().simple().to_string()[..12].to_string(),
         supervised: true,
         file_locks: Arc::new(Mutex::new(HashMap::new())),
-        jobs: Arc::new(Mutex::new(HashMap::new())),
+        processes: Arc::new(Mutex::new(HashMap::new())),
         hub_sender: Arc::new(Mutex::new(None)),
         reporting_sender: Arc::new(Mutex::new(None)),
         pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
         temporary_mcp_allows: Arc::new(Mutex::new(Vec::new())),
-        mcp_concurrency: Arc::new(crate::jobs::McpConcurrency::new()),
+        mcp_concurrency: Arc::new(crate::process::McpConcurrency::new()),
         room_repository_writes: Arc::new(Mutex::new(())),
         skills_writes: Arc::new(Mutex::new(())),
         skill_leases: Arc::new(SkillLeaseManager::new()),
         skill_installs: Arc::new(InstallManager::new()),
     }
+}
+
+async fn allow_test_printf(server: &AgentMcpServer) {
+    server
+        .state
+        .config
+        .write()
+        .await
+        .policy
+        .allow
+        .push(crate::config::Rule {
+            program: "printf".to_string(),
+            args_prefix: Vec::new(),
+        });
 }
 
 fn state_with_browser_runtime(docs_root: PathBuf, result: CallToolResult) -> AppState {

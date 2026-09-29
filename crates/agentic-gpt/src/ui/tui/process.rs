@@ -1,6 +1,6 @@
 use std::sync::mpsc::Receiver;
 
-use agentic_gpt_protocol::{JobKind, JobListItem, JobListResponse, JobState};
+use agentic_gpt_protocol::{ProcessKind, ProcessListItem, ProcessListResponse, ProcessState};
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
@@ -18,13 +18,13 @@ use super::{
 };
 
 pub(crate) enum ProcessUpdate {
-    Jobs(JobListResponse),
+    Processes(ProcessListResponse),
     Error(String),
 }
 
 pub(crate) struct ProcessScreen {
     receiver: Receiver<ProcessUpdate>,
-    jobs: Vec<JobListItem>,
+    processes: Vec<ProcessListItem>,
     selected: usize,
     next_cursor: Option<String>,
     error: Option<String>,
@@ -36,7 +36,7 @@ impl ProcessScreen {
     pub(crate) fn new(receiver: Receiver<ProcessUpdate>, language: UiLanguage) -> Self {
         Self {
             receiver,
-            jobs: Vec::new(),
+            processes: Vec::new(),
             selected: 0,
             next_cursor: None,
             error: None,
@@ -51,13 +51,13 @@ impl ProcessScreen {
             MasterDetailSpec::new(Constraint::Min(34), 2, Constraint::Min(28), 68),
             self.pane_mode,
         );
-        self.render_job_list(frame, panes.master, theme);
+        self.render_process_list(frame, panes.master, theme);
         if panes.detail.width > 0 {
             self.render_detail(frame, panes.detail, theme);
         }
     }
 
-    fn render_job_list(&self, frame: &mut Frame, body: Rect, theme: &Theme) {
+    fn render_process_list(&self, frame: &mut Frame, body: Rect, theme: &Theme) {
         if body.width == 0 || body.height == 0 {
             return;
         }
@@ -76,12 +76,12 @@ impl ProcessScreen {
             lines.push(Line::raw(""));
         }
 
-        if self.jobs.is_empty() {
+        if self.processes.is_empty() {
             lines.push(Line::styled(
                 t(
                     self.language,
-                    "No managed jobs yet.",
-                    "暂时没有 Managed Job。",
+                    "No managed processes yet.",
+                    "暂时没有 Managed Process。",
                 ),
                 theme.muted,
             ));
@@ -92,10 +92,10 @@ impl ProcessScreen {
             } else {
                 0
             };
-            let end = (start + visible_rows).min(self.jobs.len());
-            for (index, job) in self.jobs[start..end].iter().enumerate() {
+            let end = (start + visible_rows).min(self.processes.len());
+            for (index, process) in self.processes[start..end].iter().enumerate() {
                 let absolute = start + index;
-                lines.push(job_line(job, absolute == self.selected, theme));
+                lines.push(process_line(process, absolute == self.selected, theme));
             }
         }
 
@@ -108,50 +108,50 @@ impl ProcessScreen {
             horizontal: 2,
             vertical: 1,
         });
-        let Some(job) = self.jobs.get(self.selected) else {
+        let Some(process) = self.processes.get(self.selected) else {
             render_inspector(
                 frame,
                 inner,
-                t(self.language, "Job preview", "Job 预览"),
+                t(self.language, "Process preview", "Process 预览"),
                 &[t(
                     self.language,
-                    "Select a managed Job to inspect it.",
-                    "选择一个 Managed Job 查看详情。",
+                    "Select a managed process to inspect it.",
+                    "选择一个 Managed Process 查看详情。",
                 )],
                 theme,
             );
             return;
         };
-        let kind = match job.kind {
-            JobKind::Process => "process",
-            JobKind::Skill => "skill",
-            JobKind::Mcp => "mcp",
+        let kind = match process.kind {
+            ProcessKind::Command => "command",
+            ProcessKind::Skill => "skill",
+            ProcessKind::Mcp => "mcp",
         };
-        let group = job.group.as_deref().unwrap_or("—");
-        let created = job.created_at.to_rfc3339();
-        let started = job
+        let group = process.group.as_deref().unwrap_or("—");
+        let created = process.created_at.to_rfc3339();
+        let started = process
             .started_at
             .map(|value| value.to_rfc3339())
             .unwrap_or_else(|| "—".to_string());
-        let finished = job
+        let finished = process
             .finished_at
             .map(|value| value.to_rfc3339())
             .unwrap_or_else(|| "—".to_string());
         let body = [
-            format!("jobId   {}", job.job_id),
-            format!("group   {group}"),
-            format!("kind    {kind}"),
-            format!("state   {}", job.state.as_str()),
+            format!("processId   {}", process.process_id),
+            format!("group       {group}"),
+            format!("kind        {kind}"),
+            format!("state       {}", process.state.as_str()),
             String::new(),
-            format!("created {created}"),
-            format!("started {started}"),
-            format!("finished {finished}"),
+            format!("created     {created}"),
+            format!("started     {started}"),
+            format!("finished    {finished}"),
         ];
         let refs = body.iter().map(String::as_str).collect::<Vec<_>>();
         render_inspector(
             frame,
             inner,
-            t(self.language, "Job preview", "Job 预览"),
+            t(self.language, "Process preview", "Process 预览"),
             &refs,
             theme,
         );
@@ -160,14 +160,17 @@ impl ProcessScreen {
     pub(crate) fn status(&self) -> &'static str {
         match &self.error {
             Some(_) => t(self.language, "degraded", "连接异常"),
-            None if self.jobs.is_empty() => t(self.language, "waiting", "等待数据"),
+            None if self.processes.is_empty() => t(self.language, "waiting", "等待数据"),
             None => t(self.language, "live", "实时"),
         }
     }
 
     pub(crate) fn footer_hints(&self) -> Vec<(&'static str, &'static str)> {
         if self.pane_mode == PaneMode::Detail {
-            vec![("Esc", t(self.language, "back to jobs", "返回 Job 列表"))]
+            vec![(
+                "Esc",
+                t(self.language, "back to processes", "返回 Process 列表"),
+            )]
         } else {
             vec![
                 ("↑/↓ j/k", t(self.language, "select", "选择")),
@@ -200,20 +203,20 @@ impl ProcessScreen {
             return;
         }
         match key.code {
-            KeyCode::Enter | KeyCode::Char('l') if !self.jobs.is_empty() => {
+            KeyCode::Enter | KeyCode::Char('l') if !self.processes.is_empty() => {
                 self.pane_mode = PaneMode::Detail;
             }
             KeyCode::Up | KeyCode::Char('k') => {
                 self.selected = self.selected.saturating_sub(1);
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                if !self.jobs.is_empty() {
-                    self.selected = (self.selected + 1).min(self.jobs.len() - 1);
+                if !self.processes.is_empty() {
+                    self.selected = (self.selected + 1).min(self.processes.len() - 1);
                 }
             }
             KeyCode::Home | KeyCode::Char('g') => self.selected = 0,
             KeyCode::End | KeyCode::Char('G') => {
-                self.selected = self.jobs.len().saturating_sub(1);
+                self.selected = self.processes.len().saturating_sub(1);
             }
             _ => {}
         }
@@ -222,15 +225,24 @@ impl ProcessScreen {
     fn drain_updates(&mut self) {
         while let Ok(update) = self.receiver.try_recv() {
             match update {
-                ProcessUpdate::Jobs(page) => {
-                    let selected_id = self.jobs.get(self.selected).map(|job| job.job_id.clone());
-                    self.jobs = page.jobs;
+                ProcessUpdate::Processes(page) => {
+                    let selected_id = self
+                        .processes
+                        .get(self.selected)
+                        .map(|process| process.process_id.clone());
+                    self.processes = page.processes;
                     self.next_cursor = page.next_cursor;
                     self.error = None;
                     self.selected = selected_id
-                        .and_then(|id| self.jobs.iter().position(|job| job.job_id == id))
-                        .unwrap_or_else(|| self.selected.min(self.jobs.len().saturating_sub(1)));
-                    if self.jobs.is_empty() {
+                        .and_then(|id| {
+                            self.processes
+                                .iter()
+                                .position(|process| process.process_id == id)
+                        })
+                        .unwrap_or_else(|| {
+                            self.selected.min(self.processes.len().saturating_sub(1))
+                        });
+                    if self.processes.is_empty() {
                         self.pane_mode = PaneMode::Master;
                     }
                 }
@@ -240,25 +252,25 @@ impl ProcessScreen {
     }
 }
 
-fn job_line(job: &JobListItem, selected: bool, theme: &Theme) -> Line<'static> {
+fn process_line(process: &ProcessListItem, selected: bool, theme: &Theme) -> Line<'static> {
     let marker = if selected {
         Span::styled("❯ ", theme.pointer)
     } else {
         Span::raw("  ")
     };
-    let group = clip(job.group.as_deref().unwrap_or("—"), 18);
-    let kind = match job.kind {
-        JobKind::Process => "process",
-        JobKind::Skill => "skill",
-        JobKind::Mcp => "mcp",
+    let group = clip(process.group.as_deref().unwrap_or("—"), 18);
+    let kind = match process.kind {
+        ProcessKind::Command => "command",
+        ProcessKind::Skill => "skill",
+        ProcessKind::Mcp => "mcp",
     };
-    let state_style = match job.state {
-        JobState::Completed => theme.success,
-        JobState::Failed | JobState::Rejected | JobState::TimedOut => theme.error,
+    let state_style = match process.state {
+        ProcessState::Completed => theme.success,
+        ProcessState::Failed | ProcessState::Rejected | ProcessState::TimedOut => theme.error,
         state if state.is_active() => theme.accent,
         _ => theme.muted,
     };
-    let id = short_job_id(&job.job_id);
+    let id = short_process_id(&process.process_id);
     let base = if selected {
         theme.emphasis
     } else {
@@ -270,14 +282,14 @@ fn job_line(job: &JobListItem, selected: bool, theme: &Theme) -> Line<'static> {
         Span::raw("  "),
         Span::styled(format!("{kind:<7}"), theme.muted),
         Span::raw("  "),
-        Span::styled(format!("{:<21}", job.state.as_str()), state_style),
+        Span::styled(format!("{:<21}", process.state.as_str()), state_style),
         Span::raw("  "),
         Span::styled(id, theme.dim),
     ])
 }
 
-fn short_job_id(job_id: &str) -> String {
-    let suffix = job_id.rsplit('_').next().unwrap_or(job_id);
+fn short_process_id(process_id: &str) -> String {
+    let suffix = process_id.rsplit('_').next().unwrap_or(process_id);
     clip(suffix, 12)
 }
 
@@ -303,12 +315,15 @@ fn t<'a>(language: UiLanguage, en: &'a str, zh_cn: &'a str) -> &'a str {
 
 #[cfg(test)]
 mod tests {
-    use super::{clip, short_job_id};
+    use super::{clip, short_process_id};
 
     #[test]
     fn clipping_and_short_id_are_bounded() {
         assert_eq!(clip("abcdefghijkl", 6), "abcde…");
         assert_eq!(clip("abc", 6), "abc");
-        assert_eq!(short_job_id("job_boot_1234567890abcdef"), "1234567890a…");
+        assert_eq!(
+            short_process_id("process_boot_1234567890abcdef"),
+            "1234567890a…"
+        );
     }
 }

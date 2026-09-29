@@ -94,14 +94,14 @@ mod tests {
 
         let limits = OptionalSectionDraft::Limits(LimitsDraft {
             max_concurrent_tasks: "two".to_string(),
-            max_active_jobs: "never".to_string(),
+            max_active_processes: "never".to_string(),
             max_file_search_context_lines: "five".to_string(),
         });
         let errors = session.save_optional_section(limits).unwrap_err();
         assert_eq!(errors[0].field, SetupField::MaxConcurrentTasks);
         assert!(errors.iter().any(|error| {
-            error.field == SetupField::MaxActiveJobs
-                && error.code == "config_init_number_invalid: max_active_jobs"
+            error.field == SetupField::MaxActiveProcesses
+                && error.code == "config_init_number_invalid: max_active_processes"
         }));
 
         let sandbox = OptionalSectionDraft::Sandbox(SandboxDraft {
@@ -273,7 +273,7 @@ use std::path::PathBuf;
 use crate::config::mcp_servers::{self, McpServerAuthConfig, McpServerConfig};
 use crate::config::{
     self, default_room_config, ConfirmationProviderConfig, HttpMcpConfig, HubReportingConfig,
-    LimitsConfig, MaxActiveJobs, PathPolicyConfig, ReportingDetail, RoomConfig,
+    LimitsConfig, MaxActiveProcesses, PathPolicyConfig, ReportingDetail, RoomConfig,
     RoomMaintenanceConfig, RoomMaintenanceMode, SandboxConfig, ToolNamespace, ToolsetConfig,
     TunnelClientConfig,
 };
@@ -566,7 +566,7 @@ pub(super) fn validate_field(
             &session.optional_draft(OptionalSection::Confirmation),
         ),
         SetupField::MaxConcurrentTasks
-        | SetupField::MaxActiveJobs
+        | SetupField::MaxActiveProcesses
         | SetupField::MaxFileSearchContextLines => validate_optional(
             OptionalSection::Limits,
             &session.optional_draft(OptionalSection::Limits),
@@ -707,7 +707,7 @@ fn validate_optional(section: OptionalSection, draft: &OptionalSectionDraft) -> 
                 SetupField::MaxConcurrentTasks,
                 &mut errors,
             );
-            parse_max_active_jobs(&value.max_active_jobs, &mut errors);
+            parse_max_active_processes(&value.max_active_processes, &mut errors);
             match parse_usize_value(&value.max_file_search_context_lines) {
                 Ok(value) if value <= config::MAX_FILE_SEARCH_CONTEXT_LINES => {}
                 _ => errors.push(error(
@@ -896,11 +896,11 @@ fn parse_usize(value: &str, field: SetupField, errors: &mut ValidationErrors) {
     }
 }
 
-fn parse_max_active_jobs(value: &str, errors: &mut ValidationErrors) {
+fn parse_max_active_processes(value: &str, errors: &mut ValidationErrors) {
     if value.trim() != "auto" && parse_usize_value(value).is_err() {
         errors.push(error(
-            SetupField::MaxActiveJobs,
-            "config_init_number_invalid: max_active_jobs",
+            SetupField::MaxActiveProcesses,
+            "config_init_number_invalid: max_active_processes",
         ));
     }
 }
@@ -1121,15 +1121,17 @@ fn apply_optional_draft(
                             "config_init_number_invalid: max_concurrent_tasks",
                         )]
                     })?;
-            let max_active_jobs = if value.max_active_jobs.trim() == "auto" {
-                MaxActiveJobs::Auto
+            let max_active_processes = if value.max_active_processes.trim() == "auto" {
+                MaxActiveProcesses::Auto
             } else {
-                MaxActiveJobs::Explicit(value.max_active_jobs.trim().parse().map_err(|_| {
-                    vec![error(
-                        SetupField::MaxActiveJobs,
-                        "config_init_number_invalid: max_active_jobs",
-                    )]
-                })?)
+                MaxActiveProcesses::Explicit(value.max_active_processes.trim().parse().map_err(
+                    |_| {
+                        vec![error(
+                            SetupField::MaxActiveProcesses,
+                            "config_init_number_invalid: max_active_processes",
+                        )]
+                    },
+                )?)
             };
             let max_file_search_context_lines = value
                 .max_file_search_context_lines
@@ -1143,7 +1145,7 @@ fn apply_optional_draft(
                 })?;
             input.limits = Some(LimitsConfig {
                 max_concurrent_tasks,
-                max_active_jobs,
+                max_active_processes,
                 max_file_search_context_lines,
             });
         }

@@ -134,19 +134,21 @@ errors are written to stderr. A stopped/restarting runtime returns
 
 ## Tunnel, HTTP, and local tool surfaces
 
-The V2 advertised surface contains 29 Normal names and 40 Room names. Profiles select
-namespace presets rather than fixing the final runtime surface: normal enables `agent`, `file`,
-`mcp`, `process`, `job`, `skills`, `tmux`, and `browser`; room enables all of those plus `room`.
-An explicit `toolsets.enabled` selection is authoritative. The logical `room` namespace contains
-`bootstrap`, `bootstrap.read`, the semantic read tools, and maintenance status/submit. These
-filters only remove names from the advertised surface; they never expose dispatch-only aliases.
+The Normal and Room profiles select namespace presets rather than fixing the final
+runtime surface: Normal enables `agent`, `file`, `mcp`, `process`, `skills`,
+`tmux`, and `browser`; Room enables those plus `room`. An explicit
+`toolsets.enabled` selection is authoritative. The logical `room` namespace
+contains `bootstrap`, `bootstrap.read`, the semantic read tools, and maintenance
+status/submit. These filters only remove names from the advertised surface;
+they never expose dispatch-only aliases.
 
-Start with `agent.info` to inspect the active profile and enabled namespaces, bounded path policy,
-capacity, confirmation availability, and reporting state:
+Start with `agent.info` to inspect the active profile and enabled namespaces,
+bounded path policy, capacity, confirmation availability, and reporting state:
 
 ```text
 mcp.list, mcp.callTool, mcp.batch
-process.exec, process.batch, job.get, job.list, job.cancel
+process.exec, process.batch, process.status, process.list,
+process.output, process.result, process.cancel
 skills.list, skills.read, skills.setActive, skills.install,
 skills.install.get, skills.install.cancel, skills.run
 tmux.sessions, tmux.panes, tmux.exec, tmux.pasteText
@@ -193,31 +195,31 @@ passage/date-selection callers are not silently mapped to maintenance; migrate
 them to explicit semantic slot/payload requests or remove them. Historical
 release/migration records are history, not an active error contract.
 
-Managed `mcp.callTool` uses the same Job registry and capacity limit as
-process and skill Jobs. Its `waitSeconds` defaults to 5 and is capped at 30;
-`timeoutSeconds` is an absolute confirmation/connect/request deadline that
-defaults to 300 and is capped at 900. Arguments must be a JSON object and their
-serialized size is capped at 256 KiB. Results up to 512 KiB are retained in
-the flat `JobToolResponse.result`; larger results set `resultTruncated=true` and
-retain only byte count, SHA-256, and an 8 KiB UTF-8-safe preview. A downstream
-`isError=true` result is retained while the Job state becomes `failed`. Hub has
-no native `file.read` or `file.edit` tools; its generic asynchronous
-`mcp.callTool` bridge returns a Job projection, not a typed image-content
-surface, and must not be relied on to preserve `file.read` image Content blocks.
+Managed downstream `mcp.callTool` uses the same process registry and capacity
+limit as command and skill execution. Its `waitSeconds` defaults to 5 and is
+capped at 30; `timeoutSeconds` is an absolute confirmation/connect/request
+deadline that defaults to 300 and is capped at 900. Arguments must be a JSON
+object and their serialized size is capped at 256 KiB. Results up to 512 KiB
+are retained; larger results are represented by byte count, SHA-256, and an
+8 KiB UTF-8-safe preview rather than partial JSON. A downstream `isError=true`
+result is retained and the process state is `failed`. Hub has no native
+`file.read` or `file.edit` tools; its generic asynchronous `mcp.callTool` bridge
+uses the process lifecycle, not a typed image-content surface, and must not be
+relied on to preserve `file.read` image Content blocks.
 
 Skill installation lookup and skill execution use the same bounded wait
 contract: `waitSeconds` defaults to 5 and is capped at 30. A wait timeout only
-ends the local wait; it does not implicitly cancel an installation or Job.
-Use `skills.install.cancel` or `job.cancel` explicitly when cancellation is
+ends the local wait; it does not implicitly cancel an installation or process.
+Use `skills.install.cancel` or `process.cancel` explicitly when cancellation is
 required.
 
 `mcp.batch` accepts 1–16 ordered calls. Every call is fully validated before
-capacity admission or confirmation; invalid input and insufficient shared Job
-capacity create no child Jobs and start no downstream side effects. Admission
-is atomic. The batch then requests one aggregate confirmation after excluding
-servers already covered by temporary allow state. A single-server batch may
-receive a 15- or 30-minute server grant; a multi-server batch only supports one
-batch-scoped allow or deny.
+capacity admission or confirmation; invalid input and insufficient shared
+process capacity create no child processes and start no downstream side
+effects. Admission is atomic. The batch then requests one aggregate
+confirmation after excluding servers already covered by temporary allow state.
+A single-server batch may receive a 15- or 30-minute server grant; a
+multi-server batch only supports one batch-scoped allow or deny.
 
 Parallel mode is the default; sequential mode waits for each child to become
 terminal before starting the next. The shared scheduler permits at most eight
@@ -228,66 +230,70 @@ never cancelled. Child results remain in input order. Per-call arguments and
 results keep the 256 KiB / 512 KiB bounds, while aggregate arguments and the
 serialized batch response are each capped at 2 MiB. If the response budget is
 exceeded, later child result bodies are removed first while hashes, sizes,
-previews, states, and Job ids remain available.
+previews, states, and process ids remain available.
 
-MCP cancellation uses the exact rmcp request id. `job.cancel` and execution
+MCP cancellation uses the exact rmcp request id. `process.cancel` and execution
 timeouts send `notifications/cancelled`; if the transport does not provide a
 terminal cancellation response, Agentic reports `detached` with bounded
 termination evidence rather than claiming `cancelled`. Child audit records
 carry `batchId`, optional `batchCallId`, and `batchIndex`; one aggregate audit
-records mode, fail-fast, confirmation outcome, child Job ids, final outcome,
-and clipping. Confirmation/audit records contain server/tool names, a bounded
-argument-key subset plus total count, byte counts and hashes, config revision,
-result size/hash, and terminal evidence, but never raw arguments or raw results.
+records mode, fail-fast, confirmation outcome, child process ids, final
+outcome, and clipping. Confirmation/audit records contain server/tool names,
+a bounded argument-key subset plus total count, byte counts and hashes, config
+revision, result size/hash, and terminal evidence, but never raw arguments or
+raw results.
 
-The standalone worker intentionally has no Tunnel `agentId` or
-`confirmMethod` input fields. The worker supplies its configured local agent
-identity internally; unexpected legacy fields are rejected. `bootstrap` is
-Room-only. Managed Job admission tools (`process.exec`, `process.batch`,
-`skills.run`, `mcp.callTool`, and `mcp.batch`) accept an optional validated
-human-readable `group`; batch children inherit their parent group. Routine Job
-responses are compact and keep `jobId` as the stable handle for later lookup.
-Rich bounded provenance remains internal/durable rather than being repeated in
-every response.
+The standalone worker intentionally has no Tunnel `agentId` or `confirmMethod`
+input fields. The worker supplies its configured local agent identity
+internally; unexpected legacy fields are rejected. `bootstrap` is Room-only.
+Managed process admission tools (`process.exec`, `process.batch`, `skills.run`,
+`mcp.callTool`, and `mcp.batch`) accept an optional validated human-readable
+`group`; batch children inherit their parent group. Responses are compact and
+keep `processId` as the stable handle for later status, output, result, or
+cancellation requests. Rich bounded provenance remains internal/durable rather
+than being repeated in every response.
 
-Terminal Job history is retained in the per-agent private `jobs.sqlite3` store
-for 30 days subject to the logical soft cap, while a short live hot cache serves
-recent results. `job.get` falls back to retained history by `jobId`; its
-`waitSeconds` defaults to 0 and is capped at 30, and `waitOnly=true` suppresses
-active intermediate detail while a bounded wait is in progress and returns
-normal detail once terminal. `job.list` has a default limit of 50, capped at
-100, and supports exact `group`/kind/state filters plus stable opaque cursor
-pagination ordered by `createdAt DESC, jobId DESC`. Hub full and HTTP forwarding
-preserve those fields while the Agent is available.
-group/kind/state, but it explicitly refuses to invent continuation for an
-Agent-issued cursor and reports cached `job.get` data only as degraded evidence,
-not as a fresh wait result. Batch admission still rejects the whole batch before
-starting any child when preflight, policy, confirmation, or capacity fails.
+Process history is retained in the per-agent private `process.sqlite3` store
+for 30 days subject to the logical soft cap. `process.status` falls back to
+retained metadata by `processId`; its `waitSeconds` defaults to 0 and is capped
+at 30. Status and list return metadata only, never stdout, stderr, or result
+bodies. `process.list` has a default limit of 50, capped at 100, and supports
+exact `group`/kind/state filters plus stable opaque cursor pagination ordered
+by `createdAt DESC, processId DESC`. Hub Full and HTTP forwarding preserve
+those fields while the Agent is available. When the Agent is unavailable, Hub
+may filter its cached first page by group/kind/state, but it refuses to invent
+continuation for an Agent-issued cursor; cached status is explicitly degraded
+evidence, not a fresh wait result.
+
+`process.output` reads non-consuming pages from stdout and stderr. The default
+page budget is 8 KiB and the maximum is 32 KiB. Cursors are process-bound and
+carry raw-byte offsets for both streams; returned slices preserve invalid UTF-8
+through base64 encoding. Responses explicitly report retention gaps and EOF;
+EOF is true only when capture actually reached the end of output. Use
+`process.result` to retrieve a complete retained structured result. Its status
+distinguishes `complete`, `too_large`, and `unavailable`; oversized or
+unretained results are not returned as partial JSON, and Hub's metadata cache
+never supplies result content. Batch admission still rejects the whole batch
+before starting any child when preflight, policy, confirmation, or capacity
+fails.
 
 ### Storage authority and recovery boundaries
 
-The private Agent Job database (`jobs.sqlite3`) retains terminal history for
-30 days subject to its logical soft cap. Its version-1 migration adopts
-unambiguous legacy rows transactionally and refuses a future schema version
-without quarantining or rewriting the database. Before migration it creates a
-private `<jobs.sqlite3>.pre-migration.bak`; a newly created database is mode
-`0600` under a private mode-`0700` parent. The live Job registry and hot cache
-are projections; after an Agent restart, active Jobs are represented as
+The private Agent process database (`process.sqlite3`) retains process history
+for 30 days subject to its logical soft cap. It is created mode `0600` under a
+private mode-`0700` parent. The process registry and hot cache are projections;
+after an Agent restart, active processes are represented as
 `unknown_after_restart` and are not replayed for side effects. History
 retention or a Hub cache eviction does not roll back a process, MCP call, or
-other external effect.
+other external effect. The old `jobs.sqlite3` file is left untouched and is
+not opened, migrated, or used as process history.
 
 Process and MCP batch admission rows commit in one SQLite transaction before
 their children enter the live registry. A persistence failure leaves no partial
-batch admissions and starts no child execution; existing history is preserved.
-This is admission atomicity, not transactional execution or rollback of external
-effects after an admitted batch starts.
+batch admissions and starts no child execution; existing process history is
+preserved. This is admission atomicity, not transactional execution or rollback
+of external effects after an admitted batch starts.
 
-If acquiring the migration write lock fails after a snapshot has been staged,
-the Agent removes that staging snapshot without replacing the previous recovery
-backup. A later attempt can retry migration after the writer releases its lock.
-This handled-error cleanup does not claim cleanup after an abrupt process kill
-or hardware failure.
 
 Reliable Hub commands use the Agent transport ledger as their local
 deduplication and result authority. Each claim is file-locked and carries an
@@ -317,10 +323,12 @@ receipt, or cache omission likewise cannot be interpreted as remote
 cancellation or effect rollback.
 
 
-Tunnel, HTTP, and local Unix ingress do not expose Hub aggregation or notification tools. They use
-the same local policy, path-policy, confirmation, audit, and ManagedJob lifecycle as Hub execution
-while keeping the Hub out of the command path. The top-level `mcpServers` block is different: it
-is the downstream registry consumed by `mcp.*` calls, not an inbound listener definition.
+Tunnel, HTTP, and local Unix ingress do not expose Hub aggregation or
+notification tools. They use the same local policy, path-policy, confirmation,
+audit, and managed process lifecycle as Hub execution while keeping the Hub
+out of the command path. The top-level `mcpServers` block is different: it is
+the downstream registry consumed by `mcp.*` calls, not an inbound listener
+definition.
 
 The checked-in [public tool contract matrix](tool-contract-matrix.md) records
 use/non-use guidance, conditional fields, bounds, lifecycle/failure semantics,
@@ -405,7 +413,7 @@ coordinator profile exposes exactly these eight Hub-native tools:
 - `hub.info`
 - `agent.list`
 - `hub.run.list`, `hub.run.get`
-- `hub.job.list`, `hub.job.get`
+- `hub.process.list`, `hub.process.status`
 - `user.notify.channels`, `user.notify.send`
 
 Coordinator calls never dispatch an Agent command. Session queries read only
@@ -466,30 +474,29 @@ and preserve behavior; Agentic-managed writes emit the canonical `channels`
 form. `ntfy` is the truthful channel name, while notification publication,
 callback tokens, pending state, and decision relay remain owned by the Hub.
 
-The active-Job limit accepts either the adaptive value or an explicit
+The active-process limit accepts either the adaptive value or an explicit
 integer:
 
 ```json
 "limits": {
-  "maxActiveJobs": "auto"
+  "maxActiveProcesses": "auto"
 }
 ```
 
 `auto` resolves at worker startup and after each valid live limits reload as
 `clamp(ceil(availableParallelism * 1.5), 6, 24)`. Existing numeric values stay
-explicit and are not migrated. Capacity rejection keeps the
-`max_active_jobs_reached` code and includes bounded `active`, `requested`,
-and `limit` details; batch admission remains atomic and all-or-reject.
+explicit and are not migrated. Capacity rejection uses
+`max_active_processes_reached` and includes bounded `active`, `requested`, and
+`limit` details; batch admission remains atomic and all-or-reject.
 
-This is a breaking v0.9 migration. Before starting the new binary, replace
-`limits.maxActiveSessions` with `limits.maxActiveJobs` and remove the historical
-`sessionIdleTimeoutSecs` field, which never controlled runtime behavior. The
-strict limits object rejects both removed fields. The managed execution tool
-and HTTP aliases are also removed rather than wrapped: use `process.batch`,
-`job.get`, `job.list`, `job.cancel`, `/v1/process/*`, and `/v1/jobs/*`; old
-`process.batchExec`, `process.get/list/kill`, managed `session.*`, `/v1/exec`,
-`/v1/batchExec`, and `/v1/sessions/*` calls fail explicitly. tmux session names
-and tmux session APIs are unchanged.
+The breaking v0.9 migration guidance is historical, not the current execution
+interface. The current lifecycle surface is `process.exec`, `process.batch`,
+`process.status`, `process.list`, `process.output`, `process.result`, and
+`process.cancel`, with HTTP `/v1/process` routes. Legacy `job.*` tool names and
+`/v1/jobs/*` routes are not current APIs. Former `process.batchExec`,
+`process.get`, `process.kill`, managed `session.*`, `/v1/exec`, `/v1/batchExec`,
+and `/v1/sessions/*` aliases remain removed. tmux session names and tmux
+session APIs are unchanged.
 
 The current multi-file mutation boundary is documented in the file contract
 matrix: one complete apply-patch request is staged and validated before its
@@ -502,10 +509,10 @@ new admissions, calls, and tool discovery. MCP server ids use `A-Z`, `a-z`,
 `0-9`, `.`, `_`, or `-` (maximum 64 bytes); `streamable-http` requires an
 absolute HTTP(S) URL and may optionally use structured Bearer auth; `stdio`
 requires a non-empty command and rejects HTTP auth. Invalid config versions keep
-the last valid live subset. Already admitted Jobs and already-created downstream
-MCP clients retain their original decision/server definition and are not cancelled
-or rerouted by a reload. Because downstream clients are currently created per call,
-no separate reload or reconnect command is needed.
+the last valid live subset. Already admitted processes and already-created
+downstream MCP clients retain their original decision/server definition and
+are not cancelled or rerouted by a reload. Because downstream clients are
+currently created per call, no separate reload or reconnect command is needed.
 
 Startup-owned identity, workspace root, Room settings, Browser configuration,
 tunnel/client, reporting connection, and skill-install concurrency changes
@@ -626,7 +633,7 @@ agentic-gpt config set tunnel.hubReporting.detail metadata
 ```
 
 The reporting connection identifies itself as `reporting-only`. It can send
-hello/heartbeat, direct-run lifecycle events, Job snapshots, and the
+hello/heartbeat, direct-run lifecycle events, and process snapshots, plus the
 existing confirmation traffic, but it never accepts Hub execution envelopes.
 Hub requests reject reporting-only agents before creating a run. Reporting
 disconnects, queue drops, and Hub unavailability never delay or change the
@@ -635,13 +642,13 @@ local MCP result.
 `metadata` records tool/source/profile/status/timestamps/duration, identifiers,
 exit code, and bounded failure reason. It omits arguments, results, program
 argv, working directories, and stdout/stderr. `full` additionally stores
-bounded JSON arguments/results and bounded existing Job snapshots; an
+bounded JSON arguments/results and bounded existing process snapshots; an
 oversized value becomes a byte-count/SHA-256 truncation record rather than a
 partial JSON fragment. Direct-run records remain in Hub storage for 24 hours.
 
 The worker also writes bounded lifecycle records to stderr for each tool call
 and managed process terminal event. These records contain the run/tool/profile
-and status, with duration and safe 12-hex run/Job identifiers when
+and status, with duration and safe 12-hex run/process identifiers when
 available; inline terminal calls emit one final record, while calls that
 return active emit one response record and one later terminal record. They
 never contain arguments, results, paths, secrets, or process output. Reporting
@@ -702,9 +709,8 @@ Recovery checklist:
    `tunnel.hubReporting.enabled` temporarily; local Tunnel execution remains
    independent.
 
-For Hub mode, use `GET /v1/info`, `GET /v1/agents`, `hub.info`, and
 `agent.list` for safe diagnostics. Use `hub.run.list`/`hub.run.get` for retained
-run history and `hub.job.list`/`hub.job.get` for current snapshots.
+run history and `hub.process.list`/`hub.process.status` for cached metadata.
 
 ## Optional centralized Hub mode
 

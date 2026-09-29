@@ -7,8 +7,8 @@ use std::{
 };
 
 use agentic_gpt_protocol::{
-    JobError, JobState, McpBatchChildResponse, McpBatchMode, McpBatchRequest, McpBatchResponse,
-    McpBatchStatus, McpCallToolRequest,
+    McpBatchChildResponse, McpBatchMode, McpBatchRequest, McpBatchResponse, McpBatchStatus,
+    McpCallToolRequest, ProcessError, ProcessState,
 };
 use anyhow::{anyhow, Result};
 use rmcp::model::JsonObject;
@@ -22,8 +22,8 @@ use crate::{
     audit::{write_mcp_batch_audit, McpBatchAuditRecord},
     config::mcp_servers::McpServerConfig,
     confirmation::{self, McpBatchConfirmationItem},
-    jobs,
-    jobs::{ManagedMcpSpec, TerminalEventHook},
+    process,
+    process::{ManagedMcpSpec, TerminalEventHook},
     state::AppState,
     utils::bounded_mcp_argument_keys,
 };
@@ -168,7 +168,7 @@ async fn start_managed_batch_with_factory_budget(
             terminal_event_hook: terminal_event_hook.clone(),
         })
         .collect::<Vec<_>>();
-    let registrations = match jobs::register_mcp_batch(state, specs).await {
+    let registrations = match process::register_mcp_batch(state, specs).await {
         Ok(registrations) => registrations,
         Err(reason) => {
             write_batch_rejection_audit(
@@ -191,7 +191,7 @@ async fn start_managed_batch_with_factory_budget(
             (
                 index,
                 prepared[index].id.clone(),
-                registration.info.job_id.clone(),
+                registration.info.process_id.clone(),
             )
         })
         .collect::<Vec<_>>();
@@ -244,24 +244,28 @@ async fn start_managed_batch_with_factory_budget(
         } else {
             confirmation_result.as_str()
         };
-        let _ = jobs::set_mcp_authorization(state, &registration.info.job_id, child_authorization)
-            .await;
+        let _ = process::set_mcp_authorization(
+            state,
+            &registration.info.process_id,
+            child_authorization,
+        )
+        .await;
     }
 
     if !mcp_authorization_allows(&confirmation_result) {
         let terminal = if confirmation_result == "cancelled" {
-            JobState::Cancelled
+            ProcessState::Cancelled
         } else {
-            JobState::Rejected
+            ProcessState::Rejected
         };
         for registration in &registrations {
-            let _ = jobs::finish_mcp_error(
+            let _ = process::finish_mcp_error(
                 state,
-                &registration.info.job_id,
+                &registration.info.process_id,
                 terminal,
                 "mcp_batch_rejected",
                 format!("MCP batch did not start: {confirmation_result}"),
-                (terminal == JobState::Cancelled).then_some("batch_cancelled_before_start"),
+                (terminal == ProcessState::Cancelled).then_some("batch_cancelled_before_start"),
                 Some("aggregate_authorization_decision"),
             )
             .await;
@@ -275,7 +279,7 @@ async fn start_managed_batch_with_factory_budget(
             enforce_aggregate_budget,
         )
         .await?;
-        response.error = Some(JobError {
+        response.error = Some(ProcessError {
             code: "mcp_batch_rejected".to_string(),
             message: format!("MCP batch did not start: {confirmation_result}"),
         });
@@ -381,11 +385,11 @@ async fn prepare_mcp_batch(
         validate_tool_name(&call.tool_name)?;
         let arguments = tool_arguments(call.arguments.clone())?;
         let encoded = serde_json::to_vec(&call.arguments)?;
-        if encoded.len() > jobs::MAX_MCP_ARGUMENT_BYTES {
+        if encoded.len() > process::MAX_MCP_ARGUMENT_BYTES {
             return Err(anyhow!(
                 "mcp_tool_arguments_too_large: index={index}; bytes={}; max={}",
                 encoded.len(),
-                jobs::MAX_MCP_ARGUMENT_BYTES
+                process::MAX_MCP_ARGUMENT_BYTES
             ));
         }
         aggregate_bytes = aggregate_bytes.saturating_add(encoded.len());
@@ -431,7 +435,7 @@ async fn prepare_mcp_batch(
 async fn run_mcp_batch_coordinator(
     state: AppState,
     prepared: Vec<PreparedMcpBatchCall>,
-    registrations: Vec<jobs::ManagedMcpRegistration>,
+    registrations: Vec<process::ManagedMcpRegistration>,
     mode: McpBatchMode,
     fail_fast: bool,
     timeout_seconds: u64,
@@ -443,7 +447,7 @@ async fn run_mcp_batch_coordinator(
         McpBatchMode::Sequential => {
             for (call, registration) in prepared.into_iter().zip(registrations) {
                 if fail_fast && stop.load(Ordering::Acquire) {
-                    mark_batch_child_skipped(&state, &registration.info.job_id).await;
+                    mark_batch_child_skipped(&state, &registration.info.process_id).await;
                     continue;
                 }
                 run_managed_call(
@@ -453,7 +457,7 @@ async fn run_mcp_batch_coordinator(
                     call.server,
                     registration.cancel_requested,
                     timeout_seconds,
-                    registration.info.job_id.clone(),
+                    registration.info.process_id.clone(),
                     client_factory.clone(),
                     Some(if call.temporary_allowed {
                         "temporary_mcp_allow".to_string()
@@ -464,9 +468,9 @@ async fn run_mcp_batch_coordinator(
                 )
                 .await;
                 if fail_fast
-                    && jobs::get_job(&state, &registration.info.job_id, 0)
+                    && process::get_process_detail(&state, &registration.info.process_id, 0)
                         .await
-                        .is_ok_and(|job| hard_batch_failure(job.state))
+                        .is_ok_and(|process| hard_batch_failure(process.process.state))
                 {
                     stop.store(true, Ordering::Release);
                 }
@@ -487,7 +491,7 @@ async fn run_mcp_batch_coordinator(
                         call.server,
                         registration.cancel_requested,
                         timeout_seconds,
-                        registration.info.job_id.clone(),
+                        registration.info.process_id.clone(),
                         task_factory,
                         Some(if call.temporary_allowed {
                             "temporary_mcp_allow".to_string()
@@ -498,9 +502,13 @@ async fn run_mcp_batch_coordinator(
                     )
                     .await;
                     if fail_fast
-                        && jobs::get_job(&task_state, &registration.info.job_id, 0)
-                            .await
-                            .is_ok_and(|job| hard_batch_failure(job.state))
+                        && process::get_process_detail(
+                            &task_state,
+                            &registration.info.process_id,
+                            0,
+                        )
+                        .await
+                        .is_ok_and(|process| hard_batch_failure(process.process.state))
                     {
                         task_stop.store(true, Ordering::Release);
                     }
@@ -511,11 +519,11 @@ async fn run_mcp_batch_coordinator(
     }
 }
 
-async fn mark_batch_child_skipped(state: &AppState, job_id: &str) {
-    let _ = jobs::finish_mcp_error(
+async fn mark_batch_child_skipped(state: &AppState, process_id: &str) {
+    let _ = process::finish_mcp_error(
         state,
-        job_id,
-        JobState::Skipped,
+        process_id,
+        ProcessState::Skipped,
         "mcp_batch_fail_fast_skipped",
         "MCP batch fail-fast prevented this queued child from starting",
         None,
@@ -524,15 +532,15 @@ async fn mark_batch_child_skipped(state: &AppState, job_id: &str) {
     .await;
 }
 
-fn hard_batch_failure(state: JobState) -> bool {
+fn hard_batch_failure(state: ProcessState) -> bool {
     matches!(
         state,
-        JobState::Failed
-            | JobState::Rejected
-            | JobState::Cancelled
-            | JobState::TimedOut
-            | JobState::Detached
-            | JobState::UnknownAfterRestart
+        ProcessState::Failed
+            | ProcessState::Rejected
+            | ProcessState::Cancelled
+            | ProcessState::TimedOut
+            | ProcessState::Detached
+            | ProcessState::UnknownAfterRestart
     )
 }
 
@@ -559,16 +567,16 @@ async fn build_mcp_batch_response(
     loop {
         details.clear();
         let mut all_terminal = true;
-        for (index, id, job_id) in child_refs {
-            let detail = jobs::get_job_detail(state, job_id, 0)
+        for (index, id, process_id) in child_refs {
+            let detail = process::get_process_detail(state, process_id, 0)
                 .await
                 .map_err(|reason| anyhow!(reason))?;
-            all_terminal &= detail.job.state.is_terminal();
+            all_terminal &= detail.process.state.is_terminal();
             details.push(McpBatchChildResponse {
                 index: *index,
                 id: id.clone(),
                 result_omitted: false,
-                detail,
+                process: detail,
             });
         }
         if all_terminal || wait_seconds == 0 || Instant::now() >= deadline {
@@ -578,13 +586,13 @@ async fn build_mcp_batch_response(
     }
     let completed_inline = details
         .iter()
-        .all(|result| result.detail.job.state.is_terminal());
+        .all(|result| result.process.process.state.is_terminal());
     let status = forced_status.unwrap_or_else(|| {
         if !completed_inline {
             McpBatchStatus::Running
         } else if details
             .iter()
-            .all(|result| result.detail.job.state == JobState::Completed)
+            .all(|result| result.process.process.state == ProcessState::Completed)
         {
             McpBatchStatus::Completed
         } else {
@@ -614,7 +622,7 @@ fn apply_batch_result_budget(response: &mut McpBatchResponse) -> Result<()> {
         for index in (0..response.results.len()).rev() {
             let removed = {
                 let child = &mut response.results[index];
-                if child.detail.result.take().is_some() {
+                if child.process.result.take().is_some() {
                     child.result_omitted = true;
                     true
                 } else {
@@ -682,7 +690,7 @@ async fn write_batch_rejection_audit(
             fail_fast: payload.fail_fast,
             confirmation_required_count: 0,
             confirmation_result: None,
-            child_job_ids: Vec::new(),
+            child_process_ids: Vec::new(),
             outcome: outcome.to_string(),
             error_code: Some(error_code.to_string()),
             duration_ms: started.elapsed().as_millis(),
@@ -727,9 +735,9 @@ async fn write_batch_audit(
             fail_fast: payload.fail_fast,
             confirmation_required_count,
             confirmation_result,
-            child_job_ids: child_refs
+            child_process_ids: child_refs
                 .iter()
-                .map(|(_, _, job_id)| job_id.clone())
+                .map(|(_, _, process_id)| process_id.clone())
                 .collect(),
             outcome: match response.status {
                 McpBatchStatus::Running => "running",

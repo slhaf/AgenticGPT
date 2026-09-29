@@ -88,9 +88,31 @@ pub(super) async fn call_app_tool(
         "agent.list" => server.list_agents().await,
         "process.exec" => server.exec(Parameters(decode_args(arguments)?)).await,
         "process.batch" => server.batch_exec(Parameters(decode_args(arguments)?)).await,
-        "job.list" => server.job_list(Parameters(decode_args(arguments)?)).await,
-        "job.get" => server.job_get(Parameters(decode_args(arguments)?)).await,
-        "job.cancel" => server.job_cancel(Parameters(decode_args(arguments)?)).await,
+        "process.list" => {
+            server
+                .process_list(Parameters(decode_args(arguments)?))
+                .await
+        }
+        "process.status" => {
+            server
+                .process_status(Parameters(decode_args(arguments)?))
+                .await
+        }
+        "process.output" => {
+            server
+                .process_output(Parameters(decode_args(arguments)?))
+                .await
+        }
+        "process.result" => {
+            server
+                .process_result(Parameters(decode_args(arguments)?))
+                .await
+        }
+        "process.cancel" => {
+            server
+                .process_cancel(Parameters(decode_args(arguments)?))
+                .await
+        }
         "tmux.listSessions" => {
             server
                 .tmux_list_sessions(Parameters(decode_args(arguments)?))
@@ -150,14 +172,14 @@ pub(super) async fn call_app_tool(
                 .hub_run_list(Parameters(decode_args(arguments)?))
                 .await
         }
-        "hub.job.list" => {
+        "hub.process.status" => {
             server
-                .hub_job_list(Parameters(decode_args(arguments)?))
+                .hub_process_status(Parameters(decode_args(arguments)?))
                 .await
         }
-        "hub.job.get" => {
+        "hub.process.list" => {
             server
-                .hub_job_get(Parameters(decode_args(arguments)?))
+                .hub_process_list(Parameters(decode_args(arguments)?))
                 .await
         }
         "user.notify.send" => {

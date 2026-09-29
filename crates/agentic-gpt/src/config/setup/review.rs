@@ -750,7 +750,7 @@ fn optional_items(draft: OptionalSectionDraft) -> Vec<ReviewItem> {
         ],
         OptionalSectionDraft::Limits(LimitsDraft {
             max_concurrent_tasks,
-            max_active_jobs,
+            max_active_processes,
             max_file_search_context_lines,
         }) => vec![
             ReviewItem::field(
@@ -760,9 +760,9 @@ fn optional_items(draft: OptionalSectionDraft) -> Vec<ReviewItem> {
                 ReviewEditorKind::Text,
             ),
             ReviewItem::field(
-                SetupField::MaxActiveJobs,
-                "max_active_jobs",
-                max_active_jobs,
+                SetupField::MaxActiveProcesses,
+                "max_active_processes",
+                max_active_processes,
                 ReviewEditorKind::AutoCustom,
             ),
             ReviewItem::field(

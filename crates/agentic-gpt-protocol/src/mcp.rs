@@ -1,6 +1,10 @@
 use serde::{Deserialize, Serialize};
 
-use super::process_jobs::{is_false, JobDetail, JobError, JobToolResponse};
+use super::process::{ProcessDetail, ProcessError, ProcessToolResponse};
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -122,7 +126,7 @@ impl McpBatchRequest {
 #[serde(rename_all = "camelCase")]
 pub struct McpBatchToolChildResponse {
     #[serde(flatten)]
-    pub job: JobToolResponse,
+    pub process: ProcessToolResponse,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -130,7 +134,7 @@ pub struct McpBatchToolChildResponse {
 pub struct McpBatchToolResponse {
     pub status: McpBatchStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<JobError>,
+    pub error: Option<ProcessError>,
     pub results: Vec<McpBatchToolChildResponse>,
 }
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -151,7 +155,7 @@ pub struct McpBatchChildResponse {
     #[serde(default, skip_serializing_if = "is_false")]
     pub result_omitted: bool,
     #[serde(flatten)]
-    pub detail: JobDetail,
+    pub process: ProcessDetail,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -167,5 +171,5 @@ pub struct McpBatchResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aggregate_bytes: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<JobError>,
+    pub error: Option<ProcessError>,
 }

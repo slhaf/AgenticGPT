@@ -60,7 +60,7 @@ mod tests {
             agents: Arc::new(crate::agents::lifecycle::Connections::new()),
             dispatch: Arc::new(crate::agents::dispatch::Dispatch::new()),
             confirmations: Arc::new(crate::confirmation::Confirmations::new()),
-            job_cache: Arc::new(crate::state::JobCache::new()),
+            process_cache: Arc::new(crate::state::ProcessCache::new()),
             boot_generations: Arc::new(Mutex::new(HashMap::new())),
             active_room: Arc::new(Mutex::new(None)),
             http: reqwest::Client::new(),

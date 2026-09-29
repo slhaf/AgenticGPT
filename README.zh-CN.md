@@ -13,7 +13,7 @@ ChatGPT Secure MCP Tunnel
   -> agentic-gpt worker
   -> stdio MCP + owner-only Unix MCP
   -> 可选的 worker-owned HTTP MCP：http://<host>:<port>/mcp
-  -> 策略 / 文件 / Process Job / Skill / 下游 MCP / tmux / Browser runtime
+  -> 策略 / 文件 / Managed Process / Skill / 下游 MCP / tmux / Browser runtime
 
 集中式——Hub
 ChatGPT Actions 或 Apps MCP
@@ -35,7 +35,7 @@ ChatGPT Actions 或 Apps MCP
 - 每台机器具有独立连接与重启边界。
 - Standalone 还可以启用 worker-owned 的 Streamable HTTP MCP endpoint，路径固定为 `/mcp`；默认关闭，可使用直接 bearer authentication，也可选择 ChatGPT connector OAuth 流程。
 - Tunnel、HTTP 与 owner-only Unix MCP 对同一 profile 暴露一致的 29 个 Normal 工具或 40 个 Room 工具。
-- 策略、确认、审计、热配置、容量和 Managed Job 都保留在本机。
+- 策略、确认、审计、热配置、容量和 Managed Process 状态都保留在本机。
 - fresh stdio worker 即使先收到旧逻辑会话续发的请求、尚未收到新的 MCP `initialize`，也能自动恢复而不退出。
 
 当你需要多 Agent 的统一公开入口、Custom GPT Actions、集中式运行历史、Hub 聚合/通知或 Hub relay 远程确认时，Hub 模式仍然适合。
@@ -48,10 +48,10 @@ ChatGPT Actions 或 Apps MCP
 | **Hub + Local Agent** | 集中路由、Actions、共享历史/报告 | 需要 | Hub 是共享依赖 | `agentic-gpt-hub serve` + `agentic-gpt run` |
 | **Local Unix MCP** | 开发、smoke test、本地自动化 | 不需要 | 单个本地 worker | `agentic-gpt run`（配置 `mode=local`） |
 
-## v0.9 主要能力
+## 主要能力
 
-- `process.exec`、`process.batch`、`skills.run`、`mcp.callTool`、`mcp.batch` 共用统一 Managed Job 生命周期。
-- 使用 `job.get`、`job.list`、`job.cancel` 管理不同类型的 Job。
+- `process.exec`、`process.batch`、`skills.run`、`mcp.callTool`、`mcp.batch` 创建统一管理的进程。
+- 使用 `process.status`、`process.list`、`process.output`、`process.result`、`process.cancel`，通过 `processId` 查询或控制进程。
 - 批量执行原子接纳，并使用有界的确认边界。
 - allow / confirm / deny 命令策略，以及可写、只读、拒绝路径根。
 - 本地桌面确认与可选的 Hub-backed ntfy 确认。
@@ -248,7 +248,7 @@ agentic-gpt local list-tools
 agentic-gpt local call agent.info --arguments '{}'
 ```
 
-Local 模式与 Standalone 共用策略、路径策略、确认、审计、热配置和 Job 实现，但只开放 owner-only Unix socket。
+Local 模式与 Standalone 共用策略、路径策略、确认、审计、热配置和进程实现，但只开放 owner-only Unix socket。
 
 ## 集中式 Hub 模式
 
@@ -291,15 +291,18 @@ agentic-gpt run
 - Custom GPT Actions：导入 [`openapi/hub.yaml`](openapi/hub.yaml)，Bearer auth 使用 `AGENTIC_GPT_API_KEY`。
 - ChatGPT Apps MCP：连接 `https://<your-hub-domain>/mcp`。
 
-Hub 原生工具和转发执行使用相同的 Managed Job lifecycle projection。运行中的任务通过
-`job.get` 查询、通过 `job.cancel` 取消。
+Hub 原生工具和转发执行使用相同的进程生命周期 projection。使用
+`process.status` 或 `process.list` 查询运行状态，使用 `process.output` 和
+`process.result` 获取输出/结果，使用 `process.cancel` 取消，并传入返回的 `processId`。
 
-## Managed Job 与安全边界
+## Managed Process 与安全边界
 
-- V2 Normal surface 有 29 个工具，Room surface 有 40 个工具；profile preset 选择 namespace，显式 `toolsets.enabled` 仍可进一步缩小 surface。
-- `process.exec`、`skills.run`、`mcp.callTool` 返回扁平的 `JobToolResponse`；`process.batch` 返回 `JobBatchToolResponse`。
-- `mcp.batch` 返回带有按输入顺序排列的子 Job projection 的扁平 `McpBatchToolResponse`，接受 1–16 个调用，只确认一次，并执行全局/单 server 并发限制。
-- MCP 单调用参数上限 256 KiB，保留结果上限 512 KiB；批次 aggregate 参数与结果各上限 2 MiB。
+- Managed Process 带有 `processId` 和如实反映生命周期的状态。`process.status` 只返回状态元数据；有界输出使用 `process.output`，保留的最终结果使用 `process.result`。
+- Worker HTTP API 提供 `GET /v1/process`（列表）、`GET /v1/process/{processId}`（状态）、`GET /v1/process/{processId}/output`、`GET /v1/process/{processId}/result` 和 `POST /v1/process/{processId}/cancel`。Hub MCP 提供 `hub.process.status` 与 `hub.process.list`。
+- `process.exec`、`skills.run` 和 `mcp.callTool` 启动 Managed Process；`process.batch` 与 `mcp.batch` 返回按顺序排列的子进程 projection。`mcp.batch` 接受 1–16 个调用，只确认一次，并执行全局/单 server 并发限制。
+- 创建响应内联最多 8 KiB 输出；更多初始输出使用共享预览，最多 2 KiB。`process.output` 默认 cursor 窗口为 8 KiB，最大 32 KiB。
+- MCP 单次调用参数上限 256 KiB；保留的进程结果上限 512 KiB；批次 aggregate 参数与结果各上限 2 MiB。
+- Worker 进程状态存储于 `process.sqlite3`。首次初始化进程存储不会迁移或修改旧的 `jobs.sqlite3` 数据。
 - 审计记录 bounded metadata、hash、状态与终止证据，不记录原始 MCP 参数/结果。
 - 执行前使用 `agent.info` 查看 profile、路径策略、容量、确认、MCP 配置摘要和连接状态。
 
@@ -322,6 +325,8 @@ agentic-gpt config path deny add ~/.secrets
 Hub-backed `ntfy` 是可选能力，只有在 Hub 模式或配置了 Standalone Hub reporting/confirmation relay 时才有意义。本地拒绝或超时是最终结果。
 
 字段定义与热加载行为见 [`docs/configuration.zh-CN.md`](docs/configuration.zh-CN.md)。
+
+以下仅描述历史上的 v0.8 → v0.9 升级；其中的 Job API 名称不是当前进程生命周期的使用指南。
 
 ## 从 v0.8 升级
 
@@ -365,7 +370,7 @@ git push origin v0.9.0
 - Tunnel secret 优先使用 `file:` 或受保护的 `env:` 引用，不要写成配置明文。
 - 凭据、浏览器、云平台和 SSH 目录应保留在 denied roots。
 - Shell、网络工具和陌生 MCP server 优先要求确认。
-- 使用 bounded Job wait，不要让 HTTP/MCP 请求无限阻塞。
+- 使用有界的 process.output/result 获取结果，避免 HTTP/MCP 请求无限阻塞。
 - Hub 公开部署时必须使用 HTTPS。
 - 不要让 v0.9 读取未迁移的 v0.8 limits 对象。
 

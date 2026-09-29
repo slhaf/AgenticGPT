@@ -187,7 +187,7 @@ fn run_local_e2e(root: &Path) -> Result<(), String> {
     }
 
     config["toolsets"]["enabled"] =
-        json!(["agent", "file", "mcp", "process", "job", "skills", "tmux", "room"]);
+        json!(["agent", "file", "mcp", "process", "skills", "tmux", "room"]);
     fs::write(
         &config_path,
         serde_json::to_vec_pretty(&config).map_err(|error| error.to_string())?,
@@ -227,8 +227,7 @@ fn run_local_e2e(root: &Path) -> Result<(), String> {
         return Err("enabled Room call did not reach live server".to_string());
     }
 
-    config["toolsets"]["enabled"] =
-        json!(["agent", "file", "mcp", "process", "job", "skills", "tmux"]);
+    config["toolsets"]["enabled"] = json!(["agent", "file", "mcp", "process", "skills", "tmux"]);
     fs::write(
         &config_path,
         serde_json::to_vec_pretty(&config).map_err(|error| error.to_string())?,

@@ -7,9 +7,9 @@ use serde_json::{json, Value};
 
 use crate::config::{Config, ConfirmationChannel, Rule};
 use crate::exec;
-use crate::jobs;
 use crate::notify;
 use crate::policy::{self, PolicyDecision};
+use crate::process;
 use crate::state::{AppState, CapabilityProfile, HubMode, Transport};
 
 const MAX_SUMMARY_ENTRIES: usize = 128;
@@ -18,9 +18,9 @@ const MAX_CONFIG_BYTES: u64 = 4 * 1024 * 1024;
 pub(crate) async fn collect(state: &AppState) -> Value {
     let generated_at = Utc::now();
     let config = state.config.read().await.clone();
-    let active = jobs::current_jobs(state).await;
+    let active = process::current_processes(state).await;
     let active_count = active.len();
-    let resolved_limit = config.limits.max_active_jobs.resolve();
+    let resolved_limit = config.limits.max_active_processes.resolve();
     let pending_count = state.pending_confirmations.lock().await.len();
     let (hub_sender, reporting_sender) =
         tokio::join!(async { state.hub_sender.lock().await.is_some() }, async {
@@ -133,8 +133,8 @@ pub(crate) async fn collect(state: &AppState) -> Value {
         },
         "execution": {
             "programMatching": "exact",
-            "jobs": {
-                "configuredMax": config.limits.max_active_jobs.configured_label(),
+            "processes": {
+                "configuredMax": config.limits.max_active_processes.configured_label(),
                 "resolvedMax": resolved_limit.resolved,
                 "active": active_count,
                 "available": resolved_limit.resolved.saturating_sub(active_count),
@@ -162,8 +162,8 @@ pub(crate) async fn collect(state: &AppState) -> Value {
             "enabledServerCount": mcp_enabled_count,
             "clientLifecycle": "per-call",
             "concurrency": {
-                "globalLimit": jobs::MCP_GLOBAL_CONCURRENCY,
-                "perServerLimit": jobs::MCP_PER_SERVER_CONCURRENCY,
+                "globalLimit": process::MCP_GLOBAL_CONCURRENCY,
+                "perServerLimit": process::MCP_PER_SERVER_CONCURRENCY,
                 "active": state.mcp_concurrency.active(),
                 "queued": state.mcp_concurrency.queued(),
             },
@@ -409,24 +409,24 @@ mod tests {
         config.path_policy.write_roots = vec![root.clone()];
         let private_state =
             crate::private_state::PrivateStatePaths::for_test(root.join(".private-state"));
-        let job_history = crate::job_history::JobHistoryStore::open(&private_state);
+        let process_history = crate::process_history::ProcessHistoryStore::open(&private_state);
         AppState {
             config_path: std::env::temp_dir().join("agent-info-missing-config.json"),
             config: Arc::new(RwLock::new(config)),
             private_state,
-            job_history,
+            process_history,
             browser_runtime: None,
             runtime: crate::state::RuntimeModel::tunnel(profile, false),
             started_at: Utc::now(),
             boot_generation: uuid::Uuid::new_v4().simple().to_string()[..12].to_string(),
             supervised: true,
             file_locks: Arc::new(Mutex::new(HashMap::new())),
-            jobs: Arc::new(Mutex::new(HashMap::new())),
+            processes: Arc::new(Mutex::new(HashMap::new())),
             hub_sender: Arc::new(Mutex::new(None)),
             reporting_sender: Arc::new(Mutex::new(None)),
             pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
             temporary_mcp_allows: Arc::new(Mutex::new(Vec::new())),
-            mcp_concurrency: Arc::new(crate::jobs::McpConcurrency::new()),
+            mcp_concurrency: Arc::new(crate::process::McpConcurrency::new()),
             room_repository_writes: Arc::new(Mutex::new(())),
             skills_writes: Arc::new(Mutex::new(())),
             skill_leases: Arc::new(crate::skills::SkillLeaseManager::new()),
@@ -695,7 +695,8 @@ mod tests {
         ));
         fs::write(&invalid, b"not-json").unwrap();
         app.config_path = invalid.clone();
-        app.config.write().await.limits.max_active_jobs = crate::config::MaxActiveJobs::Explicit(0);
+        app.config.write().await.limits.max_active_processes =
+            crate::config::MaxActiveProcesses::Explicit(0);
         let value = collect(&app).await;
         assert_eq!(value["config"]["diskStatus"], "invalid");
         assert_eq!(value["health"]["status"], "degraded");

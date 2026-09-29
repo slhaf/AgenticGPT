@@ -186,7 +186,7 @@ async fn handle_tui(config_path: PathBuf, language: cli_i18n::UiLanguage) -> Res
     let poll_path = config_path.clone();
     let poller = tokio::spawn(async move {
         loop {
-            let client = match local_control::LocalJobClient::connect(&poll_path).await {
+            let client = match local_control::LocalProcessClient::connect(&poll_path).await {
                 Ok(client) => client,
                 Err(error) => {
                     if sender
@@ -201,9 +201,9 @@ async fn handle_tui(config_path: PathBuf, language: cli_i18n::UiLanguage) -> Res
             };
 
             loop {
-                match client.list_jobs(100).await {
+                match client.list_processes(100).await {
                     Ok(page) => {
-                        if sender.send(tui::ProcessUpdate::Jobs(page)).is_err() {
+                        if sender.send(tui::ProcessUpdate::Processes(page)).is_err() {
                             client.close().await;
                             return;
                         }

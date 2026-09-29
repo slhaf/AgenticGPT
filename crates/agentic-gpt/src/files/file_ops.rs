@@ -68,7 +68,7 @@ static INJECT_EXTERNAL_CHANGE: Mutex<Option<(PathBuf, Vec<u8>)>> = Mutex::new(No
 static INJECT_MOVE_SOURCE_REMOVE_FAILURE: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 #[cfg(test)]
-static INJECT_COMMIT_FAILURE: Mutex<Option<PathBuf>> = Mutex::new(None);
+static INJECT_COMMIT_FAILURE: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
 #[cfg(test)]
 pub(crate) fn inject_external_change(path: &Path, contents: &[u8]) {
@@ -87,21 +87,19 @@ pub(crate) fn inject_move_source_remove_failure(path: &Path) {
 
 #[cfg(test)]
 pub(crate) fn inject_commit_failure(path: &Path) {
-    *INJECT_COMMIT_FAILURE
+    INJECT_COMMIT_FAILURE
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(path.to_path_buf());
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .push(path.to_path_buf());
 }
 
 #[cfg(test)]
 fn should_inject_commit_failure(change: &PlannedChange) -> bool {
-    let mut failure = INJECT_COMMIT_FAILURE
+    let mut failures = INJECT_COMMIT_FAILURE
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if failure
-        .as_ref()
-        .is_some_and(|path| path == &change.target.path)
-    {
-        *failure = None;
+    if let Some(index) = failures.iter().position(|path| path == &change.target.path) {
+        failures.remove(index);
         true
     } else {
         false

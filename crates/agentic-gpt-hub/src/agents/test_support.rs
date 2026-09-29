@@ -1,5 +1,6 @@
 use agentic_gpt_protocol::{
-    AgentConnectionMode, AgentRole, Capabilities, JobInfo, JobKind, JobState, SafeConfigSummary,
+    AgentConnectionMode, AgentRole, Capabilities, ProcessCaptureStatus, ProcessInfo, ProcessKind,
+    ProcessState, SafeConfigSummary,
 };
 use axum::http::{HeaderMap, HeaderValue};
 use rusqlite::{params, Connection};
@@ -38,7 +39,7 @@ pub(super) fn test_state() -> HubState {
         agents: Arc::new(crate::agents::lifecycle::Connections::new()),
         dispatch: Arc::new(crate::agents::dispatch::Dispatch::new()),
         confirmations: Arc::new(crate::confirmation::Confirmations::new()),
-        job_cache: Arc::new(super::super::state::JobCache::new()),
+        process_cache: Arc::new(super::super::state::ProcessCache::new()),
         boot_generations: Arc::new(Mutex::new(HashMap::new())),
         active_room: Arc::new(Mutex::new(None)),
         http: reqwest::Client::new(),
@@ -52,7 +53,7 @@ pub(super) fn test_state() -> HubState {
 pub(super) fn register_agent(state: &HubState, agent_id: &str, secret: &str) {
     let conn = state.db.lock().unwrap();
     let capabilities = Capabilities {
-        jobs: true,
+        processes: true,
         confirmation: true,
         notification_actions: true,
     };
@@ -68,17 +69,17 @@ pub(super) fn register_agent(state: &HubState, agent_id: &str, secret: &str) {
     .unwrap();
 }
 
-pub(super) fn test_running_job(job_id: &str) -> JobInfo {
+pub(super) fn test_running_process(process_id: &str) -> ProcessInfo {
     let now = chrono::Utc::now();
-    JobInfo {
+    ProcessInfo {
         agent_id: "agent".to_string(),
-        job_id: job_id.to_string(),
+        process_id: process_id.to_string(),
         group: None,
         batch_id: None,
         batch_call_id: None,
         batch_index: None,
-        kind: JobKind::Process,
-        state: JobState::Running,
+        kind: ProcessKind::Command,
+        state: ProcessState::Running,
         created_at: now,
         started_at: Some(now),
         updated_at: now,
@@ -88,9 +89,6 @@ pub(super) fn test_running_job(job_id: &str) -> JobInfo {
         working_directory: None,
         command_preview: Some("sleep 10".to_string()),
         exit_code: None,
-        stdout_tail: String::new(),
-        stderr_tail: String::new(),
-        truncated: false,
         reject_reason: None,
         skill_id: None,
         skill_path: None,
@@ -100,6 +98,8 @@ pub(super) fn test_running_job(job_id: &str) -> JobInfo {
         cancel_requested: false,
         cancel_outcome: None,
         termination_evidence: None,
+        capture_status: ProcessCaptureStatus::NotStarted,
+        capture_error: None,
     }
 }
 

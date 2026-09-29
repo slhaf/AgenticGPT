@@ -258,9 +258,9 @@ pub(crate) async fn request_confirmation(
     "provider_unavailable".to_string()
 }
 
-/// Confirmation used by an asynchronously registered Job. Hub-backed
-/// requests remove their pending sender when the Job is cancelled, so a
-/// cancelled `waiting_confirmation` Job cannot leak a durable callback entry.
+/// Confirmation used by an asynchronously registered process. Hub-backed
+/// requests remove their pending sender when the process is cancelled, so a
+/// cancelled `waiting_confirmation` process cannot leak a durable callback entry.
 pub(crate) async fn request_confirmation_cancellable(
     state: &AppState,
     config: &Config,

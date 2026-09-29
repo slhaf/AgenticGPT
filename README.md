@@ -13,7 +13,7 @@ ChatGPT Secure MCP Tunnel
   -> agentic-gpt worker
   -> stdio MCP + owner-only Unix MCP
   -> optional worker-owned HTTP MCP: http://<host>:<port>/mcp
-  -> policy / files / process Jobs / skills / downstream MCP / tmux / Browser runtime
+  -> policy / files / managed processes / skills / downstream MCP / tmux / Browser runtime
 
 Centralized — Hub
 ChatGPT Actions or Apps MCP
@@ -35,7 +35,7 @@ The historical Cloudflare-only Hub has been removed from `main`; it remains on b
 - Every machine has an independent connection and restart boundary.
 - The tunnel, HTTP, and owner-only Unix MCP ingress expose the configured toolset surface from the pre-existing Normal/Room names; profile presets are defaults and explicit `toolsets.enabled` selection is authoritative.
 - Standalone may additionally enable a worker-owned Streamable HTTP MCP endpoint at fixed `/mcp`; it is disabled by default and supports either direct bearer authentication or the optional ChatGPT connector OAuth flow.
-- Policy, confirmation, audit, live configuration, capacity, and managed Jobs stay local to that machine.
+- Policy, confirmation, audit, live configuration, capacity, and managed process state stay local to that machine.
 - A fresh stdio worker can recover a resumed tunnel request that arrives before a new MCP `initialize` handshake.
 
 Hub mode remains useful when you need one public endpoint for many agents, Custom GPT Actions, centralized run history, Hub-native aggregation/notifications, or Hub-relayed confirmation.
@@ -50,8 +50,8 @@ Hub mode remains useful when you need one public endpoint for many agents, Custo
 
 ## Features
 
-- Unified managed Jobs for `process.exec`, `process.batch`, `skills.run`, `mcp.callTool`, and `mcp.batch`.
-- `job.get`, `job.list`, and `job.cancel` for shared lifecycle control.
+- Managed processes cover `process.exec`, `process.batch`, `skills.run`, `mcp.callTool`, and `mcp.batch`.
+- Use `process.status`, `process.list`, `process.output`, `process.result`, and `process.cancel` to inspect and control a process by `processId`.
 - Atomic batch admission and bounded confirmation boundaries.
 - Configurable allow / confirm / deny command policy.
 - Writable, read-only, and denied path roots.
@@ -168,7 +168,7 @@ agentic-gpt config toolset disable <namespace>
 `ls` shows every namespace with its enabled/disabled state and a short description. Successful
 `enable` and `disable` mutations print the namespace and resulting state.
 
-The available namespaces are `agent`, `file`, `mcp`, `process`, `job`, `skills`, `tmux`, `browser`,
+The available namespaces are `agent`, `file`, `mcp`, `process`, `skills`, `tmux`, `browser`,
 and `room`; the logical `room` namespace includes `bootstrap`, `bootstrap.read`, and every `room.*`
 tool. You can edit `toolsets.enabled` directly in JSON; valid changes hot-reload without a
 restart, while an invalid candidate keeps the last valid selection.
@@ -272,7 +272,7 @@ agentic-gpt local list-tools
 agentic-gpt local call agent.info --arguments '{}'
 ```
 
-Local mode uses the same policy, path policy, confirmation, audit, live config, and Job implementation as Standalone mode, but serves only the owner-only Unix socket.
+Local mode uses the same policy, path policy, confirmation, audit, live config, and process implementation as Standalone mode, but serves only the owner-only Unix socket.
 
 ## Centralized Hub mode
 
@@ -317,16 +317,19 @@ writes the current nested Hub schema with the usual backup transaction.
 - Custom GPT Actions: import [`openapi/hub.yaml`](openapi/hub.yaml) and use `AGENTIC_GPT_API_KEY` as Bearer auth.
 - ChatGPT Apps MCP: connect to `https://<your-hub-domain>/mcp`.
 
-Hub-native and forwarded execution use the same managed Job lifecycle
-projections. Active work is inspected with `job.get` and cancelled with
-`job.cancel`.
+Hub-native and forwarded execution use the same process lifecycle projections. Inspect
+active work with `process.status` or `process.list`, retrieve output/results with
+`process.output` and `process.result`, and cancel with `process.cancel`, using the
+returned `processId`.
 
-## Managed Jobs and safety boundaries
+## Managed processes and safety boundaries
 
-- The V2 advertised surface contains 29 Normal names and 40 Room names; profile presets select namespaces, and explicit `toolsets.enabled` can narrow that surface.
-- `process.exec`, `skills.run`, and `mcp.callTool` return flat `JobToolResponse`; `process.batch` returns `JobBatchToolResponse`.
-- `mcp.batch` returns a flat `McpBatchToolResponse` with ordered child Job projections, accepts 1–16 calls, uses one aggregate confirmation, and enforces global/per-server concurrency.
-- MCP arguments are JSON objects capped at 256 KiB per call; retained results are capped at 512 KiB; aggregate batch arguments/results are capped at 2 MiB.
+- A managed process has a `processId` and a truthful lifecycle status. `process.status` returns status metadata; use `process.output` for bounded output and `process.result` for the retained result.
+- The worker HTTP API exposes `GET /v1/process` (list), `GET /v1/process/{processId}` (status), `GET /v1/process/{processId}/output`, `GET /v1/process/{processId}/result`, and `POST /v1/process/{processId}/cancel`. Hub MCP exposes `hub.process.status` and `hub.process.list`.
+- `process.exec`, `skills.run`, and `mcp.callTool` start managed processes; `process.batch` and `mcp.batch` return ordered child process projections. `mcp.batch` accepts 1–16 calls, uses one aggregate confirmation, and enforces global/per-server concurrency.
+- Creation includes up to 8 KiB of output inline; larger initial output is represented by a shared preview capped at 2 KiB. `process.output` uses a default 8 KiB cursor window and a 32 KiB maximum.
+- MCP arguments are JSON objects capped at 256 KiB per call; retained process results are capped at 512 KiB; aggregate batch arguments/results are capped at 2 MiB.
+- Worker process state is stored in `process.sqlite3`. A fresh process store is initialized without migrating or modifying legacy `jobs.sqlite3` data.
 - Audit records contain bounded metadata, hashes, states, and termination evidence rather than raw MCP arguments/results.
 - Use `agent.info` before execution to inspect the active profile, path policy, capacity, confirmation, MCP configuration summary, and connection state.
 
@@ -349,6 +352,8 @@ agentic-gpt config path deny add ~/.secrets
 Hub-backed `ntfy` is optional and is useful only when Hub mode or standalone Hub reporting/confirmation relay is configured. Local denial or timeout is final.
 
 Detailed field definitions and live-reload behavior are in [`docs/configuration.md`](docs/configuration.md).
+
+The following describes the historical v0.8-to-v0.9 upgrade only; its Job API names do not describe the current process lifecycle.
 
 ## Upgrade to v0.9
 
@@ -392,7 +397,7 @@ Creating or pushing a tag is a separate release action; normal commits do not pu
 - Prefer `file:` or protected `env:` secret references; never store a tunnel key as plaintext config.
 - Keep credential, browser, cloud, and SSH directories in denied roots.
 - Prefer confirmation for shells, network tools, and unfamiliar MCP servers.
-- Use bounded Job waits instead of long blocking HTTP/MCP requests.
+- Use bounded process output/result retrieval instead of long blocking HTTP/MCP requests.
 - Hub mode must use HTTPS when exposed publicly.
 - Do not start v0.9 with an unmigrated v0.8 limits object.
 

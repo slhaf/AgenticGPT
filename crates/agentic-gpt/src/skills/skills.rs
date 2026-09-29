@@ -1,8 +1,8 @@
 use agentic_gpt_protocol::{
-    ActiveSkill, ExecRequest, JobResponse, SkillActivationRequest, SkillActivationResponse,
-    SkillDetail, SkillOrigin, SkillPackageSummary, SkillReadRequest, SkillReadResponse,
-    SkillRunRequest, SkillSearchRequest, SkillSummary, SkillsActiveResponse, SkillsListResponse,
-    SkillsSearchResponse,
+    ActiveSkill, ProcessExecRequest, ProcessResponse, SkillActivationRequest,
+    SkillActivationResponse, SkillDetail, SkillOrigin, SkillPackageSummary, SkillReadRequest,
+    SkillReadResponse, SkillRunRequest, SkillSearchRequest, SkillSummary, SkillsActiveResponse,
+    SkillsListResponse, SkillsSearchResponse,
 };
 use anyhow::{anyhow, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
@@ -18,7 +18,7 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, OwnedRwLockReadGuard, RwLock};
 use uuid::Uuid;
 
-use crate::{config::Config, exec, jobs, state::AppState};
+use crate::{config::Config, exec, process, state::AppState};
 
 const DEFAULT_LIMIT: usize = 20;
 const MAX_LIMIT: usize = 100;
@@ -188,18 +188,17 @@ pub(crate) async fn run(
     state: AppState,
     request: SkillRunRequest,
     request_source: &str,
-    terminal_event_hook: Option<jobs::TerminalEventHook>,
-) -> Result<JobResponse> {
+    terminal_event_hook: Option<process::TerminalEventHook>,
+) -> Result<ProcessResponse> {
     let program = resolve_run_program(&state, &request).await?;
     let config = state.config.read().await.clone();
     if let Some(working_directory) = request.working_directory.as_deref() {
         exec::resolve_working_directory(&config, Some(working_directory))
             .map_err(|reason| anyhow::Error::msg(reason).context("invalid_working_directory"))?;
     }
-    let wait_seconds = request.effective_wait_seconds();
-    let info = jobs::start_skill_job_with_hook_and_source(
-        state.clone(),
-        ExecRequest {
+    Ok(process::start_and_wait_skill_process(
+        state,
+        ProcessExecRequest {
             agent_id: config.agent_id,
             group: request.group,
             program: program.to_string_lossy().to_string(),
@@ -207,17 +206,14 @@ pub(crate) async fn run(
             need_confirm: false,
             confirm_method: None,
             working_directory: request.working_directory,
-            wait_seconds: Some(wait_seconds),
+            wait_seconds: request.wait_seconds,
         },
         &request.id,
         &request.path,
         request_source,
         terminal_event_hook,
     )
-    .await;
-    let info = jobs::wait_for_job(&state, info, wait_seconds).await;
-    let completed_inline = info.state.is_terminal();
-    Ok(jobs::response(info, completed_inline))
+    .await)
 }
 pub(crate) fn skill_run_command_error(error: anyhow::Error) -> serde_json::Value {
     let message = error.root_cause().to_string();
@@ -827,19 +823,19 @@ mod tests {
             config_path: PathBuf::from("test-config.json"),
             config: Arc::new(RwLock::new(config)),
             private_state: private_state.clone(),
-            job_history: crate::job_history::JobHistoryStore::open(&private_state),
+            process_history: crate::process_history::ProcessHistoryStore::open(&private_state),
             browser_runtime: None,
             runtime: crate::state::RuntimeModel::hub(crate::state::CapabilityProfile::Room),
             started_at: chrono::Utc::now(),
             boot_generation: uuid::Uuid::new_v4().simple().to_string()[..12].to_string(),
             supervised: false,
             file_locks: Arc::new(Mutex::new(HashMap::new())),
-            jobs: Arc::new(Mutex::new(HashMap::new())),
+            processes: Arc::new(Mutex::new(HashMap::new())),
             hub_sender: Arc::new(Mutex::new(None)),
             reporting_sender: Arc::new(Mutex::new(None)),
             pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
             temporary_mcp_allows: Arc::new(Mutex::new(Vec::new())),
-            mcp_concurrency: Arc::new(crate::jobs::McpConcurrency::new()),
+            mcp_concurrency: Arc::new(crate::process::McpConcurrency::new()),
             room_repository_writes: Arc::new(Mutex::new(())),
             skills_writes: Arc::new(Mutex::new(())),
             skill_leases: Arc::new(crate::skills::SkillLeaseManager::new()),
@@ -1244,8 +1240,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_waits_for_real_skill_job_and_returns_completed_output() {
+    async fn run_waits_for_real_skill_process_and_returns_completed_output() {
         let state = test_state();
+        let output_state = state.clone();
         let root = workspace_root(&state).await;
         write_skill(&root, "demo", "# Demo");
         let scripts = root.join("skills/demo/scripts");
@@ -1282,9 +1279,63 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(response.status, agentic_gpt_protocol::JobState::Completed);
+        assert_eq!(
+            response.status,
+            agentic_gpt_protocol::ProcessState::Completed
+        );
         assert!(response.completed_inline);
-        assert_eq!(response.detail.job.stdout_tail, "skill-output\n");
+        let expected = b"skill-output\n";
+        if response.process.capture_status == agentic_gpt_protocol::ProcessCaptureStatus::Complete {
+            let inline = response
+                .inline_output
+                .as_ref()
+                .expect("completed output should be inline");
+            let stdout = match inline.stdout.encoding {
+                agentic_gpt_protocol::ProcessOutputEncoding::Utf8 => {
+                    inline.stdout.data.as_bytes().to_vec()
+                }
+                agentic_gpt_protocol::ProcessOutputEncoding::Base64 => {
+                    BASE64.decode(&inline.stdout.data).unwrap()
+                }
+            };
+            assert_eq!(stdout.as_slice(), expected);
+        } else {
+            assert_eq!(
+                response.process.capture_status,
+                agentic_gpt_protocol::ProcessCaptureStatus::Capturing
+            );
+            assert!(response.inline_output.is_none());
+            let mut request = agentic_gpt_protocol::ProcessOutputRequest {
+                process_id: response.process.process_id,
+                cursor: None,
+                max_bytes: Some(8192),
+            };
+            let mut stdout = Vec::new();
+            loop {
+                let page = process::get_process_output(&output_state, request.clone())
+                    .await
+                    .unwrap();
+                let bytes = match page.stdout.encoding {
+                    agentic_gpt_protocol::ProcessOutputEncoding::Utf8 => {
+                        page.stdout.data.as_bytes().to_vec()
+                    }
+                    agentic_gpt_protocol::ProcessOutputEncoding::Base64 => {
+                        BASE64.decode(&page.stdout.data).unwrap()
+                    }
+                };
+                stdout.extend_from_slice(&bytes);
+                request.cursor = Some(page.next_cursor);
+                if page.eof {
+                    assert_eq!(
+                        page.capture_status,
+                        agentic_gpt_protocol::ProcessCaptureStatus::Complete
+                    );
+                    break;
+                }
+                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+            }
+            assert_eq!(stdout.as_slice(), expected);
+        }
     }
 
     #[tokio::test]

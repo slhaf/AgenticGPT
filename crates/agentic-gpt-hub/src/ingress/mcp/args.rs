@@ -7,8 +7,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{
-    default_job_list_limit, default_job_wait_seconds, default_room_notebook_limit,
-    default_room_wait_seconds, default_standard_wait_seconds, default_wait_only,
+    default_process_list_limit, default_process_output_max_bytes, default_process_result_max_bytes,
+    default_process_wait_seconds, default_room_notebook_limit, default_room_wait_seconds,
+    default_standard_wait_seconds,
 };
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
@@ -51,11 +52,13 @@ pub(super) struct HubRunListArgs {
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct ExecArgs {
+pub(super) struct ProcessExecArgs {
     #[schemars(description = "Target local agent id.")]
     pub(super) agent_id: String,
     #[serde(default)]
-    #[schemars(description = "Optional human-readable workstream key inherited by the Job.")]
+    #[schemars(
+        description = "Optional human-readable workstream key inherited by the managed process."
+    )]
     pub(super) group: Option<String>,
     #[schemars(
         description = "Executable name or path. For shell syntax, use bash or sh with args such as ['-lc', '...']."
@@ -92,18 +95,18 @@ pub(super) struct ExecArgs {
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct BatchExecArgs {
+pub(super) struct ProcessBatchArgs {
     #[schemars(description = "Target local agent id.")]
     pub(super) agent_id: String,
     #[serde(default)]
     #[schemars(
-        description = "Optional human-readable workstream key inherited by every child Job."
+        description = "Optional human-readable workstream key inherited by every child process."
     )]
     pub(super) group: Option<String>,
     #[schemars(
         description = "Commands to run. Each element can override the top-level workingDirectory."
     )]
-    pub(super) elements: Vec<BatchExecElementArgs>,
+    pub(super) elements: Vec<ProcessBatchElementArgs>,
     #[serde(default)]
     #[schemars(
         description = "Request confirmation for the batch. Local policy may still allow, confirm, or deny regardless of this flag."
@@ -130,7 +133,7 @@ pub(super) struct BatchExecArgs {
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct BatchExecElementArgs {
+pub(super) struct ProcessBatchElementArgs {
     #[schemars(description = "Executable name or path for this batch element.")]
     pub(super) program: String,
     #[serde(default)]
@@ -145,61 +148,88 @@ pub(super) struct BatchExecElementArgs {
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct JobIdArgs {
+pub(super) struct ProcessIdArgs {
     #[schemars(description = "Target local agent id.")]
     pub(super) agent_id: String,
-    #[schemars(
-        description = "Managed Job id returned by process.exec, process.batch, or skills.run."
-    )]
-    pub(super) job_id: String,
+    #[schemars(description = "Managed process id.")]
+    pub(super) process_id: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct JobGetArgs {
+pub(super) struct ProcessStatusArgs {
     #[schemars(description = "Target local agent id.")]
     pub(super) agent_id: String,
-    #[schemars(description = "Managed Job id.")]
-    pub(super) job_id: String,
+    #[schemars(description = "Managed process id.")]
+    pub(super) process_id: String,
     #[serde(default)]
     #[schemars(
         range(min = 0, max = 30),
-        default = "default_job_wait_seconds",
+        default = "default_process_wait_seconds",
         description = "Bounded wait in seconds; defaults to 5 and is capped at 30."
     )]
     pub(super) wait_seconds: Option<u64>,
-    #[serde(default)]
-    #[schemars(
-        default = "default_wait_only",
-        description = "While waiting, suppress active intermediate detail; defaults to false; terminal completion still returns normal detail."
-    )]
-    pub(super) wait_only: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct JobListArgs {
+pub(super) struct ProcessListArgs {
     #[schemars(description = "Target local agent id.")]
     pub(super) agent_id: String,
     #[serde(default)]
     #[schemars(description = "Exact human-readable workstream filter.")]
     pub(super) group: Option<String>,
     #[serde(default)]
-    #[schemars(description = "Optional Job kind: process, skill, or mcp.")]
+    #[schemars(description = "Optional managed process kind: command, skill, or mcp.")]
     pub(super) kind: Option<String>,
     #[serde(default)]
-    #[schemars(description = "Optional Job state filter.")]
+    #[schemars(description = "Optional managed process state filter.")]
     pub(super) state: Option<String>,
     #[serde(default)]
     #[schemars(
         range(min = 1, max = 100),
-        default = "default_job_list_limit",
-        description = "Maximum retained Jobs; defaults to 50 and is capped at 100."
+        default = "default_process_list_limit",
+        description = "Maximum retained processes; defaults to 50 and is capped at 100."
     )]
     pub(super) limit: Option<usize>,
     #[serde(default)]
-    #[schemars(description = "Opaque cursor returned by a prior job.list response.")]
+    #[schemars(description = "Opaque cursor returned by a prior process.list response.")]
     pub(super) cursor: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ProcessOutputArgs {
+    #[schemars(description = "Target local agent id.")]
+    pub(super) agent_id: String,
+    #[schemars(description = "Managed process id.")]
+    pub(super) process_id: String,
+    #[serde(default)]
+    #[schemars(description = "Opaque cursor returned by a prior process.output response.")]
+    pub(super) cursor: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        range(min = 1, max = 32768),
+        default = "default_process_output_max_bytes",
+        description = "Maximum aggregate encoded output bytes; defaults to 8192 and is capped at 32768."
+    )]
+    pub(super) max_bytes: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ProcessResultArgs {
+    #[schemars(description = "Target local agent id.")]
+    pub(super) agent_id: String,
+    #[schemars(description = "Managed process id.")]
+    pub(super) process_id: String,
+    #[serde(default)]
+    #[schemars(
+        range(min = 1, max = 524288),
+        default = "default_process_result_max_bytes",
+        description = "Maximum result payload bytes to include; defaults to 8192 and is capped at 524288."
+    )]
+    pub(super) max_bytes: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
@@ -325,7 +355,9 @@ pub(super) struct McpCallToolArgs {
     #[schemars(description = "Target local agent id.")]
     pub(super) agent_id: String,
     #[serde(default)]
-    #[schemars(description = "Optional human-readable workstream key inherited by the Job.")]
+    #[schemars(
+        description = "Optional human-readable workstream key inherited by the managed process."
+    )]
     pub(super) group: Option<String>,
     #[schemars(description = "MCP server id returned by mcp.listServers.")]
     pub(super) server_id: String,
@@ -386,7 +418,7 @@ pub(super) struct McpBatchArgs {
     pub(super) agent_id: String,
     #[serde(default)]
     #[schemars(
-        description = "Optional human-readable workstream key inherited by every child Job."
+        description = "Optional human-readable workstream key inherited by every child process."
     )]
     pub(super) group: Option<String>,
     #[schemars(
@@ -673,7 +705,9 @@ pub(super) struct SkillActivationArgs {
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct SkillInstallArgs {
-    #[schemars(description = "Target skill id. One installation job targets exactly one id.")]
+    #[schemars(
+        description = "Target skill id. One installation operation targets exactly one id."
+    )]
     pub(super) id: String,
     #[schemars(description = "GitHub, HTTPS-file, or inline-content source descriptor.")]
     pub(super) source: SkillInstallSourceArgs,
@@ -795,7 +829,9 @@ pub(super) struct SkillRunArgs {
     #[schemars(description = "Package-relative executable path under scripts/.")]
     pub(super) path: String,
     #[serde(default)]
-    #[schemars(description = "Optional human-readable workstream key inherited by the Job.")]
+    #[schemars(
+        description = "Optional human-readable workstream key inherited by the managed process."
+    )]
     pub(super) group: Option<String>,
     #[serde(default)]
     pub(super) args: Option<Vec<String>>,

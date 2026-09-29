@@ -46,7 +46,6 @@ pub(crate) enum ToolNamespace {
     File,
     Mcp,
     Process,
-    Job,
     Skills,
     Tmux,
     Browser,
@@ -60,7 +59,6 @@ impl ToolNamespace {
             Self::File,
             Self::Mcp,
             Self::Process,
-            Self::Job,
             Self::Skills,
             Self::Tmux,
             Self::Browser,
@@ -74,7 +72,6 @@ impl ToolNamespace {
             Self::File => "file",
             Self::Mcp => "mcp",
             Self::Process => "process",
-            Self::Job => "job",
             Self::Skills => "skills",
             Self::Tmux => "tmux",
             Self::Browser => "browser",
@@ -531,7 +528,7 @@ pub(crate) struct Rule {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct LimitsConfig {
     pub(crate) max_concurrent_tasks: usize,
-    pub(crate) max_active_jobs: MaxActiveJobs,
+    pub(crate) max_active_processes: MaxActiveProcesses,
     #[serde(
         default = "default_max_file_search_context_lines",
         deserialize_with = "deserialize_max_file_search_context_lines"
@@ -565,20 +562,20 @@ where
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) enum MaxActiveJobs {
+pub(crate) enum MaxActiveProcesses {
     #[default]
     Auto,
     Explicit(usize),
 }
 
-pub(crate) fn parse_max_active_jobs(value: &str) -> Result<MaxActiveJobs> {
+pub(crate) fn parse_max_active_processes(value: &str) -> Result<MaxActiveProcesses> {
     if value == "auto" {
-        return Ok(MaxActiveJobs::Auto);
+        return Ok(MaxActiveProcesses::Auto);
     }
-    Ok(MaxActiveJobs::Explicit(value.parse::<usize>()?))
+    Ok(MaxActiveProcesses::Explicit(value.parse::<usize>()?))
 }
 
-impl Serialize for MaxActiveJobs {
+impl Serialize for MaxActiveProcesses {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -590,15 +587,15 @@ impl Serialize for MaxActiveJobs {
     }
 }
 
-impl<'de> Deserialize<'de> for MaxActiveJobs {
+impl<'de> Deserialize<'de> for MaxActiveProcesses {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
-        struct MaxActiveJobsVisitor;
+        struct MaxActiveProcessesVisitor;
 
-        impl<'de> Visitor<'de> for MaxActiveJobsVisitor {
-            type Value = MaxActiveJobs;
+        impl<'de> Visitor<'de> for MaxActiveProcessesVisitor {
+            type Value = MaxActiveProcesses;
 
             fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
                 formatter.write_str("a non-negative integer or the string \"auto\"")
@@ -609,8 +606,8 @@ impl<'de> Deserialize<'de> for MaxActiveJobs {
                 E: de::Error,
             {
                 let value = usize::try_from(value)
-                    .map_err(|_| E::custom("maxActiveJobs is too large for this platform"))?;
-                Ok(MaxActiveJobs::Explicit(value))
+                    .map_err(|_| E::custom("maxActiveProcesses is too large for this platform"))?;
+                Ok(MaxActiveProcesses::Explicit(value))
             }
 
             fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
@@ -618,7 +615,7 @@ impl<'de> Deserialize<'de> for MaxActiveJobs {
                 E: de::Error,
             {
                 if value < 0 {
-                    return Err(E::custom("maxActiveJobs must not be negative"));
+                    return Err(E::custom("maxActiveProcesses must not be negative"));
                 }
                 self.visit_u64(value as u64)
             }
@@ -628,9 +625,11 @@ impl<'de> Deserialize<'de> for MaxActiveJobs {
                 E: de::Error,
             {
                 if value == "auto" {
-                    Ok(MaxActiveJobs::Auto)
+                    Ok(MaxActiveProcesses::Auto)
                 } else {
-                    Err(E::custom("maxActiveJobs must be an integer or \"auto\""))
+                    Err(E::custom(
+                        "maxActiveProcesses must be an integer or \"auto\"",
+                    ))
                 }
             }
 
@@ -642,11 +641,11 @@ impl<'de> Deserialize<'de> for MaxActiveJobs {
             }
         }
 
-        deserializer.deserialize_any(MaxActiveJobsVisitor)
+        deserializer.deserialize_any(MaxActiveProcessesVisitor)
     }
 }
 
-impl MaxActiveJobs {
+impl MaxActiveProcesses {
     pub(crate) const MIN_AUTO: usize = 6;
     pub(crate) const MAX_AUTO: usize = 24;
 
@@ -657,7 +656,7 @@ impl MaxActiveJobs {
         }
     }
 
-    pub(crate) fn resolve(self) -> ResolvedMaxActiveJobs {
+    pub(crate) fn resolve(self) -> ResolvedMaxActiveProcesses {
         let available_parallelism = std::thread::available_parallelism()
             .ok()
             .map(std::num::NonZeroUsize::get);
@@ -667,7 +666,7 @@ impl MaxActiveJobs {
     fn resolve_with_parallelism(
         self,
         available_parallelism: Option<usize>,
-    ) -> ResolvedMaxActiveJobs {
+    ) -> ResolvedMaxActiveProcesses {
         let resolved = match self {
             Self::Explicit(value) => value,
             Self::Auto => available_parallelism
@@ -675,7 +674,7 @@ impl MaxActiveJobs {
                 .unwrap_or(Self::MIN_AUTO)
                 .clamp(Self::MIN_AUTO, Self::MAX_AUTO),
         };
-        ResolvedMaxActiveJobs {
+        ResolvedMaxActiveProcesses {
             configured: self,
             resolved,
             available_parallelism,
@@ -684,16 +683,16 @@ impl MaxActiveJobs {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct ResolvedMaxActiveJobs {
-    pub(crate) configured: MaxActiveJobs,
+pub(crate) struct ResolvedMaxActiveProcesses {
+    pub(crate) configured: MaxActiveProcesses,
     pub(crate) resolved: usize,
     pub(crate) available_parallelism: Option<usize>,
 }
 
-impl ResolvedMaxActiveJobs {
+impl ResolvedMaxActiveProcesses {
     pub(crate) fn diagnostic(self) -> String {
         format!(
-            "maxActiveJobs={}; resolvedMaxActiveJobs={}",
+            "maxActiveProcesses={}; resolvedMaxActiveProcesses={}",
             self.configured.configured_label(),
             self.resolved
         )
@@ -873,7 +872,7 @@ impl Config {
             policy: PolicyConfig::default(),
             limits: LimitsConfig {
                 max_concurrent_tasks: 2,
-                max_active_jobs: MaxActiveJobs::Auto,
+                max_active_processes: MaxActiveProcesses::Auto,
                 max_file_search_context_lines: DEFAULT_MAX_FILE_SEARCH_CONTEXT_LINES,
             },
             skills: RoomSkillsConfig::default(),
@@ -2247,7 +2246,7 @@ mod tests {
         assert_eq!(config.mode, RuntimeMode::Standalone);
         assert_eq!(config.profile, WorkerProfile::Normal);
         assert_eq!(config.agent_id, "laptop");
-        assert_eq!(config.limits.max_active_jobs, MaxActiveJobs::Auto);
+        assert_eq!(config.limits.max_active_processes, MaxActiveProcesses::Auto);
         assert_eq!(
             config.limits.max_file_search_context_lines,
             DEFAULT_MAX_FILE_SEARCH_CONTEXT_LINES
@@ -2269,15 +2268,15 @@ mod tests {
     }
 
     #[test]
-    fn max_active_jobs_supports_auto_and_explicit_round_trips() {
-        let auto: MaxActiveJobs = serde_json::from_value(json!("auto")).unwrap();
-        let explicit: MaxActiveJobs = serde_json::from_value(json!(12)).unwrap();
-        assert_eq!(auto, MaxActiveJobs::Auto);
-        assert_eq!(explicit, MaxActiveJobs::Explicit(12));
+    fn max_active_processes_supports_auto_and_explicit_round_trips() {
+        let auto: MaxActiveProcesses = serde_json::from_value(json!("auto")).unwrap();
+        let explicit: MaxActiveProcesses = serde_json::from_value(json!(12)).unwrap();
+        assert_eq!(auto, MaxActiveProcesses::Auto);
+        assert_eq!(explicit, MaxActiveProcesses::Explicit(12));
         assert_eq!(serde_json::to_value(auto).unwrap(), json!("auto"));
         assert_eq!(serde_json::to_value(explicit).unwrap(), json!(12));
-        assert!(serde_json::from_value::<MaxActiveJobs>(json!(-1)).is_err());
-        assert!(serde_json::from_value::<MaxActiveJobs>(json!("AUTO")).is_err());
+        assert!(serde_json::from_value::<MaxActiveProcesses>(json!(-1)).is_err());
+        assert!(serde_json::from_value::<MaxActiveProcesses>(json!("AUTO")).is_err());
     }
 
     #[test]
@@ -2285,14 +2284,14 @@ mod tests {
         let base = |value: serde_json::Value| {
             serde_json::from_value::<LimitsConfig>(json!({
                 "maxConcurrentTasks": 2,
-                "maxActiveJobs": "auto",
+                "maxActiveProcesses": "auto",
                 "maxFileSearchContextLines": value,
             }))
         };
 
         let defaults = serde_json::from_value::<LimitsConfig>(json!({
             "maxConcurrentTasks": 2,
-            "maxActiveJobs": "auto",
+            "maxActiveProcesses": "auto",
         }))
         .unwrap();
         assert_eq!(
@@ -2311,38 +2310,31 @@ mod tests {
     }
 
     #[test]
-    fn limits_reject_removed_max_active_sessions_field() {
+    fn limits_reject_retired_max_active_jobs_field() {
         let error = serde_json::from_value::<LimitsConfig>(json!({
             "maxConcurrentTasks": 2,
-            "maxActiveSessions": 4
+            "maxActiveJobs": 4
         }))
         .unwrap_err()
         .to_string();
-        assert!(error.contains("unknown field `maxActiveSessions`"));
-        assert!(error.contains("maxActiveJobs"));
-
-        let error = serde_json::from_value::<LimitsConfig>(json!({
-            "maxConcurrentTasks": 2,
-            "maxActiveJobs": 4,
-            "jobIdleTimeoutSecs": 900
-        }))
-        .unwrap_err()
-        .to_string();
-        assert!(error.contains("unknown field `jobIdleTimeoutSecs`"));
+        assert!(error.contains("unknown field `maxActiveJobs`"));
+        assert!(error.contains("maxActiveProcesses"));
     }
 
     #[test]
-    fn auto_max_active_jobs_uses_the_frozen_formula() {
+    fn auto_max_active_processes_uses_the_frozen_formula() {
         for (parallelism, expected) in [(1, 6), (4, 6), (8, 12), (12, 18), (16, 24), (20, 24)] {
-            let resolved = MaxActiveJobs::Auto.resolve_with_parallelism(Some(parallelism));
+            let resolved = MaxActiveProcesses::Auto.resolve_with_parallelism(Some(parallelism));
             assert_eq!(resolved.resolved, expected, "parallelism={parallelism}");
         }
         assert_eq!(
-            MaxActiveJobs::Auto.resolve_with_parallelism(None).resolved,
+            MaxActiveProcesses::Auto
+                .resolve_with_parallelism(None)
+                .resolved,
             6
         );
         assert_eq!(
-            MaxActiveJobs::Explicit(4)
+            MaxActiveProcesses::Explicit(4)
                 .resolve_with_parallelism(Some(20))
                 .resolved,
             4
@@ -2352,7 +2344,7 @@ mod tests {
     #[test]
     fn new_default_config_serializes_auto_limit() {
         let value = serde_json::to_value(Config::default_config().unwrap()).unwrap();
-        assert_eq!(value["limits"]["maxActiveJobs"], json!("auto"));
+        assert_eq!(value["limits"]["maxActiveProcesses"], json!("auto"));
         assert_eq!(
             value["limits"]["maxFileSearchContextLines"],
             json!(DEFAULT_MAX_FILE_SEARCH_CONTEXT_LINES)
@@ -2372,7 +2364,6 @@ mod tests {
                 ToolNamespace::File,
                 ToolNamespace::Mcp,
                 ToolNamespace::Process,
-                ToolNamespace::Job,
                 ToolNamespace::Skills,
                 ToolNamespace::Tmux,
                 ToolNamespace::Browser,
@@ -2382,12 +2373,12 @@ mod tests {
         let normal = ToolsetConfig::normal();
         assert_eq!(
             normal.enabled_names(),
-            vec!["agent", "file", "mcp", "process", "job", "skills", "tmux", "browser",]
+            vec!["agent", "file", "mcp", "process", "skills", "tmux", "browser",]
         );
         let room = ToolsetConfig::room();
         assert_eq!(
             room.enabled_names(),
-            vec!["agent", "file", "mcp", "process", "job", "skills", "tmux", "browser", "room",]
+            vec!["agent", "file", "mcp", "process", "skills", "tmux", "browser", "room",]
         );
         assert_eq!(ToolsetConfig::for_profile(WorkerProfile::Normal), normal);
         assert_eq!(ToolsetConfig::for_profile(WorkerProfile::Room), room);
@@ -2454,14 +2445,17 @@ mod tests {
     fn explicit_limit_stays_numeric_after_config_load_and_write() {
         let path = temp_config_path();
         let mut value = serde_json::to_value(Config::default_config().unwrap()).unwrap();
-        value["limits"]["maxActiveJobs"] = json!(4);
+        value["limits"]["maxActiveProcesses"] = json!(4);
         value["futureField"] = json!({"preserve": true});
         fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
 
         let loaded = Config::load(&path).unwrap();
-        assert_eq!(loaded.limits.max_active_jobs, MaxActiveJobs::Explicit(4));
+        assert_eq!(
+            loaded.limits.max_active_processes,
+            MaxActiveProcesses::Explicit(4)
+        );
         let written = serde_json::to_value(loaded).unwrap();
-        assert_eq!(written["limits"]["maxActiveJobs"], json!(4));
+        assert_eq!(written["limits"]["maxActiveProcesses"], json!(4));
         assert_eq!(written["futureField"]["preserve"], json!(true));
         let _ = fs::remove_file(path);
     }
@@ -2816,7 +2810,7 @@ mod tests {
             },
             "limits": {
                 "maxConcurrentTasks": 7,
-                "maxActiveJobs": 4
+                "maxActiveProcesses": 4
             },
             "mcpServers": {
                 "imported": {

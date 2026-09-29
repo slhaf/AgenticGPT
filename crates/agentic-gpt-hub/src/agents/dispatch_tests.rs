@@ -1,8 +1,9 @@
 use super::*;
 use crate::agents::test_support::*;
 use agentic_gpt_protocol::{
-    AgentConnectionMode, AgentMessage, ExecRequest, HubCommand, HubCommandEnvelope,
+    AgentConnectionMode, AgentMessage, HubCommand, HubCommandEnvelope, ProcessExecRequest,
 };
+
 use axum::body::to_bytes;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -29,7 +30,7 @@ async fn start_response_owner_request(
     let mut outbound = insert_connection(&state, "agent", "current", chrono::Utc::now()).await;
     let command = HubCommand::Exec {
         request_id: request_id.to_string(),
-        payload: ExecRequest {
+        payload: ProcessExecRequest {
             agent_id: "agent".to_string(),
             group: None,
             program: "printf".to_string(),
@@ -93,7 +94,7 @@ async fn pending_replay_sends_reliable_envelope() {
     let state = test_state();
     let command = HubCommand::Exec {
         request_id: "req_replay".to_string(),
-        payload: ExecRequest {
+        payload: ProcessExecRequest {
             agent_id: "agent".to_string(),
             group: None,
             program: "printf".to_string(),
@@ -127,7 +128,7 @@ async fn stale_response_with_matching_run_is_accepted() {
     let _rx = insert_connection(&state, "agent", "current", chrono::Utc::now()).await;
     let command = HubCommand::Exec {
         request_id: "req_late".to_string(),
-        payload: ExecRequest {
+        payload: ProcessExecRequest {
             agent_id: "agent".to_string(),
             group: None,
             program: "printf".to_string(),
@@ -232,7 +233,7 @@ async fn response_owner_isolates_runs_sharing_request_id() {
     let request_id = "req_response_owner_shared_request".to_string();
     let make_command = || HubCommand::Exec {
         request_id: request_id.clone(),
-        payload: ExecRequest {
+        payload: ProcessExecRequest {
             agent_id: "agent".to_string(),
             group: None,
             program: "printf".to_string(),
@@ -321,7 +322,7 @@ async fn response_owner_timeout_preserves_other_run_and_accepts_late_result() {
     let request_id = "req_response_owner_timeout_shared_request".to_string();
     let make_command = || HubCommand::Exec {
         request_id: request_id.clone(),
-        payload: ExecRequest {
+        payload: ProcessExecRequest {
             agent_id: "agent".to_string(),
             group: None,
             program: "printf".to_string(),
@@ -573,7 +574,7 @@ async fn failed_request_send_removes_current_connection() {
     drop(rx);
     let command = HubCommand::Exec {
         request_id: "req_send_failed".to_string(),
-        payload: ExecRequest {
+        payload: ProcessExecRequest {
             agent_id: "agent".to_string(),
             group: None,
             program: "printf".to_string(),
@@ -615,7 +616,7 @@ async fn reporting_only_connection_is_not_a_command_target() {
     state.agents.insert_for_test("agent", connection).await;
     let command = HubCommand::Exec {
         request_id: "req_reporting_only".to_string(),
-        payload: ExecRequest {
+        payload: ProcessExecRequest {
             agent_id: "agent".to_string(),
             group: None,
             program: "printf".to_string(),
@@ -645,7 +646,7 @@ async fn wp1_send_failure_marks_not_sent_and_excludes_replay() {
     drop(rx);
     let command = HubCommand::Exec {
         request_id: "req_wp1_send_failure".to_string(),
-        payload: ExecRequest {
+        payload: ProcessExecRequest {
             agent_id: "agent".to_string(),
             group: None,
             program: "printf".to_string(),

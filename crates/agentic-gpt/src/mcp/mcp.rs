@@ -11,7 +11,7 @@ use std::{
 };
 
 use agentic_gpt_protocol::{
-    JobResponse, JobState, McpCallToolRequest, McpListToolsRequest, McpServerSummary,
+    McpCallToolRequest, McpListToolsRequest, McpServerSummary, ProcessResponse, ProcessState,
 };
 use anyhow::{anyhow, Context, Result};
 use rmcp::{
@@ -32,8 +32,8 @@ use tokio::time::{sleep, sleep_until, timeout, Duration, Instant};
 
 use crate::{
     config::mcp_servers::{McpServerAuthConfig, McpServerConfig},
-    confirmation, jobs,
-    jobs::{ManagedMcpSpec, TerminalEventHook},
+    confirmation, process,
+    process::{ManagedMcpSpec, TerminalEventHook},
     state::AppState,
     utils::bounded_mcp_argument_keys,
 };
@@ -70,7 +70,7 @@ pub(crate) async fn call_tool(
     payload: McpCallToolRequest,
     request_source: &str,
     terminal_event_hook: Option<TerminalEventHook>,
-) -> Result<JobResponse> {
+) -> Result<ProcessResponse> {
     start_managed_call_with_factory(
         state,
         payload,
@@ -87,14 +87,14 @@ async fn start_managed_call_with_factory(
     request_source: &str,
     terminal_event_hook: Option<TerminalEventHook>,
     client_factory: McpClientFactory,
-) -> Result<JobResponse> {
+) -> Result<ProcessResponse> {
     validate_tool_name(&payload.tool_name)?;
     let arguments = tool_arguments(payload.arguments.clone())?;
     let argument_bytes = serde_json::to_vec(&payload.arguments)?.len();
-    if argument_bytes > jobs::MAX_MCP_ARGUMENT_BYTES {
+    if argument_bytes > process::MAX_MCP_ARGUMENT_BYTES {
         return Err(anyhow!(
             "mcp_tool_arguments_too_large: bytes={argument_bytes}; max={}",
-            jobs::MAX_MCP_ARGUMENT_BYTES
+            process::MAX_MCP_ARGUMENT_BYTES
         ));
     }
     let argument_sha256 = format!(
@@ -106,7 +106,7 @@ async fn start_managed_call_with_factory(
     let (config_revision, server) = server_config_snapshot(state, &payload.server_id).await;
     let wait_seconds = payload.effective_wait_seconds();
     let timeout_seconds = payload.effective_timeout_seconds();
-    let registration = jobs::register_mcp_job(
+    let registration = process::register_mcp_process(
         state,
         ManagedMcpSpec {
             agent_id: payload.agent_id.clone(),
@@ -128,7 +128,7 @@ async fn start_managed_call_with_factory(
     )
     .await
     .map_err(|reason| anyhow!(reason))?;
-    let job_id = registration.info.job_id.clone();
+    let process_id = registration.info.process_id.clone();
     let server = match server {
         Ok(server) => server,
         Err(reason) => {
@@ -136,18 +136,18 @@ async fn start_managed_call_with_factory(
                 .split_once(':')
                 .map_or(reason.as_str(), |(code, _)| code)
                 .to_string();
-            let _ = jobs::set_mcp_preflight_rejection(state, &job_id).await;
-            let _ = jobs::finish_mcp_error(
+            let _ = process::set_mcp_preflight_rejection(state, &process_id).await;
+            let _ = process::finish_mcp_error(
                 state,
-                &job_id,
-                JobState::Rejected,
+                &process_id,
+                ProcessState::Rejected,
                 code,
                 reason,
                 None,
                 Some("server_config_validation"),
             )
             .await;
-            return jobs::mcp_job_response(state, &job_id, 0)
+            return process::mcp_process_response(state, &process_id, 0)
                 .await
                 .map_err(|reason| anyhow!(reason));
         }
@@ -159,12 +159,12 @@ async fn start_managed_call_with_factory(
         server,
         registration.cancel_requested,
         timeout_seconds,
-        job_id.clone(),
+        process_id.clone(),
         client_factory,
         None,
         None,
     ));
-    jobs::mcp_job_response(state, &job_id, wait_seconds)
+    process::mcp_process_response(state, &process_id, wait_seconds)
         .await
         .map_err(|reason| anyhow!(reason))
 }
@@ -177,7 +177,7 @@ async fn run_managed_call(
     server: McpServerConfig,
     cancel_requested: Arc<AtomicBool>,
     timeout_seconds: u64,
-    job_id: String,
+    process_id: String,
     client_factory: McpClientFactory,
     authorization_override: Option<String>,
     fail_fast_stop: Option<Arc<AtomicBool>>,
@@ -195,14 +195,14 @@ async fn run_managed_call(
             .await
         }
     };
-    let _ = jobs::set_mcp_authorization(&state, &job_id, &authorization).await;
+    let _ = process::set_mcp_authorization(&state, &process_id, &authorization).await;
     if authorization == "cancelled" || cancel_requested.load(Ordering::Acquire) {
-        let _ = jobs::finish_mcp_error(
+        let _ = process::finish_mcp_error(
             &state,
-            &job_id,
-            JobState::Cancelled,
+            &process_id,
+            ProcessState::Cancelled,
             "mcp_cancelled",
-            "MCP Job was cancelled before the downstream request started",
+            "MCP process was cancelled before the downstream request started",
             Some("cancelled_before_request"),
             Some("local_cancel_before_downstream_request"),
         )
@@ -210,10 +210,10 @@ async fn run_managed_call(
         return;
     }
     if !mcp_authorization_allows(&authorization) {
-        let _ = jobs::finish_mcp_error(
+        let _ = process::finish_mcp_error(
             &state,
-            &job_id,
-            JobState::Rejected,
+            &process_id,
+            ProcessState::Rejected,
             "mcp_tool_call_rejected",
             format!("MCP tool call rejected: {authorization}"),
             None,
@@ -222,7 +222,7 @@ async fn run_managed_call(
         .await;
         return;
     }
-    let _ = jobs::set_mcp_job_state(&state, &job_id, JobState::Queued).await;
+    let _ = process::set_mcp_process_state(&state, &process_id, ProcessState::Queued).await;
     let _permit = match state
         .mcp_concurrency
         .acquire(&payload.server_id, cancel_requested.clone())
@@ -230,12 +230,12 @@ async fn run_managed_call(
     {
         Ok(permit) => permit,
         Err(reason) if reason == "cancelled" => {
-            let _ = jobs::finish_mcp_error(
+            let _ = process::finish_mcp_error(
                 &state,
-                &job_id,
-                JobState::Cancelled,
+                &process_id,
+                ProcessState::Cancelled,
                 "mcp_cancelled",
-                "MCP Job was cancelled while waiting for an execution slot",
+                "MCP process was cancelled while waiting for an execution slot",
                 Some("cancelled_while_queued"),
                 Some("local_cancel_before_downstream_request"),
             )
@@ -243,10 +243,10 @@ async fn run_managed_call(
             return;
         }
         Err(reason) => {
-            let _ = jobs::finish_mcp_error(
+            let _ = process::finish_mcp_error(
                 &state,
-                &job_id,
-                JobState::Failed,
+                &process_id,
+                ProcessState::Failed,
                 "mcp_concurrency_failed",
                 reason,
                 None,
@@ -260,10 +260,10 @@ async fn run_managed_call(
         .as_ref()
         .is_some_and(|stop| stop.load(Ordering::Acquire))
     {
-        let _ = jobs::finish_mcp_error(
+        let _ = process::finish_mcp_error(
             &state,
-            &job_id,
-            JobState::Skipped,
+            &process_id,
+            ProcessState::Skipped,
             "mcp_batch_fail_fast_skipped",
             "MCP batch fail-fast prevented this queued child from starting",
             None,
@@ -273,16 +273,16 @@ async fn run_managed_call(
         return;
     }
     let deadline = Instant::now() + Duration::from_secs(timeout_seconds);
-    let _ = jobs::set_mcp_job_state(&state, &job_id, JobState::Starting).await;
+    let _ = process::set_mcp_process_state(&state, &process_id, ProcessState::Starting).await;
     let downstream = tokio::select! {
         result = (client_factory)(server.clone()) => Some(result),
         _ = wait_for_cancel(cancel_requested.clone()) => {
-            let _ = jobs::finish_mcp_error(
+            let _ = process::finish_mcp_error(
                 &state,
-                &job_id,
-                JobState::Cancelled,
+                &process_id,
+                ProcessState::Cancelled,
                 "mcp_cancelled",
-                "MCP Job was cancelled before the downstream client connected",
+                "MCP process was cancelled before the downstream client connected",
                 Some("cancelled_before_request"),
                 Some("local_cancel_before_downstream_request"),
             ).await;
@@ -291,10 +291,10 @@ async fn run_managed_call(
         _ = sleep_until(deadline) => None,
     };
     let Some(downstream) = downstream else {
-        let _ = jobs::finish_mcp_error(
+        let _ = process::finish_mcp_error(
             &state,
-            &job_id,
-            JobState::TimedOut,
+            &process_id,
+            ProcessState::TimedOut,
             "mcp_timeout",
             "MCP execution deadline expired while connecting to the downstream server",
             None,
@@ -306,10 +306,10 @@ async fn run_managed_call(
     let client = match downstream {
         Ok(client) => client,
         Err(error) => {
-            let _ = jobs::finish_mcp_error(
+            let _ = process::finish_mcp_error(
                 &state,
-                &job_id,
-                JobState::Failed,
+                &process_id,
+                ProcessState::Failed,
                 "mcp_client_connect_failed",
                 error.to_string(),
                 None,
@@ -321,12 +321,12 @@ async fn run_managed_call(
     };
     if cancel_requested.load(Ordering::Acquire) {
         close_client(client).await;
-        let _ = jobs::finish_mcp_error(
+        let _ = process::finish_mcp_error(
             &state,
-            &job_id,
-            JobState::Cancelled,
+            &process_id,
+            ProcessState::Cancelled,
             "mcp_cancelled",
-            "MCP Job was cancelled before the downstream request started",
+            "MCP process was cancelled before the downstream request started",
             Some("cancelled_before_request"),
             Some("local_cancel_before_downstream_request"),
         )
@@ -341,12 +341,12 @@ async fn run_managed_call(
         result = request_peer.send_cancellable_request(request, PeerRequestOptions::no_options()) => Some(result),
         _ = wait_for_cancel(cancel_requested.clone()) => {
             close_client(client).await;
-            let _ = jobs::finish_mcp_error(
+            let _ = process::finish_mcp_error(
                 &state,
-                &job_id,
-                JobState::Cancelled,
+                &process_id,
+                ProcessState::Cancelled,
                 "mcp_cancelled",
-                "MCP Job was cancelled before the downstream request id was allocated",
+                "MCP process was cancelled before the downstream request id was allocated",
                 Some("cancelled_before_request"),
                 Some("local_cancel_before_downstream_request"),
             ).await;
@@ -356,10 +356,10 @@ async fn run_managed_call(
     };
     let Some(handle) = handle else {
         close_client(client).await;
-        let _ = jobs::finish_mcp_error(
+        let _ = process::finish_mcp_error(
             &state,
-            &job_id,
-            JobState::TimedOut,
+            &process_id,
+            ProcessState::TimedOut,
             "mcp_timeout",
             "MCP execution deadline expired while starting the downstream request",
             None,
@@ -372,10 +372,10 @@ async fn run_managed_call(
         Ok(handle) => handle,
         Err(error) => {
             close_client(client).await;
-            let _ = jobs::finish_mcp_error(
+            let _ = process::finish_mcp_error(
                 &state,
-                &job_id,
-                JobState::Failed,
+                &process_id,
+                ProcessState::Failed,
                 "mcp_request_start_failed",
                 error.to_string(),
                 None,
@@ -388,7 +388,7 @@ async fn run_managed_call(
     let peer = handle.peer.clone();
     let request_id = handle.id.clone();
     let mut response = handle.rx;
-    if jobs::attach_mcp_request(&state, &job_id, peer.clone(), request_id.clone())
+    if process::attach_mcp_request(&state, &process_id, peer.clone(), request_id.clone())
         .await
         .is_err()
     {
@@ -396,7 +396,7 @@ async fn run_managed_call(
             Duration::from_secs(2),
             peer.notify_cancelled(CancelledNotificationParam {
                 request_id,
-                reason: Some("Job no longer active".to_string()),
+                reason: Some("Process no longer active".to_string()),
             }),
         )
         .await;
@@ -407,10 +407,10 @@ async fn run_managed_call(
     tokio::select! {
         result = &mut response => {
             let after_cancel = cancel_requested.load(Ordering::Acquire);
-            finish_from_response(&state, &job_id, result, after_cancel).await;
+            finish_from_response(&state, &process_id, result, after_cancel).await;
         }
         _ = wait_for_cancel(cancel_requested.clone()) => {
-            finish_after_cancel(&state, &job_id, &mut response).await;
+            finish_after_cancel(&state, &process_id, &mut response).await;
         }
         _ = sleep_until(deadline) => {
             let notification = timeout(
@@ -426,10 +426,10 @@ async fn run_managed_call(
                 ("notification_failed", "mcp_timeout_cancel_notification_failed")
             };
             let _ = timeout(Duration::from_secs(2), &mut response).await;
-            let _ = jobs::finish_mcp_error(
+            let _ = process::finish_mcp_error(
                 &state,
-                &job_id,
-                JobState::TimedOut,
+                &process_id,
+                ProcessState::TimedOut,
                 "mcp_timeout",
                 format!("MCP execution exceeded {timeout_seconds} seconds"),
                 Some(outcome),
@@ -446,16 +446,16 @@ async fn close_client(client: McpClient) {
 
 async fn finish_after_cancel(
     state: &AppState,
-    job_id: &str,
+    process_id: &str,
     response: &mut tokio::sync::oneshot::Receiver<Result<ServerResult, ServiceError>>,
 ) {
     match timeout(Duration::from_secs(2), response).await {
-        Ok(result) => finish_from_response(state, job_id, result, true).await,
+        Ok(result) => finish_from_response(state, process_id, result, true).await,
         Err(_) => {
-            let _ = jobs::finish_mcp_error(
+            let _ = process::finish_mcp_error(
                 state,
-                job_id,
-                JobState::Detached,
+                process_id,
+                ProcessState::Detached,
                 "mcp_cancel_detached",
                 "Cancellation notification was sent, but no downstream terminal response was observed",
                 Some("notification_sent"),
@@ -468,7 +468,7 @@ async fn finish_after_cancel(
 
 async fn finish_from_response(
     state: &AppState,
-    job_id: &str,
+    process_id: &str,
     response: Result<Result<ServerResult, ServiceError>, tokio::sync::oneshot::error::RecvError>,
     after_cancel: bool,
 ) {
@@ -482,13 +482,15 @@ async fn finish_from_response(
                 })
             });
             let cancel = after_cancel.then_some(("completed_after_cancel", "remote_response"));
-            let _ = jobs::complete_mcp_result(state, job_id, value, downstream_error, cancel).await;
+            let _ =
+                process::complete_mcp_result(state, process_id, value, downstream_error, cancel)
+                    .await;
         }
         Ok(Ok(_)) => {
-            let _ = jobs::finish_mcp_error(
+            let _ = process::finish_mcp_error(
                 state,
-                job_id,
-                JobState::Failed,
+                process_id,
+                ProcessState::Failed,
                 "mcp_unexpected_response",
                 "Downstream MCP server returned an unexpected response type",
                 after_cancel.then_some("response_after_cancel"),
@@ -497,10 +499,10 @@ async fn finish_from_response(
             .await;
         }
         Ok(Err(error)) if after_cancel && explicit_cancel_error(&error) => {
-            let _ = jobs::finish_mcp_error(
+            let _ = process::finish_mcp_error(
                 state,
-                job_id,
-                JobState::Cancelled,
+                process_id,
+                ProcessState::Cancelled,
                 "mcp_cancelled",
                 error.to_string(),
                 Some("cancelled"),
@@ -509,10 +511,10 @@ async fn finish_from_response(
             .await;
         }
         Ok(Err(error)) if after_cancel => {
-            let _ = jobs::finish_mcp_error(
+            let _ = process::finish_mcp_error(
                 state,
-                job_id,
-                JobState::Detached,
+                process_id,
+                ProcessState::Detached,
                 "mcp_cancel_detached",
                 error.to_string(),
                 Some("notification_sent"),
@@ -521,10 +523,10 @@ async fn finish_from_response(
             .await;
         }
         Ok(Err(error)) => {
-            let _ = jobs::finish_mcp_error(
+            let _ = process::finish_mcp_error(
                 state,
-                job_id,
-                JobState::Failed,
+                process_id,
+                ProcessState::Failed,
                 "mcp_request_failed",
                 error.to_string(),
                 None,
@@ -533,10 +535,10 @@ async fn finish_from_response(
             .await;
         }
         Err(_) if after_cancel => {
-            let _ = jobs::finish_mcp_error(
+            let _ = process::finish_mcp_error(
                 state,
-                job_id,
-                JobState::Detached,
+                process_id,
+                ProcessState::Detached,
                 "mcp_cancel_detached",
                 "Downstream transport closed after cancellation without terminal evidence",
                 Some("notification_sent"),
@@ -545,10 +547,10 @@ async fn finish_from_response(
             .await;
         }
         Err(_) => {
-            let _ = jobs::finish_mcp_error(
+            let _ = process::finish_mcp_error(
                 state,
-                job_id,
-                JobState::Failed,
+                process_id,
+                ProcessState::Failed,
                 "mcp_transport_closed",
                 "Downstream MCP transport closed before returning a result",
                 None,

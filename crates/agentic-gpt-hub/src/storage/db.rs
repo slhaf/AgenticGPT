@@ -4,7 +4,7 @@ use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const CURRENT_SCHEMA_VERSION: i64 = 1;
+const CURRENT_SCHEMA_VERSION: i64 = 2;
 const SQLITE_BUSY_TIMEOUT_MS: u64 = 5_000;
 
 pub(crate) fn open_db(path: &PathBuf) -> Result<Connection> {
@@ -120,11 +120,13 @@ pub(crate) fn init_db(conn: &Connection) -> Result<()> {
         );
         ",
     )?;
+    rename_legacy_column(&transaction, "agent_runs", "job_id", "process_id")?;
+    rename_legacy_column(&transaction, "agent_runs", "job_json", "process_json")?;
     ensure_column(&transaction, "agents", "alias", "alias text")?;
     ensure_column(&transaction, "agent_runs", "source", "source text")?;
     ensure_column(&transaction, "agent_runs", "profile", "profile text")?;
     ensure_column(&transaction, "agent_runs", "detail", "detail text")?;
-    ensure_column(&transaction, "agent_runs", "job_id", "job_id text")?;
+    ensure_column(&transaction, "agent_runs", "process_id", "process_id text")?;
     ensure_column(
         &transaction,
         "agent_runs",
@@ -138,7 +140,12 @@ pub(crate) fn init_db(conn: &Connection) -> Result<()> {
         "arguments_json",
         "arguments_json text",
     )?;
-    ensure_column(&transaction, "agent_runs", "job_json", "job_json text")?;
+    ensure_column(
+        &transaction,
+        "agent_runs",
+        "process_json",
+        "process_json text",
+    )?;
     transaction.execute_batch(
         "create unique index if not exists agents_alias_unique on agents(alias) where alias is not null;",
     )?;
@@ -320,6 +327,28 @@ fn ensure_column(
     Ok(())
 }
 
+fn rename_legacy_column(
+    conn: &rusqlite::Transaction<'_>,
+    table: &str,
+    old_column: &str,
+    new_column: &str,
+) -> Result<()> {
+    let columns = {
+        let mut stmt = conn.prepare(&format!("pragma table_info({table})"))?;
+        let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
+        columns.collect::<std::result::Result<Vec<_>, _>>()?
+    };
+    if columns.iter().any(|column| column == old_column)
+        && !columns.iter().any(|column| column == new_column)
+    {
+        conn.execute(
+            &format!("alter table {table} rename column {old_column} to {new_column}"),
+            [],
+        )?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -331,7 +360,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         init_db(&conn).unwrap();
         let capabilities = serde_json::to_string(&Capabilities {
-            jobs: true,
+            processes: true,
             confirmation: true,
             notification_actions: false,
         })
@@ -368,6 +397,39 @@ mod tests {
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
         assert_eq!(version, CURRENT_SCHEMA_VERSION);
+    }
+    #[test]
+    fn migration_renames_legacy_run_process_fields_without_losing_data() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "create table agent_runs (
+                 run_id text primary key,
+                 job_id text,
+                 job_json text
+             );
+             insert into agent_runs values ('run', 'process-1', '{\"state\":\"completed\"}');
+             pragma user_version = 1;",
+        )
+        .unwrap();
+
+        init_db(&conn).unwrap();
+
+        let (process_id, process_json): (String, String) = conn
+            .query_row(
+                "select process_id, process_json from agent_runs where run_id = 'run'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(process_id, "process-1");
+        assert_eq!(process_json, "{\"state\":\"completed\"}");
+        let columns = {
+            let mut stmt = conn.prepare("pragma table_info(agent_runs)").unwrap();
+            let rows = stmt.query_map([], |row| row.get::<_, String>(1)).unwrap();
+            rows.collect::<std::result::Result<Vec<_>, _>>().unwrap()
+        };
+        assert!(!columns.iter().any(|column| column == "job_id"));
+        assert!(!columns.iter().any(|column| column == "job_json"));
     }
 
     #[test]

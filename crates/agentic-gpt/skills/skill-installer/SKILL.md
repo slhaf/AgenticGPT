@@ -45,6 +45,10 @@ the package and never executes its scripts.
 For an active workspace-backed skill, `skills.run` accepts the skill `id`, a
 package-relative executable path below `scripts/`, optional direct `args`, an
 optional policy-validated `workingDirectory`, and a bounded `waitSeconds`.
-It returns a managed Job envelope. Fast terminal executions are included in
-the response; otherwise use `job.get` with bounded `waitSeconds` and
-`job.cancel` with that `jobId`.
+It returns a managed process envelope with a `processId`. Fast terminal
+executions are included in the response; otherwise use `process.status` with
+that `processId` to inspect lifecycle metadata, `process.output` for bounded
+output, and `process.result` for the retained result. Use `process.cancel` with
+the same `processId` when execution should stop. This lifecycle is separate
+from `skills.install` and its `skills.install.get` / `skills.install.cancel`
+operations above.

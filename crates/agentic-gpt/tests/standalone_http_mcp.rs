@@ -318,8 +318,7 @@ fn run_env_scenario(root: &Path) -> Result<(), String> {
         "disabled HTTP tool call did not return a JSON-RPC error",
     )?;
 
-    config["toolsets"]["enabled"] =
-        json!(["agent", "file", "mcp", "process", "job", "skills", "tmux"]);
+    config["toolsets"]["enabled"] = json!(["agent", "file", "mcp", "process", "skills", "tmux"]);
     write_config(&config_path, &config)?;
     thread::sleep(RELOAD_WAIT);
     let (_, restored_tools) = wait_for_http_tools_presence(
@@ -1476,8 +1475,7 @@ fn spawn_worker_with_public_url(
     config["agentId"] = json!(agent_id.clone());
     config["workspaceRoot"] = json!(workspace.to_string_lossy().into_owned());
     config["pathPolicy"]["writeRoots"] = json!([workspace.to_string_lossy()]);
-    config["toolsets"]["enabled"] =
-        json!(["agent", "file", "mcp", "process", "job", "skills", "tmux"]);
+    config["toolsets"]["enabled"] = json!(["agent", "file", "mcp", "process", "skills", "tmux"]);
     config["tunnel"] = json!({
         "tunnelId": "tunnel_http_mcp_integration",
         "apiKey": "env:AGENTIC_HTTP_MCP_TUNNEL_KEY",

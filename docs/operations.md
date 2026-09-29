@@ -55,10 +55,11 @@ agentic-gpt local call agent.info --arguments '{}'
 
 Expected:
 
-- Normal exposes 29 tools; Room exposes 40.
 - `agent.info.connections.localMcp.status` is `ready`.
 - Runtime directory is `0700`, socket is `0600`, and only the same UID is accepted.
-- `job.*`, `process.batch`, `mcp.callTool`, and `mcp.batch` are present.
+- `process.exec`, `process.batch`, `process.status`, `process.list`, `process.output`, `process.result`, `process.cancel`, `mcp.callTool`, and `mcp.batch` are present.
+- `process.status` reports metadata only; use the dedicated output and result tools for their payloads.
+- Process history uses `process.sqlite3`; existing `jobs.sqlite3` is intentionally untouched and inaccessible, with no Job-history migration or backup.
 - Removed v0.8 managed lifecycle names are absent.
 
 For Standalone, also confirm:
@@ -91,7 +92,7 @@ The current WP1 closure evidence is bounded: final cleanup passed `cargo fmt --a
 2. Confirm the tunnel secret is a protected `file:` or `env:` reference.
 3. Confirm `agentic-gpt run` with `mode=standalone` reaches readiness and stays stable beyond the restart-budget reset interval.
 4. Call `agent.info` through both ChatGPT tunnel and Local Unix MCP.
-5. Run one harmless process Job and inspect it through `job.get`.
+5. Start one harmless process and inspect it with `process.status`, `process.output`, and `process.result`; use `process.cancel` only when explicitly requesting cancellation.
 6. Restart one Agent and verify other machine connectors remain usable.
 7. Confirm audit JSONL is beneath `workspaceRoot` and contains no raw tunnel/MCP secrets.
 
@@ -143,7 +144,16 @@ and `hub:`.
 2. Confirm `/v1/info` responds through public HTTPS.
 3. Confirm `/v1/agents` shows expected command-capable Agents online.
 4. Run one harmless command through `/v1/process/exec`.
-5. Start and inspect one Job through `/v1/jobs/{jobId}`.
+5. Inspect process metadata through `GET /v1/process` and
+   `GET /v1/process/{processId}`; fetch output from
+   `GET /v1/process/{processId}/output`, the result from
+   `GET /v1/process/{processId}/result`, and request cancellation through
+   `POST /v1/process/{processId}/cancel`.
+   The status endpoint is metadata-only. The standalone `process.status` wait
+   defaults to 5 seconds and is capped at 30; HTTP `waitSeconds` defaults to
+   5 seconds. Output starts at byte zero when no cursor is supplied; `maxBytes`
+   defaults to 8 KiB and is capped at 32 KiB. MCP result `maxBytes` defaults
+   to 8 KiB and is capped at 512 KiB; HTTP result reads use the same bounds.
 6. Validate `/mcp` and refresh Actions schema when the contract changed.
 7. If Standalone reporting is enabled, confirm reporting-only connections reject Hub execution.
 
@@ -302,19 +312,12 @@ data-recovery operation after comparing run identities and preserving the
 newer database for evidence. A restored snapshot cannot retract a command
 already delivered to an Agent or undo an external side effect.
 
-Agent Job history migration is separate from Hub receipt migration. Version 1
-adopts unambiguous legacy rows transactionally and refuses a future schema
-version without quarantining or rewriting the database. Before migration,
-preserve the private `<jobs.sqlite3>.pre-migration.bak`; newly created history
-uses mode `0600` under a private mode-`0700` parent. Do not restore an older
-history database over newer Job or deduplication evidence.
+Agent process history is stored durably in the private `process.sqlite3` and
+uses that store's retention behavior. The process store is created fresh:
+legacy `jobs.sqlite3` is intentionally left untouched and inaccessible to the
+new process lifecycle. There is no legacy Job-history migration or
+`jobs.sqlite3` migration-backup procedure.
 
-Completed runs older than 24 hours have their payloads compacted only when
-they have canonical result hashes and no conflict evidence. Identity, status,
-hash, tombstone, replay, and unknown/conflict evidence remains protected.
-`resultRetained` and `resultOmitted` distinguish an available payload from a
-compacted payload; omission is not deletion of the run identity and is not
-evidence of cancellation.
 
 Agent config writes retain bounded private backups under `backups/` and use a
 setup journal for secret-reference replacement. If journal hashes or file
@@ -334,7 +337,7 @@ never delete or truncate deduplication evidence to bypass an ownership error.
 Agent audit JSONL is best-effort and rotates at 8 MiB, retaining the current
 file and one `.1` backup. A rotation or write failure is audit loss, not proof
 that a command, result, or side effect is absent. After any restore, reconnect
-the owning processes and inspect run/Job state; `unknown_after_restart`,
+the owning processes and inspect process state; `unknown_after_restart`,
 `unknown`, `detached`, and a local waiter timeout must not be converted into
 `cancelled` without independent termination evidence.
 
@@ -395,7 +398,7 @@ Before a Hub release tag, validate [`openapi/hub.yaml`](../openapi/hub.yaml) wit
 - OpenAPI exposes only GPT Actions endpoints; OAuth and confirmation callbacks stay outside it.
 - Safe summaries contain counts/coarse modes, not secrets or complete private path lists.
 - Agent-local confirmation denial or confirmation-decision timeout is final; this is distinct from a Hub/HTTP/MCP waiter timeout.
-- Long work uses managed Jobs and bounded waits.
-- A bounded Hub/HTTP/MCP waiter timeout ends only the local wait, not the remote Job. Late remote knowledge may update the run receipt; `not_sent` is only a proven channel-send failure and is excluded from replay.
+- Long work uses managed Processes and bounded waits.
+- A bounded Hub/HTTP/MCP waiter timeout ends only the local wait, not the remote Process. Late remote knowledge may update the run receipt; `not_sent` is only a proven channel-send failure and is excluded from replay.
 - Standalone reporting is optional and reporting-only, never a hidden shared command dependency.
 - Invalid live config keeps the last valid subset; startup identity changes require restart.

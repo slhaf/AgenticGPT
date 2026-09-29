@@ -2,7 +2,7 @@ mod envelopes;
 mod identity_config;
 mod mcp;
 mod notification_tmux;
-mod process_jobs;
+mod process;
 mod room;
 mod skill_bootstrap;
 
@@ -10,7 +10,7 @@ pub use envelopes::*;
 pub use identity_config::*;
 pub use mcp::*;
 pub use notification_tmux::*;
-pub use process_jobs::*;
+pub use process::*;
 pub use room::*;
 pub use skill_bootstrap::*;
 
@@ -260,208 +260,6 @@ mod room_v2_contract_tests {
 }
 
 #[cfg(test)]
-mod job_contract_tests {
-    use super::*;
-
-    fn sample_tool_response() -> JobToolResponse {
-        JobToolResponse {
-            job_id: "job-1".to_string(),
-            group: None,
-            kind: None,
-            state: JobState::Running,
-            elapsed_ms: Some(42),
-            duration_ms: None,
-            exit_code: None,
-            stdout_tail: String::new(),
-            stderr_tail: String::new(),
-            truncated: false,
-            result: None,
-            error: None,
-            result_truncated: false,
-            result_bytes: None,
-            result_sha256: None,
-            result_preview: None,
-            result_omitted: false,
-        }
-    }
-
-    #[test]
-    fn job_group_validation_trims_and_bounds_readable_text() {
-        assert_eq!(
-            normalize_job_group(Some("  direct work  ")).unwrap(),
-            Some("direct work".to_string())
-        );
-        assert_eq!(normalize_job_group(None).unwrap(), None);
-        assert_eq!(
-            normalize_job_group(Some("   ")).unwrap_err(),
-            JobGroupValidationError::Empty
-        );
-        assert_eq!(
-            normalize_job_group(Some("work\tstream")).unwrap_err(),
-            JobGroupValidationError::ControlCharacter
-        );
-        assert!(normalize_job_group(Some(&"界".repeat(JOB_GROUP_MAX_CHARS))).is_ok());
-        assert_eq!(
-            normalize_job_group(Some(&"界".repeat(JOB_GROUP_MAX_CHARS + 1))).unwrap_err(),
-            JobGroupValidationError::TooLong
-        );
-        assert_eq!(JobGroupValidationError::TooLong.code(), "job_group_invalid");
-    }
-
-    #[test]
-    fn managed_job_admission_group_is_additive_and_parent_scoped() {
-        let exec: ExecRequest = serde_json::from_value(serde_json::json!({
-            "agentId": "agent",
-            "program": "true",
-            "args": [],
-            "needConfirm": false
-        }))
-        .unwrap();
-        assert_eq!(exec.group, None);
-
-        let batch: BatchExecRequest = serde_json::from_value(serde_json::json!({
-            "agentId": "agent",
-            "group": "chat-direct",
-            "elements": [{"program": "true", "args": []}],
-            "needConfirm": false
-        }))
-        .unwrap();
-        assert_eq!(batch.group.as_deref(), Some("chat-direct"));
-
-        let skill: SkillRunRequest = serde_json::from_value(serde_json::json!({
-            "id": "demo",
-            "path": "scripts/check.sh",
-            "group": "chat-direct"
-        }))
-        .unwrap();
-        assert_eq!(skill.group.as_deref(), Some("chat-direct"));
-
-        let mcp: McpCallToolRequest = serde_json::from_value(serde_json::json!({
-            "agentId": "agent",
-            "serverId": "server",
-            "toolName": "tool",
-            "group": "chat-direct"
-        }))
-        .unwrap();
-        assert_eq!(mcp.group.as_deref(), Some("chat-direct"));
-
-        let mcp_batch: McpBatchRequest = serde_json::from_value(serde_json::json!({
-            "agentId": "agent",
-            "group": "chat-direct",
-            "calls": [{"serverId": "server", "toolName": "tool"}]
-        }))
-        .unwrap();
-        assert_eq!(mcp_batch.group.as_deref(), Some("chat-direct"));
-        assert!(serde_json::to_value(&mcp_batch.calls[0])
-            .unwrap()
-            .get("group")
-            .is_none());
-    }
-
-    #[test]
-    fn job_list_and_wait_contracts_have_frozen_defaults() {
-        let list: JobListRequest = serde_json::from_value(serde_json::json!({})).unwrap();
-        assert_eq!(list.effective_limit(), 50);
-        assert_eq!(list.group, None);
-        assert_eq!(list.cursor, None);
-
-        let oversized: JobListRequest = serde_json::from_value(serde_json::json!({
-            "limit": 999,
-            "group": "work",
-            "cursor": "opaque"
-        }))
-        .unwrap();
-        assert_eq!(oversized.effective_limit(), 100);
-        assert_eq!(oversized.group.as_deref(), Some("work"));
-        assert_eq!(oversized.cursor.as_deref(), Some("opaque"));
-
-        let get: JobGetRequest = serde_json::from_value(serde_json::json!({
-            "jobId": "job-1"
-        }))
-        .unwrap();
-        assert!(!get.wait_only);
-        assert!(serde_json::to_value(&get)
-            .unwrap()
-            .get("waitOnly")
-            .is_none());
-
-        let wait = JobWaitResponse {
-            job_id: "job-1".to_string(),
-            state: JobState::Running,
-            elapsed_ms: 42,
-        };
-        assert_eq!(
-            serde_json::to_value(wait).unwrap(),
-            serde_json::json!({"jobId":"job-1","state":"running","elapsedMs":42})
-        );
-    }
-
-    #[test]
-    fn slim_job_views_omit_routine_noise_and_keep_batch_budget_semantics() {
-        let active = serde_json::to_value(sample_tool_response()).unwrap();
-        assert_eq!(
-            active,
-            serde_json::json!({"jobId":"job-1","state":"running","elapsedMs":42})
-        );
-
-        let mut omitted = sample_tool_response();
-        omitted.state = JobState::Completed;
-        omitted.elapsed_ms = None;
-        omitted.duration_ms = Some(7);
-        omitted.result_omitted = true;
-        let batch = McpBatchToolResponse {
-            status: McpBatchStatus::Completed,
-            error: None,
-            results: vec![McpBatchToolChildResponse { job: omitted }],
-        };
-        let value = serde_json::to_value(batch).unwrap();
-        assert_eq!(value["results"][0]["resultOmitted"], true);
-        assert!(value.get("completedInline").is_none());
-        assert!(value.get("pollAfterMs").is_none());
-        assert!(value.get("aggregateTruncated").is_none());
-    }
-
-    #[test]
-    fn job_info_can_represent_not_started_without_fabricated_timestamp() {
-        let now = Utc::now();
-        let info = JobInfo {
-            agent_id: "agent".to_string(),
-            job_id: "job-1".to_string(),
-            group: Some("work".to_string()),
-            batch_id: None,
-            batch_call_id: None,
-            batch_index: None,
-            kind: JobKind::Process,
-            state: JobState::Queued,
-            created_at: now,
-            started_at: None,
-            updated_at: now,
-            finished_at: None,
-            program: None,
-            args: Vec::new(),
-            working_directory: None,
-            command_preview: None,
-            exit_code: None,
-            stdout_tail: String::new(),
-            stderr_tail: String::new(),
-            truncated: false,
-            reject_reason: None,
-            skill_id: None,
-            skill_path: None,
-            installed_digest: None,
-            mcp_server_id: None,
-            mcp_tool_name: None,
-            cancel_requested: false,
-            cancel_outcome: None,
-            termination_evidence: None,
-        };
-        let value = serde_json::to_value(info).unwrap();
-        assert_eq!(value["group"], "work");
-        assert!(value.get("startedAt").is_none());
-    }
-}
-
-#[cfg(test)]
 mod tmux_tests {
     use super::*;
 
@@ -584,7 +382,6 @@ mod tmux_tests {
         let value = serde_json::to_value(command).unwrap();
         assert_eq!(value["type"], "skills.run");
         assert_eq!(value["requestId"], "req");
-        assert!(value.get("jobId").is_none());
         assert_eq!(value["payload"]["waitSeconds"], serde_json::Value::Null);
 
         let install = HubCommand::SkillsInstall {

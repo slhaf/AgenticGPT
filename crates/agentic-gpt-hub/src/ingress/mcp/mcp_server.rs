@@ -2,9 +2,10 @@ mod args;
 pub(crate) mod transport;
 
 use agentic_gpt_protocol::{
-    normalize_job_group, BatchExecRequest, BootstrapReadRequest, ExecElement, ExecRequest,
-    HubCommand, JobCancelRequest, JobGetRequest, JobKind, JobListRequest, JobState, McpBatchCall,
-    McpBatchRequest, McpCallToolRequest, McpListToolsRequest, RoomDiaryActiveRequest,
+    normalize_process_group, BootstrapReadRequest, HubCommand, McpBatchCall, McpBatchRequest,
+    McpCallToolRequest, McpListToolsRequest, ProcessBatchExecRequest, ProcessCancelRequest,
+    ProcessExecElement, ProcessExecRequest, ProcessKind, ProcessListRequest, ProcessOutputRequest,
+    ProcessResultRequest, ProcessState, ProcessStatusRequest, RoomDiaryActiveRequest,
     RoomDiaryReadRequest, RoomMaintenanceStatusRequest, RoomNotebookReadRequest,
     RoomNotebookRecentRequest, RoomNotebookSearchRequest, RoomStateListRequest,
     RoomStateReadRequest, SkillActivationRequest, SkillInstallCancelRequest,
@@ -13,14 +14,15 @@ use agentic_gpt_protocol::{
     TmuxExecRequest, TmuxListPanesRequest, TmuxPasteTextRequest, UserNotifySendRequest,
 };
 use args::{
-    AgentIdArgs, BatchExecArgs, BootstrapReadArgs, ExecArgs, HubRunGetArgs, HubRunListArgs,
-    JobGetArgs, JobIdArgs, JobListArgs, McpBatchArgs, McpCallToolArgs, McpListServersArgs,
-    McpListToolsArgs, RoomDiaryActiveArgs, RoomDiaryReadArgs, RoomMaintenanceStatusArgs,
-    RoomMaintenanceSubmitArgs, RoomNotebookReadArgs, RoomNotebookRecentArgs,
-    RoomNotebookSearchArgs, RoomStateListArgs, RoomStateReadArgs, SkillActivationArgs,
-    SkillInstallArgs, SkillInstallCancelArgs, SkillInstallGetArgs, SkillReadArgs, SkillRunArgs,
-    SkillSearchArgs, TmuxCapturePaneArgs, TmuxCloseSessionArgs, TmuxCreateSessionArgs,
-    TmuxExecArgs, TmuxListPanesArgs, TmuxListSessionsArgs, TmuxPasteTextArgs, UserNotifySendArgs,
+    AgentIdArgs, BootstrapReadArgs, HubRunGetArgs, HubRunListArgs, McpBatchArgs, McpCallToolArgs,
+    McpListServersArgs, McpListToolsArgs, ProcessBatchArgs, ProcessExecArgs, ProcessIdArgs,
+    ProcessListArgs, ProcessOutputArgs, ProcessResultArgs, ProcessStatusArgs, RoomDiaryActiveArgs,
+    RoomDiaryReadArgs, RoomMaintenanceStatusArgs, RoomMaintenanceSubmitArgs, RoomNotebookReadArgs,
+    RoomNotebookRecentArgs, RoomNotebookSearchArgs, RoomStateListArgs, RoomStateReadArgs,
+    SkillActivationArgs, SkillInstallArgs, SkillInstallCancelArgs, SkillInstallGetArgs,
+    SkillReadArgs, SkillRunArgs, SkillSearchArgs, TmuxCapturePaneArgs, TmuxCloseSessionArgs,
+    TmuxCreateSessionArgs, TmuxExecArgs, TmuxListPanesArgs, TmuxListSessionsArgs,
+    TmuxPasteTextArgs, UserNotifySendArgs,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -31,15 +33,15 @@ use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 use serde_json::{json, Map, Value};
 
 use crate::agentic_result::AgenticResult;
-use crate::agents::dispatch::{cached_job, mcp_list_servers_all_agents, request_agent};
+use crate::agents::dispatch::{cached_process, mcp_list_servers_all_agents, request_agent};
 use crate::notify::{notification_channels, send_user_notification, NotifyRouteError};
 use crate::registry::{registry_entries, registry_entry};
 use crate::room::control::{request_active_room, RoomRouteError};
 use crate::runs;
 use crate::state::{
     projection::{
-        add_cache_metadata, build_hub_info_response, filter_cached_jobs, job_list_item,
-        live_job_value,
+        add_cache_metadata, build_hub_info_response, filter_cached_processes, live_process_value,
+        process_list_item,
     },
     HubState, McpProfile,
 };
@@ -47,16 +49,16 @@ use crate::utils::random_id;
 use crate::REQUEST_TIMEOUT_SECS;
 const ROOM_TRANSPORT_MARGIN_SECS: u64 = 5;
 
-const MCP_INSTRUCTIONS: &str = "Agentic GPT Hub exposes domain-specific job creation plus one generic lifecycle. Use process.exec for one managed process and process.batch for multiple managed processes; both wait briefly and return Job envelopes. Use mcp.callTool for one downstream MCP Job and mcp.batch for 1..16 atomically admitted child Jobs with one aggregate confirmation, ordered results, global/per-server concurrency bounds, and optional fail-fast scheduling. Use job.get with waitSeconds to inspect or briefly wait, job.list for bounded filtered discovery, and job.cancel for kind-aware cancellation evidence. Use tmux as the persistent shared workspace for stateful development, iterative debugging, TUIs, and user-agent handoff. For tmux work, discover the workspace with tmux.listSessions and tmux.listPanes, inspect it with tmux.capturePane, then use tmux.exec for shell panes or tmux.pasteText for non-shell panes. At Room start, call room.bootstrap, then room.bootstrap.read for relevant guides. Room skills are managed only by the active Room Agent; skills.run returns the same Job envelope and is followed through job.get/job.cancel. Commands remain subject to Agentic local policy, path policy, confirmation, capacity, and audit.";
-const COORDINATOR_INSTRUCTIONS: &str = "Agentic GPT Hub coordinator profile. This connector exposes only Hub-native agent status, retained run history, current job snapshots, and notification tools. It never dispatches execution, job-control, tmux, downstream MCP, skills, bootstrap, diary, or notebook commands to an Agent.";
-fn default_job_wait_seconds() -> u64 {
-    JobGetRequest::DEFAULT_WAIT_SECONDS
+const MCP_INSTRUCTIONS: &str = "Agentic GPT Hub exposes process.exec and process.batch for managed execution, plus process.status, process.list, process.output, process.result, and process.cancel for lifecycle follow-up. Status and list report metadata only; output uses resumable lossless pages, and result reports whether the complete structured value is retained. hub.process.status and hub.process.list are cache-only snapshots with explicit freshness. mcp.callTool and mcp.batch use the same managed process lifecycle for downstream MCP calls. Use tmux as the persistent shared workspace for stateful development, iterative debugging, TUIs, and user-agent handoff. For tmux work, discover the active session and panes before issuing commands. skills.install remains a distinct installation workflow.";
+const COORDINATOR_INSTRUCTIONS: &str = "Agentic GPT Hub coordinator profile. This connector exposes only Hub-native agent status, retained run history, current cached process snapshots, and notification tools. It never dispatches execution, process-control, tmux, downstream MCP, skills, bootstrap, diary, or notebook commands to an Agent.";
+
+fn default_process_wait_seconds() -> u64 {
+    ProcessStatusRequest::DEFAULT_WAIT_SECONDS
 }
 
-fn job_get_payload(params: &JobGetArgs) -> JobGetRequest {
-    let mut payload = JobGetRequest {
-        job_id: params.job_id.clone(),
-        wait_only: params.wait_only.unwrap_or(false),
+fn process_status_payload(params: &ProcessStatusArgs) -> ProcessStatusRequest {
+    let mut payload = ProcessStatusRequest {
+        process_id: params.process_id.clone(),
         wait_seconds: params.wait_seconds,
     };
     payload.wait_seconds = Some(payload.effective_wait_seconds());
@@ -66,25 +68,34 @@ fn job_get_payload(params: &JobGetArgs) -> JobGetRequest {
 fn default_standard_wait_seconds() -> u64 {
     5
 }
-fn default_wait_only() -> bool {
-    false
-}
+
 fn default_room_wait_seconds() -> u8 {
     0
 }
+
 fn default_room_notebook_limit() -> usize {
     20
 }
-fn default_job_list_limit() -> usize {
-    50
+
+fn default_process_list_limit() -> usize {
+    ProcessListRequest::DEFAULT_LIMIT
 }
+
+fn default_process_output_max_bytes() -> usize {
+    ProcessOutputRequest::DEFAULT_MAX_BYTES
+}
+
+fn default_process_result_max_bytes() -> usize {
+    ProcessResultRequest::DEFAULT_MAX_BYTES
+}
+
 const COORDINATOR_TOOLS: &[&str] = &[
     "hub.info",
     "agent.list",
     "hub.run.list",
     "hub.run.get",
-    "hub.job.list",
-    "hub.job.get",
+    "hub.process.status",
+    "hub.process.list",
     "user.notify.channels",
     "user.notify.send",
 ];
@@ -148,7 +159,7 @@ fn decorate_tool_descriptors(tool_router: &mut ToolRouter<AgenticMcpServer>) {
         let read_only = tool_is_read_only(name);
         let destructive = matches!(
             name,
-            "job.cancel"
+            "process.cancel"
                 | "tmux.closeSession"
                 | "room.maintenance.submit"
                 | "skills.install"
@@ -176,7 +187,7 @@ fn tool_is_read_only(name: &str) -> bool {
         name,
         "process.exec"
             | "process.batch"
-            | "job.cancel"
+            | "process.cancel"
             | "tmux.pasteText"
             | "tmux.exec"
             | "tmux.createSession"
@@ -193,36 +204,41 @@ fn tool_is_read_only(name: &str) -> bool {
     )
 }
 
-fn parse_job_kind(value: Option<&str>) -> Result<Option<JobKind>, ErrorData> {
+fn parse_process_kind(value: Option<&str>) -> Result<Option<ProcessKind>, ErrorData> {
     match value {
         None => Ok(None),
-        Some("process") => Ok(Some(JobKind::Process)),
-        Some("skill") => Ok(Some(JobKind::Skill)),
-        Some("mcp") => Ok(Some(JobKind::Mcp)),
+        Some("command") => Ok(Some(ProcessKind::Command)),
+        Some("skill") => Ok(Some(ProcessKind::Skill)),
+        Some("mcp") => Ok(Some(ProcessKind::Mcp)),
         Some(_) => Err(mcp_invalid_params(
-            "job_kind_invalid",
-            "kind must be process, skill, or mcp",
+            "process_kind_invalid",
+            "kind must be command, skill, or mcp",
         )),
     }
 }
 
-fn parse_job_state(value: Option<&str>) -> Result<Option<JobState>, ErrorData> {
+fn parse_process_state(value: Option<&str>) -> Result<Option<ProcessState>, ErrorData> {
     let state = match value {
         None => return Ok(None),
-        Some("queued") => JobState::Queued,
-        Some("waiting_confirmation") => JobState::WaitingConfirmation,
-        Some("starting") => JobState::Starting,
-        Some("running") => JobState::Running,
-        Some("completed") => JobState::Completed,
-        Some("failed") => JobState::Failed,
-        Some("rejected") => JobState::Rejected,
-        Some("cancel_requested") => JobState::CancelRequested,
-        Some("cancelled") => JobState::Cancelled,
-        Some("timed_out") => JobState::TimedOut,
-        Some("detached") => JobState::Detached,
-        Some("unknown_after_restart") => JobState::UnknownAfterRestart,
-        Some("skipped") => JobState::Skipped,
-        Some(_) => return Err(mcp_invalid_params("job_state_invalid", "unknown Job state")),
+        Some("queued") => ProcessState::Queued,
+        Some("waiting_confirmation") => ProcessState::WaitingConfirmation,
+        Some("starting") => ProcessState::Starting,
+        Some("running") => ProcessState::Running,
+        Some("completed") => ProcessState::Completed,
+        Some("failed") => ProcessState::Failed,
+        Some("rejected") => ProcessState::Rejected,
+        Some("cancel_requested") => ProcessState::CancelRequested,
+        Some("cancelled") => ProcessState::Cancelled,
+        Some("timed_out") => ProcessState::TimedOut,
+        Some("detached") => ProcessState::Detached,
+        Some("unknown_after_restart") => ProcessState::UnknownAfterRestart,
+        Some("skipped") => ProcessState::Skipped,
+        Some(_) => {
+            return Err(mcp_invalid_params(
+                "process_state_invalid",
+                "unknown process state",
+            ))
+        }
     };
     Ok(Some(state))
 }
@@ -234,29 +250,30 @@ fn object_schema() -> Map<String, Value> {
     schema
 }
 
-async fn snapshot_job_list(state: &HubState, agent_id: &str) -> Value {
-    let snapshots = state.job_cache.snapshots(agent_id).await;
+async fn snapshot_process_list(state: &HubState, agent_id: &str) -> Value {
+    let snapshots = state.process_cache.snapshots(agent_id).await;
     let mut value = json!({
-        "jobs": snapshots
+        "processes": snapshots
             .iter()
             .cloned()
-            .map(|snapshot| snapshot.job)
+            .map(|snapshot| process_list_item(snapshot.process))
             .collect::<Vec<_>>()
     });
     add_cache_metadata(&mut value, &snapshots);
     value
 }
 
-async fn snapshot_job_list_filtered(
+async fn snapshot_process_list_filtered(
     state: &HubState,
     agent_id: &str,
-    request: &JobListRequest,
+    request: &ProcessListRequest,
     unavailable_reason: &str,
 ) -> Value {
     if request.cursor.is_some() {
         return json!({
+            "status": "unavailable",
             "error": {
-                "code": "job_list_cursor_unavailable",
+                "code": "process_list_cursor_unavailable",
                 "message": format!(
                     "Agent is unavailable and Hub cache cannot continue an Agent-issued cursor: {unavailable_reason}"
                 )
@@ -264,44 +281,71 @@ async fn snapshot_job_list_filtered(
             "freshness": "unknown"
         });
     }
-    let mut snapshots = state.job_cache.snapshots(agent_id).await;
-    filter_cached_jobs(&mut snapshots, request);
+    let mut snapshots = state.process_cache.snapshots(agent_id).await;
+    filter_cached_processes(&mut snapshots, request);
     let mut value = json!({
-        "jobs": snapshots
+        "processes": snapshots
             .iter()
             .cloned()
-            .map(|snapshot| job_list_item(snapshot.job))
+            .map(|snapshot| process_list_item(snapshot.process))
             .collect::<Vec<_>>()
     });
     add_cache_metadata(&mut value, &snapshots);
     value
 }
 
-async fn cached_job_summary(state: &HubState, agent_id: &str, job_id: &str) -> Option<Value> {
-    cached_job(state, agent_id, job_id)
+async fn cached_process_summary(
+    state: &HubState,
+    agent_id: &str,
+    process_id: &str,
+) -> Option<Value> {
+    cached_process(state, agent_id, process_id)
         .await
         .and_then(|snapshot| {
-            let mut value = serde_json::to_value(job_list_item(snapshot.job.clone())).ok()?;
+            let mut value =
+                serde_json::to_value(process_list_item(snapshot.process.clone())).ok()?;
             add_cache_metadata(&mut value, std::slice::from_ref(&snapshot));
             Some(value)
         })
 }
 
-async fn snapshot_job_get(state: &HubState, agent_id: &str, job_id: &str) -> Value {
-    match cached_job(state, agent_id, job_id).await {
+async fn snapshot_process_status(state: &HubState, agent_id: &str, process_id: &str) -> Value {
+    match cached_process(state, agent_id, process_id).await {
         Some(snapshot) => {
-            let mut value = json!({
-                "job": snapshot.job.clone(),
-                "detailAvailable": false,
-                "resultTruncated": false
-            });
+            let mut value = serde_json::to_value(snapshot.process.clone())
+                .expect("ProcessInfo is serializable");
             add_cache_metadata(&mut value, std::slice::from_ref(&snapshot));
             value
         }
         None => {
-            json!({ "error": { "code": "job_not_found", "message": "Job was not found" }, "freshness": "unknown" })
+            json!({ "error": { "code": "process_not_found", "message": "Process was not found" }, "freshness": "unknown" })
         }
     }
+}
+
+async fn unavailable_process_value(
+    state: &HubState,
+    agent_id: &str,
+    process_id: &str,
+    code: &'static str,
+    reason: String,
+) -> Value {
+    let mut value = json!({
+        "processId": process_id,
+        "status": "unavailable",
+        "error": { "code": code, "message": reason },
+        "freshness": "unknown"
+    });
+    if let Some(cached) = cached_process_summary(state, agent_id, process_id).await {
+        if let Some(freshness) = cached.get("freshness").cloned() {
+            value["freshness"] = freshness;
+        }
+        if let Some(observed_at) = cached.get("observedAt").cloned() {
+            value["observedAt"] = observed_at;
+        }
+        value["cached"] = cached;
+    }
+    value
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -405,41 +449,41 @@ impl AgenticMcpServer {
     }
 
     #[tool(
-        name = "hub.job.list",
-        description = "List current or cached Job snapshots without dispatching to an Agent."
+        name = "hub.process.list",
+        description = "List cached process status metadata for one local Agent without dispatching; freshness and observation time are explicit."
     )]
-    async fn hub_job_list(
+    async fn hub_process_list(
         &self,
         params: Parameters<AgentIdArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let agent_id = params.0.agent_id;
         self.ensure_agent_enabled(&agent_id)?;
-        Ok(ok_json(snapshot_job_list(&self.state, &agent_id).await))
+        Ok(ok_json(snapshot_process_list(&self.state, &agent_id).await))
     }
 
     #[tool(
-        name = "hub.job.get",
-        description = "Get one current or cached Job snapshot without dispatching to an Agent."
+        name = "hub.process.status",
+        description = "Read one cached process status snapshot without dispatching; freshness and observation time are explicit."
     )]
-    async fn hub_job_get(
+    async fn hub_process_status(
         &self,
-        params: Parameters<JobIdArgs>,
+        params: Parameters<ProcessIdArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let params = params.0;
         self.ensure_agent_enabled(&params.agent_id)?;
         Ok(result_from_value(
-            snapshot_job_get(&self.state, &params.agent_id, &params.job_id).await,
+            snapshot_process_status(&self.state, &params.agent_id, &params.process_id).await,
         ))
     }
 
     #[tool(
         name = "process.exec",
-        description = "Start one managed process on a local Agent; use job tools for lifecycle follow-up."
+        description = "Start one managed process on a local Agent; use process.status, process.output, process.result, and process.cancel for lifecycle follow-up."
     )]
-    async fn exec(&self, params: Parameters<ExecArgs>) -> Result<CallToolResult, ErrorData> {
+    async fn exec(&self, params: Parameters<ProcessExecArgs>) -> Result<CallToolResult, ErrorData> {
         let params = params.0;
         self.ensure_agent_enabled(&params.agent_id)?;
-        let payload = ExecRequest {
+        let payload = ProcessExecRequest {
             agent_id: params.agent_id.clone(),
             group: params.group,
             program: params.program,
@@ -472,17 +516,17 @@ impl AgenticMcpServer {
     )]
     async fn batch_exec(
         &self,
-        params: Parameters<BatchExecArgs>,
+        params: Parameters<ProcessBatchArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let params = params.0;
         self.ensure_agent_enabled(&params.agent_id)?;
-        let payload = BatchExecRequest {
+        let payload = ProcessBatchExecRequest {
             agent_id: params.agent_id.clone(),
             group: params.group,
             elements: params
                 .elements
                 .into_iter()
-                .map(|element| ExecElement {
+                .map(|element| ProcessExecElement {
                     program: element.program,
                     args: element.args.unwrap_or_default(),
                     working_directory: element.working_directory,
@@ -511,66 +555,68 @@ impl AgenticMcpServer {
     }
 
     #[tool(
-        name = "job.list",
-        description = "List active or retained Jobs for one local Agent; read-only discovery."
+        name = "process.list",
+        description = "List active or retained managed processes for one local Agent with optional filters and cursor pagination; offline cache snapshots carry explicit freshness."
     )]
-    async fn job_list(&self, params: Parameters<JobListArgs>) -> Result<CallToolResult, ErrorData> {
+    async fn process_list(
+        &self,
+        params: Parameters<ProcessListArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
         let params = params.0;
         self.ensure_agent_enabled(&params.agent_id)?;
-        let payload = JobListRequest {
-            group: parse_job_group(params.group)?,
-            kind: parse_job_kind(params.kind.as_deref())?,
-            state: parse_job_state(params.state.as_deref())?,
+        let group = normalize_process_group(params.group.as_deref())
+            .map_err(|error| mcp_invalid_params(error.code(), error.message()))?;
+        let payload = ProcessListRequest {
+            group,
+            kind: parse_process_kind(params.kind.as_deref())?,
+            state: parse_process_state(params.state.as_deref())?,
             limit: params.limit,
             cursor: params.cursor,
         };
-        let command = HubCommand::JobList {
+        let command = HubCommand::ProcessList {
             request_id: random_id("req"),
             payload: payload.clone(),
         };
         let value = match request_agent(&self.state, &params.agent_id, command, 2).await {
-            Ok(value) => live_job_value(value),
+            Ok(value) => live_process_value(value),
             Err(reason) => {
-                snapshot_job_list_filtered(&self.state, &params.agent_id, &payload, &reason).await
+                snapshot_process_list_filtered(&self.state, &params.agent_id, &payload, &reason)
+                    .await
             }
         };
         Ok(result_from_value(value))
     }
 
     #[tool(
-        name = "job.get",
-        description = "Inspect or briefly wait for one Job; cached fallback is not proof of a fresh live result."
+        name = "process.status",
+        description = "Inspect or briefly wait for process status metadata only; status never includes stdout, stderr, or result bodies."
     )]
-    async fn job_get(&self, params: Parameters<JobGetArgs>) -> Result<CallToolResult, ErrorData> {
+    async fn process_status(
+        &self,
+        params: Parameters<ProcessStatusArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
         let params = params.0;
         self.ensure_agent_enabled(&params.agent_id)?;
-        let payload = job_get_payload(&params);
+        let payload = process_status_payload(&params);
         let wait_seconds = payload.effective_wait_seconds();
-        let command = HubCommand::JobGet {
+        let command = HubCommand::ProcessStatus {
             request_id: random_id("req"),
             payload,
         };
         let value =
             match request_agent(&self.state, &params.agent_id, command, wait_seconds + 2).await {
-                Ok(value) => live_job_value(value),
+                Ok(value) => live_process_value(value),
                 Err(reason) => {
-                    let cached =
-                        cached_job_summary(&self.state, &params.agent_id, &params.job_id).await;
-                    let mut value = json!({
-                        "error": {
-                            "code": "job_get_unavailable",
-                            "message": reason
-                        },
-                        "freshness": "unknown"
-                    });
-                    if let Some(cached) = cached {
-                        if let Some(freshness) = cached.get("freshness").cloned() {
-                            value["freshness"] = freshness;
-                        }
-                        if let Some(observed_at) = cached.get("observedAt").cloned() {
-                            value["observedAt"] = observed_at;
-                        }
-                        value["cached"] = cached;
+                    let mut value = unavailable_process_value(
+                        &self.state,
+                        &params.agent_id,
+                        &params.process_id,
+                        "process_status_unavailable",
+                        reason,
+                    )
+                    .await;
+                    if let Some(object) = value.as_object_mut() {
+                        object.remove("status");
                     }
                     value
                 }
@@ -579,39 +625,99 @@ impl AgenticMcpServer {
     }
 
     #[tool(
-        name = "job.cancel",
-        description = "Request Job cancellation and return observed termination evidence; remote stop is not assumed."
+        name = "process.output",
+        description = "Read a non-consuming lossless output page. Cursor offsets are raw bytes, and invalid UTF-8 is preserved with base64 encoding."
     )]
-    async fn job_cancel(&self, params: Parameters<JobIdArgs>) -> Result<CallToolResult, ErrorData> {
+    async fn process_output(
+        &self,
+        params: Parameters<ProcessOutputArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
         let params = params.0;
         self.ensure_agent_enabled(&params.agent_id)?;
-        let command = HubCommand::JobCancel {
+        let command = HubCommand::ProcessOutput {
             request_id: random_id("req"),
-            payload: JobCancelRequest {
-                job_id: params.job_id.clone(),
+            payload: ProcessOutputRequest {
+                process_id: params.process_id.clone(),
+                cursor: params.cursor,
+                max_bytes: params.max_bytes,
             },
         };
         let value = match request_agent(&self.state, &params.agent_id, command, 5).await {
-            Ok(value) => live_job_value(value),
+            Ok(value) => value,
             Err(reason) => {
-                let cached = snapshot_job_get(&self.state, &params.agent_id, &params.job_id).await;
-                let freshness = cached
-                    .get("freshness")
-                    .cloned()
-                    .unwrap_or_else(|| json!("unknown"));
-                let observed_at = cached.get("observedAt").cloned();
-                let mut value = json!({
-                    "error": {
-                        "code": "job_cancel_unavailable",
-                        "message": reason
-                    },
-                    "cached": cached,
-                    "freshness": freshness
-                });
-                if let Some(observed_at) = observed_at {
-                    value["observedAt"] = observed_at;
-                }
-                value
+                unavailable_process_value(
+                    &self.state,
+                    &params.agent_id,
+                    &params.process_id,
+                    "process_output_unavailable",
+                    reason,
+                )
+                .await
+            }
+        };
+        Ok(result_from_value(value))
+    }
+
+    #[tool(
+        name = "process.result",
+        description = "Read an explicitly retained complete structured result or an unavailable status; the Hub metadata cache never supplies result content."
+    )]
+    async fn process_result(
+        &self,
+        params: Parameters<ProcessResultArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let params = params.0;
+        self.ensure_agent_enabled(&params.agent_id)?;
+        let command = HubCommand::ProcessResult {
+            request_id: random_id("req"),
+            payload: ProcessResultRequest {
+                process_id: params.process_id.clone(),
+                max_bytes: params.max_bytes,
+            },
+        };
+        let value = match request_agent(&self.state, &params.agent_id, command, 5).await {
+            Ok(value) => value,
+            Err(reason) => {
+                unavailable_process_value(
+                    &self.state,
+                    &params.agent_id,
+                    &params.process_id,
+                    "process_result_unavailable",
+                    reason,
+                )
+                .await
+            }
+        };
+        Ok(result_from_value(value))
+    }
+
+    #[tool(
+        name = "process.cancel",
+        description = "Request managed process cancellation and return observed termination evidence; a remote stop is not assumed."
+    )]
+    async fn process_cancel(
+        &self,
+        params: Parameters<ProcessIdArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let params = params.0;
+        self.ensure_agent_enabled(&params.agent_id)?;
+        let command = HubCommand::ProcessCancel {
+            request_id: random_id("req"),
+            payload: ProcessCancelRequest {
+                process_id: params.process_id.clone(),
+            },
+        };
+        let value = match request_agent(&self.state, &params.agent_id, command, 5).await {
+            Ok(value) => live_process_value(value),
+            Err(reason) => {
+                unavailable_process_value(
+                    &self.state,
+                    &params.agent_id,
+                    &params.process_id,
+                    "process_cancel_unavailable",
+                    reason,
+                )
+                .await
             }
         };
         Ok(result_from_value(value))
@@ -837,7 +943,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "mcp.callTool",
-        description = "Run one downstream MCP tool as a managed Job; use job tools for lifecycle follow-up."
+        description = "Run one downstream MCP tool as a managed process; use process tools for lifecycle follow-up."
     )]
     async fn mcp_call_tool(
         &self,
@@ -869,7 +975,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "mcp.batch",
-        description = "Run multiple downstream MCP calls as managed Jobs under one admission boundary; downstream side effects are not rolled back."
+        description = "Run multiple downstream MCP calls as managed processes under one admission boundary; downstream side effects are not rolled back."
     )]
     async fn mcp_batch(
         &self,
@@ -1453,7 +1559,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "skills.run",
-        description = "Run an executable from an active Room skill as a managed Job."
+        description = "Run an executable from an active Room skill as a managed process."
     )]
     async fn skills_run(
         &self,
@@ -1542,11 +1648,6 @@ fn room_route_error_value_with_timeout(error: RoomRouteError, timeout_code: &'st
     }
 }
 
-fn parse_job_group(value: Option<String>) -> Result<Option<String>, ErrorData> {
-    normalize_job_group(value.as_deref())
-        .map_err(|error| mcp_invalid_params(error.code(), error.message()))
-}
-
 fn mcp_invalid_params(code: &'static str, message: impl ToString) -> ErrorData {
     ErrorData::invalid_params(message.to_string(), Some(json!({ "code": code })))
 }
@@ -1588,10 +1689,10 @@ fn notify_route_error_message(error: &NotifyRouteError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::RemoteConfirmationConfig;
+    use crate::config::{HubConfig, RemoteConfirmationConfig};
     use crate::db::init_db;
     use crate::state::McpProfile;
-    use crate::HubConfig;
+    use agentic_gpt_protocol::ProcessInfo;
     use axum::body::to_bytes;
     use axum::extract::State;
     use axum::Json;
@@ -1626,7 +1727,7 @@ mod tests {
             agents: Arc::new(crate::agents::lifecycle::Connections::new()),
             dispatch: Arc::new(crate::agents::dispatch::Dispatch::new()),
             confirmations: Arc::new(crate::confirmation::Confirmations::new()),
-            job_cache: Arc::new(crate::state::JobCache::new()),
+            process_cache: Arc::new(crate::state::ProcessCache::new()),
             boot_generations: Arc::new(Mutex::new(HashMap::new())),
             active_room: Arc::new(Mutex::new(None)),
             http: reqwest::Client::new(),
@@ -1645,7 +1746,12 @@ mod tests {
     fn tool_read_only_hints_match_side_effect_semantics() {
         for name in [
             "agent.list",
-            "job.list",
+            "process.list",
+            "process.status",
+            "process.output",
+            "process.result",
+            "hub.process.status",
+            "hub.process.list",
             "tmux.listSessions",
             "tmux.listPanes",
             "tmux.capturePane",
@@ -1670,8 +1776,8 @@ mod tests {
         }
         for name in [
             "process.exec",
-            "process.exec",
-            "job.cancel",
+            "process.batch",
+            "process.cancel",
             "tmux.exec",
             "tmux.pasteText",
             "tmux.createSession",
@@ -1705,8 +1811,8 @@ mod tests {
             vec![
                 "agent.list",
                 "hub.info",
-                "hub.job.get",
-                "hub.job.list",
+                "hub.process.list",
+                "hub.process.status",
                 "hub.run.get",
                 "hub.run.list",
                 "user.notify.channels",
@@ -1765,10 +1871,16 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(names.iter().any(|name| name == "bootstrap"));
         assert!(names.iter().any(|name| name == "bootstrap.read"));
-        assert!(names.iter().any(|name| name == "process.exec"));
-        assert!(names.iter().any(|name| name == "mcp.batch"));
-        assert!(names.iter().any(|name| name == "hub.job.list"));
         for name in [
+            "process.exec",
+            "process.batch",
+            "process.list",
+            "process.status",
+            "process.output",
+            "process.result",
+            "process.cancel",
+            "hub.process.list",
+            "hub.process.status",
             "room.diary.active",
             "room.diary.read",
             "room.notebook.recent",
@@ -1971,7 +2083,7 @@ mod tests {
 
     #[test]
     fn native_tool_values_use_agentic_result_shape() {
-        let value = json!({ "jobs": [] });
+        let value = json!({ "processes": [] });
 
         let result = result_from_value(value.clone());
         let serialized = serde_json::to_value(result).unwrap();
@@ -2007,24 +2119,105 @@ mod tests {
         assert_eq!(value["result"]["isError"], false);
     }
 
-    #[test]
-    fn job_get_descriptor_and_wait_normalization_match_protocol_contract() {
-        assert_eq!(
-            default_job_wait_seconds(),
-            JobGetRequest::DEFAULT_WAIT_SECONDS
-        );
-        let schema = serde_json::to_string(&rmcp::schemars::schema_for!(JobGetArgs)).unwrap();
-        assert!(schema.contains("\"default\":5"));
-        assert!(schema.contains("\"maximum\":30"));
+    #[tokio::test]
+    async fn offline_process_output_and_result_are_unavailable_and_cache_only() {
+        let state = test_state();
+        {
+            let conn = state.db.lock().unwrap();
+            conn.execute(
+                "insert into agents(agent_id, alias, display_name, enabled, secret_hash, last_seen_at, capabilities_json)
+                 values ('agent', null, 'Agent', 1, 'hash', null, ?1)",
+                [json!({
+                    "processes": true,
+                    "confirmation": true,
+                    "notificationActions": false
+                })
+                .to_string()],
+            )
+            .unwrap();
+        }
+        let now = chrono::Utc::now().to_rfc3339();
+        let process: ProcessInfo = serde_json::from_value(json!({
+            "agentId": "agent",
+            "processId": "process-1",
+            "kind": "command",
+            "state": "completed",
+            "createdAt": now.clone(),
+            "updatedAt": now,
+            "captureStatus": "complete"
+        }))
+        .unwrap();
+        state
+            .process_cache
+            .record("agent", "old-connection", None, process)
+            .await;
+        state
+            .process_cache
+            .mark_connection_stale("agent", "old-connection")
+            .await;
+        let server = AgenticMcpServer::new(state);
 
-        for (wait_seconds, expected) in [(None, 5), (Some(0), 0), (Some(31), 30)] {
-            let params = JobGetArgs {
+        let output = server
+            .process_output(Parameters(ProcessOutputArgs {
                 agent_id: "agent".to_string(),
-                job_id: "job".to_string(),
+                process_id: "process-1".to_string(),
+                cursor: None,
+                max_bytes: Some(1024),
+            }))
+            .await
+            .unwrap();
+        let output = serde_json::to_value(output).unwrap()["structuredContent"].clone();
+        assert_eq!(output["status"], "unavailable");
+        assert_eq!(output["error"]["code"], "process_output_unavailable");
+        assert_eq!(output["cached"]["processId"], "process-1");
+        assert_eq!(output["freshness"], "stale");
+
+        let result = server
+            .process_result(Parameters(ProcessResultArgs {
+                agent_id: "agent".to_string(),
+                process_id: "process-1".to_string(),
+                max_bytes: Some(1024),
+            }))
+            .await
+            .unwrap();
+        let result = serde_json::to_value(result).unwrap()["structuredContent"].clone();
+        assert_eq!(result["status"], "unavailable");
+        assert_eq!(result["error"]["code"], "process_result_unavailable");
+        assert_eq!(result["cached"]["processId"], "process-1");
+        assert_eq!(result["freshness"], "stale");
+        for value in [&output, &result] {
+            for field in ["stdout", "stderr", "result"] {
+                assert!(value.get(field).is_none());
+                assert!(value["cached"].get(field).is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn process_lifecycle_arg_schemas_match_protocol_bounds() {
+        assert_eq!(
+            default_process_wait_seconds(),
+            ProcessStatusRequest::DEFAULT_WAIT_SECONDS
+        );
+        let status_schema =
+            serde_json::to_string(&rmcp::schemars::schema_for!(ProcessStatusArgs)).unwrap();
+        assert!(status_schema.contains("\"default\":5"));
+        assert!(status_schema.contains("\"maximum\":30"));
+        let output_schema =
+            serde_json::to_string(&rmcp::schemars::schema_for!(ProcessOutputArgs)).unwrap();
+        assert!(output_schema.contains("\"default\":8192"));
+        assert!(output_schema.contains("\"maximum\":32768"));
+        let result_schema =
+            serde_json::to_string(&rmcp::schemars::schema_for!(ProcessResultArgs)).unwrap();
+        assert!(result_schema.contains("\"default\":8192"));
+        assert!(result_schema.contains("\"maximum\":524288"));
+        for (wait_seconds, expected) in [(None, 5), (Some(0), 0), (Some(31), 30)] {
+            let params = ProcessStatusArgs {
+                agent_id: "agent".to_string(),
+                process_id: "process".to_string(),
                 wait_seconds,
-                wait_only: None,
             };
-            let payload = job_get_payload(&params);
+            let payload = process_status_payload(&params);
             assert_eq!(payload.wait_seconds, Some(expected));
             assert_eq!(payload.effective_wait_seconds(), expected);
         }

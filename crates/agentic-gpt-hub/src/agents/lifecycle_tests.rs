@@ -2,7 +2,7 @@ use super::*;
 use crate::agents::test_support::*;
 use agentic_gpt_protocol::{
     AgentConnectionMode, AgentMessage, AgentRole, AgentRunReport, ConfirmationPayload, HubCommand,
-    HubCommandEnvelope, HubMessage, JobState, RoomNotebookReadRequest, SafeConfigSummary,
+    HubCommandEnvelope, HubMessage, ProcessState, RoomNotebookReadRequest, SafeConfigSummary,
 };
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -52,12 +52,12 @@ fn generation_report(run_id: &str, request_id: &str) -> AgentMessage {
             started_at: timestamp,
             updated_at: timestamp,
             duration_ms: None,
-            job_id: None,
+            process_id: None,
             exit_code: None,
             reason: None,
             arguments: None,
             result: None,
-            job: None,
+            process: None,
         }),
     }
 }
@@ -532,14 +532,14 @@ pub(crate) async fn generation_snapshot(state: &HubState) -> Value {
         .unwrap()
         .and_then(|entry| entry.last_seen_at);
     let boot_generation = state.boot_generations.lock().await.get("agent").cloned();
-    let jobs = state
-        .job_cache
+    let processes = state
+        .process_cache
         .snapshots("agent")
         .await
         .into_iter()
         .map(|snapshot| {
-            let job_id = snapshot.job.job_id.clone();
-            (job_id, serde_json::to_value(snapshot.job).unwrap())
+            let process_id = snapshot.process.process_id.clone();
+            (process_id, serde_json::to_value(snapshot.process).unwrap())
         })
         .collect::<serde_json::Map<_, _>>();
     let active_room = state.active_room.lock().await.as_ref().map(|active| {
@@ -553,13 +553,13 @@ pub(crate) async fn generation_snapshot(state: &HubState) -> Value {
         "connection": connection,
         "registryLastSeenAt": registry_last_seen,
         "bootGeneration": boot_generation,
-        "jobs": jobs,
+        "processes": processes,
         "activeRoom": active_room,
         "pendingConfirmations": pending_confirmations,
     })
 }
 #[tokio::test]
-async fn changed_boot_generation_marks_only_active_jobs_unknown_after_restart() {
+async fn changed_boot_generation_marks_only_active_processes_unknown_after_restart() {
     let state = test_state();
     register_agent(&state, "agent", "secret");
     let _rx = insert_connection(&state, "agent", "current", chrono::Utc::now()).await;
@@ -568,16 +568,16 @@ async fn changed_boot_generation_marks_only_active_jobs_unknown_after_restart() 
         .lock()
         .await
         .insert("agent".to_string(), "boot-a".to_string());
-    let running = test_running_job("job_boot-a_running");
-    let mut completed = test_running_job("job_boot-a_completed");
-    completed.state = JobState::Completed;
+    let running = test_running_process("process_boot-a_running");
+    let mut completed = test_running_process("process_boot-a_completed");
+    completed.state = ProcessState::Completed;
     completed.finished_at = Some(completed.updated_at);
     state
-        .job_cache
+        .process_cache
         .insert_for_test("agent", "current", Some("boot-a"), running)
         .await;
     state
-        .job_cache
+        .process_cache
         .insert_for_test("agent", "current", Some("boot-a"), completed)
         .await;
 
@@ -597,12 +597,12 @@ async fn changed_boot_generation_marks_only_active_jobs_unknown_after_restart() 
     .unwrap();
 
     let running = state
-        .job_cache
-        .snapshot("agent", "job_boot-a_running")
+        .process_cache
+        .snapshot("agent", "process_boot-a_running")
         .await
         .unwrap()
-        .job;
-    assert_eq!(running.state, JobState::UnknownAfterRestart);
+        .process;
+    assert_eq!(running.state, ProcessState::UnknownAfterRestart);
     assert_eq!(
         running.reject_reason.as_deref(),
         Some("unknown_after_restart")
@@ -610,13 +610,13 @@ async fn changed_boot_generation_marks_only_active_jobs_unknown_after_restart() 
     assert!(running.finished_at.is_none());
     assert_eq!(
         state
-            .job_cache
-            .snapshot("agent", "job_boot-a_completed")
+            .process_cache
+            .snapshot("agent", "process_boot-a_completed")
             .await
             .unwrap()
-            .job
+            .process
             .state,
-        JobState::Completed
+        ProcessState::Completed
     );
     assert_eq!(
         state
@@ -664,7 +664,7 @@ async fn stale_heartbeat_is_rejected_without_touching_current_connection() {
 }
 
 #[tokio::test]
-async fn stale_job_update_is_rejected_without_writing_job_cache() {
+async fn stale_process_update_is_rejected_without_writing_process_cache() {
     let state = test_state();
     register_agent(&state, "agent", "secret");
     let _rx = insert_connection(&state, "agent", "current", chrono::Utc::now()).await;
@@ -674,14 +674,14 @@ async fn stale_job_update_is_rejected_without_writing_job_cache() {
         Path("agent".to_string()),
         Query(SseConnectQuery::for_test(Some("old".to_string()))),
         agent_headers("secret"),
-        axum::Json(AgentMessage::JobUpdate {
-            job: test_running_job("job_oldboot_123"),
+        axum::Json(AgentMessage::ProcessUpdate {
+            process: test_running_process("process_oldboot_123"),
         }),
     )
     .await;
 
     assert_eq!(response.status(), StatusCode::CONFLICT);
-    assert_eq!(state.job_cache.count().await, 0);
+    assert_eq!(state.process_cache.count().await, 0);
 }
 #[tokio::test]
 async fn expired_connection_cleanup_removes_only_stale_current_entries() {
@@ -704,22 +704,22 @@ async fn generation_stale_messages_preserve_current_state() {
         "hello_reporting_only",
         "hello_room_changed_boot",
         "heartbeat",
-        "job_update",
+        "process_update",
         "run_report",
         "confirmation_request",
     ] {
         let (state, mut new_rx) = generation_fixture().await;
         if case == "hello_room_changed_boot" {
-            let running = test_running_job("generation_active");
-            let mut completed = test_running_job("generation_terminal");
-            completed.state = JobState::Completed;
+            let running = test_running_process("generation_active");
+            let mut completed = test_running_process("generation_terminal");
+            completed.state = ProcessState::Completed;
             completed.finished_at = Some(completed.updated_at);
             state
-                .job_cache
+                .process_cache
                 .insert_for_test("agent", "old", Some("boot-old"), running)
                 .await;
             state
-                .job_cache
+                .process_cache
                 .insert_for_test("agent", "old", Some("boot-old"), completed)
                 .await;
         }
@@ -778,13 +778,13 @@ async fn generation_stale_messages_preserve_current_state() {
                 )
                 .await
             }
-            "job_update" => {
+            "process_update" => {
                 generation_handle(
                     &state,
                     "agent",
                     "old",
-                    AgentMessage::JobUpdate {
-                        job: test_running_job("generation_stale_job"),
+                    AgentMessage::ProcessUpdate {
+                        process: test_running_process("generation_stale_process"),
                     },
                 )
                 .await
@@ -857,16 +857,16 @@ async fn generation_current_messages_keep_existing_effects() {
         Some("current")
     );
 
-    let running = test_running_job("generation_running");
-    let mut completed = test_running_job("generation_completed");
-    completed.state = JobState::Completed;
+    let running = test_running_process("generation_running");
+    let mut completed = test_running_process("generation_completed");
+    completed.state = ProcessState::Completed;
     completed.finished_at = Some(completed.updated_at);
     state
-        .job_cache
+        .process_cache
         .insert_for_test("agent", "current", Some("boot-a"), running)
         .await;
     state
-        .job_cache
+        .process_cache
         .insert_for_test("agent", "current", Some("boot-a"), completed)
         .await;
     generation_handle(
@@ -884,23 +884,23 @@ async fn generation_current_messages_keep_existing_effects() {
     .unwrap();
     assert_eq!(
         state
-            .job_cache
+            .process_cache
             .snapshot("agent", "generation_running")
             .await
             .unwrap()
-            .job
+            .process
             .state,
-        JobState::Running
+        ProcessState::Running
     );
     assert_eq!(
         state
-            .job_cache
+            .process_cache
             .snapshot("agent", "generation_completed")
             .await
             .unwrap()
-            .job
+            .process
             .state,
-        JobState::Completed
+        ProcessState::Completed
     );
     generation_handle(
         &state,
@@ -917,23 +917,23 @@ async fn generation_current_messages_keep_existing_effects() {
     .unwrap();
     assert_eq!(
         state
-            .job_cache
+            .process_cache
             .snapshot("agent", "generation_running")
             .await
             .unwrap()
-            .job
+            .process
             .state,
-        JobState::UnknownAfterRestart
+        ProcessState::UnknownAfterRestart
     );
     assert_eq!(
         state
-            .job_cache
+            .process_cache
             .snapshot("agent", "generation_completed")
             .await
             .unwrap()
-            .job
+            .process
             .state,
-        JobState::Completed
+        ProcessState::Completed
     );
 
     let sent_at = chrono::DateTime::parse_from_rfc3339("2026-09-16T00:00:00Z")
@@ -966,15 +966,15 @@ async fn generation_current_messages_keep_existing_effects() {
         &state,
         "agent",
         "current",
-        AgentMessage::JobUpdate {
-            job: test_running_job("generation_current_job"),
+        AgentMessage::ProcessUpdate {
+            process: test_running_process("generation_current_process"),
         },
     )
     .await
     .unwrap();
     assert!(state
-        .job_cache
-        .snapshot("agent", "generation_current_job")
+        .process_cache
+        .snapshot("agent", "generation_current_process")
         .await
         .is_some());
 
@@ -1074,17 +1074,17 @@ async fn generation_stale_reliable_messages_do_not_touch_current() {
     }
 }
 #[tokio::test]
-async fn generation_job_update_and_replace_are_linearized() {
+async fn generation_process_update_and_replace_are_linearized() {
     let state = test_state();
     register_agent(&state, "agent", "secret");
     let _old_rx = insert_connection(&state, "agent", "old", chrono::Utc::now()).await;
-    let jobs = state.job_cache.lock_for_test().await;
+    let processes = state.process_cache.lock_for_test().await;
     let mut update = Box::pin(handle_agent_message(
         &state,
         "agent",
         "old",
-        AgentMessage::JobUpdate {
-            job: test_running_job("generation_linearized_job"),
+        AgentMessage::ProcessUpdate {
+            process: test_running_process("generation_linearized_process"),
         },
     ));
     assert!(matches!(
@@ -1106,11 +1106,11 @@ async fn generation_job_update_and_replace_are_linearized() {
         std::task::Poll::Pending => None,
     };
     let replacement_finished = replacement_result.is_some();
-    drop(jobs);
+    drop(processes);
 
     let update_result = timeout(Duration::from_secs(5), update.as_mut())
         .await
-        .expect("job update timed out");
+        .expect("process update timed out");
     if replacement_result.is_none() {
         replacement_result = Some(
             timeout(Duration::from_secs(5), replacement.as_mut())
@@ -1122,15 +1122,15 @@ async fn generation_job_update_and_replace_are_linearized() {
     if replacement_finished {
         assert_eq!(update_result, Err("stale_connection".to_string()));
         assert!(state
-            .job_cache
-            .snapshot("agent", "generation_linearized_job")
+            .process_cache
+            .snapshot("agent", "generation_linearized_process")
             .await
             .is_none());
     } else {
         assert_eq!(update_result, Ok(()));
         assert!(state
-            .job_cache
-            .snapshot("agent", "generation_linearized_job")
+            .process_cache
+            .snapshot("agent", "generation_linearized_process")
             .await
             .is_some());
     }

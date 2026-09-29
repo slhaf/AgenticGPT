@@ -8,7 +8,6 @@
       "file",
       "mcp",
       "process",
-      "job",
       "skills",
       "tmux",
       "browser"
@@ -50,6 +49,10 @@
     "channels": [
       "freedesktop"
     ]
+  },
+  "limits": {
+    "maxConcurrentTasks": 2,
+    "maxActiveProcesses": "auto"
   },
   "mcpServers": {
     "example-http": {

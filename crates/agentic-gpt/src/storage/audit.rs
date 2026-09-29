@@ -12,7 +12,7 @@ use crate::config::Config;
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AuditRecord {
     pub(crate) task_id: Option<String>,
-    pub(crate) job_id: Option<String>,
+    pub(crate) target_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) batch_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -112,7 +112,7 @@ pub(crate) struct McpBatchAuditRecord {
     pub(crate) fail_fast: bool,
     pub(crate) confirmation_required_count: usize,
     pub(crate) confirmation_result: Option<String>,
-    pub(crate) child_job_ids: Vec<String>,
+    pub(crate) child_process_ids: Vec<String>,
     pub(crate) outcome: String,
     pub(crate) error_code: Option<String>,
     pub(crate) duration_ms: u128,

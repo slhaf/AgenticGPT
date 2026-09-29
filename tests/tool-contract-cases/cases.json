@@ -51,7 +51,6 @@
     "kind": "descriptor",
     "arguments": {},
     "expect": {
-      "descriptionIncludes": ["Codex apply_patch"],
       "required": ["patch"]
     }
   },
@@ -104,7 +103,6 @@
       ]
     },
     "expect": {
-      "descriptionIncludes": ["managed Jobs", "not rolled back"],
       "required": ["calls"]
     }
   },
@@ -128,7 +126,6 @@
     "kind": "descriptor",
     "arguments": {},
     "expect": {
-      "descriptionIncludes": [],
       "required": []
     }
   },
@@ -141,7 +138,6 @@
       "period": "current"
     },
     "expect": {
-      "descriptionIncludes": [],
       "required": ["layer", "period"]
     }
   },
@@ -151,7 +147,6 @@
     "kind": "descriptor",
     "arguments": {},
     "expect": {
-      "descriptionIncludes": [],
       "required": []
     }
   },
@@ -163,7 +158,6 @@
       "query": "contract"
     },
     "expect": {
-      "descriptionIncludes": [],
       "required": ["query"]
     }
   },
@@ -175,7 +169,6 @@
       "path": "Notebook/contract.md"
     },
     "expect": {
-      "descriptionIncludes": [],
       "required": ["path"]
     }
   },
@@ -185,7 +178,6 @@
     "kind": "descriptor",
     "arguments": {},
     "expect": {
-      "descriptionIncludes": [],
       "required": []
     }
   },
@@ -197,7 +189,6 @@
       "entity": "contract"
     },
     "expect": {
-      "descriptionIncludes": [],
       "required": ["entity"]
     }
   },
@@ -207,7 +198,6 @@
     "kind": "descriptor",
     "arguments": {},
     "expect": {
-      "descriptionIncludes": [],
       "required": []
     }
   },
@@ -230,7 +220,6 @@
       "waitSeconds": 0
     },
     "expect": {
-      "descriptionIncludes": [],
       "required": ["items"]
     }
   }

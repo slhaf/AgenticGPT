@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use agentic_gpt_protocol::JobGetRequest;
 use rmcp::model::{Meta, Tool, ToolAnnotations};
 use serde_json::{json, Map, Value};
 
@@ -64,8 +63,7 @@ fn tool_schema(name: &str) -> (Map<String, Value>, &'static [&'static str]) {
         "browser.repl" => &["name", "code"],
         "browser.reset" | "browser.release" => &["name"],
         "browser.list" => &[],
-        "process.batch" => &["elements"],
-        "job.get" | "job.cancel" => &["jobId"],
+        "process.status" | "process.cancel" | "process.output" | "process.result" => &["processId"],
         "file.read" | "file.search" => &[],
         "file.edit" => &["patch"],
         "mcp.callTool" => &["serverId", "toolName"],
@@ -336,7 +334,7 @@ pub(super) fn properties_for(name: &str) -> Map<String, Value> {
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 32,
-                    "description": "Optional human-readable workstream key; trimmed, control-free, and at most 32 Unicode characters."
+                    "description": "Optional workstream key; max 32 characters."
                 }),
             );
             add(
@@ -371,7 +369,7 @@ pub(super) fn properties_for(name: &str) -> Map<String, Value> {
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 32,
-                    "description": "Optional human-readable workstream key inherited by every child Job."
+                    "description": "Workstream key inherited by children."
                 }),
             );
             add(
@@ -383,28 +381,20 @@ pub(super) fn properties_for(name: &str) -> Map<String, Value> {
                 json!({"type":"integer","minimum":0,"maximum":30,"default":5,"description":"Bounded inline wait in seconds."}),
             );
         }
-        "job.get" => {
-            add("jobId", string("Managed Job id."));
+        "process.status" => {
+            add("processId", string("Managed process id."));
             add(
                 "waitSeconds",
                 wait_seconds_schema(
-                    JobGetRequest::DEFAULT_WAIT_SECONDS,
+                    5,
                     "Bounded wait in seconds; defaults to 5 and is capped at 30.",
                 ),
             );
-            add(
-                "waitOnly",
-                json!({
-                    "type": "boolean",
-                    "default": false,
-                    "description": "While waiting, return only jobId/state/elapsedMs if the Job remains active; terminal completion returns normal detail."
-                }),
-            );
         }
-        "job.cancel" => {
-            add("jobId", string("Managed Job id."));
+        "process.cancel" => {
+            add("processId", string("Managed process id."));
         }
-        "job.list" => {
+        "process.list" => {
             add(
                 "group",
                 json!({
@@ -416,7 +406,7 @@ pub(super) fn properties_for(name: &str) -> Map<String, Value> {
             );
             add(
                 "kind",
-                json!({"type":"string","enum":["process","skill","mcp"]}),
+                json!({"type":"string","enum":["command","skill","mcp"]}),
             );
             add(
                 "state",
@@ -424,11 +414,29 @@ pub(super) fn properties_for(name: &str) -> Map<String, Value> {
             );
             add(
                 "limit",
-                json!({"type":"integer","minimum":1,"maximum":100,"default":50,"description":"Maximum Jobs to return."}),
+                json!({"type":"integer","minimum":1,"maximum":100,"default":50,"description":"Maximum processes to return."}),
             );
             add(
                 "cursor",
-                string("Opaque cursor returned by a prior job.list response."),
+                string("Opaque cursor returned by a prior process.list response."),
+            );
+        }
+        "process.output" => {
+            add("processId", string("Managed process id."));
+            add(
+                "cursor",
+                string("Opaque byte-offset cursor returned by a prior process.output response."),
+            );
+            add(
+                "maxBytes",
+                json!({"type":"integer","minimum":1,"maximum":32768,"default":8192,"description":"Maximum aggregate encoded stdout and stderr bytes for this page."}),
+            );
+        }
+        "process.result" => {
+            add("processId", string("Managed process id."));
+            add(
+                "maxBytes",
+                json!({"type":"integer","minimum":1,"maximum":524288,"default":8192,"description":"Maximum retained result bytes to return; oversized results are reported without partial JSON."}),
             );
         }
         "tmux.sessions" => {
@@ -521,7 +529,7 @@ pub(super) fn properties_for(name: &str) -> Map<String, Value> {
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 32,
-                    "description": "Optional human-readable workstream key inherited by every child Job."
+                    "description": "Workstream key inherited by children."
                 }),
             );
             add(
@@ -530,7 +538,7 @@ pub(super) fn properties_for(name: &str) -> Map<String, Value> {
             );
             add(
                 "waitSeconds",
-                json!({"type":"integer","minimum":0,"maximum":30,"default":5,"description":"Bounded inline wait before returning child Job envelopes; maximum 30 seconds."}),
+                json!({"type":"integer","minimum":0,"maximum":30,"default":5,"description":"Bounded inline wait before returning child process responses; maximum 30 seconds."}),
             );
             add(
                 "timeoutSeconds",
@@ -544,7 +552,7 @@ pub(super) fn properties_for(name: &str) -> Map<String, Value> {
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 32,
-                    "description": "Optional human-readable workstream key for this downstream Job."
+                    "description": "Optional workstream key."
                 }),
             );
             add(
@@ -570,7 +578,7 @@ pub(super) fn properties_for(name: &str) -> Map<String, Value> {
                     "minimum": 0,
                     "maximum": 30,
                     "default": 5,
-                    "description": "Bounded inline wait before returning the Job envelope."
+                    "description": "Bounded inline wait before returning the process response."
                 }),
             );
             add(
@@ -684,7 +692,7 @@ pub(super) fn properties_for(name: &str) -> Map<String, Value> {
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 32,
-                    "description": "Optional human-readable workstream key for this skill Job."
+                    "description": "Optional skill workstream key."
                 }),
             );
             add("args", strings("Script argument vector."));
@@ -840,11 +848,13 @@ fn tool_description(name: &str) -> String {
         "file.read" => "Read bounded UTF-8 workspace files without mutation. Supports single reads and ordered batch reads; use line ranges for large files and use metadata only when file information is needed.".to_string(),
         "file.search" => "Search bounded workspace text without mutation. Supports scoped literal or regex searches and ordered batch searches; use filters to limit noisy workspace scans.".to_string(),
         "file.edit" => "Apply a Codex apply_patch patch to workspace files; mutations remain policy and confirmation controlled.".to_string(),
-        "process.exec" => "Start one managed local process; use job tools for lifecycle follow-up.".to_string(),
+        "process.exec" => "Start one managed local process; use process.status/output/result for lifecycle follow-up.".to_string(),
         "process.batch" => "Start multiple managed local processes under one admission boundary; started side effects are not rolled back.".to_string(),
-        "job.get" => "Inspect or briefly wait for one managed Job; waitOnly performs status-only waiting.".to_string(),
-        "job.list" => "List active or retained managed Jobs; read-only discovery.".to_string(),
-        "job.cancel" => "Request cancellation of one managed Job; returned state is observed evidence, not a termination guarantee.".to_string(),
+        "process.status" => "Inspect process state and metadata without output or result bodies; optionally wait up to 30 seconds.".to_string(),
+        "process.list" => "List process metadata with optional filters and pagination; read-only discovery.".to_string(),
+        "process.output" => "Read bounded, non-consuming process output pages using lossless byte offsets.".to_string(),
+        "process.result" => "Retrieve a retained MCP result explicitly; unavailable or oversized results are reported without partial JSON.".to_string(),
+        "process.cancel" => "Request cancellation of one managed process; returned state is observed evidence, not a termination guarantee.".to_string(),
         "tmux.listSessions" => "List persistent tmux sessions; read-only.".to_string(),
         "tmux.sessions" => "Manage persistent tmux sessions. Use list for discovery, create for reusable sessions, and close only when the session should be terminated.".to_string(),
         "tmux.listPanes" => "List tmux panes; read-only.".to_string(),
@@ -857,8 +867,8 @@ fn tool_description(name: &str) -> String {
         "mcp.listServers" => "List configured downstream MCP servers; read-only discovery.".to_string(),
         "mcp.listTools" => "List tools exposed by one downstream MCP server; read-only discovery.".to_string(),
         "mcp.list" => "List downstream MCP servers or one server's tools; read-only discovery.".to_string(),
-        "mcp.batch" => "Run multiple downstream MCP calls as managed Jobs under one admission boundary; downstream side effects are not rolled back.".to_string(),
-        "mcp.callTool" => "Run one downstream MCP tool as a managed Job; use job tools for lifecycle follow-up.".to_string(),
+        "mcp.batch" => "Run multiple downstream MCP calls as managed processes under one admission boundary; downstream side effects are not rolled back.".to_string(),
+        "mcp.callTool" => "Run one downstream MCP tool as a managed process; use process tools for lifecycle follow-up.".to_string(),
         "bootstrap" => "Load Room bootstrap guidance; read-only and not a generic file reader.".to_string(),
         "bootstrap.read" => "Read one validated Room bootstrap guide; not an arbitrary path reader.".to_string(),
         "skills.list" => "List local skills with optional filtering; read-only discovery.".to_string(),
@@ -871,7 +881,7 @@ fn tool_description(name: &str) -> String {
         "skills.install" => "Start an asynchronous local skill installation from a validated source. Follow the returned installation job with get or cancel; installation may mutate the local skills workspace.".to_string(),
         "skills.install.get" => "Inspect or briefly wait for one skill installation; read-only lifecycle inspection.".to_string(),
         "skills.install.cancel" => "Request cooperative cancellation of one skill installation before commit.".to_string(),
-        "skills.run" => "Run an executable from an active local skill as a managed Job.".to_string(),
+        "skills.run" => "Run an executable from an active local skill as a managed process.".to_string(),
         "room.maintenance.status" => "Inspect Room maintenance readiness, repository state, schema/scaffold support, executor configuration, workflow/remote availability, synchronization heads, and deterministic occupancy for all five semantic slots; read-only and non-destructive.".to_string(),
         "room.maintenance.submit" => "Apply one to five unique Room maintenance slot requests after exact validation; destructive but confined to the validated Room repository, with optional local/workflow mode and bounded workflow wait; not open-world.".to_string(),
         "room.diary.active" => "Read the active daily, weekly, and monthly Room diary documents; read-only, semantic, and bounded.".to_string(),

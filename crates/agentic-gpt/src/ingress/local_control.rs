@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use agentic_gpt_protocol::JobListResponse;
+use agentic_gpt_protocol::ProcessListResponse;
 use anyhow::{anyhow, Result};
 use rmcp::{model::CallToolRequestParams, ServiceExt};
 use serde_json::{json, Map, Value};
@@ -141,26 +141,26 @@ pub(crate) async fn call_tool(
     Ok(value)
 }
 
-pub(crate) struct LocalJobClient {
+pub(crate) struct LocalProcessClient {
     client: rmcp::service::RunningService<rmcp::RoleClient, ()>,
 }
 
-impl LocalJobClient {
+impl LocalProcessClient {
     pub(crate) async fn connect(config_path: &Path) -> Result<Self> {
         Ok(Self {
             client: connect(config_path).await?,
         })
     }
 
-    pub(crate) async fn list_jobs(&self, limit: usize) -> Result<JobListResponse> {
+    pub(crate) async fn list_processes(&self, limit: usize) -> Result<ProcessListResponse> {
         let mut arguments = Map::new();
         arguments.insert("limit".to_string(), json!(limit.min(100)));
         let result = self
             .client
-            .call_tool(CallToolRequestParams::new("job.list").with_arguments(arguments))
+            .call_tool(CallToolRequestParams::new("process.list").with_arguments(arguments))
             .await?;
         let value = serde_json::to_value(result)?;
-        parse_job_list(value)
+        parse_process_list(value)
     }
 
     pub(crate) async fn close(self) {
@@ -168,12 +168,12 @@ impl LocalJobClient {
     }
 }
 
-fn parse_job_list(value: Value) -> Result<JobListResponse> {
+fn parse_process_list(value: Value) -> Result<ProcessListResponse> {
     let structured = value
         .get("structuredContent")
         .cloned()
-        .ok_or_else(|| anyhow!("local_job_list_missing_structured_content"))?;
-    serde_json::from_value(structured).map_err(|_| anyhow!("local_job_list_invalid_response"))
+        .ok_or_else(|| anyhow!("local_process_list_missing_structured_content"))?;
+    serde_json::from_value(structured).map_err(|_| anyhow!("local_process_list_invalid_response"))
 }
 
 async fn connect(

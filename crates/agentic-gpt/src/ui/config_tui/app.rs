@@ -694,7 +694,7 @@ impl ConfigTuiApp {
                 pages::optional_choice_for_focus(section, draft, self.state.focus)
             });
             if let Some((field, choice)) = choice {
-                if field == SetupField::MaxActiveJobs && choice == "custom" {
+                if field == SetupField::MaxActiveProcesses && choice == "custom" {
                     let custom = self.state.max_active_custom.clone();
                     if let Some(draft) = self.section_draft.as_mut() {
                         pages::set_optional_field(draft, field, custom.clone());
@@ -800,7 +800,7 @@ impl ConfigTuiApp {
             return;
         }
         if matches!(self.state.page, ConfigPage::Optional(_)) {
-            if field == SetupField::MaxActiveJobs && value.parse::<usize>().is_ok() {
+            if field == SetupField::MaxActiveProcesses && value.parse::<usize>().is_ok() {
                 self.state.max_active_custom = value.clone();
             }
             if let Some(draft) = self.section_draft.as_mut() {
@@ -1205,15 +1205,18 @@ impl ConfigTuiApp {
                     let configured = self
                         .section_draft
                         .as_ref()
-                        .map(|draft| pages::optional_field_value(draft, SetupField::MaxActiveJobs))
+                        .map(|draft| {
+                            pages::optional_field_value(draft, SetupField::MaxActiveProcesses)
+                        })
                         .unwrap_or_else(|| "auto".to_string());
                     let value = if configured == "auto" {
                         self.state.max_active_custom.clone()
                     } else {
                         configured
                     };
-                    self.field_errors.remove(&SetupField::MaxActiveJobs);
-                    self.state.editing = Some(EditState::new(SetupField::MaxActiveJobs, value));
+                    self.field_errors.remove(&SetupField::MaxActiveProcesses);
+                    self.state.editing =
+                        Some(EditState::new(SetupField::MaxActiveProcesses, value));
                 }
                 _ => {}
             },
@@ -1345,7 +1348,7 @@ impl ConfigTuiApp {
         let Some(mut draft) = self.section_draft.as_ref().cloned() else {
             return;
         };
-        pages::set_optional_field(&mut draft, SetupField::MaxActiveJobs, value.clone());
+        pages::set_optional_field(&mut draft, SetupField::MaxActiveProcesses, value.clone());
         match self
             .session_mut()
             .save_optional_section_for_review(draft.clone())
@@ -1375,7 +1378,7 @@ impl ConfigTuiApp {
             self.state.editing = Some(edit);
             return;
         };
-        pages::set_optional_field(&mut draft, SetupField::MaxActiveJobs, value.clone());
+        pages::set_optional_field(&mut draft, SetupField::MaxActiveProcesses, value.clone());
         match self
             .session_mut()
             .save_optional_section_for_review(draft.clone())
@@ -1384,7 +1387,7 @@ impl ConfigTuiApp {
                 self.state.max_active_custom = value;
                 self.section_draft = Some(draft);
                 self.state.editing = None;
-                self.field_errors.remove(&SetupField::MaxActiveJobs);
+                self.field_errors.remove(&SetupField::MaxActiveProcesses);
                 let anchor = self.review_focus_anchor;
                 let old_focus = self.state.focus;
                 self.refresh_review();
@@ -1399,7 +1402,7 @@ impl ConfigTuiApp {
                 self.record_errors(errors);
                 if let Some(code) = inline_code {
                     self.field_errors
-                        .insert(SetupField::MaxActiveJobs, code.to_string());
+                        .insert(SetupField::MaxActiveProcesses, code.to_string());
                 }
                 self.state.editing = Some(edit);
             }
@@ -1566,7 +1569,7 @@ impl ConfigTuiApp {
             return;
         }
         if self.review_current_editor() == Some(ReviewEditorKind::AutoCustom)
-            && edit.field == SetupField::MaxActiveJobs
+            && edit.field == SetupField::MaxActiveProcesses
         {
             self.commit_review_auto_custom(edit);
             return;
@@ -2219,7 +2222,7 @@ impl ConfigTuiApp {
 
     fn sync_optional_ui_state(&mut self, draft: &OptionalSectionDraft) {
         if let OptionalSectionDraft::Limits(limits) = draft {
-            let custom = limits.max_active_jobs.trim();
+            let custom = limits.max_active_processes.trim();
             if custom != "auto" && custom.parse::<usize>().is_ok() {
                 self.state.max_active_custom = custom.to_string();
             }
@@ -2606,7 +2609,7 @@ fn numeric_field(field: SetupField) -> bool {
     matches!(
         field,
         SetupField::MaxConcurrentTasks
-            | SetupField::MaxActiveJobs
+            | SetupField::MaxActiveProcesses
             | SetupField::MaxFileSearchContextLines
             | SetupField::DiaryBoundaryHour
     )
@@ -2623,7 +2626,7 @@ fn optional_section_for_field(field: SetupField) -> crate::config_templates::Opt
             crate::config_templates::OptionalSection::Confirmation
         }
         SetupField::MaxConcurrentTasks
-        | SetupField::MaxActiveJobs
+        | SetupField::MaxActiveProcesses
         | SetupField::MaxFileSearchContextLines => crate::config_templates::OptionalSection::Limits,
         SetupField::SandboxEnabled
         | SetupField::BubblewrapPath

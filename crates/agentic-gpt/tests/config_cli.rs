@@ -310,7 +310,7 @@ fn config_keys_json_lists_registry() {
     let entries = value["keys"].as_array().unwrap();
     assert!(entries
         .iter()
-        .any(|entry| { entry["key"] == "limits.maxActiveJobs" }));
+        .any(|entry| { entry["key"] == "limits.maxActiveProcesses" }));
     let mode = entries.iter().find(|entry| entry["key"] == "mode").unwrap();
     assert_eq!(
         mode["choices"],

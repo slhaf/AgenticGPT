@@ -35,8 +35,8 @@ struct CommandEntry {
 const COMMANDS: &[CommandEntry] = &[
     CommandEntry {
         name: "process",
-        description_en: "Managed Jobs",
-        description_zh: "Managed Jobs",
+        description_en: "Managed processes",
+        description_zh: "受管进程",
         command: WorkspaceCommand::Route(WorkspaceRoute::Process),
     },
     CommandEntry {

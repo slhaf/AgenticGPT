@@ -1816,24 +1816,24 @@ mod tests {
             crate::config::ConfirmationProviderConfig::from_legacy("none").unwrap();
         let private_state =
             crate::private_state::PrivateStatePaths::for_test(root.join("private-state"));
-        let job_history = crate::job_history::JobHistoryStore::open(&private_state);
+        let process_history = crate::process_history::ProcessHistoryStore::open(&private_state);
         AppState {
             config_path: PathBuf::from("test-config.json"),
             config: Arc::new(RwLock::new(config)),
             private_state: private_state.clone(),
-            job_history,
+            process_history,
             browser_runtime: None,
             runtime: crate::state::RuntimeModel::hub(crate::state::CapabilityProfile::Room),
             started_at: chrono::Utc::now(),
             boot_generation: uuid::Uuid::new_v4().simple().to_string()[..12].to_string(),
             supervised: false,
             file_locks: Arc::new(Mutex::new(HashMap::new())),
-            jobs: Arc::new(Mutex::new(HashMap::new())),
+            processes: Arc::new(Mutex::new(HashMap::new())),
             hub_sender: Arc::new(Mutex::new(None)),
             reporting_sender: Arc::new(Mutex::new(None)),
             pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
             temporary_mcp_allows: Arc::new(Mutex::new(Vec::new())),
-            mcp_concurrency: Arc::new(crate::jobs::McpConcurrency::new()),
+            mcp_concurrency: Arc::new(crate::process::McpConcurrency::new()),
             room_repository_writes: Arc::new(Mutex::new(())),
             skills_writes: Arc::new(Mutex::new(())),
             skill_leases: Arc::new(crate::skills::SkillLeaseManager::new()),

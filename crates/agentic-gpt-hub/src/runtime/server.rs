@@ -35,7 +35,7 @@ pub(crate) async fn serve(
         agents: Arc::new(agents::lifecycle::Connections::new()),
         dispatch: Arc::new(agents::dispatch::Dispatch::new()),
         confirmations: Arc::new(confirmation::Confirmations::new()),
-        job_cache: Arc::new(state::JobCache::new()),
+        process_cache: Arc::new(state::ProcessCache::new()),
         boot_generations: Arc::new(Mutex::new(HashMap::new())),
         active_room: Arc::new(Mutex::new(None)),
         http: reqwest::Client::new(),
@@ -46,7 +46,7 @@ pub(crate) async fn serve(
     };
     tokio::spawn(confirmation::cleanup(state.clone()));
     tokio::spawn(cleanup_runs(state.clone()));
-    tokio::spawn(cleanup_job_cache(state.clone()));
+    tokio::spawn(cleanup_process_cache(state.clone()));
     tokio::spawn(agents::lifecycle::cleanup_agent_connections(state.clone()));
     tokio::spawn(oauth::cleanup_oauth(state.clone()));
     let app = Router::new()
@@ -71,9 +71,20 @@ pub(crate) async fn serve(
         )
         .route("/v1/process/exec", post(routes::process_exec))
         .route("/v1/process/batch", post(routes::process_batch))
-        .route("/v1/jobs", get(routes::list_jobs))
-        .route("/v1/jobs/:job_id", get(routes::get_job))
-        .route("/v1/jobs/:job_id/cancel", post(routes::cancel_job))
+        .route("/v1/process", get(routes::list_processes))
+        .route(
+            "/v1/process/:process_id/output",
+            get(routes::get_process_output),
+        )
+        .route(
+            "/v1/process/:process_id/result",
+            get(routes::get_process_result),
+        )
+        .route(
+            "/v1/process/:process_id/cancel",
+            post(routes::cancel_process),
+        )
+        .route("/v1/process/:process_id", get(routes::get_process_status))
         .route("/v1/tmux/sessions", get(routes::tmux_list_sessions))
         .route("/v1/tmux/panes", get(routes::tmux_list_panes))
         .route("/v1/tmux/capture", post(routes::tmux_capture_pane))
@@ -187,10 +198,10 @@ pub(crate) async fn serve(
     Ok(())
 }
 
-async fn cleanup_job_cache(state: HubState) {
+async fn cleanup_process_cache(state: HubState) {
     loop {
         sleep(Duration::from_secs(15)).await;
-        state.job_cache.sweep(Utc::now()).await;
+        state.process_cache.sweep(Utc::now()).await;
     }
 }
 

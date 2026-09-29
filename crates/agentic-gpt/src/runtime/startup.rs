@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     browser_discovery::resolve_browser_runtime,
     config::{self, Config, RuntimeMode},
-    http_server, hub, instance_lock, job_history, jobs, local_control, private_state,
+    http_server, hub, instance_lock, local_control, private_state, process, process_history,
     room_repository, skill_installs, skills,
     state::{AppState, BrowserRuntimeContext, CapabilityProfile, RuntimeModel},
     stdio_server, supervisor, tmux,
@@ -59,7 +59,7 @@ async fn run_hub(config_path: PathBuf) -> Result<()> {
         } else {
             "disabled"
         },
-        initial.limits.max_active_jobs.resolve().diagnostic()
+        initial.limits.max_active_processes.resolve().diagnostic()
     ));
     let browser_runtime = resolve_browser_runtime(&initial).await;
     let state = build_app_state(
@@ -89,7 +89,7 @@ pub(crate) async fn run_stdio_worker(
     config.ensure_workspace()?;
     log_info(format!(
         "standalone worker config loaded; {}; policyAllow={}; policyConfirm={}; policyDeny={}; pathWriteRoots={}; pathReadOnlyRoots={}; pathDenyRoots={}",
-        config.limits.max_active_jobs.resolve().diagnostic(),
+        config.limits.max_active_processes.resolve().diagnostic(),
         config.policy.allow.len(),
         config.policy.confirm.len(),
         config.policy.deny.len(),
@@ -177,25 +177,28 @@ pub(crate) fn build_app_state(
         log_warn(warning.clone());
     }
     let private_state = prepared.paths;
-    let job_history = job_history::JobHistoryStore::open(&private_state);
+    let process_history = process_history::ProcessHistoryStore::open(&private_state);
+    if let Err(error) = process_history.recover_active(chrono::Utc::now()) {
+        log_warn(format!("process history recovery failed: {error}"));
+    }
     let skill_installs_root = private_state.skill_installs.clone();
     Ok(AppState {
         config_path,
         config: Arc::new(RwLock::new(config)),
         private_state,
-        job_history,
+        process_history,
         browser_runtime,
         runtime,
         started_at: chrono::Utc::now(),
         boot_generation: uuid::Uuid::new_v4().simple().to_string()[..12].to_string(),
         supervised,
         file_locks: Arc::new(Mutex::new(HashMap::new())),
-        jobs: Arc::new(Mutex::new(HashMap::new())),
+        processes: Arc::new(Mutex::new(HashMap::new())),
         hub_sender: Arc::new(Mutex::new(None)),
         reporting_sender: Arc::new(Mutex::new(None)),
         pending_confirmations: Arc::new(Mutex::new(HashMap::new())),
         temporary_mcp_allows: Arc::new(Mutex::new(Vec::new())),
-        mcp_concurrency: Arc::new(jobs::McpConcurrency::new()),
+        mcp_concurrency: Arc::new(process::McpConcurrency::new()),
         room_repository_writes: Arc::new(Mutex::new(())),
         skills_writes: Arc::new(Mutex::new(())),
         skill_leases: Arc::new(skills::SkillLeaseManager::new()),
@@ -325,7 +328,7 @@ async fn watch_live_config(
 
 pub(crate) async fn reload_live_config_once(
     state: &AppState,
-) -> Result<config::ResolvedMaxActiveJobs> {
+) -> Result<config::ResolvedMaxActiveProcesses> {
     let candidate = Config::load(&state.config_path)?;
     let mut live = state.config.write().await;
     if !config_matches_runtime(&candidate, state.runtime) {
@@ -355,8 +358,8 @@ pub(crate) async fn reload_live_config_once(
 pub(crate) fn apply_live_config_subset(
     live: &mut Config,
     candidate: Config,
-) -> config::ResolvedMaxActiveJobs {
-    let resolved = candidate.limits.max_active_jobs.resolve();
+) -> config::ResolvedMaxActiveProcesses {
+    let resolved = candidate.limits.max_active_processes.resolve();
     let workspace_matches = live.workspace_root == candidate.workspace_root;
     live.policy = candidate.policy;
     if workspace_matches {

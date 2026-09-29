@@ -404,10 +404,10 @@ fn toolset_description(namespace: ToolNamespace, language: UiLanguage) -> &'stat
         (ToolNamespace::File, UiLanguage::ZhCn) => "工作区文件读取、搜索与编辑。",
         (ToolNamespace::Mcp, UiLanguage::En) => "Downstream MCP server discovery and tool calls.",
         (ToolNamespace::Mcp, UiLanguage::ZhCn) => "下游 MCP 服务发现与工具调用。",
-        (ToolNamespace::Process, UiLanguage::En) => "Managed local process execution.",
-        (ToolNamespace::Process, UiLanguage::ZhCn) => "受管本地进程执行。",
-        (ToolNamespace::Job, UiLanguage::En) => "Managed job inspection and cancellation.",
-        (ToolNamespace::Job, UiLanguage::ZhCn) => "受管任务查看与取消。",
+        (ToolNamespace::Process, UiLanguage::En) => {
+            "Managed local process execution and lifecycle control."
+        }
+        (ToolNamespace::Process, UiLanguage::ZhCn) => "受管本地进程执行与生命周期控制。",
         (ToolNamespace::Skills, UiLanguage::En) => {
             "Skill discovery, installation, activation, and execution."
         }
@@ -595,7 +595,7 @@ mod tests {
         )
         .unwrap();
         apply_config_key(&mut config, "limits.maxConcurrentTasks", "4").unwrap();
-        apply_config_key(&mut config, "limits.maxActiveJobs", "auto").unwrap();
+        apply_config_key(&mut config, "limits.maxActiveProcesses", "auto").unwrap();
         apply_config_key(&mut config, "limits.maxFileSearchContextLines", "12").unwrap();
 
         assert_eq!(config.display_name, "Desk Agent");

@@ -1,6 +1,6 @@
 # 现状架构：受控执行核心与多入口控制面
 
-状态：源码调查快照与全仓架构再评估，2026-09-23；WP1/WP2/WP3/WP4-A/WP-R 的既定边界修复与本轮 Agent Process/Job 配置、Hub projection、Protocol 内部模块、Skill/path、Android local transition 和 release preflight 实现均已落在既有拓扑内，证据仍按边界区分。WP-T 标准未决；Console remote 是未来产品。Rust workspace check、确定性 Job reload regression 与 workspace test（668 passed、1 ignored）已通过；release preflight 与 bounded local parity gate 已在镜像环境通过，但 hosted GitHub publication/cross-build/ARM runtime 仍未执行；`:shared:jvmTest` 已在 17 tasks 下 BUILD SUCCESSFUL，仅覆盖 shared 纯 `AttentionTransitionPolicy` 测试与 common Kotlin compile，不覆盖 Android app/Room/OS；Android app host test/assemble 因 SDK/网络边界、device/emulator 因设备缺失仍待补证。严格 Clippy 的既有债务不纳入 release preflight；外部 publication/tunnel、Browser client/service、Actions importer 仍未验证。目标规则另见 [目标架构](target-architecture.md)，问题判断见 [诊断](diagnosis.md)。文中代码路径均相对仓库根；符号名优先于可能随编辑变化的行号。
+状态：源码调查快照与全仓架构再评估，更新于 2026-09-29；WP1/WP2/WP3/WP4-A/WP-R 的既定边界修复与本轮 Agent Process/Hub projection、Protocol 内部模块、Skill/path、Android local transition 和 release preflight 实现均已落在既有拓扑内，证据仍按边界区分。WP-T 标准未决；Console remote 是未来产品。Rust workspace test 为 680 passed；旧版 release preflight 的镜像验证不代表本次 cutover 已完整验证，hosted GitHub publication/cross-build/ARM runtime 仍未执行。`:shared:jvmTest` 已在 17 tasks 下 BUILD SUCCESSFUL，仅覆盖 shared 纯 `AttentionTransitionPolicy` 测试与 common Kotlin compile，不覆盖 Android app/Room/OS；Android app host test/assemble 因 SDK/网络边界、device/emulator 因设备缺失仍待补证。严格 Clippy 的既有债务不纳入 release preflight；外部 publication/tunnel、Browser client/service、Actions importer 仍未验证。目标规则另见 [目标架构](target-architecture.md)，问题判断见 [诊断](diagnosis.md)。文中代码路径均相对仓库根；符号名优先于可能随编辑变化的行号。
 
 ## 1. 调查范围和证据等级
 
@@ -24,7 +24,7 @@ WP2 closure 已补充真实 Agent/Hub binary evidence：Local Unix、hidden stdi
 | WP4-A | 当前本地 cross-surface contract/parity gate 与已修复投影已完成 | strict 外部 Actions importer、外部 Apps client 和完整 Protocol lifecycle 未由 WP4-A 证明；本轮 release 的 bounded local live parity 另见 Release 行，不代表 hosted publication |
 | WP-R | 九个当前 Room operation 的 Hub→Protocol→Agent clean cutover 已完成，当前 live gate 已通过 | 不构成生产 tunnel/GitHub/外部 Room repository 部署证明 |
 | WP4-B | Protocol 已在同一 crate 内按 wire domain 拆为私有模块，`lib.rs` 保留 root facade/re-exports；serde/wire 边界不变 | 仍需保持 dependent-crate/serde 证据与外部 caller 边界；不扩成新 crate |
-| Source seams | Process stdio adapter、Hub neutral Job/info projection、Skill lease/digest、共享 path-root normalization、Android transition owner 已实现 | 这些是窄源码边界，不等于所有入口、OS 行为或外部效果均已验证 |
+| Source seams | Process stdio adapter、Hub neutral Process/info projection、Skill lease/digest、共享 path-root normalization、Android transition owner 已实现 | 这些是窄源码边界，不等于所有入口、OS 行为或外部效果均已验证 |
 | Release | tag preflight 已接入同一 SHA、Agent/Hub Cargo 版本匹配与 fmt/check/test/build/parity 命令；v0.9.1 bounded local preflight/parity gate 已通过镜像环境 | hosted GitHub publication/cross-build/ARM runtime 未执行；tag mismatch guard 已拒绝 deliberate `v0.0.0`；严格 Clippy debt 不在 preflight |
 | Console | Android local attention transition owner、overdue claim 与 payload-aware snooze 已实现；ExactRequired 无 exact 权限时失败而不静默转 inexact，ExactPreferred 的 inexact fallback 持久标为可见 `Degraded`；`:shared:jvmTest` 17-task BUILD SUCCESSFUL 只证明 shared policy/common Kotlin compile；remote Console 是未来产品 | Android app host test/assemble、Room/Android runtime 与 device/emulator 仍未完成（SDK/Maven TLS/设备边界）；根 Rust CI/release 不覆盖 Console Android/桌面/Web |
 
@@ -73,8 +73,9 @@ agentic-gpt 执行核心
 | Local | agent 进程持 AppState/run lock | owner-only Unix MCP；local CLI 是客户端 |
 | Standalone | supervisor → 外部 tunnel-client → hidden stdio-worker；worker 持 AppState | stdio + Unix + 可选 HTTP；可选 Hub reporting-only，不接受 Hub 执行命令 |
 | Hub Agent | agent 进程持 AppState/run lock | Hub WS/SSE command-capable；本地执行，不是 Hub 进程执行 |
-| Process TUI | 独立观察器 | LocalJobClient 轮询本机 `job.list`；当前不创建/取消 Job |
-| Hub server | 单进程、单 SQLite owner | 公共 API、连接/路由、收据与投影；不是执行器 |
+| Process TUI | 独立观察器 | Local Unix Process API 读取进程状态与列表；按需读取输出/结果，不在 TUI 自行执行 |
+
+当前 Process surface 已替代旧 Job API：MCP `process.status/list/output/result/cancel`，Hub MCP `hub.process.status/list`，HTTP `GET /v1/process`、`GET /v1/process/{processId}`、其 `/output` 和 `/result` 子路径，以及 `POST .../cancel`。status/list 只返回 metadata；output/result 通过独立读取接口按上限取回。历史/升级边界见[Process cutover 说明](../process-cutover.md)。
 
 `RuntimeModel` 的 capability 与 `toolsets.enabled` 是不同机制：Hub+Normal 的 skills/bootstrap/Room 能力受既有 Hub profile/toolset/capability 规则限制；Local/Tunnel+Normal 的 namespace gate 默认不含 Room，但显式启用 `toolsets.room` 后 Normal 仍可使用 Room。Agent-local 固定 surface 测试给出 Normal 29、Room 40 工具，实时广告还受 toolsets 过滤。Hub Full/Coordinator 是另一组入口 profile，不要求与 Agent-local 工具集合完全相同；现在 operation gate 已统一真实 ingress/context 的准入，但 namespace/toolset、capability、annotations 仍是不同层次。
 
@@ -96,23 +97,22 @@ are not aliases for those four commands.
 | `ingress/{stdio_server,stdio_transport,stdio_schema}.rs` | MCP 调用分派、stdio framing/resume 和纯工具 descriptor/schema 分属同一入口的明确责任；Process Exec/Batch 通过 `local_service::dispatch_process`，其余资源仍可保留 direct branches，annotation 只作描述/发现 |
 | `operations/{local_service,operation,operation_result}.rs` | Process shared adapter、HubCommand/value-returning operation 映射、不可变 RequestContext、同步 authorize、共享 error/slim result projection；承接 Hub ingress，但不是 Hub runner，也不反向依赖 stdio transport |
 | `ingress/hub.rs`、`storage/transport_ledger.rs` | WS/SSE、Hello/heartbeat、可靠 envelope、ACK/重放、Job/report、确认响应 |
-| `ingress/local_control.rs` | Unix listener/client、UID/权限、stale socket inode guard、LocalJobClient |
-| `ingress/{http_server,http_oauth}.rs` | worker HTTP MCP、Bearer/PKCE、Host/Origin/resource 边界 |
-| `process/jobs.rs`、`storage/job_history.rs` | Process/Skill/MCP 准入、等待、取消、输出上限、终态、SQLite 历史与重启 unknown；Process/Skill admission 捕获 Arc<Config>，batch preflight 将同一 snapshot 传给 queued workers |
+| `ingress/local_control.rs` | Unix listener/client、UID/权限、stale socket inode guard、Process client |
+| `process/managed.rs`、`storage/job_history.rs` | Process runtime 的 admission、等待、取消、输出上限和终态；Skill/MCP 复用该执行生命周期，终态历史写入 `process.sqlite3`，重启时遗留 active 标记 unknown；Process/Skill admission 捕获 Arc<Config>，batch preflight 将同一 snapshot 传给 queued workers |
 | `process/exec.rs`、`operations/{policy,confirmation}.rs` | process preflight/CWD/path、program rule、可选 bwrap、人工确认及临时 MCP allow；`exec::normalize_roots` 是配置 path-root 的共享归一化入口 |
 | `files/file_ops.rs` | 文件路径策略、读/搜索、patch 计划、revision/lock/revalidation、暂存提交与审计；复用 `exec::normalize_roots` 并保留 Expansion/Resolution failure stage；调用纯 apply-patch 库 |
-| `mcp/{mcp,batch}.rs`、`config/mcp_servers.rs` | 下游 MCP 单次调用/client/Job 衔接与 batch 预检/调度/聚合分属不同生命周期；持久 MCP server 配置及校验归配置 owner，实际 Job 与取消状态仍归 `process/jobs.rs` |
-| `tmux/tmux.rs` | 外部 tmux server/session/pane 观察与控制；session 生命周期不等同 Agent child Job |
+| `mcp/{mcp,batch}.rs`、`config/mcp_servers.rs` | 下游 MCP 单次调用/client/Process lifecycle 衔接与 batch 预检/调度/聚合分属不同生命周期；持久 MCP server 配置及校验归配置 owner，Process runtime 与取消状态仍归 `process/managed.rs` |
+| `tmux/tmux.rs` | 外部 tmux server/session/pane 观察与控制；session 生命周期不等同 Agent child process |
 | `skills/{skills,skill_installs}.rs` | `skills.rs` 拥有 Skill package metadata、`package_sha256` 与 activation/shared lease；`skill_installs.rs` 拥有安装 journal/staging/commit/recovery；skill run 复用 Process Job |
 | `room/{bootstrap,room_repository,room_reads,room_maintenance}.rs` | 有界 bootstrap/Room 文件资源、Git/scaffold、语义槽位与维护提交；不是 reasoning loop |
 | `browser/{browser_distribution,browser_distribution_verify,browser_runtime,browser_kernel,browser_manager,browser_manual,browser_discovery}.rs` | 独立的仓库签名/包索引验证、获取/解包/缓存/激活、运行时来源发现、Node 子进程和命名 lease 各按自身 owner 保留 |
 | `config/{config,config_cli,config_keys,config_templates,mcp_servers}.rs`、`config/setup/`、`ui/config_tui/` | 配置模型/加载、独立的键合同/赋值注册表、CLI init/命令、MCP server 配置及向导 draft/validation/review/commit 分别归相应 owner；磁盘合同不变 |
 | `ui/{cli,cli_i18n}.rs`、`ui/tui/` | CLI 命令解析与交互调度、展示/输入/终端恢复、本地化 |
-| `storage/{private_state,audit}.rs` | 私有状态目录与迁移、workspace append-only 审计；耐久等级不同于 Job history/transport ledger |
+| `storage/{private_state,audit}.rs` | 私有状态目录与迁移、workspace append-only 审计；耐久等级不同于 Process history/transport ledger |
 
 ### 3.1.1 Agent operation routing（当前）
 
-当前 Agent operation routing 是**按已收口 family 部分共享，而非一个 universal dispatcher**：`stdio_server::dispatch_with_lifecycle` 的 Process Exec/Batch 进入 `local_service::dispatch_process`，由同一 config admission/gate 与 Job owner 完成；其他资源仍可保留 direct branches，Hub ingress 则进入 `local_service::dispatch`。共享 WP2 `RequestContext`/`authorize` gate 与同一批资源 owner，因此源码没有显示出两套独立 executor；剩余问题是非 Process family 的结构性 `[推断]`，不可写成当前行为故障。后续收敛仍按一个 operation family 一次迁移 caller、descriptor 和 projection，不把仅 Agent-local 的操作强行新增为 Protocol wire command。
+当前 Agent operation routing 是**按已收口 family 部分共享，而非一个 universal dispatcher**：`stdio_server::dispatch_with_lifecycle` 的 Process Exec/Batch 进入 `local_service::dispatch_process`，由同一 config admission/gate 与 Process runtime 完成；其他资源仍可保留 direct branches，Hub ingress 则进入 `local_service::dispatch`。共享 WP2 `RequestContext`/`authorize` gate 与同一批资源 owner，因此源码没有显示出两套独立 executor；剩余问题是非 Process family 的结构性 `[推断]`，不可写成当前行为故障。后续收敛仍按一个 operation family 一次迁移 caller、descriptor 和 projection，不把仅 Agent-local 的操作强行新增为 Protocol wire command。
 
 ### 3.2 Hub
 
@@ -120,7 +120,7 @@ are not aliases for those four commands.
 |---|---|
 | `main.rs`、`runtime/{cli,config,server,state}.rs` | main 保留模块声明与启动入口；CLI/config、HTTP serve/router/后台清理、HubState 分属明确的 runtime owner；server 还组装远程确认回调 |
 | `agents/{transport,lifecycle,dispatch,registry}.rs` | Agent secret 接入、WS/SSE、连接替换、Hello、消息处理、受 owner 约束的 dispatch/重放，以及 Agent 注册/alias/secret hash |
-| `ingress/http/routes.rs` | action-key HTTP process/Job/tmux/MCP/运行查询及响应适配 |
+| `ingress/http/routes.rs` | action-key HTTP Process/tmux/MCP/运行查询及响应适配 |
 | `ingress/mcp/{mcp_server,args,transport}.rs`、`support/agentic_result.rs` | Apps 工具 handler/tool router、类型化参数/schema、JSON-RPC framing/auth/Full/Coordinator、业务 JSON → MCP result 各留在 MCP 入口边界 |
 | `storage/runs.rs` | command/run 收据、hash/ACK/status/result/conflict、stale 与 retention |
 | `room/{http,control}.rs`、`room/room.rs` | HTTP handlers/status projection 与中立 active Room `(agent_id, connection_id)` 租约/路由分离；`room.rs` 只声明子模块并保留跨 owner 测试；Hub 不持有 Room 内容或 run receipt owner |
@@ -134,7 +134,7 @@ are not aliases for those four commands.
 本次只按独立 owner 拆分，不以文件大小、行数或测试数量为目标：
 
 - Agent `main.rs` 中 CLI 命令、启动/热重载、Browser 来源发现分别归 `ui/cli.rs`、`runtime/startup.rs`、`browser/browser_discovery.rs`；stdio resume transport 与纯工具 descriptor/schema 分别归 `ingress/stdio_transport.rs`、`ingress/stdio_schema.rs`。stdio 参数 DTO 仍被 dispatch、validation、conversion 直接消费，未制造第二套入口类型。
-- Agent `mcp/mcp.rs` 的 managed single-call/client lifecycle 与 `mcp/batch.rs` 的 batch 预检、整体确认、调度和聚合审计有不同变化原因；共享 client factory 不是共享可变 client，Job/取消权威仍在 `process/jobs.rs`。`config/mcp_servers.rs` 统一持久 MCP server 模型/校验/修改，迁移配置及状态调用方，不在 MCP 执行模块保留转发；配置核心 `config/config.rs` 的通用加载/验证/备份仍同一 owner。
+- Agent `mcp/mcp.rs` 的 managed single-call/client lifecycle 与 `mcp/batch.rs` 的 batch 预检、整体确认、调度和聚合审计有不同变化原因；共享 client factory 不是共享可变 client，Process cancellation/terminal authority 在 `process/managed.rs`。`config/mcp_servers.rs` 统一持久 MCP server 模型/校验/修改，迁移配置及状态调用方，不在 MCP 执行模块保留转发；配置核心 `config/config.rs` 的通用加载/验证/备份仍同一 owner。
 - Agent `config/config_cli.rs` 的 Clap/init 命令流与 `config/config_keys.rs` 的键名/元数据/解析/赋值注册表分离；Browser 的可信仓库元数据验签/Packages 包选择归 `browser/browser_distribution_verify.rs`，HTTP 获取、归档物化、cache 与 lock 仍归 `browser/browser_distribution.rs`。其余大模块只在 owner/lifecycle 连续时保持完整。
 - Hub `main.rs` 的 CLI/配置存取与 server/router 各归 `runtime/cli.rs`、`runtime/config.rs`、`runtime/server.rs`；Apps MCP 参数类型/schema 与 JSON-RPC/auth transport 各归 `ingress/mcp/args.rs`、`ingress/mcp/transport.rs`，原 `mcp_server.rs` 保留工具 handler。
 - Hub `storage/runs.rs` 的投递、ACK、状态、结果与 retention 共用 SQL/identity 不变量；`runtime/state.rs` 已在 `state::projection` 有中立投影边界。复审后 `room/room.rs` 的 HTTP 合同与 active-room 租约有不同调用方和变化原因，改为 `room/http.rs` 与 `room/control.rs`：共享 `HubState` 并不构成同一生命周期，`RoomRouteError` 保留中立控制语义，连接代际与 run/waiter owner 仍在 `agents`/`runs`。
@@ -169,14 +169,14 @@ are not aliases for those four commands.
 | `ingress/stdio_server.rs` | 2380→2380 | 同一 Agent MCP 入口和 dispatch/lifecycle；transport、schema 已各有模块，测试长度单独处理。 |
 | `mcp/mcp.rs` | 1569→<800 | 拆出持久配置 owner 与 batch 编排，余下单次调用/client/Job 交互同一运行生命周期。 |
 | `operations/confirmation.rs` | 871→871 | provider、pending response、临时 MCP allow 与取消同一确认策略生命周期。 |
-| `process/jobs.rs` | 2095→2095 | Process/Skill/MCP 共用 ManagedJob admission、终态、取消与 history owner；不造另一套 executor。 |
+| `process/managed.rs` | 2095→2095 | Process/Skill/MCP 共用 managed execution admission、终态、取消与 history owner；不造另一套 executor。 |
 | `room/bootstrap.rs` | 807→807 | Room bootstrap 探测、路径安全、扫描预算、哈希/revision 和 warning 同一只读响应。 |
 | `room/room_maintenance.rs` | 954→954 | 一次 Room 维护的计划、提交和清理事务。 |
 | `room/room_repository.rs` | 1027→1027 | repository 路径/锁/revision 与文件持久化是同一保护边界。 |
 | `runtime/supervisor.rs` | 950→950 | worker/tunnel 启停、重启与回收属于一次监督生命周期。 |
 | `skills/skill_installs.rs` | 1788→1788 | 安装下载、暂存、提交、租约及恢复是一条安装事务。 |
 | `skills/skills.rs` | 807→807 | 发现、包信任、active/lease 与 Skill 运行共享 Skill registry 规则。 |
-| `storage/job_history.rs` | 1364→1364 | durable history 的查询、retention、退化/修复共享持久化事务。 |
+| `storage/job_history.rs` | 1364→1364 | Process history 的查询、retention、退化/修复共享持久化事务。 |
 | `tmux/tmux.rs` | 861→861 | Session/pane 命令共享目标检查、执行与输出合同。 |
 | `ui/cli_i18n.rs` | 1001→1001 | 语言词条与查找/render 共同维护 CLI 文案合同。 |
 | `ui/config_tui/app.rs` | 2683→2683 | 跨页输入、review/edit/commit 共享 ConfigTuiApp/SetupSession；仅搬方法不产生新 owner。 |
@@ -192,9 +192,9 @@ are not aliases for those four commands.
 
 ### 4.1 Hub 远程执行
 
-`routes::process_exec` 或 `mcp_server::call_app_tool` → Hub agents dispatch/`runs::prepare_run` 持久化 command/hash → pending waiter + envelope → Agent `hub::handle_reliable_envelope` → `transport_ledger::accept`/ACK → `local_service::dispatch`（带真实 Hub `RequestContext`）→ `jobs`/具体能力。Process Exec/Batch 的 stdio ingress 由 `local_service::dispatch_process` 复用同一 Process operation seam；各 ingress 仍保留 framing/auth/error envelope。Hub `state::projection` 提供 neutral Job/info/freshness values，HTTP `routes` 与 Apps `mcp_server` 各自消费并保留边缘投影。没有“Hub runner 调 stdio server”的反向依赖。回传分为三条路径：Response → Hub `runs::store_result` → pending waiter；JobUpdate → Hub Job cache；RunReport → `runs::upsert_agent_report`。后两条不会直接唤醒该同步 waiter。
+`routes::process_exec` 或 `mcp_server::call_app_tool` → Hub agents dispatch/`runs::prepare_run` 持久化 command/hash → pending waiter + envelope → Agent `hub::handle_reliable_envelope` → `transport_ledger::accept`/ACK → `local_service::dispatch`（带真实 Hub `RequestContext`）→ Process runtime/具体能力。Process Exec/Batch 的 stdio ingress 由 `local_service::dispatch_process` 复用同一 Process operation seam；各 ingress 仍保留 framing/auth/error envelope。Hub `state::projection` 提供 neutral Process/info/freshness values，HTTP `routes` 与 Apps `mcp_server` 各自消费并保留边缘投影。没有“Hub runner 调 stdio server”的反向依赖。回传分为三条路径：Response → Hub `runs::store_result` → pending waiter；JobUpdate → Hub Process cache；RunReport → `runs::upsert_agent_report`。后两条不会直接唤醒该同步 waiter。
 
-Hub request/run 是控制面投递与收据身份；Job 是执行端资源生命周期；connection id 是连接代际；boot generation 是执行端进程代际。它们不能互换。同步等待超时不等于取消远端任务，迟到结果可以到达；WP1 已收口 owner 校验，WP3 已分别收口 durability/retention，但任一边界都不替代另一边的证据。
+Hub request/run 是控制面投递与收据身份；Agent Process runtime 拥有本机执行生命周期，内部 managed Job 是其执行记录；connection id 是连接代际；boot generation 是执行端进程代际。它们不能互换。同步等待超时不等于取消远端任务，迟到结果可以到达；WP1 已收口 owner 校验，WP3 已分别收口 durability/retention，但任一边界都不替代另一边的证据。
 
 ### 4.2 本地与 Standalone
 
@@ -206,7 +206,7 @@ Hub request/run 是控制面投递与收据身份；Job 是执行端资源生命
 
 Process：policy/CWD/preflight → Deny 或 cancellable confirmation → 可选 sandbox command → child/输出 tail/monitor → terminal snapshot/audit/report。Skill 先由 `skills.rs` 校验激活包、脚本路径、package digest 与 shared lease，再进入同一 Process Job。
 
-MCP：server/tool/args 校验与配置快照 → managed Job/批量准入 → confirmation/temporary allow → global/per-server semaphore → HTTP 或 stdio 下游 → 响应/timeout/cancel/detached。batch fail-fast 不回滚已经发生的副作用。配置的 stdio MCP server 与 Browser Node 不是自动由 process bwrap 包裹的子执行器。
+MCP：server/tool/args 校验与配置快照 → Process runtime admission → confirmation/temporary allow → global/per-server semaphore → HTTP 或 stdio 下游 → 响应/timeout/cancel/detached。batch fail-fast 不回滚已经发生的副作用。配置的 stdio MCP server 与 Browser Node 不是自动由 process bwrap 包裹的子执行器。
 
 **配置 snapshot 当前规则**：修复前 `start_process_job_inner` 在 admission/audit 处捕获 config、而 `run_async_job` 后续从 `state.config` 读取 policy/CWD/preflight，确定性 current-thread regression 在修复前得到 `Rejected` 而预期为 `Completed`。当前 Process 与 Skill admission 捕获一份 `Arc<Config>` 并将其贯穿 worker；batch 在 preflight 捕获一份 snapshot 并传给所有 queued workers。后续新 admission 读取 reload 后的 live config；startup supervisor identity watcher 仍是独立的 startup-derived 资源边界。该 green regression 证明选定 Job 语义，不把它外推为所有 Config 使用点的统一快照。
 
@@ -237,25 +237,25 @@ distribution/runtime 发现并验证外部资产 → BrowserRuntimeContext/Manag
 
 Agent confirmation → Hub pending confirmation → ntfy callback capability URL → allow/deny/timeout → Agent waiter。连接/Hub 重启会影响这条内存等待链；不能假定确认会跨重启可靠恢复。
 
-Hub replay 未 ACK 的 durable envelope；Agent ledger 按 run/request/hash 区分首次/重复/已完成/冲突。重启后的已开始且不能证明完成的执行应报告 unknown，不盲目再执行。Job history 也将上次进程遗留 active Job 标记 UnknownAfterRestart；这不等于查到了真实 OS 进程的最终状态。
+Hub replay 未 ACK 的 durable envelope；Agent ledger 按 run/request/hash 区分首次/重复/已完成/冲突。重启后的已开始且不能证明完成的执行应报告 unknown，不盲目再执行。Process history 也将上次进程遗留 active 项标记 UnknownAfterRestart；这不等于查到了真实 OS 进程的最终状态。
 
 ## 5. 状态所有权与耐久性
 
 | 数据/资源 | 当前 owner / 存储 | 重启与边界 |
 |---|---|---|
-| 实际 child、Process/MCP Job | Agent jobs + 私有 jobs.sqlite3 | 历史有 retention/大小上限；恢复 active 为 unknown，不保证副作用回滚 |
+| 实际 child、Process/Skill/MCP execution | Agent Process runtime + 私有 `process.sqlite3` | 仅持久化的终态历史；重启恢复 active 为 unknown，不保证副作用回滚 |
 | Agent 私有安装/激活状态 | `~/.agentic_gpt/state/agent/<id>/` | 与 workspace 内容分离，部分旧状态迁移；启动时派生 owner |
 | 本地 MCP socket | `~/.agentic_gpt/runtime/agent/<id>/mcp.sock` | 0700 parent/0600 socket、同 UID、stale inode guard |
 | 可靠 command ledger | 全局、显式 owner、加锁并同步的 ledger | corrupt raw evidence fail-closed；按阈值 compaction；不因 identity expiry 删除 |
 | 审计 | workspace `.agentic-gpt-audit.jsonl` | 单文件 8 MiB + one backup；best-effort 写入/report，不能当不可丢失审计保证 |
 | Hub registry/run receipts | hub.sqlite3：agents、notification_endpoints、agent_runs | schema 1 + transaction backups；24 小时只适用于 eligible completed payload；protected hash/unknown/conflict tombstones 保留 |
-| Hub连接/pending/Job cache/active Room/confirmation/OAuth | HubState 内存 | cache 上限 4096；metadata TTL 15 分钟/60 秒；Hub 重启丢失内存等待与 token，SQLite 存在不等于同步 waiter 或 token 持久 |
+| Hub连接/pending/Process cache/active Room/confirmation/OAuth | HubState 内存 | cache 上限 4096；metadata TTL 15 分钟/60 秒；Hub 重启丢失内存等待与 token，SQLite 存在不等于同步 waiter 或 token 持久 |
 | Room内容 | Agent 配置的 Room repository + Git（默认 workspace/room；`repositoryRoot` 可配置） | Hub 不持有内容；文件服务不自动承担记忆检索/上下文组装 |
 | Browser lease/kernel | Agent BrowserRuntimeManager 内存/Node child | 进程内命名生命周期，重启不恢复 lease；JS 返回/审计不证明下游副作用回滚 |
 | browser-host socket/pending | 独立 host `/tmp/codex-browser-use` | 当前只读部署检查确认 image/mount、host/Chromium UID/GID `1000:1000`、socket `0660`、同一 socket inode 且无 ACL xattr；Agent service context 为 root `0:0`。精确生产 mode 的 primitive smoke 允许 `1000:1000`、`1001:1000`，拒绝 `1001:1001` (`EACCES`)，并确认 stdin close 清理调用方 socket；这验证 Unix 可达性/清理，不是认证或下游副作用回滚证明 |
 | Android Attention | 本地 Room DB `agentic_attention.db` | OS alarm/notification 是副作用，DB 才是 local item 权威；不是 Hub run 数据库 |
 
-配置、Job history、command ledger、审计、report 各有不同失败与恢复语义。当前没有一个统一且严格的“所有数据可靠持久化”承诺。
+配置、Process history、command ledger、审计、report 各有不同失败与恢复语义。当前没有一个统一且严格的“所有数据可靠持久化”承诺。
 
 ## 6. 安全边界的真实强度
 

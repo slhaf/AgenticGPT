@@ -117,7 +117,7 @@ pub(super) async fn handle_reliable_message(
         }
         AgentMessage::Hello { .. }
         | AgentMessage::Heartbeat { .. }
-        | AgentMessage::JobUpdate { .. }
+        | AgentMessage::ProcessUpdate { .. }
         | AgentMessage::RunReport { .. }
         | AgentMessage::ConfirmationRequest { .. } => {
             unreachable!("reliable message classification drifted")
@@ -275,12 +275,12 @@ pub(crate) async fn mcp_list_servers_all_agents(
     Ok(json!({ "agents": agents }))
 }
 
-pub(crate) async fn cached_job(
+pub(crate) async fn cached_process(
     state: &HubState,
     agent_id: &str,
-    job_id: &str,
-) -> Option<crate::state::JobCacheSnapshot> {
-    state.job_cache.snapshot(agent_id, job_id).await
+    process_id: &str,
+) -> Option<crate::state::ProcessCacheSnapshot> {
+    state.process_cache.snapshot(agent_id, process_id).await
 }
 
 #[cfg(test)]

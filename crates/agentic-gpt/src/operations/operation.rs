@@ -115,9 +115,11 @@ pub(crate) const TOOL_NAMESPACE_BY_NAME: &[(&str, ToolNamespace)] = &[
     ("file.edit", ToolNamespace::File),
     ("file.read", ToolNamespace::File),
     ("file.search", ToolNamespace::File),
-    ("job.cancel", ToolNamespace::Job),
-    ("job.get", ToolNamespace::Job),
-    ("job.list", ToolNamespace::Job),
+    ("process.cancel", ToolNamespace::Process),
+    ("process.list", ToolNamespace::Process),
+    ("process.output", ToolNamespace::Process),
+    ("process.result", ToolNamespace::Process),
+    ("process.status", ToolNamespace::Process),
     ("mcp.batch", ToolNamespace::Mcp),
     ("mcp.callTool", ToolNamespace::Mcp),
     ("mcp.list", ToolNamespace::Mcp),
@@ -161,7 +163,7 @@ pub(crate) fn tool_is_read_only(name: &str) -> bool {
             | "browser.reset"
             | "browser.release"
             | "process.batch"
-            | "job.cancel"
+            | "process.cancel"
             | "tmux.sessions"
             | "tmux.pasteText"
             | "tmux.exec"
@@ -186,7 +188,7 @@ pub(crate) fn tool_is_destructive(name: &str) -> bool {
             | "browser.repl"
             | "browser.reset"
             | "browser.release"
-            | "job.cancel"
+            | "process.cancel"
             | "tmux.sessions"
             | "tmux.closeSession"
             | "skills.install"
@@ -331,9 +333,11 @@ pub(crate) fn hub_command_name(command: &HubCommand) -> &'static str {
     match command {
         HubCommand::Exec { .. } => "process.exec",
         HubCommand::ProcessBatch { .. } => "process.batch",
-        HubCommand::JobList { .. } => "job.list",
-        HubCommand::JobGet { .. } => "job.get",
-        HubCommand::JobCancel { .. } => "job.cancel",
+        HubCommand::ProcessList { .. } => "process.list",
+        HubCommand::ProcessStatus { .. } => "process.status",
+        HubCommand::ProcessOutput { .. } => "process.output",
+        HubCommand::ProcessResult { .. } => "process.result",
+        HubCommand::ProcessCancel { .. } => "process.cancel",
         HubCommand::TmuxListSessions { .. } => "tmux.listSessions",
         HubCommand::TmuxListPanes { .. } => "tmux.listPanes",
         HubCommand::TmuxCapturePane { .. } => "tmux.capturePane",

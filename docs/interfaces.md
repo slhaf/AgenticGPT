@@ -26,7 +26,7 @@ handling and `http:`; Hub WS/SSE retains its protocol envelope/replay and
 `hub:` source; CLI uses `localadmin:`. The CLI gate is intentionally limited
 to the four existing local tmux administration operations. HTTP/MCP, Hub wire,
 and local stdio/Unix result projections may differ at the transport boundary,
-while shared Agent operations use the same value/error and slim Job/Skill
+while shared Agent operations use the same value/error and slim Process/Skill
 result layer.
 
 Normal is not an alias for Room: a Normal runtime may use Room only when the
@@ -63,21 +63,23 @@ Core endpoints:
 
 - `GET /v1/info`: safe Hub runtime summary.
 - `GET /v1/agents`: enabled local agents with online status and safe config summaries.
-- `POST /v1/process/exec`: start one managed process and wait briefly. The response is a flat `JobToolResponse` and supports optional `workingDirectory` and bounded `waitSeconds`.
-- `POST /v1/process/batch`: atomically admit a managed process batch with batch-level `workingDirectory`, per-element overrides, and one confirmation decision. The response is a flat `JobBatchToolResponse` with ordered child Job projections.
-- `GET /v1/jobs?agentId=...`: list active or recently retained Jobs with optional kind/state/limit filters. `limit` defaults to 50 and is capped at 100; opaque `cursor` pagination is preserved while the Agent is available.
-- `GET /v1/jobs/{jobId}?agentId=...&waitSeconds=...`: inspect or briefly wait for one Job. `waitSeconds` defaults to 0 and is capped at 30; `waitOnly=true` suppresses active intermediate detail while waiting.
-- `POST /v1/jobs/{jobId}/cancel?agentId=...`: request kind-aware cancellation and return outcome/termination evidence.
+- `POST /v1/process/exec`: start one managed process and wait briefly. The request requires `agentId`, `program`, `args`, and `needConfirm`; optional `workingDirectory`, `group` (1–32 characters), and bounded `waitSeconds` are supported. The response is flattened `ProcessResponse`. Complete inline output/result is included only when the serialized creation response fits within 8 KiB; overflow output is represented by a shared stdout/stderr preview capped at 2 KiB.
+- `POST /v1/process/batch`: atomically admit a managed process batch. The request requires `agentId`, `elements`, and `needConfirm`; it supports batch-level `workingDirectory`, per-element overrides, and optional `group` inherited by children. The response is `ProcessBatchResponse` with ordered child projections under one shared 8 KiB complete-inline budget and bounded output previews.
+- `GET /v1/process?agentId=...`: list active or recently retained process metadata with optional `group`, kind, state, limit, and cursor filters. `limit` defaults to 50 and is capped at 100. When the Agent is unavailable, Hub may return cached metadata for the first page, but does not continue an Agent-issued cursor from cache.
+- `GET /v1/process/{processId}?agentId=...&waitSeconds=...`: inspect process status metadata only, or briefly wait; `waitSeconds` defaults to 0 and is capped at 30. Status never includes stdout, stderr, or result bodies.
+- `GET /v1/process/{processId}/output?agentId=...&cursor=...&maxBytes=...`: read non-consuming stdout/stderr pages. The cursor is process-bound and advances raw-byte offsets for both streams; `maxBytes` defaults to 8 KiB and is capped at 32 KiB. Responses preserve invalid UTF-8 with base64 and report retention gaps and EOF explicitly.
+- `GET /v1/process/{processId}/result?agentId=...&maxBytes=...`: retrieve a complete retained structured result or a truthful `complete`, `too_large`, or `unavailable` status. `maxBytes` defaults to 8 KiB and is capped at 512 KiB; oversized results are never partial JSON, and Hub metadata cache never supplies result content.
+- `POST /v1/process/{processId}/cancel?agentId=...`: request kind-aware cancellation and return observed outcome/termination evidence; timeout or missing response is not evidence of cancellation.
 - `POST /v1/mcp/servers`: list MCP servers configured inside one local agent, or omit `agentId` to group MCP servers for all currently connected agents.
 - `POST /v1/mcp/tools`: list tools exposed by one MCP server.
-- `POST /v1/mcp/callTool`: start one managed downstream MCP tool Job through the selected local agent. The response is a flat `JobToolResponse`; `waitSeconds` defaults to 5 and is capped at 30; a wait timeout does not cancel the Job. `timeoutSeconds` defaults to 300 and is capped at 900.
-- `POST /v1/mcp/batch`: atomically admit 1–16 ordered downstream MCP child Jobs. The response is a flat `McpBatchToolResponse`; it uses one aggregate confirmation, parallel or sequential mode, optional safe fail-fast scheduling, shared global/per-server concurrency limits, and a 2 MiB aggregate response budget.
+- `POST /v1/mcp/callTool`: start one managed downstream MCP tool process through the selected local agent. The HTTP response is a flattened `ProcessResponse`; complete inline output/result follows the 8 KiB creation-response budget and overflow output is bounded by a shared 2 KiB preview. `waitSeconds` defaults to 5 and is capped at 30; a wait timeout does not cancel the process. `timeoutSeconds` defaults to 300 and is capped at 900.
+- `POST /v1/mcp/batch`: atomically admit 1–16 ordered downstream MCP child processes. The response is a `McpBatchToolResponse` with a shared 8 KiB complete-inline budget and bounded output previews; it uses one aggregate confirmation, parallel or sequential mode, optional safe fail-fast scheduling, shared global/per-server concurrency limits, and a 2 MiB aggregate response budget.
 - `GET /v1/runs/{runId}`: inspect persisted status and optional late result for one Hub-to-Agent command run.
 - `POST /v1/room/skills/list`, `/read`, `/search`, `/active`, `/activate`, `/deactivate`: discover workspace skills through the active Room Agent and maintain local active skill state. These endpoints do not take `agentId`.
 - `POST /v1/room/skills/install`: asynchronously install one skill from public GitHub, HTTPS file entries, or inline UTF-8/base64 files. The response returns an `installId` before network work begins.
 - `POST /v1/room/skills/install/get`: query an installation with bounded long polling. `waitSeconds` defaults to 5 and is capped at 30; a wait timeout does not cancel installation; terminal responses set `pollAfterMs` to `0`.
 - `POST /v1/room/skills/install/cancel`: request idempotent cooperative cancellation before atomic commit.
-- `POST /v1/room/skills/run`: run an executable active workspace skill script under `scripts/`. `waitSeconds` defaults to 5 and is capped at 30; a wait timeout does not cancel the Job. It returns terminal Job output inline when possible, otherwise the same `jobId` used by `job.get` and `job.cancel`. These endpoints do not take `agentId`.
+- `POST /v1/room/skills/run`: run an executable active workspace skill script under `scripts/`. `waitSeconds` defaults to 5 and is capped at 30; a wait timeout does not cancel execution. It returns terminal output inline when possible, otherwise the same `processId` used by `process.status`, `process.output`, `process.result`, and `process.cancel`. These endpoints do not take `agentId`.
 - `POST /v1/room/bootstrap`: load the active Room Agent's repeated session entrypoint and deterministic guide manifest. It has no request body or `agentId`.
 - `POST /v1/room/bootstrap/read`: read one valid bootstrap guide by its frontmatter `id`. It has no `agentId`.
 - `POST /v1/room/diary/active` and `POST /v1/room/diary/read`: read the active or one validated Diary layer through the captured active Room lease. Requests use `RoomDiaryActiveRequest` or `RoomDiaryReadRequest`; responses are `RoomDiaryActiveResponse` or `RoomDiaryReadResponse`.
@@ -98,31 +100,32 @@ Malformed JSON or a missing required request field fails at the Axum JSON
 extractor with HTTP 422 and `text/plain`; Agent semantic validation remains a
 JSON error response under the documented 400/selected 404/409 projection.
 
-`/v1/info` intentionally returns only safe metadata: Hub version, public base URL, timeout settings, remote confirmation status, agent counts, and pending request/Job counts. It must not expose secrets, confirmation callback URLs, or private config values.
+`/v1/info` intentionally returns only safe metadata: Hub version, public base URL, timeout settings, remote confirmation status, agent counts, and pending request/process counts. It must not expose secrets, confirmation callback URLs, or private config values.
 
 `/v1/agents` returns one safe config summary per enabled local agent. When an agent is online, the summary includes coarse sandbox mode, confirmation provider, path policy roots, configured command policy rules, and builtin command policy rules. Path roots are display paths such as `workspace`, `~/Documents`, or `/tmp`; private home paths should be shortened with `~` where possible. Offline agents may return an `unknown` summary because the Hub does not persist the last local config summary. Local confirmation prompts can use English or Simplified Chinese via `confirmationLanguage` (`en` or `zh-CN`).
 
-### Hub Job authority, freshness, and retention
+### Hub Process authority, freshness, and retention
 
-The Agent's managed Job history is the execution-side authority. Hub `JobInfo`
-entries and the Hub Job cache are projections used for routing and observation;
-they do not prove that a local process is still running or that a side effect
-was undone. A Hub cache entry is bounded to 4,096 Jobs, expires 15 minutes
-after its `observedAt`, and is classified as `stale` after 60 seconds. A
-15-second sweep removes expired entries, and capacity eviction removes the
-oldest observation. Evicting an active projection has no effect on the Agent
-Job or the authoritative Hub run receipt.
+The Agent's managed process history is the execution-side authority. Hub process
+status entries and the Hub process cache are projections used for routing and
+observation; they do not prove that a local process is still running or that a
+side effect was undone. A Hub cache entry is bounded to 4,096 processes, expires
+15 minutes after its `observedAt`, and is classified as `stale` after 60
+seconds. A 15-second sweep removes expired entries, and capacity eviction
+removes the oldest observation. Evicting an active projection has no effect on
+the Agent process or the authoritative Hub run receipt.
 
-Hub HTTP `job.list`, `job.get`, and `job.cancel`, plus the corresponding
-Apps MCP Job inspection/control responses, expose top-level `freshness` and
-`observedAt` metadata. Direct live Job envelopes from other command endpoints
-may omit these projection fields; their Agent Job payload remains authoritative.
-`live` is a response from the Agent, `cached` is a usable Hub projection within
-its freshness window, `stale` is an older projection, and `unknown` means that
-no usable current fact is available (including after restart reconciliation).
-These fields describe the response projection; they are not fields on Agent
-`JobInfo`. A cache-only `job.get` is degraded evidence, not a fresh wait, and
-the Hub does not invent continuation for an Agent-issued cursor.
+Hub HTTP `process.status` and `process.list`, plus the corresponding Apps MCP
+process inspection responses, expose `freshness` and `observedAt` metadata.
+Direct live process envelopes from creation endpoints may omit these projection
+fields; their Agent process payload remains authoritative. `live` is a response
+from the Agent, `cached` is a usable Hub projection within its freshness
+window, `stale` is an older projection, and `unknown` means that no usable
+current fact is available (including after restart reconciliation). These
+fields describe the response projection; they are not fields on Agent process
+status. A cache-only status response is degraded evidence, not a fresh wait,
+and the Hub does not invent continuation for an Agent-issued cursor. The Hub
+cache contains status metadata only: it cannot supply output or result content.
 
 Hub run receipts remain the durable control-plane identity for a dispatched
 command. After the 24-hour run retention window, only eligible completed
@@ -136,7 +139,7 @@ did not run.
 Wait or transport timeout is not remote cancellation. It ends the local wait
 only; a late matching receipt or result can still arrive. Cancellation is
 reported only from observed termination evidence, and a cache snapshot or
-missing response never permits an inference that the remote Job stopped.
+missing response never permits an inference that the remote process stopped.
 
 ### Current Room boundary and coordinated request projection
 
@@ -182,26 +185,39 @@ compatibility contract.
 
 All `/mcp` `tools/call` responses use the Hub `AgenticResult` envelope, which is directly compatible with the ChatGPT Apps / MCP tool result shape. Hub-native JSON is exposed as `structuredContent` plus a JSON text content block; a top-level `error` makes the MCP tool result `isError=true`.
 
-`mcp.callTool` does not pass a downstream result envelope through at the Hub top level. It returns a flat `JobToolResponse`; a terminal downstream result is retained under `result`, and downstream `isError=true` produces a failed Job while retaining that result. Serialized arguments are capped at 256 KiB. Serialized results up to 512 KiB are retained; larger results are omitted and replaced by `resultBytes`, `resultSha256`, and a UTF-8-safe `resultPreview`. Active calls are inspected with `job.get` and cancelled with `job.cancel`. Hub has no native `file.read` or `file.edit` tool. Its generic asynchronous `mcp.callTool` Job bridge is not a typed MCP image-content surface; do not rely on it to preserve file.read image Content blocks.
+`mcp.callTool` does not pass a downstream result envelope through at the Hub
+top level. The live HTTP endpoint currently returns a flattened
+`ProcessResponse`; a terminal downstream result is retained under `result`,
+and downstream `isError=true` produces a failed process while retaining that
+result. Serialized arguments are capped at 256 KiB. Serialized results up to
+512 KiB are retained; larger results are omitted and replaced by
+`resultBytes`, `resultSha256`, and a UTF-8-safe `resultPreview`. Active calls
+use `process.status`, `process.output`, `process.result`, and `process.cancel`.
+Hub has no native `file.read` or `file.edit` tool. Its generic asynchronous
+MCP process bridge is not a typed image-content surface; do not rely on it to
+preserve `file.read` image Content blocks.
 
-`mcp.batch` returns a flat `McpBatchToolResponse` with ordered child Job
+`mcp.batch` returns a flat `McpBatchToolResponse` with ordered child process
 projections in `results`. Validation and capacity admission happen before
 confirmation and before any child starts. Parallel mode uses the shared
 scheduler (eight globally, two per server); sequential mode waits for each
 child terminal state. With `failFast=true`, only not-yet-started children
 become `skipped`; already-started calls are not cancelled. Single-server
 batches can receive temporary server allow actions, while multi-server
-confirmation remains batch-scoped. Each child is an ordinary MCP Job with
-`batchId`, optional `batchCallId`, and `batchIndex`, so later inspection and
-cancellation use the same `job.*` lifecycle.
+confirmation remains batch-scoped. Each child is an ordinary managed process
+with `batchId`, optional `batchCallId`, and `batchIndex`, so later inspection
+and cancellation use the same `process.*` lifecycle.
 
 Cancellation is evidence-based. Agentic sends MCP `notifications/cancelled`
 with the exact downstream request id. If no downstream terminal response is
-observed, the Job becomes `detached` rather than claiming cancellation
-succeeded. Hub cache-only `job.get` responses set `detailAvailable=false`, and
-Hub never reports a cached snapshot as a successful `job.cancel`.
+observed, the process becomes `detached` rather than claiming cancellation
+succeeded. Hub cache-only process status is degraded metadata evidence and
+never supplies a cached result or reports successful cancellation.
 
-This contract applies to the Apps MCP `/mcp` surface. The GPT Actions endpoints under `/v1/*` keep their OpenAPI-described JSON response shapes.
+This contract applies to the Apps MCP `/mcp` surface. GPT Actions endpoints
+under `/v1/*` have their own JSON projections; the live HTTP
+`/v1/mcp/callTool` response/schema divergence described above is not a passed
+schema-parity claim.
 
 OAuth discovery routes:
 
@@ -214,11 +230,10 @@ OAuth discovery routes:
 The Hub MCP profile is selected at Hub startup with `--mcp-profile full|coordinator`
 or `AGENTIC_GPT_HUB_MCP_PROFILE`. `full` is the default and preserves the
 execution surface plus the transport-neutral `bootstrap` aliases. `coordinator`
-advertises only the Hub-native tools `hub.info`, `agent.list`, `hub.run.list`,
-`hub.run.get`, `hub.job.list`, `hub.job.get`, `user.notify.channels`,
-and `user.notify.send`; it never dispatches an Agent command. See
-[`standalone-runtime.md`](standalone-runtime.md) for the complete profile and
-standalone Tunnel documentation.
+advertises only Hub-native tools including `hub.process.status` and
+`hub.process.list`; these read cached process metadata and never dispatch
+execution. See [`standalone-runtime.md`](standalone-runtime.md) for the
+complete profile and standalone Tunnel documentation.
 
 The ntfy confirmation callback routes are intentionally not part of `openapi/hub.yaml`. They are only used by confirmation action buttons.
 
@@ -304,11 +319,11 @@ Keep MCP argument schemas in the tool definition; use maintenance submission for
 ---
 id: execution
 kind: guide
-title: Execution and Job choice
-summary: Choose managed Jobs or persistent panes deliberately.
+title: Execution choice
+summary: Choose managed processes or persistent panes deliberately.
 loadPolicy: startup
 priority: 90
-toolBindings: [process.exec, process.batch, job.get, job.cancel, tmux.exec]
+toolBindings: [process.exec, process.batch, process.status, process.cancel, tmux.exec]
 tags: [operations, safety]
 ---
 Use the tool schema for arguments and this guide for workflow, confirmation, and recovery.
@@ -365,15 +380,34 @@ When the current connection is replaced or removed, an unresolved confirmation m
 
 A bounded Hub/HTTP/MCP wait timeout ends only the local waiter. It does not cancel remote execution. A matching late `TransportAck`, `TransportRunStatus`, or `Response` may still advance the persisted run receipt after the caller has received its timeout, even when no waiter remains. `not_sent` is reserved for a proven channel-send failure and is excluded from replay; a timeout or missing ACK is not `not_sent`.
 
-Hub transport receipt statuses covered by this contract include `created`, `dispatched`, `acked`, `started`, `running`, `failed`, `unknown`, `completed`, `timeout_waiting_result`, and `not_sent`; this is not an exhaustive list of AgentReport or Job statuses. Terms such as `sent_no_ack`, `acked_running`, `wait_expired`, `remote_unknown`, and `cancel_requested` are conceptual vocabulary for describing observations or caller state, not additional wire or persisted statuses. No `cancel_requested` transport state is introduced.
+Hub transport receipt statuses covered by this contract include `created`,
+`dispatched`, `acked`, `started`, `running`, `failed`, `unknown`, `completed`,
+`timeout_waiting_result`, and `not_sent`; this is not an exhaustive list of
+AgentReport or Process statuses. Terms such as `sent_no_ack`, `acked_running`,
+`wait_expired`, `remote_unknown`, and `cancel_requested` are conceptual
+vocabulary for describing observations or caller state, not additional wire or
+persisted statuses. No `cancel_requested` transport state is introduced.
 
-Both transports apply the same current-generation admission rule. `Hello`, `Heartbeat`, `JobUpdate`, `RunReport`, and `ConfirmationRequest` are current-only lifecycle messages: only the latest connection for an agent may update metadata, the Job cache, reports, last-seen state, confirmation admission, or the Room lease. A stale WebSocket message is rejected by the handler and the retired stream receives `Close`; a stale HTTP/SSE message is rejected with `409 stale_connection`. The local agent should stop the writer for that generation.
+Both transports apply the same current-generation admission rule. `Hello`,
+`Heartbeat`, `ProcessUpdate`, `RunReport`, and `ConfirmationRequest` are
+current-only lifecycle messages: only the latest connection for an agent may
+update metadata, the process cache, reports, last-seen state, confirmation
+admission, or the Room lease. A stale WebSocket message is rejected by the
+handler and the retired stream receives `Close`; a stale HTTP/SSE message is
+rejected with `409 stale_connection`. The local agent should stop the writer
+for that generation.
 
 Stale reliable messages (`TransportAck`, `TransportRunStatus`, and `Response`) may still be accepted when their run metadata matches an existing Hub run, preserving late-result delivery after reconnects. They do not refresh or otherwise modify the current connection's lifecycle state. `RunReport` is not a reliable replay message and remains current-only.
 
 Each SSE connection must use a fresh, non-empty `connectionId`; the same current ID cannot name a second stream. Omitting `connectionId` lets the Hub generate a fresh ID. An explicitly empty ID returns `400 invalid_connection_id`; reusing the current ID returns `409 connection_id_in_use`. A successful replacement closes the previous stream. These IDs identify a connection generation after agent-secret authentication; they are not a separate peer-authentication mechanism.
 
-`Hello`, `Heartbeat`, `HeartbeatAck`, confirmation messages, and `JobUpdate` remain best-effort lifecycle messages in V1. `process.exec`, `process.batch`, `job.get`, and `job.cancel` are reliable request/response commands. `Hello.bootGeneration` changes cause active cached Jobs to become `unknown_after_restart`; terminal Jobs remain retained and side effects are never replayed.
+`Hello`, `Heartbeat`, `HeartbeatAck`, confirmation messages, and
+`ProcessUpdate` remain best-effort lifecycle messages in V1. `process.exec`,
+`process.batch`, `process.status`, `process.list`, `process.output`,
+`process.result`, and `process.cancel` are reliable request/response commands.
+`Hello.bootGeneration` changes cause active cached processes to become
+`unknown_after_restart`; terminal processes remain retained and side effects
+are never replayed.
 
 On Agent restart, the transport ledger is the durable command/result authority:
 owner-bound completed records can resend their matching result, and

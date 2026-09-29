@@ -34,7 +34,9 @@ pub(crate) struct AgentRun {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) arguments: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) job: Option<Value>,
+    pub(crate) process_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) process: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) reason: Option<String>,
     pub(crate) created_at: DateTime<Utc>,
@@ -67,9 +69,11 @@ pub(crate) fn command_type(command: &HubCommand) -> &'static str {
     match command {
         HubCommand::Exec { .. } => "process.exec",
         HubCommand::ProcessBatch { .. } => "process.batch",
-        HubCommand::JobList { .. } => "job.list",
-        HubCommand::JobGet { .. } => "job.get",
-        HubCommand::JobCancel { .. } => "job.cancel",
+        HubCommand::ProcessList { .. } => "process.list",
+        HubCommand::ProcessStatus { .. } => "process.status",
+        HubCommand::ProcessOutput { .. } => "process.output",
+        HubCommand::ProcessResult { .. } => "process.result",
+        HubCommand::ProcessCancel { .. } => "process.cancel",
         HubCommand::TmuxListSessions { .. } => "tmux.listSessions",
         HubCommand::TmuxListPanes { .. } => "tmux.listPanes",
         HubCommand::TmuxCapturePane { .. } => "tmux.capturePane",
@@ -390,9 +394,9 @@ pub(crate) fn upsert_agent_report(
     } else {
         None
     };
-    let job = if detail == "full" {
+    let process = if detail == "full" {
         report
-            .job
+            .process
             .map(|value| serde_json::to_string(&value))
             .transpose()?
     } else {
@@ -469,7 +473,7 @@ pub(crate) fn upsert_agent_report(
         "insert into agent_runs(
             run_id, request_id, agent_id, command_type, command_json, command_hash,
             status, result_json, result_hash, reason, created_at, updated_at, expires_at,
-            source, profile, detail, job_id, duration_ms, exit_code, arguments_json, job_json
+            source, profile, detail, process_id, duration_ms, exit_code, arguments_json, process_json
         ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
         on conflict(run_id) do update set
             status = excluded.status,
@@ -477,11 +481,11 @@ pub(crate) fn upsert_agent_report(
             result_hash = coalesce(excluded.result_hash, agent_runs.result_hash),
             reason = excluded.reason,
             updated_at = excluded.updated_at,
-            job_id = excluded.job_id,
+            process_id = excluded.process_id,
             duration_ms = excluded.duration_ms,
             exit_code = excluded.exit_code,
             arguments_json = coalesce(excluded.arguments_json, agent_runs.arguments_json),
-            job_json = coalesce(excluded.job_json, agent_runs.job_json)",
+            process_json = coalesce(excluded.process_json, agent_runs.process_json)",
         params![
             report.run_id,
             report.request_id,
@@ -499,11 +503,11 @@ pub(crate) fn upsert_agent_report(
             report.source,
             report.profile,
             detail,
-            report.job_id,
+            report.process_id,
             report.duration_ms.map(|value| value as i64),
             report.exit_code,
             arguments,
-            job,
+            process,
         ],
     )?;
     Ok(())
@@ -512,7 +516,7 @@ pub(crate) fn get_run(state: &HubState, run_id: &str) -> Result<Option<AgentRun>
     let conn = state.db.lock().unwrap();
     conn.query_row(
         "select run_id, request_id, agent_id, command_type, command_hash, source, profile, detail,
-                status, result_json, result_hash, arguments_json, job_json, reason, created_at,
+                status, result_json, result_hash, arguments_json, process_id, process_json, reason, created_at,
                 updated_at, expires_at
          from agent_runs where run_id = ?1",
         params![run_id],
@@ -520,9 +524,10 @@ pub(crate) fn get_run(state: &HubState, run_id: &str) -> Result<Option<AgentRun>
             let result_json: Option<String> = row.get(9)?;
             let result_hash: Option<String> = row.get(10)?;
             let arguments_json: Option<String> = row.get(11)?;
-            let job_json: Option<String> = row.get(12)?;
+            let process_id: Option<String> = row.get(12)?;
+            let process_json: Option<String> = row.get(13)?;
             let status: String = row.get(8)?;
-            let expires_at: Option<DateTime<Utc>> = row.get(16)?;
+            let expires_at: Option<DateTime<Utc>> = row.get(17)?;
             let result_retained = result_json.is_some();
             let result_omitted = !result_retained
                 && result_hash.is_some()
@@ -542,10 +547,11 @@ pub(crate) fn get_run(state: &HubState, run_id: &str) -> Result<Option<AgentRun>
                 result_retained,
                 result_omitted,
                 arguments: arguments_json.and_then(|json| serde_json::from_str(&json).ok()),
-                job: job_json.and_then(|json| serde_json::from_str(&json).ok()),
-                reason: row.get(13)?,
-                created_at: row.get(14)?,
-                updated_at: row.get(15)?,
+                process_id,
+                process: process_json.and_then(|json| serde_json::from_str(&json).ok()),
+                reason: row.get(14)?,
+                created_at: row.get(15)?,
+                updated_at: row.get(16)?,
             })
         },
     )
@@ -633,7 +639,7 @@ pub(crate) fn prune_expired(state: &HubState) -> Result<usize> {
         "update agent_runs
          set result_json = null,
              arguments_json = null,
-             job_json = null
+             process_json = null
          where expires_at is not null
            and expires_at <= ?1
            and status = 'completed'
@@ -680,7 +686,7 @@ mod tests {
             agents: Arc::new(crate::agents::lifecycle::Connections::new()),
             dispatch: Arc::new(crate::agents::dispatch::Dispatch::new()),
             confirmations: Arc::new(crate::confirmation::Confirmations::new()),
-            job_cache: Arc::new(crate::state::JobCache::new()),
+            process_cache: Arc::new(crate::state::ProcessCache::new()),
             boot_generations: Arc::new(Mutex::new(HashMap::new())),
             active_room: Arc::new(Mutex::new(None)),
             http: reqwest::Client::new(),
@@ -1048,12 +1054,12 @@ mod tests {
             started_at: started,
             updated_at: started,
             duration_ms: None,
-            job_id: None,
+            process_id: None,
             exit_code: None,
             reason: None,
             arguments: None,
             result: None,
-            job: None,
+            process: None,
         };
         upsert_agent_report(&state, "agent", initial.clone()).unwrap();
 
@@ -1121,7 +1127,7 @@ mod tests {
                 started_at: started,
                 updated_at: started,
                 duration_ms: None,
-                job_id: None,
+                process_id: None,
                 exit_code: None,
                 reason: None,
                 arguments: Some(BoundedJsonValue {
@@ -1131,7 +1137,7 @@ mod tests {
                     truncated: false,
                 }),
                 result: None,
-                job: None,
+                process: None,
             },
         )
         .unwrap();
@@ -1149,7 +1155,7 @@ mod tests {
                 started_at: started,
                 updated_at: started + Duration::seconds(1),
                 duration_ms: Some(1000),
-                job_id: None,
+                process_id: Some("process-agent-1".to_string()),
                 exit_code: Some(0),
                 reason: None,
                 arguments: None,
@@ -1159,7 +1165,18 @@ mod tests {
                     sha256: "b".repeat(64),
                     truncated: false,
                 }),
-                job: None,
+                process: Some(
+                    serde_json::from_value(serde_json::json!({
+                        "agentId": "agent",
+                        "processId": "process-agent-1",
+                        "kind": "command",
+                        "state": "completed",
+                        "createdAt": started.to_rfc3339(),
+                        "updatedAt": (started + Duration::seconds(1)).to_rfc3339(),
+                        "captureStatus": "complete"
+                    }))
+                    .unwrap(),
+                ),
             },
         )
         .unwrap();
@@ -1177,12 +1194,12 @@ mod tests {
                 started_at: started,
                 updated_at: started,
                 duration_ms: None,
-                job_id: None,
+                process_id: None,
                 exit_code: None,
                 reason: None,
                 arguments: None,
                 result: None,
-                job: None,
+                process: None,
             },
         )
         .unwrap();
@@ -1197,6 +1214,11 @@ mod tests {
         assert_eq!(
             stored.result,
             Some(serde_json::json!({ "status": "completed" }))
+        );
+        assert_eq!(stored.process_id.as_deref(), Some("process-agent-1"));
+        assert_eq!(
+            stored.process.as_ref().unwrap()["processId"],
+            "process-agent-1"
         );
     }
 }

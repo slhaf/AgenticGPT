@@ -44,10 +44,6 @@ mod http_server;
 mod hub;
 #[path = "runtime/instance_lock.rs"]
 mod instance_lock;
-#[path = "storage/job_history.rs"]
-mod job_history;
-#[path = "process/jobs.rs"]
-mod jobs;
 #[path = "ingress/local_control.rs"]
 mod local_control;
 #[path = "operations/local_service.rs"]
@@ -64,6 +60,10 @@ mod operation_result;
 mod policy;
 #[path = "storage/private_state.rs"]
 mod private_state;
+#[path = "process/managed.rs"]
+mod process;
+#[path = "storage/process_history.rs"]
+mod process_history;
 #[path = "room/room_maintenance.rs"]
 mod room_maintenance;
 #[path = "room/room_reads.rs"]

@@ -140,7 +140,7 @@ const AGENT_CONNECTION_SWEEP_SECS: u64 = 15;
 const AGENT_CONNECTION_TTL_SECS: i64 = 60;
 
 // `agents` is the admission and side-effect linearization guard. While it is
-// held, acquire only short state locks in agents -> room/boot/jobs/
+// held, acquire only short state locks in agents -> room/boot/processes/
 // confirmations order; do not await network, receivers, or spawned tasks, and
 // do not call helpers that reacquire `state.agents`.
 pub(super) async fn handle_agent_message(
@@ -198,7 +198,7 @@ pub(super) async fn handle_agent_message(
                         .is_some_and(|previous| previous != boot_generation)
                 };
                 if generation_changed {
-                    mark_cached_jobs_unknown_after_restart(state, agent_id).await;
+                    mark_cached_processes_unknown_after_restart(state, agent_id).await;
                 }
                 let connection = agents
                     .get_mut(agent_id)
@@ -245,18 +245,18 @@ pub(super) async fn handle_agent_message(
             let _ = sender.send(OutboundAgentMessage::Text(text));
             None
         }
-        AgentMessage::JobUpdate { job } => {
-            if job.agent_id != agent_id {
-                warn!(%agent_id, jobAgentId = %job.agent_id, "rejected JobUpdate for another agent");
-                return Err("job_agent_id_mismatch".to_string());
+        AgentMessage::ProcessUpdate { process } => {
+            if process.agent_id != agent_id {
+                warn!(%agent_id, processAgentId = %process.agent_id, "rejected ProcessUpdate for another agent");
+                return Err("process_agent_id_mismatch".to_string());
             }
             state
-                .job_cache
+                .process_cache
                 .record(
                     agent_id,
                     connection_id,
                     current_boot_generation.as_deref(),
-                    job,
+                    process,
                 )
                 .await;
             None
@@ -377,7 +377,7 @@ pub(super) async fn disconnect_agent(
                 .remove(agent_id)
                 .expect("current connection disappeared under agents guard");
             state
-                .job_cache
+                .process_cache
                 .mark_connection_stale(agent_id, connection_id)
                 .await;
             room::control::release_active_room_if_current(state, agent_id, connection_id).await;
@@ -430,7 +430,7 @@ pub(crate) async fn replace_agent_connection(
         );
         if let Some(old) = old {
             state
-                .job_cache
+                .process_cache
                 .mark_connection_stale(agent_id, &old.connection_id)
                 .await;
             room::control::release_active_room_if_current(state, agent_id, &old.connection_id)
@@ -541,8 +541,11 @@ pub(super) async fn resolve_room_target(
         sender: connection.sender.clone(),
     })
 }
-async fn mark_cached_jobs_unknown_after_restart(state: &HubState, agent_id: &str) {
-    state.job_cache.mark_unknown_after_restart(agent_id).await;
+async fn mark_cached_processes_unknown_after_restart(state: &HubState, agent_id: &str) {
+    state
+        .process_cache
+        .mark_unknown_after_restart(agent_id)
+        .await;
 }
 
 #[cfg(test)]
