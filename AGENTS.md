@@ -22,6 +22,12 @@ The root Cargo workspace contains five Rust crates: `crates/agentic-gpt` (Linux 
 
 Use `rustfmt` defaults and idiomatic Rust naming: `snake_case` functions/modules, `PascalCase` types, and `SCREAMING_SNAKE_CASE` constants. Preserve camelCase JSON contracts through explicit Serde attributes. Kotlin uses four-space indentation, `PascalCase` types/composables, `camelCase` members, and lowercase package names under `work.slhaf.agentic.console`. Prefer shared code over duplicated platform implementations.
 
+## 文档
+
+新建、修改或审查文档，以及修改面向模型的工具定义前，先阅读 [`docs/documentation-standard.md`](docs/documentation-standard.md)；该文件也是工具定义写法的规范。新增文档使用中文；修改现有中英文版本时，保持两者的功能事实一致。
+
+用户可见功能、CLI／配置默认值、API／MCP 契约或工具描述、安全／确认／策略、界面流程、发布／迁移或文档示例变化时，检查并按需更新受影响的文档。若行为和已有文档契约均未变化，无须为内部实现改动强行修改文档。历史记录应标明适用版本；文档约定变化时同步修改本标准。
+
 ## Testing Guidelines
 
 Place Rust unit tests beside implementation code in `#[cfg(test)]` modules; use `#[tokio::test]` for async behavior. Kotlin tests belong in the matching source set, such as `commonTest` or `jvmTest`, and test classes should end in `Test`. Add regression tests for bug fixes. No numeric coverage threshold is configured; prioritize policy, protocol, persistence, and transport edge cases.
