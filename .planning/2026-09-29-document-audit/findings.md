@@ -6,8 +6,6 @@
 - `docs/superpowers/plans/2026-08-04-interactive-config-initialization.md:1-9,34-43` old `inquire` plan and unchecked steps superseded by fullscreen design; historical plan, not actionable.
 - `docs/release-notes-v0.9.1.md`/`.zh-CN.md` describe historical `file.batch`, while `docs/migration-v0.10.md:1-20` guides current file API. Do not classify release notes as erroneous current guidance.
 
-Remaining slices pending.
-
 ## Hub operations (verified by HubOpsAudit and independent source reads)
 - `docs/operations.md:397` promises credentials never in argv, but `README.md:285-288,298-302` gives `agent add --secret` and `config set hub.agentSecret` argv examples; `crates/agentic-gpt-hub/src/agents/registry.rs:10-20` accepts the CLI secret. Security-facing contradiction.
 - `openapi/agents-minimal.yaml:1-12` explicitly historical/noncanonical, replaced by `openapi/hub.yaml`. `docs/operations.md:345-349` v0.9 checklist archival section only, not entire doc.
@@ -29,4 +27,3 @@ Remaining slices pending.
 - `docs/configuration.md:104` and `.zh-CN.md:90-91` erroneously gate Room settings on profile; `config_templates.rs:344-360` gates on live Room toolset.
 - `docs/configuration.md:122-124` and `.zh-CN.md:105-106` wrongly exclude MCP server collection from interactive initializer; `config_templates.rs:344-356` includes it.
 - `README.zh-CN.md:37,180-182` says 29 Normal / 40 Room; `stdio_server_tests.rs:111-161` specifies 31 Normal + 11 Room = 42 Room tools.
-- Existing CLI smoke: `target/debug/agentic-gpt config init --help` exposes interactive default and confirms agent-secret flag warns of argv/shell-history exposure; `target/debug/agentic-gpt-hub agent add --help` requires `--secret`.
