@@ -104,7 +104,7 @@ Supported targets:
 - `x86_64-unknown-linux-gnu`
 - `aarch64-unknown-linux-gnu`
 
-See the [development guide](docs/development.md) for source builds, CI, and releases.
+See the [development guide](docs/development/README.md) before adding features or modules or changing configuration, state ownership, or public contracts. See the [release guide](docs/development/releasing.md) for packaging and publishing.
 See the [self-hosted Browser guide](docs/browser-self-hosted.md) for extension/Neko deployment.
 
 ## Quick start: Secure MCP Tunnel (recommended)
@@ -301,7 +301,8 @@ See the [configuration guide](docs/configuration.md) for field definitions and l
 - [Interface index](docs/interfaces.md): Hub HTTP, Actions, Apps MCP, protocol, and direct MCP interfaces.
 - [Tool contract matrix](docs/tool-contract-matrix.md): Normal/Room/Hub tool contracts and cross-surface parity.
 - [Operations](docs/operations.md): local verification, Standalone-first deployment checks, Hub checks, and safety invariants.
-- [Development](docs/development.md): development, CI, and releases.
+- [Development](docs/development/README.md): read before implementing features/modules or reviewing changes to ownership, permissions, configuration, or contracts; includes verification and completion criteria.
+- [Releases](docs/development/releasing.md): read before release preflight, packaging, or pushing a release tag.
 
 ## Build and release
 

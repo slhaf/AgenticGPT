@@ -51,4 +51,4 @@ WP-T 的测试增删标准见根目录 [`AGENTS.md`](../../../AGENTS.md)，清�
 - `current-state.md` 随已落地代码更新；目标文档只记录仍有效的规则，不把迁移中间态描述为已完成。
 - 新的重大边界决策记录“背景、选择、替代方案、迁移影响、验证”；已由用户确认的取舍统一维护在 decisions.md，目标/规则/路线图同步更新，不为同一问题重复设审批前置，也无需为每个函数建立决策文档。
 - `.planning/2026-09-16-architecture-audit/` 是历史调查进度，不是长期规范入口；其他历史 `.planning/` 和 [`docs/archive/`](../) 的设计资料仅保留背景，不凌驾于当前实现和本指南的状态说明。
-- 使用说明仍归现有 [接口](../../interfaces.md)、[配置](../../configuration.zh-CN.md)、[运维](../../operations.md) 与 [开发](../../development.zh-CN.md) 文档，不在本目录复制一份 API 手册。
+- 使用说明仍归现有 [接口](../../interfaces.md)、[配置](../../configuration.zh-CN.md)、[运维](../../operations.md) 与 [开发](../../development/README.zh-CN.md) 文档，不在本目录复制一份 API 手册。

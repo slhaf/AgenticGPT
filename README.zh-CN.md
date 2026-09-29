@@ -103,7 +103,7 @@ install -m 0755 agentic-browser-host ~/.local/bin/
 - `x86_64-unknown-linux-gnu`
 - `aarch64-unknown-linux-gnu`
 
-源码构建、CI 与发布流程见[开发文档](docs/development.zh-CN.md)。
+新增功能或模块，或修改配置、状态所有权及公共契约前，请先阅读[开发指南](docs/development/README.zh-CN.md)；打包与发布见[发布指南](docs/development/releasing.md)。
 自托管 Browser 扩展/Neko 的部署方法见[自托管 Browser 部署指南](docs/browser-self-hosted.zh-CN.md)。
 
 ## 快速开始：Secure MCP Tunnel（推荐）
@@ -300,7 +300,8 @@ Hub 中继的 `ntfy` 是可选能力，只有在 Hub 模式或配置了 Standalo
 - [接口索引](docs/interfaces.md)：Hub HTTP、Actions、Apps MCP、协议与直接 MCP surface。
 - [工具契约矩阵](docs/tool-contract-matrix.md)：Normal/Room/Hub 工具契约、边界与 surface parity 矩阵。
 - [运维指南](docs/operations.md)：本地验证、Standalone-first 部署检查、Hub 检查与安全不变量。
-- [开发文档](docs/development.zh-CN.md)：开发、CI 与发布。
+- [开发指南](docs/development/README.zh-CN.md)：新增功能/模块，或审查所有权、权限、配置与契约变更前阅读；包含验证方式与完成标准。
+- [发布指南](docs/development/releasing.md)：执行发布预检、打包或推送发布标签前阅读。
 
 ## 构建与发布
 

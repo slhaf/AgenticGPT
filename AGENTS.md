@@ -6,6 +6,12 @@ The root Cargo workspace contains five Rust crates: `crates/agentic-gpt` (Linux 
 
 `console/` is a separate Kotlin Multiplatform/Compose project. Shared UI and domain code belongs in `console/shared/src/commonMain`; platform integrations belong in `androidMain`, `jvmMain`, `jsMain`, or `wasmJsMain`. Host applications live in `androidApp`, `desktopApp`, and `webApp`. Keep generated output (`target/`, `console/build/`, `dist/`) out of commits.
 
+## 开发指南与使用时机
+
+新增功能或模块、修改现有实现，或审查涉及状态所有权、并发、配置、权限及公开契约的变更前，先阅读 [`docs/development/README.zh-CN.md`](docs/development/README.zh-CN.md)（[English](docs/development/README.md)），按相关章节核对代码放置、消费者、验证入口和完成标准。归档架构资料只供历史追溯，不作为当前任务清单。
+
+准备发布预检、Linux 打包或推送发布标签时，阅读 [`docs/development/releasing.md`](docs/development/releasing.md)，区分本地验证和实际发布的副作用。
+
 ## Build, Test, and Development Commands
 
 - `cargo check --workspace`: type-check all Rust crates quickly.
