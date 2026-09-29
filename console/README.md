@@ -1,41 +1,35 @@
-This is a Kotlin Multiplatform project targeting Android, Web, Desktop (JVM).
+# Console 开发说明
 
-* [/shared](./shared/src) is for code that will be shared across your Compose Multiplatform applications.
-  It contains several subfolders:
-  - [commonMain](./shared/src/commonMain/kotlin) is for code that’s common for all targets.
-  - Other folders are for Kotlin code that will be compiled for only the platform indicated in the folder name.
-    For example, if you want to use Apple’s CoreCrypto for the iOS part of your Kotlin app,
-    the [iosMain](./shared/src/iosMain/kotlin) folder would be the right place for such calls.
-    Similarly, if you want to edit the Desktop (JVM) specific part, the [jvmMain](./shared/src/jvmMain/kotlin)
-    folder is the appropriate location.
+这是一个 Kotlin Multiplatform 项目，当前配置的目标平台为 Android、Web 和 Desktop（JVM）；当前 Gradle 构建配置尚未启用 iOS 编译目标。
 
-### Running the apps
+- [/shared](./shared/src) 存放 Compose Multiplatform 应用之间共享的代码，其中包含若干源集（source set）：
+  - [commonMain](./shared/src/commonMain/kotlin) 存放所有目标共用的代码。
+  - 其他源集存放只针对相应平台编译的 Kotlin 代码。例如，若以后配置 iOS 编译目标，iOS 专属代码应放在相应的 iOS 源集；Desktop（JVM）专属代码则应放在 [jvmMain](./shared/src/jvmMain/kotlin)。
 
-Use the run configurations provided by the run widget in your IDE's toolbar. You can also use these commands and options:
+### 运行应用
 
-- Android app: `./gradlew :androidApp:assembleDebug`
-- Desktop app:
-  - Hot reload: `./gradlew :desktopApp:hotRun --auto`
-  - Standard run: `./gradlew :desktopApp:run`
-- Web app:
-  - Wasm target (faster, modern browsers): `./gradlew :webApp:wasmJsBrowserDevelopmentRun`
-  - JS target (slower, supports older browsers): `./gradlew :webApp:jsBrowserDevelopmentRun`
+建议使用 IDE 工具栏中的运行配置启动应用。也可以使用以下 Gradle 命令：
 
-### Running tests
+- Android：使用 IDE 运行配置启动应用。`./gradlew :androidApp:assembleDebug` 只构建 APK，不会安装或启动应用。
+- Desktop：
+  - 热重载：`./gradlew :desktopApp:hotRun --auto`
+  - 标准运行：`./gradlew :desktopApp:run`
+- Web：
+  - Wasm 目标（速度更快，适用于现代浏览器）：`./gradlew :webApp:wasmJsBrowserDevelopmentRun`
+  - JS 目标（速度较慢，兼容较旧浏览器）：`./gradlew :webApp:jsBrowserDevelopmentRun`
 
-Use the run button in your IDE's editor gutter, or run tests using Gradle tasks:
+### 运行测试
 
-- Android tests: `./gradlew :shared:testAndroidHostTest`
-- Desktop tests: `./gradlew :shared:jvmTest`
-- Web tests:
-  - Wasm target: `./gradlew :shared:wasmJsTest`
-  - JS target: `./gradlew :shared:jsTest`
+使用 IDE 编辑器侧栏中的运行按钮，或执行以下 Gradle 任务：
+
+- Android 测试：`./gradlew :shared:testAndroidHostTest`
+- Desktop 测试：`./gradlew :shared:jvmTest`
+- Web 测试：
+  - Wasm 目标：`./gradlew :shared:wasmJsTest`
+  - JS 目标：`./gradlew :shared:jsTest`
 
 ---
 
-Learn more about [Kotlin Multiplatform](https://www.jetbrains.com/help/kotlin-multiplatform-dev/get-started.html),
-[Compose Multiplatform](https://github.com/JetBrains/compose-multiplatform/#compose-multiplatform),
-[Kotlin/Wasm](https://kotl.in/wasm/)…
+了解更多：[Kotlin Multiplatform](https://www.jetbrains.com/help/kotlin-multiplatform-dev/get-started.html)、[Compose Multiplatform](https://github.com/JetBrains/compose-multiplatform/#compose-multiplatform)、[Kotlin/Wasm](https://kotl.in/wasm/)。
 
-We would appreciate your feedback on Compose/Web and Kotlin/Wasm in the public Slack channel [#compose-web](https://slack-chats.kotlinlang.org/c/compose-web).
-If you face any issues, please report them on [YouTrack](https://youtrack.jetbrains.com/newIssue?project=CMP).
+欢迎在公共 Slack 频道 [#compose-web](https://slack-chats.kotlinlang.org/c/compose-web) 分享 Compose/Web 和 Kotlin/Wasm 的使用反馈。如遇问题，请通过 [YouTrack](https://youtrack.jetbrains.com/newIssue?project=CMP) 提交。

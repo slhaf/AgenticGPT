@@ -1,6 +1,6 @@
 # 目标架构（技术草案）
 
-> **状态：技术草案，受已确认的 D01–D08 约束。** 本文描述目标边界和迁移方向，不表示代码已经按此组织，也不得据此直接删除现有接口或改变权限、协议、部署方式。下文的目标逻辑模块、建议目录和 `OperationRequest` 等记号都是 illustrative proposals；只有带有当前源码/closure 证据的段落才是现状声明。
+> **状态：技术草案，受已确认的 D01–D08 约束。** 本文描述目标边界和迁移方向，不表示代码已经按此组织，也不得据此直接删除现有接口或改变权限、协议、部署方式。下文的目标逻辑模块、建议目录和 `OperationRequest` 等记号只是示意性提案；只有明确附有当前源码或闭环证据的段落才陈述现状。
 >
 > 适用决策： [D01](decisions.md#d01--room-是受控资源不是-agent-记忆运行时) · [D02](decisions.md#d02--room-远端能力必须补齐) · [D03](decisions.md#d03--一次升级明确迁移不刻意维持旧兼容) · [D04](decisions.md#d04--自用部署背景与具体副作用控制并存) · [D05](decisions.md#d05--browser-host-先盘点实际拓扑再收紧机制) · [D06](decisions.md#d06--持久化按正确性与用途分层) · [D07](decisions.md#d07--console-与本轮核心重构解耦) · [D08](decisions.md#d08--不借架构重构扩张范围)。这些决策确定本轮产品边界和工程取舍，不表示相关代码已经改造；剩余内容是实施细节，不是再次请求用户选择。
 >
@@ -11,7 +11,7 @@
 ### 1.1 目标
 
 Agentic 的长期定位仍是 **Agent 的受控执行基础设施**：在明确的入口、身份、策略和确认边界内，提供进程、文件、下游 MCP、终端、Browser、Skill、Room 资源访问，以及 Job 生命周期和运行观测。
-本规范与正式诊断的对应关系：A01（多入口合同）→§7；A02（Room cutover）→§6.5、§7.2；A03（visibility/capability/gate）→§2.4、§3、§6.1；A04（Hub 身份/连接）→§5、§7；A05（配置 reload）→§7.3；A06（信任保证）→§6.1、§6.3、§6.4、§9；A07（耐久性/投影）→§5；A08（Console）→§3.4、§6.6；A09（规范/验证漂移）→§7、[工程规则](engineering-rules.md)。这些是交叉索引，不把诊断结论改写为目标已落地。
+本目标稿与历史诊断编号的交叉索引：A01（多入口合同）→§7；A02（Room 接口收口）→§6.5、§7.2；A03（可见性/能力/准入）→§2.4、§3、§6.1；A04（Hub 身份/连接）→§5、§7；A05（配置热重载）→§7.3；A06（信任保证）→§6.1、§6.3、§6.4、§9；A07（耐久性/投影）→§5；A08（Console）→§3.4、§6.6；A09（规范/验证漂移）→§7、[工程规则](engineering-rules.md)。[历史诊断](../archive/architecture-diagnosis-2026-09-23.md)仅提供调查证据与根因背景，不是当前缺陷清单；这些编号是交叉索引，不表示目标已经落地。
 
 
 目标架构采用三类职责的组合，而不是再造一套完整 Agent Runtime：
@@ -113,11 +113,11 @@ Console Kotlin modules      （当前不编译依赖 Rust protocol/network clien
 2. **Local/Standalone/stdio**：目标路径是 local Unix、tunnel stdio、worker HTTP MCP、直接 stdio → Agent MCP framing/ingress → `RequestContext` + operation gate → 共享 value-returning operation/result layer → capability/approval gate → 执行核心和资源适配器。当前 checkout 的 Process Exec/Batch 已由 stdio 与 `local_service::dispatch_process` 共用 admission/Job path；其他 operation family 仍保留部分直接分支或选定 trampoline。WP2 已收紧共享 context/gate/resource owner，但没有声称一个 universal dispatcher 或已复现的行为故障。
 3. **Hub 控制面不反向调用自己的 transport**：HTTP route 与 Apps MCP 是两个入口适配器，二者共享 Hub operation/control logic；一个入口不得通过伪造另一个入口的 HTTP/MCP DTO 来实现复用。Hub wire DTO dispatch 仍由 protocol envelope/Hub agents owner 负责，未被 stdio DTO 替代。
  
-4. **TUI/CLI**：生产 Process TUI 是通过 Local Unix Process API 观察状态/列表，并按需读取输出与结果的客户端，不是执行器；配置 TUI 的 commit 是配置/secret 写入适配器。WP2 已让 tmux CLI 的四个既有操作经过显式本机管理准入；这不扩展为通用 CLI executor，也不移除其他 CLI 功能。
+4. **TUI/CLI**：生产 Process TUI 通过 Local Unix Process API 观察状态/列表，并按需读取输出与结果；它是客户端，不是执行器。配置 TUI 的 commit 是配置/secret 写入适配器。WP2 已为 tmux CLI 的四项本机管理操作（list、attach、create、close）设置显式 CLI 准入：当前实现会调用 `operation::authorize`，其 CLI 分支只按四个精确 operation 名称作 allowlist；CLI 路径不构造 `AppState`，因此不等于通常的 `AppState` policy/confirmation 流程。这不扩展为通用 CLI executor，也不移除其他 CLI 功能。
 
-当前实现的 Process API、metadata-only status/list 和独立 output/result retrieval，以及 breaking upgrade/旧数据库边界见[Process cutover 说明](../process-cutover.md)；目标描述不得恢复旧 `job.list` surface。
-5. **Console**：当前 Android attention 是 Room + AlarmManager/Notification 的 local-only 链；Hub connection field/按钮是 placeholder，不存在 Console→Hub 调用边。remote console、approval board、exec ledger 不属于本轮核心依赖；未来若作为独立产品接入，必须新增明确的 HTTP/WS/SSE client adapter、认证和状态 projection，不能把 token field 接上就宣称集成。
-6. **Browser**：Agent 的 `BrowserRuntimeManager`/Node kernel 与 `agentic-browser-host` extension bridge 是两个不同运行时边界。若二者需要交互，必须显式经过 bridge contract；不得凭共同的“Browser”命名推断共享 lease 或执行状态。
+当前 Process API 的 status/list 仅返回 metadata，output/result 通过独立接口按需读取；breaking upgrade 与旧数据库边界见[Process cutover 说明](../process-cutover.md)。目标描述不得恢复旧 `job.list` surface。
+5. **Console**：当前 Android attention 是由 Room、AlarmManager 和 Notification 构成的仅本地链路；Hub connection field/按钮只是 placeholder，不存在 Console→Hub 调用边。remote console、approval board、exec ledger 不属于本轮核心依赖；未来若作为独立产品接入，必须新增明确的 HTTP/WS/SSE client adapter、认证和状态 projection，不能因接入 token field 就宣称已经集成。
+6. **Browser**：Agent 的 `BrowserRuntimeManager`/Node kernel 与 `agentic-browser-host` extension bridge 是两个不同运行时边界。若二者需要交互，必须显式经过 bridge contract；不得凭共同的“Browser”命名推断它们共享 lease 或执行状态。
 
 ### 2.3.1 扩展放置（目标规则；不是当前实现声明）
 
@@ -128,37 +128,34 @@ Console Kotlin modules      （当前不编译依赖 Rust protocol/network clien
 
 ### 2.4 运行时分层
 
-目标上每个 Agent ingress 都经过如下逻辑层，目录名仅为建议：
+目标上，每个 Agent 入口都经过以下逻辑层；目录名仅为建议：
 
 ```text
-Ingress adapter
-  ├─ framing / decode / auth / profile / connection generation
-  ├─ ingress-specific schema and error projection
-  └─ translate to OperationRequest + RequestContext
+入口适配器
+  ├─ 帧处理 / 解码 / 认证 / profile / 连接代际
+  ├─ 入口专属 schema 与错误投影
+  └─ 转换为 OperationRequest + RequestContext
 
-Operation core
-  ├─ capability + policy + confirmation gate
-  ├─ managed Job admission/lifecycle (when applicable)
-  ├─ shared value/error semantics
-  └─ source-of-truth write or explicit projection event
+操作核心
+  ├─ capability / policy / confirmation 准入
+  ├─ managed Job 准入 / 生命周期（适用时）
+  ├─ 共享的值与错误语义
+  └─ 写入事实源或生成明确的投影事件
 
-Resource adapter
-  ├─ process/OS, file repository, downstream MCP, tmux
-  ├─ Room/Git, Skill workspace, Browser lease/kernel
-  └─ external tunnel/extension/notification services
+资源适配器
+  ├─ process / OS、文件 repository、下游 MCP、tmux
+  ├─ Room / Git、Skill workspace、Browser lease / kernel
+  └─ 外部 tunnel / extension / notification 服务
 
-Durability and projections
-  ├─ Agent job history / transport ledger / audit
+耐久性与投影
+  ├─ Agent Process 历史 / transport ledger / audit
   ├─ Hub run receipt / registry / connection projection
-  └─ Console local Room/UI cache or remote status projection
+  └─ Console 本地 Room / UI cache 或远端 status projection
 ```
 
-`stdio_server` 和 `local_service` 的工具/HubCommand 映射与错误/兼容转换已在 WP2 收入较窄的 context/gate/result 边界；当前源码进一步将 Process Exec/Batch 收束到 `local_service::dispatch_process`，但仍保留其他 operation family 的部分 stdio 直接资源分支与选定 HubCommand trampoline。Hub ingress 直接走 `local_service`。这是真实的 boundary/metadata 漂移已部分收口，不是两套执行器，也不是已复现的行为故障。后续 parity 工作仍应保留各 ingress 的 framing、schema、auth 和 projection 责任，按 operation family 逐步迁移，不先造覆盖所有入口的万能 schema、registry 或 dispatcher。破坏性接口变更通过一次升级迁移调用方和文档，不以长期兼容转换掩盖语义差异。
+`stdio_server` 与 `local_service` 的工具/HubCommand 映射及错误/兼容转换已在 WP2 纳入较窄的 context/gate/result 边界；当前源码进一步将 Process Exec/Batch 收敛到 `local_service::dispatch_process`，但其他 operation family 仍保留部分 stdio 直接资源分支和选定的 HubCommand trampoline。Hub ingress 直接进入 `local_service`。这表示边界/元数据漂移已部分收敛，不表示存在两套执行器或已复现行为故障。后续一致性核验仍应保留各入口的 framing、schema、auth 和 projection 职责，按 operation family 逐步迁移；不应先造覆盖所有入口的万能 schema、registry 或 dispatcher。破坏性接口变更应通过一次升级迁移调用方和文档，而非长期兼容转换来掩盖语义差异。
 
-WP2 implements the `RequestContext`/authorize seam in the existing Agent
-crate; `OperationRequest` in the target diagram remains a logical notation,
-not a newly introduced public type or framework. Hub protocol DTOs and wire
-dispatch remain separate.
+WP2 已在现有 Agent crate 中实现 `RequestContext`/`authorize` 接缝；目标图中的 `OperationRequest` 仍只是逻辑记号，并非新增的公开类型或框架。Hub protocol DTO 与 wire dispatch 仍保持分离。
 
 ## 3. 模块职责、禁止责任与建议边界
 
@@ -168,18 +165,18 @@ dispatch remain separate.
 
 | 当前路径/符号 | 目标逻辑模块 | 应负责 | 禁止负责 |
 |---|---|---|---|
-| `main.rs`、`supervisor.rs`、`tunnel_distribution.rs` | runtime composition / supervisor adapter | 选择 Local/Standalone/Hub mode，构造 `AppState`，管理 worker/tunnel 生命周期、lock、health 和 restart | 编排 provider/reasoning loop；让 supervisor 代替 operation core；把 worker token 当作公开 API |
-| `stdio_server.rs`、`local_control.rs`、`http_server.rs`、`http_oauth.rs` | Agent ingress adapters | MCP framing、tool descriptor/typed args、stdio resume、local peer UID、HTTP bearer/Origin/Host 约束、入口错误映射 | 自己实现第二套 job/policy/file/MCP executor；把 annotation 当 authorization；通过另一个 transport DTO 调用内部逻辑 |
-| `local_service.rs`、`operation.rs`、`operation_result.rs`、`state.rs` | operation core / request context | Agent-local operation identity、共享 value-returning operation、不可变 ingress/operation context、同步 admission、slim result projection、mode/profile/capability 组合；跨 Hub 的 Protocol mapping 只在 ingress/wire boundary 显式转换；保留有意的 Normal/Room/Tunnel/Hub 差异 | 持有 Hub 公共 registry 或 Room 文件；把 Protocol `HubCommand` 当所有内部操作的 union；把 `request_id` 当唯一 owner；吞掉 capability denial |
-| `process/managed.rs`、`storage/job_history.rs`、`process/exec.rs`、`operations/{policy,confirmation}.rs` | managed execution and approval | Agent Process runtime 拥有 Process/Skill/MCP admission、运行/取消/终态；`storage/job_history.rs` 实现当前 Process history（`process.sqlite3`）；policy/confirmation 负责各自 gate；保留 Skill run 复用 Process lifecycle 的关系 | Hub 远程运行；把 wait timeout 写成 cancel；把 SkillInstallStatus 与 Process state 合并；让任意入口绕过 gate 或审计 |
-| `file_ops.rs` + `agentic-apply-patch` 调用 | file resource operation | canonical path、reserved path、共享 `exec::normalize_roots` 的 configured write/read-only/deny roots、TOCTOU/revision、lock、stage、confirmation、commit 和 audit；路径 root expansion/resolution failure stage 必须保留；调用纯 patch 算法 | 在 patch crate 内加入 filesystem/policy；用 patch 成功代替写入成功；跳过二次 revalidate |
-| `mcp.rs` | downstream MCP adapter | server config、HTTP/stdio child、batch admission、并发、confirmation、cancel/timeout、结果和 audit | 把下游 provider 的任意副作用伪装为 core sandbox 已隔离；在 Hub 中复制下游 client |
-| `tmux.rs`、相关 CLI 路径 | terminal/tmux adapter | session/pane 观察、paste、structured exec、policy/confirmation（按 operation 分类）和外部 tmux 状态投影；CLI 仅四个既有本机 admin 操作并经过 gate | 让外部 tmux server 的生命周期成为 Hub 所有；保留绕过 AppState 的未审计 consequential path |
-| `hub.rs`、`transport_ledger.rs` | Hub ingress/transport client | WS/SSE Hello/heartbeat、connection generation、可靠 envelope、ACK/replay、run report、ReportingOnly 约束 | 公共 Hub auth/registry；把 reporting 当完整 audit；混淆 tunnel key、worker token、Hub API key |
-| `room/mod.rs`（建议边界：`repository`、`read/{diary,notebook,state}`、`maintenance`；当前对应 `room_repository.rs`、`room_reads.rs`、`room_maintenance.rs`） | Room resource adapter/owner | repository-relative path、symlink/root、schema/scaffold、bounded reads、semantic slots、Git/worktree/preflight/maintenance lock；按真实 seam 划分，不预建通用抽象 | Hub-owned notebook/diary 内容；通用长期记忆、context manager 或 reasoning loop；把维护 preflight 写成纯校验、凭 patch/检查成功声称提交完成、编造 ACID transaction，或静默复活旧 JSONL/append/update 语义 |
-| `skills.rs`、`skill_installs.rs`、`bootstrap.rs` | Skill/bootstrap resource adapters | `skills.rs` 拥有包 digest、activation lease 与 Skill 状态；`skill_installs.rs` 拥有安装 journal/staging/commit/recovery；Skill run 可借用 `jobs` 的 Process lifecycle，但安装/激活事实不归 Job history；bootstrap 只读/初始化受控资源 | provider orchestration、长期记忆；把安装状态当 Job terminal state；绕过 Process/Skill-specific policy 运行任意脚本 |
-| `browser_distribution.rs`、`browser_runtime.rs`、`browser_kernel.rs`、`browser_manager.rs`、`browser_manual.rs` | Browser runtime/resource adapter | package provenance、descriptor/cache discovery、Node kernel、named lease、reaper/reset、bounded manual docs read | 把 arbitrary JS 当作 core sandbox 已覆盖；把 browser lease 传播成 Hub durable state；把 Browser host 当同一实现 |
-| `audit.rs`、`private_state.rs`、`config*.rs` | local durability/config adapter | 配置分层、secret/config commit、private state、history/audit/retention/redaction | 让 best-effort audit 充当 command receipt；在 live reload 中替换 startup-only identity/root 而不重启 |
+| `main.rs`、`supervisor.rs`、`tunnel_distribution.rs` | 运行时组装/监督器适配器 | 选择 Local/Standalone/Hub mode，构造 `AppState`，管理 worker/tunnel 生命周期、lock、health 和 restart | 编排 provider/reasoning loop；让 supervisor 代替 operation core；把 worker token 当作公开 API |
+| `stdio_server.rs`、`local_control.rs`、`http_server.rs`、`http_oauth.rs` | Agent 入口适配器 | MCP framing、tool descriptor/typed args、stdio resume、local peer UID、HTTP bearer/Origin/Host 约束、入口错误映射 | 自己实现第二套 job/policy/file/MCP executor；把 annotation 当 authorization；通过另一个 transport DTO 调用内部逻辑 |
+| `local_service.rs`、`operation.rs`、`operation_result.rs`、`state.rs` | 操作核心/请求上下文 | Agent-local operation identity、共享 value-returning operation、不可变 ingress/operation context、同步 admission、slim result projection、mode/profile/capability 组合；跨 Hub 的 Protocol mapping 只在 ingress/wire boundary 显式转换；保留有意的 Normal/Room/Tunnel/Hub 差异 | 持有 Hub 公共 registry 或 Room 文件；把 Protocol `HubCommand` 当所有内部操作的 union；把 `request_id` 当唯一 owner；吞掉 capability denial |
+| `process/managed.rs`、`storage/process_history.rs`、`process/exec.rs`、`operations/{policy,confirmation}.rs` | 执行与审批 owner | Agent Process runtime 拥有 Process/Skill/MCP admission、运行/取消/终态；`storage/process_history.rs` 实现当前 Process history（`process.sqlite3`）；policy/confirmation 各自负责对应 gate；保留 Skill run 复用 Process lifecycle 的关系 | Hub 远程运行；把 wait timeout 写成 cancel；把 SkillInstallStatus 与 Process state 合并；让任意入口绕过 gate 或审计 |
+| `file_ops.rs` + `agentic-apply-patch` 调用 | 文件资源操作 | canonical path、reserved path、共享 `exec::normalize_roots` 的 configured write/read-only/deny roots、TOCTOU/revision、lock、stage、confirmation、commit 和 audit；路径 root expansion/resolution failure stage 必须保留；调用纯 patch 算法 | 在 patch crate 内加入 filesystem/policy；用 patch 成功代替写入成功；跳过二次 revalidate |
+| `mcp.rs` | 下游 MCP 适配器 | server config、HTTP/stdio child、batch admission、并发、confirmation、cancel/timeout、结果和 audit | 把下游 provider 的任意副作用伪装为 core sandbox 已隔离；在 Hub 中复制下游 client |
+| `tmux.rs`、相关 CLI 路径 | 终端/tmux 适配器 | 会话/窗格观察、粘贴、结构化执行、按 operation 分类的策略/确认及外部 tmux 状态投影；CLI 仅有四项既有本机管理操作。当前 CLI 调用 `operation::authorize` 的精确操作名白名单（allowlist），但不构造 `AppState`，不能把该白名单说成通常的 AppState 策略/确认流程 | 让外部 tmux server 的生命周期成为 Hub 所有；把本机白名单扩展成未经审查的通用执行入口，或将其误述为由 AppState 支持的副作用准入门 |
+| `hub.rs`、`transport_ledger.rs` | Hub 入口/传输客户端 | WS/SSE Hello/heartbeat、connection generation、可靠 envelope、ACK/replay、run report、ReportingOnly 约束 | 公共 Hub auth/registry；把 reporting 当完整 audit；混淆 tunnel key、worker token、Hub API key |
+| `room/mod.rs`（建议边界：`repository`、`read/{diary,notebook,state}`、`maintenance`；当前对应 `room_repository.rs`、`room_reads.rs`、`room_maintenance.rs`） | Room 资源适配器/owner | repository-relative path、symlink/root、schema/scaffold、bounded reads、semantic slots、Git/worktree/preflight/maintenance lock；按真实 seam 划分，不预建通用抽象 | Hub-owned notebook/diary 内容；通用长期记忆、context manager 或 reasoning loop；把维护 preflight 写成纯校验、凭 patch/检查成功声称提交完成、编造 ACID transaction，或静默复活旧 JSONL/append/update 语义 |
+| `skills.rs`、`skill_installs.rs`、`bootstrap.rs` | Skill/bootstrap 资源适配器 | `skills.rs` 拥有包 digest、activation lease 与 Skill 状态；`skill_installs.rs` 拥有安装 journal/staging/commit/recovery；Skill run 可借用 `jobs` 的 Process lifecycle，但安装/激活事实不归 Job history；bootstrap 只读/初始化受控资源 | provider orchestration、长期记忆；把安装状态当 Job terminal state；绕过 Process/Skill-specific policy 运行任意脚本 |
+| `browser_distribution.rs`、`browser_runtime.rs`、`browser_kernel.rs`、`browser_manager.rs`、`browser_manual.rs` | Browser 运行时/资源适配器 | package provenance、descriptor/cache discovery、Node kernel、named lease、reaper/reset、bounded manual docs read | 把 arbitrary JS 当作 core sandbox 已覆盖；把 browser lease 传播成 Hub durable state；把 Browser host 当同一实现 |
+| `audit.rs`、`private_state.rs`、`config*.rs` | 本地耐久性/配置适配器 | 配置分层、secret/config commit、private state、history/audit/retention/redaction | 让 best-effort audit 充当 command receipt；在 live reload 中替换 startup-only identity/root 而不重启 |
 
 执行核心中的 `jobs/exec/policy/confirmation/file_ops/mcp/tmux/Room/Browser` 仍应被视为共享实现；Local、Standalone 和 Hub agent 入口只改变 transport/profile/capability，不复制执行器。
 
@@ -187,15 +184,15 @@ dispatch remain separate.
 
 | 当前路径/符号 | 目标逻辑模块 | 应负责 | 禁止负责 |
 |---|---|---|---|
-| `main.rs`、`routes.rs` | HTTP control ingress | 监听、action auth、HTTP DTO、错误投影、路由 composition；调用 Hub neutral control/receipt helper | 打开 Agent 文件、spawn shell、直接调用 tmux/MCP downstream/Browser；拥有 Apps MCP schema |
-| `mcp_server.rs`、`agentic_result.rs` | Apps MCP ingress/projection | initialize、OAuth/profile/tool descriptor、typed args、JSON-RPC、native Hub query、执行请求投递和 MCP result projection；可消费 neutral Hub projection | 把 Apps MCP schema 当 Agent-local schema；调用 HTTP route 复用；把 `read_only/destructive/open_world` 注释直接当安全 gate |
-| `oauth.rs` | MCP auth/session adapter | PKCE、allowlist、Bearer validation、resource/scope 约束、明确的 restart/session 语义 | 用 OAuth token 自动获得 Agent secret 或细粒度权限；未配置可信 public base 时假定代理可信 |
-| `registry.rs`、部分 `state.rs` | Agent registry and connection projection | enabled、alias、secret hash、capability/last-seen 摘要；当前 connection lease 投影 | 持有执行结果的最终效果；把 registry capability 摘要当 Agent runtime authorization 的唯一依据 |
-| `agents/{transport,lifecycle,dispatch}` | connection/dispatch/coordination | connection generation、mode/role、pending owner tuple、可靠 envelope、replay/late result 校验、confirmation coordination | 无 owner 校验地消费 waiter；让 stale 非可靠消息更新当前 projection；无条件把 `store_result` failure 当成功 |
-| `runs.rs`、`db.rs` | durable control-plane receipts | `agent_runs` command/hash/ack/status/result/conflict/reason/history、schema/retention/migration；区分 not-sent/sent-unknown/acked/wait-expired/remote-unknown | 把 receipt 当远端副作用证明；把同步 timeout 当远端 cancel；无限增长的 job cache 当历史库 |
-| `room.rs` | active Room lease / RPC façade | active `(agent_id, connection_id)` lease、Room request routing、按入口投影结果/错误和必要的窄 surface adapter | 打开 Room 文件或保存长期 Room content；把 active pointer 当文件锁/持久所有权；以透明 alias/shim 隐藏必需远端能力或把不等价 maintenance 当旧 append/update |
-| `notify.rs` | delivery adapter | Agent freedesktop、ntfy 和明确 unavailable 的 Android 状态；投递结果/健康状态 | 借通知接口引入 reminder/task scheduler；把 Android registration placeholder 说成 delivery |
-| `instance_lock.rs`、`utils.rs` | process/security guard | 单 DB serve lock、ID/token/hash 工具、constant-time comparison | 代替业务 owner validation 或持久化设计 |
+| `main.rs`、`routes.rs` | HTTP 控制入口 | 监听、action auth、HTTP DTO、错误投影、路由 composition；调用 Hub neutral control/receipt helper | 打开 Agent 文件、spawn shell、直接调用 tmux/MCP downstream/Browser；拥有 Apps MCP schema |
+| `mcp_server.rs`、`agentic_result.rs` | Apps MCP 入口/投影 | initialize、OAuth/profile/tool descriptor、typed args、JSON-RPC、native Hub query、执行请求投递和 MCP result projection；可消费 neutral Hub projection | 把 Apps MCP schema 当 Agent-local schema；调用 HTTP route 复用；把 `read_only/destructive/open_world` 注释直接当安全 gate |
+| `oauth.rs` | MCP 认证/session 适配器 | PKCE、allowlist、Bearer validation、resource/scope 约束、明确的 restart/session 语义 | 用 OAuth token 自动获得 Agent secret 或细粒度权限；未配置可信 public base 时假定代理可信 |
+| `registry.rs`、部分 `state.rs` | Agent 注册与连接投影 | enabled、alias、secret hash、capability/last-seen 摘要；当前 connection lease 投影 | 持有执行结果的最终效果；把 registry capability 摘要当 Agent runtime authorization 的唯一依据 |
+| `agents/{transport,lifecycle,dispatch}` | 连接/分发/协调 | connection generation、mode/role、pending owner tuple、可靠 envelope、replay/late result 校验、confirmation coordination | 无 owner 校验地消费 waiter；让 stale 非可靠消息更新当前 projection；无条件把 `store_result` failure 当成功 |
+| `runs.rs`、`db.rs` | 控制面持久化收据 | `agent_runs` command/hash/ack/status/result/conflict/reason/history、schema/retention/migration；区分 not-sent/sent-unknown/acked/wait-expired/remote-unknown | 把 receipt 当远端副作用证明；把同步 timeout 当远端 cancel；无限增长的 job cache 当历史库 |
+| `room.rs` | active Room 租约/RPC 门面 | active `(agent_id, connection_id)` lease、Room request routing、按入口投影结果/错误和必要的窄 surface adapter | 打开 Room 文件或保存长期 Room content；把 active pointer 当文件锁/持久所有权；以透明 alias/shim 隐藏必需远端能力或把不等价 maintenance 当旧 append/update |
+| `notify.rs` | 投递适配器 | Agent freedesktop、ntfy 和明确 unavailable 的 Android 状态；投递结果/健康状态 | 借通知接口引入 reminder/task scheduler；把 Android registration placeholder 说成 delivery |
+| `instance_lock.rs`、`utils.rs` | 进程/安全防护 | 单 DB serve lock、ID/token/hash 工具、constant-time comparison | 代替业务 owner validation 或持久化设计 |
 
 Hub 内部的 `HubState` 是控制面运行时组合根，不是所有领域状态的总仓库。`active_room` 是租约，`jobs` 是缓存 projection，OAuth token、pending confirmation 和临时 cache 是易失 session；已产生的 confirmation result、Process history 和错误原因则按实际结果 owner 的 retention 尽量保留。它们都不能冒充 Agent 或 Room 的 source of truth；pending 会话失效也不能推断已批准、已取消或任务已停止。
 
@@ -225,7 +222,7 @@ Browser host 当前 socket `/tmp/codex-browser-use` 的 mode 为 0660，调查�
 | `example/agentic-tui-ux-demo` | visual prototype | 展示视觉/交互原则，作为可选参考 | 生产配置、Hub rows、process 状态、文件写入或 runtime 事实来源 |
 | `crates/agentic-gpt/src/tui`、`config_tui` | production TUI adapters | TUI 观察 Local Job、配置 draft/review/commit、secret redaction | 创建第二 Job executor；把 demo 静态内容当真实 Hub projection |
 
-Console 当前 Android 本地 attention 的 source-level transition owner 已收口到 `AttentionRuntimeCoordinator`/`AttentionTransitionPolicy`：Room 是数据权威，OS alarm/notification 是副作用，overdue restore 使用 atomic claim，snooze 传递完整 item payload。`:shared:jvmTest` 17-task BUILD SUCCESSFUL 仅覆盖 shared 纯 `AttentionTransitionPolicy` 测试与 common Kotlin compile，不覆盖 Android app/Room/OS；`console/settings.gradle.kts` 是独立 Gradle root，Android app host test/assemble、device/emulator 与 OS smoke 仍未取得证据。根 Rust CI/release 不覆盖其 Android/桌面/Web 行为。`HubConnectionCard` 以及 Android settings 的测试按钮仍是 placeholder；`console/shared` 未有 HTTP client、Bearer、Hub protocol，`AndroidManifest.xml` 未声明 `INTERNET` 权限（证据：`console-survey.md` §1–§3）。remote Console 保持独立未来产品。
+Console 当前 Android 本地 attention 的源码层 transition owner 已收敛到 `AttentionRuntimeCoordinator`/`AttentionTransitionPolicy`：Room 是数据权威，OS alarm/notification 是副作用，overdue restore 使用 atomic claim，snooze 传递完整 item payload。`:shared:jvmTest` 于 2026-09-23 有一条 17 项任务的成功运行记录，仅覆盖 shared `AttentionTransitionPolicy` 测试与 common Kotlin 编译，不覆盖 Android app/Room/OS；`console/settings.gradle.kts` 是独立 Gradle root，Android app host test/assemble、device/emulator 与 OS smoke 仍未取得证据。根 Rust CI/release 不覆盖其 Android/桌面/Web 行为。`HubConnectionCard` 以及 Android settings 的测试按钮仍是 placeholder；`console/shared` 未有 HTTP client、Bearer、Hub protocol，`AndroidManifest.xml` 未声明 `INTERNET` 权限（证据：`console-survey.md` §1–§3）。remote Console 保持独立未来产品。
 
 ## 4. 当前路径到目标逻辑模块映射
 
@@ -315,13 +312,13 @@ principal/auth context
 
 ### 6.1 Process、Job 与 terminal
 
-**目标放置**：`operation/execution`（现有 `process/managed.rs`、`process/exec.rs`、`operations/policy.rs`、`operations/confirmation.rs`）拥有 admission、policy、confirmation、spawn、monitor、cancel 和 Process lifecycle/terminal state；`storage/job_history.rs` 持有当前 Process history（`process.sqlite3`）的终态持久化与恢复。Hub/stdio/local/HTTP/TUI 只做入口/投影，Skill install/activation state 仍归 `skills.rs`/`skill_installs.rs`。
+**目标放置**：`operation/execution`（现有 `process/managed.rs`、`process/exec.rs`、`operations/policy.rs`、`operations/confirmation.rs`）拥有 admission、policy、confirmation、spawn、monitor、cancel 和 Process lifecycle/terminal state；`storage/process_history.rs` 持有当前 Process history（`process.sqlite3`）的终态持久化与恢复。Hub/stdio/local/HTTP/TUI 只做入口/投影，Skill install/activation state 仍归 `skills.rs`/`skill_installs.rs`。
 
 **规则**：
 
 - `exec::preflight` 的路径启发式检查不等于 OS sandbox；`bwrap` 当前受配置控制且默认关闭，不能在文档中宣称 generic process 已被 roots 隔离。
 - sandbox enforcement、外部执行的信任假设和既有安全默认必须分开描述；自用可控环境不等于脚本/MCP/Browser代码完全可信。本轮不改变 sandbox 默认、policy override 或权限模型，也不把未受 core sandbox 约束的 MCP stdio/Browser JS/tmux/tunnel child 说成同一安全等级。caller wait timeout 不能覆盖资源自身可终止的 execution deadline；二者必须使用不同状态和 evidence。
-- 每个 entry 都必须经过相同 operation authorization/gate；CLI `tmux create/close` 等现有绕过路径属于待收敛债务，不应复制。
+每个入口都必须经过与其权限和副作用相匹配的准入检查；这不要求所有入口调用同一个 gate。当前 CLI `tmux` 的四项操作会调用 `operation::authorize`，但其 CLI 分支只按 operation 名称 allowlist 准入，且该路径不构造 `AppState`，因此不经过通常的 `AppState` policy/confirmation 流程。不要把它写成完全绕过 `authorize`，也不要把 allowlist 说成与效果策略/确认等价的 gate。
 
 ### 6.2 File 与 apply-patch
 
@@ -362,8 +359,8 @@ Room 是受控文件/文档资源，不是通用 memory；D02 已确定所需 Ro
 - **建议模块边界（仅技术布局，不表示代码已搬）**：`room/mod.rs` 作为模块入口，按真实 seam 划分 `repository`（repository-relative path、root、symlink、schema/scaffold、Git readiness）、`read/{diary,notebook,state}`（各资源的 bounded read）和 `maintenance`（semantic slot、预期变更、worktree/tar preflight、受控写入/提交）。
 - Room maintenance 是真实副作用链：本地操作可能写入文件、创建 worktree 或 archive、运行 executor、提交 Git，并可由 `auto_push` 产生或使用 Git remote；workflow 也可以采用本地 request/Git。应复用 Agent 已有的 policy、path/symlink/Git/lock/clean-tree/expected-change/executor/controlled-maintenance authority gate 并留下结果 evidence；不得另造流程 confirmation gate，不能把 preflight 写成纯校验或编造 ACID transaction。
 - Hub `room.rs` 只拥有 active Room `(agent_id, connection_id)` lease、路由与结果/错误投影；Hub 不打开 Room 文件，不把内容装入长期 `HubState`。通用 run receipt 可以保留有界 operation result，但不构成 Room 内容 authority；实际内容、文件/Git 副作用和提交事实仍由 Agent Room repository 所有。
-- WP-R 已由 Hub→Protocol→Agent 的九个当前语义 operation 覆盖产品要求的 Room 远端读与维护语义；远端与本地应在 operation、权限、错误和生命周期上对齐，但不要求机械复制 transport envelope 或同一输入/输出 schema。各入口应有明确的 surface adapter/parity 记录，且该实现已通过当前 live gate。
-- WP-R 已将 Hub Full/HTTP/Protocol/Agent surface 收口到上述九个 operation；`recent/search` 保留公共 operation 名称但采用当前 Markdown DTO 语义。旧 JSONL/legacy HubCommand 路径已在 caller、descriptor、OpenAPI/Protocol 与文档迁移后退出当前 contract，旧 passage/date/append/update/remove 语义不做静默映射，也不添加长期透明 alias/shim。旧分叉描述仅保留为历史调查基线；当前 live gate 已通过，不构成生产 tunnel/GitHub 部署声明。
+WP-R 已由 Hub→Protocol→Agent 的九个当前语义 operation 覆盖产品要求的 Room 远端读与维护语义；远端与本地应在 operation、权限、错误和生命周期上对齐，但不要求机械复制 transport envelope 或同一输入/输出 schema。各入口应有明确的 surface adapter/parity 记录；九项操作的 live gate 于 2026-09-22 记录为通过。
+WP-R 已将 Hub Full/HTTP/Protocol/Agent surface 收口到上述九个 operation；`recent/search` 保留公共 operation 名称但采用当前 Markdown DTO 语义。旧 JSONL/legacy HubCommand 路径已在 caller、descriptor、OpenAPI/Protocol 与文档迁移后退出当前 contract，旧 passage/date/append/update/remove 语义不做静默映射，也不添加长期透明 alias/shim。旧分叉描述仅保留为历史调查基线；2026-09-22 的 live gate 记录为通过，不构成生产 tunnel/GitHub 部署声明。
 
 ### 6.6 Console、Android attention 与 TUI
 
@@ -386,7 +383,7 @@ Room 是受控文件/文档资源，不是通用 memory；D02 已确定所需 Ro
 - lifecycle（wait、cancel、late result、unknown）；
 - 迁移影响、发布/部署组合和回退边界；不要求各 transport 使用同一 schema。
 
-WP4-A 前的 A01 Job/OpenAPI drift（例如 `startedAt` optionality、分页/等待字段和 cancel projection）是**历史基线**，不能当成当前行为失败或要求 Protocol 吞并 HTTP schema。当前本地 gate 由 `scripts/check_contract_parity.py` 负责 schema/local-ref、选定 response/descriptor 与 loopback live checks；WP-R 九个 Room operation 的 OpenAPI/HTTP projection 已更新并通过 live gate。仍未由该 gate 证明 strict 外部 Actions importer、外部 Apps client、生产 tunnel/cloud、完整 Protocol-wire lifecycle 或 release/tag 组合；`openapi/agents-minimal.yaml` 也不得因存在即宣称被 CI/runtime 使用。
+WP4-A 前的 A01 Job/OpenAPI drift（例如 `startedAt` optionality、分页/等待字段和 cancel projection）是**历史基线**，不能当成当前行为失败或要求 Protocol 吞并 HTTP schema。当前本地 gate 由 `scripts/check_contract_parity.py` 负责 schema/local-ref、选定 response/descriptor 与 loopback live checks；WP-R 九个 Room operation 的 OpenAPI/HTTP projection 已更新，对应 live gate 于 2026-09-22 记录为通过。仍未由该 gate 证明 strict 外部 Actions importer、外部 Apps client、生产 tunnel/cloud、完整 Protocol-wire lifecycle 或 release/tag 组合；`openapi/agents-minimal.yaml` 也不得因存在即宣称被 CI/runtime 使用。
 
 ### 7.2 公开合同与 clean cutover
 
@@ -400,7 +397,7 @@ WP4-A 前的 A01 Job/OpenAPI drift（例如 `startedAt` optionality、分页/等
 
 startup-only identity/root/resource 字段与 live-safe policy/limits 字段必须分层；不能热加载一整份 config 后留下旧 `private_state`、Job history、Browser manager、Hub connection 与新 identity/root 不一致。当前 Agent Process/Skill admission 与 managed batch 已统一采用 admission-time `Arc<Config>` snapshot，queued workers 不重新读取 live policy；后续 admission 才使用 reload 后 config。startup supervisor watcher 保持独立，字段分类变化仍须 deterministic reload 验证，无法证明 live-safe 的字段要求 restart。
 
-release preflight 由 same-SHA checkout 驱动，并校验 `RELEASE_TAG`、Agent/Hub Cargo version 精确匹配、fmt/check/test/build 与 bounded contract parity；当前本地 `v0.9.1` preflight/parity 在可达镜像环境通过，故意的 mismatch guard 也已覆盖。strict Clippy 既有 CI debt 不属于该 preflight；hosted publication、cross-build/ARM runtime、external importer 与生产部署仍须单独取证。
+release preflight 由 same-SHA checkout 驱动，并校验 `RELEASE_TAG`、Agent/Hub Cargo version 精确匹配、fmt/check/test/build 与 bounded contract parity；2026-09-23 的历史记录显示，在可达镜像环境中本地 `v0.9.1` preflight/parity 通过，且故意的 `v0.0.0` mismatch guard 按预期拒绝。strict Clippy 既有 CI debt 不属于该 preflight；hosted publication、cross-build/ARM runtime、external importer 与生产部署仍须单独取证。
 
 ## 8. 保留项与拒绝的替代方案
 
@@ -435,11 +432,11 @@ release preflight 由 same-SHA checkout 驱动，并校验 `RELEASE_TAG`、Agent
 1. Browser host 在 Neko/container/共享目录/Unix socket 拓扑中的具体 peer/auth、组/文件权限或 token 机制，以及对应的部署检查；不预选 owner-only，也不允许无授权网络暴露。
 2. generic Process、MCP stdio、Browser JS、tmux 和 tunnel child 的 effect/trust 分类及其逐操作的 policy/confirmation/evidence 表达；本轮不改变 sandbox 默认、policy override 或权限模型，不扩大公网多租户威胁模型。
 3. operation core 的最小 `RequestContext`/authorization helper 接口；不预设一个跨所有 projection 的万能 registry。
-4. WP-R 九个当前 Room operation 的精确输入/输出、错误、权限、生命周期和 surface adapter 已实现，caller/descriptor/OpenAPI/Protocol/文档迁移已完成，并通过当前 live gate；维护仍以 Agent 既有 safeguards/controlled-maintenance authority 为准，不新增流程 confirmation gate。生产 tunnel/GitHub 部署不在该证据范围内。
+4. WP-R 九个当前 Room operation 的精确输入/输出、错误、权限、生命周期和 surface adapter 已实现，caller/descriptor/OpenAPI/Protocol/文档迁移已完成；live gate 于 2026-09-22 记录为通过。维护仍以 Agent 既有 safeguards/controlled-maintenance authority 为准，不新增流程 confirmation gate。生产 tunnel/GitHub 部署不在该证据范围内。
 5. HTTP/OpenAPI、Hub Apps MCP、Agent-local descriptors、Protocol wire 的 parity checker 与各自 authority 的变更顺序；不要求同一 transport schema。
 6. Console 本地 Attention 的独立维护细节；remote console、approval board、exec ledger 的 transport、token/TLS/CORS 和 status projection 只有在另立产品时再设计，不作为核心完成门槛。
 7. config startup/live 字段清单，以及 correctness/history/observability 各层的 durability、retention、secret projection、crash/recovery 规则；OAuth/pending confirmation/cache 可在 Hub 重启失效，但已产生的 confirmation result、Process history 和错误原因按 owner/retention 尽量保留。
-8. Agent operation routing 的窄收敛只能按 operation family 逐步迁移：Process Exec/Batch 已通过 `dispatch_process` 共享 adapter，其他直接 stdio operation 与 HubCommand wire operation 仍是结构残余；共享 gate/resource owner 不是行为 parity 的证明。本轮未复现行为失败，也不因此要求 universal dispatcher。
-9. Release preflight 的 same-SHA/version/fmt/check/test/build/parity source gate 与 bounded local pass 已记录；hosted tag/live publication、artifact/version pairing on hosted runners、strict external importers、生产 tunnel/cloud、ARM runtime、外部 Browser/MCP effects 与 Console 设备行为仍需各自 owner 单独核验。文档目标不把这些外部边界写成已验证，也不把 Console remote product 拉入核心依赖。
+8. Agent operation routing 的窄收敛只能按 operation family 逐步迁移：Process Exec/Batch 已通过 `dispatch_process` 共享 adapter，其他直接 stdio operation 与 HubCommand wire operation 仍是结构残余；共享 gate/resource owner 不是行为 parity 的证明。2026-09-23 的结构复审未复现行为失败，也不因此要求 universal dispatcher。
+9. Release preflight 的 same-SHA/version/fmt/check/test/build/parity 源码 gate 与有界本地运行结果已记录（2026-09-23）；GitHub tag/live publication、托管 runner 上的 artifact/version pairing、strict external importers、生产 tunnel/cloud、ARM runtime、外部 Browser/MCP effects 与 Console 设备行为仍需各自 owner 单独核验。文档目标不把这些外部边界写成已验证，也不把 Console remote product 拉入核心依赖。
 
-以上决策已确认；WP-R 当前 Room contract 已实现并通过 live gate，但本文仍是其他领域的目标/技术草案，不是全局实现证明。coding agent 必须按当前代码和安全边界实施，不能把未落地的目标段落当作 API；破坏性改动须随真实实现交付迁移文档和实际验证证据。
+以上决策已确认；WP-R 的当前 Room contract 已实现，live gate 于 2026-09-22 记录为通过。本文仍是其他领域的目标/技术草案，不是全局实现证明。编码代理必须按当前代码和安全边界实施，不能把未落地的目标段落当作 API；破坏性改动须随真实实现交付迁移文档和实际验证证据。

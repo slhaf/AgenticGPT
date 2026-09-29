@@ -1,6 +1,6 @@
 # 开发
 
-本文档记录源码开发、本地验证、CI 和 release 发布流程。正常安装和使用请从主 [README 中文版](../README.zh-CN.md) 开始。
+本文档记录源码开发、本地验证、CI 和 release 发布流程。正常安装和使用请从主 [README 中文版](../README.zh-CN.md) 开始。对应页面：[开发说明](development.md)。
 
 ## 修改前先确认架构
 

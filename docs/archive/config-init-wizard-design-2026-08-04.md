@@ -1,7 +1,13 @@
 # AgenticGPT 配置初始化向导与可发现 CLI 设计
 
+> **归档记录（2026-09-29）**
+> - **归档状态：** 已归档的历史设计；交互向导方案后由 2026-08-07 全屏 TUI 设计部分取代，本文不作为当前 CLI 行为依据。
+> - **原始日期/状态：** 2026-08-04；待用户复核（原文状态）。
+> - **版本范围：** 未关联独立发布版本；本文为 2026-08-04 设计快照。
+> - **当前权威：** [配置说明](../configuration.zh-CN.md)、[`config_cli.rs`](../../crates/agentic-gpt/src/config/config_cli.rs) 与 [`config_tui`](../../crates/agentic-gpt/src/ui/config_tui/mod.rs)。后继设计见[2026-08-07 全屏 TUI 设计](config-init-fullscreen-tui-design-2026-08-07.md)。
+
 日期：2026-08-04  
-状态：待用户复核
+状态：原始状态为“待用户复核”（2026-08-04），不代表当前状态
 
 ## 背景
 

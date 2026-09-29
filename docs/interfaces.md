@@ -1,225 +1,117 @@
-# Interfaces
+# 接口说明
 
-The recommended Standalone runtime exposes the Normal/Room MCP surface directly
-through Secure MCP Tunnel and owner-only Unix MCP. Its transport and tool
-contract is documented in [`standalone-runtime.md`](standalone-runtime.md).
+推荐的 Standalone 运行时通过 Secure MCP Tunnel 和仅所有者可访问的 Unix MCP 直接暴露 Normal/Room MCP 接口面。其传输和工具契约见 [`standalone-runtime.md`](standalone-runtime.md)。
 
-This page primarily maps the optional Rust Hub surfaces: GPT Actions, Apps MCP,
-Hub-native tools, and the Hub-to-Agent protocol.
+本文主要梳理可选 Rust Hub 的接口面：GPT Actions、Apps MCP、Hub 原生工具以及 Hub 到 Agent 的协议。
 
-The cross-surface use/non-use, conditional-input, bounds, lifecycle, and parity
-matrix is maintained in [`tool-contract-matrix.md`](tool-contract-matrix.md).
+跨接口面的用途/不用途、条件输入、范围、生命周期和一致性矩阵见 [`tool-contract-matrix.md`](tool-contract-matrix.md)。
 
-## Agent ingress and operation boundary (WP2)
+## Agent 接入与操作边界（WP2）
 
-The Agent keeps one narrow internal admission boundary without introducing a
-new framework or registry. Each adapter creates an immutable
-`RequestContext { ingress, operation }`; `operation::authorize(runtime, config,
-context)` checks the real ingress plus namespace/toolset and capability rules.
-Descriptor annotations such as `read_only`, `destructive`, and `open_world`
-remain discovery/client metadata and are never authorization.
+Agent 通过一个范围狭窄的内部准入边界处理请求，不引入新的框架或注册表。每个适配器都会创建不可变的 `RequestContext { ingress, operation }`；`operation::authorize(runtime, config, context)` 会根据真实接入来源以及命名空间/工具集和能力规则进行检查。`read_only`、`destructive`、`open_world` 等描述符注解仍是发现/客户端元数据，绝不构成授权。
 
-Ingress-specific authentication, framing, and error envelopes remain distinct:
-local Unix retains its UID/socket guard and `local:` source prefix; Tunnel
-stdio uses `tunnel:`; worker HTTP MCP retains bearer/Host/Origin/session
-handling and `http:`; Hub WS/SSE retains its protocol envelope/replay and
-`hub:` source; CLI uses `localadmin:`. The CLI gate is intentionally limited
-to the four existing local tmux administration operations. HTTP/MCP, Hub wire,
-and local stdio/Unix result projections may differ at the transport boundary,
-while shared Agent operations use the same value/error and slim Process/Skill
-result layer.
+各接入路径的身份验证、封装和错误封套仍互相独立：本地 Unix 保留 UID/套接字防护和 `local:` 来源前缀；Tunnel stdio 使用 `tunnel:`；worker HTTP MCP 保留 bearer、Host/Origin/session 处理并使用 `http:`；Hub WS/SSE 保留其协议封套/重放行为并使用 `hub:`；CLI 使用 `localadmin:`。CLI 准入门有意限制为现有四项本地 tmux 管理操作。HTTP/MCP、Hub wire 和本地 stdio/Unix 的结果投影可以在传输边界上有所不同，而共享 Agent 操作使用同一套值/错误和精简 Process/Skill 结果层。
 
-Normal is not an alias for Room: a Normal runtime may use Room only when the
-`room` namespace is explicitly enabled. Hub keeps its existing Room toolset,
-Skills capability/profile, and notification capability rules. Policy, path,
-confirmation, lease, and resource owners still decide actual side effects;
-this boundary does not make Hub an executor or claim generic OS sandboxing.
+Normal 并不等于 Room：只有显式启用 `room` 命名空间时，Normal 运行时才可使用 Room。Hub 保留现有 Room 工具集、Skills 能力/配置档和通知能力规则。实际副作用仍由策略、路径、确认、租约和资源所有者决定；此边界不会使 Hub 成为执行方，也不声称提供通用 OS 沙箱。
 
-Reload applies the existing live-safe subset (`policy`, `limits`, `mcpServers`,
-`toolsets`, `httpMcp`; `pathPolicy` only when `workspaceRoot` is unchanged)
-without reconstructing startup-derived resources. Identity/mode/profile,
-workspace/runtime/socket, Browser configuration as a whole (not only
-`browser.runtime`), history/install, and related resource-owner
-changes require restart. Enabling Room prepares the existing live root before
-the new subset is used.
+重载会应用现有的安全实时更新子集（`policy`、`limits`、`mcpServers`、`toolsets`、`httpMcp`；仅当 `workspaceRoot` 未改变时重载 `pathPolicy`），且不会重建启动时派生的资源。身份/模式/配置档、workspace/runtime/socket、整个 Browser 配置（不只是 `browser.runtime`）、history/install 及相关资源所有者变更都需要重启。启用 Room 时，会先准备现有实时根目录，再使用新子集。
 
-`agentic-gpt local` is the Unix MCP client and uses the ordinary MCP
-operation gate with `local:` provenance. It is distinct from
-`agentic-gpt tmux`, whose CLI-admin gate admits only
-`tmux.listSessions`, `tmux.attach`, `tmux.createSession`, and
-`tmux.closeSession` and records `localadmin:` provenance. MCP
-`tmux.sessions`, `tmux.panes`, `tmux.exec`, and `tmux.pasteText` are not those
-four CLI-admin operations.
+`agentic-gpt local` 是 Unix MCP 客户端，使用常规 MCP 操作准入门并记录 `local:` 来源。它不同于 `agentic-gpt tmux`：后者的 CLI 管理准入门仅允许 `tmux.listSessions`、`tmux.attach`、`tmux.createSession` 和 `tmux.closeSession`，并记录 `localadmin:` 来源。MCP `tmux.sessions`、`tmux.panes`、`tmux.exec` 和 `tmux.pasteText` 不属于这四项 CLI 管理操作。
 
-## GPT Actions API
+## GPT Actions API 端点
 
-The GPT Actions API is described by `openapi/hub.yaml` and is protected by the Hub API key.
+GPT Actions API 由 `openapi/hub.yaml` 描述，并受 Hub API key 保护。
 
-`openapi/hub.yaml` is the supported current OpenAPI artifact. The checked-in
-`openapi/agents-minimal.yaml` is historical/noncanonical reference material,
-not a runtime or CI gate; readers should not import it for the current API.
+`openapi/hub.yaml` 是当前受支持的 OpenAPI 工件。仓库中签入的
+`openapi/agents-minimal.yaml` 仅供历史/非规范参考，不是运行时或 CI 门禁；
+当前 API 的调用方不应导入该文件。
 
-Core endpoints:
+核心端点：
 
-- `GET /v1/info`: safe Hub runtime summary.
-- `GET /v1/agents`: enabled local agents with online status and safe config summaries.
-- `POST /v1/process/exec`: start one managed process and wait briefly. The request requires `agentId`, `program`, `args`, and `needConfirm`; optional `workingDirectory`, `group` (1–32 characters), and bounded `waitSeconds` are supported. The response is flattened `ProcessResponse`. Complete inline output/result is included only when the serialized creation response fits within 8 KiB; overflow output is represented by a shared stdout/stderr preview capped at 2 KiB.
-- `POST /v1/process/batch`: atomically admit a managed process batch. The request requires `agentId`, `elements`, and `needConfirm`; it supports batch-level `workingDirectory`, per-element overrides, and optional `group` inherited by children. The response is `ProcessBatchResponse` with ordered child projections under one shared 8 KiB complete-inline budget and bounded output previews.
-- `GET /v1/process?agentId=...`: list active or recently retained process metadata with optional `group`, kind, state, limit, and cursor filters. `limit` defaults to 50 and is capped at 100. When the Agent is unavailable, Hub may return cached metadata for the first page, but does not continue an Agent-issued cursor from cache.
-- `GET /v1/process/{processId}?agentId=...&waitSeconds=...`: inspect process status metadata only, or briefly wait; `waitSeconds` defaults to 0 and is capped at 30. Status never includes stdout, stderr, or result bodies.
-- `GET /v1/process/{processId}/output?agentId=...&cursor=...&maxBytes=...`: read non-consuming stdout/stderr pages. The cursor is process-bound and advances raw-byte offsets for both streams; `maxBytes` defaults to 8 KiB and is capped at 32 KiB. Responses preserve invalid UTF-8 with base64 and report retention gaps and EOF explicitly.
-- `GET /v1/process/{processId}/result?agentId=...&maxBytes=...`: retrieve a complete retained structured result or a truthful `complete`, `too_large`, or `unavailable` status. `maxBytes` defaults to 8 KiB and is capped at 512 KiB; oversized results are never partial JSON, and Hub metadata cache never supplies result content.
-- `POST /v1/process/{processId}/cancel?agentId=...`: request kind-aware cancellation and return observed outcome/termination evidence; timeout or missing response is not evidence of cancellation.
-- `POST /v1/mcp/servers`: list MCP servers configured inside one local agent, or omit `agentId` to group MCP servers for all currently connected agents.
-- `POST /v1/mcp/tools`: list tools exposed by one MCP server.
-- `POST /v1/mcp/callTool`: start one managed downstream MCP tool process through the selected local agent. The HTTP response is a flattened `ProcessResponse`; complete inline output/result follows the 8 KiB creation-response budget and overflow output is bounded by a shared 2 KiB preview. `waitSeconds` defaults to 5 and is capped at 30; a wait timeout does not cancel the process. `timeoutSeconds` defaults to 300 and is capped at 900.
-- `POST /v1/mcp/batch`: atomically admit 1–16 ordered downstream MCP child processes. The response is a `McpBatchToolResponse` with a shared 8 KiB complete-inline budget and bounded output previews; it uses one aggregate confirmation, parallel or sequential mode, optional safe fail-fast scheduling, shared global/per-server concurrency limits, and a 2 MiB aggregate response budget.
-- `GET /v1/runs/{runId}`: inspect persisted status and optional late result for one Hub-to-Agent command run.
-- `POST /v1/room/skills/list`, `/read`, `/search`, `/active`, `/activate`, `/deactivate`: discover workspace skills through the active Room Agent and maintain local active skill state. These endpoints do not take `agentId`.
-- `POST /v1/room/skills/install`: asynchronously install one skill from public GitHub, HTTPS file entries, or inline UTF-8/base64 files. The response returns an `installId` before network work begins.
-- `POST /v1/room/skills/install/get`: query an installation with bounded long polling. `waitSeconds` defaults to 5 and is capped at 30; a wait timeout does not cancel installation; terminal responses set `pollAfterMs` to `0`.
-- `POST /v1/room/skills/install/cancel`: request idempotent cooperative cancellation before atomic commit.
-- `POST /v1/room/skills/run`: run an executable active workspace skill script under `scripts/`. `waitSeconds` defaults to 5 and is capped at 30; a wait timeout does not cancel execution. It returns terminal output inline when possible, otherwise the same `processId` used by `process.status`, `process.output`, `process.result`, and `process.cancel`. These endpoints do not take `agentId`.
-- `POST /v1/room/bootstrap`: load the active Room Agent's repeated session entrypoint and deterministic guide manifest. It has no request body or `agentId`.
-- `POST /v1/room/bootstrap/read`: read one valid bootstrap guide by its frontmatter `id`. It has no `agentId`.
-- `POST /v1/room/diary/active` and `POST /v1/room/diary/read`: read the active or one validated Diary layer through the captured active Room lease. Requests use `RoomDiaryActiveRequest` or `RoomDiaryReadRequest`; responses are `RoomDiaryActiveResponse` or `RoomDiaryReadResponse`.
-- `POST /v1/room/notebook/recent`, `POST /v1/room/notebook/search`, and `POST /v1/room/notebook/read`: read bounded current Markdown previews, search current Markdown, or read one validated Notebook document. `recent` and `search` use `RoomNotebookResultsResponse`; `read` uses `RoomNotebookReadResponse`.
-- `POST /v1/room/state/list` and `POST /v1/room/state/read`: list or read bounded `State/entities` Markdown documents with `RoomStateListResponse` or `RoomStateReadResponse`.
-- `POST /v1/room/maintenance/status` and `POST /v1/room/maintenance/submit`: inspect repository-owned readiness or submit explicit semantic maintenance requests. Responses are `RoomMaintenanceStatusResponse` and `RoomMaintenanceSubmitResponse`; submit uses the existing local/workflow mode and bounded wait contract.
+- `GET /v1/info`：安全的 Hub 运行时概要。
+- `GET /v1/agents`：启用的本地 Agent、其在线状态和安全配置概要。
+- `POST /v1/process/exec`：启动一个受管理的进程并短暂等待。请求必须提供 `agentId`、`program`、`args` 和 `needConfirm`；支持可选的 `workingDirectory`、`group`（1–32 个字符）和有界 `waitSeconds`。响应为扁平的 `ProcessResponse`。只有当序列化后的创建响应不超过 8 KiB 时才会内联完整输出/结果；超出部分的输出会用 stdout/stderr 共用的预览表示，预览上限为 2 KiB。
+- `POST /v1/process/batch`：原子准入一批受管理进程。请求必须提供 `agentId`、`elements` 和 `needConfirm`；支持批次级 `workingDirectory`、每个元素的覆盖项，以及由子进程继承的可选 `group`。响应为 `ProcessBatchResponse`，其中按序排列的子进程投影共用一个 8 KiB 的完整内联预算，输出预览也有界。
+- `GET /v1/process?agentId=...`：列出活动或近期保留的进程元数据，可选用 `group`、kind、state、limit 和 cursor 筛选。`limit` 默认值为 50，上限为 100。Agent 不可用时，Hub 可以为第一页返回缓存元数据，但不会从缓存继续使用 Agent 发出的 cursor。
+- `GET /v1/process/{processId}?agentId=...&waitSeconds=...`：仅查看进程状态元数据，或短暂等待；`waitSeconds` 默认值为 5，上限为 30。状态永不包含 stdout、stderr 或结果正文。
+- `GET /v1/process/{processId}/output?agentId=...&cursor=...&maxBytes=...`：读取非消费式 stdout/stderr 分页。cursor 绑定到进程，并推进两个流的原始字节偏移；`maxBytes` 默认值为 8 KiB，上限为 32 KiB。响应以 base64 保留无效 UTF-8，并明确报告保留区间缺口和 EOF。
+- `GET /v1/process/{processId}/result?agentId=...&maxBytes=...`：获取完整且保留的结构化结果，或如实返回 `complete`、`too_large` 或 `unavailable` 状态。`maxBytes` 默认值为 8 KiB，上限为 512 KiB；过大的结果绝不会以不完整 JSON 返回，Hub 元数据缓存也不会提供结果内容。
+- `POST /v1/process/{processId}/cancel?agentId=...`：请求按进程类型执行取消，并返回观察到的结果/终止证据；超时或缺少响应不能作为已取消的证据。
+- `POST /v1/mcp/servers`：列出一个本地 Agent 中配置的 MCP 服务器；省略 `agentId` 时，则汇总所有当前已连接 Agent 的 MCP 服务器。
+- `POST /v1/mcp/tools`：列出一个 MCP 服务器暴露的工具。
+- `POST /v1/mcp/callTool`：通过所选本地 Agent 启动一个受管理的下游 MCP 工具进程。HTTP 响应为扁平的 `ProcessResponse`；完整内联输出/结果遵循 8 KiB 创建响应预算，超出部分的输出受 2 KiB 共用预览限制。`waitSeconds` 默认值为 5，上限为 30；等待超时不会取消进程。`timeoutSeconds` 默认值为 300，上限为 900。
+- `POST /v1/mcp/batch`：原子准入 1–16 个按序排列的下游 MCP 子进程。响应为 `McpBatchToolResponse`，所有子进程共用 8 KiB 完整内联预算，并提供有界输出预览；该操作使用一次聚合确认，支持并行或顺序模式、可选的安全快速失败调度、共用的全局/每服务器并发限制，以及 2 MiB 聚合响应预算。
+- `GET /v1/runs/{runId}`：查看一项 Hub 到 Agent 命令运行的已持久化状态和可选的迟到结果。
+- `POST /v1/room/skills/list`、`/read`、`/search`、`/active`、`/activate`、`/deactivate`：通过活动 Room Agent 发现 workspace Skills 并维护本地激活状态。这些端点不接收 `agentId`。
+- `POST /v1/room/skills/install`：异步安装一个 Skill，来源可以是公开 GitHub、HTTPS 文件条目或内联 UTF-8/base64 文件。网络操作开始前，响应会先返回 `installId`。
+- `POST /v1/room/skills/install/get`：通过有界长轮询查询安装状态。`waitSeconds` 默认值为 5，上限为 30；等待超时不会取消安装；终态响应将 `pollAfterMs` 设为 `0`。
+- `POST /v1/room/skills/install/cancel`：在原子提交之前请求幂等的协作式取消。
+- `POST /v1/room/skills/run`：运行活动 workspace Skill 在 `scripts/` 下的可执行脚本。`waitSeconds` 默认值为 5，上限为 30；等待超时不会取消执行。若可能则内联返回终态输出，否则返回与 `process.status`、`process.output`、`process.result` 和 `process.cancel` 共用的 `processId`。这些端点不接收 `agentId`。
+- `POST /v1/room/bootstrap`：读取活动 Room Agent 的重复会话入口及确定性指南清单。无请求体，也不接收 `agentId`。
+- `POST /v1/room/bootstrap/read`：按 frontmatter 中的 `id` 读取一份有效引导指南。不接收 `agentId`。
+- `POST /v1/room/diary/active` 和 `POST /v1/room/diary/read`：通过捕获的活动 Room 租约读取当前或一个经过验证的 Diary 层。请求分别使用 `RoomDiaryActiveRequest` 或 `RoomDiaryReadRequest`；响应分别为 `RoomDiaryActiveResponse` 或 `RoomDiaryReadResponse`。
+- `POST /v1/room/notebook/recent`、`POST /v1/room/notebook/search` 和 `POST /v1/room/notebook/read`：读取有界的当前 Markdown 预览、搜索当前 Markdown，或读取一份经过验证的 Notebook 文档。`recent` 和 `search` 使用 `RoomNotebookResultsResponse`；`read` 使用 `RoomNotebookReadResponse`。
+- `POST /v1/room/state/list` 和 `POST /v1/room/state/read`：列出或读取有界的 `State/entities` Markdown 文档，分别使用 `RoomStateListResponse` 或 `RoomStateReadResponse`。
+- `POST /v1/room/maintenance/status` 和 `POST /v1/room/maintenance/submit`：检查由仓库所有者负责的就绪状态，或提交明确的语义维护请求。响应分别为 `RoomMaintenanceStatusResponse` 和 `RoomMaintenanceSubmitResponse`；submit 使用现有 local/workflow 模式及有界等待契约。
 
-These nine Room endpoints use the current camelCase Agent request/response DTOs in
-the JSON body. Empty request DTOs still use `{}`; no endpoint accepts an
-`agentId` selector. They resolve and capture the active Room lease, so an absent
-Room is `room_not_active` (404), an inconsistent/replaced lease is
-`room_state_conflict` (409), and a Hub transport wait is a 504 operation timeout.
-Agent semantic errors retain the existing Room JSON error projection. Full MCP
-advertises the same nine names with the current descriptors; Coordinator neither
-advertises nor dispatches Room operations.
+这九个 Room 端点在 JSON 请求体中使用当前的 camelCase Agent 请求/响应 DTO。
+空请求 DTO 仍须传入 `{}`；没有端点接受 `agentId` 选择器。它们解析并捕获活动
+Room 租约：Room 不存在时返回 `room_not_active`（404），租约不一致/已替换时返回
+`room_state_conflict`（409），Hub 传输等待超时时返回 504 操作超时。Agent 语义错误
+保留现有 Room JSON 错误投影。Full MCP 以当前描述符公布相同的九个名称；
+Coordinator 既不公布也不派发 Room 操作。
 
-Malformed JSON or a missing required request field fails at the Axum JSON
-extractor with HTTP 422 and `text/plain`; Agent semantic validation remains a
-JSON error response under the documented 400/selected 404/409 projection.
+JSON 格式错误或缺少必需请求字段时，Axum JSON 提取器会返回 HTTP 422 和
+`text/plain`；Agent 语义验证错误仍以 JSON 错误响应返回，采用本文所述的 400/
+特定 404/409 投影。
 
-`/v1/info` intentionally returns only safe metadata: Hub version, public base URL, timeout settings, remote confirmation status, agent counts, and pending request/process counts. It must not expose secrets, confirmation callback URLs, or private config values.
+`/v1/info` 刻意只返回安全元数据：Hub 版本、公共基础 URL、超时设置、远程确认
+状态、Agent 数量以及待处理请求/进程数。不得暴露密钥、确认回调 URL 或私有配置值。
 
-`/v1/agents` returns one safe config summary per enabled local agent. When an agent is online, the summary includes coarse sandbox mode, confirmation provider, path policy roots, configured command policy rules, and builtin command policy rules. Path roots are display paths such as `workspace`, `~/Documents`, or `/tmp`; private home paths should be shortened with `~` where possible. Offline agents may return an `unknown` summary because the Hub does not persist the last local config summary. Local confirmation prompts can use English or Simplified Chinese via `confirmationLanguage` (`en` or `zh-CN`).
+`/v1/agents` 为每个已启用的本地 Agent 返回一份安全配置概要。Agent 在线时，概要
+包含粗粒度沙箱模式、确认提供方、路径策略根目录、已配置的命令策略规则和内置
+命令策略规则。路径根目录以 `workspace`、`~/Documents` 或 `/tmp` 等显示路径表示；
+若可行，私有 home 路径应缩写为 `~`。Agent 离线时可能返回 `unknown` 概要，因为
+Hub 不持久保存上次取得的本地配置概要。本地确认提示可通过 `confirmationLanguage`
+（`en` 或 `zh-CN`）使用英语或简体中文。
 
-### Hub Process authority, freshness, and retention
+### Hub Process 权威性、新鲜度与保留
 
-The Agent's managed process history is the execution-side authority. Hub process
-status entries and the Hub process cache are projections used for routing and
-observation; they do not prove that a local process is still running or that a
-side effect was undone. A Hub cache entry is bounded to 4,096 processes, expires
-15 minutes after its `observedAt`, and is classified as `stale` after 60
-seconds. A 15-second sweep removes expired entries, and capacity eviction
-removes the oldest observation. Evicting an active projection has no effect on
-the Agent process or the authoritative Hub run receipt.
+Agent 的受管理进程历史是执行侧权威来源。Hub 进程状态条目和 Hub 进程缓存是用于路由和观察的投影；它们不能证明本地进程仍在运行，也不能证明副作用已撤销。Hub 缓存最多保留 4,096 个进程，在 `observedAt` 之后 15 分钟过期，并在 60 秒后标记为 `stale`。每 15 秒运行一次清理，移除已过期条目；容量淘汰最早观察到的条目。淘汰活动投影不会影响 Agent 进程或权威的 Hub 运行回执。
 
-Hub HTTP `process.status` and `process.list`, plus the corresponding Apps MCP
-process inspection responses, expose `freshness` and `observedAt` metadata.
-Direct live process envelopes from creation endpoints may omit these projection
-fields; their Agent process payload remains authoritative. `live` is a response
-from the Agent, `cached` is a usable Hub projection within its freshness
-window, `stale` is an older projection, and `unknown` means that no usable
-current fact is available (including after restart reconciliation). These
-fields describe the response projection; they are not fields on Agent process
-status. A cache-only status response is degraded evidence, not a fresh wait,
-and the Hub does not invent continuation for an Agent-issued cursor. The Hub
-cache contains status metadata only: it cannot supply output or result content.
+Hub HTTP `process.status`、`process.list` 以及对应的 Apps MCP 进程检查响应会暴露 `freshness` 和 `observedAt` 元数据。创建端点直接返回的实时进程封套可能省略这些投影字段；其中的 Agent 进程负载仍具权威性。`live` 表示响应来自 Agent，`cached` 表示 Hub 投影仍在新鲜度窗口内且可用，`stale` 表示投影已较旧，`unknown` 表示当前没有可用事实（包括重启协调之后）。这些字段描述响应投影，不是 Agent 进程状态字段。只有缓存的状态响应属于降级证据，不是新的等待结果；Hub 不会为 Agent 发出的 cursor 臆造续页。Hub 缓存仅包含状态元数据，不能提供输出或结果内容。
 
-Hub run receipts remain the durable control-plane identity for a dispatched
-command. After the 24-hour run retention window, only eligible completed
-payloads are compacted: `runId`, request/agent identity, command hash, status,
-and conflict/unknown/tombstone evidence remain. The identity/hash evidence
-needed for replay and deduplication remains protected; unknown and conflict
-records are not compacted. `AgentRun` therefore reports `resultRetained` and
-`resultOmitted` separately; an omitted payload is not evidence that the command
-did not run.
+Hub 运行回执仍是已派发命令的持久控制面身份。运行保留窗口为 24 小时；窗口结束后，只压缩符合条件的已完成负载：`runId`、请求/Agent 身份、命令哈希、状态以及冲突/未知/墓碑证据仍会保留。重放和去重所需的身份/哈希证据仍受保护；未知和冲突记录不会压缩。因此 `AgentRun` 会分别报告 `resultRetained` 和 `resultOmitted`；负载被省略不能证明命令未运行。
 
-Wait or transport timeout is not remote cancellation. It ends the local wait
-only; a late matching receipt or result can still arrive. Cancellation is
-reported only from observed termination evidence, and a cache snapshot or
-missing response never permits an inference that the remote process stopped.
+等待超时或传输超时不等于远程取消，只会结束本地等待；匹配的迟到回执或结果仍可能到达。只有观察到终止证据时才报告取消；缓存快照或缺失响应都不能推断远程进程已经停止。
 
-### Current Room boundary and coordinated request projection
+### 当前 Room 边界与协调请求投影
 
-The current Agent semantic Room surface is the authority for the nine remote
-operations listed above. Hub Full forwards those operations through the
-captured active Room lease; it does not read the repository, own Room files,
-interpret Git state, or create a second content store. A generic Hub run receipt
-may retain a bounded operation result for status/late-result inspection, but
-that receipt is not authoritative Room content.
+当前 Agent 语义 Room 接口面是上述九项远程操作的权威来源。Hub Full 通过捕获的活动 Room 租约转发这些操作；它不会读取仓库、拥有 Room 文件、解释 Git 状态，也不会创建第二份内容存储。通用 Hub 运行回执可能为状态/迟到结果检查保留有界操作结果，但该回执不是 Room 内容的权威来源。
 
-Read bounds are part of the current contract: Notebook `limit` defaults to 20
-and is 1–100; search `query` is non-empty and at most 256 Unicode characters;
-Notebook and State Markdown reads reject content above the existing 512 KiB
-bound; Diary periods are `current`, a strict daily date, or an ordered weekly
-or monthly date range. `room.notebook.recent` and `room.notebook.search` keep
-their public names but now return current Markdown DTOs (`path`, `title`,
-`contentPreview`, `truncated`, `effectiveAt`), not the retired passage/JSONL
-shape.
+读取范围属于当前契约：Notebook `limit` 默认值为 20，范围是 1–100；搜索 `query` 不能为空，且最多 256 个 Unicode 字符；Notebook 和 State Markdown 读取会拒绝超过现有 512 KiB 上限的内容；Diary 周期可以是 `current`、严格格式的日日期，或按顺序排列的周/月日期区间。`room.notebook.recent` 和 `room.notebook.search` 保留原公开名称，但现在返回当前 Markdown DTO（`path`、`title`、`contentPreview`、`truncated`、`effectiveAt`），不再返回已退役的 passage/JSONL 格式。
 
-Maintenance remains explicit and Agent-owned. `room.maintenance.status` is
-read-only. `room.maintenance.submit` accepts one to five unique semantic
-slots, optional `local` or `workflow` mode, and `waitSeconds` from 0 through
-30 (default 0). A workflow wait observes consumption/fast-forward only; a
-timeout ends the wait and does not cancel the submitted maintenance. Existing
-repository, path, symlink, lock, clean-tree, expected-change, executor, and
-Git controls remain in force. There is no separate maintenance wait API and no
-new confirmation promise.
+维护操作仍须明确提交，且由 Agent 所有。`room.maintenance.status` 为只读。`room.maintenance.submit` 接受一至五个唯一语义 slot、可选 `local` 或 `workflow` 模式，以及范围为 0–30 的 `waitSeconds`（默认值为 0）。workflow 等待只观察消费/快进；超时只结束等待，不会取消已提交的维护操作。现有仓库、路径、symlink、锁、clean-tree、预期变更、执行器和 Git 控制仍然有效。没有单独的维护等待 API，也不承诺新增确认机制。
 
-Callers migrating from the retired Room JSONL names must choose an explicit
-current semantic operation. Old append/update/remove or passage/date-selection
-semantics are not silently translated into `room.maintenance.submit`; callers
-that change Room content must construct the documented slot/payload request or
-retire the old call. Upgrade the paired Hub and Agent artifacts together,
-refresh [`../openapi/hub.yaml`](../openapi/hub.yaml), migrate every caller, and
-verify the live active-Room path before removing the old caller. Historical
-release/migration records remain historical and are not an active error or
-compatibility contract.
+从已退役 Room JSONL 名称迁移的调用方必须选择明确的当前语义操作。旧 append/update/remove 或 passage/日期选择语义不会自动转换为 `room.maintenance.submit`；要更改 Room 内容的调用方必须构造文档规定的 slot/payload 请求，或弃用旧调用。应同时升级配对的 Hub 和 Agent 工件，刷新 [`../openapi/hub.yaml`](../openapi/hub.yaml)，迁移所有调用方，并在移除旧调用前验证实时活动 Room 路径。历史发布/迁移记录仍是历史记录，不是当前错误或兼容性契约。
 
 
-## ChatGPT Apps MCP endpoint
+## ChatGPT Apps MCP 端点
 
-`/mcp` is the Apps-friendly MCP endpoint. It is protected by the Hub OAuth shim and forwards MCP requests to the configured local agent and local MCP server.
+`/mcp` 是适用于 Apps 的 MCP 端点。它受 Hub OAuth shim 保护，并将 MCP 请求转发到已配置的本地 Agent 和本地 MCP 服务器。
 
-All `/mcp` `tools/call` responses use the Hub `AgenticResult` envelope, which is directly compatible with the ChatGPT Apps / MCP tool result shape. Hub-native JSON is exposed as `structuredContent` plus a JSON text content block; a top-level `error` makes the MCP tool result `isError=true`.
+所有 `/mcp` `tools/call` 响应均使用 Hub 的 `AgenticResult` 封套，与 ChatGPT Apps/MCP 工具结果格式直接兼容。Hub 原生 JSON 以 `structuredContent` 和 JSON 文本 content block 暴露；顶层 `error` 会使 MCP 工具结果的 `isError=true`。
 
-`mcp.callTool` does not pass a downstream result envelope through at the Hub
-top level. The live HTTP endpoint currently returns a flattened
-`ProcessResponse`; a terminal downstream result is retained under `result`,
-and downstream `isError=true` produces a failed process while retaining that
-result. Serialized arguments are capped at 256 KiB. Serialized results up to
-512 KiB are retained; larger results are omitted and replaced by
-`resultBytes`, `resultSha256`, and a UTF-8-safe `resultPreview`. Active calls
-use `process.status`, `process.output`, `process.result`, and `process.cancel`.
-Hub has no native `file.read` or `file.edit` tool. Its generic asynchronous
-MCP process bridge is not a typed image-content surface; do not rely on it to
-preserve `file.read` image Content blocks.
+`mcp.callTool` 不会在 Hub 顶层透传下游结果封套。当前实时 HTTP 端点返回扁平的 `ProcessResponse`；下游终态结果保留在 `result` 中，下游 `isError=true` 会使进程失败，同时保留该结果。序列化参数上限为 256 KiB。最多 512 KiB 的序列化结果会予以保留；更大的结果会省略，并以 `resultBytes`、`resultSha256` 和 UTF-8 安全的 `resultPreview` 替代。活动调用使用 `process.status`、`process.output`、`process.result` 和 `process.cancel` 跟进。
+Hub 没有原生 `file.read` 或 `file.edit` 工具。其通用异步 MCP 进程桥接不是类型化的图像内容接口；不要依赖它保留 `file.read` 图像 Content blocks。
 
-`mcp.batch` returns a flat `McpBatchToolResponse` with ordered child process
-projections in `results`. Validation and capacity admission happen before
-confirmation and before any child starts. Parallel mode uses the shared
-scheduler (eight globally, two per server); sequential mode waits for each
-child terminal state. With `failFast=true`, only not-yet-started children
-become `skipped`; already-started calls are not cancelled. Single-server
-batches can receive temporary server allow actions, while multi-server
-confirmation remains batch-scoped. Each child is an ordinary managed process
-with `batchId`, optional `batchCallId`, and `batchIndex`, so later inspection
-and cancellation use the same `process.*` lifecycle.
+`mcp.batch` 返回扁平的 `McpBatchToolResponse`，其中 `results` 按顺序包含子进程投影。确认和启动任何子进程之前，会先完成验证与容量准入。并行模式使用共享调度器（全局最多 8 个、每个服务器最多 2 个）；顺序模式会等待每个子进程进入终态。`failFast=true` 时，只有尚未启动的子进程会标记为 `skipped`；已经启动的调用不会取消。单服务器批次可以获得临时服务器 allow 操作，多服务器确认则仍以整个批次为作用范围。每个子项都是普通的受管理进程，带有 `batchId`、可选 `batchCallId` 和 `batchIndex`，后续检查和取消使用相同的 `process.*` 生命周期接口。
 
-Cancellation is evidence-based. Agentic sends MCP `notifications/cancelled`
-with the exact downstream request id. If no downstream terminal response is
-observed, the process becomes `detached` rather than claiming cancellation
-succeeded. Hub cache-only process status is degraded metadata evidence and
-never supplies a cached result or reports successful cancellation.
+取消以证据为准。Agentic 会使用准确的下游请求 ID 发送 MCP `notifications/cancelled`。如果未观察到下游终态响应，进程会变为 `detached`，而不是声称取消成功。仅 Hub 缓存的进程状态属于降级元数据证据，不会提供缓存结果，也不会报告取消成功。
 
-This contract applies to the Apps MCP `/mcp` surface. GPT Actions endpoints
-under `/v1/*` have their own JSON projections; the live HTTP
-`/v1/mcp/callTool` response/schema divergence described above is not a passed
-schema-parity claim.
+此契约适用于 Apps MCP `/mcp` 接口面。`/v1/*` 下的 GPT Actions 端点使用各自的 JSON 投影；上述当前实时 HTTP `/v1/mcp/callTool` 响应/schema 差异不构成通过 schema 一致性验证的声明。
 
-OAuth discovery routes:
+OAuth 发现路由：
 
 - `/.well-known/oauth-protected-resource`
 - `/.well-known/oauth-authorization-server`
@@ -227,23 +119,21 @@ OAuth discovery routes:
 - `/oauth/authorize`
 - `/oauth/token`
 
-The Hub MCP profile is selected at Hub startup with `--mcp-profile full|coordinator`
-or `AGENTIC_GPT_HUB_MCP_PROFILE`. `full` is the default and preserves the
-execution surface plus the transport-neutral `bootstrap` aliases. `coordinator`
-advertises only Hub-native tools including `hub.process.status` and
-`hub.process.list`; these read cached process metadata and never dispatch
-execution. See [`standalone-runtime.md`](standalone-runtime.md) for the
-complete profile and standalone Tunnel documentation.
+Hub MCP 配置档在 Hub 启动时通过 `--mcp-profile full|coordinator` 或
+`AGENTIC_GPT_HUB_MCP_PROFILE` 选择。`full` 是默认值，保留执行接口面和跨传输的
+`bootstrap` 别名。`coordinator` 只公布 Hub 原生工具，包括 `hub.process.status` 和
+`hub.process.list`；这些工具只读取缓存的进程元数据，不派发执行。完整配置档和
+Standalone Tunnel 文档见 [`standalone-runtime.md`](standalone-runtime.md)。
 
-The ntfy confirmation callback routes are intentionally not part of `openapi/hub.yaml`. They are only used by confirmation action buttons.
+ntfy 确认回调路由有意不纳入 `openapi/hub.yaml`，仅供确认操作按钮使用。
 
-Room skill packages remain workspace-visible under `<workspaceRoot>/skills/`, while tool-managed activation state is stored as private durable state under `~/.agentic_gpt/state/agent/<agentId>/active-skills.json`. On startup, Agentic migrates an unambiguous legacy `<workspaceRoot>/state/active-skills.json`; if both old and new copies differ, the private copy remains authoritative and the legacy copy is retained with a warning. Activating a skill does not execute it or grant permissions; stale active entries remain visible as `missing` until explicitly deactivated. The built-in `skill-installer` guide is active by default and can be explicitly deactivated.
+Room Skill 包在 workspace 下以 `<workspaceRoot>/skills/` 的形式可见；由工具管理的激活状态则作为私有持久状态存储在 `~/.agentic_gpt/state/agent/<agentId>/active-skills.json`。启动时，Agentic 会迁移无歧义的旧 `<workspaceRoot>/state/active-skills.json`；如果新旧副本内容不同，则以私有副本为准，并保留旧副本及一条警告。激活 Skill 不会运行它或授予权限；过期的活动条目会以 `missing` 状态继续显示，直到被显式停用。内置 `skill-installer` 指南默认处于激活状态，也可显式停用。
 
-Installation jobs are persisted under `~/.agentic_gpt/state/agent/<agentId>/skill-installs/`; the legacy `<workspaceRoot>/state/skill-installs/` tree is migrated with the same preserve-on-conflict behavior before install recovery runs. Installation records retain terminal state for seven days (capped at 100) and never expose inline payloads or URL query/fragment values in public status. Existing skills are archived under `skills/.archive/<id>/` before an explicit replacement. Remote file URLs require public HTTPS and are revalidated after DNS resolution and redirects; deployments can narrow hosts with `room.skills.allowedHosts`.
+安装任务持久化在 `~/.agentic_gpt/state/agent/<agentId>/skill-installs/` 下；在恢复安装前，旧的 `<workspaceRoot>/state/skill-installs/` 目录树会按相同的冲突保留规则迁移。安装记录保留终态七天（最多 100 条），且公开状态绝不暴露内联负载或 URL 查询/片段值。显式替换前，现有 Skill 会归档到 `skills/.archive/<id>/`。远程文件 URL 必须使用公开 HTTPS，并在 DNS 解析和重定向后重新验证；部署方可通过 `room.skills.allowedHosts` 收窄允许的主机。
 
-## Room session bootstrap package
+## Room 会话引导包
 
-The Room Agent reads a repeated session bootstrap package directly from the configured `workspaceRoot` on every call. Reads do not create files, install defaults, cache an index, or require a reload. The fixed layout is:
+Room Agent 每次调用时都会直接读取配置的 `workspaceRoot` 中重复使用的会话引导包。读取不会创建文件、安装默认值、缓存索引或要求重新加载。固定布局如下：
 
 ```text
 <workspaceRoot>/bootstrap/
@@ -254,64 +144,63 @@ The Room Agent reads a repeated session bootstrap package directly from the conf
     └── ...
 ```
 
-`bootstrap.md` is required. `guides/` is optional. Only direct, regular, non-hidden files with a lowercase `.md` extension are considered guides; nested directories, hidden entries, and other extensions are ignored. The bootstrap root and entrypoint may not be symlinks. A missing package is a normal 404 (`bootstrap_not_found`); the service does not auto-create or personalize one.
+`bootstrap.md` 必需；`guides/` 可选。只有该目录下直接包含的、常规、非隐藏且扩展名为小写 `.md` 的文件会被视为指南；嵌套目录、隐藏条目和其他扩展名都会忽略。引导根目录和入口文件不得为 symlink。缺少引导包是正常的 404（`bootstrap_not_found`）；服务不会自动创建或个性化引导包。
 
-The entrypoint starts with a closed YAML object. Its required fields are:
+入口文件以一个封闭的 YAML 对象开头。必需字段如下：
 
 ```markdown
 ---
 id: room
 kind: entrypoint
-name: Room Bootstrap
-description: Session initialization and guide routing.
+name: Room 会话引导
+description: 会话初始化与指南路由。
 schemaVersion: 1
 ---
 
-At the start of a Room session, read the relevant guides listed below.
+Room 会话开始时，请阅读下列相关指南。
 ```
 
-`id` uses the conservative ASCII grammar `[A-Za-z0-9_.-]+`; `.` and `..` are not valid IDs. `kind` must be `entrypoint`, `name` and `description` must be non-empty strings, and `schemaVersion` must be the integer `1`. The raw frontmatter is retained in the entrypoint response. Invalid entrypoint metadata fails the package with `bootstrap_invalid`.
+`id` 使用保守的 ASCII 语法 `[A-Za-z0-9_.-]+`；`.` 和 `..` 不是有效 ID。`kind` 必须是 `entrypoint`，`name` 和 `description` 必须是非空字符串，`schemaVersion` 必须是整数 `1`。入口响应会保留原始 frontmatter。入口元数据无效时，整个包以 `bootstrap_invalid` 失败。
 
-Every guide uses the same closed-frontmatter convention:
+每份指南都使用相同的封闭 frontmatter 约定：
 
 ```markdown
 ---
 id: diary
 kind: guide
-title: Diary conventions
-summary: Preserve continuity without replacing the Diary tool schema.
+title: Diary 约定
+summary: 保持上下文连续，同时不取代 Diary 工具 schema。
 loadPolicy: contextual
 priority: 80
 loadWhen:
-  - The session continues prior personal or project context.
+  - 会话需要延续此前的个人或项目上下文。
 toolBindings:
   - room.diary.active
   - room.diary.read
   - room.maintenance.submit
 tags:
-  - continuity
+  - 连续性
 ---
 
-Use semantic Diary reads for current or exact documents; route mutations through the
-maintenance submission contract.
+读取当前或指定文档时使用语义化 Diary 工具；所有变更都通过维护提交契约执行。
 ```
 
-Required guide fields are `id`, `kind: guide`, `title`, and `summary`. `loadPolicy` defaults to `on_demand` and accepts `startup`, `contextual`, or `on_demand`. `priority` defaults to `0` and is a signed 32-bit integer. `loadWhen`, `toolBindings`, and `tags` default to empty arrays and contain non-empty strings in authored order. Unknown fields are ignored for typed V1 behavior but remain in the raw `frontmatter` returned by `room.bootstrap.read`.
+指南必需字段为 `id`、`kind: guide`、`title` 和 `summary`。`loadPolicy` 默认为 `on_demand`，可选 `startup`、`contextual` 或 `on_demand`。`priority` 默认为 `0`，且为有符号 32 位整数。`loadWhen`、`toolBindings` 和 `tags` 默认为空数组，其中的非空字符串按编写顺序保留。对类型化 V1 行为而言，未知字段会被忽略，但仍保留在 `room.bootstrap.read` 返回的原始 `frontmatter` 中。
 
-Guide metadata is generic. For example, a workspace may author guides like these without changing the runtime:
+指南元数据是通用的。例如，workspace 可编写如下指南，而不改变运行时：
 
 ```markdown
 <!-- guides/notebook.md -->
 ---
 id: notebook
 kind: guide
-title: Notebook continuity
-summary: Search and read durable project passages before making assumptions.
+title: Notebook 连续性
+summary: 先搜索并阅读持久化的项目内容，再作出假设。
 loadPolicy: contextual
 toolBindings: [room.notebook.search, room.notebook.read, room.maintenance.submit]
-tags: [project-context]
+tags: [项目上下文]
 ---
-Keep MCP argument schemas in the tool definition; use maintenance submission for Notebook changes.
+MCP 参数 schema 应保留在工具定义中；修改 Notebook 时使用维护提交。
 ```
 
 ```markdown
@@ -319,14 +208,14 @@ Keep MCP argument schemas in the tool definition; use maintenance submission for
 ---
 id: execution
 kind: guide
-title: Execution choice
-summary: Choose managed processes or persistent panes deliberately.
+title: 执行方式选择
+summary: 有意识地选择受管理进程或持久窗格。
 loadPolicy: startup
 priority: 90
 toolBindings: [process.exec, process.batch, process.status, process.cancel, tmux.exec]
-tags: [operations, safety]
+tags: [运维, 安全]
 ---
-Use the tool schema for arguments and this guide for workflow, confirmation, and recovery.
+参数以工具 schema 为准；工作流、确认和恢复说明见本指南。
 ```
 
 ```markdown
@@ -334,94 +223,62 @@ Use the tool schema for arguments and this guide for workflow, confirmation, and
 ---
 id: skills
 kind: guide
-title: Skill selection
-summary: Discover and read relevant skills before using an installed workflow.
+title: Skill 选择
+summary: 使用已安装的工作流前，先发现并阅读相关 Skill。
 loadPolicy: on_demand
 toolBindings: [skills.list, skills.read, skills.run]
-tags: [workflows]
+tags: [工作流]
 ---
-Treat toolBindings as descriptive routing hints, not permission grants or availability claims.
+`toolBindings` 只是路由提示，不代表权限已授予，也不保证相应工具可用。
 ```
 
-The MCP schemas remain the source of truth for tool availability and arguments. Guides provide selection, sequencing, conventions, safety, examples, and recovery behavior; they do not duplicate complete MCP schemas, grant authorization, or assert that every named binding is currently exposed.
+MCP schema 仍是工具可用性和参数的事实来源。指南说明选择、顺序、约定、安全、示例和恢复行为；不会复制完整 MCP schema、授予授权，也不会断言其中列出的每个绑定当前都已暴露。
 
-`room.bootstrap` returns the entrypoint inline, a flat manifest, a package `revision`, counts, and warnings. Valid guides are ordered by descending `priority`, then ascending `id`; at most 64 summaries are returned. `totalGuides` counts all valid, duplicate-free guides, so a valid guide beyond the 64-item ceiling is still readable through `room.bootstrap.read` and still affects `revision`. Duplicate IDs exclude every colliding guide. Invalid optional guides are excluded with warnings rather than failing the package.
+`room.bootstrap` 会内联返回入口文件，并返回扁平清单、包 `revision`、计数和警告。有效指南按 `priority` 降序、再按 `id` 升序排列；最多返回 64 条摘要。`totalGuides` 统计所有有效且无重复的指南，因此超过 64 条上限的有效指南仍可通过 `room.bootstrap.read` 读取，也仍会影响 `revision`。重复 ID 会排除所有发生冲突的指南。无效的可选指南会以警告排除，不会导致整个包失败。
 
-`room.bootstrap.read` accepts `{ "id": "diary" }`, validates the entrypoint and guide package again, and returns the selected summary, raw guide frontmatter, bounded Markdown resource, and relevant warnings. It is not a generic path reader. Unknown, invalid, duplicate-excluded, or otherwise unavailable IDs return `guide_not_found`.
+`room.bootstrap.read` 接受 `{ "id": "diary" }`，会再次验证入口文件和指南包，并返回选中的摘要、原始指南 frontmatter、有界 Markdown 资源以及相关警告。它不是通用路径读取器。未知、无效、因 ID 重复而排除或以其他方式不可用的 ID 会返回 `guide_not_found`。
 
-The complete leading YAML frontmatter block, including both `---` delimiters, must end within the first 1,048,576 bytes (1 MiB); a closing delimiter exactly at the bound is accepted. This metadata bound is separate from returned-content truncation. An over-limit entrypoint returns `bootstrap_invalid`; an over-limit optional guide is excluded with `guide_frontmatter_invalid`. The complete file is still streamed for UTF-8 validation, line counting, SHA-256, and package revision.
+完整的 YAML frontmatter 起始块（包括两个 `---` 分隔符）必须在前 1,048,576 字节（1 MiB）内结束；结束分隔符恰好位于该边界时也接受。此元数据上限独立于返回内容截断。超限的入口文件返回 `bootstrap_invalid`；超限的可选指南以 `guide_frontmatter_invalid` 排除。整个文件仍会被流式读取，以完成 UTF-8 验证、行计数、SHA-256 计算和包 revision 计算。
 
-Each text resource is UTF-8 Markdown with `mediaType: text/markdown`. `sizeBytes` and `sha256` describe the complete original file; `returnedSizeBytes` describes the returned content. Entrypoints are capped at 65,536 bytes and guides at 262,144 bytes. Oversized valid documents return a prefix with `truncated: true` and an `entrypoint_truncated` or `guide_truncated` warning. Truncation prefers the last complete newline within the bound; otherwise it ends at a valid UTF-8 boundary. `totalLines` and `returnedThroughLine` are one-based logical counts, `omittedFromLine` identifies the first omitted line, and `lastLineComplete` distinguishes a complete-line prefix from a partial-line prefix.
+每个文本资源都是 UTF-8 Markdown，`mediaType` 为 `text/markdown`。`sizeBytes` 和 `sha256` 描述完整原文件；`returnedSizeBytes` 描述实际返回的内容。入口文件上限为 65,536 字节，指南上限为 262,144 字节。有效但过大的文档会返回前缀，设置 `truncated: true`，并附带 `entrypoint_truncated` 或 `guide_truncated` 警告。截断时优先使用上限内最后一个完整换行；否则截到有效 UTF-8 边界。`totalLines` 和 `returnedThroughLine` 是从 1 开始的逻辑行数，`omittedFromLine` 标识首个省略行，`lastLineComplete` 用来区分完整行前缀与部分行前缀。
 
-The stable warning prefixes include `entrypoint_truncated`, `guide_truncated`, `guides_truncated`, `guides_dir_symlink_ignored`, `guide_dir_entry_unreadable`, `guide_symlink_ignored`, `guide_unreadable`, `guide_non_utf8`, `guide_frontmatter_invalid`, `guide_metadata_invalid`, and `guide_duplicate_id`. Package-level failures use `bootstrap_not_found`, `bootstrap_invalid`, or `bootstrap_read_failed`; Room routing adds `room_not_active`, `room_state_conflict`, `room_bootstrap_timeout`, and `room_bootstrap_read_timeout`. These operations are read-only, retry-safe, non-destructive, and non-consequential.
+稳定的警告前缀包括 `entrypoint_truncated`、`guide_truncated`、`guides_truncated`、`guides_dir_symlink_ignored`、`guide_dir_entry_unreadable`、`guide_symlink_ignored`、`guide_unreadable`、`guide_non_utf8`、`guide_frontmatter_invalid`、`guide_metadata_invalid` 和 `guide_duplicate_id`。包级失败使用 `bootstrap_not_found`、`bootstrap_invalid` 或 `bootstrap_read_failed`；Room 路由还会返回 `room_not_active`、`room_state_conflict`、`room_bootstrap_timeout` 和 `room_bootstrap_read_timeout`。这些操作为只读、可安全重试、非破坏性，且不会触发具有后果的副作用。
 
-The MCP tools are `room.bootstrap` and `room.bootstrap.read`. The matching GPT Actions routes are `POST /v1/room/bootstrap` and `POST /v1/room/bootstrap/read`, with operation IDs `roomBootstrap` and `roomBootstrapRead`. Both surfaces are Room-scoped and omit `agentId`.
+MCP 工具为 `room.bootstrap` 和 `room.bootstrap.read`。对应的 GPT Actions 路由是 `POST /v1/room/bootstrap` 和 `POST /v1/room/bootstrap/read`，operation ID 为 `roomBootstrap` 和 `roomBootstrapRead`。两个接口都限定于 Room，不接收 `agentId`。
 
-## Local Agent transports
+## 本地 Agent 传输
 
-Local agents connect to:
+本地 Agent 连接到：
 
 ```text
 GET /v1/agents/{agentId}/connect
 ```
 
-WebSocket is the default local-agent transport. Local agents may opt into the HTTP/SSE transport with `hub.transport: "sse"` for environments where outbound HTTP/SSE is more stable than WebSocket.
+WebSocket 是本地 Agent 的默认传输方式。本地 Agent 可通过 `hub.transport: "sse"` 选择 HTTP/SSE 传输，适用于出站 HTTP/SSE 比 WebSocket 更稳定的环境。
 
-SSE endpoints are agent-private and use the same `x-agent-secret` authentication as WebSocket:
+SSE 端点仅供 Agent 使用，并采用与 WebSocket 相同的 `x-agent-secret` 身份验证：
 
 ```text
 GET  /v1/agents/{agentId}/events?connectionId=...
 POST /v1/agents/{agentId}/messages?connectionId=...
 ```
 
-WebSocket and HTTP/SSE share reliable ack/replay semantics for request/response-style `HubCommand` messages. The Hub sends a command envelope containing `eventId`, `runId`, `requestId`, `commandHash`, and the original `HubCommand`. The agent writes the accepted command to its local transport ledger before sending `TransportAck`; command results include `runId` and are accepted as late results when `agentId`, `runId`, and `requestId` match, even if the original connection is stale.
-ConfirmationRequest is not a run-bearing command and carries no `runId`. Hub confirmation ownership is the captured `(agentId, connectionId, requestId, sender)` tuple: a callback resolves one claim against that connection/request and the captured delivery target; it never reselects a sender by bare Agent id or invents a run identity.
-When the current connection is replaced or removed, an unresolved confirmation makes one terminal `ProviderUnavailable` claim with reason `provider_unavailable` and targets the captured sender before the old stream is closed when that transport is writable. Callback, confirmation timeout, publish failure, replacement, and disconnect race for the same claim, so none can emit a second terminal decision or reselect a sender. If the captured sender is already broken, Agent disconnect-drain behavior remains the fallback; Hub does not promise delivery over a failed transport.
+WebSocket 与 HTTP/SSE 对请求/响应式 `HubCommand` 消息使用相同的可靠确认/重放语义。Hub 发送的命令封套包含 `eventId`、`runId`、`requestId`、`commandHash` 和原始 `HubCommand`。Agent 会先将已接受命令写入本地传输账本，再发送 `TransportAck`；命令结果带有 `runId`，即使原连接已过期，只要 `agentId`、`runId` 和 `requestId` 匹配，仍会作为迟到结果接受。
+`ConfirmationRequest` 不是带有运行 ID 的命令，也不携带 `runId`。Hub 确认操作的所有权由已捕获的 `(agentId, connectionId, requestId, sender)` 元组确定：回调会针对该连接/请求及捕获的投递目标解决一项 claim；它不会只依据 Agent ID 重新选择发送方，也不会臆造运行身份。
+当前连接被替换或移除时，若仍有未解决的确认请求，系统会产生一次终态 `ProviderUnavailable` claim（原因是 `provider_unavailable`）；当该传输可写时，会在关闭旧流之前将其发送到捕获的 sender。回调、确认超时、发布失败、连接替换和断开会竞争解决同一 claim，因此都不能再次发出终态决策或重新选择 sender。如果捕获的 sender 已断开，Agent 的断开排空行为仍是后备方案；Hub 不承诺通过已失效的传输投递。
 
-A bounded Hub/HTTP/MCP wait timeout ends only the local waiter. It does not cancel remote execution. A matching late `TransportAck`, `TransportRunStatus`, or `Response` may still advance the persisted run receipt after the caller has received its timeout, even when no waiter remains. `not_sent` is reserved for a proven channel-send failure and is excluded from replay; a timeout or missing ACK is not `not_sent`.
+有界的 Hub/HTTP/MCP 等待超时只会结束本地等待者，不会取消远程执行。即使调用方已收到超时且不再有等待者，只要迟到的 `TransportAck`、`TransportRunStatus` 或 `Response` 匹配，仍可能推进已持久化的运行回执。只有已证实的 channel-send 失败才使用 `not_sent`，且该状态不会重放；超时或缺少 ACK 不属于 `not_sent`。
 
-Hub transport receipt statuses covered by this contract include `created`,
-`dispatched`, `acked`, `started`, `running`, `failed`, `unknown`, `completed`,
-`timeout_waiting_result`, and `not_sent`; this is not an exhaustive list of
-AgentReport or Process statuses. Terms such as `sent_no_ack`, `acked_running`,
-`wait_expired`, `remote_unknown`, and `cancel_requested` are conceptual
-vocabulary for describing observations or caller state, not additional wire or
-persisted statuses. No `cancel_requested` transport state is introduced.
+本契约涵盖的 Hub 传输回执状态包括 `created`、`dispatched`、`acked`、`started`、`running`、`failed`、`unknown`、`completed`、`timeout_waiting_result` 和 `not_sent`；这并非 AgentReport 或 Process 状态的完整清单。`sent_no_ack`、`acked_running`、`wait_expired`、`remote_unknown` 和 `cancel_requested` 等词汇用于描述观察结果或调用方状态，并不是额外的 wire 状态或持久化状态。这里不会引入 `cancel_requested` 传输状态。
 
-Both transports apply the same current-generation admission rule. `Hello`,
-`Heartbeat`, `ProcessUpdate`, `RunReport`, and `ConfirmationRequest` are
-current-only lifecycle messages: only the latest connection for an agent may
-update metadata, the process cache, reports, last-seen state, confirmation
-admission, or the Room lease. A stale WebSocket message is rejected by the
-handler and the retired stream receives `Close`; a stale HTTP/SSE message is
-rejected with `409 stale_connection`. The local agent should stop the writer
-for that generation.
+两种传输都采用相同的当前连接代际准入规则。`Hello`、`Heartbeat`、`ProcessUpdate`、`RunReport` 和 `ConfirmationRequest` 都是仅允许当前连接处理的生命周期消息：只有 Agent 的最新连接可以更新元数据、进程缓存、报告、最近活动状态、确认准入或 Room 租约。过期 WebSocket 消息会被处理器拒绝，已退役的流会收到 `Close`；过期 HTTP/SSE 消息会以 `409 stale_connection` 拒绝。本地 Agent 应停止该代际对应的 writer。
 
-Stale reliable messages (`TransportAck`, `TransportRunStatus`, and `Response`) may still be accepted when their run metadata matches an existing Hub run, preserving late-result delivery after reconnects. They do not refresh or otherwise modify the current connection's lifecycle state. `RunReport` is not a reliable replay message and remains current-only.
+如果过期的可靠消息（`TransportAck`、`TransportRunStatus` 和 `Response`）中的运行元数据匹配现有 Hub 运行，它们仍可能被接受，以便重连后继续投递迟到结果。它们不会刷新或以其他方式修改当前连接的生命周期状态。`RunReport` 不是可靠重放消息，仍仅接受当前连接发来的消息。
 
-Each SSE connection must use a fresh, non-empty `connectionId`; the same current ID cannot name a second stream. Omitting `connectionId` lets the Hub generate a fresh ID. An explicitly empty ID returns `400 invalid_connection_id`; reusing the current ID returns `409 connection_id_in_use`. A successful replacement closes the previous stream. These IDs identify a connection generation after agent-secret authentication; they are not a separate peer-authentication mechanism.
+每个 SSE 连接都必须使用全新且非空的 `connectionId`；同一个当前 ID 不能标识第二条流。省略 `connectionId` 时，Hub 会生成新的 ID。显式传入空 ID 会返回 `400 invalid_connection_id`；重复使用当前 ID 会返回 `409 connection_id_in_use`。替换成功后会关闭旧流。这些 ID 在 agent-secret 身份验证之后用于标识连接代际，不是独立的对端身份验证机制。
 
-`Hello`, `Heartbeat`, `HeartbeatAck`, confirmation messages, and
-`ProcessUpdate` remain best-effort lifecycle messages in V1. `process.exec`,
-`process.batch`, `process.status`, `process.list`, `process.output`,
-`process.result`, and `process.cancel` are reliable request/response commands.
-`Hello.bootGeneration` changes cause active cached processes to become
-`unknown_after_restart`; terminal processes remain retained and side effects
-are never replayed.
+V1 中，`Hello`、`Heartbeat`、`HeartbeatAck`、确认消息和 `ProcessUpdate` 仍是尽力而为的生命周期消息。`process.exec`、`process.batch`、`process.status`、`process.list`、`process.output`、`process.result` 和 `process.cancel` 是可靠的请求/响应命令。`Hello.bootGeneration` 变更会使缓存中的活动进程变为 `unknown_after_restart`；终态进程仍予保留，且不会重放副作用。
 
-On Agent restart, the transport ledger is the durable command/result authority:
-owner-bound completed records can resend their matching result, and
-owner-bound accepted records can resume from the stored command; started/running
-records without a completed result become `unknown` rather than replaying a side
-effect. Claims
-are locked and bound to their explicit `agentId`; a foreign owner cannot adopt
-the record. Legacy unowned records remain `LegacyUnowned`: they are not
-auto-reconciled, executed, or used to disclose a result. Recovery is an
-operator-led review of the preserved raw record and newer owner-bound
-evidence; never delete deduplication evidence to make startup pass.
+Agent 重启时，传输账本是命令/结果的持久权威来源：绑定所有者的已完成记录可以重新发送匹配结果；绑定所有者的已接受记录可以从已存储命令恢复；没有完成结果的 started/running 记录会变为 `unknown`，而不会重放副作用。claim 会被锁定并绑定到显式的 `agentId`；其他所有者不能接管该记录。旧的无所有者记录继续保持 `LegacyUnowned`：不会自动协调、执行，也不会用于披露结果。恢复操作须由运维人员检查保留的原始记录和更新的所有者绑定证据；绝不能为了让启动通过而删除去重证据。
 
-Ledger parsing or a torn final line fails closed. The raw offending bytes are
-preserved in a private `.recovery` sidecar, and compaction keeps a private
-`.backup`; neither is a reason to delete or reset the ledger. The Hub marks
-acked runs without a status/result as `unknown` after its timeout, but neither
-that state nor a missing cache proves that an Agent stopped.
+账本解析失败或最后一行被截断时会 fail closed。出错的原始字节保存在私有 `.recovery` sidecar 中，压缩过程会保留私有 `.backup`；这些都不是删除或重置账本的理由。Hub 会在超时后将缺少状态/结果的 acked 运行标记为 `unknown`，但该状态或缓存缺失都不能证明 Agent 已停止。

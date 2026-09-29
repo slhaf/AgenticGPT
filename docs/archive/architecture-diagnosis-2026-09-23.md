@@ -1,8 +1,13 @@
 # 架构诊断与根因判断
 
-状态：历史调查结论、已交付边界与 2026-09-23 复审并存；历史基线为 2026-09-16，WP2 closure 为 2026-09-20，WP3、WP4-A、WP-R 与本轮结构收口的有界状态以[重构计划](refactoring-plan.md)和[现状架构](current-state.md)为准。本文不把完成包扩展成全局目标架构完成。
+> **归档记录（2026-09-29）**
+> - **归档状态：** 已归档；本文保留历史调查基线、A01–A09 根因判断与 R01–R06 源级复审，不作为当前行为的唯一依据。
+> - **版本范围：** 非发布版本；对应 2026-09-16 历史基线及 2026-09-23 复审。
+> - **当前权威：** 当前结构见[现状架构](../architecture/current-state.md)，用户已确认边界见[已确认决策](../architecture/decisions.md)，日常残余及触发条件见[重构计划](../architecture/refactoring-plan.md)。
 
-后续用户决策见[已确认决策](decisions.md)。A01/A02/A04/A07/A09 的基线段落保留修复前机制与根因，但各节新增当前闭环/残余说明；A03/A05/A06 保留 WP2 的窄 operation/config/security 边界。Process routing、Job config snapshot、Hub neutral projection、Protocol domain modules、Skill/path ownership、Android transition 与 release preflight 已有当前源码闭环；本地 bounded live gate 已通过，但证据仍不能替代 hosted release publication/live parity、外部部署、Console OS 或完整跨进程场景。当前非 Process Agent branches 仍可能保留局部 routing/projection，不应读成一个 universal dispatcher。
+状态：历史调查结论、已交付边界与 2026-09-23 复审并存；历史基线为 2026-09-16，WP2 closure 为 2026-09-20，WP3、WP4-A、WP-R 与本轮结构收口的有界状态以[重构计划](../architecture/refactoring-plan.md)和[现状架构](../architecture/current-state.md)为准。本文不把完成包扩展成全局目标架构完成。
+
+后续用户决策见[已确认决策](../architecture/decisions.md)。A01/A02/A04/A07/A09 的基线段落保留修复前机制与根因，但各节新增当前闭环/残余说明；A03/A05/A06 保留 WP2 的窄 operation/config/security 边界。Process routing、Job config snapshot、Hub neutral projection、Protocol domain modules、Skill/path ownership、Android transition 与 release preflight 已有当前源码闭环；本地 bounded live gate 已通过，但证据仍不能替代 hosted release publication/live parity、外部部署、Console OS 或完整跨进程场景。当前非 Process Agent branches 仍可能保留局部 routing/projection，不应读成一个 universal dispatcher。
 
 本文件用“历史基线”“[推断]”“[未验证]”“当前残余”区分证据等级。没有运行竞态、攻击或真实多进程场景，不声称这些风险已完成复现。
 
@@ -102,7 +107,7 @@ Agentic 不是已经失去所有边界的单体。实际执行核心、Hub 控�
 
 **修复前配置 discrepancy（历史）**：`jobs.rs::start_process_job_inner` 在 admission/audit 处复制 config，而 `run_async_job` 后续从 `state.config` 读取 policy/CWD/preflight。current-thread regression `admitted_process_keeps_policy_snapshot_across_reload` 在修复前确定性得到 `Rejected`，预期为 `Completed`；这把原先 source-level interleaving 风险变成了已复现的行为回归，而不是静态推测。
 
-**当前规则与边界（2026-09-23）**：Process 与 Skill admission 各捕获一份 `Arc<Config>` 并将其贯穿 worker；batch preflight 捕获一份 snapshot，所有 queued workers 复用它；后续新 admission 才读取 reload 后的 live config。startup supervisor identity watcher 仍独立负责 startup-derived identity/resource 分类；这不是所有 Config 读取点的普遍 snapshot 保证。Rust workspace check、该确定性 regression 与 workspace test（668 passed、1 ignored）已通过。
+**当前规则与边界（2026-09-23）**：Process 与 Skill admission 各捕获一份 `Arc<Config>` 并将其贯穿 worker；batch preflight 捕获一份 snapshot，所有 queued workers 复用它；后续新 admission 才读取 reload 后的 live config。startup supervisor identity watcher 仍独立负责 startup-derived identity/resource 分类；这不是所有 Config 读取点的普遍 snapshot 保证。Rust workspace check、该确定性 regression 与 2026-09-23 workspace test（668 passed、1 ignored）通过。
 
 **WP2/WP3 保留边界**：reload 仍只应用 live-safe subset（policy、limits、mcpServers、toolsets、httpMcp；workspace 未改变时才应用 pathPolicy），并保留 startup-derived resources；identity/mode/profile/workspace/runtime/socket、Browser 配置整体、history/install 等 restart-required 变化不重建半套资源；启用 Room 时先准备既有 live root。durability/retention 另按 WP3 分层。
 
@@ -151,7 +156,7 @@ Agentic 不是已经失去所有边界的单体。实际执行核心、Hub 控�
 
 **已确认范围（D07）**：保留本地 Attention，局部状态/恢复问题仍属独立维护，不计入 Agent/Hub/Protocol/Room 核心完成条件。shared 保持 domain/UI ports，平台拥有持久化和 OS adapter；Hub remote console、approval board、exec ledger 以后另立产品，不引入 Hub reminder scheduler 或以 local DB 代替远端 Job authority。
 
-**独立维护验证门槛（不阻塞核心重构）**：`:shared:jvmTest` 已在 17 tasks 下 BUILD SUCCESSFUL，仅覆盖 shared 纯 `AttentionTransitionPolicy` 测试和 common Kotlin compile；Android app host test/assemble、Room/OS behavior 与 device/emulator 证据仍待补，当前 SDK 为空、Maven TLS/设备边界未解决。Desktop/Web capability 需诚实展示；未来网络 token、TLS/CORS、平台安全存储随产品接入另行设计。
+**独立维护验证门槛（不阻塞核心重构）**：`:shared:jvmTest` 于 2026-09-23 在 17 个 Gradle tasks 下 BUILD SUCCESSFUL，仅覆盖 shared 纯 `AttentionTransitionPolicy` 测试和 common Kotlin compile；Android app host test/assemble、Room/OS behavior 与 device/emulator 证据仍待补，当前 SDK 为空、Maven TLS/设备边界未解决。Desktop/Web capability 需诚实展示；未来网络 token、TLS/CORS、平台安全存储随产品接入另行设计。
 
 ### A09 — 当前规范、历史说明与验证工具的保证混在一起【历史基线；WP4-A 部分闭环；同步残余】
 
@@ -175,7 +180,7 @@ Agentic 不是已经失去所有边界的单体。实际执行核心、Hub 控�
 4. **资源与配置耦合隐式化**：共享 AppState 可用，但 startup-derived owner 与 mutable Config 没有严格区分。明确生命周期，不急于依赖注入框架。
 5. **实验成熟度没有同步工程约束**：Android/Browser/历史 docs 的独立探索不能自动等同正式支持。明确状态，再决定保留或退出。
 
-优先级不是按文件长度排列：A01/A02/A04/A05/A07/A09 的历史基线已有对应闭环或残余说明，不再作为 blanket open defects；当前应按第 6 节 R01–R06 的已实现 seam、结构残余与证据边界逐项核验，再按[工程规则](engineering-rules.md)和[重构计划](refactoring-plan.md)提供行为证据。A08 归独立 Console 维护，不是核心完成前置；WP-T 标准仍未决定，WP5-O 仍是未来产品。
+优先级不是按文件长度排列：A01/A02/A04/A05/A07/A09 的历史基线已有对应闭环或残余说明，不再作为 blanket open defects；当前应按第 6 节 R01–R06 的已实现 seam、结构残余与证据边界逐项核验，再按[工程规则](../architecture/engineering-rules.md)和[重构计划](../architecture/refactoring-plan.md)提供行为证据。A08 归独立 Console 维护，不是核心完成前置；WP-T 测试增删标准已确立，逐项清理仍未完成；WP5-O 仍是未来产品。
 
 ## 5. 未采纳的扩大范围
 
@@ -187,7 +192,7 @@ Agentic 不是已经失去所有边界的单体。实际执行核心、Hub 控�
 
 ## 6. 2026-09-23 当前结构残余（源级分析）
 
-本节是当前复审提出的结构风险、已收口 seam 和条件性后续边界，不是把历史机制静默删除，也不是把未验证外部行为写成通过。每项保留现有 owner、入口认证、投影差异和部署拓扑；实施/维护前仍须按[目标架构](target-architecture.md)、[工程规则](engineering-rules.md)和[重构计划](refactoring-plan.md)核对源码与行为证据。
+本节是当前复审提出的结构风险、已收口 seam 和条件性后续边界，不是把历史机制静默删除，也不是把未验证外部行为写成通过。实施/维护前仍须按[目标架构](../architecture/target-architecture.md)、[工程规则](../architecture/engineering-rules.md)和[重构计划](../architecture/refactoring-plan.md)核对源码与行为证据。
 
 ### R01 — Agent direct/Hub 路由：Process family 已共享 adapter，其余局部映射仍是结构残余
 
@@ -207,7 +212,7 @@ Agentic 不是已经失去所有边界的单体。实际执行核心、Hub 控�
 
 **历史机制/影响**：一次 reload 位于 admission 与 async policy/CWD/preflight/spawn 之间，曾使审计快照和实际执行读取不同；修复前 current-thread regression `admitted_process_keeps_policy_snapshot_across_reload` 确定性复现 `Rejected` vs `Completed`。该历史 failure 不应继续写成 pending source-only risk。
 
-**当前规则**：每个 Process/Skill admission 采用 admission-time config snapshot；batch 在 preflight 采用一份 snapshot 并贯穿 queued workers；后续新 admission 使用 live reload 后的 config。startup supervisor watcher 保持独立，不与 Job snapshot 合并。Rust workspace check、targeted regression 与 workspace test 668 passed/1 ignored 已通过。
+**当前规则**：每个 Process/Skill admission 采用 admission-time config snapshot；batch 在 preflight 采用一份 snapshot 并贯穿 queued workers；后续新 admission 使用 live reload 后的 config。startup supervisor watcher 保持独立，不与 Job snapshot 合并。Rust workspace check、targeted regression 与 2026-09-23 workspace test（668 passed、1 ignored）已通过。
 
 **根因 [推断]**：`Config` 同时承载持久 schema、live policy 和 startup-derived identity/resource 输入，watcher 与 Job 后续执行曾在不同阶段演化；当前规则修复了 Job effect 的时间边界，但不把所有 Config consumers 宣称为同一 snapshot。
 
@@ -243,7 +248,7 @@ Agentic 不是已经失去所有边界的单体。实际执行核心、Hub 控�
 
 **源证据**：`AttentionRuntimeCoordinator` 现实现 `AttentionTransitionOwner` 并集中 UI、receiver、alarm、boot 的 transition；`AttentionTransitionPolicy` 定义本地 policy；overdue restore 使用 `queryOverdueForRestore` 与原子 `claimTriggered`，`snooze(id,duration)` 读取完整 item 后调用 `snoozeIfActive(snoozed)` 和 scheduler 的 payload-aware API。`AndroidAgenticApp` 仍组装 coordinator、Room repository/DAO、scheduler 与 notification service，但 UI/OS 入口不再各自拥有同一 transition。
 
-**机制与影响**：source-level 的 UI 与 OS callback 双 orchestrator 风险和 scheduler snooze payload 缺口已收窄；overdue claim 的 atomicity 与 full payload contract 已有实现。`:shared:jvmTest` 的 17-task BUILD SUCCESSFUL 仅覆盖 shared policy/common Kotlin compile，不覆盖 Android app/Room/OS；Android app host assemble、OS/device process-death/boot/permission degradation 尚未取得证据，因此不能把 source implementation 等同于 Android runtime proof。
+**机制与影响**：source-level 的 UI 与 OS callback 双 orchestrator 风险和 scheduler snooze payload 缺口已收窄；overdue claim 的 atomicity 与 full payload contract 已有实现。`:shared:jvmTest` 于 2026-09-23 在 17 个 Gradle tasks 下 BUILD SUCCESSFUL 仅覆盖 shared policy/common Kotlin compile，不覆盖 Android app/Room/OS；Android app host assemble、OS/device process-death/boot/permission degradation 尚未取得证据，因此不能把 source implementation 等同于 Android runtime proof。
 
 **根因 [推断]**：Android local spike 从 mock 演进到 Room/AlarmManager/Notification 时，跨入口 transition policy 与恢复语义没有由一个 use-case owner 统一；本轮已在平台内补齐该 owner，剩余是运行环境验证。
 
@@ -265,5 +270,5 @@ Agentic 不是已经失去所有边界的单体。实际执行核心、Hub 控�
 
 ### 当前残余工作包结论
 
-R01–R06 不再是“全部未开始”：Process family adapter、admission config snapshot、Skill digest/lease owner、Hub neutral projection、Android local Attention transition owner 与 release preflight 已在源代码中落地，且 Rust/本地 bounded release evidence 已按各条边界记录。残余包括其他 operation family 的 adapter 收敛、宽组合根的进一步 contexts、Android host/device、hosted publication/cross-build/ARM 与外部 importer/Console surface 证据。WP-T 仍待标准决策；Console remote product（WP5-O）继续是未来范围。
+R01–R06 不再是“全部未开始”：Process family adapter、admission config snapshot、Skill digest/lease owner、Hub neutral projection、Android local Attention transition owner 与 release preflight 已在源代码中落地，且 Rust/本地 bounded release evidence 已按各条边界记录。残余包括其他 operation family 的 adapter 收敛、宽组合根的进一步 contexts、Android host/device、hosted publication/cross-build/ARM 与外部 importer/Console surface 证据。WP-T 测试增删标准已确立（截至 2026-09-29），逐项审查与清理仍未完成；Console remote product（WP5-O）继续是未来范围。
 

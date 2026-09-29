@@ -1,80 +1,72 @@
-# Configuration
+# 配置说明
 
-Agentic GPT uses one local JSON configuration for Standalone, Local Unix MCP, and Hub-connected Agent modes. The default path is:
+Agentic GPT 的 Standalone、Local Unix MCP 与连接 Hub 的 Agent 共用一份本地 JSON 配置。默认路径：
 
 ```text
 ~/.agentic_gpt/config.json
 ```
 
-The durable file is a sparse Config v2 projection. It always contains the authoritative top-level
-`mode` (`standalone`, `hub`, or `local`) and `profile` (`normal` or `room`); omitted values are
-reconstructed from effective defaults. `config show` displays the fully materialized effective
-configuration, while Agentic-managed writes keep the file sparse.
+对应页面：[配置说明](configuration.zh-CN.md)。
 
-Start from:
+磁盘文件是稀疏的 Config v2 投影，始终包含权威的顶层 `mode`（`standalone`、`hub` 或
+`local`）和 `profile`（`normal` 或 `room`）；省略的值会从有效默认值重建。`config show`
+显示完整的有效配置，而 Agentic 管理的写入会保持文件稀疏。
+
+从以下命令开始：
 
 ```bash
 agentic-gpt config init
 agentic-gpt config show
 ```
 
-[`config.example.json`](../config.example.json) is a sparse Config v2 example. It is
-Standalone-first, contains no usable credentials, keeps all example downstream MCP servers
-disabled, and includes only meaningful Hub fields for deployments that need them.
+[`config.example.json`](../config.example.json) 是稀疏的 Config v2 示例：以 Standalone 为优先入口，不包含可用凭据，示例下游 MCP server 全部保持 disabled，同时只保留 Hub 模式需要的有意义字段。
 
-## Fullscreen initializer behavior
+## 全屏初始化行为
 
-`agentic-gpt config init` opens the keyboard-driven fullscreen setup UI only when stdin, stdout,
-and stderr are all terminals. A pipe or redirected stream is not an implicit fallback: bare
-non-TTY init returns a localized, actionable error and writes nothing. Use
-`config init --non-interactive` for scripts, CI, redirected output, or any other automation. The
-default mode is `standalone` and the default profile is `normal`.
+只有当 stdin、stdout、stderr 全部是终端时，`agentic-gpt config init` 才会打开键盘驱动的
+全屏配置界面。管道或重定向的流不会隐式回退：裸跑的非 TTY 初始化会返回本地化的可操作
+错误且不会写入文件。脚本、CI、重定向输出或其他自动化场景请使用
+`config init --non-interactive`。默认模式是 `standalone`，默认配置档是 `normal`。
 
-Mode and profile are independent choices:
+模式与配置档是两个独立选择：
 
-- `--mode standalone|hub|local` selects the runtime connection and configuration shape.
-- `--profile normal|room` selects the default toolset preset. The normal preset enables every
-  namespace except `room`; the room preset enables every namespace. A profile preset does not
-  by itself fix the final runtime surface or count, because an explicit `toolsets.enabled`
-  selection is authoritative.
+- `--mode standalone|hub|local` 选择运行时连接方式与配置形状。
+- `--profile normal|room` 选择默认 toolset preset。normal preset 启用除 `room` 外的所有
+  namespace；room preset 启用所有 namespace。配置档本身不会固定最终 runtime surface 或数量，
+  因为显式的 `toolsets.enabled` 选择具有权威性。
 
-The available namespaces are `agent`, `file`, `mcp`, `process`, `job`, `skills`, `tmux`,
-`browser`, and `room`. The logical `room` namespace includes Room bootstrap (`bootstrap` and
-`bootstrap.read`) and every `room.*` tool. Selection filters the pre-existing advertised Normal/Room names only;
-it never exposes dispatch-only aliases.
-
-Pin a selection with the following exact commands:
+可用 namespace 为 `agent`、`file`、`mcp`、`process`、`skills`、`tmux`、`browser`、`room`。
+逻辑上的 `room` namespace 包含 Room bootstrap（`bootstrap` 与 `bootstrap.read`）以及全部
+`room.*` 工具。选择只会过滤既有的 Normal/Room advertised names，不会暴露 dispatch-only alias。
+使用以下精确命令固定选择：
 
 ```bash
 agentic-gpt config toolset ls
 agentic-gpt config toolset enable <namespace>
 agentic-gpt config toolset disable <namespace>
 ```
-`ls` prints all namespaces, their enabled/disabled state, and a concise description of the tools
-they contain. Successful `enable` and `disable` mutations print an explicit confirmation.
+`ls` 会列出全部 namespace、当前启用/禁用状态及其所含工具的简短说明。`enable` 和
+`disable` 成功后会明确输出被修改的 namespace 与结果状态。
 
-The same `toolsets.enabled` array may be edited directly in JSON. Valid toolset changes are
-hot-reloaded while the worker is running and take effect for subsequent tool discovery and
-calls; restarting is not required. An invalid candidate keeps the last valid live selection.
-Room bootstrap, diary, and notebook authorization follows the live `room` namespace, not the
-startup profile. A direct Room command while that namespace is disabled returns
-`room_toolset_required`.
+同一个 `toolsets.enabled` 数组也可以直接编辑 JSON。有效的 toolset 修改会在 worker 运行时
+热加载，并对后续工具发现与调用生效；无需重启。无效候选会保留上一次有效的 live selection。
+Room bootstrap、日记和笔记本命令以实时 `room` namespace 为授权依据，而不是启动时的
+profile。该 namespace 禁用时，直接分发 Room 命令会返回 `room_toolset_required`。
 
-For example, an explicit normal selection is represented as:
+例如，显式固定 normal 选择时写成：
 
 ```json
 {
   "profile": "normal",
   "toolsets": {
-    "enabled": ["agent", "file", "mcp", "process", "job", "skills", "tmux", "browser"]
+    "enabled": ["agent", "file", "mcp", "process", "skills", "tmux", "browser"]
   }
 }
 ```
 
-This later explicit selection remains authoritative if the profile is changed.
+如果之后切换 profile，这个显式选择仍然具有权威性。
 
-For deterministic scripts, use the exact CLI grammar below and provide values that must not be
-placeholders:
+脚本需要确定性结果时，请使用以下实际 CLI 语法，并提供不应保留占位符的值：
 
 ```bash
 agentic-gpt config init --non-interactive
@@ -87,56 +79,51 @@ agentic-gpt config init \
   --non-interactive
 ```
 
-With no values supplied, the non-interactive Standalone + Normal template uses safe placeholders
-such as `tunnel_replace-me` and a `file:` reference under the Agentic home. It reports pending
-actions to replace the tunnel ID and provision the referenced secret; it does not create or
-provision secret material automatically. Hub defaults similarly report pending Hub URL and
-agent-secret actions when those values are omitted. `--agent-secret` is visible to shell history
-and local process inspection, so hidden interactive input is preferred. A `file:` or `env:`
-reference avoids putting a tunnel secret in the command line; plaintext tunnel API keys are
-rejected.
+不提供值时，非交互式 Standalone + Normal 模板使用安全占位符，例如 `tunnel_replace-me`
+以及 Agentic home 下的 `file:` 引用。命令会报告替换 tunnel ID、配置所引用密钥等待处理
+操作；不会自动创建或配置密钥材料。Hub 缺少值时同样会报告待配置的 Hub URL 与代理密钥。
+`--agent-secret` 会暴露在 shell 历史和本地进程检查中，因此优先使用交互式隐藏输入。
+使用 `file:` 或 `env:` 引用可以避免把 tunnel secret 放进命令行；明文 tunnel API key
+会被拒绝。
 
-The fullscreen flow is Basic → Connection (except for Local) → Optional settings → Review →
-Completion. The command-line flags seed editable fields in interactive mode; they do not lock the
-values or skip the pages. Identity/display name, workspace/path policy, confirmation/language,
-limits, sandbox, and the optional Toolsets section are available. Toolsets starts from the
-profile preset; once explicitly edited, its namespace selection is authoritative. Room settings
-are offered only for the Room profile. Tunnel-client overrides and Hub reporting are offered only
-for Standalone mode. Hub and Local modes do not show those tunnel sections. Optional sections can
-be revisited, and selecting none keeps the template defaults.
+全屏流程为 Basic → Connection（Local 除外）→ Optional settings → Review → Completion。
+交互模式下的命令行 flag 只是可编辑的预填值，不会锁定字段或跳过页面。身份/显示名称、
+工作区/路径策略、确认方式/语言、限制、沙箱、Toolsets 与下游 MCP server 集合均可在
+Optional settings 中配置。Toolsets 从配置档 preset 开始；一旦显式编辑，其 namespace
+selection 具有权威性。Room 设置仅当当前有效的 toolset selection 启用 `room` namespace 时
+才会提供。profile 通过默认 preset 影响该 selection；显式 `toolsets.enabled` 会覆盖 preset，
+因此显示条件是有效 namespace selection，而不是 `profile` 字段本身。只有 Standalone 模式会出现
+tunnel-client 覆盖和 Hub reporting。Hub 与 Local 模式不会显示这些 tunnel 部分。不选可选部分时会保留模板默认值。
 
+界面使用键盘导航：Tab/Shift+Tab 与方向键移动焦点，Enter 编辑或触发当前操作，Esc 返回
+（根 Basic 页面是 no-op），Ctrl+C 取消初始化。编辑态按 Esc 只结束编辑，不会取消初始化。
+Review 会隐藏密钥，可跳回 Basic、Connection 或可选 section 编辑；最终确认前不会写入配置、
+备份或密钥文件。本功能只承诺键盘全屏流程；鼠标、inline、dashboard 与 Windows 行为不在
+本功能契约内。
 
-The UI uses keyboard navigation: Tab/Shift+Tab and the arrow keys move focus, Enter edits or
-activates the focused item, Esc backs out (and is a no-op on the root Basic page), and Ctrl+C
-cancels the setup. Editing Esc only leaves editing; it does not cancel the setup. Review is
-redacted, can jump back to Basic, Connection, or an optional section, and does not write config,
-backup, or secret files until final confirmation. This feature documents the fullscreen keyboard
-flow only; mouse, inline, dashboard, and Windows behavior are outside its contract.
+`config init --language auto|zh-CN|en` 选择 CLI 界面语言。使用 `auto` 时依次检查
+`LC_ALL`、`LC_MESSAGES`、`LANG`，都没有匹配时使用英文界面。显式的 `zh-CN` 或 `en`
+优先于环境变量。这个界面选择与持久化的 `confirmationLanguage` 不同；后者控制 runtime
+发出的确认提示语言，可在可选配置 section 或通过 `config set` 设置。
 
-`config init --language auto|zh-CN|en` selects the CLI interface language. With `auto`, locale
-variables are checked in this order: `LC_ALL`, then `LC_MESSAGES`, then `LANG`, then English.
-An explicit `zh-CN` or `en` wins over the environment. This interface choice is separate from
-the persisted `confirmationLanguage`, which controls the language of confirmation prompts sent
-by the runtime and can be set through the optional configuration section or `config set`.
+全屏初始化的 Optional settings 包含下游 MCP server 集合编辑器；但 `config init --non-interactive`
+没有用于填写 `mcpServers` 集合的 CLI flags。自动化初始化后可使用 `config mcp` 配置 server；
+命令策略集合仍使用 `config allow`、`config confirm`、`config deny`，路径根使用 `config path`。
 
-The first-run setup scope deliberately excludes MCP server collections and command-policy
-collections. Configure those after initialization with `config mcp` and `config allow`,
-`config confirm`, or `config deny` (and use `config path` for path roots).
+## 各 runtime 必需项
 
-## Runtime-specific requirements
-
-| Field group | Standalone | Local Unix MCP | Hub-connected Agent |
+| 配置组 | Standalone | Local Unix MCP | 连接 Hub 的 Agent |
 | --- | --- | --- | --- |
-| Common identity/workspace/policy | Required | Required | Required |
-| `tunnel` | Required | Ignored | Ignored |
-| `httpMcp` | Optional, active only in Standalone | Ignored | Ignored |
-| `hub` (`url`, `transport`, `agentSecret`) | Used only for optional Hub reporting/ntfy relay | Ignored | Required |
-| Public Hub/VPS | Not required | Not required | Required |
-| Startup command | `agentic-gpt run` | `agentic-gpt run` | `agentic-gpt run` |
+| 公共 identity/workspace/policy | 必需 | 必需 | 必需 |
+| `tunnel` | 必需 | 忽略 | 忽略 |
+| `httpMcp` | 可选，仅在 Standalone 中生效 | 忽略 | 忽略 |
+| `hub`（`url`、`transport`、`agentSecret`） | 仅可选 Hub reporting/ntfy relay 使用 | 忽略 | 必需 |
+| 公开 Hub/VPS | 不需要 | 不需要 | 需要 |
+| 启动命令 | `agentic-gpt run` | `agentic-gpt run` | `agentic-gpt run` |
 
-The JSON type still contains a nested `hub` section in every mode because one config can be moved between runtime shapes. Standalone and Local execution do not put Hub in the command path. In Standalone, Hub fields matter only when `tunnel.hubReporting.enabled` or Hub-backed `ntfy` confirmation is used. Inactive sections are preserved when explicitly configured.
+所有模式的 JSON 类型仍保留嵌套 `hub` section，便于同一配置在不同 runtime 之间切换。Standalone 与 Local 的命令链路不经过 Hub。Standalone 只有在启用 `tunnel.hubReporting.enabled` 或使用 Hub-backed `ntfy` 确认时才会使用 Hub 字段；显式配置的非活动 section 会保留。
 
-## Standalone-first setup
+## Standalone-first 配置
 
 ```bash
 agentic-gpt config init
@@ -157,44 +144,43 @@ agentic-gpt config set tunnel.client.autoDownload true
 agentic-gpt run
 ```
 
-Set `profile` to `room` for the all-namespace Room preset (for example, `agentic-gpt config set
-profile room`). An explicit `toolsets.enabled` selection remains authoritative.
+将 `profile` 设为 `room` 会选择启用所有 namespace 的 Room preset（例如
+`agentic-gpt config set profile room`）；如果存在 `toolsets.enabled`，则以它为准。
 
-## Top-level fields
+## 顶层字段
 
-| Field | Purpose |
+| 字段 | 用途 |
 | --- | --- |
-| `mode` | Authoritative runtime dispatch: `standalone`, `hub`, or `local`. |
-| `profile` | Default capability/toolset preset: `normal` or `room`. |
-| `toolsets` | Enabled tool namespaces; an explicit `enabled` list overrides the profile preset. |
-| `agentId` | Stable local identity. It also determines the private runtime/socket path and per-agent durable state root under `~/.agentic_gpt/state/agent/<agentId>/`. |
-| `displayName` | Human-readable machine label used in summaries/reporting. |
-| `workspaceRoot` | Main writable workspace and location of `.agentic-gpt-audit.jsonl`. |
-| `backupLimit` | Number of config backups retained by Agentic-managed writes. |
-| `confirmationProvider` | Ordered local/remote confirmation channels. |
-| `confirmationLanguage` | `en` or `zh-CN`. |
-| `sandbox` | Optional bubblewrap configuration. |
-| `mcpServers` | Downstream MCP servers bridged by `mcp.*`. |
-| `pathPolicy` | Writable, read-only, and denied roots. |
-| `policy` | Explicit allow / confirm / deny command rules. |
-| `limits` | Process concurrency and total active Job capacity. |
-| `skills` | Skill package/install limits and network policy. |
-| `room` | Room repository root, timezone, diary boundary, maintenance mode, and auto-push policy. |
-| `tunnel` | Standalone tunnel-client source, secret reference, and optional reporting. |
-| `browser` | Optional advanced explicit Browser runtime override; ordinary runtime discovery/provisioning is otherwise automatic. |
-| `hub` | Centralized Hub connection or optional standalone Hub reporting/ntfy relay. |
-| `httpMcp` | Optional Standalone worker-owned inbound Streamable HTTP MCP endpoint. |
+| `mode` | 权威运行时分派：`standalone`、`hub` 或 `local`。 |
+| `profile` | 默认能力/toolset preset：`normal` 或 `room`。 |
+| `toolsets` | 已启用的 tool namespace；显式 `enabled` 列表会覆盖配置档 preset。 |
+| `agentId` | 稳定本地 identity，也用于派生私有 runtime/socket 路径，以及 `~/.agentic_gpt/state/agent/<agentId>/` 下的 per-agent 持久状态根目录。 |
+| `displayName` | summary/reporting 中的人类可读机器名称。 |
+| `workspaceRoot` | 主可写工作区，也是 `.agentic-gpt-audit.jsonl` 所在位置。 |
+| `backupLimit` | Agentic 管理配置写入时保留的备份数量。 |
+| `confirmationProvider` | 有序的本地/远程确认通道。 |
+| `confirmationLanguage` | `en` 或 `zh-CN`。 |
+| `sandbox` | 可选 bubblewrap 配置。 |
+| `mcpServers` | `mcp.*` 转发的下游 MCP server。 |
+| `pathPolicy` | 可写、只读、拒绝路径根。 |
+| `policy` | 显式 allow / confirm / deny 命令规则。 |
+| `limits` | Process 并发限制与最大活动 Process/Skill/MCP Job 容量。 |
+| `skills` | Skill package/install 限制与网络策略。 |
+| `room` | Room 仓库根目录、时区、日记日界线、维护模式和自动推送策略。 |
+| `tunnel` | Standalone tunnel-client 来源、secret 引用与可选 reporting。 |
+| `browser` | 可选的高级 Browser runtime 覆盖；普通 runtime discovery/provisioning 默认仍自动进行。 |
+| `hub` | 集中式 Hub 连接，或 Standalone 的可选 Hub reporting/ntfy relay。 |
+| `httpMcp` | 可选的 Standalone hidden worker 所有入站 Streamable HTTP MCP endpoint。 |
 
 ## Standalone HTTP MCP endpoint
 
-Standalone can expose an optional inbound MCP endpoint from the hidden worker:
+Standalone 可以由 hidden worker 提供可选的入站 MCP endpoint：
 
 ```text
 http://<host>:<port>/mcp
 ```
 
-It is disabled by default and is independent of both the tunnel transport and Hub. The
-configuration shape and defaults are:
+它默认关闭，并且独立于 tunnel transport 与 Hub。配置形状与默认值如下：
 
 ```json
 {
@@ -209,87 +195,74 @@ configuration shape and defaults are:
 }
 ```
 
-The path is fixed at `/mcp`; it cannot be changed through configuration. When
-`publicUrl` is absent, the endpoint accepts the configured
-`Authorization: Bearer ...` credential for direct local use. When `publicUrl`
-is present, it additionally exposes the standalone ChatGPT connector OAuth
-contract:
+路径固定为 `/mcp`，不能通过配置修改。没有 `publicUrl` 时，endpoint 接受配置的
+`Authorization: Bearer ...` 凭据，保持直接本地使用；配置 `publicUrl` 后，另外
+提供 Standalone ChatGPT connector OAuth contract：
 
-- `GET /.well-known/oauth-protected-resource/mcp` is the canonical
-  path-specific protected-resource metadata; `GET
-  /.well-known/oauth-protected-resource` is a root-compatible alias.
-- `GET /.well-known/oauth-authorization-server` and `GET
-  /.well-known/openid-configuration` are authorization-server/OpenID aliases.
-- `GET|POST /oauth/authorize` and `POST /oauth/token` implement the
-  authorization-code flow with the single `agentic:mcp` scope.
+- `GET /.well-known/oauth-protected-resource/mcp` 是 canonical path-specific
+  protected-resource metadata；`GET /.well-known/oauth-protected-resource` 是根路径
+ 兼容 alias。
+- `GET /.well-known/oauth-authorization-server` 与
+  `GET /.well-known/openid-configuration` 是 authorization-server/OpenID alias。
+- `GET|POST /oauth/authorize` 与 `POST /oauth/token` 实现唯一 `agentic:mcp`
+  scope 的 authorization-code flow。
 
-The configured value must be a non-empty HTTPS origin with no userinfo, path
-other than empty or `/`, query, or fragment. A trailing slash is normalized.
-It is an advertised external origin, not a routing or proxy override: `host`
-and `port` remain the local bind coordinates, and the origin may remain
-loopback/private. `publicUrl` is non-secret and is never masked in `config
-show`, Review, diagnostics, or the TUI; `bearerToken` remains a secret
-reference and its resolved value is never exposed.
+`publicUrl` 必须是非空 HTTPS origin，不能包含 userinfo、除空路径或 `/` 之外的
+path、query 或 fragment；末尾 `/` 会被规范化。它只是公布的外部 origin，不是
+路由或 proxy 覆盖：`host` 与 `port` 仍是本地 bind 坐标，origin 可以保持
+loopback/private。`publicUrl` 不是 secret，在 `config show`、Review、诊断和 TUI
+中始终显示且不隐藏；`bearerToken` 仍是 secret 引用，解析后的值不会暴露。
 
-The connector accepts only ChatGPT callback URIs in these exact families:
-`https://chatgpt.com/connector/oauth/<suffix>` or
-`https://chatgpt.com/connector_platform_oauth_redirect`. It accepts only
-`agentic:mcp`; there are no refresh tokens, `offline_access`, dynamic client
-registration, generic registration, or arbitrary redirects. Authorization codes
-and access tokens are opaque, listener-local in-memory records with expiry,
-one-use code consumption, and revocation on listener replacement or bearer
-content rotation. The standalone authorization page and tool/profile surface
-are standalone semantics; they do not use Hub's `Hub API key`, profile, or
-routing contract.
+connector 只接受以下精确 ChatGPT callback family：
+`https://chatgpt.com/connector/oauth/<suffix>` 或精确的
+`https://chatgpt.com/connector_platform_oauth_redirect`。只接受 `agentic:mcp`；
+不提供 refresh token、`offline_access`、dynamic client registration、generic
+registration 或任意 redirect。authorization code 与 access token 是 opaque、
+listener-local 的内存记录，有过期、单次 code 消费和 listener 替换/token 内容
+轮换时撤销机制。Standalone authorization 页面以及 tool/profile surface 使用
+Standalone 语义，不是 Hub 的 `Hub API key`、profile 或 routing contract。
 
-OAuth routes and `/mcp` share listener Host protection. Missing or malformed
-Host is rejected, and a disallowed authority is forbidden; an allowlist entry
-without a port matches any port, while a port-bearing entry matches exactly.
-`null` and exactly `["*"]` remain explicit allow-all values. If `Origin` is
-present it must exactly match the configured `publicUrl`; absent Origin remains
-valid for server-to-server requests, and no permissive CORS is added. With no
-`publicUrl`, failed direct bearer authentication keeps a plain Bearer
-challenge; with one configured, the MCP challenge points to the
-path-specific protected-resource metadata URL.
+OAuth 路由与 `/mcp` 共用 listener Host 防护。缺失或 malformed Host 会被拒绝，
+不允许的 authority 返回 forbidden；不带 port 的 allowlist 项匹配任意 port，
+带 port 的项目必须精确匹配。`null` 与严格等于 `["*"]` 仍是明确的全量放行值。
+如果存在 `Origin`，必须精确匹配配置的 `publicUrl`；缺失 Origin 的
+server-to-server 请求仍然有效，不添加 permissive CORS。未配置 `publicUrl` 时，
+直接 bearer 失败仍使用普通 Bearer challenge；配置后，MCP challenge 指向
+path-specific protected-resource metadata URL。
 
-The rmcp transport is stateful Streamable HTTP/SSE: clients must initialize a
-session, and a listener rebind or disable closes its sessions so the client
-must initialize again. Direct bearer content rotation updates authentication
-in place and preserves existing sessions while atomically revoking OAuth
-records. Invalid candidates retain the last-good listener and its state.
+rmcp transport 使用有状态的 Streamable HTTP/SSE：客户端必须先初始化 session；
+listener rebind 或关闭会终止 session，客户端必须重新 initialize。直接 bearer
+内容轮换会原地更新认证并保留既有 session，同时原子撤销 OAuth 记录。无效候选
+保留上一次有效 listener 及其 state。
 
-`allowHosts` is the DNS-rebinding protection applied by the HTTP MCP transport:
+`allowHosts` 是 HTTP MCP transport 使用的 DNS-rebinding 防护：
 
-- The default list permits only `localhost`, `127.0.0.1`, and `::1`.
-- A non-empty list of valid host/authority entries restricts requests to those entries.
-- `null` or exactly `["*"]` explicitly allows every Host value. The wildcard cannot be
-  mixed with another entry.
-- An empty array is rejected; it is not an implicit allow-all value.
-- Malformed authority entries, wildcard mixtures, and other invalid values are rejected.
+- 默认列表只允许 `localhost`、`127.0.0.1` 和 `::1`。
+- 非空合法 host/authority 列表只允许列表中的请求。
+- `null` 或严格等于 `["*"]` 时明确允许任意 Host 值；wildcard 不能与其他项混用。
+- 空数组会被拒绝，不会被解释为全量允许。
+- malformed authority、wildcard 混用以及其他非法值都会被拒绝。
 
-For a non-loopback listener, choose an explicit authority allowlist or deliberately use
-one of the two full-allow values. `host` must be a non-empty bindable host without
-whitespace or control characters, and `port` must be in `1..=65535`.
+非 loopback listener 应显式填写 authority allowlist，或有意使用上述两个全量放行值。
+`host` 必须是可 bind 的非空值，且不能含空白或控制字符；`port` 必须在 `1..=65535`
+范围内。
 
-`bearerToken` is a secret reference, never a literal credential. It must be empty only
-when the endpoint is disabled; an enabled endpoint requires one of:
+`bearerToken` 永远是 secret 引用，不能填写 literal credential。只有 endpoint disabled
+时才允许为空；启用后必须使用以下一种形式：
 
-- `file:/absolute/path` (one trailing LF or CRLF is removed);
-- `env:VARIABLE_NAME`.
+- `file:/absolute/path`（会去除末尾一个 LF 或 CRLF）；
+- `env:VARIABLE_NAME`。
 
-The referenced value must be available, non-empty, and free of control characters.
-Configuration validation rejects plaintext, malformed references, and an enabled
-endpoint without a reference. Resolved token content is kept in memory only. Config
-show, review, diagnostics, logs, and `agent.info` redact both the reference and the
-resolved value; provisioning and rotating the underlying file/environment remains an
-external secret-management operation.
+引用值必须可用、非空且不含控制字符。配置校验会拒绝明文、格式错误的引用，以及缺少
+引用的 enabled endpoint。解析后的 token 只保留在内存中。`config show`、Review、诊断、
+日志和 `agent.info` 都会同时隐藏引用和解析值；文件或环境中的 secret 由外部 secret
+管理流程负责配置与轮换。
 
-### Configure HTTP MCP with the CLI
+### 使用 CLI 配置 HTTP MCP
 
-The controlled registry is exposed under the `http-mcp` section:
+受控 registry 在 `http-mcp` section 中提供这些键：
 
 ```bash
-agentic-gpt config keys --section http-mcp
 agentic-gpt config set httpMcp.bearerToken env:AGENTIC_HTTP_MCP_TOKEN
 agentic-gpt config set httpMcp.host 127.0.0.1
 agentic-gpt config set httpMcp.port 8765
@@ -298,9 +271,8 @@ agentic-gpt config set httpMcp.allowHosts '["mcp.example.com"]'
 agentic-gpt config set httpMcp.enabled true
 ```
 
-To explicitly disable Host filtering, use either JSON `null` or `["*"]`; to
-make the OAuth routes fail closed and return to direct-bearer local use,
-clear the optional origin:
+要明确关闭 Host 过滤，可使用 JSON `null` 或 `["*"]`；要让 OAuth 路由 fail closed
+并回到本地直接 bearer 模式，请清除可选 origin：
 
 ```bash
 agentic-gpt config set httpMcp.allowHosts null
@@ -308,14 +280,11 @@ agentic-gpt config set httpMcp.allowHosts '["*"]'
 agentic-gpt config set httpMcp.publicUrl null
 ```
 
-`allowHosts` is a JSON array or `null`, not a comma-delimited string.
-`publicUrl` must be an HTTPS origin; `config set` validates the complete
-candidate before writing. A rejected value leaves both the configuration and
-its backup unchanged. `config mcp` remains reserved for the downstream
-`mcpServers` registry and does not configure this inbound listener.
+`allowHosts` 是 JSON array 或 `null`，不是逗号分隔字符串。`publicUrl` 必须是 HTTPS
+origin；`config set` 会在写入前校验完整候选值。被拒绝的值不会修改配置或 backup。
+`config mcp` 仍专门管理下游 `mcpServers` registry，不配置这个入站 listener。
 
-For deterministic provisioning, `config init --non-interactive` accepts all endpoint
-fields as flags:
+确定性部署可使用 `config init --non-interactive` 的全部 endpoint flags：
 
 ```bash
 agentic-gpt config init --non-interactive \
@@ -328,31 +297,23 @@ agentic-gpt config init --non-interactive \
   --http-mcp-allow-hosts '["mcp.example.com"]'
 ```
 
-The flags must still obey the HTTPS-origin, secret-reference, and allow-host
-rules; enabling without a token reference fails before any config or backup is
-written. In interactive `config init`, the same flags seed editable Connection
-fields. The HTTP MCP enabled toggle, bind host/port, non-secret public-origin
-editor, secret-reference editor, and JSON array/`null` allow-host editor can be
-changed before Review; an empty public-origin value clears it. `config import
---config PATH [SOURCE]` recognizes an existing `httpMcp` object, seeds these
-fields into the same interactive editor, and lets the operator correct or
-disable it before the single final commit. Review shows the bearer reference as
-`[REDACTED]` but displays `publicUrl`; cancellation or validation failure writes
-nothing.
+这些 flags 仍须通过 HTTPS origin、secret 引用和 allow-host 规则；启用 endpoint 却没有
+token 引用时，会在写入 config 或 backup 前失败。交互式 `config init` 会把同样的 flags
+作为 Connection 字段的可编辑初始值。HTTP MCP enabled toggle、host/port、非 secret 的
+public-origin editor、secret-reference editor 与 JSON array/`null` allow-host editor
+都可在 Review 前修改；public-origin 输入为空时会清除它。
+`config import --config PATH [SOURCE]` 会识别已有的 `httpMcp` object，把字段带入同一套
+交互式 editor；用户可在最终一次提交前修正或关闭 endpoint。Review 中 bearer 引用显示为
+`[REDACTED]`，但会显示 `publicUrl`；取消或校验失败不会写入任何内容。
 
-Path-safe `agentId` values map directly to the private state directory name. Wider legacy Hub identities remain supported and use a stable hashed directory key instead of becoming a filesystem path component.
+### Browser runtime 覆盖
 
-Unknown top-level fields are preserved by load/write round trips. Nested strict objects such as `limits` reject removed v0.8 fields.
-
-### Browser runtime override
-
-Browser is not enabled by configuring a runtime; `toolsets.enabled` remains authoritative. With no
-`browser` section (or with `browser: {}`), normal runtime discovery is unchanged. The explicit
-descriptor is an advanced override for development, unusual deployments, or recovery; it is not
-intended to be the normal managed-runtime installation path. `codexCliPath` is optional because the
-official Browser launcher only exports `CODEX_CLI_PATH` when one is available. Other scalar values
-are required when `runtime` is present, and every configured path must be absolute;
-`nodeModuleDirs` defaults to an empty list:
+Browser 是否启用不由 runtime 配置决定，`toolsets.enabled` 仍具有权威性。没有
+`browser` section（或使用 `browser: {}`）时，普通 runtime discovery 不变。显式 descriptor
+用于开发、特殊部署或恢复等高级场景，不是普通 managed-runtime 安装路径。
+`codexCliPath` 可选，因为官方 Browser launcher 只有在可用时才会导出
+`CODEX_CLI_PATH`。配置 `runtime` 时其他 scalar 均必填，所有配置路径必须是绝对路径；
+`nodeModuleDirs` 默认为空列表：
 
 ```json
 {
@@ -372,13 +333,16 @@ are required when `runtime` is present, and every configured path must be absolu
 }
 ```
 
-The explicit source is selected at process startup and is authoritative: an invalid descriptor
-closes Browser capability rather than falling back to Desktop discovery, while Agentic startup
-continues. Changing it requires a process restart. `docsRoot` and `trustedCodePaths` are derived
-internally and are not configuration fields. No installer, downloader, or runtime cache is managed
-by this setting.
+显式 source 在进程启动时选择并具有权威性：无效 descriptor 会关闭 Browser capability，
+不会回退到 Desktop discovery，但 Agentic 仍会继续启动。修改它需要重启进程。
+`docsRoot` 与 `trustedCodePaths` 由内部派生，不是配置字段。本设置不管理 installer、
+downloader 或 runtime cache。
 
-## Tunnel configuration
+可直接作为路径组件的 `agentId` 会原样映射为私有状态目录名；历史上较宽松的 Hub identity 仍然兼容，但会使用稳定 hash 目录 key，而不会直接成为文件系统路径组件。
+
+未知顶层字段会在 load/write round trip 中保留。`limits` 等严格嵌套对象会拒绝已经删除的 v0.8 字段。
+
+## Tunnel 配置
 
 ```json
 {
@@ -401,26 +365,26 @@ by this setting.
 }
 ```
 
-`tunnelId` must be non-empty. `apiKey` accepts only:
+`tunnelId` 不能为空。`apiKey` 只接受：
 
 - `file:/absolute/or/expanded/path`
 - `env:VARIABLE_NAME`
 
-Plaintext values are rejected. A referenced file may end with one LF or CRLF; the terminator is removed. Empty values and control characters fail startup.
+明文值会被拒绝。引用文件末尾允许一个 LF 或 CRLF，并会被去除；空值和控制字符会导致启动失败。
 
-Tunnel client source precedence:
+Tunnel client 来源优先级：
 
-1. `client.executable`: trusted local executable; optional `sha256` is checked on every start.
-2. `client.downloadUrl` + required `sha256`: exact custom HTTPS archive.
-3. Managed manifest/cache: the pinned official tunnel-client for the current platform.
+1. `client.executable`：受信任的本地可执行文件，可选 `sha256` 每次启动校验。
+2. `client.downloadUrl` + 必需的 `sha256`：精确自定义 HTTPS archive。
+3. Managed manifest/cache：当前平台内置固定版本的官方 tunnel-client。
 
-`version: null` selects the embedded pin. `autoDownload: false` requires a verified cached artifact.
+`version: null` 使用内置 pin。`autoDownload: false` 要求 verified cache 已存在。
 
-`hubReporting.enabled` is false by default. When enabled, the Hub connection is reporting-only and never accepts execution commands. `detail` is `metadata` or `full`; see [`standalone-runtime.md`](standalone-runtime.md) for the privacy boundary.
+`hubReporting.enabled` 默认 false。启用后 Hub 连接是 reporting-only，绝不会接收执行命令。`detail` 可为 `metadata` 或 `full`；隐私边界见 [`standalone-runtime.md`](standalone-runtime.md)。
 
-## Hub configuration
+## Hub 配置
 
-Hub mode requires:
+Hub 模式需要：
 
 ```json
 {
@@ -433,13 +397,13 @@ Hub mode requires:
 }
 ```
 
-`hub.transport` accepts `websocket` or `sse`. Legacy top-level `hubUrl`, `hubTransport`, `workerUrl`, and `agentSecret` are recognized only by the explicit `config import` flow; normal v2 load rejects them.
+`hub.transport` 可为 `websocket` 或 `sse`。旧的顶层 `hubUrl`、`hubTransport`、`workerUrl`、`agentSecret` 仅由显式 `config import` 识别；普通 v2 load 会拒绝它们。
 
-Hub credentials are separate from the Standalone tunnel API key. Do not reuse them.
+Hub credential 与 Standalone tunnel API key 是两套独立凭据，不要复用。
 
-## Confirmation
+## 确认机制
 
-Canonical form:
+规范形式：
 
 ```json
 {
@@ -450,16 +414,16 @@ Canonical form:
 }
 ```
 
-Channels:
+通道：
 
-- `freedesktop`: local desktop notification actions.
-- `ntfy`: Hub-backed remote relay.
+- `freedesktop`：本地桌面通知按钮。
+- `ntfy`：Hub-backed 远程 relay。
 
-For Standalone without Hub reporting, prefer `freedesktop` only. If all configured channels are unavailable, a confirmation-required operation fails closed. Local denial or timeout never falls through to another channel.
+Standalone 未配置 Hub reporting 时，建议只使用 `freedesktop`。所有配置通道均不可用时，需要确认的操作会 fail closed。本地拒绝或超时不会继续回退到其他通道。
 
-The CLI accepts legacy labels such as `freedesktop-then-ntfy`; Agentic-managed writes serialize the canonical ordered array.
+CLI 仍接受 `freedesktop-then-ntfy` 等 legacy label；Agentic 管理写入会序列化为规范有序数组。
 
-## Command and path policy
+## 命令与路径策略
 
 ```bash
 agentic-gpt config allow add bash
@@ -472,9 +436,9 @@ agentic-gpt config path readonly add /var/log
 agentic-gpt config path deny add ~/.secrets
 ```
 
-Configured allow rules may explicitly override builtin confirmation/deny rules. When several configured rules match, deny wins unless a more explicit configured allow override applies according to the runtime policy implementation.
+配置的 allow 规则可以显式覆盖 builtin confirm/deny。多个配置规则匹配时，除非存在按运行时策略生效的更明确 allow override，否则 deny 优先。
 
-`workspaceRoot` is always treated as writable. Denied roots override writable and read-only roots. Symlinks are resolved and must remain inside the effective policy boundary.
+`workspaceRoot` 始终视为可写。Denied roots 覆盖 writable/read-only roots。Symlink 会解析，最终目标必须留在有效策略边界内。
 
 ## Limits
 
@@ -482,21 +446,21 @@ Configured allow rules may explicitly override builtin confirmation/deny rules. 
 {
   "limits": {
     "maxConcurrentTasks": 2,
-    "maxActiveJobs": "auto",
+    "maxActiveProcesses": "auto",
     "maxFileSearchContextLines": 5
   }
 }
 ```
 
-`maxConcurrentTasks` limits how many child Process Jobs from one `process.batch` call may run at the same time. All children are admitted together; excess children remain `queued`, so this limit does not prevent the batch call from returning after its bounded `waitSeconds`. Values below 1 have an effective minimum of 1.
+`maxConcurrentTasks` 限制单次 `process.batch` 中同时实际运行的子 Process Job 数量。所有子 Job 仍会整批 admission；超过并发槽的子 Job 保持 `queued`，因此该限制不会阻止 batch 在有界 `waitSeconds` 后返回。配置小于 1 时，有效下限为 1。
 
-`maxActiveJobs` accepts a non-negative integer or `"auto"`. Auto resolves as `ceil(availableParallelism * 1.5)` clamped to 6–24. Process, skill, and MCP Jobs share this capacity, including queued batch children.
+`maxActiveProcesses` 接受非负整数或 `"auto"`。Auto 基于 `availableParallelism` 计算 `ceil(availableParallelism * 1.5)`；无法获取并行度时使用 6，并将结果限制在 6–24。Process、Skill 与 MCP Job 共用该容量，排队中的 batch 子 Job 也计入该容量。
 
-`maxFileSearchContextLines` is the live maximum number of before/after lines that `file.search` returns for one match. It defaults to 5 and accepts an integer from 0 through 100. A search request may ask for more; the runtime clips it to the effective value and reports `requestedContextLines`, `effectiveContextLines`, `contextLinesClipped`, and a bounded warning. Negative or non-integer requests remain invalid.
+`maxFileSearchContextLines` 是 `file.search` 对每个匹配返回的前后文行数 live 上限，默认 5，接受 0–100 的整数。请求可以超过该值；运行时会裁剪到 effective 值，并返回 `requestedContextLines`、`effectiveContextLines`、`contextLinesClipped` 与一个有界 warning。负数或非整数请求仍会被拒绝。
 
-v0.9 rejects `maxActiveSessions` and `sessionIdleTimeoutSecs`.
+v0.9 会拒绝 `maxActiveSessions` 与 `sessionIdleTimeoutSecs`。
 
-## Downstream MCP servers
+## 下游 MCP server
 
 ```json
 {
@@ -519,55 +483,48 @@ v0.9 rejects `maxActiveSessions` and `sessionIdleTimeoutSecs`.
 }
 ```
 
-Server ids are at most 64 bytes and use letters, digits, `.`, `_`, or `-`. `streamable-http` requires an absolute HTTP(S) URL and may use `auth: {"type":"bearer","token":"..."}`; the runtime sends the token as `Authorization: Bearer <token>`. Bearer auth is rejected for `stdio`, which requires a non-empty command. The TUI masks Bearer tokens and redacts them from its final JSON preview. Keep examples disabled until their trust and confirmation policy are reviewed.
+Server id 最长 64 字节，只使用字母、数字、`.`、`_`、`-`。`streamable-http` 需要绝对 HTTP(S) URL，并可配置 `auth: {"type":"bearer","token":"..."}`；运行时会发送 `Authorization: Bearer <token>`。`stdio` 不接受 Bearer auth，且需要非空命令。TUI 会掩码 Bearer token，并在最终 JSON 预览中脱敏。在审查信任与确认策略之前，示例应保持 disabled。
 
-## Skills, Room, and sandbox
+## Skills、Room 与 sandbox
 
-`skills` controls package sizes, redirects, timeouts, retry/deadline limits, install/download concurrency, and optional host allowlisting. The canonical block is top-level `skills`; legacy `room.skills` is read only when the top-level block is absent.
+`skills` 控制 package 大小、redirect、timeout、重试/总 deadline、安装/下载并发，以及可选 host allowlist。规范字段是顶层 `skills`；只有缺少顶层字段时才读取 legacy `room.skills`。
 
-`room.timezone` is retained Room metadata; current reads use repository paths
-rather than legacy JSONL date partitioning. `room.diaryDayBoundaryHour` is 0–23
-and controls the logical date written into a newly bootstrapped Daily scaffold.
-`room.repositoryRoot` is optional and defaults to `<workspaceRoot>/room`. The
-nested `room.maintenance.mode` is `local` or `workflow` and defaults to
-`local`; `room.maintenance.autoPush` defaults to `false`.
+`room.timezone` 保留为 Room metadata；当前读取使用仓库路径，而不是 legacy JSONL
+日期分区。`room.diaryDayBoundaryHour` 范围为 0–23，用于新 bootstrap 的 Daily scaffold
+逻辑日期。`room.repositoryRoot` 可选，默认是 `<workspaceRoot>/room`。嵌套的
+`room.maintenance.mode` 可为 `local` 或 `workflow`，默认 `local`；
+`room.maintenance.autoPush` 默认是 `false`。
 
-The Room namespace exposes the nine semantic operations: Diary active/read,
-Notebook recent/search/read, State list/read, and maintenance status/submit.
-Notebook recent/search `limit` defaults to 20 and is capped at 100; search queries
-must be non-empty and at most 256 Unicode characters; Markdown reads are
-512 KiB. Maintenance submit accepts one to five unique semantic slots and an
-optional mode override; `waitSeconds` defaults to 0 and is capped at 30. A
-workflow wait timeout does not cancel the submission, and there is no implicit
-confirmation or separate maintenance wait operation.
+Room namespace 的九个语义操作是 Diary active/read、Notebook recent/search/read、
+State list/read，以及 maintenance status/submit。Notebook recent/search 的 `limit`
+默认 20、范围为 1–100；search query 必须非空且不超过 256 个 Unicode 字符；
+Markdown read 限制为 512 KiB。Maintenance submit 接受 1–5 个不重复的 semantic slot，可选
+mode 覆盖；`waitSeconds` 默认 0、上限 30。workflow 等待超时只结束等待，不会取消
+submission；没有隐式 confirmation 或单独的 maintenance wait 操作。
 
-Hub Full exposes the same nine operations through active-Room routing and
-`POST /v1/room/<namespace>/<action>`; these requests contain no `agentId`.
-Hub does not own the configured repository or create a content replica.
-Retired JSONL append/update/remove and passage/date-selection callers are not
-silently mapped to maintenance; migrate them to explicit slot/payload requests
-or remove them. Historical release/migration records are not an active
-compatibility contract.
+Hub Full 通过 active Room lease 与 `POST /v1/room/<namespace>/<action>` 暴露同一
+九项操作，请求不接受 `agentId`。Hub 不拥有 Room repository，也不创建 content
+replica。旧 JSONL append/update/remove 与 passage/date-selection 调用不会静默映射
+为 maintenance；请迁移到显式 slot/payload request，或删除旧调用。历史 release/migration
+记录只保留历史，不是当前 compatibility contract。
 
-`sandbox.enabled` activates bubblewrap. `requiredRuntimePaths` lists host paths made available inside the sandbox. Sandbox does not replace command policy, path policy, or confirmation.
+`sandbox.enabled` 启用 bubblewrap；`requiredRuntimePaths` 定义 sandbox 中可见的宿主路径。Sandbox 不能替代命令策略、路径策略或确认。
 
-## CLI-managed keys
+## CLI 可管理字段
 
-`config set` is a controlled registry, not a general JSONPath editor. List the registry in the
-current locale with:
+`config set` 使用受控 registry，并不是通用 JSONPath 编辑器。使用当前语言列出 registry：
 
 ```text
 agentic-gpt config keys [--section <SECTION>] [--json]
 ```
 
-The text form groups keys by `runtime`, `identity`, `hub`, `confirmation`, `sandbox`, `limits`, `skills`,
-`room`, `tunnel`, and `http-mcp`; `--section` filters to one of those names. `--json` returns machine-readable
-metadata including the value type, nullability, example, bilingual descriptions, and aliases. Only keys in this
-registry are accepted by `config set`; structured policy and MCP collections use their dedicated commands.
+文本形式按 `runtime`、`identity`、`hub`、`confirmation`、`sandbox`、`limits`、`skills`、`room`、
+`tunnel` 和 `http-mcp` 分组；`--section` 只显示其中一个分组。`--json` 返回机器可读的类型、
+是否可为 null、示例、双语说明和别名元数据。`config set` 只接受 registry 中的键；结构化
+policy 与 MCP 集合应使用专用命令。
 
-The value is one shell argument after the registered key. JSON list values therefore need shell
-quoting. `room.repositoryRoot` is nullable: use the literal JSON value `null` to clear it and
-return to the workspace default.
+注册键后的值是一个 shell 参数。因此 JSON 列表必须加引号。`room.repositoryRoot` 可为 null，
+使用字面量 JSON 值 `null` 可以清除它并恢复 workspace 默认目录。
 
 ```bash
 agentic-gpt config set sandbox.requiredRuntimePaths '["/usr","/opt/runtime"]'
@@ -577,83 +534,75 @@ agentic-gpt config set room.maintenance.mode local
 agentic-gpt config set room.maintenance.autoPush false
 ```
 
-The registry includes common scalar values such as:
+registry 包含以下常用 scalar：
 
-- `mode`, `profile`, `agentId`, `hub.url`, `hub.transport`, `hub.agentSecret`, `workspaceRoot`
-- `confirmationProvider.channels`, `confirmationLanguage`, `sandbox.enabled`
-- `tunnel.tunnelId`, `tunnel.apiKey`
-- all `tunnel.client.*` and `tunnel.hubReporting.*` fields
-- `room.repositoryRoot`, `room.timezone`, `room.diaryDayBoundaryHour`
-- `room.maintenance.mode`, `room.maintenance.autoPush`
-- the documented `skills.*` scalar/list fields
-- `httpMcp.enabled`, `httpMcp.host`, `httpMcp.port`, `httpMcp.publicUrl`, `httpMcp.bearerToken`, `httpMcp.allowHosts`
+- `mode`、`profile`、`agentId`、`hub.url`、`hub.transport`、`hub.agentSecret`、`workspaceRoot`
+- `confirmationProvider.channels`、`confirmationLanguage`、`sandbox.enabled`
+- `tunnel.tunnelId`、`tunnel.apiKey`
+- 全部 `tunnel.client.*` 与 `tunnel.hubReporting.*`
+- `room.repositoryRoot`、`room.timezone`、`room.diaryDayBoundaryHour`
+- `room.maintenance.mode`、`room.maintenance.autoPush`
+- 文档列出的 `skills.*` scalar/list 字段
+- `httpMcp.enabled`、`httpMcp.host`、`httpMcp.port`、`httpMcp.publicUrl`、`httpMcp.bearerToken`、`httpMcp.allowHosts`
 
-Use `config allow/confirm/deny`, `config path`, and `config mcp` for structured policy/MCP changes.
-The exact `config toolset` commands above manage namespace selection. Complex JSON, including
-`toolsets.enabled`, may also be edited directly; a valid edit hot-reloads without restarting the
-worker, while an invalid candidate leaves the last valid live state in place. Follow with
-`agentic-gpt config show` and a smoke test.
+结构化策略与 MCP 修改使用 `config allow/confirm/deny`、`config path`、`config mcp`。
+上面的 `config toolset` 命令用于管理 namespace 选择。复杂 JSON（包括 `toolsets.enabled`）
+也可直接编辑；有效编辑会在不重启 worker 的情况下热加载，无效候选会保留上一次有效状态。
+随后可执行 `agentic-gpt config show` 与 smoke test。
 
-## Secret files and transactional writes
+## 密钥文件与事务写入
 
-Tunnel secrets must be referenced as `file:PATH` or `env:NAME`; the `file:` path may be absolute
-or use the usual home expansion, while an environment name must be a valid shell variable name.
-The fullscreen setup's optional file writer creates the parent directory with mode `0700` and the
-secret file with mode `0600`, writes through a temporary file, and atomically renames it into
-place.
-If the subsequent config write fails, it removes a newly-created secret or restores the prior
-secret bytes and mode. Escape, Ctrl-C, a prompt error, or a final refusal happens before the
-transaction is committed, so no config or secret file is created or modified. Summaries,
-diagnostics, and errors never print secret values.
+Tunnel secret 必须写成 `file:PATH` 或 `env:NAME` 引用；`file:` 路径可以是绝对路径或使用
+常规 home 展开，环境变量名必须是合法 shell 变量名。全屏配置在最终确认时选择写入文件，会以 `0700`
+创建父目录、以 `0600` 创建密钥文件，先写临时文件再原子重命名。如果之后的配置写入失败，
+会删除新建的密钥，或恢复原密钥的字节内容与权限。Escape、Ctrl-C、提示错误或最终拒绝都
+发生在事务提交之前，因此不会创建或修改配置文件或密钥文件。summary、诊断与错误不会输出
+密钥值。
 
-## Explicit import migration
+## 显式 import 迁移
 
-Normal `Config::load()` is strict v2 and does not infer missing selectors or silently accept the old
-Hub shape. Use `agentic-gpt config import --config PATH [SOURCE]` to migrate old or external JSON
-(`--config` may be omitted for the default config path). If SOURCE is omitted, the selected
-`--config` path is imported. The flow seeds the normal interactive Config
-Init TUI, carries forward recognized fields without editors (including MCP servers, policy, path
-policy, limits, inactive hub/tunnel/room data, and safe unknown flattened fields), reports fields
-that cannot be imported, and writes through the normal backup/secret transaction.
+普通 `Config::load()` 严格要求 v2，不会推断缺失的 selector，也不会静默接受旧的 Hub 形状。
+请使用 `agentic-gpt config import --config PATH [SOURCE]` 迁移旧版或外部 JSON（`--config`
+可省略，此时使用默认配置路径）；省略 SOURCE 时会导入所选 `--config` 路径。该流程进入普通
+交互式 Config Init TUI，保留没有编辑器的已识别字段（包括
+MCP server、policy、path policy、limits、非活动 hub/tunnel/room 数据以及安全的未知扁平字段），
+明确报告无法导入的字段，并通过标准备份/密钥事务写入。
 
-## Live reload versus restart
+## 热加载与重启边界
 
-Standalone, Local, and Hub-connected Agent workers poll the same configuration and
-atomically apply the supported live subset. Invalid candidates keep the last valid state.
-When a candidate changes a restart-owned resource, that resource remains at its previous
-live value until the process is restarted.
+Standalone、Local 以及连接 Hub 的 Agent worker 轮询同一份配置，并原子应用支持的
+live subset。无效候选会保留上一份有效状态；候选修改需要重启的资源时，该资源在进程
+重启前仍保持原来的 live 值。
 
-| Configuration | Effect |
+| 配置 | 行为 |
 | --- | --- |
-| `policy`, `limits`, `mcpServers`, `toolsets.enabled` | Shared live reload for new admissions/calls and tool discovery |
-| `pathPolicy` (when `workspaceRoot` is unchanged) | Shared live reload for subsequent path checks |
-| `httpMcp.enabled`, `host`, `port`, `publicUrl`, `allowHosts` | The Standalone HTTP watcher reconciles enablement and endpoint identity; identity changes close stateful sessions and discard listener-local OAuth state, so clients must initialize again |
-| `httpMcp.bearerToken` reference or referenced content | The Standalone HTTP watcher updates authentication without rebinding; existing sessions remain valid while the resolved credential is available |
-| Already-admitted Process/Skill Jobs and already-created downstream calls | Process and Skill Jobs retain the effective configuration captured at admission through capacity, audit, package digest, policy, working directory, preflight, confirmation, and asynchronous execution. Process batches use the same captured configuration for preflight/confirmation, prepared admission, and queued workers. Later admissions use the reloaded live configuration. Downstream MCP calls retain their own resource-specific snapshots; this is not a universal snapshot rule for every operation. |
-| `workspaceRoot` and its coupled `pathPolicy` | Changing the workspace requires a restart; until then, the previous workspace/path-policy pair remains effective atomically |
-| `mode`, `profile`, `agentId` | Restart required |
-| `browser` | Restart required; the configured Browser runtime is selected at process startup |
-| `room.*` repository, timezone, diary-boundary, and maintenance settings | Restart required; `toolsets.enabled` may expose Room live using the current live Room settings |
-| `tunnel.*` client identity/source/secret | Restart required |
-| `hub`, reporting mode | Restart required for the related connection |
-| Skill install concurrency/startup-owned settings | Restart required |
+| `policy`、`limits`、`mcpServers`、`toolsets.enabled` | 所有 Agent worker 共享热加载，对新 admission/call 与工具发现生效 |
+| `pathPolicy`（`workspaceRoot` 未改变时） | 所有 Agent worker 共享热加载，对后续路径检查生效 |
+| `httpMcp.enabled`、`host`、`port`、`publicUrl`、`allowHosts` | Standalone HTTP watcher 协调启用状态与 endpoint identity；identity 变化会关闭有状态 session 并丢弃 listener-local OAuth state，客户端必须重新 initialize |
+| `httpMcp.bearerToken` 引用或其解析内容 | Standalone HTTP watcher 原地更新认证而不重新绑定；解析凭据可用时保留已有 session |
+| 已接纳 Process/Skill Job 与已创建下游调用 | Process 与 Skill Job 从准入开始保留同一份有效配置，贯穿容量、审计、包摘要、policy、工作目录、preflight、确认和异步执行。Process batch 的 preflight/确认、prepared admission 与排队 worker 使用同一份配置；后续新准入使用热加载后的配置。下游 MCP 调用保留各自资源专属快照，这不是全部操作的统一快照规则。 |
+| `workspaceRoot` 及其配套 `pathPolicy` | 修改 workspace 需要重启；重启前原 workspace/path-policy 成对原子保留并继续生效 |
+| `mode`、`profile`、`agentId` | 需要重启 |
+| `browser` | 需要重启；配置的 Browser runtime 在进程启动时选择 |
+| `room.*` 仓库、时区、日界线和 maintenance 设置 | 需要重启；`toolsets.enabled` 可热启用 Room，但使用当前 live Room 设置 |
+| `tunnel.*` client identity/source/secret | 需要重启 |
+| `hub`、reporting mode | 相关连接需要重启 |
+| Skill install 并发等 startup-owned 设置 | 需要重启 |
 
-The shared live subset applies to every Agent worker; only a runtime with a Standalone
-HTTP MCP listener acts on the `httpMcp` listener fields. Local mode has no TCP listener,
-and Hub mode does not turn this configuration section into a Hub ingress.
+共享 live subset 适用于每个 Agent worker；只有具有 Standalone HTTP MCP listener 的运行时
+才会处理 `httpMcp` listener 字段。Local 没有 TCP listener，Hub 也不会因此把这个配置
+section 变成 Hub ingress。
 
-An unavailable HTTP MCP credential fails closed: the endpoint stops accepting requests and stops
-listening until the reference resolves again. A syntactically or semantically invalid candidate is
-rejected by the watcher and leaves the last-good live configuration in place. A bind conflict is
-also kept isolated from tunnel and Unix execution; fix the endpoint configuration and let the watcher
-retry. These outcomes never print the reference or token.
+HTTP MCP 凭据无法解析时会 fail closed：endpoint 停止接受请求并停止监听，直到引用再次
+可用。语法或语义无效的候选会被 watcher 拒绝并保留 last-good live 配置。监听地址冲突
+也不会影响 tunnel 或 Unix execution；修复 endpoint 配置后 watcher 会重试。上述过程
+不会输出引用或 token。
 
-A shared watcher logs `config changes require restart; fields=...` when a restart-owned
-field changes, including `browser`. The diagnostic names changed fields but never prints
-secret values. The Standalone supervisor additionally emits `restart_required`; Hub mode
-has no supervisor event. Do not assume editing the file switched the existing child tree.
+共享 watcher 在需要重启的字段变化时记录 `config changes require restart; fields=...`，其中包括
+`browser`。诊断只列出发生变化的字段名，不会输出 secret 值。Standalone supervisor 另外输出
+`restart_required`；Hub 没有 supervisor 事件。不要把“文件已修改”误认为现有子进程树已经切换。
 
-## Validation and inspection
+## 验证与检查
 
 ```bash
 agentic-gpt config show
@@ -661,10 +610,10 @@ agentic-gpt local list-tools
 agentic-gpt local call agent.info --arguments '{}'
 ```
 
-`agent.info` exposes safe summaries rather than tunnel secrets, Hub secrets, full private paths, or MCP endpoints. The workspace audit file is:
+`agent.info` 只暴露安全摘要，不暴露 tunnel secret、Hub secret、完整私有路径或 MCP endpoint。工作区审计文件为：
 
 ```text
 <workspaceRoot>/.agentic-gpt-audit.jsonl
 ```
 
-For exact Standalone lifecycle and recovery behavior, see [`standalone-runtime.md`](standalone-runtime.md). For deployment checks, see [`operations.md`](operations.md).
+Standalone 生命周期与恢复语义见 [`standalone-runtime.md`](standalone-runtime.md)，部署检查见 [`operations.md`](operations.md)。

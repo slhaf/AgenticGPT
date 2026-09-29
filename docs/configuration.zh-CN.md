@@ -6,6 +6,8 @@ Agentic GPT 的 Standalone、Local Unix MCP 与连接 Hub 的 Agent 共用一份
 ~/.agentic_gpt/config.json
 ```
 
+对应页面：[配置说明](configuration.md)。
+
 磁盘文件是稀疏的 Config v2 投影，始终包含权威的顶层 `mode`（`standalone`、`hub` 或
 `local`）和 `profile`（`normal` 或 `room`）；省略的值会从有效默认值重建。`config show`
 显示完整的有效配置，而 Agentic 管理的写入会保持文件稀疏。
@@ -33,7 +35,7 @@ agentic-gpt config show
   namespace；room preset 启用所有 namespace。配置档本身不会固定最终 runtime surface 或数量，
   因为显式的 `toolsets.enabled` 选择具有权威性。
 
-可用 namespace 为 `agent`、`file`、`mcp`、`process`、`job`、`skills`、`tmux`、`browser`、`room`。
+可用 namespace 为 `agent`、`file`、`mcp`、`process`、`skills`、`tmux`、`browser`、`room`。
 逻辑上的 `room` namespace 包含 Room bootstrap（`bootstrap` 与 `bootstrap.read`）以及全部
 `room.*` 工具。选择只会过滤既有的 Normal/Room advertised names，不会暴露 dispatch-only alias。
 使用以下精确命令固定选择：
@@ -57,7 +59,7 @@ profile。该 namespace 禁用时，直接分发 Room 命令会返回 `room_tool
 {
   "profile": "normal",
   "toolsets": {
-    "enabled": ["agent", "file", "mcp", "process", "job", "skills", "tmux", "browser"]
+    "enabled": ["agent", "file", "mcp", "process", "skills", "tmux", "browser"]
   }
 }
 ```
@@ -86,10 +88,12 @@ agentic-gpt config init \
 
 全屏流程为 Basic → Connection（Local 除外）→ Optional settings → Review → Completion。
 交互模式下的命令行 flag 只是可编辑的预填值，不会锁定字段或跳过页面。身份/显示名称、
-工作区/路径策略、确认方式/语言、限制、沙箱和可选的 Toolsets section 始终可用。Toolsets
-从配置档 preset 开始；一旦显式编辑，其 namespace selection 具有权威性。只有 Room 配置档会
-出现 Room 设置；只有 Standalone 模式会出现 tunnel-client 覆盖和 Hub reporting。Hub 与 Local
-模式不会显示这些 tunnel 部分。不选可选部分时会保留模板默认值。
+工作区/路径策略、确认方式/语言、限制、沙箱、Toolsets 与下游 MCP server 集合均可在
+Optional settings 中配置。Toolsets 从配置档 preset 开始；一旦显式编辑，其 namespace
+selection 具有权威性。Room 设置仅当当前有效的 toolset selection 启用 `room` namespace 时
+才会提供。profile 通过默认 preset 影响该 selection；显式 `toolsets.enabled` 会覆盖 preset，
+因此显示条件是有效 namespace selection，而不是 `profile` 字段本身。只有 Standalone 模式会出现
+tunnel-client 覆盖和 Hub reporting。Hub 与 Local 模式不会显示这些 tunnel 部分。不选可选部分时会保留模板默认值。
 
 界面使用键盘导航：Tab/Shift+Tab 与方向键移动焦点，Enter 编辑或触发当前操作，Esc 返回
 （根 Basic 页面是 no-op），Ctrl+C 取消初始化。编辑态按 Esc 只结束编辑，不会取消初始化。
@@ -98,12 +102,13 @@ Review 会隐藏密钥，可跳回 Basic、Connection 或可选 section 编辑�
 本功能契约内。
 
 `config init --language auto|zh-CN|en` 选择 CLI 界面语言。使用 `auto` 时依次检查
-`LC_ALL`、`LC_MESSAGES`、`LANG`，都没有匹配时使用 English。显式的 `zh-CN` 或 `en`
+`LC_ALL`、`LC_MESSAGES`、`LANG`，都没有匹配时使用英文界面。显式的 `zh-CN` 或 `en`
 优先于环境变量。这个界面选择与持久化的 `confirmationLanguage` 不同；后者控制 runtime
 发出的确认提示语言，可在可选配置 section 或通过 `config set` 设置。
 
-首次配置刻意不包含 MCP server 集合与命令策略集合。初始化后分别使用 `config mcp`、
-`config allow`、`config confirm`、`config deny` 配置它们（路径根使用 `config path`）。
+全屏初始化的 Optional settings 包含下游 MCP server 集合编辑器；但 `config init --non-interactive`
+没有用于填写 `mcpServers` 集合的 CLI flags。自动化初始化后可使用 `config mcp` 配置 server；
+命令策略集合仍使用 `config allow`、`config confirm`、`config deny`，路径根使用 `config path`。
 
 ## 各 runtime 必需项
 
@@ -159,7 +164,7 @@ agentic-gpt run
 | `mcpServers` | `mcp.*` 转发的下游 MCP server。 |
 | `pathPolicy` | 可写、只读、拒绝路径根。 |
 | `policy` | 显式 allow / confirm / deny 命令规则。 |
-| `limits` | Process 并发与总 active Job 容量。 |
+| `limits` | Process 并发限制与最大活动 Process/Skill/MCP Job 容量。 |
 | `skills` | Skill package/install 限制与网络策略。 |
 | `room` | Room 仓库根目录、时区、日记日界线、维护模式和自动推送策略。 |
 | `tunnel` | Standalone tunnel-client 来源、secret 引用与可选 reporting。 |
@@ -441,7 +446,7 @@ agentic-gpt config path deny add ~/.secrets
 {
   "limits": {
     "maxConcurrentTasks": 2,
-    "maxActiveJobs": "auto",
+    "maxActiveProcesses": "auto",
     "maxFileSearchContextLines": 5
   }
 }
@@ -449,7 +454,7 @@ agentic-gpt config path deny add ~/.secrets
 
 `maxConcurrentTasks` 限制单次 `process.batch` 中同时实际运行的子 Process Job 数量。所有子 Job 仍会整批 admission；超过并发槽的子 Job 保持 `queued`，因此该限制不会阻止 batch 在有界 `waitSeconds` 后返回。配置小于 1 时，有效下限为 1。
 
-`maxActiveJobs` 接受非负整数或 `"auto"`。Auto 按 `ceil(availableParallelism * 1.5)` 计算，并限制在 6–24。Process、Skill 与 MCP Job 共用该容量，排队中的 batch 子 Job 也计入该容量。
+`maxActiveProcesses` 接受非负整数或 `"auto"`。Auto 基于 `availableParallelism` 计算 `ceil(availableParallelism * 1.5)`；无法获取并行度时使用 6，并将结果限制在 6–24。Process、Skill 与 MCP Job 共用该容量，排队中的 batch 子 Job 也计入该容量。
 
 `maxFileSearchContextLines` 是 `file.search` 对每个匹配返回的前后文行数 live 上限，默认 5，接受 0–100 的整数。请求可以超过该值；运行时会裁剪到 effective 值，并返回 `requestedContextLines`、`effectiveContextLines`、`contextLinesClipped` 与一个有界 warning。负数或非整数请求仍会被拒绝。
 

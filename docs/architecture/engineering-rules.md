@@ -1,18 +1,18 @@
 # 工程规则（技术草案）
 
-> **状态：技术草案，受已确认的 D01–D08 约束。** 本文是给 coding agent、reviewer 和维护者的放置/依赖/边界规则，不是已经完成的重构清单。目标模块目录、逻辑分层和示例路径可能尚不存在，均须视为 illustrative/conditional placement；若规则与当前代码冲突，先按现状记录并准备一次协调升级的迁移，不要偷偷引入 shim 或权限变化。
+> **状态：技术草案，受已确认的 D01–D08 约束。** 本文是给编码代理、审阅者和维护者的放置、依赖及边界规则，不是已完成的重构清单。目标模块目录、逻辑分层和示例路径可能尚不存在，均须视为说明性或有条件的放置建议；若规则与当前代码冲突，先按现状记录并准备一次协调升级的迁移，不要偷偷引入兼容垫片或改变权限。
 >
 > 适用决策： [D01](decisions.md#d01--room-是受控资源不是-agent-记忆运行时) · [D02](decisions.md#d02--room-远端能力必须补齐) · [D03](decisions.md#d03--一次升级明确迁移不刻意维持旧兼容) · [D04](decisions.md#d04--自用部署背景与具体副作用控制并存) · [D05](decisions.md#d05--browser-host-先盘点实际拓扑再收紧机制) · [D06](decisions.md#d06--持久化按正确性与用途分层) · [D07](decisions.md#d07--console-与本轮核心重构解耦) · [D08](decisions.md#d08--不借架构重构扩张范围)。这些决策确定产品边界和工程取舍，不表示代码已经实现；剩余事项是实施细节，不是再次请求用户选择。
 >
 > 事实引用来自本轮只读调查记录：`.planning/2026-09-16-architecture-audit/execution-survey.md`、`contract-ops-survey.md`、`hub-survey.md`、`hub-supplement.md`、`console-survey.md`、`verification.md`，以及已建立的 CodeGraph 索引。调查中未验证的行为在此标为“待核验”，不得写成通过或已集成。
-正式现状和诊断分别见 [现状架构](current-state.md) 与 [问题诊断](diagnosis.md)；目标边界见 [目标架构](target-architecture.md)。诊断编号 A01–A09 是 review 交叉索引，不代表规则已由代码实现。
+正式现状见[现状架构](current-state.md)，目标边界见[目标架构](target-architecture.md)；A01–A09 的历史调查证据与根因见[归档诊断](../archive/architecture-diagnosis-2026-09-23.md)，它不是当前缺陷清单。诊断编号是历史审查交叉索引，不代表规则已由代码实现。
 
 
 ## 1. 使用方式：先判断“谁拥有事实和副作用”
 
 每个 WP 开始前，先阅读本目录中相关的已确认决策、目标边界、工程规则，以及路线图中的依赖、范围和验收条件，再对照当前源码核验历史诊断。文档提供方向与约束，不要求机械采用建议目录或过时实现；具体实现方向、实施步骤、代码架构和设计模式由实施者依据现有代码与场景决定。普通工程选择不重复请求审批；尚未决定的产品行为、权限变化或范围扩张需明确提出。
 
-提交代码前，coding agent 必须按以下顺序回答问题，并把答案写进 PR 描述或相邻架构说明：
+提交代码前，编码代理必须按以下顺序回答问题，并把答案写进 PR 描述或相邻架构说明：
 
 1. **这是纯算法、wire DTO、控制面协调、Agent 本地效果、独立进程 bridge，还是 UI/交互？**
 2. **哪个进程/模块拥有最终事实和生命周期？** 先找 source of truth，再决定文件位置；不要按关键词或文件大小放置。
@@ -245,7 +245,7 @@ Hub HTTP/Apps MCP/Local/stdio/CLI
 - `policy.rs` 判断，`exec.rs` 执行；不要在 Hub、stdio descriptor 或 TUI 复制 program allow/deny。
 - path preflight 是启发式筛查，不是 OS containment；`bwrap` 当前由配置开启且默认关闭，不能把 roots 检查写成强 sandbox 保证。
 - MCP stdio、Browser JS、tmux、tunnel child 具有独立 external effect/trust；不要用它们的 annotation 或调用成功伪装 core sandbox 已覆盖。
-- CLI `tmux create/close` 等现有绕过 AppState/gate 的路径应作为边界债务处理；新代码禁止复制。
+CLI 的四项 tmux 操作（`tmux.listSessions`、`tmux.attach`、`tmux.createSession`、`tmux.closeSession`）会调用 `operation::authorize`；其 CLI 分支仅按精确 operation 名称 allowlist 准入。CLI 路径不构造 `AppState`，所以这不等于通常的 `AppState` policy/confirmation 流程；同时也不能称为完全绕过 `authorize`。新入口或新增 CLI 操作应明确选择所需的授权与副作用控制，不得把这条本机管理 allowlist 误当成通用效果 gate。
 
 ### R-12：File edit 与纯 apply-patch
 
@@ -325,7 +325,7 @@ Room 代码必须按资源 owner 放置。以下是技术布局建议，不表�
 - AlarmManager、Notification、boot receiver 和 action receiver 是 OS side effects/recovery path，不是另一数据库；overdue restore 使用 atomic claim，scheduler snooze 必须接收完整 item payload。
 - `AttentionSourceKind.Hub` 只是模型预留；没有 Hub producer/client/ack lifecycle。
 - `HubConnectionCard`/Android settings 的连接字段和测试按钮是 placeholder；`console/shared` 没有网络 client、Bearer、Hub protocol，`AndroidManifest.xml` 未声明 `INTERNET` 权限。
-- Desktop/Web 当前启动 UI shell，不拥有 Android attention/Hub parity；`:shared:jvmTest` 17-task BUILD SUCCESSFUL 仅证明 shared policy/common Kotlin compile，Android app host test/assemble、Room/OS 与 device/emulator smoke 仍需单独验证。
+- Desktop/Web 当前启动 UI shell（界面壳），不具备 Android attention/Hub parity；`:shared:jvmTest` 于 2026-09-23 有 17 项任务的成功运行记录，仅覆盖 shared policy 测试与 common Kotlin 编译，不覆盖 Android app/Room/OS；Android app host test/assemble、Room/OS 与 device/emulator smoke 仍需单独验证。
 
 **未来新增 Hub client 的正确放置**：
 
@@ -428,7 +428,7 @@ Parity gate 可以输出每个 surface 的差异，不要求所有 surface 共�
 
 当前 `scripts/check_contract_parity.py` 是 CI 中的行为/合同 gate，已超出单纯 YAML parse：它校验 local refs/schema、选定 response/descriptor 并运行 loopback/private-home live checks。它不证明 strict 外部 Actions importer、外部 Apps client、生产 tunnel/cloud、完整 Protocol-wire lifecycle 或 Android/Console/Browser service。`evaluate_tool_contracts.py` 与 matrix 只作 prediction/review probe。
 
-tag-triggered release workflow 的 preflight 固定 same-SHA checkout，并校验 release tag、Agent/Hub Cargo version 精确匹配、fmt/check/test/build 与 bounded contract parity，然后才进入 cross Linux packaging、三 binary archive 和 `SHA256SUMS`；当前本地 `v0.9.1` preflight/parity 已在可达镜像环境通过，故意 mismatch guard 也已覆盖。strict Clippy 既有 CI debt 不属于该 preflight；hosted publication、ARM runtime、artifact/version pairing on hosted runners、外部部署仍未验证。
+tag-triggered release workflow 的 preflight 固定 same-SHA checkout，并校验 release tag、Agent/Hub Cargo version 精确匹配、fmt/check/test/build 与 bounded contract parity，然后才进入 cross Linux packaging、三 binary archive 和 `SHA256SUMS`；2026-09-23 的历史记录显示，可达镜像环境中的本地 `v0.9.1` preflight/parity 当时通过，故意的 `v0.0.0` mismatch guard 按预期拒绝。strict Clippy 既有 CI debt 不属于该 preflight；hosted publication、ARM runtime、artifact/version pairing on hosted runners、外部部署仍未验证。
 
 ### R-25：公开合同只能通过 clean cutover 迁移
 
@@ -499,20 +499,20 @@ Reviewer 和 coding agent 在合并前逐项标记 `是/否/不适用 + 证据�
 
 ## 11. 实施门槛与剩余核验项
 
-以下门槛属于后续实现和主线核验的证据要求，不是新的用户确认事项；WP-R closure 已实现并通过当前 live gate，Agent/Hub/Protocol 的本轮窄 source seams 与 bounded release preflight 也已有记录；其余外部/平台边界仍不能由这些结果代替：
+以下门槛属于后续实现和主线核验的证据要求，不是新的用户确认事项；WP-R 的有界交付与 live gate 通过有 2026-09-22 的记录，Agent/Hub/Protocol 窄源码边界和本地有界 release preflight 有 2026-09-23 的历史记录；这些结果不能代替其余外部/平台边界的验证：
 
 1. Hub↔Agent 真实 WS/SSE 断线、重连、旧连接、late/duplicate/mismatched Response、run receipt 与 Agent ledger 的跨进程验证。
 2. [已完成；有界] WP4-A 的当前本地 Agent-local/Hub Full/Coordinator/HTTP/OpenAPI/Protocol wire descriptor/schema/response/lifecycle gate 已有实现与证据；剩余 scope 仍包括 strict 外部 importer、完整 Protocol-wire lifecycle 和 release/tag 组合，不是单一万能 schema，也不把历史 Job/OpenAPI drift 例子当作当前失败。
-3. [已完成] D02 要求的 Room 远端读与维护能力、各 surface 合同/权限/错误/lifecycle 和真实 HTTP/Apps/WS E2E；WP-R 已一次升级迁移全部 caller、移除 obsolete path、保护现有文件数据并提供迁移文档，当前 live gate 已验证九个 operation。维护继续使用 Agent 既有 safeguards/controlled-maintenance authority，不新增流程 confirmation gate；生产 tunnel/GitHub 部署不在证据范围内。
+3. [已完成；有界] D02 要求的 Room 远端读与维护能力、各 surface 合同/权限/错误/lifecycle 和真实 HTTP/Apps/WS E2E；WP-R 于 2026-09-22 完成一次升级、迁移全部 caller、移除 obsolete path、保护现有文件数据并提供迁移文档。同日的 live gate 记录验证了九个 operation。维护继续使用 Agent 既有 safeguards/controlled-maintenance authority，不新增流程 confirmation gate；生产 tunnel/GitHub 部署不在证据范围内。
 4. process sandbox/preflight、MCP stdio、Browser JS、tmux、tunnel child 的 effect/trust/confirmation 审查；本轮不改变 sandbox 默认、policy override 或权限模型。
 5. Browser host 在 Neko/shared-volume/container/Unix socket 实际拓扑中的 peer/auth、权限与生命周期检查；拓扑本身受支持，机制在盘点后选定，不预选 owner-only，且不得无授权网络暴露。
-6. Console Android local-only attention 的独立维护与真实 placeholder/unavailable 展示；source-level transition owner、atomic overdue claim 和 payload-aware snooze 已实现，`:shared:jvmTest` 17-task BUILD SUCCESSFUL 仅覆盖 shared policy/common Kotlin compile；Android Gradle/app host/assemble、Room/OS/device 行为仍待核验；remote console、approval board、exec ledger 另立产品，不是核心重构完成门槛。
+6. Console Android 仅本地 attention 的独立维护及真实 placeholder/unavailable 展示；源码层 transition owner、atomic overdue claim 和 payload-aware snooze 已实现。`:shared:jvmTest` 于 2026-09-23 有 17 项任务的成功运行记录，仅覆盖 shared policy 测试与 common Kotlin 编译；Android Gradle/app host/assemble、Room/OS/device 行为仍待核验。remote console、approval board、exec ledger 是独立未来产品，不是核心重构完成门槛。
 7. config startup/live reload、atomic persistence、correctness/history/observability 分层、pending confirmation/OAuth/cache 的易失语义、已产生 confirmation result/Job history/error retention、secret projection 和 release contract/artifact checks 的明确验收；provenance/signing 是另行决定的发布专题。
 
-8. Agent operation routing remains a structural residual: Process Exec/Batch now share `dispatch_process`, but other stdio direct branches and HubCommand trampolines are not one universal dispatcher. No behavior failure is claimed; any cleanup must migrate one operation family and verify each projection.
-9. Release/tag source preflight and bounded local parity pass are recorded; hosted publication/live gate, artifact/version pairing on hosted runners, strict external importers, production tunnel/cloud, ARM runtime, external Browser/MCP effects and Console device behavior require separate owner evidence; the Rust parity gate does not cover them.
+8. Agent operation routing 仍有结构性残余：Process Exec/Batch 目前共享 `dispatch_process`，其他 stdio 直接分支与 HubCommand trampoline 尚未归并为一个统一 dispatcher。这不是行为故障结论；若后续收敛，必须一次迁移一个 operation family，并核验各项投影。
+9. Release/tag 源码预检与有界本地 parity 于 2026-09-23 有通过记录；GitHub 托管发布/实时 gate、托管 runner 上的产物与版本配对、严格外部 importer、生产 tunnel/cloud、ARM 运行、外部 Browser/MCP 效果和 Console 设备行为，均须由各自 owner 单独提供证据；Rust parity gate 不覆盖这些范围。
 
-这些仍是后续实现和主线核验入口，不是本次文档对全局测试的通过声明。**历史调查说明（2026-09-23 前）**：当时仅运行 Cargo metadata 和静态合同检查，未运行当时列出的 Cargo/Gradle 构建或测试、lint/formatter、真实 Hub/Agent/Android/Browser/tunnel、ARM release 或外部 Actions importer。**当前整合证据**：Rust `cargo check --workspace`、targeted admitted-process reload regression、`cargo test --workspace`（668 passed、1 ignored）已通过；本地 bounded release preflight/parity 已通过。上述结果不构成生产 tunnel/GitHub 发布、hosted cross-build/ARM、Android OS/device 或外部组件通过声明。
+这些仍是后续实现和主线核验入口，不是本次文档对全局测试的通过声明。**历史调查（2026-09-23 前）**：当时仅运行 Cargo metadata 和静态合同检查，未运行当时列出的 Cargo/Gradle 构建或测试、lint/formatter、真实 Hub/Agent/Android/Browser/tunnel、ARM release 或外部 Actions importer。**历史整合记录（2026-09-23）**：Rust `cargo check --workspace`、targeted admitted-process reload regression、`cargo test --workspace`（668 passed、1 ignored）及本地有界 release preflight/parity gate 曾通过；该记录只反映当时的运行结果，不证明当前 checkout 或本次文档更新已通过验证。生产 tunnel/GitHub 发布、托管交叉编译/ARM、Android OS/device 或外部组件仍属未验证范围。
 
 ## 12. 保留项与不采用的做法
 

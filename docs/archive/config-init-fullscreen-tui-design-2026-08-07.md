@@ -1,7 +1,13 @@
 # AgenticGPT `config init` Fullscreen TUI 设计
 
+> **归档记录（2026-09-29）**
+> - **归档状态：** 已归档的历史设计；当前行为以[配置说明](../configuration.zh-CN.md)、[`config_cli.rs`](../../crates/agentic-gpt/src/config/config_cli.rs) 与 [`config_tui`](../../crates/agentic-gpt/src/ui/config_tui/mod.rs) 为准，不以本提案替代实现。
+> - **原始日期/状态：** 2026-08-07；已确认、待实现计划（原文状态，仅表示当时状态）。
+> - **版本范围：** 未关联独立发布版本；本文为 2026-08-07 设计快照。
+> - **前序设计：** [2026-08-04 配置初始化向导设计](config-init-wizard-design-2026-08-04.md)。
+
 日期：2026-08-07  
-状态：已确认，待实现计划
+状态：原始状态为“已确认，待实现计划”（截至 2026-08-07）；不表示当前仍待实现
 
 ## 1. 背景与范围
 
@@ -15,7 +21,7 @@
 
 本设计仅重做 `config init` 的交互式体验，并建立一层最小可复用 Fullscreen TUI 基础设施。
 
-本设计覆盖并替代 `2026-08-04-config-init-wizard-design.md` 中以下部分：
+本设计覆盖并替代[2026-08-04 配置初始化向导设计](config-init-wizard-design-2026-08-04.md)中以下部分：
 
 - `config init` 的 TTY 交互流程；
 - `inquire` 交互库与 prompt abstraction；

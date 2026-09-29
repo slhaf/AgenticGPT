@@ -1,113 +1,88 @@
-# Standalone and local MCP runtimes
+# Standalone 与本地 MCP 运行时
 
-Agentic has three runtime shapes. Standalone is the recommended direct
-deployment: it puts the official OpenAI `tunnel-client` in front of one Agentic
-worker and does not require Hub in the command path. Local integration serves
-the same Agent surface over a private Unix socket without tunnel credentials.
-Hub mode remains the optional centralized topology.
+Agentic 提供三种运行时形态。推荐直接部署的 Standalone 模式会在一个 Agentic worker 前运行 OpenAI 官方 `tunnel-client`，命令路径不经过 Hub。本地集成模式通过私有 Unix socket 提供相同的 Agent 工具表面，无需 tunnel 凭据。Hub 模式仍是可选的集中式拓扑。
 
-## Runtime topology
+## 运行时拓扑
 
 ```text
-Standalone mode (recommended):
+Standalone 模式（推荐）：
 Secure MCP Tunnel -> tunnel-client -> agentic-gpt worker
-                                      |-> stdio MCP ingress
-                                      |-> owner-only Unix MCP ingress
-                                      \-> optional HTTP MCP ingress: http://<host>:<port>/mcp
-                                          (worker-owned, enabled by httpMcp)
-                                      \-> optional reporting-only Hub connection
+                                      |-> stdio MCP 入口
+                                      |-> 仅所有者可访问的 Unix MCP 入口
+                                      \-> 可选 HTTP MCP 入口：http://<host>:<port>/mcp
+                                          （由 worker 持有，由 httpMcp 启用）
+                                      \-> 仅用于报告的可选 Hub 连接
 
-Local integration mode:
-local rmcp CLI/client -> owner-only Unix socket -> agentic-gpt worker
+本地集成模式：
+本地 rmcp CLI/client -> 仅所有者可访问的 Unix socket -> agentic-gpt worker
 
-Hub mode (centralized):
-ChatGPT -> HTTPS Hub -> WebSocket/SSE -> agentic-gpt -> local policy/services
-```
+Hub 模式（集中式）：
+ChatGPT -> HTTPS Hub -> WebSocket/SSE -> agentic-gpt -> 本地策略/服务
 
-The tunnel runtime is started with `agentic-gpt run` when the config has `mode=standalone`.
-Agentic resolves and
-verifies the tunnel client, runs its `doctor --json` preflight, creates the
-worker command, supervises the tunnel/worker process tree, and keeps the
-worker's stdout reserved for MCP framing. That same hidden worker owns the
-owner-only Unix MCP socket and, when `httpMcp.enabled` is true, the optional
-HTTP MCP listener. Do not start the hidden `stdio-worker` command directly.
+当配置包含 `mode=standalone` 时，使用 `agentic-gpt run` 启动 tunnel 运行时。Agentic 会解析并
+验证 tunnel client，运行其 `doctor --json` 预检，构造 worker 命令，监管 tunnel/worker 进程树，并将
+worker 的 stdout 保留给 MCP framing 使用。同一个隐藏 worker 拥有仅所有者可访问的 Unix MCP socket；
+当 `httpMcp.enabled` 为 true 时，也拥有可选的 HTTP MCP listener。不要直接启动隐藏的
+`stdio-worker` 命令。
 
-The standalone HTTP endpoint is fixed at `/mcp` and supports the configured
-direct bearer plus an optional standalone ChatGPT connector OAuth contract.
-Without `httpMcp.publicUrl`, direct bearer use remains valid and OAuth routes
-fail closed; with a valid HTTPS `publicUrl`, the listener advertises
-path-specific protected-resource metadata at
-`/.well-known/oauth-protected-resource/mcp`, a root-compatible alias at
-`/.well-known/oauth-protected-resource`, and AS/OIDC aliases at
-`/.well-known/oauth-authorization-server` and
-`/.well-known/openid-configuration`. `/oauth/authorize` and `/oauth/token`
-implement one authorization-code flow for `agentic:mcp`. Only
-`https://chatgpt.com/connector/oauth/<suffix>` and the exact
-`https://chatgpt.com/connector_platform_oauth_redirect` callbacks are
-accepted. There are no refresh tokens, `offline_access`, DCR, generic
-registration, or arbitrary redirects.
+Standalone HTTP endpoint 固定为 `/mcp`，支持已配置的 direct bearer，以及可选的 Standalone ChatGPT connector OAuth 合同。
+未配置 `httpMcp.publicUrl` 时，direct bearer 仍然可用，OAuth 路由会 fail closed；配置有效的 HTTPS `publicUrl` 后，
+listener 会公布以下路径对应的 protected-resource metadata：
+`/.well-known/oauth-protected-resource/mcp`，兼容根路径的别名 `/.well-known/oauth-protected-resource`，以及
+AS/OIDC 别名 `/.well-known/oauth-authorization-server` 和
+`/.well-known/openid-configuration`。`/oauth/authorize` 与 `/oauth/token`
+为 `agentic:mcp` 实现单一 authorization-code 流程。仅接受
+`https://chatgpt.com/connector/oauth/<suffix>` 和精确的
+`https://chatgpt.com/connector_platform_oauth_redirect` 回调。不提供 refresh token、
+`offline_access`、DCR、通用注册或任意重定向。
 
-OAuth codes and access tokens are opaque, listener-local in-memory records with
-expiry and revocation. Direct bearer content rotation updates authentication in
-place, preserves existing rmcp sessions, and revokes OAuth records; listener
-replacement, rebind, disable, or restart discards all listener-local state.
-The standalone authorization page and tool/profile semantics are not Hub's
-`Hub API key`, profile, or routing contract. The rmcp transport is stateful
-Streamable HTTP/SSE, so rebind or disable still requires a new `initialize`.
-See [`configuration.md`](configuration.md) for schema, allow-host, CLI, and
-reload details.
+OAuth code 和 access token 是不透明的 listener 本地内存记录，带有过期和撤销状态。轮换 direct bearer 内容会原地更新认证、
+保留已有 rmcp session，并撤销 OAuth 记录；替换 listener、rebind、禁用或重启都会丢弃所有 listener 本地状态。
+Standalone 授权页面及工具/profile 语义不等同于 Hub 的 `Hub API key`、profile 或路由合同。rmcp transport
+使用有状态的 Streamable HTTP/SSE，因此 rebind 或禁用后仍需重新执行 `initialize`。schema、allow-host、CLI 和
+reload 详情见 [`configuration.md`](configuration.md)。
 
-`publicUrl` is the advertised external HTTPS origin only; it does not change
-the local bind or route traffic, and the origin may remain loopback/private.
-All sibling discovery, authorization, token, and `/mcp` routes must be exposed
-through HTTPS for ChatGPT. The listener rejects malformed/missing Host and
-forbids disallowed authorities on every sibling route. A reverse proxy or ESA
-must put the authority it actually sends in `allowHosts`; a present `Origin`
-must exactly match `publicUrl`, while absent Origin remains valid for
-server-to-server requests. No permissive CORS is added.
+`publicUrl` 仅用于公布外部 HTTPS origin；它不会改变本地 bind，也不负责路由流量，且该 origin 可以仍为 loopback/private。
+ChatGPT 所用的所有同级 discovery、authorization、token 和 `/mcp` 路由都必须通过 HTTPS 暴露。listener 会拒绝格式错误或缺失的
+Host，并在每个同级路由上禁止不在许可列表内的 authority。反向代理或 ESA 必须将其实际发送的 authority 放入 `allowHosts`；
+若存在 `Origin`，它必须与 `publicUrl` 完全一致；未提供 `Origin` 时仍允许 server-to-server 请求。不会添加宽松的 CORS。
 
-For development without tunnel configuration or Hub reporting, set
-`mode=local` and use `agentic-gpt run`. It loads the same profile-selected toolset preset,
-policy, path policy, confirmation, audit, live config, and managed execution state, but serves
-only the Unix MCP ingress; `httpMcp` does not add a TCP listener in Local mode.
+开发时若不使用 tunnel 配置或 Hub reporting，可设置
+`mode=local` 并运行 `agentic-gpt run`。此模式会加载相同的、由 profile 选择的工具集预设、
+策略、路径策略、确认、审计、实时配置和托管执行状态，但只提供 Unix MCP 入口；
+Local 模式下 `httpMcp` 不会添加 TCP listener。
 
-### Six public runtime mappings
+### 六种公开运行时映射
 
-| Command | Command transport | Capability profile | Hub connection |
+| 命令 | 命令传输 | 能力 profile | Hub 连接 |
 | --- | --- | --- | --- |
-| `agentic-gpt run` (`mode=standalone`, `profile=normal`) | Tunnel stdio + local Unix MCP + optional HTTP MCP | Normal | disabled by default; reporting-only when enabled |
-| `agentic-gpt run` (`mode=standalone`, `profile=room`) | Tunnel stdio + local Unix MCP + optional HTTP MCP | Room | disabled by default; reporting-only when enabled |
-| `agentic-gpt run` (`mode=local`, `profile=normal`) | Local Unix MCP | Normal | disabled |
-| `agentic-gpt run` (`mode=local`, `profile=room`) | Local Unix MCP | Room | disabled |
-| `agentic-gpt run` (`mode=hub`, `profile=normal`) | Hub | Normal | command-capable |
-| `agentic-gpt run` (`mode=hub`, `profile=room`) | Hub | Room | command-capable |
+| `agentic-gpt run` (`mode=standalone`, `profile=normal`) | Tunnel stdio + 本地 Unix MCP + 可选 HTTP MCP | Normal | 默认禁用；启用时仅用于报告 |
+| `agentic-gpt run` (`mode=standalone`, `profile=room`) | Tunnel stdio + 本地 Unix MCP + 可选 HTTP MCP | Room | 默认禁用；启用时仅用于报告 |
+| `agentic-gpt run` (`mode=local`, `profile=normal`) | 本地 Unix MCP | Normal | 禁用 |
+| `agentic-gpt run` (`mode=local`, `profile=room`) | 本地 Unix MCP | Room | 禁用 |
+| `agentic-gpt run` (`mode=hub`, `profile=normal`) | Hub | Normal | 可执行命令 |
+| `agentic-gpt run` (`mode=hub`, `profile=room`) | Hub | Room | 可执行命令 |
 
-Transport does not change local policy. Tunnel, HTTP, and local Unix ingress use the same
-Agent tool surface and policy boundaries for a profile-selected toolset set. The normal preset
-excludes the logical `room` namespace by default; the room preset enables it. Explicit
-`toolsets.enabled` selection is authoritative. Calls entering one worker share the same live
-config, confirmation state, audit, capacity, and managed execution registry.
-Room bootstrap, diary, and notebook execution follows the live `room` namespace rather than the
-startup profile. A Normal-profile worker can therefore enable `room` without restart; direct
-Room dispatch while it is disabled returns `room_toolset_required`.
+传输方式不会改变本地策略。Tunnel、HTTP 和本地 Unix 入口对按 profile 选择的工具集使用相同的 Agent 工具表面和策略边界。
+Normal 预设默认不包含逻辑 `room` namespace；Room 预设会启用它。显式设置的 `toolsets.enabled` 是最终依据。进入同一个
+worker 的调用共享其实时配置、确认状态、审计、容量和托管执行注册表。Room bootstrap、diary 和 notebook 执行遵循实时
+`room` namespace，而非启动时的 profile。因此，Normal-profile worker 可在不重启的情况下启用 `room`；若该 namespace
+仍处于禁用状态，直接 dispatch Room 操作会返回 `room_toolset_required`。
 
-## Local Unix MCP control channel
+## 本地 Unix MCP 控制通道
 
-The socket path is derived from the configured identity:
+socket 路径根据已配置的身份生成：
 
 ```text
 ~/.agentic_gpt/runtime/agent/<agentId>/mcp.sock
 ```
 
-The runtime directory is mode `0700`, the socket is mode `0600`, and accepted
-connections must report the same local UID. Agentic never opens a TCP debug
-port. Startup rejects an active socket, safely removes only a proven stale
-owned socket, and uses the existing per-config `.run.lock`, so tunnel-backed
-and local-only runtimes cannot own the same configuration simultaneously.
-`agent.info.connections.localMcp` reports `ready`/`unavailable` and the exact
-socket path.
+runtime 目录权限为 `0700`，socket 权限为 `0600`，且接受的连接必须报告相同的本地 UID。Agentic 从不打开 TCP 调试端口。
+启动时若 socket 正在使用则拒绝启动；只有确认是本进程所有的陈旧 socket 才会被安全移除。该模式使用现有的每配置
+`.run.lock`，因此 tunnel-backed 与仅本地的运行时不能同时占用同一配置。`agent.info.connections.localMcp` 会报告
+`ready`/`unavailable` 及准确的 socket 路径。
 
-Use the built-in real rmcp client to inspect or call the running surface:
+使用内置的真实 rmcp client 检查或调用运行中的工具表面：
 
 ```bash
 agentic-gpt local list-tools --config ~/.agentic_gpt/config.json
@@ -117,34 +92,23 @@ printf '%s' '{"path":"README.md"}' | \
   --arguments-file -
 ```
 
-The `agentic-gpt local` command is the owner-only Unix MCP client; its calls
-retain `local:` audit provenance. It is distinct from the `agentic-gpt tmux`
-local-admin CLI, which exposes exactly four commands: `list`, `attach`,
-`create`, and `close` (request-context operation names
-`tmux.listSessions`, `tmux.attach`, `tmux.createSession`, and
-`tmux.closeSession`). Those CLI calls use `localadmin:` provenance, do not add
-remote approval semantics, and do not fabricate AppState. The other ingress
-prefixes remain distinct: `tunnel:` for the tunnel, `http:` for HTTP, and
-`hub:` for Hub.
+`agentic-gpt local` 命令是仅所有者可访问的 Unix MCP client；其调用保留 `local:` 审计 provenance。它不同于
+`agentic-gpt tmux` 本地管理 CLI；后者只提供四个命令：`list`、`attach`、`create` 和 `close`（request-context
+operation 名称为 `tmux.listSessions`、`tmux.attach`、`tmux.createSession` 和
+`tmux.closeSession`）。这些 CLI 调用使用 `localadmin:` provenance，不增加远程批准语义，也不会伪造 AppState。
+其他入口的前缀彼此独立：Tunnel 使用 `tunnel:`，HTTP 使用 `http:`，Hub 使用 `hub:`。
 
-`--arguments` and `--arguments-file PATH|-` accept one JSON object, capped at
-2 MiB. Structured MCP results are written to stdout; logs and typed connection
-errors are written to stderr. A stopped/restarting runtime returns
-`local_mcp_unavailable`; clients may reconnect but must not replay side effects.
+`--arguments` 和 `--arguments-file PATH|-` 接受一个 JSON object，上限为 2 MiB。结构化 MCP 结果写入 stdout；日志和
+类型化连接错误写入 stderr。运行时停止或重启期间会返回 `local_mcp_unavailable`；客户端可以重新连接，但不得重放有副作用的调用。
 
-## Tunnel, HTTP, and local tool surfaces
+## Tunnel、HTTP 与本地工具表面
 
-The Normal and Room profiles select namespace presets rather than fixing the final
-runtime surface: Normal enables `agent`, `file`, `mcp`, `process`, `skills`,
-`tmux`, and `browser`; Room enables those plus `room`. An explicit
-`toolsets.enabled` selection is authoritative. The logical `room` namespace
-contains `bootstrap`, `bootstrap.read`, the semantic read tools, and maintenance
-status/submit. These filters only remove names from the advertised surface;
-they never expose dispatch-only aliases.
+Normal 与 Room profile 选择 namespace 预设，而不是固定最终运行时表面：Normal 启用 `agent`、`file`、`mcp`、`process`、`skills`、
+`tmux` 和 `browser`；Room 在此基础上还启用 `room`。显式设置的
+`toolsets.enabled` 是最终依据。逻辑 `room` namespace 包含 `bootstrap`、`bootstrap.read`、语义读取工具以及维护状态/提交工具。
+这些过滤器只会从已公布的工具表面移除名称，不会暴露仅供 dispatch 使用的别名。
 
-Start with `agent.info` to inspect the active profile and enabled namespaces,
-bounded path policy, capacity, confirmation availability, and reporting state:
-
+先调用 `agent.info`，检查当前 profile、已启用的 namespace、受限的路径策略、容量、确认功能是否可用以及 reporting 状态：
 ```text
 mcp.list, mcp.callTool, mcp.batch
 process.exec, process.batch, process.status, process.list,
@@ -156,7 +120,7 @@ browser.manual, browser.acquire, browser.repl, browser.reset, browser.release, b
 agent.info, file.read, file.search, file.edit
 ```
 
-When the logical `room` namespace is enabled, the additional advertised names are:
+启用逻辑 `room` namespace 后，还会公布以下工具名称：
 
 ```text
 bootstrap, bootstrap.read
@@ -166,278 +130,156 @@ room.state.list, room.state.read
 room.maintenance.status, room.maintenance.submit
 ```
 
-The same nine semantic Room names are the current contract for local Unix MCP,
-Tunnel stdio, and Hub Full MCP/HTTP. Hub Full forwards
-`room.diary.active/read`, `room.notebook.recent/search/read`,
-`room.state.list/read`, and `room.maintenance.status/submit` through the
-captured active Room lease; the matching HTTP routes are
-`POST /v1/room/<namespace>/<action>` and accept no `agentId`. Coordinator
-advertises and dispatches none of these Room operations.
+相同的九个语义 Room 名称是本地 Unix MCP、Tunnel stdio 和 Hub Full MCP/HTTP 当前合同的一部分。Hub Full 会通过捕获的活动 Room lease 转发
+`room.diary.active/read`、`room.notebook.recent/search/read`、
+`room.state.list/read` 和 `room.maintenance.status/submit`；对应的 HTTP 路由是
+`POST /v1/room/<namespace>/<action>`，且不接受 `agentId`。Coordinator 不会公布或 dispatch 这些 Room 操作。
 
-Room reads remain bounded and Agent-owned: Notebook `limit` defaults to 20 and
-is 1–100, search queries are non-empty and at most 256 Unicode characters,
-Diary periods are semantic layer/date values, and Notebook/State Markdown reads
-reject content above 512 KiB. `room.notebook.recent` and
-`room.notebook.search` use current Markdown previews/results despite retaining
-their public names; they are not passage/JSONL operations.
+Room 读取受限且由 Agent 持有：Notebook `limit` 默认值为 20，范围为 1–100；搜索查询不得为空，且最多 256 个 Unicode 字符；
+Diary period 是语义 layer/date 值；Notebook/State Markdown 读取会拒绝超过 512 KiB 的内容。`room.notebook.recent` 和
+`room.notebook.search` 虽保留原有公开名称，使用的却是当前 Markdown 预览/搜索结果，并非 passage/JSONL 操作。
 
-`room.maintenance.status` is read-only. `room.maintenance.submit` accepts one
-to five unique slots, optional `local`/`workflow` mode, and `waitSeconds` from
-0 through 30 (default 0). A workflow wait timeout only ends the wait and does
-not cancel maintenance. Existing Agent path, lock, clean-tree, expected-change,
-executor, and Git controls remain authoritative; no separate wait API or new
-confirmation gate is added.
+`room.maintenance.status` 是只读操作。`room.maintenance.submit` 接受 1–5 个互不重复的 slot，可选 `local`/`workflow` mode，
+并接受 0–30 的 `waitSeconds`（默认 0）。workflow 等待超时只会结束等待，不会取消维护操作。现有 Agent 路径、锁、clean-tree、
+expected-change、executor 和 Git 控制仍具有最终效力；不会添加独立等待 API 或新的确认门。
 
-Hub owns only authentication, active-lease routing, and bounded run receipts.
-A generic receipt may retain a bounded operation result, but it is not a Room
-content authority or replica. Retired JSONL append/update/remove and
-passage/date-selection callers are not silently mapped to maintenance; migrate
-them to explicit semantic slot/payload requests or remove them. Historical
-release/migration records are history, not an active error contract.
+Hub 只负责认证、活动 lease 路由和有界 run receipt。通用 receipt 可以保留有界操作结果，但不是 Room 内容的权威来源或副本。
+已退役的 JSONL 追加/更新/删除及 passage/date-selection 调用方不会被悄然映射为维护操作；应迁移为明确的语义 slot/payload 请求，
+或将其移除。历史 release/migration 记录仅供查阅，不是当前错误合同。
 
-Managed downstream `mcp.callTool` uses the same process registry and capacity
-limit as command and skill execution. Its `waitSeconds` defaults to 5 and is
-capped at 30; `timeoutSeconds` is an absolute confirmation/connect/request
-deadline that defaults to 300 and is capped at 900. Arguments must be a JSON
-object and their serialized size is capped at 256 KiB. Results up to 512 KiB
-are retained; larger results are represented by byte count, SHA-256, and an
-8 KiB UTF-8-safe preview rather than partial JSON. A downstream `isError=true`
-result is retained and the process state is `failed`. Hub has no native
-`file.read` or `file.edit` tools; its generic asynchronous `mcp.callTool` bridge
-uses the process lifecycle, not a typed image-content surface, and must not be
-relied on to preserve `file.read` image Content blocks.
+托管下游 `mcp.callTool` 与命令和 skill 执行共用同一 process registry 及容量上限。其 `waitSeconds` 默认值为 5，最大为 30；
+`timeoutSeconds` 是确认/连接/请求的绝对截止时间，默认值为 300，最大为 900。arguments 必须是 JSON object，序列化大小上限为
+256 KiB。最多保留 512 KiB 的结果；更大的结果不会截断成部分 JSON，而会以字节数、SHA-256 和最多 8 KiB 的 UTF-8 安全预览表示。
+下游返回 `isError=true` 的结果会被保留，process 状态为 `failed`。Hub 没有原生 `file.read` 或 `file.edit` 工具；其通用异步
+`mcp.callTool` bridge 使用 process 生命周期，而非带类型的图像内容表面，因此不得依赖它保留 `file.read` 的 image Content blocks。
 
-Skill installation lookup and skill execution use the same bounded wait
-contract: `waitSeconds` defaults to 5 and is capped at 30. A wait timeout only
-ends the local wait; it does not implicitly cancel an installation or process.
-Use `skills.install.cancel` or `process.cancel` explicitly when cancellation is
-required.
+Skill 安装查询与 skill 执行使用相同的有界等待合同：`waitSeconds` 默认值为 5，最大为 30。等待超时只会结束本地等待，不会隐式取消
+安装或 process。确需取消时，必须显式调用 `skills.install.cancel` 或 `process.cancel`。
 
-`mcp.batch` accepts 1–16 ordered calls. Every call is fully validated before
-capacity admission or confirmation; invalid input and insufficient shared
-process capacity create no child processes and start no downstream side
-effects. Admission is atomic. The batch then requests one aggregate
-confirmation after excluding servers already covered by temporary allow state.
-A single-server batch may receive a 15- or 30-minute server grant; a
-multi-server batch only supports one batch-scoped allow or deny.
+`mcp.batch` 接受 1–16 个有序调用。每个调用都要在容量准入或确认之前完成完整验证；输入无效或共享 process 容量不足时，不会创建子进程，
+也不会启动下游副作用。准入是原子的。之后 batch 会在排除已由临时 allow 状态覆盖的 server 后，请求一次汇总确认。单 server batch
+可获 15 或 30 分钟的 server grant；多 server batch 只支持一个作用于整个 batch 的 allow 或 deny。
 
-Parallel mode is the default; sequential mode waits for each child to become
-terminal before starting the next. The shared scheduler permits at most eight
-active MCP children globally and two per server, and `agent.info` reports the
-limits plus active/queued counts. `failFast=true` only prevents children that
-have not started from beginning after a hard failure; already-started calls are
-never cancelled. Child results remain in input order. Per-call arguments and
-results keep the 256 KiB / 512 KiB bounds, while aggregate arguments and the
-serialized batch response are each capped at 2 MiB. If the response budget is
-exceeded, later child result bodies are removed first while hashes, sizes,
-previews, states, and process ids remain available.
+默认采用并行模式；顺序模式会等每个子调用进入终态后才启动下一个。共享 scheduler 全局最多允许 8 个活动 MCP 子调用、每个 server
+最多 2 个；`agent.info` 会报告这些上限及活动/排队数量。`failFast=true` 只会阻止硬失败发生后尚未启动的子调用开始；已经启动的调用
+绝不会因此被取消。子结果按输入顺序返回。每次调用的 arguments/results 上限仍为 256 KiB/512 KiB；汇总 arguments 和序列化后的
+batch 响应分别限制为 2 MiB。若超出响应预算，会先移除靠后的子结果正文，同时保留 hash、大小、预览、状态和 process id。
 
-MCP cancellation uses the exact rmcp request id. `process.cancel` and execution
-timeouts send `notifications/cancelled`; if the transport does not provide a
-terminal cancellation response, Agentic reports `detached` with bounded
-termination evidence rather than claiming `cancelled`. Child audit records
-carry `batchId`, optional `batchCallId`, and `batchIndex`; one aggregate audit
-records mode, fail-fast, confirmation outcome, child process ids, final
-outcome, and clipping. Confirmation/audit records contain server/tool names,
-a bounded argument-key subset plus total count, byte counts and hashes, config
-revision, result size/hash, and terminal evidence, but never raw arguments or
-raw results.
+MCP 取消使用确切的 rmcp request id。`process.cancel` 和执行超时会发送 `notifications/cancelled`；若 transport 未提供终态取消响应，
+Agentic 会报告 `detached` 并附带有界的终止证据，而不会声称已 `cancelled`。子级审计记录包含 `batchId`、可选的
+`batchCallId` 和 `batchIndex`；一条汇总审计记录 batch mode、fail-fast、确认结果、子 process id、最终结果和截断信息。确认/审计记录
+包含 server/tool 名称、有界的 argument key 子集及其总数、字节数和 hash、配置 revision、结果大小/hash 和终态证据，但绝不包含原始
+arguments 或原始结果。
 
-The standalone worker intentionally has no Tunnel `agentId` or `confirmMethod`
-input fields. The worker supplies its configured local agent identity
-internally; unexpected legacy fields are rejected. `bootstrap` is Room-only.
-Managed process admission tools (`process.exec`, `process.batch`, `skills.run`,
-`mcp.callTool`, and `mcp.batch`) accept an optional validated human-readable
-`group`; batch children inherit their parent group. Responses are compact and
-keep `processId` as the stable handle for later status, output, result, or
-cancellation requests. Rich bounded provenance remains internal/durable rather
-than being repeated in every response.
+Standalone worker 有意不接受 Tunnel `agentId` 或 `confirmMethod` 输入字段。worker 会在内部使用已配置的本地 Agent 身份；出现意外的旧版字段
+时会拒绝请求。`bootstrap` 仅限 Room。托管 process 准入工具（`process.exec`、`process.batch`、`skills.run`、`mcp.callTool` 和
+`mcp.batch`）接受可选且经过校验的可读 `group`；batch 子项继承父项的 group。响应保持精简，并将 `processId` 作为后续查询状态、输出、
+结果或取消的稳定句柄。丰富但有界的 provenance 保留在内部/持久记录中，不会在每个响应里重复。
 
-Process history is retained in the per-agent private `process.sqlite3` store
-for 30 days subject to the logical soft cap. `process.status` falls back to
-retained metadata by `processId`; its `waitSeconds` defaults to 0 and is capped
-at 30. Status and list return metadata only, never stdout, stderr, or result
-bodies. `process.list` has a default limit of 50, capped at 100, and supports
-exact `group`/kind/state filters plus stable opaque cursor pagination ordered
-by `createdAt DESC, processId DESC`. Hub Full and HTTP forwarding preserve
-those fields while the Agent is available. When the Agent is unavailable, Hub
-may filter its cached first page by group/kind/state, but it refuses to invent
-continuation for an Agent-issued cursor; cached status is explicitly degraded
-evidence, not a fresh wait result.
+Process 历史保存在每个 Agent 的私有 `process.sqlite3` store 中，保留 30 天并受逻辑软上限约束。`process.status` 可按 `processId`
+回退到保留的 metadata；其 `waitSeconds` 未提供时默认值为 5，最大为 30。显式传入 `waitSeconds: 0` 时只查询当前状态，不等待状态变化。
+Status 和 list 只返回 metadata，不返回 stdout、stderr 或结果正文。`process.list` 的默认 limit 为 50，上限为 100，支持精确的
+`group`/kind/state 过滤，以及按 `createdAt DESC, processId DESC` 排序的稳定不透明 cursor 分页。Agent 可用时，Hub Full 和 HTTP 转发会保留
+这些字段。Agent 不可用时，Hub 可以按 group/kind/state 过滤缓存的第一页，但不会为 Agent 签发的 cursor 虚构后续页；缓存 status 明确属于降级
+证据，不是刚完成等待后的结果。
 
-`process.output` reads non-consuming pages from stdout and stderr. The default
-page budget is 8 KiB and the maximum is 32 KiB. Cursors are process-bound and
-carry raw-byte offsets for both streams; returned slices preserve invalid UTF-8
-through base64 encoding. Responses explicitly report retention gaps and EOF;
-EOF is true only when capture actually reached the end of output. Use
-`process.result` to retrieve a complete retained structured result. Its status
-distinguishes `complete`, `too_large`, and `unavailable`; oversized or
-unretained results are not returned as partial JSON, and Hub's metadata cache
-never supplies result content. Batch admission still rejects the whole batch
-before starting any child when preflight, policy, confirmation, or capacity
-fails.
+`process.output` 以非消耗方式分页读取 stdout 和 stderr。默认页预算为 8 KiB，上限为 32 KiB。cursor 与特定 process 绑定，并携带两个 stream
+的原始字节偏移量；返回片段会通过 base64 编码保留无效 UTF-8 字节。响应会明确报告保留缺口和 EOF；仅当采集实际到达输出末尾时，EOF 才为 true。
+使用 `process.result` 获取完整且仍被保留的结构化结果。其状态区分 `complete`、`too_large` 和 `unavailable`；过大或未保留的结果不会作为部分
+JSON 返回，Hub metadata cache 也永远不会提供结果内容。若 preflight、策略、确认或容量检查失败，batch 准入仍会在启动任何子项之前拒绝整个 batch。
 
-### Storage authority and recovery boundaries
+### 存储权威与恢复边界
 
-The private Agent process database (`process.sqlite3`) retains process history
-for 30 days subject to its logical soft cap. It is created mode `0600` under a
-private mode-`0700` parent. The process registry and hot cache are projections;
-after an Agent restart, active processes are represented as
-`unknown_after_restart` and are not replayed for side effects. History
-retention or a Hub cache eviction does not roll back a process, MCP call, or
-other external effect. The old `jobs.sqlite3` file is left untouched and is
-not opened, migrated, or used as process history.
+私有 Agent process 数据库（`process.sqlite3`）会保留 30 天的 process 历史，并受逻辑软上限约束。数据库以 `0600` 权限创建在私有的
+`0700` 父目录下。Process registry 和热缓存只是投影；Agent 重启后，活动 process 会表示为 `unknown_after_restart`，不会为了重放副作用而再次执行。
+历史到期或 Hub cache 淘汰都不会回滚 process、MCP 调用或其他外部效果。旧 `jobs.sqlite3` 文件保持原样，不会被打开、迁移或用作 process 历史。
 
-Process and MCP batch admission rows commit in one SQLite transaction before
-their children enter the live registry. A persistence failure leaves no partial
-batch admissions and starts no child execution; existing process history is
-preserved. This is admission atomicity, not transactional execution or rollback
-of external effects after an admitted batch starts.
+Process 和 MCP batch 准入记录会先在一个 SQLite transaction 中提交，然后子项才进入实时 registry。持久化失败不会留下部分 batch 准入，也不会启动子项；
+已有 process 历史会保留。这保证的是准入原子性，而不是事务式执行，也不保证 batch 开始后可以回滚外部效果。
 
 
-Reliable Hub commands use the Agent transport ledger as their local
-deduplication and result authority. Each claim is file-locked and carries an
-explicit owner; a record owned by another Agent is rejected. Unowned legacy
-records remain `LegacyUnowned`: they are not automatically reconciled,
-executed, or used to disclose a result. Recovery is an operator-led review of
-the preserved raw record and newer owner-bound evidence; never delete or
-replace deduplication evidence to bypass a corruption or ownership error.
-Malformed JSON or a torn final line fails closed and preserves the raw bytes in
-a private `.recovery` sidecar. Compaction may retain the prior raw ledger in a
-private `.backup`; do not delete or replace these artifacts to bypass a
-corruption error.
+可靠 Hub 命令使用 Agent transport ledger 作为本地去重与结果权威。每次 claim 都会进行文件锁定并带有明确 owner；由其他 Agent 所有的记录会被拒绝。
+未指定 owner 的旧记录仍属于 `LegacyUnowned`：不会自动 reconcile、执行，也不会用于泄露结果。恢复由操作人员检查保留的原始记录和更新的 owner-bound 证据；
+不得删除或替换去重证据来绕过损坏或 ownership 错误。格式错误的 JSON 或被截断的末行会 fail closed，并将原始字节保留在私有 `.recovery` sidecar 中。
+压缩时可能在私有 `.backup` 中保留先前的原始 ledger；不得删除或替换这些文件来绕过损坏错误。
 
-Configuration replacement stages and syncs a private temporary file, then
-renames it into place. Replacing an existing config first stores a private
-backup under its `backups/` directory, bounded by `backupLimit`. Setup of
-secret references also uses a private setup journal. If hashes, file types, or
-the journal state do not match an expected before/after pair, recovery fails
-closed with a conflict rather than choosing a side or overwriting user data.
-Stop the owning Agent before manually restoring a config or secret; never
-paste secret values into commands, logs, or support output.
+替换配置时，会先暂存并同步私有临时文件，再将其 rename 到目标位置。覆盖现有配置前，会先在其 `backups/` 目录中保存私有备份，数量受
+`backupLimit` 限制。配置 secret reference 时也使用私有 setup journal。如果 hash、文件类型或 journal 状态不符合预期的变更前/后状态，恢复会因冲突而
+fail closed，不会自行选择一侧或覆盖用户数据。手动恢复配置或 secret 前，先停止拥有它的 Agent；绝不要将 secret 值粘贴进命令、日志或支持输出。
 
-Workspace audit JSONL is bounded at 8 MiB. Rotation keeps the current file and
-one `.1` backup and is best effort; audit loss is observable logging loss, not
-proof that an operation or result did not occur. A wait timeout, missing
-receipt, or cache omission likewise cannot be interpreted as remote
-cancellation or effect rollback.
+Workspace audit JSONL 上限为 8 MiB。轮换会保留当前文件和一个 `.1` 备份，且尽力而为；审计丢失只表明日志有缺失，不能证明操作或结果没有发生。
+等待超时、缺少 receipt 或缓存未包含某记录，同样不能解释为远程取消或效果回滚。
 
 
-Tunnel, HTTP, and local Unix ingress do not expose Hub aggregation or
-notification tools. They use the same local policy, path-policy, confirmation,
-audit, and managed process lifecycle as Hub execution while keeping the Hub
-out of the command path. The top-level `mcpServers` block is different: it is
-the downstream registry consumed by `mcp.*` calls, not an inbound listener
-definition.
+Tunnel、HTTP 和本地 Unix 入口不会暴露 Hub 汇总或通知工具。它们在不让 Hub 进入命令路径的情况下，仍使用与 Hub 执行相同的本地策略、路径策略、
+确认、审计和托管 process 生命周期。顶层 `mcpServers` block 则不同：它是 `mcp.*` 调用使用的下游注册表，不是入站 listener 定义。
 
-The checked-in [public tool contract matrix](tool-contract-matrix.md) records
-use/non-use guidance, conditional fields, bounds, lifecycle/failure semantics,
-and standalone/Hub parity for every Normal, Room, and Hub profile tool.
+仓库内的[公开工具合同矩阵](tool-contract-matrix.md)为每个 Normal、Room 和 Hub profile 工具记录适用/不适用场景、条件字段、边界、生命周期/失败语义
+以及 Standalone/Hub 对等情况。
 
-### Standalone file tools
+### Standalone 文件工具
 
-`file.search` and text-mode `file.read` are bounded UTF-8 operations. They
-accept paths relative to `workspaceRoot` (or absolute paths authorized by
-`pathPolicy`), resolve symlinks before policy checks, and never invoke a shell
-or external search process. Text reads return content by default, optionally
-attach metadata with `metadata: true`, support inclusive line ranges, and stop
-at the last complete line before the 256 KiB response bound. A truncated read
-returns only `nextStartLine`; a single line larger than the bound is rejected.
-Inside Git repositories, search honors Git ignore
-rules by default and caps its returned match/context payload at 256 KiB while
-also bounding scanned files and bytes.
+`file.search` 和文本模式的 `file.read` 都是有界 UTF-8 操作。路径可相对于 `workspaceRoot` 指定，也可使用经
+`pathPolicy` 授权的绝对路径；工具会在策略检查前解析符号链接，且不会调用 shell 或外部搜索进程。文本读取默认返回内容，可通过
+`metadata: true` 附带 metadata，支持包含首尾行的行范围，并会在 256 KiB 响应上限之前停在最后一个完整行。若读取被截断，只返回
+`nextStartLine`；超过上限的单行会被拒绝。在 Git 仓库中，搜索默认遵循 Git ignore 规则；返回的匹配/上下文内容最多为 256 KiB，
+扫描的文件数和字节数也有限制。
 
-Binary `file.read` supports PNG, JPEG, WebP, and GIF. An image call returns
-MCP image Content blocks at the top level and JSON `structuredContent` metadata;
-image bytes are not duplicated in the JSON. Static images preserve their PNG,
-JPEG, or WebP encoding; metadata is under `image` with detected `mimeType`
-(`image/png`, `image/jpeg`, or `image/webp`) and
-`width`/`height`. GIF metadata has `sourceMimeType: "image/gif"`, canvas
-`width`/`height`, and ordered `frames` entries with `timestampMs`, output
-`mimeType: "image/png"`, and frame `width`/`height`. GIFs produce at most eight
-frames sampled uniformly over playback duration, including the first and last
-playback endpoints; timestamps are source playback frame-start milliseconds.
-Image/frame decode is limited to 16 Mi pixels and GIF traversal to 64 Mi
-cumulative pixels. Serialized image payload is limited to 8 MiB per `file.read`
-call. Other formats remain text when valid UTF-8, or return the existing typed
-read error; they are not treated as images.
+二进制 `file.read` 支持 PNG、JPEG、WebP 和 GIF。读取图像时，顶层 MCP Content 会返回 image Content blocks，JSON 中则带有
+`structuredContent` metadata；图像字节不会在 JSON 中重复。静态图像保留 PNG、JPEG 或 WebP 编码；metadata 位于 `image` 中，
+包含检测到的 `mimeType`（`image/png`、`image/jpeg` 或 `image/webp`）以及 `width`/`height`。GIF metadata 包含
+`sourceMimeType: "image/gif"`、画布 `width`/`height`，以及有序的 `frames` 项；每项包含 `timestampMs`、输出 `mimeType: "image/png"`
+和帧的 `width`/`height`。GIF 最多生成 8 帧，按播放时长均匀采样并包括首尾播放端点；时间戳是源播放帧开始的毫秒数。图像/帧解码上限为
+16 Mi 像素，GIF 遍历累计上限为 64 Mi 像素。每次 `file.read` 调用序列化后的图像 payload 上限为 8 MiB。其他格式若为有效 UTF-8，仍按文本处理；
+否则返回现有的类型化读取错误，不会当作图像处理。
 
-`contextLines` is a non-negative integer with a default of 0. The live maximum
-is `limits.maxFileSearchContextLines` (default 5, configurable from 0 through
-100 and visible as `agent.info.execution.fileSearch.maxContextLines`). Requests
-above that maximum are clipped rather than discarded. Normal search responses
-return only `matches`; clipping adds the effective `contextLines` and a bounded
-warning, while truncation/skipped-file evidence appears only when it occurs.
-Negative or non-integer values fail argument validation.
+`contextLines` 必须是非负整数，默认值为 0。运行时最大值由
+`limits.maxFileSearchContextLines` 指定（默认 5，可配置为 0–100，并显示在
+`agent.info.execution.fileSearch.maxContextLines` 中）。超过最大值的请求会被裁剪，而非拒绝。普通搜索响应只返回 `matches`；
+发生裁剪时会附上实际生效的 `contextLines` 和有界警告，只有实际发生截断/跳过文件时才会返回相应证据。负数或非整数值会在参数验证时失败。
 
-`file.read` and `file.search` also accept an ordered `requests` array of up to
-32 per-request shapes. Flat and batch forms are mutually exclusive. The
-structured batch `results` retain input order and carry each request's
-zero-based `index`; failures are isolated per item. For mixed image batches,
-top-level MCP Content follows that same order: each item's JSON envelope
-(including its image metadata, when present) is followed immediately by that
-item's image block(s), with GIF frames in chronological order. Text-only
-responses and their existing response bounds are unchanged. Search batches
-retain the 20,000-file and 128 MiB aggregate scan limits in addition to each
-search's ordinary limits.
+`file.read` 和 `file.search` 还接受有序的 `requests` 数组，每项最多支持 32 种请求形状。扁平形式和 batch 形式互斥。结构化 batch 的
+`results` 保留输入顺序，并为每个请求附上从 0 开始的 `index`；单项失败不会影响其他项。混合图像 batch 的顶层 MCP Content 也遵循相同顺序：
+每项的 JSON envelope（若有图像则包含其 metadata）后面紧跟该项 image block；GIF 帧按时间顺序排列。纯文本响应及其现有响应边界不变。Search
+batch 除每次搜索自身的限制外，还保留 20,000 个文件和 128 MiB 的汇总扫描上限。
 
-`file.edit` accepts only `patch` and optional `needConfirm`.
-The patch uses Codex apply-patch syntax and may add, update, delete, or move
-multiple files. Every source and destination is resolved through the existing
-path policy, locked deterministically, checked as UTF-8 and at most 8 MiB,
-staged and validated before one optional confirmation. For an `Add File`, a
-missing parent directory may be created only when the requested path passes
-the unchanged path policy. Newly created empty parents are tracked and cleaned
-up if preflight is rejected or confirmation does not proceed; this does not
-change `Move` behavior or make path checks race-proof. Source snapshots are
-revalidated immediately before commit. Failures before the first physical
-commit write no file contents; after commit begins, there is no cross-file
-rollback guarantee. Normal success responses contain only committed requested
-paths and actions; partial failures retain ordered status/error evidence.
-Diffs, resolved paths, changed-line counts, and revisions stay internal for
-confirmation and audit.
+`file.edit` 只接受 `patch` 和可选的 `needConfirm`。
+patch 使用 Codex apply-patch 语法，可一次新增、更新、删除或移动多个文件。所有源路径和目标路径都会依据现有路径策略解析，以确定性顺序加锁，
+并检查是否为 UTF-8 及是否不超过 8 MiB；所有变更会先暂存并验证，然后才可进行一次可选确认。对于 `Add File`，仅当请求路径通过既有路径策略时，
+才可创建缺失的父目录。新建的空父目录会被跟踪；若 preflight 拒绝请求或确认未继续，会清理这些目录。这不会改变 `Move` 行为，也不能消除路径检查中的
+竞态。提交前会重新验证源文件快照。第一次实际写入提交开始前发生失败时，不会写入任何文件内容；提交开始后，不保证跨文件回滚。正常成功响应只包含已提交的
+请求路径和操作；部分失败会保留有序的状态/错误证据。Diff、解析后的路径、变更行数和 revision 仅供确认与审计使用，不对外返回。
 
-## Hub MCP profiles
+## Hub MCP 配置档
 
-`agentic-gpt-hub serve` defaults to the backward-compatible `full` profile.
-Choose the profile at startup; it is not hot-switched:
+`agentic-gpt-hub serve` 默认使用向后兼容的 `full` profile。profile 在启动时选择，不支持热切换：
 
 ```text
 agentic-gpt-hub serve --mcp-profile full
 agentic-gpt-hub serve --mcp-profile coordinator
 ```
 
-`AGENTIC_GPT_HUB_MCP_PROFILE` is the equivalent environment setting. The
-coordinator profile exposes exactly these eight Hub-native tools:
+`AGENTIC_GPT_HUB_MCP_PROFILE` 是等效的环境变量设置。Coordinator profile 恰好暴露以下八个 Hub 原生工具：
 
 - `hub.info`
 - `agent.list`
-- `hub.run.list`, `hub.run.get`
-- `hub.process.list`, `hub.process.status`
-- `user.notify.channels`, `user.notify.send`
+- `hub.run.list`、`hub.run.get`
+- `hub.process.list`、`hub.process.status`
+- `user.notify.channels`、`user.notify.send`
 
-Coordinator calls never dispatch an Agent command. Session queries read only
-current/recent snapshots held for the active connection; retained run records
-are the durable history. Hidden execution, session-control, tmux, downstream
-MCP, skills, bootstrap, diary, and notebook tools are both absent from
-`tools/list` and rejected by `tools/call`.
+Coordinator 调用绝不 dispatch Agent 命令。Session 查询只读取当前连接持有的当前/近期快照；保留的 run 记录才是持久历史。隐藏的执行、
+session-control、tmux、下游 MCP、skills、bootstrap、diary 和 notebook 工具不会出现在 `tools/list` 中，且会被 `tools/call` 拒绝。
 
-The full profile keeps the existing Hub execution surface, adds the
-transport-neutral `bootstrap` and `bootstrap.read` names, retains
-`room.bootstrap` and `room.bootstrap.read` compatibility aliases, and includes
-the Hub-native aggregation/notification tools. OAuth discovery metadata
-identifies the selected profile without advertising hidden tools.
+Full profile 保留现有 Hub 执行表面，增加与 transport 无关的 `bootstrap` 和 `bootstrap.read` 名称，保留兼容别名
+`room.bootstrap` 和 `room.bootstrap.read`，并包含 Hub 原生的汇总/通知工具。OAuth discovery metadata 会标识所选 profile，但不会公布隐藏工具。
 
-## Configuration
+## 配置
 
-The local configuration is normally `~/.agentic_gpt/config.json`. Standalone
-requires the `tunnel` block; Hub and Local modes do not. The complete
-cross-runtime field reference is [`configuration.md`](configuration.md). The
-canonical skill block is top-level `skills`. A legacy `room.skills`
-block is read only when top-level `skills` is absent; when both are present,
-top-level values win and a later config write serializes the canonical block.
+本地配置通常位于 `~/.agentic_gpt/config.json`。Standalone 必须配置 `tunnel` block；Hub 和 Local 模式不需要。跨运行时字段的完整说明见
+[`configuration.md`](configuration.md)。规范的 skill block 位于顶层 `skills`。仅当顶层 `skills` 缺失时才读取旧版 `room.skills` block；
+若两者同时存在，则顶层值优先，后续配置写入会序列化为规范的顶层 block。
 
-A minimal standalone configuration uses references, not secret values:
+最小 Standalone 配置使用 secret reference，而不是 secret 值：
 
 ```json
 {
@@ -460,7 +302,7 @@ A minimal standalone configuration uses references, not secret values:
 }
 ```
 
-Confirmation channels are serialized canonically as an ordered array:
+确认渠道以有序数组的规范形式序列化：
 
 ```json
 "confirmationProvider": {
@@ -468,14 +310,11 @@ Confirmation channels are serialized canonically as an ordered array:
 }
 ```
 
-The legacy scalar/object forms (`hub`, `freedesktop-then-hub`,
-`freedesktopThenHub`, `default`, and `{ "provider": "..." }`) remain readable
-and preserve behavior; Agentic-managed writes emit the canonical `channels`
-form. `ntfy` is the truthful channel name, while notification publication,
-callback tokens, pending state, and decision relay remain owned by the Hub.
+旧版标量/对象形式（`hub`、`freedesktop-then-hub`、`freedesktopThenHub`、`default` 和
+`{ "provider": "..." }`）仍可读取且行为不变；由 Agentic 管理的写入会使用规范的 `channels` 形式。`ntfy` 是准确的渠道名称；
+通知发布、callback token、pending 状态和决策转发仍由 Hub 管理。
 
-The active-process limit accepts either the adaptive value or an explicit
-integer:
+活动 process 上限既可设置为自适应值，也可设置为明确的整数：
 
 ```json
 "limits": {
@@ -483,79 +322,42 @@ integer:
 }
 ```
 
-`auto` resolves at worker startup and after each valid live limits reload as
-`clamp(ceil(availableParallelism * 1.5), 6, 24)`. Existing numeric values stay
-explicit and are not migrated. Capacity rejection uses
-`max_active_processes_reached` and includes bounded `active`, `requested`, and
-`limit` details; batch admission remains atomic and all-or-reject.
+`auto` 会在 worker 启动时，以及每次有效的实时 limits reload 后，解析为
+`clamp(ceil(availableParallelism * 1.5), 6, 24)`。现有数值保持显式设置，不会迁移。容量拒绝时返回
+`max_active_processes_reached`，并附带有界的 `active`、`requested` 和 `limit` 详情；batch 准入仍为原子操作，要么全部接受，要么全部拒绝。
 
-The breaking v0.9 migration guidance is historical, not the current execution
-interface. The current lifecycle surface is `process.exec`, `process.batch`,
-`process.status`, `process.list`, `process.output`, `process.result`, and
-`process.cancel`, with HTTP `/v1/process` routes. Legacy `job.*` tool names and
-`/v1/jobs/*` routes are not current APIs. Former `process.batchExec`,
-`process.get`, `process.kill`, managed `session.*`, `/v1/exec`, `/v1/batchExec`,
-and `/v1/sessions/*` aliases remain removed. tmux session names and tmux
-session APIs are unchanged.
+有破坏性的 v0.9 迁移指南属于历史记录，不是当前执行接口。当前生命周期工具表面为 `process.exec`、`process.batch`、
+`process.status`、`process.list`、`process.output`、`process.result` 和 `process.cancel`，HTTP 路由为 `/v1/process`。旧版
+`job.*` 工具名称和 `/v1/jobs/*` 路由不是当前 API。此前的 `process.batchExec`、`process.get`、`process.kill`、托管
+`session.*`、`/v1/exec`、`/v1/batchExec` 和 `/v1/sessions/*` 别名仍已移除。tmux session 名称与 tmux session API 未改变。
 
-The current multi-file mutation boundary is documented in the file contract
-matrix: one complete apply-patch request is staged and validated before its
-optional confirmation and commit.
+当前的多文件变更边界见 file 合同矩阵：一份完整的 apply-patch 请求会先暂存和验证，然后才进行可选确认及提交。
 
-While a Standalone, Local, or Hub-connected Agent worker is running, edits to
-`policy`, `limits`, `mcpServers`, `toolsets.enabled`, and (when `workspaceRoot`
-is unchanged) `pathPolicy` are polled, fully validated, and applied atomically to
-new admissions, calls, and tool discovery. MCP server ids use `A-Z`, `a-z`,
-`0-9`, `.`, `_`, or `-` (maximum 64 bytes); `streamable-http` requires an
-absolute HTTP(S) URL and may optionally use structured Bearer auth; `stdio`
-requires a non-empty command and rejects HTTP auth. Invalid config versions keep
-the last valid live subset. Already admitted processes and already-created
-downstream MCP clients retain their original decision/server definition and
-are not cancelled or rerouted by a reload. Because downstream clients are
-currently created per call, no separate reload or reconnect command is needed.
+Standalone、Local 或已连接 Hub 的 Agent worker 运行期间，会轮询 `policy`、`limits`、`mcpServers`、`toolsets.enabled`，以及在
+`workspaceRoot` 未变时的 `pathPolicy` 变更；这些配置会经过完整验证，再原子应用于新的准入、调用和工具发现。MCP server id 只能使用
+`A-Z`、`a-z`、`0-9`、`.`、`_` 或 `-`，最长 64 字节；`streamable-http` 要求绝对 HTTP(S) URL，可选结构化 Bearer auth；
+`stdio` 要求非空 command，且拒绝 HTTP auth。无效的配置版本会保留最后一个有效的实时配置子集。已准入的 process 和已创建的下游 MCP client
+继续使用原有决策/server 定义，不会因 reload 而取消或重路由。由于当前每次调用都会新建下游 client，无需单独执行 reload 或 reconnect 命令。
 
-Startup-owned identity, workspace root, Room settings, Browser configuration,
-tunnel/client, reporting connection, and skill-install concurrency changes
-remain restart-required. The shared watcher logs
-`config changes require restart; fields=...`; the Standalone supervisor
-additionally emits `restart_required`, while Hub mode has no supervisor event.
-If `workspaceRoot` changes, the previous workspace root and `pathPolicy` remain
-an atomic live pair until restart; a path-policy-only edit can reload only while
-the root is unchanged. Enabling the `room` namespace live bootstraps against the
-current live Room configuration; restart-required `room.*` edits on disk do not
-change that runtime root until restart. `agent.info.mcp` reports only the
-effective config revision, configured/enabled counts, and client lifecycle; it
-does not expose endpoints.
+由启动时身份决定的配置包括 workspace root、Room 设置、Browser 配置、tunnel/client、reporting connection 及 skill-install 并发设置；
+这些字段变更后必须重启。共享 watcher 会记录 `config changes require restart; fields=...`；Standalone supervisor 还会发出
+`restart_required`，Hub 模式则没有 supervisor 事件。若 `workspaceRoot` 发生变化，原 workspace root 和 `pathPolicy` 会作为一个原子组合保持生效，
+直到重启；只有 root 未改变时，才可单独 reload path policy。实时启用 `room` namespace 时，会依据当前实时 Room 配置执行 bootstrap；磁盘上需重启才生效的
+`room.*` 变更不会在重启前改变运行时 root。`agent.info.mcp` 仅报告生效的配置 revision、已配置/已启用计数和 client 生命周期，不会暴露 endpoint。
 
-The Standalone worker also watches and reconciles the `httpMcp` subset. Enabling
-or disabling the endpoint, changing the bearer-token reference or resolved
-content, or changing `host`, `port`, `publicUrl`, or `allowHosts` is handled
-without restarting the worker. A public-origin or listener replacement is a new
-listener identity: it closes stateful HTTP sessions and discards listener-local
-OAuth codes and tokens. When the replacement bind address differs, it binds the
-replacement before retiring the old listener. A same-address `allowHosts` or
-`publicUrl` change must retire the old listener before binding the replacement;
-if that replacement bind fails, the old listener is already gone and a later
-retry starts fresh. A bind conflict on a different address keeps a working old
-listener when the old address remains usable and is retried without interrupting
-tunnel or Unix execution. Changing the token reference, or the content resolved
-from it, updates the in-memory direct authenticator without rebinding, preserves
-existing sessions, and atomically revokes OAuth records. If the reference cannot
-be resolved, HTTP authentication fails closed: the listener stops listening and
-accepting requests until the credential becomes available again. Invalid
-candidates retain the last-good live configuration and state, and no reference,
-token, code, or access-token value is logged or included in summaries.
+Standalone worker 也会监视并协调 `httpMcp` 子集。启用或禁用 endpoint、变更 bearer-token reference 或其解析后的内容，以及变更 `host`、`port`、
+`publicUrl` 或 `allowHosts`，都无需重启 worker。更换 public origin 或监听器会建立新的监听器身份：会关闭有状态 HTTP session，并丢弃监听器本地
+OAuth code 和 token。替换绑定地址不同时，会先绑定新监听器再退役旧监听器。同一地址上的 `allowHosts` 或 `publicUrl` 变更则必须先退役旧监听器，
+再绑定新监听器；若新绑定失败，旧监听器已不可用，后续重试会重新启动。若不同地址发生 bind 冲突，只要旧地址仍可用，就会保留正常工作的旧监听器，
+并在不中断 tunnel 或 Unix 执行的情况下重试。变更 token reference 或其解析出的内容，会在不重新绑定的情况下更新内存中的 direct bearer 认证器、
+保留现有 session，并原子撤销 OAuth 记录。若无法解析 reference，HTTP 认证会 fail closed：监听器停止监听和接受请求，直到凭据重新可用。
+无效候选配置会保留上一个有效的实时配置和状态；日志或摘要中不会记录或包含 reference、token、code 或 access-token 值。
 
-`apiKey` accepts only `env:NAME` and `file:PATH`. The resolved value is
-injected into the tunnel-client child environment as
-`CONTROL_PLANE_API_KEY`; it is not placed in argv, logs, config summaries,
-reports, generated runtime files, or backups. A file reference may end in one
-LF or CRLF, which is removed. Empty values and plaintext references fail
-startup.
+`apiKey` 仅接受 `env:NAME` 和 `file:PATH`。解析出的值会作为 `CONTROL_PLANE_API_KEY` 注入 tunnel-client 子进程环境；
+不会将其放入 argv、日志、配置摘要、报告、生成的 runtime 文件或备份。文件 reference 末尾可有一个 LF 或 CRLF，读取时会将其移除。
+空值和明文 reference 会导致启动失败。
 
-Provision the secret with a secret manager or a separately protected file. For
-example, configure the path without putting the key in shell history or
-argv:
+使用 secret manager 或单独受保护的文件提供 secret。以下示例只配置文件路径，不会把密钥写入 shell history 或 argv：
 
 ```bash
 touch "$HOME/.agentic_gpt/secrets/tunnel-api-key"
@@ -570,11 +372,10 @@ agentic-gpt config set tunnel.apiKey file:"$HOME/.agentic_gpt/secrets/tunnel-api
 agentic-gpt config set tunnel.client.autoDownload true
 ```
 
-The `env:NAME` form is suitable for a service manager's protected environment
-or an injected secret, for example `env:AGENTIC_TUNNEL_API_KEY`; do not use a
-literal `AGENTIC_TUNNEL_API_KEY=<secret> ...` command in a shell transcript.
+`env:NAME` 形式适用于 service manager 的受保护环境或注入的 secret，例如 `env:AGENTIC_TUNNEL_API_KEY`；不要在 shell transcript 中使用
+包含字面值 `AGENTIC_TUNNEL_API_KEY=<secret> ...` 的命令。
 
-Supported `config set` keys include:
+受支持的 `config set` 键包括：
 
 - `tunnel.tunnelId`, `tunnel.apiKey`.
 - `tunnel.client.version`, `tunnel.client.cacheDir`,
@@ -584,175 +385,123 @@ Supported `config set` keys include:
 - `httpMcp.enabled`, `httpMcp.host`, `httpMcp.port`, `httpMcp.publicUrl`,
   `httpMcp.bearerToken`, `httpMcp.allowHosts`.
 
-The tunnel identity, secret reference, client source/version/hash/cache, Browser
-configuration, and CLI profile are startup identity. Editing one while the
-Standalone supervisor is running logs `restart_required` with changed field
-names only; Browser changes use the `browser` field name. It does not switch
-the existing child tree, and secret values are never printed.
-`toolsets.enabled` is live configuration and does not require a restart.
+Tunnel 身份、secret reference、client 来源/版本/hash/cache、Browser 配置和 CLI profile 都属于启动身份。Standalone supervisor 运行期间，
+修改这些值只会记录包含变更字段名称的 `restart_required`；Browser 变更使用 `browser` 字段名，不会切换现有子进程树，也绝不会打印 secret 值。
+`toolsets.enabled` 属于实时配置，不需要重启。
 
-## Tunnel client trust and source selection
+## Tunnel client 的信任与来源选择
 
-With no executable override, the release manifest pins OpenAI tunnel-client
-`v0.0.10` for the supported Linux targets:
+未设置 executable override 时，release manifest 会为受支持的 Linux 目标固定 OpenAI tunnel-client `v0.0.10`：
 
-| Platform | Asset | Archive SHA-256 |
+| 平台 | 资源文件 | Archive SHA-256 |
 | --- | --- | --- |
 | `linux-amd64` | `tunnel-client-v0.0.10-linux-amd64.zip` | `b9e0388a343f2d7adeff3992f411a0bd3d916a64bc56534aac5fd15ac1b20cd5` |
 | `linux-arm64` | `tunnel-client-v0.0.10-linux-arm64.zip` | `b842a9b2352eebd80514cf01a1fbb1c0d400a7d24a4015e85a7ea5f1aeaa5b30` |
 
-`version: null` selects the embedded pin. An explicit version must be in the
-manifest. Unsupported platforms fail before network access. Agentic verifies
-the archive before extraction, accepts only one regular file named
-`tunnel-client`, rejects traversal/symlink/device/duplicate layouts, and
-installs through a private cache and atomic replacement.
+`version: null` 表示使用内嵌 pin。显式指定的版本必须存在于 manifest 中。不支持的平台会在访问网络前失败。Agentic 会在解压前验证 archive，
+只接受一个名为 `tunnel-client` 的普通文件；会拒绝路径穿越、符号链接、设备文件和重复布局，并通过私有 cache 与原子替换完成安装。
 
-Source precedence is:
+来源优先级如下：
 
-1. `client.executable`: use a local trusted executable; an optional `sha256`
-   is checked on every startup.
-2. `client.downloadUrl` plus `client.sha256`: use an exact HTTPS archive URL
-   with a required archive digest and bounded HTTPS redirects.
-3. Managed manifest/cache: use the pinned URL and digest. `autoDownload: false`
-   requires a verified cache artifact to already exist.
+1. `client.executable`：使用本地可信 executable；若提供可选的 `sha256`，每次启动都会校验。
+2. `client.downloadUrl` 加 `client.sha256`：使用精确的 HTTPS archive URL，必须提供 archive digest，HTTPS 重定向次数受限。
+3. 托管 manifest/cache：使用固定的 URL 和 digest。`autoDownload: false` 时，必须已有经过验证的 cache artifact。
 
-Managed identities include version, platform, and archive digest, so custom and
-official artifacts cannot collide. The default cache is
-`~/.agentic_gpt/cache/tunnel-client`.
+托管资源身份包含版本、平台和 archive digest，因此自定义与官方 artifact 不会冲突。默认 cache 位于
+`~/.agentic_gpt/cache/tunnel-client`。
 
-## Optional Hub reporting
+## 可选 Hub 报告
 
-Reporting is disabled by default and is independent of Tunnel command
-execution. Enable it only when the local config already has the Hub identity
-needed for an Agent connection (`hub.url`, `hub.transport`, `agentId`, and
-`hub.agentSecret`):
+Reporting 默认禁用，且与 Tunnel 命令执行相互独立。只有当本地配置已有 Agent 连接所需的 Hub 身份
+（`hub.url`、`hub.transport`、`agentId` 和 `hub.agentSecret`）时，才启用 reporting：
 
 ```bash
 agentic-gpt config set tunnel.hubReporting.enabled true
 agentic-gpt config set tunnel.hubReporting.detail metadata
 ```
 
-The reporting connection identifies itself as `reporting-only`. It can send
-hello/heartbeat, direct-run lifecycle events, and process snapshots, plus the
-existing confirmation traffic, but it never accepts Hub execution envelopes.
-Hub requests reject reporting-only agents before creating a run. Reporting
-disconnects, queue drops, and Hub unavailability never delay or change the
-local MCP result.
+Reporting connection 会标明自身为 `reporting-only`。它可以发送 hello/heartbeat、direct-run 生命周期事件、process 快照和现有确认流量，
+但绝不接受 Hub 执行 envelope。Hub 会在创建 run 之前拒绝 reporting-only Agent。Reporting 断连、队列丢弃或 Hub 不可用都不会延迟或改变本地 MCP 结果。
 
-`metadata` records tool/source/profile/status/timestamps/duration, identifiers,
-exit code, and bounded failure reason. It omits arguments, results, program
-argv, working directories, and stdout/stderr. `full` additionally stores
-bounded JSON arguments/results and bounded existing process snapshots; an
-oversized value becomes a byte-count/SHA-256 truncation record rather than a
-partial JSON fragment. Direct-run records remain in Hub storage for 24 hours.
+`metadata` 级别会记录工具/来源/profile/状态/时间戳/持续时间、标识符、退出码和有界的失败原因；不包含 arguments、results、程序 argv、工作目录或
+stdout/stderr。`full` 还会保存有界的 JSON arguments/results 和有界的现有 process 快照；超大值会记录字节数与 SHA-256 的截断信息，而非部分 JSON。
+Direct-run 记录在 Hub 中保留 24 小时。
 
-The worker also writes bounded lifecycle records to stderr for each tool call
-and managed process terminal event. These records contain the run/tool/profile
-and status, with duration and safe 12-hex run/process identifiers when
-available; inline terminal calls emit one final record, while calls that
-return active emit one response record and one later terminal record. They
-never contain arguments, results, paths, secrets, or process output. Reporting
-connection transitions are logged separately as connected/disconnected with
-the selected transport.
+每次工具调用和托管 process 终态事件也会在 stderr 写入有界生命周期记录。这些记录包含 run/tool/profile 和状态；如果有持续时间及安全的 12 位十六进制
+run/process 标识符，也会一并记录。内联结束的调用只写一条最终记录；返回活动状态的调用先写一条响应记录，之后再写一条终态记录。记录中绝不包含
+arguments、results、路径、secret 或 process 输出。Reporting connection 的连接状态转换会另行记录为 connected/disconnected，并标明所选 transport。
 
-## Health, logs, restart, and recovery
+## 健康状态、日志、重启与恢复
 
-For agent id `laptop`, the supervisor uses the private runtime directory:
+对于 Agent id `laptop`，supervisor 使用以下私有 runtime 目录：
 
 ```text
 ~/.agentic_gpt/runtime/tunnel/laptop/
-├── health.url          # transient loopback readiness URL
-├── tunnel-client.log   # structured child log, retained for diagnostics
-└── tunnel-client.pid   # transient child pid marker
+├── health.url          # 临时的 loopback 就绪 URL
+├── tunnel-client.log   # 供诊断使用的结构化子进程日志
+└── tunnel-client.pid   # 临时子进程 PID 标记
 ```
 
-The supervisor runs `doctor --json` before the first child, waits up to 45
-seconds for loopback readiness, and forwards child output to Agentic stderr
-with component prefixes, secret redaction, and the child's known INFO/WARN/
-ERROR severity. Unknown child stdout is informational and unknown child
-stderr is warning-level. Under journald Agentic omits its own inner timestamp;
-foreground logs retain one self-contained timestamp. The health URL and pid
-marker are removed on normal or failed cleanup; the structured log is
-retained.
+supervisor 会在启动第一个子进程前运行 `doctor --json`，等待 loopback 最多 45 秒以确认就绪，并将子进程输出转发到 Agentic stderr。
+转发内容会带组件前缀并脱敏 secret；已知的 INFO/WARN/ERROR 级别会保留。未知级别的子进程 stdout 按信息级别处理，stderr 按警告级别处理。
+在 journald 下，Agentic 会省略自身内部时间戳；前台日志则保留一个完整时间戳。正常或失败清理都会删除 health URL 和 PID 标记，但保留结构化日志。
 
-Unexpected child exits and readiness failures use at most five retries with
-1/2/4/8/16-second delays. Sixty seconds continuously ready resets the failure
-counter. Configuration/reference errors, unsupported platforms, missing local
-executables, checksum failures, and tunnel authentication/authorization
-failures are permanent startup failures. SIGINT/SIGTERM stops the tunnel
-process group and worker, then uses a bounded kill fallback.
+子进程意外退出或就绪失败时，最多重试 5 次，间隔依次为 1/2/4/8/16 秒。连续就绪 60 秒会重置失败计数。配置/reference 错误、不支持的平台、
+缺少本地 executable、checksum 失败，以及 tunnel authentication/authorization 失败，都会作为永久启动失败处理。收到 SIGINT/SIGTERM 时会停止
+tunnel 进程组和 worker，随后使用有界的 kill fallback。
 
-A tunnel control-plane logical connection can outlive a restarted stdio child.
-When the fresh worker receives a non-ping request before a new MCP `initialize`,
-the tunnel-only stdio transport restores rmcp's local initialization state with
-a private handshake, suppresses that private response, and then replays the
-original request with its original id. Pre-initialize notifications from the
-stale logical connection are ignored. Ordinary client-led initialization is
-passed through unchanged, and the owner-only Local Unix ingress does not use
-this recovery shim. Successful recovery emits bounded diagnostics
-`mcp_stdio_session_resume` and `mcp_stdio_session_resumed`; neither log contains
-request arguments or results.
+tunnel control-plane 的逻辑连接可能比重启后的 stdio 子进程存活更久。新的 worker 在新的 MCP `initialize` 之前收到非 ping 请求时，只有
+tunnel stdio transport 会通过私有 handshake 恢复 rmcp 的本地初始化状态；它会抑制该私有响应，然后以原 request id 重放原请求。来自旧逻辑连接的
+initialize 前通知会被忽略。普通的客户端发起初始化会原样转发；仅所有者可访问的 Local Unix 入口不使用此恢复 shim。恢复成功时会生成有界诊断
+`mcp_stdio_session_resume` 和 `mcp_stdio_session_resumed`；两者都不包含请求 arguments 或 results。
 
-Recovery checklist:
+恢复检查清单：
 
-1. Read the Agentic stderr diagnostic and the retained
-   `tunnel-client.log`; never print the API key while inspecting logs.
-2. Check `agentic-gpt config show` for the reference and non-secret source
-   summary, not the resolved value.
-3. For a managed client, check the cache path and leave
-   `autoDownload: true` unless offline provisioning is intentional.
-4. For an override, verify the file is a regular executable and that the
-   configured optional digest matches the intended binary.
-5. Check the tunnel/control-plane status with the provider. Restart after
-   changing identity, profile, or client distribution settings.
-6. If reporting is the only failure, disable
-   `tunnel.hubReporting.enabled` temporarily; local Tunnel execution remains
-   independent.
+1. 阅读 Agentic stderr 诊断和保留的 `tunnel-client.log`；检查日志时绝不要打印 API key。
+2. 查看 `agentic-gpt config show` 输出中的 reference 和非 secret 来源摘要，不要读取解析后的值。
+3. 使用托管 client 时，检查 cache 路径；除非有意进行离线配置，否则保留 `autoDownload: true`。
+4. 使用 override 时，确认文件是普通 executable，并核对配置的可选 digest 是否对应预期二进制文件。
+5. 向服务提供方检查 tunnel/control-plane 状态。身份、profile 或 client 分发设置变更后应重启。
+6. 若只有 reporting 失败，可暂时禁用 `tunnel.hubReporting.enabled`；本地 Tunnel 执行不受影响。
 
-`agent.list` for safe diagnostics. Use `hub.run.list`/`hub.run.get` for retained
-run history and `hub.process.list`/`hub.process.status` for cached metadata.
+安全诊断使用 `agent.list`；查看保留的运行历史使用 `hub.run.list`/`hub.run.get`，查看缓存的 metadata 使用 `hub.process.list`/`hub.process.status`。
 
-## Optional centralized Hub mode
+## 可选的集中式 Hub 模式
 
-Hub mode remains available when centralized routing, Actions, history, or
-reporting is worth the shared infrastructure:
+若集中路由、Actions、历史记录或 reporting 的价值足以覆盖额外共享基础设施的成本，仍可选择 Hub 模式：
 
 ```bash
 agentic-gpt-hub init
-agentic-gpt-hub agent add --agent-id laptop --display-name my-laptop --secret '<agent-secret>'
+read -rsp "Agent secret: " AGENT_SECRET
+printf '\n'
+agentic-gpt-hub agent add \
+  --agent-id laptop \
+  --display-name my-laptop \
+  --secret "$AGENT_SECRET"
+unset AGENT_SECRET
 agentic-gpt run
 ```
 
-The full Hub MCP profile remains the default. Use coordinator only on a Hub
-instance intended for status/history/notification access:
+Full Hub MCP profile 仍为默认值。仅当 Hub 实例只用于状态/历史/通知访问时，才使用 coordinator：
 
 ```text
 agentic-gpt-hub serve --mcp-profile coordinator
 ```
 
-Keep the Hub behind HTTPS when it is reachable from ChatGPT. The existing
-Actions routes and WebSocket/SSE agent transports remain available; the
-standalone reporting connection is an additional reporting-only mode, not a
-replacement for command-capable Hub agents.
+若 ChatGPT 可以访问 Hub，请让 Hub 位于 HTTPS 后。现有 Actions 路由和 WebSocket/SSE Agent transport 仍可使用；Standalone reporting connection
+是额外的、仅用于报告的模式，不能替代支持命令的 Hub Agent。
 
-## Verification map
+Hub 的 `agent add` 不提供隐藏式交互输入；`--secret` 必须作为 argv 参数。以上 `read -s` 做法可避免将 secret 写入 shell history，但变量展开后，
+secret 仍可能出现在本地进程检查中。请只在可信机器上执行，并在操作后清除变量。
 
-Automated checks cover config/reference validation, exact worker tool lists,
-secret argv/environment separation, trusted asset/cache behavior, supervisor
-restart and process-tree cleanup, reporting privacy/idempotency, and the full
-versus coordinator MCP surfaces. The repository's multi-target release script
-is [`scripts/dist-linux.sh`](../scripts/dist-linux.sh); it builds both Linux
-targets when `cross` and the corresponding toolchains are installed.
+## 验证范围
 
-`crates/agentic-gpt/tests/standalone_supervisor.rs` launches the actual Agentic
-supervisor and hidden stdio worker for a Normal-profile initialize/list/call
-smoke. It also launches the hidden worker with a stale initialized notification
-and a tool call as the first request, proving restart recovery keeps the worker
-alive, hides the private handshake, and accepts a follow-up call. The in-process
-tests cover the corresponding Room profile. Together they verify that stdout
-remains MCP-only and that the compact Normal/Room surfaces are callable. These
-checks are still distinct from a real Secure MCP
-Tunnel control-plane call: the latter must invoke an actual external connector
-and return a local Agentic tool result, not merely pass `/healthz`, `doctor`, or
-a local fake handoff. Record external credentials/environment prerequisites
-separately from repository tests.
+自动化检查覆盖配置/reference 验证、worker 工具列表精确性、secret 的 argv/environment 隔离、可信资源/cache 行为、supervisor 重启与进程树清理、
+reporting 隐私/幂等性，以及 Full/Coordinator MCP 工具表面。仓库的多目标 release 脚本为
+[`scripts/dist-linux.sh`](../scripts/dist-linux.sh)；安装了 `cross` 和对应工具链时，该脚本会构建两个 Linux 目标。
+
+`crates/agentic-gpt/tests/standalone_supervisor.rs` 会启动实际的 Agentic supervisor 和隐藏 stdio worker，对 Normal profile 执行
+initialize/list/call smoke。它还会启动隐藏 worker，并将旧的 initialized notification 和一个工具调用作为首个请求，以证明重启恢复可以让 worker 保持运行、
+隐藏私有 handshake，并接受后续调用。对应的 Room profile 由进程内测试覆盖。两者共同验证 stdout 仅包含 MCP framing，且精简后的 Normal/Room 工具表面可调用。
+这些检查仍不等同于调用真实 Secure MCP Tunnel control plane：真实调用必须启动外部 connector 并返回本地 Agentic 工具结果，而不只是通过 `/healthz`、
+`doctor` 或本地伪造的交接。外部凭据/环境前置条件应与仓库测试分别记录。
