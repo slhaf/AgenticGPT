@@ -16,8 +16,9 @@ Status: complete
 - 内部生产与 stdin/Unix socket 外部接入。
 
 ## 阶段三：结论
-Status: in_progress
+Status: complete
 - 提供可行性、建议架构、风险与待定决策。
+- 已补充用户要求的 low/medium/high 统计，明确统计全部未处理且未过期事件，隐藏不减计数。
 - 不做实现提交；按仓库阶段提交约束只提交调研记录，记录不代表已交付行为。
 
 ## 错误

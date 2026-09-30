@@ -69,3 +69,19 @@
 - 外部记录真实接收时间 receivedAt，允许附来源发生时间 occurredAt；source 与本机调用者身份分开，外部去重键按来源命名空间限定。
 - 外部正文不可信，不作为可执行指令；设载荷/队列上限，满时明确拒绝，不暗中删除 high。
 - Agent-local 面板不意味着 Hub MCP 自动覆盖；如“每次调用”包括 Hub，需同步评估 wire、Hub 封套、OpenAPI 与消费者，不静默遗漏。
+
+## 结论与实现前必须明确的边界
+- 可行；三个 Agent MCP 入口已有共同结果出口，无需先搭完整消息总线。
+- 推荐 Agent-local 持久 inbox、显式输出骨架迁移、生产者终态接入、独立 CLI stdin 经 Unix MCP 注入。
+- 三个消费工具本身简单；可靠终态生产/重启恢复、所有结果分支覆盖、消费者迁移是主要工程量。
+- 工具返回携带提醒是拉取/捎带，不是空闲主动唤醒；无下一次调用便不可见，low 可能在无人调用期间过期。
+- 待产品确定：Agent 全局还是稳定 consumer 收件人；high 是否允许有界列表+overflow；范围是否包含 Hub；是否需要空闲主动推送。
+- 本轮仅运行既有二进制与读取源码；新 API、新 schema、持久事件交付均未实现或验证。
+
+## 用户补充：按紧急程度统计
+- 面板增加固定 pendingCounts: { low, medium, high }，三个键始终存在，无事件时为0。
+- 计数统计同一授权/收件箱范围内所有 pending 且未过期事件，不限当前 items，也包含曝光额度耗尽后隐藏的 low/medium。
+- pendingCount = low + medium + high；展示不扣减 pendingCounts，mark handled 和 low 自动过期才减少。
+- hiddenCount 指因展示次数政策隐藏的 pending；hasMore 指仍具展示资格但本次面板未放下的事件，二者不可混用。
+- 面板计数/条目应从同一事务快照生成，避免并发 mark/过期导致同一响应自相矛盾。
+- event.list 返回按同一默认未处理口径查询的事件；过滤后的列表计数不能冒充全收件箱统计。

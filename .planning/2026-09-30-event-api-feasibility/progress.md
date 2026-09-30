@@ -17,3 +17,13 @@
 - 已直接核对 skill install 的 Completed/Failed/Cancelled 保存点和 JSON rename 边界。
 - 外部写入建议独立 CLI 的 stdin → 已有 Unix MCP → 本地准入操作；不污染服务 stdin，不默认暴露模型创建工具。
 - 未实现新 API，未把建议写成现有行为。
+
+## 阶段三完成
+- 结论：可行，现有结果出口可复用，建议持久 Agent-local inbox 而非扩张为通用消息总线。
+- 已明确所有未实现建议与已观察事实，列出 consumer/high 容量/Hub 范围/空闲推送四个产品边界。
+- 验证仅为现有二进制真实 Unix MCP 的 agent.info 与 process.list；服务和临时状态已清理。
+- 所有阶段仅提交本任务调研记录，未改代码、工具 schema 或公开 API。
+
+## 用户补充已纳入
+- 用户要求面板增加 low/medium/high 统计；已明确 pendingCounts 三个固定键及 pendingCount 求和不变量。
+- 隐藏事件仍计入统计；计数与条目使用同一快照；与当前面板可展示条目的 overflow 区分。
