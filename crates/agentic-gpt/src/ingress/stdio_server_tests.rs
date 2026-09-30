@@ -2741,13 +2741,16 @@ async fn file_read_and_search_batches_preserve_order_and_isolate_failures() -> a
     );
 
     assert!(server
-        .dispatch("file.read", json!({"path":"batch-a.txt","requests":[]}))
+        .dispatch(
+            "file.read",
+            json!({"path":"batch-a.txt","requests":[{"path":"batch-b.txt"}]}),
+        )
         .await
         .is_err());
     assert!(server
         .dispatch(
             "file.search",
-            json!({"path":"batch-a.txt","query":"x","requests":[]})
+            json!({"path":"batch-a.txt","query":"x","requests":[{"path":"batch-b.txt","query":"needle"}]})
         )
         .await
         .is_err());

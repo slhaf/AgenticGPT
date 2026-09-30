@@ -46,7 +46,7 @@ GPT Actions API 由 `openapi/hub.yaml` 描述，并受 Hub API key 保护。
 - `POST /v1/room/skills/install`：异步安装一个 Skill，来源可以是公开 GitHub、HTTPS 文件条目或内联 UTF-8/base64 文件。网络操作开始前，响应会先返回 `installId`。
 - `POST /v1/room/skills/install/get`：通过有界长轮询查询安装状态。`waitSeconds` 默认值为 5，上限为 30；等待超时不会取消安装；终态响应将 `pollAfterMs` 设为 `0`。
 - `POST /v1/room/skills/install/cancel`：在原子提交之前请求幂等的协作式取消。
-- `POST /v1/room/skills/run`：运行活动 workspace Skill 在 `scripts/` 下的可执行脚本。`waitSeconds` 默认值为 5，上限为 30；等待超时不会取消执行。若可能则内联返回终态输出，否则返回与 `process.status`、`process.output`、`process.result` 和 `process.cancel` 共用的 `processId`。这些端点不接收 `agentId`。
+- `POST /v1/room/skills/run`：运行活动 workspace Skill 在 `scripts/` 下的可执行脚本。`waitSeconds` 默认值为 5，上限为 30；等待超时不会取消执行。若可能则内联返回终态输出，否则使用响应中的实际 `agentId` 和 `processId` 调用 `process.status`、`process.output` 或 `process.cancel`；Skill 脚本不适用 `process.result`。此运行端点的输入不接收 `agentId`。
 - `POST /v1/room/bootstrap`：读取活动 Room Agent 的重复会话入口及确定性指南清单。无请求体，也不接收 `agentId`。
 - `POST /v1/room/bootstrap/read`：按 frontmatter 中的 `id` 读取一份有效引导指南。不接收 `agentId`。
 - `POST /v1/room/diary/active` 和 `POST /v1/room/diary/read`：通过捕获的活动 Room 租约读取当前或一个经过验证的 Diary 层。请求分别使用 `RoomDiaryActiveRequest` 或 `RoomDiaryReadRequest`；响应分别为 `RoomDiaryActiveResponse` 或 `RoomDiaryReadResponse`。

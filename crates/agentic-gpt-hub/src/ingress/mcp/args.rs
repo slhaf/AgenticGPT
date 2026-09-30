@@ -378,7 +378,7 @@ pub(super) struct TmuxCloseSessionArgs {
 pub(super) struct McpListServersArgs {
     #[serde(default)]
     #[schemars(
-        description = "可选的本地 Agent ID；提供时只查询该 Agent，省略或传 null 时通过 Hub 聚合查询全部本地 Agent。"
+        description = "可选的本地 Agent ID；提供时只查询该 Agent。省略或传 null 时，Hub 仅聚合当前已启用且在线的 Agent 的 MCP 服务器；已注册但离线的 Agent 不包含在结果中。"
     )]
     pub(super) agent_id: Option<String>,
 }
@@ -420,19 +420,17 @@ pub(super) struct McpCallToolArgs {
     pub(super) wait_seconds: Option<u64>,
     #[serde(default)]
     #[schemars(
-        description = "下游调用的执行截止时长，单位秒；省略或传 null 时为 300，运行时限制在 1–900 秒（小于 1 的值按 1 处理）。"
+        description = "下游连接/请求的截止时长，单位秒；从调用获准并取得并发执行槽后开始，不含确认和等待执行槽的排队时间。省略或传 null 时为 300，运行时限制在 1–900 秒（小于 1 的值按 1 处理）。"
     )]
     pub(super) timeout_seconds: Option<u64>,
 }
 
-/// 下游 MCP 批次的调度方式；并发或按 calls 输入顺序串行执行。
+/// 下游 MCP 批次的调度方式：parallel 并发执行（默认），sequential 按 calls 输入顺序执行；并发子调用可能各自产生副作用。
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum McpBatchModeArgs {
     #[default]
-    /// 并发调度子调用；各调用可能产生彼此独立的副作用。
     Parallel,
-    /// 按 calls 数组中的输入顺序依次启动子调用。
     Sequential,
 }
 
@@ -493,7 +491,7 @@ pub(super) struct McpBatchArgs {
     #[serde(default)]
     #[schemars(
         range(min = 1, max = 900),
-        description = "每个子调用的下游执行截止时长，单位秒；省略或传 null 时为 300，范围 1–900，超过上限时运行时按 900 处理。"
+        description = "每个子调用在获准并取得下游并发执行槽后适用的连接/请求截止时长，单位秒；不含确认和等待执行槽的排队时间。省略或传 null 时为 300，范围 1–900，超过上限时运行时按 900 处理。"
     )]
     pub(super) timeout_seconds: Option<u64>,
 }
@@ -545,15 +543,12 @@ impl From<UserNotifyActionArgs> for NotificationAction {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct RoomDiaryActiveArgs {}
 
-/// Room 日记读取层；序列化值使用小写。
+/// Room 日记层取值为 daily、weekly 或 monthly：daily 使用 current 或有效 YYYY-MM-DD，weekly/monthly 使用 current 或有序的 YYYY-MM-DD--YYYY-MM-DD 范围。
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub(super) enum RoomDiaryLayerArgs {
-    /// 读取每日层；period 为 current 或有效的 YYYY-MM-DD 日期。
     Daily,
-    /// 读取每周层；period 为 current 或起止日期范围。
     Weekly,
-    /// 读取每月层；period 为 current 或起止日期范围。
     Monthly,
 }
 
@@ -636,22 +631,17 @@ pub(super) struct RoomStateReadArgs {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct RoomMaintenanceStatusArgs {}
 
-/// Room 维护目标槽位；取值为 diary.daily、diary.weekly、diary.monthly、notebook 或 entity。
+/// Room 维护目标槽位：diary.daily/weekly/monthly 分别指向对应层的 current.md；notebook 按 payload.path 定位，entity 按 payload.entity 定位。
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum RoomMaintenanceSlotArgs {
-    /// 当前日记文件 Diary/Daily/current.md。
     #[serde(rename = "diary.daily")]
     DiaryDaily,
-    /// 当前周记文件 Diary/Weekly/current.md。
     #[serde(rename = "diary.weekly")]
     DiaryWeekly,
-    /// 当前月记文件 Diary/Monthly/current.md。
     #[serde(rename = "diary.monthly")]
     DiaryMonthly,
-    /// Notebook 语义维护槽位；目标路径由 payload.path 指定。
     Notebook,
-    /// State entity 语义维护槽位；目标文件由 payload.entity 指定。
     Entity,
 }
 
@@ -667,13 +657,11 @@ impl From<RoomMaintenanceSlotArgs> for RoomMaintenanceSlot {
     }
 }
 
-/// Room 维护执行方式；小写 local 或 workflow。
+/// Room 维护执行方式：local 在已验证仓库中直接应用，workflow 提交给已配置的 Room workflow。
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub(super) enum RoomMaintenanceModeArgs {
-    /// 在已验证的 Room 仓库中直接执行维护并应用本地变更。
     Local,
-    /// 将维护请求提交给已配置的 Room workflow。
     Workflow,
 }
 
@@ -750,12 +738,12 @@ pub(super) struct BootstrapReadArgs {
 #[serde(rename_all = "camelCase")]
 pub(super) struct SkillReadArgs {
     #[schemars(
-        description = "Room 工作区 skills/ 下的技能目录 ID；不能为空、不能为 . 或 ..，且只允许 ASCII 字母、数字、下划线、点和连字符。"
+        description = "Room 技能 ID；可为工作区 skills/ 目录名或内置 skill-installer。内置项只读且不可运行；ID 不能为空、不能为 . 或 ..，且只允许 ASCII 字母、数字、下划线、点和连字符。"
     )]
     pub(super) id: String,
     #[serde(default)]
     #[schemars(
-        description = "可选的技能包相对文件路径；省略或传 null 时返回旧版 SKILL.md 响应。指定时不得是绝对路径、含 . 或 .. 路径段、反斜杠或 NUL；拒绝符号链接，文件内容上限为 1 MiB。"
+        description = "可选的包内相对资源路径；省略或传 null 时返回旧版 SKILL.md 响应。工作区技能可读取包内资源，内置 skill-installer 仅提供内嵌 SKILL.md。指定路径不得是绝对路径、含 . 或 .. 路径段、反斜杠或 NUL；拒绝符号链接，文件内容上限为 1 MiB。"
     )]
     pub(super) path: Option<String>,
 }
@@ -804,7 +792,7 @@ pub(super) struct SkillInstallArgs {
     pub(super) activate_after_install: Option<bool>,
     #[serde(default)]
     #[schemars(
-        description = "可选幂等键，必须为 1–128 字节；相同键和相同请求可安全重试并复用原安装任务，相同键配不同请求会返回 idempotency_conflict。"
+        description = "可选幂等键，必须为 1–128 字节；相同键和相同请求仅在任务记录保留期间复用，相同键配不同请求在保留期间返回 idempotency_conflict。终态记录最多保留 7 天且仅保留最近 100 条；记录清理后相同键不再复用或冲突检测，可能发起新安装或因目标已存在而失败。"
     )]
     pub(super) idempotency_key: Option<String>,
 }

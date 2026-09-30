@@ -148,7 +148,7 @@ Hub 只负责认证、活动 lease 路由和有界 run receipt。通用 receipt 
 或将其移除。历史 release/migration 记录仅供查阅，不是当前错误合同。
 
 托管下游 `mcp.callTool` 与命令和 skill 执行共用同一 process registry 及容量上限。其 `waitSeconds` 默认值为 5，最大为 30；
-`timeoutSeconds` 是确认/连接/请求的绝对截止时间，默认值为 300，最大为 900。arguments 必须是 JSON object，序列化大小上限为
+`timeoutSeconds` 是获准并取得执行槽后的连接/请求截止时间，不含确认及排队等待，默认值为 300，最大为 900。arguments 必须是 JSON object，序列化大小上限为
 256 KiB。最多保留 512 KiB 的结果；更大的结果不会截断成部分 JSON，而会以字节数、SHA-256 和最多 8 KiB 的 UTF-8 安全预览表示。
 下游返回 `isError=true` 的结果会被保留，process 状态为 `failed`。Hub 没有原生 `file.read` 或 `file.edit` 工具；其通用异步
 `mcp.callTool` bridge 使用 process 生命周期，而非带类型的图像内容表面，因此不得依赖它保留 `file.read` 的 image Content blocks。
