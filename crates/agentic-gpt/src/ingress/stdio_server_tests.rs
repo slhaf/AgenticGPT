@@ -293,10 +293,6 @@ async fn file_surface_schema_is_exact() -> anyhow::Result<()> {
         read["inputSchema"]["properties"]["requests"]["maxItems"],
         32
     );
-    assert!(read["inputSchema"]["properties"]["requests"]["description"]
-        .as_str()
-        .unwrap()
-        .contains("mutually exclusive"));
 
     let search = serde_json::to_value(tool_descriptor("file.search"))?;
     assert!(search["inputSchema"]["properties"]
@@ -310,12 +306,6 @@ async fn file_surface_schema_is_exact() -> anyhow::Result<()> {
     assert_eq!(
         search["inputSchema"]["properties"]["requests"]["maxItems"],
         32
-    );
-    assert!(
-        search["inputSchema"]["properties"]["requests"]["description"]
-            .as_str()
-            .unwrap()
-            .contains("mutually exclusive")
     );
 
     let edit = serde_json::to_value(tool_descriptor("file.edit"))?;
@@ -331,6 +321,29 @@ async fn file_surface_schema_is_exact() -> anyhow::Result<()> {
         .collect::<BTreeSet<_>>();
     assert_eq!(edit_fields, expected_edit_fields);
     assert_eq!(edit["inputSchema"]["required"], json!(["patch"]));
+    Ok(())
+}
+
+#[tokio::test]
+async fn mutating_tool_annotations_do_not_promise_read_only_or_additive_effects(
+) -> anyhow::Result<()> {
+    let tools = AgentMcpServer::new(test_state(CapabilityProfile::Normal))
+        .current_tools()
+        .await;
+    for name in [
+        "skills.setActive",
+        "process.exec",
+        "process.batch",
+        "mcp.callTool",
+        "mcp.batch",
+        "tmux.exec",
+        "tmux.pasteText",
+    ] {
+        let tool = tools.iter().find(|tool| tool.name == name).unwrap();
+        let descriptor = serde_json::to_value(tool)?;
+        assert_eq!(descriptor["annotations"]["readOnlyHint"], false, "{name}");
+        assert_eq!(descriptor["annotations"]["destructiveHint"], true, "{name}");
+    }
     Ok(())
 }
 

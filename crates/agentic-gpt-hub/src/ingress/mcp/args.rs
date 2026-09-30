@@ -16,7 +16,7 @@ use super::{
 #[serde(rename_all = "camelCase")]
 pub(super) struct AgentIdArgs {
     #[schemars(
-        description = "Target local agent id. Room notebook tools do not use agentId; they route to the active Room Agent."
+        description = "Hub 中已启用的本地 Agent ID；可从 agent.list 获取。Room 工具另路由到当前活动的 Room Agent，不接收此字段。"
     )]
     pub(super) agent_id: String,
 }
@@ -24,7 +24,9 @@ pub(super) struct AgentIdArgs {
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct HubRunGetArgs {
-    #[schemars(description = "Run id returned by a timed-out Hub request.")]
+    #[schemars(
+        description = "从 hub.run.list 返回的运行记录 ID；不存在或已清理的记录会返回 run_not_found。"
+    )]
     pub(super) run_id: String,
 }
 
@@ -32,63 +34,67 @@ pub(super) struct HubRunGetArgs {
 #[serde(rename_all = "camelCase")]
 pub(super) struct HubRunListArgs {
     #[serde(default)]
-    #[schemars(description = "Optional agent id filter.")]
+    #[schemars(description = "可选的本地 Agent ID 精确筛选；省略或传 null 时不按 Agent 限制。")]
     pub(super) agent_id: Option<String>,
     #[serde(default)]
-    #[schemars(description = "Optional source filter such as hub or tunnel.")]
+    #[schemars(
+        description = "可选的来源字符串精确筛选，按记录中的 source 原值匹配；例如 hub 或 tunnel，不是固定枚举。"
+    )]
     pub(super) source: Option<String>,
     #[serde(default)]
     #[schemars(
-        description = "Optional status filter such as started, completed, failed, or timeout_waiting_result."
+        description = "可选的状态字符串精确筛选，按记录中的 status 原值匹配；例如 started、completed、failed 或 timeout_waiting_result，不是固定枚举。"
     )]
     pub(super) status: Option<String>,
     #[serde(default)]
-    #[schemars(description = "Only include records created within this many seconds.")]
+    #[schemars(
+        description = "只保留最近这段时间内创建的记录；单位为秒，省略或传 null 时不设时间下限。"
+    )]
     pub(super) since_seconds: Option<u64>,
     #[serde(default)]
-    #[schemars(description = "Result count, default 20 and capped at 100.")]
+    #[schemars(description = "返回记录数上限；省略或传 null 时为 20，运行时限制在 1–100。")]
     pub(super) limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct ProcessExecArgs {
-    #[schemars(description = "Target local agent id.")]
+    #[schemars(description = "目标本地 Agent ID；必须是 Hub 中已启用的 Agent。")]
     pub(super) agent_id: String,
     #[serde(default)]
     #[schemars(
-        description = "Optional human-readable workstream key inherited by the managed process."
+        description = "可选工作流分组名，会随托管进程记录；首尾空白会去除，去除后不能为空、最多 32 个 Unicode 字符且不能含控制字符。"
     )]
     pub(super) group: Option<String>,
     #[schemars(
-        description = "Executable name or path. For shell syntax, use bash or sh with args such as ['-lc', '...']."
+        description = "要直接启动的可执行文件名或路径，不会自动经 shell 拆分；需要 shell 语法时用 bash 或 sh，并将脚本放在 args（例如 ['-lc', '...']）。"
     )]
     pub(super) program: String,
     #[serde(default)]
     #[schemars(
-        description = "Argument vector passed directly to the program; this is not a shell-split string."
+        description = "可选的 argv 字符串数组；每项作为独立参数直接传给程序，不按 shell 字符串拆分。省略或传 null 等同空数组。"
     )]
     pub(super) args: Option<Vec<String>>,
     #[serde(default)]
     #[schemars(
-        description = "Request confirmation before execution. Local policy may still allow, confirm, or deny regardless of this flag."
+        description = "是否在请求中要求确认；省略或传 null 时为 false。最终 Allow、Confirm 或 Deny 仍由 Agent 本地策略决定，true 不能覆盖策略拒绝，false 也不能绕过策略确认。"
     )]
     pub(super) need_confirm: Option<bool>,
     #[serde(default)]
     #[schemars(
-        description = "Optional per-request confirmation provider override. Omit or use default to follow local agent config."
+        description = "可选的确认提供方覆盖；省略、null 或 default 沿用 Agent 本地配置的提供方链，其他值按受支持的旧式提供方名称解析；不能绕过本地策略。"
     )]
     pub(super) confirm_method: Option<String>,
     #[serde(default)]
     #[schemars(
-        description = "Process working directory. Relative values resolve from the agent workspace root; prefer this over cd in shell commands."
+        description = "可选工作目录；省略或传 null 时使用 Agent 工作区根目录，相对路径从工作区根目录解析，绝对路径也必须通过本地允许/拒绝路径策略并指向现存目录。"
     )]
     pub(super) working_directory: Option<String>,
     #[serde(default)]
     #[schemars(
         range(min = 0, max = 30),
         default = "default_standard_wait_seconds",
-        description = "Bounded inline wait in seconds; defaults to 5 and is capped at 30."
+        description = "启动后等待进程完成的内联等待秒数；省略或传 null 时为 5，范围 0–30，超过 30 时运行时按 30 处理；0 表示不等待完成。"
     )]
     pub(super) wait_seconds: Option<u64>,
 }
@@ -96,52 +102,55 @@ pub(super) struct ProcessExecArgs {
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct ProcessBatchArgs {
-    #[schemars(description = "Target local agent id.")]
+    #[schemars(description = "目标本地 Agent ID；必须是 Hub 中已启用的 Agent。")]
     pub(super) agent_id: String,
     #[serde(default)]
     #[schemars(
-        description = "Optional human-readable workstream key inherited by every child process."
+        description = "可选工作流分组名，继承给批次中的每个托管进程；按与 process.exec 相同的规则去除首尾空白并校验非空、最多 32 个 Unicode 字符且无控制字符。"
     )]
     pub(super) group: Option<String>,
     #[schemars(
-        description = "Commands to run. Each element can override the top-level workingDirectory."
+        description = "按输入顺序排列的子命令；空数组是无操作并返回空的已完成批次。所有子命令先做路径、执行策略和预检，再开始启动；元素级 workingDirectory（非 null 时）覆盖此处的默认目录。"
     )]
     pub(super) elements: Vec<ProcessBatchElementArgs>,
     #[serde(default)]
     #[schemars(
-        description = "Request confirmation for the batch. Local policy may still allow, confirm, or deny regardless of this flag."
+        description = "是否为批次请求确认；省略或传 null 时为 false。Agent 本地策略仍可对各元素要求确认或拒绝；需要确认的元素通过批次确认流程处理。"
     )]
     pub(super) need_confirm: Option<bool>,
     #[serde(default)]
     #[schemars(
-        description = "Optional per-request confirmation provider override for all batch elements."
+        description = "可选的批次级确认提供方覆盖，传给所有需要确认的元素；省略、null 或 default 使用 Agent 本地配置，其他值按受支持的旧式提供方名称解析，不能绕过本地策略。"
     )]
     pub(super) confirm_method: Option<String>,
     #[serde(default)]
     #[schemars(
-        description = "Default process working directory for all batch elements. Relative values resolve from the agent workspace root."
+        description = "所有元素的默认工作目录；省略或传 null 时使用 Agent 工作区根目录，相对路径从该根目录解析且目录必须通过本地路径策略。元素级非 null 的 workingDirectory 优先覆盖此值。"
     )]
     pub(super) working_directory: Option<String>,
     #[serde(default)]
     #[schemars(
         range(min = 0, max = 30),
         default = "default_standard_wait_seconds",
-        description = "Bounded inline wait in seconds; defaults to 5 and is capped at 30."
+        description = "开始批次后等待所有子进程完成的内联等待秒数；省略或传 null 时为 5，范围 0–30，超过 30 时运行时按 30 处理；0 表示不等待完成。"
     )]
     pub(super) wait_seconds: Option<u64>,
 }
 
+/// 批次中的单条命令；可单独指定工作目录覆盖批次默认目录。
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct ProcessBatchElementArgs {
-    #[schemars(description = "Executable name or path for this batch element.")]
+    #[schemars(
+        description = "本批次元素要直接启动的可执行文件名或路径；不会按 shell 字符串拆分。"
+    )]
     pub(super) program: String,
     #[serde(default)]
-    #[schemars(description = "Argument vector passed directly to the program.")]
+    #[schemars(description = "可选的 argv 字符串数组；每项是独立参数。省略或传 null 等同空数组。")]
     pub(super) args: Option<Vec<String>>,
     #[serde(default)]
     #[schemars(
-        description = "Per-element process working directory. Overrides the batch workingDirectory."
+        description = "可选的元素级工作目录；非 null 时覆盖批次 workingDirectory，省略或传 null 时继承批次目录；相对路径从 Agent 工作区根目录解析并受本地路径策略约束。"
     )]
     pub(super) working_directory: Option<String>,
 }
@@ -149,24 +158,26 @@ pub(super) struct ProcessBatchElementArgs {
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct ProcessIdArgs {
-    #[schemars(description = "Target local agent id.")]
+    #[schemars(description = "目标本地 Agent ID；必须是 Hub 中已启用的 Agent。")]
     pub(super) agent_id: String,
-    #[schemars(description = "Managed process id.")]
+    #[schemars(
+        description = "托管进程 ID；使用 process.exec、process.batch、skills.run 或 mcp.callTool 返回的 ID。"
+    )]
     pub(super) process_id: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct ProcessStatusArgs {
-    #[schemars(description = "Target local agent id.")]
+    #[schemars(description = "目标本地 Agent ID；必须是 Hub 中已启用的 Agent。")]
     pub(super) agent_id: String,
-    #[schemars(description = "Managed process id.")]
+    #[schemars(description = "要检查的托管进程 ID。")]
     pub(super) process_id: String,
     #[serde(default)]
     #[schemars(
         range(min = 0, max = 30),
         default = "default_process_wait_seconds",
-        description = "Bounded wait in seconds; defaults to 5 and is capped at 30."
+        description = "等待状态变化的最长秒数；省略或传 null 时为 5，范围 0–30，超过 30 时运行时按 30 处理；0 表示立即读取当前状态。"
     )]
     pub(super) wait_seconds: Option<u64>,
 }
@@ -174,44 +185,54 @@ pub(super) struct ProcessStatusArgs {
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct ProcessListArgs {
-    #[schemars(description = "Target local agent id.")]
+    #[schemars(description = "目标本地 Agent ID；必须是 Hub 中已启用的 Agent。")]
     pub(super) agent_id: String,
     #[serde(default)]
-    #[schemars(description = "Exact human-readable workstream filter.")]
+    #[schemars(
+        description = "可选的分组精确筛选；按去除首尾空白后的名称匹配，不能为空、最多 32 个 Unicode 字符且不能含控制字符。"
+    )]
     pub(super) group: Option<String>,
     #[serde(default)]
-    #[schemars(description = "Optional managed process kind: command, skill, or mcp.")]
+    #[schemars(
+        description = "可选的进程类型筛选；仅接受 command、skill 或 mcp，省略或传 null 时不筛选。"
+    )]
     pub(super) kind: Option<String>,
     #[serde(default)]
-    #[schemars(description = "Optional managed process state filter.")]
+    #[schemars(
+        description = "可选的进程状态精确筛选；仅接受 queued、waiting_confirmation、starting、running、completed、failed、rejected、cancel_requested、cancelled、timed_out、detached、unknown_after_restart 或 skipped。"
+    )]
     pub(super) state: Option<String>,
     #[serde(default)]
     #[schemars(
         range(min = 1, max = 100),
         default = "default_process_list_limit",
-        description = "Maximum retained processes; defaults to 50 and is capped at 100."
+        description = "最多返回的保留进程数；默认 50，范围 1–100。"
     )]
     pub(super) limit: Option<usize>,
     #[serde(default)]
-    #[schemars(description = "Opaque cursor returned by a prior process.list response.")]
+    #[schemars(
+        description = "上一页 process.list 响应中的 nextCursor；不透明游标，原样传回以继续分页。"
+    )]
     pub(super) cursor: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct ProcessOutputArgs {
-    #[schemars(description = "Target local agent id.")]
+    #[schemars(description = "目标本地 Agent ID；必须是 Hub 中已启用的 Agent。")]
     pub(super) agent_id: String,
-    #[schemars(description = "Managed process id.")]
+    #[schemars(description = "要读取输出的托管进程 ID。")]
     pub(super) process_id: String,
     #[serde(default)]
-    #[schemars(description = "Opaque cursor returned by a prior process.output response.")]
+    #[schemars(
+        description = "上一页 process.output 响应中的游标；不透明续读令牌，原样传回以读取下一页。"
+    )]
     pub(super) cursor: Option<String>,
     #[serde(default)]
     #[schemars(
         range(min = 1, max = 32768),
         default = "default_process_output_max_bytes",
-        description = "Maximum aggregate encoded output bytes; defaults to 8192 and is capped at 32768."
+        description = "本次输出页 stdout 与 stderr 合计的最大字节数；默认 8192，范围 1–32768。"
     )]
     pub(super) max_bytes: Option<usize>,
 }
@@ -219,15 +240,15 @@ pub(super) struct ProcessOutputArgs {
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct ProcessResultArgs {
-    #[schemars(description = "Target local agent id.")]
+    #[schemars(description = "目标本地 Agent ID；必须是 Hub 中已启用的 Agent。")]
     pub(super) agent_id: String,
-    #[schemars(description = "Managed process id.")]
+    #[schemars(description = "要读取结构化结果的托管进程 ID。")]
     pub(super) process_id: String,
     #[serde(default)]
     #[schemars(
         range(min = 1, max = 524288),
         default = "default_process_result_max_bytes",
-        description = "Maximum result payload bytes to include; defaults to 8192 and is capped at 524288."
+        description = "响应中可包含的结构化结果最大字节数；默认 8192，范围 1–524288，过大的完整结果可能报告为过大而不返回内容。"
     )]
     pub(super) max_bytes: Option<usize>,
 }
@@ -235,30 +256,34 @@ pub(super) struct ProcessResultArgs {
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct TmuxListSessionsArgs {
-    #[schemars(description = "Target local agent id.")]
+    #[schemars(description = "目标本地 Agent ID；必须是 Hub 中已启用的 Agent。")]
     pub(super) agent_id: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct TmuxListPanesArgs {
-    #[schemars(description = "Target local agent id.")]
+    #[schemars(description = "目标本地 Agent ID；必须是 Hub 中已启用的 Agent。")]
     pub(super) agent_id: String,
     #[serde(default)]
-    #[schemars(description = "Optional tmux session name to scope pane listing.")]
+    #[schemars(
+        description = "可选的 tmux 会话名精确筛选；省略或传 null 时列出该 Agent 下所有会话的窗格。"
+    )]
     pub(super) session: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct TmuxCapturePaneArgs {
-    #[schemars(description = "Target local agent id.")]
+    #[schemars(description = "目标本地 Agent ID；必须是 Hub 中已启用的 Agent。")]
     pub(super) agent_id: String,
-    #[schemars(description = "tmux target such as session:window.pane or a pane id like %0.")]
+    #[schemars(
+        description = "要捕获的 tmux 窗格目标，例如 session:window.pane 或窗格 ID（如 %0）；目标必须存在。"
+    )]
     pub(super) target: String,
     #[serde(default)]
     #[schemars(
-        description = "Number of recent tmux history lines to capture. Defaults to 160 and caps at 5000."
+        description = "捕获的最近 tmux 历史行数；省略或传 null 时为 160，运行时最多取 5000 行。"
     )]
     pub(super) lines: Option<u32>,
 }
@@ -266,43 +291,57 @@ pub(super) struct TmuxCapturePaneArgs {
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct TmuxPasteTextArgs {
-    #[schemars(description = "Target local agent id.")]
+    #[schemars(description = "目标本地 Agent ID；必须是 Hub 中已启用的 Agent。")]
     pub(super) agent_id: String,
-    #[schemars(description = "tmux target such as session:window.pane or a pane id like %0.")]
+    #[schemars(
+        description = "要粘贴的 tmux 窗格目标，例如 session:window.pane 或窗格 ID（如 %0）；shell 窗格会被拒绝。"
+    )]
     pub(super) target: String,
-    #[schemars(description = "Text to paste into the tmux pane.")]
+    #[schemars(
+        description = "粘贴到非 shell 窗格或 TUI 的原文；这是有副作用的输入，可改变目标应用状态。"
+    )]
     pub(super) text: String,
     #[serde(default)]
-    #[schemars(description = "Append Enter after pasting the text. Defaults to false.")]
+    #[schemars(description = "是否在粘贴文本后追加 Enter；省略或传 null 时为 false。")]
     pub(super) submit: Option<bool>,
     #[serde(default)]
-    #[schemars(description = "Request local confirmation before pasting. Defaults to true.")]
+    #[schemars(
+        description = "是否先请求本地确认；省略或传 null 时为 true，显式 false 会跳过此确认。"
+    )]
     pub(super) need_confirm: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct TmuxExecArgs {
-    #[schemars(description = "Target local agent id.")]
+    #[schemars(description = "目标本地 Agent ID；必须是 Hub 中已启用的 Agent。")]
     pub(super) agent_id: String,
-    #[schemars(description = "Shell pane target such as session:window.pane or %0.")]
+    #[schemars(
+        description = "必须是可用的 tmux shell 窗格目标，例如 session:window.pane 或 %0；非 shell、已退出或处于 copy mode 的窗格会被拒绝。"
+    )]
     pub(super) target: String,
-    #[schemars(description = "Program or shell builtin to execute as one command.")]
+    #[schemars(
+        description = "提交到 shell 窗格的程序名或内建命令；命令会先经过本地路径/执行预检和策略判定。"
+    )]
     pub(super) program: String,
     #[serde(default)]
-    #[schemars(description = "Structured argument vector; shell operators are not interpreted.")]
+    #[schemars(
+        description = "可选的结构化参数数组；程序及每个参数会分别 shell 引号转义，数组元素中的 shell 运算符按字面参数处理。需要 shell 语法时显式调用 bash 或 sh 并使用 -lc。"
+    )]
     pub(super) args: Vec<String>,
     #[serde(default)]
-    #[schemars(description = "Force local confirmation in addition to configured policy.")]
+    #[schemars(
+        description = "是否额外请求本地确认；省略或传 null 时为 false，但本地执行策略仍可要求确认或拒绝。"
+    )]
     pub(super) need_confirm: Option<bool>,
     #[serde(default)]
     #[schemars(
-        description = "Milliseconds to wait before returning the post-submit pane snapshot. Defaults to 300 and caps at 5000."
+        description = "提交命令后、读取窗格快照前等待的毫秒数；省略或传 null 时为 300，运行时最多等待 5000 毫秒。"
     )]
     pub(super) wait_ms: Option<u64>,
     #[serde(default)]
     #[schemars(
-        description = "Number of tmux history lines to include in the post-submit snapshot. Defaults to 120, caps at 5000, and 0 disables the snapshot."
+        description = "提交后的窗格快照最多包含的历史行数；省略或传 null 时为 120，运行时最多取 5000 行；0 禁用快照。快照不证明命令已完成。"
     )]
     pub(super) capture_lines: Option<u32>,
 }
@@ -310,23 +349,27 @@ pub(super) struct TmuxExecArgs {
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct TmuxCreateSessionArgs {
-    #[schemars(description = "Target local agent id.")]
+    #[schemars(description = "目标本地 Agent ID；必须是 Hub 中已启用的 Agent。")]
     pub(super) agent_id: String,
-    #[schemars(description = "tmux session name.")]
+    #[schemars(description = "要创建或复用的 tmux 会话名；不能为空或含控制字符。")]
     pub(super) name: String,
-    #[schemars(description = "Session cwd, subject to the local agent path policy.")]
+    #[schemars(
+        description = "会话工作目录；相对路径从 Agent 工作区根目录解析，必须是现存目录并通过本地路径策略。"
+    )]
     pub(super) cwd: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct TmuxCloseSessionArgs {
-    #[schemars(description = "Target local agent id.")]
+    #[schemars(description = "目标本地 Agent ID；必须是 Hub 中已启用的 Agent。")]
     pub(super) agent_id: String,
-    #[schemars(description = "tmux session name.")]
+    #[schemars(description = "要关闭的 tmux 会话名；会终止该会话及其窗格中的工作。")]
     pub(super) name: String,
     #[serde(default)]
-    #[schemars(description = "Request local confirmation before closing. Defaults to true.")]
+    #[schemars(
+        description = "是否在关闭会话前请求本地确认；省略或传 null 时为 true，显式 false 会跳过此确认。"
+    )]
     pub(super) need_confirm: Option<bool>,
 }
 
@@ -335,7 +378,7 @@ pub(super) struct TmuxCloseSessionArgs {
 pub(super) struct McpListServersArgs {
     #[serde(default)]
     #[schemars(
-        description = "Optional target local agent id. Omit to list MCP servers for all currently connected agents."
+        description = "可选的本地 Agent ID；提供时只查询该 Agent，省略或传 null 时通过 Hub 聚合查询全部本地 Agent。"
     )]
     pub(super) agent_id: Option<String>,
 }
@@ -343,50 +386,53 @@ pub(super) struct McpListServersArgs {
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct McpListToolsArgs {
-    #[schemars(description = "Target local agent id.")]
+    #[schemars(description = "目标本地 Agent ID；必须是 Hub 中已启用的 Agent。")]
     pub(super) agent_id: String,
-    #[schemars(description = "MCP server id returned by mcp.listServers.")]
+    #[schemars(description = "mcp.listServers 返回的 MCP 服务器 ID。")]
     pub(super) server_id: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct McpCallToolArgs {
-    #[schemars(description = "Target local agent id.")]
+    #[schemars(description = "目标本地 Agent ID；必须是 Hub 中已启用的 Agent。")]
     pub(super) agent_id: String,
     #[serde(default)]
     #[schemars(
-        description = "Optional human-readable workstream key inherited by the managed process."
+        description = "可选工作流分组名，会记录在对应托管进程上；首尾空白会去除，去除后不能为空、最多 32 个 Unicode 字符且不能含控制字符。"
     )]
     pub(super) group: Option<String>,
-    #[schemars(description = "MCP server id returned by mcp.listServers.")]
+    #[schemars(description = "目标 MCP 服务器 ID；应使用同一 Agent 的 mcp.listServers 返回值。")]
     pub(super) server_id: String,
-    #[schemars(description = "Tool name returned by mcp.listTools.")]
+    #[schemars(description = "下游 MCP 工具名；应使用 mcp.listTools 返回的名称。")]
     pub(super) tool_name: String,
     #[serde(default)]
     #[schemars(
-        description = "JSON object arguments forwarded to the MCP tool; maximum serialized size 256 KiB."
+        description = "转发给下游工具的 JSON 对象；省略或传 null 时使用空对象 {}，序列化后最多 256 KiB，非对象参数会被拒绝。"
     )]
     pub(super) arguments: Option<Value>,
     #[serde(default)]
     #[schemars(
         range(min = 0, max = 30),
         default = "default_standard_wait_seconds",
-        description = "Bounded inline wait in seconds; defaults to 5 and is capped at 30."
+        description = "启动后等待托管调用结果的内联等待秒数；省略或传 null 时为 5，范围 0–30，超过 30 时运行时按 30 处理；0 不等待结果。"
     )]
     pub(super) wait_seconds: Option<u64>,
     #[serde(default)]
     #[schemars(
-        description = "Absolute downstream execution deadline in seconds, default 300 and capped at 900."
+        description = "下游调用的执行截止时长，单位秒；省略或传 null 时为 300，运行时限制在 1–900 秒（小于 1 的值按 1 处理）。"
     )]
     pub(super) timeout_seconds: Option<u64>,
 }
 
+/// 下游 MCP 批次的调度方式；并发或按 calls 输入顺序串行执行。
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum McpBatchModeArgs {
     #[default]
+    /// 并发调度子调用；各调用可能产生彼此独立的副作用。
     Parallel,
+    /// 按 calls 数组中的输入顺序依次启动子调用。
     Sequential,
 }
 
@@ -399,52 +445,55 @@ impl From<McpBatchModeArgs> for McpBatchMode {
     }
 }
 
+/// 批次中的单个下游 MCP 工具调用；省略参数时按空对象处理。
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct McpBatchCallArgs {
-    #[schemars(description = "Configured MCP server id.")]
+    #[schemars(description = "配置中的 MCP 服务器 ID；使用该 Agent 的 mcp.listServers 返回值。")]
     pub(super) server_id: String,
-    #[schemars(description = "Downstream MCP tool name.")]
+    #[schemars(description = "下游 MCP 工具名；使用 mcp.listTools 返回的名称。")]
     pub(super) tool_name: String,
     #[serde(default)]
-    #[schemars(description = "JSON object arguments; maximum serialized size 256 KiB per call.")]
+    #[schemars(
+        description = "转发给下游工具的 JSON 对象；省略或传 null 时使用空对象 {}，每次调用序列化后最多 256 KiB。"
+    )]
     pub(super) arguments: Option<Value>,
 }
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct McpBatchArgs {
-    #[schemars(description = "Target local agent id.")]
+    #[schemars(description = "目标本地 Agent ID；必须是 Hub 中已启用的 Agent。")]
     pub(super) agent_id: String,
     #[serde(default)]
     #[schemars(
-        description = "Optional human-readable workstream key inherited by every child process."
+        description = "可选工作流分组名，继承给批次中每个托管进程；首尾空白会去除，去除后不能为空、最多 32 个 Unicode 字符且不能含控制字符。"
     )]
     pub(super) group: Option<String>,
     #[schemars(
         length(min = 1, max = 16),
-        description = "Ordered 1..16 downstream MCP calls; aggregate serialized arguments are capped at 2 MiB."
+        description = "必填的下游调用列表；必须有 1–16 项，每项参数序列化后最多 256 KiB，全部参数合计最多 2 MiB。调用可能各自产生外部副作用，批次不回滚已执行调用。"
     )]
     pub(super) calls: Vec<McpBatchCallArgs>,
     #[serde(default)]
-    #[schemars(description = "Execution mode: parallel by default, or sequential.")]
+    #[schemars(description = "调用调度方式；省略或传 null 时为 parallel，也可指定 sequential。")]
     pub(super) mode: Option<McpBatchModeArgs>,
     #[serde(default)]
     #[schemars(
-        description = "When true, prevent not-yet-started children from starting after a hard child failure; already-started calls are never cancelled."
+        description = "是否快速停止后续调度；省略或传 null 时为 false。设为 true 后，硬失败发生时不再启动尚未开始的子调用，但不会取消已启动的调用。"
     )]
     pub(super) fail_fast: Option<bool>,
     #[serde(default)]
     #[schemars(
         range(min = 0, max = 30),
         default = "default_standard_wait_seconds",
-        description = "Bounded inline wait in seconds; defaults to 5 and is capped at 30."
+        description = "批次开始后等待整体结果的内联等待秒数；省略或传 null 时为 5，范围 0–30，超过 30 时运行时按 30 处理；0 不等待结果。"
     )]
     pub(super) wait_seconds: Option<u64>,
     #[serde(default)]
     #[schemars(
         range(min = 1, max = 900),
-        description = "Per-child downstream execution deadline in seconds after scheduling, default 300 and capped at 900."
+        description = "每个子调用的下游执行截止时长，单位秒；省略或传 null 时为 300，范围 1–900，超过上限时运行时按 900 处理。"
     )]
     pub(super) timeout_seconds: Option<u64>,
 }
@@ -452,26 +501,33 @@ pub(super) struct McpBatchArgs {
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct UserNotifySendArgs {
-    #[schemars(description = "Notification channel key returned by user.notify.channels.")]
+    #[schemars(
+        description = "通知目标 channel key；从 user.notify.channels 选择 available 为 true 的条目。"
+    )]
     pub(super) channel: String,
-    #[schemars(description = "Notification title.")]
+    #[schemars(description = "通知标题文本；按目标通道能力发送，不由此字段保证显示长度。")]
     pub(super) title: String,
-    #[schemars(description = "Notification body.")]
+    #[schemars(description = "通知正文文本；按目标通道能力发送，不由此字段保证显示长度。")]
     pub(super) body: String,
     #[serde(default)]
-    #[schemars(description = "Optional notification actions. Phase A does not deliver actions.")]
+    #[schemars(
+        description = "可选的动作 ID/标签列表；字段会被接受，但当前桌面、ntfy 和 Android 投递实现均不投递动作，也不会产生 actionId 确认回传。"
+    )]
     pub(super) actions: Option<Vec<UserNotifyActionArgs>>,
     #[serde(default)]
-    #[schemars(description = "Optional priority such as low, normal, high, urgent, or alarm.")]
+    #[schemars(
+        description = "可选的通道优先级提示。Hub 的 ntfy 通道将 min/low 映射为低、high 映射为高、urgent/alarm 映射为最高，其余或省略均按 normal 处理；桌面通道忽略此值。"
+    )]
     pub(super) priority: Option<String>,
 }
 
+/// 通知动作的稳定标识和显示标签；当前投递实现不发送动作，也不会回传动作 ID。
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct UserNotifyActionArgs {
-    #[schemars(description = "Stable action id. Android ack will report this as actionId.")]
+    #[schemars(description = "动作的稳定 ID；当前投递实现不会触发该动作或回传 actionId。")]
     pub(super) id: String,
-    #[schemars(description = "Human-readable action label.")]
+    #[schemars(description = "供通知界面显示的动作标签；当前投递实现不会显示动作。")]
     pub(super) label: String,
 }
 
@@ -484,15 +540,20 @@ impl From<UserNotifyActionArgs> for NotificationAction {
     }
 }
 
+/// 无输入字段；请传空对象，附加字段会因 deny_unknown_fields 被拒绝。
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct RoomDiaryActiveArgs {}
 
+/// Room 日记读取层；序列化值使用小写。
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub(super) enum RoomDiaryLayerArgs {
+    /// 读取每日层；period 为 current 或有效的 YYYY-MM-DD 日期。
     Daily,
+    /// 读取每周层；period 为 current 或起止日期范围。
     Weekly,
+    /// 读取每月层；period 为 current 或起止日期范围。
     Monthly,
 }
 
@@ -509,11 +570,11 @@ impl From<RoomDiaryLayerArgs> for RoomDiaryLayer {
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct RoomDiaryReadArgs {
-    #[schemars(description = "Room diary temporal layer.")]
+    #[schemars(description = "日记时间层；取值为 daily、weekly 或 monthly。")]
     pub(super) layer: RoomDiaryLayerArgs,
     #[schemars(
         pattern(r"^(current|\d{4}-\d{2}-\d{2}(--\d{4}-\d{2}-\d{2})?)$"),
-        description = "Room-local logical period: daily uses current or YYYY-MM-DD; weekly/monthly use current or YYYY-MM-DD--YYYY-MM-DD."
+        description = "Room 本地日记周期：daily 使用 current 或有效的 YYYY-MM-DD；weekly/monthly 使用 current 或 YYYY-MM-DD--YYYY-MM-DD，范围起始日期不得晚于结束日期。"
     )]
     pub(super) period: String,
 }
@@ -525,7 +586,7 @@ pub(super) struct RoomNotebookRecentArgs {
     #[schemars(
         range(min = 1, max = 100),
         default = "default_room_notebook_limit",
-        description = "Maximum bounded recent Notebook previews returned; defaults to 20."
+        description = "返回的近期 Notebook 预览数；省略或传 null 时为 20，范围 1–100。"
     )]
     pub(super) limit: Option<usize>,
 }
@@ -535,14 +596,14 @@ pub(super) struct RoomNotebookRecentArgs {
 pub(super) struct RoomNotebookSearchArgs {
     #[schemars(
         length(min = 1, max = 256),
-        description = "Case-insensitive bounded substring query over Notebook paths, H1 titles, and bodies."
+        description = "不区分大小写的子串查询，匹配 Notebook 路径、一级标题和正文；长度为 1–256 个字符。"
     )]
     pub(super) query: String,
     #[serde(default)]
     #[schemars(
         range(min = 1, max = 100),
         default = "default_room_notebook_limit",
-        description = "Maximum bounded Notebook previews returned; defaults to 20."
+        description = "最多返回的 Notebook 预览数；省略或传 null 时为 20，范围 1–100。"
     )]
     pub(super) limit: Option<usize>,
 }
@@ -551,11 +612,12 @@ pub(super) struct RoomNotebookSearchArgs {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct RoomNotebookReadArgs {
     #[schemars(
-        description = "Exact Notebook-relative Markdown path returned or discovered under Notebook/; arbitrary repository paths are rejected."
+        description = "要读取的精确 Notebook 相对 Markdown 路径；路径必须位于 Notebook/ 下、以 .md 结尾且不能越出 Room 仓库。优先使用 recent/search 返回的路径。"
     )]
     pub(super) path: String,
 }
 
+/// 无输入字段；请传空对象，附加字段会因 deny_unknown_fields 被拒绝。
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct RoomStateListArgs {}
@@ -564,25 +626,32 @@ pub(super) struct RoomStateListArgs {}
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct RoomStateReadArgs {
     #[schemars(
-        description = "State entity filename stem resolved under State/entities/; arbitrary repository paths are rejected."
+        description = "State/entities/ 下实体文件的文件名主干，不含目录或 .md；不能为空、含路径分隔符或为 . / ..，例如 project.v2。任意仓库路径会被拒绝。"
     )]
     pub(super) entity: String,
 }
 
+/// 无输入字段；请传空对象，附加字段会因 deny_unknown_fields 被拒绝。
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct RoomMaintenanceStatusArgs {}
 
+/// Room 维护目标槽位；取值为 diary.daily、diary.weekly、diary.monthly、notebook 或 entity。
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum RoomMaintenanceSlotArgs {
+    /// 当前日记文件 Diary/Daily/current.md。
     #[serde(rename = "diary.daily")]
     DiaryDaily,
+    /// 当前周记文件 Diary/Weekly/current.md。
     #[serde(rename = "diary.weekly")]
     DiaryWeekly,
+    /// 当前月记文件 Diary/Monthly/current.md。
     #[serde(rename = "diary.monthly")]
     DiaryMonthly,
+    /// Notebook 语义维护槽位；目标路径由 payload.path 指定。
     Notebook,
+    /// State entity 语义维护槽位；目标文件由 payload.entity 指定。
     Entity,
 }
 
@@ -598,10 +667,13 @@ impl From<RoomMaintenanceSlotArgs> for RoomMaintenanceSlot {
     }
 }
 
+/// Room 维护执行方式；小写 local 或 workflow。
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub(super) enum RoomMaintenanceModeArgs {
+    /// 在已验证的 Room 仓库中直接执行维护并应用本地变更。
     Local,
+    /// 将维护请求提交给已配置的 Room workflow。
     Workflow,
 }
 
@@ -614,13 +686,14 @@ impl From<RoomMaintenanceModeArgs> for RoomMaintenanceExecutionMode {
     }
 }
 
+/// 一个 Room 维护语义槽位及其原样交给执行器的 JSON 请求载荷。
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct RoomMaintenanceItemArgs {
-    #[schemars(description = "Unique Room semantic slot to maintain.")]
+    #[schemars(description = "本项要维护的唯一语义槽位；一个提交中同一 slot 不得重复。")]
     pub(super) slot: RoomMaintenanceSlotArgs,
     #[schemars(
-        description = "Slot-specific maintenance payload; validated by the Room maintenance executor."
+        description = "随 slot 变化的 JSON 请求载荷，按原值交给 Room 维护执行器校验；序列化后每项最多 64 KiB。Notebook 槽位要求 payload.path 位于 Notebook/ 且以 .md 结尾（最多 240 字节）；Entity 槽位要求 payload.entity 是单个文件名主干（最多 160 字节，不能含 /、\\ 或 NUL，也不能是 . 或 ..）。日记槽位的其余结构由执行器校验。"
     )]
     pub(super) payload: Value,
 }
@@ -630,19 +703,19 @@ pub(super) struct RoomMaintenanceItemArgs {
 pub(super) struct RoomMaintenanceSubmitArgs {
     #[schemars(
         length(min = 1, max = 5),
-        description = "One to five maintenance requests; each slot may appear at most once. The set is validated against the Room repository before any mutation."
+        description = "必填的维护项列表，须有 1–5 项且 slot 互不重复；整组请求会先针对已初始化、干净且可用的 Room 仓库校验，再执行限定在对应语义目标内的维护。"
     )]
     pub(super) items: Vec<RoomMaintenanceItemArgs>,
     #[serde(default)]
     #[schemars(
-        description = "Optional execution mode override; local applies in the validated Room repository, workflow submits through the configured Room workflow."
+        description = "可选执行方式覆盖；省略或传 null 时使用 Room 本地配置。local 在通过校验的 Room 仓库中直接应用；workflow 提交给已配置的工作流。"
     )]
     pub(super) mode: Option<RoomMaintenanceModeArgs>,
     #[serde(default)]
     #[schemars(
         range(min = 0, max = 30),
         default = "default_room_wait_seconds",
-        description = "Optional bounded wait for workflow consumption and local fast-forward, from 0 through 30 seconds."
+        description = "等待 workflow 消费请求及可能的本地快进等待时长，单位秒；省略或传 null 时为 0，范围 0–30。仅 workflow 模式使用此等待，local 模式直接执行。"
     )]
     pub(super) wait_seconds: Option<u8>,
 }
@@ -667,18 +740,22 @@ impl RoomMaintenanceSubmitArgs {
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct BootstrapReadArgs {
-    #[schemars(description = "Guide id returned by room.bootstrap.")]
+    #[schemars(
+        description = "room.bootstrap 返回的引导指南 ID；不存在的 ID 会由 Room 路由报告错误。"
+    )]
     pub(super) id: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct SkillReadArgs {
-    #[schemars(description = "Skill id, matching one workspace skills/ directory name.")]
+    #[schemars(
+        description = "Room 工作区 skills/ 下的技能目录 ID；不能为空、不能为 . 或 ..，且只允许 ASCII 字母、数字、下划线、点和连字符。"
+    )]
     pub(super) id: String,
     #[serde(default)]
     #[schemars(
-        description = "Optional package-relative file path. Omit to read the legacy SKILL.md response."
+        description = "可选的技能包相对文件路径；省略或传 null 时返回旧版 SKILL.md 响应。指定时不得是绝对路径、含 . 或 .. 路径段、反斜杠或 NUL；拒绝符号链接，文件内容上限为 1 MiB。"
     )]
     pub(super) path: Option<String>,
 }
@@ -687,18 +764,20 @@ pub(super) struct SkillReadArgs {
 #[serde(rename_all = "camelCase")]
 pub(super) struct SkillSearchArgs {
     #[schemars(
-        description = "Case-insensitive substring query over id, frontmatter, tags, and SKILL.md content."
+        description = "查询先去除首尾空白且不能为空，再做不区分大小写的子串匹配；匹配技能 ID、frontmatter、标签和 SKILL.md 内容。"
     )]
     pub(super) query: String,
     #[serde(default)]
-    #[schemars(description = "Maximum skills returned. Defaults to 20 and caps at 100.")]
+    #[schemars(description = "最多返回的技能数；省略或传 null 时为 20，运行时限制在 1–100。")]
     pub(super) limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct SkillActivationArgs {
-    #[schemars(description = "Skill id, matching one workspace skills/ directory name.")]
+    #[schemars(
+        description = "要启用或停用的 Room 技能目录 ID；不能为空、不能为 . 或 ..，且只允许 ASCII 字母、数字、下划线、点和连字符。"
+    )]
     pub(super) id: String,
 }
 
@@ -706,28 +785,31 @@ pub(super) struct SkillActivationArgs {
 #[serde(rename_all = "camelCase")]
 pub(super) struct SkillInstallArgs {
     #[schemars(
-        description = "Target skill id. One installation operation targets exactly one id."
+        description = "目标技能目录 ID：非空，仅含 ASCII 字母、数字、下划线、点或连字符；.、..、以点开头以及保留名 skill-installer 不允许。一次安装只处理一个技能 ID。"
     )]
     pub(super) id: String,
-    #[schemars(description = "GitHub, HTTPS-file, or inline-content source descriptor.")]
+    #[schemars(
+        description = "必填的安装来源联合体；type 为 github（仓库）或 files（显式文件列表），两种形式不能混用。"
+    )]
     pub(super) source: SkillInstallSourceArgs,
     #[serde(default)]
     #[schemars(
-        description = "Archive an existing workspace skill before replacement. Defaults to false."
+        description = "是否替换已存在技能；省略时为 false。设为 true 会先归档旧技能；若目标已存在而此值为 false，安装请求会被拒绝。"
     )]
     pub(super) replace_existing: bool,
     #[serde(default)]
     #[schemars(
-        description = "Optional explicit activation choice; new skills default active and replacement preserves its prior state."
+        description = "可选的安装后启用选择；true 会确保启用，false、null 或省略时新技能仍默认启用，替换时保留旧技能原有启用状态。"
     )]
     pub(super) activate_after_install: Option<bool>,
     #[serde(default)]
     #[schemars(
-        description = "Optional idempotency key for safe retries of the same install request."
+        description = "可选幂等键，必须为 1–128 字节；相同键和相同请求可安全重试并复用原安装任务，相同键配不同请求会返回 idempotency_conflict。"
     )]
     pub(super) idempotency_key: Option<String>,
 }
 
+/// 带 type 标签的安装来源联合体：从 GitHub 仓库读取，或显式提供一组文件。
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(
     tag = "type",
@@ -735,17 +817,32 @@ pub(super) struct SkillInstallArgs {
     rename_all_fields = "camelCase"
 )]
 pub(super) enum SkillInstallSourceArgs {
+    /// type 为 github。repository 与 url 必须且只能提供一个；ref/path 可覆盖 URL 中解析出的分支/子目录。
     Github {
         #[serde(default)]
+        #[schemars(
+            description = "GitHub owner/repository 标识；与 url 互斥且必须提供其中之一，例如 octo/demo。"
+        )]
         repository: Option<String>,
         #[serde(default)]
+        #[schemars(
+            description = "HTTPS GitHub URL；主机必须是 github.com，不能带凭据、查询参数或片段；可为仓库根 URL 或 tree/blob 引用 URL，并与 repository 互斥。"
+        )]
         url: Option<String>,
         #[serde(rename = "ref", default)]
+        #[schemars(
+            description = "可选分支、标签或提交引用；覆盖 URL 中解析出的 ref，repository 形式下指定要安装的引用。"
+        )]
         ref_name: Option<String>,
         #[serde(default)]
+        #[schemars(description = "可选的仓库内子目录/文件路径；覆盖 URL 中解析出的路径。")]
         path: Option<String>,
     },
+    /// type 为 files。显式提供的文件必须非空且数量不超过本地技能配置上限。
     Files {
+        #[schemars(
+            description = "要安装的文件列表；必须非空且不超过本地配置的文件数上限，路径须唯一并且每个文件恰有一种内容来源。"
+        )]
         files: Vec<SkillInstallFileArgs>,
     },
 }
@@ -774,19 +871,36 @@ impl SkillInstallSourceArgs {
     }
 }
 
+/// 单个技能包文件；path 必填，内容来源为 url、content、contentBase64 三者之一。
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct SkillInstallFileArgs {
+    #[schemars(
+        description = "包内相对文件路径；不得是绝对路径、含 . 或 .. 路径段、反斜杠或 NUL，最长 240 字节、最多 16 层；同一安装中大小写折叠后不得重复或形成父子路径冲突。"
+    )]
     pub(super) path: String,
     #[serde(default)]
+    #[schemars(
+        description = "HTTPS 文件下载地址；不得含用户名/密码，且须与 content、contentBase64 恰有一个被提供。"
+    )]
     pub(super) url: Option<String>,
     #[serde(default)]
+    #[schemars(
+        description = "作为 UTF-8 文本写入文件的内联内容；与 url、contentBase64 互斥，内联总量受本地技能配置上限限制。"
+    )]
     pub(super) content: Option<String>,
     #[serde(default)]
+    #[schemars(
+        description = "Base64 编码的原始文件字节；与 url、content 互斥，解码后的内联总量受本地技能配置上限限制。"
+    )]
     pub(super) content_base64: Option<String>,
     #[serde(default)]
+    #[schemars(
+        description = "可选的预期 SHA-256 十六进制摘要；对最终文件字节校验，比较时不区分大小写，不匹配会使安装失败。"
+    )]
     pub(super) sha256: Option<String>,
     #[serde(default)]
+    #[schemars(description = "是否将文件标记为可执行；省略或传 null 时为 false。")]
     pub(super) executable: Option<bool>,
 }
 
@@ -806,12 +920,13 @@ impl SkillInstallFileArgs {
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct SkillInstallGetArgs {
+    #[schemars(description = "skills.install 返回的安装任务 ID。")]
     pub(super) install_id: String,
     #[serde(default)]
     #[schemars(
         range(min = 0, max = 30),
         default = "default_standard_wait_seconds",
-        description = "Bounded status wait in seconds; defaults to 5 and is capped at 30."
+        description = "等待安装状态变化的秒数；省略或传 null 时为 5，范围 0–30，超过 30 时运行时按 30 处理；0 表示不等待。"
     )]
     pub(super) wait_seconds: Option<u64>,
 }
@@ -819,29 +934,41 @@ pub(super) struct SkillInstallGetArgs {
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct SkillInstallCancelArgs {
+    #[schemars(
+        description = "skills.install 返回的安装任务 ID；此工具请求在提交点之前协作取消该安装。"
+    )]
     pub(super) install_id: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct SkillRunArgs {
+    #[schemars(description = "要运行的 Room 技能 ID；必须是已启用且可运行的工作区技能。")]
     pub(super) id: String,
-    #[schemars(description = "Package-relative executable path under scripts/.")]
+    #[schemars(
+        description = "技能包内 scripts/ 下的相对可执行文件路径；目标必须存在、可执行且不能经过符号链接逃逸。"
+    )]
     pub(super) path: String,
     #[serde(default)]
     #[schemars(
-        description = "Optional human-readable workstream key inherited by the managed process."
+        description = "可选工作流分组名，记录在托管进程上；首尾空白会去除，去除后不能为空、最多 32 个 Unicode 字符且不能含控制字符。"
     )]
     pub(super) group: Option<String>,
     #[serde(default)]
+    #[schemars(
+        description = "传给技能脚本的 argv 字符串数组；每项是独立参数，不按 shell 字符串拆分。省略或传 null 等同空数组。"
+    )]
     pub(super) args: Option<Vec<String>>,
     #[serde(default)]
+    #[schemars(
+        description = "可选进程工作目录；省略或传 null 时使用 Agent 工作区根目录，相对路径从该根目录解析，且必须通过本地路径策略。"
+    )]
     pub(super) working_directory: Option<String>,
     #[serde(default)]
     #[schemars(
         range(min = 0, max = 30),
         default = "default_standard_wait_seconds",
-        description = "Bounded inline wait in seconds; defaults to 5 and is capped at 30."
+        description = "启动技能脚本后等待完成的内联等待秒数；省略或传 null 时为 5，范围 0–30，超过 30 时运行时按 30 处理；0 表示不等待完成。"
     )]
     pub(super) wait_seconds: Option<u64>,
 }

@@ -49,8 +49,8 @@ use crate::utils::random_id;
 use crate::REQUEST_TIMEOUT_SECS;
 const ROOM_TRANSPORT_MARGIN_SECS: u64 = 5;
 
-const MCP_INSTRUCTIONS: &str = "Agentic GPT Hub exposes process.exec and process.batch for managed execution, plus process.status, process.list, process.output, process.result, and process.cancel for lifecycle follow-up. Status and list report metadata only; output uses resumable lossless pages, and result reports whether the complete structured value is retained. hub.process.status and hub.process.list are cache-only snapshots with explicit freshness. mcp.callTool and mcp.batch use the same managed process lifecycle for downstream MCP calls. Use tmux as the persistent shared workspace for stateful development, iterative debugging, TUIs, and user-agent handoff. For tmux work, discover the active session and panes before issuing commands. skills.install remains a distinct installation workflow.";
-const COORDINATOR_INSTRUCTIONS: &str = "Agentic GPT Hub coordinator profile. This connector exposes only Hub-native agent status, retained run history, current cached process snapshots, and notification tools. It never dispatches execution, process-control, tmux, downstream MCP, skills, bootstrap, diary, or notebook commands to an Agent.";
+const MCP_INSTRUCTIONS: &str = "Agentic GPT Hub 完整配置提供 49 个工具。先用 agent.list 选择已启用的本地 Agent：进程、tmux 和指定 Agent 的下游 MCP 工具以 agentId 路由；Room、bootstrap 与 skills 工具不接受 agentId，每次请求由 Hub 捕获当时的活动 Room 连接。process.exec/process.batch 与 mcp.callTool/mcp.batch 创建 Agent 受管理进程；waitSeconds 只控制本次内联等待，不代表完成或取消，后续用 process.status/output/result/cancel。hub.process.* 只读 Hub 进程缓存，需检查 freshness/observedAt；process.list/status 向 Agent 请求实时状态（请求失败时可能回退缓存）。hub.run.* 查询 Hub 持久派发回执，不等于进程状态，也不证明进程完成或停止。先用 mcp.listServers/listTools 发现下游 MCP 服务器、工具及参数 schema，再调用会在下游真实执行的 mcp.callTool/batch；批次失败不回滚已开始的调用。tmux.exec 返回提交状态和短暂窗格快照，不是完成证据；需要时用 tmux.capturePane 核验输出，先用 tmux.listPanes 找目标。skills.install 是异步安装/替换，随后用 skills.install.get/cancel；安装不等于运行，skills.run 只运行已激活的 skill 并按进程工具追踪。发送前先查 user.notify.channels；user.notify.send 会真实投递，accepted 不表示用户已看到。工具原生 JSON 位于 MCP structuredContent，并以 text 内容返回；structuredContent 顶层含 error 时 isError 为 true；参数/路由等 MCP 协议错误与工具返回的 JSON 错误不同。annotations 是行为提示而非授权。";
+const COORDINATOR_INSTRUCTIONS: &str = "协调者配置仅暴露 8 个 Hub 原生工具：hub.info、agent.list、hub.run.list/get、hub.process.status/list 和 user.notify.channels/send。可查看 Agent 注册/在线状态、Hub 派发回执与当前进程缓存快照；hub.process.* 是可能过期的 Hub 缓存（检查 freshness/observedAt），hub.run.* 是回执而非实时进程状态或停止证据。此配置不会向 Agent 派发执行、进程控制、tmux、下游 MCP、Room、bootstrap 或 skill 操作。user.notify.channels 只列通道能力/可用性；user.notify.send 会真实投递，accepted 不表示用户已看到。结果原生 JSON 位于 MCP structuredContent 并以 text 返回；其中顶层 error 会标记 isError，参数/路由错误可作为 MCP 协议错误返回。annotations 是提示，不是授权。";
 
 fn default_process_wait_seconds() -> u64 {
     ProcessStatusRequest::DEFAULT_WAIT_SECONDS
@@ -159,9 +159,16 @@ fn decorate_tool_descriptors(tool_router: &mut ToolRouter<AgenticMcpServer>) {
         let read_only = tool_is_read_only(name);
         let destructive = matches!(
             name,
-            "process.cancel"
+            "process.exec"
+                | "process.batch"
+                | "process.cancel"
+                | "tmux.pasteText"
+                | "tmux.exec"
                 | "tmux.closeSession"
+                | "mcp.batch"
+                | "mcp.callTool"
                 | "room.maintenance.submit"
+                | "skills.deactivate"
                 | "skills.install"
                 | "skills.install.cancel"
                 | "skills.run"
@@ -364,7 +371,7 @@ impl ServerHandler for AgenticMcpServer {
 impl AgenticMcpServer {
     #[tool(
         name = "hub.info",
-        description = "Inspect Hub runtime health and bounded capacity summaries; read-only."
+        description = "查询 Hub 本地运行与容量概况，适合确认服务版本、超时上限、Agent 数量、待处理请求/确认及进程缓存规模；返回 service/version、remoteConfirmation、agents、counts 和 generatedAt，不派发命令。数据库或序列化失败会作为 MCP 错误返回。"
     )]
     async fn hub_info(&self) -> Result<CallToolResult, ErrorData> {
         let info = build_hub_info_response(&self.state)
@@ -377,7 +384,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "agent.list",
-        description = "List registered local agents and availability; read-only discovery."
+        description = "发现已注册 Agent 及其可用性，供后续需要 agentId 的工具选择目标；返回 agents 数组，条目含 agentId、alias、displayName、online、connectionMode、lastSeenAt、capabilities 和 configSummary。只读 Hub registry/连接状态，不选择 Room Agent；数据库错误为 MCP 错误。"
     )]
     async fn list_agents(&self) -> Result<CallToolResult, ErrorData> {
         let entries = registry_entries(&self.state)
@@ -406,7 +413,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "hub.run.get",
-        description = "Read one retained Hub command run by id."
+        description = "按 runId 查询一条 Hub 持久派发回执，适合从超时错误中的 runId 恢复检查；返回 request/Agent/命令身份、status、时间、reason，以及可选 result、processId/process 和 resultRetained/resultOmitted。它不是实时进程状态、进程输出或停止证明；未找到返回 MCP 参数错误 run_not_found，数据库错误返回 MCP 内部错误。"
     )]
     async fn hub_run_get(
         &self,
@@ -425,7 +432,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "hub.run.list",
-        description = "List retained Hub and Agent-originated run records; read-only."
+        description = "检索 Hub 持久派发回执历史，适合按 agentId、source、status 或 sinceSeconds 回顾运行；返回 runs 和实际 limit（默认 20、上限 100）。这些是回执/结果保留记录，不是实时进程列表；不派发命令，数据库错误作为 MCP 内部错误返回。"
     )]
     async fn hub_run_list(
         &self,
@@ -450,7 +457,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "hub.process.list",
-        description = "List cached process status metadata for one local Agent without dispatching; freshness and observation time are explicit."
+        description = "读取 Hub 为指定 agentId 保留的进程元数据快照；仅在查看缓存状态且不要求实时性时使用，不会联系 Agent。返回 processes 与 freshness（cached/stale/unknown），有观测时间时含 observedAt；不含进程输出/结构化结果，快照可能过期。Agent 未注册或未启用时返回 MCP 参数错误。"
     )]
     async fn hub_process_list(
         &self,
@@ -463,7 +470,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "hub.process.status",
-        description = "Read one cached process status snapshot without dispatching; freshness and observation time are explicit."
+        description = "按 agentId 和 processId 读取一条 Hub 缓存快照，不会联系 Agent；适合离线时查看最近已观测元数据，不能证明当前状态。返回进程字段以及 freshness/observedAt；无缓存项在 structuredContent 中返回 error.code=process_not_found 与 freshness=unknown。Agent 未注册或未启用时返回 MCP 参数错误。"
     )]
     async fn hub_process_status(
         &self,
@@ -478,7 +485,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "process.exec",
-        description = "Start one managed process on a local Agent; use process.status, process.output, process.result, and process.cancel for lifecycle follow-up."
+        description = "在指定 Agent 上启动一个受管理进程，适合运行命令；program 与 args 是直接可执行文件和参数数组，不自动拆分 shell 字符串，shell 语法须显式调用 bash/sh。返回 processId、status、completedInline 等初始进程结果，waitSeconds 只限制内联等待。执行会产生实际副作用并仍受 Agent 本地策略/确认约束；process_exec_timeout 是结果内 JSON 错误，超时不表示未启动或已取消，可用 process.status/output/result/cancel 跟进，回执则用 hub.run.get 查询。"
     )]
     async fn exec(&self, params: Parameters<ProcessExecArgs>) -> Result<CallToolResult, ErrorData> {
         let params = params.0;
@@ -512,7 +519,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "process.batch",
-        description = "Start multiple managed processes under one admission boundary; started side effects are not rolled back."
+        description = "在同一批次准入边界内启动多个 Agent 受管理进程；每项可用 workingDirectory 覆盖批次默认目录。返回 batchId、status、completedInline 和逐项 results/processId；已启动项的副作用不会回滚。waitSeconds 只等初始结果，process_batch_timeout 不会取消子进程；按返回的进程标识用 process 工具跟进。"
     )]
     async fn batch_exec(
         &self,
@@ -556,7 +563,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "process.list",
-        description = "List active or retained managed processes for one local Agent with optional filters and cursor pagination; offline cache snapshots carry explicit freshness."
+        description = "列出指定 Agent 的活动或保留进程，可按 group/kind/state 过滤并以 cursor 续页；优先用于在线实时发现。返回 processes、nextCursor，以及 freshness/observedAt；Agent 请求失败时 Hub 可能回退缓存快照，需据 freshness 判断。离线时不能续用 Agent 签发的 cursor，会返回 status=unavailable 和 process_list_cursor_unavailable；该错误不等于空列表。"
     )]
     async fn process_list(
         &self,
@@ -589,7 +596,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "process.status",
-        description = "Inspect or briefly wait for process status metadata only; status never includes stdout, stderr, or result bodies."
+        description = "查询指定进程的 Agent 实时状态；waitSeconds 可短暂等待状态变化，但不会取消进程。返回 ProcessInfo 元数据及可选 waitElapsedMs，不含 stdout、stderr 或结果正文。Agent 不可达时 structuredContent 含 process_status_unavailable，可能附带 Hub 缓存摘要但不视为实时状态；未注册/启用的 Agent 返回 MCP 参数错误。"
     )]
     async fn process_status(
         &self,
@@ -626,7 +633,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "process.output",
-        description = "Read a non-consuming lossless output page. Cursor offsets are raw bytes, and invalid UTF-8 is preserved with base64 encoding."
+        description = "以非消费式分页读取 Agent 保存的 stdout/stderr；cursor 按原始字节续读，maxBytes 限制本页，非法 UTF-8 会用 base64 编码保留。返回 processId、stdout/stderr 分段的 data/offset/encoding（可能含 gap）、nextCursor、hasMore、eof 与 captureStatus。Agent 不可达时返回 process_output_unavailable；Hub 缓存只补元数据，不提供输出正文。"
     )]
     async fn process_output(
         &self,
@@ -660,7 +667,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "process.result",
-        description = "Read an explicitly retained complete structured result or an unavailable status; the Hub metadata cache never supplies result content."
+        description = "读取 Agent 保留的完整结构化进程结果；仅用于取结果，不取代 process.output 的 stdout/stderr，也不从 Hub 缓存补内容。返回 processId、status（complete/too_large/unavailable）、resultAvailable，以及可选 result、error、resultBytes、resultSha256、resultPreview。结果缺失/过大按状态说明；Agent 不可达时返回 process_result_unavailable。"
     )]
     async fn process_result(
         &self,
@@ -693,7 +700,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "process.cancel",
-        description = "Request managed process cancellation and return observed termination evidence; a remote stop is not assumed."
+        description = "请求 Agent 取消指定进程，并检查实际终止证据；返回 state、cancelOutcome、terminationEvidence，失败时可含 error。请求取消不保证远端已停止；Agent 不可达时返回 process_cancel_unavailable，并可能附 Hub 缓存元数据，不能把缓存当停止证据。"
     )]
     async fn process_cancel(
         &self,
@@ -725,7 +732,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "tmux.listSessions",
-        description = "List persistent tmux sessions on a local Agent; read-only."
+        description = "发现指定 Agent 上持久 tmux 会话，适合在命令前确认会话是否存在；返回 sessions（会话名、窗口数、附着状态及活动/创建时间），不改变会话。tmux Hub 请求超时作为 MCP 错误返回。"
     )]
     async fn tmux_list_sessions(
         &self,
@@ -744,7 +751,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "tmux.listPanes",
-        description = "List tmux panes and shell/TUI hints; read-only."
+        description = "发现指定 Agent 的 tmux panes，可选按 session 收窄；返回 panes（paneId、session、currentPath/currentCommand、shell、dead 和 copy-mode 提示），供后续 capturePane/exec/pasteText 选择目标。只读；Hub 请求超时作为 MCP 错误返回。"
     )]
     async fn tmux_list_panes(
         &self,
@@ -766,7 +773,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "tmux.capturePane",
-        description = "Capture bounded tmux pane history; use it to observe tmux.exec progress."
+        description = "读取指定 tmux pane 最近的有界历史，适合在 tmux.exec 后检查输出；返回 capture 文本，不推进或消费 pane。它是某一时刻的屏幕快照，不单独证明命令完成；目标无效或 Hub 请求超时会返回错误。"
     )]
     async fn tmux_capture_pane(
         &self,
@@ -789,7 +796,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "tmux.pasteText",
-        description = "Paste text into a non-shell tmux pane or TUI; shell panes are rejected."
+        description = "把文本输入到非 shell 的 tmux pane（如 TUI/REPL）；shell pane 会以 tmux_shell_paste_forbidden 拒绝，应改用 tmux.exec。submit=true 会追加 Enter，可能触发界面动作；confirmation/local policy 仍适用。成功返回 status=completed，表示已处理输入而非下游任务完成；失败返回 error。"
     )]
     async fn tmux_paste_text(
         &self,
@@ -814,7 +821,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "tmux.exec",
-        description = "Submit one structured command to a tmux shell pane; returned snapshot is not proof of completion."
+        description = "向指定 Agent 的活动 shell 窗格提交一个 program/args 命令；仅接受存活且可用的 shell 窗格，并执行本地预检、策略与必要确认。成功返回 status=submitted 及可选 snapshot/warning；waitMs 仅决定短暂观察时间，snapshot 不是命令完成证据，之后用 tmux.capturePane 核实。命令会作用于持久窗格/工作区；错误以结果内 JSON 返回，Hub 请求超时为 MCP 错误。"
     )]
     async fn tmux_exec(
         &self,
@@ -841,7 +848,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "tmux.createSession",
-        description = "Create or reuse one persistent tmux session in an allowed working directory."
+        description = "在指定 Agent 的允许工作目录中创建或复用持久 tmux 会话，适合需要跨调用保留 shell/TUI 状态的工作；返回 session 和 created。会话与其窗格会持续存在并承载后续命令，cwd 必须在 Agent 允许范围内；Hub 请求超时作为 MCP 错误返回。"
     )]
     async fn tmux_create_session(
         &self,
@@ -864,7 +871,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "tmux.closeSession",
-        description = "Close one persistent tmux session; destructive and confirmation-aware."
+        description = "关闭指定 Agent 的持久 tmux session；只有在明确需要结束该工作区时调用。关闭会终止其中窗口/窗格并可能中断正在运行的工作，默认请求确认且仍服从本地策略。成功返回 session 和 closed=true；失败返回错误，Hub 请求超时作为 MCP 错误返回。"
     )]
     async fn tmux_close_session(
         &self,
@@ -887,7 +894,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "mcp.listServers",
-        description = "List downstream MCP servers, optionally scoped to one Agent; read-only discovery."
+        description = "发现下游 MCP servers：提供 agentId 时查询该 Agent，否则聚合当前在线 Agents。返回单 Agent 的 servers，或 agents 数组及各自 servers/error；不调用下游工具。聚合范围仅在线 Agent，单个请求失败会保留在对应条目的 error；数据库失败作为结果内 JSON 错误返回。"
     )]
     async fn mcp_list_servers(
         &self,
@@ -912,7 +919,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "mcp.listTools",
-        description = "List tools exposed by one downstream MCP server; read-only discovery."
+        description = "按 agentId 和 mcp.listServers 返回的 serverId 查询下游工具清单；返回 tools 及工具名、描述与 input schema，用于确认参数后再调用。只读取发现信息，不执行工具；Agent 超时以结果内 error 返回。"
     )]
     async fn mcp_list_tools(
         &self,
@@ -943,7 +950,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "mcp.callTool",
-        description = "Run one downstream MCP tool as a managed process; use process tools for lifecycle follow-up."
+        description = "在指定 Agent 上调用一个已发现的下游 MCP 工具；调用前先用 mcp.listServers/listTools 核对 serverId、toolName、参数和副作用。Hub 将其作为受管理 MCP 进程执行，返回 processId/status/completedInline 与可用的下游 CallToolResult（保留 content/isError）；waitSeconds 只等内联结果，timeoutSeconds 是执行期限。下游副作用不会由 Hub 回滚；超时不等于取消，可用 process 工具跟进。"
     )]
     async fn mcp_call_tool(
         &self,
@@ -975,7 +982,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "mcp.batch",
-        description = "Run multiple downstream MCP calls as managed processes under one admission boundary; downstream side effects are not rolled back."
+        description = "在指定 Agent 上运行 1 至 16 个下游 MCP 调用；先核对每项 server/tool/schema。mode 决定并行或顺序，failFast 只阻止尚未开始的子项，已启动调用不取消且副作用不回滚。返回 batchId/status 和逐项结果/进程标识；waitSeconds 只等内联结果，timeoutSeconds 是子调用期限，超时后用 process 工具跟进。"
     )]
     async fn mcp_batch(
         &self,
@@ -1016,7 +1023,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "user.notify.channels",
-        description = "List Hub-native notification channels; read-only."
+        description = "查询当前 Hub 可用的通知通道及能力，发送前用其选择 channel key；返回 channels，含 key、displayName、available、kind、supportsActions、reason 和可选 agentId。只读、不发送通知；当前 Android 通道会说明不可用原因，数据库错误作为 MCP 内部错误返回。"
     )]
     async fn user_notify_channels(&self) -> Result<CallToolResult, ErrorData> {
         let channels = notification_channels(&self.state)
@@ -1027,7 +1034,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "user.notify.send",
-        description = "Send one Hub-native user notification."
+        description = "通过 channels 返回的 channel key 向用户真实投递通知；适合明确需要用户收到提示时调用，可能触达 Hub ntfy 或 Agent 桌面通道。返回 channelKey、accepted 和可选 reason/deliveryId；accepted 不证明用户已看到。无效/不可用通道、Agent alias 无效或投递失败会在 structuredContent.error 中给出类别，可恢复时先查 channels 或修正通道。"
     )]
     async fn user_notify_send(
         &self,
@@ -1063,7 +1070,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "room.diary.active",
-        description = "Read the active daily, weekly, and monthly Room diary documents; read-only, semantic, and bounded."
+        description = "读取本次调用所捕获的活动 Room Agent 当前 daily/weekly/monthly 日记概览，适合先了解近期记录；返回 daily、weekly、monthly 三层各自的路径、可用性、内容或 issue 提示。只读，不接受 agentId；无活动 Room、活动状态冲突或超时分别返回 room_not_active、room_state_conflict 或专用 timeout 错误。"
     )]
     async fn room_diary_active(
         &self,
@@ -1086,7 +1093,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "room.diary.read",
-        description = "Read one exact Room diary document by validated semantic layer and period; read-only, semantic, and bounded."
+        description = "读取本次请求捕获的活动 Room 中一个精确日记周期；layer 选择 daily/weekly/monthly，period 使用 Room 本地逻辑周期。返回 document（路径、内容/可用性或 issue）；不修改日记，也不接受 agentId。无活动 Room、状态冲突或超时会以 structuredContent.error 返回。"
     )]
     async fn room_diary_read(
         &self,
@@ -1114,7 +1121,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "room.notebook.recent",
-        description = "Read bounded recent Room notebook Markdown previews; read-only, semantic, and bounded semantic discovery."
+        description = "在活动 Room 的 Notebook 中发现最近文档，适合在搜索或精读前浏览；limit 限制返回数量。返回 documents 数组（每项含 path、title、contentPreview、truncated、effectiveAt）及可能的 warnings，不返回完整正文、不修改文件，也不接受 agentId。"
     )]
     async fn room_notebook_recent(
         &self,
@@ -1140,7 +1147,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "room.notebook.search",
-        description = "Search Room notebook Markdown by bounded case-insensitive substring fields; read-only, semantic, and bounded discovery."
+        description = "在活动 Room 的 Notebook 路径、H1 标题和正文中做不区分大小写的子串搜索；适合先定位候选文档，再用 room.notebook.read 精读。返回 documents 数组（path、title、contentPreview、truncated、effectiveAt）及可能的 warnings，不修改文件、不接受 agentId；query 长度受 schema 限制。"
     )]
     async fn room_notebook_search(
         &self,
@@ -1168,7 +1175,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "room.notebook.read",
-        description = "Read one exact Room notebook Markdown document under the validated Notebook root; read-only, semantic, and bounded."
+        description = "按 Notebook 相对 Markdown path 读取一个精确文档；只能使用 Room 返回/发现的 Notebook/ 下路径，任意仓库路径会被拒绝。返回 path 和完整 content；只读、不接受 agentId，错误和无活动 Room 状态按结果中的 error 说明。"
     )]
     async fn room_notebook_read(
         &self,
@@ -1194,7 +1201,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "room.state.list",
-        description = "List deterministic Room state entity documents; read-only, semantic, and bounded."
+        description = "列出活动 Room 的确定性 State 实体文档，适合发现可读取的当前实体；返回 entities 数组（entity 标识和 path），不修改状态，也不接受 agentId。无活动 Room、状态冲突或超时会返回对应 error。"
     )]
     async fn room_state_list(
         &self,
@@ -1217,7 +1224,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "room.state.read",
-        description = "Read one exact Room state entity Markdown document by validated entity name; read-only, semantic, and bounded."
+        description = "按 State/entities/ 下的精确实体文件名读取一个活动 Room 状态实体；只使用 room.state.list 返回的实体名，不可传任意仓库路径。返回文档路径与内容，只读、不接受 agentId；无活动 Room 或无效实体会以 error 返回。"
     )]
     async fn room_state_read(
         &self,
@@ -1243,7 +1250,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "room.maintenance.status",
-        description = "Inspect Room maintenance readiness, repository state, schema/scaffold support, executor configuration, workflow/remote availability, synchronization heads, and deterministic occupancy for all five semantic slots; read-only and non-destructive."
+        description = "在提交维护前检查活动 Room 的维护就绪状态：返回 repository、schema、scaffold、localExecutor、configuredMode、autoPush、workflow、remote、sync 和 slots（五个语义槽位的占用）。只读、不接受 agentId，适合先判断仓库与执行路径能否维护。"
     )]
     async fn room_maintenance_status(
         &self,
@@ -1266,7 +1273,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "room.maintenance.submit",
-        description = "Apply one to five unique Room maintenance slot requests after exact validation; destructive but confined to the validated Room repository, with optional local/workflow mode and bounded workflow wait; not open-world."
+        description = "向当前活动 Room 提交 1 至 5 个互不重复的 diary.daily/weekly/monthly、notebook 或 entity 槽位维护请求；Hub/Agent 会先按 Room 仓库验证整组输入。返回 mode、state、localApplied、sync、revision 等执行/同步状态。local 模式会改写经验证的 Room 文件，并可能按 autoPush 配置同步/推送；workflow 模式会提交配置的工作流；副作用不自动回滚，waitSeconds 只等待有限时间。"
     )]
     async fn room_maintenance_submit(
         &self,
@@ -1292,7 +1299,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "room.bootstrap",
-        description = "Load Room bootstrap guidance; read-only."
+        description = "加载本次请求捕获的活动 Room bootstrap 指引，适合开始 Room 工作前了解可用流程；返回 guides、entrypoint、revision、schemaVersion、totalGuides/returnedGuides 和 warnings，不修改文件、不接受 agentId。需要一篇完整指引时用 room.bootstrap.read；无活动 Room或路由失败会返回 error。"
     )]
     async fn room_bootstrap(&self) -> Result<CallToolResult, ErrorData> {
         let value = request_active_room(
@@ -1311,7 +1318,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "room.bootstrap.read",
-        description = "Read one validated Room bootstrap guide by id."
+        description = "按 room.bootstrap 返回的 id 读取活动 Room 的一篇已验证 bootstrap 指引；返回 guide、frontmatter、resource 和 warnings，不修改文件、不接受 agentId。不存在的 id、无活动 Room 或路由超时会返回对应 error。"
     )]
     async fn room_bootstrap_read(
         &self,
@@ -1334,7 +1341,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "bootstrap",
-        description = "Load Room bootstrap guidance; read-only alias."
+        description = "room.bootstrap 的简短名称别名：读取当前活动 Room 的 bootstrap 指引清单/摘要；只读、不接受 agentId。需要单篇内容时用 bootstrap.read；它与 room.bootstrap 使用相同的路由和错误语义。"
     )]
     async fn bootstrap(&self) -> Result<CallToolResult, ErrorData> {
         self.room_bootstrap().await
@@ -1342,7 +1349,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "bootstrap.read",
-        description = "Read one Room bootstrap guide by id; read-only alias."
+        description = "room.bootstrap.read 的简短名称别名：用 bootstrap 返回的 id 读取一篇活动 Room 指引及内容；只读、不接受 agentId，错误语义与 room.bootstrap.read 相同。"
     )]
     async fn bootstrap_read(
         &self,
@@ -1353,7 +1360,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "skills.list",
-        description = "List local Room skills with active state; read-only discovery."
+        description = "列出活动 Room 工作区中的本地 skills 及 active 标记，适合发现安装内容和后续可运行项；返回 skills 元数据数组和可能的 warnings。只读，不安装/激活或执行 skill，也不接受 agentId。"
     )]
     async fn skills_list(&self) -> Result<CallToolResult, ErrorData> {
         let value = request_active_room(
@@ -1370,7 +1377,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "skills.read",
-        description = "Read one local Room skill package or resource."
+        description = "读取活动 Room 中一个 skill 包；id 必须是 workspace skills/ 下的技能目录，path 可选且相对包目录，不传时返回兼容的 SKILL.md 内容。返回 skill 详情及可选 resource（path、encoding、content、sizeBytes、sha256）；用于查看指令/资源，不会激活或执行 skill，也不接受 agentId。"
     )]
     async fn skills_read(
         &self,
@@ -1395,7 +1402,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "skills.search",
-        description = "Search local Room skill metadata and content; read-only."
+        description = "按不区分大小写的子串搜索活动 Room 本地 skill 的 id、frontmatter、tags 和 SKILL.md 正文；用于从已安装 skill 中发现候选。返回有界匹配元数据，不改状态、不运行代码，也不接受 agentId。"
     )]
     async fn skills_search(
         &self,
@@ -1421,7 +1428,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "skills.active",
-        description = "List active Room skill state, including stale entries; read-only."
+        description = "检查活动 Room 中 skill 的持久激活状态，包括可能已过期/陈旧的条目；适合在运行前确认当前状态。返回 active 状态清单，不修改、不执行 skill，也不接受 agentId。"
     )]
     async fn skills_active(&self) -> Result<CallToolResult, ErrorData> {
         let value = request_active_room(
@@ -1438,7 +1445,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "skills.activate",
-        description = "Mark one valid Room skill active; executes nothing."
+        description = "在活动 Room 持久激活状态中加入指定 skill；用于允许后续 skills.run 使用该技能，不安装包也不执行脚本。返回更新后的激活状态；这是状态写入而非只读操作，不接受 agentId。"
     )]
     async fn skills_activate(
         &self,
@@ -1460,7 +1467,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "skills.deactivate",
-        description = "Remove active state for one Room skill; executes nothing."
+        description = "从活动 Room 持久激活状态中移除指定 skill；这不会卸载 skill 包或充当受管理进程取消。返回更新后的激活状态；属于状态修改，不接受 agentId。"
     )]
     async fn skills_deactivate(
         &self,
@@ -1482,7 +1489,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "skills.install",
-        description = "Start one asynchronous Room skill installation; use install get/cancel for follow-up."
+        description = "在活动 Room 异步安装一个 GitHub 或显式文件源 skill；可能访问外部网络并创建/替换工作区文件，replaceExisting 会归档旧包，且可设置安装后激活。返回 installId、id、status、queued、deduplicated 和 pollAfterMs；立即返回不等于安装完成，使用 skills.install.get/cancel 跟进。安装只准备包，不运行其脚本；不接受 agentId。"
     )]
     async fn skills_install(
         &self,
@@ -1511,7 +1518,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "skills.install.get",
-        description = "Inspect or briefly wait for one Room skill installation; read-only lifecycle inspection."
+        description = "按 installId 查询或短暂等待活动 Room skill 安装任务；返回 status/phase/progress、attempt、source、时间、可选 result/error 和 pollAfterMs，适合跟踪 skills.install。waitSeconds 只等待状态，不改变安装；不存在的任务和路由错误会返回 error，不接受 agentId。"
     )]
     async fn skills_install_get(
         &self,
@@ -1536,7 +1543,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "skills.install.cancel",
-        description = "Request cooperative cancellation of one Room skill installation before commit."
+        description = "请求在提交前协作取消一项活动 Room skill 安装；返回 outcome、changed、status 及可选 phase/cancelRequestedAt。取消是请求而非保证，若安装已进入提交阶段可能返回 too_late/already_terminal；此工具不会卸载已安装包，不接受 agentId。"
     )]
     async fn skills_install_cancel(
         &self,
@@ -1559,7 +1566,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "skills.run",
-        description = "Run an executable from an active Room skill as a managed process."
+        description = "运行活动 Room skill 包 scripts/ 下的指定可执行文件，并作为 Agent 受管理进程追踪；可先用 skills.active/read 确认状态与脚本。返回 processId、status、completedInline 等初始结果，waitSeconds 只控制内联等待；脚本会产生实际副作用，使用 process.status/output/result/cancel 跟进，不接受 agentId。"
     )]
     async fn skills_run(
         &self,
@@ -1907,7 +1914,7 @@ mod tests {
             .find(|tool| tool.get("name").and_then(Value::as_str) == Some("mcp.batch"))
             .expect("mcp.batch descriptor missing");
         assert_eq!(batch["annotations"]["readOnlyHint"], false);
-        assert_eq!(batch["annotations"]["destructiveHint"], false);
+        assert_eq!(batch["annotations"]["destructiveHint"], true);
         assert_eq!(batch["annotations"]["openWorldHint"], true);
         let calls = &batch["inputSchema"]["properties"]["calls"];
         assert_eq!(calls["type"], "array");

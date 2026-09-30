@@ -20,6 +20,8 @@ Standalone 公布的接口面有 Normal 和 Room 两种预设。Normal 预设启
 
 Tunnel stdio 和本地 Unix MCP 使用相同的描述符、schema、确认、路径策略、审计和 Process 注册表。Standalone 调用不接受仅 Hub 支持的 `agentId` 或 `confirmMethod` 字段。
 
+模型通过实时 `tools/list` 中的中文工具和参数说明选择操作、构造输入并识别结果与风险；工具名称、输入结构和执行行为不因文案改变。进程执行、下游 MCP 调用及 tmux 命令/文本输入可能产生删除或覆盖等副作用，因此不能标为仅追加的非破坏性操作。`skills.setActive` 写入激活状态，不是只读；停用操作移除该状态。相关 `readOnlyHint` / `destructiveHint` 据此标记，但仍不替代运行时策略、授权或确认。
+
 | 公开名称 | 用途 / 不执行的操作 | 必填或条件必填输入 | 默认值与范围 | 失败与生命周期 | 接口面一致性 |
 |---|---|---|---|---|---|
 | `agent.info` | 查看本地运行时；不执行操作或修改状态。 | 无必填字段。 | 有界诊断和安全配置概要。 | 只读快照；返回后实时 Process/配置状态可能变化。 | Normal + Room；Tunnel 与本地 Unix 一致。 |
