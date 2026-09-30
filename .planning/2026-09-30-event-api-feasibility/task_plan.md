@@ -10,13 +10,13 @@ Status: complete
 - 隔离运行已有入口，观察当前响应。
 
 ## 阶段二：方案评估
-Status: in_progress
+Status: complete
 - event.list/event.mark/event.get 与固定面板。
 - low/medium/high 展示次数、过期、状态所有权和并发。
 - 内部生产与 stdin/Unix socket 外部接入。
 
 ## 阶段三：结论
-Status: pending
+Status: in_progress
 - 提供可行性、建议架构、风险与待定决策。
 - 不做实现提交；按仓库阶段提交约束只提交调研记录，记录不代表已交付行为。
 

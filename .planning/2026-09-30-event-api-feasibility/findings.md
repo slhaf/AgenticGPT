@@ -40,3 +40,32 @@
 - process history 保留 30 天；install 终态记录受 7 天/100 条约束。事件生命周期必须独立。
 - 现有业务记录无可恢复的 consumer 身份；request_source 不是 owner。
 - Hub AgenticResult、wire 与 REST 是独立合同，不应将 Agent 面板机械加入 Hub。
+
+## 建议 API 与 schema（未实现）
+- event.list：按状态/级别/来源过滤，稳定 cursor 分页；默认 pending，包括自动面板已隐藏的 pending。
+- event.get(eventId)：读取完整事件、业务实体引用、展示和过期状态，不自动处理事件。
+- event.mark(eventIds, status=handled)：明确确认，幂等；先标记，再生成响应面板。
+- 通用 MCP structuredContent 骨架推荐明确迁移为 { result, eventPanel }；普通工具 result 是原结构结果，原本无 structuredContent 的特殊工具不捏造业务 result。
+- 多模态原 content blocks 保留，追加独立简短面板 text；不可仅藏在 _meta，也不可遗漏 special_result。
+- eventPanel 固定存在，含 pendingCount、hiddenCount、items、hasMore；无事件时计数0、items=[]。
+- 应更新统一 output_schema 和所有本地消费者；这是合同迁移，不宣称完全兼容旧 flat 结果。
+
+## 建议生命周期（未实现）
+- 处理状态 pending/handled/expired 与面板曝光计数分开。
+- low（用户原文 lowd）：曝光1次后隐藏，可配置 TTL；medium：3次后隐藏，无自动 TTL；high：直到 handled 一直有展示资格。
+- 曝光只统计自动面板实际选中的事件，不统计 list/get 正文；同一响应 text+structured 两份算1次。
+- 原子选择、计数、mark；采用面板逻辑响应生成计数，不保证真实阅读或 exactly-once 交付。
+- 初始按 Agent 共享 inbox 建议可行，但任何入口客户端都会消耗配额；如要隔离消费者，需稳定 consumerId，不可按临时连接计数。
+- high 全部每次展示与固定有界面板不可同时保证：建议明确 hasMore/总数及 event.list；若要求逐条每次必见，则响应可能无界。
+- low TTL 与展示次数独立；配置策略在创建时形成 expiresAt，避免 reload 改写已创建事件的期限。
+- medium/high pending 不能按时间悄悄删；hidden 也非删除。handled/expired 另有明确历史保留策略。
+
+## 建议生产与接入（未实现）
+- Agent-local EventStore 持久事件与曝光状态，由 AppState 共享，业务终态仍由 process/install owner 拥有。
+- 内部按实体稳定 ID + 终态事件类型去重；同步 inline 已返回的完成不重复作为异步提醒。
+- 重启可靠性需 durable outbox/同事务或基于持久终态的恢复补偿；仅 callback 有崩溃漏报窗口，skill JSON 与 process SQLite 不是同一事务。
+- 外部使用受准入控制的本地事件写入操作；模型侧仍保持三个消费 API，不必默认开放创建工具。
+- stdin 仅由独立注入 CLI 接收一个 JSON 请求，再经现有 Unix MCP 通道提交；不另建裸 socket 协议。
+- 外部记录真实接收时间 receivedAt，允许附来源发生时间 occurredAt；source 与本机调用者身份分开，外部去重键按来源命名空间限定。
+- 外部正文不可信，不作为可执行指令；设载荷/队列上限，满时明确拒绝，不暗中删除 high。
+- Agent-local 面板不意味着 Hub MCP 自动覆盖；如“每次调用”包括 Hub，需同步评估 wire、Hub 封套、OpenAPI 与消费者，不静默遗漏。
