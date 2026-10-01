@@ -93,3 +93,25 @@
 - Returned必须确认实际持久decision=Returned才允许返回原终态；已有NoTerminal时通用Ok不能证明成功。普通调用须等实际flush完成，原coalescer忙时立即return不是屏障。
 - 采用既有Dispatch持有每Hub实例Coordinator，取代static DB-key coalescer，避免测试/实例状态混淆；module和既有文件owner明确分工。
 - Receipt retention源码prune_expired只清result/arguments/process正文，保留identity/status/hash tombstone，不删除agent_runs origin；无须扩展无关retention修改。
+
+## 最终source集成核对
+- Hub post-barrier validate释放agents guard后，prepare及pending.lock await仍在捕获sender发送之前；替换连接能在该间隙发生。要求保持原捕获Agent/Room lease，并在既有agents线性化guard内验证generation/role后同步send，不重选Room或持锁等网络。
+- cargo fmt与workspace test/build首次均被protocol EventMark缺闭合delimiter阻止；feedback同类缺brace已交给owner。尚未有构建二进制，live parity/TUI不能用旧binary冒充本次实现证据。
+
+## 最终反馈独立审阅
+- 四项具体发现已转原owner：run与Awaiting intent分事务允许reconnect orphan repair误判live调用；run-result SQL失败过早丢弃source metadata；部分batch source完成后恢复合法subset被拒绝且会阻塞SSE有序writer；flush→request_agent→request_target→flush形成未boxed async递归。
+- 采用同SQLite事务创建run+Awaiting、保留已认证source metadata供普通调用重试、只在identity-only恢复接受已知subset且保留完整set和原终态flags；feedbackdispatch最小box打破类型递归。
+- all-targets编译诊断其余问题按文件owner修正：serde imports、Hub imports/ProcessCancel arm、outbox RFC3339 parser、两个Vec origin类型、skills test第五参数、HTTP测试使用pending_count。
+- OpenAPI独立静态prepare命令已exit0：本地refs与Draft202012/format合同断言通过。这不是live parity，也不是TUI验证。
+- Room lease额外核对：生产release/claim调用位于lifecycle角色更新、disconnect或replace；既有agents guard保护这些路径。捕获Room target的generation、mode、role同步验证及send足以拒绝上述变更，无需重选activeRoom或扩展路由模型。
+
+## Room既有消费者边界
+- preflight 130项Hub测试中仅room_dispatch_keeps_validated_generation_during_replacement失败：原request赢得agents→active_room lease验证后，旧generation应先收到command再retire，匹配stale reliable Response仍可完成，替换generation不得收到重路由命令。
+- 独立RoomLeaseOpinion确认这不是仅poll数量的incidental断言。无反馈时不应因新agents重获取改业务顺序；真实反馈等待时尚未业务准入，释放agents等待、之后只重验捕获target，失效用既有RoomStateConflict/409而非重选Room。
+- 采用既有per-Agent barrier的同步ready预检，try-lock排除busy flush并persist/check durable+live队列；ready时保留原agents guard直到同事务run/intent、waiter注册与同步enqueue，无网络await持agents。新增busy/真实等待边界测试且保留旧race测试。
+- all-targets check与Agent静态/GIF批次消费者修后测试已exit0；Hub129项通过。完整第三轮尚未开始，当前失败计数2/3。
+
+## 停止时已知未解决项
+- 最终live parity实际失败于Agent事件多传输fixture启动：stderr tunnel_config_required；导致后续事件跨入口/Hubtimeout/恢复/delta场景未执行。已有TUI/Unix实际source smoke不替代上述完整验收。
+- TargetlessExposureReview只读静态确认：Hub dispatch.rs:mcp_list_servers_all_agents (:539–580)发普通McpListServers，之后只取servers并丢掉events；Agent ingress/hub.rs (:1263–1267)正常取panel，event_store.rs (:380–414)已给选中条目增加shown_count。无单一目标的聚合调用因此消耗low一次/medium三次提醒而不公开展示，需显式内部panel-suppression标识且保留targeted发现正常行为。该消费者问题尚未独立runtime重现/修复；不通过Hub删字段补救。
+- workspace tests 758 passed/1 ignored及Agent/Hub build通过，不证明live parity或上述未覆盖路径。失败3/3上限已到，停止，不以tests成功替代完成标准。

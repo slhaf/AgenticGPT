@@ -23,12 +23,12 @@ Status: complete
 持久store/DTO/计次/过期/分页/API核心与行为测试、配置和配置TUI source实现已交付并修正独立审阅发现；尚未运行验收。此阶段提交planning checkpoint，source在跨入口集成后统一提交，避免不完整ABI切换提交。
 
 ## 阶段三：生产与跨入口
-Status: in_progress
-生产者响应仲裁/恢复、外部注入、Agent全MCP、HubMCP/API及wire/OpenAPI和消费者；阶段提交。
+Status: blocked
+生产者响应仲裁/恢复、外部注入、Agent全MCP、HubMCP/API及wire/OpenAPI和消费者source已交付；包括增量source可靠delta反馈。真实Agent/TUI smoke、workspace tests与build已通过，但live parity未通过；source集成提交暂缓，不宣称阶段完成。
 
 ## 阶段四：文档与验收
-Status: pending
-同步相关文档；真实入口、配置TUI；fmt/workspace tests/build/live parity全部exit0；阶段提交。
+Status: blocked
+真实隔离配置TUI保存/读回与同配置实际生产已exit0；相关既有文档已交付并复核。第三轮fmt/workspace tests/build通过，live parity在Agent事件多传输fixture启动报tunnel_config_required；完整失败3/3，按用户停止条件停止修复与重验。
 
 ## 验收与停止
 - cargo fmt --all -- --check
@@ -40,7 +40,7 @@ Status: pending
 - 不改apply-patch/browser-host/发布部署；Console仅必要合同适配；不改用户已有改动。
 
 ## 错误与验收轮次
-URI脚本调用错误已解决；完整验收修复轮次0/3。
+完整验收失败轮次3/3：首轮解析错误；第二轮typed Content新断言编译错误；第三轮fmt通过、workspace tests 758通过/1忽略、Agent/Hub build通过，但live parity的Agent事件多传输启动失败（tunnel_config_required）。达到上限，停止，不重置、不宣称完成；继续修复和重验需要用户明确授权。
 
 ## 用户补充确认的Hub例外
 - 无单一目标Agent的Hub调用不附events。
