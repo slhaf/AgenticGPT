@@ -29,3 +29,8 @@
 ## 工具错误
 - `sh skill://.../resolve-plan-dir.sh`未自动解析URI，exit127；已报告工具问题。随后coreutils realpath得到安装实际路径，使用该路径+PLAN_ID/PWF_PLAN_ROOT成功解析到本任务目录。
 - 未运行构建、测试、格式化；验收修复轮次仍0/3。
+
+## 合同歧义已清除
+- 用户明确选择：Hub无目标Agent不附events；Agent离线/超时缓存或错误返回不附events。
+- 因而不需要Hub镜像事件store或陈旧面板格式，不改现有离线业务语义。
+- 共享接口与文件所有权已映射为核心DTO/store、配置TUI、Agent入口、Producer和Hub入口五个真正独立编辑切片。

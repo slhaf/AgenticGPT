@@ -15,11 +15,11 @@
 - 外部独立CLI接受stdin JSON，提交现有Unix MCP；不污染服务stdin。
 
 ## 阶段一：合同与所有者
-Status: in_progress
+Status: complete
 归档最终合同，核对CodeGraph/LSP、配置TUI与入口/消费者，确定共享接口；提交本阶段记录。
 
 ## 阶段二：核心与配置
-Status: pending
+Status: in_progress
 持久store/DTO/计次/过期/分页/API核心与回归测试；配置和配置TUI；阶段提交。
 
 ## 阶段三：生产与跨入口
@@ -40,8 +40,10 @@ Status: pending
 - 不改apply-patch/browser-host/发布部署；Console仅必要合同适配；不改用户已有改动。
 
 ## 错误与验收轮次
-目前无错误；完整验收修复轮次0/3。
+URI脚本调用错误已解决；完整验收修复轮次0/3。
 
-## 等待合同确认
-- 初步所有者/入口/TUI映射完成；发现无目标Hub响应及离线缓存响应的事件面板合同未定。
-- 按用户批准的停止条件暂停实现，待确认后进入代码阶段。
+## 用户补充确认的Hub例外
+- 无单一目标Agent的Hub调用不附events。
+- Agent离线/请求超时后的Hub错误或缓存业务结果不附events，不报假零、不新增陈旧快照缓存。
+- 其余有明确在线目标Agent的响应仍覆盖同一收件箱。
+- 已确认，继续实现；共享代码接口见local://event-implementation-interfaces.md。
