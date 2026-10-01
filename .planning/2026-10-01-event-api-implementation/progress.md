@@ -125,3 +125,17 @@
 - 该次parity前置OpenAPI refs/schema/format检查、Agent Unix基础process/Skill检查与Standalone HTTP Skill检查实际PASS；不是事件系统完整验收通过。
 - 额外只读review已结束：targetless mcp.listServers聚合仅丢掉公开events，但Agent已增加展示次数。静态路径见findings.md；未运行独立repro，不在停止后修复。
 - 完整失败计数3/3，执行用户hard stop；不再修复/重验、不标goal complete。source/docs保持当前工作区，阶段source集成提交暂缓，仅提交停止planning证据。继续需要用户明确扩展失败修复上限。
+
+## 用户追加：无warning门禁与问题解释
+- 用户明确要求修复cargo警告，并问启动失败及targetless events丢弃具体含义；本次仅授权warning修复，原live parity3/3停止不重置，不修问题1/2。
+- 已修runs.rs测试专用TransactionBehavior import：fixture用限定名称，生产不再导入。CI实际严格门禁为cargo clippy --workspace --all-targets -- -D warnings。
+- 主线程fmt/check通过，strict clippy实际暴露另外8处lint（Hub needless_borrow、Agent两处type_complexity、map_or、obfuscated_if_else、derivable_impls、let_and_return、测试clone slice）。分配两个不重叠owner修SQL row/Process机械lint，父线程修其余；不增加allow属性，不改业务行为。
+- 问题1已定位：parity init_agent无条件设tunnel=null；start_event_agent以standalone+run启动，supervisor validate_standalone强制要求tunnel，故在listener创建前退出。这是fixture启动路径不匹配，不是已证明事件API运行失败。
+- 问题2：aggregate只将Agent返回的servers复制到新agents列表，不返回events；Agent已在panel事务递增shown_count。因此“丢弃”指响应投影舍弃，不是删除event正文或mark handled；low/medium会隐藏但pending仍可list/get。
+
+## 无warning Rust门禁已通过
+- 8处额外Clippy lint已最小修复：两个SQL tuple变具名row（列索引/所有权不变）；其余移除多余借用、is_some_and、明确if/else、派生等价Default、返回collect、from_ref单元素slice。未使用allow/warning压制，未修改问题1/2或公开行为。
+- 主线程cargo fmt --all -- --check、cargo check --workspace、cargo clippy --workspace --all-targets -- -D warnings、cargo test --workspace、Agent/Hub cargo build均exit0且无warning（artifact234）；tests仍758 passed/1 ignored。
+- 本次新binary隔离Unix真实smoke exit0：sleep1/wait0→completed→event.list/get，medium/pending/source process及真实processId/无expiresAt均符合。临时HOME/config/workspace由TemporaryDirectory清理、Agent停止，无throwaway文件保留。
+- 问题1具体为测试fixture把tunnel设null却经Standalone supervisor启动；问题2具体为Hub重构聚合响应只取servers，舍弃events但Agent已计次。仅解释，未在本次扩展原hard stop或修复该两项；整个事件功能仍未完成。
+- 本次为内部等价lint修正，不改变用户文档/API合同，无须追加公共行为文档。source与原未完集成仍保留工作区；本阶段提交planning证据checkpoint。

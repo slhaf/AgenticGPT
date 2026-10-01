@@ -69,3 +69,7 @@ Status: blocked
 ## 阶段二交接
 - Core已补resolved policy tombstone压缩、RFC3339年份上限，Config同步边界；Agent公开event API及外部Unix CLI接入source已实现。
 - 初步producer/Agent/Hub wire source齐备，Hub反馈coordinator/HTTP/OpenAPI与live parity仍在阶段三集成；完整命令/真实TUI尚未运行，验收0/3。
+
+## 用户追加阶段：警告修复与问题解释
+Status: complete
+按用户新授权修复rustc warning及strict Clippy诊断，不压制warning。fmt/check/clippy -D warnings/workspace tests/Agent与Hub build均通过且无warning；新binary隔离Unix进程事件smoke通过。已定位并解释问题1fixture tunnel=null与Standalone run不匹配，以及问题2聚合只投影servers导致events隐藏计次。原live parity失败3/3仍blocked，未重跑、未修问题1/2；本阶段仅planning证据提交，source集成提交继续暂缓。
