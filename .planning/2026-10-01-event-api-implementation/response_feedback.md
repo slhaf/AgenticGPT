@@ -9,9 +9,10 @@
 - AgentMessage::Response追加 `#[serde(default, skip_serializing_if="Vec::is_empty")] event_sources:Vec<EventResponseDisposition>`，只用于内部wire，HTTP/MCP业务JSON不新增此字段。非创建操作vec为空；创建响应逐新实体描述其最终原value是否terminal，跳过deduplicated install重试。
 - HubCommand追加隐藏内部EventSettle { request_id:String, payload:EventSettleRequest }；不注册公开模型工具/HTTP端点，不走自动event panel生成，避免内部metadata反馈消耗展示次数。
 - request_id() match、所有Rust Response构造/匹配以及wire合同消费者同步，Agent入站handler校验origin身份/来源关联。
+- AgentMessage::EventSources { origin, sources:Vec<EventSource> }，内部event.sources；在original reply前崩溃/重连时从仍待仲裁的bound sources恢复身份。来源身份与原reply includesTerminal flags分别保存，不能将活跃重连误当false原reply；反复上报幂等，不伪造业务Response。
 
 ## EventStore追加能力（EventCore）
-- bind_origin(source:&EventSource, origin:&EventOrigin)->Result<()>：在初始Hub创建响应持久handoff前绑定origin；不改source，不改旧资格，不允许绑定冲突。
+- bind_origin(source:&EventSource, origin:&EventOrigin)->Result<()>：producer准入先register、再绑定origin，二者完成后才允许业务副作用；不得等初始Hub创建响应才首次绑定。不改source，不改旧资格，不允许绑定冲突。
 - remote_origin(source:&EventSource)->Result<Option<EventOrigin>>。
 - settle_remote_response(source:&EventSource, origin:&EventOrigin, includes_terminal:bool)->Result<()>：必须验证同源origin匹配，再做一次性Awaiting→Suppressed/AsyncEligible；重复同判定幂等、冲突拒绝。
 - 核心pending_internal_sources仍含远程Awaiting，Producer恢复不能把有remote_origin的Awaiting盲目settle(false)，只能补owner终态snapshot并等Hub反馈。无origin的local Awaiting恢复可按无已提交原响应处理。
@@ -20,7 +21,7 @@
 ## Producer：原value观察与原始创建身份
 - 提供 `initial_response_dispositions(operation:&str,value:&Value)->Result<Vec<EventResponseDisposition>>`纯解析真实creation结果（只有新创建实体、batch逐项，deduplicated install不参与）。includes_terminal判断实体terminal state/终态说明，不看completedInline/完整stdout/result预算；后续get/status/list不能参与。
 - 本地settle_initial_response可调用此纯helper再settle。
-- Agent Hub初始dispatch后先用helper取sources，bind_origin，再持久mark_completed原业务value，回包event_sources；不做本地settle。原创建完成receipt replay从原value重建同source metadata，但仍等待Hub最终判定；原响应标识必须来自该receipt command，不通过后续查询捏造。
+- Agent Hub入口将origin经RequestContext/准入参数传给producer；在实体副作用前register并bind。dispatch后的helper仅取sources metadata，再持久mark_completed完整原业务value（含唯一panel），回包event_sources；不做本地settle。原创建完成receipt replay从原value重建同source metadata，但仍等待Hub最终判定；原响应标识必须来自该receipt command，不通过后续查询捏造。
 - recovery先owner自身恢复/终态补录；local与remote Awaiting分开，不扫描所有旧历史注册新事件。
 
 ## Hub：最终返回决策/outbox（EventHubFeedback新模块owner，HubIngress接线owner）
@@ -31,6 +32,10 @@
 - 通过Hub私有SQLite新增小型outbox/决策表，无用户数据破坏；初始化/restart把旧Awaiting原请求视为NoTerminal（旧客户端响应不再存在），等sources或已到sources后反馈。
 - pending反馈在Agent连接、收到metadata、原响应决策、后续适当可靠请求时驱动flush；失败保留，已ack可收缩正文但保留必要去重身份。不要持DB锁await网络；不要新建用户主动推送。
 - 新模块API由EventHubFeedback与EventHubIngress直接message精确对齐；新module/root/sql-init/dispatch/lifecycle接线只由HubIngress编辑。
+- replayable creation若缺intent，发送前先修复为NoTerminal；修复失败不发送，覆盖run/intent之间崩溃窗口。
+- 原调用owner guard在durable intent后、第一个await/副作用前建立；明确失败及未disarm Drop登记小pending NoTerminal。仅实际Returned提交确认后disarm并立即返回原值；提交失败只返入口error，不返原终态。
+- Dispatch持有每Hub实例Coordinator；短同步锁缓存NoTerminal身份及必要source metadata，DB恢复后重试。metadata写失败不得log后丢弃；没有writer时由持久Awaiting保证重启恢复。
+- 普通明确目标/同Room lease调用在公共业务/panel前等待实际反馈drain完成；内部EventSettle绕过屏障。现有flush忙时return不算完成，需可等待barrier/串行锁；不持DB/队列锁await网络。
 
 ## Owner终态补录证据（Producer新增文件所有权）
 - Producer现在同时拥有storage/process_history.rs的事件小outbox扩展及protocol/skill_bootstrap.rs中私有SkillInstallJobRecord pending-marker。

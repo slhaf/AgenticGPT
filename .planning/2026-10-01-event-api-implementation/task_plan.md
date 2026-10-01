@@ -19,11 +19,11 @@ Status: complete
 归档最终合同，核对CodeGraph/LSP、配置TUI与入口/消费者，确定共享接口；提交本阶段记录。
 
 ## 阶段二：核心与配置
-Status: in_progress
-持久store/DTO/计次/过期/分页/API核心与回归测试；配置和配置TUI；阶段提交。
+Status: complete
+持久store/DTO/计次/过期/分页/API核心与行为测试、配置和配置TUI source实现已交付并修正独立审阅发现；尚未运行验收。此阶段提交planning checkpoint，source在跨入口集成后统一提交，避免不完整ABI切换提交。
 
 ## 阶段三：生产与跨入口
-Status: pending
+Status: in_progress
 生产者响应仲裁/恢复、外部注入、Agent全MCP、HubMCP/API及wire/OpenAPI和消费者；阶段提交。
 
 ## 阶段四：文档与验收
@@ -65,3 +65,7 @@ URI脚本调用错误已解决；完整验收修复轮次0/3。
 - 已完整恢复objective.md五段目标（排除过时工具阻塞说明），原定3轮上限及0/3计数不变。
 - interfaces.md、response_feedback.md已保存为本任务可提交的共享合同，local://仅作会话辅助。
 - 解除goal工具阻塞，通知原文件owner恢复，不重做已完成设置、不运行未集成代码的验收。
+
+## 阶段二交接
+- Core已补resolved policy tombstone压缩、RFC3339年份上限，Config同步边界；Agent公开event API及外部Unix CLI接入source已实现。
+- 初步producer/Agent/Hub wire source齐备，Hub反馈coordinator/HTTP/OpenAPI与live parity仍在阶段三集成；完整命令/真实TUI尚未运行，验收0/3。

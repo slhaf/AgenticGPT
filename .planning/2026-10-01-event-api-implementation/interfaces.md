@@ -14,7 +14,7 @@
 - EventMarkRequest { #[serde(default)] agent_id:String, event_ids:Vec<String> }。
 - EventListResponse { items:Vec<EventListItem>, next_cursor:Option<String> }；EventMarkResponse { handled_ids:Vec<String>, not_found_ids:Vec<String> }。
 - EventPanel { current:String, new:Vec<BTreeMap<String,String>> }；Default是计数全零+空new；panel中key="eventId | 摘要", value="severity | RFC3339日期"。
-- EventInjectRequest（只给受权本地写入入口，不注册模型创建工具）{ message:String, severity:Option<EventSeverity>, #[serde(rename="ref")] reference:String }，deny_unknown_fields；来源kind固定external、createdAt服务端生成。
+- EventInjectRequest（只给受权本地写入入口，不注册模型创建工具）{ message:String, severity:Option<EventSeverity>, #[serde(rename="ref")] reference:String }，deny_unknown_fields；来源kind固定external、createdAt服务端生成。privateevent.inject仅回注入record/ack，不生成panel/消耗曝光；否则low会被CLI注入确认吞掉，无法在下一次公开工具调用提醒。
 - HubCommand沿现有模式：EventList/EventGet/EventMark { request_id:String, payload:对应请求DTO }；内部EventPanel { request_id:String }（无agent_id字段，目标由request_agent绑定）。Hub集成任务拥有envelopes及request_id() exhaustive match。
 
 ## EventStore（核心任务拥有storage/event_store.rs；Agent集成任务拥有装配/所有者/生产者）
@@ -26,14 +26,14 @@
 - register_internal(source:&EventSource, policy:&InternalEventPolicy)->Result<()>：实体产生副作用前持久创建响应仲裁记录，幂等，初始AwaitingResponse；不得覆盖旧实体的已判定状态或已通知终态。
 - record_internal_completion(source:&EventSource, event_type:&str, message:&str, at:DateTime<Utc>)->Result<()>：持久终态摘要/类型，去重；若响应尚未判定暂存，若AsyncEligible则按snapshot policy插入事件，若Suppressed/off则不创建。
 - settle_response(source:&EventSource, includes_terminal:bool)->Result<()>：在真实原响应handoff之前持久判定；true Suppressed（不创建），false AsyncEligible（已有completion立即创建）。不能用是否spawn或finish先后来决定。
-- pending_internal_sources()->Result<Vec<EventSource>>：用于启动恢复所有AwaitingResponse（含已有completion）以及AsyncEligible尚缺completion的记录。Awaiting在恢复时可settle false（未持久响应判定，未已返回终态）。仲裁记录必须避免重放已通知/已处理事件；保留必要去重元数据，但不无限留无用正文。
+- pending_internal_sources()->Result<Vec<EventSource>>：用于启动恢复所有AwaitingResponse（含已有completion）以及AsyncEligible尚缺completion的记录。仅无remote origin的local Awaiting在恢复时可settle false；remote Awaiting只能补终态并等待Hub反馈。仲裁记录必须避免重放已通知/已处理事件；保留必要去重元数据，但不无限留无用正文。
 - 来源创建时固定，事件API不可改变来源或操作实体。TTL创建事件时确定；处理/过期历史7天清理，不自动清理pending medium/high。
 - 需要有永久测试证明隐藏仍计数、32Unicode边界、mark幂等/unknown、TTL边界、同级排序/固定cap、分页、并发低次数、重开恢复、完成早/晚于响应仲裁/抑制/off、source不可伪造。无mock echo/source-text/wiring测试。
 
 ## EventsConfig（配置任务拥有config及配置TUI；Store只使用独立policy）
 - config.events: EventsConfig { low_ttl_seconds:u64(default86400), internal_overrides:BTreeMap<String,EventNotificationLevel> }，camelCase default/deny_unknown_fields。
 - EventNotificationLevel Low/Medium/High/Off，serde lowercase；fn severity(self)->Option<EventSeverity>。
-- EventsConfig::internal_policy()->crate::event_store::InternalEventPolicy，用来在操作准入时snapshot；既有config构造/validation/reload/safe summary/CLI registry/template同步。
+- EventsConfig::internal_policy()->crate::event_store::InternalEventPolicy，用来在操作准入时snapshot；既有config构造/validation/reload/CLI registry/template同步。SafeConfigSummary刻意不变，它不是完整配置；不把覆写map复制到Hello或agent.info，完整字段由config show/keys/TUI暴露。
 - 稳定配置事件名process.completed/failed/rejected/cancelled/timed_out/detached/unknown_after_restart/skipped；skill_install.completed/failed/cancelled。按生产者实际可达终态命名。默认全low；未知事件名须给明确验证错误或沿现有map约定（先报告，不默默忽略无效配置）。
 - 配置TUI只是选择这些覆写值，并可恢复未覆写默认；不是运行时事件管理。复用既有选择/保存锁/备份流程。
 

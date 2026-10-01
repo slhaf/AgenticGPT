@@ -66,3 +66,30 @@
 - 本轮未缺任何访谈字段：命令、真实入口/TUI验证、3轮、范围与停止条件均已逐项确认；用户明确不重新访谈。
 - 停点已读，24个tracked文件暂停diff +1457/-59；未追认这些改动完成或编译可用。
 - 共享接口现保存在本任务interfaces.md/response_feedback.md，最新反馈合同覆盖旧Agent-only判据。
+
+## 恢复后的跨层不变量核对
+- dispatch原实现先prepare run、再send、最后waiter timeout；Agent原实现dispatch完成后才ledger mark_completed。新origin必须在producer准入、副作用之前绑定，而非最终值解析时首次绑定。
+- 已通知AgentIngress/Producer协调RequestContext传origin，HubIngress/Feedback在发送前持久prepare。反馈命令不参与原调用仲裁、不消耗面板。
+- parity要求真实Agent配合loopback WebSocket延迟relay证明Hubtimeout/迟到结果，不能仅fake Agent回声替代生产证明。
+
+## Agent归属边界
+- CodeGraph核对PrivateStatePaths按Agent key分目录；raw安全ID与id-<hash>命名空间可别名，现有Config未限制到可证明无别名的子集。
+- 仅新增trusted Agent身份到prepare路径并由EventStore私有owner metadata拒绝不同Agent混用；不迁移/重设计既有私有状态目录。
+- AgentIngress拥有此prepare边界及通用fixture，Core拥有DB校验，Producer更新自身fixture。此为事件隔离要求，不扩展其他存储修复。
+
+## 核心独立审阅发现
+- CoreReview发现：migration锁外读取user_version的双连接竞态；Duration::seconds超大TTL panic；remote测试局部policy遮蔽helper的编译错误。已转交Core/Config修正，未跑验收，计数0/3。
+- Context7三次查询取得Chrono原始API事实：seconds超出±i64::MAX/1000会panic，try_seconds返回None；checked_add_signed在日期超界返回None。来源：https://docs.rs/chrono/latest/chrono/struct.TimeDelta.html 及 https://docs.rs/chrono/latest/chrono/struct.NaiveDateTime.html；原始artifact 95/93。
+- Hub lifecycle同步await可靠消息处理；feedback网络等待须脱离该reader路径并禁止持DB/agents锁，已通知两Hub owner。
+- reviewer向agent://发消息被readonly拒绝已报告工具问题；主线程转发发现，未因此丢失修正。
+
+## 最终投影核对
+- HTTP process.exec当前成功路径直接Json(value)，Room skills.install/run将request_active_room结果交给result_from_value；继续核对公共封套是否丢终态。
+- Hub owners协调finalize内部API从bool变Option dispositions以支持最终投影判据，非公开API变化；None=NoTerminal、Some=Returned且按source验证，决策与raw metadata均不可被晚结果改写。
+- 创建投影实际保留：HTTP process.exec与mcp.callTool/batch直接Json(value)，Room result_from_value调用AgenticResult保留完整structuredContent及text（含error）。已告知HubIngress：这些入口成功waiter判定Returned有效，无须额外投影框架；detail/cache错误投影仍要保留events或按离线例外省略。
+
+## 活进程持久失败与公共调用屏障
+- 独立EventDurabilityOpinion确认：原调用owner明确error/drop登记pending NoTerminal，已持久Awaiting支撑crash恢复；不能按waiter暂时缺席推断。需要保留小source dispositions以重试metadata，不保存业务输出正文。
+- Returned必须确认实际持久decision=Returned才允许返回原终态；已有NoTerminal时通用Ok不能证明成功。普通调用须等实际flush完成，原coalescer忙时立即return不是屏障。
+- 采用既有Dispatch持有每Hub实例Coordinator，取代static DB-key coalescer，避免测试/实例状态混淆；module和既有文件owner明确分工。
+- Receipt retention源码prune_expired只清result/arguments/process正文，保留identity/status/hash tombstone，不删除agent_runs origin；无须扩展无关retention修改。
