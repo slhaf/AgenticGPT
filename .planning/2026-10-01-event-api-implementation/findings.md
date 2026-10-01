@@ -34,3 +34,29 @@
 - 用户明确选择：Hub无目标Agent不附events；Agent离线/超时缓存或错误返回不附events。
 - 因而不需要Hub镜像事件store或陈旧面板格式，不改现有离线业务语义。
 - 共享接口与文件所有权已映射为核心DTO/store、配置TUI、Agent入口、Producer和Hub入口五个真正独立编辑切片。
+
+## 验收依赖与文档定位
+- 系统python3缺jsonschema；已有target/contract-venv/bin/python已实测可import yaml/jsonschema，无需安装新依赖。最终运行目标命令时使用该venv的PATH。
+- find文档语义检索因judge服务账户拒绝全失败；改用已知文档的标题/字面grep和精确范围，不把无hits当不存在。
+- 文档更新入口：interfaces.md端点列表及Apps MCP封套、tool-contract-matrix.md表面矩阵、configuration两份Optional/Toplevel段、standalone-runtime工具列表及存储权威、operations实时reload段。
+- 文档正式更新安排在真实实现冒烟证据之后，不把未验证行为提前写成承诺。
+
+## 共享装配和高风险仲裁
+- CodeGraph核对main.rs：Agent是平铺#[path]module，统一crate::event_store与crate::event_notifications；已纠正Core提出的crate::storage路径，不新增第二模块约定。
+- wire扩展只在既有HubCommand，Core仅提供DTO，禁止额外EventCommand enum。
+- Producer与入口共享settle_initial_response(state, operation, value)及recover_event_notifications；初始资格sticky，get/status/list不能改写。
+- 高风险独立意见：EventDurabilityOpinion审阅分离持久层间crash窗口、原终态state与completedInline/大小预算判据；不扩大成新总线或主动推送。
+
+## 独立高风险审阅与最终入口选择
+- 读EventDurabilityOpinion全报告，直接源码核对Hub dispatch :43-81及:189-196：timeout移除waiter，迟到结果仍持久化但不交给原调用方。
+- 用户明确选择以最终入口返回为准，因此废弃仅Agent生成value/receipt就suppress的Hub方案，新增可靠disposition反馈。
+- EventHubFeedback拥有新Hub小型决策/outbox模块；HubIngress拥有其dispatch/db/root/lifecycle接线及wire变更。
+- Core拥有Origin/Disposition/SettleDTO与bind/remote-settle；Producer新增ProcessHistory同事务completion outbox及Install私有pending marker；Agent入口拥有transportledger必要只读/关联接口。
+- terminal state与终态描述已在原响应告知便可suppress；completedInline=false仅因预算/TooLarge不等于异步。安装deduplicated重放不能抢先判定原调用。
+- 7天仅清事件history正文，source/origin/已通知等小tombstone不能随之删除导致旧receipt复活。
+
+## goal运行时阻塞证据
+- goal(drop)返回status=dropped后，工具从runtime消失；xd://goal read/create皆No such tool，eval tool.goal(get)报Unknown tool from js runtime。
+- 已向xd://report_issue报告；在已知CLI/RPC/SDK文档检索goal恢复路由无匹配。
+- 全部7个实现owner确认HOLD：部分源已写但尚未集成/编译；详细文件与剩余项在pause_handoff.md。没有验收成功声明。
+- 最新objective.md保留用户全部规则，加入最终入口timeout/late-result判定与Hub恢复验收；3轮计数仍0。
