@@ -29,3 +29,14 @@
 - 已向所有owner广播HOLD；Core/Config/Producer/AgentIngress/HubIngress/HubFeedback/Parity全部确认停止编辑和检查。
 - 保存objective.md（五段目标）及pause_handoff.md（精确未完成状态），只提交planning记录，source不做完成提交。
 - 当前无active goal可用；等待宿主恢复工具后继续，不重做已确认访谈。验收修复0/3。
+
+## 用户恢复目标
+- goal(create)成功返回active，五项授权/验收/范围/3轮/停止条件此前已确认，本次不重复访谈。
+- 读取本任务四份记录与pause handoff、解析固定PLAN_ID目录，初始paused diff已记录。
+- 共享接口复制到interfaces.md及response_feedback.md，成为可提交依据；现有local文件保持辅助，不是唯一规范。
+- 准备解除全部外部工具阻塞，并通知原owner RESUME；验收修复0/3。
+
+## 恢复执行接线
+- goal(get)确认active；七个原owner收到RESUME（EventConfig由parked恢复），沿原文件所有权继续。
+- 所有暂停todo已解除，core任务active；缺失origin helpers、ConfigValueKind旧variant和producer旧草案优先补齐。
+- 本次无build/test/formatter执行；完整验收修复仍0/3。

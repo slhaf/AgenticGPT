@@ -19,7 +19,7 @@ Status: complete
 归档最终合同，核对CodeGraph/LSP、配置TUI与入口/消费者，确定共享接口；提交本阶段记录。
 
 ## 阶段二：核心与配置
-Status: blocked
+Status: in_progress
 持久store/DTO/计次/过期/分页/API核心与回归测试；配置和配置TUI；阶段提交。
 
 ## 阶段三：生产与跨入口
@@ -46,12 +46,12 @@ URI脚本调用错误已解决；完整验收修复轮次0/3。
 - 无单一目标Agent的Hub调用不附events。
 - Agent离线/请求超时后的Hub错误或缓存业务结果不附events，不报假零、不新增陈旧快照缓存。
 - 其余有明确在线目标Agent的响应仍覆盖同一收件箱。
-- 已确认，继续实现；共享代码接口见local://event-implementation-interfaces.md。
+- 已确认，继续实现；共享代码接口见interfaces.md。
 
 ## 用户补充确认：最终入口响应为权威
 - 用户选择“最终入口返回”：Hub原调用超时而未包含终态，迟到Agent终态仍须产生事件；不是以Agent已生成terminal值为准。不承诺客户端阅读确认。
 - Hub持久记录每original run的Returned/NoTerminal判定并可靠反馈Agent；Agent远程起源Awaiting不自行suppress或恢复false。
-- 新内部wire metadata、来源origin绑定与反馈outbox接口见local://event-response-feedback.md；不改变公开三个event API，不增加主动模型推送。
+- 新内部wire metadata、来源origin绑定与反馈outbox接口见response_feedback.md；不改变公开三个event API，不增加主动模型推送。
 - 验收新增真实Hubtimeout→lateAgentterminal→下一次在线调用一条event，以及Hub/Agentrestart未决仲裁恢复；其他已定合同、范围和3轮上限不变。
 
 ## 外部工具阻塞：goal无法重新激活
@@ -59,3 +59,9 @@ URI脚本调用错误已解决；完整验收修复轮次0/3。
 - 所有7个实现owner已确认HOLD；当前代码有未完成接线和符号，未编译/验收，不能当作可用实现。
 - 最新完整五段目标保存在objective.md，详细暂停交接pause_handoff.md；需宿主恢复goal工具后重建active目标，再继续。
 - 此为外部工具阻塞，完整验收修复轮次仍0/3；未提交未完成source作为完成交付。
+
+## 目标与执行已恢复
+- 用户重新启用guided-goal并明确要求载入已确认目标、无需重新访谈；goal(create)已成功返回active。
+- 已完整恢复objective.md五段目标（排除过时工具阻塞说明），原定3轮上限及0/3计数不变。
+- interfaces.md、response_feedback.md已保存为本任务可提交的共享合同，local://仅作会话辅助。
+- 解除goal工具阻塞，通知原文件owner恢复，不重做已完成设置、不运行未集成代码的验收。

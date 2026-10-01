@@ -60,3 +60,9 @@
 - 已向xd://report_issue报告；在已知CLI/RPC/SDK文档检索goal恢复路由无匹配。
 - 全部7个实现owner确认HOLD：部分源已写但尚未集成/编译；详细文件与剩余项在pause_handoff.md。没有验收成功声明。
 - 最新objective.md保留用户全部规则，加入最终入口timeout/late-result判定与Hub恢复验收；3轮计数仍0。
+
+## 恢复证据
+- 用户再次guided-goal载入objective.md；主线程goal(create)返回Status active。
+- 本轮未缺任何访谈字段：命令、真实入口/TUI验证、3轮、范围与停止条件均已逐项确认；用户明确不重新访谈。
+- 停点已读，24个tracked文件暂停diff +1457/-59；未追认这些改动完成或编译可用。
+- 共享接口现保存在本任务interfaces.md/response_feedback.md，最新反馈合同覆盖旧Agent-only判据。
