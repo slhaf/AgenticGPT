@@ -139,3 +139,49 @@
 - 本次新binary隔离Unix真实smoke exit0：sleep1/wait0→completed→event.list/get，medium/pending/source process及真实processId/无expiresAt均符合。临时HOME/config/workspace由TemporaryDirectory清理、Agent停止，无throwaway文件保留。
 - 问题1具体为测试fixture把tunnel设null却经Standalone supervisor启动；问题2具体为Hub重构聚合响应只取servers，舍弃events但Agent已计次。仅解释，未在本次扩展原hard stop或修复该两项；整个事件功能仍未完成。
 - 本次为内部等价lint修正，不改变用户文档/API合同，无须追加公共行为文档。source与原未完集成仍保留工作区；本阶段提交planning证据checkpoint。
+
+## 用户授权继续两项修复
+- 用户明确选择修复两项并追加最多3轮完整验收；历史失败3/3保留，新增失败0/3。原目标/验收范围不变，未标goal complete。
+- AggregateExposureRepair交付内部McpListServers suppressEventPanel默认false/false省略、aggregate唯一true；Agent先判flag再dispatch，跳过panel生成与计次，公开schema不增加该参数。
+- 主线程Rust preflight严格Clippy通过、Agent真实dispatch exposure回归通过；新protocol测试错把已有wire tag mcpListServers写为mcp.listServers，已交owner仅修新断言/输入，保留既有序列化合同。这不是新增完整验收失败，新增计数仍0/3。
+- EventFixtureRepair仍独占parity脚本，修trusted stdio-worker启动及实际Hub聚合曝光验证；等待交付后冻结全部source再运行完整CI/live。
+
+## 授权后完整第一轮开始
+- Fixture已冻结：start_event_worker统一trusted stdio-worker，临时tunnel配置只用env假key且禁download/reporting；restart复用同helper。实际聚合live回归用medium最后一次机会与low第一次机会验证不能被aggregate吞掉。
+- Protocol owner发现之前编辑误删原McpListServers serde rename，已恢复原mcp.listServers tag；不是改旧wire合同迁就新测试。所有owner再次冻结。
+- 主线程开始fmt/check/strict Clippy/workspace tests/Agent与Hub build/既有venv PATH live parity完整链。新增完整失败0/3（历史3/3保留），等待实际结果，不提前宣称成功。
+
+## 授权后完整第一轮结果：新增失败1/3
+- fmt/check/strict Clippy均通过，无warning；workspace tests实际760 passed/1 ignored；Agent与Hub build通过。
+- 实际Agent stdio/Unix/HTTP事件gate已PASS：共享inbox、external固定来源、Unicode摘要、曝光/cap/order、get/mark、inline抑制、async low完成及durable reopen。
+- 接着policy-reload fixture启动失败：嵌套events-policy-reload/event-policy-reload使私有Unix socket超过路径上限，stderr local_mcp_socket_path_too_long。属于测试目录布局，不放宽生产path guard；原owner修所有event fixture运行路径的有界隔离布局。
+- 新增完整失败1/3，历史3/3保留。后续Hubtimeout/restart/delta尚未实际到达，不能宣称全通过；修后先定点policy/reload及Hub诊断，再完整第二轮。
+
+## 第二轮前定点诊断与冻结
+- event fixture短独立HOME/runtime位于顶层临时树覆盖所有start_event_agent调用；保持同fixture的restart state，生产path guard不变。
+- 首次定点reload已启动真实worker，因旧sleep30的HTTP waitSeconds30超过client默认timeout而失败；只给该调用45秒clienttimeout，helper可选timeout默认保持原值，无全局放宽。
+- 主线程定点真实reload与TTL均exit0：旧准入low、新准入medium snapshot及TTL过期/保留expired历史通过。已清理隔离worker与临时目录。
+- 全部source冻结，开始授权后完整第二轮fmt/check/strict Clippy/test/build/live；新增完整失败仍1/3，历史3/3保留。定点诊断不代替整链。
+
+## 授权后完整第二轮结果：新增失败2/3
+- Rust全部门禁仍无warning通过，760 tests/1 ignored，build通过。实际多传输共享inbox/reopen、live policy snapshot reload、内部off策略均PASS；Hub Full normal/Room已实际连接。
+- live parity失败于delayed-response Agent receipt replay：relay已观察2次EventSettle，新测试要求至少3次。仅此输出不能证明运行时丢反馈；ReceiptReplayRepair独占脚本追溯持久held ACK、Agent ledger主动重放与Hub重发竞态，不允许简单降低计数掩盖恢复。
+- 新增完整失败2/3，历史3/3保留。最终完整第三轮前必须定点证明late/restart、delta/crash及targetless实际场景；仍保持全目标未完成。
+
+## 最后一轮前实际Hub诊断
+- 定点late/restart已实际PASS：held ACK、Agent completed Response主动重放、匹配run/request/hash与Hub outbox ACK、首次公开一条事件及正常inline抑制。无需保证第3个EventSettle/TransportAck先于已完成Response重放。
+- 实际process.batch primary/delta补漏及各自ACK、公开A/B各一事件已PASS；临时Hub恢复checkpoint基于真实source，live A/B admission竞态仍明确[INFERENCE]。
+- Crash gate确已到达durable completion+started ledger checkpoint；relay collector错用event_sources而真实wire为event.sources，已修。定点后续又遇到要求第二次settle而忽略completed Response主动重放，唯一script owner修为真正held Response/public barrier证据，不减弱恢复标准。
+- Hub事件fixture假定mode=hub存在Unix listener，实际local_external_event返回local_mcp_unavailable。该模式既有run_hub只连接Hub，不提供LocalMcpListener；为避免扩展入口，已撤销拟议新Hub-private Unix ingress，保留原产品范围。fixture改由真实Hub可达process终态生产者seed等级事件，外部来源/Unix注入继续由受支持Agent入口验证。
+- 上述均为最后完整轮前定点诊断，新增完整失败仍2/3（历史3/3保留）；没有修改生产确认/path限制，也未宣称完整通过。
+
+## 最后一轮前诊断完成
+- 真实Hub producer seed、跨MCP/HTTP inbox、无目标隔离及targetless不消费low/medium曝光均实际PASS；未增加Hub模式Unix入口。
+- Crash gate实际PASS：原业务run与私有EventSettle run身份独立，held completed Response按后者精确匹配；公开event.list在反馈ACK前阻塞，释放后返回唯一事件。完成正文/时间从持久源转移到公开event.get后仍精确保留，源记录的清理不误判为数据丢失。
+- late/restart、delta恢复与crash均已有定点真实证据；完整第三轮开始。新增完整失败保持2/3，历史3/3保留；若本轮失败停止，不作第四轮。
+
+## 授权后完整第三轮：达到新增停止条件
+- 最终命令链fmt --check、cargo check --workspace、strict Clippy -D warnings均exit0且无warning。
+- cargo test --workspace exit101：Agent suite 561 passed/1 failed/1 ignored。stdio_server::tests::file_edit_apply_patch_revalidates_external_change_before_commit在stdio_server_tests.rs:3418断言失败，实际error字段Null，期望file_revision_conflict；原始输出artifact://276。
+- &&命令链因此未执行本轮Agent/Hub build及完整live parity。此前定点Hub聚合/晚到/重启/delta/crash及TUI证据保持有效，但不能替代本轮完整验收。
+- 新增完整失败3/3，历史3/3保留。按用户停止条件不再调查修复/重验，不标goal complete；source/docs继续保留工作区，阶段三/四集成提交暂缓，仅提交停止证据。继续需用户明确追加授权。

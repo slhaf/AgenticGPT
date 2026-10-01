@@ -115,3 +115,8 @@
 - 最终live parity实际失败于Agent事件多传输fixture启动：stderr tunnel_config_required；导致后续事件跨入口/Hubtimeout/恢复/delta场景未执行。已有TUI/Unix实际source smoke不替代上述完整验收。
 - TargetlessExposureReview只读静态确认：Hub dispatch.rs:mcp_list_servers_all_agents (:539–580)发普通McpListServers，之后只取servers并丢掉events；Agent ingress/hub.rs (:1263–1267)正常取panel，event_store.rs (:380–414)已给选中条目增加shown_count。无单一目标的聚合调用因此消耗low一次/medium三次提醒而不公开展示，需显式内部panel-suppression标识且保留targeted发现正常行为。该消费者问题尚未独立runtime重现/修复；不通过Hub删字段补救。
 - workspace tests 758 passed/1 ignored及Agent/Hub build通过，不证明live parity或上述未覆盖路径。失败3/3上限已到，停止，不以tests成功替代完成标准。
+
+## 追加授权后停止：新增完整失败3/3
+- 原启动及targetless吞曝光问题已修并获得实际Agent/Hub入口证据。Hub无新增Unix入口；事件fixture用真实process终态生产者。Crash反馈检查按私有settle身份匹配completed Response，公开事件正文/创建时间保留已实测。
+- 最终第三轮strict Rust门禁无warning，但workspace test失败于file_edit_apply_patch_revalidates_external_change_before_commit（stdio_server_tests.rs:3418），error实际Null而非file_revision_conflict。此次未继续诊断或重跑，原因尚未确定。
+- 本轮build/live parity被&&阻断；整体仍未完成，历史3/3及新增3/3均保留。此前定点恢复证据不替代整链成功。

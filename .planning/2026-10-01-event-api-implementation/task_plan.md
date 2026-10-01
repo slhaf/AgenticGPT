@@ -23,12 +23,12 @@ Status: complete
 持久store/DTO/计次/过期/分页/API核心与行为测试、配置和配置TUI source实现已交付并修正独立审阅发现；尚未运行验收。此阶段提交planning checkpoint，source在跨入口集成后统一提交，避免不完整ABI切换提交。
 
 ## 阶段三：生产与跨入口
-Status: blocked
+Status: in_progress
 生产者响应仲裁/恢复、外部注入、Agent全MCP、HubMCP/API及wire/OpenAPI和消费者source已交付；包括增量source可靠delta反馈。真实Agent/TUI smoke、workspace tests与build已通过，但live parity未通过；source集成提交暂缓，不宣称阶段完成。
 
 ## 阶段四：文档与验收
-Status: blocked
-真实隔离配置TUI保存/读回与同配置实际生产已exit0；相关既有文档已交付并复核。第三轮fmt/workspace tests/build通过，live parity在Agent事件多传输fixture启动报tunnel_config_required；完整失败3/3，按用户停止条件停止修复与重验。
+Status: in_progress
+历史完整验收3/3失败已保留；追加授权的新增完整验收也已失败3/3，达到停止条件。真实隔离TUI及定点Agent/Hub证据保留，整体目标未完成；不再修复重验，源代码集成与文档完成提交暂缓。
 
 ## 验收与停止
 - cargo fmt --all -- --check
@@ -73,3 +73,10 @@ Status: blocked
 ## 用户追加阶段：警告修复与问题解释
 Status: complete
 按用户新授权修复rustc warning及strict Clippy诊断，不压制warning。fmt/check/clippy -D warnings/workspace tests/Agent与Hub build均通过且无warning；新binary隔离Unix进程事件smoke通过。已定位并解释问题1fixture tunnel=null与Standalone run不匹配，以及问题2聚合只投影servers导致events隐藏计次。原live parity失败3/3仍blocked，未重跑、未修问题1/2；本阶段仅planning证据提交，source集成提交继续暂缓。
+
+## 用户授权继续：两项修复与完整验收
+Status: blocked
+用户选择“修复两项，再允许最多3轮完整验收”。历史3次失败不重置；新增完整失败0/3。两个不重叠owner分别修parity多传输worker启动及live曝光覆盖、Rust内部聚合McpListServers不生成panel机制/所有caller与行为回归。主线程唯一fmt/check/clippy/test/build/live/TUI证据和commit owner；全部原目标及安全边界保留。
+
+## 授权后验收计数
+新增完整失败3/3：第一轮policy-reload临时socket路径过长；第二轮Hub delayed-response receipt replay检查误要求第3个settle；第三轮fmt/check/strict Clippy无warning通过，但workspace test的file_edit_apply_patch_revalidates_external_change_before_commit断言失败（Null != file_revision_conflict），命令链未到build/live parity。历史3次失败不重置，按授权上限停止，未标目标完成。
