@@ -57,7 +57,7 @@ ChatGPT Actions 或 Apps MCP
 - 支持本地桌面确认，以及可选的 Hub 中继 ntfy 确认。
 - 可选集成 bubblewrap 沙箱。
 - 下游 MCP 参数/结果有界；支持按精确 request-id 取消；无法证明远端终止时如实返回 `detached` 状态。
-- Room 引导、日记/笔记工具、公开来源的 Skill 安装、受管 Skill 执行和 tmux 持久工作区。
+- 每个 Agent 独立的持久事件收件箱，提供有界提醒及显式 list/get/mark；接口契约见[接口参考](docs/interfaces.md#持久事件收件箱)。
 - 可选 Rust Hub 提供 Actions OpenAPI、兼容 Apps 的 `/mcp`、OAuth shim、HTTP API、WebSocket/SSE Agent、历史记录、报告和通知。
 
 ## 仓库结构

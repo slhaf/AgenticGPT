@@ -24,11 +24,11 @@ Status: complete
 
 ## 阶段三：生产与跨入口
 Status: complete
-生产者响应仲裁/恢复、外部注入、Agent全MCP、HubMCP/API、wire/OpenAPI及全部消费者已集成；五轮授权第2轮完整验收通过，真实跨入口/恢复/Room业务错误与缓存例外均通过，开始提交本阶段源代码。
+生产者响应仲裁/恢复、外部注入、Agent全MCP、HubMCP/API、wire/OpenAPI及全部消费者已集成；五轮授权第2轮完整验收通过，真实跨入口/恢复/Room业务错误与缓存例外均通过。本阶段源代码提交c6f3b17。
 
 ## 阶段四：文档与验收
-Status: in_progress
-历史完整3/3、追加3/3及独立一次验收失败均保留。用户已授权检查当前问题，并允许新最多五轮完整验收；本次0/5。源代码集成提交待全验收成功，不削弱原标准。
+Status: complete
+fmt/check/strict Clippy/workspace761 tests/1 ignored/build/live parity全部exit0；真实TUI保存/读回/同配置生产证据保留且相关代码未改变。文档已按实际合同更新，提交本阶段文档与最终证据。历史3/3、追加3/3、独立一次失败保留；最新五轮授权新增失败1/5，第2轮完整成功。
 
 ## 验收与停止
 - cargo fmt --all -- --check
@@ -74,8 +74,8 @@ Status: in_progress
 Status: complete
 按用户新授权修复rustc warning及strict Clippy诊断，不压制warning。fmt/check/clippy -D warnings/workspace tests/Agent与Hub build均通过且无warning；新binary隔离Unix进程事件smoke通过。已定位并解释问题1fixture tunnel=null与Standalone run不匹配，以及问题2聚合只投影servers导致events隐藏计次。原live parity失败3/3仍blocked，未重跑、未修问题1/2；本阶段仅planning证据提交，source集成提交继续暂缓。
 
-## 用户授权继续：两项修复与完整验收
-Status: blocked
+## 用户授权继续：两项修复与完整验收（历史轮次）
+Status: complete
 用户选择“修复两项，再允许最多3轮完整验收”。历史3次失败不重置；新增完整失败0/3。两个不重叠owner分别修parity多传输worker启动及live曝光覆盖、Rust内部聚合McpListServers不生成panel机制/所有caller与行为回归。主线程唯一fmt/check/clippy/test/build/live/TUI证据和commit owner；全部原目标及安全边界保留。
 
 ## 授权后验收计数
@@ -91,10 +91,10 @@ Status: complete
 用户要求“可以，尝试修一下”。仅修复cfg(test)外部改写注入的单槽覆盖；增加确定性双Agent路径隔离的真实dispatch回归，先观察修前失败、再运行修后相关定点回归。生产代码与原断言不变，不重启完整验收；历史3/3及新增3/3保留。此内部测试修复不改变公共文档合同。
 已取得新真实dispatch回归修前失败/修后通过证据，8项相关并行回归及fmt/strict Clippy通过；本次局部修复完成。没有重启全验收，原目标仍blocked。
 
-## 用户再次授权完整验收
-Status: blocked
-再次授权的一次完整验收已结束并失败；fmt/check/strict Clippy、workspace761 tests/1 ignored、Agent/Hub build通过，live parity在Hub inline process.exec event suppression期望全零而实际low1/medium1时exit1。历史3/3及前次新增3/3不重置。本次未修复/重试，保留真实TUI与本轮各定点通过证据；仍未标目标完成。
+## 用户再次授权完整验收（历史单次失败已归档）
+Status: complete
+该次完整验收已执行并失败；fmt/check/strict Clippy、workspace761 tests/1 ignored、Agent/Hub build通过，live parity在Hub inline process.exec event suppression期望全零而实际low1/medium1时exit1。当时依单次授权停止，历史结果不改写；随后按最新五轮授权修复并在第2轮全通过。
 
 ## 用户授权：检查问题与五轮完整验收
-Status: in_progress
-inline fixture pending泄漏及Room错误schema遗漏已修复；本次完整第2轮全部exit0，新增完整失败1/5。历史3/3、追加3/3和独立一次失败保留。完成原目标分阶段集成提交，不再需要重试；TUI真实证据及delta/tunnel验证限制保持准确。
+Status: complete
+inline fixture pending泄漏及Room错误schema遗漏已修复；最新完整第2轮全部exit0，新增完整失败1/5。历史3/3、追加3/3和独立一次失败保留。阶段三源代码已提交c6f3b17，阶段四文档/最终证据提交后完成原目标；TUI实际证据及delta/tunnel验证限制保持准确。

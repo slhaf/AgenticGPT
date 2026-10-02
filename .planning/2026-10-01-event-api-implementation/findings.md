@@ -141,3 +141,18 @@
 - 修复测试注入后workspace实际761 passed/1 ignored，strict Clippy无warning；先前file.edit失败未在本轮出现。
 - 全live parity现到达Hub inline process.exec event suppression，current断言预期全零却实际low1/medium1（artifact://291）。这是inbox计数差异证据，单凭错误不能断言inline资格仲裁缺陷，亦不能直接认定fixture残留。
 - 此前真实Hub聚合/共享API、晚到结果/重启、delta检查点和crash恢复在同一完整运行中均已通过，但后续parity未完成。按本次一次验收授权记录失败并停止，原目标仍未完成。
+
+## 五轮授权后的集成范围核对
+- 当前待集成64个已修改路径均位于既有计划目录、三核心Rust crate、config.example.json、OpenAPI、parity脚本及已指派README/docs；不包含apply-patch/browser-host/Console/发布部署文件。
+- 四个新事件模块为Agent storage/event_store.rs、operations/event_notifications.rs、protocol/events.rs、Hub storage/event_feedback.rs。待完整验收成功后分生产集成与文档证据两阶段提交，不提交临时状态或构建产物。
+- 已核对main的GateError处理：失败时打印累计reports并返回1，后续runtime代码不会继续执行；不能由FAIL后出现PASS文本推断完整parity已完成。
+
+## inline抑制问题已定位并定点验证
+- run_hub_event_gate为曝光合同生产的medium失败进程事件与low完成进程事件，targeted最后一次展示后仍pending；隐藏/曝光不是handled。原函数返回时未mark，后续inline全零断言读到恰好这两条seed，属于fixture状态泄漏。
+- 修复仅script：核对实际seed ID/source/process ref/severity/message，公开event.mark只处理这两个已知ID，核对handled记录和空pending/全零；原inline响应及后续pending全零断言不变。事件生产测试覆写的原config在inline检查后真实reload恢复，避免影响后续gate。
+- 主线程隔离真实Hub+normal/Room Agent定点exit0：seed公开mark后为空、printf原响应terminal并全零、后续event.list为空且全零、原config实际reload恢复。未改生产事件仲裁，也未通过删除断言规避。完整新验收计数仍0/5。
+
+## Room错误schema修复的来源边界
+- 原在线Room invalid-path400实际返回Agent error+events，但共享ErrorResponse只准error。最终方案保留generic ErrorResponse no-events，新增strict RoomAgentErrorResponse（strict ErrorDetail、可选EventPanel），只用于九个Room路径的400及有明确Agent producer的notebook.read/state.read404；其他404、全部409、401/422/504不扩展。
+- Agent room_notebook_not_found/room_state_entity_not_found在缺失Room根时映射404；普通missing-file是room_notebook_read_failed默认400。Hub room_not_active404/room_state_conflict409仍不返回events；兼容同状态Hub无panel响应不能推断它是Agent来源。
+- 主线程static契约及实际Room HTTP烟测exit0：invalid-path400与missing-file400保留error/零panel并验证strict schema；Room下线后的room_not_active404无events且schema合法。未改runtime，不削弱schema或去掉面板；完整新增失败保持1/5。

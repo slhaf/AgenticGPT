@@ -246,3 +246,8 @@
 - 本次新增完整失败1/5，在第2轮成功；历史3/3、追加3/3及独立一次失败不改写。原TUI实际操作/读回/同配置生产证据仍有效，未把unit test替代UI操作。
 - 限制如实保留：补漏用真实source创建的Hub恢复checkpoint验证primary/delta及公开恰一次事件，不声称复现live partial-A→reconnect→source-B竞态；生产tunnel executable transport不在本地实测范围。本目标已要求的HTTP/Unix/stdio/Hub路径全部证明。
 - 现在提交原阶段三生产集成（仅三核心crate、直接相关配置/schema/parity），随后提交阶段四文档/验收记录；无临时probe文件/私有状态/构建产物进入提交。
+
+## 阶段三已提交，阶段四收尾
+- c6f3b17已提交全部事件source集成、配置/OpenAPI/parity及阶段证据，四个新模块入库；未修改apply-patch/browser-host/Console/发布部署，未提交私有状态或构建产物。
+- 当前文档已与验证结果一致；额外明确Room在线Agent400/特定404可含panel，Hub自身错误/超时省略。完成文档段落排版，无代码或运行时变更，不需要重跑已成功整链。
+- 所有约定成功标准已核对：完整CI/live为artifact://310，实际TUI与同配置生产为本记录100–102。原目标不是仅“修fixture”或“Rust编译成功”；保留所有历史失败及明确验证限制。

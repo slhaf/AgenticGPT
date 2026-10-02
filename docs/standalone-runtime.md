@@ -98,6 +98,24 @@ operation 名称为 `tmux.listSessions`、`tmux.attach`、`tmux.createSession` �
 `tmux.closeSession`）。这些 CLI 调用使用 `localadmin:` provenance，不增加远程批准语义，也不会伪造 AppState。
 其他入口的前缀彼此独立：Tunnel 使用 `tunnel:`，HTTP 使用 `http:`，Hub 使用 `hub:`。
 
+通过已有的受保护本地 Unix MCP 通道，可调用隐藏的 `privateevent.inject` 工具，将外部事件注入该 Agent 收件箱。
+此工具仅限本地 Unix MCP，不通过 loopback HTTP MCP 或 daemon stdio 提供；Agent 必须以同一 UID 运行，运行时目录为 `0700`，socket 为 `0600`。
+例如，以下命令从标准输入提交一条低严重度事件：
+
+```bash
+printf '%s' '{"message":"需要查看部署状态","ref":"deploy-42","severity":"low"}' | \
+  agentic-gpt local call privateevent.inject --config ~/.agentic_gpt/config.json \
+  --arguments-file -
+```
+
+`privateevent.inject` 不会出现在公开 `tools/list` 中。运行时将事件来源固定为 `external`，外部事件调用方提供 `ref` 作为事件引用。
+注入成功的 ACK 不会向调用方暴露事件，也不表示事件已被消费。当前没有事件主动 push；提醒只会随该 Agent 的下一次公开工具调用显示。
+不要把裸事件 JSON 写入 daemon 的 MCP stdin；该 stdin 保留给 MCP framing。
+公开的 `event.list`、`event.get` 和 `event.mark` 是独立于工具集开关的 Agent 收件箱工具，可供 Standalone、Local、Tunnel 和 HTTP 工具表面使用。
+这些工具可选接受 `agentId`，但只允许匹配当前 Agent 的配置身份；此字段不会路由到其他 Agent。Hub Full 调用则必须提供 `agentId`。
+同一 Agent 的客户端共享收件箱事件及其显示计数。事件接口的规范行为见
+[`接口说明：持久事件收件箱`](interfaces.md#持久事件收件箱)。
+
 `--arguments` 和 `--arguments-file PATH|-` 接受一个 JSON object，上限为 2 MiB。结构化 MCP 结果写入 stdout；日志和
 类型化连接错误写入 stderr。运行时停止或重启期间会返回 `local_mcp_unavailable`；客户端可以重新连接，但不得重放有副作用的调用。
 
@@ -118,7 +136,12 @@ skills.install.get, skills.install.cancel, skills.run
 tmux.sessions, tmux.panes, tmux.exec, tmux.pasteText
 browser.manual, browser.acquire, browser.repl, browser.reset, browser.release, browser.list
 agent.info, file.read, file.search, file.edit
+event.list, event.get, event.mark
 ```
+
+`event.list`、`event.get` 和 `event.mark` 是独立于 `toolsets.enabled` 的公开事件收件箱工具；
+隐藏事件不会因此变为已处理。事件工具只管理收件箱状态，不是进程控制接口。规范说明见
+[`接口说明：持久事件收件箱`](interfaces.md#持久事件收件箱)。
 
 启用逻辑 `room` namespace 后，还会公布以下工具名称：
 
@@ -171,11 +194,12 @@ Agentic 会报告 `detached` 并附带有界的终止证据，而不会声称已
 包含 server/tool 名称、有界的 argument key 子集及其总数、字节数和 hash、配置 revision、结果大小/hash 和终态证据，但绝不包含原始
 arguments 或原始结果。
 
-Standalone worker 有意不接受 Tunnel `agentId` 或 `confirmMethod` 输入字段。worker 会在内部使用已配置的本地 Agent 身份；出现意外的旧版字段
-时会拒绝请求。`bootstrap` 仅限 Room。托管 process 准入工具（`process.exec`、`process.batch`、`skills.run`、`mcp.callTool` 和
+Standalone worker 不接受 Tunnel 命令封套中的 `agentId` 或 `confirmMethod` 字段，意外的旧版字段仍会被拒绝；事件工具另有明确的可选 `agentId` 输入，且只接受匹配当前 worker 身份的值，不会据此选择其他 Agent。worker 使用已配置的本地 Agent 身份处理调用。`bootstrap` 仅限 Room。托管 process 准入工具（`process.exec`、`process.batch`、`skills.run`、`mcp.callTool` 和
 `mcp.batch`）接受可选且经过校验的可读 `group`；batch 子项继承父项的 group。响应保持精简，并将 `processId` 作为后续查询状态、输出、
 结果或取消的稳定句柄。丰富但有界的 provenance 保留在内部/持久记录中，不会在每个响应里重复。
 
+事件收件箱持久历史保存在独立的 `events.sqlite3` store 中，不与 `process.sqlite3` 进程历史混用；`event.list`、`event.get` 和
+`event.mark` 只管理事件收件箱，不控制或取消进程。
 Process 历史保存在每个 Agent 的私有 `process.sqlite3` store 中，保留 30 天并受逻辑软上限约束。`process.status` 可按 `processId`
 回退到保留的 metadata；其 `waitSeconds` 未提供时默认值为 5，最大为 30。显式传入 `waitSeconds: 0` 时只查询当前状态，不等待状态变化。
 Status 和 list 只返回 metadata，不返回 stdout、stderr 或结果正文。`process.list` 的默认 limit 为 50，上限为 100，支持精确的
@@ -333,11 +357,11 @@ Full profile 保留现有 Hub 执行表面，增加与 transport 无关的 `boot
 
 当前的多文件变更边界见 file 合同矩阵：一份完整的 apply-patch 请求会先暂存和验证，然后才进行可选确认及提交。
 
-Standalone、Local 或已连接 Hub 的 Agent worker 运行期间，会轮询 `policy`、`limits`、`mcpServers`、`toolsets.enabled`，以及在
+Standalone、Local 或已连接 Hub 的 Agent worker 运行期间，会轮询 `policy`、`limits`、`mcpServers`、`toolsets.enabled`、`events`，以及在
 `workspaceRoot` 未变时的 `pathPolicy` 变更；这些配置会经过完整验证，再原子应用于新的准入、调用和工具发现。MCP server id 只能使用
 `A-Z`、`a-z`、`0-9`、`.`、`_` 或 `-`，最长 64 字节；`streamable-http` 要求绝对 HTTP(S) URL，可选结构化 Bearer auth；
-`stdio` 要求非空 command，且拒绝 HTTP auth。无效的配置版本会保留最后一个有效的实时配置子集。已准入的 process 和已创建的下游 MCP client
-继续使用原有决策/server 定义，不会因 reload 而取消或重路由。由于当前每次调用都会新建下游 client，无需单独执行 reload 或 reconnect 命令。
+`stdio` 要求非空 command，且拒绝 HTTP auth。无效的配置版本会保留最后一个有效的实时配置子集。已准入的 process 和 skill installation
+继续使用准入时的配置快照；`events` 配置变更仅用于后续准入，不会改写已准入工作的决定。
 
 由启动时身份决定的配置包括 workspace root、Room 设置、Browser 配置、tunnel/client、reporting connection 及 skill-install 并发设置；
 这些字段变更后必须重启。共享 watcher 会记录 `config changes require restart; fields=...`；Standalone supervisor 还会发出

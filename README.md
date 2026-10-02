@@ -58,7 +58,7 @@ Choose Hub mode when you need one public entry point for multiple Agents, Custom
 - Local desktop confirmation and optional Hub-relayed ntfy confirmation.
 - Optional bubblewrap sandbox integration.
 - Bounded downstream MCP arguments/results and exact request-ID cancellation; `detached` is reported when remote termination cannot be proven.
-- Room bootstrap, diary/notebook tools, public-source Skill installation, managed Skill execution, and tmux workspaces.
+- 每个 Agent 独立的持久事件收件箱，提供有界提醒及显式 list/get/mark；接口契约见[接口参考](docs/interfaces.md#持久事件收件箱)。
 - An optional Rust Hub with Actions OpenAPI, an Apps-compatible `/mcp`, OAuth shim, HTTP API, WebSocket/SSE Agents, history, reporting, and notifications.
 
 ## Repository layout

@@ -88,7 +88,7 @@ agentic-gpt config init \
 
 全屏流程为 Basic → Connection（Local 除外）→ Optional settings → Review → Completion。
 交互模式下的命令行 flag 只是可编辑的预填值，不会锁定字段或跳过页面。身份/显示名称、
-工作区/路径策略、确认方式/语言、限制、沙箱、Toolsets 与下游 MCP server 集合均可在
+工作区/路径策略、确认方式/语言、限制、沙箱、Toolsets、Events 与下游 MCP server 集合均可在
 Optional settings 中配置。Toolsets 从配置档 preset 开始；一旦显式编辑，其 namespace
 selection 具有权威性。Room 设置仅当当前有效的 toolset selection 启用 `room` namespace 时
 才会提供。profile 通过默认 preset 影响该 selection；显式 `toolsets.enabled` 会覆盖 preset，
@@ -99,7 +99,8 @@ tunnel-client 覆盖和 Hub reporting。Hub 与 Local 模式不会显示这些 t
 （根 Basic 页面是 no-op），Ctrl+C 取消初始化。编辑态按 Esc 只结束编辑，不会取消初始化。
 Review 会隐藏密钥，可跳回 Basic、Connection 或可选 section 编辑；最终确认前不会写入配置、
 备份或密钥文件。本功能只承诺键盘全屏流程；鼠标、inline、dashboard 与 Windows 行为不在
-本功能契约内。
+本功能契约内。Events 设置可选择 `low`、`medium`、`high` 或 `off`，并在 Review 中复核保存；
+这只是配置界面，不提供运行时事件收件箱界面。
 
 `config init --language auto|zh-CN|en` 选择 CLI 界面语言。使用 `auto` 时依次检查
 `LC_ALL`、`LC_MESSAGES`、`LANG`，都没有匹配时使用英文界面。显式的 `zh-CN` 或 `en`
@@ -171,6 +172,42 @@ agentic-gpt run
 | `browser` | 可选的高级 Browser runtime 覆盖；普通 runtime discovery/provisioning 默认仍自动进行。 |
 | `hub` | 集中式 Hub 连接，或 Standalone 的可选 Hub reporting/ntfy relay。 |
 | `httpMcp` | 可选的 Standalone hidden worker 所有入站 Streamable HTTP MCP endpoint。 |
+| `events` | 持久事件收件箱中 `low` 严重级别事件的保留时长，以及内部事件严重级别覆盖。 |
+
+## 持久事件收件箱配置
+
+`events` 配置所有 `low` 事件（含外部注入）的保留时长，以及内部事件的严重级别覆盖；缺少整个 section 时使用下列默认值：
+
+```json
+{
+  "events": {
+    "lowTtlSeconds": 86400,
+    "internalOverrides": {}
+  }
+}
+```
+
+`lowTtlSeconds` 以秒为单位，默认 `86400`（24 小时），最小值为 `0`；取值还须确保事件到期时间不超过 RFC 3339 可表示范围（年份 `0..=9999`），边界由运行时校验。内部事件的默认严重级别为 `low`。以下稳定事件类型可配置覆盖；这些已知类型未配置覆盖时继承 `low`，未知类型键会被拒绝：
+
+| 事件类型 | 默认严重级别 |
+| --- | --- |
+| `process.completed`、`process.failed`、`process.rejected`、`process.cancelled`、`process.timed_out`、`process.detached`、`process.unknown_after_restart`、`process.skipped` | `low` |
+| `skill_install.completed`、`skill_install.failed`、`skill_install.cancelled` | `low` |
+
+每个覆盖值只能是 `low`、`medium`、`high` 或 `off`。`off` 不创建该类型的事件；把某个已知事件类型的覆盖值设为 CLI 的 JSON `null` 会移除该覆盖并恢复继承的 `low`。事件收件箱的查询、计数、过期和处理语义见[持久事件收件箱](interfaces.md#持久事件收件箱)。
+
+`config set` 的值是单个 shell 参数；枚举值是 JSON 字符串，对象中的 JSON 字符串也要在 shell 中引用。可使用 `config keys` 查看当前 registry、`config show` 查看有效配置：
+
+```bash
+agentic-gpt config keys --section events
+agentic-gpt config set events.lowTtlSeconds 86400
+agentic-gpt config set events.internalOverrides.process.completed '"high"'
+agentic-gpt config set events.internalOverrides.skill_install.failed '"off"'
+agentic-gpt config show
+agentic-gpt config set events.internalOverrides.process.completed null
+```
+
+`agent.info` 的安全摘要不包含事件级别覆盖；事件配置不包含密钥。
 
 ## Standalone 入站 HTTP MCP 端点
 
@@ -519,7 +556,7 @@ agentic-gpt config keys [--section <SECTION>] [--json]
 ```
 
 文本形式按 `runtime`、`identity`、`hub`、`confirmation`、`sandbox`、`limits`、`skills`、`room`、
-`tunnel` 和 `http-mcp` 分组；`--section` 只显示其中一个分组。`--json` 返回机器可读的类型、
+`tunnel`、`http-mcp` 和 `events` 分组；`--section` 只显示其中一个分组。`--json` 返回机器可读的类型、
 是否可为 null、示例、双语说明和别名元数据。`config set` 只接受 registry 中的键；结构化
 policy 与 MCP 集合应使用专用命令。
 
@@ -544,6 +581,7 @@ registry 包含以下常用 scalar：
 - `room.maintenance.mode`、`room.maintenance.autoPush`
 - 文档列出的 `skills.*` scalar/list 字段
 - `httpMcp.enabled`、`httpMcp.host`、`httpMcp.port`、`httpMcp.publicUrl`、`httpMcp.bearerToken`、`httpMcp.allowHosts`
+- `events.lowTtlSeconds`、以及每个 `events.internalOverrides.<event-type>` 注册键（例如 `events.internalOverrides.process.completed`、`events.internalOverrides.skill_install.failed`）
 
 结构化策略与 MCP 修改使用 `config allow/confirm/deny`、`config path`、`config mcp`。
 上面的 `config toolset` 命令用于管理 namespace 选择。复杂 JSON（包括 `toolsets.enabled`）
@@ -581,6 +619,7 @@ live subset。无效候选会保留上一份有效状态；候选修改需要重
 | `httpMcp.enabled`、`host`、`port`、`publicUrl`、`allowHosts` | Standalone HTTP watcher 协调启用状态与 endpoint identity；identity 变化会关闭有状态 session 并丢弃 listener-local OAuth state，客户端必须重新 initialize |
 | `httpMcp.bearerToken` 引用或其解析内容 | Standalone HTTP watcher 原地更新认证而不重新绑定；解析凭据可用时保留已有 session |
 | 已接纳 Process/Skill Job 与已创建下游调用 | Process 与 Skill Job 从准入开始保留同一份有效配置，贯穿容量、审计、包摘要、policy、工作目录、preflight、确认和异步执行。Process batch 的 preflight/确认、prepared admission 与排队 worker 使用同一份配置；后续新准入使用热加载后的配置。下游 MCP 调用保留各自资源专属快照，这不是全部操作的统一快照规则。 |
+| `events.lowTtlSeconds`、各 `events.internalOverrides.<event-type>` 键 | 热加载；新接纳操作与外部注入使用新配置，已接纳的 Process/Skill install 保留其接纳时快照，之后产生的事件也继续使用该快照。 |
 | `workspaceRoot` 及其配套 `pathPolicy` | 修改 workspace 需要重启；重启前原 workspace/path-policy 成对原子保留并继续生效 |
 | `mode`、`profile`、`agentId` | 需要重启 |
 | `browser` | 需要重启；配置的 Browser runtime 在进程启动时选择 |

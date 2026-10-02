@@ -14,7 +14,7 @@ Agent 通过一个范围狭窄的内部准入边界处理请求，不引入新�
 
 Normal 并不等于 Room：只有显式启用 `room` 命名空间时，Normal 运行时才可使用 Room。Hub 保留现有 Room 工具集、Skills 能力/配置档和通知能力规则。实际副作用仍由策略、路径、确认、租约和资源所有者决定；此边界不会使 Hub 成为执行方，也不声称提供通用 OS 沙箱。
 
-重载会应用现有的安全实时更新子集（`policy`、`limits`、`mcpServers`、`toolsets`、`httpMcp`；仅当 `workspaceRoot` 未改变时重载 `pathPolicy`），且不会重建启动时派生的资源。身份/模式/配置档、workspace/runtime/socket、整个 Browser 配置（不只是 `browser.runtime`）、history/install 及相关资源所有者变更都需要重启。启用 Room 时，会先准备现有实时根目录，再使用新子集。
+重载会应用现有的安全实时更新子集（`policy`、`limits`、`mcpServers`、`toolsets`、`httpMcp`、`events`；仅当 `workspaceRoot` 未改变时重载 `pathPolicy`），且不会重建启动时派生的资源。身份/模式/配置档、workspace/runtime/socket、整个 Browser 配置（不只是 `browser.runtime`）、history/install 及相关资源所有者变更都需要重启。启用 Room 时，会先准备现有实时根目录，再使用新子集。
 
 `agentic-gpt local` 是 Unix MCP 客户端，使用常规 MCP 操作准入门并记录 `local:` 来源。它不同于 `agentic-gpt tmux`：后者的 CLI 管理准入门仅允许 `tmux.listSessions`、`tmux.attach`、`tmux.createSession` 和 `tmux.closeSession`，并记录 `localadmin:` 来源。MCP `tmux.sessions`、`tmux.panes`、`tmux.exec` 和 `tmux.pasteText` 不属于这四项 CLI 管理操作。
 
@@ -95,6 +95,50 @@ Hub 运行回执仍是已派发命令的持久控制面身份。运行保留窗�
 
 从已退役 Room JSONL 名称迁移的调用方必须选择明确的当前语义操作。旧 append/update/remove 或 passage/日期选择语义不会自动转换为 `room.maintenance.submit`；要更改 Room 内容的调用方必须构造文档规定的 slot/payload 请求，或弃用旧调用。应同时升级配对的 Hub 和 Agent 工件，刷新 [`../openapi/hub.yaml`](../openapi/hub.yaml)，迁移所有调用方，并在移除旧调用前验证实时活动 Room 路径。历史发布/迁移记录仍是历史记录，不是当前错误或兼容性契约。
 
+
+## 持久事件收件箱
+
+每个 Agent 有独立、持久的事件收件箱；同一 Agent 的客户端共享事件和展示计数。事件 API 与 Process/Skill Install 的生命周期操作彼此独立。Standalone 的三个公开 MCP 工具 `event.list`、`event.get`、`event.mark` 不依赖 Process/Skills 工具集开关，也不新增可配置 namespace。Standalone 请求省略 `agentId` 时使用当前 Agent；若提供，则必须与当前 Agent 匹配，不作为跨 Agent 选择器。Hub Full 的三个工具要求显式 `agentId`；Coordinator 的八项工具保持不变，且不公开事件工具。
+
+`EventSource.kind` 是创建时固定的事件来源类型，与入口/传输（如 Unix、stdio、HTTP、Hub）以及 Hub `RunReport` 相互独立：内部事件由服务端绑定 `process` 或 `skill_install` 和对应实体 ID；外部注入固定为 `external`，调用方只提供 `ref`。读取、筛选、标记或传输事件都不能改写来源。事件记录使用 camelCase 字段 `eventId`、`message`、`severity`（`low|medium|high`）、`createdAt`、`status`（`pending|handled|expired`）、`source: { kind, ref }`、`shownCount` 与可空 `expiresAt`。列表项以 `summary` 代替完整正文。
+
+| 操作 | 请求与结果 |
+|---|---|
+| `event.list` | 可选 `agentId`（Standalone 省略时为当前 Agent；若提供须匹配当前 Agent）、`status`（缺省 `pending`）、`severity`、`limit`（缺省 20，范围 1–100）和不透明 `cursor`；返回 `{ items, nextCursor? }`，每项为 `eventId/summary/severity/createdAt/status`。隐藏的 pending 事件仍可列出；有后续页时返回 `nextCursor`。 |
+| `event.get` | 必填 `eventId`，可选 `agentId`；返回完整事件记录（含 `message`），读取不会标记为已处理。 |
+| `event.mark` | 必填 `eventIds`（最多 512 项），可选 `agentId`；幂等地标记为 handled，只改变收件箱处理状态，返回 `{ handledIds, notFoundIds }`。不管理进程或安装。 |
+
+Hub HTTP 路由使用现有 Hub API Bearer 认证及 Agent 启用状态授权：`GET /v1/events?agentId=...`（另支持 `status`、`severity`、`limit`、`cursor`）、`GET /v1/events/{eventId}?agentId=...`、`POST /v1/events/mark`（JSON `{ "agentId": "...", "eventIds": ["..."] }`）。Hub 工具、OpenAPI 与请求体都按目标 Agent 隔离，不跨 Agent 查找或合并。
+
+有明确目标且在线的 Agent 响应（包括业务错误响应）会在原业务 JSON 根对象附带 `events` 面板，不包裹或替换原结果。以下仅为结构示意，标识、文案和时间均为占位，不是运行输出：
+
+```json
+{
+  "items": [
+    {
+      "eventId": "evt_example",
+      "summary": "Process completed",
+      "severity": "low",
+      "createdAt": "2026-10-01T12:00:00Z",
+      "status": "pending"
+    }
+  ],
+  "events": {
+    "current": "low: 1 | medium: 0 | high: 0",
+    "new": [{ "evt_example | 示意摘要": "low | 2026-10-01T12:00:00Z" }]
+  }
+}
+```
+
+面板统计所有未过期 pending 事件（含本次未展示项）；`new` 最多五项，按 high、medium、low 排序，同级按较早创建时间排序。摘要最多 32 个 Unicode 字符（超长时 31 字符加 `…`）；等级、时间和 ID 不截断。low 首次曝光后隐藏，默认 TTL 为 24 小时且可配置；medium 曝光三次后隐藏且不自动过期；high 保持候选直到处理。等级表示通知优先级，不表示内部事件成功/失败或是否需要人工介入。handled/expired 历史保留七天后清理。新事件只在后续工具调用中以面板提醒；同一响应内，原有 Browser/file 内容块会保留，面板为紧凑文本且只展示/计次一次。事件详情正文读取本身不计入曝光，面板实际展示的候选仍按正常规则计次。面板位于原结果根级键 `events`，不另加结果封套或面板封套。
+
+没有主动推送。无单一 Agent 目标的 Hub 调用不附面板；Agent 离线、Hub 请求超时或 Hub 缓存回退也不附事件，不能伪报零值或旧快照；成功在线的 native cache-only Hub 工具可单独做一次 best-effort 面板查询。原始创建响应是否已包含终态结果由最终入口决定：包含终态即抑制对应异步事件，不包含则晚到的终态可产生事件；这一判定不依赖 `completedInline`、结果/输出截断或大小限制。创建去重、事件来源/origin 绑定及可靠的私有响应反馈用于防止重放改变资格；这些不是公开事件 API。模型不可写入内部来源/仲裁元数据，也没有客户端阅读 ACK 或模型主动推送。
+
+无目标的 `mcp.listServers` 聚合发现会在 Agent 端抑制面板生成，因此不会消耗事件曝光次数；单目标发现仍按正常规则附带面板。
+
+Agent 内部可靠传输命令清单新增 `event.list`、`event.get`、`event.mark`；内部私有 `event.settle` 用于反馈原响应判定，不是公开工具或 HTTP 路由。Hub 创建在副作用前绑定来源/origin；Agent 对远程来源等待 Hub 的最终判定，不以重启、完成先后或再次读取推断资格。可靠 `Response.eventSources` 携带该原始创建响应的来源及 `includesTerminal` 判定；独立私有 `event.sources` 只用于恢复待仲裁来源身份。二者分工不同，配合持久决策/可靠反馈支持 Hub 重启恢复，均不替代业务 `RunReport`，也不进入公开 HTTP/MCP 业务 DTO。外部 Unix CLI 注入仅为本地集成入口，stdin JSON 及其使用方式见[Standalone 运行指南](standalone-runtime.md)；不是模型可调用工具。
+
+公开定义见 [`openapi/hub.yaml`](../openapi/hub.yaml) 与实时 Agent MCP 工具 schema；此节概述不替代它们。
 
 ## ChatGPT Apps MCP 端点
 
@@ -277,7 +321,7 @@ WebSocket 与 HTTP/SSE 对请求/响应式 `HubCommand` 消息使用相同的可
 
 每个 SSE 连接都必须使用全新且非空的 `connectionId`；同一个当前 ID 不能标识第二条流。省略 `connectionId` 时，Hub 会生成新的 ID。显式传入空 ID 会返回 `400 invalid_connection_id`；重复使用当前 ID 会返回 `409 connection_id_in_use`。替换成功后会关闭旧流。这些 ID 在 agent-secret 身份验证之后用于标识连接代际，不是独立的对端身份验证机制。
 
-V1 中，`Hello`、`Heartbeat`、`HeartbeatAck`、确认消息和 `ProcessUpdate` 仍是尽力而为的生命周期消息。`process.exec`、`process.batch`、`process.status`、`process.list`、`process.output`、`process.result` 和 `process.cancel` 是可靠的请求/响应命令。`Hello.bootGeneration` 变更会使缓存中的活动进程变为 `unknown_after_restart`；终态进程仍予保留，且不会重放副作用。
+V1 中，`Hello`、`Heartbeat`、`HeartbeatAck`、确认消息和 `ProcessUpdate` 仍是尽力而为的生命周期消息。`process.exec`、`process.batch`、`process.status`、`process.list`、`process.output`、`process.result`、`process.cancel` 以及 `event.list`、`event.get`、`event.mark` 是可靠的请求/响应命令；私有 `event.settle` 用于响应事件仲裁反馈。`Hello.bootGeneration` 变更会使缓存中的活动进程变为 `unknown_after_restart`；终态进程仍予保留，且不会重放副作用。
 
 Agent 重启时，传输账本是命令/结果的持久权威来源：绑定所有者的已完成记录可以重新发送匹配结果；绑定所有者的已接受记录可以从已存储命令恢复；没有完成结果的 started/running 记录会变为 `unknown`，而不会重放副作用。claim 会被锁定并绑定到显式的 `agentId`；其他所有者不能接管该记录。旧的无所有者记录继续保持 `LegacyUnowned`：不会自动协调、执行，也不会用于披露结果。恢复操作须由运维人员检查保留的原始记录和更新的所有者绑定证据；绝不能为了让启动通过而删除去重证据。
 

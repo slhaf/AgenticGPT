@@ -12,22 +12,17 @@ cargo check --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo build -p agentic-gpt -p agentic-gpt-hub
-python3 -m pip install "PyYAML" "jsonschema[format]>=4.25,<5"
-python3 scripts/check_contract_parity.py
-```
-
-如果本地 Python 安装由外部管理，运行此序列前应启用一个被忽略的
-虚拟环境：
-
-```bash
 python3 -m venv target/contract-venv
 source target/contract-venv/bin/activate
+python -m pip install "PyYAML" "jsonschema[format]>=4.25,<5"
+python3 scripts/check_contract_parity.py
 ```
 
 契约一致性检查器是跨接口 schema/实时行为门禁。不带选项时，它使用
 `target/debug/agentic-gpt` 和 `target/debug/agentic-gpt-hub`；
 `--agent-bin PATH` 和 `--hub-bin PATH` 用于指定二进制文件。它会启动隔离的
 loopback/私有主目录进程并在结束时清理；schema 验证与实时行为是两项独立要求。
+该检查序列用于验证包含 Agent 事件工具在内的契约；本文不表示 Hub parity 门禁已通过。
 通过一致性门禁不能替代前面的严格 Clippy 检查。
 
 Standalone HTTP MCP 集成测试夹具使用较短且 UUID 唯一的 Agent ID：其本地 Unix MCP
@@ -56,9 +51,10 @@ agentic-gpt local call agent.info --arguments '{}'
 
 - `agent.info.connections.localMcp.status` 为 `ready`。
 - 运行时目录权限为 `0700`、套接字权限为 `0600`，且只接受相同 UID。
-- 存在 `process.exec`、`process.batch`、`process.status`、`process.list`、`process.output`、`process.result`、`process.cancel`、`mcp.callTool` 和 `mcp.batch`。
-- `process.status` 只报告元数据；负载应使用专用输出和结果工具获取。
-- Process 历史使用 `process.sqlite3`；现有 `jobs.sqlite3` 会有意保持原样且不可访问，不迁移或备份 Job 历史。
+- 存在 `event.list`、`event.get`、`event.mark`，以及 `process.exec`、`process.batch`、`process.status`、`process.list`、`process.output`、`process.result`、`process.cancel`、`mcp.callTool` 和 `mcp.batch`。
+- 事件收件箱工具独立于工具集开关；隐藏事件不因此视为已处理。它们管理收件箱状态，不是进程控制接口。
+- Process 历史使用 `process.sqlite3`；事件历史使用独立的 `events.sqlite3`。现有 `jobs.sqlite3` 会有意保持原样且不可访问，不迁移或备份 Job 历史。
+- [持久事件收件箱](interfaces.md#持久事件收件箱)说明同一 Agent 的共享收件箱和提醒范围。
 - 已移除的 v0.8 受管理生命周期名称不存在。
 
 Standalone 还应确认：
@@ -100,8 +96,9 @@ curl -fsS -H 'Authorization: Bearer test-key' http://127.0.0.1:18787/v1/info
 ## 配置重载与重启诊断
 
 实时更新/重启边界适用于 Standalone、Local 和 Hub 连接模式下的 Agent worker，
-并非 Standalone 独有。Agent worker 运行时，对 `policy`、`limits`、`mcpServers` 和
-`toolsets.enabled` 的有效变更会以原子方式应用于后续准入、调用和工具发现。
+并非 Standalone 独有。Agent worker 运行时，对 `policy`、`limits`、`mcpServers`、
+`toolsets.enabled` 和 `events` 的有效变更会以原子方式应用于后续准入、调用和工具发现。
+`events` 配置变更影响后续 process/skill-install 准入；已准入的 process 和安装任务保留准入时的配置快照。
 若 `workspaceRoot` 未变更，`pathPolicy` 也会重载。候选配置若变更
 `workspaceRoot`，则旧 `workspaceRoot` 和 `pathPolicy` 会作为一个原子配置对继续
 生效，直到重启；不得将部分生效的候选配置视为活动配置。

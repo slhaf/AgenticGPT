@@ -41,6 +41,9 @@ Tunnel stdio 和本地 Unix MCP 使用相同的描述符、schema、确认、路
 | `process.output` | 读取一个 Process 捕获的有界输出；不启动新工作。 | `processId`；可选 cursor 和 `maxBytes`。 | 从指定 cursor 开始（省略时从开头读取）；`maxBytes` 默认 8 KiB，上限为 32 KiB。 | 返回有界输出块；还有后续输出时附带续读 cursor。 | Normal + Room；Hub Full 的 `process.output`；对应 HTTP `GET /v1/process/{processId}/output`。 |
 | `process.result` | 读取 `kind=mcp` 进程保留的下游 MCP 结构化结果；不启动新工作，命令和 Skill 脚本输出应使用 `process.output`。 | `processId`；可选 `maxBytes`。 | MCP `maxBytes` 默认 8 KiB，上限为 512 KiB；HTTP 默认 8 KiB，上限为 512 KiB。 | 结果可用时包含完整结果，超限不返回部分 JSON；非 MCP 进程返回 `unavailable` 和 `process_result_not_applicable`。 | Normal + Room；Hub Full 的 `process.result`；对应 HTTP `GET /v1/process/{processId}/result`。 |
 | `process.cancel` | 请求取消 Process；不声称未经观察的终止已经发生。 | `processId`。 | 显式请求；无等待参数。 | 报告已观察到的取消/证据，并保留 unknown 或 detached 等结果。 | Normal + Room；Hub Full 的 `process.cancel`；对应 HTTP `POST /v1/process/{processId}/cancel`。 |
+| `event.list` | 按状态、等级和 cursor 查看当前 Agent 的持久事件；隐藏的 pending 事件仍可列出，不读取 Process 状态。 | 可选 `agentId`（若提供须与当前 Agent 匹配）、`status`、`severity`、`limit`、`cursor`。 | `status` 默认 `pending`；`limit` 默认 20、范围 1–100；列表项不含完整正文。 | 返回 `items`/`nextCursor`；正文不会单独计曝光，面板实际展示项会计次；不修改事件处理或 Process 状态。 | Agent Normal + Room；不依赖工具集开关，不新增 namespace。 |
+| `event.get` | 读取一条事件的完整记录及正文；不标记 handled，也不操作 Process/安装。 | `eventId`；可选 `agentId`（若提供须与当前 Agent 匹配）。 | 正文读取不额外计次；该响应面板中实际展示的事件照常计次。 | 未知 ID 或 Agent 不匹配时报错；不修改事件处理状态。 | Agent Normal + Room；与 `event.list` 使用同一收件箱。 |
+| `event.mark` | 幂等地将选中事件标为 handled；不清理历史或控制 Process/安装。 | `eventIds`（最多 512 项）；可选 `agentId`（若提供须与当前 Agent 匹配）。 | 重复 ID 幂等；未知 ID 进入 `notFoundIds`。 | 返回 `handledIds`/`notFoundIds`；只改变收件箱处理状态。 | Agent Normal + Room；与 `event.list` 使用同一收件箱。 |
 | `mcp.list` | 发现已配置的下游服务器或某一服务器的工具；不执行下游调用。 | 可选 `serverId`；省略时列出服务器。 | 有界服务器/工具元数据。 | 配置/传输错误为类型化错误；只读。 | Normal + Room；Hub Full 拆分为 `mcp.listServers`/`mcp.listTools`。 |
 | `mcp.callTool` | 将一次下游 MCP 调用作为受管理 Process 启动；不是直接事务式调用。 | `serverId`、`toolName`；可选 `group`、JSON 对象 `arguments`、`waitSeconds`、`timeoutSeconds`。 | 参数上限为 256 KiB；等待默认 5 秒/最多 30 秒，等待超时不会取消 Process；调用超时默认 300 秒/最多 900 秒。 | 确认/策略/传输/下游错误都会保留；过大结果保留哈希/大小/预览；后续使用 `process.*`。 | Normal + Room；Hub Full 对应相同 Process 生命周期语义。 |
 | `mcp.batch` | 通过一次聚合确认验证并准入 1–16 个下游调用；不回滚下游副作用。 | `calls` 中每项含 `serverId`/`toolName`；可选父级 `group`，以及每次调用的参数、`mode`、`failFast`、等待/截止时间。 | 默认并行；顺序执行需显式选择；聚合参数/响应上限为 2 MiB；全局/每服务器并发数为 8/2。子项继承父级 group；公开结果按顺序排列，因此关联 ID/索引留在内部。 | 准入是原子的；`failFast` 只跳过尚未启动的子项；按序保留子 Process 和聚合审计。 | Normal + Room；Hub Full 对应相同准入、group 和范围。 |
@@ -79,6 +82,7 @@ Tunnel stdio 和本地 Unix MCP 使用相同的描述符、schema、确认、路
 | `hub.run.list`、`hub.run.get` | 检查已持久化的 Hub 到 Agent 请求运行记录；不派发新命令。 | `run.get` 必须提供 `runId`；list 筛选项可选。 | 保留历史/结果有界。 | 明确保留超时/投递/迟到结果状态。 | Coordinator + Full；对应 HTTP 运行端点。 |
 | `hub.process.status`、`hub.process.list` | 检查缓存的 Process 元数据；不派发执行。 | `agentId`；status 还必须提供 `processId`；list 支持 Process 筛选/cursor。 | 仅缓存快照；status/list 只有元数据，绝不包含输出或结果正文。 | 明确提供新鲜度和观察时间；快照不是实时等待结果。 | Coordinator + Full；HTTP 进程状态/列表端点是由 Agent 实时提供的视图。 |
 | `process.exec`、`process.batch`、`process.status`、`process.list`、`process.output`、`process.result`、`process.cancel` | 通过选中的 `agentId` 提供与 Standalone 相同的受管理 Process 语义。 | `agentId` 加 Standalone Process 字段。 | Hub Full status 等待默认 5 秒/最多 30 秒；输出块默认 8 KiB/最多 32 KiB；结果最多 512 KiB。 | status 仅含元数据；输出/结果须调用各自端点。 | 仅 Full；HTTP `/v1/process`、`/v1/process/{processId}`、`/output`、`/result` 和 `/cancel` 生命周期端点对应相同契约。 |
+| `event.list`、`event.get`、`event.mark` | 查看或标记一个明确选定 Agent 的持久事件；不操作该 Agent 的进程/安装。 | 所有工具都必须提供 `agentId`；list 可提供 `status`/`severity`/`limit`/`cursor`，get 提供 `eventId`，mark 提供 `eventIds`。 | list 默认 pending、每页 20（1–100）；mark 最多 512 个 ID；get 返回完整记录。 | list 返回 `items`/`nextCursor`，get 不隐式标记，mark 幂等并分列 `handledIds`/`notFoundIds`。三者沿 Hub Full 工具面提供，非新的共享 namespace。 | 仅 Hub Full；对应 HTTP `GET /v1/events?agentId=...`、`GET /v1/events/{eventId}?agentId=...`、`POST /v1/events/mark`。Coordinator 工具集不变。 |
 | `tmux.listSessions`、`tmux.listPanes`、`tmux.capturePane` | 发现/读取持久窗格；不修改输入。 | `agentId`；按操作需要提供 capture/pane 目标。 | capture 默认 160 行；输出有界。 | 返回只读的类型化窗格/会话错误。 | 仅 Full；Standalone 将其合并为别名。 |
 | `tmux.pasteText`、`tmux.exec` | 将非 shell 输入粘贴到窗格，或通过选定 Agent 提交 shell 命令。 | `agentId` 和按操作需要提供的 target/text/program。 | 等待/历史有界。 | 明确区分 shell 与非 shell，并说明策略/确认边界。 | 仅 Full；与本地语义相同。 |
 | `tmux.createSession`、`tmux.closeSession` | 创建/关闭持久 workspace；不属于通用进程生命周期。 | `agentId`、name/cwd；close 可能需要确认。 | cwd 受策略检查；优先复用。 | close 具有破坏性；不隐式恢复数据。 | 仅 Full；与本地语义相同。 |
@@ -96,7 +100,13 @@ Tunnel stdio 和本地 Unix MCP 使用相同的描述符、schema、确认、路
 | `skills.install`、`skills.install.get`、`skills.install.cancel` | 活动 Room Skill 的异步安装生命周期。 | install 必须提供 `id`、`source`；get/cancel 必须提供 `installId`；无 `agentId`。 | 等待默认 5 秒、最多 30 秒；等待超时不会取消；取消必须显式请求。 | 提供协作式取消/原子提交证据。 | 仅 Full；对应 HTTP Room 安装端点。 |
 | `skills.run` | 将活动 workspace Skill 的可执行项作为受管理 Process 运行；内置只读 Skill 不可执行。 | `id`、`path`；可选 `group`、args/cwd/wait；无 `agentId`。 | 等待默认 5 秒、最多 30 秒；等待超时不会取消；使用 `process.cancel` 显式取消。 | 返回实际执行 Agent 的 `agentId` 与 `processId`；后续 `process.status/output/cancel` 必须复用这组标识，不随活动 Room 切换重新路由。 | 仅 Full；HTTP Room Skill 运行端点沿用 group 和 Process 生命周期语义。 |
 
+Hub 转发到在线 Agent 的单目标业务响应（包括业务错误响应）会在原 JSON 根级附带 `events` 面板；无目标、Agent 离线、请求超时或 Hub cache fallback 不附面板，也不以零值或旧快照代替。在线 native cache-only Hub 工具可额外进行一次 best-effort 面板查询，失败时省略。三个 `event.*` 工具沿现有 Agent API 面提供，不依赖 Process/Skills 工具集开关，也不新增可配置 namespace；Coordinator 仍仅公布前述八项工具。
+
+无目标的 `mcp.listServers` 聚合发现不生成各 Agent 的事件面板，也不消耗曝光次数；指定单一 Agent 的发现调用仍正常附带面板。
+
 这九个 HTTP 路由中，JSON 格式错误或缺少必填请求字段时，提取器返回 `422 text/plain`。通过身份验证后的语义响应使用现有 JSON 投影：Room 未激活返回 `room_not_active`（404），租约冲突返回 `room_state_conflict`（409），传输等待超时返回 504；其他 Agent 侧语义验证错误仍为 400，除非适用现有的特定未找到/冲突映射。
+
+在线 Agent 的 Room 业务错误保留根级 `events`：九个路由的 HTTP 400，以及 `notebook.read`／`state.read` 的 Agent 未找到错误 HTTP 404，使用支持可选面板的严格 schema。Hub 自身的 `room_not_active`、租约冲突及传输超时不附面板；错误的 HTTP 状态码本身不决定事件来源。
 
 ## 审查规则
 
