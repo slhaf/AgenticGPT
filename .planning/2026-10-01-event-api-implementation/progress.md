@@ -208,3 +208,41 @@
 - live parity exit1（artifact://291）：Hub inline process.exec event suppression预期current为low: 0 | medium: 0 | high: 0，实际low: 1 | medium: 1 | high: 0。输出不足以区分先前pending未清理或此次inline错误产事件，未展开调查/修复/重验。
 - 本轮实际通过Agent stdio/Unix/HTTP共享inbox/reopen、snapshot reload、内部off、Hub late/restart、primary/delta补漏、crash恢复、targetless不消费曝光以及HubMCP/HTTP list/get/mark。delta live partial-A admission竞态仍为[INFERENCE]，恢复checkpoint证据不改写为live竞态复现。
 - 本次单独授权验收失败，历史3/3与前次新增3/3保持；停止，不自动追加修复轮。仅提交planning授权/结果证据及历史表述修正，feature集成/文档完成提交继续暂缓，goal不complete。
+
+## 检查问题与五轮重试授权
+- 用户明确授权继续检查/修复，并将本次完整验收重试上限设为5；新增0/5，历史完整3/3、追加3/3及独立一次失败保留。原目标不缩减。
+- 已委派InlineGateRepair独占script，追溯真实seed事件ID/source/policy及后续inline计数，不放宽抑制断言，不新增入口。主线程唯一检查、planning及commit owner。
+- main的except GateError在失败后打印此前累积reports，因此FAIL后列出的PASS是之前执行，不证明失败之后继续执行；本轮确有未到达的后续检查。
+
+## 五轮验收第一轮前冻结
+- script owner交付：精确public seed mark/空pending断言、保留inline断言、测试config恢复及真实reload。主线程删除新增的自比较seed-ID tautology，其余消费者断言保留；脚本冻结。
+- 真实隔离Hub定点实际PASS：targetless保留曝光、MCP/HTTP shared inbox、精确seed cleanup、terminal inline及下一查询全零、config恢复reload。临时进程/状态已清理。
+- 本次开始完整第1轮fmt/check/strict Clippy/test/build/live，新增完整失败0/5；历史3/3、追加3/3及独立一次失败全部保留。
+
+## 验收运行期间的原目标完成核对
+- 当前protocol事件DTO与interfaces.md一致：完整记录与列表摘要分离、source固定类型/ref、list/get/mark以及紧凑根级panel、单目标/在线例外均有实现/文档与已有真实入口证据。
+- TUI完成依据保留本记录100–102的真实PTY操作、保存/读回和同配置Unix生产结果，不把键盘方案或单元测试当作UI证据。之后的变更限于测试hook、内部聚合标识和parity fixture，未改变已实测配置/TUI代码。
+- 待bg_29完整结果；没有由Rust/tests成功推断live全部成功。若全部成功，分别提交原阶段三source集成与阶段四文档/证据；原完整目标保持，不把checkpoint恢复限制写成live竞态复现。
+
+## 五轮验收第1轮：新增失败1/5
+- fmt/check/strict Clippy/workspace761 tests/1 ignored/build全部通过，无warning。完整parity已通过seed清理与inline抑制、policy恢复、Coordinator隔离、实际downstream MCP/batch、process分页/取消、Room安装/运行、maintenance真实apply及九个Room当前操作。
+- live exit1于Room HTTP notebook.read invalid path：declared HTTP400 Additional properties events unexpected（artifact://297）。这是在线Agent业务错误公开保留panel与OpenAPI strict错误schema不匹配，不删除响应events；单一OpenAPI owner核对所有共享Room错误schema。
+- 新增完整失败1/5，历史3/3+3/3及独立一次失败保持。修后先静态schema/真实Room错误smoke，再完整第2轮；原目标未完成。
+
+## 第2轮前schema定点诊断
+- 首次OpenAPI修补把events加到generic ErrorResponse；主线程定点static preflight实际失败于require_schema_contract“offline/gateway errors advertise an event panel”。未启动真实Room请求，不能宣称修复验证通过。
+- 保留gateway无面板schema门禁，退回generic变更；owner改为Room在线Agent业务错误的专属response/schema引用，核对九个Room路径。此为定点修复诊断，不消耗完整轮次；新增完整失败仍1/5。
+- 第二次schema preflight通过，真实Room invalid-path HTTP400/error+events通过。后续临时诊断误把missing-file期望404，实际为Agent room_notebook_read_failed HTTP400且events正常，已按真实行为修正诊断，不修改生产投影。
+- 进一步要求只在实际Agent-owned400声明可选panel，Hub-owned room_not_active404/room_state_conflict409保持generic no-events；owner核对mapper与producer后收窄引用。新增完整失败仍1/5。
+
+## 第二轮前定点schema已通过
+- 最终scoped RoomAgentError：九个Room400及有明确Agent producer的两个404支持strict可选panel；generic ErrorResponse、其他404及全部409/504不扩展。
+- 主线程static/schema +真实HTTP400 invalid/missing及no-active404均exit0；保留正确错误码/面板及no-target省略，不改变runtime。OpenAPI owner已冻结。
+- 开始完整第2轮，新增完整失败仍1/5；历史记录全部保留。
+
+## 五轮验收第2轮：完整通过
+- 完整fmt --check/check/strict Clippy -D warnings/workspace tests/Agent与Hub build/live parity全部exit0（artifact://310），无warning；761 tests passed（13 suites）、1 ignored。
+- live已执行至末尾cache-only/offline unavailable检查。除全部事件共享/计次/source/TTL/inline/async/config/restart/crash/targetless场景外，Room业务错误投影、所有当前MCP/HTTP操作、no-active/ReportingOnly隔离、Room重连和workflow bounded wait均PASS。
+- 本次新增完整失败1/5，在第2轮成功；历史3/3、追加3/3及独立一次失败不改写。原TUI实际操作/读回/同配置生产证据仍有效，未把unit test替代UI操作。
+- 限制如实保留：补漏用真实source创建的Hub恢复checkpoint验证primary/delta及公开恰一次事件，不声称复现live partial-A→reconnect→source-B竞态；生产tunnel executable transport不在本地实测范围。本目标已要求的HTTP/Unix/stdio/Hub路径全部证明。
+- 现在提交原阶段三生产集成（仅三核心crate、直接相关配置/schema/parity），随后提交阶段四文档/验收记录；无临时probe文件/私有状态/构建产物进入提交。

@@ -23,12 +23,12 @@ Status: complete
 持久store/DTO/计次/过期/分页/API核心与行为测试、配置和配置TUI source实现已交付并修正独立审阅发现；尚未运行验收。此阶段提交planning checkpoint，source在跨入口集成后统一提交，避免不完整ABI切换提交。
 
 ## 阶段三：生产与跨入口
-Status: blocked
-生产者响应仲裁/恢复、外部注入、Agent全MCP、HubMCP/API及wire/OpenAPI和消费者source已交付；包括增量source可靠delta反馈。真实Agent/TUI smoke、workspace tests与build已通过，但live parity未通过；source集成提交暂缓，不宣称阶段完成。
+Status: complete
+生产者响应仲裁/恢复、外部注入、Agent全MCP、HubMCP/API、wire/OpenAPI及全部消费者已集成；五轮授权第2轮完整验收通过，真实跨入口/恢复/Room业务错误与缓存例外均通过，开始提交本阶段源代码。
 
 ## 阶段四：文档与验收
-Status: blocked
-历史完整验收3/3及追加验收3/3失败均保留。测试注入修复后再次授权的一次完整验收也失败：Rust全部通过，live parity在Hub inline process.exec event suppression计数断言失败。记录并停止，不自动修复重试；整体未完成，源代码集成提交继续暂缓。
+Status: in_progress
+历史完整3/3、追加3/3及独立一次验收失败均保留。用户已授权检查当前问题，并允许新最多五轮完整验收；本次0/5。源代码集成提交待全验收成功，不削弱原标准。
 
 ## 验收与停止
 - cargo fmt --all -- --check
@@ -94,3 +94,7 @@ Status: complete
 ## 用户再次授权完整验收
 Status: blocked
 再次授权的一次完整验收已结束并失败；fmt/check/strict Clippy、workspace761 tests/1 ignored、Agent/Hub build通过，live parity在Hub inline process.exec event suppression期望全零而实际low1/medium1时exit1。历史3/3及前次新增3/3不重置。本次未修复/重试，保留真实TUI与本轮各定点通过证据；仍未标目标完成。
+
+## 用户授权：检查问题与五轮完整验收
+Status: in_progress
+inline fixture pending泄漏及Room错误schema遗漏已修复；本次完整第2轮全部exit0，新增完整失败1/5。历史3/3、追加3/3和独立一次失败保留。完成原目标分阶段集成提交，不再需要重试；TUI真实证据及delta/tunnel验证限制保持准确。

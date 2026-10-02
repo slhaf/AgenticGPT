@@ -131,6 +131,18 @@ fn localized_error(code: &str, language: UiLanguage) -> String {
         "config_init_room_maintenance_mode_invalid" => {
             ("Maintenance mode must be local or workflow.", "维护模式必须是 local 或 workflow。")
         }
+        "config_init_events_low_ttl_seconds_invalid" => (
+            "Low event TTL must be a non-negative integer.",
+            "低等级事件保留时间必须是非负整数。",
+        ),
+        "config_init_events_low_ttl_date_invalid" => (
+            "Low event TTL is too large to represent an expiration date.",
+            "低等级事件保留时间过大，无法表示过期日期。",
+        ),
+        "config_init_events_internal_override_invalid" => (
+            "Choose inherit, low, medium, high, or off.",
+            "请选择 inherit、low、medium、high 或 off。",
+        ),
         _ => ("Input is invalid.", "输入值无效。"),
     };
     t(language, en, zh).to_string()
@@ -1495,6 +1507,45 @@ fn render_optional_form(
                 language,
             );
         }
+        OptionalSection::Events => {
+            push_long_form_field(
+                &mut lines,
+                &mut focused_line,
+                session,
+                section,
+                draft,
+                state,
+                SetupField::EventsLowTtlSeconds,
+                language,
+                theme,
+                errors,
+                left.width,
+            );
+            let choices = [
+                ("inherit", t(language, "inherit (low)", "继承 (low)")),
+                ("low", "low"),
+                ("medium", "medium"),
+                ("high", "high"),
+                ("off", "off"),
+            ];
+            for event_type in crate::config::INTERNAL_EVENT_TYPES {
+                let field = SetupField::internal_event_override(event_type)
+                    .expect("every configured event type has a TUI field");
+                push_choice_group(
+                    &mut lines,
+                    &mut focused_line,
+                    section,
+                    draft,
+                    state,
+                    field,
+                    optional_field_label(field, language),
+                    &choices,
+                    theme,
+                    errors,
+                    language,
+                );
+            }
+        }
         OptionalSection::Workspace => unreachable!("workspace has a dedicated renderer"),
     }
 
@@ -1596,7 +1647,10 @@ fn push_long_form_field(
     } else {
         current.to_string()
     };
-    if field == SetupField::DiaryBoundaryHour {
+    if matches!(
+        field,
+        SetupField::DiaryBoundaryHour | SetupField::EventsLowTtlSeconds
+    ) {
         lines.push(numeric_input_value_line(
             current,
             focused,
@@ -2707,6 +2761,19 @@ pub(super) fn optional_focus_items(
                 value: "full",
             },
         ],
+        OptionalSection::Events => {
+            let mut items = vec![OptionalFocusItem::Field(SetupField::EventsLowTtlSeconds)];
+            for event_type in crate::config::INTERNAL_EVENT_TYPES {
+                let field = SetupField::internal_event_override(event_type)
+                    .expect("every configured event type has a TUI field");
+                items.extend(
+                    ["inherit", "low", "medium", "high", "off"]
+                        .into_iter()
+                        .map(|value| OptionalFocusItem::Choice { field, value }),
+                );
+            }
+            items
+        }
     }
 }
 
@@ -3332,6 +3399,11 @@ fn optional_center_inspector_body(
                     "Control optional run and Process reporting from Standalone to the Hub.",
                     "Default: off; metadata hides tool arguments, results, and command/output details.",
                 ],
+                OptionalSection::Events => &[
+                    "Configure the persistent event notification policy.",
+                    "Low-severity events default to a 86400-second TTL; 0 expires them immediately.",
+                    "Each stable internal event type may inherit low or use low, medium, high, or off.",
+                ],
             },
             UiLanguage::ZhCn => match section {
                 OptionalSection::Identity => &[
@@ -3390,6 +3462,11 @@ fn optional_center_inspector_body(
                 OptionalSection::HubReporting => &[
                     "控制 Standalone 向 Hub 上报运行和 Process 信息。",
                     "默认关闭；metadata 会隐藏工具参数、结果以及命令和输出细节。",
+                ],
+                OptionalSection::Events => &[
+                    "配置持久事件通知策略。",
+                    "低等级事件默认保留 86400 秒；0 表示立即过期。",
+                    "每个稳定内部事件类型可继承 low，或选择 low、medium、high、off。",
                 ],
             },
         },
@@ -3594,6 +3671,24 @@ fn optional_form_inspector_body(
                     "• metadata: hide tool arguments/results and command, cwd, stdout/stderr details",
                     "• full: include bounded arguments/results and full process details",
                 ],
+                SetupField::EventsLowTtlSeconds => &[
+                    "Low-severity event lifetime in seconds.",
+                    "Use a non-negative whole number; 0 expires events immediately.",
+                ],
+                SetupField::EventProcessCompletedLevel
+                | SetupField::EventProcessFailedLevel
+                | SetupField::EventProcessRejectedLevel
+                | SetupField::EventProcessCancelledLevel
+                | SetupField::EventProcessTimedOutLevel
+                | SetupField::EventProcessDetachedLevel
+                | SetupField::EventProcessUnknownAfterRestartLevel
+                | SetupField::EventProcessSkippedLevel
+                | SetupField::EventSkillInstallCompletedLevel
+                | SetupField::EventSkillInstallFailedLevel
+                | SetupField::EventSkillInstallCancelledLevel => &[
+                    "Choose an override for this stable internal event type.",
+                    "Inherit keeps the default low severity; or choose low, medium, high, or off.",
+                ],
                 _ => &["Edit the staged value; validation remains authoritative."],
             },
             UiLanguage::ZhCn => match field {
@@ -3771,6 +3866,24 @@ fn optional_form_inspector_body(
                     "必须正好是 64 个十六进制字符。",
                     "",
                 ],
+                SetupField::EventsLowTtlSeconds => &[
+                    "低等级事件的保留秒数。",
+                    "请输入非负整数；0 表示立即过期。",
+                ],
+                SetupField::EventProcessCompletedLevel
+                | SetupField::EventProcessFailedLevel
+                | SetupField::EventProcessRejectedLevel
+                | SetupField::EventProcessCancelledLevel
+                | SetupField::EventProcessTimedOutLevel
+                | SetupField::EventProcessDetachedLevel
+                | SetupField::EventProcessUnknownAfterRestartLevel
+                | SetupField::EventProcessSkippedLevel
+                | SetupField::EventSkillInstallCompletedLevel
+                | SetupField::EventSkillInstallFailedLevel
+                | SetupField::EventSkillInstallCancelledLevel => &[
+                    "选择此稳定内部事件类型的覆写值。",
+                    "继承表示使用默认 low 等级；也可选择 low、medium、high 或 off。",
+                ],
                 _ => &["编辑暂存值；验证逻辑保持不变。"],
             },
         },
@@ -3795,7 +3908,7 @@ fn editing_cursor(state: &TuiState, field: SetupField) -> Option<usize> {
         .map(|editing| editing.cursor)
 }
 
-fn all_optional_sections() -> [OptionalSection; 10] {
+fn all_optional_sections() -> [OptionalSection; 11] {
     [
         OptionalSection::Identity,
         OptionalSection::Workspace,
@@ -3807,6 +3920,7 @@ fn all_optional_sections() -> [OptionalSection; 10] {
         OptionalSection::Room,
         OptionalSection::TunnelClient,
         OptionalSection::HubReporting,
+        OptionalSection::Events,
     ]
 }
 
@@ -3822,6 +3936,7 @@ fn section_label(section: OptionalSection, language: UiLanguage) -> &'static str
         OptionalSection::Room => t(language, "Room", "Room"),
         OptionalSection::TunnelClient => t(language, "Tunnel client", "隧道客户端"),
         OptionalSection::HubReporting => t(language, "Hub reporting", "Hub 报告"),
+        OptionalSection::Events => t(language, "Events", "事件"),
     }
 }
 
@@ -3861,6 +3976,34 @@ fn optional_field_label(field: SetupField, language: UiLanguage) -> &'static str
         SetupField::TunnelSha256 => t(language, "SHA-256", "SHA-256"),
         SetupField::HubReportingEnabled => t(language, "Reporting enabled", "启用报告"),
         SetupField::HubReportingDetail => t(language, "Reporting detail", "报告详细程度"),
+        SetupField::EventsLowTtlSeconds => t(
+            language,
+            "Low-severity event TTL (seconds)",
+            "低等级事件 TTL（秒）",
+        ),
+        SetupField::EventProcessCompletedLevel => t(language, "Process completed", "Process 完成"),
+        SetupField::EventProcessFailedLevel => t(language, "Process failed", "Process 失败"),
+        SetupField::EventProcessRejectedLevel => t(language, "Process rejected", "Process 被拒绝"),
+        SetupField::EventProcessCancelledLevel => {
+            t(language, "Process cancelled", "Process 已取消")
+        }
+        SetupField::EventProcessTimedOutLevel => t(language, "Process timed out", "Process 超时"),
+        SetupField::EventProcessDetachedLevel => t(language, "Process detached", "Process 已脱离"),
+        SetupField::EventProcessUnknownAfterRestartLevel => t(
+            language,
+            "Process unknown after restart",
+            "重启后状态未知的 Process",
+        ),
+        SetupField::EventProcessSkippedLevel => t(language, "Process skipped", "Process 已跳过"),
+        SetupField::EventSkillInstallCompletedLevel => {
+            t(language, "Skill install completed", "Skill 安装完成")
+        }
+        SetupField::EventSkillInstallFailedLevel => {
+            t(language, "Skill install failed", "Skill 安装失败")
+        }
+        SetupField::EventSkillInstallCancelledLevel => {
+            t(language, "Skill install cancelled", "Skill 安装已取消")
+        }
         _ => t(language, "Value", "值"),
     }
 }
@@ -3932,6 +4075,16 @@ pub(super) fn optional_field_value(draft: &OptionalSectionDraft, field: SetupFie
             SetupField::HubReportingDetail => value.detail.clone(),
             _ => String::new(),
         },
+        OptionalSectionDraft::Events(value) => {
+            if field == SetupField::EventsLowTtlSeconds {
+                value.low_ttl_seconds.clone()
+            } else {
+                field
+                    .internal_event_type()
+                    .and_then(|event_type| value.internal_overrides.get(event_type).cloned())
+                    .unwrap_or_else(|| "inherit".to_string())
+            }
+        }
     }
 }
 
@@ -3990,6 +4143,15 @@ pub(super) fn set_optional_field(
             SetupField::HubReportingDetail => draft.detail = value,
             _ => {}
         },
+        OptionalSectionDraft::Events(draft) => {
+            if field == SetupField::EventsLowTtlSeconds {
+                draft.low_ttl_seconds = value;
+            } else if let Some(event_type) = field.internal_event_type() {
+                draft
+                    .internal_overrides
+                    .insert(event_type.to_string(), value);
+            }
+        }
         _ => {}
     }
 }
@@ -4834,6 +4996,26 @@ fn review_item_label(label_key: &str, language: UiLanguage) -> &'static str {
         "tunnel_sha256" => t(language, "SHA-256", "SHA-256"),
         "hub_reporting_enabled" => t(language, "Reporting enabled", "启用报告"),
         "hub_reporting_detail" => t(language, "Reporting detail", "报告详细程度"),
+        "events_low_ttl_seconds" => t(
+            language,
+            "Low-severity event TTL (seconds)",
+            "低等级事件 TTL（秒）",
+        ),
+        "process.completed" => t(language, "Process completed", "Process 完成"),
+        "process.failed" => t(language, "Process failed", "Process 失败"),
+        "process.rejected" => t(language, "Process rejected", "Process 被拒绝"),
+        "process.cancelled" => t(language, "Process cancelled", "Process 已取消"),
+        "process.timed_out" => t(language, "Process timed out", "Process 超时"),
+        "process.detached" => t(language, "Process detached", "Process 已脱离"),
+        "process.unknown_after_restart" => t(
+            language,
+            "Process unknown after restart",
+            "重启后状态未知的 Process",
+        ),
+        "process.skipped" => t(language, "Process skipped", "Process 已跳过"),
+        "skill_install.completed" => t(language, "Skill install completed", "Skill 安装完成"),
+        "skill_install.failed" => t(language, "Skill install failed", "Skill 安装失败"),
+        "skill_install.cancelled" => t(language, "Skill install cancelled", "Skill 安装已取消"),
         _ => t(language, "Value", "值"),
     }
 }

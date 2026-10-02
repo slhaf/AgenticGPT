@@ -189,6 +189,7 @@ pub(crate) async fn run(
     request: SkillRunRequest,
     request_source: &str,
     terminal_event_hook: Option<process::TerminalEventHook>,
+    event_origin: Option<agentic_gpt_protocol::EventOrigin>,
 ) -> Result<ProcessResponse> {
     let program = resolve_run_program(&state, &request).await?;
     let config = state.config.read().await.clone();
@@ -212,6 +213,7 @@ pub(crate) async fn run(
         &request.path,
         request_source,
         terminal_event_hook,
+        event_origin,
     )
     .await)
 }
@@ -814,14 +816,17 @@ mod tests {
         let root = std::env::temp_dir().join(format!("agentic-skills-{}", Uuid::new_v4().simple()));
         let mut config = Config::default_config().unwrap();
         config.workspace_root = root;
-        let private_state =
-            crate::private_state::PrivateStatePaths::for_test(std::env::temp_dir().join(format!(
+        let private_state = crate::private_state::PrivateStatePaths::for_test_agent(
+            std::env::temp_dir().join(format!(
                 "agentic-test-private-{}",
                 uuid::Uuid::new_v4().simple()
-            )));
+            )),
+            config.agent_id.clone(),
+        );
         AppState {
             config_path: PathBuf::from("test-config.json"),
             config: Arc::new(RwLock::new(config)),
+            event_store: crate::event_store::EventStore::open(&private_state).unwrap(),
             private_state: private_state.clone(),
             process_history: crate::process_history::ProcessHistoryStore::open(&private_state),
             browser_runtime: None,
@@ -1274,6 +1279,7 @@ mod tests {
                 wait_seconds: Some(5),
             },
             "test:skills.run",
+            None,
             None,
         )
         .await

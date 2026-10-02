@@ -321,12 +321,27 @@ pub(crate) fn ack_message(envelope: &HubCommandEnvelope) -> AgentMessage {
     }
 }
 
-pub(crate) fn completed_response(record: &LedgerRecord) -> Option<AgentMessage> {
-    Some(AgentMessage::Response {
+pub(crate) fn completed_response(record: &LedgerRecord) -> Result<Option<AgentMessage>> {
+    let Some(data) = record.result.clone() else {
+        return Ok(None);
+    };
+    let event_sources = record
+        .command
+        .as_ref()
+        .map(|command| {
+            crate::event_notifications::initial_response_dispositions(
+                crate::operation::hub_command_name(command),
+                &data,
+            )
+        })
+        .transpose()?
+        .unwrap_or_default();
+    Ok(Some(AgentMessage::Response {
         run_id: Some(record.run_id.clone()),
         request_id: record.request_id.clone(),
-        data: record.result.clone()?,
-    })
+        event_sources,
+        data,
+    }))
 }
 
 fn with_ledger_lock<T>(operation: impl FnOnce(&Path) -> Result<T>) -> Result<T> {

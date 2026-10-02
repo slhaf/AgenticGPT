@@ -70,6 +70,9 @@ pub(crate) async fn serve(
             post(confirmation::callback),
         )
         .route("/v1/process/exec", post(routes::process_exec))
+        .route("/v1/events", get(routes::list_events))
+        .route("/v1/events/mark", post(routes::mark_events))
+        .route("/v1/events/:event_id", get(routes::get_event))
         .route("/v1/process/batch", post(routes::process_batch))
         .route("/v1/process", get(routes::list_processes))
         .route(

@@ -1,5 +1,8 @@
+use std::collections::HashSet;
+
 use agentic_gpt_protocol::{
-    normalize_process_group, HubCommand, ProcessBatchExecRequest, ProcessExecRequest, ProcessInfo,
+    normalize_process_group, EventResponseDisposition, EventSettleRequest, EventSourceKind,
+    HubCommand, ProcessBatchExecRequest, ProcessExecRequest, ProcessInfo,
 };
 use anyhow::Result;
 
@@ -17,6 +20,33 @@ use crate::{
     state::AppState,
     tmux,
 };
+fn settle_remote_response(
+    state: &AppState,
+    payload: &EventSettleRequest,
+) -> Result<serde_json::Value> {
+    let mut seen = HashSet::with_capacity(payload.dispositions.len());
+    for disposition in &payload.dispositions {
+        if disposition.source.kind == EventSourceKind::External {
+            return Err(anyhow::anyhow!("event_settle_external_source"));
+        }
+        if !seen.insert((
+            disposition.source.kind.as_str(),
+            disposition.source.reference.as_str(),
+        )) {
+            return Err(anyhow::anyhow!("event_settle_duplicate_source"));
+        }
+    }
+    for EventResponseDisposition {
+        source,
+        includes_terminal,
+    } in &payload.dispositions
+    {
+        state
+            .event_store
+            .settle_remote_response(source, &payload.origin, *includes_terminal)?;
+    }
+    Ok(serde_json::json!({"status": "settled"}))
+}
 
 pub(crate) enum ProcessCall {
     Exec {
@@ -60,6 +90,7 @@ where
                 request,
                 process::ProcessOptions {
                     terminal_event_hook,
+                    event_origin: context.event_origin.cloned(),
                     ..process::ProcessOptions::for_source(request_source)
                 },
             )
@@ -74,8 +105,14 @@ where
                 Ok(group) => group,
                 Err(error) => return Ok(error),
             };
-            match process::start_process_batch(state, request, request_source, terminal_event_hook)
-                .await
+            match process::start_process_batch(
+                state,
+                request,
+                request_source,
+                terminal_event_hook,
+                context.event_origin.cloned(),
+            )
+            .await
             {
                 Ok(response) => slim_process_batch_response(response, snapshots),
                 Err(reason) => Ok(serde_json::json!({
@@ -138,6 +175,39 @@ fn admission_error_value(error: AdmissionError) -> serde_json::Value {
         }
     })
 }
+async fn bind_current_agent_id(state: &AppState, requested: &mut String) -> bool {
+    let current = state.config.read().await.agent_id.clone();
+    if requested.is_empty() {
+        *requested = current;
+        true
+    } else {
+        *requested == current
+    }
+}
+
+fn event_agent_mismatch() -> serde_json::Value {
+    serde_json::json!({
+        "error": {
+            "code": "event_agent_mismatch",
+            "message": "event request must target the connected Agent"
+        }
+    })
+}
+
+fn event_store_error_value(error: anyhow::Error) -> serde_json::Value {
+    let message = error.to_string();
+    let code = message
+        .split([':', ';'])
+        .next()
+        .filter(|code| {
+            !code.is_empty()
+                && code
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric() || character == '_')
+        })
+        .unwrap_or("event_operation_failed");
+    serde_json::json!({"error": {"code": code, "message": message}})
+}
 
 async fn dispatch_inner(
     state: AppState,
@@ -162,6 +232,36 @@ async fn dispatch_inner(
                 })),
             }
         }
+        HubCommand::EventList { mut payload, .. } => {
+            if !bind_current_agent_id(&state, &mut payload.agent_id).await {
+                return Ok(event_agent_mismatch());
+            }
+            match state.event_store.list(&payload) {
+                Ok(response) => Ok(serde_json::to_value(response)?),
+                Err(error) => Ok(event_store_error_value(error)),
+            }
+        }
+        HubCommand::EventGet { mut payload, .. } => {
+            if !bind_current_agent_id(&state, &mut payload.agent_id).await {
+                return Ok(event_agent_mismatch());
+            }
+            match state.event_store.get(&payload.event_id) {
+                Ok(record) => Ok(serde_json::to_value(record)?),
+                Err(error) => Ok(event_store_error_value(error)),
+            }
+        }
+        HubCommand::EventMark { mut payload, .. } => {
+            if !bind_current_agent_id(&state, &mut payload.agent_id).await {
+                return Ok(event_agent_mismatch());
+            }
+            match state.event_store.mark(&payload.event_ids) {
+                Ok(response) => Ok(serde_json::to_value(response)?),
+                Err(error) => Ok(event_store_error_value(error)),
+            }
+        }
+        HubCommand::EventPanel { .. } => Ok(serde_json::to_value(state.event_store.panel()?)?),
+        HubCommand::EventSettle { payload, .. } => settle_remote_response(&state, &payload),
+
         HubCommand::ProcessList { mut payload, .. } => {
             payload.group = match normalize_group(payload.group) {
                 Ok(group) => group,
@@ -217,7 +317,15 @@ async fn dispatch_inner(
                 Err(error) => return Ok(error),
             };
             let request_source = context.source();
-            match mcp::call_tool(&state, payload, &request_source, None).await {
+            match mcp::call_tool(
+                &state,
+                payload,
+                &request_source,
+                None,
+                context.event_origin.cloned(),
+            )
+            .await
+            {
                 Ok(response) => slim_mcp_response(response, snapshots.as_deref_mut()),
                 Err(error) => Ok(serde_json::json!({
                     "error": { "code": "mcp_call_tool_failed", "message": error.to_string() }
@@ -230,7 +338,15 @@ async fn dispatch_inner(
                 Err(error) => return Ok(error),
             };
             let request_source = context.source();
-            match mcp::batch::batch(&state, payload, &request_source, None).await {
+            match mcp::batch::batch(
+                &state,
+                payload,
+                &request_source,
+                None,
+                context.event_origin.cloned(),
+            )
+            .await
+            {
                 Ok(response) => slim_mcp_batch_response(response, snapshots.as_deref_mut()),
                 Err(error) => Ok(serde_json::json!({
                     "error": { "code": "mcp_batch_failed", "message": error.to_string() }
@@ -303,9 +419,12 @@ async fn dispatch_inner(
             skills::deactivate(&state, payload).await,
             "skills_deactivate_failed",
         ),
-        HubCommand::SkillsInstall { payload, .. } => {
-            map_install_result(state.skill_installs.start(state.clone(), payload).await)
-        }
+        HubCommand::SkillsInstall { payload, .. } => map_install_result(
+            state
+                .skill_installs
+                .start_with_origin(state.clone(), payload, context.event_origin.cloned())
+                .await,
+        ),
         HubCommand::SkillsInstallGet { payload, .. } => {
             map_install_result(state.skill_installs.get(&state, payload).await)
         }
@@ -318,7 +437,15 @@ async fn dispatch_inner(
                 Err(error) => return Ok(error),
             };
             let request_source = context.source();
-            match skills::run(state.clone(), payload, &request_source, None).await {
+            match skills::run(
+                state.clone(),
+                payload,
+                &request_source,
+                None,
+                context.event_origin.cloned(),
+            )
+            .await
+            {
                 Ok(response) => slim_process_response(response, snapshots),
                 Err(error) => Ok(skills::skill_run_command_error(error)),
             }

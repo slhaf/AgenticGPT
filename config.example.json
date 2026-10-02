@@ -13,6 +13,10 @@
       "browser"
     ]
   },
+  "events": {
+    "lowTtlSeconds": 86400,
+    "internalOverrides": {}
+  },
   "tunnel": {
     "tunnelId": "tunnel_replace-me",
     "apiKey": "file:/home/your-user/.agentic_gpt/secrets/tunnel-api-key"

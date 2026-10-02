@@ -39,6 +39,168 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "500":
           $ref: "#/components/responses/InternalError"
+  /v1/events:
+    get:
+      operationId: listEvents
+      description: List one explicitly selected enabled Agent's persisted inbox. Defaults to pending events and 20 items; hidden pending events remain listable. The response includes the Agent's compact events panel when available. Offline, timeout, and Hub errors omit events.
+      x-openai-isConsequential: false
+      parameters:
+        - name: agentId
+          in: query
+          required: true
+          description: Target enabled local Agentic agent id; this API never selects or merges agents.
+          schema:
+            type: string
+        - name: status
+          in: query
+          required: false
+          schema:
+            $ref: "#/components/schemas/EventStatus"
+            default: pending
+        - name: severity
+          in: query
+          required: false
+          schema:
+            $ref: "#/components/schemas/EventSeverity"
+        - name: limit
+          in: query
+          required: false
+          description: Defaults to 20; the Agent clamps the effective page size to 1 through 100.
+          schema:
+            type: integer
+            default: 20
+        - name: cursor
+          in: query
+          required: false
+          description: Opaque cursor returned by a prior listEvents response, scoped to the same Agent and filters.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Flat event list DTO plus the optional compact Agent events panel.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EventListResponse"
+              examples:
+                page:
+                  summary: Pending events and compact panel
+                  value:
+                    items:
+                      - eventId: evt_example
+                        summary: Process completed
+                        severity: low
+                        createdAt: "2026-10-01T12:00:00Z"
+                        status: pending
+                    events:
+                      current: "low: 1 | medium: 0 | high: 0"
+                      new:
+                        - "evt_example | Process completed": "low | 2026-10-01T12:00:00Z"
+        "400":
+          $ref: "#/components/responses/AgentError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/AgentError"
+        "500":
+          $ref: "#/components/responses/AgentError"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+  /v1/events/{eventId}:
+    get:
+      operationId: getEvent
+      description: Read one full event record for the explicitly selected enabled Agent. Reading does not mark it handled. The response includes the Agent's compact events panel when available; offline, timeout, and Hub errors omit events.
+      x-openai-isConsequential: false
+      parameters:
+        - name: eventId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: agentId
+          in: query
+          required: true
+          description: Target enabled local Agentic agent id; event IDs are never looked up across agents.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Full flat event record plus the optional compact Agent events panel.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EventGetResponse"
+              examples:
+                record:
+                  summary: Event record with its source and compact panel
+                  value:
+                    eventId: evt_example
+                    message: Process completed successfully
+                    severity: low
+                    createdAt: "2026-10-01T12:00:00Z"
+                    status: pending
+                    source:
+                      kind: process
+                      ref: process-1
+                    shownCount: 1
+                    expiresAt: "2026-10-02T12:00:00Z"
+                    events:
+                      current: "low: 1 | medium: 0 | high: 0"
+                      new:
+                        - "evt_example | Process completed": "low | 2026-10-01T12:00:00Z"
+        "400":
+          $ref: "#/components/responses/AgentError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/AgentError"
+        "500":
+          $ref: "#/components/responses/AgentError"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+  /v1/events/mark:
+    post:
+      operationId: markEvents
+      description: Idempotently mark selected events in one explicitly selected enabled Agent's inbox as handled. Unknown IDs are returned in notFoundIds; this changes only inbox handling state. The response includes the Agent's compact events panel when available; offline, timeout, and Hub errors omit events.
+      x-openai-isConsequential: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EventMarkRequest"
+            examples:
+              mark:
+                summary: Mark a batch in one Agent inbox
+                value:
+                  agentId: agent-example
+                  eventIds: [evt_example, evt_other]
+      responses:
+        "200":
+          description: Handled and unknown event IDs, plus the optional compact Agent events panel.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EventMarkResponse"
+              examples:
+                marked:
+                  summary: Per-ID result
+                  value:
+                    handledIds: [evt_example]
+                    notFoundIds: [evt_other]
+                    events:
+                      current: "low: 0 | medium: 0 | high: 0"
+                      new: []
+        "400":
+          $ref: "#/components/responses/AgentError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/AgentError"
+        "500":
+          $ref: "#/components/responses/AgentError"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
   /v1/process/exec:
     post:
       operationId: processExec
@@ -57,8 +219,8 @@ paths:
             application/json:
               schema:
                 oneOf:
-                  - $ref: "#/components/schemas/ProcessResponse"
-                  - $ref: "#/components/schemas/ErrorResponse"
+                  - $ref: "#/components/schemas/ProcessExecResponse"
+                  - $ref: "#/components/schemas/AgentErrorResponse"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -88,7 +250,7 @@ paths:
               schema:
                 oneOf:
                   - $ref: "#/components/schemas/ProcessBatchResponse"
-                  - $ref: "#/components/schemas/ErrorResponse"
+                  - $ref: "#/components/schemas/AgentErrorResponse"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -148,7 +310,9 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ProcessListResponse"
+                oneOf:
+                  - $ref: "#/components/schemas/ProcessListResponse"
+                  - $ref: "#/components/schemas/ProcessLiveErrorResponse"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -196,6 +360,7 @@ paths:
                 oneOf:
                   - $ref: "#/components/schemas/ProcessStatusResponse"
                   - $ref: "#/components/schemas/ProcessCacheFallbackResponse"
+                  - $ref: "#/components/schemas/ProcessLiveErrorResponse"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -249,13 +414,13 @@ paths:
               schema:
                 $ref: "#/components/schemas/ProcessOutputResponse"
         "400":
-          $ref: "#/components/responses/BadRequest"
+          $ref: "#/components/responses/AgentError"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
-          $ref: "#/components/responses/NotFound"
+          $ref: "#/components/responses/AgentError"
         "500":
-          $ref: "#/components/responses/InternalError"
+          $ref: "#/components/responses/AgentError"
         "503":
           description: Agent unavailable; output is never synthesized from Hub metadata cache.
           content:
@@ -294,13 +459,13 @@ paths:
               schema:
                 $ref: "#/components/schemas/ProcessResultResponse"
         "400":
-          $ref: "#/components/responses/BadRequest"
+          $ref: "#/components/responses/AgentError"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
-          $ref: "#/components/responses/NotFound"
+          $ref: "#/components/responses/AgentError"
         "500":
-          $ref: "#/components/responses/InternalError"
+          $ref: "#/components/responses/AgentError"
         "503":
           description: Agent unavailable; result content is never synthesized from Hub metadata cache.
           content:
@@ -329,7 +494,9 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ProcessCancelResponse"
+                oneOf:
+                  - $ref: "#/components/schemas/ProcessCancelResponse"
+                  - $ref: "#/components/schemas/ProcessLiveErrorResponse"
         "400":
           $ref: "#/components/responses/BadRequest"
         "502":
@@ -362,7 +529,9 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/TmuxListSessionsResponse"
+                oneOf:
+                  - $ref: "#/components/schemas/TmuxListSessionsResponse"
+                  - $ref: "#/components/schemas/AgentErrorResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
@@ -393,7 +562,9 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/TmuxListPanesResponse"
+                oneOf:
+                  - $ref: "#/components/schemas/TmuxListPanesResponse"
+                  - $ref: "#/components/schemas/AgentErrorResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
@@ -561,7 +732,9 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/McpListToolsResponse"
+                oneOf:
+                  - $ref: "#/components/schemas/McpListToolsResponse"
+                  - $ref: "#/components/schemas/AgentErrorResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
@@ -586,8 +759,8 @@ paths:
             application/json:
               schema:
                 oneOf:
-                  - $ref: "#/components/schemas/ProcessResponse"
-                  - $ref: "#/components/schemas/ErrorResponse"
+                  - $ref: "#/components/schemas/ProcessExecResponse"
+                  - $ref: "#/components/schemas/AgentErrorResponse"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -615,7 +788,7 @@ paths:
               schema:
                 oneOf:
                   - $ref: "#/components/schemas/McpBatchToolResponse"
-                  - $ref: "#/components/schemas/ErrorResponse"
+                  - $ref: "#/components/schemas/AgentErrorResponse"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -683,9 +856,11 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/RoomDiaryActiveResponse"
+                oneOf:
+                  - $ref: "#/components/schemas/RoomDiaryActiveResponse"
+                  - $ref: "#/components/schemas/AgentErrorResponse"
         "400":
-          $ref: "#/components/responses/BadRequest"
+          $ref: "#/components/responses/RoomAgentError"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
@@ -717,9 +892,11 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/RoomDiaryReadResponse"
+                oneOf:
+                  - $ref: "#/components/schemas/RoomDiaryReadResponse"
+                  - $ref: "#/components/schemas/AgentErrorResponse"
         "400":
-          $ref: "#/components/responses/BadRequest"
+          $ref: "#/components/responses/RoomAgentError"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
@@ -751,9 +928,11 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/RoomNotebookResultsResponse"
+                oneOf:
+                  - $ref: "#/components/schemas/RoomNotebookResultsResponse"
+                  - $ref: "#/components/schemas/AgentErrorResponse"
         "400":
-          $ref: "#/components/responses/BadRequest"
+          $ref: "#/components/responses/RoomAgentError"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
@@ -785,9 +964,11 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/RoomNotebookResultsResponse"
+                oneOf:
+                  - $ref: "#/components/schemas/RoomNotebookResultsResponse"
+                  - $ref: "#/components/schemas/AgentErrorResponse"
         "400":
-          $ref: "#/components/responses/BadRequest"
+          $ref: "#/components/responses/RoomAgentError"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
@@ -819,13 +1000,15 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/RoomNotebookReadResponse"
+                oneOf:
+                  - $ref: "#/components/schemas/RoomNotebookReadResponse"
+                  - $ref: "#/components/schemas/AgentErrorResponse"
         "400":
-          $ref: "#/components/responses/BadRequest"
+          $ref: "#/components/responses/RoomAgentError"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
-          $ref: "#/components/responses/NotFound"
+          $ref: "#/components/responses/RoomAgentError"
         "409":
           $ref: "#/components/responses/Conflict"
         "422":
@@ -853,9 +1036,11 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/RoomStateListResponse"
+                oneOf:
+                  - $ref: "#/components/schemas/RoomStateListResponse"
+                  - $ref: "#/components/schemas/AgentErrorResponse"
         "400":
-          $ref: "#/components/responses/BadRequest"
+          $ref: "#/components/responses/RoomAgentError"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
@@ -887,13 +1072,15 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/RoomStateReadResponse"
+                oneOf:
+                  - $ref: "#/components/schemas/RoomStateReadResponse"
+                  - $ref: "#/components/schemas/AgentErrorResponse"
         "400":
-          $ref: "#/components/responses/BadRequest"
+          $ref: "#/components/responses/RoomAgentError"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
-          $ref: "#/components/responses/NotFound"
+          $ref: "#/components/responses/RoomAgentError"
         "409":
           $ref: "#/components/responses/Conflict"
         "422":
@@ -921,9 +1108,11 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/RoomMaintenanceStatusResponse"
+                oneOf:
+                  - $ref: "#/components/schemas/RoomMaintenanceStatusResponse"
+                  - $ref: "#/components/schemas/AgentErrorResponse"
         "400":
-          $ref: "#/components/responses/BadRequest"
+          $ref: "#/components/responses/RoomAgentError"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
@@ -955,9 +1144,11 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/RoomMaintenanceSubmitResponse"
+                oneOf:
+                  - $ref: "#/components/schemas/RoomMaintenanceSubmitResponse"
+                  - $ref: "#/components/schemas/AgentErrorResponse"
         "400":
-          $ref: "#/components/responses/BadRequest"
+          $ref: "#/components/responses/RoomAgentError"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
@@ -983,7 +1174,9 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/BootstrapResponse"
+                oneOf:
+                  - $ref: "#/components/schemas/BootstrapResponse"
+                  - $ref: "#/components/schemas/AgentErrorResponse"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -1011,7 +1204,9 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/BootstrapReadResponse"
+                oneOf:
+                  - $ref: "#/components/schemas/BootstrapReadResponse"
+                  - $ref: "#/components/schemas/AgentErrorResponse"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -1033,7 +1228,9 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SkillsListResponse"
+                oneOf:
+                  - $ref: "#/components/schemas/SkillsListResponse"
+                  - $ref: "#/components/schemas/AgentErrorResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
@@ -1057,7 +1254,9 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SkillReadResponse"
+                oneOf:
+                  - $ref: "#/components/schemas/SkillReadResponse"
+                  - $ref: "#/components/schemas/AgentErrorResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
@@ -1081,7 +1280,9 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SkillsSearchResponse"
+                oneOf:
+                  - $ref: "#/components/schemas/SkillsSearchResponse"
+                  - $ref: "#/components/schemas/AgentErrorResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
@@ -1099,7 +1300,9 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SkillsActiveResponse"
+                oneOf:
+                  - $ref: "#/components/schemas/SkillsActiveResponse"
+                  - $ref: "#/components/schemas/AgentErrorResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
@@ -1123,7 +1326,9 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SkillActivationResponse"
+                oneOf:
+                  - $ref: "#/components/schemas/SkillActivationResponse"
+                  - $ref: "#/components/schemas/AgentErrorResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
@@ -1147,7 +1352,9 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SkillActivationResponse"
+                oneOf:
+                  - $ref: "#/components/schemas/SkillActivationResponse"
+                  - $ref: "#/components/schemas/AgentErrorResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
@@ -1171,7 +1378,9 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SkillInstallStartResponse"
+                oneOf:
+                  - $ref: "#/components/schemas/SkillInstallStartResponse"
+                  - $ref: "#/components/schemas/AgentErrorResponse"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -1199,7 +1408,9 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SkillInstallStatusResponse"
+                oneOf:
+                  - $ref: "#/components/schemas/SkillInstallStatusResponse"
+                  - $ref: "#/components/schemas/AgentErrorResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
@@ -1223,7 +1434,9 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SkillInstallCancelResponse"
+                oneOf:
+                  - $ref: "#/components/schemas/SkillInstallCancelResponse"
+                  - $ref: "#/components/schemas/AgentErrorResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
@@ -1247,7 +1460,9 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ProcessResponse"
+                oneOf:
+                  - $ref: "#/components/schemas/ProcessExecResponse"
+                  - $ref: "#/components/schemas/AgentErrorResponse"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -1330,6 +1545,18 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
+    RoomAgentError:
+      description: Room Hub-generated or Agent business error. An online Agent error may include the compact events panel; no-target, offline, and timeout errors omit it.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/RoomAgentErrorResponse"
+    AgentError:
+      description: Agent returned an error for a targeted online operation. The compact events panel is optional and is absent when the Hub or Agent could not retrieve it.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/AgentErrorResponse"
     InternalError:
       description: Hub internal error.
       content:
@@ -1426,6 +1653,8 @@ components:
             $ref: "#/components/schemas/TmuxSession"
         error:
           $ref: "#/components/schemas/ErrorDetail"
+        events:
+          $ref: "#/components/schemas/EventPanel"
     TmuxListPanesResponse:
       type: object
       required:
@@ -1442,6 +1671,8 @@ components:
             $ref: "#/components/schemas/TmuxPane"
         error:
           $ref: "#/components/schemas/ErrorDetail"
+        events:
+          $ref: "#/components/schemas/EventPanel"
     TmuxCaptureRequest:
       type: object
       required:
@@ -1470,6 +1701,8 @@ components:
           type: string
         error:
           $ref: "#/components/schemas/ErrorDetail"
+        events:
+          $ref: "#/components/schemas/EventPanel"
     TmuxExecRequest:
       type: object
       required:
@@ -1580,6 +1813,8 @@ components:
               $ref: "#/components/schemas/ErrorDetail"
         error:
           $ref: "#/components/schemas/ErrorDetail"
+        events:
+          $ref: "#/components/schemas/EventPanel"
     ErrorDetail:
       type: object
       required:
@@ -1681,6 +1916,34 @@ components:
               type: string
             message:
               type: string
+    RoomAgentErrorResponse:
+      type: object
+      required: [error]
+      additionalProperties: false
+      properties:
+        error:
+          $ref: "#/components/schemas/ErrorDetail"
+        events:
+          $ref: "#/components/schemas/EventPanel"
+    AgentErrorResponse:
+      type: object
+      description: Online Agent error projections retain the original Agent envelope fields, including terminal outcomes and MCP content/meta/isError data.
+      required: [error]
+      additionalProperties: true
+      properties:
+        error:
+          $ref: "#/components/schemas/AgentErrorDetail"
+        events:
+          $ref: "#/components/schemas/EventPanel"
+    AgentErrorDetail:
+      type: object
+      required: [code, message]
+      additionalProperties: true
+      properties:
+        code:
+          type: string
+        message:
+          type: string
     AgentRun:
       type: object
       required:
@@ -1970,17 +2233,30 @@ components:
             - string
             - "null"
     McpListServersResponse:
+      oneOf:
+        - $ref: "#/components/schemas/McpListServersTargetedResponse"
+        - $ref: "#/components/schemas/McpListServersAllAgentsResponse"
+        - $ref: "#/components/schemas/AgentErrorResponse"
+    McpListServersTargetedResponse:
       type: object
+      required: [servers]
       additionalProperties: false
       properties:
         servers:
           type: array
-          description: MCP servers on the selected agent when agentId is provided.
+          description: MCP servers on the selected enabled agent.
           items:
             $ref: "#/components/schemas/McpServerSummary"
+        events:
+          $ref: "#/components/schemas/EventPanel"
+    McpListServersAllAgentsResponse:
+      type: object
+      required: [agents]
+      additionalProperties: false
+      properties:
         agents:
           type: array
-          description: MCP servers grouped by connected agent when agentId is omitted.
+          description: MCP servers grouped by connected agents when agentId is omitted; this aggregate response has no events panel.
           items:
             $ref: "#/components/schemas/McpAgentServersSummary"
     McpAgentServersSummary:
@@ -2069,6 +2345,8 @@ components:
                 type: object
                 additionalProperties: true
                 properties: {}
+        events:
+          $ref: "#/components/schemas/EventPanel"
     McpBatchMode:
       type: string
       enum: [parallel, sequential]
@@ -2288,6 +2566,8 @@ components:
           $ref: "#/components/schemas/RoomDiaryLayerResult"
         monthly:
           $ref: "#/components/schemas/RoomDiaryLayerResult"
+        events:
+          $ref: "#/components/schemas/EventPanel"
     RoomDiaryReadRequest:
       type: object
       required:
@@ -2309,6 +2589,8 @@ components:
       properties:
         document:
           $ref: "#/components/schemas/RoomDiaryLayerResult"
+        events:
+          $ref: "#/components/schemas/EventPanel"
     RoomNotebookPreview:
       type: object
       required:
@@ -2384,6 +2666,8 @@ components:
           type: string
           maxLength: 524288
           description: Bounded Markdown content.
+        events:
+          $ref: "#/components/schemas/EventPanel"
     RoomNotebookResultsResponse:
       type: object
       required:
@@ -2400,6 +2684,8 @@ components:
           maxItems: 32
           items:
             type: string
+        events:
+          $ref: "#/components/schemas/EventPanel"
     RoomStateListRequest:
       type: object
       additionalProperties: false
@@ -2425,6 +2711,8 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/RoomStateEntity"
+        events:
+          $ref: "#/components/schemas/EventPanel"
     RoomStateReadRequest:
       type: object
       required:
@@ -2448,6 +2736,8 @@ components:
           type: string
           maxLength: 524288
           description: Bounded Markdown content.
+        events:
+          $ref: "#/components/schemas/EventPanel"
     RoomMaintenanceSlot:
       type: string
       enum:
@@ -2527,6 +2817,8 @@ components:
           $ref: "#/components/schemas/RoomMaintenanceSyncOutcome"
         revision:
           type: string
+        events:
+          $ref: "#/components/schemas/EventPanel"
     RoomMaintenanceStatusRequest:
       type: object
       additionalProperties: false
@@ -2672,6 +2964,8 @@ components:
           maxItems: 5
           items:
             $ref: "#/components/schemas/RoomMaintenanceSlotStatus"
+        events:
+          $ref: "#/components/schemas/EventPanel"
     BootstrapDocumentKind:
       type: string
       enum:
@@ -2850,6 +3144,8 @@ components:
           type: array
           items:
             type: string
+        events:
+          $ref: "#/components/schemas/EventPanel"
     BootstrapReadRequest:
       type: object
       required:
@@ -2879,6 +3175,8 @@ components:
           type: array
           items:
             type: string
+        events:
+          $ref: "#/components/schemas/EventPanel"
     SkillReadRequest:
       type: object
       required:
@@ -3048,6 +3346,8 @@ components:
           type: array
           items:
             type: string
+        events:
+          $ref: "#/components/schemas/EventPanel"
     SkillReadResponse:
       type: object
       required:
@@ -3058,6 +3358,8 @@ components:
           $ref: "#/components/schemas/SkillDetail"
         resource:
           $ref: "#/components/schemas/SkillResource"
+        events:
+          $ref: "#/components/schemas/EventPanel"
     SkillResource:
       type: object
       required:
@@ -3196,6 +3498,8 @@ components:
           type: string
         pollAfterMs:
           type: integer
+        events:
+          $ref: "#/components/schemas/EventPanel"
     SkillInstallGetRequest:
       type: object
       required:
@@ -3264,6 +3568,8 @@ components:
           $ref: "#/components/schemas/SkillInstallError"
         pollAfterMs:
           type: integer
+        events:
+          $ref: "#/components/schemas/EventPanel"
     SkillInstallProgress:
       type: object
       required: [filesCompleted, filesTotal, bytesDownloaded]
@@ -3359,6 +3665,8 @@ components:
           type: string
         cancelRequestedAt:
           type: string
+        events:
+          $ref: "#/components/schemas/EventPanel"
     SkillRunRequest:
       type: object
       required: [id, path]
@@ -3395,6 +3703,8 @@ components:
           type: array
           items:
             type: string
+        events:
+          $ref: "#/components/schemas/EventPanel"
     SkillsActiveResponse:
       type: object
       required:
@@ -3410,6 +3720,8 @@ components:
           type: array
           items:
             type: string
+        events:
+          $ref: "#/components/schemas/EventPanel"
     SkillActivationResponse:
       type: object
       required:
@@ -3426,6 +3738,135 @@ components:
           type: boolean
         activatedAt:
           type: string
+        events:
+          $ref: "#/components/schemas/EventPanel"
+    EventSeverity:
+      type: string
+      enum: [low, medium, high]
+    EventStatus:
+      type: string
+      enum: [pending, handled, expired]
+    EventSourceKind:
+      type: string
+      enum: [process, skill_install, external]
+    EventSource:
+      type: object
+      required: [kind, ref]
+      additionalProperties: false
+      properties:
+        kind:
+          $ref: "#/components/schemas/EventSourceKind"
+        ref:
+          type: string
+    EventPanel:
+      type: object
+      required: [current, new]
+      additionalProperties: false
+      properties:
+        current:
+          type: string
+          pattern: '^low: [0-9]+ \| medium: [0-9]+ \| high: [0-9]+$'
+          description: Pending low/medium/high counts, including hidden events.
+        new:
+          type: array
+          maxItems: 5
+          description: Compact newly surfaced entries; each object has one `eventId | summary` key and a `severity | RFC3339 date` value.
+          items:
+            type: object
+            minProperties: 1
+            maxProperties: 1
+            additionalProperties:
+              type: string
+    EventListItem:
+      type: object
+      required: [eventId, summary, severity, createdAt, status]
+      additionalProperties: false
+      properties:
+        eventId:
+          type: string
+        summary:
+          type: string
+          maxLength: 32
+        severity:
+          $ref: "#/components/schemas/EventSeverity"
+        createdAt:
+          type: string
+          format: date-time
+        status:
+          $ref: "#/components/schemas/EventStatus"
+    EventRecord:
+      type: object
+      required: [eventId, message, severity, createdAt, status, source, shownCount, expiresAt]
+      properties:
+        eventId:
+          type: string
+        message:
+          type: string
+        severity:
+          $ref: "#/components/schemas/EventSeverity"
+        createdAt:
+          type: string
+          format: date-time
+        status:
+          $ref: "#/components/schemas/EventStatus"
+        source:
+          $ref: "#/components/schemas/EventSource"
+        shownCount:
+          type: integer
+          minimum: 0
+        expiresAt:
+          type:
+            - string
+            - "null"
+          format: date-time
+    EventListResponse:
+      type: object
+      required: [items]
+      additionalProperties: false
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/EventListItem"
+        nextCursor:
+          type: string
+        events:
+          $ref: "#/components/schemas/EventPanel"
+    EventGetResponse:
+      allOf:
+        - $ref: "#/components/schemas/EventRecord"
+        - type: object
+          properties:
+            events:
+              $ref: "#/components/schemas/EventPanel"
+      unevaluatedProperties: false
+    EventMarkRequest:
+      type: object
+      required: [agentId, eventIds]
+      additionalProperties: false
+      properties:
+        agentId:
+          type: string
+        eventIds:
+          type: array
+          maxItems: 512
+          items:
+            type: string
+    EventMarkResponse:
+      type: object
+      required: [handledIds, notFoundIds]
+      additionalProperties: false
+      properties:
+        handledIds:
+          type: array
+          items:
+            type: string
+        notFoundIds:
+          type: array
+          items:
+            type: string
+        events:
+          $ref: "#/components/schemas/EventPanel"
     ProcessExecRequest:
       type: object
       required:
@@ -3652,8 +4093,12 @@ components:
         captureStatus:
           $ref: "#/components/schemas/ProcessCaptureStatus"
     ProcessListResponse:
+      oneOf:
+        - $ref: "#/components/schemas/ProcessListLiveResponse"
+        - $ref: "#/components/schemas/ProcessListCacheResponse"
+    ProcessListLiveResponse:
       type: object
-      required: [processes, freshness]
+      required: [processes, freshness, observedAt]
       additionalProperties: false
       properties:
         processes:
@@ -3663,10 +4108,43 @@ components:
         nextCursor:
           type: string
         freshness:
-          $ref: "#/components/schemas/ProcessFreshness"
+          type: string
+          const: live
         observedAt:
           type: string
           format: date-time
+        events:
+          $ref: "#/components/schemas/EventPanel"
+    ProcessListCacheResponse:
+      type: object
+      required: [processes, freshness]
+      additionalProperties: false
+      properties:
+        processes:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProcessListItem"
+        freshness:
+          type: string
+          enum: [cached, stale, unknown]
+        observedAt:
+          type: string
+          format: date-time
+    ProcessLiveErrorResponse:
+      type: object
+      required: [error, freshness, observedAt]
+      additionalProperties: false
+      properties:
+        error:
+          $ref: "#/components/schemas/ProcessError"
+        freshness:
+          type: string
+          const: live
+        observedAt:
+          type: string
+          format: date-time
+        events:
+          $ref: "#/components/schemas/EventPanel"
     ProcessStatusResponse:
       allOf:
         - $ref: "#/components/schemas/ProcessInfo"
@@ -3677,10 +4155,13 @@ components:
               type: integer
               minimum: 0
             freshness:
-              $ref: "#/components/schemas/ProcessFreshness"
+              type: string
+              const: live
             observedAt:
               type: string
               format: date-time
+            events:
+              $ref: "#/components/schemas/EventPanel"
       unevaluatedProperties: false
     ProcessCacheFallbackResponse:
       type: object
@@ -3786,6 +4267,8 @@ components:
           description: True only when process output capture has actually reached EOF.
         captureStatus:
           $ref: "#/components/schemas/ProcessCaptureStatus"
+        events:
+          $ref: "#/components/schemas/EventPanel"
     ProcessResultStatus:
       type: string
       enum: [complete, too_large, unavailable]
@@ -3811,6 +4294,8 @@ components:
           type: string
         resultPreview:
           type: string
+        events:
+          $ref: "#/components/schemas/EventPanel"
     ProcessCancelResponse:
       type: object
       required: [processId, state, cancelOutcome, terminationEvidence, freshness, observedAt]
@@ -3833,6 +4318,8 @@ components:
         observedAt:
           type: string
           format: date-time
+        events:
+          $ref: "#/components/schemas/EventPanel"
     ProcessInlineStream:
       type: object
       required: [data, encoding]
@@ -3862,7 +4349,7 @@ components:
           type: string
         truncated:
           type: boolean
-    ProcessResponse:
+    ProcessResponseBase:
       type: object
       description: Creation status with flattened ProcessInfo fields. Complete inline output/result is included only when the serialized response fits within 8192 bytes; overflow output uses a shared stdout/stderr preview capped at 2048 bytes.
       allOf:
@@ -3896,6 +4383,17 @@ components:
               type: string
             error:
               $ref: "#/components/schemas/ProcessError"
+    ProcessResponse:
+      allOf:
+        - $ref: "#/components/schemas/ProcessResponseBase"
+      unevaluatedProperties: false
+    ProcessExecResponse:
+      allOf:
+        - $ref: "#/components/schemas/ProcessResponseBase"
+        - type: object
+          properties:
+            events:
+              $ref: "#/components/schemas/EventPanel"
       unevaluatedProperties: false
     ProcessBatchResponse:
       type: object
@@ -3916,6 +4414,8 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/ProcessResponse"
+        events:
+          $ref: "#/components/schemas/EventPanel"
     ProcessToolResponse:
       type: object
       required: [processId, state, resultAvailable]
@@ -3984,3 +4484,5 @@ components:
           description: Flat child process status projections in original input order.
           items:
             $ref: "#/components/schemas/ProcessToolResponse"
+        events:
+          $ref: "#/components/schemas/EventPanel"

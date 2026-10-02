@@ -234,12 +234,16 @@ async fn managed_test_state(max_active_processes: usize) -> (AppState, PathBuf) 
             auth: None,
         },
     );
-    let private_state =
-        crate::private_state::PrivateStatePaths::for_test(root.join("private-state"));
+    let private_state = crate::private_state::PrivateStatePaths::for_test_agent(
+        root.join("private-state"),
+        config.agent_id.clone(),
+    );
+    let event_store = crate::event_store::EventStore::open(&private_state).unwrap();
     let state = AppState {
         config_path: root.join("config.json"),
         config: Arc::new(RwLock::new(config)),
         private_state: private_state.clone(),
+        event_store,
         process_history: crate::process_history::ProcessHistoryStore::open(&private_state),
         browser_runtime: None,
         runtime: crate::state::RuntimeModel::local(crate::state::CapabilityProfile::Normal),

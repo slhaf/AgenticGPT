@@ -7,8 +7,8 @@ mod tests {
     use crate::WorkerProfile;
 
     use super::super::model::{
-        IdentityDraft, McpServerDraft, McpServersDraft, OptionalSectionDraft, SetupField,
-        SetupSeed, SetupSession,
+        EventsDraft, IdentityDraft, McpServerDraft, McpServersDraft, OptionalSectionDraft,
+        SetupField, SetupSeed, SetupSession,
     };
     use super::{optional_items, ReviewEditorKind, ReviewItemTarget};
 
@@ -165,6 +165,40 @@ mod tests {
             mcp_items[0].target,
             ReviewItemTarget::McpServer { index: 0 }
         );
+    }
+    #[test]
+    fn event_review_preserves_values_and_offers_every_override_choice() {
+        let items = optional_items(OptionalSectionDraft::Events(EventsDraft {
+            low_ttl_seconds: "3600".into(),
+            internal_overrides: [("process.failed".into(), "off".into())]
+                .into_iter()
+                .collect(),
+        }));
+
+        let ttl = items
+            .iter()
+            .find(|item| item.field == Some(SetupField::EventsLowTtlSeconds))
+            .unwrap();
+        assert_eq!(ttl.value, "3600");
+        assert_eq!(ttl.editor, ReviewEditorKind::Text);
+
+        let failed = items
+            .iter()
+            .find(|item| item.field == Some(SetupField::EventProcessFailedLevel))
+            .unwrap();
+        assert_eq!(failed.value, "off");
+        assert_eq!(failed.editor, ReviewEditorKind::Choice);
+        assert_eq!(
+            failed.choice_values(),
+            &["inherit", "low", "medium", "high", "off"]
+        );
+
+        let completed = items
+            .iter()
+            .find(|item| item.field == Some(SetupField::EventProcessCompletedLevel))
+            .unwrap();
+        assert_eq!(completed.value, "inherit");
+        assert_eq!(items.len(), crate::config::INTERNAL_EVENT_TYPES.len() + 1);
     }
 
     #[test]
@@ -340,6 +374,19 @@ impl ReviewItem {
                 | SetupField::RoomMaintenanceAutoPush,
             ) => &["false", "true"],
             Some(SetupField::HubReportingDetail) => &["metadata", "full"],
+            Some(
+                SetupField::EventProcessCompletedLevel
+                | SetupField::EventProcessFailedLevel
+                | SetupField::EventProcessRejectedLevel
+                | SetupField::EventProcessCancelledLevel
+                | SetupField::EventProcessTimedOutLevel
+                | SetupField::EventProcessDetachedLevel
+                | SetupField::EventProcessUnknownAfterRestartLevel
+                | SetupField::EventProcessSkippedLevel
+                | SetupField::EventSkillInstallCompletedLevel
+                | SetupField::EventSkillInstallFailedLevel
+                | SetupField::EventSkillInstallCancelledLevel,
+            ) => &["inherit", "low", "medium", "high", "off"],
             _ => &[],
         }
     }
@@ -441,6 +488,7 @@ pub(super) fn build_review_model(session: &SetupSession) -> Result<ReviewModel, 
         OptionalSection::Room,
         OptionalSection::TunnelClient,
         OptionalSection::HubReporting,
+        OptionalSection::Events,
     ]
     .into_iter()
     .map(|section| optional_group(session, section))
@@ -927,6 +975,33 @@ fn optional_items(draft: OptionalSectionDraft) -> Vec<ReviewItem> {
                 ReviewEditorKind::Choice,
             ),
         ],
+        OptionalSectionDraft::Events(value) => {
+            let mut items = vec![ReviewItem::field(
+                SetupField::EventsLowTtlSeconds,
+                "events_low_ttl_seconds",
+                value.low_ttl_seconds,
+                ReviewEditorKind::Text,
+            )];
+            items.extend(
+                crate::config::INTERNAL_EVENT_TYPES
+                    .iter()
+                    .map(|event_type| {
+                        let field = SetupField::internal_event_override(event_type)
+                            .expect("every configured event type has a review field");
+                        ReviewItem::field(
+                            field,
+                            event_type,
+                            value
+                                .internal_overrides
+                                .get(*event_type)
+                                .map(String::as_str)
+                                .unwrap_or("inherit"),
+                            ReviewEditorKind::Choice,
+                        )
+                    }),
+            );
+            items
+        }
     }
 }
 

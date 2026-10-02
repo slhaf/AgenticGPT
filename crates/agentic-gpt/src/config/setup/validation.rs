@@ -272,19 +272,19 @@ use std::path::PathBuf;
 
 use crate::config::mcp_servers::{self, McpServerAuthConfig, McpServerConfig};
 use crate::config::{
-    self, default_room_config, ConfirmationProviderConfig, HttpMcpConfig, HubReportingConfig,
-    LimitsConfig, MaxActiveProcesses, PathPolicyConfig, ReportingDetail, RoomConfig,
-    RoomMaintenanceConfig, RoomMaintenanceMode, SandboxConfig, ToolNamespace, ToolsetConfig,
-    TunnelClientConfig,
+    self, default_room_config, ConfirmationProviderConfig, EventNotificationLevel, EventsConfig,
+    HttpMcpConfig, HubReportingConfig, LimitsConfig, MaxActiveProcesses, PathPolicyConfig,
+    ReportingDetail, RoomConfig, RoomMaintenanceConfig, RoomMaintenanceMode, SandboxConfig,
+    ToolNamespace, ToolsetConfig, TunnelClientConfig,
 };
 use crate::config_templates::{
     self, build_config, InitInput, OptionalSection, RuntimeMode, SecretValue, TunnelSecretSource,
 };
 
 use super::model::{
-    HubDraft, McpServerDraft, OptionalSectionDraft, SetupField, SetupSession, StandaloneDraft,
+    EventsDraft, HubDraft, McpServerDraft, OptionalSectionDraft, SetupField, SetupSession,
+    StandaloneDraft,
 };
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ValidationError {
     pub(crate) field: SetupField,
@@ -320,6 +320,7 @@ pub(super) fn available_optional_sections(
         OptionalSection::Room,
         OptionalSection::TunnelClient,
         OptionalSection::HubReporting,
+        OptionalSection::Events,
     ]
     .into_iter()
     .filter(|section| section_is_legal(*section, mode, toolsets))
@@ -611,6 +612,21 @@ pub(super) fn validate_field(
             OptionalSection::HubReporting,
             &session.optional_draft(OptionalSection::HubReporting),
         ),
+        SetupField::EventsLowTtlSeconds
+        | SetupField::EventProcessCompletedLevel
+        | SetupField::EventProcessFailedLevel
+        | SetupField::EventProcessRejectedLevel
+        | SetupField::EventProcessCancelledLevel
+        | SetupField::EventProcessTimedOutLevel
+        | SetupField::EventProcessDetachedLevel
+        | SetupField::EventProcessUnknownAfterRestartLevel
+        | SetupField::EventProcessSkippedLevel
+        | SetupField::EventSkillInstallCompletedLevel
+        | SetupField::EventSkillInstallFailedLevel
+        | SetupField::EventSkillInstallCancelledLevel => validate_optional(
+            OptionalSection::Events,
+            &session.optional_draft(OptionalSection::Events),
+        ),
     };
     let errors: ValidationErrors = errors
         .into_iter()
@@ -795,12 +811,68 @@ fn validate_optional(section: OptionalSection, draft: &OptionalSectionDraft) -> 
                 ));
             }
         }
+        (OptionalSection::Events, OptionalSectionDraft::Events(value)) => {
+            if let Err(event_errors) = events_config_from_draft(value) {
+                errors.extend(event_errors);
+            }
+        }
         _ => errors.push(error(
             first_field(section),
             "config_init_optional_section_invalid",
         )),
     }
     errors
+}
+
+fn events_config_from_draft(draft: &EventsDraft) -> Result<EventsConfig, ValidationErrors> {
+    let low_ttl_seconds = draft.low_ttl_seconds.trim().parse::<u64>().map_err(|_| {
+        vec![error(
+            SetupField::EventsLowTtlSeconds,
+            "config_init_events_low_ttl_seconds_invalid",
+        )]
+    })?;
+    let mut internal_overrides = BTreeMap::new();
+    let mut errors = Vec::new();
+    for event_type in config::INTERNAL_EVENT_TYPES {
+        let Some(field) = SetupField::internal_event_override(event_type) else {
+            return Err(vec![error(
+                SetupField::EventsLowTtlSeconds,
+                "config_init_events_internal_override_invalid",
+            )]);
+        };
+        let level = draft
+            .internal_overrides
+            .get(*event_type)
+            .map(String::as_str)
+            .unwrap_or("inherit")
+            .trim();
+        let level = match level {
+            "inherit" => continue,
+            "low" => EventNotificationLevel::Low,
+            "medium" => EventNotificationLevel::Medium,
+            "high" => EventNotificationLevel::High,
+            "off" => EventNotificationLevel::Off,
+            _ => {
+                errors.push(error(field, "config_init_events_internal_override_invalid"));
+                continue;
+            }
+        };
+        internal_overrides.insert((*event_type).to_string(), level);
+    }
+    if !errors.is_empty() {
+        return Err(errors);
+    }
+    let events = EventsConfig {
+        low_ttl_seconds,
+        internal_overrides,
+    };
+    events.validate().map_err(|_| {
+        vec![error(
+            SetupField::EventsLowTtlSeconds,
+            "config_init_events_low_ttl_date_invalid",
+        )]
+    })?;
+    Ok(events)
 }
 
 fn mcp_servers_from_draft(
@@ -999,6 +1071,7 @@ fn configured_draft(
             .hub_reporting
             .clone()
             .map(OptionalSectionDraft::HubReporting),
+        OptionalSection::Events => drafts.events.clone().map(OptionalSectionDraft::Events),
     }
 }
 
@@ -1231,6 +1304,9 @@ fn apply_optional_draft(
                 detail,
             });
         }
+        (OptionalSection::Events, OptionalSectionDraft::Events(value)) => {
+            input.events = Some(events_config_from_draft(value)?);
+        }
         _ => {
             return Err(vec![error(
                 first_field(section),
@@ -1320,5 +1396,6 @@ fn first_field(section: OptionalSection) -> SetupField {
         OptionalSection::Room => SetupField::RoomTimezone,
         OptionalSection::TunnelClient => SetupField::TunnelClientVersion,
         OptionalSection::HubReporting => SetupField::HubReportingDetail,
+        OptionalSection::Events => SetupField::EventsLowTtlSeconds,
     }
 }

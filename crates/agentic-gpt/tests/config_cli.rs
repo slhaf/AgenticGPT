@@ -332,6 +332,211 @@ fn config_keys_json_lists_registry() {
         .find(|entry| entry["key"] == "sandbox.enabled")
         .unwrap();
     assert_eq!(sandbox["choices"], serde_json::json!(["true", "false"]));
+    let events = entries
+        .iter()
+        .filter(|entry| entry["section"] == "events")
+        .collect::<Vec<_>>();
+    assert_eq!(events.len(), 12);
+    let ttl = events
+        .iter()
+        .find(|entry| entry["key"] == "events.lowTtlSeconds")
+        .unwrap();
+    assert_eq!(ttl["type"], "non-negative-integer");
+    assert_eq!(ttl["example"], "86400");
+    let completed = events
+        .iter()
+        .find(|entry| entry["key"] == "events.internalOverrides.process.completed")
+        .unwrap();
+    assert_eq!(
+        completed["choices"],
+        serde_json::json!(["low", "medium", "high", "off"])
+    );
+    assert_eq!(completed["nullable"], true);
+}
+
+#[test]
+fn config_events_set_show_and_restore_default_override() {
+    let root = temp_root("events-set");
+    fs::create_dir_all(&root).unwrap();
+    let config = root.join("config.json");
+    let binary = binary_path();
+
+    let init = Command::new(&binary)
+        .args(["config", "--config"])
+        .arg(&config)
+        .args(["init", "--non-interactive"])
+        .output()
+        .unwrap();
+    assert!(init.status.success(), "event config fixture init failed");
+    let sparse: Value = serde_json::from_slice(&fs::read(&config).unwrap()).unwrap();
+    assert!(
+        sparse.get("events").is_none(),
+        "default event policy should remain sparse"
+    );
+
+    let show = Command::new(&binary)
+        .args(["config", "--config"])
+        .arg(&config)
+        .arg("show")
+        .output()
+        .unwrap();
+    assert!(show.status.success(), "legacy config show failed");
+    let defaults: Value = serde_json::from_slice(&show.stdout).unwrap();
+    assert_eq!(defaults["events"]["lowTtlSeconds"], 86_400);
+    assert_eq!(
+        defaults["events"]["internalOverrides"],
+        serde_json::json!({})
+    );
+    let large_ttl = Command::new(&binary)
+        .args(["config", "--config"])
+        .arg(&config)
+        .args(["set", "events.lowTtlSeconds", "100000000000"])
+        .output()
+        .unwrap();
+    assert!(
+        large_ttl.status.success(),
+        "a representable large event TTL was rejected"
+    );
+    let large_show = Command::new(&binary)
+        .args(["config", "--config"])
+        .arg(&config)
+        .arg("show")
+        .output()
+        .unwrap();
+    assert!(large_show.status.success());
+    let large_show: Value = serde_json::from_slice(&large_show.stdout).unwrap();
+    assert_eq!(large_show["events"]["lowTtlSeconds"], 100_000_000_000u64);
+
+    for (key, value) in [
+        ("events.lowTtlSeconds", "0"),
+        ("events.internalOverrides.process.completed", "medium"),
+    ] {
+        let set = Command::new(&binary)
+            .args(["config", "--config"])
+            .arg(&config)
+            .args(["set", key, value])
+            .output()
+            .unwrap();
+        assert!(
+            set.status.success(),
+            "valid event config set failed for {key}"
+        );
+    }
+    let configured = Command::new(&binary)
+        .args(["config", "--config"])
+        .arg(&config)
+        .arg("show")
+        .output()
+        .unwrap();
+    assert!(configured.status.success());
+    let configured: Value = serde_json::from_slice(&configured.stdout).unwrap();
+    assert_eq!(configured["events"]["lowTtlSeconds"], 0);
+    assert_eq!(
+        configured["events"]["internalOverrides"]["process.completed"],
+        "medium"
+    );
+
+    let reset = Command::new(&binary)
+        .args(["config", "--config"])
+        .arg(&config)
+        .args(["set", "events.internalOverrides.process.completed", "null"])
+        .output()
+        .unwrap();
+    assert!(reset.status.success(), "null did not restore the default");
+    let disk: Value = serde_json::from_slice(&fs::read(&config).unwrap()).unwrap();
+    assert_eq!(disk["events"]["lowTtlSeconds"], 0);
+    assert!(
+        disk["events"].get("internalOverrides").is_none(),
+        "restored default override should not persist"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn config_set_rejects_invalid_event_policy_without_writing() {
+    let root = temp_root("events-invalid-set");
+    fs::create_dir_all(&root).unwrap();
+    let config = root.join("config.json");
+    let binary = binary_path();
+    let init = Command::new(&binary)
+        .args(["config", "--config"])
+        .arg(&config)
+        .args(["init", "--non-interactive"])
+        .output()
+        .unwrap();
+    assert!(init.status.success(), "event config fixture init failed");
+
+    for (key, value) in [
+        ("events.lowTtlSeconds", "-1"),
+        ("events.lowTtlSeconds", "not-an-integer"),
+        ("events.lowTtlSeconds", "18446744073709551615"),
+        ("events.lowTtlSeconds", "9223372036854776"),
+        ("events.lowTtlSeconds", "1000000000000"),
+        ("events.internalOverrides.process.completed", "urgent"),
+        ("events.internalOverrides.process.unknown", "low"),
+    ] {
+        let before = fs::read(&config).unwrap();
+        let set = Command::new(&binary)
+            .args(["--language", "en", "config", "--config"])
+            .arg(&config)
+            .args(["set", key, value])
+            .output()
+            .unwrap();
+        assert!(
+            !set.status.success(),
+            "invalid event config set unexpectedly succeeded for {key}={value}"
+        );
+        if key == "events.lowTtlSeconds" && matches!(value, "9223372036854776" | "1000000000000") {
+            assert!(
+                String::from_utf8_lossy(&set.stderr).contains("event_low_ttl_out_of_range"),
+                "out-of-range TTL rejection should explain the unsupported value"
+            );
+        }
+        assert_eq!(
+            fs::read(&config).unwrap(),
+            before,
+            "invalid event config set modified the config for {key}={value}"
+        );
+    }
+
+    let invalid_source = root.join("invalid-event-import.json");
+    fs::write(
+        &invalid_source,
+        serde_json::to_vec(&serde_json::json!({
+            "mode": "local",
+            "profile": "normal",
+            "events": {
+                "internalOverrides": {
+                    "process.unknown": "medium"
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let imported_config = root.join("imported.json");
+    let import = Command::new(&binary)
+        .args(["--language", "en", "config", "--config"])
+        .arg(&imported_config)
+        .args(["import"])
+        .arg(&invalid_source)
+        .output()
+        .unwrap();
+    assert!(
+        !import.status.success(),
+        "unknown imported event type succeeded"
+    );
+    assert!(
+        String::from_utf8_lossy(&import.stderr).contains("config_import_events_invalid"),
+        "import did not explain the invalid event policy"
+    );
+    assert!(
+        !imported_config.exists(),
+        "invalid event import wrote a partial config"
+    );
+
+    let _ = fs::remove_dir_all(root);
 }
 
 #[test]

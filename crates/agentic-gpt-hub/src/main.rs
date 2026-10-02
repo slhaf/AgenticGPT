@@ -9,6 +9,8 @@ mod config;
 mod confirmation;
 #[path = "storage/db.rs"]
 mod db;
+#[path = "storage/event_feedback.rs"]
+mod event_feedback;
 #[path = "runtime/instance_lock.rs"]
 mod instance_lock;
 #[path = "ingress/mcp/mcp_server.rs"]
@@ -57,6 +59,7 @@ async fn main() -> Result<()> {
         cli::HubCommandCli::Init => {
             let conn = open_db(&db_path)?;
             init_db(&conn)?;
+            event_feedback::init(&conn)?;
             config.write_if_missing(&config_path)?;
             println!("initialized {}", db_path.display());
             println!("config {}", config_path.display());
@@ -72,11 +75,14 @@ async fn main() -> Result<()> {
             config.write_if_missing(&config_path)?;
             let conn = open_db(&db_path)?;
             init_db(&conn)?;
+            event_feedback::init(&conn)?;
+            event_feedback::recover_after_restart(&conn)?;
             server::serve(bind, api_key, public_base_url, mcp_profile, conn, config).await?;
         }
         cli::HubCommandCli::Agent { command } => {
             let conn = open_db(&db_path)?;
             init_db(&conn)?;
+            event_feedback::init(&conn)?;
             handle_agent_command(&conn, command)?;
         }
     }

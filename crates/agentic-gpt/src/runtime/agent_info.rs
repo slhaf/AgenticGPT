@@ -407,12 +407,15 @@ mod tests {
             std::env::temp_dir().join(format!("agent-info-{}", uuid::Uuid::new_v4().simple()));
         config.workspace_root = root.clone();
         config.path_policy.write_roots = vec![root.clone()];
-        let private_state =
-            crate::private_state::PrivateStatePaths::for_test(root.join(".private-state"));
+        let private_state = crate::private_state::PrivateStatePaths::for_test_agent(
+            root.join(".private-state"),
+            config.agent_id.clone(),
+        );
         let process_history = crate::process_history::ProcessHistoryStore::open(&private_state);
         AppState {
             config_path: std::env::temp_dir().join("agent-info-missing-config.json"),
             config: Arc::new(RwLock::new(config)),
+            event_store: crate::event_store::EventStore::open(&private_state).unwrap(),
             private_state,
             process_history,
             browser_runtime: None,

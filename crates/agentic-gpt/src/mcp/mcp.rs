@@ -11,7 +11,8 @@ use std::{
 };
 
 use agentic_gpt_protocol::{
-    McpCallToolRequest, McpListToolsRequest, McpServerSummary, ProcessResponse, ProcessState,
+    EventOrigin, McpCallToolRequest, McpListToolsRequest, McpServerSummary, ProcessResponse,
+    ProcessState,
 };
 use anyhow::{anyhow, Context, Result};
 use rmcp::{
@@ -70,22 +71,44 @@ pub(crate) async fn call_tool(
     payload: McpCallToolRequest,
     request_source: &str,
     terminal_event_hook: Option<TerminalEventHook>,
+    event_origin: Option<EventOrigin>,
 ) -> Result<ProcessResponse> {
-    start_managed_call_with_factory(
+    start_managed_call_with_origin(
         state,
         payload,
         request_source,
         terminal_event_hook,
+        event_origin,
         production_client_factory(),
     )
     .await
 }
 
+#[cfg(test)]
 async fn start_managed_call_with_factory(
     state: &AppState,
     payload: McpCallToolRequest,
     request_source: &str,
     terminal_event_hook: Option<TerminalEventHook>,
+    client_factory: McpClientFactory,
+) -> Result<ProcessResponse> {
+    start_managed_call_with_origin(
+        state,
+        payload,
+        request_source,
+        terminal_event_hook,
+        None,
+        client_factory,
+    )
+    .await
+}
+
+async fn start_managed_call_with_origin(
+    state: &AppState,
+    payload: McpCallToolRequest,
+    request_source: &str,
+    terminal_event_hook: Option<TerminalEventHook>,
+    event_origin: Option<EventOrigin>,
     client_factory: McpClientFactory,
 ) -> Result<ProcessResponse> {
     validate_tool_name(&payload.tool_name)?;
@@ -124,6 +147,7 @@ async fn start_managed_call_with_factory(
             argument_sha256,
             config_revision,
             terminal_event_hook,
+            event_origin,
         },
     )
     .await

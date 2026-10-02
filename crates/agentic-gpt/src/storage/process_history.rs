@@ -55,6 +55,12 @@ CREATE INDEX IF NOT EXISTS idx_processes_group_created ON processes(group_name, 
 CREATE INDEX IF NOT EXISTS idx_processes_kind_created ON processes(kind, created_at DESC, process_id DESC);
 CREATE INDEX IF NOT EXISTS idx_processes_state_created ON processes(state, created_at DESC, process_id DESC);
 CREATE INDEX IF NOT EXISTS idx_processes_finished ON processes(finished_at);
+CREATE TABLE IF NOT EXISTS process_event_completions (
+    process_id TEXT PRIMARY KEY NOT NULL,
+    event_type TEXT,
+    message TEXT,
+    completed_at TEXT
+);
 "#;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -92,7 +98,7 @@ impl HistoryWriteOutcome {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct ProcessOutputSnapshot {
     pub(crate) stdout: Vec<u8>,
     pub(crate) stdout_start_offset: u64,
@@ -102,24 +108,18 @@ pub(crate) struct ProcessOutputSnapshot {
     pub(crate) stderr_end_offset: u64,
 }
 
-impl Default for ProcessOutputSnapshot {
-    fn default() -> Self {
-        Self {
-            stdout: Vec::new(),
-            stdout_start_offset: 0,
-            stdout_end_offset: 0,
-            stderr: Vec::new(),
-            stderr_start_offset: 0,
-            stderr_end_offset: 0,
-        }
-    }
-}
-
 #[derive(Clone, Debug)]
 pub(crate) struct ProcessHistoryRecord {
     pub(crate) info: ProcessInfo,
     pub(crate) detail: Option<ProcessDetail>,
     pub(crate) output: ProcessOutputSnapshot,
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PendingProcessEventCompletion {
+    pub(crate) process_id: String,
+    pub(crate) event_type: String,
+    pub(crate) message: String,
+    pub(crate) completed_at: DateTime<Utc>,
 }
 
 #[derive(Clone, Debug)]
@@ -210,6 +210,21 @@ impl ProcessHistoryStore {
         &self,
         infos: impl IntoIterator<Item = &'a ProcessInfo>,
     ) -> HistoryWriteOutcome {
+        self.insert_admissions_inner(infos, false)
+    }
+
+    pub(crate) fn insert_admissions_with_event_tracking<'a>(
+        &self,
+        infos: impl IntoIterator<Item = &'a ProcessInfo>,
+    ) -> HistoryWriteOutcome {
+        self.insert_admissions_inner(infos, true)
+    }
+
+    fn insert_admissions_inner<'a>(
+        &self,
+        infos: impl IntoIterator<Item = &'a ProcessInfo>,
+        track_event_completions: bool,
+    ) -> HistoryWriteOutcome {
         let mut admissions = Vec::new();
         for info in infos {
             let info = bounded_info(info);
@@ -262,6 +277,14 @@ impl ProcessHistoryStore {
                         capture_label(info.capture_status),
                         info.capture_error,
                     ])?;
+                }
+                if track_event_completions {
+                    for (info, _) in &admissions {
+                        transaction.execute(
+                            "INSERT OR IGNORE INTO process_event_completions(process_id) VALUES (?1)",
+                            params![info.process_id],
+                        )?;
+                    }
                 }
             }
             transaction.commit()?;
@@ -404,6 +427,7 @@ impl ProcessHistoryStore {
                     ));
                 }
             }
+            persist_process_event_completion(&transaction, info)?;
             transaction.commit()?;
             Ok(())
         })();
@@ -411,6 +435,38 @@ impl ProcessHistoryStore {
             Ok(()) => {
                 self.healthy();
                 self.maybe_cleanup(Utc::now());
+                HistoryWriteOutcome::Persisted
+            }
+            Err(error) => self.failed(error),
+        }
+    }
+
+    pub(crate) fn record_terminal_event(&self, process: &ProcessInfo) -> HistoryWriteOutcome {
+        if process.state.is_active() {
+            return HistoryWriteOutcome::Failed(
+                "process_event_requires_terminal_state".to_string(),
+            );
+        }
+        if let Err(error) = self.ensure_ready() {
+            return self.failed(error);
+        }
+        let result = (|| -> rusqlite::Result<()> {
+            let mut guard = self
+                .connection
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let connection = guard.as_mut().ok_or_else(|| {
+                rusqlite::Error::InvalidParameterName("process_history_unavailable".to_string())
+            })?;
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            persist_process_event_completion(&transaction, process)?;
+            transaction.commit()?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                self.healthy();
                 HistoryWriteOutcome::Persisted
             }
             Err(error) => self.failed(error),
@@ -443,6 +499,53 @@ impl ProcessHistoryStore {
             }),
             Ok(())
         )
+    }
+
+    pub(crate) fn pending_event_completions(&self) -> Result<Vec<PendingProcessEventCompletion>> {
+        self.ensure_ready()?;
+        let rows = self
+            .with_connection(|connection| {
+                let mut statement = connection.prepare(
+                    "SELECT process_id,event_type,message,completed_at
+                     FROM process_event_completions
+                     WHERE event_type IS NOT NULL AND message IS NOT NULL AND completed_at IS NOT NULL
+                     ORDER BY completed_at,process_id",
+                )?;
+                let mapped = statement.query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                })?;
+                mapped.collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .map_err(|error| anyhow!(error))?;
+        rows.into_iter()
+            .map(|(process_id, event_type, message, completed_at)| {
+                Ok(PendingProcessEventCompletion {
+                    process_id,
+                    event_type,
+                    message,
+                    completed_at: DateTime::parse_from_rfc3339(&completed_at)
+                        .map_err(|_| anyhow!("invalid_process_event_completion_timestamp"))?
+                        .with_timezone(&Utc),
+                })
+            })
+            .collect()
+    }
+
+    pub(crate) fn acknowledge_event_completion(&self, process_id: &str) -> Result<()> {
+        self.ensure_ready()?;
+        self.with_connection(|connection| {
+            connection.execute(
+                "DELETE FROM process_event_completions WHERE process_id=?1",
+                params![process_id],
+            )?;
+            Ok(())
+        })
+        .map_err(|error| anyhow!(error))
     }
 
     pub(crate) fn get(&self, process_id: &str) -> Result<Option<ProcessHistoryRecord>> {
@@ -561,6 +664,7 @@ impl ProcessHistoryStore {
                     "UPDATE processes SET state=?1, updated_at=?2, finished_at=?2, info_json=?3, detail_json=?4, capture_status='incomplete', capture_error=?5 WHERE process_id=?6",
                     params![info.state.label(), format_time(now), info_json, detail_json, info.capture_error, info.process_id],
                 )?;
+                persist_process_event_completion(&transaction, info)?;
             }
             transaction.commit()?;
             Ok(recovered.len())
@@ -697,6 +801,29 @@ impl ProcessHistoryStore {
         self.degrade(&message);
         HistoryWriteOutcome::Failed(message)
     }
+}
+
+fn persist_process_event_completion(
+    transaction: &rusqlite::Transaction<'_>,
+    process: &ProcessInfo,
+) -> rusqlite::Result<()> {
+    let Some((event_type, message, completed_at)) =
+        crate::event_notifications::process_completion_details(process)
+    else {
+        return Ok(());
+    };
+    transaction.execute(
+        "UPDATE process_event_completions
+         SET event_type=?1,message=?2,completed_at=?3
+         WHERE process_id=?4 AND event_type IS NULL",
+        params![
+            event_type,
+            message,
+            format_time(completed_at),
+            process.process_id
+        ],
+    )?;
+    Ok(())
 }
 
 fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProcessHistoryRecord> {
@@ -978,6 +1105,109 @@ mod tests {
         assert_eq!(record.output.stderr_start_offset, 2);
         assert_eq!(record.output.stderr_end_offset, 5);
         assert_eq!(record.detail.unwrap().result, Some(json!({"ok": true})));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn terminal_event_outbox_survives_reopen_until_acknowledged() {
+        let root = root("event-outbox");
+        let paths = PrivateStatePaths::for_test(root.clone());
+        let process_id = "process_event_outbox";
+        let store = ProcessHistoryStore::open(&paths);
+        let admission = info(process_id, ProcessState::Running);
+        assert!(store
+            .insert_admissions_with_event_tracking([&admission])
+            .is_persisted());
+        let terminal = info(process_id, ProcessState::Completed);
+        assert!(store
+            .upsert_terminal(&detail(terminal.clone()), &ProcessOutputSnapshot::default(),)
+            .is_persisted());
+        let pending = store.pending_event_completions().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].process_id, process_id);
+        assert_eq!(pending[0].event_type, "process.completed");
+        assert_eq!(pending[0].completed_at, terminal.updated_at);
+        drop(store);
+
+        let reopened = ProcessHistoryStore::open(&paths);
+        assert_eq!(reopened.pending_event_completions().unwrap(), pending);
+        assert!(reopened
+            .get(process_id)
+            .unwrap()
+            .is_some_and(|record| record.info.state == ProcessState::Completed));
+        reopened.acknowledge_event_completion(process_id).unwrap();
+        assert!(reopened.pending_event_completions().unwrap().is_empty());
+        drop(reopened);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn early_terminal_evidence_survives_full_snapshot_and_restart_recovery() {
+        let root = root("early-event");
+        let store = ProcessHistoryStore::open(&PrivateStatePaths::for_test(root.clone()));
+        let full_snapshot_id = "process_early_event";
+        let restart_id = "process_restart_after_terminal";
+        let full_admission = info(full_snapshot_id, ProcessState::Running);
+        let restart_admission = info(restart_id, ProcessState::Running);
+        assert!(store
+            .insert_admissions_with_event_tracking([&full_admission, &restart_admission])
+            .is_persisted());
+
+        let completed = info(full_snapshot_id, ProcessState::Completed);
+        assert!(store.record_terminal_event(&completed).is_persisted());
+        assert_eq!(
+            store.get(full_snapshot_id).unwrap().unwrap().info.state,
+            ProcessState::Running
+        );
+        let early_completion = store
+            .pending_event_completions()
+            .unwrap()
+            .into_iter()
+            .find(|completion| completion.process_id == full_snapshot_id)
+            .unwrap();
+        let final_output = ProcessOutputSnapshot {
+            stdout: b"final output".to_vec(),
+            stdout_end_offset: 12,
+            ..ProcessOutputSnapshot::default()
+        };
+        assert!(store
+            .upsert_terminal(&detail(completed), &final_output)
+            .is_persisted());
+        assert_eq!(
+            store
+                .pending_event_completions()
+                .unwrap()
+                .into_iter()
+                .find(|completion| completion.process_id == full_snapshot_id)
+                .unwrap(),
+            early_completion
+        );
+        assert_eq!(
+            store.get(full_snapshot_id).unwrap().unwrap().output.stdout,
+            b"final output"
+        );
+
+        let completed_before_restart = info(restart_id, ProcessState::Completed);
+        assert!(store
+            .record_terminal_event(&completed_before_restart)
+            .is_persisted());
+        assert_eq!(store.recover_active(Utc::now()).unwrap(), 1);
+        let recovered_history = store.get(restart_id).unwrap().unwrap();
+        assert_eq!(
+            recovered_history.info.state,
+            ProcessState::UnknownAfterRestart
+        );
+        let recovered_event = store
+            .pending_event_completions()
+            .unwrap()
+            .into_iter()
+            .find(|completion| completion.process_id == restart_id)
+            .unwrap();
+        assert_eq!(recovered_event.event_type, "process.completed");
+        assert_eq!(
+            recovered_event.completed_at,
+            completed_before_restart.updated_at
+        );
         let _ = fs::remove_dir_all(root);
     }
 

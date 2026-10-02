@@ -8,7 +8,7 @@ use crate::agents::dispatch;
 use crate::registry::update_last_seen;
 use crate::runs;
 use crate::state::{AgentConnection, AgentTransport, HubState, OutboundAgentMessage};
-use crate::{confirmation, room};
+use crate::{confirmation, event_feedback, room};
 
 pub(crate) struct Connections {
     current: tokio::sync::Mutex<std::collections::HashMap<String, AgentConnection>>,
@@ -134,6 +134,7 @@ pub(super) struct DispatchTarget {
     pub(super) agent_id: String,
     pub(super) connection_id: String,
     pub(super) sender: mpsc::UnboundedSender<OutboundAgentMessage>,
+    expected_role: Option<AgentRole>,
 }
 
 const AGENT_CONNECTION_SWEEP_SECS: u64 = 15;
@@ -312,6 +313,7 @@ pub(super) async fn handle_agent_message(
             None
         }
         AgentMessage::Response { .. }
+        | AgentMessage::EventSources { .. }
         | AgentMessage::TransportAck { .. }
         | AgentMessage::TransportRunStatus { .. } => {
             unreachable!("reliable message classification drifted")
@@ -328,7 +330,14 @@ pub(super) async fn handle_agent_message(
         });
     }
     if let Some(sender) = replay_sender {
-        dispatch::send_pending_replays(state, agent_id, &sender).await;
+        let state = state.clone();
+        let agent_id = agent_id.to_string();
+        tokio::spawn(async move {
+            if let Err(error) = event_feedback::flush_for_agent(&state, &agent_id).await {
+                warn!(%agent_id, %error, "connection event feedback flush failed");
+            }
+            dispatch::send_pending_replays(&state, &agent_id, &sender).await;
+        });
     }
     Ok(())
 }
@@ -337,6 +346,7 @@ fn is_reliable_agent_message(message: &AgentMessage) -> bool {
     matches!(
         message,
         AgentMessage::Response { .. }
+            | AgentMessage::EventSources { .. }
             | AgentMessage::TransportAck { .. }
             | AgentMessage::TransportRunStatus { .. }
     )
@@ -483,12 +493,17 @@ pub(crate) async fn cleanup_expired_agent_connections_once(
         }
     }
 }
-pub(super) async fn resolve_command_target(
-    state: &HubState,
+pub(super) async fn resolve_command_target<'a>(
+    state: &'a HubState,
     agent_id: &str,
-) -> std::result::Result<DispatchTarget, String> {
+) -> std::result::Result<(DispatchTarget, DispatchAdmission<'a>), String> {
     let current = state.agents.current.lock().await;
-    command_target(&current, agent_id)
+    let target = command_target(&current, agent_id)?;
+    let admission = DispatchAdmission {
+        _current: current,
+        sender: target.sender.clone(),
+    };
+    Ok((target, admission))
 }
 
 fn command_target(
@@ -508,12 +523,13 @@ fn command_target(
         agent_id: agent_id.to_string(),
         connection_id: connection.connection_id.clone(),
         sender: connection.sender.clone(),
+        expected_role: None,
     })
 }
 
-pub(super) async fn resolve_room_target(
-    state: &HubState,
-) -> std::result::Result<DispatchTarget, room::control::RoomRouteError> {
+pub(super) async fn resolve_room_target<'a>(
+    state: &'a HubState,
+) -> std::result::Result<(DispatchTarget, DispatchAdmission<'a>), room::control::RoomRouteError> {
     let current = state.agents.current.lock().await;
     let active = state
         .active_room
@@ -535,12 +551,68 @@ pub(super) async fn resolve_room_target(
             "agent_not_ready".to_string(),
         ));
     }
-    Ok(DispatchTarget {
+    let target = DispatchTarget {
         agent_id: active.agent_id,
         connection_id: connection.connection_id.clone(),
         sender: connection.sender.clone(),
+        expected_role: Some(AgentRole::Room),
+    };
+    let admission = DispatchAdmission {
+        _current: current,
+        sender: target.sender.clone(),
+    };
+    Ok((target, admission))
+}
+pub(super) struct DispatchAdmission<'a> {
+    _current: tokio::sync::MutexGuard<'a, std::collections::HashMap<String, AgentConnection>>,
+    sender: mpsc::UnboundedSender<OutboundAgentMessage>,
+}
+
+impl DispatchAdmission<'_> {
+    pub(super) fn send(&self, message: OutboundAgentMessage) -> std::result::Result<(), String> {
+        self.sender
+            .send(message)
+            .map_err(|_| "agent_offline".to_string())
+    }
+}
+
+pub(super) async fn admit_dispatch_target<'a>(
+    state: &'a HubState,
+    target: &DispatchTarget,
+) -> std::result::Result<DispatchAdmission<'a>, String> {
+    let current = state.agents.current.lock().await;
+    ensure_dispatch_target(&current, target)?;
+    Ok(DispatchAdmission {
+        _current: current,
+        sender: target.sender.clone(),
     })
 }
+
+fn ensure_dispatch_target(
+    current: &std::collections::HashMap<String, AgentConnection>,
+    target: &DispatchTarget,
+) -> std::result::Result<(), String> {
+    let Some(connection) = current.get(&target.agent_id) else {
+        return Err("agent_offline".to_string());
+    };
+    if connection.connection_id != target.connection_id {
+        return Err("agent_connection_changed".to_string());
+    }
+    if !connection.hello_received {
+        return Err("agent_not_ready".to_string());
+    }
+    if connection.connection_mode == AgentConnectionMode::ReportingOnly {
+        return Err("agent_reporting_only".to_string());
+    }
+    if target
+        .expected_role
+        .is_some_and(|expected_role| connection.role != expected_role)
+    {
+        return Err("agent_role_changed".to_string());
+    }
+    Ok(())
+}
+
 async fn mark_cached_processes_unknown_after_restart(state: &HubState, agent_id: &str) {
     state
         .process_cache

@@ -175,6 +175,12 @@ impl AgentMcpServer {
     }
 
     async fn tool_is_available(&self, name: &str) -> bool {
+        if operation::is_event_api_operation(name) {
+            return true;
+        }
+        if name == "privateevent.inject" {
+            return self.ingress == RequestIngress::LocalUnix;
+        }
         let Some(namespace) = tool_namespace(name) else {
             return false;
         };
@@ -221,6 +227,17 @@ impl AgentMcpServer {
                 format!("Tool is not available: {name}"),
                 None,
             ));
+        }
+
+        if !matches!(
+            name.as_str(),
+            "privateevent.inject" | "event.panel" | "event.settle"
+        ) {
+            if let Err(error) =
+                crate::event_notifications::drain_completion_notifications(&self.state).await
+            {
+                crate::utils::log_warn(format!("event completion drain failed: {error}"));
+            }
         }
 
         let arguments = Value::Object(request.arguments.unwrap_or_default());
@@ -271,7 +288,33 @@ impl AgentMcpServer {
             }
         };
         let browser_repl_result = self.take_browser_repl_result(&mut value);
-        let special_result = browser_repl_result.or(file_read_result);
+        let mut special_result = browser_repl_result.or(file_read_result);
+        if self.ingress != RequestIngress::Hub
+            && !matches!(
+                name.as_str(),
+                "privateevent.inject" | "event.panel" | "event.settle"
+            )
+        {
+            let panel = match self.state.event_store.panel() {
+                Ok(panel) => panel,
+                Err(error) => {
+                    settle_unreturned_response(&self.state, &name, &value);
+                    return Err(ErrorData::internal_error(error.to_string(), None));
+                }
+            };
+            let decorate_result = if let Some(result) = special_result.as_mut() {
+                crate::operation_result::attach_event_panel_to_tool_result(result, &panel)
+            } else {
+                crate::operation_result::attach_event_panel(&mut value, &panel)
+            };
+            if let Err(error) = decorate_result {
+                settle_unreturned_response(&self.state, &name, &value);
+                return Err(ErrorData::internal_error(error.to_string(), None));
+            }
+            crate::event_notifications::settle_initial_response(&self.state, &name, &value)
+                .await
+                .map_err(|error| ErrorData::internal_error(error.to_string(), None))?;
+        }
         let process: Option<ProcessInfo> = value
             .get("process")
             .cloned()
@@ -398,7 +441,7 @@ impl AgentMcpServer {
         if let Err(error) = admission {
             return Ok((admission_error_value(error), None));
         }
-        if tool_namespace(name).is_some() {
+        if tool_namespace(name).is_some() || operation::is_event_api_operation(name) {
             validate_stdio_arguments(name, &arguments)?;
         }
         let request_id = request_id();
@@ -407,6 +450,44 @@ impl AgentMcpServer {
             "agent.info" => {
                 let _: EmptyArgs = from_value(arguments)?;
                 Ok(crate::agent_info::collect(&self.state).await)
+            }
+            "event.list" => {
+                dispatch(
+                    self,
+                    HubCommand::EventList {
+                        request_id,
+                        payload: from_value(arguments)?,
+                    },
+                )
+                .await
+            }
+            "event.get" => {
+                dispatch(
+                    self,
+                    HubCommand::EventGet {
+                        request_id,
+                        payload: from_value(arguments)?,
+                    },
+                )
+                .await
+            }
+            "event.mark" => {
+                dispatch(
+                    self,
+                    HubCommand::EventMark {
+                        request_id,
+                        payload: from_value(arguments)?,
+                    },
+                )
+                .await
+            }
+            "privateevent.inject" => {
+                let request: agentic_gpt_protocol::EventInjectRequest = from_value(arguments)?;
+                let low_ttl_seconds = self.state.config.read().await.events.low_ttl_seconds;
+                map_result_value(
+                    self.state.event_store.inject(&request, low_ttl_seconds),
+                    "event_injection_failed",
+                )
             }
             "browser.manual" => self.dispatch_browser_manual(arguments).await,
             "browser.acquire" => self.dispatch_browser_acquire(arguments).await,
@@ -691,7 +772,14 @@ impl AgentMcpServer {
             }
             "mcp.listServers" => {
                 self.require_optional_agent(&arguments).await?;
-                dispatch(self, HubCommand::McpListServers { request_id }).await
+                dispatch(
+                    self,
+                    HubCommand::McpListServers {
+                        request_id,
+                        suppress_event_panel: false,
+                    },
+                )
+                .await
             }
             "mcp.listTools" => {
                 self.require_agent(&arguments).await?;
@@ -729,6 +817,7 @@ impl AgentMcpServer {
                         request_source.clone(),
                         terminal_tracker,
                     )),
+                    None,
                 )
                 .await
                 {
@@ -773,6 +862,7 @@ impl AgentMcpServer {
                         request_source.clone(),
                         terminal_tracker,
                     )),
+                    None,
                 )
                 .await
                 {
@@ -1113,6 +1203,7 @@ impl AgentMcpServer {
             request,
             &request_source,
             Some(terminal_event_hook),
+            None,
         )
         .await
         {
@@ -1522,6 +1613,11 @@ impl ServerHandler for AgentMcpServer {
     }
 
     fn get_tool(&self, name: &str) -> Option<Tool> {
+        if operation::is_event_api_operation(name)
+            || (name == "privateevent.inject" && self.ingress == RequestIngress::LocalUnix)
+        {
+            return Some(tool_descriptor(name));
+        }
         let namespace = tool_namespace(name)?;
         let config = self.state.config.try_read().ok()?;
         config
@@ -2210,6 +2306,15 @@ fn validate_stdio_arguments(name: &str, arguments: &Value) -> Result<()> {
         "browser.list" => {
             let _: EmptyArgs = from_value(arguments.clone())?;
         }
+        "event.list" => {
+            let _: agentic_gpt_protocol::EventListRequest = from_value(arguments.clone())?;
+        }
+        "event.get" => {
+            let _: agentic_gpt_protocol::EventGetRequest = from_value(arguments.clone())?;
+        }
+        "event.mark" => {
+            let _: agentic_gpt_protocol::EventMarkRequest = from_value(arguments.clone())?;
+        }
         _ => {}
     }
     Ok(())
@@ -2546,6 +2651,32 @@ fn map_result_value<T: serde::Serialize>(result: Result<T>, code: &str) -> Resul
         Err(error) => Ok(json!({
             "error": { "code": code, "message": error.to_string() }
         })),
+    }
+}
+fn settle_unreturned_response(state: &AppState, operation: &str, value: &Value) {
+    let dispositions =
+        match crate::event_notifications::initial_response_dispositions(operation, value) {
+            Ok(dispositions) => dispositions,
+            Err(error) => {
+                crate::utils::log_warn(format!(
+                    "unreturned event response metadata failed: {error}"
+                ));
+                return;
+            }
+        };
+    for disposition in dispositions {
+        match state
+            .event_store
+            .settle_response(&disposition.source, false)
+        {
+            Ok(()) => {}
+            Err(error) if error.to_string() == "event_internal_source_not_registered" => {}
+            Err(error) => {
+                crate::utils::log_warn(format!(
+                    "unreturned event response settlement failed: {error}"
+                ));
+            }
+        }
     }
 }
 

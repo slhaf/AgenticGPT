@@ -1,8 +1,9 @@
 use super::*;
 use crate::agents::test_support::*;
 use agentic_gpt_protocol::{
-    AgentConnectionMode, AgentMessage, AgentRole, AgentRunReport, ConfirmationPayload, HubCommand,
-    HubCommandEnvelope, HubMessage, ProcessState, RoomNotebookReadRequest, SafeConfigSummary,
+    AgentConnectionMode, AgentMessage, AgentRole, AgentRunReport, ConfirmationPayload, EventOrigin,
+    EventResponseDisposition, EventSource, EventSourceKind, HubCommand, HubCommandEnvelope,
+    HubMessage, ProcessExecRequest, ProcessState, RoomNotebookReadRequest, SafeConfigSummary,
 };
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -256,6 +257,7 @@ async fn room_dispatch_keeps_validated_generation_during_replacement() {
             run_id: Some(envelope.run_id.clone()),
             request_id: envelope.request_id.clone(),
             data: data.clone(),
+            event_sources: vec![],
         }),
     )
     .await;
@@ -285,6 +287,111 @@ async fn room_dispatch_keeps_validated_generation_during_replacement() {
         new_rx.try_recv(),
         Err(mpsc::error::TryRecvError::Empty)
     ));
+}
+
+#[tokio::test]
+async fn room_lease_invalidated_during_feedback_flush_returns_conflict_without_reroute() {
+    let state = test_state();
+    register_agent(&state, "agent", "secret");
+    let mut old_rx = insert_connection(&state, "agent", "old", chrono::Utc::now()).await;
+    {
+        let mut current = state.agents.current.lock().await;
+        current.get_mut("agent").unwrap().role = AgentRole::Room;
+    }
+    crate::room::control::register_connection_role(&state, "agent", "old", AgentRole::Room)
+        .await
+        .unwrap();
+
+    let source_command = HubCommand::Exec {
+        request_id: "room-feedback-source".to_string(),
+        payload: ProcessExecRequest {
+            agent_id: "agent".to_string(),
+            group: None,
+            program: "printf".to_string(),
+            args: vec!["done".to_string()],
+            need_confirm: false,
+            confirm_method: None,
+            working_directory: None,
+            wait_seconds: None,
+        },
+    };
+    let source_run =
+        runs::prepare_run(&state, "agent", "room-feedback-source", &source_command).unwrap();
+    let origin = EventOrigin {
+        run_id: source_run.run_id,
+        request_id: source_run.request_id,
+        command_hash: source_run.command_hash,
+    };
+    crate::event_feedback::prepare(&state, "agent", &origin).unwrap();
+    let disposition = EventResponseDisposition {
+        source: EventSource {
+            kind: EventSourceKind::Process,
+            reference: "room-process".to_string(),
+        },
+        includes_terminal: false,
+    };
+    crate::event_feedback::record_reply_metadata(
+        &state,
+        "agent",
+        &origin,
+        std::slice::from_ref(&disposition),
+    )
+    .unwrap();
+    crate::event_feedback::finalize_original(&state, "agent", &origin, None).unwrap();
+
+    let room_command = HubCommand::RoomNotebookRead {
+        request_id: "room-after-feedback-flush".to_string(),
+        payload: RoomNotebookReadRequest {
+            path: "Notebook/topic.md".to_string(),
+        },
+    };
+    let request_state = state.clone();
+    let request = tokio::spawn(async move {
+        crate::room::control::request_active_room(&request_state, room_command, 5).await
+    });
+    let OutboundAgentMessage::Text(settle_text) = timeout(Duration::from_secs(5), old_rx.recv())
+        .await
+        .expect("feedback settlement was not sent to the captured Room Agent")
+        .unwrap()
+    else {
+        panic!("expected EventSettle while the public Room request waits");
+    };
+    let settle_envelope: HubCommandEnvelope = serde_json::from_str(&settle_text).unwrap();
+    let HubCommand::EventSettle { payload, .. } = &settle_envelope.command else {
+        panic!("expected EventSettle during Room preflight");
+    };
+    assert_eq!(payload.origin, origin);
+    assert_eq!(payload.dispositions.len(), 1);
+    assert_eq!(payload.dispositions[0].source.reference, "room-process");
+    assert!(!payload.dispositions[0].includes_terminal);
+
+    let (new_tx, mut new_rx) = mpsc::unbounded_channel();
+    replace_agent_connection(&state, "agent", "new", AgentTransport::WebSocket, new_tx)
+        .await
+        .unwrap();
+    let settle_ack = post_agent_message(
+        State(state.clone()),
+        Path("agent".to_string()),
+        Query(SseConnectQuery::for_test(Some("old".to_string()))),
+        agent_headers("secret"),
+        axum::Json(AgentMessage::Response {
+            run_id: Some(settle_envelope.run_id),
+            request_id: settle_envelope.request_id,
+            data: json!({ "status": "settled" }),
+            event_sources: Vec::new(),
+        }),
+    )
+    .await;
+    assert_eq!(settle_ack.status(), StatusCode::OK);
+    assert!(matches!(
+        timeout(Duration::from_secs(5), request)
+            .await
+            .expect("Room route did not finish after feedback acknowledgement")
+            .unwrap(),
+        Err(crate::room::control::RoomRouteError::StateConflict)
+    ));
+    assert!(matches!(old_rx.try_recv(), Ok(OutboundAgentMessage::Close)));
+    assert!(new_rx.try_recv().is_err());
 }
 #[tokio::test]
 async fn wp1_confirmation_callback_does_not_route_to_replacement_generation() {
@@ -998,6 +1105,7 @@ async fn generation_stale_reliable_messages_do_not_touch_current() {
         let (state, mut new_rx) = generation_fixture().await;
         let command = HubCommand::McpListServers {
             request_id: format!("generation-{case}-request"),
+            suppress_event_panel: false,
         };
         let run = runs::prepare_run(
             &state,
@@ -1017,6 +1125,7 @@ async fn generation_stale_reliable_messages_do_not_touch_current() {
                         run_id: Some(run.run_id.clone()),
                         request_id: run.request_id.clone(),
                         data: json!({ "servers": [] }),
+                        event_sources: vec![],
                     },
                 )
                 .await
@@ -1234,6 +1343,34 @@ async fn generation_expiry_rechecks_current_liveness() {
         Some("new")
     );
 }
+#[tokio::test]
+async fn guarded_send_rejects_captured_target_after_replacement() {
+    let state = test_state();
+    register_agent(&state, "agent", "secret");
+    let mut old_rx = insert_connection(&state, "agent", "old", chrono::Utc::now()).await;
+    {
+        let mut current = state.agents.current.lock().await;
+        current.get_mut("agent").unwrap().hello_received = true;
+    }
+    let (target, admission) = resolve_command_target(&state, "agent").await.unwrap();
+    drop(admission);
+    let (new_tx, mut new_rx) = mpsc::unbounded_channel();
+    replace_agent_connection(&state, "agent", "new", AgentTransport::WebSocket, new_tx)
+        .await
+        .unwrap();
+    assert!(matches!(
+        old_rx.recv().await,
+        Some(OutboundAgentMessage::Close)
+    ));
+
+    assert!(matches!(
+        admit_dispatch_target(&state, &target).await,
+        Err(reason) if reason == "agent_connection_changed"
+    ));
+    assert!(old_rx.try_recv().is_err());
+    assert!(new_rx.try_recv().is_err());
+}
+
 #[tokio::test]
 async fn generation_stale_heartbeat_direct_handler() {
     let state = test_state();

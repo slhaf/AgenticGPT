@@ -1,11 +1,47 @@
 use agentic_gpt_protocol::{
-    McpBatchRequest, McpBatchResponse, McpBatchToolChildResponse, McpBatchToolResponse,
+    EventPanel, McpBatchRequest, McpBatchResponse, McpBatchToolChildResponse, McpBatchToolResponse,
     ProcessBatchResponse, ProcessCancelResponse, ProcessDetail, ProcessError, ProcessInfo,
     ProcessListResponse, ProcessResponse, ProcessResultStatus, ProcessState, ProcessStatusResponse,
     ProcessToolResponse,
 };
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use serde_json::Value;
+
+pub(crate) fn attach_event_panel_to_tool_result(
+    result: &mut rmcp::model::CallToolResult,
+    panel: &EventPanel,
+) -> Result<()> {
+    {
+        let structured = result
+            .structured_content
+            .get_or_insert_with(|| Value::Object(serde_json::Map::new()));
+        attach_event_panel(structured, panel)?;
+    }
+
+    #[derive(serde::Serialize)]
+    struct EventReminder<'a> {
+        events: &'a EventPanel,
+    }
+
+    let reminder = serde_json::to_string(&EventReminder { events: panel })?;
+    let already_present = result.content.iter().any(|content| {
+        content
+            .as_text()
+            .is_some_and(|text| text.text.as_str() == reminder.as_str())
+    });
+    if !already_present {
+        result.content.push(rmcp::model::Content::text(reminder));
+    }
+    Ok(())
+}
+
+pub(crate) fn attach_event_panel(value: &mut Value, panel: &EventPanel) -> Result<()> {
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("event_panel_result_must_be_object"))?;
+    object.insert("events".to_string(), serde_json::to_value(panel)?);
+    Ok(())
+}
 
 fn elapsed_ms(process: &ProcessInfo) -> u64 {
     process
@@ -79,7 +115,7 @@ fn process_tool_response(detail: &ProcessDetail, include_identity: bool) -> Proc
             Some(
                 if detail
                     .result_bytes
-                    .map_or(false, |bytes| bytes > crate::process::MAX_MCP_RESULT_BYTES)
+                    .is_some_and(|bytes| bytes > crate::process::MAX_MCP_RESULT_BYTES)
                 {
                     ProcessResultStatus::TooLarge
                 } else {

@@ -1,6 +1,6 @@
 use agentic_gpt_protocol::{
-    AgentConnectionMode, AgentMessage, AgentRunReport, BoundedJsonValue, HubCommand,
-    HubCommandEnvelope, HubMessage, ProcessInfo,
+    AgentConnectionMode, AgentMessage, AgentRunReport, BoundedJsonValue, EventOrigin,
+    EventResponseDisposition, EventSource, HubCommand, HubCommandEnvelope, HubMessage, ProcessInfo,
 };
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
@@ -868,10 +868,19 @@ async fn handle_reliable_envelope(
             return;
         }
         transport_ledger::AcceptOutcome::Completed(result) => {
+            let event_sources =
+                match event_response_sources(hub_command_name(&envelope.command), &result) {
+                    Ok(sources) => sources,
+                    Err(error) => {
+                        log_warn(format!("transport replay event metadata failed: {error}"));
+                        return;
+                    }
+                };
             let _ = tx.send(transport_ledger::ack_message(&envelope));
             let _ = tx.send(AgentMessage::Response {
                 run_id: Some(envelope.run_id),
                 request_id: envelope.request_id,
+                event_sources,
                 data: result,
             });
             return;
@@ -920,10 +929,19 @@ async fn handle_reliable_envelope(
             let _ = tx.send(transport_ledger::ack_message(&envelope));
         }
         transport_ledger::ClaimOutcome::Completed(result) => {
+            let event_sources =
+                match event_response_sources(hub_command_name(&envelope.command), &result) {
+                    Ok(sources) => sources,
+                    Err(error) => {
+                        log_warn(format!("transport replay event metadata failed: {error}"));
+                        return;
+                    }
+                };
             let _ = tx.send(transport_ledger::ack_message(&envelope));
             let _ = tx.send(AgentMessage::Response {
                 run_id: Some(envelope.run_id),
                 request_id: envelope.request_id,
+                event_sources,
                 data: result,
             });
         }
@@ -940,7 +958,37 @@ async fn handle_reliable_envelope(
     }
 }
 
+fn pending_remote_event_sources(state: &AppState) -> Result<Vec<(EventOrigin, Vec<EventSource>)>> {
+    let mut groups: Vec<(EventOrigin, Vec<EventSource>)> = Vec::new();
+    for source in state.event_store.pending_internal_sources()? {
+        let Some(origin) = state.event_store.remote_origin(&source)? else {
+            continue;
+        };
+        if let Some((_, sources)) = groups.iter_mut().find(|(existing, _)| existing == &origin) {
+            sources.push(source);
+        } else {
+            groups.push((origin, vec![source]));
+        }
+    }
+    Ok(groups)
+}
+
 async fn reconcile_transport_runs(state: &AppState, tx: &mpsc::UnboundedSender<AgentMessage>) {
+    match pending_remote_event_sources(state) {
+        Ok(groups) => {
+            for (origin, sources) in groups {
+                if let Err(error) = tx.send(AgentMessage::EventSources { origin, sources }) {
+                    log_warn(format!(
+                        "pending event source recovery send failed: {error}"
+                    ));
+                    break;
+                }
+            }
+        }
+        Err(error) => log_warn(format!(
+            "pending event source recovery scan failed: {error}"
+        )),
+    }
     let agent_id = state.config.read().await.agent_id.clone();
     let records = match transport_ledger::latest_records() {
         Ok(records) => records,
@@ -956,11 +1004,15 @@ async fn reconcile_transport_runs(state: &AppState, tx: &mpsc::UnboundedSender<A
             continue;
         }
         match record.status.as_str() {
-            "completed" => {
-                if let Some(message) = transport_ledger::completed_response(&record) {
+            "completed" => match transport_ledger::completed_response(&record) {
+                Ok(Some(message)) => {
                     let _ = tx.send(message);
                 }
-            }
+                Ok(None) => {}
+                Err(error) => {
+                    log_warn(format!("transport replay event metadata failed: {error}"));
+                }
+            },
             "accepted" => {
                 let Some(command) = record.command.clone() else {
                     let _ = tx.send(AgentMessage::TransportRunStatus {
@@ -1134,15 +1186,72 @@ pub(crate) struct RunIdentity {
     pub(crate) agent_id: String,
 }
 
+fn event_response_sources(
+    operation: &str,
+    data: &serde_json::Value,
+) -> Result<Vec<EventResponseDisposition>> {
+    crate::event_notifications::initial_response_dispositions(operation, data)
+}
+
+async fn report_unreturned_event_sources(
+    state: &AppState,
+    origin: Option<&EventOrigin>,
+    dispositions: &[EventResponseDisposition],
+) {
+    let Some(origin) = origin else {
+        return;
+    };
+    let sources = dispositions
+        .iter()
+        .map(|disposition| disposition.source.clone())
+        .collect::<Vec<_>>();
+    if sources.is_empty() {
+        return;
+    }
+    if let Err(error) = send_agent_message(
+        state,
+        AgentMessage::EventSources {
+            origin: origin.clone(),
+            sources,
+        },
+    )
+    .await
+    {
+        log_warn(format!(
+            "unreturned event source recovery send failed: {error}"
+        ));
+    }
+}
+
 pub(crate) async fn handle_hub_command(
     state: AppState,
     command: HubCommand,
     identity: Option<RunIdentity>,
 ) -> Result<()> {
+    let suppress_event_panel = matches!(
+        &command,
+        HubCommand::McpListServers {
+            suppress_event_panel: true,
+            ..
+        }
+    );
     let request_id = command.request_id().to_string();
+    let operation = hub_command_name(&command);
+    let event_origin = identity.as_ref().map(|identity| EventOrigin {
+        run_id: identity.run_id.clone(),
+        request_id: identity.request_id.clone(),
+        command_hash: identity.command_hash.clone(),
+    });
+    let context =
+        RequestContext::with_event_origin(RequestIngress::Hub, operation, event_origin.as_ref());
+    if operation != "event.settle" {
+        if let Err(error) = crate::event_notifications::drain_completion_notifications(&state).await
+        {
+            log_warn(format!("event completion drain failed: {error}"));
+        }
+    }
     let mut snapshots = Vec::new();
-    let context = RequestContext::new(RequestIngress::Hub, hub_command_name(&command));
-    let data =
+    let mut data =
         match crate::local_service::dispatch(state.clone(), command, context, Some(&mut snapshots))
             .await
         {
@@ -1157,21 +1266,36 @@ pub(crate) async fn handle_hub_command(
                 })
             }
         };
+    let event_sources = event_response_sources(operation, &data)?;
+    if !suppress_event_panel && !matches!(operation, "event.panel" | "event.settle") {
+        let panel_result = state
+            .event_store
+            .panel()
+            .and_then(|panel| crate::operation_result::attach_event_panel(&mut data, &panel));
+        if let Err(error) = panel_result {
+            report_unreturned_event_sources(&state, event_origin.as_ref(), &event_sources).await;
+            return Err(error);
+        }
+    }
     if let Some(identity) = identity.as_ref() {
         if identity.request_id != request_id {
             return Err(anyhow!("transport_request_id_mismatch"));
         }
-        transport_ledger::mark_completed(
+        if let Err(error) = transport_ledger::mark_completed(
             &identity.run_id,
             &identity.request_id,
             &identity.command_hash,
             &identity.agent_id,
             &data,
-        )?;
+        ) {
+            report_unreturned_event_sources(&state, event_origin.as_ref(), &event_sources).await;
+            return Err(error);
+        }
     }
     let response = AgentMessage::Response {
         run_id: identity.as_ref().map(|value| value.run_id.clone()),
         request_id,
+        event_sources,
         data: data.clone(),
     };
     let mut delivery_error = None;

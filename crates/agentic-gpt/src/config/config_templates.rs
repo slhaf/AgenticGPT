@@ -9,8 +9,8 @@ use crate::config::mcp_servers::McpServerConfig;
 use crate::config::{
     default_path_policy, normalize_http_mcp_public_url, parse_http_mcp_allow_hosts,
     validate_hub_transport, validate_hub_url_shape, Config, ConfirmationProviderConfig,
-    HubReportingConfig, LimitsConfig, PathPolicyConfig, RoomConfig, SandboxConfig, ToolNamespace,
-    ToolsetConfig, TunnelClientConfig, TunnelConfig, WorkerProfile,
+    EventsConfig, HubReportingConfig, LimitsConfig, PathPolicyConfig, RoomConfig, SandboxConfig,
+    ToolNamespace, ToolsetConfig, TunnelClientConfig, TunnelConfig, WorkerProfile,
 };
 use crate::utils::agentic_home;
 
@@ -32,6 +32,7 @@ pub(crate) enum OptionalSection {
     Room,
     TunnelClient,
     HubReporting,
+    Events,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -96,6 +97,7 @@ pub(crate) struct InitInput {
     pub(crate) hub_reporting: Option<HubReportingConfig>,
     pub(crate) mcp_servers: Option<BTreeMap<String, McpServerConfig>>,
     pub(crate) toolsets: Option<ToolsetConfig>,
+    pub(crate) events: Option<EventsConfig>,
 }
 
 impl InitInput {
@@ -127,6 +129,7 @@ impl InitInput {
             room: None,
             tunnel_client: None,
             hub_reporting: None,
+            events: None,
             mcp_servers: None,
             toolsets: None,
         }
@@ -190,12 +193,16 @@ pub(crate) fn build_config(input: InitInput) -> Result<InitBuild> {
         room,
         tunnel_client,
         hub_reporting,
+        events,
         mcp_servers,
         toolsets,
     } = input;
 
     let has_imported_base = imported_base.is_some();
     let mut config = imported_base.unwrap_or(Config::default_config()?);
+    if let Some(events) = events {
+        config.events = events;
+    }
     config.mode = mode;
     if let Some(enabled) = http_mcp_enabled {
         config.http_mcp.enabled = enabled;
@@ -353,7 +360,8 @@ pub(crate) fn optional_section_is_legal(
         | OptionalSection::Limits
         | OptionalSection::Sandbox
         | OptionalSection::McpServers
-        | OptionalSection::Toolsets => true,
+        | OptionalSection::Toolsets
+        | OptionalSection::Events => true,
         OptionalSection::Room => toolsets.is_enabled(ToolNamespace::Room),
         OptionalSection::TunnelClient | OptionalSection::HubReporting => {
             mode == RuntimeMode::Standalone

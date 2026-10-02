@@ -4,7 +4,7 @@ use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const CURRENT_SCHEMA_VERSION: i64 = 2;
+const CURRENT_SCHEMA_VERSION: i64 = 3;
 const SQLITE_BUSY_TIMEOUT_MS: u64 = 5_000;
 
 pub(crate) fn open_db(path: &PathBuf) -> Result<Connection> {
@@ -149,6 +149,7 @@ pub(crate) fn init_db(conn: &Connection) -> Result<()> {
     transaction.execute_batch(
         "create unique index if not exists agents_alias_unique on agents(alias) where alias is not null;",
     )?;
+    crate::event_feedback::init_transaction(&transaction)?;
     transaction.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)?;
     transaction.commit()?;
     Ok(())

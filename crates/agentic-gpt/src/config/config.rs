@@ -10,11 +10,11 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use agentic_gpt_protocol::{
-    PolicyCounts, SafeBuiltinPolicyRules, SafeConfigSummary, SafePathPolicySummary, SafePathRoot,
-    SafePolicyRules, SafeRule, SafeSandboxSummary, SafeTunnelSummary,
+    EventSeverity, PolicyCounts, SafeBuiltinPolicyRules, SafeConfigSummary, SafePathPolicySummary,
+    SafePathRoot, SafePolicyRules, SafeRule, SafeSandboxSummary, SafeTunnelSummary,
 };
 use anyhow::{anyhow, Result};
-use chrono::Utc;
+use chrono::{Datelike, Utc};
 use serde::de::{self, Visitor};
 use serde::{
     ser::{SerializeMap, SerializeStruct},
@@ -319,6 +319,144 @@ pub(crate) struct ExplicitBrowserRuntimeConfig {
     pub(crate) node_module_dirs: Vec<String>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum EventNotificationLevel {
+    Low,
+    Medium,
+    High,
+    Off,
+}
+
+impl EventNotificationLevel {
+    pub(crate) fn severity(self) -> Option<EventSeverity> {
+        match self {
+            Self::Low => Some(EventSeverity::Low),
+            Self::Medium => Some(EventSeverity::Medium),
+            Self::High => Some(EventSeverity::High),
+            Self::Off => None,
+        }
+    }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Off => "off",
+        }
+    }
+}
+
+pub(crate) const INTERNAL_EVENT_TYPES: &[&str] = &[
+    "process.completed",
+    "process.failed",
+    "process.rejected",
+    "process.cancelled",
+    "process.timed_out",
+    "process.detached",
+    "process.unknown_after_restart",
+    "process.skipped",
+    "skill_install.completed",
+    "skill_install.failed",
+    "skill_install.cancelled",
+];
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct EventsConfig {
+    #[serde(
+        default = "default_event_low_ttl_seconds",
+        deserialize_with = "deserialize_event_low_ttl_seconds"
+    )]
+    pub(crate) low_ttl_seconds: u64,
+    #[serde(default, deserialize_with = "deserialize_internal_overrides")]
+    pub(crate) internal_overrides: BTreeMap<String, EventNotificationLevel>,
+}
+
+impl Default for EventsConfig {
+    fn default() -> Self {
+        Self {
+            low_ttl_seconds: default_event_low_ttl_seconds(),
+            internal_overrides: BTreeMap::new(),
+        }
+    }
+}
+
+impl EventsConfig {
+    pub(crate) fn internal_policy(&self) -> crate::event_store::InternalEventPolicy {
+        crate::event_store::InternalEventPolicy {
+            low_ttl_seconds: self.low_ttl_seconds,
+            overrides: self
+                .internal_overrides
+                .iter()
+                .map(|(event_type, level)| (event_type.clone(), level.severity()))
+                .collect(),
+        }
+    }
+
+    pub(crate) fn validate(&self) -> Result<()> {
+        validate_event_low_ttl_seconds(self.low_ttl_seconds)?;
+        if let Some(event_type) = self
+            .internal_overrides
+            .keys()
+            .find(|event_type| !INTERNAL_EVENT_TYPES.contains(&event_type.as_str()))
+        {
+            return Err(anyhow!(
+                "unknown internal event type in events.internalOverrides: {event_type}"
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn default_event_low_ttl_seconds() -> u64 {
+    86_400
+}
+
+fn validate_event_low_ttl_seconds(value: u64) -> Result<()> {
+    if value > crate::event_store::MAX_LOW_TTL_SECONDS {
+        return Err(anyhow!("event_low_ttl_out_of_range"));
+    }
+    let seconds = i64::try_from(value).map_err(|_| anyhow!("event_low_ttl_out_of_range"))?;
+    let duration = chrono::Duration::try_seconds(seconds)
+        .ok_or_else(|| anyhow!("event_low_ttl_out_of_range"))?;
+    let expiration = Utc::now()
+        .checked_add_signed(duration)
+        .ok_or_else(|| anyhow!("event_low_ttl_out_of_range"))?;
+    if !(0..=9999).contains(&expiration.year()) {
+        return Err(anyhow!("event_low_ttl_out_of_range"));
+    }
+    Ok(())
+}
+
+fn deserialize_event_low_ttl_seconds<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = u64::deserialize(deserializer)?;
+    validate_event_low_ttl_seconds(value).map_err(de::Error::custom)?;
+    Ok(value)
+}
+
+fn deserialize_internal_overrides<'de, D>(
+    deserializer: D,
+) -> Result<BTreeMap<String, EventNotificationLevel>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let overrides = BTreeMap::<String, EventNotificationLevel>::deserialize(deserializer)?;
+    if let Some(event_type) = overrides
+        .keys()
+        .find(|event_type| !INTERNAL_EVENT_TYPES.contains(&event_type.as_str()))
+    {
+        return Err(de::Error::custom(format!(
+            "unknown internal event type in events.internalOverrides: {event_type}"
+        )));
+    }
+    Ok(overrides)
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Config {
@@ -339,6 +477,7 @@ pub(crate) struct Config {
     #[serde(default)]
     pub(crate) mcp_servers: BTreeMap<String, McpServerConfig>,
     #[serde(default)]
+    pub(crate) events: EventsConfig,
     pub(crate) http_mcp: HttpMcpConfig,
     #[serde(default)]
     pub(crate) path_policy: PathPolicyConfig,
@@ -856,6 +995,7 @@ impl Config {
             confirmation_language: default_confirmation_language(),
             browser: BrowserConfig::default(),
             mcp_servers: BTreeMap::new(),
+            events: EventsConfig::default(),
             http_mcp: HttpMcpConfig::default(),
             sandbox: SandboxConfig {
                 enabled: false,
@@ -969,6 +1109,7 @@ impl Config {
             config.path_policy = default_path_policy(&config.workspace_root);
         }
         config.room.skills = config.skills.clone();
+        config.events.validate()?;
         Ok(config)
     }
 
@@ -1175,6 +1316,7 @@ impl Config {
             "confirmationLanguage",
             "sandbox",
             "mcpServers",
+            "events",
             "browser",
             "httpMcp",
             "pathPolicy",
@@ -1199,7 +1341,10 @@ impl Config {
                     candidate.remove(other);
                 }
             }
-            if materialize_import_value(&Value::Object(candidate)).is_err() {
+            if let Err(error) = materialize_import_value(&Value::Object(candidate)) {
+                if key == "events" {
+                    return Err(anyhow!("config_import_events_invalid: {error}"));
+                }
                 warnings.push(format!(
                     "{key} (could not be imported; retained default instead)"
                 ));
@@ -1290,6 +1435,7 @@ impl Config {
     }
 
     pub(crate) fn validate_local(&self) -> Result<()> {
+        self.events.validate()?;
         self.validate_mcp_servers()
     }
     pub(crate) fn validate_http_mcp(&self) -> Result<()> {

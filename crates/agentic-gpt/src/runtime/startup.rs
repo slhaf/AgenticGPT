@@ -70,6 +70,7 @@ async fn run_hub(config_path: PathBuf) -> Result<()> {
         browser_runtime,
     )?;
     state.skill_installs.recover(state.clone()).await?;
+    crate::event_notifications::recover_event_notifications(&state).await?;
     tokio::spawn(watch_live_config(state.clone(), false, None));
     hub::connect_loop(state).await
 }
@@ -112,6 +113,7 @@ pub(crate) async fn run_stdio_worker(
         browser_runtime,
     )?;
     state.skill_installs.recover(state.clone()).await?;
+    crate::event_notifications::recover_event_notifications(&state).await?;
     let listener = local_control::bind(&agent_id).await?;
     log_info(format!(
         "local MCP ingress ready; transport=unix; path={}",
@@ -177,6 +179,7 @@ pub(crate) fn build_app_state(
         log_warn(warning.clone());
     }
     let private_state = prepared.paths;
+    let event_store = crate::event_store::EventStore::open(&private_state)?;
     let process_history = process_history::ProcessHistoryStore::open(&private_state);
     if let Err(error) = process_history.recover_active(chrono::Utc::now()) {
         log_warn(format!("process history recovery failed: {error}"));
@@ -186,6 +189,7 @@ pub(crate) fn build_app_state(
         config_path,
         config: Arc::new(RwLock::new(config)),
         private_state,
+        event_store,
         process_history,
         browser_runtime,
         runtime,
@@ -237,6 +241,7 @@ async fn run_local(config_path: PathBuf) -> Result<()> {
         browser_runtime,
     )?;
     state.skill_installs.recover(state.clone()).await?;
+    crate::event_notifications::recover_event_notifications(&state).await?;
     tokio::spawn(watch_live_config(state.clone(), false, None));
     let listener = local_control::bind(&agent_id).await?;
     log_info(format!(
@@ -368,6 +373,7 @@ pub(crate) fn apply_live_config_subset(
     live.limits = candidate.limits;
     live.mcp_servers = candidate.mcp_servers;
     live.toolsets = candidate.toolsets;
+    live.events = candidate.events;
     live.http_mcp = candidate.http_mcp;
     resolved
 }

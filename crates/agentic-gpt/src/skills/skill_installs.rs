@@ -1,5 +1,5 @@
 use agentic_gpt_protocol::{
-    SkillInstallCancelOutcome, SkillInstallCancelRequest, SkillInstallCancelResponse,
+    EventOrigin, SkillInstallCancelOutcome, SkillInstallCancelRequest, SkillInstallCancelResponse,
     SkillInstallError, SkillInstallFile, SkillInstallFileSummary, SkillInstallGetRequest,
     SkillInstallJobRecord, SkillInstallPhase, SkillInstallProgress, SkillInstallRequest,
     SkillInstallResult, SkillInstallSource, SkillInstallSourceSummary, SkillInstallStartResponse,
@@ -98,6 +98,17 @@ impl InstallManager {
             if validate_install_id(&record.install_id).is_err() {
                 continue;
             }
+            if !is_terminal(record.status.status) && !record.event_completion_pending {
+                let source = crate::event_notifications::skill_install_source(&record.install_id);
+                crate::event_notifications::register_internal_source(
+                    &state,
+                    &source,
+                    &config.events.internal_policy(),
+                    None,
+                )?;
+                record.event_completion_pending = true;
+                self.save_cache(&config, &record).await?;
+            }
             if is_terminal(record.status.status) {
                 // A terminal record should have no live commit journal. If a
                 // process stopped after persisting the terminal state but
@@ -163,10 +174,20 @@ impl InstallManager {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) async fn start(
         &self,
         state: AppState,
         request: SkillInstallRequest,
+    ) -> Result<SkillInstallStartResponse> {
+        self.start_with_origin(state, request, None).await
+    }
+
+    pub(crate) async fn start_with_origin(
+        &self,
+        state: AppState,
+        request: SkillInstallRequest,
+        event_origin: Option<EventOrigin>,
     ) -> Result<SkillInstallStartResponse> {
         let config = state.config.read().await.clone();
         validate_install_request(&config, &request)?;
@@ -207,14 +228,29 @@ impl InstallManager {
             error: None,
             poll_after_ms: DEFAULT_POLL_AFTER_MS,
         };
+        let source = crate::event_notifications::skill_install_source(&install_id);
+        crate::event_notifications::register_internal_source(
+            &state,
+            &source,
+            &config.events.internal_policy(),
+            event_origin.as_ref(),
+        )?;
         let record = SkillInstallJobRecord {
             schema_version: SKILL_INSTALL_JOB_SCHEMA_VERSION,
             install_id: install_id.clone(),
             request,
             canonical_request_sha256,
             status: status.clone(),
+            event_completion_pending: true,
         };
-        self.insert_record(&config, record).await?;
+        if let Err(error) = self.insert_record(&config, record).await {
+            crate::event_notifications::abort_unadmitted_source(
+                &state,
+                &source,
+                event_origin.as_ref(),
+            );
+            return Err(error);
+        }
         self.cancellations
             .lock()
             .await
@@ -302,6 +338,30 @@ impl InstallManager {
         };
         Ok(cancel_response(&record.status, outcome, true))
     }
+    pub(crate) async fn pending_event_completions(&self) -> Result<Vec<SkillInstallJobRecord>> {
+        Ok(self
+            .records
+            .lock()
+            .await
+            .values()
+            .filter(|record| record.event_completion_pending && is_terminal(record.status.status))
+            .cloned()
+            .collect())
+    }
+
+    pub(crate) async fn acknowledge_event_completion(
+        &self,
+        state: &AppState,
+        install_id: &str,
+    ) -> Result<()> {
+        let config = state.config.read().await.clone();
+        let mut record = self.load_record(&config, install_id).await?;
+        if record.event_completion_pending && is_terminal(record.status.status) {
+            record.event_completion_pending = false;
+            self.save_cache(&config, &record).await?;
+        }
+        Ok(())
+    }
 
     async fn run_worker(&self, state: AppState, install_id: String) {
         let permit = match self.worker_slots.clone().acquire_owned().await {
@@ -310,9 +370,20 @@ impl InstallManager {
         };
         let result = self.execute_worker(&state, &install_id, permit).await;
         if let Err(error) = result {
-            let _ = self
+            if let Err(failure) = self
                 .fail(&state, &install_id, &error.to_string(), None, false)
-                .await;
+                .await
+            {
+                crate::utils::log_warn(format!(
+                    "skill install terminal state persistence failed; installId={install_id}; error={failure}"
+                ));
+            }
+        }
+        if let Err(error) = crate::event_notifications::drain_completion_notifications(&state).await
+        {
+            crate::utils::log_warn(format!(
+                "skill install completion delivery remains pending; installId={install_id}; error={error}"
+            ));
         }
         let _ = self.cancellations.lock().await.remove(&install_id);
     }
@@ -792,7 +863,7 @@ impl InstallManager {
             let Ok(record) = serde_json::from_str::<SkillInstallJobRecord>(&text) else {
                 continue;
             };
-            if is_terminal(record.status.status) {
+            if is_terminal(record.status.status) && !record.event_completion_pending {
                 terminal.push((
                     record
                         .status
@@ -1820,6 +1891,7 @@ mod tests {
         AppState {
             config_path: PathBuf::from("test-config.json"),
             config: Arc::new(RwLock::new(config)),
+            event_store: crate::event_store::EventStore::open(&private_state).unwrap(),
             private_state: private_state.clone(),
             process_history,
             browser_runtime: None,
@@ -2117,5 +2189,154 @@ mod tests {
 
         assert!(reconcile_commit_journal(&config, &records_root, "install-test").is_err());
         assert!(outside.exists());
+    }
+    #[tokio::test]
+    async fn terminal_install_notification_survives_recovery_until_acknowledged() {
+        let state = test_state();
+        let config = state.config.read().await.clone();
+        let records_root = std::env::temp_dir().join(format!(
+            "agentic-install-event-outbox-{}",
+            Uuid::new_v4().simple()
+        ));
+        let install_id = format!("install-{}", Uuid::new_v4().simple());
+        let request = inline_request("event-outbox");
+        let now = Utc::now();
+        let status = SkillInstallStatusResponse {
+            install_id: install_id.clone(),
+            id: request.id.clone(),
+            revision: 2,
+            status: SkillInstallStatus::Completed,
+            phase: None,
+            attempt: 1,
+            max_attempts: config.skills.max_attempts.max(1),
+            progress: initial_progress(&request.source),
+            source: source_summary(&request.source),
+            created_at: now,
+            started_at: Some(now),
+            updated_at: now,
+            finished_at: Some(now),
+            elapsed_ms: 0,
+            cancel_requested_at: None,
+            result: None,
+            error: None,
+            poll_after_ms: 0,
+        };
+        let record = SkillInstallJobRecord {
+            schema_version: SKILL_INSTALL_JOB_SCHEMA_VERSION,
+            install_id: install_id.clone(),
+            request,
+            canonical_request_sha256: "sha256:test".to_string(),
+            status,
+            event_completion_pending: true,
+        };
+        let manager = InstallManager::for_test(records_root.clone());
+        manager.insert_record(&config, record).await.unwrap();
+        drop(manager);
+
+        let recovered = InstallManager::for_test(records_root.clone());
+        recovered.recover(state.clone()).await.unwrap();
+        let pending = recovered.pending_event_completions().await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].install_id, install_id);
+        assert_eq!(pending[0].status.status, SkillInstallStatus::Completed);
+
+        recovered
+            .acknowledge_event_completion(&state, &install_id)
+            .await
+            .unwrap();
+        assert!(recovered
+            .pending_event_completions()
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(
+            !recovered
+                .load_record(&config, &install_id)
+                .await
+                .unwrap()
+                .event_completion_pending
+        );
+        let _ = fs::remove_dir_all(records_root);
+    }
+
+    #[tokio::test]
+    async fn live_completion_drain_retries_after_event_store_becomes_writable() {
+        let state = test_state();
+        let config = state.config.read().await.clone();
+        let install_id = format!("install-{}", Uuid::new_v4().simple());
+        let request = inline_request("drain-retry");
+        let now = Utc::now();
+        let status = SkillInstallStatusResponse {
+            install_id: install_id.clone(),
+            id: request.id.clone(),
+            revision: 2,
+            status: SkillInstallStatus::Completed,
+            phase: None,
+            attempt: 1,
+            max_attempts: config.skills.max_attempts.max(1),
+            progress: initial_progress(&request.source),
+            source: source_summary(&request.source),
+            created_at: now,
+            started_at: Some(now),
+            updated_at: now,
+            finished_at: Some(now),
+            elapsed_ms: 0,
+            cancel_requested_at: None,
+            result: None,
+            error: None,
+            poll_after_ms: 0,
+        };
+        let record = SkillInstallJobRecord {
+            schema_version: SKILL_INSTALL_JOB_SCHEMA_VERSION,
+            install_id: install_id.clone(),
+            request,
+            canonical_request_sha256: "sha256:test".to_string(),
+            status,
+            event_completion_pending: true,
+        };
+        let manager = state.skill_installs.clone();
+        manager.insert_record(&config, record).await.unwrap();
+        let source = crate::event_notifications::skill_install_source(&install_id);
+        state
+            .event_store
+            .register_internal(&source, &config.events.internal_policy())
+            .unwrap();
+
+        let lock_connection =
+            rusqlite::Connection::open(state.private_state.root.join("events.sqlite3")).unwrap();
+        lock_connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+        assert!(
+            crate::event_notifications::drain_completion_notifications(&state)
+                .await
+                .is_err()
+        );
+        assert_eq!(manager.pending_event_completions().await.unwrap().len(), 1);
+
+        lock_connection.execute_batch("ROLLBACK").unwrap();
+        crate::event_notifications::drain_completion_notifications(&state)
+            .await
+            .unwrap();
+        assert!(manager
+            .pending_event_completions()
+            .await
+            .unwrap()
+            .is_empty());
+        state.event_store.settle_response(&source, false).unwrap();
+        let notifications = state
+            .event_store
+            .list(&agentic_gpt_protocol::EventListRequest::default())
+            .unwrap();
+        let notification = notifications
+            .items
+            .first()
+            .expect("retried install completion must become visible");
+        assert_eq!(
+            state
+                .event_store
+                .get(&notification.event_id)
+                .unwrap()
+                .source,
+            source
+        );
     }
 }

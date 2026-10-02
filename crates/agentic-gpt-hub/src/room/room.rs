@@ -365,6 +365,7 @@ mod tests {
                 run_id: Some(envelope.run_id.clone()),
                 request_id: envelope.request_id.clone(),
                 data: response_data.clone(),
+                event_sources: vec![],
             }),
         )
         .await;

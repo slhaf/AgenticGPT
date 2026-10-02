@@ -113,6 +113,9 @@ pub(crate) async fn post_agent_message(
         Err(reason) if reason == "stale_connection" => {
             api_error(StatusCode::CONFLICT, "stale_connection", reason)
         }
+        Err(reason) if reason.starts_with("event_sources_validation:") => {
+            api_error(StatusCode::CONFLICT, "event_sources_validation", reason)
+        }
         Err(reason) => api_error(StatusCode::BAD_REQUEST, "agent_message_rejected", reason),
     }
 }

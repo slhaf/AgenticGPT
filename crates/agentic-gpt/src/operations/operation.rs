@@ -1,4 +1,4 @@
-use agentic_gpt_protocol::HubCommand;
+use agentic_gpt_protocol::{EventOrigin, HubCommand};
 
 use crate::{
     config::{Config, ToolNamespace},
@@ -42,11 +42,28 @@ impl RequestIngress {
 pub(crate) struct RequestContext<'a> {
     pub(crate) ingress: RequestIngress,
     pub(crate) operation: &'a str,
+    pub(crate) event_origin: Option<&'a EventOrigin>,
 }
 
 impl<'a> RequestContext<'a> {
     pub(crate) fn new(ingress: RequestIngress, operation: &'a str) -> Self {
-        Self { ingress, operation }
+        Self {
+            ingress,
+            operation,
+            event_origin: None,
+        }
+    }
+
+    pub(crate) fn with_event_origin(
+        ingress: RequestIngress,
+        operation: &'a str,
+        event_origin: Option<&'a EventOrigin>,
+    ) -> Self {
+        Self {
+            ingress,
+            operation,
+            event_origin,
+        }
     }
 
     pub(crate) fn source(self) -> String {
@@ -99,6 +116,12 @@ impl std::fmt::Display for AdmissionError {
 }
 
 impl std::error::Error for AdmissionError {}
+
+pub(crate) const EVENT_API_TOOL_NAMES: &[&str] = &["event.get", "event.list", "event.mark"];
+
+pub(crate) fn is_event_api_operation(operation: &str) -> bool {
+    EVENT_API_TOOL_NAMES.contains(&operation)
+}
 
 /// Existing Agent-local descriptor namespace metadata. Discovery may filter this list, but
 /// admission never treats descriptor presence or annotation hints as authorization.
@@ -178,6 +201,7 @@ pub(crate) fn tool_is_read_only(name: &str) -> bool {
             | "skills.install.cancel"
             | "room.maintenance.submit"
             | "skills.run"
+            | "event.mark"
             | "file.edit"
     )
 }
@@ -282,6 +306,27 @@ pub(crate) fn authorize(
             operation: operation.to_string(),
         });
     }
+    if is_event_api_operation(operation) {
+        return Ok(());
+    }
+    if operation == "privateevent.inject" {
+        return if context.ingress == RequestIngress::LocalUnix {
+            Ok(())
+        } else {
+            Err(AdmissionError::UnknownOperation {
+                operation: operation.to_string(),
+            })
+        };
+    }
+    if matches!(operation, "event.panel" | "event.settle") {
+        return if context.ingress == RequestIngress::Hub {
+            Ok(())
+        } else {
+            Err(AdmissionError::UnknownOperation {
+                operation: operation.to_string(),
+            })
+        };
+    }
 
     if operation == "user.notify.deliver" {
         if runtime.capabilities().notifications {
@@ -345,6 +390,11 @@ pub(crate) fn hub_command_name(command: &HubCommand) -> &'static str {
         HubCommand::ProcessStatus { .. } => "process.status",
         HubCommand::ProcessOutput { .. } => "process.output",
         HubCommand::ProcessResult { .. } => "process.result",
+        HubCommand::EventList { .. } => "event.list",
+        HubCommand::EventGet { .. } => "event.get",
+        HubCommand::EventMark { .. } => "event.mark",
+        HubCommand::EventSettle { .. } => "event.settle",
+        HubCommand::EventPanel { .. } => "event.panel",
         HubCommand::ProcessCancel { .. } => "process.cancel",
         HubCommand::TmuxListSessions { .. } => "tmux.listSessions",
         HubCommand::TmuxListPanes { .. } => "tmux.listPanes",

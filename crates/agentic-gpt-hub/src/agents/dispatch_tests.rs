@@ -1,7 +1,9 @@
 use super::*;
 use crate::agents::test_support::*;
 use agentic_gpt_protocol::{
-    AgentConnectionMode, AgentMessage, HubCommand, HubCommandEnvelope, ProcessExecRequest,
+    AgentConnectionMode, AgentMessage, EventListRequest, EventResponseDisposition,
+    EventSettleRequest, EventSource, EventSourceKind, HubCommand, HubCommandEnvelope,
+    ProcessBatchExecRequest, ProcessExecElement, ProcessExecRequest,
 };
 
 use axum::body::to_bytes;
@@ -18,6 +20,18 @@ use crate::state::OutboundAgentMessage;
 
 async fn start_response_owner_request(
     request_id: &str,
+) -> (
+    HubState,
+    mpsc::UnboundedReceiver<OutboundAgentMessage>,
+    tokio::task::JoinHandle<std::result::Result<Value, String>>,
+    HubCommandEnvelope,
+) {
+    start_response_owner_request_with_timeout(request_id, 5).await
+}
+
+async fn start_response_owner_request_with_timeout(
+    request_id: &str,
+    timeout_secs: u64,
 ) -> (
     HubState,
     mpsc::UnboundedReceiver<OutboundAgentMessage>,
@@ -43,7 +57,9 @@ async fn start_response_owner_request(
     };
     let request_state = state.clone();
     let caller =
-        tokio::spawn(async move { request_agent(&request_state, "agent", command, 5).await });
+        tokio::spawn(
+            async move { request_agent(&request_state, "agent", command, timeout_secs).await },
+        );
 
     let OutboundAgentMessage::Text(text) = outbound.recv().await.unwrap() else {
         panic!("expected command envelope");
@@ -77,6 +93,7 @@ async fn post_response(
             run_id,
             request_id,
             data,
+            event_sources: vec![],
         }),
     )
     .await
@@ -150,6 +167,7 @@ async fn stale_response_with_matching_run_is_accepted() {
             run_id: Some(run.run_id.clone()),
             request_id: "req_late".to_string(),
             data: json!({ "ok": true }),
+            event_sources: vec![],
         }),
     )
     .await;
@@ -688,6 +706,7 @@ async fn wp1_unknown_transport_status_is_mismatch_without_mutation() {
     let state = test_state();
     let command = HubCommand::McpListServers {
         request_id: "req_wp1_unknown_status".to_string(),
+        suppress_event_panel: false,
     };
     let run = runs::prepare_run(&state, "agent", command.request_id(), &command).unwrap();
     runs::mark_dispatched(&state, &run.run_id).unwrap();
@@ -711,4 +730,478 @@ async fn wp1_unknown_transport_status_is_mismatch_without_mutation() {
     assert_eq!(after.status, before.status);
     assert_eq!(after.reason, before.reason);
     assert_eq!(after.updated_at, before.updated_at);
+}
+
+#[tokio::test]
+async fn returned_decision_write_failure_returns_error_and_next_call_settles_false() {
+    let (state, mut outbound, caller, original) =
+        start_response_owner_request("req_returned_write_failure").await;
+    state
+        .db
+        .lock()
+        .unwrap()
+        .execute_batch(
+            "create trigger reject_returned_event_decision
+             before update of decision on event_response_feedback
+             when new.decision = 'returned'
+             begin
+                 select raise(abort, 'injected returned decision failure');
+             end;",
+        )
+        .unwrap();
+
+    let dispositions = vec![EventResponseDisposition {
+        source: EventSource {
+            kind: EventSourceKind::Process,
+            reference: "process-1".to_string(),
+        },
+        includes_terminal: true,
+    }];
+    let response = post_agent_message(
+        State(state.clone()),
+        Path("agent".to_string()),
+        Query(SseConnectQuery::for_test(Some("current".to_string()))),
+        agent_headers("secret"),
+        axum::Json(AgentMessage::Response {
+            run_id: Some(original.run_id.clone()),
+            request_id: original.request_id.clone(),
+            data: json!({
+                "processId": "process-1",
+                "status": "completed",
+                "resultAvailable": true
+            }),
+            event_sources: dispositions,
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(caller.await.unwrap().is_err());
+
+    let next_state = state.clone();
+    let list_request = HubCommand::EventList {
+        request_id: "req_after_returned_write_failure".to_string(),
+        payload: EventListRequest {
+            agent_id: "agent".to_string(),
+            status: None,
+            severity: None,
+            limit: Some(20),
+            cursor: None,
+        },
+    };
+    let next_call =
+        tokio::spawn(async move { request_agent(&next_state, "agent", list_request, 5).await });
+
+    let OutboundAgentMessage::Text(settle_text) =
+        tokio::time::timeout(std::time::Duration::from_secs(5), outbound.recv())
+            .await
+            .expect("expected pending EventSettle before the next public request")
+            .unwrap()
+    else {
+        panic!("expected EventSettle envelope");
+    };
+    let settle_envelope: HubCommandEnvelope = serde_json::from_str(&settle_text).unwrap();
+    let HubCommand::EventSettle { payload, .. } = &settle_envelope.command else {
+        panic!("expected EventSettle command before event.list");
+    };
+    assert_eq!(payload.origin.run_id, original.run_id);
+    assert_eq!(payload.dispositions.len(), 1);
+    assert!(!payload.dispositions[0].includes_terminal);
+
+    for _ in 0..3 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        outbound.try_recv().is_err(),
+        "the public event.list request must wait for the pending settlement"
+    );
+    let settle_ack = post_response(
+        &state,
+        "agent",
+        "secret",
+        Some(settle_envelope.run_id.clone()),
+        settle_envelope.request_id.clone(),
+        json!({ "status": "settled" }),
+    )
+    .await;
+    assert_eq!(settle_ack.status(), StatusCode::OK);
+
+    let OutboundAgentMessage::Text(list_text) =
+        tokio::time::timeout(std::time::Duration::from_secs(5), outbound.recv())
+            .await
+            .expect("expected event.list after feedback acknowledgement")
+            .unwrap()
+    else {
+        panic!("expected event.list envelope");
+    };
+    let list_envelope: HubCommandEnvelope = serde_json::from_str(&list_text).unwrap();
+    assert!(matches!(
+        list_envelope.command,
+        HubCommand::EventList { .. }
+    ));
+    let list_response = post_response(
+        &state,
+        "agent",
+        "secret",
+        Some(list_envelope.run_id.clone()),
+        list_envelope.request_id.clone(),
+        json!({
+            "items": [],
+            "nextCursor": null,
+            "events": { "current": "low: 1 | medium: 0 | high: 0", "new": [] }
+        }),
+    )
+    .await;
+    assert_eq!(list_response.status(), StatusCode::OK);
+    assert_eq!(
+        next_call.await.unwrap().unwrap()["events"]["current"],
+        "low: 1 | medium: 0 | high: 0"
+    );
+
+    let conn = state.db.lock().unwrap();
+    let (decision, payload_json, acked_at): (String, String, Option<String>) = conn
+        .query_row(
+            "select decision, feedback_payload_json, acked_at
+             from event_response_feedback where run_id = ?1",
+            params![original.run_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(decision, "no_terminal");
+    assert!(acked_at.is_some());
+    let settled: EventSettleRequest = serde_json::from_str(&payload_json).unwrap();
+    assert!(!settled.dispositions[0].includes_terminal);
+}
+
+#[tokio::test]
+async fn result_store_failure_preserves_sources_and_settles_before_public_call() {
+    let (state, mut outbound, caller, original) =
+        start_response_owner_request_with_timeout("req_result_store_failure", 1).await;
+    state
+        .db
+        .lock()
+        .unwrap()
+        .execute_batch(
+            "create trigger reject_creation_result
+             before update of status on agent_runs
+             when new.command_type = 'process.exec' and new.status = 'completed'
+             begin
+                 select raise(abort, 'injected creation result-store failure');
+             end;",
+        )
+        .unwrap();
+
+    let response = post_agent_message(
+        State(state.clone()),
+        Path("agent".to_string()),
+        Query(SseConnectQuery::for_test(Some("current".to_string()))),
+        agent_headers("secret"),
+        axum::Json(AgentMessage::Response {
+            run_id: Some(original.run_id.clone()),
+            request_id: original.request_id.clone(),
+            data: json!({
+                "processId": "process-1",
+                "status": "completed",
+                "resultAvailable": true
+            }),
+            event_sources: vec![EventResponseDisposition {
+                source: EventSource {
+                    kind: EventSourceKind::Process,
+                    reference: "process-1".to_string(),
+                },
+                includes_terminal: true,
+            }],
+        }),
+    )
+    .await;
+    assert_eq!(
+        rejected_reason(response).await,
+        "response_result_store_failed"
+    );
+
+    assert!(caller.await.unwrap().is_err());
+    let current = state.agents.snapshot_for_test().await;
+    assert_eq!(
+        current
+            .get("agent")
+            .map(|connection| connection.connection_id.as_str()),
+        Some("current"),
+        "a rejected result write must not disconnect its live Agent"
+    );
+    let failed_run = runs::get_run(&state, &original.run_id).unwrap().unwrap();
+    assert!(failed_run.result.is_none());
+
+    let next_state = state.clone();
+    let request = HubCommand::EventList {
+        request_id: "req_after_result_store_failure".to_string(),
+        payload: EventListRequest {
+            agent_id: "agent".to_string(),
+            status: None,
+            severity: None,
+            limit: Some(20),
+            cursor: None,
+        },
+    };
+    let next_call =
+        tokio::spawn(async move { request_agent(&next_state, "agent", request, 5).await });
+
+    let OutboundAgentMessage::Text(settle_text) =
+        tokio::time::timeout(std::time::Duration::from_secs(5), outbound.recv())
+            .await
+            .expect("expected settlement recovered from the rejected response")
+            .unwrap()
+    else {
+        panic!("expected EventSettle envelope");
+    };
+    let settle_envelope: HubCommandEnvelope = serde_json::from_str(&settle_text).unwrap();
+    let HubCommand::EventSettle { payload, .. } = &settle_envelope.command else {
+        panic!("expected EventSettle before event.list");
+    };
+    assert_eq!(payload.origin.run_id, original.run_id);
+    assert_eq!(payload.dispositions.len(), 1);
+    assert_eq!(
+        payload.dispositions[0].source.kind,
+        EventSourceKind::Process
+    );
+    assert_eq!(payload.dispositions[0].source.reference, "process-1");
+    assert!(!payload.dispositions[0].includes_terminal);
+    for _ in 0..3 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        outbound.try_recv().is_err(),
+        "event.list must wait for the recovered EventSettle acknowledgement"
+    );
+
+    let settle_ack = post_response(
+        &state,
+        "agent",
+        "secret",
+        Some(settle_envelope.run_id.clone()),
+        settle_envelope.request_id.clone(),
+        json!({ "status": "settled" }),
+    )
+    .await;
+    assert_eq!(settle_ack.status(), StatusCode::OK);
+    let OutboundAgentMessage::Text(list_text) =
+        tokio::time::timeout(std::time::Duration::from_secs(5), outbound.recv())
+            .await
+            .expect("expected public event.list after settlement")
+            .unwrap()
+    else {
+        panic!("expected event.list envelope");
+    };
+    let list_envelope: HubCommandEnvelope = serde_json::from_str(&list_text).unwrap();
+    assert!(matches!(
+        list_envelope.command,
+        HubCommand::EventList { .. }
+    ));
+    let list_response = post_response(
+        &state,
+        "agent",
+        "secret",
+        Some(list_envelope.run_id.clone()),
+        list_envelope.request_id.clone(),
+        json!({ "items": [], "nextCursor": null }),
+    )
+    .await;
+    assert_eq!(list_response.status(), StatusCode::OK);
+    assert!(next_call.await.unwrap().is_ok());
+}
+
+#[tokio::test]
+async fn feedback_intent_insert_failure_rolls_back_creation_run_before_send() {
+    let state = test_state();
+    register_agent(&state, "agent", "secret");
+    let mut outbound = insert_connection(&state, "agent", "current", chrono::Utc::now()).await;
+    state
+        .db
+        .lock()
+        .unwrap()
+        .execute_batch(
+            "create trigger reject_feedback_intent
+             before insert on event_response_feedback
+             begin
+                 select raise(abort, 'injected event feedback intent failure');
+             end;",
+        )
+        .unwrap();
+
+    let command = HubCommand::Exec {
+        request_id: "req_atomic_feedback_intent".to_string(),
+        payload: ProcessExecRequest {
+            agent_id: "agent".to_string(),
+            group: None,
+            program: "printf".to_string(),
+            args: vec!["must-not-run".to_string()],
+            need_confirm: false,
+            confirm_method: None,
+            working_directory: None,
+            wait_seconds: None,
+        },
+    };
+    assert!(request_agent(&state, "agent", command, 1).await.is_err());
+    assert!(outbound.try_recv().is_err());
+
+    let conn = state.db.lock().unwrap();
+    let run_count: i64 = conn
+        .query_row(
+            "select count(*) from agent_runs where request_id = ?1",
+            params!["req_atomic_feedback_intent"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let intent_count: i64 = conn
+        .query_row(
+            "select count(*) from event_response_feedback where request_id = ?1",
+            params!["req_atomic_feedback_intent"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(run_count, 0);
+    assert_eq!(intent_count, 0);
+}
+
+#[tokio::test]
+async fn event_sources_validation_conflict_is_http_409_for_unknown_source() {
+    let state = test_state();
+    register_agent(&state, "agent", "secret");
+    let _outbound = insert_connection(&state, "agent", "current", chrono::Utc::now()).await;
+    let request_id = "req_event_sources_validation";
+    let command = HubCommand::ProcessBatch {
+        request_id: request_id.to_string(),
+        payload: ProcessBatchExecRequest {
+            agent_id: "agent".to_string(),
+            group: None,
+            elements: vec![
+                ProcessExecElement {
+                    program: "printf".to_string(),
+                    args: vec!["one".to_string()],
+                    working_directory: None,
+                },
+                ProcessExecElement {
+                    program: "printf".to_string(),
+                    args: vec!["two".to_string()],
+                    working_directory: None,
+                },
+            ],
+            need_confirm: false,
+            confirm_method: None,
+            working_directory: None,
+            wait_seconds: None,
+        },
+    };
+    let run = runs::prepare_run(&state, "agent", request_id, &command).unwrap();
+    let origin = agentic_gpt_protocol::EventOrigin {
+        run_id: run.run_id,
+        request_id: run.request_id,
+        command_hash: run.command_hash,
+    };
+    event_feedback::prepare(&state, "agent", &origin).unwrap();
+    let dispositions = vec![
+        EventResponseDisposition {
+            source: EventSource {
+                kind: EventSourceKind::Process,
+                reference: "process-1".to_string(),
+            },
+            includes_terminal: true,
+        },
+        EventResponseDisposition {
+            source: EventSource {
+                kind: EventSourceKind::Process,
+                reference: "process-2".to_string(),
+            },
+            includes_terminal: false,
+        },
+    ];
+    event_feedback::record_reply_metadata(&state, "agent", &origin, &dispositions).unwrap();
+    event_feedback::finalize_original(&state, "agent", &origin, Some(&dispositions)).unwrap();
+
+    let accepted = post_agent_message(
+        State(state.clone()),
+        Path("agent".to_string()),
+        Query(SseConnectQuery::for_test(Some("current".to_string()))),
+        agent_headers("secret"),
+        axum::Json(AgentMessage::EventSources {
+            origin: origin.clone(),
+            sources: vec![dispositions[0].source.clone()],
+        }),
+    )
+    .await;
+    assert_eq!(accepted.status(), StatusCode::OK);
+
+    let rejected = post_agent_message(
+        State(state.clone()),
+        Path("agent".to_string()),
+        Query(SseConnectQuery::for_test(Some("current".to_string()))),
+        agent_headers("secret"),
+        axum::Json(AgentMessage::EventSources {
+            origin,
+            sources: vec![
+                dispositions[0].source.clone(),
+                EventSource {
+                    kind: EventSourceKind::Process,
+                    reference: "process-unknown".to_string(),
+                },
+            ],
+        }),
+    )
+    .await;
+    assert_eq!(rejected.status(), StatusCode::CONFLICT);
+    let body = to_bytes(rejected.into_body(), usize::MAX).await.unwrap();
+    let body: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["error"]["code"], "event_sources_validation");
+    let retry_command = HubCommand::Exec {
+        request_id: "req_event_sources_sql_failure".to_string(),
+        payload: ProcessExecRequest {
+            agent_id: "agent".to_string(),
+            group: None,
+            program: "printf".to_string(),
+            args: vec!["recovery".to_string()],
+            need_confirm: false,
+            confirm_method: None,
+            working_directory: None,
+            wait_seconds: None,
+        },
+    };
+    let retry_run = runs::prepare_run(
+        &state,
+        "agent",
+        "req_event_sources_sql_failure",
+        &retry_command,
+    )
+    .unwrap();
+    let retry_origin = agentic_gpt_protocol::EventOrigin {
+        run_id: retry_run.run_id,
+        request_id: retry_run.request_id,
+        command_hash: retry_run.command_hash,
+    };
+    event_feedback::prepare(&state, "agent", &retry_origin).unwrap();
+    event_feedback::finalize_original(&state, "agent", &retry_origin, None).unwrap();
+    state
+        .db
+        .lock()
+        .unwrap()
+        .execute_batch(
+            "create trigger reject_recovery_source_update
+             before update of sources_json on event_response_feedback
+             begin
+                 select raise(abort, 'injected recovery source update failure');
+             end;",
+        )
+        .unwrap();
+    let sql_failure = post_agent_message(
+        State(state),
+        Path("agent".to_string()),
+        Query(SseConnectQuery::for_test(Some("current".to_string()))),
+        agent_headers("secret"),
+        axum::Json(AgentMessage::EventSources {
+            origin: retry_origin,
+            sources: vec![EventSource {
+                kind: EventSourceKind::Process,
+                reference: "process-recovery".to_string(),
+            }],
+        }),
+    )
+    .await;
+    assert_eq!(sql_failure.status(), StatusCode::BAD_REQUEST);
 }

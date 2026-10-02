@@ -1,5 +1,6 @@
 use agentic_gpt_protocol::{
-    HubCommand, McpBatchRequest, McpCallToolRequest, McpListServersRequest, McpListToolsRequest,
+    EventGetRequest, EventListRequest, EventMarkRequest, EventSeverity, EventStatus, HubCommand,
+    McpBatchRequest, McpCallToolRequest, McpListServersRequest, McpListToolsRequest,
     ProcessBatchExecRequest, ProcessCancelRequest, ProcessExecRequest, ProcessListRequest,
     ProcessOutputRequest, ProcessResultRequest, ProcessStatusRequest, TmuxCapturePaneRequest,
     TmuxCloseSessionRequest, TmuxCreateSessionRequest, TmuxExecRequest, TmuxListPanesRequest,
@@ -28,6 +29,22 @@ use crate::REQUEST_TIMEOUT_SECS;
 pub(crate) struct AgentIdQuery {
     #[serde(rename = "agentId")]
     agent_id: String,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct EventListQuery {
+    agent_id: String,
+    status: Option<EventStatus>,
+    severity: Option<EventSeverity>,
+    limit: Option<usize>,
+    cursor: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct EventMarkHttpRequest {
+    agent_id: String,
+    event_ids: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -344,6 +361,85 @@ pub(crate) async fn list_processes(
     }
 }
 
+pub(crate) async fn list_events(
+    State(state): State<HubState>,
+    headers: HeaderMap,
+    Query(query): Query<EventListQuery>,
+) -> Response {
+    if let Err(response) = require_action_auth(&state, &headers) {
+        return response;
+    }
+    if let Err(response) = require_agent_enabled(&state, &query.agent_id) {
+        return response;
+    }
+
+    let command = HubCommand::EventList {
+        request_id: random_id("req"),
+        payload: EventListRequest {
+            agent_id: query.agent_id.clone(),
+            status: query.status,
+            severity: query.severity,
+            limit: query.limit,
+            cursor: query.cursor,
+        },
+    };
+    match request_agent(&state, &query.agent_id, command, REQUEST_TIMEOUT_SECS).await {
+        Ok(value) => process_success_response(value),
+        Err(reason) => api_error(StatusCode::GATEWAY_TIMEOUT, "event_list_timeout", reason),
+    }
+}
+
+pub(crate) async fn get_event(
+    State(state): State<HubState>,
+    headers: HeaderMap,
+    Path(event_id): Path<String>,
+    Query(query): Query<AgentIdQuery>,
+) -> Response {
+    if let Err(response) = require_action_auth(&state, &headers) {
+        return response;
+    }
+    if let Err(response) = require_agent_enabled(&state, &query.agent_id) {
+        return response;
+    }
+
+    let command = HubCommand::EventGet {
+        request_id: random_id("req"),
+        payload: EventGetRequest {
+            agent_id: query.agent_id.clone(),
+            event_id,
+        },
+    };
+    match request_agent(&state, &query.agent_id, command, REQUEST_TIMEOUT_SECS).await {
+        Ok(value) => process_success_response(value),
+        Err(reason) => api_error(StatusCode::GATEWAY_TIMEOUT, "event_get_timeout", reason),
+    }
+}
+
+pub(crate) async fn mark_events(
+    State(state): State<HubState>,
+    headers: HeaderMap,
+    Json(payload): Json<EventMarkHttpRequest>,
+) -> Response {
+    if let Err(response) = require_action_auth(&state, &headers) {
+        return response;
+    }
+    if let Err(response) = require_agent_enabled(&state, &payload.agent_id) {
+        return response;
+    }
+
+    let command = HubCommand::EventMark {
+        request_id: random_id("req"),
+        payload: EventMarkRequest {
+            agent_id: payload.agent_id.clone(),
+            event_ids: payload.event_ids,
+        },
+    };
+    match request_agent(&state, &payload.agent_id, command, REQUEST_TIMEOUT_SECS).await {
+        Ok(value) => process_success_response(value),
+        Err(reason) => api_error(StatusCode::GATEWAY_TIMEOUT, "event_mark_timeout", reason),
+    }
+}
+
 pub(crate) async fn get_process_status(
     State(state): State<HubState>,
     headers: HeaderMap,
@@ -392,39 +488,53 @@ fn process_agent_error_status(code: &str) -> StatusCode {
     match code {
         "invalid_process_output_cursor"
         | "process_output_cursor_ahead_of_output"
-        | "process_output_max_bytes_too_small_for_next_unit" => StatusCode::BAD_REQUEST,
-        "process_not_found" | "process_lost_after_restart" => StatusCode::NOT_FOUND,
+        | "process_output_max_bytes_too_small_for_next_unit"
+        | "event_cursor_invalid"
+        | "event_cursor_scope_mismatch"
+        | "event_mark_too_many_ids"
+        | "event_id_invalid"
+        | "event_agent_mismatch"
+        | "event_store_agent_scope_invalid" => StatusCode::BAD_REQUEST,
+        "process_not_found" | "process_lost_after_restart" | "event_not_found" => {
+            StatusCode::NOT_FOUND
+        }
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
 
-fn process_agent_error_response(value: &serde_json::Value) -> Option<Response> {
+fn process_agent_error_response(value: &mut serde_json::Value) -> Option<StatusCode> {
     if value.get("processId").is_some()
         && value.get("status").is_some()
         && value.get("resultAvailable").is_some()
     {
         return None;
     }
-    let error = value.get("error")?.as_object();
+    let error_value = value.get_mut("error")?;
+    if !error_value.is_object() {
+        *error_value = json!({});
+    }
+    let error = error_value.as_object_mut()?;
     let code = error
-        .and_then(|error| error.get("code"))
+        .get("code")
         .and_then(serde_json::Value::as_str)
-        .unwrap_or("agent_process_error");
+        .unwrap_or("agent_process_error")
+        .to_string();
     let message = error
-        .and_then(|error| error.get("message"))
+        .get("message")
         .and_then(serde_json::Value::as_str)
-        .unwrap_or(code);
-    Some(
-        (
-            process_agent_error_status(code),
-            Json(json!({ "error": { "code": code, "message": message } })),
-        )
-            .into_response(),
-    )
+        .unwrap_or(&code)
+        .to_string();
+    let status = process_agent_error_status(&code);
+    error.insert("code".to_string(), serde_json::Value::String(code));
+    error.insert("message".to_string(), serde_json::Value::String(message));
+    Some(status)
 }
 
-fn process_success_response(value: serde_json::Value) -> Response {
-    process_agent_error_response(&value).unwrap_or_else(|| Json(value).into_response())
+fn process_success_response(mut value: serde_json::Value) -> Response {
+    match process_agent_error_response(&mut value) {
+        Some(status) => (status, Json(value)).into_response(),
+        None => Json(value).into_response(),
+    }
 }
 
 pub(crate) async fn get_process_output(
@@ -745,6 +855,7 @@ pub(crate) async fn mcp_list_servers(
         }
         let command = HubCommand::McpListServers {
             request_id: random_id("req"),
+            suppress_event_panel: false,
         };
         return match request_agent(&state, agent_id, command, REQUEST_TIMEOUT_SECS).await {
             Ok(value) => Json(value).into_response(),
@@ -907,6 +1018,398 @@ pub(crate) fn api_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::params;
+    use std::collections::HashMap;
+    use std::future::Future;
+    use std::sync::{Arc, Mutex as StdMutex};
+    use tokio::sync::mpsc;
+
+    fn http_test_state() -> HubState {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::init_db(&conn).unwrap();
+        crate::event_feedback::init(&conn).unwrap();
+        HubState {
+            api_key: "test-api-key".to_string(),
+            db: Arc::new(StdMutex::new(conn)),
+            config: Arc::new(crate::HubConfig {
+                remote_confirmation: crate::config::RemoteConfirmationConfig {
+                    enabled: false,
+                    provider: "none".to_string(),
+                    timeout_seconds: 45,
+                    ntfy: crate::NtfyConfig {
+                        server_url: String::new(),
+                        topic: String::new(),
+                        callback_base_url: String::new(),
+                    },
+                },
+            }),
+            mcp_profile: crate::state::McpProfile::Full,
+            agents: Arc::new(crate::agents::lifecycle::Connections::new()),
+            dispatch: Arc::new(crate::agents::dispatch::Dispatch::new()),
+            confirmations: Arc::new(crate::confirmation::Confirmations::new()),
+            process_cache: Arc::new(crate::state::ProcessCache::new()),
+            boot_generations: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            active_room: Arc::new(tokio::sync::Mutex::new(None)),
+            http: reqwest::Client::new(),
+            public_base_url: None,
+            oauth_codes: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            oauth_tokens: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            ntfy_health: Arc::new(tokio::sync::Mutex::new(None)),
+        }
+    }
+
+    fn register_http_agent(state: &HubState) {
+        let capabilities = agentic_gpt_protocol::Capabilities {
+            processes: true,
+            confirmation: true,
+            notification_actions: true,
+        };
+        state
+            .db
+            .lock()
+            .unwrap()
+            .execute(
+                "insert into agents(agent_id, alias, display_name, enabled, secret_hash, last_seen_at, capabilities_json)
+                 values (?1, null, ?1, 1, ?2, null, ?3)",
+                params![
+                    "agent",
+                    crate::utils::sha256_hex("agent-secret"),
+                    serde_json::to_string(&capabilities).unwrap()
+                ],
+            )
+            .unwrap();
+    }
+
+    fn http_action_headers() -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            axum::http::HeaderValue::from_static("Bearer test-api-key"),
+        );
+        headers
+    }
+
+    fn http_agent_headers() -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-agent-secret",
+            axum::http::HeaderValue::from_static("agent-secret"),
+        );
+        headers
+    }
+
+    fn event_list_query(agent_id: &str, cursor: Option<&str>) -> EventListQuery {
+        EventListQuery {
+            agent_id: agent_id.to_string(),
+            status: None,
+            severity: None,
+            limit: None,
+            cursor: cursor.map(str::to_string),
+        }
+    }
+
+    async fn insert_http_agent_connection(
+        state: &HubState,
+    ) -> mpsc::UnboundedReceiver<crate::state::OutboundAgentMessage> {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        state
+            .agents
+            .insert_for_test(
+                "agent",
+                crate::state::AgentConnection {
+                    connection_id: "current".to_string(),
+                    sender,
+                    last_seen_at: chrono::Utc::now(),
+                    role: agentic_gpt_protocol::AgentRole::Normal,
+                    connection_mode: agentic_gpt_protocol::AgentConnectionMode::CommandCapable,
+                    hello_received: true,
+                    boot_generation: Some("testboot".to_string()),
+                    transport: crate::state::AgentTransport::Sse,
+                    config_summary: None,
+                    notification_channels: Vec::new(),
+                },
+            )
+            .await;
+        receiver
+    }
+
+    async fn respond_with_agent_error<F>(
+        state: HubState,
+        outbound: &mut mpsc::UnboundedReceiver<crate::state::OutboundAgentMessage>,
+        request: F,
+        data: serde_json::Value,
+    ) -> Response
+    where
+        F: Future<Output = Response> + Send + 'static,
+    {
+        let task = tokio::spawn(request);
+        let message = outbound.recv().await.expect("Hub sends an Agent command");
+        let crate::state::OutboundAgentMessage::Text(text) = message else {
+            panic!("expected a text command envelope");
+        };
+        let envelope: agentic_gpt_protocol::HubCommandEnvelope =
+            serde_json::from_str(&text).unwrap();
+        let transport_response = crate::agents::transport::post_agent_message(
+            State(state.clone()),
+            Path("agent".to_string()),
+            Query(crate::agents::transport::SseConnectQuery::for_test(Some(
+                "current".to_string(),
+            ))),
+            http_agent_headers(),
+            Json(agentic_gpt_protocol::AgentMessage::Response {
+                run_id: Some(envelope.run_id),
+                request_id: envelope.request_id,
+                data,
+                event_sources: Vec::new(),
+            }),
+        )
+        .await;
+        assert_eq!(transport_response.status(), StatusCode::OK);
+        task.await.unwrap()
+    }
+
+    async fn response_json(response: Response) -> serde_json::Value {
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    #[test]
+    fn event_mark_body_requires_an_agent_and_event_ids() {
+        assert!(serde_json::from_value::<EventMarkHttpRequest>(json!({
+            "eventIds": []
+        }))
+        .is_err());
+        assert!(serde_json::from_value::<EventMarkHttpRequest>(json!({
+            "agentId": "agent"
+        }))
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn event_http_routes_require_authorization_and_an_enabled_agent() {
+        let state = http_test_state();
+
+        for response in [
+            list_events(
+                State(state.clone()),
+                HeaderMap::new(),
+                Query(event_list_query("agent", None)),
+            )
+            .await,
+            get_event(
+                State(state.clone()),
+                HeaderMap::new(),
+                Path("event-1".to_string()),
+                Query(AgentIdQuery {
+                    agent_id: "agent".to_string(),
+                }),
+            )
+            .await,
+            mark_events(
+                State(state.clone()),
+                HeaderMap::new(),
+                Json(EventMarkHttpRequest {
+                    agent_id: "agent".to_string(),
+                    event_ids: vec!["event-1".to_string()],
+                }),
+            )
+            .await,
+        ] {
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+
+        for response in [
+            list_events(
+                State(state.clone()),
+                http_action_headers(),
+                Query(event_list_query("agent", None)),
+            )
+            .await,
+            get_event(
+                State(state.clone()),
+                http_action_headers(),
+                Path("event-1".to_string()),
+                Query(AgentIdQuery {
+                    agent_id: "agent".to_string(),
+                }),
+            )
+            .await,
+            mark_events(
+                State(state.clone()),
+                http_action_headers(),
+                Json(EventMarkHttpRequest {
+                    agent_id: "agent".to_string(),
+                    event_ids: vec!["event-1".to_string()],
+                }),
+            )
+            .await,
+        ] {
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+        assert_eq!(state.dispatch.pending_count().await, 0);
+        register_http_agent(&state);
+        state
+            .db
+            .lock()
+            .unwrap()
+            .execute(
+                "update agents set enabled = 0 where agent_id = ?1",
+                params!["agent"],
+            )
+            .unwrap();
+        for response in [
+            list_events(
+                State(state.clone()),
+                http_action_headers(),
+                Query(event_list_query("agent", None)),
+            )
+            .await,
+            get_event(
+                State(state.clone()),
+                http_action_headers(),
+                Path("event-1".to_string()),
+                Query(AgentIdQuery {
+                    agent_id: "agent".to_string(),
+                }),
+            )
+            .await,
+            mark_events(
+                State(state.clone()),
+                http_action_headers(),
+                Json(EventMarkHttpRequest {
+                    agent_id: "agent".to_string(),
+                    event_ids: vec!["event-1".to_string()],
+                }),
+            )
+            .await,
+        ] {
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+        assert_eq!(state.dispatch.pending_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn offline_event_list_returns_an_error_without_cached_events() {
+        let state = http_test_state();
+        register_http_agent(&state);
+
+        let response = list_events(
+            State(state),
+            http_action_headers(),
+            Query(event_list_query("agent", None)),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+        let body = response_json(response).await;
+        assert_eq!(body["error"]["code"], "event_list_timeout");
+        assert!(body.get("events").is_none());
+    }
+
+    #[tokio::test]
+    async fn online_event_domain_errors_keep_the_agent_panel_and_http_status() {
+        let state = http_test_state();
+        register_http_agent(&state);
+        let mut outbound = insert_http_agent_connection(&state).await;
+        let panel = json!({
+            "current": "low: 1 | medium: 0 | high: 0",
+            "new": [{
+                "event-1 | Process completed": "low | 2026-10-01T12:00:00Z"
+            }]
+        });
+
+        let request_state = state.clone();
+        let response = respond_with_agent_error(
+            state.clone(),
+            &mut outbound,
+            async move {
+                get_event(
+                    State(request_state),
+                    http_action_headers(),
+                    Path("missing-event".to_string()),
+                    Query(AgentIdQuery {
+                        agent_id: "agent".to_string(),
+                    }),
+                )
+                .await
+            },
+            json!({
+                "error": { "code": "event_not_found", "message": "event_not_found" },
+                "events": panel
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = response_json(response).await;
+        assert_eq!(body["error"]["code"], "event_not_found");
+        assert_eq!(body["events"]["current"], "low: 1 | medium: 0 | high: 0");
+        assert_eq!(
+            body["events"]["new"][0]["event-1 | Process completed"],
+            "low | 2026-10-01T12:00:00Z"
+        );
+
+        let panel = json!({
+            "current": "low: 1 | medium: 0 | high: 0",
+            "new": [{
+                "event-1 | Process completed": "low | 2026-10-01T12:00:00Z"
+            }]
+        });
+        let request_state = state.clone();
+        let response = respond_with_agent_error(
+            state.clone(),
+            &mut outbound,
+            async move {
+                list_events(
+                    State(request_state),
+                    http_action_headers(),
+                    Query(event_list_query("agent", Some("not-a-valid-cursor"))),
+                )
+                .await
+            },
+            json!({
+                "error": { "code": "event_cursor_invalid", "message": "event_cursor_invalid" },
+                "events": panel
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await;
+        assert_eq!(body["error"]["code"], "event_cursor_invalid");
+        assert_eq!(body["events"]["current"], "low: 1 | medium: 0 | high: 0");
+        let panel = json!({
+            "current": "low: 1 | medium: 0 | high: 0",
+            "new": [{
+                "event-1 | Process completed": "low | 2026-10-01T12:00:00Z"
+            }]
+        });
+        let event_ids = (0..513).map(|index| format!("event-{index}")).collect();
+        let request_state = state.clone();
+        let response = respond_with_agent_error(
+            state.clone(),
+            &mut outbound,
+            async move {
+                mark_events(
+                    State(request_state),
+                    http_action_headers(),
+                    Json(EventMarkHttpRequest {
+                        agent_id: "agent".to_string(),
+                        event_ids,
+                    }),
+                )
+                .await
+            },
+            json!({
+                "error": { "code": "event_mark_too_many_ids", "message": "event_mark_too_many_ids" },
+                "events": panel
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await;
+        assert_eq!(body["error"]["code"], "event_mark_too_many_ids");
+        assert_eq!(body["events"]["current"], "low: 1 | medium: 0 | high: 0");
+    }
 
     #[test]
     fn process_status_wait_is_bounded_by_protocol_defaults() {
@@ -939,6 +1442,18 @@ mod tests {
             ),
         ] {
             let response = process_success_response(json!({
+                "processId": "process-1",
+                "status": "completed",
+                "completedInline": false,
+                "resultStatus": "too_large",
+                "content": [{ "type": "text", "text": "terminal content" }],
+                "meta": { "trace": "tool-result" },
+                "_meta": { "trace": "wire-result" },
+                "isError": true,
+                "events": {
+                    "current": "low: 0 | medium: 0 | high: 0",
+                    "new": []
+                },
                 "error": { "code": code, "message": "Agent rejected the request" }
             }));
             assert_eq!(response.status(), expected_status, "{code}");
@@ -948,12 +1463,28 @@ mod tests {
             let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
             assert_eq!(body["error"]["code"], code);
             assert_eq!(body["error"]["message"], "Agent rejected the request");
+            assert_eq!(body["events"]["current"], "low: 0 | medium: 0 | high: 0");
+            assert_eq!(body["processId"], "process-1");
+            assert_eq!(body["status"], "completed");
+            assert_eq!(body["completedInline"], false);
+            assert_eq!(body["resultStatus"], "too_large");
+            assert_eq!(body["content"][0]["text"], "terminal content");
+            assert_eq!(body["meta"]["trace"], "tool-result");
+            assert_eq!(body["_meta"]["trace"], "wire-result");
+            assert_eq!(body["isError"], true);
         }
 
         let valid_unavailable_result = json!({
             "processId": "process-1",
             "status": "unavailable",
             "resultAvailable": false,
+            "content": [{ "type": "text", "text": "unavailable" }],
+            "meta": { "trace": "result" },
+            "isError": true,
+            "events": {
+                "current": "low: 0 | medium: 0 | high: 0",
+                "new": []
+            },
             "error": { "code": "process_result_not_ready", "message": "Process has not completed" }
         });
         let response = process_success_response(valid_unavailable_result.clone());

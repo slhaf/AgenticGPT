@@ -1,4 +1,5 @@
 mod envelopes;
+mod events;
 mod identity_config;
 mod mcp;
 mod notification_tmux;
@@ -7,6 +8,7 @@ mod room;
 mod skill_bootstrap;
 
 pub use envelopes::*;
+pub use events::*;
 pub use identity_config::*;
 pub use mcp::*;
 pub use notification_tmux::*;

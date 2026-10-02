@@ -2,9 +2,10 @@ mod args;
 pub(crate) mod transport;
 
 use agentic_gpt_protocol::{
-    normalize_process_group, BootstrapReadRequest, HubCommand, McpBatchCall, McpBatchRequest,
-    McpCallToolRequest, McpListToolsRequest, ProcessBatchExecRequest, ProcessCancelRequest,
-    ProcessExecElement, ProcessExecRequest, ProcessKind, ProcessListRequest, ProcessOutputRequest,
+    normalize_process_group, BootstrapReadRequest, EventGetRequest, EventListRequest,
+    EventMarkRequest, HubCommand, McpBatchCall, McpBatchRequest, McpCallToolRequest,
+    McpListToolsRequest, ProcessBatchExecRequest, ProcessCancelRequest, ProcessExecElement,
+    ProcessExecRequest, ProcessKind, ProcessListRequest, ProcessOutputRequest,
     ProcessResultRequest, ProcessState, ProcessStatusRequest, RoomDiaryActiveRequest,
     RoomDiaryReadRequest, RoomMaintenanceStatusRequest, RoomNotebookReadRequest,
     RoomNotebookRecentRequest, RoomNotebookSearchRequest, RoomStateListRequest,
@@ -14,10 +15,11 @@ use agentic_gpt_protocol::{
     TmuxExecRequest, TmuxListPanesRequest, TmuxPasteTextRequest, UserNotifySendRequest,
 };
 use args::{
-    AgentIdArgs, BootstrapReadArgs, HubRunGetArgs, HubRunListArgs, McpBatchArgs, McpCallToolArgs,
-    McpListServersArgs, McpListToolsArgs, ProcessBatchArgs, ProcessExecArgs, ProcessIdArgs,
-    ProcessListArgs, ProcessOutputArgs, ProcessResultArgs, ProcessStatusArgs, RoomDiaryActiveArgs,
-    RoomDiaryReadArgs, RoomMaintenanceStatusArgs, RoomMaintenanceSubmitArgs, RoomNotebookReadArgs,
+    AgentIdArgs, BootstrapReadArgs, EventGetArgs, EventListArgs, EventMarkArgs, HubRunGetArgs,
+    HubRunListArgs, McpBatchArgs, McpCallToolArgs, McpListServersArgs, McpListToolsArgs,
+    ProcessBatchArgs, ProcessExecArgs, ProcessIdArgs, ProcessListArgs, ProcessOutputArgs,
+    ProcessResultArgs, ProcessStatusArgs, RoomDiaryActiveArgs, RoomDiaryReadArgs,
+    RoomMaintenanceStatusArgs, RoomMaintenanceSubmitArgs, RoomNotebookReadArgs,
     RoomNotebookRecentArgs, RoomNotebookSearchArgs, RoomStateListArgs, RoomStateReadArgs,
     SkillActivationArgs, SkillInstallArgs, SkillInstallCancelArgs, SkillInstallGetArgs,
     SkillReadArgs, SkillRunArgs, SkillSearchArgs, TmuxCapturePaneArgs, TmuxCloseSessionArgs,
@@ -33,7 +35,9 @@ use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 use serde_json::{json, Map, Value};
 
 use crate::agentic_result::AgenticResult;
-use crate::agents::dispatch::{cached_process, mcp_list_servers_all_agents, request_agent};
+use crate::agents::dispatch::{
+    cache_value_with_event_panel, cached_process, mcp_list_servers_all_agents, request_agent,
+};
 use crate::notify::{notification_channels, send_user_notification, NotifyRouteError};
 use crate::registry::{registry_entries, registry_entry};
 use crate::room::control::{request_active_room, RoomRouteError};
@@ -49,8 +53,8 @@ use crate::utils::random_id;
 use crate::REQUEST_TIMEOUT_SECS;
 const ROOM_TRANSPORT_MARGIN_SECS: u64 = 5;
 
-const MCP_INSTRUCTIONS: &str = "Agentic GPT Hub 完整配置提供 49 个工具。先用 agent.list 选择已启用的本地 Agent：进程、tmux 和指定 Agent 的下游 MCP 工具以 agentId 路由；Room、bootstrap 与 skills 工具不接收 agentId，每次调用由 Hub 捕获当时的活动 Room 连接。process.exec/process.batch 运行 command 进程，mcp.callTool/mcp.batch 运行 kind=mcp 进程；waitSeconds 只控制本次内联等待，不代表完成或取消。mcp.callTool/batch 的 timeoutSeconds 从调用获准并取得执行槽后起算，只限下游连接/请求，不含确认等待和排队。用 process.status/output/cancel 跟踪命令和 skill；只有下游 MCP 的 kind=mcp 结构化结果适用 process.result，command/skill 的 stdout/stderr 用 process.output。skills.run 返回实际执行 Agent 的 agentId 和 processId；之后的 process.* 必须复用这两个值，不会按当前活动 Room 自动路由。hub.process.* 只读 Hub 进程缓存，需检查 freshness/observedAt；process.list/status 向 Agent 请求状态（请求失败时可能回退缓存）。hub.run.* 是 Hub 持久派发回执，不等于进程状态或停止证据。先用 mcp.listServers/listTools 发现下游 MCP 服务器、工具及参数 schema；mcp.batch 只返回子调用进程摘要，完整下游结果用对应 processId 调 process.result，批次失败不回滚已开始的调用。tmux.exec 返回提交状态和短暂窗格快照，不是完成证据；需要时用 tmux.capturePane 核验输出。skills.install 是异步安装/替换，随后用 skills.install.get/cancel；内置 skill-installer 可读但只读、不可运行，调用 skills.run 前检查 origin/readOnly。发送前先查 user.notify.channels 并检查 user.notify.send 的 accepted；桌面通道可用 accepted=false/reason 表示投递失败且 isError 仍为 false，路由/Hub 投递错误才返回 error。accepted 表示通道提供方接受/处理请求，不代表用户端送达或已读；ntfy 只以发布 HTTP 成功确认。工具原生 JSON 位于 MCP structuredContent 并以 text 返回，顶层含 error 时 isError 为 true；参数/路由等 MCP 协议错误与工具 JSON 错误不同。annotations 是行为提示而非授权。";
-const COORDINATOR_INSTRUCTIONS: &str = "协调者配置仅暴露 8 个 Hub 原生工具：hub.info、agent.list、hub.run.list/get、hub.process.status/list 和 user.notify.channels/send。可查看 Agent 注册/在线状态、Hub 派发回执与进程缓存快照；hub.process.* 是可能过期的 Hub 缓存（检查 freshness/observedAt），hub.run.* 是回执而非实时进程状态或停止证据。此配置不会向 Agent 派发执行、进程控制、tmux、下游 MCP、Room、bootstrap 或 skill 操作。发送前先查 user.notify.channels 并检查 accepted：桌面通道可能返回 accepted=false/reason 而 isError=false，路由/Hub 投递错误才返回 error。accepted 表示通道提供方接受/处理请求，不代表用户端送达或已读；ntfy 只以发布 HTTP 成功确认。结果原生 JSON 位于 MCP structuredContent 并以 text 返回；其中顶层 error 会标记 isError，参数/路由错误可作为 MCP 协议错误返回。annotations 是提示，不是授权。";
+const MCP_INSTRUCTIONS: &str = "Agentic GPT Hub 完整配置提供 52 个工具。先用 agent.list 选择已启用的本地 Agent：进程、tmux 和指定 Agent 的下游 MCP 工具以 agentId 路由；Room、bootstrap 与 skills 工具不接收 agentId，每次调用由 Hub 捕获当时的活动 Room 连接。process.exec/process.batch 运行 command 进程，mcp.callTool/mcp.batch 运行 kind=mcp 进程；waitSeconds 只控制本次内联等待，不代表完成或取消。mcp.callTool/batch 的 timeoutSeconds 从调用获准并取得执行槽后起算，只限下游连接/请求，不含确认等待和排队。用 process.status/output/cancel 跟踪命令和 skill；只有下游 MCP 的 kind=mcp 结构化结果适用 process.result，command/skill 的 stdout/stderr 用 process.output。skills.run 返回实际执行 Agent 的 agentId 和 processId；之后的 process.* 必须复用这两个值，不会按当前活动 Room 自动路由。event.list/get/mark 必须指定 agentId，只操作该 Agent 的 inbox。hub.process.* 只读 Hub 进程缓存，需检查 freshness/observedAt；process.list/status 向 Agent 请求状态（请求失败时可能回退缓存）。hub.run.* 是 Hub 持久派发回执，不等于进程状态或停止证据。先用 mcp.listServers/listTools 发现下游 MCP 服务器、工具及参数 schema；mcp.batch 只返回子调用进程摘要，完整下游结果用对应 processId 调 process.result，批次失败不回滚已开始的调用。tmux.exec 返回提交状态和短暂窗格快照，不是完成证据；需要时用 tmux.capturePane 核验输出。skills.install 是异步安装/替换，随后用 skills.install.get/cancel；内置 skill-installer 可读但只读、不可运行，调用 skills.run 前检查 origin/readOnly。发送前先查 user.notify.channels 并检查 user.notify.send 的 accepted；桌面通道可用 accepted=false/reason 表示投递失败且 isError 仍为 false，路由/Hub 投递错误才返回 error。accepted 表示通道提供方接受/处理请求，不代表用户端送达或已读；ntfy 只以发布 HTTP 成功确认。工具原生 JSON 位于 MCP structuredContent 并以 text 返回，顶层含 error 时 isError 为 true；参数/路由等 MCP 协议错误与工具 JSON 错误不同。annotations 是行为提示而非授权。";
+const COORDINATOR_INSTRUCTIONS: &str = "协调者配置仅暴露 8 个 Hub 原生工具：hub.info、agent.list、hub.run.list/get、hub.process.status/list 和 user.notify.channels/send。可查看 Agent 注册/在线状态、Hub 派发回执与进程缓存快照；hub.process.* 是可能过期的 Hub 缓存（检查 freshness/observedAt），hub.run.* 是回执而非实时进程状态或停止证据。在线且指定 Agent 时，hub.process.* 额外请求一次 EventPanel 元数据以附加 events；Agent 离线或查询失败时省略 events。这不是进程状态/执行派发。此配置不会向 Agent 派发执行、进程控制、tmux、下游 MCP、Room、bootstrap 或 skill 操作。发送前先查 user.notify.channels 并检查 accepted：桌面通道可能返回 accepted=false/reason 而 isError=false，路由/Hub 投递错误才返回 error。accepted 表示通道提供方接受/处理请求，不代表用户端送达或已读；ntfy 只以发布 HTTP 成功确认。结果原生 JSON 位于 MCP structuredContent 并以 text 返回；其中顶层 error 会标记 isError，参数/路由错误可作为 MCP 协议错误返回。annotations 是提示，不是授权。";
 
 fn default_process_wait_seconds() -> u64 {
     ProcessStatusRequest::DEFAULT_WAIT_SECONDS
@@ -172,6 +176,7 @@ fn decorate_tool_descriptors(tool_router: &mut ToolRouter<AgenticMcpServer>) {
                 | "skills.install"
                 | "skills.install.cancel"
                 | "skills.run"
+                | "event.mark"
         );
         route.attr.annotations = Some(
             ToolAnnotations::new()
@@ -208,6 +213,7 @@ fn tool_is_read_only(name: &str) -> bool {
             | "skills.install"
             | "skills.install.cancel"
             | "skills.run"
+            | "event.mark"
     )
 }
 
@@ -329,6 +335,7 @@ async fn snapshot_process_status(state: &HubState, agent_id: &str, process_id: &
         }
     }
 }
+// Native cache-only process tools use the shared dispatch metadata helper.
 
 async fn unavailable_process_value(
     state: &HubState,
@@ -457,7 +464,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "hub.process.list",
-        description = "读取 Hub 为指定 agentId 保留的进程元数据快照；仅在查看缓存状态且不要求实时性时使用，不会联系 Agent。返回 processes 与 freshness（cached/stale/unknown），有观测时间时含 observedAt；不含进程输出/结构化结果，快照可能过期。Agent 未注册或未启用时返回 MCP 参数错误。"
+        description = "读取 Hub 为指定 agentId 保留的进程元数据快照；不会请求 Agent 执行或读取进程状态。在线时额外进行一次 best-effort EventPanel 元数据查询并附加 events，Agent 离线或查询失败时省略 events。返回 processes 与 freshness（cached/stale/unknown），有观测时间时含 observedAt；快照可能过期。Agent 未注册或未启用时返回 MCP 参数错误。"
     )]
     async fn hub_process_list(
         &self,
@@ -465,12 +472,15 @@ impl AgenticMcpServer {
     ) -> Result<CallToolResult, ErrorData> {
         let agent_id = params.0.agent_id;
         self.ensure_agent_enabled(&agent_id)?;
-        Ok(ok_json(snapshot_process_list(&self.state, &agent_id).await))
+        let value = snapshot_process_list(&self.state, &agent_id).await;
+        Ok(ok_json(
+            cache_value_with_event_panel(&self.state, &agent_id, value).await,
+        ))
     }
 
     #[tool(
         name = "hub.process.status",
-        description = "按 agentId 和 processId 读取一条 Hub 缓存快照，不会联系 Agent；适合离线时查看最近已观测元数据，不能证明当前状态。返回进程字段以及 freshness/observedAt；无缓存项在 structuredContent 中返回 error.code=process_not_found 与 freshness=unknown。Agent 未注册或未启用时返回 MCP 参数错误。"
+        description = "按 agentId 和 processId 读取一条 Hub 缓存快照，不会请求 Agent 执行或读取进程状态。在线时额外进行一次 best-effort EventPanel 元数据查询并附加 events，Agent 离线或查询失败时省略 events；适合离线时查看最近已观测元数据，不能证明当前状态。返回进程字段以及 freshness/observedAt；无缓存项在 structuredContent 中返回 error.code=process_not_found 与 freshness=unknown。Agent 未注册或未启用时返回 MCP 参数错误。"
     )]
     async fn hub_process_status(
         &self,
@@ -478,9 +488,91 @@ impl AgenticMcpServer {
     ) -> Result<CallToolResult, ErrorData> {
         let params = params.0;
         self.ensure_agent_enabled(&params.agent_id)?;
+        let value =
+            snapshot_process_status(&self.state, &params.agent_id, &params.process_id).await;
         Ok(result_from_value(
-            snapshot_process_status(&self.state, &params.agent_id, &params.process_id).await,
+            cache_value_with_event_panel(&self.state, &params.agent_id, value).await,
         ))
+    }
+    #[tool(
+        name = "event.list",
+        description = "列出指定 Agent 的持久事件 inbox，可按状态/等级筛选并分页；仅读取事件，不操作进程。必须显式指定 agentId，不会选择或合并其他 Agent。"
+    )]
+    async fn event_list(
+        &self,
+        params: Parameters<EventListArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let params = params.0;
+        self.ensure_agent_enabled(&params.agent_id)?;
+        let payload = EventListRequest {
+            agent_id: params.agent_id.clone(),
+            status: params.status.map(Into::into),
+            severity: params.severity.map(Into::into),
+            limit: params.limit,
+            cursor: params.cursor,
+        };
+        let command = HubCommand::EventList {
+            request_id: random_id("req"),
+            payload,
+        };
+        let value = request_agent(&self.state, &params.agent_id, command, REQUEST_TIMEOUT_SECS)
+            .await
+            .unwrap_or_else(
+                |reason| json!({ "error": { "code": "event_list_timeout", "message": reason } }),
+            );
+        Ok(result_from_value(value))
+    }
+
+    #[tool(
+        name = "event.get",
+        description = "读取指定 Agent inbox 中一个事件的完整记录和 message；仅读取事件，不操作进程。必须显式指定 agentId，不会跨 Agent 查找。"
+    )]
+    async fn event_get(
+        &self,
+        params: Parameters<EventGetArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let params = params.0;
+        self.ensure_agent_enabled(&params.agent_id)?;
+        let payload = EventGetRequest {
+            agent_id: params.agent_id.clone(),
+            event_id: params.event_id,
+        };
+        let command = HubCommand::EventGet {
+            request_id: random_id("req"),
+            payload,
+        };
+        let value = request_agent(&self.state, &params.agent_id, command, REQUEST_TIMEOUT_SECS)
+            .await
+            .unwrap_or_else(
+                |reason| json!({ "error": { "code": "event_get_timeout", "message": reason } }),
+            );
+        Ok(result_from_value(value))
+    }
+
+    #[tool(
+        name = "event.mark",
+        description = "将指定 Agent inbox 中的事件标记为已处理；重复和未知 ID 的结果由 Agent 明确返回。该操作仅改变事件处理状态，不操作进程；必须显式指定 agentId。"
+    )]
+    async fn event_mark(
+        &self,
+        params: Parameters<EventMarkArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let params = params.0;
+        self.ensure_agent_enabled(&params.agent_id)?;
+        let payload = EventMarkRequest {
+            agent_id: params.agent_id.clone(),
+            event_ids: params.event_ids,
+        };
+        let command = HubCommand::EventMark {
+            request_id: random_id("req"),
+            payload,
+        };
+        let value = request_agent(&self.state, &params.agent_id, command, REQUEST_TIMEOUT_SECS)
+            .await
+            .unwrap_or_else(
+                |reason| json!({ "error": { "code": "event_mark_timeout", "message": reason } }),
+            );
+        Ok(result_from_value(value))
     }
 
     #[tool(
@@ -904,6 +996,7 @@ impl AgenticMcpServer {
             self.ensure_agent_enabled(&agent_id)?;
             let command = HubCommand::McpListServers {
                 request_id: random_id("req"),
+                suppress_event_panel: false,
             };
             let value = request_agent(&self.state, &agent_id, command, REQUEST_TIMEOUT_SECS)
                 .await
@@ -1698,15 +1791,18 @@ mod tests {
     use super::*;
     use crate::config::{HubConfig, RemoteConfirmationConfig};
     use crate::db::init_db;
-    use crate::state::McpProfile;
-    use agentic_gpt_protocol::ProcessInfo;
+    use crate::state::{McpProfile, OutboundAgentMessage};
+    use agentic_gpt_protocol::{
+        AgentConnectionMode, AgentMessage, AgentRole, Capabilities, ProcessInfo,
+    };
     use axum::body::to_bytes;
-    use axum::extract::State;
+    use axum::extract::{Path, Query, State};
+    use axum::http::{HeaderMap, HeaderValue, StatusCode};
     use axum::Json;
     use rusqlite::Connection;
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex as StdMutex};
-    use tokio::sync::Mutex;
+    use tokio::sync::{mpsc, Mutex};
 
     fn test_hub_config() -> HubConfig {
         HubConfig {
@@ -1748,11 +1844,387 @@ mod tests {
             }))),
         }
     }
+    fn register_agent_record(state: &HubState, agent_id: &str, secret: &str) {
+        let conn = state.db.lock().unwrap();
+        let capabilities = Capabilities {
+            processes: true,
+            confirmation: true,
+            notification_actions: true,
+        };
+        conn.execute(
+            "insert into agents(agent_id, alias, display_name, enabled, secret_hash, last_seen_at, capabilities_json)
+             values (?1, null, ?1, 1, ?2, null, ?3)",
+            rusqlite::params![
+                agent_id,
+                crate::utils::sha256_hex(secret),
+                serde_json::to_string(&capabilities).unwrap()
+            ],
+        )
+        .unwrap();
+    }
+
+    async fn register_online_agent(
+        state: &HubState,
+        agent_id: &str,
+        secret: &str,
+        connection_id: &str,
+    ) -> mpsc::UnboundedReceiver<crate::state::OutboundAgentMessage> {
+        register_agent_record(state, agent_id, secret);
+        let (sender, receiver) = mpsc::unbounded_channel();
+        state
+            .agents
+            .insert_for_test(
+                agent_id,
+                crate::state::AgentConnection {
+                    connection_id: connection_id.to_string(),
+                    sender,
+                    last_seen_at: chrono::Utc::now(),
+                    role: AgentRole::Normal,
+                    connection_mode: AgentConnectionMode::CommandCapable,
+                    hello_received: true,
+                    boot_generation: Some("test-boot".to_string()),
+                    transport: crate::state::AgentTransport::Sse,
+                    config_summary: None,
+                    notification_channels: Vec::new(),
+                },
+            )
+            .await;
+        receiver
+    }
+
+    fn agent_headers(secret: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-agent-secret", HeaderValue::from_str(secret).unwrap());
+        headers
+    }
+
+    fn tools_call_rpc(id: u64, name: &str, arguments: Value) -> Value {
+        json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/call",
+            "params": { "name": name, "arguments": arguments }
+        })
+    }
+
+    async fn respond_to_agent_command(
+        state: &HubState,
+        agent_id: &str,
+        secret: &str,
+        connection_id: &str,
+        envelope: &agentic_gpt_protocol::HubCommandEnvelope,
+        data: Value,
+    ) {
+        let response = crate::agents::transport::post_agent_message(
+            State(state.clone()),
+            Path(agent_id.to_string()),
+            Query(crate::agents::transport::SseConnectQuery::for_test(Some(
+                connection_id.to_string(),
+            ))),
+            agent_headers(secret),
+            Json(AgentMessage::Response {
+                run_id: Some(envelope.run_id.clone()),
+                request_id: envelope.request_id.clone(),
+                data,
+                event_sources: vec![],
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    async fn call_event_mcp_tool(
+        state: &HubState,
+        agent_outbound: &mut mpsc::UnboundedReceiver<crate::state::OutboundAgentMessage>,
+        other_outbound: &mut mpsc::UnboundedReceiver<crate::state::OutboundAgentMessage>,
+        id: u64,
+        tool: &str,
+        arguments: Value,
+        agent_response: Value,
+    ) -> Value {
+        let state_for_call = state.clone();
+        let tool_name = tool.to_string();
+        let request = tokio::spawn(async move {
+            transport::mcp_post(
+                State(state_for_call),
+                Json(tools_call_rpc(id, &tool_name, arguments)),
+            )
+            .await
+        });
+        let OutboundAgentMessage::Text(text) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), agent_outbound.recv())
+                .await
+                .expect("expected an Agent command")
+                .unwrap()
+        else {
+            panic!("expected Agent command envelope");
+        };
+        let envelope: agentic_gpt_protocol::HubCommandEnvelope =
+            serde_json::from_str(&text).unwrap();
+        match (tool, &envelope.command) {
+            ("event.list", agentic_gpt_protocol::HubCommand::EventList { payload, .. }) => {
+                assert_eq!(payload.agent_id, "event-agent");
+                assert_eq!(payload.limit, Some(4));
+            }
+            ("event.get", agentic_gpt_protocol::HubCommand::EventGet { payload, .. }) => {
+                assert_eq!(payload.agent_id, "event-agent");
+                assert_eq!(payload.event_id, "event-1");
+            }
+            ("event.mark", agentic_gpt_protocol::HubCommand::EventMark { payload, .. }) => {
+                assert_eq!(payload.agent_id, "event-agent");
+                assert_eq!(payload.event_ids, vec!["event-1", "event-2"]);
+            }
+            _ => panic!("event tool routed as an unexpected HubCommand"),
+        }
+        assert!(other_outbound.try_recv().is_err());
+
+        respond_to_agent_command(
+            state,
+            "event-agent",
+            "event-secret",
+            "event-connection",
+            &envelope,
+            agent_response,
+        )
+        .await;
+        let response = request.await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            agent_outbound.try_recv().is_err(),
+            "Hub sent an extra Agent command"
+        );
+        assert!(
+            other_outbound.try_recv().is_err(),
+            "Hub queried another Agent"
+        );
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["id"], id);
+        value["result"].clone()
+    }
+
+    #[tokio::test]
+    async fn event_tools_forward_only_explicit_agent_responses_and_keep_error_panels() {
+        let state = test_state();
+        let mut event_agent =
+            register_online_agent(&state, "event-agent", "event-secret", "event-connection").await;
+        let mut other_agent =
+            register_online_agent(&state, "other-agent", "other-secret", "other-connection").await;
+        let panel = json!({
+            "current": "low: 1 | medium: 0 | high: 0",
+            "new": [{ "event-1 | completed": "low | 2026-10-01T00:00:00Z" }]
+        });
+
+        let listed = call_event_mcp_tool(
+            &state,
+            &mut event_agent,
+            &mut other_agent,
+            1,
+            "event.list",
+            json!({ "agentId": "event-agent", "status": "pending", "limit": 4 }),
+            json!({
+                "items": [{ "eventId": "event-1", "summary": "completed", "status": "pending" }],
+                "nextCursor": null,
+                "events": panel
+            }),
+        )
+        .await;
+        assert_eq!(
+            listed["structuredContent"]["items"][0]["eventId"],
+            "event-1"
+        );
+        assert_eq!(listed["structuredContent"]["events"], panel);
+        assert_eq!(listed["isError"], false);
+
+        let fetched = call_event_mcp_tool(
+            &state,
+            &mut event_agent,
+            &mut other_agent,
+            2,
+            "event.get",
+            json!({ "agentId": "event-agent", "eventId": "event-1" }),
+            json!({
+                "error": { "code": "event_not_found", "message": "Event was not found" },
+                "events": panel
+            }),
+        )
+        .await;
+        assert_eq!(
+            fetched["structuredContent"]["error"]["code"],
+            "event_not_found"
+        );
+        assert_eq!(fetched["structuredContent"]["events"], panel);
+        assert_eq!(fetched["isError"], true);
+
+        let marked = call_event_mcp_tool(
+            &state,
+            &mut event_agent,
+            &mut other_agent,
+            3,
+            "event.mark",
+            json!({ "agentId": "event-agent", "eventIds": ["event-1", "event-2"] }),
+            json!({
+                "handledIds": ["event-1"],
+                "notFoundIds": ["event-2"],
+                "events": panel
+            }),
+        )
+        .await;
+        assert_eq!(
+            marked["structuredContent"]["handledIds"],
+            json!(["event-1"])
+        );
+        assert_eq!(marked["structuredContent"]["events"], panel);
+        let missing_target = transport::mcp_post(
+            State(state.clone()),
+            Json(tools_call_rpc(
+                4,
+                "event.list",
+                json!({ "status": "pending" }),
+            )),
+        )
+        .await;
+        let body = to_bytes(missing_target.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let missing_target: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(missing_target["error"]["code"], -32602);
+        assert!(event_agent.try_recv().is_err());
+        assert!(other_agent.try_recv().is_err());
+
+        assert_eq!(marked["isError"], false);
+    }
+
+    #[tokio::test]
+    async fn native_cache_status_adds_one_panel_and_preserves_error_when_panel_fails() {
+        let state = test_state();
+        let mut outbound =
+            register_online_agent(&state, "cache-agent", "cache-secret", "cache-connection").await;
+        let panel = json!({ "current": "low: 0 | medium: 0 | high: 0", "new": [] });
+
+        let call_state = state.clone();
+        let call = tokio::spawn(async move {
+            transport::mcp_post(
+                State(call_state),
+                Json(tools_call_rpc(
+                    1,
+                    "hub.process.status",
+                    json!({ "agentId": "cache-agent", "processId": "missing-process" }),
+                )),
+            )
+            .await
+        });
+        let OutboundAgentMessage::Text(text) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), outbound.recv())
+                .await
+                .expect("expected one EventPanel request")
+                .unwrap()
+        else {
+            panic!("expected EventPanel command");
+        };
+        let envelope: agentic_gpt_protocol::HubCommandEnvelope =
+            serde_json::from_str(&text).unwrap();
+        assert!(matches!(
+            envelope.command,
+            agentic_gpt_protocol::HubCommand::EventPanel { .. }
+        ));
+        respond_to_agent_command(
+            &state,
+            "cache-agent",
+            "cache-secret",
+            "cache-connection",
+            &envelope,
+            panel.clone(),
+        )
+        .await;
+        let response = call.await.unwrap();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            value["result"]["structuredContent"]["error"]["code"],
+            "process_not_found"
+        );
+        assert_eq!(value["result"]["structuredContent"]["events"], panel);
+        assert_eq!(value["result"]["isError"], true);
+        assert!(
+            outbound.try_recv().is_err(),
+            "status requested more than one panel"
+        );
+
+        let call_state = state.clone();
+        let call = tokio::spawn(async move {
+            transport::mcp_post(
+                State(call_state),
+                Json(tools_call_rpc(
+                    2,
+                    "hub.process.status",
+                    json!({ "agentId": "cache-agent", "processId": "missing-process" }),
+                )),
+            )
+            .await
+        });
+        let OutboundAgentMessage::Text(text) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), outbound.recv())
+                .await
+                .expect("expected one EventPanel request for malformed panel response")
+                .unwrap()
+        else {
+            panic!("expected EventPanel command");
+        };
+        let envelope: agentic_gpt_protocol::HubCommandEnvelope =
+            serde_json::from_str(&text).unwrap();
+        respond_to_agent_command(
+            &state,
+            "cache-agent",
+            "cache-secret",
+            "cache-connection",
+            &envelope,
+            json!({ "current": 0, "new": [] }),
+        )
+        .await;
+        let response = call.await.unwrap();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            value["result"]["structuredContent"]["error"]["code"],
+            "process_not_found"
+        );
+        assert!(value["result"]["structuredContent"].get("events").is_none());
+        assert!(outbound.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn offline_native_process_cache_tools_omit_events() {
+        let state = test_state();
+        register_agent_record(&state, "offline-agent", "offline-secret");
+        for (id, name, arguments) in [
+            (1, "hub.process.list", json!({ "agentId": "offline-agent" })),
+            (
+                2,
+                "hub.process.status",
+                json!({ "agentId": "offline-agent", "processId": "missing-process" }),
+            ),
+        ] {
+            let response = transport::mcp_post(
+                State(state.clone()),
+                Json(tools_call_rpc(id, name, arguments)),
+            )
+            .await;
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let value: Value = serde_json::from_slice(&body).unwrap();
+            assert!(
+                value["result"]["structuredContent"].get("events").is_none(),
+                "{name} must not synthesize an offline event panel"
+            );
+        }
+    }
 
     #[test]
     fn tool_read_only_hints_match_side_effect_semantics() {
         for name in [
             "agent.list",
+            "event.list",
+            "event.get",
             "process.list",
             "process.status",
             "process.output",
@@ -1792,6 +2264,7 @@ mod tests {
             "mcp.batch",
             "mcp.callTool",
             "user.notify.send",
+            "event.mark",
             "room.maintenance.submit",
             "skills.activate",
             "skills.deactivate",
@@ -1868,6 +2341,24 @@ mod tests {
             .unwrap();
         assert_eq!(run_count, 0);
     }
+    #[tokio::test]
+    async fn coordinator_hides_event_tools_before_target_dispatch() {
+        let mut state = test_state();
+        state.mcp_profile = McpProfile::Coordinator;
+        let server = AgenticMcpServer::new(state);
+        for name in ["event.list", "event.get", "event.mark"] {
+            let error = transport::call_app_tool(
+                &server,
+                json!({ "name": name, "arguments": { "agentId": "agent" } }),
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                error.contains("tool_unavailable_for_profile"),
+                "{name}: {error}"
+            );
+        }
+    }
 
     #[test]
     fn full_profile_keeps_bootstrap_aliases_and_execution_surface() {
@@ -1887,6 +2378,9 @@ mod tests {
             "process.result",
             "process.cancel",
             "hub.process.list",
+            "event.list",
+            "event.get",
+            "event.mark",
             "hub.process.status",
             "room.diary.active",
             "room.diary.read",

@@ -528,13 +528,15 @@ mod tests {
     fn test_state(workspace_root: PathBuf) -> AppState {
         let mut config = Config::default_config().unwrap();
         config.workspace_root = workspace_root.clone();
-        let private_state = crate::private_state::PrivateStatePaths::for_test(
+        let private_state = crate::private_state::PrivateStatePaths::for_test_agent(
             workspace_root.join(".private-state"),
+            config.agent_id.clone(),
         );
         let process_history = crate::process_history::ProcessHistoryStore::open(&private_state);
         AppState {
             config_path: PathBuf::from("room-reads-test-config.json"),
             config: Arc::new(RwLock::new(config)),
+            event_store: crate::event_store::EventStore::open(&private_state).unwrap(),
             private_state,
             process_history,
             browser_runtime: None,

@@ -440,16 +440,19 @@ fn command_test_state(
     };
     config.workspace_root = workspace_root;
     let (tx, rx) = mpsc::unbounded_channel();
-    let private_state =
-        crate::private_state::PrivateStatePaths::for_test(std::env::temp_dir().join(format!(
+    let private_state = crate::private_state::PrivateStatePaths::for_test_agent(
+        std::env::temp_dir().join(format!(
             "agentic-test-private-{}",
             uuid::Uuid::new_v4().simple()
-        )));
+        )),
+        config.agent_id.clone(),
+    );
     let process_history = crate::process_history::ProcessHistoryStore::open(&private_state);
     (
         AppState {
             config_path: PathBuf::from("test-config.json"),
             config: Arc::new(RwLock::new(config)),
+            event_store: crate::event_store::EventStore::open(&private_state).unwrap(),
             private_state,
             process_history,
             browser_runtime: None,
@@ -550,8 +553,93 @@ async fn hub_adapter_and_local_dispatcher_share_toolset_errors() {
     .unwrap();
     hub::handle_hub_command(state, command, None).await.unwrap();
     let adapted = recv_response(&mut rx).await;
-    assert_eq!(direct, adapted);
+    assert_eq!(direct["error"], adapted["error"]);
     assert_eq!(direct["error"]["code"], "room_toolset_required");
+}
+
+#[tokio::test]
+async fn hub_panel_failure_emits_live_event_source_without_terminal_response() {
+    let workspace = unique_temp_dir("hub-panel-failure").join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    let (state, mut rx) = command_test_state(CapabilityProfile::Normal, workspace);
+    let agent_id = state.config.read().await.agent_id.clone();
+    let request_id = "req-panel-failure".to_string();
+    let identity = hub::RunIdentity {
+        run_id: "run-panel-failure".to_string(),
+        request_id: request_id.clone(),
+        command_hash: "command-hash-panel-failure".to_string(),
+        agent_id: agent_id.clone(),
+    };
+    let expected_origin = agentic_gpt_protocol::EventOrigin {
+        run_id: identity.run_id.clone(),
+        request_id: identity.request_id.clone(),
+        command_hash: identity.command_hash.clone(),
+    };
+    state
+        .event_store
+        .inject(
+            &agentic_gpt_protocol::EventInjectRequest {
+                message: "forces panel exposure update".to_string(),
+                severity: Some(agentic_gpt_protocol::EventSeverity::Low),
+                reference: "hub-panel-failure".to_string(),
+            },
+            state.config.read().await.events.low_ttl_seconds,
+        )
+        .unwrap();
+    let database = state.private_state.root.join("events.sqlite3");
+    rusqlite::Connection::open(&database)
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER reject_panel_exposure BEFORE UPDATE OF shown_count ON events
+             BEGIN SELECT RAISE(ABORT, 'panel write failed'); END;",
+        )
+        .unwrap();
+
+    let error = hub::handle_hub_command(
+        state.clone(),
+        HubCommand::Exec {
+            request_id,
+            payload: agentic_gpt_protocol::ProcessExecRequest {
+                agent_id,
+                group: None,
+                program: "true".to_string(),
+                args: Vec::new(),
+                need_confirm: false,
+                confirm_method: None,
+                working_directory: None,
+                wait_seconds: Some(5),
+            },
+        },
+        Some(identity),
+    )
+    .await
+    .expect_err("panel exposure SQL fault must prevent business response");
+    assert!(error
+        .to_string()
+        .contains("event_store_panel_exposure_update_failed"));
+
+    let message = rx.recv().await.unwrap();
+    let AgentMessage::EventSources { origin, sources } = message else {
+        panic!("expected identity-only event source handoff");
+    };
+    assert_eq!(origin, expected_origin);
+    let process_source = sources
+        .iter()
+        .find(|source| source.kind == agentic_gpt_protocol::EventSourceKind::Process)
+        .expect("real process execution source must be included");
+    assert_eq!(
+        state.event_store.remote_origin(process_source).unwrap(),
+        Some(expected_origin)
+    );
+    assert!(state
+        .event_store
+        .pending_internal_sources()
+        .unwrap()
+        .contains(process_source));
+    assert!(matches!(
+        rx.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
 }
 
 #[tokio::test]

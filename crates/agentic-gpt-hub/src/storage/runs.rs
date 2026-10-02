@@ -1,7 +1,7 @@
 use agentic_gpt_protocol::{AgentRunReport, HubCommand};
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Duration, Utc};
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, OptionalExtension, Transaction};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -51,8 +51,14 @@ pub(crate) struct PreparedRun {
 }
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum StoreResultOutcome {
-    Stored { command_hash: String },
-    Duplicate { command_hash: String },
+    Stored {
+        command_hash: String,
+        command_type: String,
+    },
+    Duplicate {
+        command_hash: String,
+        command_type: String,
+    },
     Conflict,
     Unmatched,
 }
@@ -74,6 +80,11 @@ pub(crate) fn command_type(command: &HubCommand) -> &'static str {
         HubCommand::ProcessOutput { .. } => "process.output",
         HubCommand::ProcessResult { .. } => "process.result",
         HubCommand::ProcessCancel { .. } => "process.cancel",
+        HubCommand::EventList { .. } => "event.list",
+        HubCommand::EventGet { .. } => "event.get",
+        HubCommand::EventMark { .. } => "event.mark",
+        HubCommand::EventSettle { .. } => "event.settle",
+        HubCommand::EventPanel { .. } => "event.panel",
         HubCommand::TmuxListSessions { .. } => "tmux.listSessions",
         HubCommand::TmuxListPanes { .. } => "tmux.listPanes",
         HubCommand::TmuxCapturePane { .. } => "tmux.capturePane",
@@ -111,9 +122,22 @@ pub(crate) fn command_type(command: &HubCommand) -> &'static str {
         HubCommand::SkillsRun { .. } => "skills.run",
     }
 }
-
+#[cfg(test)]
 pub(crate) fn prepare_run(
     state: &HubState,
+    agent_id: &str,
+    request_id: &str,
+    command: &HubCommand,
+) -> Result<PreparedRun> {
+    let mut conn = state.db.lock().unwrap();
+    let transaction = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let run = prepare_run_in_transaction(&transaction, agent_id, request_id, command)?;
+    transaction.commit()?;
+    Ok(run)
+}
+
+pub(crate) fn prepare_run_in_transaction(
+    transaction: &Transaction<'_>,
     agent_id: &str,
     request_id: &str,
     command: &HubCommand,
@@ -123,8 +147,7 @@ pub(crate) fn prepare_run(
     let run_id = random_id("run");
     let now = Utc::now();
     let expires_at = now + Duration::hours(RUN_TTL_HOURS);
-    let conn = state.db.lock().unwrap();
-    conn.execute(
+    transaction.execute(
         "insert into agent_runs(
             run_id, request_id, agent_id, command_type, command_json, command_hash,
             status, created_at, updated_at, expires_at
@@ -315,17 +338,18 @@ pub(crate) fn store_result(
     let result_hash = sha256_hex(&result_json);
     let now = Utc::now();
     let conn = state.db.lock().unwrap();
-    let Some((command_hash, existing_result_json, existing_result_hash)) = conn
+    let Some((command_hash, command_type, existing_result_json, existing_result_hash)) = conn
         .query_row(
-            "select command_hash, result_json, result_hash
+            "select command_hash, command_type, result_json, result_hash
              from agent_runs
              where run_id = ?1 and request_id = ?2 and agent_id = ?3",
             params![run_id, request_id, agent_id],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
-                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(1)?,
                     row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
                 ))
             },
         )
@@ -339,7 +363,10 @@ pub(crate) fn store_result(
             .or_else(|| existing_result_json.as_deref().map(sha256_hex))
             .expect("result JSON or hash is present");
         if canonical_hash == result_hash {
-            return Ok(StoreResultOutcome::Duplicate { command_hash });
+            return Ok(StoreResultOutcome::Duplicate {
+                command_hash,
+                command_type,
+            });
         }
         conn.execute(
             "update agent_runs
@@ -359,7 +386,10 @@ pub(crate) fn store_result(
            and result_json is null",
         params![result_json, result_hash, now, run_id, request_id, agent_id],
     )?;
-    Ok(StoreResultOutcome::Stored { command_hash })
+    Ok(StoreResultOutcome::Stored {
+        command_hash,
+        command_type,
+    })
 }
 
 pub(crate) fn upsert_agent_report(
@@ -702,6 +732,7 @@ mod tests {
         let state = test_state();
         let command = HubCommand::McpListServers {
             request_id: "req_1".to_string(),
+            suppress_event_panel: false,
         };
         let run = prepare_run(&state, "agent", "req_1", &command).unwrap();
         assert!(mark_acked(&state, "agent", &run.run_id, "req_1", &run.command_hash).unwrap());
@@ -709,13 +740,15 @@ mod tests {
         assert_eq!(
             store_result(&state, "agent", &run.run_id, "req_1", &result).unwrap(),
             StoreResultOutcome::Stored {
-                command_hash: run.command_hash.clone()
+                command_hash: run.command_hash.clone(),
+                command_type: "mcp.listServers".to_string(),
             }
         );
         assert_eq!(
             store_result(&state, "agent", &run.run_id, "req_1", &result).unwrap(),
             StoreResultOutcome::Duplicate {
-                command_hash: run.command_hash.clone()
+                command_hash: run.command_hash.clone(),
+                command_type: "mcp.listServers".to_string(),
             }
         );
         let stored = get_run(&state, &run.run_id).unwrap().unwrap();
@@ -727,6 +760,7 @@ mod tests {
         let state = test_state();
         let command = HubCommand::McpListServers {
             request_id: "req_completed_guard".to_string(),
+            suppress_event_panel: false,
         };
         let run = prepare_run(&state, "agent", "req_completed_guard", &command).unwrap();
         assert!(mark_status(
@@ -768,6 +802,7 @@ mod tests {
             "req_unfinished_guard",
             &HubCommand::McpListServers {
                 request_id: "req_unfinished_guard".to_string(),
+                suppress_event_panel: false,
             },
         )
         .unwrap();
@@ -786,6 +821,7 @@ mod tests {
         let state = test_state();
         let command = HubCommand::McpListServers {
             request_id: "req_wp1_completed_status".to_string(),
+            suppress_event_panel: false,
         };
         let run = prepare_run(&state, "agent", "req_wp1_completed_status", &command).unwrap();
         let result = serde_json::json!({ "servers": ["canonical"] });
@@ -823,6 +859,7 @@ mod tests {
         let state = test_state();
         let command = HubCommand::McpListServers {
             request_id: "req_wp1_status_tuple".to_string(),
+            suppress_event_panel: false,
         };
         let run = prepare_run(&state, "agent", "req_wp1_status_tuple", &command).unwrap();
         assert!(mark_status(
@@ -870,6 +907,7 @@ mod tests {
             "req_wp1_started_progress",
             &HubCommand::McpListServers {
                 request_id: "req_wp1_started_progress".to_string(),
+                suppress_event_panel: false,
             },
         )
         .unwrap();
@@ -906,6 +944,7 @@ mod tests {
             "req_wp1_late_progress",
             &HubCommand::McpListServers {
                 request_id: "req_wp1_late_progress".to_string(),
+                suppress_event_panel: false,
             },
         )
         .unwrap();
@@ -951,6 +990,7 @@ mod tests {
             "req_wp1_running_progress",
             &HubCommand::McpListServers {
                 request_id: "req_wp1_running_progress".to_string(),
+                suppress_event_panel: false,
             },
         )
         .unwrap();
@@ -986,6 +1026,7 @@ mod tests {
             "req_wp1_acked_progress",
             &HubCommand::McpListServers {
                 request_id: "req_wp1_acked_progress".to_string(),
+                suppress_event_panel: false,
             },
         )
         .unwrap();
@@ -1016,6 +1057,7 @@ mod tests {
             let request_id = format!("req_wp1_{status}_late_result");
             let command = HubCommand::McpListServers {
                 request_id: request_id.clone(),
+                suppress_event_panel: false,
             };
             let run = prepare_run(&state, "agent", &request_id, &command).unwrap();
             assert!(mark_status(
@@ -1100,6 +1142,7 @@ mod tests {
         let state = test_state();
         let command = HubCommand::McpListServers {
             request_id: "req_1".to_string(),
+            suppress_event_panel: false,
         };
         let run = prepare_run(&state, "agent", "req_1", &command).unwrap();
         assert!(mark_acked(&state, "agent", &run.run_id, "req_1", &run.command_hash).unwrap());

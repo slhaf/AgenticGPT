@@ -1,7 +1,7 @@
 use agentic_gpt_protocol::{
-    McpBatchMode, NotificationAction, RoomDiaryLayer, RoomMaintenanceExecutionMode,
-    RoomMaintenanceRequestItem, RoomMaintenanceSlot, RoomMaintenanceSubmitRequest,
-    SkillInstallFile, SkillInstallSource,
+    EventSeverity, EventStatus, McpBatchMode, NotificationAction, RoomDiaryLayer,
+    RoomMaintenanceExecutionMode, RoomMaintenanceRequestItem, RoomMaintenanceSlot,
+    RoomMaintenanceSubmitRequest, SkillInstallFile, SkillInstallSource,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -19,6 +19,86 @@ pub(super) struct AgentIdArgs {
         description = "Hub 中已启用的本地 Agent ID；可从 agent.list 获取。Room 工具另路由到当前活动的 Room Agent，不接收此字段。"
     )]
     pub(super) agent_id: String,
+}
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub(super) enum EventStatusArgs {
+    Pending,
+    Handled,
+    Expired,
+}
+
+impl From<EventStatusArgs> for EventStatus {
+    fn from(value: EventStatusArgs) -> Self {
+        match value {
+            EventStatusArgs::Pending => Self::Pending,
+            EventStatusArgs::Handled => Self::Handled,
+            EventStatusArgs::Expired => Self::Expired,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub(super) enum EventSeverityArgs {
+    Low,
+    Medium,
+    High,
+}
+
+impl From<EventSeverityArgs> for EventSeverity {
+    fn from(value: EventSeverityArgs) -> Self {
+        match value {
+            EventSeverityArgs::Low => Self::Low,
+            EventSeverityArgs::Medium => Self::Medium,
+            EventSeverityArgs::High => Self::High,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct EventListArgs {
+    #[schemars(
+        description = "目标本地 Agent ID；必须指定 Hub 中已启用的 Agent，不会自动选择其他 Agent。"
+    )]
+    pub(super) agent_id: String,
+    #[serde(default)]
+    #[schemars(description = "可选事件状态筛选：pending、handled 或 expired。")]
+    pub(super) status: Option<EventStatusArgs>,
+    #[serde(default)]
+    #[schemars(description = "可选事件等级筛选：low、medium 或 high。")]
+    pub(super) severity: Option<EventSeverityArgs>,
+    #[serde(default)]
+    #[schemars(description = "可选结果数限制。")]
+    pub(super) limit: Option<usize>,
+    #[serde(default)]
+    #[schemars(description = "此前 event.list 返回的不透明分页游标。")]
+    pub(super) cursor: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct EventGetArgs {
+    #[schemars(
+        description = "目标本地 Agent ID；必须指定 Hub 中已启用的 Agent，不会自动选择其他 Agent。"
+    )]
+    pub(super) agent_id: String,
+    #[schemars(description = "event.list 返回的事件 ID。")]
+    pub(super) event_id: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct EventMarkArgs {
+    #[schemars(
+        description = "目标本地 Agent ID；必须指定 Hub 中已启用的 Agent，不会自动选择其他 Agent。"
+    )]
+    pub(super) agent_id: String,
+    #[schemars(
+        description = "要标记为已处理的事件 ID；重复或未知 ID 按 Agent 返回的结果说明处理。"
+    )]
+    pub(super) event_ids: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]

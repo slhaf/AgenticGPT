@@ -6,13 +6,14 @@ use std::sync::{
 };
 
 use agentic_gpt_protocol::{
-    normalize_process_group, ProcessBatchExecRequest, ProcessBatchResponse, ProcessCancelResponse,
-    ProcessCaptureStatus, ProcessCursor, ProcessDetail, ProcessError, ProcessExecRequest,
-    ProcessInfo, ProcessInlineOutput, ProcessInlineStream, ProcessKind, ProcessListItem,
-    ProcessListRequest, ProcessListResponse, ProcessOutputEncoding, ProcessOutputGap,
-    ProcessOutputPreview, ProcessOutputRequest, ProcessOutputResponse, ProcessOutputSegment,
-    ProcessResponse, ProcessResultRequest, ProcessResultResponse, ProcessResultStatus,
-    ProcessState, ProcessStatusRequest, ProcessStatusResponse,
+    normalize_process_group, EventOrigin, EventSource, ProcessBatchExecRequest,
+    ProcessBatchResponse, ProcessCancelResponse, ProcessCaptureStatus, ProcessCursor,
+    ProcessDetail, ProcessError, ProcessExecRequest, ProcessInfo, ProcessInlineOutput,
+    ProcessInlineStream, ProcessKind, ProcessListItem, ProcessListRequest, ProcessListResponse,
+    ProcessOutputEncoding, ProcessOutputGap, ProcessOutputPreview, ProcessOutputRequest,
+    ProcessOutputResponse, ProcessOutputSegment, ProcessResponse, ProcessResultRequest,
+    ProcessResultResponse, ProcessResultStatus, ProcessState, ProcessStatusRequest,
+    ProcessStatusResponse,
 };
 use anyhow::Result;
 use base64::{
@@ -178,6 +179,7 @@ pub(crate) struct ManagedProcess {
     cancel_requested: Arc<std::sync::atomic::AtomicBool>,
     audit: Option<ManagedAuditContext>,
     history_terminal_snapshot_at: Option<chrono::DateTime<Utc>>,
+    event_completion_recorded: bool,
 }
 
 #[derive(Default)]
@@ -215,6 +217,7 @@ pub(crate) struct ProcessOptions {
     pub(crate) skill_path: Option<String>,
     pub(crate) installed_digest: Option<String>,
     pub(crate) terminal_event_hook: Option<TerminalEventHook>,
+    pub(crate) event_origin: Option<EventOrigin>,
 }
 
 impl ProcessOptions {
@@ -225,6 +228,7 @@ impl ProcessOptions {
             skill_path: None,
             installed_digest: None,
             terminal_event_hook: None,
+            event_origin: None,
         }
     }
 }
@@ -236,6 +240,7 @@ pub(crate) struct ManagedProcessSpec {
     pub(crate) confirmation_result: Option<String>,
     pub(crate) request_source: String,
     pub(crate) terminal_event_hook: Option<TerminalEventHook>,
+    pub(crate) event_origin: Option<EventOrigin>,
 }
 
 pub(crate) struct ManagedMcpSpec {
@@ -254,6 +259,7 @@ pub(crate) struct ManagedMcpSpec {
     pub(crate) argument_sha256: String,
     pub(crate) config_revision: String,
     pub(crate) terminal_event_hook: Option<TerminalEventHook>,
+    pub(crate) event_origin: Option<EventOrigin>,
 }
 
 pub(crate) struct ManagedMcpRegistration {
@@ -407,6 +413,7 @@ pub(crate) async fn start_skill_process_with_hook_and_source(
     skill_path: &str,
     request_source: &str,
     terminal_event_hook: Option<TerminalEventHook>,
+    event_origin: Option<EventOrigin>,
 ) -> ProcessInfo {
     let config = Arc::new(state.config.read().await.clone());
     let lease = state.skill_leases.try_shared(skill_id).await;
@@ -422,6 +429,7 @@ pub(crate) async fn start_skill_process_with_hook_and_source(
             skill_path: Some(skill_path.to_string()),
             installed_digest: package_sha256(&config, skill_id).ok(),
             terminal_event_hook,
+            event_origin,
         },
         None,
         (!lease_available).then(|| (ProcessState::Rejected, "skill_update_pending".to_string())),
@@ -478,8 +486,23 @@ pub(crate) async fn register_mcp_process(
     if active >= limit {
         return Err(capacity_rejection(active, 1, limit));
     }
-    let admission = state.process_history.insert_admissions([&info]);
+    let source = crate::event_notifications::process_source(&process_id);
+    crate::event_notifications::register_internal_source(
+        state,
+        &source,
+        &config.events.internal_policy(),
+        spec.event_origin.as_ref(),
+    )
+    .map_err(|error| format!("internal_event_registration_failed: {error}"))?;
+    let admission = state
+        .process_history
+        .insert_admissions_with_event_tracking([&info]);
     if !admission.is_persisted() {
+        crate::event_notifications::abort_unadmitted_source(
+            state,
+            &source,
+            spec.event_origin.as_ref(),
+        );
         let error = admission
             .error()
             .unwrap_or("history admission persistence failed");
@@ -518,6 +541,7 @@ pub(crate) async fn register_mcp_process(
                 terminal_event_hook: spec.terminal_event_hook,
             }),
             history_terminal_snapshot_at: None,
+            event_completion_recorded: false,
         },
     );
     Ok(ManagedMcpRegistration {
@@ -586,10 +610,33 @@ pub(crate) async fn register_mcp_batch(
         let cancel_requested = Arc::new(AtomicBool::new(false));
         staged.push((spec, info, cancel_requested));
     }
+    let mut sources: Vec<(EventSource, Option<EventOrigin>)> = Vec::with_capacity(staged.len());
+    for (spec, info, _) in &staged {
+        let source = crate::event_notifications::process_source(&info.process_id);
+        if let Err(error) = crate::event_notifications::register_internal_source(
+            state,
+            &source,
+            &config.events.internal_policy(),
+            spec.event_origin.as_ref(),
+        ) {
+            for (registered_source, origin) in &sources {
+                crate::event_notifications::abort_unadmitted_source(
+                    state,
+                    registered_source,
+                    origin.as_ref(),
+                );
+            }
+            return Err(format!("internal_event_registration_failed: {error}"));
+        }
+        sources.push((source, spec.event_origin.clone()));
+    }
     let admission = state
         .process_history
-        .insert_admissions(staged.iter().map(|(_, info, _)| info));
+        .insert_admissions_with_event_tracking(staged.iter().map(|(_, info, _)| info));
     if !admission.is_persisted() {
+        for (source, origin) in &sources {
+            crate::event_notifications::abort_unadmitted_source(state, source, origin.as_ref());
+        }
         let error = admission
             .error()
             .unwrap_or("history admission persistence failed");
@@ -631,6 +678,7 @@ pub(crate) async fn register_mcp_batch(
                     terminal_event_hook: spec.terminal_event_hook,
                 }),
                 history_terminal_snapshot_at: None,
+                event_completion_recorded: false,
             },
         );
         registrations.push(ManagedMcpRegistration {
@@ -1102,6 +1150,7 @@ pub(crate) async fn start_and_wait_skill_process(
     skill_path: &str,
     request_source: &str,
     terminal_event_hook: Option<TerminalEventHook>,
+    event_origin: Option<EventOrigin>,
 ) -> ProcessResponse {
     let wait_seconds = request.effective_wait_seconds();
     let process = start_skill_process_with_hook_and_source(
@@ -1111,6 +1160,7 @@ pub(crate) async fn start_and_wait_skill_process(
         skill_path,
         request_source,
         terminal_event_hook,
+        event_origin,
     )
     .await;
     let process = wait_for_process(&state, process, wait_seconds).await;
@@ -1122,6 +1172,7 @@ pub(crate) async fn start_process_batch(
     request: ProcessBatchExecRequest,
     request_source: String,
     terminal_event_hook: Option<TerminalEventHook>,
+    event_origin: Option<EventOrigin>,
 ) -> Result<ProcessBatchResponse, String> {
     let wait_seconds = request.effective_wait_seconds();
     let batch_id = format!("batch_{}", uuid::Uuid::new_v4().simple());
@@ -1216,6 +1267,7 @@ pub(crate) async fn start_process_batch(
             confirmation_result: confirmation_result.clone(),
             request_source: request_source.clone(),
             terminal_event_hook: terminal_event_hook.clone(),
+            event_origin: event_origin.clone(),
         })
         .collect::<Vec<_>>();
     let mut processes = start_prepared_managed_batch(state.clone(), config, specs).await?;
@@ -1529,10 +1581,38 @@ pub(crate) async fn start_prepared_managed_batch(
             let stderr = runtime.stderr.clone();
             registered.push((spec, info, stdout, stderr, cancel_requested));
         }
-        let admission = state
-            .process_history
-            .insert_admissions(registered.iter().map(|(_, info, _, _, _)| info));
+        let mut sources: Vec<(EventSource, Option<EventOrigin>)> =
+            Vec::with_capacity(registered.len());
+        for (spec, info, _, _, _) in &registered {
+            let source = crate::event_notifications::process_source(&info.process_id);
+            if let Err(error) = crate::event_notifications::register_internal_source(
+                &state,
+                &source,
+                &config.events.internal_policy(),
+                spec.event_origin.as_ref(),
+            ) {
+                for (registered_source, origin) in &sources {
+                    crate::event_notifications::abort_unadmitted_source(
+                        &state,
+                        registered_source,
+                        origin.as_ref(),
+                    );
+                }
+                return Err(format!("internal_event_registration_failed: {error}"));
+            }
+            sources.push((source, spec.event_origin.clone()));
+        }
+        let admission = state.process_history.insert_admissions_with_event_tracking(
+            registered.iter().map(|(_, info, _, _, _)| info),
+        );
         if !admission.is_persisted() {
+            for (source, origin) in &sources {
+                crate::event_notifications::abort_unadmitted_source(
+                    &state,
+                    source,
+                    origin.as_ref(),
+                );
+            }
             let error = admission
                 .error()
                 .unwrap_or("history admission persistence failed");
@@ -1578,6 +1658,7 @@ pub(crate) async fn start_prepared_managed_batch(
                     cancel_requested: cancel_requested.clone(),
                     audit: Some(audit),
                     history_terminal_snapshot_at: None,
+                    event_completion_recorded: false,
                 },
             );
         }
@@ -1647,6 +1728,7 @@ async fn start_managed_process_inner(
     let stdout = runtime.stdout.clone();
     let stderr = runtime.stderr.clone();
     let cancel_requested = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let event_origin = options.event_origin.clone();
     let audit = ManagedAuditContext {
         config: config.clone(),
         request_source: options.request_source,
@@ -1684,25 +1766,47 @@ async fn start_managed_process_inner(
         if capacity_error.is_some() {
             (capacity_error, None)
         } else {
-            let admission = state.process_history.insert_admissions([&info]);
-            if !admission.is_persisted() {
-                let error = admission
-                    .error()
-                    .unwrap_or("history admission persistence failed");
-                (None, Some(format!("history_admission_failed: {error}")))
+            let source = crate::event_notifications::process_source(&process_id);
+            let registration = crate::event_notifications::register_internal_source(
+                &state,
+                &source,
+                &config.events.internal_policy(),
+                event_origin.as_ref(),
+            );
+            if let Err(error) = registration {
+                (
+                    None,
+                    Some(format!("internal_event_registration_failed: {error}")),
+                )
             } else {
-                processes.insert(
-                    process_id.clone(),
-                    ManagedProcess {
-                        info: info.clone(),
-                        detail: ManagedProcessDetail::default(),
-                        runtime: ProcessRuntime::Process(runtime),
-                        cancel_requested: cancel_requested.clone(),
-                        audit: Some(audit),
-                        history_terminal_snapshot_at: None,
-                    },
-                );
-                (None, None)
+                let admission = state
+                    .process_history
+                    .insert_admissions_with_event_tracking([&info]);
+                if !admission.is_persisted() {
+                    crate::event_notifications::abort_unadmitted_source(
+                        &state,
+                        &source,
+                        event_origin.as_ref(),
+                    );
+                    let error = admission
+                        .error()
+                        .unwrap_or("history admission persistence failed");
+                    (None, Some(format!("history_admission_failed: {error}")))
+                } else {
+                    processes.insert(
+                        process_id.clone(),
+                        ManagedProcess {
+                            info: info.clone(),
+                            detail: ManagedProcessDetail::default(),
+                            runtime: ProcessRuntime::Process(runtime),
+                            cancel_requested: cancel_requested.clone(),
+                            audit: Some(audit),
+                            history_terminal_snapshot_at: None,
+                            event_completion_recorded: false,
+                        },
+                    );
+                    (None, None)
+                }
             }
         }
     };
@@ -2226,9 +2330,35 @@ async fn process_output_snapshot(
     }
 }
 
+fn persist_and_deliver_process_completion(state: &AppState, process: &ManagedProcess) -> bool {
+    let outcome = state.process_history.record_terminal_event(&process.info);
+    if !outcome.is_persisted() {
+        crate::utils::log_warn(format!(
+            "process event owner evidence remains pending; processId={}; error={}",
+            process.info.process_id,
+            outcome
+                .error()
+                .unwrap_or("process_event_evidence_persistence_failed")
+        ));
+        return false;
+    }
+    if let Err(error) = crate::event_notifications::record_process_completion(state, &process.info)
+    {
+        crate::utils::log_warn(format!(
+            "process event delivery remains pending; processId={}; error={error}",
+            process.info.process_id
+        ));
+        return false;
+    }
+    true
+}
+
 async fn finalize_process(state: &AppState, process: &mut ManagedProcess) {
     if !process.info.state.is_terminal() {
         return;
+    }
+    if !process.event_completion_recorded {
+        process.event_completion_recorded = persist_and_deliver_process_completion(state, process);
     }
     refresh_capture_status(process).await;
     let capture_settled = !matches!(
@@ -2252,6 +2382,7 @@ async fn finalize_process(state: &AppState, process: &mut ManagedProcess) {
             process.history_terminal_snapshot_at = None;
         }
     }
+
     let Some(context) = process.audit.take() else {
         return;
     };
@@ -2780,9 +2911,11 @@ pub(crate) async fn get_process_result(
         error: detail.error,
         result_bytes: Some(result_bytes),
         result_sha256: detail.result_sha256,
-        result_preview: (result_bytes <= max_bytes)
-            .then_some(None)
-            .unwrap_or(detail.result_preview),
+        result_preview: if result_bytes <= max_bytes {
+            None
+        } else {
+            detail.result_preview
+        },
     })
 }
 
@@ -3338,6 +3471,7 @@ mod tests {
         let state = AppState {
             config_path: root.join("config.json"),
             config: Arc::new(RwLock::new(config)),
+            event_store: crate::event_store::EventStore::open(&private_state).unwrap(),
             private_state: private_state.clone(),
             process_history: crate::process_history::ProcessHistoryStore::open(&private_state),
             browser_runtime: None,
@@ -3433,6 +3567,7 @@ mod tests {
             argument_sha256: "sha256:test".to_string(),
             config_revision: "test-revision".to_string(),
             terminal_event_hook: None,
+            event_origin: None,
         }
     }
 
@@ -3650,6 +3785,20 @@ mod tests {
             .unwrap()
             .expect("the active admission row remains until reader EOF");
         assert!(admission.info.state.is_active());
+
+        let source = crate::event_notifications::process_source(&terminal.process_id);
+        state.event_store.settle_response(&source, false).unwrap();
+        let notifications = state
+            .event_store
+            .list(&agentic_gpt_protocol::EventListRequest::default())
+            .unwrap();
+        let notification = notifications
+            .items
+            .first()
+            .expect("completed process event is visible before inherited pipe EOF");
+        let persisted_event = state.event_store.get(&notification.event_id).unwrap();
+        assert_eq!(persisted_event.source, source);
+        assert!(persisted_event.message.contains("completed"));
 
         let output = wait_output_capture(&state, &terminal.process_id).await;
         assert!(output.eof);
@@ -3944,9 +4093,10 @@ mod tests {
             working_directory: Some(workspace.to_string_lossy().to_string()),
             wait_seconds: Some(2),
         };
-        let response = start_process_batch(state, request, "test:process.batch".to_string(), None)
-            .await
-            .unwrap();
+        let response =
+            start_process_batch(state, request, "test:process.batch".to_string(), None, None)
+                .await
+                .unwrap();
         assert!(serde_json::to_vec(&response).unwrap().len() <= PROCESS_INLINE_RESPONSE_BYTES);
         assert_eq!(response.processes.len(), 2);
         assert!(response
@@ -4025,6 +4175,7 @@ mod tests {
             request,
             "test:process.batch".to_string(),
             None,
+            None,
         )
         .await
         .unwrap_err();
@@ -4073,6 +4224,7 @@ mod tests {
                 confirmation_result: None,
                 request_source: "test:process.batch".to_string(),
                 terminal_event_hook: None,
+                event_origin: None,
             },
             ManagedProcessSpec {
                 request: second_request,
@@ -4081,6 +4233,7 @@ mod tests {
                 confirmation_result: None,
                 request_source: "test:process.batch".to_string(),
                 terminal_event_hook: None,
+                event_origin: None,
             },
         ];
         let config = Arc::new(state.config.read().await.clone());
@@ -4106,6 +4259,7 @@ mod tests {
                     confirmation_result: None,
                     request_source: "test:process.batch".to_string(),
                     terminal_event_hook: None,
+                    event_origin: None,
                 },
                 ManagedProcessSpec {
                     request: exec_request("true", &workspace),
@@ -4114,6 +4268,7 @@ mod tests {
                     confirmation_result: None,
                     request_source: "test:process.batch".to_string(),
                     terminal_event_hook: None,
+                    event_origin: None,
                 },
             ],
         )
@@ -4182,6 +4337,7 @@ mod tests {
             state.clone(),
             request,
             "test:process.batch".to_string(),
+            None,
             None,
         )
         .await
@@ -4457,6 +4613,7 @@ mod tests {
                 cancel_requested: Arc::new(AtomicBool::new(false)),
                 audit: None,
                 history_terminal_snapshot_at: None,
+                event_completion_recorded: false,
             },
         );
 

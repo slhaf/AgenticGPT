@@ -588,9 +588,10 @@ fn sync_parent(parent: &Path) -> Result<()> {
 mod tests {
     use super::*;
 
+    use super::super::model::OptionalSectionDraft;
     use crate::cli_i18n::UiLanguage;
     use crate::config_setup::{SetupSeed, SetupSession};
-    use crate::config_templates::{RuntimeMode, SecretValue};
+    use crate::config_templates::{OptionalSection, RuntimeMode, SecretValue};
     use crate::WorkerProfile;
     use std::os::unix::fs::symlink;
     use std::os::unix::fs::PermissionsExt;
@@ -805,7 +806,7 @@ mod tests {
     }
 
     #[test]
-    fn imported_config_commit_uses_backup_and_writes_nested_hub_schema() {
+    fn imported_config_review_edit_commits_events_and_keeps_backup() {
         let root = fresh_root("import-backup");
         let config_path = root.join("config.json");
         let old = serde_json::json!({
@@ -814,12 +815,18 @@ mod tests {
             "hubUrl": "https://legacy.example.com",
             "hubTransport": "sse",
             "agentSecret": "legacy-secret",
-            "futureField": {"keep": true}
+            "futureField": {"keep": true},
+            "events": {
+                "lowTtlSeconds": 7200,
+                "internalOverrides": {
+                    "process.failed": "high"
+                }
+            },
         });
         let old_bytes = serde_json::to_vec_pretty(&old).unwrap();
         fs::write(&config_path, &old_bytes).unwrap();
         let imported = crate::config::Config::import(&config_path).unwrap();
-        let session = SetupSession::new(
+        let mut session = SetupSession::new(
             SetupSeed {
                 mode: Some(RuntimeMode::Local),
                 profile: Some(WorkerProfile::Normal),
@@ -829,10 +836,59 @@ mod tests {
             UiLanguage::En,
             config_path.clone(),
         );
+        let mut events_draft = session.optional_draft(OptionalSection::Events);
+        let OptionalSectionDraft::Events(events) = &mut events_draft else {
+            panic!("imported events configuration was not reviewable");
+        };
+        assert_eq!(events.low_ttl_seconds, "7200");
+        assert_eq!(
+            events
+                .internal_overrides
+                .get("process.failed")
+                .map(String::as_str),
+            Some("high")
+        );
+        events.low_ttl_seconds = "0".to_string();
+        events
+            .internal_overrides
+            .insert("process.completed".to_string(), "off".to_string());
+        session
+            .save_optional_section_for_review(events_draft)
+            .unwrap();
+        let review = session.review_model().unwrap();
+        let event_group = review
+            .optional_sections
+            .iter()
+            .find(|group| {
+                group
+                    .items
+                    .iter()
+                    .any(|item| item.field == Some(SetupField::EventProcessCompletedLevel))
+            })
+            .unwrap();
+        let completed = event_group
+            .items
+            .iter()
+            .find(|item| item.field == Some(SetupField::EventProcessCompletedLevel))
+            .unwrap();
+        assert_eq!(completed.value, "off");
+        assert_eq!(
+            completed.choice_values(),
+            &["inherit", "low", "medium", "high", "off"]
+        );
         commit_wizard_outcome(&config_path, session.into_wizard_outcome().unwrap()).unwrap();
 
         let written: serde_json::Value =
             serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
+        assert_eq!(written["events"]["lowTtlSeconds"], 0);
+        assert_eq!(
+            written["events"]["internalOverrides"]["process.completed"],
+            "off"
+        );
+        assert_eq!(
+            written["events"]["internalOverrides"]["process.failed"],
+            "high"
+        );
         assert_eq!(written["hub"]["url"], "https://legacy.example.com");
         assert_eq!(written["hub"]["transport"], "sse");
         assert_eq!(written["futureField"]["keep"], true);

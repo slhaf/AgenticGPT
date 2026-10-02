@@ -86,6 +86,9 @@ pub(super) async fn call_app_tool(
         .unwrap_or_else(|| json!({}));
     let result = match name {
         "agent.list" => server.list_agents().await,
+        "event.list" => server.event_list(Parameters(decode_args(arguments)?)).await,
+        "event.get" => server.event_get(Parameters(decode_args(arguments)?)).await,
+        "event.mark" => server.event_mark(Parameters(decode_args(arguments)?)).await,
         "process.exec" => server.exec(Parameters(decode_args(arguments)?)).await,
         "process.batch" => server.batch_exec(Parameters(decode_args(arguments)?)).await,
         "process.list" => {

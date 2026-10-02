@@ -7,8 +7,8 @@ use std::{
 };
 
 use agentic_gpt_protocol::{
-    McpBatchChildResponse, McpBatchMode, McpBatchRequest, McpBatchResponse, McpBatchStatus,
-    McpCallToolRequest, ProcessError, ProcessState,
+    EventOrigin, McpBatchChildResponse, McpBatchMode, McpBatchRequest, McpBatchResponse,
+    McpBatchStatus, McpCallToolRequest, ProcessError, ProcessState,
 };
 use anyhow::{anyhow, Result};
 use rmcp::model::JsonObject;
@@ -54,13 +54,16 @@ pub(crate) async fn batch(
     payload: McpBatchRequest,
     request_source: &str,
     terminal_event_hook: Option<TerminalEventHook>,
+    event_origin: Option<EventOrigin>,
 ) -> Result<McpBatchResponse> {
-    start_managed_batch_with_factory(
+    start_managed_batch_with_factory_budget(
         state,
         payload,
         request_source,
         terminal_event_hook,
+        event_origin,
         production_client_factory(),
+        true,
     )
     .await
 }
@@ -70,17 +73,20 @@ pub(crate) async fn batch_slim(
     payload: McpBatchRequest,
     request_source: &str,
     terminal_event_hook: Option<TerminalEventHook>,
+    event_origin: Option<EventOrigin>,
 ) -> Result<McpBatchResponse> {
     start_managed_batch_without_aggregate_budget(
         state,
         payload,
         request_source,
         terminal_event_hook,
+        event_origin,
         production_client_factory(),
     )
     .await
 }
 
+#[cfg(test)]
 pub(super) async fn start_managed_batch_with_factory(
     state: &AppState,
     payload: McpBatchRequest,
@@ -93,6 +99,7 @@ pub(super) async fn start_managed_batch_with_factory(
         payload,
         request_source,
         terminal_event_hook,
+        None,
         client_factory,
         true,
     )
@@ -104,6 +111,7 @@ async fn start_managed_batch_without_aggregate_budget(
     payload: McpBatchRequest,
     request_source: &str,
     terminal_event_hook: Option<TerminalEventHook>,
+    event_origin: Option<EventOrigin>,
     client_factory: McpClientFactory,
 ) -> Result<McpBatchResponse> {
     start_managed_batch_with_factory_budget(
@@ -111,6 +119,7 @@ async fn start_managed_batch_without_aggregate_budget(
         payload,
         request_source,
         terminal_event_hook,
+        event_origin,
         client_factory,
         false,
     )
@@ -122,6 +131,7 @@ async fn start_managed_batch_with_factory_budget(
     payload: McpBatchRequest,
     request_source: &str,
     terminal_event_hook: Option<TerminalEventHook>,
+    event_origin: Option<EventOrigin>,
     client_factory: McpClientFactory,
     enforce_aggregate_budget: bool,
 ) -> Result<McpBatchResponse> {
@@ -166,6 +176,7 @@ async fn start_managed_batch_with_factory_budget(
             argument_sha256: call.argument_sha256.clone(),
             config_revision: call.config_revision.clone(),
             terminal_event_hook: terminal_event_hook.clone(),
+            event_origin: event_origin.clone(),
         })
         .collect::<Vec<_>>();
     let registrations = match process::register_mcp_batch(state, specs).await {

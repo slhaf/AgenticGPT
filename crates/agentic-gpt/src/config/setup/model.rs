@@ -1,10 +1,12 @@
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::PathBuf;
 
 use crate::cli_i18n::UiLanguage;
 use crate::config::{
-    default_path_policy, sparse_config_json, Config, HttpMcpConfig, ToolNamespace, ToolsetConfig,
-    DEFAULT_HTTP_MCP_ALLOW_HOSTS, DEFAULT_HTTP_MCP_HOST, DEFAULT_HTTP_MCP_PORT,
+    default_path_policy, sparse_config_json, Config, EventsConfig, HttpMcpConfig, ToolNamespace,
+    ToolsetConfig, DEFAULT_HTTP_MCP_ALLOW_HOSTS, DEFAULT_HTTP_MCP_HOST, DEFAULT_HTTP_MCP_PORT,
+    INTERNAL_EVENT_TYPES,
 };
 use crate::config_templates::{
     build_config, InitInput, OptionalSection, RuntimeMode, SecretValue, TunnelSecretSource,
@@ -74,7 +76,54 @@ pub(crate) enum SetupField {
     TunnelSha256,
     HubReportingEnabled,
     HubReportingDetail,
+    EventsLowTtlSeconds,
+    EventProcessCompletedLevel,
+    EventProcessFailedLevel,
+    EventProcessRejectedLevel,
+    EventProcessCancelledLevel,
+    EventProcessTimedOutLevel,
+    EventProcessDetachedLevel,
+    EventProcessUnknownAfterRestartLevel,
+    EventProcessSkippedLevel,
+    EventSkillInstallCompletedLevel,
+    EventSkillInstallFailedLevel,
+    EventSkillInstallCancelledLevel,
     Toolsets,
+}
+impl SetupField {
+    pub(crate) fn internal_event_type(self) -> Option<&'static str> {
+        match self {
+            Self::EventProcessCompletedLevel => Some("process.completed"),
+            Self::EventProcessFailedLevel => Some("process.failed"),
+            Self::EventProcessRejectedLevel => Some("process.rejected"),
+            Self::EventProcessCancelledLevel => Some("process.cancelled"),
+            Self::EventProcessTimedOutLevel => Some("process.timed_out"),
+            Self::EventProcessDetachedLevel => Some("process.detached"),
+            Self::EventProcessUnknownAfterRestartLevel => Some("process.unknown_after_restart"),
+            Self::EventProcessSkippedLevel => Some("process.skipped"),
+            Self::EventSkillInstallCompletedLevel => Some("skill_install.completed"),
+            Self::EventSkillInstallFailedLevel => Some("skill_install.failed"),
+            Self::EventSkillInstallCancelledLevel => Some("skill_install.cancelled"),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn internal_event_override(event_type: &str) -> Option<Self> {
+        match event_type {
+            "process.completed" => Some(Self::EventProcessCompletedLevel),
+            "process.failed" => Some(Self::EventProcessFailedLevel),
+            "process.rejected" => Some(Self::EventProcessRejectedLevel),
+            "process.cancelled" => Some(Self::EventProcessCancelledLevel),
+            "process.timed_out" => Some(Self::EventProcessTimedOutLevel),
+            "process.detached" => Some(Self::EventProcessDetachedLevel),
+            "process.unknown_after_restart" => Some(Self::EventProcessUnknownAfterRestartLevel),
+            "process.skipped" => Some(Self::EventProcessSkippedLevel),
+            "skill_install.completed" => Some(Self::EventSkillInstallCompletedLevel),
+            "skill_install.failed" => Some(Self::EventSkillInstallFailedLevel),
+            "skill_install.cancelled" => Some(Self::EventSkillInstallCancelledLevel),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -267,6 +316,37 @@ pub(crate) struct HubReportingDraft {
     pub(crate) enabled: bool,
     pub(crate) detail: String,
 }
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct EventsDraft {
+    pub(crate) low_ttl_seconds: String,
+    pub(crate) internal_overrides: BTreeMap<String, String>,
+}
+
+impl EventsDraft {
+    fn from_config(config: &EventsConfig) -> Self {
+        let internal_overrides = INTERNAL_EVENT_TYPES
+            .iter()
+            .map(|event_type| {
+                let level = config
+                    .internal_overrides
+                    .get(*event_type)
+                    .map(|level| level.as_str())
+                    .unwrap_or("inherit");
+                ((*event_type).to_string(), level.to_string())
+            })
+            .collect();
+        Self {
+            low_ttl_seconds: config.low_ttl_seconds.to_string(),
+            internal_overrides,
+        }
+    }
+}
+
+impl Default for EventsDraft {
+    fn default() -> Self {
+        Self::from_config(&EventsConfig::default())
+    }
+}
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct OptionalDrafts {
@@ -280,6 +360,7 @@ pub(crate) struct OptionalDrafts {
     pub(crate) room: Option<RoomDraft>,
     pub(crate) tunnel_client: Option<TunnelClientDraft>,
     pub(crate) hub_reporting: Option<HubReportingDraft>,
+    pub(crate) events: Option<EventsDraft>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -294,6 +375,7 @@ pub(crate) enum OptionalSectionDraft {
     Room(RoomDraft),
     TunnelClient(TunnelClientDraft),
     HubReporting(HubReportingDraft),
+    Events(EventsDraft),
 }
 
 struct StandaloneSeed<'a> {
@@ -321,6 +403,7 @@ impl OptionalSectionDraft {
             Self::Room(_) => OptionalSection::Room,
             Self::TunnelClient(_) => OptionalSection::TunnelClient,
             Self::HubReporting(_) => OptionalSection::HubReporting,
+            Self::Events(_) => OptionalSection::Events,
         }
     }
 }
@@ -674,6 +757,7 @@ impl OptionalDrafts {
             OptionalSection::Room => self.room.is_some(),
             OptionalSection::TunnelClient => self.tunnel_client.is_some(),
             OptionalSection::HubReporting => self.hub_reporting.is_some(),
+            OptionalSection::Events => self.events.is_some(),
         }
     }
 
@@ -703,6 +787,7 @@ impl OptionalDrafts {
                 .hub_reporting
                 .clone()
                 .map(OptionalSectionDraft::HubReporting),
+            OptionalSection::Events => self.events.clone().map(OptionalSectionDraft::Events),
         }
     }
 
@@ -718,6 +803,7 @@ impl OptionalDrafts {
             OptionalSectionDraft::Room(value) => self.room = Some(value),
             OptionalSectionDraft::TunnelClient(value) => self.tunnel_client = Some(value),
             OptionalSectionDraft::HubReporting(value) => self.hub_reporting = Some(value),
+            OptionalSectionDraft::Events(value) => self.events = Some(value),
         }
     }
 }
@@ -788,6 +874,9 @@ pub(crate) fn default_optional_draft_for_profile(
             enabled: false,
             detail: "metadata".to_string(),
         }),
+        OptionalSection::Events => {
+            OptionalSectionDraft::Events(EventsDraft::from_config(&EventsConfig::default()))
+        }
     }
 }
 
@@ -872,6 +961,7 @@ fn optional_drafts_from_config(config: &Config) -> OptionalDrafts {
             enabled: tunnel.hub_reporting.enabled,
             detail: tunnel.hub_reporting.detail.to_string(),
         }),
+        events: Some(EventsDraft::from_config(&config.events)),
     }
 }
 

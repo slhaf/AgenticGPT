@@ -32,6 +32,10 @@ mod config_templates;
 mod config_tui;
 #[path = "operations/confirmation.rs"]
 mod confirmation;
+#[path = "operations/event_notifications.rs"]
+mod event_notifications;
+#[path = "storage/event_store.rs"]
+mod event_store;
 #[path = "process/exec.rs"]
 mod exec;
 #[path = "files/file_ops.rs"]

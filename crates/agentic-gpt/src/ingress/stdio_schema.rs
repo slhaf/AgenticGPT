@@ -28,6 +28,11 @@ pub(super) fn tool_descriptors(toolsets: &ToolsetConfig) -> Vec<Tool> {
         .filter(|(_, namespace)| toolsets.is_enabled(*namespace))
         .map(|(name, _)| tool_descriptor(name))
         .collect::<Vec<_>>();
+    tools.extend(
+        crate::operation::EVENT_API_TOOL_NAMES
+            .iter()
+            .map(|name| tool_descriptor(name)),
+    );
     tools.sort_unstable_by(|left, right| left.name.cmp(&right.name));
     tools
 }
@@ -65,6 +70,9 @@ fn tool_schema(name: &str) -> (Map<String, Value>, &'static [&'static str]) {
         "browser.reset" | "browser.release" => &["name"],
         "browser.list" => &[],
         "process.status" | "process.cancel" | "process.output" | "process.result" => &["processId"],
+        "event.get" => &["eventId"],
+        "event.mark" => &["eventIds"],
+        "privateevent.inject" => &["message", "ref"],
         "file.read" | "file.search" => &[],
         "file.edit" => &["patch"],
         "mcp.callTool" => &["serverId", "toolName"],
@@ -306,6 +314,69 @@ pub(super) fn properties_for(name: &str) -> Map<String, Value> {
                 }),
             );
         }
+        "event.list" => {
+            add("agentId", string("目标 Agent ID；省略时使用当前 Agent。"));
+            add(
+                "status",
+                json!({
+                    "type":"string",
+                    "enum":["pending","handled","expired"],
+                    "default":"pending",
+                    "description":"事件状态筛选；省略时为 pending。"
+                }),
+            );
+            add(
+                "severity",
+                json!({
+                    "type":"string",
+                    "enum":["low","medium","high"],
+                    "description":"可选等级筛选。"
+                }),
+            );
+            add(
+                "limit",
+                json!({
+                    "type":"integer",
+                    "minimum":1,
+                    "maximum":100,
+                    "default":20,
+                    "description":"页大小；省略时为20，范围1–100。"
+                }),
+            );
+            add("cursor", string("由上一页返回的不透明 nextCursor。"));
+        }
+        "event.get" => {
+            add("agentId", string("目标 Agent ID；省略时使用当前 Agent。"));
+            add("eventId", string("event.list 返回的事件 ID。"));
+        }
+        "event.mark" => {
+            add("agentId", string("目标 Agent ID；省略时使用当前 Agent。"));
+            add(
+                "eventIds",
+                json!({
+                    "type":"array",
+                    "maxItems":512,
+                    "items":{"type":"string"},
+                    "description":"要标记为 handled 的事件 ID；重复 ID 幂等，未知 ID 返回 notFoundIds。"
+                }),
+            );
+        }
+        "privateevent.inject" => {
+            add("message", string("事件正文，最大长度由事件存储限制。"));
+            add(
+                "severity",
+                json!({
+                    "type":"string",
+                    "enum":["low","medium","high"],
+                    "description":"可选事件等级；省略时为 low。"
+                }),
+            );
+            add(
+                "ref",
+                string("调用方提供的外部来源引用。来源种类由服务固定为 external。"),
+            );
+        }
+
         "file.edit" => {
             add("patch", string(PATCH_SCHEMA_DESCRIPTION));
             add(
@@ -863,6 +934,11 @@ fn tool_description(name: &str) -> String {
         "room.notebook.read" => "读取 Notebook/ 下精确的 .md 相对路径；返回 path/content。未知或超大文档返回错误；只读，不是任意仓库文件读取器。".to_string(),
         "room.state.list" => "列出 State/entities/ 下的 Markdown 实体；返回按路径排序的 entities（entity/path），跳过 symlink 和非 Markdown 文件。只读。".to_string(),
         "room.state.read" => "按实体文件名 stem 读取 State/entities/{entity}.md；返回 path/content。缺失或超大文档报错；不接受路径输入，只读。".to_string(),
+        "event.list" => "按状态、等级和不透明游标分页查看当前 Agent 的事件；默认列 pending、每页20条，隐藏事件仍包含在列表/计数中。返回 items/nextCursor 与本次紧凑 events 面板；非法游标或目标 Agent 不匹配时返回错误。只读，不读取进程状态。".to_string(),
+        "event.get" => "按 eventId 读取完整事件记录和当前 Agent 的紧凑 events 面板；读取不标记 handled，也不操作进程或安装。未知 ID 或目标 Agent 不匹配时返回错误。".to_string(),
+        "event.mark" => "将 eventIds 对应事件幂等标记为 handled，并返回 handledIds/notFoundIds 与紧凑 events 面板；不清理历史、不操作进程或安装。".to_string(),
+        "privateevent.inject" => "本地集成专用事件注入；仅 LocalUnix ingress 可直接调用，不在 tools/list 中公开。来源固定为 external，调用方只提供 ref；此注入确认不消费事件面板曝光。".to_string(),
+
         _ => "未知本地工具；请使用已列出的工具名，输入和结果由对应工具合同定义。".to_string(),
     }
 }

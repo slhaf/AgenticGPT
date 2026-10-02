@@ -420,6 +420,8 @@ pub struct SkillInstallJobRecord {
     pub request: SkillInstallRequest,
     pub canonical_request_sha256: String,
     pub status: SkillInstallStatusResponse,
+    #[serde(default)]
+    pub event_completion_pending: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

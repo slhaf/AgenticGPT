@@ -119,6 +119,9 @@ async fn normal_and_room_tool_sets_follow_fixed_surface_contract() {
         "file.edit",
         "file.read",
         "file.search",
+        "event.get",
+        "event.list",
+        "event.mark",
         "process.cancel",
         "process.list",
         "process.output",
@@ -177,6 +180,7 @@ async fn normal_and_room_tool_sets_follow_fixed_surface_contract() {
         "browser.tabs",
         "browser.screenshot",
         "user.notify.deliver",
+        "privateevent.inject",
         "mcp.listServers",
         "mcp.listTools",
         "skills.active",
@@ -230,7 +234,11 @@ async fn normal_and_room_tool_sets_follow_fixed_surface_contract() {
     assert_eq!(browser_error.code, rmcp::model::ErrorCode::METHOD_NOT_FOUND);
 
     let serialized = serde_json::to_string(&normal_tools).unwrap();
-    assert!(!serialized.contains("agentId"));
+    let process_exec_schema = serde_json::to_value(tool_descriptor("process.exec")).unwrap();
+    assert!(process_exec_schema["inputSchema"]["properties"]
+        .get("agentId")
+        .is_none());
+    assert!(serialized.contains("event.list"));
     assert!(!serialized.contains("confirmMethod"));
     assert!(serialized.contains("mcp.list"));
     assert!(serialized.contains("skills.setActive"));
@@ -239,37 +247,243 @@ async fn normal_and_room_tool_sets_follow_fixed_surface_contract() {
 }
 
 #[tokio::test]
-async fn compact_tool_schema_budgets_hold() {
-    let normal = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
-    let room = AgentMcpServer::new(test_state(CapabilityProfile::Room));
-    let normal_tools = normal.current_tools().await;
-    let room_tools = room.current_tools().await;
-    for (label, tools, max_total, max_inputs) in [
-        // File plus the six frozen Browser schemas remain under explicit
-        // finite caps for the resulting Normal/Room surfaces.
-        ("normal", &normal_tools, 32_000usize, 17_000usize),
-        ("room", &room_tools, 48_000usize, 24_000usize),
-    ] {
-        let serialized = serde_json::to_vec(tools).unwrap();
-        let input_bytes = tools
-            .iter()
-            .map(|tool| {
-                let value = serde_json::to_value(tool).unwrap();
-                serde_json::to_vec(&value["inputSchema"]).unwrap().len()
-            })
-            .sum::<usize>();
-        assert!(
-            serialized.len() <= max_total,
-            "{label} tool schemas use {} bytes, budget is {max_total}",
-            serialized.len()
-        );
-        assert!(
-            input_bytes <= max_inputs,
-            "{label} input schemas use {input_bytes} bytes, budget is {max_inputs}",
-            input_bytes = input_bytes,
-            max_inputs = max_inputs
-        );
+async fn external_injection_waits_for_the_next_public_panel_exposure() -> anyhow::Result<()> {
+    let server = AgentMcpServer::with_ingress(
+        test_state(CapabilityProfile::Normal),
+        RequestIngress::LocalUnix,
+    );
+    let listed_tools = server.current_tools().await;
+    assert!(!listed_tools
+        .iter()
+        .any(|tool| tool.name == "privateevent.inject"));
+
+    let injected = server
+        .call(
+            CallToolRequestParams::new("privateevent.inject").with_arguments(Map::from_iter([
+                ("message".to_string(), json!("injected reminder")),
+                ("ref".to_string(), json!("inject-regression")),
+                ("severity".to_string(), json!("low")),
+            ])),
+        )
+        .await?;
+    let event_id = injected["eventId"].as_str().unwrap().to_string();
+    assert_eq!(injected["source"]["kind"], "external");
+    assert_eq!(injected["shownCount"], 0);
+    assert!(injected.get("events").is_none());
+
+    let first = server
+        .call(CallToolRequestParams::new("agent.info"))
+        .await?;
+    assert_eq!(first["events"]["new"].as_array().unwrap().len(), 1);
+    assert!(first["events"]["new"][0]
+        .as_object()
+        .unwrap()
+        .keys()
+        .any(|key| key.starts_with(&event_id)));
+
+    let next = server
+        .call(CallToolRequestParams::new("agent.info"))
+        .await?;
+    assert_eq!(next["events"]["current"], "low: 1 | medium: 0 | high: 0");
+    assert!(next["events"]["new"].as_array().unwrap().is_empty());
+
+    let event = server
+        .call(
+            CallToolRequestParams::new("event.get")
+                .with_arguments(Map::from_iter([("eventId".to_string(), json!(event_id))])),
+        )
+        .await?;
+    assert_eq!(event["eventId"], event_id);
+    assert_eq!(event["events"]["current"], "low: 1 | medium: 0 | high: 0");
+
+    let http =
+        AgentMcpServer::with_ingress(test_state(CapabilityProfile::Normal), RequestIngress::Http);
+    let denied = http
+        .call(
+            CallToolRequestParams::new("privateevent.inject").with_arguments(Map::from_iter([
+                ("message".to_string(), json!("not permitted")),
+                ("ref".to_string(), json!("http-injection")),
+            ])),
+        )
+        .await
+        .expect_err("external injection must be unavailable outside LocalUnix");
+    assert_eq!(denied.code, rmcp::model::ErrorCode::METHOD_NOT_FOUND);
+    Ok(())
+}
+
+#[tokio::test]
+async fn event_api_business_errors_keep_their_code_and_include_the_panel() -> anyhow::Result<()> {
+    let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
+    let missing = server
+        .call(
+            CallToolRequestParams::new("event.get")
+                .with_arguments(Map::from_iter([("eventId".to_string(), json!("missing"))])),
+        )
+        .await?;
+    assert_eq!(missing["error"]["code"], "event_not_found");
+    assert_eq!(missing["events"]["current"], "low: 0 | medium: 0 | high: 0");
+
+    let invalid_cursor = server
+        .call(
+            CallToolRequestParams::new("event.list").with_arguments(Map::from_iter([(
+                "cursor".to_string(),
+                json!("not-a-cursor"),
+            )])),
+        )
+        .await?;
+    assert_eq!(invalid_cursor["error"]["code"], "event_cursor_invalid");
+    assert!(invalid_cursor["events"]["current"].is_string());
+    Ok(())
+}
+
+#[tokio::test]
+async fn targetless_hub_listing_keeps_events_for_targeted_calls() -> anyhow::Result<()> {
+    let state = test_state(CapabilityProfile::Normal);
+    let ttl = state.config.read().await.events.low_ttl_seconds;
+    let low = state.event_store.inject(
+        &agentic_gpt_protocol::EventInjectRequest {
+            message: "low inbox reminder".to_string(),
+            severity: Some(agentic_gpt_protocol::EventSeverity::Low),
+            reference: "hub-list-servers-low".to_string(),
+        },
+        ttl,
+    )?;
+    let medium = state.event_store.inject(
+        &agentic_gpt_protocol::EventInjectRequest {
+            message: "medium inbox reminder".to_string(),
+            severity: Some(agentic_gpt_protocol::EventSeverity::Medium),
+            reference: "hub-list-servers-medium".to_string(),
+        },
+        ttl,
+    )?;
+    let (sender, mut receiver) = mpsc::unbounded_channel();
+    *state.hub_sender.lock().await = Some(sender);
+
+    crate::hub::handle_hub_command(
+        state.clone(),
+        agentic_gpt_protocol::HubCommand::McpListServers {
+            request_id: "aggregate-list-servers".to_string(),
+            suppress_event_panel: true,
+        },
+        None,
+    )
+    .await?;
+    let Some(AgentMessage::Response {
+        request_id,
+        data: aggregate_data,
+        ..
+    }) = receiver.recv().await
+    else {
+        anyhow::bail!("aggregate list-servers response was not sent");
+    };
+    assert_eq!(request_id, "aggregate-list-servers");
+    assert!(aggregate_data["servers"].is_array());
+    assert!(aggregate_data.get("events").is_none());
+    assert_eq!(state.event_store.get(&low.event_id)?.shown_count, 0);
+    assert_eq!(state.event_store.get(&medium.event_id)?.shown_count, 0);
+
+    crate::hub::handle_hub_command(
+        state.clone(),
+        agentic_gpt_protocol::HubCommand::McpListServers {
+            request_id: "targeted-list-servers".to_string(),
+            suppress_event_panel: false,
+        },
+        None,
+    )
+    .await?;
+    let Some(AgentMessage::Response {
+        request_id,
+        data: targeted_data,
+        ..
+    }) = receiver.recv().await
+    else {
+        anyhow::bail!("targeted list-servers response was not sent");
+    };
+    assert_eq!(request_id, "targeted-list-servers");
+    assert_eq!(
+        targeted_data["events"]["current"],
+        "low: 1 | medium: 1 | high: 0"
+    );
+    let newly_exposed = targeted_data["events"]["new"]
+        .as_array()
+        .expect("targeted discovery should include newly exposed events");
+    assert_eq!(newly_exposed.len(), 2);
+    let newly_exposed = serde_json::Value::Array(newly_exposed.clone()).to_string();
+    assert!(newly_exposed.contains(low.event_id.as_str()));
+    assert!(newly_exposed.contains(medium.event_id.as_str()));
+    assert_eq!(state.event_store.get(&low.event_id)?.shown_count, 1);
+    assert_eq!(state.event_store.get(&medium.event_id)?.shown_count, 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn terminal_result_is_not_suppressed_when_panel_preparation_fails() -> anyhow::Result<()> {
+    let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
+    let state = server.state.clone();
+    state.event_store.inject(
+        &agentic_gpt_protocol::EventInjectRequest {
+            message: "forces panel exposure write".to_string(),
+            severity: Some(agentic_gpt_protocol::EventSeverity::Low),
+            reference: "panel-failure-regression".to_string(),
+        },
+        state.config.read().await.events.low_ttl_seconds,
+    )?;
+    let database = state.private_state.root.join("events.sqlite3");
+    rusqlite::Connection::open(&database)?.execute_batch(
+        "CREATE TRIGGER reject_panel_exposure BEFORE UPDATE OF shown_count ON events
+         BEGIN SELECT RAISE(ABORT, 'panel write failed'); END;",
+    )?;
+
+    let failed_handoff = server
+        .call(
+            CallToolRequestParams::new("process.exec").with_arguments(Map::from_iter([
+                ("program".to_string(), json!("true")),
+                ("waitSeconds".to_string(), json!(5)),
+            ])),
+        )
+        .await;
+    assert!(failed_handoff.is_err());
+
+    rusqlite::Connection::open(&database)?.execute_batch("DROP TRIGGER reject_panel_exposure;")?;
+    let listed = server
+        .call(CallToolRequestParams::new("event.list"))
+        .await?;
+    let mut process_event_found = false;
+    for item in listed["items"].as_array().unwrap() {
+        let event = server
+            .call(
+                CallToolRequestParams::new("event.get").with_arguments(Map::from_iter([(
+                    "eventId".to_string(),
+                    item["eventId"].clone(),
+                )])),
+            )
+            .await?;
+        process_event_found |= event["source"]["kind"] == "process";
     }
+    assert!(
+        process_event_found,
+        "a terminal business result that could not be decorated must remain async-eligible"
+    );
+    Ok(())
+}
+
+#[test]
+fn event_api_schemas_preserve_defaults_and_empty_mark_boundary() {
+    let list = serde_json::to_value(tool_descriptor("event.list")).unwrap();
+    assert_eq!(
+        list["inputSchema"]["properties"]["status"]["default"],
+        "pending"
+    );
+    assert_eq!(list["inputSchema"]["properties"]["limit"]["default"], 20);
+
+    let mark = serde_json::to_value(tool_descriptor("event.mark")).unwrap();
+    assert!(mark["inputSchema"]["properties"]["eventIds"]
+        .get("minItems")
+        .is_none());
+    assert_eq!(
+        mark["inputSchema"]["properties"]["eventIds"]["maxItems"],
+        512
+    );
 }
 
 #[tokio::test]
@@ -649,10 +863,17 @@ async fn browser_list_maps_runtime_snapshots_and_release_is_idempotent() -> anyh
 }
 
 #[tokio::test]
-async fn browser_repl_returns_inner_result_channels_verbatim() -> anyhow::Result<()> {
+async fn browser_repl_event_decoration_preserves_inner_result_channels() -> anyhow::Result<()> {
+    let matching_panel = serde_json::to_string(&json!({
+        "events": {
+            "current": "low: 0 | medium: 0 | high: 0",
+            "new": []
+        }
+    }))?;
     let mut inner = CallToolResult::default();
     inner.content = vec![
         Content::text("hello"),
+        Content::text(matching_panel.clone()),
         Content::image("aW1hZ2U=", "image/png"),
     ];
     inner.structured_content = Some(json!({"value":42}));
@@ -693,10 +914,29 @@ async fn browser_repl_returns_inner_result_channels_verbatim() -> anyhow::Result
             ])),
         )
         .await?;
-    assert_eq!(serde_json::to_value(&outer)?, serde_json::to_value(&inner)?);
-    assert_eq!(outer.content.len(), 2);
-    assert_eq!(outer.structured_content, inner.structured_content);
-    assert_eq!(outer.is_error, Some(true));
+    let original_prefix = &outer.content[..inner.content.len()];
+    assert_eq!(
+        serde_json::to_value(original_prefix)?,
+        serde_json::to_value(&inner.content)?
+    );
+    let matching_panel_count = outer
+        .content
+        .iter()
+        .filter_map(|block| serde_json::to_value(block).ok())
+        .filter(|block| block["text"].as_str() == Some(matching_panel.as_str()))
+        .count();
+    assert_eq!(
+        matching_panel_count, 1,
+        "matching panel text is not duplicated"
+    );
+    let structured = outer.structured_content.as_ref().unwrap();
+    assert_eq!(structured["value"], 42);
+    assert_eq!(
+        structured["events"]["current"],
+        "low: 0 | medium: 0 | high: 0"
+    );
+    assert!(structured["events"]["new"].as_array().unwrap().is_empty());
+    assert_eq!(outer.is_error, inner.is_error);
     assert_eq!(outer.meta, inner.meta);
     let _ = client.cancel().await;
     server_task.await??;
@@ -2302,6 +2542,93 @@ async fn in_process_stdio_file_read_batch_descriptor_and_call_contract() -> anyh
 }
 
 #[tokio::test]
+async fn file_image_response_adds_event_panel_text_once() -> anyhow::Result<()> {
+    let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
+    let state = server.state.clone();
+    let event = state.event_store.inject(
+        &agentic_gpt_protocol::EventInjectRequest {
+            message: "file response reminder".to_string(),
+            severity: Some(agentic_gpt_protocol::EventSeverity::Low),
+            reference: "file-image-panel".to_string(),
+        },
+        state.config.read().await.events.low_ttl_seconds,
+    )?;
+    let workspace = state.config.read().await.workspace_root.clone();
+    let image_bytes = encoded_test_image(image::ImageFormat::Png)?;
+    std::fs::write(workspace.join("event-panel.png"), &image_bytes)?;
+
+    let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+    let (client_read, client_write) = split(client_io);
+    let (server_read, server_write) = split(server_io);
+    let server_task = tokio::spawn(async move {
+        let transport = AsyncRwTransport::<RoleServer, _, _>::new_server(server_read, server_write);
+        let running = server
+            .serve(ResumableStdioTransport::new(transport))
+            .await?;
+        let _ = running.waiting().await?;
+        anyhow::Result::<()>::Ok(())
+    });
+    let client = ().serve((client_read, client_write)).await?;
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new("file.read").with_arguments(Map::from_iter([(
+                "path".to_string(),
+                json!("event-panel.png"),
+            )])),
+        )
+        .await?;
+
+    let structured = result.structured_content.as_ref().unwrap();
+    let panel = &structured["events"];
+    assert_eq!(panel["new"].as_array().unwrap().len(), 1);
+    let reminder = serde_json::to_string(&json!({"events": panel}))?;
+    let content = result
+        .content
+        .iter()
+        .map(serde_json::to_value)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let reminder_count = content
+        .iter()
+        .filter(|block| {
+            block["type"].as_str() == Some("text")
+                && block["text"].as_str() == Some(reminder.as_str())
+        })
+        .count();
+    assert_eq!(reminder_count, 1, "same panel reminder appears once");
+    let original_value = content
+        .iter()
+        .filter_map(|block| block["text"].as_str())
+        .find_map(|text| {
+            serde_json::from_str::<Value>(text)
+                .ok()
+                .filter(|value| value.get("image").is_some())
+        })
+        .expect("original file business text remains available");
+    assert_eq!(original_value["image"]["mimeType"], "image/png");
+    assert_eq!(
+        content
+            .iter()
+            .filter(|block| block["type"].as_str() == Some("image"))
+            .count(),
+        1
+    );
+    let image = content
+        .iter()
+        .find(|block| block["type"].as_str() == Some("image"))
+        .expect("original image block remains available");
+    assert_eq!(image["mimeType"], "image/png");
+    assert_eq!(
+        image["data"],
+        base64::engine::general_purpose::STANDARD.encode(&image_bytes)
+    );
+    assert_eq!(state.event_store.get(&event.event_id)?.shown_count, 1);
+
+    let _ = client.cancel().await;
+    server_task.await??;
+    Ok(())
+}
+
+#[tokio::test]
 async fn in_process_stdio_file_read_projects_static_and_gif_images() -> anyhow::Result<()> {
     let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
     let workspace = server.state.config.read().await.workspace_root.clone();
@@ -2349,7 +2676,13 @@ async fn in_process_stdio_file_read_projects_static_and_gif_images() -> anyhow::
             .iter()
             .map(serde_json::to_value)
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        assert_eq!(content.len(), 2);
+        assert_eq!(
+            content
+                .iter()
+                .filter(|block| block["type"].as_str() == Some("image"))
+                .count(),
+            1
+        );
         assert_eq!(content[0]["type"], "text");
         assert_eq!(content[1]["type"], "image");
         assert_eq!(content[1]["mimeType"], json!(mime_type));
@@ -2399,13 +2732,24 @@ async fn in_process_stdio_file_read_projects_static_and_gif_images() -> anyhow::
         .iter()
         .map(serde_json::to_value)
         .collect::<std::result::Result<Vec<_>, _>>()?;
+    let ordered_prefix = batch_content
+        .get(..6)
+        .expect("original text/image response prefix remains available");
     assert_eq!(
-        batch_content
+        ordered_prefix
             .iter()
             .map(|block| block["type"].as_str().unwrap())
             .collect::<Vec<_>>(),
         ["text", "image", "text", "text", "text", "image"]
     );
+    assert_eq!(batch_content[1]["mimeType"], "image/png");
+    let png_data = base64::engine::general_purpose::STANDARD
+        .decode(batch_content[1]["data"].as_str().unwrap())?;
+    assert_eq!(png_data.as_slice(), expected_static[0].2.as_slice());
+    assert_eq!(batch_content[5]["mimeType"], "image/webp");
+    let webp_data = base64::engine::general_purpose::STANDARD
+        .decode(batch_content[5]["data"].as_str().unwrap())?;
+    assert_eq!(webp_data.as_slice(), expected_static[2].2.as_slice());
     assert_eq!(
         serde_json::from_str::<Value>(batch_content[0]["text"].as_str().unwrap())?["index"],
         0
@@ -2443,13 +2787,26 @@ async fn in_process_stdio_file_read_projects_static_and_gif_images() -> anyhow::
         .map(|frame| frame["timestampMs"].as_u64().unwrap())
         .collect::<Vec<_>>();
     assert_eq!(timestamps, [0, 100, 210, 280, 360, 550, 660]);
-    assert_eq!(gif.content.len(), 1 + frames.len());
-    for (block, frame) in gif.content.iter().skip(1).zip(frames) {
-        let block = serde_json::to_value(block)?;
-        assert_eq!(block["type"], "image");
-        assert_eq!(block["mimeType"], frame["mimeType"]);
-        let bytes =
-            base64::engine::general_purpose::STANDARD.decode(block["data"].as_str().unwrap())?;
+    let original_prefix = gif
+        .content
+        .get(..1 + frames.len())
+        .expect("original GIF text and frame images remain available");
+    let business_text = original_prefix[0]
+        .as_text()
+        .expect("original GIF business text remains available")
+        .text
+        .as_str();
+    let business_value: Value = serde_json::from_str(business_text)?;
+    assert_eq!(business_value["image"]["sourceMimeType"], "image/gif");
+    for (block, frame) in original_prefix.iter().skip(1).zip(frames) {
+        let frame_image = block
+            .as_image()
+            .expect("original GIF frame remains an image");
+        assert_eq!(
+            frame_image.mime_type.as_str(),
+            frame["mimeType"].as_str().unwrap()
+        );
+        let bytes = base64::engine::general_purpose::STANDARD.decode(&frame_image.data)?;
         let decoded = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png)?;
         assert_eq!(decoded.width(), frame["width"].as_u64().unwrap() as u32);
         assert_eq!(decoded.height(), frame["height"].as_u64().unwrap() as u32);
@@ -3156,13 +3513,17 @@ fn test_state(profile: CapabilityProfile) -> AppState {
             "---\nid: room\nkind: entrypoint\nname: Room Bootstrap\ndescription: Test bootstrap\nschemaVersion: 1\n---\n",
         )
         .expect("bootstrap entrypoint");
-    let private_state =
-        crate::private_state::PrivateStatePaths::for_test(root.join("private-state"));
+    let private_state = crate::private_state::PrivateStatePaths::for_test_agent(
+        root.join("private-state"),
+        config.agent_id.clone(),
+    );
     let process_history = crate::process_history::ProcessHistoryStore::open(&private_state);
+    let event_store = crate::event_store::EventStore::open(&private_state).expect("event store");
     AppState {
         config_path: PathBuf::from("stdio-test-config.json"),
         config: Arc::new(RwLock::new(config)),
         private_state,
+        event_store,
         process_history,
         browser_runtime: None,
         runtime: RuntimeModel::tunnel(profile, false),

@@ -6,8 +6,8 @@ use serde::Serialize;
 use crate::{
     cli_i18n::{self, UiLanguage},
     config::{
-        self, normalize_confirmation_language, Config, ReportingDetail, RoomMaintenanceMode,
-        RuntimeMode,
+        self, normalize_confirmation_language, Config, EventNotificationLevel, ReportingDetail,
+        RoomMaintenanceMode, RuntimeMode, INTERNAL_EVENT_TYPES,
     },
     policy, WorkerProfile,
 };
@@ -20,6 +20,7 @@ pub(crate) enum ConfigValueKind {
     Port,
     NonNegativeInteger,
     AutoOrNonNegativeInteger,
+    EventNotificationLevel,
     JsonStringArray,
     JsonStringArrayOrNull,
     JsonPathArray,
@@ -55,6 +56,7 @@ impl ConfigValueKind {
             Self::RuntimeMode => "runtime-mode",
             Self::WorkerProfile => "worker-profile",
             Self::RoomMaintenanceMode => "room-maintenance-mode",
+            Self::EventNotificationLevel => "event-notification-level",
         }
     }
 
@@ -67,6 +69,7 @@ impl ConfigValueKind {
             Self::RuntimeMode => Some(&["standalone", "hub", "local"]),
             Self::WorkerProfile => Some(&["normal", "room"]),
             Self::RoomMaintenanceMode => Some(&["local", "workflow"]),
+            Self::EventNotificationLevel => Some(&["low", "medium", "high", "off"]),
             _ => None,
         }
     }
@@ -83,6 +86,7 @@ pub(crate) enum ConfigSection {
     Skills,
     Room,
     Tunnel,
+    Events,
 }
 
 impl ConfigSection {
@@ -98,6 +102,7 @@ impl ConfigSection {
             Self::Skills => "skills",
             Self::Room => "room",
             Self::Tunnel => "tunnel",
+            Self::Events => "events",
         }
     }
 
@@ -123,6 +128,8 @@ impl ConfigSection {
             (Self::Room, UiLanguage::ZhCn) => "Room",
             (Self::Tunnel, UiLanguage::En) => "Tunnel",
             (Self::Tunnel, UiLanguage::ZhCn) => "隧道",
+            (Self::Events, UiLanguage::En) => "Events",
+            (Self::Events, UiLanguage::ZhCn) => "事件",
         }
     }
 }
@@ -697,6 +704,126 @@ pub(crate) static CONFIG_KEYS: &[ConfigKeySpec] = &[
         "metadata",
         set_tunnel_hub_reporting_detail
     ),
+    config_key!(
+        "events.lowTtlSeconds",
+        Events,
+        NonNegativeInteger,
+        false,
+        "Low-severity event lifetime in seconds; zero expires immediately.",
+        "低等级事件保留秒数；0 表示立即过期。",
+        "86400",
+        set_events_low_ttl_seconds
+    ),
+    config_key!(
+        "events.internalOverrides.process.completed",
+        Events,
+        EventNotificationLevel,
+        true,
+        "Override process.completed notification level; null restores the default.",
+        "覆写 process.completed 通知等级；null 恢复默认值。",
+        "low",
+        set_process_completed_level
+    ),
+    config_key!(
+        "events.internalOverrides.process.failed",
+        Events,
+        EventNotificationLevel,
+        true,
+        "Override process.failed notification level; null restores the default.",
+        "覆写 process.failed 通知等级；null 恢复默认值。",
+        "low",
+        set_process_failed_level
+    ),
+    config_key!(
+        "events.internalOverrides.process.rejected",
+        Events,
+        EventNotificationLevel,
+        true,
+        "Override process.rejected notification level; null restores the default.",
+        "覆写 process.rejected 通知等级；null 恢复默认值。",
+        "low",
+        set_process_rejected_level
+    ),
+    config_key!(
+        "events.internalOverrides.process.cancelled",
+        Events,
+        EventNotificationLevel,
+        true,
+        "Override process.cancelled notification level; null restores the default.",
+        "覆写 process.cancelled 通知等级；null 恢复默认值。",
+        "low",
+        set_process_cancelled_level
+    ),
+    config_key!(
+        "events.internalOverrides.process.timed_out",
+        Events,
+        EventNotificationLevel,
+        true,
+        "Override process.timed_out notification level; null restores the default.",
+        "覆写 process.timed_out 通知等级；null 恢复默认值。",
+        "low",
+        set_process_timed_out_level
+    ),
+    config_key!(
+        "events.internalOverrides.process.detached",
+        Events,
+        EventNotificationLevel,
+        true,
+        "Override process.detached notification level; null restores the default.",
+        "覆写 process.detached 通知等级；null 恢复默认值。",
+        "low",
+        set_process_detached_level
+    ),
+    config_key!(
+        "events.internalOverrides.process.unknown_after_restart",
+        Events,
+        EventNotificationLevel,
+        true,
+        "Override process.unknown_after_restart notification level; null restores the default.",
+        "覆写 process.unknown_after_restart 通知等级；null 恢复默认值。",
+        "low",
+        set_process_unknown_after_restart_level
+    ),
+    config_key!(
+        "events.internalOverrides.process.skipped",
+        Events,
+        EventNotificationLevel,
+        true,
+        "Override process.skipped notification level; null restores the default.",
+        "覆写 process.skipped 通知等级；null 恢复默认值。",
+        "low",
+        set_process_skipped_level
+    ),
+    config_key!(
+        "events.internalOverrides.skill_install.completed",
+        Events,
+        EventNotificationLevel,
+        true,
+        "Override skill_install.completed notification level; null restores the default.",
+        "覆写 skill_install.completed 通知等级；null 恢复默认值。",
+        "low",
+        set_skill_install_completed_level
+    ),
+    config_key!(
+        "events.internalOverrides.skill_install.failed",
+        Events,
+        EventNotificationLevel,
+        true,
+        "Override skill_install.failed notification level; null restores the default.",
+        "覆写 skill_install.failed 通知等级；null 恢复默认值。",
+        "low",
+        set_skill_install_failed_level
+    ),
+    config_key!(
+        "events.internalOverrides.skill_install.cancelled",
+        Events,
+        EventNotificationLevel,
+        true,
+        "Override skill_install.cancelled notification level; null restores the default.",
+        "覆写 skill_install.cancelled 通知等级；null 恢复默认值。",
+        "low",
+        set_skill_install_cancelled_level
+    ),
 ];
 
 pub(crate) fn apply_config_key(config: &mut Config, key: &str, value: &str) -> Result<()> {
@@ -738,7 +865,7 @@ struct ConfigDescriptionOutput {
     zh_cn: &'static str,
 }
 
-const CONFIG_SECTION_ORDER: [ConfigSection; 10] = [
+const CONFIG_SECTION_ORDER: [ConfigSection; 11] = [
     ConfigSection::Runtime,
     ConfigSection::Identity,
     ConfigSection::Hub,
@@ -749,6 +876,7 @@ const CONFIG_SECTION_ORDER: [ConfigSection; 10] = [
     ConfigSection::Skills,
     ConfigSection::Room,
     ConfigSection::Tunnel,
+    ConfigSection::Events,
 ];
 
 pub(super) fn print_config_keys(
@@ -1167,6 +1295,68 @@ fn set_tunnel_hub_reporting_detail(config: &mut Config, value: &str) -> Result<(
     tunnel_config(config).hub_reporting.detail = detail;
     Ok(())
 }
+fn set_events_low_ttl_seconds(config: &mut Config, value: &str) -> Result<()> {
+    let low_ttl_seconds = value
+        .parse::<u64>()
+        .map_err(|_| anyhow!("events.lowTtlSeconds must be a non-negative integer"))?;
+    let mut events = config.events.clone();
+    events.low_ttl_seconds = low_ttl_seconds;
+    events.validate()?;
+    config.events = events;
+    Ok(())
+}
+
+fn set_internal_override(config: &mut Config, event_type: &str, value: &str) -> Result<()> {
+    if !INTERNAL_EVENT_TYPES.contains(&event_type) {
+        return Err(anyhow!("unknown internal event type: {event_type}"));
+    }
+    let mut events = config.events.clone();
+    if value == "null" {
+        events.internal_overrides.remove(event_type);
+    } else {
+        let level = match value {
+            "low" => EventNotificationLevel::Low,
+            "medium" => EventNotificationLevel::Medium,
+            "high" => EventNotificationLevel::High,
+            "off" => EventNotificationLevel::Off,
+            _ => {
+                return Err(anyhow!(
+                    "events.internalOverrides value must be low, medium, high, off, or null"
+                ))
+            }
+        };
+        events
+            .internal_overrides
+            .insert(event_type.to_string(), level);
+    }
+    events.validate()?;
+    config.events = events;
+    Ok(())
+}
+
+macro_rules! internal_override_setter {
+    ($name:ident, $event_type:literal) => {
+        fn $name(config: &mut Config, value: &str) -> Result<()> {
+            set_internal_override(config, $event_type, value)
+        }
+    };
+}
+
+internal_override_setter!(set_process_completed_level, "process.completed");
+internal_override_setter!(set_process_failed_level, "process.failed");
+internal_override_setter!(set_process_rejected_level, "process.rejected");
+internal_override_setter!(set_process_cancelled_level, "process.cancelled");
+internal_override_setter!(set_process_timed_out_level, "process.timed_out");
+internal_override_setter!(set_process_detached_level, "process.detached");
+internal_override_setter!(
+    set_process_unknown_after_restart_level,
+    "process.unknown_after_restart"
+);
+internal_override_setter!(set_process_skipped_level, "process.skipped");
+internal_override_setter!(set_skill_install_completed_level, "skill_install.completed");
+internal_override_setter!(set_skill_install_failed_level, "skill_install.failed");
+internal_override_setter!(set_skill_install_cancelled_level, "skill_install.cancelled");
+
 fn tunnel_config(config: &mut Config) -> &mut config::TunnelConfig {
     config
         .tunnel

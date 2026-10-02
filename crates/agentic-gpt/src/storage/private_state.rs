@@ -13,6 +13,7 @@ pub(crate) struct PrivateStatePaths {
     // Kept as the authoritative per-agent root for subsequent private-state consumers.
     #[allow(dead_code)]
     pub(crate) root: PathBuf,
+    pub(crate) agent_id: String,
     pub(crate) active_skills: PathBuf,
     pub(crate) skill_installs: PathBuf,
 }
@@ -41,6 +42,7 @@ fn prepare_at(config: &Config, agentic_root: &Path) -> Result<PrepareOutcome> {
         warnings.push(format!("private_state_root_unavailable: {error}"));
         return Ok(PrepareOutcome {
             paths: PrivateStatePaths {
+                agent_id: config.agent_id.clone(),
                 root,
                 active_skills: legacy_active,
                 skill_installs: legacy_installs,
@@ -53,6 +55,7 @@ fn prepare_at(config: &Config, agentic_root: &Path) -> Result<PrepareOutcome> {
         warnings.push(format!("private_state_root_sync_failed: {error}"));
         return Ok(PrepareOutcome {
             paths: PrivateStatePaths {
+                agent_id: config.agent_id.clone(),
                 root,
                 active_skills: legacy_active,
                 skill_installs: legacy_installs,
@@ -92,6 +95,7 @@ fn prepare_at(config: &Config, agentic_root: &Path) -> Result<PrepareOutcome> {
 
     Ok(PrepareOutcome {
         paths: PrivateStatePaths {
+            agent_id: config.agent_id.clone(),
             root,
             active_skills,
             skill_installs,
@@ -434,10 +438,16 @@ fn remove_dir_and_sync(path: &Path) -> Result<()> {
 #[cfg(test)]
 impl PrivateStatePaths {
     pub(crate) fn for_test(root: PathBuf) -> Self {
+        Self::for_test_agent(root, "test-agent".to_string())
+    }
+
+    pub(crate) fn for_test_agent(root: PathBuf, agent_id: String) -> Self {
+        ensure_private_dir(&root).expect("test private-state root should be creatable");
         Self {
             active_skills: root.join("active-skills.json"),
             skill_installs: root.join("skill-installs"),
             root,
+            agent_id,
         }
     }
 }
