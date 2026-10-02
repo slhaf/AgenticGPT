@@ -131,3 +131,8 @@
 - 另用现有已构建Agent在一次性HOME/config/workspace启动真实HTTP MCP，无注入地执行同一before→agent patch。实际响应{changed:1,changes:[{action:"updated",path:"race.txt"}],events:{current:"low: 0 | medium: 0 | high: 0",new:[]},status:"completed"}，文件agent换行，exit0。此处仅证明成功响应没有error；生产binary不含cfg(test)hook，不能用此smoke替代失败单测。
 - 因果解释：A注入被B覆盖→A未发生外部改写→A revision不变→正常commit→error.code缺失，被JSON索引读为Null。原日志同进程B通过/A失败与此吻合；原调度无记录，因此将其标作最有证据支持的原因，而非已捕获原交错。
 - 影响范围为cfg(test)共享单槽；两个调用者均受影响。未发现要求修改生产错误投影或事件面板的证据。推荐仅把测试注入状态按绝对路径隔离、消费匹配项，保留两个行为断言；不删除测试、不放宽assert、不以全套串行化隐藏问题。本次未实施修复。
+
+## 测试注入修复与真实dispatch回归
+- 新增file_edit_external_changes_remain_isolated_by_path：两个独立AgentMcpServer workspace使用同名race.txt，先同时注册两个不同绝对路径，再逐个真实dispatch更新；每项必须返回file_revision_conflict且保留各自不同的external正文。修前该回归实际失败Null != file_revision_conflict；不是仅hook helper探针。
+- cfg(test)外部改写注入改为Mutex<Vec<(PathBuf,Vec<u8>)>>，按路径更新/新增待注入项，消费只移除当前patch匹配项；不再覆盖其他路径。同路径仍保留最后一次注册内容，原生产校验和两个旧回归断言不变。
+- 修后8项file_edit_回归以8线程运行全部通过，包括新确定性隔离回归和原失败/相邻add回归；fmt --check与Agent all-targets strict Clippy均exit0、无warning（artifact://284）。内部测试修复不改变用户文档/API合同；未执行全workspace/live完整验收，计数保持历史3/3及新增3/3。

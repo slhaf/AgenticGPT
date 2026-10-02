@@ -192,3 +192,8 @@
 - 最有证据支持的原因是两个并行测试互相覆盖cfg(test)单槽注入，详见findings.md；原失败run未记录调度，不能宣称捕获其确切线程顺序。HTTP smoke只证明无改写的成功封套，不替代失败单测/生产race验证。
 - 未重跑原失败test来确认既知失败。未跑workspace套件、build/live parity整链；计数不变。一次agent字段读取误加line selector被工具拒绝，改读report字段后取得完整建议。
 - 调查阶段结束；原目标仍blocked，修复及完整重验需新授权。
+
+## 用户授权的测试注入修复完成
+- 新确定性双Agent真实dispatch回归先在旧单槽实现上exit101，实际捕获Null != file_revision_conflict；随后仅修改cfg(test)hook按路径保留注册项，原生产逻辑不动。
+- rustfmt两处受影响文件后cargo fmt --all -- --check通过；cargo test -p agentic-gpt --bin agentic-gpt file_edit_ -- --nocapture --test-threads=8实际8 passed；cargo clippy -p agentic-gpt --all-targets -- -D warnings通过且无warning。
+- 此为修复前/后定点证据，不是完整新验收轮；历史3/3及新增3/3保持。公共文档无需改动，原事件系统集成及全验收仍blocked。修复阶段提交仅包含本次hook/新回归的精确变更及planning证据，不夹带stdio tests已有未提交事件功能。

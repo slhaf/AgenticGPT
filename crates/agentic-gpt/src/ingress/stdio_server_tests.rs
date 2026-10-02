@@ -3064,6 +3064,45 @@ async fn file_edit_apply_patch_revalidates_external_change_before_commit() -> an
 }
 
 #[tokio::test]
+async fn file_edit_external_changes_remain_isolated_by_path() -> anyhow::Result<()> {
+    let first = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
+    let second = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
+    let first_path = first
+        .state
+        .config
+        .read()
+        .await
+        .workspace_root
+        .join("race.txt");
+    let second_path = second
+        .state
+        .config
+        .read()
+        .await
+        .workspace_root
+        .join("race.txt");
+    std::fs::write(&first_path, "before\n")?;
+    std::fs::write(&second_path, "before\n")?;
+    crate::file_ops::inject_external_change(&first_path, b"first external\n");
+    crate::file_ops::inject_external_change(&second_path, b"second external\n");
+
+    for (server, path, expected) in [
+        (&first, &first_path, "first external\n"),
+        (&second, &second_path, "second external\n"),
+    ] {
+        let result = server
+            .dispatch(
+                "file.edit",
+                json!({"patch":"*** Begin Patch\n*** Update File: race.txt\n@@\n-before\n+agent\n*** End Patch"}),
+            )
+            .await?;
+        assert_eq!(result["error"]["code"], "file_revision_conflict");
+        assert_eq!(std::fs::read_to_string(path)?, expected);
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn file_lock_registry_prunes_released_paths() -> anyhow::Result<()> {
     let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
     let workspace = server.state.config.read().await.workspace_root.clone();

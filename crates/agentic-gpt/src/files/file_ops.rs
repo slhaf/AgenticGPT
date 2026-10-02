@@ -62,7 +62,7 @@ pub(crate) struct ReadBatchOutput {
 }
 
 #[cfg(test)]
-static INJECT_EXTERNAL_CHANGE: Mutex<Option<(PathBuf, Vec<u8>)>> = Mutex::new(None);
+static INJECT_EXTERNAL_CHANGE: Mutex<Vec<(PathBuf, Vec<u8>)>> = Mutex::new(Vec::new());
 
 #[cfg(test)]
 static INJECT_MOVE_SOURCE_REMOVE_FAILURE: Mutex<Option<PathBuf>> = Mutex::new(None);
@@ -72,10 +72,14 @@ static INJECT_COMMIT_FAILURE: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
 #[cfg(test)]
 pub(crate) fn inject_external_change(path: &Path, contents: &[u8]) {
-    *INJECT_EXTERNAL_CHANGE
+    let mut pending = INJECT_EXTERNAL_CHANGE
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) =
-        Some((path.to_path_buf(), contents.to_vec()));
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some((_, current)) = pending.iter_mut().find(|(target, _)| target == path) {
+        *current = contents.to_vec();
+    } else {
+        pending.push((path.to_path_buf(), contents.to_vec()));
+    }
 }
 
 #[cfg(test)]
@@ -111,7 +115,7 @@ fn take_external_change_for(changes: &[PlannedChange]) -> Option<(PathBuf, Vec<u
     let mut pending = INJECT_EXTERNAL_CHANGE
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let matches = pending.as_ref().is_some_and(|(path, _)| {
+    let index = pending.iter().position(|(path, _)| {
         changes.iter().any(|change| {
             change
                 .source
@@ -120,11 +124,7 @@ fn take_external_change_for(changes: &[PlannedChange]) -> Option<(PathBuf, Vec<u
                 || change.target.path == *path
         })
     });
-    if matches {
-        pending.take()
-    } else {
-        None
-    }
+    index.map(|index| pending.swap_remove(index))
 }
 
 #[derive(Clone, Debug)]
