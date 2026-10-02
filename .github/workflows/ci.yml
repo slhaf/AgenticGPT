@@ -17,10 +17,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+      - name: Install repository Rust toolchain
+        # rustup reads rust-toolchain.toml and installs its version/components.
+        run: |
+          rustup show
+          rustc --version --verbose
+          cargo --version
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2

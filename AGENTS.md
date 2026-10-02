@@ -14,6 +14,8 @@ The root Cargo workspace contains five Rust crates: `crates/agentic-gpt` (Linux 
 
 ## Build, Test, and Development Commands
 
+本地开发和主 CI 使用根目录 `rust-toolchain.toml` 指定的 Rust 版本与组件；在仓库中运行 `rustup show` 可安装并确认。该版本是可复现的开发/CI 基线，不是 MSRV 承诺，`Cargo.toml` 不因此新增 `rust-version`。升级时修改工具链文件并运行下方完整验证链。独立 `Latest stable Rust` workflow 每周一及手动运行严格 Clippy；其显式 `cargo +stable` 绕过锁定，失败应作为升级待办处理，不放宽主 CI 门禁。
+
 - `cargo check --workspace`: type-check all Rust crates quickly.
 - `cargo test --workspace`: run the full Rust test suite.
 - `cargo fmt --all -- --check`: enforce CI formatting.

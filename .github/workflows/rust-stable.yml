@@ -1,0 +1,35 @@
+name: Latest stable Rust
+
+on:
+  schedule:
+    - cron: '23 3 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  clippy:
+    name: Latest stable Clippy
+    runs-on: ubuntu-latest
+    env:
+      RUSTUP_TOOLCHAIN: stable
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install latest stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: latest-stable
+
+      - name: Check upgrade compatibility
+        # Explicit +stable bypasses the repository toolchain pin.
+        run: |
+          rustc +stable --version --verbose
+          cargo +stable clippy --workspace --all-targets -- -D warnings

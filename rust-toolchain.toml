@@ -1,0 +1,5 @@
+# 本地开发与主 CI 的可复现工具链基线；不是 MSRV 承诺。
+[toolchain]
+channel = "1.99.0"
+profile = "minimal"
+components = ["rustfmt", "clippy"]
