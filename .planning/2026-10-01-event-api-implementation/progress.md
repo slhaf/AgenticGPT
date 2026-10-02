@@ -185,3 +185,10 @@
 - cargo test --workspace exit101：Agent suite 561 passed/1 failed/1 ignored。stdio_server::tests::file_edit_apply_patch_revalidates_external_change_before_commit在stdio_server_tests.rs:3418断言失败，实际error字段Null，期望file_revision_conflict；原始输出artifact://276。
 - &&命令链因此未执行本轮Agent/Hub build及完整live parity。此前定点Hub聚合/晚到/重启/delta/crash及TUI证据保持有效，但不能替代本轮完整验收。
 - 新增完整失败3/3，历史3/3保留。按用户停止条件不再调查修复/重验，不标goal complete；source/docs继续保留工作区，阶段三/四集成提交暂缓，仅提交停止证据。继续需用户明确追加授权。
+
+## 用户追加调查完成
+- “调查”仅授权诊断本次file.edit失败；未解除历史3/3或新增3/3停止条件，未重启全验收。
+- scout只读核对共享hook与全部调用者；主线程实际运行临时Rust hook覆盖probe和独立真实HTTP MCP成功响应观察，均exit0。探针/二进制及临时Agent状态已由TemporaryDirectory清理，未留下永久测试、未改实现。
+- 最有证据支持的原因是两个并行测试互相覆盖cfg(test)单槽注入，详见findings.md；原失败run未记录调度，不能宣称捕获其确切线程顺序。HTTP smoke只证明无改写的成功封套，不替代失败单测/生产race验证。
+- 未重跑原失败test来确认既知失败。未跑workspace套件、build/live parity整链；计数不变。一次agent字段读取误加line selector被工具拒绝，改读report字段后取得完整建议。
+- 调查阶段结束；原目标仍blocked，修复及完整重验需新授权。

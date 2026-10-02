@@ -23,11 +23,11 @@ Status: complete
 持久store/DTO/计次/过期/分页/API核心与行为测试、配置和配置TUI source实现已交付并修正独立审阅发现；尚未运行验收。此阶段提交planning checkpoint，source在跨入口集成后统一提交，避免不完整ABI切换提交。
 
 ## 阶段三：生产与跨入口
-Status: in_progress
+Status: blocked
 生产者响应仲裁/恢复、外部注入、Agent全MCP、HubMCP/API及wire/OpenAPI和消费者source已交付；包括增量source可靠delta反馈。真实Agent/TUI smoke、workspace tests与build已通过，但live parity未通过；source集成提交暂缓，不宣称阶段完成。
 
 ## 阶段四：文档与验收
-Status: in_progress
+Status: blocked
 历史完整验收3/3失败已保留；追加授权的新增完整验收也已失败3/3，达到停止条件。真实隔离TUI及定点Agent/Hub证据保留，整体目标未完成；不再修复重验，源代码集成与文档完成提交暂缓。
 
 ## 验收与停止
@@ -80,3 +80,8 @@ Status: blocked
 
 ## 授权后验收计数
 新增完整失败3/3：第一轮policy-reload临时socket路径过长；第二轮Hub delayed-response receipt replay检查误要求第3个settle；第三轮fmt/check/strict Clippy无warning通过，但workspace test的file_edit_apply_patch_revalidates_external_change_before_commit断言失败（Null != file_revision_conflict），命令链未到build/live parity。历史3次失败不重置，按授权上限停止，未标目标完成。
+
+## 用户追加：失败原因调查
+Status: complete
+用户要求“调查”，仅诊断file.edit外部改写回归的Null错误断言；允许隔离执行因果诊断，不修改实现、不新增永久测试、不重启完整验收。历史3/3及新增3/3保持；事件系统完成任务仍blocked。主线程记录结论，scout只读追溯hook与调用链。
+诊断已实际证明test-only单槽注入覆盖机制，另观察真实HTTP MCP无改写时的成功封套。结论、证据范围和未捕获原调度的限制见findings.md；实现未改，原全验收仍blocked。
