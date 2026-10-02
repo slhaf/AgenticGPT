@@ -37,11 +37,7 @@ struct FakeConcurrency {
 impl FakeConcurrency {
     fn enter(self: &Arc<Self>) -> FakeConcurrencyGuard {
         let active = self.active.fetch_add(1, Ordering::AcqRel) + 1;
-        let _ = self
-            .max_active
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                (active > current).then_some(active)
-            });
+        self.max_active.fetch_max(active, Ordering::AcqRel);
         FakeConcurrencyGuard {
             tracker: self.clone(),
         }
