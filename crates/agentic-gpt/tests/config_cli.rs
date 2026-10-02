@@ -276,11 +276,21 @@ fn config_init_set_and_show_round_trip() {
         .output()
         .unwrap();
     assert!(set.status.success(), "config set command failed");
+    let process_set = Command::new(&binary)
+        .args(["config", "--config"])
+        .arg(&config)
+        .args(["set", "limits.processResponseBytes", "16384"])
+        .output()
+        .unwrap();
+    assert!(
+        process_set.status.success(),
+        "process response config set command failed"
+    );
 
     let disk: Value = serde_json::from_slice(&fs::read(&config).unwrap()).unwrap();
     assert_eq!(disk["mode"], "standalone");
     assert_eq!(disk["profile"], "room");
-    assert!(disk.get("limits").is_none());
+    assert_eq!(disk["limits"]["processResponseBytes"], 16384);
 
     let show = Command::new(&binary)
         .args(["config", "--config"])
@@ -293,6 +303,7 @@ fn config_init_set_and_show_round_trip() {
     assert_eq!(value["mode"], "standalone");
     assert_eq!(value["profile"], "room");
     assert_eq!(value["limits"]["maxConcurrentTasks"], 2);
+    assert_eq!(value["limits"]["processResponseBytes"], 16384);
     assert_eq!(value["room"]["timezone"], "Asia/Tokyo");
 
     let _ = fs::remove_dir_all(root);
@@ -311,6 +322,9 @@ fn config_keys_json_lists_registry() {
     assert!(entries
         .iter()
         .any(|entry| { entry["key"] == "limits.maxActiveProcesses" }));
+    assert!(entries
+        .iter()
+        .any(|entry| { entry["key"] == "limits.processResponseBytes" }));
     let mode = entries.iter().find(|entry| entry["key"] == "mode").unwrap();
     assert_eq!(
         mode["choices"],
@@ -565,6 +579,61 @@ fn config_set_rejects_file_search_context_bound_without_writing() {
     assert!(String::from_utf8_lossy(&set.stderr)
         .contains("maxFileSearchContextLines must be between 0 and 100"));
     assert_eq!(fs::read(&config).unwrap(), before);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn config_set_enforces_process_response_bounds_without_invalid_writes() {
+    let root = temp_root("process-response-bounds");
+    fs::create_dir_all(&root).unwrap();
+    let config = root.join("config.json");
+    let binary = binary_path();
+
+    let init = Command::new(&binary)
+        .args(["config", "--config"])
+        .arg(&config)
+        .args(["init", "--non-interactive"])
+        .output()
+        .unwrap();
+    assert!(init.status.success(), "config init command failed");
+
+    for value in ["4096", "1048576"] {
+        let set = Command::new(&binary)
+            .args(["config", "--config"])
+            .arg(&config)
+            .args(["set", "limits.processResponseBytes", value])
+            .output()
+            .unwrap();
+        assert!(
+            set.status.success(),
+            "valid process response limit {value} was rejected"
+        );
+        let disk: Value = serde_json::from_slice(&fs::read(&config).unwrap()).unwrap();
+        assert_eq!(
+            disk["limits"]["processResponseBytes"],
+            value.parse::<u64>().unwrap()
+        );
+    }
+
+    let before = fs::read(&config).unwrap();
+    for value in ["4095", "1048577", "not-a-number"] {
+        let set = Command::new(&binary)
+            .args(["config", "--config"])
+            .arg(&config)
+            .args(["set", "limits.processResponseBytes", value])
+            .output()
+            .unwrap();
+        assert!(
+            !set.status.success(),
+            "invalid process response limit {value} was accepted"
+        );
+        assert_eq!(
+            fs::read(&config).unwrap(),
+            before,
+            "invalid process response limit {value} changed the config file"
+        );
+    }
 
     let _ = fs::remove_dir_all(root);
 }

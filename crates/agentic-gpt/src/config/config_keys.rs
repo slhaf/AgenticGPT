@@ -415,6 +415,16 @@ pub(crate) static CONFIG_KEYS: &[ConfigKeySpec] = &[
         set_max_file_search_context_lines
     ),
     config_key!(
+        "limits.processResponseBytes",
+        Limits,
+        NonNegativeInteger,
+        false,
+        "Default serialized Process response budget shared by process.exec, process.batch, skills.run, mcp.callTool, and process.read. If process.read omits maxBytes, it uses this value; an explicit maxBytes overrides it for that read only. Configured range: 4096–1048576 bytes.",
+        "process.exec、process.batch、skills.run、mcp.callTool 和 process.read 共用的序列化 Process 响应默认预算。process.read 省略 maxBytes 时使用此值；显式 maxBytes 仅覆盖本次 read。配置范围：4096–1048576 字节。",
+        "8192",
+        set_process_response_bytes
+    ),
+    config_key!(
         "skills.maxFiles",
         Skills,
         NonNegativeInteger,
@@ -1107,6 +1117,13 @@ fn set_max_file_search_context_lines(config: &mut Config, value: &str) -> Result
     let parsed = value.parse::<usize>()?;
     config::validate_max_file_search_context_lines(parsed)?;
     config.limits.max_file_search_context_lines = parsed;
+    Ok(())
+}
+
+fn set_process_response_bytes(config: &mut Config, value: &str) -> Result<()> {
+    let parsed = value.parse::<usize>()?;
+    config::validate_process_response_bytes(parsed)?;
+    config.limits.process_response_bytes = parsed;
     Ok(())
 }
 

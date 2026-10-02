@@ -69,25 +69,10 @@ pub(crate) async fn serve(
             "/v1/confirmations/:confirmation_id/:decision",
             post(confirmation::callback),
         )
-        .route("/v1/process/exec", post(routes::process_exec))
         .route("/v1/events", get(routes::list_events))
         .route("/v1/events/mark", post(routes::mark_events))
         .route("/v1/events/:event_id", get(routes::get_event))
-        .route("/v1/process/batch", post(routes::process_batch))
-        .route("/v1/process", get(routes::list_processes))
-        .route(
-            "/v1/process/:process_id/output",
-            get(routes::get_process_output),
-        )
-        .route(
-            "/v1/process/:process_id/result",
-            get(routes::get_process_result),
-        )
-        .route(
-            "/v1/process/:process_id/cancel",
-            post(routes::cancel_process),
-        )
-        .route("/v1/process/:process_id", get(routes::get_process_status))
+        .merge(routes::process_routes())
         .route("/v1/tmux/sessions", get(routes::tmux_list_sessions))
         .route("/v1/tmux/panes", get(routes::tmux_list_panes))
         .route("/v1/tmux/capture", post(routes::tmux_capture_pane))

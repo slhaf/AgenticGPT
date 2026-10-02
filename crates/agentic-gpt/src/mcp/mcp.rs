@@ -11,7 +11,7 @@ use std::{
 };
 
 use agentic_gpt_protocol::{
-    EventOrigin, McpCallToolRequest, McpListToolsRequest, McpServerSummary, ProcessResponse,
+    EventOrigin, McpCallToolRequest, McpListToolsRequest, McpServerSummary, ProcessKind,
     ProcessState,
 };
 use anyhow::{anyhow, Context, Result};
@@ -72,7 +72,7 @@ pub(crate) async fn call_tool(
     request_source: &str,
     terminal_event_hook: Option<TerminalEventHook>,
     event_origin: Option<EventOrigin>,
-) -> Result<ProcessResponse> {
+) -> Result<process::ManagedProcessResponse> {
     start_managed_call_with_origin(
         state,
         payload,
@@ -91,7 +91,7 @@ async fn start_managed_call_with_factory(
     request_source: &str,
     terminal_event_hook: Option<TerminalEventHook>,
     client_factory: McpClientFactory,
-) -> Result<ProcessResponse> {
+) -> Result<process::ManagedProcessResponse> {
     start_managed_call_with_origin(
         state,
         payload,
@@ -110,8 +110,17 @@ async fn start_managed_call_with_origin(
     terminal_event_hook: Option<TerminalEventHook>,
     event_origin: Option<EventOrigin>,
     client_factory: McpClientFactory,
-) -> Result<ProcessResponse> {
+) -> Result<process::ManagedProcessResponse> {
     validate_tool_name(&payload.tool_name)?;
+    let response_budget = state.config.read().await.limits.process_response_bytes;
+    process::ensure_process_response_fits(
+        &payload.agent_id,
+        payload.group.as_deref(),
+        ProcessKind::Mcp,
+        &state.boot_generation,
+        response_budget,
+    )
+    .map_err(|reason| anyhow!(reason))?;
     let arguments = tool_arguments(payload.arguments.clone())?;
     let argument_bytes = serde_json::to_vec(&payload.arguments)?.len();
     if argument_bytes > process::MAX_MCP_ARGUMENT_BYTES {
@@ -171,7 +180,7 @@ async fn start_managed_call_with_origin(
                 Some("server_config_validation"),
             )
             .await;
-            return process::mcp_process_response(state, &process_id, 0)
+            return process::mcp_process_response(state, &process_id, 0, response_budget)
                 .await
                 .map_err(|reason| anyhow!(reason));
         }
@@ -188,7 +197,7 @@ async fn start_managed_call_with_origin(
         None,
         None,
     ));
-    process::mcp_process_response(state, &process_id, wait_seconds)
+    process::mcp_process_response(state, &process_id, wait_seconds, response_budget)
         .await
         .map_err(|reason| anyhow!(reason))
 }

@@ -96,6 +96,7 @@ mod tests {
             max_concurrent_tasks: "two".to_string(),
             max_active_processes: "never".to_string(),
             max_file_search_context_lines: "five".to_string(),
+            process_response_bytes: "8192".to_string(),
         });
         let errors = session.save_optional_section(limits).unwrap_err();
         assert_eq!(errors[0].field, SetupField::MaxConcurrentTasks);
@@ -136,6 +137,56 @@ mod tests {
             session.section_status(OptionalSection::Room),
             super::super::model::SectionStatus::NotApplicable
         );
+    }
+
+    #[test]
+    fn process_response_bytes_limit_accepts_protocol_bounds_and_rejects_invalid_values() {
+        use agentic_gpt_protocol::{MAX_PROCESS_RESPONSE_BYTES, MIN_PROCESS_RESPONSE_BYTES};
+
+        let mut session = session(RuntimeMode::Local, WorkerProfile::Normal);
+        let limits_draft = |process_response_bytes: String| {
+            OptionalSectionDraft::Limits(LimitsDraft {
+                max_concurrent_tasks: "2".to_string(),
+                max_active_processes: "auto".to_string(),
+                max_file_search_context_lines: "5".to_string(),
+                process_response_bytes,
+            })
+        };
+
+        for value in [MIN_PROCESS_RESPONSE_BYTES, MAX_PROCESS_RESPONSE_BYTES] {
+            session
+                .save_optional_section(limits_draft(value.to_string()))
+                .unwrap();
+            let OptionalSectionDraft::Limits(saved) =
+                session.optional_draft(OptionalSection::Limits)
+            else {
+                unreachable!();
+            };
+            assert_eq!(saved.process_response_bytes, value.to_string());
+        }
+
+        for value in [
+            (MIN_PROCESS_RESPONSE_BYTES - 1).to_string(),
+            (MAX_PROCESS_RESPONSE_BYTES + 1).to_string(),
+            "not-a-number".to_string(),
+        ] {
+            let errors = session
+                .save_optional_section(limits_draft(value))
+                .unwrap_err();
+            assert!(errors.iter().any(|error| {
+                error.field == SetupField::ProcessResponseBytes
+                    && error.code == "config_init_number_invalid: process_response_bytes"
+            }));
+            let OptionalSectionDraft::Limits(saved) =
+                session.optional_draft(OptionalSection::Limits)
+            else {
+                unreachable!();
+            };
+            assert_eq!(
+                saved.process_response_bytes,
+                MAX_PROCESS_RESPONSE_BYTES.to_string()
+            );
+        }
     }
 
     #[test]
@@ -568,7 +619,8 @@ pub(super) fn validate_field(
         ),
         SetupField::MaxConcurrentTasks
         | SetupField::MaxActiveProcesses
-        | SetupField::MaxFileSearchContextLines => validate_optional(
+        | SetupField::MaxFileSearchContextLines
+        | SetupField::ProcessResponseBytes => validate_optional(
             OptionalSection::Limits,
             &session.optional_draft(OptionalSection::Limits),
         ),
@@ -729,6 +781,13 @@ fn validate_optional(section: OptionalSection, draft: &OptionalSectionDraft) -> 
                 _ => errors.push(error(
                     SetupField::MaxFileSearchContextLines,
                     "config_init_number_invalid: max_file_search_context_lines",
+                )),
+            }
+            match parse_usize_value(&value.process_response_bytes) {
+                Ok(value) if config::validate_process_response_bytes(value).is_ok() => {}
+                _ => errors.push(error(
+                    SetupField::ProcessResponseBytes,
+                    "config_init_number_invalid: process_response_bytes",
                 )),
             }
         }
@@ -991,6 +1050,7 @@ fn number_code(field: SetupField) -> &'static str {
         SetupField::MaxFileSearchContextLines => {
             "config_init_number_invalid: max_file_search_context_lines"
         }
+        SetupField::ProcessResponseBytes => "config_init_number_invalid: process_response_bytes",
         _ => "config_init_number_invalid",
     }
 }
@@ -1216,10 +1276,27 @@ fn apply_optional_draft(
                         "config_init_number_invalid: max_file_search_context_lines",
                     )]
                 })?;
+            let process_response_bytes = value
+                .process_response_bytes
+                .trim()
+                .parse::<usize>()
+                .map_err(|_| {
+                    vec![error(
+                        SetupField::ProcessResponseBytes,
+                        "config_init_number_invalid: process_response_bytes",
+                    )]
+                })?;
+            config::validate_process_response_bytes(process_response_bytes).map_err(|_| {
+                vec![error(
+                    SetupField::ProcessResponseBytes,
+                    "config_init_number_invalid: process_response_bytes",
+                )]
+            })?;
             input.limits = Some(LimitsConfig {
                 max_concurrent_tasks,
                 max_active_processes,
                 max_file_search_context_lines,
+                process_response_bytes,
             });
         }
         (OptionalSection::Sandbox, OptionalSectionDraft::Sandbox(value)) => {

@@ -24,7 +24,7 @@ use crate::{
     operation::{hub_command_name, RequestContext, RequestIngress},
     process,
     state::AppState,
-    transport_ledger,
+    transport_ledger::{self, StoredCommand},
     utils::{
         log_info, log_warn, CONNECT_TIMEOUT_SECS, HEARTBEAT_ACK_TIMEOUT_SECS,
         HEARTBEAT_INTERVAL_SECS, RECONNECT_DELAY_SECS,
@@ -480,6 +480,8 @@ pub(crate) fn report_run_event(
     started_at: DateTime<Utc>,
     result: Option<serde_json::Value>,
     reason: Option<String>,
+    process_id: Option<String>,
+    exit_code: Option<i32>,
     process: Option<ProcessInfo>,
 ) {
     let detail = reporting_detail(state);
@@ -491,7 +493,8 @@ pub(crate) fn report_run_event(
     } else {
         None
     };
-    let process_id = process.as_ref().map(|value| value.process_id.clone());
+    let process_id = process_id.or_else(|| process.as_ref().map(|value| value.process_id.clone()));
+    let exit_code = exit_code.or_else(|| process.as_ref().and_then(|value| value.exit_code));
     try_send_reporting(
         state,
         AgentMessage::RunReport {
@@ -511,7 +514,7 @@ pub(crate) fn report_run_event(
                     Some((updated_at - started_at).num_milliseconds().max(0) as u64)
                 },
                 process_id,
-                exit_code: process.as_ref().and_then(|value| value.exit_code),
+                exit_code,
                 reason: reason.map(|value| bounded_reason(&value)),
                 arguments,
                 result,
@@ -1014,14 +1017,26 @@ async fn reconcile_transport_runs(state: &AppState, tx: &mpsc::UnboundedSender<A
                 }
             },
             "accepted" => {
-                let Some(command) = record.command.clone() else {
-                    let _ = tx.send(AgentMessage::TransportRunStatus {
-                        run_id: record.run_id,
-                        request_id: record.request_id,
-                        status: "unknown".to_string(),
-                        reason: Some("transport_command_missing".to_string()),
-                    });
-                    continue;
+                let command = match record.command.clone() {
+                    Some(StoredCommand::Current(command)) => command,
+                    Some(StoredCommand::RetiredProcessRead { .. }) => {
+                        let _ = tx.send(AgentMessage::TransportRunStatus {
+                            run_id: record.run_id.clone(),
+                            request_id: record.request_id.clone(),
+                            status: "unknown".to_string(),
+                            reason: Some("transport_command_retired".to_string()),
+                        });
+                        continue;
+                    }
+                    None => {
+                        let _ = tx.send(AgentMessage::TransportRunStatus {
+                            run_id: record.run_id.clone(),
+                            request_id: record.request_id.clone(),
+                            status: "unknown".to_string(),
+                            reason: Some("transport_command_missing".to_string()),
+                        });
+                        continue;
+                    }
                 };
                 let claim = match transport_ledger::claim_started(
                     &record.run_id,
@@ -1054,11 +1069,19 @@ async fn reconcile_transport_runs(state: &AppState, tx: &mpsc::UnboundedSender<A
                 });
             }
             "started" | "running" => {
+                let reason = if matches!(
+                    record.command.as_ref(),
+                    Some(StoredCommand::RetiredProcessRead { .. })
+                ) {
+                    "transport_command_retired"
+                } else {
+                    "agent_restarted_before_completion"
+                };
                 let _ = tx.send(AgentMessage::TransportRunStatus {
                     run_id: record.run_id,
                     request_id: record.request_id,
                     status: "unknown".to_string(),
-                    reason: Some("agent_restarted_before_completion".to_string()),
+                    reason: Some(reason.to_string()),
                 });
             }
             _ => {}

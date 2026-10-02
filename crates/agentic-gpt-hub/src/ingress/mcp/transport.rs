@@ -96,19 +96,9 @@ pub(super) async fn call_app_tool(
                 .process_list(Parameters(decode_args(arguments)?))
                 .await
         }
-        "process.status" => {
+        "process.read" => {
             server
-                .process_status(Parameters(decode_args(arguments)?))
-                .await
-        }
-        "process.output" => {
-            server
-                .process_output(Parameters(decode_args(arguments)?))
-                .await
-        }
-        "process.result" => {
-            server
-                .process_result(Parameters(decode_args(arguments)?))
+                .process_read(Parameters(decode_args(arguments)?))
                 .await
         }
         "process.cancel" => {

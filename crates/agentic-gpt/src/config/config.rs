@@ -12,6 +12,7 @@ use std::str::FromStr;
 use agentic_gpt_protocol::{
     EventSeverity, PolicyCounts, SafeBuiltinPolicyRules, SafeConfigSummary, SafePathPolicySummary,
     SafePathRoot, SafePolicyRules, SafeRule, SafeSandboxSummary, SafeTunnelSummary,
+    DEFAULT_PROCESS_RESPONSE_BYTES, MAX_PROCESS_RESPONSE_BYTES, MIN_PROCESS_RESPONSE_BYTES,
 };
 use anyhow::{anyhow, Result};
 use chrono::{Datelike, Utc};
@@ -673,8 +674,12 @@ pub(crate) struct LimitsConfig {
         deserialize_with = "deserialize_max_file_search_context_lines"
     )]
     pub(crate) max_file_search_context_lines: usize,
+    #[serde(
+        default = "default_process_response_bytes",
+        deserialize_with = "deserialize_process_response_bytes"
+    )]
+    pub(crate) process_response_bytes: usize,
 }
-
 pub(crate) const DEFAULT_MAX_FILE_SEARCH_CONTEXT_LINES: usize = 5;
 pub(crate) const MAX_FILE_SEARCH_CONTEXT_LINES: usize = 100;
 
@@ -697,6 +702,28 @@ where
 {
     let value = usize::deserialize(deserializer)?;
     validate_max_file_search_context_lines(value).map_err(de::Error::custom)?;
+    Ok(value)
+}
+
+fn default_process_response_bytes() -> usize {
+    DEFAULT_PROCESS_RESPONSE_BYTES
+}
+
+pub(crate) fn validate_process_response_bytes(value: usize) -> Result<()> {
+    if !(MIN_PROCESS_RESPONSE_BYTES..=MAX_PROCESS_RESPONSE_BYTES).contains(&value) {
+        return Err(anyhow!(
+            "processResponseBytes must be between {MIN_PROCESS_RESPONSE_BYTES} and {MAX_PROCESS_RESPONSE_BYTES}"
+        ));
+    }
+    Ok(())
+}
+
+fn deserialize_process_response_bytes<'de, D>(deserializer: D) -> Result<usize, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = usize::deserialize(deserializer)?;
+    validate_process_response_bytes(value).map_err(de::Error::custom)?;
     Ok(value)
 }
 
@@ -1014,6 +1041,7 @@ impl Config {
                 max_concurrent_tasks: 2,
                 max_active_processes: MaxActiveProcesses::Auto,
                 max_file_search_context_lines: DEFAULT_MAX_FILE_SEARCH_CONTEXT_LINES,
+                process_response_bytes: DEFAULT_PROCESS_RESPONSE_BYTES,
             },
             skills: RoomSkillsConfig::default(),
             room: default_room_config(),
@@ -2397,6 +2425,10 @@ mod tests {
             config.limits.max_file_search_context_lines,
             DEFAULT_MAX_FILE_SEARCH_CONTEXT_LINES
         );
+        assert_eq!(
+            config.limits.process_response_bytes,
+            DEFAULT_PROCESS_RESPONSE_BYTES
+        );
         assert_eq!(config.mcp_servers.len(), 2);
         assert!(config.mcp_servers.values().all(|server| !server.enabled));
         assert_eq!(value["hub"]["agentSecret"], "change-me-before-use");
@@ -2410,6 +2442,24 @@ mod tests {
         assert!(value["limits"].get("sessionIdleTimeoutSecs").is_none());
         assert!(!source.contains("AGENTIC_GPT_API_KEY="));
         assert!(!source.contains("integration-secret"));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn old_config_without_process_response_bytes_uses_default() {
+        let path = temp_config_path();
+        let mut value = serde_json::to_value(Config::default_config().unwrap()).unwrap();
+        value["limits"]
+            .as_object_mut()
+            .unwrap()
+            .remove("processResponseBytes");
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+
+        let config = Config::load(&path).unwrap();
+        assert_eq!(
+            config.limits.process_response_bytes,
+            DEFAULT_PROCESS_RESPONSE_BYTES
+        );
         let _ = fs::remove_file(path);
     }
 
@@ -2453,6 +2503,39 @@ mod tests {
         assert!(base(json!(-1)).is_err());
         assert!(base(json!(1.5)).is_err());
         assert!(base(json!(MAX_FILE_SEARCH_CONTEXT_LINES + 1)).is_err());
+    }
+
+    #[test]
+    fn process_response_bytes_defaults_validates_bounds_and_rejects_invalid_values() {
+        let limits = |process_response_bytes: serde_json::Value| {
+            serde_json::from_value::<LimitsConfig>(json!({
+                "maxConcurrentTasks": 2,
+                "maxActiveProcesses": "auto",
+                "processResponseBytes": process_response_bytes,
+            }))
+        };
+        let defaults = serde_json::from_value::<LimitsConfig>(json!({
+            "maxConcurrentTasks": 2,
+            "maxActiveProcesses": "auto",
+        }))
+        .unwrap();
+        assert_eq!(
+            defaults.process_response_bytes,
+            DEFAULT_PROCESS_RESPONSE_BYTES
+        );
+
+        for value in [MIN_PROCESS_RESPONSE_BYTES, MAX_PROCESS_RESPONSE_BYTES] {
+            assert_eq!(limits(json!(value)).unwrap().process_response_bytes, value);
+        }
+        for value in [
+            json!(MIN_PROCESS_RESPONSE_BYTES - 1),
+            json!(MAX_PROCESS_RESPONSE_BYTES + 1),
+            json!(-1),
+            json!(1.5),
+            json!("8192"),
+        ] {
+            assert!(limits(value).is_err());
+        }
     }
 
     #[test]

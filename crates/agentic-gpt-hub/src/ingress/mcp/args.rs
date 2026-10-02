@@ -7,9 +7,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{
-    default_process_list_limit, default_process_output_max_bytes, default_process_result_max_bytes,
-    default_process_wait_seconds, default_room_notebook_limit, default_room_wait_seconds,
-    default_standard_wait_seconds,
+    default_process_list_limit, default_process_wait_seconds, default_room_notebook_limit,
+    default_room_wait_seconds, default_standard_wait_seconds,
 };
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
@@ -246,20 +245,57 @@ pub(super) struct ProcessIdArgs {
     pub(super) process_id: String,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum ProcessReadViewArgs {
+    #[default]
+    Auto,
+    Status,
+}
+
+impl From<ProcessReadViewArgs> for agentic_gpt_protocol::ProcessReadView {
+    fn from(value: ProcessReadViewArgs) -> Self {
+        match value {
+            ProcessReadViewArgs::Auto => Self::Auto,
+            ProcessReadViewArgs::Status => Self::Status,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct ProcessStatusArgs {
-    #[schemars(description = "目标本地 Agent ID；必须是 Hub 中已启用的 Agent。")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct ProcessReadArgs {
+    #[schemars(
+        description = "目标本地 Agent ID；必须是 Hub 中已启用的 Agent。Room skill 首响返回的 agentId 必须原样复用，不会按当前活动 Room 自动路由。"
+    )]
     pub(super) agent_id: String,
-    #[schemars(description = "要检查的托管进程 ID。")]
+    #[schemars(
+        description = "要读取的托管进程 ID；使用 process.exec、process.batch、skills.run 或 mcp.callTool 返回的 processId。"
+    )]
     pub(super) process_id: String,
     #[serde(default)]
     #[schemars(
         range(min = 0, max = 30),
         default = "default_process_wait_seconds",
-        description = "等待状态变化的最长秒数；省略或传 null 时为 5，范围 0–30，超过 30 时运行时按 30 处理；0 表示立即读取当前状态。"
+        description = "等待可观察变化的最长秒数；省略或传 null 时为 5，范围 0–30，超过 30 时按 30 处理；0 立即读取。auto 有输出 backlog 时优先返回，status 只等待执行终态或期限；等待超时不取消进程。"
     )]
     pub(super) wait_seconds: Option<u64>,
+    #[serde(default)]
+    #[schemars(
+        description = "观察视图：auto（默认）读取有界输出或 kind=mcp 结果并可等待；status 仅返回状态元数据，不含输出或结构化结果。"
+    )]
+    pub(super) view: Option<ProcessReadViewArgs>,
+    #[serde(default)]
+    #[schemars(
+        description = "auto 视图的非消费式输出游标，用于续读 command/skill 输出；status 不能与 cursor 同时使用。kind=mcp 的下游结果不支持输出 cursor，应读取 mcpResult。"
+    )]
+    pub(super) cursor: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        range(min = 4096, max = 1048576),
+        description = "整个紧凑 ProcessResponse 的 JSON UTF-8 字节预算；省略时不在 Hub 覆盖 Agent 当前 limits.processResponseBytes（出厂默认 8192）；显式值范围 4096–1048576。"
+    )]
+    pub(super) max_bytes: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
@@ -294,43 +330,6 @@ pub(super) struct ProcessListArgs {
         description = "上一页 process.list 响应中的 nextCursor；不透明游标，原样传回以继续分页。"
     )]
     pub(super) cursor: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct ProcessOutputArgs {
-    #[schemars(description = "目标本地 Agent ID；必须是 Hub 中已启用的 Agent。")]
-    pub(super) agent_id: String,
-    #[schemars(description = "要读取输出的托管进程 ID。")]
-    pub(super) process_id: String,
-    #[serde(default)]
-    #[schemars(
-        description = "上一页 process.output 响应中的游标；不透明续读令牌，原样传回以读取下一页。"
-    )]
-    pub(super) cursor: Option<String>,
-    #[serde(default)]
-    #[schemars(
-        range(min = 1, max = 32768),
-        default = "default_process_output_max_bytes",
-        description = "本次输出页 stdout 与 stderr 合计的最大字节数；默认 8192，范围 1–32768。"
-    )]
-    pub(super) max_bytes: Option<usize>,
-}
-
-#[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct ProcessResultArgs {
-    #[schemars(description = "目标本地 Agent ID；必须是 Hub 中已启用的 Agent。")]
-    pub(super) agent_id: String,
-    #[schemars(description = "要读取结构化结果的托管进程 ID。")]
-    pub(super) process_id: String,
-    #[serde(default)]
-    #[schemars(
-        range(min = 1, max = 524288),
-        default = "default_process_result_max_bytes",
-        description = "响应中可包含的结构化结果最大字节数；默认 8192，范围 1–524288，过大的完整结果可能报告为过大而不返回内容。"
-    )]
-    pub(super) max_bytes: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]

@@ -56,7 +56,8 @@
   },
   "limits": {
     "maxConcurrentTasks": 2,
-    "maxActiveProcesses": "auto"
+    "maxActiveProcesses": "auto",
+    "processResponseBytes": 8192
   },
   "mcpServers": {
     "example-http": {

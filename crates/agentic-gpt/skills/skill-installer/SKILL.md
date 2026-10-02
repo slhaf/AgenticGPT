@@ -45,10 +45,9 @@ the package and never executes its scripts.
 For an active workspace-backed skill, `skills.run` accepts the skill `id`, a
 package-relative executable path below `scripts/`, optional direct `args`, an
 optional policy-validated `workingDirectory`, and a bounded `waitSeconds`.
-It returns a managed process envelope with a `processId`. Fast terminal
-executions are included in the response; otherwise use `process.status` with
-that `processId` to inspect lifecycle metadata, `process.output` for bounded
-output, and `process.result` for the retained result. Use `process.cancel` with
-the same `processId` when execution should stop. This lifecycle is separate
-from `skills.install` and its `skills.install.get` / `skills.install.cancel`
-operations above.
+It returns a compact managed-process observation, including the owning
+`agentId`. Use `process.read` with the `processId` to inspect lifecycle state and
+available command output, or `process.cancel` when execution should stop.
+Command and skill output can be read in pages with `process.read`'s `cursor`;
+this lifecycle is separate from `skills.install` and its
+`skills.install.get` / `skills.install.cancel` operations above.

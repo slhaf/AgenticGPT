@@ -5,15 +5,16 @@ use std::sync::{
     Arc, Weak,
 };
 
+#[cfg(test)]
+use agentic_gpt_protocol::DEFAULT_PROCESS_RESPONSE_BYTES;
 use agentic_gpt_protocol::{
     normalize_process_group, EventOrigin, EventSource, ProcessBatchExecRequest,
     ProcessBatchResponse, ProcessCancelResponse, ProcessCaptureStatus, ProcessCursor,
-    ProcessDetail, ProcessError, ProcessExecRequest, ProcessInfo, ProcessInlineOutput,
-    ProcessInlineStream, ProcessKind, ProcessListItem, ProcessListRequest, ProcessListResponse,
-    ProcessOutputEncoding, ProcessOutputGap, ProcessOutputPreview, ProcessOutputRequest,
-    ProcessOutputResponse, ProcessOutputSegment, ProcessResponse, ProcessResultRequest,
-    ProcessResultResponse, ProcessResultStatus, ProcessState, ProcessStatusRequest,
-    ProcessStatusResponse,
+    ProcessDetail, ProcessError, ProcessExecRequest, ProcessInfo, ProcessKind, ProcessListItem,
+    ProcessListRequest, ProcessListResponse, ProcessMcpResult, ProcessMcpResultStatus,
+    ProcessOutputEncoding, ProcessOutputGap, ProcessOutputPage, ProcessOutputSegment,
+    ProcessReadRequest, ProcessReadView, ProcessResponse, ProcessState, MAX_PROCESS_RESPONSE_BYTES,
+    MIN_PROCESS_RESPONSE_BYTES,
 };
 use anyhow::Result;
 use base64::{
@@ -40,8 +41,6 @@ use crate::{
 };
 
 const PROCESS_OUTPUT_RING_CAPACITY: usize = 64 * 1024;
-const PROCESS_INLINE_RESPONSE_BYTES: usize = 8 * 1024;
-const PROCESS_INLINE_PREVIEW_BYTES: usize = 2 * 1024;
 
 const TERMINAL_PROCESS_HOT_CACHE_MINUTES: i64 = 5;
 const MAX_TERMINAL_PROCESSES: usize = 100;
@@ -49,7 +48,10 @@ const MAX_LIST_PROCESSES: usize = 100;
 pub(crate) const MAX_MCP_ARGUMENT_BYTES: usize = 256 * 1024;
 pub(crate) const MAX_MCP_RESULT_BYTES: usize = 512 * 1024;
 const MAX_MCP_RESULT_PREVIEW_BYTES: usize = 8 * 1024;
-const MAX_PROCESS_ERROR_BYTES: usize = 8 * 1024;
+pub(crate) const MAX_PROCESS_ERROR_BYTES: usize = 8 * 1024;
+pub(crate) const MAX_PROCESS_ERROR_CODE_BYTES: usize = 64;
+pub(crate) const MAX_PROCESS_RESPONSE_TEXT_BYTES: usize = 512;
+pub(crate) const PROCESS_RESPONSE_TRUNCATION_MARKER: &str = "[truncated]";
 pub(crate) const MCP_GLOBAL_CONCURRENCY: usize = 8;
 pub(crate) const MCP_PER_SERVER_CONCURRENCY: usize = 2;
 
@@ -233,9 +235,23 @@ impl ProcessOptions {
     }
 }
 
+#[derive(Debug)]
+pub(crate) struct ManagedProcessResponse {
+    pub(crate) response: ProcessResponse,
+    pub(crate) process: ProcessInfo,
+}
+
+#[derive(Debug)]
+pub(crate) struct ManagedProcessBatchResponse {
+    pub(crate) response: ProcessBatchResponse,
+    pub(crate) processes: Vec<ProcessInfo>,
+}
+
 pub(crate) struct ManagedProcessSpec {
     pub(crate) request: ProcessExecRequest,
     pub(crate) working_directory: std::path::PathBuf,
+    pub(crate) batch_id: Option<String>,
+    pub(crate) batch_index: Option<usize>,
     pub(crate) decision: PolicyDecision,
     pub(crate) confirmation_result: Option<String>,
     pub(crate) request_source: String,
@@ -886,10 +902,20 @@ pub(crate) async fn mcp_process_response(
     state: &AppState,
     process_id: &str,
     wait_seconds: u64,
-) -> Result<ProcessResponse, String> {
-    let detail = get_process_detail(state, process_id, wait_seconds).await?;
-    let completed_inline = detail.process.state.is_terminal();
-    Ok(creation_response(state, detail.process, completed_inline).await)
+    response_budget: usize,
+) -> Result<ManagedProcessResponse, String> {
+    get_process_read_with_budget(
+        state,
+        ProcessReadRequest {
+            process_id: process_id.to_string(),
+            wait_seconds: Some(wait_seconds),
+            view: ProcessReadView::Auto,
+            cursor: None,
+            max_bytes: Some(response_budget),
+        },
+        response_budget,
+    )
+    .await
 }
 
 fn bounded_error_message(value: String) -> String {
@@ -899,6 +925,21 @@ fn bounded_error_message(value: String) -> String {
     const SUFFIX: &str = "...[truncated]";
     let prefix_limit = MAX_PROCESS_ERROR_BYTES.saturating_sub(SUFFIX.len());
     format!("{}{}", utf8_prefix(&value, prefix_limit), SUFFIX)
+}
+
+pub(crate) fn bounded_response_text(value: &str) -> String {
+    if value.len() <= MAX_PROCESS_RESPONSE_TEXT_BYTES {
+        return value.to_string();
+    }
+    const SUFFIX: &str = "...[truncated]";
+    format!(
+        "{}{}",
+        utf8_prefix(
+            value,
+            MAX_PROCESS_RESPONSE_TEXT_BYTES.saturating_sub(SUFFIX.len())
+        ),
+        SUFFIX
+    )
 }
 
 fn utf8_prefix(value: &str, max_bytes: usize) -> &str {
@@ -912,247 +953,550 @@ fn utf8_prefix(value: &str, max_bytes: usize) -> &str {
     &value[..end]
 }
 
-pub(crate) async fn response(
-    state: &AppState,
+struct ProcessObservation {
     process: ProcessInfo,
-    completed_inline: bool,
-) -> ProcessResponse {
-    creation_response(state, process, completed_inline).await
+    detail: ProcessDetail,
+    output: Option<crate::process_history::ProcessOutputSnapshot>,
 }
 
-async fn creation_response(
-    state: &AppState,
-    process: ProcessInfo,
-    completed_inline: bool,
-) -> ProcessResponse {
-    let mut response = ProcessResponse {
-        status: process.state,
-        completed_inline,
-        process: process.clone(),
-        poll_after_ms: if completed_inline { 0 } else { 1_000 },
-        inline_output: None,
-        output_preview: None,
-        result: None,
-        result_status: None,
-        result_available: false,
-        result_bytes: None,
-        result_sha256: None,
-        result_preview: None,
-        error: None,
+fn process_recorded_failure_error(process: &ProcessInfo) -> Option<ProcessError> {
+    let reason = match process.state {
+        ProcessState::Rejected => process
+            .reject_reason
+            .as_deref()
+            .unwrap_or("process_rejected"),
+        ProcessState::Failed => process.reject_reason.as_deref()?,
+        _ => return None,
     };
-    let mut output_snapshot = None;
-    if process.kind == ProcessKind::Mcp {
-        if let Ok(detail) = get_process_detail(state, &process.process_id, 0).await {
-            response.result_available = detail.result_available;
-            response.result_bytes = detail.result_bytes;
-            response.result_sha256 = detail.result_sha256.clone();
-            response.result_preview = detail
-                .result_preview
-                .as_deref()
-                .map(|preview| utf8_prefix(preview, PROCESS_INLINE_PREVIEW_BYTES).to_string());
-            response.error = detail.error;
-            if detail.result_available {
-                response.result_status = Some(ProcessResultStatus::Complete);
-                response.result = detail.result;
-            } else if completed_inline {
-                response.result_status = Some(
-                    if detail
-                        .result_bytes
-                        .is_some_and(|bytes| bytes > MAX_MCP_RESULT_BYTES)
-                    {
-                        ProcessResultStatus::TooLarge
-                    } else {
-                        ProcessResultStatus::Unavailable
-                    },
-                );
-            }
-        } else {
-            response.result_status = Some(ProcessResultStatus::Unavailable);
-        }
-    } else if let Ok(read) = process_output_for(state, &process.process_id).await {
-        let output = read.snapshot;
-        let capture_complete = read.capture_status == ProcessCaptureStatus::Complete;
-        let retained_from_start =
-            output.stdout_start_offset == 0 && output.stderr_start_offset == 0;
-        if completed_inline && capture_complete && retained_from_start {
-            response.inline_output = Some(ProcessInlineOutput {
-                stdout: inline_stream(&output.stdout),
-                stderr: inline_stream(&output.stderr),
-            });
-        } else if !output.stdout.is_empty()
-            || !output.stderr.is_empty()
-            || read.capture_status != ProcessCaptureStatus::Complete
-            || !retained_from_start
-        {
-            response.output_preview =
-                Some(output_preview(&output, PROCESS_INLINE_PREVIEW_BYTES, true));
-        }
-        output_snapshot = Some(output);
-    }
-    if process.kind != ProcessKind::Mcp && completed_inline && response.inline_output.is_none() {
-        response.completed_inline = false;
-        response.poll_after_ms = 1_000;
-    }
-    if serialized_size(&response) > PROCESS_INLINE_RESPONSE_BYTES {
-        response.completed_inline = false;
-        response.poll_after_ms = 1_000;
-        if response.inline_output.take().is_some() {
-            if let Some(output) = output_snapshot.as_ref() {
-                response.output_preview =
-                    Some(output_preview(output, PROCESS_INLINE_PREVIEW_BYTES, true));
-            }
-        }
-        if let Some(result) = response.result.take() {
-            response.result_status = Some(ProcessResultStatus::TooLarge);
-            let serialized = serde_json::to_string(&result).unwrap_or_default();
-            response.result_preview =
-                Some(utf8_prefix(&serialized, PROCESS_INLINE_PREVIEW_BYTES).to_string());
-        }
-    }
-    fit_process_response(&mut response);
-    response
+    let code = reason
+        .split([':', ';'])
+        .next()
+        .map(str::trim)
+        .filter(|code| {
+            !code.is_empty()
+                && code
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric() || character == '_')
+        })
+        .unwrap_or("process_rejected")
+        .chars()
+        .take(MAX_PROCESS_ERROR_CODE_BYTES)
+        .collect();
+    Some(ProcessError {
+        code,
+        message: bounded_response_text(reason),
+    })
 }
 
-fn inline_stream(bytes: &[u8]) -> ProcessInlineStream {
-    match std::str::from_utf8(bytes) {
-        Ok(text) => ProcessInlineStream {
-            data: text.to_string(),
-            encoding: ProcessOutputEncoding::Utf8,
-        },
-        Err(_) => ProcessInlineStream {
-            data: BASE64.encode(bytes),
-            encoding: ProcessOutputEncoding::Base64,
-        },
+fn process_mcp_result(detail: ProcessDetail) -> ProcessMcpResult {
+    let ProcessDetail {
+        process,
+        detail_available,
+        result,
+        result_available,
+        result_bytes,
+        result_sha256,
+        result_preview,
+        ..
+    } = detail;
+    let status = if process.state.is_active() {
+        ProcessMcpResultStatus::Pending
+    } else if result_bytes.is_some_and(|bytes| bytes > MAX_MCP_RESULT_BYTES) {
+        ProcessMcpResultStatus::NotRetained
+    } else if !detail_available || !result_available || result.is_none() {
+        ProcessMcpResultStatus::Unavailable
+    } else {
+        ProcessMcpResultStatus::Included
+    };
+    ProcessMcpResult {
+        status,
+        bytes: result_bytes,
+        sha256: result_sha256,
+        value: (status == ProcessMcpResultStatus::Included)
+            .then_some(result)
+            .flatten(),
+        preview: (status != ProcessMcpResultStatus::Included)
+            .then_some(result_preview)
+            .flatten()
+            .map(|value| bounded_response_text(&value)),
     }
 }
 
-fn output_preview(
-    output: &crate::process_history::ProcessOutputSnapshot,
-    max_bytes: usize,
-    truncated: bool,
-) -> ProcessOutputPreview {
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let first = max_bytes / 2;
-    let mut stdout_budget = stdout.len().min(first);
-    let mut stderr_budget = stderr.len().min(max_bytes - first);
-    let mut spare = max_bytes.saturating_sub(stdout_budget + stderr_budget);
-    let more_stdout = stdout.len().saturating_sub(stdout_budget).min(spare);
-    stdout_budget += more_stdout;
-    spare -= more_stdout;
-    stderr_budget += stderr.len().saturating_sub(stderr_budget).min(spare);
-    let stdout_value = utf8_prefix(&stdout, stdout_budget).to_string();
-    let stderr_value = utf8_prefix(&stderr, stderr_budget).to_string();
-    ProcessOutputPreview {
-        truncated: truncated
-            || stdout_value.len() < stdout.len()
-            || stderr_value.len() < stderr.len()
-            || output.stdout_start_offset > 0
-            || output.stderr_start_offset > 0,
-        stdout: stdout_value,
-        stderr: stderr_value,
+struct CountingWriter {
+    bytes: usize,
+}
+
+impl std::io::Write for CountingWriter {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.bytes = self.bytes.saturating_add(buffer.len());
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
 
 fn serialized_size<T: serde::Serialize>(value: &T) -> usize {
-    serde_json::to_vec(value)
-        .map(|bytes| bytes.len())
-        .unwrap_or(usize::MAX)
-}
-
-fn fit_process_response(response: &mut ProcessResponse) {
-    if serialized_size(response) <= PROCESS_INLINE_RESPONSE_BYTES {
-        return;
-    }
-    response.completed_inline = false;
-    response.poll_after_ms = 1_000;
-    compact_process_response(response);
-    if serialized_size(response) > PROCESS_INLINE_RESPONSE_BYTES {
-        response.output_preview = None;
-        response.result_preview = None;
-        response.error = None;
-        response.process.reject_reason = None;
-        response.process.command_preview = None;
-        response.process.working_directory = None;
-        response.process.skill_path = None;
-        response.process.capture_error = None;
+    let mut writer = CountingWriter { bytes: 0 };
+    if serde_json::to_writer(&mut writer, value).is_ok() {
+        writer.bytes
+    } else {
+        usize::MAX
     }
 }
 
-fn compact_process_response(response: &mut ProcessResponse) {
-    response.process.args.clear();
-    response.process.agent_id = utf8_prefix(&response.process.agent_id, 256).to_string();
-    response.process.program = response
-        .process
-        .program
-        .as_deref()
-        .map(|value| utf8_prefix(value, 256).to_string());
-    response.process.command_preview = response
-        .process
-        .command_preview
-        .as_deref()
-        .map(|value| utf8_prefix(value, 256).to_string());
-    response.process.working_directory = response
-        .process
-        .working_directory
-        .as_deref()
-        .map(|value| utf8_prefix(value, 256).to_string());
-    response.process.reject_reason = response
-        .process
-        .reject_reason
-        .as_deref()
-        .map(|value| utf8_prefix(value, 512).to_string());
-    response.process.skill_path = response
-        .process
-        .skill_path
-        .as_deref()
-        .map(|value| utf8_prefix(value, 256).to_string());
-    response.process.mcp_server_id = response
-        .process
-        .mcp_server_id
-        .as_deref()
-        .map(|value| utf8_prefix(value, 256).to_string());
-    response.process.mcp_tool_name = response
-        .process
-        .mcp_tool_name
-        .as_deref()
-        .map(|value| utf8_prefix(value, 256).to_string());
-    response.process.capture_error = response
-        .process
-        .capture_error
-        .as_deref()
-        .map(|value| utf8_prefix(value, 512).to_string());
+pub(crate) fn serialized_json_size<T: serde::Serialize>(value: &T) -> usize {
+    serialized_size(value)
+}
+
+fn json_string_content_size(value: &str) -> usize {
+    value.chars().fold(0usize, |bytes, character| {
+        bytes.saturating_add(match character {
+            '"' | '\\' | '\u{0008}' | '\u{0009}' | '\u{000a}' | '\u{000c}' | '\u{000d}' => 2,
+            '\u{0000}'..='\u{001f}' => 6,
+            _ => character.len_utf8(),
+        })
+    })
+}
+
+fn utf8_prefix_for_json_budget(value: &str, budget: usize) -> &str {
+    let mut bytes = 0usize;
+    let mut end = 0usize;
+    for character in value.chars() {
+        let cost = match character {
+            '"' | '\\' | '\u{0008}' | '\u{0009}' | '\u{000a}' | '\u{000c}' | '\u{000d}' => 2,
+            '\u{0000}'..='\u{001f}' => 6,
+            _ => character.len_utf8(),
+        };
+        if bytes.saturating_add(cost) > budget {
+            break;
+        }
+        bytes += cost;
+        end += character.len_utf8();
+    }
+    &value[..end]
+}
+
+fn output_payload_plan(data: &[u8], json_budget: usize) -> (ProcessOutputEncoding, usize, usize) {
+    if data.is_empty() || json_budget == 0 {
+        return (ProcessOutputEncoding::Utf8, 0, 0);
+    }
+    match std::str::from_utf8(data) {
+        Ok(text) => {
+            let prefix = utf8_prefix_for_json_budget(text, json_budget);
+            (
+                ProcessOutputEncoding::Utf8,
+                prefix.len(),
+                json_string_content_size(prefix),
+            )
+        }
+        Err(error) if error.valid_up_to() > 0 => {
+            let text =
+                std::str::from_utf8(&data[..error.valid_up_to()]).expect("valid UTF-8 prefix");
+            let prefix = utf8_prefix_for_json_budget(text, json_budget);
+            (
+                ProcessOutputEncoding::Utf8,
+                prefix.len(),
+                json_string_content_size(prefix),
+            )
+        }
+        Err(_) => {
+            let mut raw_bytes = (json_budget / 4).saturating_mul(3).min(data.len());
+            while raw_bytes > 0 && raw_bytes.saturating_add(2) / 3 * 4 > json_budget {
+                raw_bytes -= 1;
+            }
+            let encoded_bytes = raw_bytes.saturating_add(2) / 3 * 4;
+            (ProcessOutputEncoding::Base64, raw_bytes, encoded_bytes)
+        }
+    }
+}
+
+fn encode_output_prefix(data: &[u8], encoding: ProcessOutputEncoding, raw_bytes: usize) -> String {
+    match encoding {
+        ProcessOutputEncoding::Utf8 => std::str::from_utf8(&data[..raw_bytes])
+            .expect("planned output prefix is UTF-8")
+            .to_string(),
+        ProcessOutputEncoding::Base64 => BASE64.encode(&data[..raw_bytes]),
+    }
+}
+
+fn output_segment_for_json_budget(
+    data: &[u8],
+    retained_start: u64,
+    end_offset: u64,
+    requested_offset: u64,
+    json_budget: usize,
+) -> Result<(ProcessOutputSegment, u64, usize), String> {
+    if retained_start > end_offset || end_offset - retained_start != data.len() as u64 {
+        return Err("process_output_snapshot_invalid".to_string());
+    }
+    if requested_offset > end_offset {
+        return Err("process_output_cursor_ahead_of_output".to_string());
+    }
+    let data_start = requested_offset.max(retained_start);
+    let gap = (requested_offset < retained_start).then(|| ProcessOutputGap {
+        start_offset: requested_offset.to_string(),
+        end_offset: retained_start.to_string(),
+    });
+    let start_index = usize::try_from(data_start - retained_start)
+        .map_err(|_| "process_output_snapshot_invalid".to_string())?;
+    let available = &data[start_index..];
+    let (encoding, raw_bytes, encoded_bytes) = output_payload_plan(available, json_budget);
+    let payload = encode_output_prefix(available, encoding, raw_bytes);
+    let next_offset = data_start + raw_bytes as u64;
+    Ok((
+        ProcessOutputSegment {
+            data: payload,
+            start_offset: data_start.to_string(),
+            end_offset: next_offset.to_string(),
+            encoding,
+            gap,
+        },
+        next_offset,
+        encoded_bytes,
+    ))
+}
+
+fn encode_output_cursor(cursor: ProcessCursor) -> Result<String, String> {
+    serde_json::to_vec(&cursor)
+        .map(|bytes| URL_SAFE_NO_PAD.encode(bytes))
+        .map_err(|_| "process_output_cursor_encode_failed".to_string())
+}
+
+fn output_page_reservation(
+    snapshot: &crate::process_history::ProcessOutputSnapshot,
+    process_id: &str,
+    cursor: &ProcessCursor,
+) -> Result<ProcessOutputPage, String> {
+    let (mut stdout, _, _) = output_segment_for_json_budget(
+        &snapshot.stdout,
+        snapshot.stdout_start_offset,
+        snapshot.stdout_end_offset,
+        cursor.stdout_offset,
+        0,
+    )?;
+    let (mut stderr, _, _) = output_segment_for_json_budget(
+        &snapshot.stderr,
+        snapshot.stderr_start_offset,
+        snapshot.stderr_end_offset,
+        cursor.stderr_offset,
+        0,
+    )?;
+    stdout.encoding = ProcessOutputEncoding::Base64;
+    stdout.end_offset = u64::MAX.to_string();
+    stderr.encoding = ProcessOutputEncoding::Base64;
+    stderr.end_offset = u64::MAX.to_string();
+    Ok(ProcessOutputPage {
+        stdout,
+        stderr,
+        next_cursor: encode_output_cursor(ProcessCursor {
+            version: 1,
+            process_id: process_id.to_string(),
+            stdout_offset: u64::MAX,
+            stderr_offset: u64::MAX,
+        })?,
+        has_more: false,
+        eof: false,
+    })
+}
+
+fn output_page_for_json_budget(
+    snapshot: &crate::process_history::ProcessOutputSnapshot,
+    process_id: &str,
+    cursor: &ProcessCursor,
+    capture_status: ProcessCaptureStatus,
+    json_budget: usize,
+) -> Result<(ProcessOutputPage, usize), String> {
+    let stdout_available =
+        snapshot.stdout_end_offset > cursor.stdout_offset.max(snapshot.stdout_start_offset);
+    let stderr_available =
+        snapshot.stderr_end_offset > cursor.stderr_offset.max(snapshot.stderr_start_offset);
+    let (stdout_budget, stderr_budget) = match (stdout_available, stderr_available) {
+        (true, true) => (json_budget / 2, json_budget - json_budget / 2),
+        (true, false) => (json_budget, 0),
+        (false, true) => (0, json_budget),
+        (false, false) => (0, 0),
+    };
+    let (stdout, stdout_next, stdout_used) = output_segment_for_json_budget(
+        &snapshot.stdout,
+        snapshot.stdout_start_offset,
+        snapshot.stdout_end_offset,
+        cursor.stdout_offset,
+        stdout_budget,
+    )?;
+    let (stderr, stderr_next, stderr_used) = output_segment_for_json_budget(
+        &snapshot.stderr,
+        snapshot.stderr_start_offset,
+        snapshot.stderr_end_offset,
+        cursor.stderr_offset,
+        stderr_budget,
+    )?;
+    let used = stdout_used.saturating_add(stderr_used);
+    let has_more =
+        stdout_next < snapshot.stdout_end_offset || stderr_next < snapshot.stderr_end_offset;
+    let eof = !has_more
+        && matches!(
+            capture_status,
+            ProcessCaptureStatus::Complete | ProcessCaptureStatus::NotApplicable
+        );
+    Ok((
+        ProcessOutputPage {
+            stdout,
+            stderr,
+            next_cursor: encode_output_cursor(ProcessCursor {
+                version: 1,
+                process_id: process_id.to_string(),
+                stdout_offset: stdout_next,
+                stderr_offset: stderr_next,
+            })?,
+            has_more,
+            eof,
+        },
+        used,
+    ))
+}
+
+fn fit_process_response(
+    response: &mut ProcessResponse,
+    output: Option<&crate::process_history::ProcessOutputSnapshot>,
+    cursor: Option<&ProcessCursor>,
+    fallback_result_preview: Option<String>,
+    response_budget: usize,
+) -> Result<(), String> {
+    if response
+        .mcp_result
+        .as_ref()
+        .is_some_and(|result| result.status == ProcessMcpResultStatus::Included)
+        && serialized_size(response) <= response_budget
+    {
+        return Ok(());
+    }
+    if let Some(result) = response.mcp_result.as_mut() {
+        if result.status == ProcessMcpResultStatus::Included {
+            result.status = ProcessMcpResultStatus::Deferred;
+            result.value = None;
+            result.preview = fallback_result_preview.map(|value| bounded_response_text(&value));
+        }
+    }
+    if let Some(snapshot) = output {
+        let empty_cursor = ProcessCursor {
+            version: 1,
+            process_id: response.process_id.clone(),
+            stdout_offset: 0,
+            stderr_offset: 0,
+        };
+        response.output = Some(output_page_reservation(
+            snapshot,
+            &response.process_id,
+            cursor.unwrap_or(&empty_cursor),
+        )?);
+    }
     if let Some(error) = response.error.as_mut() {
-        error.code = utf8_prefix(&error.code, 128).to_string();
-        error.message = utf8_prefix(&error.message, 512).to_string();
+        error.message = bounded_response_text(&error.message);
     }
-    response.result_preview = response
-        .result_preview
-        .as_deref()
-        .map(|value| utf8_prefix(value, 512).to_string());
+    if let Some(capture_error) = response.capture_error.as_mut() {
+        *capture_error = bounded_response_text(capture_error);
+    }
+    let mut size = serialized_size(response);
+    if size > response_budget {
+        if let Some(error) = response.error.as_mut() {
+            if !error.message.is_empty() {
+                error.message = PROCESS_RESPONSE_TRUNCATION_MARKER.to_string();
+            }
+        }
+        response.capture_error = None;
+        if let Some(result) = response.mcp_result.as_mut() {
+            result.preview = None;
+        }
+        size = serialized_size(response);
+    }
+    if size > response_budget {
+        return Err("process_response_budget_too_small".to_string());
+    }
+    if let Some(snapshot) = output {
+        let cursor = cursor.cloned().unwrap_or_else(|| ProcessCursor {
+            version: 1,
+            process_id: response.process_id.clone(),
+            stdout_offset: 0,
+            stderr_offset: 0,
+        });
+        let available_data_budget = response_budget.saturating_sub(size);
+        let (actual_page, used) = output_page_for_json_budget(
+            snapshot,
+            &response.process_id,
+            &cursor,
+            response.capture_status,
+            available_data_budget,
+        )?;
+        let stdout_progress = actual_page
+            .stdout
+            .end_offset
+            .parse::<u64>()
+            .ok()
+            .is_some_and(|offset| offset > cursor.stdout_offset);
+        let stderr_progress = actual_page
+            .stderr
+            .end_offset
+            .parse::<u64>()
+            .ok()
+            .is_some_and(|offset| offset > cursor.stderr_offset);
+        if used > available_data_budget
+            || (actual_page.has_more && !stdout_progress && !stderr_progress)
+        {
+            return Err("process_response_budget_too_small".to_string());
+        }
+        response.output = Some(actual_page);
+    }
+    if serialized_size(response) > response_budget {
+        return Err("process_response_budget_too_small".to_string());
+    }
+    Ok(())
 }
 
+fn response_error(process: &ProcessInfo, detail: &ProcessDetail) -> Option<ProcessError> {
+    detail
+        .error
+        .clone()
+        .or_else(|| process_recorded_failure_error(process))
+        .map(|mut error| {
+            error.message = bounded_response_text(&error.message);
+            error
+        })
+}
+
+fn process_response_base(
+    observation: ProcessObservation,
+    view: ProcessReadView,
+    wait_elapsed_ms: u64,
+) -> (
+    ProcessResponse,
+    ProcessInfo,
+    Option<crate::process_history::ProcessOutputSnapshot>,
+    Option<String>,
+) {
+    let ProcessObservation {
+        process,
+        detail,
+        output,
+    } = observation;
+    let include_artifacts = view == ProcessReadView::Auto;
+    let fallback_result_preview = detail.result_preview.clone();
+    let error = response_error(&process, &detail);
+    let mcp_result =
+        (include_artifacts && process.kind == ProcessKind::Mcp).then(|| process_mcp_result(detail));
+    let response = ProcessResponse {
+        agent_id: process.agent_id.clone(),
+        process_id: process.process_id.clone(),
+        kind: process.kind,
+        state: process.state,
+        capture_status: process.capture_status,
+        group: process.group.clone(),
+        batch_id: process.batch_id.clone(),
+        batch_index: process.batch_index,
+        exit_code: process.exit_code,
+        wait_elapsed_ms: Some(wait_elapsed_ms),
+        error,
+        cancel_outcome: process.cancel_outcome.clone(),
+        termination_evidence: process.termination_evidence.clone(),
+        capture_error: process
+            .capture_error
+            .clone()
+            .map(|value| bounded_response_text(&value)),
+        output: None,
+        mcp_result,
+    };
+    let output = (include_artifacts && process.kind != ProcessKind::Mcp)
+        .then_some(output)
+        .flatten();
+    (response, process, output, fallback_result_preview)
+}
+
+fn managed_response_from_observation(
+    observation: ProcessObservation,
+    view: ProcessReadView,
+    cursor: Option<ProcessCursor>,
+    wait_elapsed_ms: u64,
+    response_budget: usize,
+) -> Result<ManagedProcessResponse, String> {
+    let (mut response, process, output, fallback_result_preview) =
+        process_response_base(observation, view, wait_elapsed_ms);
+    fit_process_response(
+        &mut response,
+        output.as_ref(),
+        cursor.as_ref(),
+        fallback_result_preview,
+        response_budget,
+    )?;
+    Ok(ManagedProcessResponse { response, process })
+}
+
+async fn response_after_process_wait(
+    state: &AppState,
+    process: ProcessInfo,
+    wait_seconds: u64,
+    started: Instant,
+    response_budget: usize,
+) -> Result<ManagedProcessResponse, String> {
+    let process = wait_for_process(state, process, wait_seconds).await;
+    let observation = if process.state.is_terminal()
+        && process.termination_evidence.as_deref() == Some("not_started")
+    {
+        ProcessObservation {
+            detail: status_process_detail(&process, None),
+            process,
+            output: None,
+        }
+    } else {
+        get_process_observation(state, &process.process_id, true).await?
+    };
+    managed_response_from_observation(
+        observation,
+        ProcessReadView::Auto,
+        None,
+        started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+        response_budget,
+    )
+}
 pub(crate) async fn start_and_wait_process(
     state: AppState,
     request: ProcessExecRequest,
     options: ProcessOptions,
-) -> ProcessResponse {
+    response_budget: usize,
+) -> Result<ManagedProcessResponse, String> {
+    let group = validated_group(request.group.as_deref())?;
+    ensure_process_response_fits(
+        &request.agent_id,
+        group.as_deref(),
+        ProcessKind::Command,
+        &state.boot_generation,
+        response_budget,
+    )?;
     let wait_seconds = request.effective_wait_seconds();
+    let started = Instant::now();
     let process = start_managed_process(state.clone(), request, options).await;
-    let process = wait_for_process(&state, process, wait_seconds).await;
-    response(&state, process.clone(), process.state.is_terminal()).await
+    response_after_process_wait(&state, process, wait_seconds, started, response_budget).await
 }
 
 pub(crate) async fn start_and_wait_skill_process(
     state: AppState,
     request: ProcessExecRequest,
-    skill_id: &str,
-    skill_path: &str,
+    (skill_id, skill_path): (&str, &str),
     request_source: &str,
     terminal_event_hook: Option<TerminalEventHook>,
     event_origin: Option<EventOrigin>,
-) -> ProcessResponse {
+    response_budget: usize,
+) -> Result<ManagedProcessResponse, String> {
+    let group = validated_group(request.group.as_deref())?;
+    ensure_process_response_fits(
+        &request.agent_id,
+        group.as_deref(),
+        ProcessKind::Skill,
+        &state.boot_generation,
+        response_budget,
+    )?;
     let wait_seconds = request.effective_wait_seconds();
+    let started = Instant::now();
     let process = start_skill_process_with_hook_and_source(
         state.clone(),
         request,
@@ -1163,8 +1507,7 @@ pub(crate) async fn start_and_wait_skill_process(
         event_origin,
     )
     .await;
-    let process = wait_for_process(&state, process, wait_seconds).await;
-    response(&state, process.clone(), process.state.is_terminal()).await
+    response_after_process_wait(&state, process, wait_seconds, started, response_budget).await
 }
 
 pub(crate) async fn start_process_batch(
@@ -1173,24 +1516,33 @@ pub(crate) async fn start_process_batch(
     request_source: String,
     terminal_event_hook: Option<TerminalEventHook>,
     event_origin: Option<EventOrigin>,
-) -> Result<ProcessBatchResponse, String> {
+    response_budget: usize,
+) -> Result<ManagedProcessBatchResponse, String> {
+    ensure_process_response_budget(response_budget)?;
     let wait_seconds = request.effective_wait_seconds();
     let batch_id = format!("batch_{}", uuid::Uuid::new_v4().simple());
     let group = validated_group(request.group.as_deref())?;
     if request.elements.is_empty() {
-        return Ok(ProcessBatchResponse {
+        let response = ProcessBatchResponse {
             batch_id,
             status: "completed".to_string(),
-            completed_inline: true,
-            poll_after_ms: 0,
+            processes: Vec::new(),
+        };
+        if serialized_size(&response) > response_budget {
+            return Err("process_batch_response_too_large".to_string());
+        }
+        return Ok(ManagedProcessBatchResponse {
+            response,
             processes: Vec::new(),
         });
     }
     ensure_process_batch_response_fits(
         &batch_id,
         &request.agent_id,
+        group.as_deref(),
         &state.boot_generation,
         request.elements.len(),
+        response_budget,
     )?;
     let config = Arc::new(state.config.read().await.clone());
     let mut prepared = Vec::with_capacity(request.elements.len());
@@ -1263,6 +1615,8 @@ pub(crate) async fn start_process_batch(
                 wait_seconds: request.wait_seconds,
             },
             working_directory: element.resolved_working_directory,
+            batch_id: Some(batch_id.clone()),
+            batch_index: Some(element.index),
             decision: element.decision,
             confirmation_result: confirmation_result.clone(),
             request_source: request_source.clone(),
@@ -1271,7 +1625,8 @@ pub(crate) async fn start_process_batch(
         })
         .collect::<Vec<_>>();
     let mut processes = start_prepared_managed_batch(state.clone(), config, specs).await?;
-    let deadline = Instant::now() + std::time::Duration::from_secs(wait_seconds);
+    let started = Instant::now();
+    let deadline = started + std::time::Duration::from_secs(wait_seconds);
     loop {
         let mut all_terminal = true;
         for process in &mut processes {
@@ -1285,247 +1640,236 @@ pub(crate) async fn start_process_batch(
         }
         sleep(std::time::Duration::from_millis(20)).await;
     }
-    let all_terminal = processes.iter().all(|process| process.state.is_terminal());
+    let mut response_processes = Vec::with_capacity(processes.len());
+    let mut snapshots = Vec::with_capacity(processes.len());
+    let mut outputs = Vec::with_capacity(processes.len());
+    let wait_elapsed_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+    let mut all_terminal = true;
+    let mut all_completed = true;
+    for process in processes {
+        let observation = get_process_observation(&state, &process.process_id, true).await?;
+        all_terminal &= observation.process.state.is_terminal();
+        all_completed &= observation.process.state == ProcessState::Completed;
+        let (response, snapshot, output, _) =
+            process_response_base(observation, ProcessReadView::Auto, wait_elapsed_ms);
+        response_processes.push(response);
+        snapshots.push(snapshot);
+        outputs.push(output);
+    }
     let status = if !all_terminal {
         "running"
-    } else if processes
-        .iter()
-        .any(|process| process.state != ProcessState::Completed)
-    {
+    } else if !all_completed {
         "completed_with_errors"
     } else {
         "completed"
     };
-    let mut items = Vec::with_capacity(processes.len());
-    for process in processes {
-        let child_completed = process.state.is_terminal();
-        items.push(creation_response(&state, process, child_completed).await);
-    }
-    let completed_inline = all_terminal && items.iter().all(|process| process.completed_inline);
-    Ok(fit_process_batch_response(ProcessBatchResponse {
-        batch_id,
-        status: status.to_string(),
-        completed_inline,
-        poll_after_ms: if completed_inline { 0 } else { 1_000 },
-        processes: items,
-    }))
+    let response = fit_process_batch_response(
+        ProcessBatchResponse {
+            batch_id,
+            status: status.to_string(),
+            processes: response_processes,
+        },
+        &outputs,
+        response_budget,
+    )?;
+    Ok(ManagedProcessBatchResponse {
+        response,
+        processes: snapshots,
+    })
 }
 
-fn fit_process_batch_response(mut response: ProcessBatchResponse) -> ProcessBatchResponse {
-    let preview_bytes = response
-        .processes
-        .iter()
-        .map(|process| {
-            process
-                .output_preview
-                .as_ref()
-                .map(|preview| preview.stdout.len() + preview.stderr.len())
-                .unwrap_or(0)
-                + process
-                    .result_preview
-                    .as_ref()
-                    .map(String::len)
-                    .unwrap_or(0)
-        })
-        .sum::<usize>();
-    if serialized_size(&response) <= PROCESS_INLINE_RESPONSE_BYTES
-        && preview_bytes <= PROCESS_INLINE_PREVIEW_BYTES
-    {
-        return response;
-    }
-    response.completed_inline = false;
-    response.poll_after_ms = 1_000;
-    let mut preview_budget = PROCESS_INLINE_PREVIEW_BYTES;
-    for process in &mut response.processes {
-        let mut output_preview_generated = false;
-        let mut result_preview_generated = false;
-        if let Some(inline) = process.inline_output.take() {
-            process.completed_inline = false;
-            process.poll_after_ms = 1_000;
-            let stdout = decode_inline_stream(&inline.stdout).unwrap_or_default();
-            let stderr = decode_inline_stream(&inline.stderr).unwrap_or_default();
-            let output = crate::process_history::ProcessOutputSnapshot {
-                stdout_end_offset: stdout.len() as u64,
-                stderr_end_offset: stderr.len() as u64,
-                stdout,
-                stderr,
-                ..crate::process_history::ProcessOutputSnapshot::default()
+fn fit_process_batch_response(
+    mut response: ProcessBatchResponse,
+    outputs: &[Option<crate::process_history::ProcessOutputSnapshot>],
+    response_budget: usize,
+) -> Result<ProcessBatchResponse, String> {
+    for (process, output) in response.processes.iter_mut().zip(outputs) {
+        if let Some(output) = output {
+            let cursor = ProcessCursor {
+                version: 1,
+                process_id: process.process_id.clone(),
+                stdout_offset: 0,
+                stderr_offset: 0,
             };
-            if preview_budget > 0 {
-                let preview = output_preview(&output, preview_budget, true);
-                preview_budget =
-                    preview_budget.saturating_sub(preview.stdout.len() + preview.stderr.len());
-                process.output_preview = Some(preview);
-                output_preview_generated = true;
-            }
-        }
-        if let Some(result) = process.result.take() {
-            process.completed_inline = false;
-            process.poll_after_ms = 1_000;
-            process.result_status = Some(ProcessResultStatus::TooLarge);
-            let text = serde_json::to_string(&result).unwrap_or_default();
-            if preview_budget > 0 {
-                let preview = utf8_prefix(&text, preview_budget).to_string();
-                preview_budget = preview_budget.saturating_sub(preview.len());
-                process.result_preview = Some(preview);
-                result_preview_generated = true;
-            }
-        }
-        if !output_preview_generated {
-            if let Some(preview) = process.output_preview.as_mut() {
-                let limited = limit_output_preview(preview, preview_budget);
-                preview_budget =
-                    preview_budget.saturating_sub(limited.stdout.len() + limited.stderr.len());
-                *preview = limited;
-            }
-        }
-        if !result_preview_generated {
-            if let Some(preview) = process.result_preview.as_mut() {
-                let limited = utf8_prefix(preview, preview_budget).to_string();
-                preview_budget = preview_budget.saturating_sub(limited.len());
-                *preview = limited;
-            }
+            process.output = Some(output_page_reservation(
+                output,
+                &process.process_id,
+                &cursor,
+            )?);
         }
     }
-
-    if serialized_size(&response) > PROCESS_INLINE_RESPONSE_BYTES {
+    let mut size = serialized_size(&response);
+    if size > response_budget {
         for process in &mut response.processes {
-            compact_batch_process_response(process);
+            let previous_size = serialized_size(process);
+            if let Some(error) = process.error.as_mut() {
+                if !error.message.is_empty() {
+                    error.message = PROCESS_RESPONSE_TRUNCATION_MARKER.to_string();
+                }
+            }
+            process.capture_error = None;
+            if let Some(result) = process.mcp_result.as_mut() {
+                result.preview = None;
+            }
+            size = size
+                .saturating_sub(previous_size)
+                .saturating_add(serialized_size(process));
+            if size <= response_budget {
+                break;
+            }
         }
     }
-    debug_assert!(serialized_size(&response) <= PROCESS_INLINE_RESPONSE_BYTES);
-    response
+    if size > response_budget {
+        return Err("process_batch_response_budget_too_small".to_string());
+    }
+    let output_count = outputs.iter().filter(|output| output.is_some()).count();
+    let mut remaining = response_budget - size;
+    let mut remaining_outputs = output_count;
+    for (process, output) in response.processes.iter_mut().zip(outputs) {
+        let Some(output) = output else {
+            continue;
+        };
+        let share = remaining.checked_div(remaining_outputs).unwrap_or(0);
+        let cursor = ProcessCursor {
+            version: 1,
+            process_id: process.process_id.clone(),
+            stdout_offset: 0,
+            stderr_offset: 0,
+        };
+        let (page, used) = output_page_for_json_budget(
+            output,
+            &process.process_id,
+            &cursor,
+            process.capture_status,
+            share,
+        )?;
+        process.output = Some(page);
+        remaining = remaining.saturating_sub(used);
+        remaining_outputs = remaining_outputs.saturating_sub(1);
+    }
+    if serialized_size(&response) > response_budget {
+        return Err("process_batch_response_budget_too_small".to_string());
+    }
+    Ok(response)
 }
 
-fn compact_batch_process_response(response: &mut ProcessResponse) {
-    compact_process_response(response);
-    response.completed_inline = false;
-    response.poll_after_ms = 1_000;
-    response.inline_output = None;
-    response.output_preview = None;
-    response.result = None;
-    response.result_status = None;
-    response.result_available = false;
-    response.result_bytes = None;
-    response.result_sha256 = None;
-    response.result_preview = None;
-    response.error = None;
-
-    let process = &mut response.process;
-    process.agent_id = utf8_prefix(&process.agent_id, 64).to_string();
-    process.group = None;
-    process.batch_id = None;
-    process.batch_call_id = None;
-    process.batch_index = None;
-    process.started_at = None;
-    process.finished_at = None;
-    process.program = None;
-    process.args.clear();
-    process.working_directory = None;
-    process.command_preview = None;
-    process.exit_code = None;
-    process.reject_reason = None;
-    process.skill_id = None;
-    process.skill_path = None;
-    process.installed_digest = None;
-    process.mcp_server_id = None;
-    process.mcp_tool_name = None;
-    process.cancel_requested = false;
-    process.cancel_outcome = None;
-    process.termination_evidence = None;
-    process.capture_error = None;
+fn worst_case_batch_process_response(
+    batch_id: &str,
+    agent_id: &str,
+    group: Option<&str>,
+    process_id: &str,
+    batch_index: usize,
+) -> ProcessResponse {
+    let segment = || ProcessOutputSegment {
+        data: String::new(),
+        start_offset: u64::MAX.to_string(),
+        end_offset: u64::MAX.to_string(),
+        encoding: ProcessOutputEncoding::Base64,
+        gap: Some(ProcessOutputGap {
+            start_offset: u64::MAX.to_string(),
+            end_offset: u64::MAX.to_string(),
+        }),
+    };
+    ProcessResponse {
+        agent_id: agent_id.to_string(),
+        process_id: process_id.to_string(),
+        kind: ProcessKind::Command,
+        state: ProcessState::UnknownAfterRestart,
+        capture_status: ProcessCaptureStatus::NotApplicable,
+        group: group.map(str::to_string),
+        batch_id: Some(batch_id.to_string()),
+        batch_index: Some(batch_index),
+        exit_code: Some(i32::MIN),
+        wait_elapsed_ms: Some(u64::MAX),
+        error: Some(ProcessError {
+            code: "x".repeat(64),
+            message: PROCESS_RESPONSE_TRUNCATION_MARKER.to_string(),
+        }),
+        cancel_outcome: Some("x".repeat(64)),
+        termination_evidence: Some("x".repeat(128)),
+        capture_error: None,
+        output: Some(ProcessOutputPage {
+            stdout: segment(),
+            stderr: segment(),
+            next_cursor: encode_output_cursor(ProcessCursor {
+                version: 1,
+                process_id: process_id.to_string(),
+                stdout_offset: u64::MAX,
+                stderr_offset: u64::MAX,
+            })
+            .expect("ProcessCursor serialization is infallible"),
+            has_more: false,
+            eof: false,
+        }),
+        mcp_result: None,
+    }
 }
 
 fn ensure_process_batch_response_fits(
     batch_id: &str,
     agent_id: &str,
+    group: Option<&str>,
     boot_generation: &str,
     process_count: usize,
+    response_budget: usize,
 ) -> Result<(), String> {
-    let now = Utc::now();
-    let process = ProcessInfo {
-        agent_id: utf8_prefix(agent_id, 64).to_string(),
-        process_id: format!("process_{}_{}", boot_generation, "x".repeat(32)),
-        group: None,
-        batch_id: None,
-        batch_call_id: None,
-        batch_index: None,
-        kind: ProcessKind::Command,
-        state: ProcessState::UnknownAfterRestart,
-        created_at: now,
-        started_at: None,
-        updated_at: now,
-        finished_at: None,
-        program: None,
-        args: Vec::new(),
-        working_directory: None,
-        command_preview: None,
-        exit_code: None,
-        reject_reason: None,
-        skill_id: None,
-        skill_path: None,
-        installed_digest: None,
-        mcp_server_id: None,
-        mcp_tool_name: None,
-        cancel_requested: false,
-        cancel_outcome: None,
-        termination_evidence: None,
-        capture_status: ProcessCaptureStatus::NotApplicable,
-        capture_error: None,
-    };
-    let mut item = ProcessResponse {
-        status: process.state,
-        completed_inline: false,
-        process,
-        poll_after_ms: 1_000,
-        inline_output: None,
-        output_preview: None,
-        result: None,
-        result_status: None,
-        result_available: false,
-        result_bytes: None,
-        result_sha256: None,
-        result_preview: None,
-        error: None,
-    };
-    compact_batch_process_response(&mut item);
-    let item_bytes = serialized_size(&item);
-    let response = ProcessBatchResponse {
+    let process_id = format!("process_{}_{}", boot_generation, "x".repeat(32));
+    let worst_case = worst_case_batch_process_response(
+        batch_id,
+        agent_id,
+        group,
+        &process_id,
+        process_count.saturating_sub(1),
+    );
+    let empty = ProcessBatchResponse {
         batch_id: batch_id.to_string(),
         status: "completed_with_errors".to_string(),
-        completed_inline: false,
-        poll_after_ms: 1_000,
-        processes: vec![item],
+        processes: Vec::new(),
     };
-    let additional_items = process_count.saturating_sub(1);
-    let size = serialized_size(&response)
-        .saturating_add(additional_items.saturating_mul(item_bytes.saturating_add(1)))
-        .saturating_add(process_count.saturating_mul(64));
-    if size > PROCESS_INLINE_RESPONSE_BYTES {
+    let total = serialized_size(&empty)
+        .saturating_add(process_count.saturating_mul(serialized_size(&worst_case)))
+        .saturating_add(process_count.saturating_sub(1));
+    if total > response_budget {
         return Err("process_batch_response_too_large".to_string());
     }
     Ok(())
 }
 
-fn decode_inline_stream(stream: &ProcessInlineStream) -> Option<Vec<u8>> {
-    match stream.encoding {
-        ProcessOutputEncoding::Utf8 => Some(stream.data.as_bytes().to_vec()),
-        ProcessOutputEncoding::Base64 => BASE64.decode(&stream.data).ok(),
+fn ensure_process_response_budget(response_budget: usize) -> Result<(), String> {
+    if (MIN_PROCESS_RESPONSE_BYTES..=MAX_PROCESS_RESPONSE_BYTES).contains(&response_budget) {
+        Ok(())
+    } else {
+        Err("process_response_config_invalid".to_string())
     }
 }
 
-fn limit_output_preview(preview: &ProcessOutputPreview, max_bytes: usize) -> ProcessOutputPreview {
-    let output = crate::process_history::ProcessOutputSnapshot {
-        stdout: preview.stdout.as_bytes().to_vec(),
-        stderr: preview.stderr.as_bytes().to_vec(),
-        stdout_end_offset: preview.stdout.len() as u64,
-        stderr_end_offset: preview.stderr.len() as u64,
-        ..crate::process_history::ProcessOutputSnapshot::default()
-    };
-    let mut limited = output_preview(&output, max_bytes, preview.truncated);
-    limited.truncated |=
-        limited.stdout.len() < preview.stdout.len() || limited.stderr.len() < preview.stderr.len();
-    limited
+pub(crate) fn ensure_process_response_fits(
+    agent_id: &str,
+    group: Option<&str>,
+    kind: ProcessKind,
+    boot_generation: &str,
+    response_budget: usize,
+) -> Result<(), String> {
+    ensure_process_response_budget(response_budget)?;
+    let process_id = format!("process_{}_{}", boot_generation, "x".repeat(32));
+    let mut worst_case = worst_case_batch_process_response("", agent_id, group, &process_id, 0);
+    worst_case.batch_id = None;
+    worst_case.batch_index = None;
+    worst_case.kind = kind;
+    if kind == ProcessKind::Mcp {
+        worst_case.output = None;
+        worst_case.mcp_result = Some(ProcessMcpResult {
+            status: ProcessMcpResultStatus::NotRetained,
+            bytes: Some(usize::MAX),
+            sha256: Some(format!("sha256:{}", "x".repeat(64))),
+            value: None,
+            preview: None,
+        });
+    }
+    if serialized_size(&worst_case) > response_budget {
+        return Err("process_response_budget_too_small".to_string());
+    }
+    Ok(())
 }
 
 type RegisteredProcess = (
@@ -1567,7 +1911,7 @@ pub(crate) async fn start_prepared_managed_batch(
         for spec in specs {
             let process_id = state.new_process_id();
             let now = Utc::now();
-            let info = process_info(
+            let mut info = process_info(
                 &spec.request,
                 process_id,
                 ProcessKind::Command,
@@ -1575,6 +1919,8 @@ pub(crate) async fn start_prepared_managed_batch(
                 now,
                 None,
             );
+            info.batch_id = spec.batch_id.clone();
+            info.batch_index = spec.batch_index;
             let runtime = process_runtime(None);
             let cancel_requested = Arc::new(AtomicBool::new(false));
             let stdout = runtime.stdout.clone();
@@ -1636,9 +1982,9 @@ pub(crate) async fn start_prepared_managed_batch(
                 skill_id: None,
                 skill_path: None,
                 installed_digest: None,
-                batch_id: None,
+                batch_id: spec.batch_id.clone(),
                 batch_call_id: None,
-                batch_index: None,
+                batch_index: spec.batch_index,
                 mcp_server_id: None,
                 mcp_tool_name: None,
                 argument_keys: Vec::new(),
@@ -2287,12 +2633,9 @@ async fn refresh_capture_status(process: &mut ManagedProcess) {
     process.info.capture_error = error.map(bounded_error_message);
 }
 
-fn capture_summary(
-    stdout: &OutputRing,
-    stderr: &OutputRing,
-) -> (ProcessCaptureStatus, Option<String>) {
+fn capture_status_summary(stdout: &OutputRing, stderr: &OutputRing) -> ProcessCaptureStatus {
     let settled = stdout.is_settled() && stderr.is_settled();
-    let status = if settled && (stdout.is_failed() || stderr.is_failed()) {
+    if settled && (stdout.is_failed() || stderr.is_failed()) {
         ProcessCaptureStatus::Incomplete
     } else if settled {
         ProcessCaptureStatus::Complete
@@ -2300,7 +2643,14 @@ fn capture_summary(
         ProcessCaptureStatus::NotStarted
     } else {
         ProcessCaptureStatus::Capturing
-    };
+    }
+}
+
+fn capture_summary(
+    stdout: &OutputRing,
+    stderr: &OutputRing,
+) -> (ProcessCaptureStatus, Option<String>) {
+    let status = capture_status_summary(stdout, stderr);
     let mut errors = Vec::new();
     if let Some(error) = stdout.failure() {
         errors.push(format!("stdout: {error}"));
@@ -2318,8 +2668,10 @@ async fn process_output_snapshot(
     let ProcessRuntime::Process(runtime) = &process.runtime else {
         return crate::process_history::ProcessOutputSnapshot::default();
     };
-    let stdout = runtime.stdout.lock().await.snapshot();
-    let stderr = runtime.stderr.lock().await.snapshot();
+    let stdout_guard = runtime.stdout.lock().await;
+    let stderr_guard = runtime.stderr.lock().await;
+    let stdout = stdout_guard.snapshot();
+    let stderr = stderr_guard.snapshot();
     crate::process_history::ProcessOutputSnapshot {
         stdout: stdout.0,
         stdout_start_offset: stdout.1,
@@ -2625,18 +2977,6 @@ pub(crate) async fn get_process(
         _ => Err(missing_process_reason(state, process_id)),
     }
 }
-pub(crate) async fn get_process_status(
-    state: &AppState,
-    request: ProcessStatusRequest,
-) -> Result<ProcessStatusResponse, String> {
-    let started = Instant::now();
-    let process = get_process(state, &request.process_id, request.effective_wait_seconds()).await?;
-    Ok(ProcessStatusResponse {
-        process,
-        wait_elapsed_ms: Some(started.elapsed().as_millis().min(u64::MAX as u128) as u64),
-    })
-}
-
 pub(crate) async fn get_process_detail(
     state: &AppState,
     process_id: &str,
@@ -2680,304 +3020,267 @@ fn process_detail(process: &ManagedProcess) -> ProcessDetail {
     }
 }
 
-pub(crate) async fn get_process_output(
+fn status_process_detail(info: &ProcessInfo, error: Option<ProcessError>) -> ProcessDetail {
+    ProcessDetail {
+        process: info.clone(),
+        detail_available: true,
+        result: None,
+        error,
+        result_available: false,
+        result_bytes: None,
+        result_sha256: None,
+        result_preview: None,
+    }
+}
+
+pub(crate) async fn get_process_read(
     state: &AppState,
-    request: ProcessOutputRequest,
-) -> Result<ProcessOutputResponse, String> {
-    let info = get_process(state, &request.process_id, 0).await?;
-    let ProcessOutputRead {
-        snapshot: output,
-        capture_status: output_capture_status,
-    } = process_output_for(state, &request.process_id).await?;
-    let max_bytes = request.effective_max_bytes();
-    let cursor = match request.cursor.as_deref() {
-        Some(encoded) => decode_output_cursor(encoded, &request.process_id)?,
-        None => ProcessCursor {
-            version: 1,
-            process_id: request.process_id.clone(),
-            stdout_offset: 0,
-            stderr_offset: 0,
-        },
+    request: ProcessReadRequest,
+) -> Result<ManagedProcessResponse, String> {
+    let configured_budget = state.config.read().await.limits.process_response_bytes;
+    get_process_read_with_budget(state, request, configured_budget).await
+}
+
+async fn get_process_read_with_budget(
+    state: &AppState,
+    request: ProcessReadRequest,
+    configured_budget: usize,
+) -> Result<ManagedProcessResponse, String> {
+    if request.view == ProcessReadView::Status && request.cursor.is_some() {
+        return Err("process_read_cursor_with_status_view".to_string());
+    }
+    if !(MIN_PROCESS_RESPONSE_BYTES..=MAX_PROCESS_RESPONSE_BYTES).contains(&configured_budget) {
+        return Err("process_read_config_invalid".to_string());
+    }
+    let response_budget = request.effective_max_bytes(configured_budget)?;
+    let cursor = request
+        .cursor
+        .as_deref()
+        .map(|encoded| decode_output_cursor(encoded, &request.process_id))
+        .transpose()?;
+    let started = Instant::now();
+    let deadline = started + std::time::Duration::from_secs(request.effective_wait_seconds());
+    let mut summary = get_process_read_summary(state, &request.process_id).await?;
+    validate_read_cursor_summary(&summary, cursor.as_ref())?;
+    loop {
+        let ready = match request.view {
+            ProcessReadView::Status => summary.state.is_terminal(),
+            ProcessReadView::Auto => process_read_auto_ready(&summary, cursor.as_ref()),
+        };
+        if ready || Instant::now() >= deadline {
+            break;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        sleep(remaining.min(std::time::Duration::from_millis(20))).await;
+        summary = get_process_read_summary(state, &request.process_id).await?;
+        validate_read_cursor_summary(&summary, cursor.as_ref())?;
+    }
+    let observation = get_process_observation(
+        state,
+        &request.process_id,
+        request.view == ProcessReadView::Auto,
+    )
+    .await?;
+    validate_read_cursor(&observation, cursor.as_ref())?;
+    managed_response_from_observation(
+        observation,
+        request.view,
+        cursor,
+        started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+        response_budget,
+    )
+}
+
+fn validate_read_cursor(
+    observation: &ProcessObservation,
+    cursor: Option<&ProcessCursor>,
+) -> Result<(), String> {
+    let Some(cursor) = cursor else {
+        return Ok(());
     };
-    if cursor.stdout_offset > output.stdout_end_offset
-        || cursor.stderr_offset > output.stderr_end_offset
+    if observation.process.kind == ProcessKind::Mcp {
+        return Err("process_read_cursor_not_supported_for_mcp".to_string());
+    }
+    if let Some(output) = observation.output.as_ref() {
+        if cursor.stdout_offset > output.stdout_end_offset
+            || cursor.stderr_offset > output.stderr_end_offset
+        {
+            return Err("process_output_cursor_ahead_of_output".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn validate_read_cursor_summary(
+    summary: &crate::process_history::ProcessHistoryReadSummary,
+    cursor: Option<&ProcessCursor>,
+) -> Result<(), String> {
+    let Some(cursor) = cursor else {
+        return Ok(());
+    };
+    if summary.kind == ProcessKind::Mcp {
+        return Err("process_read_cursor_not_supported_for_mcp".to_string());
+    }
+    if cursor.stdout_offset > summary.stdout_end_offset
+        || cursor.stderr_offset > summary.stderr_end_offset
     {
         return Err("process_output_cursor_ahead_of_output".to_string());
     }
-    let stdout_budget = max_bytes / 2;
-    let stderr_budget = max_bytes - stdout_budget;
-    let (mut stdout, mut stdout_next, stdout_used) = output_segment(
-        &output.stdout,
-        output.stdout_start_offset,
-        output.stdout_end_offset,
-        cursor.stdout_offset,
-        stdout_budget,
-    )?;
-    let (mut stderr, mut stderr_next, stderr_used) = output_segment(
-        &output.stderr,
-        output.stderr_start_offset,
-        output.stderr_end_offset,
-        cursor.stderr_offset,
-        stderr_budget,
-    )?;
-    let spare = max_bytes.saturating_sub(stdout_used + stderr_used);
-    if stdout_next == output.stdout_end_offset
-        && stderr_next < output.stderr_end_offset
-        && spare > 0
-    {
-        let (segment, next_offset, _) = output_segment(
-            &output.stderr,
-            output.stderr_start_offset,
-            output.stderr_end_offset,
-            cursor.stderr_offset,
-            max_bytes.saturating_sub(stdout_used),
-        )?;
-        stderr = segment;
-        stderr_next = next_offset;
-    } else if stderr_next == output.stderr_end_offset
-        && stdout_next < output.stdout_end_offset
-        && spare > 0
-    {
-        let (segment, next_offset, _) = output_segment(
-            &output.stdout,
-            output.stdout_start_offset,
-            output.stdout_end_offset,
-            cursor.stdout_offset,
-            max_bytes.saturating_sub(stderr_used),
-        )?;
-        stdout = segment;
-        stdout_next = next_offset;
-    }
-    if stdout_next == cursor.stdout_offset && stderr_next == cursor.stderr_offset {
-        if cursor.stdout_offset < output.stdout_end_offset {
-            let (segment, next_offset, _) = output_segment(
-                &output.stdout,
-                output.stdout_start_offset,
-                output.stdout_end_offset,
-                cursor.stdout_offset,
-                max_bytes,
-            )?;
-            stdout = segment;
-            stdout_next = next_offset;
-        } else if cursor.stderr_offset < output.stderr_end_offset {
-            let (segment, next_offset, _) = output_segment(
-                &output.stderr,
-                output.stderr_start_offset,
-                output.stderr_end_offset,
-                cursor.stderr_offset,
-                max_bytes,
-            )?;
-            stderr = segment;
-            stderr_next = next_offset;
-        }
-    }
-    if stdout_next == cursor.stdout_offset
-        && stderr_next == cursor.stderr_offset
-        && (cursor.stdout_offset < output.stdout_end_offset
-            || cursor.stderr_offset < output.stderr_end_offset)
-    {
-        return Err("process_output_max_bytes_too_small_for_next_unit".to_string());
-    }
-    let has_more = stdout_next < output.stdout_end_offset || stderr_next < output.stderr_end_offset;
-    let capture_status = if info.kind == ProcessKind::Mcp {
-        ProcessCaptureStatus::NotApplicable
-    } else {
-        output_capture_status
-    };
-    let eof = !has_more
-        && matches!(
-            capture_status,
-            ProcessCaptureStatus::Complete | ProcessCaptureStatus::NotApplicable
-        );
-    let next_cursor = encode_output_cursor(ProcessCursor {
-        version: 1,
-        process_id: request.process_id.clone(),
-        stdout_offset: stdout_next,
-        stderr_offset: stderr_next,
-    })?;
-    Ok(ProcessOutputResponse {
-        process_id: request.process_id,
-        stdout,
-        stderr,
-        next_cursor,
-        has_more,
-        eof,
-        capture_status,
-    })
+    Ok(())
 }
 
-pub(crate) async fn get_process_result(
-    state: &AppState,
-    request: ProcessResultRequest,
-) -> Result<ProcessResultResponse, String> {
-    let detail = get_process_detail(state, &request.process_id, 0).await?;
-    let unavailable = |code: &str, message: &str| ProcessResultResponse {
-        process_id: request.process_id.clone(),
-        status: ProcessResultStatus::Unavailable,
-        result_available: false,
-        result: None,
-        error: Some(ProcessError {
-            code: code.to_string(),
-            message: message.to_string(),
-        }),
-        result_bytes: detail.result_bytes,
-        result_sha256: detail.result_sha256.clone(),
-        result_preview: detail.result_preview.clone(),
-    };
-    let result_error = detail.error.clone();
-    let result_sha256 = detail.result_sha256.clone();
-    let result_preview = detail.result_preview.clone();
-    let process_id = request.process_id.clone();
-    let too_large = |result_bytes| ProcessResultResponse {
-        process_id: process_id.clone(),
-        status: ProcessResultStatus::TooLarge,
-        result_available: false,
-        result: None,
-        error: result_error.clone().or_else(|| {
-            Some(ProcessError {
-                code: "process_result_not_retained".to_string(),
-                message: "Result exceeded the retained result limit".to_string(),
-            })
-        }),
-        result_bytes: Some(result_bytes),
-        result_sha256: result_sha256.clone(),
-        result_preview: result_preview.clone(),
-    };
-    if detail.process.kind != ProcessKind::Mcp {
-        return Ok(unavailable(
-            "process_result_not_applicable",
-            "Process does not produce a structured MCP result",
-        ));
+fn process_read_auto_ready(
+    summary: &crate::process_history::ProcessHistoryReadSummary,
+    cursor: Option<&ProcessCursor>,
+) -> bool {
+    if summary.kind == ProcessKind::Mcp {
+        return summary.state.is_terminal();
     }
-    if detail.process.state.is_active() {
-        return Ok(unavailable(
-            "process_result_not_ready",
-            "Process has not completed",
-        ));
+    let cursor_stdout = cursor.map_or(0, |cursor| cursor.stdout_offset);
+    let cursor_stderr = cursor.map_or(0, |cursor| cursor.stderr_offset);
+    if cursor_stdout < summary.stdout_end_offset || cursor_stderr < summary.stderr_end_offset {
+        return true;
     }
-    if let Some(result_bytes) = detail
-        .result_bytes
-        .filter(|bytes| *bytes > MAX_MCP_RESULT_BYTES)
-    {
-        return Ok(too_large(result_bytes));
+    if matches!(
+        summary.capture_status,
+        ProcessCaptureStatus::Complete
+            | ProcessCaptureStatus::Incomplete
+            | ProcessCaptureStatus::NotApplicable
+    ) {
+        return true;
     }
-    if !detail.detail_available {
-        return Ok(unavailable(
-            "process_result_unavailable",
-            "Retained process result is unavailable",
-        ));
-    }
-    if !detail.result_available {
-        let error = detail.error.or_else(|| {
-            Some(ProcessError {
-                code: "process_result_unavailable".to_string(),
-                message: "No structured result was retained for this process".to_string(),
-            })
-        });
-        return Ok(ProcessResultResponse {
-            process_id: request.process_id,
-            status: ProcessResultStatus::Unavailable,
-            result_available: false,
-            result: None,
-            error,
-            result_bytes: detail.result_bytes,
-            result_sha256: detail.result_sha256,
-            result_preview: detail.result_preview,
-        });
-    }
-    let Some(result) = detail.result else {
-        return Ok(unavailable(
-            "process_result_unavailable",
-            "Retained process result is unavailable",
-        ));
-    };
-    let encoded =
-        serde_json::to_vec(&result).map_err(|_| "process_result_encode_failed".to_string())?;
-    let result_bytes = detail.result_bytes.unwrap_or(encoded.len());
-    if result_bytes > MAX_MCP_RESULT_BYTES {
-        return Ok(too_large(result_bytes));
-    }
-    let max_bytes = request.effective_max_bytes();
-    let status = if result_bytes > max_bytes {
-        ProcessResultStatus::TooLarge
-    } else {
-        ProcessResultStatus::Complete
-    };
-    Ok(ProcessResultResponse {
-        process_id: request.process_id,
-        status,
-        result_available: true,
-        result: (result_bytes <= max_bytes).then_some(result),
-        error: detail.error,
-        result_bytes: Some(result_bytes),
-        result_sha256: detail.result_sha256,
-        result_preview: if result_bytes <= max_bytes {
-            None
-        } else {
-            detail.result_preview
-        },
-    })
+    summary.state.is_terminal() && summary.capture_status != ProcessCaptureStatus::Capturing
 }
 
-async fn process_output_for(
+async fn get_process_read_summary(
     state: &AppState,
     process_id: &str,
-) -> Result<ProcessOutputRead, String> {
-    let live = {
-        let processes = state.processes.lock().await;
-        processes
-            .get(process_id)
-            .map(|process| match &process.runtime {
-                ProcessRuntime::Process(runtime) => {
-                    Some((runtime.stdout.clone(), runtime.stderr.clone()))
+) -> Result<crate::process_history::ProcessHistoryReadSummary, String> {
+    let mut processes = state.processes.lock().await;
+    if let Some(process) = processes.get_mut(process_id) {
+        refresh_process(state, process).await;
+        let summary = match &process.runtime {
+            ProcessRuntime::Process(runtime) => {
+                let stdout = runtime.stdout.lock().await;
+                let stderr = runtime.stderr.lock().await;
+                crate::process_history::ProcessHistoryReadSummary {
+                    kind: process.info.kind,
+                    state: process.info.state,
+                    capture_status: capture_status_summary(&stdout, &stderr),
+                    stdout_start_offset: stdout.start_offset,
+                    stdout_end_offset: stdout.end_offset,
+                    stderr_start_offset: stderr.start_offset,
+                    stderr_end_offset: stderr.end_offset,
                 }
-                ProcessRuntime::Mcp(_) => None,
-            })
-    };
-    if let Some(live) = live {
-        if let Some((stdout_ring, stderr_ring)) = live {
-            let (stdout_guard, stderr_guard) = tokio::join!(stdout_ring.lock(), stderr_ring.lock());
-            let (stdout, stdout_start_offset, stdout_end_offset) = stdout_guard.snapshot();
-            let (stderr, stderr_start_offset, stderr_end_offset) = stderr_guard.snapshot();
-            let (capture_status, capture_error) = capture_summary(&stdout_guard, &stderr_guard);
-            let _ = capture_error;
-            return Ok(ProcessOutputRead {
-                snapshot: crate::process_history::ProcessOutputSnapshot {
-                    stdout,
-                    stdout_start_offset,
-                    stdout_end_offset,
-                    stderr,
-                    stderr_start_offset,
-                    stderr_end_offset,
-                },
-                capture_status,
-            });
-        }
-        return Ok(ProcessOutputRead {
-            snapshot: crate::process_history::ProcessOutputSnapshot::default(),
-            capture_status: ProcessCaptureStatus::NotApplicable,
-        });
+            }
+            ProcessRuntime::Mcp(_) => crate::process_history::ProcessHistoryReadSummary {
+                kind: process.info.kind,
+                state: process.info.state,
+                capture_status: process.info.capture_status,
+                stdout_start_offset: 0,
+                stdout_end_offset: 0,
+                stderr_start_offset: 0,
+                stderr_end_offset: 0,
+            },
+        };
+        prune_terminal_processes(state, &mut processes);
+        return Ok(summary);
     }
-    match state.process_history.get(process_id) {
-        Ok(Some(record)) if record.info.state.is_terminal() => Ok(ProcessOutputRead {
-            snapshot: record.output,
-            capture_status: record.info.capture_status,
-        }),
+    drop(processes);
+    match state.process_history.read_summary(process_id) {
+        Ok(Some(summary)) if summary.state.is_terminal() => Ok(summary),
         _ => Err(missing_process_reason(state, process_id)),
     }
 }
 
-struct ProcessOutputRead {
-    snapshot: crate::process_history::ProcessOutputSnapshot,
-    capture_status: ProcessCaptureStatus,
+async fn get_process_observation(
+    state: &AppState,
+    process_id: &str,
+    include_artifacts: bool,
+) -> Result<ProcessObservation, String> {
+    let mut processes = state.processes.lock().await;
+    if let Some(process) = processes.get_mut(process_id) {
+        refresh_process(state, process).await;
+        let mut info = process.info.clone();
+        let mut detail = if include_artifacts {
+            process_detail(process)
+        } else {
+            status_process_detail(&process.info, process.detail.error.clone())
+        };
+        let output = match &process.runtime {
+            ProcessRuntime::Process(runtime) => {
+                let stdout = runtime.stdout.lock().await;
+                let stderr = runtime.stderr.lock().await;
+                let (capture_status, capture_error) = capture_summary(&stdout, &stderr);
+                info.capture_status = capture_status;
+                info.capture_error = capture_error.map(bounded_error_message);
+                if include_artifacts {
+                    let (stdout, stdout_start_offset, stdout_end_offset) = stdout.snapshot();
+                    let (stderr, stderr_start_offset, stderr_end_offset) = stderr.snapshot();
+                    Some(crate::process_history::ProcessOutputSnapshot {
+                        stdout,
+                        stdout_start_offset,
+                        stdout_end_offset,
+                        stderr,
+                        stderr_start_offset,
+                        stderr_end_offset,
+                    })
+                } else {
+                    None
+                }
+            }
+            ProcessRuntime::Mcp(_) => None,
+        };
+        detail.process = info.clone();
+        let observation = ProcessObservation {
+            process: info,
+            detail,
+            output,
+        };
+        prune_terminal_processes(state, &mut processes);
+        return Ok(observation);
+    }
+    drop(processes);
+    if include_artifacts {
+        return match state.process_history.get(process_id) {
+            Ok(Some(record)) if record.info.state.is_terminal() => {
+                let info = record.info;
+                let mut detail = record.detail.unwrap_or(ProcessDetail {
+                    process: info.clone(),
+                    detail_available: false,
+                    result: None,
+                    error: None,
+                    result_available: false,
+                    result_bytes: None,
+                    result_sha256: None,
+                    result_preview: None,
+                });
+                detail.process = info.clone();
+                let output = (info.kind != ProcessKind::Mcp).then_some(record.output);
+                Ok(ProcessObservation {
+                    process: info,
+                    detail,
+                    output,
+                })
+            }
+            _ => Err(missing_process_reason(state, process_id)),
+        };
+    }
+    match state.process_history.status_record(process_id) {
+        Ok(Some(record)) if record.summary.state.is_terminal() => {
+            let mut info = record.info;
+            info.state = record.summary.state;
+            info.capture_status = record.summary.capture_status;
+            let detail = status_process_detail(&info, record.error);
+            Ok(ProcessObservation {
+                process: info,
+                detail,
+                output: None,
+            })
+        }
+        _ => Err(missing_process_reason(state, process_id)),
+    }
 }
-
-fn encode_output_cursor(cursor: ProcessCursor) -> Result<String, String> {
-    serde_json::to_vec(&cursor)
-        .map(|bytes| URL_SAFE_NO_PAD.encode(bytes))
-        .map_err(|_| "process_output_cursor_encode_failed".to_string())
-}
-
 fn decode_output_cursor(encoded: &str, process_id: &str) -> Result<ProcessCursor, String> {
     if encoded.len() > 2048 {
         return Err("invalid_process_output_cursor".to_string());
@@ -2991,75 +3294,6 @@ fn decode_output_cursor(encoded: &str, process_id: &str) -> Result<ProcessCursor
         return Err("invalid_process_output_cursor".to_string());
     }
     Ok(cursor)
-}
-
-fn output_segment(
-    data: &[u8],
-    retained_start: u64,
-    end_offset: u64,
-    requested_offset: u64,
-    max_encoded_bytes: usize,
-) -> Result<(ProcessOutputSegment, u64, usize), String> {
-    if retained_start > end_offset || end_offset - retained_start != data.len() as u64 {
-        return Err("process_output_snapshot_invalid".to_string());
-    }
-    let data_start = requested_offset.max(retained_start);
-    let gap = (requested_offset < retained_start).then(|| ProcessOutputGap {
-        start_offset: requested_offset.to_string(),
-        end_offset: retained_start.to_string(),
-    });
-    let start_index = usize::try_from(data_start - retained_start)
-        .map_err(|_| "process_output_snapshot_invalid".to_string())?;
-    let available = &data[start_index..];
-    let (payload, encoding, raw_bytes) = encode_output_payload(available, max_encoded_bytes);
-    let next_offset = data_start + raw_bytes as u64;
-    let encoded_bytes = payload.len();
-    Ok((
-        ProcessOutputSegment {
-            data: payload,
-            start_offset: data_start.to_string(),
-            end_offset: next_offset.to_string(),
-            encoding,
-            gap,
-        },
-        next_offset,
-        encoded_bytes,
-    ))
-}
-
-fn encode_output_payload(
-    data: &[u8],
-    max_encoded_bytes: usize,
-) -> (String, ProcessOutputEncoding, usize) {
-    if data.is_empty() || max_encoded_bytes == 0 {
-        return (String::new(), ProcessOutputEncoding::Utf8, 0);
-    }
-    let candidate = &data[..data.len().min(max_encoded_bytes)];
-    match std::str::from_utf8(candidate) {
-        Ok(text) => (
-            text.to_string(),
-            ProcessOutputEncoding::Utf8,
-            candidate.len(),
-        ),
-        Err(error) if error.error_len().is_none() && error.valid_up_to() > 0 => {
-            let valid = &candidate[..error.valid_up_to()];
-            (
-                std::str::from_utf8(valid)
-                    .expect("valid prefix")
-                    .to_string(),
-                ProcessOutputEncoding::Utf8,
-                valid.len(),
-            )
-        }
-        Err(_) => {
-            let raw_limit = (max_encoded_bytes / 4).saturating_mul(3);
-            if raw_limit == 0 {
-                return (String::new(), ProcessOutputEncoding::Base64, 0);
-            }
-            let raw = &data[..data.len().min(raw_limit)];
-            (BASE64.encode(raw), ProcessOutputEncoding::Base64, raw.len())
-        }
-    }
 }
 
 async fn get_process_now(state: &AppState, process_id: &str) -> Option<ProcessInfo> {
@@ -3629,20 +3863,34 @@ mod tests {
         wait_for_process(state, process, 3).await
     }
 
-    async fn wait_output_capture(state: &AppState, process_id: &str) -> ProcessOutputResponse {
+    async fn read_process(
+        state: &AppState,
+        process_id: &str,
+        wait_seconds: u64,
+        view: ProcessReadView,
+        cursor: Option<String>,
+        max_bytes: Option<usize>,
+    ) -> Result<ManagedProcessResponse, String> {
+        get_process_read(
+            state,
+            ProcessReadRequest {
+                process_id: process_id.to_string(),
+                wait_seconds: Some(wait_seconds),
+                view,
+                cursor,
+                max_bytes,
+            },
+        )
+        .await
+    }
+
+    async fn wait_output_capture(state: &AppState, process_id: &str) -> ManagedProcessResponse {
         for _ in 0..100 {
-            let output = get_process_output(
-                state,
-                ProcessOutputRequest {
-                    process_id: process_id.to_string(),
-                    cursor: None,
-                    max_bytes: None,
-                },
-            )
-            .await
-            .unwrap();
+            let output = read_process(state, process_id, 0, ProcessReadView::Auto, None, None)
+                .await
+                .unwrap();
             if matches!(
-                output.capture_status,
+                output.response.capture_status,
                 ProcessCaptureStatus::Complete | ProcessCaptureStatus::Incomplete
             ) {
                 return output;
@@ -3668,6 +3916,169 @@ mod tests {
         assert!(bounded.is_char_boundary(bounded.len()));
     }
 
+    #[test]
+    fn failed_process_reasons_are_projected_without_fabricating_exit_errors() {
+        let now = Utc::now();
+        let mut failed = synthetic_process(
+            "process_spawn_failure",
+            None,
+            ProcessKind::Command,
+            ProcessState::Failed,
+            now,
+        );
+        failed.reject_reason = Some("spawn_failed: executable missing".to_string());
+        let detail = synthetic_detail(failed.clone());
+        let response = managed_response_from_observation(
+            ProcessObservation {
+                process: failed,
+                detail,
+                output: None,
+            },
+            ProcessReadView::Status,
+            None,
+            0,
+            DEFAULT_PROCESS_RESPONSE_BYTES,
+        )
+        .unwrap();
+        let error = response.response.error.unwrap();
+        assert_eq!(error.code, "spawn_failed");
+        assert!(error.message.starts_with("spawn_failed:"));
+
+        let mut nonzero_exit = synthetic_process(
+            "process_nonzero_exit",
+            None,
+            ProcessKind::Command,
+            ProcessState::Failed,
+            now + chrono::Duration::seconds(1),
+        );
+        nonzero_exit.exit_code = Some(127);
+        let detail = synthetic_detail(nonzero_exit.clone());
+        let response = managed_response_from_observation(
+            ProcessObservation {
+                process: nonzero_exit,
+                detail,
+                output: None,
+            },
+            ProcessReadView::Status,
+            None,
+            0,
+            DEFAULT_PROCESS_RESPONSE_BYTES,
+        )
+        .unwrap();
+        assert!(response.response.error.is_none());
+    }
+
+    #[test]
+    fn process_read_rejects_output_pages_that_cannot_advance() {
+        let mut info = synthetic_process(
+            "process_tiny_output_budget",
+            None,
+            ProcessKind::Command,
+            ProcessState::Running,
+            Utc::now(),
+        );
+        info.agent_id.clear();
+        info.capture_status = ProcessCaptureStatus::Capturing;
+        let detail = synthetic_detail(info.clone());
+        let output = crate::process_history::ProcessOutputSnapshot {
+            stdout: vec![0xff],
+            stdout_start_offset: 0,
+            stdout_end_offset: 1,
+            ..Default::default()
+        };
+        let (mut response, _, _, fallback_preview) = process_response_base(
+            ProcessObservation {
+                process: info,
+                detail,
+                output: Some(output.clone()),
+            },
+            ProcessReadView::Auto,
+            0,
+        );
+        let cursor = ProcessCursor {
+            version: 1,
+            process_id: response.process_id.clone(),
+            stdout_offset: 0,
+            stderr_offset: 0,
+        };
+        response.output =
+            Some(output_page_reservation(&output, &response.process_id, &cursor).unwrap());
+        let fixed_size = serialized_size(&response);
+        assert!(fixed_size < MIN_PROCESS_RESPONSE_BYTES);
+        response.agent_id = "a".repeat(MIN_PROCESS_RESPONSE_BYTES - fixed_size - 1);
+        response.output = None;
+
+        let error = fit_process_response(
+            &mut response,
+            Some(&output),
+            Some(&cursor),
+            fallback_preview,
+            MIN_PROCESS_RESPONSE_BYTES,
+        )
+        .unwrap_err();
+        assert_eq!(error, "process_response_budget_too_small");
+    }
+
+    #[tokio::test]
+    async fn exec_waits_for_terminal_state_after_early_output() {
+        let (state, workspace) = test_state(1).await;
+        state
+            .config
+            .write()
+            .await
+            .policy
+            .allow
+            .push(crate::config::Rule {
+                program: "sh".to_string(),
+                args_prefix: Vec::new(),
+            });
+        let mut request = exec_request("sh", &workspace);
+        request.args = vec!["-c".to_string(), "printf progress; sleep 0.15".to_string()];
+        request.wait_seconds = Some(5);
+        let budget = state.config.read().await.limits.process_response_bytes;
+        let response =
+            start_and_wait_process(state, request, ProcessOptions::for_source("test"), budget)
+                .await
+                .unwrap();
+        assert_eq!(response.response.state, ProcessState::Completed);
+        assert!(response.response.wait_elapsed_ms.unwrap() >= 100);
+    }
+
+    #[tokio::test]
+    async fn exec_preserves_rejection_when_process_was_not_admitted() {
+        let (state, workspace) = test_state(1).await;
+        let mut long_running = exec_request("sleep", &workspace);
+        long_running.args = vec!["2".to_string()];
+        let running = start_process_for_test(state.clone(), long_running).await;
+
+        let mut rejected_request = exec_request("true", &workspace);
+        rejected_request.wait_seconds = Some(0);
+        let response = start_and_wait_process(
+            state.clone(),
+            rejected_request,
+            ProcessOptions::for_source("test"),
+            DEFAULT_PROCESS_RESPONSE_BYTES,
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.response.state, ProcessState::Rejected);
+        assert_eq!(
+            response.response.error.as_ref().unwrap().code,
+            "max_active_processes_reached"
+        );
+        assert_eq!(
+            response.response.termination_evidence.as_deref(),
+            Some("not_started")
+        );
+        assert!(response
+            .process
+            .reject_reason
+            .as_deref()
+            .unwrap()
+            .contains("max_active"));
+
+        let _ = cancel_process(&state, &running.process_id).await;
+    }
     #[tokio::test]
     async fn completed_processes_release_capacity_and_keep_output() {
         let (state, workspace) = test_state(1).await;
@@ -3683,8 +4094,9 @@ mod tests {
         let second = wait_terminal(&state, second).await;
         assert_eq!(second.state, ProcessState::Completed);
         let output = wait_output_capture(&state, &second.process_id).await;
-        assert_eq!(output.stdout.data, "done");
-        assert!(output.eof);
+        let output_page = output.response.output.as_ref().unwrap();
+        assert_eq!(output_page.stdout.data, "done");
+        assert!(output_page.eof);
     }
 
     #[tokio::test]
@@ -3710,17 +4122,17 @@ mod tests {
         for _ in 0..100 {
             let info = get_process(&state, &process.process_id, 0).await.unwrap();
             if info.state.is_active() {
-                let output = get_process_output(
+                let output = read_process(
                     &state,
-                    ProcessOutputRequest {
-                        process_id: process.process_id.clone(),
-                        cursor: None,
-                        max_bytes: None,
-                    },
+                    &process.process_id,
+                    0,
+                    ProcessReadView::Auto,
+                    None,
+                    None,
                 )
                 .await
                 .unwrap();
-                if output.eof {
+                if output.response.output.as_ref().unwrap().eof {
                     eof_while_running = Some((info, output));
                     break;
                 }
@@ -3730,8 +4142,11 @@ mod tests {
         let (info, output) =
             eof_while_running.expect("closed output pipes must report EOF before child exit");
         assert!(info.state.is_active());
-        assert_eq!(output.capture_status, ProcessCaptureStatus::Complete);
-        assert!(output.eof);
+        assert_eq!(
+            output.response.capture_status,
+            ProcessCaptureStatus::Complete
+        );
+        assert!(output.response.output.as_ref().unwrap().eof);
         assert_eq!(
             wait_terminal(&state, process).await.state,
             ProcessState::Completed
@@ -3767,18 +4182,21 @@ mod tests {
         assert_eq!(terminal.state, ProcessState::Completed);
         assert_eq!(hook_count.load(Ordering::Acquire), 1);
 
-        let before_eof = get_process_output(
+        let before_eof = read_process(
             &state,
-            ProcessOutputRequest {
-                process_id: terminal.process_id.clone(),
-                cursor: None,
-                max_bytes: None,
-            },
+            &terminal.process_id,
+            0,
+            ProcessReadView::Auto,
+            None,
+            None,
         )
         .await
         .unwrap();
-        assert_eq!(before_eof.capture_status, ProcessCaptureStatus::Capturing);
-        assert!(!before_eof.eof);
+        assert_eq!(
+            before_eof.response.capture_status,
+            ProcessCaptureStatus::Capturing
+        );
+        assert!(!before_eof.response.output.as_ref().unwrap().eof);
         let admission = state
             .process_history
             .get(&terminal.process_id)
@@ -3801,8 +4219,9 @@ mod tests {
         assert!(persisted_event.message.contains("completed"));
 
         let output = wait_output_capture(&state, &terminal.process_id).await;
-        assert!(output.eof);
-        assert_eq!(decode_segment(&output.stdout), b"beforeafter");
+        let output_page = output.response.output.as_ref().unwrap();
+        assert!(output_page.eof);
+        assert_eq!(decode_segment(&output_page.stdout), b"beforeafter");
         assert_eq!(
             get_process(&state, &terminal.process_id, 0)
                 .await
@@ -3821,78 +4240,100 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn output_cursors_are_replayable_and_page_raw_offsets() {
+    async fn process_read_cursors_are_replayable_and_page_raw_offsets() {
         let (state, workspace) = test_state(2).await;
+        let payload = "x".repeat(12 * 1024);
         let mut request = exec_request("printf", &workspace);
-        request.args = vec!["%s".to_string(), "abcdefghij".to_string()];
+        request.args = vec!["%s".to_string(), payload.clone()];
         let process = start_process_for_test(state.clone(), request).await;
         let process = wait_terminal(&state, process).await;
         let _ = wait_output_capture(&state, &process.process_id).await;
 
-        let first = get_process_output(
+        let first = read_process(
             &state,
-            ProcessOutputRequest {
-                process_id: process.process_id.clone(),
-                cursor: None,
-                max_bytes: Some(4),
-            },
+            &process.process_id,
+            0,
+            ProcessReadView::Auto,
+            None,
+            Some(MIN_PROCESS_RESPONSE_BYTES),
         )
         .await
         .unwrap();
-        assert_eq!(first.stdout.data, "abcd");
-        assert_eq!(first.stdout.start_offset, "0");
-        assert_eq!(first.stdout.end_offset, "4");
-        assert!(first.has_more);
-        assert!(!first.eof);
+        assert!(serialized_size(&first.response) <= MIN_PROCESS_RESPONSE_BYTES);
+        let first_page = first.response.output.unwrap();
+        assert_eq!(first_page.stdout.start_offset, "0");
+        assert!(!first_page.stdout.data.is_empty());
+        assert!(first_page.has_more);
+        assert!(!first_page.eof);
+        let replay = read_process(
+            &state,
+            &process.process_id,
+            0,
+            ProcessReadView::Auto,
+            None,
+            Some(MIN_PROCESS_RESPONSE_BYTES),
+        )
+        .await
+        .unwrap();
+        let replay_page = replay.response.output.unwrap();
+        assert_eq!(replay_page.stdout.data, first_page.stdout.data);
+        assert_eq!(replay_page.next_cursor, first_page.next_cursor);
 
-        let replay = get_process_output(
-            &state,
-            ProcessOutputRequest {
-                process_id: process.process_id.clone(),
-                cursor: None,
-                max_bytes: Some(4),
-            },
-        )
-        .await
-        .unwrap();
-        assert_eq!(replay.stdout.data, first.stdout.data);
-        assert_eq!(replay.next_cursor, first.next_cursor);
+        let cursor_for_other = first_page.next_cursor.clone();
+        let mut current_page = first_page;
+        let mut collected = decode_segment(&current_page.stdout);
+        while current_page.has_more {
+            let previous_end = current_page.stdout.end_offset.clone();
+            let next = read_process(
+                &state,
+                &process.process_id,
+                0,
+                ProcessReadView::Auto,
+                Some(current_page.next_cursor.clone()),
+                Some(MIN_PROCESS_RESPONSE_BYTES),
+            )
+            .await
+            .unwrap();
+            current_page = next.response.output.unwrap();
+            assert_eq!(current_page.stdout.start_offset, previous_end);
+            collected.extend(decode_segment(&current_page.stdout));
+        }
+        assert!(current_page.eof);
+        assert_eq!(collected.as_slice(), payload.as_bytes());
 
-        let second = get_process_output(
+        let malformed = read_process(
             &state,
-            ProcessOutputRequest {
-                process_id: process.process_id.clone(),
-                cursor: Some(first.next_cursor.clone()),
-                max_bytes: Some(4),
-            },
-        )
-        .await
-        .unwrap();
-        let third = get_process_output(
-            &state,
-            ProcessOutputRequest {
-                process_id: process.process_id.clone(),
-                cursor: Some(second.next_cursor),
-                max_bytes: Some(4),
-            },
-        )
-        .await
-        .unwrap();
-        assert_eq!(second.stdout.data, "efgh");
-        assert_eq!(third.stdout.data, "ij");
-        assert!(!third.has_more);
-        assert!(third.eof);
-        let malformed = get_process_output(
-            &state,
-            ProcessOutputRequest {
-                process_id: process.process_id.clone(),
-                cursor: Some("invalid".to_string()),
-                max_bytes: Some(4),
-            },
+            &process.process_id,
+            0,
+            ProcessReadView::Auto,
+            Some("invalid".to_string()),
+            Some(MIN_PROCESS_RESPONSE_BYTES),
         )
         .await
         .unwrap_err();
         assert_eq!(malformed, "invalid_process_output_cursor");
+        let invalid_budget = read_process(
+            &state,
+            &process.process_id,
+            0,
+            ProcessReadView::Auto,
+            None,
+            Some(MIN_PROCESS_RESPONSE_BYTES - 1),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(invalid_budget, "process_read_max_bytes_out_of_range");
+        let status_cursor = read_process(
+            &state,
+            &process.process_id,
+            0,
+            ProcessReadView::Status,
+            Some(cursor_for_other.clone()),
+            Some(MIN_PROCESS_RESPONSE_BYTES),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(status_cursor, "process_read_cursor_with_status_view");
         let ahead_cursor = encode_output_cursor(agentic_gpt_protocol::ProcessCursor {
             version: 1,
             process_id: process.process_id.clone(),
@@ -3900,13 +4341,13 @@ mod tests {
             stderr_offset: 0,
         })
         .unwrap();
-        let ahead = get_process_output(
+        let ahead = read_process(
             &state,
-            ProcessOutputRequest {
-                process_id: process.process_id.clone(),
-                cursor: Some(ahead_cursor),
-                max_bytes: Some(4),
-            },
+            &process.process_id,
+            0,
+            ProcessReadView::Auto,
+            Some(ahead_cursor),
+            Some(MIN_PROCESS_RESPONSE_BYTES),
         )
         .await
         .unwrap_err();
@@ -3915,13 +4356,13 @@ mod tests {
         let other = start_process_for_test(state.clone(), exec_request("true", &workspace)).await;
         let other = wait_terminal(&state, other).await;
         let _ = wait_output_capture(&state, &other.process_id).await;
-        let bound_cursor = get_process_output(
+        let bound_cursor = read_process(
             &state,
-            ProcessOutputRequest {
-                process_id: other.process_id,
-                cursor: Some(first.next_cursor),
-                max_bytes: Some(4),
-            },
+            &other.process_id,
+            0,
+            ProcessReadView::Auto,
+            Some(cursor_for_other),
+            Some(MIN_PROCESS_RESPONSE_BYTES),
         )
         .await
         .unwrap_err();
@@ -3936,36 +4377,36 @@ mod tests {
         let process = start_process_for_test(state.clone(), request).await;
         let process = wait_terminal(&state, process).await;
         let output = wait_output_capture(&state, &process.process_id).await;
-        assert_eq!(output.stdout.encoding, ProcessOutputEncoding::Base64);
-        assert_eq!(decode_segment(&output.stdout), [0xff, 0x00, 0x80]);
-        assert!(output.eof);
-        let bounded = get_process_output(
+        let output_page = output.response.output.as_ref().unwrap();
+        assert_eq!(output_page.stdout.encoding, ProcessOutputEncoding::Base64);
+        assert_eq!(decode_segment(&output_page.stdout), [0xff, 0x00, 0x80]);
+        assert!(output_page.eof);
+
+        let bounded = read_process(
             &state,
-            ProcessOutputRequest {
-                process_id: process.process_id.clone(),
-                cursor: None,
-                max_bytes: Some(4),
-            },
+            &process.process_id,
+            0,
+            ProcessReadView::Auto,
+            None,
+            Some(MIN_PROCESS_RESPONSE_BYTES),
         )
         .await
         .unwrap();
-        assert_eq!(bounded.stdout.encoding, ProcessOutputEncoding::Base64);
-        assert_eq!(bounded.stdout.data, BASE64.encode([0xff, 0x00, 0x80]));
-        assert!(bounded.eof);
-        let too_small = get_process_output(
+        let bounded_page = bounded.response.output.unwrap();
+        assert_eq!(bounded_page.stdout.encoding, ProcessOutputEncoding::Base64);
+        assert_eq!(bounded_page.stdout.data, BASE64.encode([0xff, 0x00, 0x80]));
+        assert!(bounded_page.eof);
+        let too_small = read_process(
             &state,
-            ProcessOutputRequest {
-                process_id: process.process_id,
-                cursor: None,
-                max_bytes: Some(3),
-            },
+            &process.process_id,
+            0,
+            ProcessReadView::Auto,
+            None,
+            Some(MIN_PROCESS_RESPONSE_BYTES - 1),
         )
         .await
         .unwrap_err();
-        assert_eq!(
-            too_small,
-            "process_output_max_bytes_too_small_for_next_unit"
-        );
+        assert_eq!(too_small, "process_read_max_bytes_out_of_range");
     }
 
     #[tokio::test]
@@ -3975,39 +4416,62 @@ mod tests {
         ring.push(&vec![b'x'; PROCESS_OUTPUT_RING_CAPACITY + 5]);
         ring.finish(ReaderOutcome::Eof);
         let (data, start, end) = ring.snapshot();
-        let (segment, next, used) = output_segment(&data, start, end, 0, 32).unwrap();
-        let gap = segment
+        let snapshot = crate::process_history::ProcessOutputSnapshot {
+            stdout: data,
+            stdout_start_offset: start,
+            stdout_end_offset: end,
+            ..Default::default()
+        };
+        let cursor = ProcessCursor {
+            version: 1,
+            process_id: "process_gap".to_string(),
+            stdout_offset: 0,
+            stderr_offset: 0,
+        };
+        let (page, used) = output_page_for_json_budget(
+            &snapshot,
+            "process_gap",
+            &cursor,
+            ProcessCaptureStatus::Complete,
+            64,
+        )
+        .unwrap();
+        let gap = page
+            .stdout
             .gap
             .as_ref()
             .expect("retained output must report a gap");
         assert_eq!(gap.start_offset, "0");
         assert_eq!(gap.end_offset, "5");
-        assert_eq!(segment.start_offset, "5");
-        assert_eq!(segment.end_offset, next.to_string());
-        assert_eq!(used, 32);
-        assert_eq!(decode_segment(&segment), vec![b'x'; 32]);
+        assert_eq!(page.stdout.start_offset, "5");
+        assert_eq!(page.stdout.end_offset, "69");
+        assert_eq!(used, 64);
+        assert_eq!(decode_segment(&page.stdout), vec![b'x'; 64]);
+        assert!(page.has_more);
+        assert!(!page.eof);
     }
 
     #[tokio::test]
-    async fn creation_responses_stay_within_inline_and_preview_budgets() {
+    async fn process_read_compacts_output_to_configured_response_budget() {
         let (state, workspace) = test_state(2).await;
+        let budget = state.config.read().await.limits.process_response_bytes;
         let mut request = exec_request("printf", &workspace);
         request.args = vec!["%s".to_string(), "x".repeat(12 * 1024)];
         let response =
-            start_and_wait_process(state, request, ProcessOptions::for_source("test")).await;
-        assert_eq!(response.status, ProcessState::Completed);
-        assert!(!response.completed_inline);
-        assert!(serde_json::to_vec(&response).unwrap().len() <= PROCESS_INLINE_RESPONSE_BYTES);
-        assert!(response.inline_output.is_none());
-        let preview = response
-            .output_preview
-            .expect("oversized output has a preview");
-        assert!(preview.stdout.len() + preview.stderr.len() <= PROCESS_INLINE_PREVIEW_BYTES);
-        assert!(preview.truncated);
+            start_and_wait_process(state, request, ProcessOptions::for_source("test"), budget)
+                .await
+                .unwrap();
+        assert_eq!(response.response.state, ProcessState::Completed);
+        assert_eq!(response.response.agent_id, "test-agent");
+        assert!(serialized_size(&response.response) <= budget);
+        let output = response.response.output.unwrap();
+        assert!(!output.stdout.data.is_empty());
+        assert!(output.has_more);
+        assert!(!output.eof);
     }
 
     #[tokio::test]
-    async fn mcp_result_retrieval_distinguishes_complete_oversized_and_unavailable() {
+    async fn process_read_mcp_result_exposes_retained_and_not_retained_values() {
         let (state, _workspace) = test_state(4).await;
         let registration = register_mcp_process(&state, mcp_spec("retained-result"))
             .await
@@ -4018,31 +4482,31 @@ mod tests {
             .await
             .unwrap();
 
-        let too_small = get_process_result(
+        let too_small = read_process(
             &state,
-            ProcessResultRequest {
-                process_id: process_id.clone(),
-                max_bytes: Some(1),
-            },
+            &process_id,
+            0,
+            ProcessReadView::Auto,
+            None,
+            Some(MIN_PROCESS_RESPONSE_BYTES - 1),
         )
         .await
-        .unwrap();
-        assert!(matches!(too_small.status, ProcessResultStatus::TooLarge));
-        assert!(too_small.result_available);
-        assert!(too_small.result.is_none());
+        .unwrap_err();
+        assert_eq!(too_small, "process_read_max_bytes_out_of_range");
 
-        let complete = get_process_result(
+        let complete = read_process(
             &state,
-            ProcessResultRequest {
-                process_id,
-                max_bytes: Some(ProcessResultRequest::MAX_MAX_BYTES),
-            },
+            &process_id,
+            0,
+            ProcessReadView::Auto,
+            None,
+            Some(MAX_PROCESS_RESPONSE_BYTES),
         )
         .await
         .unwrap();
-        assert!(matches!(complete.status, ProcessResultStatus::Complete));
-        assert!(complete.result_available);
-        assert_eq!(complete.result, Some(value));
+        let result = complete.response.mcp_result.unwrap();
+        assert_eq!(result.status, ProcessMcpResultStatus::Included);
+        assert_eq!(result.value, Some(value));
 
         let registration = register_mcp_process(&state, mcp_spec("oversized-result"))
             .await
@@ -4054,24 +4518,26 @@ mod tests {
         complete_mcp_result(&state, &process_id, value, false, None)
             .await
             .unwrap();
-        let too_large = get_process_result(
+        let too_large = read_process(
             &state,
-            ProcessResultRequest {
-                process_id,
-                max_bytes: Some(ProcessResultRequest::MAX_MAX_BYTES),
-            },
+            &process_id,
+            0,
+            ProcessReadView::Auto,
+            None,
+            Some(MAX_PROCESS_RESPONSE_BYTES),
         )
         .await
         .unwrap();
-        assert!(matches!(too_large.status, ProcessResultStatus::TooLarge));
-        assert!(!too_large.result_available);
-        assert!(too_large.result.is_none());
-        assert!(too_large.result_bytes.unwrap() > MAX_MCP_RESULT_BYTES);
+        let result = too_large.response.mcp_result.unwrap();
+        assert_eq!(result.status, ProcessMcpResultStatus::NotRetained);
+        assert!(result.value.is_none());
+        assert!(result.bytes.unwrap() > MAX_MCP_RESULT_BYTES);
     }
 
     #[tokio::test]
-    async fn process_batch_applies_shared_response_preview_budget() {
+    async fn process_batch_response_obeys_whole_body_budget_and_keeps_identities() {
         let (state, workspace) = test_state(4).await;
+        let budget = state.config.read().await.limits.process_response_bytes;
         let payload = "b".repeat(5 * 1024);
         let request = ProcessBatchExecRequest {
             agent_id: "test-agent".to_string(),
@@ -4093,38 +4559,30 @@ mod tests {
             working_directory: Some(workspace.to_string_lossy().to_string()),
             wait_seconds: Some(2),
         };
-        let response =
-            start_process_batch(state, request, "test:process.batch".to_string(), None, None)
-                .await
-                .unwrap();
-        assert!(serde_json::to_vec(&response).unwrap().len() <= PROCESS_INLINE_RESPONSE_BYTES);
+        let response = start_process_batch(
+            state,
+            request,
+            "test:process.batch".to_string(),
+            None,
+            None,
+            budget,
+        )
+        .await
+        .unwrap();
+        assert!(serialized_size(&response.response) <= budget);
+        assert_eq!(response.response.processes.len(), 2);
+        assert!(response
+            .response
+            .processes
+            .iter()
+            .enumerate()
+            .all(|(index, process)| {
+                process.agent_id == "test-agent"
+                    && !process.process_id.is_empty()
+                    && process.batch_id.as_deref() == Some(response.response.batch_id.as_str())
+                    && process.batch_index == Some(index)
+            }));
         assert_eq!(response.processes.len(), 2);
-        assert!(response
-            .processes
-            .iter()
-            .all(|process| !process.process.process_id.is_empty()));
-        let preview_bytes = response
-            .processes
-            .iter()
-            .map(|process| {
-                process
-                    .output_preview
-                    .as_ref()
-                    .map(|preview| preview.stdout.len() + preview.stderr.len())
-                    .unwrap_or(0)
-                    + process
-                        .result_preview
-                        .as_ref()
-                        .map(String::len)
-                        .unwrap_or(0)
-            })
-            .sum::<usize>();
-        assert!(preview_bytes <= PROCESS_INLINE_PREVIEW_BYTES);
-        assert!(!response.completed_inline);
-        assert!(response
-            .processes
-            .iter()
-            .all(|process| !process.completed_inline));
     }
 
     #[tokio::test]
@@ -4176,6 +4634,7 @@ mod tests {
             "test:process.batch".to_string(),
             None,
             None,
+            DEFAULT_PROCESS_RESPONSE_BYTES,
         )
         .await
         .unwrap_err();
@@ -4206,7 +4665,10 @@ mod tests {
         let finished = wait_terminal(&state, admitted).await;
         assert_eq!(finished.state, ProcessState::Completed);
         let output = wait_output_capture(&state, &finished.process_id).await;
-        assert_eq!(output.stdout.data, "admitted");
+        assert_eq!(
+            output.response.output.as_ref().unwrap().stdout.data,
+            "admitted"
+        );
     }
 
     #[tokio::test]
@@ -4220,6 +4682,8 @@ mod tests {
             ManagedProcessSpec {
                 request: first_request,
                 working_directory: workspace.clone(),
+                batch_id: None,
+                batch_index: None,
                 decision: PolicyDecision::Allow,
                 confirmation_result: None,
                 request_source: "test:process.batch".to_string(),
@@ -4231,6 +4695,8 @@ mod tests {
                 working_directory: workspace.clone(),
                 decision: PolicyDecision::Allow,
                 confirmation_result: None,
+                batch_id: None,
+                batch_index: None,
                 request_source: "test:process.batch".to_string(),
                 terminal_event_hook: None,
                 event_origin: None,
@@ -4257,6 +4723,8 @@ mod tests {
                     working_directory: workspace.clone(),
                     decision: PolicyDecision::Allow,
                     confirmation_result: None,
+                    batch_id: None,
+                    batch_index: None,
                     request_source: "test:process.batch".to_string(),
                     terminal_event_hook: None,
                     event_origin: None,
@@ -4266,6 +4734,8 @@ mod tests {
                     working_directory: workspace.clone(),
                     decision: PolicyDecision::Allow,
                     confirmation_result: None,
+                    batch_id: None,
+                    batch_index: None,
                     request_source: "test:process.batch".to_string(),
                     terminal_event_hook: None,
                     event_origin: None,
@@ -4339,11 +4809,11 @@ mod tests {
             "test:process.batch".to_string(),
             None,
             None,
+            DEFAULT_PROCESS_RESPONSE_BYTES,
         )
         .await
         .unwrap();
-        assert_eq!(batch.status, "running");
-        assert!(!batch.completed_inline);
+        assert_eq!(batch.response.status, "running");
         assert_eq!(batch.processes.len(), 2);
 
         let mut states = Vec::new();
@@ -4351,7 +4821,7 @@ mod tests {
             states = Vec::with_capacity(batch.processes.len());
             for process in &batch.processes {
                 states.push(
-                    get_process(&state, &process.process.process_id, 0)
+                    get_process(&state, &process.process_id, 0)
                         .await
                         .unwrap()
                         .state,
@@ -4378,7 +4848,7 @@ mod tests {
         );
 
         for process in &batch.processes {
-            let _ = cancel_process(&state, &process.process.process_id).await;
+            let _ = cancel_process(&state, &process.process_id).await;
         }
     }
 
@@ -4516,8 +4986,9 @@ mod tests {
 
         let terminal = wait_terminal(&state, admitted).await;
         let output = wait_output_capture(&state, &terminal.process_id).await;
-        assert_eq!(decode_segment(&output.stdout), b"history-output");
-        assert!(output.eof);
+        let output_page = output.response.output.as_ref().unwrap();
+        assert_eq!(decode_segment(&output_page.stdout), b"history-output");
+        assert!(output_page.eof);
         let started_at = terminal.started_at.expect("process should start");
         let finished_at = terminal.finished_at.expect("process should finish");
         assert!(terminal.created_at <= started_at);
@@ -4558,18 +5029,19 @@ mod tests {
             .unwrap();
         assert_eq!(recovered.process.group.as_deref(), Some("runtime-group"));
         assert_eq!(recovered.process.state, ProcessState::Completed);
-        let recovered_output = get_process_output(
+        let recovered_output = read_process(
             &state,
-            ProcessOutputRequest {
-                process_id: terminal.process_id.clone(),
-                cursor: None,
-                max_bytes: None,
-            },
+            &terminal.process_id,
+            0,
+            ProcessReadView::Auto,
+            None,
+            None,
         )
         .await
         .unwrap();
-        assert_eq!(decode_segment(&recovered_output.stdout), b"history-output");
-        assert!(recovered_output.eof);
+        let output = recovered_output.response.output.unwrap();
+        assert_eq!(decode_segment(&output.stdout), b"history-output");
+        assert!(output.eof);
     }
 
     #[tokio::test]

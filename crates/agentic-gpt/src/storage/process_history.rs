@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use agentic_gpt_protocol::{
-    ProcessCaptureStatus, ProcessDetail, ProcessInfo, ProcessKind, ProcessListRequest, ProcessState,
+    ProcessCaptureStatus, ProcessDetail, ProcessError, ProcessInfo, ProcessKind,
+    ProcessListRequest, ProcessState,
 };
 use anyhow::{anyhow, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
@@ -106,6 +107,23 @@ pub(crate) struct ProcessOutputSnapshot {
     pub(crate) stderr: Vec<u8>,
     pub(crate) stderr_start_offset: u64,
     pub(crate) stderr_end_offset: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ProcessHistoryReadSummary {
+    pub(crate) kind: ProcessKind,
+    pub(crate) state: ProcessState,
+    pub(crate) capture_status: ProcessCaptureStatus,
+    pub(crate) stdout_start_offset: u64,
+    pub(crate) stdout_end_offset: u64,
+    pub(crate) stderr_start_offset: u64,
+    pub(crate) stderr_end_offset: u64,
+}
+
+pub(crate) struct ProcessHistoryStatusRecord {
+    pub(crate) info: ProcessInfo,
+    pub(crate) error: Option<ProcessError>,
+    pub(crate) summary: ProcessHistoryReadSummary,
 }
 
 #[derive(Clone, Debug)]
@@ -564,6 +582,44 @@ impl ProcessHistoryStore {
         .map_err(|error| anyhow!(error))
     }
 
+    pub(crate) fn read_summary(
+        &self,
+        process_id: &str,
+    ) -> Result<Option<ProcessHistoryReadSummary>> {
+        self.ensure_ready()?;
+        self.with_connection(|connection| {
+            connection
+                .query_row(
+                    "SELECT kind, state, capture_status, stdout_start_offset,
+                        stdout_end_offset, stderr_start_offset, stderr_end_offset
+                        FROM processes WHERE process_id=?1",
+                    params![process_id],
+                    row_to_read_summary,
+                )
+                .optional()
+        })
+        .map_err(|error| anyhow!(error))
+    }
+
+    pub(crate) fn status_record(
+        &self,
+        process_id: &str,
+    ) -> Result<Option<ProcessHistoryStatusRecord>> {
+        self.ensure_ready()?;
+        self.with_connection(|connection| {
+            connection
+                .query_row(
+                    "SELECT info_json, detail_json, kind, state, capture_status,
+                        stdout_start_offset, stdout_end_offset, stderr_start_offset,
+                        stderr_end_offset FROM processes WHERE process_id=?1",
+                    params![process_id],
+                    row_to_status_record,
+                )
+                .optional()
+        })
+        .map_err(|error| anyhow!(error))
+    }
+
     pub(crate) fn list(&self, request: &ProcessListRequest) -> Result<ProcessHistoryPage> {
         self.ensure_ready()?;
         let limit = request.effective_limit();
@@ -824,6 +880,105 @@ fn persist_process_event_completion(
         ],
     )?;
     Ok(())
+}
+
+#[derive(Deserialize)]
+struct ProcessDetailErrorProjection {
+    error: Option<ProcessError>,
+}
+
+fn row_to_read_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProcessHistoryReadSummary> {
+    row_to_read_summary_at(row, 0)
+}
+
+fn row_to_read_summary_at(
+    row: &rusqlite::Row<'_>,
+    start_column: usize,
+) -> rusqlite::Result<ProcessHistoryReadSummary> {
+    let kind_label: String = row.get(start_column)?;
+    let state_label: String = row.get(start_column + 1)?;
+    let capture_label: String = row.get(start_column + 2)?;
+    let stdout_start: String = row.get(start_column + 3)?;
+    let stdout_end: String = row.get(start_column + 4)?;
+    let stderr_start: String = row.get(start_column + 5)?;
+    let stderr_end: String = row.get(start_column + 6)?;
+    let kind = match kind_label.as_str() {
+        "command" => ProcessKind::Command,
+        "skill" => ProcessKind::Skill,
+        "mcp" => ProcessKind::Mcp,
+        _ => return Err(invalid_summary_value(start_column, "kind")),
+    };
+    let state = match state_label.as_str() {
+        "queued" => ProcessState::Queued,
+        "waiting_confirmation" => ProcessState::WaitingConfirmation,
+        "starting" => ProcessState::Starting,
+        "running" => ProcessState::Running,
+        "completed" => ProcessState::Completed,
+        "failed" => ProcessState::Failed,
+        "rejected" => ProcessState::Rejected,
+        "cancel_requested" => ProcessState::CancelRequested,
+        "cancelled" => ProcessState::Cancelled,
+        "timed_out" => ProcessState::TimedOut,
+        "detached" => ProcessState::Detached,
+        "unknown_after_restart" => ProcessState::UnknownAfterRestart,
+        "skipped" => ProcessState::Skipped,
+        _ => return Err(invalid_summary_value(start_column + 1, "state")),
+    };
+    let capture_status = match capture_label.as_str() {
+        "not_started" => ProcessCaptureStatus::NotStarted,
+        "capturing" => ProcessCaptureStatus::Capturing,
+        "complete" => ProcessCaptureStatus::Complete,
+        "incomplete" => ProcessCaptureStatus::Incomplete,
+        "not_applicable" => ProcessCaptureStatus::NotApplicable,
+        _ => return Err(invalid_summary_value(start_column + 2, "capture_status")),
+    };
+    Ok(ProcessHistoryReadSummary {
+        kind,
+        state,
+        capture_status,
+        stdout_start_offset: parse_offset(&stdout_start)?,
+        stdout_end_offset: parse_offset(&stdout_end)?,
+        stderr_start_offset: parse_offset(&stderr_start)?,
+        stderr_end_offset: parse_offset(&stderr_end)?,
+    })
+}
+
+fn row_to_status_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProcessHistoryStatusRecord> {
+    let info_json: String = row.get(0)?;
+    let info: ProcessInfo = serde_json::from_str(&info_json)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    let error = match row.get_ref(1)? {
+        rusqlite::types::ValueRef::Null => None,
+        rusqlite::types::ValueRef::Text(bytes) => {
+            serde_json::from_slice::<ProcessDetailErrorProjection>(bytes)
+                .map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        1,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?
+                .error
+        }
+        _ => return Err(invalid_summary_value(1, "detail")),
+    };
+    let summary = row_to_read_summary_at(row, 2)?;
+    Ok(ProcessHistoryStatusRecord {
+        info,
+        error,
+        summary,
+    })
+}
+
+fn invalid_summary_value(column: usize, name: &str) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(
+        column,
+        rusqlite::types::Type::Text,
+        Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("invalid process history {name}"),
+        )),
+    )
 }
 
 fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProcessHistoryRecord> {

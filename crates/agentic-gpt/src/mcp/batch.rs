@@ -49,41 +49,33 @@ struct PreparedMcpBatchCall {
     temporary_allowed: bool,
 }
 
+pub(crate) struct ManagedMcpBatchResponse {
+    pub(crate) response: McpBatchResponse,
+    pub(crate) response_budget: usize,
+}
+
 pub(crate) async fn batch(
     state: &AppState,
     payload: McpBatchRequest,
     request_source: &str,
     terminal_event_hook: Option<TerminalEventHook>,
     event_origin: Option<EventOrigin>,
-) -> Result<McpBatchResponse> {
-    start_managed_batch_with_factory_budget(
+    response_budget: usize,
+) -> Result<ManagedMcpBatchResponse> {
+    let response = start_managed_batch_with_factory_budget(
         state,
         payload,
         request_source,
         terminal_event_hook,
         event_origin,
         production_client_factory(),
-        true,
+        response_budget,
     )
-    .await
-}
-
-pub(crate) async fn batch_slim(
-    state: &AppState,
-    payload: McpBatchRequest,
-    request_source: &str,
-    terminal_event_hook: Option<TerminalEventHook>,
-    event_origin: Option<EventOrigin>,
-) -> Result<McpBatchResponse> {
-    start_managed_batch_without_aggregate_budget(
-        state,
-        payload,
-        request_source,
-        terminal_event_hook,
-        event_origin,
-        production_client_factory(),
-    )
-    .await
+    .await?;
+    Ok(ManagedMcpBatchResponse {
+        response,
+        response_budget,
+    })
 }
 
 #[cfg(test)]
@@ -94,36 +86,40 @@ pub(super) async fn start_managed_batch_with_factory(
     terminal_event_hook: Option<TerminalEventHook>,
     client_factory: McpClientFactory,
 ) -> Result<McpBatchResponse> {
-    start_managed_batch_with_factory_budget(
+    Ok(start_managed_batch_with_factory_response(
+        state,
+        payload,
+        request_source,
+        terminal_event_hook,
+        client_factory,
+    )
+    .await?
+    .response)
+}
+
+#[cfg(test)]
+pub(super) async fn start_managed_batch_with_factory_response(
+    state: &AppState,
+    payload: McpBatchRequest,
+    request_source: &str,
+    terminal_event_hook: Option<TerminalEventHook>,
+    client_factory: McpClientFactory,
+) -> Result<ManagedMcpBatchResponse> {
+    let response_budget = state.config.read().await.limits.process_response_bytes;
+    let response = start_managed_batch_with_factory_budget(
         state,
         payload,
         request_source,
         terminal_event_hook,
         None,
         client_factory,
-        true,
+        response_budget,
     )
-    .await
-}
-
-async fn start_managed_batch_without_aggregate_budget(
-    state: &AppState,
-    payload: McpBatchRequest,
-    request_source: &str,
-    terminal_event_hook: Option<TerminalEventHook>,
-    event_origin: Option<EventOrigin>,
-    client_factory: McpClientFactory,
-) -> Result<McpBatchResponse> {
-    start_managed_batch_with_factory_budget(
-        state,
-        payload,
-        request_source,
-        terminal_event_hook,
-        event_origin,
-        client_factory,
-        false,
-    )
-    .await
+    .await?;
+    Ok(ManagedMcpBatchResponse {
+        response,
+        response_budget,
+    })
 }
 
 async fn start_managed_batch_with_factory_budget(
@@ -133,7 +129,7 @@ async fn start_managed_batch_with_factory_budget(
     terminal_event_hook: Option<TerminalEventHook>,
     event_origin: Option<EventOrigin>,
     client_factory: McpClientFactory,
-    enforce_aggregate_budget: bool,
+    response_budget: usize,
 ) -> Result<McpBatchResponse> {
     let started = Instant::now();
     let batch_id = format!("batch_{}", uuid::Uuid::new_v4().simple());
@@ -153,6 +149,30 @@ async fn start_managed_batch_with_factory_budget(
             return Err(error);
         }
     };
+    let response_calls = prepared
+        .iter()
+        .map(|call| (call.index, call.id.clone()))
+        .collect::<Vec<_>>();
+    if let Err(error) = crate::operation_result::ensure_mcp_batch_response_fits(
+        &batch_id,
+        &payload.agent_id,
+        payload.group.as_deref(),
+        &response_calls,
+        &state.boot_generation,
+        response_budget,
+    ) {
+        write_batch_rejection_audit(
+            state,
+            &batch_id,
+            request_source,
+            &payload,
+            "response_budget_rejected",
+            &batch_error_code(&error.to_string()),
+            started,
+        )
+        .await;
+        return Err(error);
+    }
     let server_count = prepared
         .iter()
         .map(|call| call.payload.server_id.as_str())
@@ -287,16 +307,13 @@ async fn start_managed_batch_with_factory_budget(
             &child_refs,
             0,
             Some(McpBatchStatus::Rejected),
-            enforce_aggregate_budget,
         )
         .await?;
         response.error = Some(ProcessError {
             code: "mcp_batch_rejected".to_string(),
             message: format!("MCP batch did not start: {confirmation_result}"),
         });
-        if enforce_aggregate_budget {
-            apply_batch_result_budget(&mut response)?;
-        }
+        apply_batch_result_budget(&mut response)?;
         write_batch_audit(
             state,
             &batch_id,
@@ -340,7 +357,6 @@ async fn start_managed_batch_with_factory_budget(
             &coordinator_refs,
             0,
             None,
-            enforce_aggregate_budget,
         )
         .await
         {
@@ -366,7 +382,6 @@ async fn start_managed_batch_with_factory_budget(
         &child_refs,
         payload.effective_wait_seconds(),
         None,
-        enforce_aggregate_budget,
     )
     .await
 }
@@ -571,7 +586,6 @@ async fn build_mcp_batch_response(
     child_refs: &[(usize, Option<String>, String)],
     wait_seconds: u64,
     forced_status: Option<McpBatchStatus>,
-    enforce_aggregate_budget: bool,
 ) -> Result<McpBatchResponse> {
     let deadline = Instant::now() + Duration::from_secs(wait_seconds.min(30));
     let mut details = Vec::new();
@@ -595,11 +609,11 @@ async fn build_mcp_batch_response(
         }
         sleep(Duration::from_millis(20)).await;
     }
-    let completed_inline = details
+    let all_terminal = details
         .iter()
         .all(|result| result.process.process.state.is_terminal());
     let status = forced_status.unwrap_or_else(|| {
-        if !completed_inline {
+        if !all_terminal {
             McpBatchStatus::Running
         } else if details
             .iter()
@@ -613,56 +627,54 @@ async fn build_mcp_batch_response(
     let mut response = McpBatchResponse {
         batch_id: batch_id.to_string(),
         status,
-        completed_inline,
-        poll_after_ms: if completed_inline { 0 } else { 1_000 },
         results: details,
         aggregate_truncated: false,
         aggregate_bytes: None,
         error: None,
     };
-    if enforce_aggregate_budget {
-        apply_batch_result_budget(&mut response)?;
-    }
+    apply_batch_result_budget(&mut response)?;
     Ok(response)
 }
 
 fn apply_batch_result_budget(response: &mut McpBatchResponse) -> Result<()> {
-    let mut bytes = serde_json::to_vec(response)?.len();
-    if bytes > McpBatchRequest::MAX_AGGREGATE_RESULT_BYTES {
+    let limit = McpBatchRequest::MAX_AGGREGATE_RESULT_BYTES;
+    response.aggregate_bytes = Some(limit);
+    let mut bytes = process::serialized_json_size(response);
+    if bytes > limit {
         response.aggregate_truncated = true;
-        for index in (0..response.results.len()).rev() {
-            let removed = {
-                let child = &mut response.results[index];
-                if child.process.result.take().is_some() {
-                    child.result_omitted = true;
-                    true
-                } else {
-                    false
-                }
+        bytes = bytes.saturating_sub(1);
+        for child in response.results.iter_mut().rev() {
+            let Some(result) = child.process.result.take() else {
+                continue;
             };
-            if removed {
-                bytes = serde_json::to_vec(response)?.len();
-                if bytes <= McpBatchRequest::MAX_AGGREGATE_RESULT_BYTES {
-                    break;
-                }
+            let result_bytes = process::serialized_json_size(&result);
+            child.result_omitted = true;
+            bytes = bytes
+                .saturating_sub(10usize.saturating_add(result_bytes))
+                .saturating_add(21);
+            if bytes <= limit {
+                break;
             }
         }
     }
-    let mut previous = None;
-    for _ in 0..4 {
-        let current = serde_json::to_vec(response)?.len();
-        response.aggregate_bytes = Some(current);
-        if previous == Some(current) {
+    if bytes > limit {
+        return Err(anyhow!(
+            "mcp_batch_result_too_large_after_clipping: bytes={bytes}; max={limit}"
+        ));
+    }
+    let without_placeholder_digits = bytes.saturating_sub(limit.to_string().len());
+    let mut final_bytes = bytes;
+    loop {
+        let adjusted = without_placeholder_digits.saturating_add(final_bytes.to_string().len());
+        if adjusted == final_bytes {
             break;
         }
-        previous = Some(current);
+        final_bytes = adjusted;
     }
-    let final_bytes = serde_json::to_vec(response)?.len();
     response.aggregate_bytes = Some(final_bytes);
-    if final_bytes > McpBatchRequest::MAX_AGGREGATE_RESULT_BYTES {
+    if final_bytes > limit {
         return Err(anyhow!(
-            "mcp_batch_result_too_large_after_clipping: bytes={final_bytes}; max={}",
-            McpBatchRequest::MAX_AGGREGATE_RESULT_BYTES
+            "mcp_batch_result_too_large_after_clipping: bytes={final_bytes}; max={limit}"
         ));
     }
     Ok(())

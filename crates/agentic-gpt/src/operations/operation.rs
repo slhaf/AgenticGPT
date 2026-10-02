@@ -140,9 +140,7 @@ pub(crate) const TOOL_NAMESPACE_BY_NAME: &[(&str, ToolNamespace)] = &[
     ("file.search", ToolNamespace::File),
     ("process.cancel", ToolNamespace::Process),
     ("process.list", ToolNamespace::Process),
-    ("process.output", ToolNamespace::Process),
-    ("process.result", ToolNamespace::Process),
-    ("process.status", ToolNamespace::Process),
+    ("process.read", ToolNamespace::Process),
     ("mcp.batch", ToolNamespace::Mcp),
     ("mcp.callTool", ToolNamespace::Mcp),
     ("mcp.list", ToolNamespace::Mcp),
@@ -387,9 +385,7 @@ pub(crate) fn hub_command_name(command: &HubCommand) -> &'static str {
         HubCommand::Exec { .. } => "process.exec",
         HubCommand::ProcessBatch { .. } => "process.batch",
         HubCommand::ProcessList { .. } => "process.list",
-        HubCommand::ProcessStatus { .. } => "process.status",
-        HubCommand::ProcessOutput { .. } => "process.output",
-        HubCommand::ProcessResult { .. } => "process.result",
+        HubCommand::ProcessRead { .. } => "process.read",
         HubCommand::EventList { .. } => "event.list",
         HubCommand::EventGet { .. } => "event.get",
         HubCommand::EventMark { .. } => "event.mark",
@@ -499,5 +495,40 @@ mod tests {
             .expect_err("Normal Hub must not admit Room operations");
             assert_eq!(error.code(), "room_agent_required");
         }
+    }
+    #[test]
+    fn process_read_keeps_process_authorization_across_agent_profiles_and_hub() {
+        let mut config = Config::default_config().expect("default config");
+        for profile in [CapabilityProfile::Normal, CapabilityProfile::Room] {
+            for ingress in [RequestIngress::TunnelStdio, RequestIngress::LocalUnix] {
+                assert!(authorize(
+                    RuntimeModel::local(profile),
+                    &config,
+                    RequestContext::new(ingress, "process.read"),
+                )
+                .is_ok());
+            }
+            assert!(authorize(
+                RuntimeModel::hub(profile),
+                &config,
+                RequestContext::new(RequestIngress::Hub, "process.read"),
+            )
+            .is_ok());
+        }
+
+        config.toolsets.disable(ToolNamespace::Process);
+        let local_error = authorize(
+            RuntimeModel::local(CapabilityProfile::Normal),
+            &config,
+            RequestContext::new(RequestIngress::LocalUnix, "process.read"),
+        )
+        .expect_err("local process.read requires the Process toolset");
+        assert_eq!(local_error.code(), "toolset_required");
+        assert!(authorize(
+            RuntimeModel::hub(CapabilityProfile::Normal),
+            &config,
+            RequestContext::new(RequestIngress::Hub, "process.read"),
+        )
+        .is_ok());
     }
 }

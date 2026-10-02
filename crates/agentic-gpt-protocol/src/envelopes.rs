@@ -14,7 +14,7 @@ use super::notification_tmux::{
 };
 use super::process::{
     ProcessBatchExecRequest, ProcessCancelRequest, ProcessExecRequest, ProcessInfo,
-    ProcessListRequest, ProcessOutputRequest, ProcessResultRequest, ProcessStatusRequest,
+    ProcessListRequest, ProcessReadRequest,
 };
 use super::room::{
     RoomDiaryActiveRequest, RoomDiaryReadRequest, RoomMaintenanceStatusRequest,
@@ -53,25 +53,15 @@ pub enum HubCommand {
         request_id: String,
         payload: ProcessListRequest,
     },
-    #[serde(rename = "process.status")]
-    ProcessStatus {
+    #[serde(rename = "process.read")]
+    ProcessRead {
         request_id: String,
-        payload: ProcessStatusRequest,
+        payload: ProcessReadRequest,
     },
     #[serde(rename = "process.cancel")]
     ProcessCancel {
         request_id: String,
         payload: ProcessCancelRequest,
-    },
-    #[serde(rename = "process.output")]
-    ProcessOutput {
-        request_id: String,
-        payload: ProcessOutputRequest,
-    },
-    #[serde(rename = "process.result")]
-    ProcessResult {
-        request_id: String,
-        payload: ProcessResultRequest,
     },
     #[serde(rename = "event.list")]
     EventList {
@@ -264,10 +254,8 @@ impl HubCommand {
             Self::Exec { request_id, .. }
             | Self::ProcessBatch { request_id, .. }
             | Self::ProcessList { request_id, .. }
-            | Self::ProcessStatus { request_id, .. }
+            | Self::ProcessRead { request_id, .. }
             | Self::ProcessCancel { request_id, .. }
-            | Self::ProcessOutput { request_id, .. }
-            | Self::ProcessResult { request_id, .. }
             | Self::EventList { request_id, .. }
             | Self::EventGet { request_id, .. }
             | Self::EventMark { request_id, .. }

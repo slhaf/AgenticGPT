@@ -31,6 +31,71 @@ fn set_test_ledger_path(path: Option<PathBuf>) {
 }
 static TEMP_COUNTER: LazyLock<Mutex<u64>> = LazyLock::new(|| Mutex::new(0));
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RetiredProcessCommand {
+    Status,
+    Output,
+    Result,
+}
+
+impl RetiredProcessCommand {
+    fn operation_name(self) -> &'static str {
+        match self {
+            Self::Status => "process.status",
+            Self::Output => "process.output",
+            Self::Result => "process.result",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum StoredCommand {
+    Current(HubCommand),
+    RetiredProcessRead {
+        command_type: RetiredProcessCommand,
+        value: Value,
+    },
+}
+
+impl Serialize for StoredCommand {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::Current(command) => command.serialize(serializer),
+            Self::RetiredProcessRead { value, .. } => value.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for StoredCommand {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        if let Some(command_type) = retired_process_command(&value) {
+            return Ok(Self::RetiredProcessRead {
+                command_type,
+                value,
+            });
+        }
+        serde_json::from_value(value)
+            .map(Self::Current)
+            .map_err(<D::Error as serde::de::Error>::custom)
+    }
+}
+
+fn retired_process_command(value: &Value) -> Option<RetiredProcessCommand> {
+    match value.get("type").and_then(Value::as_str)? {
+        "process.status" => Some(RetiredProcessCommand::Status),
+        "process.output" => Some(RetiredProcessCommand::Output),
+        "process.result" => Some(RetiredProcessCommand::Result),
+        _ => None,
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct LedgerRecord {
@@ -41,7 +106,7 @@ pub(crate) struct LedgerRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) agent_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) command: Option<HubCommand>,
+    pub(crate) command: Option<StoredCommand>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) result: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -55,7 +120,7 @@ struct ConflictDetails<'a> {
     request_id: &'a str,
     command_hash: &'a str,
     agent_id: &'a str,
-    command: Option<HubCommand>,
+    command: Option<StoredCommand>,
     result: Option<Value>,
     reason: &'a str,
 }
@@ -109,7 +174,7 @@ pub(crate) fn accept(envelope: &HubCommandEnvelope, agent_id: &str) -> Result<Ac
                     command_hash: envelope.command_hash.clone(),
                     status: "accepted".to_string(),
                     agent_id: Some(agent_id.to_string()),
-                    command: Some(envelope.command.clone()),
+                    command: Some(StoredCommand::Current(envelope.command.clone())),
                     result: None,
                     reason: None,
                     conflict: None,
@@ -129,7 +194,7 @@ pub(crate) fn accept(envelope: &HubCommandEnvelope, agent_id: &str) -> Result<Ac
                     request_id: &envelope.request_id,
                     command_hash: &envelope.command_hash,
                     agent_id,
-                    command: Some(envelope.command.clone()),
+                    command: Some(StoredCommand::Current(envelope.command.clone())),
                     result: None,
                     reason: "transport_identity_mismatch",
                 },
@@ -147,7 +212,7 @@ pub(crate) fn accept(envelope: &HubCommandEnvelope, agent_id: &str) -> Result<Ac
                         request_id: &envelope.request_id,
                         command_hash: &envelope.command_hash,
                         agent_id,
-                        command: Some(envelope.command.clone()),
+                        command: Some(StoredCommand::Current(envelope.command.clone())),
                         result: None,
                         reason: "transport_owner_mismatch",
                     },
@@ -329,10 +394,13 @@ pub(crate) fn completed_response(record: &LedgerRecord) -> Result<Option<AgentMe
         .command
         .as_ref()
         .map(|command| {
-            crate::event_notifications::initial_response_dispositions(
-                crate::operation::hub_command_name(command),
-                &data,
-            )
+            let operation = match command {
+                StoredCommand::Current(command) => crate::operation::hub_command_name(command),
+                StoredCommand::RetiredProcessRead { command_type, .. } => {
+                    command_type.operation_name()
+                }
+            };
+            crate::event_notifications::initial_response_dispositions(operation, &data)
         })
         .transpose()?
         .unwrap_or_default();
@@ -894,7 +962,7 @@ mod tests {
                 command_hash: legacy.command_hash.clone(),
                 status: "accepted".to_string(),
                 agent_id: None,
-                command: Some(legacy.command.clone()),
+                command: Some(StoredCommand::Current(legacy.command.clone())),
                 result: None,
                 reason: None,
                 conflict: None,
@@ -920,7 +988,7 @@ mod tests {
                 command_hash: adopted.command_hash.clone(),
                 status: "completed".to_string(),
                 agent_id: None,
-                command: Some(adopted_command),
+                command: Some(StoredCommand::Current(adopted_command)),
                 result: Some(serde_json::json!({"legacy": true})),
                 reason: None,
                 conflict: None,
@@ -980,7 +1048,7 @@ mod tests {
                 command_hash: hash.to_string(),
                 status: status.to_string(),
                 agent_id: owner.map(str::to_string),
-                command: Some(command.clone()),
+                command: Some(StoredCommand::Current(command.clone())),
                 result,
                 reason: None,
                 conflict: None,
@@ -1071,7 +1139,7 @@ mod tests {
                 command_hash: "hash-conflict".to_string(),
                 status: "conflict".to_string(),
                 agent_id: Some("agent-a".to_string()),
-                command: Some(command.clone()),
+                command: Some(StoredCommand::Current(command.clone())),
                 result: Some(serde_json::json!({"conflict": true})),
                 reason: Some("preserve-conflict".to_string()),
                 conflict: Some(serde_json::json!({"canonical": true})),
@@ -1088,6 +1156,262 @@ mod tests {
             assert!(String::from_utf8_lossy(&after).contains(marker));
         }
         assert_eq!(fs::read(recovery_backup_path(&ledger)).unwrap(), before);
+    }
+
+    #[test]
+    fn retired_process_commands_survive_mixed_ledger_recovery_and_compaction() {
+        let _home_lock = TEST_HOME_LOCK.lock();
+        let _home = test_home();
+        let ledger = ledger_path().unwrap();
+        let retired_completed_command = serde_json::json!({
+            "type": "process.output",
+            "requestId": "request-retired-completed",
+            "payload": {"processId": "process-retired", "cursor": null}
+        });
+        let retired_incomplete_command = serde_json::json!({
+            "type": "process.status",
+            "requestId": "request-retired-incomplete",
+            "payload": {"processId": "process-pending"}
+        });
+        let retired_result_command = serde_json::json!({
+            "type": "process.result",
+            "requestId": "request-retired-result",
+            "payload": {"processId": "process-result-pending"}
+        });
+        let current_incomplete_command =
+            serde_json::to_value(skills_command("request-current-incomplete")).unwrap();
+        let current_completed_command =
+            serde_json::to_value(skills_command("request-current-completed")).unwrap();
+        let retired_result = serde_json::json!({
+            "agentId": "agent-a",
+            "processId": "process-retired",
+            "kind": "process",
+            "state": "completed",
+            "historicalEvidence": {"source": "old-ledger"}
+        });
+        let retired_command_type = retired_completed_command["type"].clone();
+        let current_result = serde_json::json!({"supported": true});
+        let records = [
+            serde_json::json!({
+                "runId": "run-retired-completed",
+                "requestId": "request-retired-completed",
+                "commandHash": "hash-retired-completed",
+                "status": "completed",
+                "agentId": "agent-a",
+                "command": retired_completed_command,
+                "result": retired_result,
+            }),
+            serde_json::json!({
+                "runId": "run-retired-incomplete",
+                "requestId": "request-retired-incomplete",
+                "commandHash": "hash-retired-incomplete",
+                "status": "accepted",
+                "agentId": "agent-a",
+                "command": retired_incomplete_command,
+            }),
+            serde_json::json!({
+                "runId": "run-retired-result",
+                "requestId": "request-retired-result",
+                "commandHash": "hash-retired-result",
+                "status": "started",
+                "agentId": "agent-a",
+                "command": retired_result_command,
+            }),
+            serde_json::json!({
+                "runId": "run-current-incomplete",
+                "requestId": "request-current-incomplete",
+                "commandHash": "hash-current-incomplete",
+                "status": "accepted",
+                "agentId": "agent-a",
+                "command": current_incomplete_command,
+            }),
+            serde_json::json!({
+                "runId": "run-current-completed",
+                "requestId": "request-current-completed",
+                "commandHash": "hash-current-completed",
+                "status": "accepted",
+                "agentId": "agent-a",
+                "command": current_completed_command,
+            }),
+            serde_json::json!({
+                "runId": "run-current-completed",
+                "requestId": "request-current-completed",
+                "commandHash": "hash-current-completed",
+                "status": "completed",
+                "agentId": "agent-a",
+                "command": current_completed_command,
+                "result": current_result,
+            }),
+            serde_json::json!({
+                "runId": "run-retired-conflict",
+                "requestId": "request-retired-conflict",
+                "commandHash": "hash-retired-conflict",
+                "status": "conflict",
+                "agentId": "agent-a",
+                "command": retired_incomplete_command,
+                "reason": "legacy-conflict-evidence",
+                "conflict": {"original": "retained"}
+            }),
+        ];
+        for record in records {
+            append_raw_record(&ledger, &record);
+        }
+
+        let before = fs::read(&ledger).unwrap();
+        let recovered = latest_records().unwrap();
+        assert_eq!(recovered.len(), 5);
+        assert!(matches!(
+            recovered
+                .get("run-retired-completed")
+                .and_then(|record| record.command.as_ref()),
+            Some(StoredCommand::RetiredProcessRead {
+                command_type: RetiredProcessCommand::Output,
+                value,
+            }) if value["type"] == retired_command_type
+        ));
+        assert!(matches!(
+            recovered
+                .get("run-retired-incomplete")
+                .and_then(|record| record.command.as_ref()),
+            Some(StoredCommand::RetiredProcessRead {
+                command_type: RetiredProcessCommand::Status,
+                ..
+            })
+        ));
+        assert!(matches!(
+            recovered
+                .get("run-retired-result")
+                .and_then(|record| record.command.as_ref()),
+            Some(StoredCommand::RetiredProcessRead {
+                command_type: RetiredProcessCommand::Result,
+                ..
+            })
+        ));
+        assert!(matches!(
+            recovered
+                .get("run-current-incomplete")
+                .and_then(|record| record.command.as_ref()),
+            Some(StoredCommand::Current(HubCommand::SkillsList { request_id }))
+                if request_id == "request-current-incomplete"
+        ));
+
+        let response = completed_response(recovered.get("run-retired-completed").unwrap())
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            response,
+            AgentMessage::Response {
+                run_id: Some(run_id),
+                request_id,
+                data,
+                event_sources,
+            } if run_id == "run-retired-completed"
+                && request_id == "request-retired-completed"
+                && data == retired_result
+                && event_sources.is_empty()
+        ));
+
+        with_ledger_lock(compact_locked).unwrap();
+        let after = fs::read(&ledger).unwrap();
+        assert!(after.len() < before.len());
+        assert_eq!(fs::read(recovery_backup_path(&ledger)).unwrap(), before);
+        assert!(String::from_utf8_lossy(&after).contains("legacy-conflict-evidence"));
+        assert!(String::from_utf8_lossy(&after).contains("\"original\":\"retained\""));
+        let compacted = latest_records().unwrap();
+        assert_eq!(compacted.len(), 5);
+        assert!(matches!(
+            compacted
+                .get("run-retired-completed")
+                .and_then(|record| record.command.as_ref()),
+            Some(StoredCommand::RetiredProcessRead {
+                command_type: RetiredProcessCommand::Output,
+                value,
+            }) if value == &serde_json::json!({
+                "type": "process.output",
+                "requestId": "request-retired-completed",
+                "payload": {"processId": "process-retired", "cursor": null}
+            })
+        ));
+        assert_eq!(
+            compacted
+                .get("run-retired-completed")
+                .and_then(|record| record.result.as_ref()),
+            Some(&retired_result)
+        );
+        assert!(matches!(
+            compacted
+                .get("run-retired-incomplete")
+                .and_then(|record| record.command.as_ref()),
+            Some(StoredCommand::RetiredProcessRead {
+                command_type: RetiredProcessCommand::Status,
+                ..
+            })
+        ));
+        assert!(matches!(
+            compacted
+                .get("run-retired-result")
+                .and_then(|record| record.command.as_ref()),
+            Some(StoredCommand::RetiredProcessRead {
+                command_type: RetiredProcessCommand::Result,
+                ..
+            })
+        ));
+        assert!(matches!(
+            compacted
+                .get("run-current-incomplete")
+                .and_then(|record| record.command.as_ref()),
+            Some(StoredCommand::Current(HubCommand::SkillsList { request_id }))
+                if request_id == "request-current-incomplete"
+        ));
+    }
+
+    #[test]
+    fn malformed_transport_identity_and_owner_rows_fail_closed() {
+        let _home_lock = TEST_HOME_LOCK.lock();
+        let _home = test_home();
+        let ledger = ledger_path().unwrap();
+        let retired_command = serde_json::json!({
+            "type": "process.result",
+            "requestId": "request-corrupt"
+        });
+        let corrupt_rows = [
+            serde_json::json!({
+                "runId": 42,
+                "requestId": "request-corrupt",
+                "commandHash": "hash-corrupt",
+                "status": "accepted",
+                "agentId": "agent-a",
+                "command": retired_command,
+            }),
+            serde_json::json!({
+                "runId": "run-corrupt-owner",
+                "requestId": "request-corrupt-owner",
+                "commandHash": "hash-corrupt-owner",
+                "status": "accepted",
+                "agentId": 42,
+                "command": retired_command,
+            }),
+        ];
+
+        for record in corrupt_rows {
+            let line = serde_json::to_string(&record).unwrap();
+            let bytes = format!("{line}\n");
+            fs::write(&ledger, &bytes).unwrap();
+            assert!(latest_records().is_err());
+            assert_eq!(fs::read_to_string(&ledger).unwrap(), bytes);
+            assert!(fs::read_to_string(recovery_path(&ledger))
+                .unwrap()
+                .contains(&line));
+        }
+    }
+
+    fn append_raw_record(path: &Path, record: &Value) {
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .unwrap();
+        writeln!(file, "{record}").unwrap();
     }
 
     fn append_json_record(path: &Path, record: &LedgerRecord) {

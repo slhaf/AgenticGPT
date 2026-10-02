@@ -5,11 +5,10 @@ use agentic_gpt_protocol::{
     normalize_process_group, BootstrapReadRequest, EventGetRequest, EventListRequest,
     EventMarkRequest, HubCommand, McpBatchCall, McpBatchRequest, McpCallToolRequest,
     McpListToolsRequest, ProcessBatchExecRequest, ProcessCancelRequest, ProcessExecElement,
-    ProcessExecRequest, ProcessKind, ProcessListRequest, ProcessOutputRequest,
-    ProcessResultRequest, ProcessState, ProcessStatusRequest, RoomDiaryActiveRequest,
-    RoomDiaryReadRequest, RoomMaintenanceStatusRequest, RoomNotebookReadRequest,
-    RoomNotebookRecentRequest, RoomNotebookSearchRequest, RoomStateListRequest,
-    RoomStateReadRequest, SkillActivationRequest, SkillInstallCancelRequest,
+    ProcessExecRequest, ProcessKind, ProcessListRequest, ProcessReadRequest, ProcessReadView,
+    ProcessState, RoomDiaryActiveRequest, RoomDiaryReadRequest, RoomMaintenanceStatusRequest,
+    RoomNotebookReadRequest, RoomNotebookRecentRequest, RoomNotebookSearchRequest,
+    RoomStateListRequest, RoomStateReadRequest, SkillActivationRequest, SkillInstallCancelRequest,
     SkillInstallGetRequest, SkillInstallRequest, SkillReadRequest, SkillRunRequest,
     SkillSearchRequest, TmuxCapturePaneRequest, TmuxCloseSessionRequest, TmuxCreateSessionRequest,
     TmuxExecRequest, TmuxListPanesRequest, TmuxPasteTextRequest, UserNotifySendRequest,
@@ -17,14 +16,13 @@ use agentic_gpt_protocol::{
 use args::{
     AgentIdArgs, BootstrapReadArgs, EventGetArgs, EventListArgs, EventMarkArgs, HubRunGetArgs,
     HubRunListArgs, McpBatchArgs, McpCallToolArgs, McpListServersArgs, McpListToolsArgs,
-    ProcessBatchArgs, ProcessExecArgs, ProcessIdArgs, ProcessListArgs, ProcessOutputArgs,
-    ProcessResultArgs, ProcessStatusArgs, RoomDiaryActiveArgs, RoomDiaryReadArgs,
-    RoomMaintenanceStatusArgs, RoomMaintenanceSubmitArgs, RoomNotebookReadArgs,
-    RoomNotebookRecentArgs, RoomNotebookSearchArgs, RoomStateListArgs, RoomStateReadArgs,
-    SkillActivationArgs, SkillInstallArgs, SkillInstallCancelArgs, SkillInstallGetArgs,
-    SkillReadArgs, SkillRunArgs, SkillSearchArgs, TmuxCapturePaneArgs, TmuxCloseSessionArgs,
-    TmuxCreateSessionArgs, TmuxExecArgs, TmuxListPanesArgs, TmuxListSessionsArgs,
-    TmuxPasteTextArgs, UserNotifySendArgs,
+    ProcessBatchArgs, ProcessExecArgs, ProcessIdArgs, ProcessListArgs, ProcessReadArgs,
+    RoomDiaryActiveArgs, RoomDiaryReadArgs, RoomMaintenanceStatusArgs, RoomMaintenanceSubmitArgs,
+    RoomNotebookReadArgs, RoomNotebookRecentArgs, RoomNotebookSearchArgs, RoomStateListArgs,
+    RoomStateReadArgs, SkillActivationArgs, SkillInstallArgs, SkillInstallCancelArgs,
+    SkillInstallGetArgs, SkillReadArgs, SkillRunArgs, SkillSearchArgs, TmuxCapturePaneArgs,
+    TmuxCloseSessionArgs, TmuxCreateSessionArgs, TmuxExecArgs, TmuxListPanesArgs,
+    TmuxListSessionsArgs, TmuxPasteTextArgs, UserNotifySendArgs,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -53,17 +51,20 @@ use crate::utils::random_id;
 use crate::REQUEST_TIMEOUT_SECS;
 const ROOM_TRANSPORT_MARGIN_SECS: u64 = 5;
 
-const MCP_INSTRUCTIONS: &str = "Agentic GPT Hub 完整配置提供 52 个工具。先用 agent.list 选择已启用的本地 Agent：进程、tmux 和指定 Agent 的下游 MCP 工具以 agentId 路由；Room、bootstrap 与 skills 工具不接收 agentId，每次调用由 Hub 捕获当时的活动 Room 连接。process.exec/process.batch 运行 command 进程，mcp.callTool/mcp.batch 运行 kind=mcp 进程；waitSeconds 只控制本次内联等待，不代表完成或取消。mcp.callTool/batch 的 timeoutSeconds 从调用获准并取得执行槽后起算，只限下游连接/请求，不含确认等待和排队。用 process.status/output/cancel 跟踪命令和 skill；只有下游 MCP 的 kind=mcp 结构化结果适用 process.result，command/skill 的 stdout/stderr 用 process.output。skills.run 返回实际执行 Agent 的 agentId 和 processId；之后的 process.* 必须复用这两个值，不会按当前活动 Room 自动路由。event.list/get/mark 必须指定 agentId，只操作该 Agent 的 inbox。hub.process.* 只读 Hub 进程缓存，需检查 freshness/observedAt；process.list/status 向 Agent 请求状态（请求失败时可能回退缓存）。hub.run.* 是 Hub 持久派发回执，不等于进程状态或停止证据。先用 mcp.listServers/listTools 发现下游 MCP 服务器、工具及参数 schema；mcp.batch 只返回子调用进程摘要，完整下游结果用对应 processId 调 process.result，批次失败不回滚已开始的调用。tmux.exec 返回提交状态和短暂窗格快照，不是完成证据；需要时用 tmux.capturePane 核验输出。skills.install 是异步安装/替换，随后用 skills.install.get/cancel；内置 skill-installer 可读但只读、不可运行，调用 skills.run 前检查 origin/readOnly。发送前先查 user.notify.channels 并检查 user.notify.send 的 accepted；桌面通道可用 accepted=false/reason 表示投递失败且 isError 仍为 false，路由/Hub 投递错误才返回 error。accepted 表示通道提供方接受/处理请求，不代表用户端送达或已读；ntfy 只以发布 HTTP 成功确认。工具原生 JSON 位于 MCP structuredContent 并以 text 返回，顶层含 error 时 isError 为 true；参数/路由等 MCP 协议错误与工具 JSON 错误不同。annotations 是行为提示而非授权。";
-const COORDINATOR_INSTRUCTIONS: &str = "协调者配置仅暴露 8 个 Hub 原生工具：hub.info、agent.list、hub.run.list/get、hub.process.status/list 和 user.notify.channels/send。可查看 Agent 注册/在线状态、Hub 派发回执与进程缓存快照；hub.process.* 是可能过期的 Hub 缓存（检查 freshness/observedAt），hub.run.* 是回执而非实时进程状态或停止证据。在线且指定 Agent 时，hub.process.* 额外请求一次 EventPanel 元数据以附加 events；Agent 离线或查询失败时省略 events。这不是进程状态/执行派发。此配置不会向 Agent 派发执行、进程控制、tmux、下游 MCP、Room、bootstrap 或 skill 操作。发送前先查 user.notify.channels 并检查 accepted：桌面通道可能返回 accepted=false/reason 而 isError=false，路由/Hub 投递错误才返回 error。accepted 表示通道提供方接受/处理请求，不代表用户端送达或已读；ntfy 只以发布 HTTP 成功确认。结果原生 JSON 位于 MCP structuredContent 并以 text 返回；其中顶层 error 会标记 isError，参数/路由错误可作为 MCP 协议错误返回。annotations 是提示，不是授权。";
+const MCP_INSTRUCTIONS: &str = "Agentic GPT Hub 完整配置提供完整 Apps MCP 工具集。先用 agent.list 选择已启用的本地 Agent：进程、tmux 和指定 Agent 的下游 MCP 工具以 agentId 路由；Room、bootstrap 与 skills 工具不接收 agentId，每次调用由 Hub 捕获当时的活动 Room 连接。process.exec/process.batch 运行 command 进程，mcp.callTool/mcp.batch 运行 kind=mcp 进程；waitSeconds 只控制本次等待，不代表完成或取消。process.* 的完整执行面为 exec、batch、read、list、cancel；process.read 使用 auto 或 status 视图统一读取状态与可用产物，status 不含产物；auto 可用 cursor 续读 command/skill 输出，status 与 cursor 不可组合，kind=mcp 的下游结果不支持输出 cursor。maxBytes 是整个 ProcessResponse 的 JSON UTF-8 字节预算，省略时使用 Agent 当前 limits.processResponseBytes（出厂默认 8192），显式范围为 4096–1048576。等待超时不取消进程。mcp.callTool 的下游结果以 mcpResult 保留完整 CallToolResult；command/skill 输出用 process.read 获取。skills.run 返回实际执行 Agent 的 agentId 和 processId；之后的 process.* 必须复用这两个值，不会按当前活动 Room 自动路由。event.list/get/mark 必须指定 agentId，只操作该 Agent 的 inbox。hub.process.* 只读 Hub 进程元数据缓存，需检查 freshness/observedAt，不能等待当前状态或获取输出/结果/取消证据；process.list/read 向 Agent 请求实时观察，失败时可能返回明确标记的缓存元数据。hub.run.* 是 Hub 持久派发回执，不等于进程状态或停止证据。先用 mcp.listServers/listTools 发现下游 MCP 服务器、工具及参数 schema；mcp.batch 返回 batchId/status 和按输入顺序的紧凑子进程结果（index/id 与 ProcessResponse 字段）；included 的 mcpResult 保留完整 CallToolResult，deferred 时用对应 agentId/processId 调 process.read 续读。批次失败不回滚已开始的调用。tmux.exec 返回提交状态和短暂窗格快照，不是完成证据；需要时用 tmux.capturePane 核验输出。skills.install 是异步安装/替换，随后用 skills.install.get/cancel；内置 skill-installer 可读但只读、不可运行，调用 skills.run 前检查 origin/readOnly。发送前先查 user.notify.channels 并检查 user.notify.send 的 accepted；桌面通道可用 accepted=false/reason 表示投递失败且 isError 仍为 false，路由/Hub 投递错误才返回 error。accepted 表示通道提供方接受/处理请求，不代表用户端送达或已读；ntfy 只以发布 HTTP 成功确认。工具原生 JSON 位于 MCP structuredContent 并以 text 返回，顶层含 error 时 isError 为 true；参数/路由等 MCP 协议错误与工具 JSON 错误不同。annotations 是行为提示而非授权。";
+const COORDINATOR_INSTRUCTIONS: &str = "协调者配置仅暴露 8 个 Hub 原生工具：hub.info、agent.list、hub.run.list/get、hub.process.status/list 和 user.notify.channels/send。可查看 Agent 注册/在线状态、Hub 派发回执与进程缓存快照；hub.process.* 只读可能过期的 Hub 元数据缓存（检查 freshness/observedAt），不请求 Agent 执行或读取、不等待状态，也不返回输出、结果或取消证据；hub.run.* 是回执而非实时进程状态或停止证据。在线且指定 Agent 时，hub.process.* 额外进行一次 best-effort EventPanel 元数据查询并附加 events；Agent 离线或查询失败时省略 events。这些缓存快照不代表 Agent 当前进程状态，也不同于 Full 配置中的 process.read。此配置不会向 Agent 派发执行、进程控制、tmux、下游 MCP、Room、bootstrap 或 skill 操作。发送前先查 user.notify.channels 并检查 accepted：桌面通道可能返回 accepted=false/reason 而 isError=false，路由/Hub 投递错误才返回 error。accepted 表示通道提供方接受/处理请求，不代表用户端送达或已读；ntfy 只以发布 HTTP 成功确认。结果原生 JSON 位于 MCP structuredContent 并以 text 返回；其中顶层 error 会标记 isError，参数/路由错误可作为 MCP 协议错误返回。annotations 是提示，不是授权。";
 
 fn default_process_wait_seconds() -> u64 {
-    ProcessStatusRequest::DEFAULT_WAIT_SECONDS
+    ProcessReadRequest::DEFAULT_WAIT_SECONDS
 }
 
-fn process_status_payload(params: &ProcessStatusArgs) -> ProcessStatusRequest {
-    let mut payload = ProcessStatusRequest {
+fn process_read_payload(params: &ProcessReadArgs) -> ProcessReadRequest {
+    let mut payload = ProcessReadRequest {
         process_id: params.process_id.clone(),
         wait_seconds: params.wait_seconds,
+        view: params.view.map(ProcessReadView::from).unwrap_or_default(),
+        cursor: params.cursor.clone(),
+        max_bytes: params.max_bytes,
     };
     payload.wait_seconds = Some(payload.effective_wait_seconds());
     payload
@@ -83,14 +84,6 @@ fn default_room_notebook_limit() -> usize {
 
 fn default_process_list_limit() -> usize {
     ProcessListRequest::DEFAULT_LIMIT
-}
-
-fn default_process_output_max_bytes() -> usize {
-    ProcessOutputRequest::DEFAULT_MAX_BYTES
-}
-
-fn default_process_result_max_bytes() -> usize {
-    ProcessResultRequest::DEFAULT_MAX_BYTES
 }
 
 const COORDINATOR_TOOLS: &[&str] = &[
@@ -480,7 +473,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "hub.process.status",
-        description = "按 agentId 和 processId 读取一条 Hub 缓存快照，不会请求 Agent 执行或读取进程状态。在线时额外进行一次 best-effort EventPanel 元数据查询并附加 events，Agent 离线或查询失败时省略 events；适合离线时查看最近已观测元数据，不能证明当前状态。返回进程字段以及 freshness/observedAt；无缓存项在 structuredContent 中返回 error.code=process_not_found 与 freshness=unknown。Agent 未注册或未启用时返回 MCP 参数错误。"
+        description = "按 agentId 和 processId 只读取 Hub 缓存中的进程元数据；不会请求 Agent 执行、读取或等待实时状态，也不返回 stdout/stderr、下游结果正文或取消证据。适合检查最近已观测的快照，不能证明当前状态；检查 freshness/observedAt。在线时会额外进行一次 best-effort EventPanel 元数据查询并附加 events，离线或查询失败时省略。无缓存项在 structuredContent 中返回 error.code=process_not_found 与 freshness=unknown；Agent 未注册或未启用时返回 MCP 参数错误。"
     )]
     async fn hub_process_status(
         &self,
@@ -577,7 +570,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "process.exec",
-        description = "在指定 Agent 上启动一个受管理命令进程；program 与 args 是直接可执行文件和参数数组，不自动拆分 shell 字符串，shell 语法须显式调用 bash/sh。返回实际 agentId、processId、status、completedInline 等初始字段；waitSeconds 只限制内联等待。执行会产生实际副作用并受 Agent 本地策略/确认约束；process_exec_timeout 是结果内 JSON 错误，超时不表示未启动或已取消，可用相同 agentId/processId 调 process.status/output/cancel 跟进，Hub 派发回执用 hub.run.get 查询。"
+        description = "在指定 Agent 上启动一个受管理命令进程；program 与 args 是直接可执行文件和参数数组，不自动拆分 shell 字符串，shell 语法须显式调用 bash/sh。首响为紧凑 ProcessResponse，含 agentId、processId、kind、state、captureStatus 及预算内的可选 output；waitSeconds 默认 5、上限 30、0 不等待。执行会产生实际副作用并受 Agent 本地策略/确认约束；process_exec_timeout 是结果内 JSON 错误，超时不表示未启动或已取消，可用首响中的相同 agentId/processId 调 process.read/cancel 跟进，Hub 派发回执用 hub.run.get 查询。"
     )]
     async fn exec(&self, params: Parameters<ProcessExecArgs>) -> Result<CallToolResult, ErrorData> {
         let params = params.0;
@@ -611,7 +604,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "process.batch",
-        description = "在同一批次准入边界内启动多个 Agent 受管理命令进程；每项可用 workingDirectory 覆盖批次默认目录。返回 batchId、status、completedInline、pollAfterMs 和逐项 processes（每项含 agentId/processId）；已启动项的副作用不会回滚。waitSeconds 只等初始结果，process_batch_timeout 不会取消子进程；用对应标识调用 process.status/output/cancel 跟进。"
+        description = "在同一批次准入边界内启动多个 Agent 受管理命令进程；每项可用 workingDirectory 覆盖批次默认目录。返回 batchId、批次 status 和逐项紧凑 ProcessResponse；整个 ProcessBatchResponse 共用一个响应预算，waitSeconds 默认 5、上限 30、0 不等待。已启动项的副作用不会回滚；process_batch_timeout 不会取消子进程。后续对每项使用其 agentId/processId 调 process.read/cancel。"
     )]
     async fn batch_exec(
         &self,
@@ -687,112 +680,41 @@ impl AgenticMcpServer {
     }
 
     #[tool(
-        name = "process.status",
-        description = "查询指定进程的 Agent 实时状态；waitSeconds 可短暂等待状态变化，但不会取消进程。返回 ProcessInfo 元数据及可选 waitElapsedMs，不含 stdout、stderr 或结果正文。Agent 不可达时 structuredContent 含 process_status_unavailable，可能附带 Hub 缓存摘要但不视为实时状态；未注册/启用的 Agent 返回 MCP 参数错误。"
+        name = "process.read",
+        description = "统一读取指定 Agent 的受管理进程状态与可用产物，适合跟进 process.exec、process.batch、skills.run 或 mcp.callTool 的 processId。必填 agentId/processId；waitSeconds 省略时为 5、范围 0–30（超过按 30，0 立即），view 为 auto（默认）或 status；status 仅等待执行终态/期限且不返回产物，auto 有 backlog 时先返回输出/结果，否则可有界等待输出、终态/采集结算或期限。auto 可用 cursor 续读 command/skill 输出，status 与 cursor 不可组合；kind=mcp 的下游结果不支持输出 cursor。maxBytes 是整个紧凑 ProcessResponse 的 UTF-8 JSON 预算，省略时保持未指定并由 Agent 使用 limits.processResponseBytes（出厂默认 8192），显式范围 4096–1048576。返回 agentId、processId、kind、state、captureStatus 与可选 output/mcpResult；完整下游 CallToolResult 只会以 included 状态整体保留，deferred 可提高预算，pending 不是失败。等待超时不取消进程；Agent 不可达时返回 process_read_unavailable 及明确标记的 Hub 缓存元数据（若有），缓存不含产物且不是实时结果。"
     )]
-    async fn process_status(
+    async fn process_read(
         &self,
-        params: Parameters<ProcessStatusArgs>,
+        params: Parameters<ProcessReadArgs>,
     ) -> Result<CallToolResult, ErrorData> {
         let params = params.0;
         self.ensure_agent_enabled(&params.agent_id)?;
-        let payload = process_status_payload(&params);
-        let wait_seconds = payload.effective_wait_seconds();
-        let command = HubCommand::ProcessStatus {
+        let payload = process_read_payload(&params);
+        let timeout_seconds = payload.effective_wait_seconds() + 2;
+        let command = HubCommand::ProcessRead {
             request_id: random_id("req"),
             payload,
         };
         let value =
-            match request_agent(&self.state, &params.agent_id, command, wait_seconds + 2).await {
-                Ok(value) => live_process_value(value),
+            match request_agent(&self.state, &params.agent_id, command, timeout_seconds).await {
+                Ok(value) => value,
                 Err(reason) => {
-                    let mut value = unavailable_process_value(
+                    unavailable_process_value(
                         &self.state,
                         &params.agent_id,
                         &params.process_id,
-                        "process_status_unavailable",
+                        "process_read_unavailable",
                         reason,
                     )
-                    .await;
-                    if let Some(object) = value.as_object_mut() {
-                        object.remove("status");
-                    }
-                    value
+                    .await
                 }
             };
         Ok(result_from_value(value))
     }
 
     #[tool(
-        name = "process.output",
-        description = "以非消费式分页读取 Agent 保存的 stdout/stderr；cursor 按原始字节续读，maxBytes 限制本页，非法 UTF-8 会用 base64 编码保留。返回 processId、stdout/stderr 分段的 data、startOffset、endOffset、encoding（偏移为原始字节位置的十进制字符串，可能含 gap），以及 nextCursor、hasMore、eof、captureStatus。Agent 不可达时返回 process_output_unavailable；Hub 缓存只补元数据，不提供输出正文。"
-    )]
-    async fn process_output(
-        &self,
-        params: Parameters<ProcessOutputArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let params = params.0;
-        self.ensure_agent_enabled(&params.agent_id)?;
-        let command = HubCommand::ProcessOutput {
-            request_id: random_id("req"),
-            payload: ProcessOutputRequest {
-                process_id: params.process_id.clone(),
-                cursor: params.cursor,
-                max_bytes: params.max_bytes,
-            },
-        };
-        let value = match request_agent(&self.state, &params.agent_id, command, 5).await {
-            Ok(value) => value,
-            Err(reason) => {
-                unavailable_process_value(
-                    &self.state,
-                    &params.agent_id,
-                    &params.process_id,
-                    "process_output_unavailable",
-                    reason,
-                )
-                .await
-            }
-        };
-        Ok(result_from_value(value))
-    }
-
-    #[tool(
-        name = "process.result",
-        description = "仅读取 kind=mcp 的下游 MCP 结构化 CallToolResult；它不适用于普通命令或 skill 进程，这两类即使成功完成也会返回 status=unavailable、process_result_not_applicable，应改用 process.output 读 stdout/stderr。kind=mcp 进程尚未结束时会返回 process_result_not_ready，完成后重试。结果返回 processId、status、resultAvailable，以及可选 result、error、resultBytes、resultSha256、resultPreview；过大或未保留时按状态处理，Agent 不可达时返回 process_result_unavailable。Hub 缓存不提供结果正文。"
-    )]
-    async fn process_result(
-        &self,
-        params: Parameters<ProcessResultArgs>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let params = params.0;
-        self.ensure_agent_enabled(&params.agent_id)?;
-        let command = HubCommand::ProcessResult {
-            request_id: random_id("req"),
-            payload: ProcessResultRequest {
-                process_id: params.process_id.clone(),
-                max_bytes: params.max_bytes,
-            },
-        };
-        let value = match request_agent(&self.state, &params.agent_id, command, 5).await {
-            Ok(value) => value,
-            Err(reason) => {
-                unavailable_process_value(
-                    &self.state,
-                    &params.agent_id,
-                    &params.process_id,
-                    "process_result_unavailable",
-                    reason,
-                )
-                .await
-            }
-        };
-        Ok(result_from_value(value))
-    }
-
-    #[tool(
         name = "process.cancel",
-        description = "请求 Agent 取消指定进程，并检查实际终止证据；返回 state、cancelOutcome、terminationEvidence，失败时可含 error。请求取消不保证远端已停止；Agent 不可达时返回 process_cancel_unavailable，并可能附 Hub 缓存元数据，不能把缓存当停止证据。"
+        description = "请求 Agent 取消指定进程并核验实际终止证据；成功时返回 ProcessCancelResponse（processId、state、cancelOutcome、terminationEvidence，可选 error），并可能附独立 events 面板。请求取消不保证远端已停止；Agent 不可达时返回 process_cancel_unavailable，并可能附 Hub 缓存元数据，不能把缓存当停止证据。"
     )]
     async fn process_cancel(
         &self,
@@ -807,7 +729,7 @@ impl AgenticMcpServer {
             },
         };
         let value = match request_agent(&self.state, &params.agent_id, command, 5).await {
-            Ok(value) => live_process_value(value),
+            Ok(value) => value,
             Err(reason) => {
                 unavailable_process_value(
                     &self.state,
@@ -1043,7 +965,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "mcp.callTool",
-        description = "在指定 Agent 上调用一个已发现的下游 MCP 工具；调用前先用 mcp.listServers/listTools 核对 serverId、toolName、参数和副作用。Hub 将其作为 kind=mcp 的受管理进程执行，返回实际 agentId、processId、status/completedInline 和可用的下游 CallToolResult（保留 content/isError）；waitSeconds 只等内联结果。timeoutSeconds 从调用获准且取得执行槽后起算，限制下游连接/请求，不含确认等待和排队。下游副作用不会由 Hub 回滚；超时不等于取消，之后用相同 agentId/processId 调 process.status/output/result/cancel 跟进。"
+        description = "在指定 Agent 上调用一个已发现的下游 MCP 工具；调用前先用 mcp.listServers/listTools 核对 serverId、toolName、参数和副作用。Hub 将其作为 kind=mcp 的受管理进程执行，返回统一 ProcessResponse（agentId/processId/kind/state 等）及预算内的可选 mcpResult；waitSeconds 只控制此次等待。timeoutSeconds 从调用获准且取得执行槽后起算，限制下游连接/请求，不含确认等待和排队。下游副作用不会由 Hub 回滚；超时不等于取消，之后用相同 agentId/processId 调 process.read/cancel 跟进。"
     )]
     async fn mcp_call_tool(
         &self,
@@ -1075,7 +997,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "mcp.batch",
-        description = "在指定 Agent 上运行 1 至 16 个下游 MCP 调用；先核对每项 server/tool/schema。mode 决定并行或顺序，failFast 只阻止尚未开始的子项，已启动调用不取消且副作用不回滚。公开返回只有 status、可选 error 和逐项 results；每项是 processId/state、退出/错误及结果保留状态/摘要等进程元数据，不含 batchId 或完整下游结果。完整 kind=mcp 结果用本次输入的 agentId 和对应 processId 调 process.result；waitSeconds 只等内联结果，timeoutSeconds 对每个调用从获准且取得执行槽后起算，限制下游连接/请求，不含确认等待和排队。"
+        description = "在指定 Agent 上运行 1 至 16 个下游 MCP 调用；先核对每项 server/tool/schema。mode 决定并行或顺序，failFast 只阻止尚未开始的子项，已启动调用不取消且副作用不回滚。返回 batchId、status、可选 error 和按输入顺序的 results；每项含 index、可选 id 及紧凑 ProcessResponse 字段（包括 agentId/captureStatus 与可选 mcpResult）。mcpResult 为 included 时保留完整 CallToolResult，deferred 时用本次输入的 agentId 和对应 processId 调 process.read 续读。waitSeconds 只等内联结果，timeoutSeconds 对每个调用从获准且取得执行槽后起算，限制下游连接/请求，不含确认等待和排队。"
     )]
     async fn mcp_batch(
         &self,
@@ -1659,7 +1581,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "skills.run",
-        description = "仅运行活动 Room 中已激活、origin=workspace 且 readOnly=false 的 skill 包 scripts/ 下可执行文件；内置 skill-installer 即使 active 也不可运行。返回实际执行 Agent 的 agentId、processId、status、completedInline 等初始结果；waitSeconds 只控制内联等待。脚本会产生实际副作用；后续 process.status/output/cancel 必须复用返回的 agentId 和 processId，不按当前活动 Room 自动路由；skill stdout/stderr 用 process.output，不能用 process.result。"
+        description = "仅运行活动 Room 中已激活、origin=workspace 且 readOnly=false 的 skill 包 scripts/ 下可执行文件；内置 skill-installer 即使 active 也不可运行。返回统一 ProcessResponse 并包含实际执行 Agent 的 agentId、processId；waitSeconds 只控制本次等待。脚本会产生实际副作用；后续 process.read/cancel 必须复用返回的 agentId 和 processId，不按当前活动 Room 自动路由；skill stdout/stderr 用 process.read，不能用下游 mcpResult。"
     )]
     async fn skills_run(
         &self,
@@ -1788,12 +1710,14 @@ fn notify_route_error_message(error: &NotifyRouteError) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::args::ProcessReadViewArgs;
     use super::*;
     use crate::config::{HubConfig, RemoteConfirmationConfig};
     use crate::db::init_db;
     use crate::state::{McpProfile, OutboundAgentMessage};
     use agentic_gpt_protocol::{
         AgentConnectionMode, AgentMessage, AgentRole, Capabilities, ProcessInfo,
+        DEFAULT_PROCESS_RESPONSE_BYTES,
     };
     use axum::body::to_bytes;
     use axum::extract::{Path, Query, State};
@@ -2226,9 +2150,7 @@ mod tests {
             "event.list",
             "event.get",
             "process.list",
-            "process.status",
-            "process.output",
-            "process.result",
+            "process.read",
             "hub.process.status",
             "hub.process.list",
             "tmux.listSessions",
@@ -2373,9 +2295,7 @@ mod tests {
             "process.exec",
             "process.batch",
             "process.list",
-            "process.status",
-            "process.output",
-            "process.result",
+            "process.read",
             "process.cancel",
             "hub.process.list",
             "event.list",
@@ -2396,6 +2316,16 @@ mod tests {
                 names.iter().any(|candidate| candidate == name),
                 "missing {name}"
             );
+        }
+        assert_eq!(
+            names
+                .iter()
+                .filter(|name| name.starts_with("process."))
+                .count(),
+            5
+        );
+        for removed in ["process.status", "process.output", "process.result"] {
+            assert!(!names.iter().any(|candidate| candidate == removed));
         }
     }
 
@@ -2621,7 +2551,81 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn offline_process_output_and_result_are_unavailable_and_cache_only() {
+    async fn process_read_mcp_dispatches_process_read_and_returns_unified_response() {
+        let state = test_state();
+        let mut outbound =
+            register_online_agent(&state, "agent", "agent-secret", "agent-connection").await;
+        let request_state = state.clone();
+        let call = tokio::spawn(async move {
+            transport::mcp_post(
+                State(request_state),
+                Json(tools_call_rpc(
+                    7,
+                    "process.read",
+                    json!({
+                        "agentId": "agent",
+                        "processId": "process-1",
+                        "waitSeconds": 0,
+                        "view": "auto",
+                        "cursor": "cursor-1"
+                    }),
+                )),
+            )
+            .await
+        });
+        let OutboundAgentMessage::Text(text) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), outbound.recv())
+                .await
+                .expect("process.read dispatches within the tool timeout")
+                .unwrap()
+        else {
+            panic!("expected a reliable Agent command envelope");
+        };
+        let envelope: agentic_gpt_protocol::HubCommandEnvelope =
+            serde_json::from_str(&text).unwrap();
+        assert!(!envelope.run_id.is_empty());
+        assert!(!envelope.command_hash.is_empty());
+        let (request_id, payload) = match &envelope.command {
+            agentic_gpt_protocol::HubCommand::ProcessRead {
+                request_id,
+                payload,
+            } => (request_id.clone(), payload.clone()),
+            command => panic!("expected ProcessRead, received {command:?}"),
+        };
+        assert_eq!(request_id, envelope.request_id);
+        assert_eq!(payload.process_id, "process-1");
+        assert_eq!(payload.wait_seconds, Some(0));
+        assert_eq!(payload.view, ProcessReadView::Auto);
+        assert_eq!(payload.cursor.as_deref(), Some("cursor-1"));
+        assert!(payload.max_bytes.is_none());
+
+        let response_data = json!({
+            "agentId": "agent",
+            "processId": "process-1",
+            "kind": "command",
+            "state": "running",
+            "captureStatus": "capturing"
+        });
+        respond_to_agent_command(
+            &state,
+            "agent",
+            "agent-secret",
+            "agent-connection",
+            &envelope,
+            response_data.clone(),
+        )
+        .await;
+        let response = call.await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["id"], 7);
+        assert_eq!(value["result"]["structuredContent"], response_data);
+        assert_eq!(value["result"]["isError"], false);
+    }
+
+    #[tokio::test]
+    async fn offline_process_read_is_unavailable_and_metadata_only() {
         let state = test_state();
         {
             let conn = state.db.lock().unwrap();
@@ -2658,69 +2662,73 @@ mod tests {
             .await;
         let server = AgenticMcpServer::new(state);
 
-        let output = server
-            .process_output(Parameters(ProcessOutputArgs {
+        let response = server
+            .process_read(Parameters(ProcessReadArgs {
                 agent_id: "agent".to_string(),
                 process_id: "process-1".to_string(),
+                wait_seconds: Some(0),
+                view: None,
                 cursor: None,
-                max_bytes: Some(1024),
+                max_bytes: None,
             }))
             .await
             .unwrap();
-        let output = serde_json::to_value(output).unwrap()["structuredContent"].clone();
-        assert_eq!(output["status"], "unavailable");
-        assert_eq!(output["error"]["code"], "process_output_unavailable");
-        assert_eq!(output["cached"]["processId"], "process-1");
-        assert_eq!(output["freshness"], "stale");
-
-        let result = server
-            .process_result(Parameters(ProcessResultArgs {
-                agent_id: "agent".to_string(),
-                process_id: "process-1".to_string(),
-                max_bytes: Some(1024),
-            }))
-            .await
-            .unwrap();
-        let result = serde_json::to_value(result).unwrap()["structuredContent"].clone();
-        assert_eq!(result["status"], "unavailable");
-        assert_eq!(result["error"]["code"], "process_result_unavailable");
-        assert_eq!(result["cached"]["processId"], "process-1");
-        assert_eq!(result["freshness"], "stale");
-        for value in [&output, &result] {
-            for field in ["stdout", "stderr", "result"] {
-                assert!(value.get(field).is_none());
-                assert!(value["cached"].get(field).is_none());
-            }
+        let response = serde_json::to_value(response).unwrap()["structuredContent"].clone();
+        assert_eq!(response["status"], "unavailable");
+        assert_eq!(response["error"]["code"], "process_read_unavailable");
+        assert_eq!(response["cached"]["processId"], "process-1");
+        assert_eq!(response["freshness"], "stale");
+        assert!(response["observedAt"].is_string());
+        for field in ["output", "mcpResult", "stdout", "stderr", "result"] {
+            assert!(response.get(field).is_none());
+            assert!(response["cached"].get(field).is_none());
         }
     }
 
     #[test]
-    fn process_lifecycle_arg_schemas_match_protocol_bounds() {
+    fn process_read_arg_schema_matches_contract_and_defaults() {
         assert_eq!(
             default_process_wait_seconds(),
-            ProcessStatusRequest::DEFAULT_WAIT_SECONDS
+            ProcessReadRequest::DEFAULT_WAIT_SECONDS
         );
-        let status_schema =
-            serde_json::to_string(&rmcp::schemars::schema_for!(ProcessStatusArgs)).unwrap();
-        assert!(status_schema.contains("\"default\":5"));
-        assert!(status_schema.contains("\"maximum\":30"));
-        let output_schema =
-            serde_json::to_string(&rmcp::schemars::schema_for!(ProcessOutputArgs)).unwrap();
-        assert!(output_schema.contains("\"default\":8192"));
-        assert!(output_schema.contains("\"maximum\":32768"));
-        let result_schema =
-            serde_json::to_string(&rmcp::schemars::schema_for!(ProcessResultArgs)).unwrap();
-        assert!(result_schema.contains("\"default\":8192"));
-        assert!(result_schema.contains("\"maximum\":524288"));
+        let schema = serde_json::to_value(rmcp::schemars::schema_for!(ProcessReadArgs)).unwrap();
+        let schema_text = schema.to_string();
+        assert!(schema_text.contains("\"default\":5"));
+        assert!(schema_text.contains("\"maximum\":30"));
+        assert!(schema_text.contains("\"minimum\":4096"));
+        assert!(schema_text.contains("\"maximum\":1048576"));
+        assert!(schema_text.contains("\"auto\""));
+        assert!(schema_text.contains("\"status\""));
+        assert!(schema_text.contains("limits.processResponseBytes"));
+        assert!(schema_text.contains(&DEFAULT_PROCESS_RESPONSE_BYTES.to_string()));
+        assert!(schema["properties"].get("cursor").is_some());
+
         for (wait_seconds, expected) in [(None, 5), (Some(0), 0), (Some(31), 30)] {
-            let params = ProcessStatusArgs {
+            let params = ProcessReadArgs {
                 agent_id: "agent".to_string(),
                 process_id: "process".to_string(),
                 wait_seconds,
+                view: None,
+                cursor: None,
+                max_bytes: None,
             };
-            let payload = process_status_payload(&params);
+            let payload = process_read_payload(&params);
             assert_eq!(payload.wait_seconds, Some(expected));
             assert_eq!(payload.effective_wait_seconds(), expected);
+            assert_eq!(payload.view, ProcessReadView::Auto);
+            assert!(payload.cursor.is_none());
+            assert!(payload.max_bytes.is_none());
         }
+        let params = ProcessReadArgs {
+            agent_id: "agent".to_string(),
+            process_id: "process".to_string(),
+            wait_seconds: None,
+            view: Some(ProcessReadViewArgs::Status),
+            cursor: None,
+            max_bytes: Some(4096),
+        };
+        let payload = process_read_payload(&params);
+        assert_eq!(payload.view, ProcessReadView::Status);
+        assert_eq!(payload.max_bytes, Some(4096));
     }
 }

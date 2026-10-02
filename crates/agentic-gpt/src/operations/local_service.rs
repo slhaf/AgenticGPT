@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use agentic_gpt_protocol::{
     normalize_process_group, EventResponseDisposition, EventSettleRequest, EventSourceKind,
-    HubCommand, ProcessBatchExecRequest, ProcessExecRequest, ProcessInfo,
+    HubCommand, ProcessBatchExecRequest, ProcessExecRequest, ProcessInfo, ProcessReadRequest,
 };
 use anyhow::Result;
 
@@ -14,7 +14,6 @@ use crate::{
     operation_result::{
         slim_mcp_batch_response, slim_mcp_response, slim_process_batch_response,
         slim_process_cancel_response, slim_process_list_response, slim_process_response,
-        slim_process_status_response,
     },
     process, room_maintenance, room_reads, skills,
     state::AppState,
@@ -68,12 +67,12 @@ pub(crate) async fn dispatch_process<F>(
 where
     F: FnOnce(&Config) -> Result<ProcessCall>,
 {
-    let call = {
+    let (call, response_budget) = {
         let config = state.config.read().await;
         if let Err(error) = operation::authorize(state.runtime, &config, context) {
             return Ok(admission_error_value(error));
         }
-        build(&config)?
+        (build(&config)?, config.limits.process_response_bytes)
     };
     let request_source = context.source();
     match call {
@@ -85,7 +84,7 @@ where
                 Ok(group) => group,
                 Err(error) => return Ok(error),
             };
-            let response = process::start_and_wait_process(
+            match process::start_and_wait_process(
                 state,
                 request,
                 process::ProcessOptions {
@@ -93,9 +92,15 @@ where
                     event_origin: context.event_origin.cloned(),
                     ..process::ProcessOptions::for_source(request_source)
                 },
+                response_budget,
             )
-            .await;
-            slim_process_response(response, snapshots.as_deref_mut())
+            .await
+            {
+                Ok(response) => slim_process_response(response, snapshots.as_deref_mut()),
+                Err(reason) => Ok(serde_json::json!({
+                    "error": {"code": reason, "message": reason}
+                })),
+            }
         }
         ProcessCall::Batch {
             mut request,
@@ -111,24 +116,53 @@ where
                 request_source,
                 terminal_event_hook,
                 context.event_origin.cloned(),
+                response_budget,
             )
             .await
             {
                 Ok(response) => slim_process_batch_response(response, snapshots),
                 Err(reason) => Ok(serde_json::json!({
-                    "error": {"code": "process_batch_rejected", "message": reason}
+                    "error": {"code": reason.clone(), "message": reason}
                 })),
             }
         }
     }
 }
 
+pub(crate) async fn dispatch_process_read(
+    state: AppState,
+    context: RequestContext<'_>,
+    request: ProcessReadRequest,
+    snapshots: Option<&mut Vec<ProcessInfo>>,
+) -> Result<serde_json::Value> {
+    let admission = {
+        let config = state.config.read().await;
+        operation::authorize(state.runtime, &config, context)
+    };
+    if let Err(error) = admission {
+        return Ok(admission_error_value(error));
+    }
+    dispatch_authorized_process_read(state, request, snapshots).await
+}
+
+async fn dispatch_authorized_process_read(
+    state: AppState,
+    request: ProcessReadRequest,
+    snapshots: Option<&mut Vec<ProcessInfo>>,
+) -> Result<serde_json::Value> {
+    match process::get_process_read(&state, request).await {
+        Ok(response) => slim_process_response(response, snapshots),
+        Err(reason) => Ok(serde_json::json!({
+            "error": {"code": reason.clone(), "message": reason}
+        })),
+    }
+}
 /// Value-returning local operation layer shared by transport adapters.
 ///
 /// Transport adapters own their envelopes and acknowledgements. This module owns shared admission,
 /// operation execution, and result/error shapes for Hub and local stdio callers.
-/// ProcessInfo values from typed operation results during projection. Other ingress
-/// callers pass `None` and incur no snapshot allocation or cloning.
+/// Callers that report process observations pass `Some` to collect the full `ProcessInfo` from
+/// the same read; other callers use `None` and avoid snapshot storage.
 pub(crate) async fn dispatch(
     state: AppState,
     command: HubCommand,
@@ -216,21 +250,8 @@ async fn dispatch_inner(
     mut snapshots: Option<&mut Vec<ProcessInfo>>,
 ) -> Result<serde_json::Value> {
     match command {
-        HubCommand::ProcessOutput { payload, .. } => {
-            match process::get_process_output(&state, payload).await {
-                Ok(response) => Ok(serde_json::to_value(response)?),
-                Err(reason) => Ok(serde_json::json!({
-                    "error": {"code": reason.clone(), "message": reason}
-                })),
-            }
-        }
-        HubCommand::ProcessResult { payload, .. } => {
-            match process::get_process_result(&state, payload).await {
-                Ok(response) => Ok(serde_json::to_value(response)?),
-                Err(reason) => Ok(serde_json::json!({
-                    "error": {"code": reason.clone(), "message": reason}
-                })),
-            }
+        HubCommand::ProcessRead { payload, .. } => {
+            dispatch_authorized_process_read(state, payload, snapshots.as_deref_mut()).await
         }
         HubCommand::EventList { mut payload, .. } => {
             if !bind_current_agent_id(&state, &mut payload.agent_id).await {
@@ -271,14 +292,6 @@ async fn dispatch_inner(
                 Ok(page) => slim_process_list_response(page),
                 Err(reason) => Ok(serde_json::json!({
                     "error": { "code": reason.clone(), "message": reason }
-                })),
-            }
-        }
-        HubCommand::ProcessStatus { payload, .. } => {
-            match process::get_process_status(&state, payload).await {
-                Ok(status) => slim_process_status_response(status, snapshots.as_deref_mut()),
-                Err(reason) => Ok(serde_json::json!({
-                    "error": {"code": reason.clone(), "message": reason}
                 })),
             }
         }
@@ -337,6 +350,7 @@ async fn dispatch_inner(
                 Ok(group) => group,
                 Err(error) => return Ok(error),
             };
+            let response_budget = state.config.read().await.limits.process_response_bytes;
             let request_source = context.source();
             match mcp::batch::batch(
                 &state,
@@ -344,6 +358,7 @@ async fn dispatch_inner(
                 &request_source,
                 None,
                 context.event_origin.cloned(),
+                response_budget,
             )
             .await
             {

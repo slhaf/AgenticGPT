@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use agentic_gpt_protocol::{MAX_PROCESS_RESPONSE_BYTES, MIN_PROCESS_RESPONSE_BYTES};
 use rmcp::model::{Meta, Tool, ToolAnnotations};
 use serde_json::{json, Map, Value};
 
@@ -69,7 +70,7 @@ fn tool_schema(name: &str) -> (Map<String, Value>, &'static [&'static str]) {
         "browser.repl" => &["name", "code"],
         "browser.reset" | "browser.release" => &["name"],
         "browser.list" => &[],
-        "process.status" | "process.cancel" | "process.output" | "process.result" => &["processId"],
+        "process.read" | "process.cancel" => &["processId"],
         "event.get" => &["eventId"],
         "event.mark" => &["eventIds"],
         "privateevent.inject" => &["message", "ref"],
@@ -439,9 +440,34 @@ pub(super) fn properties_for(name: &str) -> Map<String, Value> {
                 json!({"type":"integer","minimum":0,"maximum":30,"default":5,"description":"终态等待。"}),
             );
         }
-        "process.status" => {
+        "process.read" => {
             add("processId", string("受管理进程 ID。"));
-            add("waitSeconds", wait_seconds_schema(5, "终态轮询。"));
+            add(
+                "waitSeconds",
+                wait_seconds_schema(5, "最长等待时间；缺省 5 秒，范围 0..=30 秒。"),
+            );
+            add(
+                "view",
+                json!({
+                    "type": "string",
+                    "enum": ["auto", "status"],
+                    "default": "auto",
+                    "description": "auto 在有可用输出/结果时返回产物，否则等待终态/采集结算或期限；status 只等待执行终态，不返回产物。",
+                }),
+            );
+            add(
+                "cursor",
+                string("命令/脚本输出续读游标；仅用于目标进程 kind=command 或 skill。kind=mcp 的完整结果不支持日志游标。"),
+            );
+            add(
+                "maxBytes",
+                json!({
+                    "type": "integer",
+                    "minimum": MIN_PROCESS_RESPONSE_BYTES,
+                    "maximum": MAX_PROCESS_RESPONSE_BYTES,
+                    "description": "统一响应 JSON 的可选字节上限；范围 4096..=1048576。省略时使用当前 limits.processResponseBytes 配置（出厂默认 8192）；不切分 MCP 结果。",
+                }),
+            );
         }
         "process.cancel" => {
             add("processId", string("受管理进程 ID。"));
@@ -453,37 +479,41 @@ pub(super) fn properties_for(name: &str) -> Map<String, Value> {
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 32,
-                    "description": "分组键 trim 后精确匹配。",
+                    "description": "精确分组筛选；首尾空白会裁剪。",
                 }),
             );
             add(
                 "kind",
-                json!({"type":"string","enum":["command","skill","mcp"],"description":"来源筛选。"}),
+                json!({
+                    "type": "string",
+                    "enum": ["command", "skill", "mcp"],
+                    "description": "进程类型筛选。",
+                }),
             );
             add(
                 "state",
-                json!({"type":"string","enum":["queued","waiting_confirmation","starting","running","completed","failed","rejected","cancel_requested","cancelled","timed_out","detached","unknown_after_restart","skipped"],"description":"状态筛选。"}),
+                json!({
+                    "type": "string",
+                    "enum": [
+                        "queued", "waiting_confirmation", "starting", "running",
+                        "completed", "failed", "rejected", "cancel_requested",
+                        "cancelled", "timed_out", "detached", "unknown_after_restart",
+                        "skipped"
+                    ],
+                    "description": "进程状态筛选。",
+                }),
             );
             add(
                 "limit",
-                json!({"type":"integer","minimum":1,"maximum":100,"default":50,"description":"分页上限。"}),
+                json!({
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100,
+                    "default": 50,
+                    "description": "每页数量；缺省 50。",
+                }),
             );
-            add("cursor", string("下一页游标。"));
-        }
-        "process.output" => {
-            add("processId", string("受管理进程 ID。"));
-            add("cursor", string("上次游标；首次省略。"));
-            add(
-                "maxBytes",
-                json!({"type":"integer","minimum":1,"maximum":32768,"default":8192,"description":"本页输出字节总上限。"}),
-            );
-        }
-        "process.result" => {
-            add("processId", string("MCP 结果进程 ID。"));
-            add(
-                "maxBytes",
-                json!({"type":"integer","minimum":1,"maximum":524288,"default":8192,"description":"字节上限。"}),
-            );
+            add("cursor", string("读取下一页的游标。"));
         }
         "tmux.sessions" => {
             add(
@@ -891,13 +921,12 @@ fn tool_description(name: &str) -> String {
         "file.read" => "按文件路径策略读取 UTF-8 文件或目录元数据；单次 path 与 requests 批次二选一。文本返回 content/可选 metadata/nextStartLine；PNG/JPEG/WebP 及 GIF 以 image content blocks 返回，GIF 为采样 PNG 帧并带帧元数据。批次按序逐项给状态/错误，单项失败不阻断其他项；目录须请求 metadata，图片不支持行范围。只读。".to_string(),
         "file.search" => "在允许的工作区路径搜索文本，支持字面/正则、glob 和有序批次；返回匹配位置/上下文及跳过、裁剪状态，批次逐项标明结果或错误。空查询、无效正则/glob 或路径会失败；上下文可能按配置裁剪。只读。".to_string(),
         "file.edit" => "用 Codex apply_patch 更新、新增、删除或移动工作区文件；成功返回 status/changed/changes（path/action/可选 destination），部分失败保留已完成项和错误，不公开 diff/revision。无效补丁、路径策略、确认拒绝或并发冲突会报错；有效操作会写盘，needConfirm 可请求一次确认。".to_string(),
-        "process.exec" => "用 program 与参数数组启动本地受管理进程；不是拼接 shell 命令。返回 processId、status、completedInline、进程信息及可用的内联输出；用 status/output/cancel 跟进。执行受策略/确认控制并可产生真实副作用；waitSeconds 只等响应，不取消进程。".to_string(),
-        "process.batch" => "在同一准入边界下启动一组有序子进程；返回 processes（各进程响应）。失败时已启动的子进程及副作用不回滚；按子 processId 跟进。waitSeconds 只控制本次等待，不取消任务。".to_string(),
-        "process.status" => "查询 processId 的状态与元数据（含生命周期、时间和执行信息），不返回输出/结果正文；返回 waitElapsedMs。可短暂轮询，未知或过期 ID 返回结构化错误；等待不等于取消。".to_string(),
+        "process.exec" => "用 program 与参数数组启动本地受管理进程；不是拼接 shell 命令。返回紧凑观察，包含 agentId、processId、kind、state、captureStatus 及预算内可选产物；后续用 process.read 查看或 process.cancel 请求取消。执行受策略/确认控制并可产生真实副作用；waitSeconds 只等响应，不取消进程。".to_string(),
+        "process.batch" => "在同一准入边界下启动一组有序子进程；返回批次状态和各子进程紧凑观察。失败时已启动的子进程及副作用不回滚；按子 processId 用 process.read 查看或 process.cancel 请求取消。waitSeconds 只控制本次等待，不取消任务。".to_string(),
+        "process.read" => "按 processId 读取状态与一页产物，不启动或取消工作。返回 agentId/processId/kind/state/captureStatus，及预算内的 output 或完整下游 mcpResult。view=auto 在有未读输出时立即返回，否则有界等待；view=status 只等执行终态或期限，不返回正文。command/skill 用 cursor 续读；kind=mcp 和 status view 不接受日志 cursor。hasMore 只表示可续读，不要求读完日志；gap 表示已丢失字节，captureStatus=incomplete 时不要无限等待 EOF。MCP 结果状态 pending/deferred 不代表失败；deferred 可提高 maxBytes 领取，not_retained 不可恢复。waitSeconds 默认5、最大30、0立即，超时不取消；maxBytes 省略用 limits.processResponseBytes（出厂8192），显式范围4096..=1048576。预算计 Process JSON 主体，不含传输封套和独立事件面板。未知ID或非法参数返回结构化错误。".to_string(),
         "process.list" => "按 group、kind、state 分页发现进程；返回进程 ID、类型、状态、时间、捕获状态及 nextCursor。游标错误会失败；只读，不读取输出正文。".to_string(),
-        "process.output" => "按不透明字节游标读取 stdout/stderr 页；返回 data、encoding、起止 offset、nextCursor、hasMore/eof 和 captureStatus。分页不消费输出；未知进程或无效游标报错。".to_string(),
-        "process.result" => "读取已保留的 MCP JSON 结果；返回 complete/too_large/unavailable 状态、resultAvailable、可用结果或错误及大小/hash/预览。超限时不返回部分 JSON；未知进程报错。".to_string(),
         "process.cancel" => "向进程所有者请求取消；返回当前 state、cancelOutcome、terminationEvidence 和可选 error。MCP 通过下游取消通知，返回请求/通知不证明远端副作用已停止。".to_string(),
+        "mcp.callTool" => "调用已发现的下游 MCP 工具并登记为受管理进程；返回统一进程观察和预算内可用结果/错误，后续用 process.read 查看或 process.cancel 请求取消。下游可能产生外部副作用；waitSeconds 不取消；timeoutSeconds 仅在获准并取得执行槽后限制连接/请求（不含确认/排队），取消须另行请求。".to_string(),
         "tmux.listSessions" => "列出目标 Agent 的持久 tmux sessions；调用时提供 agentId。返回 sessions 列表；tmux server 未运行时为空列表，其他错误返回 error。只读。".to_string(),
         "tmux.sessions" => "本地 session 合并入口：list 只传 action；create 需 name/cwd；close 需 name，可选 needConfirm（缺省 true）。返回列表或 session/created 结果；close 会结束 session 内任务，拒绝或 tmux 错误返回 error。".to_string(),
         "tmux.listPanes" => "列出 agentId 指定 Agent 的 tmux panes，可选 session 限定范围；返回 panes 元数据。只读；无效 session 或远端错误返回 error。".to_string(),
@@ -910,8 +939,7 @@ fn tool_description(name: &str) -> String {
         "mcp.listServers" => "列出已配置的下游 MCP servers，可选 agentId 指定目标；返回 id、enabled、transport 和 url 摘要。只读发现；目标或远端错误返回 error。".to_string(),
         "mcp.listTools" => "用 agentId 与 serverId 查询下游 MCP server 暴露的工具定义；返回其原始 tools/schema，便于选择 toolName 和构造 arguments。连接、配置或远端错误返回 error；只读。".to_string(),
         "mcp.list" => "本地合并发现入口：省略 serverId 列出已配置服务器，提供时连接该 server 并列出 tools；返回 servers 或原始工具定义。配置/连接错误返回 error；只读。".to_string(),
-        "mcp.batch" => "把 1..=16 个下游 MCP 调用作为受管理子进程批量启动；返回批次状态、错误和各项进程结果。failFast 只跳过未启动项，已启动副作用不回滚；waitSeconds 仅内联等待，timeoutSeconds 是获准并取得执行槽后的连接/请求期限（不含确认/排队），取消另用 process.cancel。".to_string(),
-        "mcp.callTool" => "调用已发现的下游 MCP 工具并登记为受管理进程；返回 processId/status/completedInline 与可用结果/错误，后续用 process 工具查询。下游可能产生外部副作用；waitSeconds 不取消；timeoutSeconds 仅在获准并取得执行槽后限制连接/请求（不含确认/排队），取消须另行请求。".to_string(),
+        "mcp.batch" => "把 1..=16 个下游 MCP 调用作为受管理子进程批量启动；返回批次状态、错误和各项统一进程观察。failFast 只跳过未启动项，已启动副作用不回滚；waitSeconds 仅内联等待，用 process.read 查看子进程观察，取消另用 process.cancel；timeoutSeconds 是获准并取得执行槽后的连接/请求期限（不含确认/排队）。".to_string(),
         "bootstrap" => "加载 Room bootstrap 索引与引导摘要；返回 schemaVersion、revision、entrypoint、guide 列表/数量和 warnings。只读，不是通用文件读取器。".to_string(),
         "bootstrap.read" => "用 bootstrap 返回的 guide ID 读取一份引导文档；返回 guide 摘要、frontmatter、resource 路径/编码/内容和 warnings。未知 ID 或读取错误返回 error；只读。".to_string(),
         "skills.list" => "发现本地 skills（含只读内置 skill-installer，可查看不可运行），返回摘要与 warnings；非空 query 不区分大小写检索，activeOnly 只保留 active 项。空 query 等同未查询；不修改技能或运行状态。".to_string(),
@@ -924,7 +952,7 @@ fn tool_description(name: &str) -> String {
         "skills.install" => "从 GitHub 或显式文件源启动异步安装；返回 installId、状态、queued/deduplicated 和 pollAfterMs。会下载并写入/替换本地技能，替换旧包会归档；用 get/cancel 跟进。启动前错误直接返回 code/message；后台失败含 retryable，phase 可缺省。".to_string(),
         "skills.install.get" => "查询安装任务状态，可短暂等待；返回 status、可用 phase、attempt/progress/source 及终态 result/error。等待不取消安装；未知 installId 返回 error。".to_string(),
         "skills.install.cancel" => "请求协作取消安装并返回 outcome/status/phase；排队任务可立即取消，提交或激活阶段可能返回 tooLate，已完成写入不会被此请求撤销。".to_string(),
-        "skills.run" => "运行已激活、可写本地 skill 的 scripts/ 下可执行文件，作为受管理进程返回 processId/status/completedInline 和输出/错误；用 process 工具跟进。脚本可产生真实副作用；inactive、路径或可执行性错误会拒绝。".to_string(),
+        "skills.run" => "运行已激活、可写本地 skill 的 scripts/ 下可执行文件，作为受管理进程返回统一紧凑观察；后续用 process.read 查看或 process.cancel 请求取消。脚本可产生真实副作用；inactive、路径或可执行性错误会拒绝。".to_string(),
         "room.maintenance.status" => "检查 Room 仓库、schema/scaffold、本地执行器、配置模式、workflow/remote/sync heads 和五个槽位占用；返回各 readiness/status 字段。只读；仓库不可检查时返回 error。".to_string(),
         "room.maintenance.submit" => "按槽位 payload 更新 Room 日记、Notebook 或实体；local 写入目标文档并提交本地 commit，workflow 提交请求并可能等待消费。返回 mode/state/localApplied/sync/revision；不会覆盖已占用槽，仓库未就绪、重复槽或 payload 错误会拒绝。".to_string(),
         "room.diary.active" => "读取 daily/weekly/monthly 三个 current.md；每层返回 period/path/available 与 content 或 missing、unreadable、invalid_utf8 issue。语义化只读，不接受任意路径。".to_string(),

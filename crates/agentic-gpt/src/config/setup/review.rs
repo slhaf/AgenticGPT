@@ -800,6 +800,7 @@ fn optional_items(draft: OptionalSectionDraft) -> Vec<ReviewItem> {
             max_concurrent_tasks,
             max_active_processes,
             max_file_search_context_lines,
+            process_response_bytes,
         }) => vec![
             ReviewItem::field(
                 SetupField::MaxConcurrentTasks,
@@ -817,6 +818,12 @@ fn optional_items(draft: OptionalSectionDraft) -> Vec<ReviewItem> {
                 SetupField::MaxFileSearchContextLines,
                 "max_file_search_context_lines",
                 max_file_search_context_lines,
+                ReviewEditorKind::Text,
+            ),
+            ReviewItem::field(
+                SetupField::ProcessResponseBytes,
+                "process_response_bytes",
+                process_response_bytes,
                 ReviewEditorKind::Text,
             ),
         ],

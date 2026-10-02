@@ -4,14 +4,14 @@
 - 模型 Process 工具仅 process.exec / process.batch / process.read / process.list / process.cancel。
 - HubCommand 用 ProcessRead 替换 ProcessStatus/ProcessOutput/ProcessResult，wire 名 process.read。
 - HTTP 新读取路径 GET /v1/process/{processId}/read；移除旧 GET /v1/process/{processId} 元数据读取及 /output、/result。list 与 cancel/exec/batch 保持用途。
-- Hub cache-only hub.process.status 不可伪装为实时 read；独立缓存查询命名与消费者由 Hub 负责人核实后提出，须明确只读缓存、新鲜度，不新增执行权威。
+- 保留独立 cache-only `hub.process.status`：它不是旧 live `process.status` 的别名，语义未变，不为了名称统一扩大迁移。描述继续明确缓存新鲜度、不可等待/获取正文，不新增执行权威。
 
 ## 请求
-ProcessReadRequest: process_id:String, wait_seconds:Option<u64>, view:ProcessReadView(default Auto; JSON auto|status), cursor:Option<String>, max_bytes:Option<usize>。wait 默认5/max30/0立即，超30按30。maxBytes 省略用当前配置；显式范围4096..1048576，非法拒绝。status view 不返回产物，cursor 与 status 不可组合；MCP 不接受输出 cursor。
+ProcessReadRequest: process_id:String, wait_seconds:Option<u64>, view:ProcessReadView(default Auto; JSON auto|status), cursor:Option<String>, max_bytes:Option<usize>。wait 默认5/max30/0立即，超30按30。maxBytes 省略用当前配置；显式范围4096..1048576，非法拒绝。status view 不返回产物，cursor 与 status 不可组合。只有目标进程 kind=mcp（下游工具结果、非日志流）不接受输出cursor；Agent MCP/Hub Apps MCP 的 process.read 工具均必须接受并原样转发 cursor，以读取 command/skill 的下一页，不能按入口传输类型禁用cursor。
 配置 key limits.processResponseBytes，Rust process_response_bytes:usize，默认8192，范围4096..1048576。单一常量来源置 protocol process.rs；config 引用。响应预算不是存储保留预算。MCP现有512KiB保留及输出ring不变。
 
 ## 统一响应
-公开 ProcessResponse 紧凑 JSON：processId, kind, state, captureStatus；可选 group/batchId/batchIndex、exitCode、waitElapsedMs、error、cancelOutcome、terminationEvidence、captureError、output、mcpResult。不返回重复 status/completedInline/pollAfterMs/inlineOutput/outputPreview/resultAvailable。避免重复命令参数/路径/全部时间戳。
+公开 ProcessResponse 紧凑 JSON：agentId,processId,kind,state,captureStatus；可选 group/batchId/batchIndex、exitCode、waitElapsedMs、error、cancelOutcome、terminationEvidence、captureError、output、mcpResult。agentId 必须保留，尤其 Room skills.run 返回后需要钉住所属Agent，不能随活动Room切换。其余不返回重复 status/completedInline/pollAfterMs/inlineOutput/outputPreview/resultAvailable，避免重复命令参数/路径/全部时间戳。
 ProcessOutputPage: stdout/stderr 使用现有 data/encoding/startOffset/endOffset/gap segment；nextCursor/hasMore/eof；captureStatus 以外层为准。第一页和续读同形态。
 ProcessMcpResult: status enum pending|included|deferred|unavailable|not_retained；可选 bytes, sha256, value, preview。included 有完整 value；deferred 为仍可取但本次预算不足；not_retained 不可恢复。pending 不是失败。完整下游 CallToolResult 保留原 JSON 结构。
 ProcessBatchResponse: batchId,status(批次聚合状态),processes:[ProcessResponse]；删除 completedInline/pollAfterMs。批次预算为整个 ProcessBatchResponse，不是每子项各享一份。

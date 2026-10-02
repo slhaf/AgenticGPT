@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import base64
+import random
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import http.client
@@ -23,6 +25,8 @@ import queue
 import select
 import signal
 import socket
+import struct
+import zlib
 import subprocess
 import sys
 import tempfile
@@ -1434,8 +1438,8 @@ def assert_tool_semantics(
 ) -> None:
     descriptors = descriptor_map(tools)
     required = {
-        "process.exec", "process.batch", "process.status", "process.list",
-        "process.output", "process.result", "process.cancel",
+        "process.exec", "process.batch", "process.read", "process.list",
+        "process.cancel",
     }
     if hub:
         required |= {"hub.process.status", "hub.process.list"}
@@ -1447,22 +1451,44 @@ def assert_tool_semantics(
         if name not in descriptors:
             fail(label, f"missing required descriptor {name}")
     assert_event_tool_semantics(tools, label, hub=hub, coordinator=coordinator)
-    for name in ("process.status", "process.output", "process.result", "process.cancel", "hub.process.status"):
+    for name in ("process.read", "process.cancel", "hub.process.status"):
         if name not in descriptors:
             continue
         schema = descriptors[name].get("inputSchema", {})
         if "processId" not in schema.get("required", []):
             fail(label, f"{name} processId is not required")
-    status_props = descriptors.get("process.status", {}).get("inputSchema", {}).get("properties", {})
-    wait_seconds = status_props.get("waitSeconds", {})
-    if "process.status" in descriptors and (wait_seconds.get("minimum") != 0 or wait_seconds.get("maximum") != 30):
-        fail(label, "process.status waitSeconds bounds are not 0..30")
-    output_props = descriptors.get("process.output", {}).get("inputSchema", {}).get("properties", {})
-    output_bytes = output_props.get("maxBytes", {})
-    if "process.output" in descriptors and (
-        output_bytes.get("default") != 8192 or output_bytes.get("maximum") != 32768
+    read_schema = descriptors.get("process.read", {}).get("inputSchema", {})
+    read_props = read_schema.get("properties", {})
+    wait_seconds = read_props.get("waitSeconds", {})
+    if "process.read" in descriptors and (
+        wait_seconds.get("default") != 5
+        or wait_seconds.get("minimum") != 0
+        or wait_seconds.get("maximum") != 30
     ):
-        fail(label, "process.output maxBytes is not default8192/max32768")
+        fail(label, "process.read waitSeconds is not default5/clamped0..30")
+    view = read_props.get("view", {})
+    if "process.read" in descriptors and (
+        view.get("default") != "auto" or view.get("enum") != ["auto", "status"]
+    ):
+        fail(label, "process.read view is not default auto with auto/status choices")
+    response_bytes = read_props.get("maxBytes", {})
+    if "process.read" in descriptors and (
+        "default" in response_bytes
+        or response_bytes.get("minimum") != 4096
+        or response_bytes.get("maximum") != 1048576
+    ):
+        fail(label, "process.read maxBytes must use configured defaults and enforce 4096..1048576")
+    cursor = read_props.get("cursor", {})
+    if "process.read" in descriptors and (
+        cursor.get("type") != "string" or "cursor" in read_schema.get("required", [])
+    ):
+        fail(label, "process.read cursor must be optional string for output pagination")
+    if hub and "process.read" in descriptors:
+        if "agentId" not in read_schema.get("required", []):
+            fail(label, "Hub process.read agentId is not required")
+    retired_process_tools = {"process.status", "process.output", "process.result"}
+    if retired_process_tools.intersection(descriptors):
+        fail(label, f"retired live process tools are still advertised: {sorted(retired_process_tools.intersection(descriptors))}")
     list_name = "hub.process.list" if coordinator else "process.list"
     list_schema = descriptors.get(list_name, {}).get("inputSchema", {})
     list_props = list_schema.get("properties", {})
@@ -1525,10 +1551,20 @@ PROCESS_MARKERS = (
     "contract-parity-batch-two",
 )
 PROCESS_OVERFLOW_MARKER = "overflow-" + "x" * 20000
+PROCESS_ESCAPE_OUTPUT = ('"\\\n\t' * 700)
+PROCESS_AUTO_MARKER = "contract-parity-auto-before-exit"
+PROCESS_AUTO_COMMAND = f"printf '%s' '{PROCESS_AUTO_MARKER}'; sleep 2"
+PROCESS_TAIL_MARKER = "contract-parity-post-exit-tail"
+PROCESS_MCP_PAGINATION_COMMAND = 'printf "%s" "$1"; sleep 1'
+PROCESS_TAIL_COMMAND = f"(sleep 2; printf '%s' '{PROCESS_TAIL_MARKER}') &"
 
 
-def configure_process_fixture(config_path: Path, http_port: int | None = None,
-                              http_token: str | None = None) -> None:
+def configure_process_fixture(
+    config_path: Path,
+    http_port: int | None = None,
+    http_token: str | None = None,
+    process_response_bytes: int | None = None,
+) -> None:
     try:
         data = json.loads(config_path.read_text())
         data["policy"] = {
@@ -1536,7 +1572,17 @@ def configure_process_fixture(config_path: Path, http_port: int | None = None,
                 {"program": "/usr/bin/printf", "argsPrefix": [marker]}
                 for marker in PROCESS_MARKERS
             ]
-            + [{"program": "/usr/bin/printf", "argsPrefix": [PROCESS_OVERFLOW_MARKER]}]
+            + [
+                {"program": "/usr/bin/printf", "argsPrefix": [PROCESS_OVERFLOW_MARKER]},
+                {"program": "/usr/bin/printf", "argsPrefix": ["%s", PROCESS_ESCAPE_OUTPUT]},
+                {"program": "/usr/bin/printf", "argsPrefix": [PROCESS_BINARY_FORMAT]},
+            ]
+            + [
+                {"program": "/bin/sh", "argsPrefix": ["-c", command]}
+                for command in (
+                    PROCESS_AUTO_COMMAND, PROCESS_TAIL_COMMAND, PROCESS_MCP_PAGINATION_COMMAND
+                )
+            ]
             + [
                 {"program": "/usr/bin/true", "argsPrefix": []},
                 {"program": "/usr/bin/sleep", "argsPrefix": ["30"]},
@@ -1545,6 +1591,11 @@ def configure_process_fixture(config_path: Path, http_port: int | None = None,
             "confirm": [],
             "deny": [{"program": "/usr/bin/echo", "argsPrefix": []}],
         }
+        if process_response_bytes is not None:
+            limits = data.setdefault("limits", {})
+            if not isinstance(limits, dict):
+                fail("process fixture", "generated limits config is not an object")
+            limits["processResponseBytes"] = process_response_bytes
         if http_port is not None and http_token is not None:
             data["confirmationProvider"] = {"channels": ["ntfy"]}
             data["mcpServers"] = {
@@ -1558,6 +1609,36 @@ def configure_process_fixture(config_path: Path, http_port: int | None = None,
         config_path.write_text(json.dumps(data, indent=2) + "\n")
     except (OSError, TypeError, json.JSONDecodeError) as error:
         fail("process fixture", f"could not configure private process fixture: {error}")
+
+def write_large_mcp_result_fixture(workspace: Path) -> None:
+    """Create an incompressible, valid image whose MCP content exceeds retention."""
+    width = height = 512
+    row_bytes = width * 4
+    pixels = random.Random(0).randbytes(row_bytes * height)
+    scanlines = b"".join(
+        b"\x00" + pixels[offset : offset + row_bytes]
+        for offset in range(0, len(pixels), row_bytes)
+    )
+
+    def chunk(kind: bytes, value: bytes) -> bytes:
+        return (
+            struct.pack(">I", len(value))
+            + kind
+            + value
+            + struct.pack(">I", zlib.crc32(kind + value) & 0xFFFFFFFF)
+        )
+
+    image = (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(scanlines, level=1))
+        + chunk(b"IEND", b"")
+    )
+    try:
+        (workspace / "large-mcp-result.png").write_bytes(image)
+    except OSError as error:
+        fail("MCP retention fixture", f"could not create the large image fixture: {error}")
+
 
 def configure_event_fixture(
     config_path: Path,
@@ -1763,39 +1844,84 @@ def require_schema_contract(document: dict[str, Any], schemas: dict[str, Any]) -
         fail("schema/contract", "retired /v1/jobs HTTP routes are still advertised")
     process_paths = {
         "/v1/process/exec", "/v1/process/batch", "/v1/process",
-        "/v1/process/{processId}", "/v1/process/{processId}/output",
-        "/v1/process/{processId}/result", "/v1/process/{processId}/cancel",
+        "/v1/process/{processId}/read", "/v1/process/{processId}/cancel",
     }
     missing = process_paths - set(paths)
     if missing:
         fail("schema/contract", f"required process HTTP routes are missing: {sorted(missing)}")
+    retired_read_paths = {
+        "/v1/process/{processId}",
+        "/v1/process/{processId}/output",
+        "/v1/process/{processId}/result",
+    }
+    if retired_read_paths.intersection(paths):
+        fail("schema/contract", f"retired live process HTTP routes are still advertised: {sorted(retired_read_paths.intersection(paths))}")
     list_parameters = paths["/v1/process"]["get"].get("parameters", [])
     list_by_name = {item["name"]: item for item in list_parameters}
     list_limit = list_by_name["limit"]["schema"]
     if list_limit.get("default") != 50 or list_limit.get("minimum") != 1 or list_limit.get("maximum") != 100:
         fail("schema/contract", "HTTP process list limit is not default50/clamped1..100")
-    status_parameters = paths["/v1/process/{processId}"]["get"].get("parameters", [])
-    status_by_name = {item["name"]: item for item in status_parameters}
-    if "waitOnly" in status_by_name:
-        fail("schema/contract", "HTTP process status exposes retired waitOnly")
-    wait_schema = status_by_name.get("waitSeconds", {}).get("schema", {})
-    if wait_schema.get("minimum") != 0 or wait_schema.get("maximum") != 30:
-        fail("schema/contract", "HTTP process status waitSeconds is not clamped0..30")
-    output_parameters = paths["/v1/process/{processId}/output"]["get"].get("parameters", [])
-    output_by_name = {item["name"]: item for item in output_parameters}
-    if "cursor" not in output_by_name:
-        fail("schema/contract", "HTTP process output does not declare a cursor")
-    output_bytes = output_by_name.get("maxBytes", {}).get("schema", {})
-    if output_bytes.get("default") != 8192 or output_bytes.get("maximum") != 32768:
-        fail("schema/contract", "HTTP process output maxBytes is not default8192/max32768")
+    read_parameters = [
+        resolve_local_ref(document, parameter)
+        for parameter in paths["/v1/process/{processId}/read"]["get"].get("parameters", [])
+    ]
+    read_by_name = {item["name"]: item for item in read_parameters}
+    agent_id = read_by_name.get("agentId", {})
+    if agent_id.get("in") != "query" or agent_id.get("required") is not True:
+        fail("schema/contract", "HTTP process.read must require agentId")
+    wait_schema = read_by_name.get("waitSeconds", {}).get("schema", {})
+    if wait_schema.get("default") != 5 or wait_schema.get("minimum") != 0 or wait_schema.get("maximum") != 30:
+        fail("schema/contract", "HTTP process.read waitSeconds is not default5/clamped0..30")
+    view_schema = read_by_name.get("view", {}).get("schema", {})
+    if view_schema.get("default") != "auto" or view_schema.get("enum") != ["auto", "status"]:
+        fail("schema/contract", "HTTP process.read view is not default auto with auto/status choices")
+    if "cursor" not in read_by_name:
+        fail("schema/contract", "HTTP process.read does not declare an output cursor")
+    response_bytes = read_by_name.get("maxBytes", {}).get("schema", {})
+    if (
+        "default" in response_bytes
+        or response_bytes.get("minimum") != 4096
+        or response_bytes.get("maximum") != 1048576
+    ):
+        fail("schema/contract", "HTTP process.read maxBytes must use configured defaults and enforce 4096..1048576")
     for name in (
         "ProcessExecRequest", "ProcessBatchExecRequest", "ProcessResponse", "ProcessBatchResponse",
-        "ProcessStatusResponse", "ProcessCacheFallbackResponse", "ProcessListResponse",
-        "ProcessOutputSegment", "ProcessOutputResponse", "ProcessResultResponse",
-        "ProcessCancelResponse", "ProcessUnavailableResponse",
+        "ProcessListResponse", "ProcessOutputSegment", "ProcessOutputPage", "ProcessMcpResult",
+        "ProcessReadView", "ProcessCancelResponse", "ProcessUnavailableResponse",
     ):
         if not isinstance(schemas.get(name), dict):
             fail("schema/contract", f"OpenAPI process schema {name} is missing")
+    process_response = schemas["ProcessResponse"]
+    if not {"agentId", "processId", "kind", "state", "captureStatus"}.issubset(
+        set(process_response.get("required", []))
+    ):
+        fail("schema/contract", "ProcessResponse omits required process identity or state")
+    process_properties = process_response.get("properties", {})
+    if process_properties.get("output", {}).get("$ref") != "#/components/schemas/ProcessOutputPage":
+        fail("schema/contract", "ProcessResponse.output does not use ProcessOutputPage")
+    if process_properties.get("mcpResult", {}).get("$ref") != "#/components/schemas/ProcessMcpResult":
+        fail("schema/contract", "ProcessResponse.mcpResult does not use ProcessMcpResult")
+    retired_response_fields = {
+        "status", "completedInline", "pollAfterMs", "inlineOutput", "outputPreview", "resultAvailable",
+    }
+    if retired_response_fields.intersection(process_properties):
+        fail("schema/contract", "ProcessResponse retains retired duplicate fields")
+    if schemas["ProcessMcpResult"].get("properties", {}).get("status", {}).get("enum") != [
+        "pending", "included", "deferred", "unavailable", "not_retained",
+    ]:
+        fail("schema/contract", "ProcessMcpResult status choices changed")
+    read_operation = paths["/v1/process/{processId}/read"]["get"]
+    for status, schema_name in ((200, "ProcessResponse"), (503, "ProcessUnavailableResponse")):
+        response = resolve_local_ref(document, read_operation.get("responses", {}).get(str(status)))
+        response_schema = (
+            response.get("content", {}).get("application/json", {}).get("schema")
+            if isinstance(response, dict)
+            else None
+        )
+        if not isinstance(response_schema, dict) or response_schema.get("$ref") != (
+            f"#/components/schemas/{schema_name}"
+        ):
+            fail("schema/contract", f"HTTP process.read {status} response does not use {schema_name}")
 
     event_operations = {
         "/v1/events": ("get", "listEvents", "EventListResponse"),
@@ -2135,83 +2261,45 @@ def start_local_agent(binary: Path, root: Path, reports: list[str]) -> tuple[Man
     )
     local_exec = local_exec.get("structuredContent", local_exec)
     local_process_id = local_exec.get("processId")
-    inline_output = local_exec.get("inlineOutput", {})
-    inline_stdout = inline_output.get("stdout", {})
+    local_output = local_exec.get("output", {})
+    local_stdout = local_output.get("stdout", {})
     if (
         not local_process_id
-        or local_exec.get("status") != "completed"
-        or inline_stdout.get("data") != PROCESS_MARKERS[0]
-        or inline_stdout.get("encoding") != "utf8"
+        or local_exec.get("state") != "completed"
+        or local_exec.get("agentId") != "parity-local"
+        or local_stdout.get("data") != PROCESS_MARKERS[0]
+        or local_stdout.get("encoding") != "utf8"
         or len(json.dumps(local_exec, separators=(",", ":")).encode()) > 8192
     ):
-        fail("Agent local process.exec", f"printf did not complete with full inline output: {local_exec}")
+        fail("Agent local process.exec", f"printf did not complete with full read response: {local_exec}")
     local_status = local_tool(
-        binary, config, "process.status", {"processId": local_process_id, "waitSeconds": 0}, env,
-        "Agent local process.status",
+        binary, config, "process.read",
+        {"processId": local_process_id, "view": "status", "waitSeconds": 0}, env,
+        "Agent local process.read status view",
     )
     local_status = local_status.get("structuredContent", local_status)
-    if local_status.get("state") != "completed" or any(key in local_status for key in ("stdout", "stderr", "result")):
-        fail("Agent local process.status", f"terminal status exposed body data: {local_status}")
-    first_page = local_tool(
-        binary, config, "process.output", {"processId": local_process_id, "maxBytes": 8}, env,
-        "Agent local process.output first page",
-    )
-    first_page = first_page.get("structuredContent", first_page)
-    segment = first_page.get("stdout", {})
-    segments = [first_page.get("stdout", {}), first_page.get("stderr", {})]
-    encoded_page_bytes = sum(
-        len(item.get("data", "").encode("utf-8"))
-        for item in segments
-        if isinstance(item, dict)
-    )
     if (
-        first_page.get("processId") != local_process_id
-        or not segment.get("data")
-        or segment.get("startOffset") != "0"
-        or int(segment.get("endOffset", "0")) <= 0
-        or segment.get("encoding") not in {"utf8", "base64"}
-        or encoded_page_bytes > 8
-        or first_page.get("eof") is not False
-        or first_page.get("hasMore") is not True
-        or "captureStatus" not in first_page
-        or not first_page.get("nextCursor")
+        local_status.get("state") != "completed"
+        or process_read_has_artifacts(local_status)
     ):
-        fail("Agent local process.output first page", f"first output page did not advance within aggregate budget: {first_page}")
-    second_page = local_tool(
-        binary, config, "process.output",
-        {"processId": local_process_id, "cursor": first_page["nextCursor"], "maxBytes": 64}, env,
-        "Agent local process.output continuation",
+        fail("Agent local process.read status view", f"status view exposed process artifacts: {local_status}")
+    local_read = local_tool(
+        binary, config, "process.read",
+        {"processId": local_process_id, "maxBytes": 4096}, env,
+        "Agent local process.read auto view",
     )
-    second_page = second_page.get("structuredContent", second_page)
+    local_read = local_read.get("structuredContent", local_read)
+    local_page = local_read.get("output", {})
     if (
-        second_page.get("eof") is not True
-        or second_page.get("hasMore") is not False
-        or second_page.get("nextCursor") == first_page.get("nextCursor")
+        local_read.get("processId") != local_process_id
+        or local_page.get("stdout", {}).get("data") != PROCESS_MARKERS[0]
+        or str(local_page.get("stdout", {}).get("startOffset")) != "0"
+        or local_page.get("eof") is not True
+        or local_page.get("hasMore") is not False
+        or local_read.get("mcpResult", {}).get("status") != "unavailable"
     ):
-        fail("Agent local process.output continuation", f"terminal EOF/cursor did not advance: {second_page}")
-    invalid_cursor_rejected = False
-    try:
-        invalid_cursor = local_tool(
-            binary, config, "process.output",
-            {"processId": local_process_id, "cursor": "not-a-valid-cursor", "maxBytes": 8},
-            env, "Agent local process.output invalid cursor",
-        )
-        invalid_cursor_rejected = (
-            invalid_cursor.get("isError") is True
-            or "error" in invalid_cursor
-            or "invalid cursor" in json.dumps(invalid_cursor).lower()
-        )
-    except GateError:
-        invalid_cursor_rejected = True
-    if not invalid_cursor_rejected:
-        fail("Agent local process.output invalid cursor", "invalid cursor was silently treated as a fresh cursor")
-    process_result = local_tool(
-        binary, config, "process.result", {"processId": local_process_id, "maxBytes": 8192}, env, "Agent local process.result",
-    )
-    process_result = process_result.get("structuredContent", process_result)
-    if process_result.get("status") != "unavailable" or process_result.get("resultAvailable") is not False:
-        fail("Agent local process.result", f"command result was not accurately reported unavailable: {process_result}")
-    reports.append("PASS Agent local Unix MCP process status/output cursor and EOF/result retrieval")
+        fail("Agent local process.read auto view", f"unified read omitted retained output or result applicability: {local_read}")
+    reports.append("PASS Agent local Unix MCP process.read status/auto views and command result applicability")
     overflow_response = local_tool(
         binary,
         config,
@@ -2221,35 +2309,44 @@ def start_local_agent(binary: Path, root: Path, reports: list[str]) -> tuple[Man
         "Agent local process.exec overflow",
     )
     overflow_response = overflow_response.get("structuredContent", overflow_response)
-    preview = overflow_response.get("outputPreview", {})
-    preview_bytes = (
-        len(preview.get("stdout", "").encode("utf-8"))
-        + len(preview.get("stderr", "").encode("utf-8"))
-    )
+    overflow_output = overflow_response.get("output", {})
     overflow_process_id = overflow_response.get("processId")
     if (
-        overflow_response.get("status") != "completed"
+        overflow_response.get("state") != "completed"
         or overflow_process_id is None
-        or "inlineOutput" in overflow_response
-        or preview.get("truncated") is not True
-        or preview_bytes > 2048
+        or overflow_output.get("hasMore") is not True
         or len(json.dumps(overflow_response, separators=(",", ":")).encode()) > 8192
     ):
-        fail("Agent local process.exec overflow", f"creation overflow preview/aggregate cap was incorrect: {overflow_response}")
+        fail("Agent local process.exec overflow", f"creation response did not preserve identity and bounded read page: {overflow_response}")
+    process_read_status = local_tool(
+        binary, config, "process.read",
+        {"processId": overflow_process_id, "view": "status", "waitSeconds": 0}, env,
+        "Agent local process.read status",
+    )
+    process_read_status = process_read_status.get("structuredContent", process_read_status)
+    if process_read_status.get("state") != "completed" or "output" in process_read_status:
+        fail("Agent local process.read status", f"status view did not omit output: {process_read_status}")
     local_tool(binary, config, "skills.setActive", {"id": "demo", "active": True}, env, "Agent local Skill activate")
     skill_value = local_tool(binary, config, "skills.run", {"id": "demo", "path": "scripts/check.sh", "waitSeconds": 0}, env, "Agent local Skill run")
     skill_value = skill_value.get("structuredContent", skill_value)
     skill_id = skill_value.get("processId")
     if skill_value.get("state") not in {"starting", "running", "completed"} or not skill_id:
         fail("Agent local Skill run", f"invalid real Skill process envelope: {skill_value}")
-    skill_done = local_tool(binary, config, "process.status", {"processId": skill_id, "waitSeconds": 5}, env, "Agent local Skill completion")
+    skill_done = local_tool(
+        binary, config, "process.read",
+        {"processId": skill_id, "view": "status", "waitSeconds": 5}, env,
+        "Agent local Skill completion status view",
+    )
     skill_done = skill_done.get("structuredContent", skill_done)
-    if skill_done.get("state") != "completed" or "stdout" in skill_done or "stderr" in skill_done or "result" in skill_done:
-        fail("Agent local Skill completion", f"status was not metadata-only terminal state: {skill_done}")
-    skill_output = local_tool(binary, config, "process.output", {"processId": skill_id, "maxBytes": 8192}, env, "Agent local Skill output")
-    skill_output = skill_output.get("structuredContent", skill_output)
-    if "skill-parity" not in skill_output.get("stdout", {}).get("data", ""):
-        fail("Agent local Skill output", f"Skill output was not retrievable: {skill_output}")
+    if skill_done.get("state") != "completed" or "output" in skill_done:
+        fail("Agent local Skill completion status view", f"status view returned output: {skill_done}")
+    skill_read = local_tool(
+        binary, config, "process.read", {"processId": skill_id, "maxBytes": 8192}, env,
+        "Agent local Skill read",
+    )
+    skill_read = skill_read.get("structuredContent", skill_read)
+    if "skill-parity" not in skill_read.get("output", {}).get("stdout", {}).get("data", ""):
+        fail("Agent local Skill read", f"Skill output was not retrievable: {skill_read}")
     install_value = local_tool(binary, config, "skills.install", inline_skill_install_request(), env, "Agent local Skill install")
     install_value = install_value.get("structuredContent", install_value)
     install_id = install_value.get("installId")
@@ -2265,14 +2362,21 @@ def start_local_agent(binary: Path, root: Path, reports: list[str]) -> tuple[Man
     installed_id = installed_run.get("processId")
     if not installed_id:
         fail("Agent local installed Skill run", f"missing installed process id: {installed_run}")
-    installed_done = local_tool(binary, config, "process.status", {"processId": installed_id, "waitSeconds": 5}, env, "Agent local installed Skill completion")
+    installed_done = local_tool(
+        binary, config, "process.read",
+        {"processId": installed_id, "view": "status", "waitSeconds": 5}, env,
+        "Agent local installed Skill status view",
+    )
     installed_done = installed_done.get("structuredContent", installed_done)
-    if installed_done.get("state") != "completed" or "stdout" in installed_done:
-        fail("Agent local installed Skill completion", f"status was not terminal metadata: {installed_done}")
-    installed_output = local_tool(binary, config, "process.output", {"processId": installed_id, "maxBytes": 8192}, env, "Agent local installed Skill output")
-    installed_output = installed_output.get("structuredContent", installed_output)
-    if "inline-skill" not in installed_output.get("stdout", {}).get("data", ""):
-        fail("Agent local installed Skill output", f"installed Skill output was not retrievable: {installed_output}")
+    if installed_done.get("state") != "completed" or "output" in installed_done:
+        fail("Agent local installed Skill status view", f"status view returned output: {installed_done}")
+    installed_read = local_tool(
+        binary, config, "process.read", {"processId": installed_id, "maxBytes": 8192}, env,
+        "Agent local installed Skill read",
+    )
+    installed_read = installed_read.get("structuredContent", installed_read)
+    if "inline-skill" not in installed_read.get("output", {}).get("stdout", {}).get("data", ""):
+        fail("Agent local installed Skill read", f"installed Skill output was not retrievable: {installed_read}")
     reports.append("PASS Agent local Unix MCP: tools/list, agent.info, Skill run/completion, inline install/get(0,5), and installed run/completion")
     return process, config, env, tools
 
@@ -2281,6 +2385,7 @@ def start_http_agent(binary: Path, root: Path, reports: list[str]) -> tuple[Mana
     port = free_port()
     config, _, env = init_agent(binary, root, "standalone", "normal", "parity-http")
     prepare_skill_fixture(config)
+    write_large_mcp_result_fixture(Path(json.loads(config.read_text())["workspaceRoot"]))
     token = "contract-parity-http-token"
     data = json.loads(config.read_text())
     data["httpMcp"] = {
@@ -2324,12 +2429,26 @@ def start_http_agent(binary: Path, root: Path, reports: list[str]) -> tuple[Mana
     skill_id = skill_value.get("processId") if isinstance(skill_value, dict) else None
     if not skill_id or skill_value.get("state") not in {"starting", "running", "completed"}:
         fail("Agent HTTP Skill run", f"invalid real Skill process envelope: {skill_value}")
-    skill_done = json_result(mcp_call(port, token, session, 5, "tools/call", {"name": "process.status", "arguments": {"processId": skill_id, "waitSeconds": 5}}, "Agent HTTP Skill completion"), "Agent HTTP Skill completion")
-    if skill_done.get("state") != "completed" or "stdout" in skill_done or "result" in skill_done:
-        fail("Agent HTTP Skill completion", f"status was not metadata-only terminal state: {skill_done}")
-    skill_output = json_result(mcp_call(port, token, session, 6, "tools/call", {"name": "process.output", "arguments": {"processId": skill_id, "maxBytes": 8192}}, "Agent HTTP Skill output"), "Agent HTTP Skill output")
-    if "skill-parity" not in skill_output.get("stdout", {}).get("data", ""):
-        fail("Agent HTTP Skill output", f"Skill output was not retrievable: {skill_output}")
+    skill_done = json_result(
+        mcp_call(
+            port, token, session, 5, "tools/call",
+            {"name": "process.read", "arguments": {"processId": skill_id, "view": "status", "waitSeconds": 5}},
+            "Agent HTTP Skill completion status view",
+        ),
+        "Agent HTTP Skill completion status view",
+    )
+    if skill_done.get("state") != "completed" or "output" in skill_done:
+        fail("Agent HTTP Skill completion status view", f"status view returned output: {skill_done}")
+    skill_output = json_result(
+        mcp_call(
+            port, token, session, 6, "tools/call",
+            {"name": "process.read", "arguments": {"processId": skill_id, "maxBytes": 8192}},
+            "Agent HTTP Skill read",
+        ),
+        "Agent HTTP Skill read",
+    )
+    if "skill-parity" not in skill_output.get("output", {}).get("stdout", {}).get("data", ""):
+        fail("Agent HTTP Skill read", f"Skill output was not retrievable: {skill_output}")
     install_value = json_result(mcp_call(port, token, session, 7, "tools/call", {"name": "skills.install", "arguments": inline_skill_install_request()}, "Agent HTTP Skill install"), "Agent HTTP Skill install")
     install_id = install_value.get("installId") if isinstance(install_value, dict) else None
     if not install_id:
@@ -2342,13 +2461,27 @@ def start_http_agent(binary: Path, root: Path, reports: list[str]) -> tuple[Mana
     installed_id = installed_run.get("processId")
     if not installed_id:
         fail("Agent HTTP installed Skill run", f"missing installed process id: {installed_run}")
-    installed_done = json_result(mcp_call(port, token, session, 11, "tools/call", {"name": "process.status", "arguments": {"processId": installed_id, "waitSeconds": 5}}, "Agent HTTP installed Skill completion"), "Agent HTTP installed Skill completion")
-    if installed_done.get("state") != "completed" or "stdout" in installed_done:
-        fail("Agent HTTP installed Skill completion", f"status was not terminal metadata: {installed_done}")
-    installed_output = json_result(mcp_call(port, token, session, 12, "tools/call", {"name": "process.output", "arguments": {"processId": installed_id, "maxBytes": 8192}}, "Agent HTTP installed Skill output"), "Agent HTTP installed Skill output")
-    if "inline-skill" not in installed_output.get("stdout", {}).get("data", ""):
-        fail("Agent HTTP installed Skill output", f"installed Skill output was not retrievable: {installed_output}")
-    reports.append("PASS Agent standalone streamable HTTP MCP: tools/list, Skill run/status/result, inline install/get(0,5), and installed run/status/result")
+    installed_done = json_result(
+        mcp_call(
+            port, token, session, 11, "tools/call",
+            {"name": "process.read", "arguments": {"processId": installed_id, "view": "status", "waitSeconds": 5}},
+            "Agent HTTP installed Skill status view",
+        ),
+        "Agent HTTP installed Skill status view",
+    )
+    if installed_done.get("state") != "completed" or "output" in installed_done:
+        fail("Agent HTTP installed Skill status view", f"status view returned output: {installed_done}")
+    installed_output = json_result(
+        mcp_call(
+            port, token, session, 12, "tools/call",
+            {"name": "process.read", "arguments": {"processId": installed_id, "maxBytes": 8192}},
+            "Agent HTTP installed Skill read",
+        ),
+        "Agent HTTP installed Skill read",
+    )
+    if "inline-skill" not in installed_output.get("output", {}).get("stdout", {}).get("data", ""):
+        fail("Agent HTTP installed Skill read", f"installed Skill output was not retrievable: {installed_output}")
+    reports.append("PASS Agent standalone streamable HTTP MCP: tools/list, Skill run/read status/auto, inline install/get(0,5), and installed run/read")
     return process, config, env, port, token, tools
 
 def start_event_worker(
@@ -2509,11 +2642,24 @@ def register_hub_agent(hub_binary: Path, db: Path, config: Path, env: dict[str, 
     )
 
 
-def start_hub_agent(binary: Path, root: Path, profile: str, agent_id: str, hub_url: str, secret: str,
-                    reports: list[str], downstream: tuple[int, str] | None = None) -> tuple[ManagedProcess, Path, dict[str, str]]:
+def start_hub_agent(
+    binary: Path,
+    root: Path,
+    profile: str,
+    agent_id: str,
+    hub_url: str,
+    secret: str,
+    reports: list[str],
+    downstream: tuple[int, str] | None = None,
+    process_response_bytes: int | None = None,
+) -> tuple[ManagedProcess, Path, dict[str, str]]:
     config, _, env = init_agent(binary, root, "hub", profile, agent_id, hub_url, secret)
-    if downstream is not None:
-        configure_process_fixture(config, *downstream)
+    if downstream is not None or process_response_bytes is not None:
+        configure_process_fixture(
+            config,
+            *(downstream or (None, None)),
+            process_response_bytes=process_response_bytes,
+        )
     process = ManagedProcess([str(binary), "run", "--config", str(config)], env, f"Hub Agent {profile}")
     reports.append(f"START Hub Agent {profile} ({agent_id})")
     return process, config, env
@@ -3329,8 +3475,8 @@ def run_hub_late_response_gate(
         )
     result = late_response.get("data")
     dispositions = late_response.get("eventSources")
-    if not isinstance(result, dict) or result.get("status") != "completed" or result.get("completedInline") is not True:
-        fail("Hub real delayed terminal response", f"Agent response was not the completed process.exec result: {late_response}")
+    if not isinstance(result, dict) or result.get("state") != "completed":
+        fail("Hub real delayed terminal response", f"Agent response was not a completed process response: {late_response}")
     process_id = result.get("processId")
     if (
         not isinstance(process_id, str)
@@ -3613,8 +3759,8 @@ def run_hub_late_response_gate(
         "Hub normal terminal response suppression",
     )
     terminal_id = terminal.get("processId")
-    if terminal.get("status") != "completed" or terminal.get("completedInline") is not True or not terminal_id:
-        fail("Hub normal terminal response suppression", f"real terminal process did not return inline: {terminal}")
+    if terminal.get("state") != "completed" or not terminal_id:
+        fail("Hub normal terminal response suppression", f"real terminal process did not finish: {terminal}")
     terminal_panel = assert_event_counts(terminal, (1, 0, 0), "Hub normal terminal response suppression")
     if event_id in event_panel_ids(terminal_panel, "Hub normal terminal response suppression"):
         fail("Hub normal terminal response suppression", f"terminal operation changed pending-event visibility: {terminal}")
@@ -3763,7 +3909,7 @@ def run_hub_feedback_delta_recovery_gate(
         or batch_result.get("status") != "completed"
         or not isinstance(reported_processes, list)
         or len(reported_processes) != 2
-        or any(item.get("status") != "completed" for item in reported_processes if isinstance(item, dict))
+        or any(item.get("state") != "completed" for item in reported_processes if isinstance(item, dict))
         or reported_process_ids != expected_refs
         or len(expected_refs) != 2
         or not isinstance(actual_dispositions, list)
@@ -4683,10 +4829,10 @@ def run_agent_event_gate(binary: Path, root: Path, reports: list[str]) -> Manage
     inline_id = inline.get("processId")
     if (
         not inline_id
-        or inline.get("status") != "completed"
-        or inline.get("inlineOutput", {}).get("stdout", {}).get("data") != PROCESS_MARKERS[0]
+        or inline.get("state") != "completed"
+        or inline.get("output", {}).get("stdout", {}).get("data") != PROCESS_MARKERS[0]
     ):
-        fail("Agent Unix inline process.exec", f"inline business result changed: {inline}")
+        fail("Agent Unix inline process.exec", f"inline process response omitted terminal output: {inline}")
     assert_event_counts(inline, (0, 1, 1), "Agent inline result keeps original content")
     inline_list = local_event_call(
         binary, config, env, "event.list", {"status": "pending"}, "Agent inline suppression query"
@@ -4710,8 +4856,7 @@ def run_agent_event_gate(binary: Path, root: Path, reports: list[str]) -> Manage
         {"program": "/usr/bin/sleep", "args": ["1"], "waitSeconds": 0},
         "Agent stdio asynchronous process.exec",
     )
-    async_id = asynchronous.get("processId")
-    if not async_id or asynchronous.get("completedInline") is True or "inlineOutput" in asynchronous:
+    if not async_id or asynchronous.get("state") in {"completed", "failed", "cancelled"}:
         fail("Agent stdio asynchronous process.exec", f"creation response was not asynchronous: {asynchronous}")
     assert_event_counts(asynchronous, (0, 1, 1), "Agent asynchronous creation response")
     completed = agent_http_tool_call(
@@ -4719,12 +4864,12 @@ def run_agent_event_gate(binary: Path, root: Path, reports: list[str]) -> Manage
         token,
         http_session,
         next(http_ids),
-        "process.status",
-        {"processId": async_id, "waitSeconds": 5},
-        "Agent HTTP async process.status",
+        "process.read",
+        {"processId": async_id, "view": "status", "waitSeconds": 5},
+        "Agent HTTP async process.read status view",
     )
-    if completed.get("state") != "completed" or any(key in completed for key in ("stdout", "stderr", "result")):
-        fail("Agent HTTP async process.status", f"terminal status was not metadata-only: {completed}")
+    if completed.get("state") != "completed" or "output" in completed:
+        fail("Agent HTTP async process.read status view", f"terminal status view returned output: {completed}")
     completion_panel = assert_event_counts(completed, (1, 1, 1), "Agent async completion notification")
     completion_ids = event_panel_ids(completion_panel, "Agent async completion notification")
     async_event_id = next((value for value in completion_ids if value != high_id), None)
@@ -4840,16 +4985,16 @@ def run_http_internal_policy_off_gate(
         "Agent HTTP internal-off async process.exec",
     )
     process_id = process_start.get("processId")
-    if not process_id or process_start.get("completedInline") is True:
+    if not process_id or process_start.get("state") in {"completed", "failed", "cancelled"}:
         fail("Agent HTTP internal-off async process.exec", f"sleep did not start asynchronously: {process_start}")
     agent_http_tool_call(
         port,
         token,
         session,
         14,
-        "process.status",
-        {"processId": process_id, "waitSeconds": 5},
-        "Agent HTTP internal-off process.status",
+        "process.read",
+        {"processId": process_id, "view": "status", "waitSeconds": 5},
+        "Agent HTTP internal-off process.read status view",
     )
     pending = agent_http_tool_call(
         port,
@@ -4898,7 +5043,7 @@ def run_live_event_policy_reload_gate(
             "Agent pre-reload async process.exec",
         )
         old_id = old_start.get("processId")
-        if not old_id or old_start.get("completedInline") is True:
+        if not old_id or old_start.get("state") in {"completed", "failed", "cancelled"}:
             fail("Agent pre-reload async process.exec", f"old process was not admitted asynchronously: {old_start}")
 
         previous_reload_count = process.diagnostics().count("live config reloaded;")
@@ -4947,25 +5092,25 @@ def run_live_event_policy_reload_gate(
             "Agent post-reload async process.exec",
         )
         new_id = new_start.get("processId")
-        if not new_id or new_start.get("completedInline") is True:
+        if not new_id or new_start.get("state") in {"completed", "failed", "cancelled"}:
             fail("Agent post-reload async process.exec", f"new process was not admitted asynchronously: {new_start}")
         new_done = agent_http_tool_call(
             port,
             token,
             session,
             6,
-            "process.status",
-            {"processId": new_id, "waitSeconds": 5},
-            "Agent post-reload process.status",
+            "process.read",
+            {"processId": new_id, "view": "status", "waitSeconds": 5},
+            "Agent post-reload process.read status view",
         )
         old_done = agent_http_tool_call(
             port,
             token,
             session,
             7,
-            "process.status",
-            {"processId": old_id, "waitSeconds": 30},
-            "Agent pre-reload process.status",
+            "process.read",
+            {"processId": old_id, "view": "status", "waitSeconds": 30},
+            "Agent pre-reload process.read status view",
             timeout=45,
         )
         if new_done.get("state") != "completed" or old_done.get("state") != "completed":
@@ -5193,6 +5338,233 @@ def process_request(port: int, api_key: str, agent_id: str, program: str, args: 
         fail(scenario, f"response is not an object: {value}")
     return value
 
+
+def decode_output_segment(segment: dict[str, Any], scenario: str) -> bytes:
+    data = segment.get("data")
+    if not isinstance(data, str):
+        fail(scenario, f"output segment has no string data: {segment}")
+    if segment.get("encoding") == "utf8":
+        decoded = data.encode("utf-8")
+    elif segment.get("encoding") == "base64":
+        try:
+            decoded = base64.b64decode(data, validate=True)
+        except (ValueError, base64.binascii.Error) as error:
+            fail(scenario, f"output segment is not valid base64: {error}")
+    else:
+        fail(scenario, f"unsupported output encoding: {segment.get('encoding')!r}")
+    try:
+        start = int(segment["startOffset"])
+        end = int(segment["endOffset"])
+    except (KeyError, TypeError, ValueError):
+        fail(scenario, f"output segment offsets are not decimal strings: {segment}")
+    if end - start != len(decoded):
+        fail(scenario, f"output byte offsets do not match the returned data: {segment}")
+    return decoded
+
+
+def process_read_has_artifacts(response: dict[str, Any]) -> bool:
+    return "output" in response or "mcpResult" in response
+
+
+def hub_process_read(
+    port: int,
+    api_key: str,
+    agent_id: str,
+    process_id: str,
+    document: dict[str, Any],
+    schemas: dict[str, Any],
+    scenario: str,
+    *,
+    wait_seconds: int | None = None,
+    view: str | None = None,
+    cursor: str | None = None,
+    max_bytes: int | None = None,
+    expected_status: int = 200,
+) -> tuple[HttpResponse, dict[str, Any]]:
+    query: dict[str, Any] = {"agentId": agent_id}
+    for name, value in (
+        ("waitSeconds", wait_seconds),
+        ("view", view),
+        ("cursor", cursor),
+        ("maxBytes", max_bytes),
+    ):
+        if value is not None:
+            query[name] = value
+    response, result = hub_json(
+        port,
+        api_key,
+        "GET",
+        f"/v1/process/{quote(process_id, safe='')}/read?" + urlencode(query),
+        None,
+        scenario,
+    )
+    if response.status != expected_status or not isinstance(result, dict):
+        fail(scenario, f"HTTP {response.status}: {result}")
+    validate_operation_response(
+        document,
+        "/v1/process/{processId}/read",
+        "get",
+        expected_status,
+        result,
+        scenario,
+    )
+    if expected_status == 200:
+        validate_instance(document, schemas, "ProcessResponse", result, f"{scenario} response")
+    return response, result
+
+
+def collect_http_process_stdout(
+    port: int,
+    api_key: str,
+    agent_id: str,
+    process_id: str,
+    document: dict[str, Any],
+    schemas: dict[str, Any],
+    scenario: str,
+    expected: bytes,
+    *,
+    first_max_bytes: int | None,
+    continuation_max_bytes: int,
+) -> list[dict[str, Any]]:
+    collected = bytearray()
+    pages: list[dict[str, Any]] = []
+    cursor: str | None = None
+    for index in range(64):
+        response_budget = (
+            first_max_bytes if first_max_bytes is not None else 4096
+        ) if index == 0 else continuation_max_bytes
+        response, value = hub_process_read(
+            port,
+            api_key,
+            agent_id,
+            process_id,
+            document,
+            schemas,
+            scenario,
+            cursor=cursor,
+            max_bytes=first_max_bytes if index == 0 else continuation_max_bytes,
+        )
+        if len(response.body) > response_budget:
+            fail(scenario, f"serialized ProcessResponse exceeded its {response_budget}-byte budget")
+        output = value.get("output")
+        if not isinstance(output, dict):
+            fail(scenario, f"read response omitted its output page: {value}")
+        stdout = output.get("stdout")
+        if not isinstance(stdout, dict):
+            fail(scenario, f"read output page omitted its stdout segment: {output}")
+        if stdout.get("gap"):
+            fail(scenario, f"unexpected output gap while assembling fixture: {stdout}")
+        try:
+            segment_start = int(stdout.get("startOffset", "-1"))
+        except (TypeError, ValueError):
+            fail(scenario, f"output start offset is not decimal: {stdout}")
+        if segment_start != len(collected):
+            fail(scenario, f"cursor page did not continue at the returned byte offset: {stdout}")
+        collected.extend(decode_output_segment(stdout, scenario))
+        pages.append(value)
+        if output.get("hasMore") is False:
+            if output.get("eof") is not True:
+                fail(scenario, f"output ended without EOF: {output}")
+            break
+        if output.get("hasMore") is not True or not output.get("nextCursor"):
+            fail(scenario, f"output continuation omitted its cursor: {output}")
+        cursor = output["nextCursor"]
+    else:
+        fail(scenario, "output cursor did not reach EOF within the page bound")
+    if bytes(collected) != expected:
+        fail(
+            scenario,
+            f"cursor pages did not reproduce exact output ({len(collected)} bytes, expected {len(expected)})",
+        )
+    return pages
+
+
+def collect_mcp_process_stdout(
+    port: int,
+    token: str,
+    session: str,
+    agent_id: str,
+    process_id: str,
+    expected: bytes,
+    scenario: str,
+    *,
+    request_id_start: int,
+    max_bytes: int,
+) -> list[dict[str, Any]]:
+    collected = bytearray()
+    pages: list[dict[str, Any]] = []
+    cursor: str | None = None
+    seen_cursors: set[str] = set()
+    for index in range(64):
+        page_scenario = f"{scenario} page {index + 1}"
+        arguments: dict[str, Any] = {
+            "agentId": agent_id,
+            "processId": process_id,
+            "waitSeconds": 0,
+            "maxBytes": max_bytes,
+        }
+        if cursor is not None:
+            arguments["cursor"] = cursor
+        value = json_result(
+            mcp_call(
+                port,
+                token,
+                session,
+                request_id_start + index,
+                "tools/call",
+                {"name": "process.read", "arguments": arguments},
+                page_scenario,
+            ),
+            page_scenario,
+        )
+        if not isinstance(value, dict):
+            fail(page_scenario, f"process.read result is not an object: {value}")
+        if (
+            value.get("agentId") != agent_id
+            or value.get("processId") != process_id
+            or value.get("state") != "completed"
+        ):
+            fail(page_scenario, f"cursor response lost process identity or terminal state: {value}")
+        serialized_size = len(
+            json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        )
+        if serialized_size > max_bytes:
+            fail(page_scenario, f"serialized ProcessResponse exceeded its {max_bytes}-byte budget")
+        output = value.get("output")
+        if not isinstance(output, dict):
+            fail(page_scenario, f"process.read response omitted its output page: {value}")
+        stdout = output.get("stdout")
+        if not isinstance(stdout, dict) or stdout.get("gap"):
+            fail(page_scenario, f"process.read page omitted contiguous stdout: {output}")
+        try:
+            segment_start = int(stdout.get("startOffset", "-1"))
+        except (TypeError, ValueError):
+            fail(page_scenario, f"output start offset is not decimal: {stdout}")
+        if segment_start != len(collected):
+            fail(page_scenario, f"MCP cursor page did not continue at the returned byte offset: {stdout}")
+        collected.extend(decode_output_segment(stdout, page_scenario))
+        pages.append(value)
+        if output.get("hasMore") is False:
+            if output.get("eof") is not True:
+                fail(page_scenario, f"output ended without EOF: {output}")
+            break
+        if output.get("hasMore") is not True:
+            fail(page_scenario, f"output page has invalid continuation state: {output}")
+        next_cursor = output.get("nextCursor")
+        if not isinstance(next_cursor, str) or not next_cursor or next_cursor in seen_cursors:
+            fail(page_scenario, f"output cursor is absent or repeated: {output}")
+        seen_cursors.add(next_cursor)
+        cursor = next_cursor
+    else:
+        fail(scenario, "MCP output cursor did not reach EOF within the page bound")
+    if bytes(collected) != expected:
+        fail(
+            scenario,
+            f"MCP cursor pages did not reproduce exact output ({len(collected)} bytes, expected {len(expected)})",
+        )
+    return pages
+
+
 def confirmed_hub_json(port: int, api_key: str, method: str, path: str, body: Any,
                        receiver: ConfirmationReceiver, scenario: str) -> tuple[HttpResponse, Any]:
     result: dict[str, Any] = {}
@@ -5253,7 +5625,7 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
         assert_skill_semantics(http_tools, "Agent HTTP Skill descriptors")
         if descriptor_map(local_tools).keys() != descriptor_map(http_tools).keys():
             fail("Agent local/HTTP parity", "tools/list names differ")
-        for name in ("process.status", "process.list", "process.output", "process.result", "process.cancel", "skills.install.get", "skills.run"):
+        for name in ("process.read", "process.list", "process.cancel", "skills.install.get", "skills.run"):
             if descriptor_map(local_tools)[name].get("inputSchema") != descriptor_map(http_tools)[name].get("inputSchema"):
                 fail("Agent local/HTTP parity", f"{name} input schemas differ")
 
@@ -5278,17 +5650,17 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
             "Agent HTTP process.exec",
         )
         http_process_id = http_exec.get("processId")
-        http_inline = http_exec.get("inlineOutput", {})
+        http_output = http_exec.get("output", {})
         if (
             not http_process_id
-            or http_exec.get("status") != "completed"
-            or http_exec.get("completedInline") is not True
-            or http_inline.get("stdout", {}).get("data") != PROCESS_MARKERS[0]
-            or http_inline.get("stdout", {}).get("encoding") != "utf8"
+            or http_exec.get("agentId") != "parity-http"
+            or http_exec.get("state") != "completed"
+            or http_output.get("stdout", {}).get("data") != PROCESS_MARKERS[0]
+            or http_output.get("stdout", {}).get("encoding") != "utf8"
         ):
-            fail("Agent HTTP process.exec", f"printf did not complete with full inline output: {http_exec}")
+            fail("Agent HTTP process.exec", f"printf did not complete with full process read response: {http_exec}")
         if len(json.dumps(http_exec, separators=(",", ":")).encode()) > 8192:
-            fail("Agent HTTP process.exec", f"creation response exceeded the inline response budget: {http_exec}")
+            fail("Agent HTTP process.exec", f"creation response exceeded the configured process response budget: {http_exec}")
         run_http_internal_policy_off_gate(http_port, http_token, http_session, reports)
         reports.append("PASS Agent local/HTTP descriptor parity and HTTP process printf dispatch")
 
@@ -5312,6 +5684,7 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
             normal_secret,
             reports,
             downstream=(http_port, http_token),
+            process_response_bytes=4096,
         )
         room_process, room_config, room_env = start_hub_agent(
             agent_binary, root / "hub-room", "room", room_id, f"http://127.0.0.1:{hub_port}", room_secret, reports
@@ -5409,16 +5782,16 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
             "Hub Full process.exec printf",
         )
         full_id = full_exec.get("processId") if isinstance(full_exec, dict) else None
-        full_inline = full_exec.get("inlineOutput", {}) if isinstance(full_exec, dict) else {}
+        full_output = full_exec.get("output", {}) if isinstance(full_exec, dict) else {}
         if (
             not full_id
-            or full_exec.get("status") != "completed"
-            or full_exec.get("completedInline") is not True
-            or full_inline.get("stdout", {}).get("data") != PROCESS_MARKERS[1]
-            or full_inline.get("stdout", {}).get("encoding") != "utf8"
-            or len(json.dumps(full_exec, separators=(",", ":")).encode()) > 8192
+            or full_exec.get("agentId") != normal_id
+            or full_exec.get("state") != "completed"
+            or full_output.get("stdout", {}).get("data") != PROCESS_MARKERS[1]
+            or full_output.get("stdout", {}).get("encoding") != "utf8"
+            or len(json.dumps(full_exec, separators=(",", ":")).encode()) > 4096
         ):
-            fail("Hub Full process.exec printf", f"missing complete inline process creation response: {full_exec}")
+            fail("Hub Full process.exec printf", f"process response omitted identity or bounded output: {full_exec}")
         inline_panel = assert_event_counts(
             full_exec, (0, 0, 0), "Hub inline process.exec event suppression"
         )
@@ -5448,86 +5821,342 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
         full_status = json_result(
             mcp_call(
                 hub_port, hub_key, full_session, 4, "tools/call",
-                {"name": "process.status", "arguments": {"agentId": normal_id, "processId": full_id, "waitSeconds": 1}},
-                "Hub Full process.status",
+                {
+                    "name": "process.read",
+                    "arguments": {
+                        "agentId": normal_id,
+                        "processId": full_id,
+                        "waitSeconds": 1,
+                        "view": "status",
+                    },
+                },
+                "Hub Full process.read status view",
             ),
-            "Hub Full process.status",
+            "Hub Full process.read status view",
         )
         if (
-            full_status.get("processId") != full_id
+            full_status.get("agentId") != normal_id
+            or full_status.get("processId") != full_id
             or full_status.get("state") != "completed"
-            or any(key in full_status for key in ("stdout", "stderr", "result"))
+            or process_read_has_artifacts(full_status)
         ):
-            fail("Hub Full process.status", f"status did not return metadata-only completion: {full_status}")
-        full_result = json_result(
+            fail("Hub Full process.read status view", f"status view returned artifacts or lost process identity: {full_status}")
+        full_read = json_result(
             mcp_call(
                 hub_port, hub_key, full_session, 5, "tools/call",
-                {"name": "process.result", "arguments": {"agentId": normal_id, "processId": full_id, "maxBytes": 8192}},
-                "Hub Full process.result",
+                {
+                    "name": "process.read",
+                    "arguments": {"agentId": normal_id, "processId": full_id, "maxBytes": 4096},
+                },
+                "Hub Full process.read auto view",
             ),
-            "Hub Full process.result",
+            "Hub Full process.read auto view",
         )
-        if full_result.get("status") != "unavailable" or full_result.get("resultAvailable") is not False:
-            fail("Hub Full process.result", f"command result was not accurately reported unavailable: {full_result}")
-
-        hub_output = json_result(
+        if (
+            full_read.get("agentId") != normal_id
+            or full_read.get("processId") != full_id
+            or full_read.get("output", {}).get("stdout", {}).get("data") != PROCESS_MARKERS[1]
+            or full_read.get("output", {}).get("eof") is not True
+            or full_read.get("mcpResult", {}).get("status") != "unavailable"
+        ):
+            fail("Hub Full process.read auto view", f"unified read omitted command output or MCP applicability: {full_read}")
+        mcp_page_exec = json_result(
             mcp_call(
-                hub_port, hub_key, full_session, 73, "tools/call",
-                {"name": "process.output", "arguments": {"agentId": normal_id, "processId": full_id, "maxBytes": 8192}},
-                "Hub Full process.output",
+                hub_port,
+                hub_key,
+                full_session,
+                200,
+                "tools/call",
+                {
+                    "name": "process.exec",
+                    "arguments": {
+                        "agentId": normal_id,
+                        "program": "/bin/sh",
+                        "args": ["-c", PROCESS_MCP_PAGINATION_COMMAND, "sh", PROCESS_OVERFLOW_MARKER],
+                        "needConfirm": False,
+                        "waitSeconds": 5,
+                    },
+                },
+                "Hub MCP process.read cursor fixture",
             ),
-            "Hub Full process.output",
+            "Hub MCP process.read cursor fixture",
         )
+        mcp_page_id = mcp_page_exec.get("processId") if isinstance(mcp_page_exec, dict) else None
         if (
-            hub_output.get("processId") != full_id
-            or hub_output.get("stdout", {}).get("data") != PROCESS_MARKERS[1]
-            or hub_output.get("eof") is not True
+            not mcp_page_id
+            or mcp_page_exec.get("agentId") != normal_id
+            or mcp_page_exec.get("state") != "completed"
         ):
-            fail("Hub Full process.output", f"retained command output was not retrieved: {hub_output}")
+            fail("Hub MCP process.read cursor fixture", f"large MCP output process did not complete: {mcp_page_exec}")
+        mcp_pages = collect_mcp_process_stdout(
+            hub_port,
+            hub_key,
+            full_session,
+            normal_id,
+            mcp_page_id,
+            PROCESS_OVERFLOW_MARKER.encode(),
+            "Hub MCP process.read cursor pagination",
+            request_id_start=210,
+            max_bytes=4096,
+        )
+        if len(mcp_pages) < 2 or mcp_pages[0].get("output", {}).get("hasMore") is not True:
+            fail("Hub MCP process.read cursor pagination", "MCP process.read did not return a continuable first page")
+        reports.append("PASS Hub MCP process.read cursor pages preserve contiguous output within each response budget")
+        for request_id, (retired_tool, arguments) in enumerate(
+            (
+                ("process.status", {"agentId": normal_id, "processId": full_id, "waitSeconds": 0}),
+                ("process.output", {"agentId": normal_id, "processId": full_id, "maxBytes": 8192}),
+                ("process.result", {"agentId": normal_id, "processId": full_id, "maxBytes": 8192}),
+            ),
+            start=100,
+        ):
+            retired_call = mcp_call(
+                hub_port,
+                hub_key,
+                full_session,
+                request_id,
+                "tools/call",
+                {"name": retired_tool, "arguments": arguments},
+                f"Retired process MCP tool {retired_tool}",
+            )
+            if "error" not in retired_call and retired_call.get("result", {}).get("isError") is not True:
+                fail(
+                    f"Retired process MCP tool {retired_tool}",
+                    f"retired live process tool remained callable: {retired_call}",
+                )
 
-        http_first_response, http_first = hub_json(
-            hub_port, hub_key, "GET",
-            f"/v1/process/{full_id}/output?" + urlencode({"agentId": normal_id, "maxBytes": 8}),
-            None, "Hub HTTP process.output first page",
+        page_exec = process_request(
+            hub_port, hub_key, normal_id, "/usr/bin/printf", [PROCESS_OVERFLOW_MARKER],
+            "parity-read-pages", 5, "Hub HTTP process.read page fixture",
         )
-        if http_first_response.status != 200:
-            fail("Hub HTTP process.output first page", f"HTTP {http_first_response.status}: {http_first}")
-        validate_operation_response(document, "/v1/process/{processId}/output", "get", 200, http_first, "Hub HTTP process.output first page")
+        validate_operation_response(
+            document, "/v1/process/exec", "post", 200, page_exec, "Hub HTTP process.read page fixture",
+        )
+        page_process_id = page_exec.get("processId")
+        if not page_process_id or page_exec.get("state") != "completed":
+            fail("Hub HTTP process.read page fixture", f"large output process did not complete: {page_exec}")
+        pages = collect_http_process_stdout(
+            hub_port,
+            hub_key,
+            normal_id,
+            page_process_id,
+            document,
+            schemas,
+            "Hub HTTP process.read configured-default pagination",
+            PROCESS_OVERFLOW_MARKER.encode(),
+            first_max_bytes=None,
+            continuation_max_bytes=4096,
+        )
         if (
-            http_first.get("processId") != full_id
-            or http_first.get("stdout", {}).get("startOffset") != "0"
-            or not http_first.get("stdout", {}).get("data")
-            or len(http_first["stdout"]["data"].encode()) > 8
-            or http_first.get("hasMore") is not True
-            or not http_first.get("nextCursor")
+            len(pages) < 2
+            or pages[0].get("output", {}).get("hasMore") is not True
+            or not pages[0].get("output", {}).get("nextCursor")
         ):
-            fail("Hub HTTP process.output first page", f"bounded cursor page was not returned: {http_first}")
-        http_next_response, http_next = hub_json(
-            hub_port, hub_key, "GET",
-            f"/v1/process/{full_id}/output?" + urlencode({"agentId": normal_id, "cursor": http_first["nextCursor"], "maxBytes": 64}),
-            None, "Hub HTTP process.output continuation",
+            fail("Hub HTTP process.read configured-default pagination", "the configured 4096-byte response cap did not paginate real output")
+
+        escaped_exec = process_request(
+            hub_port, hub_key, normal_id, "/usr/bin/printf",
+            ["%s", PROCESS_ESCAPE_OUTPUT], "parity-read-json-escape", 5,
+            "Hub HTTP process.read JSON escaping fixture",
         )
-        if http_next_response.status != 200:
-            fail("Hub HTTP process.output continuation", f"HTTP {http_next_response.status}: {http_next}")
-        validate_operation_response(document, "/v1/process/{processId}/output", "get", 200, http_next, "Hub HTTP process.output continuation")
+        escaped_id = escaped_exec.get("processId")
+        if not escaped_id:
+            fail("Hub HTTP process.read JSON escaping fixture", f"process omitted its id: {escaped_exec}")
+        escaped_pages = collect_http_process_stdout(
+            hub_port,
+            hub_key,
+            normal_id,
+            escaped_id,
+            document,
+            schemas,
+            "Hub HTTP process.read JSON escaping budget",
+            PROCESS_ESCAPE_OUTPUT.encode(),
+            first_max_bytes=4096,
+            continuation_max_bytes=4096,
+        )
         if (
-            http_next.get("stdout", {}).get("startOffset") != http_first["stdout"]["endOffset"]
-            or http_next.get("stdout", {}).get("data") == http_first["stdout"]["data"]
-            or http_next.get("eof") is not True
-            or http_next.get("hasMore") is not False
+            len(escaped_pages) < 2
+            or escaped_pages[0].get("output", {}).get("stdout", {}).get("encoding") != "utf8"
         ):
-            fail("Hub HTTP process.output continuation", f"cursor replayed output or missed EOF: {http_next}")
-        http_result_response, http_result = hub_json(
-            hub_port, hub_key, "GET",
-            f"/v1/process/{full_id}/result?" + urlencode({"agentId": normal_id, "maxBytes": 8192}),
-            None, "Hub HTTP process.result",
+            fail("Hub HTTP process.read JSON escaping budget", "JSON-escaped output did not honor the response budget")
+
+        binary_exec = process_request(
+            hub_port, hub_key, normal_id, "/usr/bin/printf",
+            [PROCESS_BINARY_FORMAT], "parity-read-base64", 5,
+            "Hub HTTP process.read binary fixture",
         )
-        if http_result_response.status != 200:
-            fail("Hub HTTP process.result", f"HTTP {http_result_response.status}: {http_result}")
-        validate_operation_response(document, "/v1/process/{processId}/result", "get", 200, http_result, "Hub HTTP process.result")
-        if http_result.get("status") != "unavailable" or http_result.get("resultAvailable") is not False or "result" in http_result:
-            fail("Hub HTTP process.result", f"command result was not accurately unavailable: {http_result}")
-        reports.append("PASS Hub MCP and live HTTP process.output cursor/EOF and HTTP process.result")
+        binary_id = binary_exec.get("processId")
+        if not binary_id:
+            fail("Hub HTTP process.read binary fixture", f"process omitted its id: {binary_exec}")
+        binary_pages = collect_http_process_stdout(
+            hub_port,
+            hub_key,
+            normal_id,
+            binary_id,
+            document,
+            schemas,
+            "Hub HTTP process.read base64 budget",
+            b"\xff" * 7000,
+            first_max_bytes=4096,
+            continuation_max_bytes=4096,
+        )
+        if binary_pages[0].get("output", {}).get("stdout", {}).get("encoding") != "base64":
+            fail("Hub HTTP process.read base64 budget", "invalid UTF-8 output was not preserved as base64")
+
+        invalid_budget_response, invalid_budget = hub_process_read(
+            hub_port,
+            hub_key,
+            normal_id,
+            page_process_id,
+            document,
+            schemas,
+            "Hub HTTP process.read rejects sub-minimum budget",
+            max_bytes=4095,
+            expected_status=400,
+        )
+        if invalid_budget_response.status != 400:
+            fail("Hub HTTP process.read rejects sub-minimum budget", f"invalid maxBytes was accepted: {invalid_budget}")
+        invalid_view_response, invalid_view = hub_process_read(
+            hub_port,
+            hub_key,
+            normal_id,
+            page_process_id,
+            document,
+            schemas,
+            "Hub HTTP process.read rejects status cursor",
+            wait_seconds=0,
+            view="status",
+            cursor="opaque-cursor",
+            max_bytes=4096,
+            expected_status=400,
+        )
+        if invalid_view_response.status != 400:
+            fail("Hub HTTP process.read rejects status cursor", f"status and cursor were combined: {invalid_view}")
+
+        for retired_path in (
+            f"/v1/process/{full_id}",
+            f"/v1/process/{full_id}/output",
+            f"/v1/process/{full_id}/result",
+        ):
+            retired_response = http_request(
+                hub_port,
+                "GET",
+                retired_path,
+                headers={"Authorization": f"Bearer {hub_key}"},
+                scenario=f"Retired process HTTP route {retired_path}",
+            )
+            if retired_response.status != 404:
+                fail(
+                    f"Retired process HTTP route {retired_path}",
+                    f"retired live read route remained reachable: HTTP {retired_response.status}",
+                )
+
+        auto_start = process_request(
+            hub_port, hub_key, normal_id, "/bin/sh", ["-c", PROCESS_AUTO_COMMAND],
+            "parity-read-auto-wait", 0, "Hub process.read auto wait fixture",
+        )
+        auto_id = auto_start.get("processId")
+        if not auto_id:
+            fail("Hub process.read auto wait fixture", f"process omitted its id: {auto_start}")
+        auto_started = time.monotonic()
+        _, auto_read = hub_process_read(
+            hub_port, hub_key, normal_id, auto_id, document, schemas,
+            "Hub process.read auto returns backlog",
+            wait_seconds=5,
+        )
+        auto_elapsed = time.monotonic() - auto_started
+        if (
+            auto_elapsed >= 1.5
+            or auto_read.get("state") in {"completed", "failed", "cancelled"}
+            or auto_read.get("output", {}).get("stdout", {}).get("data") != PROCESS_AUTO_MARKER
+        ):
+            fail("Hub process.read auto returns backlog", f"auto did not return available output before process exit: {auto_read}")
+        status_started = time.monotonic()
+        auto_status = json_result(
+            mcp_call(
+                hub_port, hub_key, full_session, 74, "tools/call",
+                {
+                    "name": "process.read",
+                    "arguments": {
+                        "agentId": normal_id,
+                        "processId": auto_id,
+                        "waitSeconds": 5,
+                        "view": "status",
+                    },
+                },
+                "Hub process.read status waits for exit",
+                timeout=8,
+            ),
+            "Hub process.read status waits for exit",
+        )
+        status_elapsed = time.monotonic() - status_started
+        if (
+            auto_status.get("state") != "completed"
+            or "output" in auto_status
+            or status_elapsed < 0.5
+        ):
+            fail("Hub process.read status waits for exit", f"status returned on output rather than process exit: {auto_status}")
+
+        tail_start = process_request(
+            hub_port, hub_key, normal_id, "/bin/sh", ["-c", PROCESS_TAIL_COMMAND],
+            "parity-read-tail-after-exit", 0, "Hub process.read tail fixture",
+        )
+        tail_id = tail_start.get("processId")
+        if not tail_id:
+            fail("Hub process.read tail fixture", f"process omitted its id: {tail_start}")
+        tail_status = json_result(
+            mcp_call(
+                hub_port, hub_key, full_session, 75, "tools/call",
+                {
+                    "name": "process.read",
+                    "arguments": {
+                        "agentId": normal_id,
+                        "processId": tail_id,
+                        "waitSeconds": 5,
+                        "view": "status",
+                    },
+                },
+                "Hub process.read terminal while capture continues",
+                timeout=8,
+            ),
+            "Hub process.read terminal while capture continues",
+        )
+        if tail_status.get("state") != "completed" or tail_status.get("captureStatus") != "capturing":
+            fail("Hub process.read terminal while capture continues", f"process/capture terminal states were not separated: {tail_status}")
+        tail_read = json_result(
+            mcp_call(
+                hub_port, hub_key, full_session, 76, "tools/call",
+                {
+                    "name": "process.read",
+                    "arguments": {"agentId": normal_id, "processId": tail_id, "waitSeconds": 5},
+                },
+                "Hub process.read captures tail after exit",
+                timeout=8,
+            ),
+            "Hub process.read captures tail after exit",
+        )
+        if (
+            tail_read.get("state") != "completed"
+            or tail_read.get("output", {}).get("stdout", {}).get("data") != PROCESS_TAIL_MARKER
+        ):
+            fail("Hub process.read captures tail after exit", f"post-exit output tail was not retained: {tail_read}")
+        time.sleep(0.2)
+        tail_settled = json_result(
+            mcp_call(
+                hub_port, hub_key, full_session, 78, "tools/call",
+                {
+                    "name": "process.read",
+                    "arguments": {"agentId": normal_id, "processId": tail_id, "waitSeconds": 0},
+                },
+                "Hub process.read capture EOF after tail",
+            ),
+            "Hub process.read capture EOF after tail",
+        )
+        if (
+            tail_settled.get("output", {}).get("stdout", {}).get("data") != PROCESS_TAIL_MARKER
+            or tail_settled.get("output", {}).get("eof") is not True
+        ):
+            fail("Hub process.read capture EOF after tail", f"tail capture did not settle after its writer exited: {tail_settled}")
 
         denied = json_result(
             mcp_call(
@@ -5564,7 +6193,7 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
         assert_tool_semantics(coordinator_tools, "Hub Coordinator descriptor", hub=True, coordinator=True)
         names = tool_names(coordinator_tools)
         leaked = ROOM_OPERATION_NAMES.intersection(names) | ROOM_RETIRED_NAMES.intersection(names)
-        if {"process.exec", "process.batch", "process.status", "process.output", "process.result", "process.cancel", "job.get"}.intersection(names) or leaked:
+        if {"process.exec", "process.batch", "process.read", "process.cancel", "job.get"}.intersection(names) or leaked:
             fail("Hub Coordinator profile", f"execution or Room tool leaked into tools/list: {sorted(leaked)}")
         hidden = mcp_call(
             coordinator_port,
@@ -5618,13 +6247,12 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
         completed_id = completed.get("processId")
         if (
             not completed_id
-            or completed.get("status") != "completed"
-            or completed.get("completedInline") is not True
-            or completed.get("inlineOutput", {}).get("stdout", {}).get("data") != PROCESS_MARKERS[2]
+            or completed.get("state") != "completed"
+            or completed.get("output", {}).get("stdout", {}).get("data") != PROCESS_MARKERS[2]
         ):
-            fail("Hub HTTP completed printf", f"expected complete inline process output: {completed}")
-        if len(json.dumps(completed, separators=(",", ":")).encode()) > 8192:
-            fail("Hub HTTP completed printf", f"creation response exceeded 8192 bytes: {completed}")
+            fail("Hub HTTP completed printf", f"expected complete process observation: {completed}")
+        if len(json.dumps(completed, separators=(",", ":")).encode()) > 4096:
+            fail("Hub HTTP completed printf", f"creation response exceeded the configured 4096-byte budget: {completed}")
         assert_event_counts(completed, (0, 0, 0), "Hub HTTP inline completion suppression")
         completed_events_response, completed_events = hub_event_http_call(
             hub_port,
@@ -5646,23 +6274,26 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
         )
         validate_operation_response(document, "/v1/process/exec", "post", 200, active, "Hub HTTP active process")
         active_id = active.get("processId")
-        if not active_id or active.get("status") in {"completed", "failed", "cancelled", "rejected", "timed_out"}:
+        if not active_id or active.get("state") in {"completed", "failed", "cancelled", "rejected", "timed_out"}:
             fail("Hub HTTP active process", f"sleep30 was not active: {active}")
 
-        status_response, status_body = hub_json(
-            hub_port, hub_key, "GET",
-            f"/v1/process/{active_id}?" + urlencode({"agentId": normal_id, "waitSeconds": "0"}),
-            None, "Hub HTTP process.status",
+        status_response, status_body = hub_process_read(
+            hub_port,
+            hub_key,
+            normal_id,
+            active_id,
+            document,
+            schemas,
+            "Hub HTTP process.read status view",
+            wait_seconds=0,
+            view="status",
         )
-        if status_response.status != 200:
-            fail("Hub HTTP process.status", f"HTTP {status_response.status}: {status_body}")
-        validate_operation_response(document, "/v1/process/{processId}", "get", 200, status_body, "Hub HTTP process.status")
         if (
             status_body.get("processId") != active_id
             or status_body.get("state") in {"completed", "failed", "cancelled", "rejected", "timed_out"}
-            or any(key in status_body for key in ("stdout", "stderr", "result"))
+            or "output" in status_body
         ):
-            fail("Hub HTTP process.status", f"status is not active metadata-only response: {status_body}")
+            fail("Hub HTTP process.read status view", f"status view was not active metadata: {status_body}")
 
         cancel_response, cancel_body = hub_json(
             hub_port, hub_key, "POST",
@@ -5701,17 +6332,18 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
         validate_operation_response(document, "/v1/process/batch", "post", 200, batch_body, "Hub HTTP process.batch")
         batch_processes = batch_body.get("processes") if isinstance(batch_body, dict) else None
         if (
-            batch_body.get("status") != "completed"
+            not batch_body.get("batchId")
+            or batch_body.get("status") != "completed"
             or not isinstance(batch_processes, list)
             or len(batch_processes) != 2
-            or [process.get("status") for process in batch_processes] != ["completed", "completed"]
-            or not all(process.get("processId") for process in batch_processes)
-            or PROCESS_MARKERS[3] not in json.dumps(batch_body)
-            or PROCESS_MARKERS[4] not in json.dumps(batch_body)
+            or [process.get("state") for process in batch_processes] != ["completed", "completed"]
+            or not all(process.get("processId") and process.get("agentId") == normal_id for process in batch_processes)
+            or batch_processes[0].get("output", {}).get("stdout", {}).get("data") != PROCESS_MARKERS[3]
+            or batch_processes[1].get("output", {}).get("stdout", {}).get("data") != PROCESS_MARKERS[4]
         ):
-            fail("Hub HTTP process.batch", f"ordered complete process output was not returned: {batch_body}")
-        if len(json.dumps(batch_body, separators=(",", ":")).encode()) > 8192:
-            fail("Hub HTTP process.batch", f"aggregate batch response exceeded 8192 bytes: {batch_body}")
+            fail("Hub HTTP process.batch", f"ordered complete process observations were not returned: {batch_body}")
+        if len(json.dumps(batch_body, separators=(",", ":")).encode()) > 4096:
+            fail("Hub HTTP process.batch", f"aggregate batch response exceeded the configured 4096-byte budget: {batch_body}")
 
         mcp_payload = {
             "agentId": normal_id,
@@ -5731,40 +6363,136 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
             fail("Hub HTTP mcp.callTool", f"HTTP {mcp_response.status}: {mcp_body}")
         validate_operation_response(document, "/v1/mcp/callTool", "post", 200, mcp_body, "Hub HTTP mcp.callTool")
         mcp_process_id = mcp_body.get("processId")
-        if mcp_body.get("state") != "completed" or not mcp_process_id or mcp_body.get("resultAvailable") is not True:
-            fail("Hub HTTP mcp.callTool", f"downstream MCP process was not completed/result-available: {mcp_body}")
-        bounded_result = json_result(
+        if (
+            mcp_body.get("state") != "completed"
+            or not mcp_process_id
+            or mcp_body.get("mcpResult", {}).get("status") != "deferred"
+        ):
+            fail("Hub HTTP mcp.callTool", f"large retained MCP result was not deferred in the bounded response: {mcp_body}")
+        bounded_read = json_result(
             mcp_call(
                 hub_port, hub_key, full_session, 7, "tools/call",
-                {"name": "process.result", "arguments": {"agentId": normal_id, "processId": mcp_process_id, "maxBytes": 8192}},
-                "Hub Full bounded MCP result",
+                {
+                    "name": "process.read",
+                    "arguments": {"agentId": normal_id, "processId": mcp_process_id, "maxBytes": 4096},
+                },
+                "Hub Full deferred MCP result",
             ),
-            "Hub Full bounded MCP result",
+            "Hub Full deferred MCP result",
         )
+        deferred_result = bounded_read.get("mcpResult", {})
         if (
-            bounded_result.get("status") != "too_large"
-            or bounded_result.get("resultAvailable") is not True
-            or bounded_result.get("resultBytes", 0) <= 8192
-            or "result" in bounded_result
+            deferred_result.get("status") != "deferred"
+            or deferred_result.get("bytes", 0) <= 4096
+            or "value" in deferred_result
         ):
-            fail("Hub Full bounded MCP result", f"oversized result was not accurately reported: {bounded_result}")
-        mcp_result = json_result(
+            fail("Hub Full deferred MCP result", f"large retained result was not reported deferred: {bounded_read}")
+        mcp_read = json_result(
             mcp_call(
                 hub_port, hub_key, full_session, 70, "tools/call",
-                {"name": "process.result", "arguments": {"agentId": normal_id, "processId": mcp_process_id, "maxBytes": 524288}},
+                {
+                    "name": "process.read",
+                    "arguments": {"agentId": normal_id, "processId": mcp_process_id, "maxBytes": 524288},
+                },
                 "Hub Full explicit MCP result",
             ),
             "Hub Full explicit MCP result",
         )
-        mcp_info = mcp_result.get("result", {}).get("structuredContent", {})
+        mcp_result = mcp_read.get("mcpResult", {})
+        mcp_value = mcp_result.get("value", {})
+        mcp_info = mcp_value.get("structuredContent", {}) if isinstance(mcp_value, dict) else {}
         mcp_identity = mcp_info.get("identity", {}) if isinstance(mcp_info, dict) else {}
         if (
-            mcp_result.get("status") != "complete"
+            mcp_result.get("status") != "included"
             or mcp_identity.get("agentId") != "parity-http"
             or mcp_identity.get("profile") != "normal"
             or mcp_identity.get("transport") != "tunnel-stdio"
         ):
-            fail("Hub Full explicit MCP result", f"downstream identity was not returned by process.result: {mcp_result}")
+            fail("Hub Full explicit MCP result", f"deferred downstream result was not retrievable intact: {mcp_read}")
+
+        non_log_cursor_call = mcp_call(
+            hub_port,
+            hub_key,
+            full_session,
+            80,
+            "tools/call",
+            {
+                "name": "process.read",
+                "arguments": {
+                    "agentId": normal_id,
+                    "processId": mcp_process_id,
+                    "cursor": "not-a-log-cursor",
+                    "maxBytes": 524288,
+                },
+            },
+            "Hub process.read rejects output cursors for downstream results",
+        )
+        non_log_cursor_result = non_log_cursor_call.get("result")
+        if (
+            "error" not in non_log_cursor_call
+            and (
+                not isinstance(non_log_cursor_result, dict)
+                or non_log_cursor_result.get("isError") is not True
+            )
+        ):
+            fail(
+                "Hub process.read rejects output cursors for downstream results",
+                f"downstream MCP result accepted an output cursor: {non_log_cursor_call}",
+            )
+
+        large_mcp_payload = {
+            "agentId": normal_id,
+            "serverId": "standalone-http",
+            "toolName": "file.read",
+            "arguments": {"path": "large-mcp-result.png"},
+            "waitSeconds": 5,
+        }
+        validate_instance(
+            document, schemas, "McpCallToolRequest", large_mcp_payload,
+            "Hub HTTP mcp.callTool non-retained fixture request",
+        )
+        large_mcp_response, large_mcp_body = confirmed_hub_json(
+            hub_port,
+            hub_key,
+            "POST",
+            "/v1/mcp/callTool",
+            large_mcp_payload,
+            confirmation,
+            "Hub HTTP mcp.callTool non-retained fixture",
+        )
+        if large_mcp_response.status != 200:
+            fail("Hub HTTP mcp.callTool non-retained fixture", f"HTTP {large_mcp_response.status}: {large_mcp_body}")
+        validate_operation_response(
+            document,
+            "/v1/mcp/callTool",
+            "post",
+            200,
+            large_mcp_body,
+            "Hub HTTP mcp.callTool non-retained fixture",
+        )
+        large_mcp_id = large_mcp_body.get("processId")
+        if not large_mcp_id:
+            fail("Hub HTTP mcp.callTool non-retained fixture", f"process omitted its id: {large_mcp_body}")
+        not_retained = json_result(
+            mcp_call(
+                hub_port, hub_key, full_session, 77, "tools/call",
+                {
+                    "name": "process.read",
+                    "arguments": {
+                        "agentId": normal_id,
+                        "processId": large_mcp_id,
+                        "maxBytes": 524288,
+                    },
+                },
+                "Hub Full not-retained MCP result",
+                timeout=8,
+            ),
+            "Hub Full not-retained MCP result",
+        )
+        not_retained_result = not_retained.get("mcpResult", {})
+        if not_retained_result.get("status") != "not_retained" or "value" in not_retained_result:
+            fail("Hub Full not-retained MCP result", f"oversized MCP result remained available: {not_retained}")
+        reports.append("PASS Hub process.read MCP result deferred, re-retrievable, and explicitly not-retained states")
 
         mcp_batch_payload = {
             "agentId": normal_id,
@@ -5801,7 +6529,10 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
         first_result = json_result(
             mcp_call(
                 hub_port, hub_key, full_session, 71, "tools/call",
-                {"name": "process.result", "arguments": {"agentId": normal_id, "processId": batch_results[0]["processId"], "maxBytes": 524288}},
+                {
+                    "name": "process.read",
+                    "arguments": {"agentId": normal_id, "processId": batch_results[0]["processId"], "maxBytes": 524288},
+                },
                 "Hub Full first batch MCP result",
             ),
             "Hub Full first batch MCP result",
@@ -5809,18 +6540,23 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
         second_result = json_result(
             mcp_call(
                 hub_port, hub_key, full_session, 72, "tools/call",
-                {"name": "process.result", "arguments": {"agentId": normal_id, "processId": batch_results[1]["processId"], "maxBytes": 524288}},
+                {
+                    "name": "process.read",
+                    "arguments": {"agentId": normal_id, "processId": batch_results[1]["processId"], "maxBytes": 524288},
+                },
                 "Hub Full second batch MCP result",
             ),
             "Hub Full second batch MCP result",
         )
-        first_content = first_result.get("result", {}).get("structuredContent", {})
-        second_content = second_result.get("result", {}).get("structuredContent", {})
+        first_mcp_result = first_result.get("mcpResult", {})
+        second_mcp_result = second_result.get("mcpResult", {})
+        first_content = first_mcp_result.get("value", {}).get("structuredContent", {})
+        second_content = second_mcp_result.get("value", {}).get("structuredContent", {})
         identity = first_content.get("identity", {})
         if (
             batch_results[0]["processId"] == batch_results[1]["processId"]
-            or first_result.get("status") != "complete"
-            or second_result.get("status") != "complete"
+            or first_mcp_result.get("status") != "included"
+            or second_mcp_result.get("status") != "included"
             or identity.get("agentId") != "parity-http"
             or identity.get("profile") != "normal"
             or identity.get("transport") != "tunnel-stdio"
@@ -5860,19 +6596,31 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
         validate_operation_response(document, "/v1/room/skills/run", "post", 200, room_run_body, "Hub Room skills.run")
         if (
             not room_run_body.get("processId")
+            or room_run_body.get("agentId") != room_id
             or room_run_body.get("state") != "completed"
-            or "inline-skill" not in json.dumps(room_run_body)
+            or "inline-skill" not in room_run_body.get("output", {}).get("stdout", {}).get("data", "")
         ):
-            fail("Hub Room skills.run", f"active Room routing did not return completed inline process result: {room_run_body}")
+            fail("Hub Room skills.run", f"active Room routing did not preserve process identity and output: {room_run_body}")
         room_process_id = room_run_body["processId"]
-        room_status_response, room_status = hub_json(
-            hub_port, hub_key, "GET",
-            f"/v1/process/{room_process_id}?" + urlencode({"agentId": room_id, "waitSeconds": "0"}),
-            None, "Hub Room process.status",
+        room_agent_id = room_run_body["agentId"]
+        room_status_response, room_status = hub_process_read(
+            hub_port,
+            hub_key,
+            room_agent_id,
+            room_process_id,
+            document,
+            schemas,
+            "Hub Room process.read status view",
+            wait_seconds=0,
+            view="status",
         )
-        if room_status_response.status != 200 or any(key in room_status for key in ("stdout", "stderr", "result")):
-            fail("Hub Room process.status", f"status was not metadata-only: {room_status_response.status}, {room_status}")
-        reports.append("PASS Hub Room HTTP inline skills install/get/run flat response and active-room routing")
+        if (
+            room_status.get("agentId") != room_agent_id
+            or room_status.get("processId") != room_process_id
+            or "output" in room_status
+        ):
+            fail("Hub Room process.read status view", f"status view did not retain the skill's actual Agent identity: {room_status}")
+        reports.append("PASS Hub Room HTTP inline skills install/get/run unified response and pinned active-room process identity")
 
         pagination_ids: list[str] = []
         for _ in range(101):
@@ -5946,7 +6694,7 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
         validate_operation_response(document, "/v1/process", "get", 200, minimum_body, "Hub process.list minimum1")
         if len(minimum_body.get("processes", [])) != 1:
             fail("Hub process.list minimum1", f"expected one process after lower clamp, got {len(minimum_body.get('processes', []))}")
-        reports.append("PASS Hub HTTP process.status/cancel and process.list typed group error, 50/100/1 pages, and cursor")
+        reports.append("PASS Hub HTTP process.read/cancel and process.list typed group error, 50/100/1 pages, and cursor")
         for retired_path in sorted(ROOM_RETIRED_PATHS):
             retired_response = http_request(
                 hub_port,
@@ -6369,21 +7117,6 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
             "Hub normal disconnect",
             "normal Agent disconnect",
         )
-        cached_response, cached_body = hub_json(
-            hub_port, hub_key, "GET",
-            f"/v1/process/{completed_id}?" + urlencode({"agentId": normal_id}),
-            None, "Hub cached process.status",
-        )
-        if cached_response.status != 200:
-            fail("Hub cached process.status", f"HTTP {cached_response.status}: {cached_body}")
-        validate_operation_response(document, "/v1/process/{processId}", "get", 200, cached_body, "Hub cached process.status")
-        if (
-            cached_body.get("processId") != completed_id
-            or cached_body.get("freshness") not in {"cached", "stale"}
-            or "events" in cached_body
-            or any(key in cached_body for key in ("stdout", "stderr", "result"))
-        ):
-            fail("Hub cached process.status", f"cached status exposed output or lost process identity: {cached_body}")
         cached_mcp_status = json_result(
             mcp_call(
                 hub_port, hub_key, full_session, 8, "tools/call",
@@ -6396,9 +7129,9 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
             cached_mcp_status.get("freshness") not in {"cached", "stale"}
             or completed_id not in json.dumps(cached_mcp_status)
             or "events" in cached_mcp_status
-            or any(key in cached_mcp_status for key in ("stdout", "stderr", "result"))
+            or any(key in cached_mcp_status for key in ("output", "mcpResult"))
         ):
-            fail("Hub Full cached process status", f"cache-only MCP status exposed body or lost process identity: {cached_mcp_status}")
+            fail("Hub Full cached process status", f"cache-only MCP status exposed process artifacts or lost identity: {cached_mcp_status}")
         cached_mcp_list = json_result(
             mcp_call(
                 hub_port, hub_key, full_session, 9, "tools/call",
@@ -6414,53 +7147,26 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
         ):
             fail("Hub Full cached process list", f"cache-only MCP list did not return status metadata: {cached_mcp_list}")
 
-        output_offline_response, output_offline_body = hub_json(
-            hub_port, hub_key, "GET",
-            f"/v1/process/{completed_id}/output?" + urlencode({"agentId": normal_id}),
-            None, "Hub offline process.output",
+        offline_read_response, offline_read_body = hub_process_read(
+            hub_port,
+            hub_key,
+            normal_id,
+            completed_id,
+            document,
+            schemas,
+            "Hub offline process.read",
+            expected_status=503,
         )
+        offline_cached = offline_read_body.get("cached", {})
         if (
-            output_offline_response.status != 503
-            or output_offline_body.get("error", {}).get("code") != "process_output_unavailable"
-            or output_offline_body.get("cached", {}).get("processId") != completed_id
-            or output_offline_body.get("freshness") not in {"cached", "stale"}
-            or output_offline_body.get("result") is not None
-            or any(key in output_offline_body for key in ("stdout", "stderr"))
-            or "events" in output_offline_body
+            offline_read_response.status != 503
+            or offline_read_body.get("status") != "unavailable"
+            or offline_read_body.get("error", {}).get("code") != "process_read_unavailable"
+            or offline_cached.get("processId") != completed_id
+            or offline_read_body.get("freshness") not in {"cached", "stale"}
+            or any(key in offline_read_body for key in ("output", "mcpResult", "events"))
         ):
-            fail("Hub offline process.output", f"expected typed body-free unavailable response: {output_offline_response.status}, {output_offline_body}")
-        validate_operation_response(document, "/v1/process/{processId}/output", "get", 503, output_offline_body, "Hub offline process.output")
-
-        result_offline_response, result_offline_body = hub_json(
-            hub_port, hub_key, "GET",
-            f"/v1/process/{completed_id}/result?" + urlencode({"agentId": normal_id}),
-            None, "Hub offline process.result",
-        )
-        if (
-            result_offline_response.status != 503
-            or result_offline_body.get("error", {}).get("code") != "process_result_unavailable"
-            or result_offline_body.get("cached", {}).get("processId") != completed_id
-            or result_offline_body.get("freshness") not in {"cached", "stale"}
-            or result_offline_body.get("result") is not None
-            or any(key in result_offline_body for key in ("stdout", "stderr"))
-            or "events" in result_offline_body
-        ):
-            fail("Hub offline process.result", f"expected typed body-free unavailable response: {result_offline_response.status}, {result_offline_body}")
-        validate_operation_response(document, "/v1/process/{processId}/result", "get", 503, result_offline_body, "Hub offline process.result")
-        offline_mcp_result = json_result(
-            mcp_call(
-                hub_port, hub_key, full_session, 10, "tools/call",
-                {"name": "process.result", "arguments": {"agentId": normal_id, "processId": completed_id, "maxBytes": 8192}},
-                "Hub Full offline process.result",
-            ),
-            "Hub Full offline process.result",
-        )
-        if (
-            offline_mcp_result.get("status") != "unavailable"
-            or offline_mcp_result.get("result") is not None
-            or "events" in offline_mcp_result
-        ):
-            fail("Hub Full offline process.result", f"MCP did not report unavailable result without body: {offline_mcp_result}")
+            fail("Hub offline process.read", f"expected typed body-free live-read unavailable response: {offline_read_response.status}, {offline_read_body}")
 
         offline_cancel_response, offline_cancel_body = hub_json(
             hub_port, hub_key, "POST",
@@ -6476,7 +7182,7 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
         ):
             fail("Hub offline process.cancel", f"expected typed unavailable response without cached success: {offline_cancel_response.status}, {offline_cancel_body}")
         validate_operation_response(document, "/v1/process/{processId}/cancel", "post", 502, offline_cancel_body, "Hub offline process.cancel")
-        reports.append("PASS Hub cache-only process.status and offline output/result/cancel typed unavailable responses")
+        reports.append("PASS cache-only hub.process.status, typed offline process.read, and unavailable cancel")
     finally:
         for process in (
             coordinator_process,

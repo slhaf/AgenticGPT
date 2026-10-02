@@ -2,9 +2,8 @@ use agentic_gpt_protocol::{
     EventGetRequest, EventListRequest, EventMarkRequest, EventSeverity, EventStatus, HubCommand,
     McpBatchRequest, McpCallToolRequest, McpListServersRequest, McpListToolsRequest,
     ProcessBatchExecRequest, ProcessCancelRequest, ProcessExecRequest, ProcessListRequest,
-    ProcessOutputRequest, ProcessResultRequest, ProcessStatusRequest, TmuxCapturePaneRequest,
-    TmuxCloseSessionRequest, TmuxCreateSessionRequest, TmuxExecRequest, TmuxListPanesRequest,
-    TmuxPasteTextRequest,
+    ProcessReadRequest, ProcessReadView, TmuxCapturePaneRequest, TmuxCloseSessionRequest,
+    TmuxCreateSessionRequest, TmuxExecRequest, TmuxListPanesRequest, TmuxPasteTextRequest,
 };
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -24,6 +23,17 @@ use crate::state::{
 };
 use crate::utils::{constant_time_equal, random_id};
 use crate::REQUEST_TIMEOUT_SECS;
+
+pub(crate) fn process_routes() -> axum::Router<HubState> {
+    use axum::routing::{get, post};
+
+    axum::Router::new()
+        .route("/v1/process/exec", post(process_exec))
+        .route("/v1/process/batch", post(process_batch))
+        .route("/v1/process", get(list_processes))
+        .route("/v1/process/:process_id/read", get(get_process_read))
+        .route("/v1/process/:process_id/cancel", post(cancel_process))
+}
 
 #[derive(Deserialize)]
 pub(crate) struct AgentIdQuery {
@@ -60,23 +70,11 @@ pub(crate) struct ProcessListQuery {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct ProcessStatusQuery {
+pub(crate) struct ProcessReadQuery {
     agent_id: String,
     wait_seconds: Option<u64>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct ProcessOutputQuery {
-    agent_id: String,
+    view: Option<ProcessReadView>,
     cursor: Option<String>,
-    max_bytes: Option<usize>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct ProcessResultQuery {
-    agent_id: String,
     max_bytes: Option<usize>,
 }
 
@@ -183,21 +181,6 @@ fn unavailable_process_value(
         body["cached"] = json!(process_list_item(snapshot.process.clone()));
         add_cache_metadata(&mut body, std::slice::from_ref(snapshot));
     }
-    body
-}
-
-fn cached_process_status_value(
-    process_id: &str,
-    code: &'static str,
-    reason: String,
-    snapshot: &crate::state::ProcessCacheSnapshot,
-) -> serde_json::Value {
-    let mut body = json!({
-        "processId": process_id,
-        "error": { "code": code, "message": reason },
-        "cached": process_list_item(snapshot.process.clone())
-    });
-    add_cache_metadata(&mut body, std::slice::from_ref(snapshot));
     body
 }
 
@@ -440,11 +423,11 @@ pub(crate) async fn mark_events(
     }
 }
 
-pub(crate) async fn get_process_status(
+pub(crate) async fn get_process_read(
     State(state): State<HubState>,
     headers: HeaderMap,
     Path(process_id): Path<String>,
-    Query(query): Query<ProcessStatusQuery>,
+    Query(query): Query<ProcessReadQuery>,
 ) -> Response {
     if let Err(response) = require_action_auth(&state, &headers) {
         return response;
@@ -452,43 +435,44 @@ pub(crate) async fn get_process_status(
     if let Err(response) = require_agent_enabled(&state, &query.agent_id) {
         return response;
     }
-    let payload = ProcessStatusRequest {
+    let payload = ProcessReadRequest {
         process_id: process_id.clone(),
         wait_seconds: query.wait_seconds,
+        view: query.view.unwrap_or_default(),
+        cursor: query.cursor,
+        max_bytes: query.max_bytes,
     };
     let timeout_seconds = payload.effective_wait_seconds() + 2;
-    let command = HubCommand::ProcessStatus {
+    let command = HubCommand::ProcessRead {
         request_id: random_id("req"),
         payload,
     };
     match request_agent(&state, &query.agent_id, command, timeout_seconds).await {
-        Ok(value) => Json(live_process_value(value)).into_response(),
-        Err(reason) => match cached_process(&state, &query.agent_id, &process_id).await {
-            Some(snapshot) => Json(cached_process_status_value(
+        Ok(value) => process_success_response(value),
+        Err(reason) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(unavailable_process_value(
                 &process_id,
-                "process_status_unavailable",
+                "process_read_unavailable",
                 reason,
-                &snapshot,
-            ))
+                cached_process(&state, &query.agent_id, &process_id)
+                    .await
+                    .as_ref(),
+            )),
+        )
             .into_response(),
-            None => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(unavailable_process_value(
-                    &process_id,
-                    "process_status_unavailable",
-                    reason,
-                    None,
-                )),
-            )
-                .into_response(),
-        },
     }
 }
+
 fn process_agent_error_status(code: &str) -> StatusCode {
     match code {
         "invalid_process_output_cursor"
         | "process_output_cursor_ahead_of_output"
         | "process_output_max_bytes_too_small_for_next_unit"
+        | "process_read_cursor_with_status_view"
+        | "process_read_cursor_not_supported_for_mcp"
+        | "process_read_max_bytes_out_of_range"
+        | "process_response_budget_too_small"
         | "event_cursor_invalid"
         | "event_cursor_scope_mismatch"
         | "event_mark_too_many_ids"
@@ -503,9 +487,11 @@ fn process_agent_error_status(code: &str) -> StatusCode {
 }
 
 fn process_agent_error_response(value: &mut serde_json::Value) -> Option<StatusCode> {
-    if value.get("processId").is_some()
-        && value.get("status").is_some()
-        && value.get("resultAvailable").is_some()
+    if value.get("agentId").is_some()
+        && value.get("processId").is_some()
+        && value.get("kind").is_some()
+        && value.get("state").is_some()
+        && value.get("captureStatus").is_some()
     {
         return None;
     }
@@ -537,79 +523,6 @@ fn process_success_response(mut value: serde_json::Value) -> Response {
     }
 }
 
-pub(crate) async fn get_process_output(
-    State(state): State<HubState>,
-    headers: HeaderMap,
-    Path(process_id): Path<String>,
-    Query(query): Query<ProcessOutputQuery>,
-) -> Response {
-    if let Err(response) = require_action_auth(&state, &headers) {
-        return response;
-    }
-    if let Err(response) = require_agent_enabled(&state, &query.agent_id) {
-        return response;
-    }
-    let command = HubCommand::ProcessOutput {
-        request_id: random_id("req"),
-        payload: ProcessOutputRequest {
-            process_id: process_id.clone(),
-            cursor: query.cursor,
-            max_bytes: query.max_bytes,
-        },
-    };
-    match request_agent(&state, &query.agent_id, command, 5).await {
-        Ok(value) => process_success_response(value),
-        Err(reason) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(unavailable_process_value(
-                &process_id,
-                "process_output_unavailable",
-                reason,
-                cached_process(&state, &query.agent_id, &process_id)
-                    .await
-                    .as_ref(),
-            )),
-        )
-            .into_response(),
-    }
-}
-
-pub(crate) async fn get_process_result(
-    State(state): State<HubState>,
-    headers: HeaderMap,
-    Path(process_id): Path<String>,
-    Query(query): Query<ProcessResultQuery>,
-) -> Response {
-    if let Err(response) = require_action_auth(&state, &headers) {
-        return response;
-    }
-    if let Err(response) = require_agent_enabled(&state, &query.agent_id) {
-        return response;
-    }
-    let command = HubCommand::ProcessResult {
-        request_id: random_id("req"),
-        payload: ProcessResultRequest {
-            process_id: process_id.clone(),
-            max_bytes: query.max_bytes,
-        },
-    };
-    match request_agent(&state, &query.agent_id, command, 5).await {
-        Ok(value) => process_success_response(value),
-        Err(reason) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(unavailable_process_value(
-                &process_id,
-                "process_result_unavailable",
-                reason,
-                cached_process(&state, &query.agent_id, &process_id)
-                    .await
-                    .as_ref(),
-            )),
-        )
-            .into_response(),
-    }
-}
-
 pub(crate) async fn cancel_process(
     State(state): State<HubState>,
     headers: HeaderMap,
@@ -629,7 +542,7 @@ pub(crate) async fn cancel_process(
         },
     };
     match request_agent(&state, &query.agent_id, command, 5).await {
-        Ok(value) => Json(live_process_value(value)).into_response(),
+        Ok(value) => Json(value).into_response(),
         Err(reason) => (
             StatusCode::BAD_GATEWAY,
             Json(json!({
@@ -1411,95 +1324,109 @@ mod tests {
         assert_eq!(body["events"]["current"], "low: 1 | medium: 0 | high: 0");
     }
 
-    #[test]
-    fn process_status_wait_is_bounded_by_protocol_defaults() {
-        for (wait_seconds, expected) in [(None, 5), (Some(0), 0), (Some(30), 30), (Some(31), 30)] {
-            let query = ProcessStatusQuery {
-                agent_id: "agent".to_string(),
-                wait_seconds,
-            };
-            let payload = ProcessStatusRequest {
-                process_id: "process".to_string(),
-                wait_seconds: query.wait_seconds,
-            };
-            assert_eq!(payload.effective_wait_seconds(), expected);
-        }
+    #[tokio::test]
+    async fn process_read_resolves_reliable_response_and_preserves_contract_shape() {
+        let state = http_test_state();
+        register_http_agent(&state);
+        let mut outbound = insert_http_agent_connection(&state).await;
+        let response_data = json!({
+            "agentId": "agent",
+            "processId": "process-1",
+            "kind": "command",
+            "state": "running",
+            "captureStatus": "capturing",
+            "output": {
+                "stdout": {
+                    "data": "ok",
+                    "startOffset": "0",
+                    "endOffset": "2",
+                    "encoding": "utf8"
+                },
+                "stderr": {
+                    "data": "",
+                    "startOffset": "0",
+                    "endOffset": "0",
+                    "encoding": "utf8"
+                },
+                "nextCursor": "next-page",
+                "hasMore": true,
+                "eof": false
+            }
+        });
+        let request_state = state.clone();
+        let task = tokio::spawn(async move {
+            get_process_read(
+                State(request_state),
+                http_action_headers(),
+                Path("process-1".to_string()),
+                Query(ProcessReadQuery {
+                    agent_id: "agent".to_string(),
+                    wait_seconds: Some(3),
+                    view: Some(ProcessReadView::Auto),
+                    cursor: Some("prior-page".to_string()),
+                    max_bytes: Some(4096),
+                }),
+            )
+            .await
+        });
+        let message = outbound
+            .recv()
+            .await
+            .expect("Hub sends a ProcessRead command");
+        let crate::state::OutboundAgentMessage::Text(text) = message else {
+            panic!("expected a reliable text command envelope");
+        };
+        let envelope: agentic_gpt_protocol::HubCommandEnvelope =
+            serde_json::from_str(&text).unwrap();
+        assert!(!envelope.event_id.is_empty());
+        assert!(!envelope.run_id.is_empty());
+        assert!(!envelope.command_hash.is_empty());
+        let expected_request_id = envelope.request_id.clone();
+        let run_id = envelope.run_id.clone();
+        let payload = match envelope.command {
+            HubCommand::ProcessRead {
+                request_id,
+                payload,
+            } => {
+                assert_eq!(request_id, expected_request_id);
+                payload
+            }
+            command => panic!("expected ProcessRead, received {command:?}"),
+        };
+        assert_eq!(payload.process_id, "process-1");
+        assert_eq!(payload.wait_seconds, Some(3));
+        assert_eq!(payload.view, ProcessReadView::Auto);
+        assert_eq!(payload.cursor.as_deref(), Some("prior-page"));
+        assert_eq!(payload.max_bytes, Some(4096));
+
+        let transport_response = crate::agents::transport::post_agent_message(
+            State(state),
+            Path("agent".to_string()),
+            Query(crate::agents::transport::SseConnectQuery::for_test(Some(
+                "current".to_string(),
+            ))),
+            http_agent_headers(),
+            Json(agentic_gpt_protocol::AgentMessage::Response {
+                run_id: Some(run_id),
+                request_id: expected_request_id,
+                data: response_data.clone(),
+                event_sources: Vec::new(),
+            }),
+        )
+        .await;
+        assert_eq!(transport_response.status(), StatusCode::OK);
+        let response = task.await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body, response_data);
+        assert!(body.get("freshness").is_none());
+        assert!(body.get("observedAt").is_none());
     }
 
     #[tokio::test]
-    async fn process_agent_errors_become_declared_http_errors() {
-        for (code, expected_status) in [
-            ("invalid_process_output_cursor", StatusCode::BAD_REQUEST),
-            (
-                "process_output_cursor_ahead_of_output",
-                StatusCode::BAD_REQUEST,
-            ),
-            ("process_not_found", StatusCode::NOT_FOUND),
-            ("process_lost_after_restart", StatusCode::NOT_FOUND),
-            (
-                "process_output_snapshot_invalid",
-                StatusCode::INTERNAL_SERVER_ERROR,
-            ),
-        ] {
-            let response = process_success_response(json!({
-                "processId": "process-1",
-                "status": "completed",
-                "completedInline": false,
-                "resultStatus": "too_large",
-                "content": [{ "type": "text", "text": "terminal content" }],
-                "meta": { "trace": "tool-result" },
-                "_meta": { "trace": "wire-result" },
-                "isError": true,
-                "events": {
-                    "current": "low: 0 | medium: 0 | high: 0",
-                    "new": []
-                },
-                "error": { "code": code, "message": "Agent rejected the request" }
-            }));
-            assert_eq!(response.status(), expected_status, "{code}");
-            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-                .await
-                .unwrap();
-            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-            assert_eq!(body["error"]["code"], code);
-            assert_eq!(body["error"]["message"], "Agent rejected the request");
-            assert_eq!(body["events"]["current"], "low: 0 | medium: 0 | high: 0");
-            assert_eq!(body["processId"], "process-1");
-            assert_eq!(body["status"], "completed");
-            assert_eq!(body["completedInline"], false);
-            assert_eq!(body["resultStatus"], "too_large");
-            assert_eq!(body["content"][0]["text"], "terminal content");
-            assert_eq!(body["meta"]["trace"], "tool-result");
-            assert_eq!(body["_meta"]["trace"], "wire-result");
-            assert_eq!(body["isError"], true);
-        }
-
-        let valid_unavailable_result = json!({
-            "processId": "process-1",
-            "status": "unavailable",
-            "resultAvailable": false,
-            "content": [{ "type": "text", "text": "unavailable" }],
-            "meta": { "trace": "result" },
-            "isError": true,
-            "events": {
-                "current": "low: 0 | medium: 0 | high: 0",
-                "new": []
-            },
-            "error": { "code": "process_result_not_ready", "message": "Process has not completed" }
-        });
-        let response = process_success_response(valid_unavailable_result.clone());
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
-            valid_unavailable_result
-        );
-    }
-
-    #[test]
-    fn unavailable_process_detail_responses_expose_metadata_without_payloads() {
+    async fn unavailable_process_read_reports_only_stale_cache_metadata() {
+        let state = http_test_state();
+        register_http_agent(&state);
         let now = chrono::Utc::now();
         let process: agentic_gpt_protocol::ProcessInfo =
             serde_json::from_value(serde_json::json!({
@@ -1512,29 +1439,135 @@ mod tests {
                 "captureStatus": "complete"
             }))
             .unwrap();
-        let snapshot = crate::state::ProcessCacheSnapshot {
-            process,
-            observed_at: now,
-            freshness: crate::state::ProcessFreshness::Stale,
-        };
+        state
+            .process_cache
+            .record("agent", "old-connection", None, process)
+            .await;
+        state
+            .process_cache
+            .mark_connection_stale("agent", "old-connection")
+            .await;
 
-        for code in ["process_output_unavailable", "process_result_unavailable"] {
-            let value = unavailable_process_value(
-                "process-1",
-                code,
-                "Agent is unavailable".to_string(),
-                Some(&snapshot),
-            );
-            assert_eq!(value["processId"], "process-1");
-            assert_eq!(value["status"], "unavailable");
-            assert_eq!(value["error"]["code"], code);
-            assert_eq!(value["cached"]["processId"], "process-1");
-            assert_eq!(value["freshness"], "stale");
-            assert!(value["observedAt"].is_string());
-            for field in ["stdout", "stderr", "result"] {
-                assert!(value.get(field).is_none());
-                assert!(value["cached"].get(field).is_none());
-            }
+        let response = get_process_read(
+            State(state),
+            http_action_headers(),
+            Path("process-1".to_string()),
+            Query(ProcessReadQuery {
+                agent_id: "agent".to_string(),
+                wait_seconds: Some(0),
+                view: None,
+                cursor: None,
+                max_bytes: None,
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = response_json(response).await;
+        assert_eq!(body["processId"], "process-1");
+        assert_eq!(body["status"], "unavailable");
+        assert_eq!(body["error"]["code"], "process_read_unavailable");
+        assert_eq!(body["freshness"], "stale");
+        assert!(body["observedAt"].is_string());
+        assert_eq!(body["cached"]["processId"], "process-1");
+        for field in ["output", "mcpResult", "stdout", "stderr", "result"] {
+            assert!(body.get(field).is_none());
+            assert!(body["cached"].get(field).is_none());
         }
+    }
+
+    #[tokio::test]
+    async fn process_read_keeps_domain_errors_as_http_errors() {
+        for (code, expected_status) in [
+            ("invalid_process_output_cursor", StatusCode::BAD_REQUEST),
+            (
+                "process_output_cursor_ahead_of_output",
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                "process_read_cursor_with_status_view",
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                "process_read_cursor_not_supported_for_mcp",
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                "process_read_max_bytes_out_of_range",
+                StatusCode::BAD_REQUEST,
+            ),
+            ("process_response_budget_too_small", StatusCode::BAD_REQUEST),
+            ("process_not_found", StatusCode::NOT_FOUND),
+            ("process_lost_after_restart", StatusCode::NOT_FOUND),
+        ] {
+            let response = process_success_response(json!({
+                "error": { "code": code, "message": "Agent rejected the request" }
+            }));
+            assert_eq!(response.status(), expected_status, "{code}");
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["error"]["code"], code);
+            assert_eq!(body["error"]["message"], "Agent rejected the request");
+        }
+
+        let response_data = json!({
+            "agentId": "agent",
+            "processId": "process-1",
+            "kind": "mcp",
+            "state": "completed",
+            "captureStatus": "complete",
+            "mcpResult": {
+                "status": "included",
+                "bytes": 9,
+                "sha256": "digest",
+                "value": {
+                    "content": [{ "type": "text", "text": "done" }],
+                    "isError": false
+                }
+            }
+        });
+        let response = process_success_response(response_data.clone());
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            response_data
+        );
+    }
+
+    #[tokio::test]
+    async fn process_http_routes_reject_removed_read_paths() {
+        let app = process_routes().with_state(http_test_state());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let client = reqwest::Client::new();
+
+        let read = client
+            .get(format!(
+                "http://{address}/v1/process/process-1/read?agentId=agent"
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(read.status(), StatusCode::UNAUTHORIZED);
+        for path in [
+            "/v1/process/process-1",
+            "/v1/process/process-1/output",
+            "/v1/process/process-1/result",
+        ] {
+            let response = client
+                .get(format!("http://{address}{path}?agentId=agent"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+        }
+        server.abort();
     }
 }

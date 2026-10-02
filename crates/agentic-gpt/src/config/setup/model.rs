@@ -13,6 +13,7 @@ use crate::config_templates::{
 };
 use crate::tui::forms::OrderedMultiSelectState;
 use crate::WorkerProfile;
+use agentic_gpt_protocol::DEFAULT_PROCESS_RESPONSE_BYTES;
 
 use super::validation;
 
@@ -54,6 +55,7 @@ pub(crate) enum SetupField {
     MaxConcurrentTasks,
     MaxActiveProcesses,
     MaxFileSearchContextLines,
+    ProcessResponseBytes,
     SandboxEnabled,
     BubblewrapPath,
     RequiredRuntimePaths,
@@ -231,6 +233,7 @@ pub(crate) struct LimitsDraft {
     pub(crate) max_concurrent_tasks: String,
     pub(crate) max_active_processes: String,
     pub(crate) max_file_search_context_lines: String,
+    pub(crate) process_response_bytes: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -845,6 +848,7 @@ pub(crate) fn default_optional_draft_for_profile(
             max_concurrent_tasks: "2".to_string(),
             max_active_processes: "auto".to_string(),
             max_file_search_context_lines: "5".to_string(),
+            process_response_bytes: DEFAULT_PROCESS_RESPONSE_BYTES.to_string(),
         }),
         OptionalSection::Sandbox => OptionalSectionDraft::Sandbox(SandboxDraft {
             enabled: false,
@@ -904,6 +908,7 @@ fn optional_drafts_from_config(config: &Config) -> OptionalDrafts {
             max_concurrent_tasks: config.limits.max_concurrent_tasks.to_string(),
             max_active_processes: config.limits.max_active_processes.configured_label(),
             max_file_search_context_lines: config.limits.max_file_search_context_lines.to_string(),
+            process_response_bytes: config.limits.process_response_bytes.to_string(),
         }),
         sandbox: Some(SandboxDraft {
             enabled: config.sandbox.enabled,

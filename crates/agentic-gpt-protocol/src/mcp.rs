@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::process::{ProcessDetail, ProcessError, ProcessToolResponse};
+use super::process::{ProcessDetail, ProcessError, ProcessResponse};
 
 fn is_false(value: &bool) -> bool {
     !*value
@@ -125,13 +125,17 @@ impl McpBatchRequest {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpBatchToolChildResponse {
+    pub index: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     #[serde(flatten)]
-    pub process: ProcessToolResponse,
+    pub process: ProcessResponse,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpBatchToolResponse {
+    pub batch_id: String,
     pub status: McpBatchStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<ProcessError>,
@@ -163,8 +167,6 @@ pub struct McpBatchChildResponse {
 pub struct McpBatchResponse {
     pub batch_id: String,
     pub status: McpBatchStatus,
-    pub completed_inline: bool,
-    pub poll_after_ms: u64,
     pub results: Vec<McpBatchChildResponse>,
     #[serde(default)]
     pub aggregate_truncated: bool,

@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeSet, HashMap},
     io::Cursor,
+    os::unix::fs::PermissionsExt,
     path::PathBuf,
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -124,9 +125,7 @@ async fn normal_and_room_tool_sets_follow_fixed_surface_contract() {
         "event.mark",
         "process.cancel",
         "process.list",
-        "process.output",
-        "process.result",
-        "process.status",
+        "process.read",
         "mcp.batch",
         "mcp.callTool",
         "mcp.list",
@@ -1369,14 +1368,30 @@ async fn process_tools_reject_legacy_identity_and_confirmation_fields() {
     for name in [
         "process.exec",
         "process.batch",
-        "process.status",
+        "process.read",
         "process.list",
-        "process.output",
-        "process.result",
         "process.cancel",
     ] {
         assert!(names.contains(name), "missing process API {name}");
     }
+    let process_names = names
+        .iter()
+        .filter(|name| name.starts_with("process."))
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        process_names,
+        [
+            "process.batch",
+            "process.cancel",
+            "process.exec",
+            "process.list",
+            "process.read",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+    );
     for name in ["job.get", "job.list", "job.cancel"] {
         assert!(!names.contains(name), "legacy API is advertised: {name}");
         let removed = server
@@ -1414,7 +1429,21 @@ async fn process_tools_reject_legacy_identity_and_confirmation_fields() {
         .expect_err("Tunnel process schemas must reject confirmMethod");
     assert_eq!(confirmation.code, rmcp::model::ErrorCode::INVALID_PARAMS);
 
+    let too_small = server
+        .call(
+            CallToolRequestParams::new("process.read").with_arguments(Map::from_iter([
+                ("processId".to_string(), json!("process_example")),
+                ("maxBytes".to_string(), json!(2048)),
+            ])),
+        )
+        .await
+        .expect_err("process.read maxBytes below the protocol range must be rejected");
+    assert_eq!(too_small.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+
     for removed_name in [
+        "process.status",
+        "process.output",
+        "process.result",
         "session.start",
         "session.list",
         "session.inspect",
@@ -1433,42 +1462,44 @@ async fn process_tools_reject_legacy_identity_and_confirmation_fields() {
 }
 
 #[tokio::test]
-async fn process_creation_status_cancel_and_batch_use_process_api() -> anyhow::Result<()> {
+async fn process_creation_read_cancel_and_batch_use_process_api() -> anyhow::Result<()> {
     let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
     let quick = server
         .dispatch("process.exec", json!({"program": "true", "waitSeconds": 5}))
         .await?;
     assert_eq!(quick["state"], "completed");
-    assert_eq!(quick["status"], "completed");
-    assert_eq!(quick["completedInline"], true);
+    assert_eq!(quick["kind"], "command");
+    assert!(quick["captureStatus"].is_string());
+    assert!(quick["agentId"].as_str().is_some_and(|id| !id.is_empty()));
     assert!(quick["processId"]
         .as_str()
         .is_some_and(|id| id.starts_with("process_")));
-    assert!(serde_json::to_vec(&quick)?.len() <= 8 * 1024);
+    for obsolete in [
+        "status",
+        "completedInline",
+        "pollAfterMs",
+        "inlineOutput",
+        "outputPreview",
+        "resultAvailable",
+    ] {
+        assert!(quick.get(obsolete).is_none(), "unexpected field {obsolete}");
+    }
+    assert!(
+        serde_json::to_vec(&quick)?.len() <= agentic_gpt_protocol::DEFAULT_PROCESS_RESPONSE_BYTES
+    );
     let process_id = quick["processId"].as_str().unwrap().to_string();
-
     let status = server
         .dispatch(
-            "process.status",
-            json!({"processId": process_id, "waitSeconds": 0}),
+            "process.read",
+            json!({"processId": process_id, "waitSeconds": 0, "view": "status"}),
         )
         .await?;
     assert_eq!(status["processId"], quick["processId"]);
+    assert_eq!(status["agentId"], quick["agentId"]);
     assert_eq!(status["kind"], "command");
     assert_eq!(status["state"], "completed");
-    for body_field in [
-        "stdout",
-        "stderr",
-        "output",
-        "inlineOutput",
-        "outputPreview",
-        "result",
-    ] {
-        assert!(
-            status.get(body_field).is_none(),
-            "process.status unexpectedly included {body_field}"
-        );
-    }
+    assert!(status.get("output").is_none());
+    assert!(status.get("mcpResult").is_none());
 
     let long = server
         .dispatch(
@@ -1480,7 +1511,7 @@ async fn process_creation_status_cancel_and_batch_use_process_api() -> anyhow::R
     for _ in 0..100 {
         let state = server
             .dispatch(
-                "process.status",
+                "process.read",
                 json!({"processId": long_id, "waitSeconds": 0}),
             )
             .await?;
@@ -1545,7 +1576,7 @@ async fn process_creation_status_cancel_and_batch_use_process_api() -> anyhow::R
 }
 
 #[tokio::test]
-async fn process_status_omitted_waits_but_zero_is_nonblocking() -> anyhow::Result<()> {
+async fn process_read_omitted_waits_but_zero_is_nonblocking() -> anyhow::Result<()> {
     let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
     let started = server
         .dispatch(
@@ -1558,8 +1589,8 @@ async fn process_status_omitted_waits_but_zero_is_nonblocking() -> anyhow::Resul
     for _ in 0..100 {
         let state = server
             .dispatch(
-                "process.status",
-                json!({"processId": process_id, "waitSeconds": 0}),
+                "process.read",
+                json!({"processId": process_id, "waitSeconds": 0, "view": "status"}),
             )
             .await?;
         if is_active_process_state(state["state"].as_str().unwrap()) {
@@ -1570,8 +1601,8 @@ async fn process_status_omitted_waits_but_zero_is_nonblocking() -> anyhow::Resul
 
     let explicit_zero = server
         .dispatch(
-            "process.status",
-            json!({"processId": process_id, "waitSeconds": 0}),
+            "process.read",
+            json!({"processId": process_id, "waitSeconds": 0, "view": "status"}),
         )
         .await?;
     assert!(
@@ -1580,7 +1611,7 @@ async fn process_status_omitted_waits_but_zero_is_nonblocking() -> anyhow::Resul
     );
 
     let omitted = server
-        .dispatch("process.status", json!({"processId": process_id}))
+        .dispatch("process.read", json!({"processId": process_id}))
         .await?;
     assert_eq!(
         omitted["state"], "completed",
@@ -1590,7 +1621,7 @@ async fn process_status_omitted_waits_but_zero_is_nonblocking() -> anyhow::Resul
 }
 
 #[tokio::test]
-async fn process_shapes_are_metadata_only_and_keep_group_filters() -> anyhow::Result<()> {
+async fn process_shapes_are_compact_and_keep_group_filters() -> anyhow::Result<()> {
     let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
     let quick = server
         .dispatch(
@@ -1612,19 +1643,17 @@ async fn process_shapes_are_metadata_only_and_keep_group_filters() -> anyhow::Re
 
     let ordinary = server
         .dispatch(
-            "process.status",
-            json!({"processId": process_id, "waitSeconds": 0}),
+            "process.read",
+            json!({"processId": process_id, "waitSeconds": 0, "view": "status"}),
         )
         .await?;
     assert_eq!(ordinary["group"], "workstream");
     assert_eq!(ordinary["kind"], "command");
     assert_eq!(ordinary["state"], "completed");
-    assert!(ordinary.get("createdAt").is_some());
-    assert!(ordinary.get("finishedAt").is_some());
-    assert!(ordinary.get("program").is_some());
-    assert!(ordinary.get("result").is_none());
-    assert!(ordinary.get("inlineOutput").is_none());
-    assert!(ordinary.get("outputPreview").is_none());
+    assert_eq!(ordinary["agentId"], quick["agentId"]);
+    assert!(ordinary["captureStatus"].is_string());
+    assert!(ordinary.get("output").is_none());
+    assert!(ordinary.get("mcpResult").is_none());
 
     let listed = server
         .dispatch(
@@ -1649,8 +1678,8 @@ async fn process_shapes_are_metadata_only_and_keep_group_filters() -> anyhow::Re
     let running_id = running["processId"].as_str().unwrap().to_string();
     let wait_status = server
         .dispatch(
-            "process.status",
-            json!({"processId": running_id, "waitSeconds": 1}),
+            "process.read",
+            json!({"processId": running_id, "waitSeconds": 1, "view": "status"}),
         )
         .await?;
     assert!(is_active_process_state(
@@ -1658,15 +1687,15 @@ async fn process_shapes_are_metadata_only_and_keep_group_filters() -> anyhow::Re
     ));
     let ordinary_zero = server
         .dispatch(
-            "process.status",
-            json!({"processId": running_id, "waitSeconds": 0}),
+            "process.read",
+            json!({"processId": running_id, "waitSeconds": 0, "view": "status"}),
         )
         .await?;
     assert_eq!(ordinary_zero["processId"], running["processId"]);
     assert!(is_active_process_state(
         ordinary_zero["state"].as_str().unwrap()
     ));
-    assert!(ordinary_zero.get("createdAt").is_some());
+    assert!(ordinary_zero["captureStatus"].is_string());
     let _ = server
         .dispatch("process.cancel", json!({"processId": running_id}))
         .await?;
@@ -1676,8 +1705,6 @@ async fn process_shapes_are_metadata_only_and_keep_group_filters() -> anyhow::Re
         .await?;
     assert_eq!(rejected["state"], "rejected");
     assert_eq!(rejected["error"]["code"], "requires_tty_not_supported");
-    assert!(rejected.get("rejectReason").is_none());
-    assert!(rejected.get("durationMs").is_none());
 
     let failed = server
         .dispatch(
@@ -1692,10 +1719,10 @@ async fn process_shapes_are_metadata_only_and_keep_group_filters() -> anyhow::Re
 }
 
 #[tokio::test]
-async fn process_output_pages_preserve_raw_byte_offsets_and_content() -> anyhow::Result<()> {
+async fn process_read_preserves_raw_byte_offsets_and_utf8_output() -> anyhow::Result<()> {
     let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
     allow_test_printf(&server).await;
-    let expected = "AéBC".repeat(20);
+    let expected = "AéBC".repeat(2_500);
     let started = server
         .dispatch(
             "process.exec",
@@ -1709,55 +1736,62 @@ async fn process_output_pages_preserve_raw_byte_offsets_and_content() -> anyhow:
     assert_eq!(started["state"], "completed");
     let process_id = started["processId"].as_str().unwrap().to_string();
 
-    let mut cursor: Option<String> = None;
-    let mut stdout_bytes = Vec::new();
-    let mut stdout_offset = 0u64;
-    let mut pages = 0usize;
+    let mut response = server
+        .dispatch(
+            "process.read",
+            json!({
+                "processId": process_id,
+                "waitSeconds": 0,
+                "maxBytes": agentic_gpt_protocol::MIN_PROCESS_RESPONSE_BYTES
+            }),
+        )
+        .await?;
+    assert_eq!(response["state"], "completed");
+
+    let mut expected_offset = 0_u64;
+    let mut collected = Vec::new();
     loop {
-        let mut request = json!({"processId": process_id, "maxBytes": 16});
-        if let Some(cursor) = &cursor {
-            request["cursor"] = json!(cursor);
-        }
-        let page = server.dispatch("process.output", request).await?;
-        assert_eq!(page["processId"], process_id);
-        let stdout = &page["stdout"];
+        let output = &response["output"];
+        let stdout = &output["stdout"];
         let start = stdout["startOffset"].as_str().unwrap().parse::<u64>()?;
         let end = stdout["endOffset"].as_str().unwrap().parse::<u64>()?;
-        assert_eq!(start, stdout_offset);
+        assert_eq!(start, expected_offset);
         let data = stdout["data"].as_str().unwrap();
-        let decoded = match stdout["encoding"].as_str().unwrap() {
+        let bytes = match stdout["encoding"].as_str().unwrap() {
             "utf8" => data.as_bytes().to_vec(),
             "base64" => base64::engine::general_purpose::STANDARD.decode(data)?,
-            encoding => panic!("unexpected process.output encoding {encoding}"),
+            encoding => panic!("unexpected process.read output encoding {encoding}"),
         };
-        assert_eq!(end - start, decoded.len() as u64);
-        stdout_offset = end;
-        if !decoded.is_empty() {
-            pages += 1;
-            assert!(pages < 50, "process.output cursor did not reach EOF");
-        }
-        stdout_bytes.extend(decoded);
+        assert_eq!(end - start, bytes.len() as u64);
+        collected.extend_from_slice(&bytes);
+        expected_offset = end;
 
-        let next = page["nextCursor"].as_str().unwrap().to_string();
-        if page["hasMore"] == true {
-            assert_ne!(cursor.as_deref(), Some(next.as_str()));
-            cursor = Some(next);
-        } else if page["eof"] == true {
+        if output["hasMore"] == false {
+            assert_eq!(output["eof"], true);
             break;
-        } else {
-            cursor = Some(next);
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
+        let cursor = output["nextCursor"].as_str().unwrap().to_string();
+        response = server
+            .call(
+                CallToolRequestParams::new("process.read").with_arguments(Map::from_iter([
+                    ("processId".to_string(), json!(process_id)),
+                    ("waitSeconds".to_string(), json!(0)),
+                    ("cursor".to_string(), json!(cursor)),
+                    (
+                        "maxBytes".to_string(),
+                        json!(agentic_gpt_protocol::MIN_PROCESS_RESPONSE_BYTES),
+                    ),
+                ])),
+            )
+            .await?;
     }
-
-    assert!(pages > 1, "the output should require multiple pages");
-    assert_eq!(stdout_offset, expected.len() as u64);
-    assert_eq!(stdout_bytes.as_slice(), expected.as_bytes());
+    assert_eq!(expected_offset, expected.len() as u64);
+    assert_eq!(collected, expected.as_bytes());
     Ok(())
 }
 
 #[tokio::test]
-async fn process_creation_and_batch_responses_obey_inline_budget() -> anyhow::Result<()> {
+async fn process_creation_and_batch_responses_obey_response_budget() -> anyhow::Result<()> {
     let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
     allow_test_printf(&server).await;
 
@@ -1772,12 +1806,20 @@ async fn process_creation_and_batch_responses_obey_inline_budget() -> anyhow::Re
         )
         .await?;
     assert_eq!(large["state"], "completed");
-    assert_eq!(large["completedInline"], false);
-    assert!(large.get("inlineOutput").is_none());
-    assert_eq!(large["outputPreview"]["truncated"], true);
-    assert!(large["outputPreview"]["stdout"].as_str().unwrap().len() <= 2048);
-    assert!(large["outputPreview"]["stderr"].as_str().unwrap().len() <= 2048);
-    assert!(serde_json::to_vec(&large)?.len() <= 8 * 1024);
+    for obsolete in [
+        "status",
+        "completedInline",
+        "pollAfterMs",
+        "inlineOutput",
+        "outputPreview",
+        "resultAvailable",
+        "resultStatus",
+    ] {
+        assert!(large.get(obsolete).is_none(), "unexpected field {obsolete}");
+    }
+    assert!(
+        serde_json::to_vec(&large)?.len() <= agentic_gpt_protocol::DEFAULT_PROCESS_RESPONSE_BYTES
+    );
 
     let batch = server
         .dispatch(
@@ -1792,12 +1834,19 @@ async fn process_creation_and_batch_responses_obey_inline_budget() -> anyhow::Re
         )
         .await?;
     assert_eq!(batch["processes"].as_array().unwrap().len(), 2);
-    assert!(serde_json::to_vec(&batch)?.len() <= 8 * 1024);
+    assert!(batch["processes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|process| process["state"] == "completed"));
+    assert!(
+        serde_json::to_vec(&batch)?.len() <= agentic_gpt_protocol::DEFAULT_PROCESS_RESPONSE_BYTES
+    );
     Ok(())
 }
 
 #[test]
-fn process_input_schemas_advertise_wait_bounds_and_paging_limits() {
+fn process_read_input_schema_advertises_wait_view_and_response_budget() {
     for name in [
         "process.exec",
         "process.batch",
@@ -1812,40 +1861,36 @@ fn process_input_schemas_advertise_wait_bounds_and_paging_limits() {
             32
         );
     }
-    let status = serde_json::to_value(tool_descriptor("process.status")).unwrap();
+    let read = serde_json::to_value(tool_descriptor("process.read")).unwrap();
+    assert_eq!(read["annotations"]["readOnlyHint"], true);
+    assert_eq!(read["annotations"]["destructiveHint"], false);
+    assert_eq!(read["annotations"]["openWorldHint"], false);
+    let properties = &read["inputSchema"]["properties"];
+    assert_eq!(read["inputSchema"]["required"], json!(["processId"]));
+    assert_eq!(properties["waitSeconds"]["default"], 5);
+    assert_eq!(properties["waitSeconds"]["minimum"], 0);
+    assert_eq!(properties["waitSeconds"]["maximum"], 30);
+    assert_eq!(properties["view"]["default"], "auto");
+    assert_eq!(properties["view"]["enum"], json!(["auto", "status"]));
     assert_eq!(
-        status["inputSchema"]["properties"]["waitSeconds"]["default"],
-        5
+        properties["maxBytes"]["minimum"],
+        agentic_gpt_protocol::MIN_PROCESS_RESPONSE_BYTES
     );
     assert_eq!(
-        status["inputSchema"]["properties"]["waitSeconds"]["minimum"],
-        0
+        properties["maxBytes"]["maximum"],
+        agentic_gpt_protocol::MAX_PROCESS_RESPONSE_BYTES
     );
-    assert_eq!(
-        status["inputSchema"]["properties"]["waitSeconds"]["maximum"],
-        30
-    );
-    assert!(status["inputSchema"]["properties"]
-        .get("waitOnly")
-        .is_none());
-    let output = serde_json::to_value(tool_descriptor("process.output")).unwrap();
-    assert_eq!(
-        output["inputSchema"]["properties"]["maxBytes"]["default"],
-        8192
-    );
-    assert_eq!(
-        output["inputSchema"]["properties"]["maxBytes"]["maximum"],
-        32768
-    );
-    let result = serde_json::to_value(tool_descriptor("process.result")).unwrap();
-    assert_eq!(
-        result["inputSchema"]["properties"]["maxBytes"]["default"],
-        8192
-    );
-    assert_eq!(
-        result["inputSchema"]["properties"]["maxBytes"]["maximum"],
-        512 * 1024
-    );
+    assert!(properties["maxBytes"].get("default").is_none());
+    assert!(properties["cursor"].is_object());
+    assert_eq!(properties["cursor"]["type"], "string");
+    assert!(properties["cursor"].get("default").is_none());
+    assert!(!read["inputSchema"]["required"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|field| field.as_str() == Some("cursor")));
+    assert_eq!(read["inputSchema"]["additionalProperties"], false);
+
     let list = serde_json::to_value(tool_descriptor("process.list")).unwrap();
     for field in ["group", "kind", "state", "limit", "cursor"] {
         assert!(
@@ -1856,17 +1901,18 @@ fn process_input_schemas_advertise_wait_bounds_and_paging_limits() {
 }
 
 #[test]
-fn mcp_batch_projection_keeps_result_availability_without_bodies() -> anyhow::Result<()> {
+fn mcp_batch_projection_preserves_compact_observation_and_child_identity() -> anyhow::Result<()> {
     let mut retained_process = test_terminal_process();
     retained_process.process_id = "process_testboot_retained".to_string();
     retained_process.kind = agentic_gpt_protocol::ProcessKind::Mcp;
+    retained_process.capture_status = agentic_gpt_protocol::ProcessCaptureStatus::NotApplicable;
     retained_process.mcp_server_id = Some("local".to_string());
     retained_process.mcp_tool_name = Some("lookup".to_string());
     let retained_result = json!({"answer": 42});
     let retained_detail = ProcessDetail {
         process: retained_process,
         detail_available: true,
-        result: Some(retained_result),
+        result: Some(retained_result.clone()),
         error: None,
         result_available: true,
         result_bytes: Some(13),
@@ -1877,6 +1923,7 @@ fn mcp_batch_projection_keeps_result_availability_without_bodies() -> anyhow::Re
     let mut unavailable_process = test_terminal_process();
     unavailable_process.process_id = "process_testboot_unavailable".to_string();
     unavailable_process.kind = agentic_gpt_protocol::ProcessKind::Mcp;
+    unavailable_process.capture_status = agentic_gpt_protocol::ProcessCaptureStatus::NotApplicable;
     unavailable_process.mcp_server_id = Some("local".to_string());
     unavailable_process.mcp_tool_name = Some("lookup".to_string());
     let unavailable_detail = ProcessDetail {
@@ -1891,53 +1938,71 @@ fn mcp_batch_projection_keeps_result_availability_without_bodies() -> anyhow::Re
     };
 
     let value = slim_mcp_batch_response(
-        McpBatchResponse {
-            batch_id: "batch_test".to_string(),
-            status: McpBatchStatus::Completed,
-            completed_inline: true,
-            poll_after_ms: 0,
-            results: vec![
-                McpBatchChildResponse {
-                    index: 0,
-                    id: Some("retained".to_string()),
-                    result_omitted: false,
-                    process: retained_detail,
-                },
-                McpBatchChildResponse {
-                    index: 1,
-                    id: Some("unavailable".to_string()),
-                    result_omitted: false,
-                    process: unavailable_detail,
-                },
-            ],
-            aggregate_truncated: false,
-            aggregate_bytes: None,
-            error: None,
+        crate::mcp::batch::ManagedMcpBatchResponse {
+            response: McpBatchResponse {
+                batch_id: "batch_test".to_string(),
+                status: McpBatchStatus::Completed,
+                results: vec![
+                    McpBatchChildResponse {
+                        index: 0,
+                        id: Some("retained".to_string()),
+                        result_omitted: false,
+                        process: retained_detail,
+                    },
+                    McpBatchChildResponse {
+                        index: 1,
+                        id: Some("unavailable".to_string()),
+                        result_omitted: false,
+                        process: unavailable_detail,
+                    },
+                ],
+                aggregate_truncated: false,
+                aggregate_bytes: None,
+                error: None,
+            },
+            response_budget: agentic_gpt_protocol::MAX_PROCESS_RESPONSE_BYTES,
         },
         None,
     )?;
-    assert!(value.get("batchId").is_none());
+    assert_eq!(value["batchId"], "batch_test");
+    assert_eq!(value["status"], "completed");
     assert!(value.get("completedInline").is_none());
     assert!(value.get("pollAfterMs").is_none());
     assert!(value.get("aggregateTruncated").is_none());
     assert!(value.get("aggregateBytes").is_none());
-    assert_eq!(value["results"][0]["resultAvailable"], true);
-    assert_eq!(value["results"][0]["resultStatus"], "complete");
-    assert_eq!(value["results"][0]["resultBytes"], 13);
-    assert_eq!(value["results"][1]["resultAvailable"], false);
-    assert_eq!(value["results"][1]["resultStatus"], "unavailable");
+    assert_eq!(value["results"][0]["index"], 0);
+    assert_eq!(value["results"][0]["id"], "retained");
+    assert_eq!(
+        value["results"][0]["processId"],
+        "process_testboot_retained"
+    );
+    assert_eq!(value["results"][0]["kind"], "mcp");
+    assert_eq!(value["results"][0]["state"], "completed");
+    assert!(value["results"][0]["agentId"]
+        .as_str()
+        .is_some_and(|agent_id| !agent_id.is_empty()));
+    assert_eq!(value["results"][0]["mcpResult"]["status"], "included");
+    assert_eq!(value["results"][0]["mcpResult"]["bytes"], 13);
+    assert_eq!(value["results"][0]["mcpResult"]["value"], retained_result);
+    assert_eq!(value["results"][1]["index"], 1);
+    assert_eq!(value["results"][1]["id"], "unavailable");
+    assert_eq!(
+        value["results"][1]["processId"],
+        "process_testboot_unavailable"
+    );
+    assert_eq!(value["results"][1]["mcpResult"]["status"], "unavailable");
     for child in value["results"].as_array().unwrap() {
-        assert!(child.get("result").is_none());
+        assert!(child.get("process").is_none());
+        assert!(child.get("resultAvailable").is_none());
+        assert!(child.get("resultStatus").is_none());
+        assert!(child.get("resultBytes").is_none());
         assert!(child.get("resultOmitted").is_none());
-        assert!(child.get("index").is_none());
-        assert!(child.get("id").is_none());
     }
     Ok(())
 }
 
 #[tokio::test]
-async fn process_result_preserves_retained_mcp_payloads_and_reports_unavailable(
-) -> anyhow::Result<()> {
+async fn process_read_preserves_mcp_result_states_and_complete_values() -> anyhow::Result<()> {
     let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
     let payload = json!({"answer": "retained"});
     let mut retained_process = test_terminal_process();
@@ -1967,23 +2032,66 @@ async fn process_result_preserves_retained_mcp_payloads_and_reports_unavailable(
 
     let retained = server
         .dispatch(
-            "process.result",
-            json!({"processId": "process_testboot_result"}),
+            "process.read",
+            json!({"processId": "process_testboot_result", "waitSeconds": 0}),
         )
         .await?;
-    assert_eq!(retained["status"], "complete");
-    assert_eq!(retained["resultAvailable"], true);
-    assert_eq!(retained["result"], payload);
+    assert_eq!(retained["agentId"], retained_detail.process.agent_id);
+    assert_eq!(retained["state"], "completed");
+    assert_eq!(retained["mcpResult"]["status"], "included");
+    assert_eq!(retained["mcpResult"]["value"], payload);
+    assert!(retained.get("result").is_none());
+    assert!(retained.get("resultAvailable").is_none());
 
-    let too_small = server
+    let deferred_payload = json!({"answer": "x".repeat(5_000)});
+    let mut deferred_process = test_terminal_process();
+    deferred_process.process_id = "process_testboot_deferred".to_string();
+    deferred_process.kind = agentic_gpt_protocol::ProcessKind::Mcp;
+    deferred_process.mcp_server_id = Some("local".to_string());
+    deferred_process.mcp_tool_name = Some("lookup".to_string());
+    deferred_process.capture_status = agentic_gpt_protocol::ProcessCaptureStatus::NotApplicable;
+    let deferred_detail = ProcessDetail {
+        process: deferred_process,
+        detail_available: true,
+        result: Some(deferred_payload.clone()),
+        error: None,
+        result_available: true,
+        result_bytes: Some(serde_json::to_vec(&deferred_payload)?.len()),
+        result_sha256: Some("sha256:deferred".to_string()),
+        result_preview: Some("{\"answer\":\"preview\"}".to_string()),
+    };
+    assert!(server
+        .state
+        .process_history
+        .upsert_terminal(
+            &deferred_detail,
+            &crate::process_history::ProcessOutputSnapshot::default(),
+        )
+        .is_persisted());
+    let deferred = server
         .dispatch(
-            "process.result",
-            json!({"processId": "process_testboot_result", "maxBytes": 1}),
+            "process.read",
+            json!({
+                "processId": "process_testboot_deferred",
+                "waitSeconds": 0,
+                "maxBytes": agentic_gpt_protocol::MIN_PROCESS_RESPONSE_BYTES
+            }),
         )
         .await?;
-    assert_eq!(too_small["status"], "too_large");
-    assert_eq!(too_small["resultAvailable"], true);
-    assert!(too_small.get("result").is_none());
+    assert_eq!(deferred["mcpResult"]["status"], "deferred");
+    assert!(deferred["mcpResult"].get("value").is_none());
+    let retried = server
+        .dispatch(
+            "process.read",
+            json!({
+                "processId": "process_testboot_deferred",
+                "waitSeconds": 0,
+                "maxBytes": 8 * 1024
+            }),
+        )
+        .await?;
+    assert_eq!(retried["mcpResult"]["status"], "included");
+    assert_eq!(retried["mcpResult"]["value"], deferred_payload);
 
     let mut unavailable_process = test_terminal_process();
     unavailable_process.process_id = "process_testboot_unavailable".to_string();
@@ -2011,13 +2119,45 @@ async fn process_result_preserves_retained_mcp_payloads_and_reports_unavailable(
         .is_persisted());
     let unavailable = server
         .dispatch(
-            "process.result",
-            json!({"processId": "process_testboot_unavailable"}),
+            "process.read",
+            json!({"processId": "process_testboot_unavailable", "waitSeconds": 0}),
         )
         .await?;
-    assert_eq!(unavailable["status"], "unavailable");
-    assert_eq!(unavailable["resultAvailable"], false);
-    assert!(unavailable.get("result").is_none());
+    assert_eq!(unavailable["mcpResult"]["status"], "unavailable");
+    assert!(unavailable["mcpResult"].get("value").is_none());
+
+    let mut not_retained_process = test_terminal_process();
+    not_retained_process.process_id = "process_testboot_not_retained".to_string();
+    not_retained_process.kind = agentic_gpt_protocol::ProcessKind::Mcp;
+    not_retained_process.mcp_server_id = Some("local".to_string());
+    not_retained_process.mcp_tool_name = Some("lookup".to_string());
+    not_retained_process.capture_status = agentic_gpt_protocol::ProcessCaptureStatus::NotApplicable;
+    let not_retained_detail = ProcessDetail {
+        process: not_retained_process,
+        detail_available: true,
+        result: None,
+        error: None,
+        result_available: false,
+        result_bytes: Some(crate::process::MAX_MCP_RESULT_BYTES + 1),
+        result_sha256: Some("sha256:not-retained".to_string()),
+        result_preview: Some("{\"answer\":\"not retained\"}".to_string()),
+    };
+    assert!(server
+        .state
+        .process_history
+        .upsert_terminal(
+            &not_retained_detail,
+            &crate::process_history::ProcessOutputSnapshot::default(),
+        )
+        .is_persisted());
+    let not_retained = server
+        .dispatch(
+            "process.read",
+            json!({"processId": "process_testboot_not_retained", "waitSeconds": 0}),
+        )
+        .await?;
+    assert_eq!(not_retained["mcpResult"]["status"], "not_retained");
+    assert!(not_retained["mcpResult"].get("value").is_none());
     Ok(())
 }
 
@@ -2281,9 +2421,8 @@ fn batch_lifecycle_detection_reads_process_envelopes() {
         }]
     });
     assert!(!value_has_active_process(&failed));
-    assert!(value_has_terminal_failure(&failed));
     assert_eq!(
-        human_failure_reason(&failed, None).as_deref(),
+        human_failure_reason(&failed).as_deref(),
         Some("spawn_failed")
     );
 }
@@ -2312,7 +2451,7 @@ async fn tunnel_local_and_http_ingress_advertise_identical_surface() {
 #[tokio::test]
 async fn local_skill_audit_uses_local_request_source() -> anyhow::Result<()> {
     let server = AgentMcpServer::with_ingress(
-        test_state(CapabilityProfile::Normal),
+        test_state(CapabilityProfile::Room),
         RequestIngress::LocalUnix,
     );
     let workspace = server.state.config.read().await.workspace_root.clone();
@@ -2321,7 +2460,7 @@ async fn local_skill_audit_uses_local_request_source() -> anyhow::Result<()> {
     std::fs::write(workspace.join("skills/demo/SKILL.md"), "# Demo\n")?;
     let script = scripts.join("check.sh");
     std::fs::write(&script, "#!/bin/sh\nprintf done\n")?;
-    use std::os::unix::fs::PermissionsExt;
+    let agent_id = server.state.config.read().await.agent_id.clone();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))?;
     crate::skills::activate(
         &server.state,
@@ -2338,6 +2477,7 @@ async fn local_skill_audit_uses_local_request_source() -> anyhow::Result<()> {
         .await?;
     assert_eq!(result["state"], "completed");
     assert_eq!(result["kind"], "skill");
+    assert_eq!(result["agentId"], agent_id);
     let audit = std::fs::read_to_string(workspace.join(".agentic-gpt-audit.jsonl"))?;
     assert!(audit.contains("\"requestSource\":\"local:skills.run\""));
     assert!(!audit.contains("\"requestSource\":\"tunnel:skills.run\""));

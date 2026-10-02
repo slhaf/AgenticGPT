@@ -11,8 +11,7 @@ use std::{
 
 use agentic_gpt_protocol::{
     normalize_process_group, HubCommand, ProcessBatchExecRequest, ProcessCancelRequest,
-    ProcessExecElement, ProcessExecRequest, ProcessInfo, ProcessListRequest, ProcessOutputRequest,
-    ProcessResultRequest, ProcessStatusRequest,
+    ProcessExecElement, ProcessExecRequest, ProcessInfo, ProcessListRequest, ProcessReadRequest,
 };
 #[cfg(test)]
 use agentic_gpt_protocol::{McpBatchResponse, ProcessDetail};
@@ -48,7 +47,7 @@ use crate::{
 };
 use stdio_schema::{properties_for, tool_descriptor, tool_descriptors};
 
-const INSTRUCTIONS: &str = "先用 agent.info 查看当前 profile、工作区、路径策略、容量、连接与确认通道；仅调用当前 tools/list 暴露的工具，按各工具的 schema 和说明构造参数。file.read/search 用于有界读取与搜索，file.edit 接受 Codex apply_patch。process.exec/batch 和 skills.run 启动受管理命令/脚本，用 process.status/output/cancel 跟进；process.result 仅取 kind=mcp 保留的下游结果。mcp.list 发现服务器/工具，mcp.callTool/batch 调用下游并登记 Process；等待到期不等于取消，已发生的外部副作用不回滚。tmux 用于持久终端；skills 包含 workspace 技能及只读、不可运行的内置 skill-installer，激活不执行代码或授予权限；bootstrap 与 room 工具用于 Room 引导和语义文档。Browser 先读 browser.manual，acquire 后以同名 repl 执行官方 SDK JavaScript；list 查租约，reset 仅恢复，release 最终清理。工具注解只是提示，不是授权；各操作受其实际策略、确认及资源限制控制，不构成对下游 MCP、tmux 或 Browser JavaScript 的通用沙箱。";
+const INSTRUCTIONS: &str = "先用 agent.info 查看当前 profile、工作区、路径策略、容量、连接与确认通道；仅调用当前 tools/list 暴露的工具，按各工具的 schema 和说明构造参数。file.read/search 用于有界读取与搜索，file.edit 接受 Codex apply_patch。process.exec/batch 和 skills.run 启动受管理命令/脚本，用 process.read 统一读取状态与可用输出/结果，使用 process.cancel 请求取消。mcp.list 发现服务器/工具，mcp.callTool/batch 调用下游并登记 Process；等待到期不等于取消，已发生的外部副作用不回滚。tmux 用于持久终端；skills 包含 workspace 技能及只读、不可运行的内置 skill-installer，激活不执行代码或授予权限；bootstrap 与 room 工具用于 Room 引导和语义文档。Browser 先读 browser.manual，acquire 后以同名 repl 执行官方 SDK JavaScript；list 查租约，reset 仅恢复，release 最终清理。工具注解只是提示，不是授权；各操作受其实际策略、确认及资源限制控制，不构成对下游 MCP、tmux 或 Browser JavaScript 的通用沙箱。";
 const BROWSER_REPL_RESULT_MARKER: &str = "__agentic_browser_repl_result";
 
 pub(crate) async fn serve_stdio(state: AppState) -> Result<()> {
@@ -283,6 +282,8 @@ impl AgentMcpServer {
                     None,
                     Some(error.to_string()),
                     None,
+                    None,
+                    None,
                 );
                 return Err(ErrorData::invalid_params(error.to_string(), None));
             }
@@ -315,14 +316,6 @@ impl AgentMcpServer {
                 .await
                 .map_err(|error| ErrorData::internal_error(error.to_string(), None))?;
         }
-        let process: Option<ProcessInfo> = value
-            .get("process")
-            .cloned()
-            .and_then(|value| serde_json::from_value(value).ok())
-            .or_else(|| serde_json::from_value(value.clone()).ok());
-        if let Some(process) = process.as_ref() {
-            crate::hub::report_process(&self.state, process.clone());
-        }
         let is_browser_repl = name == "browser.repl";
         let is_error = value.get("error").is_some()
             || (is_browser_repl
@@ -339,13 +332,14 @@ impl AgentMcpServer {
                 .and_then(Value::as_str)
                 .map(str::to_string)
         };
-        let process_id = process.as_ref().map(|process| process.process_id.as_str());
-        let exit_code = process.as_ref().and_then(|process| process.exit_code);
+        let process_id = value.get("processId").and_then(Value::as_str);
+        let exit_code = value
+            .get("exitCode")
+            .and_then(Value::as_i64)
+            .and_then(|code| i32::try_from(code).ok());
         let active = value_has_active_process(&value);
         let terminal_failure = value_has_terminal_failure(&value);
-        let human_reason = reason
-            .clone()
-            .or_else(|| human_failure_reason(&value, process.as_ref()));
+        let human_reason = reason.clone().or_else(|| human_failure_reason(&value));
         let mut lifecycle = format!(
             "mcp_tool; ingress={}; run={}; tool={name}; profile={}; status={}; durationMs={}",
             self.ingress.label(),
@@ -378,7 +372,11 @@ impl AgentMcpServer {
             &run_id,
             &report_request_id,
             &name,
-            if is_error { "failed" } else { "completed" },
+            if is_error || terminal_failure {
+                "failed"
+            } else {
+                "completed"
+            },
             started_at,
             if name == "browser.repl" {
                 None
@@ -386,7 +384,9 @@ impl AgentMcpServer {
                 Some(value.clone())
             },
             reason,
-            process,
+            process_id.map(str::to_owned),
+            exit_code,
+            None,
         );
         Ok((value, special_result))
     }
@@ -605,9 +605,7 @@ impl AgentMcpServer {
                 )
                 .await)
             }
-            "process.status" => self.dispatch_process_status(arguments).await,
-            "process.output" => self.dispatch_process_output(arguments).await,
-            "process.result" => self.dispatch_process_result(arguments).await,
+            "process.read" => self.dispatch_process_read(arguments).await,
             "process.cancel" => self.dispatch_process_cancel(arguments).await,
             "process.list" => self.dispatch_process_list(arguments).await,
             "tmux.sessions" => {
@@ -821,7 +819,12 @@ impl AgentMcpServer {
                 )
                 .await
                 {
-                    Ok(value) => slim_mcp_response(value, None),
+                    Ok(value) => {
+                        let mut snapshots = Vec::new();
+                        let response = slim_mcp_response(value, Some(&mut snapshots))?;
+                        report_process_snapshots(&self.state, snapshots);
+                        Ok(response)
+                    }
                     Err(error) => Ok(structured_error_from_reason(
                         "mcp_call_tool_failed",
                         error.to_string(),
@@ -835,8 +838,9 @@ impl AgentMcpServer {
                     Err(error) => return Ok((error, None)),
                 };
                 let config = self.state.config.read().await.clone();
+                let response_budget = config.limits.process_response_bytes;
                 let request_source = self.ingress.source("mcp.batch");
-                match crate::mcp::batch::batch_slim(
+                match crate::mcp::batch::batch(
                     &self.state,
                     agentic_gpt_protocol::McpBatchRequest {
                         agent_id: config.agent_id,
@@ -863,10 +867,16 @@ impl AgentMcpServer {
                         terminal_tracker,
                     )),
                     None,
+                    response_budget,
                 )
                 .await
                 {
-                    Ok(value) => slim_mcp_batch_response(value, None),
+                    Ok(value) => {
+                        let mut snapshots = Vec::new();
+                        let response = slim_mcp_batch_response(value, Some(&mut snapshots))?;
+                        report_process_snapshots(&self.state, snapshots);
+                        Ok(response)
+                    }
                     Err(error) => Ok(structured_error_from_reason(
                         "mcp_batch_failed",
                         error.to_string(),
@@ -1055,61 +1065,50 @@ impl AgentMcpServer {
         let context = RequestContext::new(self.ingress, "process.exec");
         let request_source = context.source();
         let profile = self.state.runtime.profile;
-        local_service::dispatch_process(self.state.clone(), context, None, move |config| {
-            validate_stdio_arguments("process.exec", &arguments)?;
-            let args: ProcessExecArgs = from_value(arguments)?;
-            Ok(local_service::ProcessCall::Exec {
-                request: ProcessExecRequest {
-                    agent_id: config.agent_id.clone(),
-                    group: args.group,
-                    program: args.program,
-                    args: args.args,
-                    need_confirm: args.need_confirm,
-                    confirm_method: None,
-                    working_directory: args.working_directory,
-                    wait_seconds: args.wait_seconds,
-                },
-                terminal_event_hook: Some(managed_terminal_event_hook(
-                    profile,
-                    request_source.clone(),
-                    terminal_tracker,
-                )),
-            })
-        })
-        .await
+        let mut snapshots = Vec::new();
+        let response = local_service::dispatch_process(
+            self.state.clone(),
+            context,
+            Some(&mut snapshots),
+            move |config| {
+                validate_stdio_arguments("process.exec", &arguments)?;
+                let args: ProcessExecArgs = from_value(arguments)?;
+                Ok(local_service::ProcessCall::Exec {
+                    request: ProcessExecRequest {
+                        agent_id: config.agent_id.clone(),
+                        group: args.group,
+                        program: args.program,
+                        args: args.args,
+                        need_confirm: args.need_confirm,
+                        confirm_method: None,
+                        working_directory: args.working_directory,
+                        wait_seconds: args.wait_seconds,
+                    },
+                    terminal_event_hook: Some(managed_terminal_event_hook(
+                        profile,
+                        request_source.clone(),
+                        terminal_tracker,
+                    )),
+                })
+            },
+        )
+        .await?;
+        report_process_snapshots(&self.state, snapshots);
+        Ok(response)
     }
 
-    async fn dispatch_process_status(&self, arguments: Value) -> Result<Value> {
-        let request: ProcessStatusRequest = from_value(arguments)?;
-        match crate::process::get_process_status(&self.state, request).await {
-            Ok(response) => Ok(serde_json::to_value(response)?),
-            Err(reason) => Ok(structured_error_from_reason(
-                "process_status_failed",
-                reason,
-            )),
-        }
-    }
-
-    async fn dispatch_process_output(&self, arguments: Value) -> Result<Value> {
-        let request: ProcessOutputRequest = from_value(arguments)?;
-        match crate::process::get_process_output(&self.state, request).await {
-            Ok(response) => Ok(serde_json::to_value(response)?),
-            Err(reason) => Ok(structured_error_from_reason(
-                "process_output_failed",
-                reason,
-            )),
-        }
-    }
-
-    async fn dispatch_process_result(&self, arguments: Value) -> Result<Value> {
-        let request: ProcessResultRequest = from_value(arguments)?;
-        match crate::process::get_process_result(&self.state, request).await {
-            Ok(response) => Ok(serde_json::to_value(response)?),
-            Err(reason) => Ok(structured_error_from_reason(
-                "process_result_failed",
-                reason,
-            )),
-        }
+    async fn dispatch_process_read(&self, arguments: Value) -> Result<Value> {
+        let request: ProcessReadRequest = from_value(arguments)?;
+        let mut snapshots = Vec::new();
+        let response = local_service::dispatch_process_read(
+            self.state.clone(),
+            RequestContext::new(self.ingress, "process.read"),
+            request,
+            Some(&mut snapshots),
+        )
+        .await?;
+        report_process_snapshots(&self.state, snapshots);
+        Ok(response)
     }
     async fn dispatch_process_batch(
         &self,
@@ -1119,36 +1118,44 @@ impl AgentMcpServer {
         let context = RequestContext::new(self.ingress, "process.batch");
         let request_source = context.source();
         let profile = self.state.runtime.profile;
-        local_service::dispatch_process(self.state.clone(), context, None, move |config| {
-            validate_stdio_arguments("process.batch", &arguments)?;
-            let args: ProcessBatchArgs = from_value(arguments)?;
-            let request = ProcessBatchExecRequest {
-                agent_id: config.agent_id.clone(),
-                group: args.group,
-                elements: args
-                    .elements
-                    .into_iter()
-                    .map(|element| ProcessExecElement {
-                        program: element.program,
-                        args: element.args,
-                        working_directory: element.working_directory,
-                    })
-                    .collect(),
-                need_confirm: args.need_confirm,
-                confirm_method: None,
-                working_directory: args.working_directory,
-                wait_seconds: args.wait_seconds,
-            };
-            Ok(local_service::ProcessCall::Batch {
-                request,
-                terminal_event_hook: Some(managed_terminal_event_hook(
-                    profile,
-                    request_source.clone(),
-                    terminal_tracker,
-                )),
-            })
-        })
-        .await
+        let mut snapshots = Vec::new();
+        let response = local_service::dispatch_process(
+            self.state.clone(),
+            context,
+            Some(&mut snapshots),
+            move |config| {
+                validate_stdio_arguments("process.batch", &arguments)?;
+                let args: ProcessBatchArgs = from_value(arguments)?;
+                let request = ProcessBatchExecRequest {
+                    agent_id: config.agent_id.clone(),
+                    group: args.group,
+                    elements: args
+                        .elements
+                        .into_iter()
+                        .map(|element| ProcessExecElement {
+                            program: element.program,
+                            args: element.args,
+                            working_directory: element.working_directory,
+                        })
+                        .collect(),
+                    need_confirm: args.need_confirm,
+                    confirm_method: None,
+                    working_directory: args.working_directory,
+                    wait_seconds: args.wait_seconds,
+                };
+                Ok(local_service::ProcessCall::Batch {
+                    request,
+                    terminal_event_hook: Some(managed_terminal_event_hook(
+                        profile,
+                        request_source.clone(),
+                        terminal_tracker,
+                    )),
+                })
+            },
+        )
+        .await?;
+        report_process_snapshots(&self.state, snapshots);
+        Ok(response)
     }
 
     async fn dispatch_process_cancel(&self, arguments: Value) -> Result<Value> {
@@ -1207,7 +1214,12 @@ impl AgentMcpServer {
         )
         .await
         {
-            Ok(response) => slim_process_response(response, None),
+            Ok(response) => {
+                let mut snapshots = Vec::new();
+                let value = slim_process_response(response, Some(&mut snapshots))?;
+                report_process_snapshots(&self.state, snapshots);
+                Ok(value)
+            }
             Err(error) => Ok(crate::skills::skill_run_command_error(error)),
         }
     }
@@ -2707,17 +2719,14 @@ fn value_has_terminal_failure(value: &Value) -> bool {
         })
 }
 
-fn human_failure_reason(value: &Value, process: Option<&ProcessInfo>) -> Option<String> {
-    process
-        .and_then(|process| process.reject_reason.clone())
-        .or_else(|| {
-            process_values(value).find_map(|process| {
-                process
-                    .get("rejectReason")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-            })
-        })
+fn human_failure_reason(value: &Value) -> Option<String> {
+    process_values(value).find_map(|process| {
+        process
+            .get("error")
+            .and_then(|error| error.get("message"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    })
 }
 
 fn process_values(value: &Value) -> impl Iterator<Item = &Value> {
@@ -2774,6 +2783,12 @@ fn managed_terminal_event_hook(
     Arc::new(move |process| {
         tracker.record(profile, &source, process);
     })
+}
+
+fn report_process_snapshots(state: &AppState, snapshots: Vec<ProcessInfo>) {
+    for process in snapshots {
+        crate::hub::report_process(state, process);
+    }
 }
 
 fn managed_terminal_event_message(profile: &str, source: &str, process: &ProcessInfo) -> String {

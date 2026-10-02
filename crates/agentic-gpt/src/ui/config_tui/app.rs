@@ -2611,6 +2611,7 @@ fn numeric_field(field: SetupField) -> bool {
         SetupField::MaxConcurrentTasks
             | SetupField::MaxActiveProcesses
             | SetupField::MaxFileSearchContextLines
+            | SetupField::ProcessResponseBytes
             | SetupField::DiaryBoundaryHour
     )
 }
@@ -2627,7 +2628,8 @@ fn optional_section_for_field(field: SetupField) -> crate::config_templates::Opt
         }
         SetupField::MaxConcurrentTasks
         | SetupField::MaxActiveProcesses
-        | SetupField::MaxFileSearchContextLines => crate::config_templates::OptionalSection::Limits,
+        | SetupField::MaxFileSearchContextLines
+        | SetupField::ProcessResponseBytes => crate::config_templates::OptionalSection::Limits,
         SetupField::SandboxEnabled
         | SetupField::BubblewrapPath
         | SetupField::RequiredRuntimePaths => crate::config_templates::OptionalSection::Sandbox,
@@ -2692,7 +2694,7 @@ mod tests {
 
     use crate::cli_i18n::UiLanguage;
     use crate::config_setup::{SetupField, SetupSeed, SetupSession, WizardOutcome};
-    use crate::config_templates::{InitSummary, RuntimeMode};
+    use crate::config_templates::{InitSummary, OptionalSection, RuntimeMode};
 
     use super::super::{Committer, ConfigPage, ConfigTuiApp, TuiAction};
 
@@ -2805,5 +2807,113 @@ mod tests {
             .apply_review_connection_value(SetupField::HttpMcpAllowHosts, "[]".into())
             .is_err());
         assert_eq!(app.session().standalone().http_mcp_allow_hosts, "null");
+    }
+    #[test]
+    fn limits_form_edits_validates_saves_and_reviews_process_response_budget() {
+        use agentic_gpt_protocol::{
+            DEFAULT_PROCESS_RESPONSE_BYTES, MAX_PROCESS_RESPONSE_BYTES, MIN_PROCESS_RESPONSE_BYTES,
+        };
+
+        let mut app = ConfigTuiApp::new(SetupSession::new(
+            SetupSeed {
+                mode: Some(RuntimeMode::Standalone),
+                tunnel_id: Some("limits-test-tunnel".into()),
+                tunnel_api_key: Some("file:/tmp/limits-test-secret".into()),
+                ..SetupSeed::default()
+            },
+            UiLanguage::En,
+            PathBuf::from("/tmp/config-tui-process-response-bytes.json"),
+        ));
+        while app.page() != ConfigPage::OptionalCenter {
+            app.handle_action(TuiAction::Next).unwrap();
+        }
+        app.state.focus = app
+            .session()
+            .available_optional_sections()
+            .iter()
+            .position(|section| *section == OptionalSection::Limits)
+            .unwrap();
+        app.handle_action(TuiAction::Activate).unwrap();
+        assert_eq!(app.page(), ConfigPage::Optional(OptionalSection::Limits));
+
+        app.focus_field(SetupField::ProcessResponseBytes);
+        app.handle_action(TuiAction::Activate).unwrap();
+        for _ in 0..4 {
+            app.handle_action(TuiAction::Backspace).unwrap();
+        }
+        for character in MIN_PROCESS_RESPONSE_BYTES.to_string().chars() {
+            app.handle_action(TuiAction::Text(character)).unwrap();
+        }
+        app.handle_action(TuiAction::Text('x')).unwrap();
+        assert_eq!(
+            app.editing().unwrap().buffer,
+            MIN_PROCESS_RESPONSE_BYTES.to_string()
+        );
+        app.handle_action(TuiAction::Activate).unwrap();
+        assert!(!app
+            .field_errors
+            .contains_key(&SetupField::ProcessResponseBytes));
+
+        app.focus_field(SetupField::ProcessResponseBytes);
+        app.handle_action(TuiAction::Activate).unwrap();
+        for _ in 0..MIN_PROCESS_RESPONSE_BYTES.to_string().len() {
+            app.handle_action(TuiAction::Backspace).unwrap();
+        }
+        for character in (MIN_PROCESS_RESPONSE_BYTES - 1).to_string().chars() {
+            app.handle_action(TuiAction::Text(character)).unwrap();
+        }
+        app.handle_action(TuiAction::Activate).unwrap();
+        assert_eq!(
+            app.field_errors
+                .get(&SetupField::ProcessResponseBytes)
+                .map(String::as_str),
+            Some("config_init_number_invalid: process_response_bytes")
+        );
+        app.handle_action(TuiAction::Next).unwrap();
+        assert_eq!(app.page(), ConfigPage::Optional(OptionalSection::Limits));
+        let draft = app.session().optional_draft(OptionalSection::Limits);
+        assert_eq!(
+            super::pages::optional_field_value(&draft, SetupField::ProcessResponseBytes),
+            DEFAULT_PROCESS_RESPONSE_BYTES.to_string()
+        );
+
+        app.focus_field(SetupField::ProcessResponseBytes);
+        app.handle_action(TuiAction::Activate).unwrap();
+        for _ in 0..(MIN_PROCESS_RESPONSE_BYTES - 1).to_string().len() {
+            app.handle_action(TuiAction::Backspace).unwrap();
+        }
+        for character in MAX_PROCESS_RESPONSE_BYTES.to_string().chars() {
+            app.handle_action(TuiAction::Text(character)).unwrap();
+        }
+        app.handle_action(TuiAction::Activate).unwrap();
+        assert!(!app
+            .field_errors
+            .contains_key(&SetupField::ProcessResponseBytes));
+        app.handle_action(TuiAction::Next).unwrap();
+        assert_eq!(app.page(), ConfigPage::OptionalCenter);
+        let draft = app.session().optional_draft(OptionalSection::Limits);
+        assert_eq!(
+            super::pages::optional_field_value(&draft, SetupField::ProcessResponseBytes),
+            MAX_PROCESS_RESPONSE_BYTES.to_string()
+        );
+
+        app.handle_action(TuiAction::Next).unwrap();
+        let review = app.review_model().unwrap();
+        let reviewed_budget = review
+            .groups()
+            .into_iter()
+            .flat_map(|group| group.items.iter())
+            .find(|item| item.field == Some(SetupField::ProcessResponseBytes))
+            .unwrap();
+        assert_eq!(
+            reviewed_budget.value,
+            MAX_PROCESS_RESPONSE_BYTES.to_string()
+        );
+        let input = app.session().build_active_input().unwrap();
+        let built = crate::config_templates::build_config(input).unwrap();
+        assert_eq!(
+            built.config.limits.process_response_bytes,
+            MAX_PROCESS_RESPONSE_BYTES
+        );
     }
 }

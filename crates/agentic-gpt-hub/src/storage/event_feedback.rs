@@ -2244,7 +2244,7 @@ mod tests {
                 (&reported_orphan, "process.exec", "dispatched", None),
                 (&existing, "process.exec", "dispatched", None),
                 (&completed, "process.exec", "completed", Some("{}")),
-                (&non_creation, "process.status", "dispatched", None),
+                (&non_creation, "process.read", "dispatched", None),
             ] {
                 conn.execute(
                     "insert into agent_runs(
@@ -2562,10 +2562,10 @@ mod tests {
     #[test]
     fn non_creation_and_source_less_runs_do_not_create_feedback_commands() {
         let state = test_state();
-        let status_origin = EventOrigin {
-            run_id: "run_status_only".to_string(),
-            request_id: "request_status_only".to_string(),
-            command_hash: "hash_status_only".to_string(),
+        let read_origin = EventOrigin {
+            run_id: "run_process_read_only".to_string(),
+            request_id: "request_process_read_only".to_string(),
+            command_hash: "hash_process_read_only".to_string(),
         };
         {
             let conn = state.db.lock().unwrap();
@@ -2574,17 +2574,17 @@ mod tests {
                 "insert into agent_runs(
                     run_id, request_id, agent_id, command_type, command_json,
                     command_hash, status, created_at, updated_at
-                 ) values (?1, ?2, 'agent', 'process.status', '{}', ?3, 'dispatched', ?4, ?4)",
+                 ) values (?1, ?2, 'agent', 'process.read', '{}', ?3, 'dispatched', ?4, ?4)",
                 params![
-                    status_origin.run_id,
-                    status_origin.request_id,
-                    status_origin.command_hash,
+                    read_origin.run_id,
+                    read_origin.request_id,
+                    read_origin.command_hash,
                     now
                 ],
             )
             .unwrap();
         }
-        assert!(prepare(&state, "agent", &status_origin).is_err());
+        assert!(prepare(&state, "agent", &read_origin).is_err());
 
         let (state, origin) = fixture("process.exec", "source_less");
         record_reply_metadata(&state, "agent", &origin, &[]).unwrap();

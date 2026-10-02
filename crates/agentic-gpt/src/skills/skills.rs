@@ -1,8 +1,8 @@
 use agentic_gpt_protocol::{
-    ActiveSkill, ProcessExecRequest, ProcessResponse, SkillActivationRequest,
-    SkillActivationResponse, SkillDetail, SkillOrigin, SkillPackageSummary, SkillReadRequest,
-    SkillReadResponse, SkillRunRequest, SkillSearchRequest, SkillSummary, SkillsActiveResponse,
-    SkillsListResponse, SkillsSearchResponse,
+    ActiveSkill, ProcessExecRequest, SkillActivationRequest, SkillActivationResponse, SkillDetail,
+    SkillOrigin, SkillPackageSummary, SkillReadRequest, SkillReadResponse, SkillRunRequest,
+    SkillSearchRequest, SkillSummary, SkillsActiveResponse, SkillsListResponse,
+    SkillsSearchResponse,
 };
 use anyhow::{anyhow, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
@@ -190,14 +190,14 @@ pub(crate) async fn run(
     request_source: &str,
     terminal_event_hook: Option<process::TerminalEventHook>,
     event_origin: Option<agentic_gpt_protocol::EventOrigin>,
-) -> Result<ProcessResponse> {
+) -> Result<process::ManagedProcessResponse> {
     let program = resolve_run_program(&state, &request).await?;
     let config = state.config.read().await.clone();
     if let Some(working_directory) = request.working_directory.as_deref() {
         exec::resolve_working_directory(&config, Some(working_directory))
             .map_err(|reason| anyhow::Error::msg(reason).context("invalid_working_directory"))?;
     }
-    Ok(process::start_and_wait_skill_process(
+    process::start_and_wait_skill_process(
         state,
         ProcessExecRequest {
             agent_id: config.agent_id,
@@ -209,13 +209,14 @@ pub(crate) async fn run(
             working_directory: request.working_directory,
             wait_seconds: request.wait_seconds,
         },
-        &request.id,
-        &request.path,
+        (&request.id, &request.path),
         request_source,
         terminal_event_hook,
         event_origin,
+        config.limits.process_response_bytes,
     )
-    .await)
+    .await
+    .map_err(anyhow::Error::msg)
 }
 pub(crate) fn skill_run_command_error(error: anyhow::Error) -> serde_json::Value {
     let message = error.root_cause().to_string();
@@ -1247,13 +1248,12 @@ mod tests {
     #[tokio::test]
     async fn run_waits_for_real_skill_process_and_returns_completed_output() {
         let state = test_state();
-        let output_state = state.clone();
         let root = workspace_root(&state).await;
         write_skill(&root, "demo", "# Demo");
         let scripts = root.join("skills/demo/scripts");
         fs::create_dir_all(&scripts).unwrap();
         let script = scripts.join("print.sh");
-        fs::write(&script, "#!/bin/sh\nprintf 'skill-output\\n'\n").unwrap();
+        fs::write(&script, "#!/bin/sh\nprintf 'skill-output\\n'\nsleep 0.15\n").unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -1286,62 +1286,20 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            response.status,
+            response.response.state,
             agentic_gpt_protocol::ProcessState::Completed
         );
-        assert!(response.completed_inline);
         let expected = b"skill-output\n";
-        if response.process.capture_status == agentic_gpt_protocol::ProcessCaptureStatus::Complete {
-            let inline = response
-                .inline_output
-                .as_ref()
-                .expect("completed output should be inline");
-            let stdout = match inline.stdout.encoding {
-                agentic_gpt_protocol::ProcessOutputEncoding::Utf8 => {
-                    inline.stdout.data.as_bytes().to_vec()
-                }
-                agentic_gpt_protocol::ProcessOutputEncoding::Base64 => {
-                    BASE64.decode(&inline.stdout.data).unwrap()
-                }
-            };
-            assert_eq!(stdout.as_slice(), expected);
-        } else {
-            assert_eq!(
-                response.process.capture_status,
-                agentic_gpt_protocol::ProcessCaptureStatus::Capturing
-            );
-            assert!(response.inline_output.is_none());
-            let mut request = agentic_gpt_protocol::ProcessOutputRequest {
-                process_id: response.process.process_id,
-                cursor: None,
-                max_bytes: Some(8192),
-            };
-            let mut stdout = Vec::new();
-            loop {
-                let page = process::get_process_output(&output_state, request.clone())
-                    .await
-                    .unwrap();
-                let bytes = match page.stdout.encoding {
-                    agentic_gpt_protocol::ProcessOutputEncoding::Utf8 => {
-                        page.stdout.data.as_bytes().to_vec()
-                    }
-                    agentic_gpt_protocol::ProcessOutputEncoding::Base64 => {
-                        BASE64.decode(&page.stdout.data).unwrap()
-                    }
-                };
-                stdout.extend_from_slice(&bytes);
-                request.cursor = Some(page.next_cursor);
-                if page.eof {
-                    assert_eq!(
-                        page.capture_status,
-                        agentic_gpt_protocol::ProcessCaptureStatus::Complete
-                    );
-                    break;
-                }
-                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        let output = response.response.output.as_ref().unwrap();
+        let stdout = match output.stdout.encoding {
+            agentic_gpt_protocol::ProcessOutputEncoding::Utf8 => {
+                output.stdout.data.as_bytes().to_vec()
             }
-            assert_eq!(stdout.as_slice(), expected);
-        }
+            agentic_gpt_protocol::ProcessOutputEncoding::Base64 => {
+                BASE64.decode(&output.stdout.data).unwrap()
+            }
+        };
+        assert_eq!(stdout.as_slice(), expected);
     }
 
     #[tokio::test]

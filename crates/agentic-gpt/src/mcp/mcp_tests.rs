@@ -24,6 +24,7 @@ enum FakeBehavior {
     ToolError,
     Large,
     MediumLarge,
+    MediumLargeDelayed(u64),
     WaitForCancel,
     IgnoreCancel,
 }
@@ -133,6 +134,12 @@ impl rmcp::ServerHandler for FakeMcpServer {
                 FakeBehavior::MediumLarge => Ok(rmcp::model::CallToolResult::structured(json!({
                     "blob": "x".repeat(240_000)
                 }))),
+                FakeBehavior::MediumLargeDelayed(milliseconds) => {
+                    sleep(Duration::from_millis(milliseconds)).await;
+                    Ok(rmcp::model::CallToolResult::structured(json!({
+                        "blob": "x".repeat(240_000)
+                    })))
+                }
                 FakeBehavior::WaitForCancel => {
                     context.ct.cancelled().await;
                     context_cancelled.store(true, Ordering::Release);
@@ -350,14 +357,28 @@ async fn managed_mcp_fast_result_uses_real_rmcp_transport() {
     )
     .await
     .unwrap();
-    assert!(response.completed_inline);
-    assert_eq!(response.status, ProcessState::Completed);
+    assert!(matches!(
+        response
+            .response
+            .mcp_result
+            .as_ref()
+            .map(|result| &result.status),
+        Some(agentic_gpt_protocol::ProcessMcpResultStatus::Included)
+    ));
+    assert_eq!(response.response.state, ProcessState::Completed);
     assert_eq!(
         response.process.kind,
         agentic_gpt_protocol::ProcessKind::Mcp
     );
     assert_eq!(
-        response.result.as_ref().unwrap()["structuredContent"]["ok"],
+        response
+            .response
+            .mcp_result
+            .as_ref()
+            .unwrap()
+            .value
+            .as_ref()
+            .unwrap()["structuredContent"]["ok"],
         true
     );
     assert_eq!(
@@ -390,30 +411,38 @@ async fn managed_mcp_deferred_result_is_retained_for_process_get() {
     )
     .await
     .unwrap();
-    assert!(!response.completed_inline);
-    assert!(response.status.is_active());
+    assert!(response.response.state.is_active());
     let detail = crate::process::get_process_detail(&state, &response.process.process_id, 2)
         .await
         .unwrap();
     assert_eq!(detail.process.state, ProcessState::Completed);
     assert!(detail.result_available);
     assert_eq!(detail.result.unwrap()["structuredContent"]["delayed"], true);
-    let retrieved = crate::process::get_process_result(
+    let retrieved = crate::process::get_process_read(
         &state,
-        agentic_gpt_protocol::ProcessResultRequest {
+        agentic_gpt_protocol::ProcessReadRequest {
             process_id: response.process.process_id.clone(),
+            wait_seconds: Some(2),
+            view: agentic_gpt_protocol::ProcessReadView::Auto,
+            cursor: None,
             max_bytes: None,
         },
     )
     .await
     .unwrap();
-    assert!(matches!(
-        &retrieved.status,
-        &agentic_gpt_protocol::ProcessResultStatus::Complete
-    ));
-    assert!(retrieved.result_available);
     assert_eq!(
-        retrieved.result.unwrap()["structuredContent"]["delayed"],
+        retrieved.response.mcp_result.as_ref().unwrap().status,
+        agentic_gpt_protocol::ProcessMcpResultStatus::Included
+    );
+    assert_eq!(
+        retrieved
+            .response
+            .mcp_result
+            .as_ref()
+            .unwrap()
+            .value
+            .as_ref()
+            .unwrap()["structuredContent"]["delayed"],
         true
     );
     let _ = std::fs::remove_dir_all(root);
@@ -472,21 +501,23 @@ async fn managed_mcp_cancel_while_waiting_for_hub_confirmation_cleans_pending_se
         .await
         .unwrap();
     assert!(!detail.result_available);
-    let result = crate::process::get_process_result(
+    let result = crate::process::get_process_read(
         &state,
-        agentic_gpt_protocol::ProcessResultRequest {
+        agentic_gpt_protocol::ProcessReadRequest {
             process_id: response.process.process_id,
+            wait_seconds: Some(0),
+            view: agentic_gpt_protocol::ProcessReadView::Auto,
+            cursor: None,
             max_bytes: None,
         },
     )
     .await
     .unwrap();
-    assert!(matches!(
-        &result.status,
-        &agentic_gpt_protocol::ProcessResultStatus::Unavailable
-    ));
-    assert!(!result.result_available);
-    assert!(result.result.is_none());
+    assert_eq!(
+        result.response.mcp_result.as_ref().unwrap().status,
+        agentic_gpt_protocol::ProcessMcpResultStatus::Unavailable
+    );
+    assert!(result.response.mcp_result.as_ref().unwrap().value.is_none());
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -502,9 +533,55 @@ async fn managed_mcp_tool_error_and_large_result_are_truthful() {
     )
     .await
     .unwrap();
-    assert_eq!(error.status, ProcessState::Failed);
-    assert_eq!(error.error.as_ref().unwrap().code, "mcp_tool_error");
-    assert_eq!(error.result.as_ref().unwrap()["isError"], true);
+    assert_eq!(error.response.state, ProcessState::Failed);
+    assert_eq!(
+        error.response.error.as_ref().unwrap().code,
+        "mcp_tool_error"
+    );
+    assert_eq!(
+        error
+            .response
+            .mcp_result
+            .as_ref()
+            .unwrap()
+            .value
+            .as_ref()
+            .unwrap()["isError"],
+        true
+    );
+
+    let deferred = start_managed_call_with_factory(
+        &state,
+        managed_request(json!({}), 5),
+        "local:mcp.callTool",
+        None,
+        fake_factory(FakeMcpServer::new(FakeBehavior::MediumLarge)),
+    )
+    .await
+    .unwrap();
+    let deferred_result = deferred.response.mcp_result.as_ref().unwrap();
+    assert_eq!(
+        deferred_result.status,
+        agentic_gpt_protocol::ProcessMcpResultStatus::Deferred
+    );
+    assert!(deferred_result.value.is_none());
+    assert!(deferred_result.preview.as_deref().unwrap().contains("xxx"));
+    let deferred_read = crate::process::get_process_read(
+        &state,
+        agentic_gpt_protocol::ProcessReadRequest {
+            process_id: deferred.process.process_id.clone(),
+            wait_seconds: Some(0),
+            view: agentic_gpt_protocol::ProcessReadView::Auto,
+            cursor: None,
+            max_bytes: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        deferred_read.response.mcp_result.as_ref().unwrap().status,
+        agentic_gpt_protocol::ProcessMcpResultStatus::Deferred
+    );
 
     let large = start_managed_call_with_factory(
         &state,
@@ -515,35 +592,43 @@ async fn managed_mcp_tool_error_and_large_result_are_truthful() {
     )
     .await
     .unwrap();
-    assert_eq!(large.status, ProcessState::Completed);
-    assert!(large.result.is_none());
-    assert!(matches!(
-        large.result_status.as_ref(),
-        Some(agentic_gpt_protocol::ProcessResultStatus::TooLarge)
-    ));
-    assert!(!large.result_available);
-    assert!(large.result_bytes.unwrap() > crate::process::MAX_MCP_RESULT_BYTES);
-    assert!(large
-        .result_sha256
+    assert_eq!(large.response.state, ProcessState::Completed);
+    let large_result = large.response.mcp_result.as_ref().unwrap();
+    assert_eq!(
+        large_result.status,
+        agentic_gpt_protocol::ProcessMcpResultStatus::NotRetained
+    );
+    assert!(large_result.value.is_none());
+    assert!(large_result.bytes.unwrap() > crate::process::MAX_MCP_RESULT_BYTES);
+    assert!(large_result
+        .sha256
         .as_deref()
         .unwrap()
         .starts_with("sha256:"));
-    assert!(large.result_preview.as_deref().unwrap().contains("blob"));
-    let unavailable = crate::process::get_process_result(
+    assert!(large_result.preview.as_deref().unwrap().contains("blob"));
+    let unavailable = crate::process::get_process_read(
         &state,
-        agentic_gpt_protocol::ProcessResultRequest {
+        agentic_gpt_protocol::ProcessReadRequest {
             process_id: large.process.process_id.clone(),
+            wait_seconds: Some(0),
+            view: agentic_gpt_protocol::ProcessReadView::Auto,
+            cursor: None,
             max_bytes: None,
         },
     )
     .await
     .unwrap();
-    assert!(matches!(
-        &unavailable.status,
-        &agentic_gpt_protocol::ProcessResultStatus::TooLarge
-    ));
-    assert!(!unavailable.result_available);
-    assert!(unavailable.result.is_none());
+    assert_eq!(
+        unavailable.response.mcp_result.as_ref().unwrap().status,
+        agentic_gpt_protocol::ProcessMcpResultStatus::NotRetained
+    );
+    assert!(unavailable
+        .response
+        .mcp_result
+        .as_ref()
+        .unwrap()
+        .value
+        .is_none());
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -560,7 +645,7 @@ async fn managed_mcp_timeout_sends_exact_cancel_notification() {
     )
     .await
     .unwrap();
-    assert_eq!(response.status, ProcessState::TimedOut);
+    assert_eq!(response.response.state, ProcessState::TimedOut);
     assert_eq!(
         response.process.termination_evidence.as_deref(),
         Some("mcp_timeout_cancel_notification_sent")
@@ -878,6 +963,63 @@ async fn mcp_batch_preflight_and_capacity_fail_atomically_before_confirmation() 
 }
 
 #[tokio::test]
+async fn mcp_batch_impossible_response_budget_rejects_before_registration_or_effects() {
+    let (state, root) = managed_test_state(20).await;
+    let mut config = state.config.write().await;
+    config.limits.process_response_bytes = agentic_gpt_protocol::MIN_PROCESS_RESPONSE_BYTES;
+    config.confirmation_provider =
+        crate::config::ConfirmationProviderConfig::from_legacy("hub").unwrap();
+    drop(config);
+    state.temporary_mcp_allows.lock().await.clear();
+    let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    *state.hub_sender.lock().await = Some(sender);
+    let fake = FakeMcpServer::new(FakeBehavior::Fast);
+    let calls = (0..McpBatchRequest::MAX_CALLS)
+        .map(|index| {
+            batch_call(
+                Some(&format!("c{index:02}-{}", "x".repeat(60))),
+                "fake",
+                "unused",
+            )
+        })
+        .collect();
+    let error = timeout(
+        Duration::from_secs(1),
+        batch::start_managed_batch_with_factory(
+            &state,
+            batch_request(calls, McpBatchMode::Parallel, false, 0),
+            "local:mcp.batch",
+            None,
+            fake_factory(fake.clone()),
+        ),
+    )
+    .await
+    .expect("impossible batch budget should reject before confirmation")
+    .unwrap_err()
+    .to_string();
+    assert!(error.starts_with("mcp_batch_response_too_large"));
+    assert!(crate::process::list_processes(
+        &state,
+        agentic_gpt_protocol::ProcessListRequest::default(),
+    )
+    .await
+    .is_empty());
+    assert!(state.pending_confirmations.lock().await.is_empty());
+    assert!(receiver.try_recv().is_err());
+    assert!(fake.calls.lock().unwrap().is_empty());
+    let audit =
+        std::fs::read_to_string(root.join("workspace").join(".agentic-gpt-audit.jsonl")).unwrap();
+    let records = audit
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["outcome"], "response_budget_rejected");
+    assert_eq!(records[0]["childProcessIds"], json!([]));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn mcp_batch_sequential_fail_fast_preserves_order_and_audit_correlation() {
     let (state, root) = managed_test_state(10).await;
     add_fake_server(&state, "error", true).await;
@@ -906,7 +1048,6 @@ async fn mcp_batch_sequential_fail_fast_preserves_order_and_audit_correlation() 
     .await
     .unwrap();
 
-    assert!(response.completed_inline);
     assert_eq!(response.status, McpBatchStatus::CompletedWithErrors);
     assert_eq!(
         response
@@ -1100,6 +1241,225 @@ async fn mcp_batch_clips_late_results_to_the_aggregate_budget() {
 }
 
 #[tokio::test]
+async fn mcp_batch_public_projection_obeys_exact_json_budget_and_keeps_deferred_result_readable() {
+    let (state, root) = managed_test_state(20).await;
+    let fake = FakeMcpServer::new(FakeBehavior::MediumLarge);
+    let response = batch::start_managed_batch_with_factory(
+        &state,
+        batch_request(
+            (0..5)
+                .map(|index| {
+                    batch_call(
+                        Some(&format!("large-{index}")),
+                        "fake",
+                        &format!("large-{index}"),
+                    )
+                })
+                .collect(),
+            McpBatchMode::Parallel,
+            false,
+            10,
+        ),
+        "local:mcp.batch",
+        None,
+        fake_factory(fake),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status, McpBatchStatus::Completed);
+    let retained_count = response
+        .results
+        .iter()
+        .filter(|child| child.process.result.is_some() && !child.result_omitted)
+        .count();
+    assert!(retained_count > 0);
+
+    let min_budget = agentic_gpt_protocol::MIN_PROCESS_RESPONSE_BYTES;
+    let deferred_projection = crate::operation_result::slim_mcp_batch_response(
+        batch::ManagedMcpBatchResponse {
+            response: response.clone(),
+            response_budget: min_budget,
+        },
+        None,
+    )
+    .unwrap();
+    assert!(crate::process::serialized_json_size(&deferred_projection) <= min_budget);
+    let projected_children = deferred_projection["results"].as_array().unwrap();
+    assert_eq!(projected_children.len(), 5);
+    for (index, child) in projected_children.iter().enumerate() {
+        assert_eq!(child["index"], index);
+        assert_eq!(child["id"], format!("large-{index}"));
+        assert_eq!(child["agentId"], "test-agent");
+        assert_eq!(child["batchId"], response.batch_id);
+        assert_eq!(child["batchIndex"], index);
+        assert!(child["processId"]
+            .as_str()
+            .is_some_and(|process_id| !process_id.is_empty()));
+    }
+    let count_status = |value: &Value, status: &str| {
+        value["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|child| child["mcpResult"]["status"] == status)
+            .count()
+    };
+    assert_eq!(count_status(&deferred_projection, "included"), 0);
+    assert!(count_status(&deferred_projection, "deferred") > 0);
+
+    let deferred_retained_result = deferred_projection["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|public_child| {
+            public_child["mcpResult"]["status"] == "deferred"
+                && response.results.iter().any(|child| {
+                    child.process.process.process_id.as_str()
+                        == public_child["processId"].as_str().unwrap_or_default()
+                        && !child.result_omitted
+                        && child.process.result.is_some()
+                        && child.process.result_available
+                })
+        })
+        .expect("a budget-deferred result remains available to process.read");
+    let process_id = deferred_retained_result["processId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let mut one_value_response = response.clone();
+    for child in &mut one_value_response.results {
+        if child.process.process.process_id != process_id {
+            child.result_omitted = true;
+        }
+    }
+    let one_value_projection = crate::operation_result::slim_mcp_batch_response(
+        batch::ManagedMcpBatchResponse {
+            response: one_value_response,
+            response_budget: agentic_gpt_protocol::MAX_PROCESS_RESPONSE_BYTES,
+        },
+        None,
+    )
+    .unwrap();
+    assert_eq!(count_status(&one_value_projection, "included"), 1);
+    let exact_bytes = crate::process::serialized_json_size(&one_value_projection);
+    assert!(exact_bytes <= agentic_gpt_protocol::MAX_PROCESS_RESPONSE_BYTES);
+
+    let exact_projection = crate::operation_result::slim_mcp_batch_response(
+        batch::ManagedMcpBatchResponse {
+            response: response.clone(),
+            response_budget: exact_bytes,
+        },
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        crate::process::serialized_json_size(&exact_projection),
+        exact_bytes
+    );
+    assert_eq!(count_status(&exact_projection, "included"), 1);
+
+    let one_byte_below = exact_bytes - 1;
+    let below_projection = crate::operation_result::slim_mcp_batch_response(
+        batch::ManagedMcpBatchResponse {
+            response,
+            response_budget: one_byte_below,
+        },
+        None,
+    )
+    .unwrap();
+    assert!(crate::process::serialized_json_size(&below_projection) <= one_byte_below);
+    assert_eq!(count_status(&below_projection, "included"), 0);
+    let retrieved = crate::process::get_process_read(
+        &state,
+        agentic_gpt_protocol::ProcessReadRequest {
+            process_id,
+            wait_seconds: Some(0),
+            view: agentic_gpt_protocol::ProcessReadView::Auto,
+            cursor: None,
+            max_bytes: Some(agentic_gpt_protocol::MAX_PROCESS_RESPONSE_BYTES),
+        },
+    )
+    .await
+    .unwrap();
+    let result = retrieved.response.mcp_result.as_ref().unwrap();
+    assert_eq!(
+        result.status,
+        agentic_gpt_protocol::ProcessMcpResultStatus::Included
+    );
+    assert_eq!(
+        result.value.as_ref().unwrap()["structuredContent"]["blob"]
+            .as_str()
+            .unwrap()
+            .len(),
+        240_000
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn mcp_batch_response_budget_is_captured_before_waiting() {
+    let (state, root) = managed_test_state(20).await;
+    let captured_budget = agentic_gpt_protocol::MAX_PROCESS_RESPONSE_BYTES;
+    state.config.write().await.limits.process_response_bytes = captured_budget;
+    let fake = FakeMcpServer::new(FakeBehavior::MediumLargeDelayed(100));
+    let task_state = state.clone();
+    let task_fake = fake.clone();
+    let task = tokio::spawn(async move {
+        batch::start_managed_batch_with_factory_response(
+            &task_state,
+            batch_request(
+                (0..5)
+                    .map(|index| {
+                        batch_call(
+                            Some(&format!("large-{index}")),
+                            "fake",
+                            &format!("large-{index}"),
+                        )
+                    })
+                    .collect(),
+                McpBatchMode::Parallel,
+                false,
+                10,
+            ),
+            "local:mcp.batch",
+            None,
+            fake_factory(task_fake),
+        )
+        .await
+    });
+    wait_for_fake_request(&fake).await;
+    state.config.write().await.limits.process_response_bytes =
+        agentic_gpt_protocol::MIN_PROCESS_RESPONSE_BYTES;
+    let managed = timeout(Duration::from_secs(10), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(managed.response_budget, captured_budget);
+    let projection = crate::operation_result::slim_mcp_batch_response(managed, None).unwrap();
+    let bytes = crate::process::serialized_json_size(&projection);
+    assert!(bytes <= captured_budget);
+    assert!(bytes > agentic_gpt_protocol::MIN_PROCESS_RESPONSE_BYTES);
+    let included = projection["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|child| child["mcpResult"]["status"] == "included")
+        .count();
+    let deferred = projection["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|child| child["mcpResult"]["status"] == "deferred")
+        .count();
+    assert!(included > 0 && included < 5);
+    assert!(deferred > 0);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn mcp_batch_single_server_uses_one_confirmation_and_can_grant_temporary_allow() {
     let (state, root) = managed_test_state(10).await;
     state.temporary_mcp_allows.lock().await.clear();
@@ -1247,7 +1607,6 @@ async fn mcp_batch_multi_server_uses_one_non_scoped_confirmation_and_rejects_all
         .unwrap()
         .unwrap();
     assert_eq!(response.status, McpBatchStatus::Rejected);
-    assert!(response.completed_inline);
     assert_eq!(response.error.as_ref().unwrap().code, "mcp_batch_rejected");
     assert!(response
         .results
@@ -1320,7 +1679,6 @@ async fn mcp_batch_child_cancel_during_aggregate_confirmation_cancels_all_before
         .unwrap()
         .unwrap();
     assert_eq!(response.status, McpBatchStatus::Rejected);
-    assert!(response.completed_inline);
     assert_eq!(response.error.as_ref().unwrap().code, "mcp_batch_rejected");
     assert!(response
         .results

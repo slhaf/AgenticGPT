@@ -136,6 +136,7 @@ pub(crate) async fn collect(state: &AppState) -> Value {
             "processes": {
                 "configuredMax": config.limits.max_active_processes.configured_label(),
                 "resolvedMax": resolved_limit.resolved,
+                "defaultResponseBytes": config.limits.process_response_bytes,
                 "active": active_count,
                 "available": resolved_limit.resolved.saturating_sub(active_count),
             },

@@ -1372,6 +1372,7 @@ fn standalone_reload_replaces_the_frozen_live_subset() {
     candidate.path_policy.write_roots = vec![PathBuf::from("/tmp/live")];
     candidate.limits.max_active_processes = config::MaxActiveProcesses::Explicit(9);
     candidate.limits.max_file_search_context_lines = 20;
+    candidate.limits.process_response_bytes = agentic_gpt_protocol::MIN_PROCESS_RESPONSE_BYTES;
     live.mcp_servers.insert(
         "primary".to_string(),
         McpServerConfig {
@@ -1409,6 +1410,10 @@ fn standalone_reload_replaces_the_frozen_live_subset() {
         config::MaxActiveProcesses::Explicit(9)
     );
     assert_eq!(live.limits.max_file_search_context_lines, 20);
+    assert_eq!(
+        live.limits.process_response_bytes,
+        agentic_gpt_protocol::MIN_PROCESS_RESPONSE_BYTES
+    );
     assert_eq!(live.toolsets, candidate_toolsets);
     assert_eq!(
         live.mcp_servers["primary"].url.as_deref(),
@@ -1593,11 +1598,16 @@ async fn standalone_live_reload_applies_valid_mcp_map_and_rejects_invalid_candid
         },
     );
     valid.limits.max_file_search_context_lines = 20;
+    valid.limits.process_response_bytes = agentic_gpt_protocol::MAX_PROCESS_RESPONSE_BYTES;
     fs::write(&config_path, serde_json::to_vec_pretty(&valid).unwrap()).unwrap();
     reload_live_config_once(&state).await.unwrap();
     let live_after_valid = state.config.read().await.clone();
     assert_eq!(live_after_valid.mcp_servers, valid.mcp_servers);
     assert_eq!(live_after_valid.limits.max_file_search_context_lines, 20);
+    assert_eq!(
+        live_after_valid.limits.process_response_bytes,
+        agentic_gpt_protocol::MAX_PROCESS_RESPONSE_BYTES
+    );
     assert_eq!(live_after_valid.toolsets, valid.toolsets);
 
     let mut invalid = valid;
@@ -1612,6 +1622,10 @@ async fn standalone_live_reload_applies_valid_mcp_map_and_rejects_invalid_candid
         state.config.read().await.mcp_servers,
         live_after_valid.mcp_servers,
         "invalid disk changes must not partially replace the live map"
+    );
+    assert_eq!(
+        state.config.read().await.limits.process_response_bytes,
+        agentic_gpt_protocol::MAX_PROCESS_RESPONSE_BYTES
     );
     let _ = fs::remove_dir_all(root);
 }

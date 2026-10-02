@@ -219,10 +219,10 @@ pub(crate) async fn settle_initial_response(
 }
 
 fn includes_process_terminal(value: &Value) -> bool {
-    ["status", "state"]
-        .into_iter()
-        .filter_map(|field| value.get(field).and_then(Value::as_str))
-        .any(is_terminal_process_state)
+    value
+        .get("state")
+        .and_then(Value::as_str)
+        .is_some_and(is_terminal_process_state)
         || value.get("process").is_some_and(includes_process_terminal)
 }
 
@@ -351,14 +351,15 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
-    fn terminal_response_suppresses_completion_despite_inline_and_output_limits() {
+    fn terminal_process_observation_suppresses_completion_with_incomplete_capture() {
         let dispositions = initial_response_dispositions(
             "process.exec",
             &json!({
+                "agentId": "agent-local",
                 "processId": "process-terminal",
-                "status": "completed",
-                "completedInline": false,
-                "description": {"outputTruncated": true, "tooLarge": true}
+                "state": "completed",
+                "captureStatus": "incomplete",
+                "output": {"hasMore": true}
             }),
         )
         .unwrap();
@@ -373,10 +374,10 @@ mod tests {
         let dispositions = initial_response_dispositions(
             "process.exec",
             &json!({
+                "agentId": "agent-local",
                 "processId": "process-running",
-                "status": "running",
-                "completedInline": false,
-                "description": {"outputTruncated": true}
+                "state": "running",
+                "captureStatus": "capturing"
             }),
         )
         .unwrap();
@@ -391,12 +392,10 @@ mod tests {
         let dispositions = initial_response_dispositions(
             "process.batch",
             &json!({
-                "completedInline": false,
-                "description": {"outputTruncated": true},
                 "processes": [
-                    {"process": {"processId": "process-done", "state": "completed"}},
-                    {"processId": "process-active", "state": "running"},
-                    {"processId": "process-failed", "state": "failed"}
+                    {"agentId": "agent-local", "processId": "process-done", "kind": "command", "state": "completed", "captureStatus": "complete"},
+                    {"agentId": "agent-local", "processId": "process-active", "kind": "command", "state": "running", "captureStatus": "capturing"},
+                    {"agentId": "agent-local", "processId": "process-failed", "kind": "command", "state": "failed", "captureStatus": "complete"}
                 ]
             }),
         )

@@ -2220,6 +2220,36 @@ fn push_limits_form(
         theme,
     );
     lines.push(Line::raw(""));
+    lines.push(subsection_heading_line(
+        t(language, "Process response", "Process 响应"),
+        theme,
+    ));
+    let response_focus = optional_field_index(section, draft, SetupField::ProcessResponseBytes)
+        .unwrap_or(usize::MAX);
+    let response_focused = state.focus == response_focus;
+    if response_focused {
+        *focused_line = lines.len();
+    }
+    let response_value = optional_field_value(draft, SetupField::ProcessResponseBytes);
+    let response_cursor = editing_cursor(state, SetupField::ProcessResponseBytes);
+    lines.push(input_row_line(
+        optional_field_label(SetupField::ProcessResponseBytes, language),
+        current_input_value(state, SetupField::ProcessResponseBytes, &response_value),
+        response_focused,
+        response_cursor.is_some(),
+        response_cursor,
+        22,
+        5,
+        theme,
+    ));
+    push_optional_error(
+        lines,
+        errors,
+        SetupField::ProcessResponseBytes,
+        language,
+        theme,
+    );
+    lines.push(Line::raw(""));
 }
 
 fn push_optional_error(
@@ -2668,6 +2698,7 @@ pub(super) fn optional_focus_items(
                 value: "custom",
             },
             OptionalFocusItem::Field(SetupField::MaxFileSearchContextLines),
+            OptionalFocusItem::Field(SetupField::ProcessResponseBytes),
         ],
         OptionalSection::Sandbox => {
             let mut items = vec![
@@ -3360,12 +3391,13 @@ fn optional_center_inspector_body(
                     "• freedesktop → ntfy",
                 ],
                 OptionalSection::Limits => &[
-                    "Control Process batch concurrency, total active process capacity, and file-search context.",
+                    "Control Process batch concurrency, total active process capacity, file-search context, and the shared default Process response budget for exec, batch, skills.run, mcp.callTool, and read.",
                     "",
                     "Defaults:",
                     "• Process batch concurrency: 2",
                     "• Active processes: auto",
                     "• File-search context: 5 lines",
+                    "• Shared default Process response budget: 8192 bytes",
                 ],
                 OptionalSection::Sandbox => &[
                     "Add bubblewrap isolation to process execution.",
@@ -3424,12 +3456,13 @@ fn optional_center_inspector_body(
                     "• freedesktop → ntfy",
                 ],
                 OptionalSection::Limits => &[
-                    "控制 Process 批处理并发、活动进程总容量和文件搜索上下文。",
+                    "控制 Process 批处理并发、活动进程总容量、文件搜索上下文，以及 exec、batch、skills.run、mcp.callTool 和 read 共用的 Process 响应默认预算。",
                     "",
                     "默认值：",
                     "• Process 批处理并发：2",
                     "• 活动进程：auto",
                     "• 文件搜索上下文：5 行",
+                    "• Process 共用响应默认预算：8192 字节",
                 ],
                 OptionalSection::Sandbox => &[
                     "为进程执行增加 bubblewrap 隔离。",
@@ -3547,6 +3580,11 @@ fn optional_form_inspector_body(
                 SetupField::MaxFileSearchContextLines => &[
                     "Number of surrounding lines included for each file-search hit.",
                     "Default: 5; valid range: 0–100.",
+                ],
+                SetupField::ProcessResponseBytes => &[
+                    "Default serialized Process response budget shared by process.exec, process.batch, skills.run, mcp.callTool, and process.read.",
+                    "process.read uses this value when maxBytes is omitted; an explicit maxBytes overrides it for that read only (4096–1048576 bytes).",
+                    "Counts the UTF-8 JSON response, including metadata and encoded output; default: 8192 bytes. Does not limit retained process output.",
                 ],
                 SetupField::SandboxEnabled => &[
                     "Wrap process execution with bubblewrap isolation when enabled.",
@@ -3755,6 +3793,11 @@ fn optional_form_inspector_body(
                     "每个文件搜索命中项附带的上下文行数。",
                     "默认 5；有效范围 0–100。",
                 ],
+                SetupField::ProcessResponseBytes => &[
+                    "process.exec、process.batch、skills.run、mcp.callTool 和 process.read 共用的序列化 Process 响应默认预算。",
+                    "process.read 省略 maxBytes 时使用此值；显式 maxBytes 仅覆盖本次 read（4096–1048576 字节）。",
+                    "按包含元数据和编码输出的 UTF-8 JSON 计量；默认 8192 字节，配置范围 4096–1048576；不限制输出保留量。",
+                ],
                 SetupField::SandboxEnabled => &[
                     "开启后使用 bubblewrap 隔离进程执行。",
                     "默认关闭；无论是否开启，路径策略和确认检查仍然生效。",
@@ -3954,6 +3997,11 @@ fn optional_field_label(field: SetupField, language: UiLanguage) -> &'static str
         SetupField::MaxFileSearchContextLines => {
             t(language, "File-search context lines", "文件搜索上下文行数")
         }
+        SetupField::ProcessResponseBytes => t(
+            language,
+            "Default process response bytes",
+            "默认进程响应字节预算",
+        ),
         SetupField::SandboxEnabled => t(language, "Sandbox enabled", "启用沙箱"),
         SetupField::BubblewrapPath => t(language, "Bubblewrap path", "Bubblewrap 路径"),
         SetupField::RequiredRuntimePaths => t(language, "Required runtime paths", "必需运行时路径"),
@@ -4040,6 +4088,7 @@ pub(super) fn optional_field_value(draft: &OptionalSectionDraft, field: SetupFie
             SetupField::MaxConcurrentTasks => value.max_concurrent_tasks.clone(),
             SetupField::MaxActiveProcesses => value.max_active_processes.clone(),
             SetupField::MaxFileSearchContextLines => value.max_file_search_context_lines.clone(),
+            SetupField::ProcessResponseBytes => value.process_response_bytes.clone(),
             _ => String::new(),
         },
         OptionalSectionDraft::Sandbox(value) => match field {
@@ -4113,6 +4162,7 @@ pub(super) fn set_optional_field(
             SetupField::MaxConcurrentTasks => draft.max_concurrent_tasks = value,
             SetupField::MaxActiveProcesses => draft.max_active_processes = value,
             SetupField::MaxFileSearchContextLines => draft.max_file_search_context_lines = value,
+            SetupField::ProcessResponseBytes => draft.process_response_bytes = value,
             _ => {}
         },
         OptionalSectionDraft::Sandbox(draft) => match field {
@@ -4979,6 +5029,11 @@ fn review_item_label(label_key: &str, language: UiLanguage) -> &'static str {
         "max_file_search_context_lines" => {
             t(language, "File-search context lines", "文件搜索上下文行数")
         }
+        "process_response_bytes" => t(
+            language,
+            "Default process response bytes",
+            "默认进程响应字节预算",
+        ),
         "sandbox_enabled" => t(language, "Sandbox enabled", "启用沙箱"),
         "bubblewrap_path" => t(language, "Bubblewrap path", "Bubblewrap 路径"),
         "required_runtime_paths" => t(language, "Required runtime paths", "必需运行时路径"),

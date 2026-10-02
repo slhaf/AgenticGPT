@@ -76,9 +76,7 @@ pub(crate) fn command_type(command: &HubCommand) -> &'static str {
         HubCommand::Exec { .. } => "process.exec",
         HubCommand::ProcessBatch { .. } => "process.batch",
         HubCommand::ProcessList { .. } => "process.list",
-        HubCommand::ProcessStatus { .. } => "process.status",
-        HubCommand::ProcessOutput { .. } => "process.output",
-        HubCommand::ProcessResult { .. } => "process.result",
+        HubCommand::ProcessRead { .. } => "process.read",
         HubCommand::ProcessCancel { .. } => "process.cancel",
         HubCommand::EventList { .. } => "event.list",
         HubCommand::EventGet { .. } => "event.get",
@@ -172,6 +170,22 @@ pub(crate) fn prepare_run_in_transaction(
 
 pub(crate) fn pending_unacked(state: &HubState, agent_id: &str) -> Result<Vec<PendingReplay>> {
     let conn = state.db.lock().unwrap();
+    // Retired read variants must not be deserialized or replayed after the wire cutover.
+    conn.execute(
+        "update agent_runs
+         set status = 'unknown',
+             reason = case
+                 when reason is null or reason = '' then 'retired_process_read_command'
+                 else reason || ';retired_process_read_command'
+             end,
+             updated_at = ?1
+         where agent_id = ?2
+           and command_type in ('process.status', 'process.output', 'process.result')
+           and acked_at is null
+           and result_json is null
+           and status in ('created', 'dispatched', 'timeout_waiting_result')",
+        params![Utc::now(), agent_id],
+    )?;
     let mut stmt = conn.prepare(
         "select run_id, request_id, command_hash, command_json
          from agent_runs
@@ -179,6 +193,7 @@ pub(crate) fn pending_unacked(state: &HubState, agent_id: &str) -> Result<Vec<Pe
            and acked_at is null
            and result_json is null
            and status in ('created', 'dispatched', 'timeout_waiting_result')
+           and command_type not in ('process.status', 'process.output', 'process.result')
          order by created_at asc",
     )?;
     let rows = stmt.query_map(params![agent_id], |row| {
@@ -725,6 +740,230 @@ mod tests {
             oauth_tokens: Arc::new(Mutex::new(HashMap::new())),
             ntfy_health: Arc::new(Mutex::new(None)),
         }
+    }
+    #[test]
+    fn pending_unacked_preserves_unified_reads_until_acknowledged() {
+        let state = test_state();
+        let command = HubCommand::ProcessRead {
+            request_id: "req_process_read".to_string(),
+            payload: agentic_gpt_protocol::ProcessReadRequest {
+                process_id: "process-1".to_string(),
+                wait_seconds: Some(0),
+                view: agentic_gpt_protocol::ProcessReadView::Auto,
+                cursor: None,
+                max_bytes: None,
+            },
+        };
+
+        let receipt = prepare_run(&state, "agent", "req_process_read", &command).unwrap();
+        let pending = pending_unacked(&state, "agent").unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(matches!(
+            &pending[0].command,
+            HubCommand::ProcessRead { request_id, .. } if request_id == "req_process_read"
+        ));
+        assert!(mark_acked(
+            &state,
+            "agent",
+            &receipt.run_id,
+            "req_process_read",
+            &receipt.command_hash,
+        )
+        .unwrap());
+        assert!(pending_unacked(&state, "agent").unwrap().is_empty());
+    }
+    #[test]
+    fn pending_unacked_retires_legacy_reads_without_blocking_supported_commands() {
+        let state = test_state();
+        let prepare_legacy_read = |request_id: &str, command_type: &str| {
+            let command = HubCommand::ProcessRead {
+                request_id: request_id.to_string(),
+                payload: agentic_gpt_protocol::ProcessReadRequest {
+                    process_id: "legacy-process".to_string(),
+                    wait_seconds: Some(0),
+                    view: agentic_gpt_protocol::ProcessReadView::Auto,
+                    cursor: None,
+                    max_bytes: None,
+                },
+            };
+            let receipt = prepare_run(&state, "agent", request_id, &command).unwrap();
+            let command_json = serde_json::json!({
+                "type": command_type,
+                "requestId": request_id,
+                "payload": { "processId": "legacy-process" }
+            })
+            .to_string();
+            let command_hash = crate::utils::sha256_hex(&command_json);
+            state
+                .db
+                .lock()
+                .unwrap()
+                .execute(
+                    "update agent_runs
+                     set command_type = ?1, command_json = ?2, command_hash = ?3
+                     where run_id = ?4",
+                    params![command_type, command_json, command_hash, receipt.run_id],
+                )
+                .unwrap();
+            (receipt, command_json, command_hash)
+        };
+
+        let mut retired = Vec::new();
+        for (index, command_type) in ["process.status", "process.output", "process.result"]
+            .iter()
+            .copied()
+            .enumerate()
+        {
+            let request_id = format!("req_legacy_read_{index}");
+            let (receipt, command_json, command_hash) =
+                prepare_legacy_read(&request_id, command_type);
+            retired.push((
+                receipt,
+                request_id,
+                command_type,
+                command_json,
+                command_hash,
+            ));
+        }
+
+        let completed_request_id = "req_legacy_result_evidence";
+        let completed_command = HubCommand::ProcessRead {
+            request_id: completed_request_id.to_string(),
+            payload: agentic_gpt_protocol::ProcessReadRequest {
+                process_id: "legacy-result".to_string(),
+                wait_seconds: Some(0),
+                view: agentic_gpt_protocol::ProcessReadView::Auto,
+                cursor: None,
+                max_bytes: None,
+            },
+        };
+        let completed_receipt =
+            prepare_run(&state, "agent", completed_request_id, &completed_command).unwrap();
+        assert!(mark_acked(
+            &state,
+            "agent",
+            &completed_receipt.run_id,
+            completed_request_id,
+            &completed_receipt.command_hash,
+        )
+        .unwrap());
+        let retained_result = serde_json::json!({ "value": "already recorded" });
+        assert!(matches!(
+            store_result(
+                &state,
+                "agent",
+                &completed_receipt.run_id,
+                completed_request_id,
+                &retained_result,
+            )
+            .unwrap(),
+            StoreResultOutcome::Stored { .. }
+        ));
+        let completed_legacy_json = serde_json::json!({
+            "type": "process.result",
+            "requestId": completed_request_id,
+            "payload": { "processId": "legacy-result" }
+        })
+        .to_string();
+        let completed_legacy_hash = crate::utils::sha256_hex(&completed_legacy_json);
+        state
+            .db
+            .lock()
+            .unwrap()
+            .execute(
+                "update agent_runs
+                 set command_type = 'process.result', command_json = ?1, command_hash = ?2
+                 where run_id = ?3",
+                params![
+                    completed_legacy_json,
+                    completed_legacy_hash,
+                    completed_receipt.run_id
+                ],
+            )
+            .unwrap();
+        let completed_before = get_run(&state, &completed_receipt.run_id).unwrap().unwrap();
+
+        let exec_request_id = "req_supported_exec";
+        let exec = HubCommand::Exec {
+            request_id: exec_request_id.to_string(),
+            payload: agentic_gpt_protocol::ProcessExecRequest {
+                agent_id: "agent".to_string(),
+                group: None,
+                program: "echo".to_string(),
+                args: vec!["ok".to_string()],
+                need_confirm: false,
+                confirm_method: None,
+                working_directory: None,
+                wait_seconds: Some(0),
+            },
+        };
+        let exec_receipt = prepare_run(&state, "agent", exec_request_id, &exec).unwrap();
+
+        let pending = pending_unacked(&state, "agent").unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].run_id, exec_receipt.run_id);
+        assert_eq!(pending[0].request_id, exec_request_id);
+        assert_eq!(pending[0].command_hash, exec_receipt.command_hash);
+        assert!(matches!(
+            &pending[0].command,
+            HubCommand::Exec { request_id, .. } if request_id.as_str() == exec_request_id
+        ));
+
+        type RetiredReceiptRow = (
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        );
+        for (receipt, request_id, command_type, command_json, command_hash) in retired {
+            let stored: RetiredReceiptRow = state
+                .db
+                .lock()
+                .unwrap()
+                .query_row(
+                    "select run_id, request_id, command_type, command_json, command_hash,
+                            status, reason, acked_at, result_json
+                     from agent_runs where run_id = ?1",
+                    params![receipt.run_id],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                            row.get(6)?,
+                            row.get(7)?,
+                            row.get(8)?,
+                        ))
+                    },
+                )
+                .unwrap();
+            assert_eq!(stored.0, receipt.run_id);
+            assert_eq!(stored.1, request_id);
+            assert_eq!(stored.2, command_type);
+            assert_eq!(stored.3, command_json);
+            assert_eq!(stored.4, command_hash);
+            assert_eq!(stored.5, "unknown");
+            assert_eq!(stored.6.as_deref(), Some("retired_process_read_command"));
+            assert_eq!(stored.7, None);
+            assert_eq!(stored.8, None);
+        }
+
+        let completed_after = get_run(&state, &completed_receipt.run_id).unwrap().unwrap();
+        assert_eq!(completed_after.command_type, "process.result");
+        assert_eq!(completed_after.command_hash, completed_legacy_hash);
+        assert_eq!(completed_after.status, completed_before.status);
+        assert_eq!(completed_after.result, completed_before.result);
+        assert_eq!(completed_after.reason, completed_before.reason);
+        assert_eq!(completed_after.updated_at, completed_before.updated_at);
+        assert_eq!(completed_after.result, Some(retained_result));
     }
 
     #[test]

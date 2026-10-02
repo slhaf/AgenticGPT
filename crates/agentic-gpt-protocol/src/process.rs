@@ -1,6 +1,10 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+pub const DEFAULT_PROCESS_RESPONSE_BYTES: usize = 8 * 1024;
+pub const MIN_PROCESS_RESPONSE_BYTES: usize = 4 * 1024;
+pub const MAX_PROCESS_RESPONSE_BYTES: usize = 1024 * 1024;
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProcessExecRequest {
@@ -284,46 +288,37 @@ pub struct ProcessOutputSegment {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ProcessOutputRequest {
+pub struct ProcessOutputPage {
+    pub stdout: ProcessOutputSegment,
+    pub stderr: ProcessOutputSegment,
+    pub next_cursor: String,
+    pub has_more: bool,
+    pub eof: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessReadView {
+    #[default]
+    Auto,
+    Status,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProcessReadRequest {
     pub process_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_seconds: Option<u64>,
+    #[serde(default)]
+    pub view: ProcessReadView,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_bytes: Option<usize>,
 }
 
-impl ProcessOutputRequest {
-    pub const DEFAULT_MAX_BYTES: usize = 8 * 1024;
-    pub const MAX_MAX_BYTES: usize = 32 * 1024;
-
-    pub fn effective_max_bytes(&self) -> usize {
-        self.max_bytes
-            .unwrap_or(Self::DEFAULT_MAX_BYTES)
-            .clamp(1, Self::MAX_MAX_BYTES)
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProcessOutputResponse {
-    pub process_id: String,
-    pub stdout: ProcessOutputSegment,
-    pub stderr: ProcessOutputSegment,
-    pub next_cursor: String,
-    pub has_more: bool,
-    pub eof: bool,
-    pub capture_status: ProcessCaptureStatus,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ProcessStatusRequest {
-    pub process_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub wait_seconds: Option<u64>,
-}
-
-impl ProcessStatusRequest {
+impl ProcessReadRequest {
     pub const DEFAULT_WAIT_SECONDS: u64 = 5;
     pub const MAX_WAIT_SECONDS: u64 = 30;
 
@@ -332,15 +327,82 @@ impl ProcessStatusRequest {
             .unwrap_or(Self::DEFAULT_WAIT_SECONDS)
             .min(Self::MAX_WAIT_SECONDS)
     }
+
+    pub fn effective_max_bytes(&self, configured: usize) -> Result<usize, String> {
+        match self.max_bytes {
+            Some(bytes)
+                if !(MIN_PROCESS_RESPONSE_BYTES..=MAX_PROCESS_RESPONSE_BYTES).contains(&bytes) =>
+            {
+                Err("process_read_max_bytes_out_of_range".to_string())
+            }
+            Some(bytes) => Ok(bytes),
+            None => Ok(configured),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessMcpResultStatus {
+    Pending,
+    Included,
+    Deferred,
+    Unavailable,
+    NotRetained,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ProcessStatusResponse {
-    #[serde(flatten)]
-    pub process: ProcessInfo,
+pub struct ProcessMcpResult {
+    pub status: ProcessMcpResultStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcessResponse {
+    pub agent_id: String,
+    pub process_id: String,
+    pub kind: ProcessKind,
+    pub state: ProcessState,
+    pub capture_status: ProcessCaptureStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_index: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wait_elapsed_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<ProcessError>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancel_outcome: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub termination_evidence: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<ProcessOutputPage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_result: Option<ProcessMcpResult>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcessBatchResponse {
+    pub batch_id: String,
+    pub status: String,
+    pub processes: Vec<ProcessResponse>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -412,73 +474,6 @@ pub struct ProcessCancelResponse {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ProcessInlineStream {
-    pub data: String,
-    pub encoding: ProcessOutputEncoding,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProcessInlineOutput {
-    pub stdout: ProcessInlineStream,
-    pub stderr: ProcessInlineStream,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProcessOutputPreview {
-    pub stdout: String,
-    pub stderr: String,
-    pub truncated: bool,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ProcessResultStatus {
-    Complete,
-    TooLarge,
-    Unavailable,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProcessResultRequest {
-    pub process_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_bytes: Option<usize>,
-}
-
-impl ProcessResultRequest {
-    pub const DEFAULT_MAX_BYTES: usize = 8 * 1024;
-    pub const MAX_MAX_BYTES: usize = 512 * 1024;
-
-    pub fn effective_max_bytes(&self) -> usize {
-        self.max_bytes
-            .unwrap_or(Self::DEFAULT_MAX_BYTES)
-            .clamp(1, Self::MAX_MAX_BYTES)
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProcessResultResponse {
-    pub process_id: String,
-    pub status: ProcessResultStatus,
-    pub result_available: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub result: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<ProcessError>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub result_bytes: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub result_sha256: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub result_preview: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct ProcessDetail {
     pub process: ProcessInfo,
     pub detail_available: bool,
@@ -498,81 +493,6 @@ pub struct ProcessDetail {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ProcessResponse {
-    pub status: ProcessState,
-    pub completed_inline: bool,
-    #[serde(flatten)]
-    pub process: ProcessInfo,
-    pub poll_after_ms: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub inline_output: Option<ProcessInlineOutput>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output_preview: Option<ProcessOutputPreview>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub result: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub result_status: Option<ProcessResultStatus>,
-    #[serde(default)]
-    pub result_available: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub result_bytes: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub result_sha256: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub result_preview: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<ProcessError>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProcessBatchResponse {
-    pub batch_id: String,
-    pub status: String,
-    pub completed_inline: bool,
-    pub poll_after_ms: u64,
-    pub processes: Vec<ProcessResponse>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProcessToolResponse {
-    pub process_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub group: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub kind: Option<ProcessKind>,
-    pub state: ProcessState,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub elapsed_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub duration_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub exit_code: Option<i32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<ProcessError>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub result_status: Option<ProcessResultStatus>,
-    #[serde(default)]
-    pub result_available: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub result_bytes: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub result_sha256: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub result_preview: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProcessBatchToolResponse {
-    pub batch_id: String,
-    pub status: String,
-    pub results: Vec<ProcessToolResponse>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct ProcessCursor {
     pub version: u8,
     pub process_id: String,
@@ -585,63 +505,93 @@ mod tests {
     use super::*;
 
     #[test]
-    fn process_list_and_status_contracts_have_bounded_defaults_without_wait_only() {
-        let list: ProcessListRequest = serde_json::from_value(serde_json::json!({})).unwrap();
-        assert_eq!(list.effective_limit(), 50);
-        assert!(list.group.is_none());
-        assert!(list.cursor.is_none());
-
-        let status: ProcessStatusRequest = serde_json::from_value(serde_json::json!({
+    fn process_read_defaults_view_and_bounds_wait() {
+        let request: ProcessReadRequest = serde_json::from_value(serde_json::json!({
             "processId": "process-1"
         }))
         .unwrap();
-        assert_eq!(status.effective_wait_seconds(), 5);
-        assert_eq!(status.process_id, "process-1");
-        assert!(
-            serde_json::from_value::<ProcessStatusRequest>(serde_json::json!({
-                "processId": "process-1",
-                "waitOnly": true
-            }))
-            .is_err()
-        );
+        assert_eq!(request.process_id, "process-1");
+        assert_eq!(request.view, ProcessReadView::Auto);
+        assert_eq!(request.effective_wait_seconds(), 5);
+        assert!(request.cursor.is_none());
+        assert!(request.max_bytes.is_none());
 
         for (wait_seconds, expected) in [(0, 0), (5, 5), (30, 30), (31, 30), (u64::MAX, 30)] {
-            let status = ProcessStatusRequest {
+            let request = ProcessReadRequest {
                 process_id: "process-1".to_string(),
                 wait_seconds: Some(wait_seconds),
+                view: ProcessReadView::Status,
+                cursor: None,
+                max_bytes: None,
             };
-            assert_eq!(status.effective_wait_seconds(), expected);
+            assert_eq!(request.effective_wait_seconds(), expected);
         }
     }
 
     #[test]
-    fn process_wire_contract_uses_process_id_and_never_status_output_fields() {
-        let request = ProcessOutputRequest {
+    fn process_read_rejects_explicit_budgets_outside_shared_limits() {
+        let read = |max_bytes| ProcessReadRequest {
             process_id: "process-1".to_string(),
+            wait_seconds: None,
+            view: ProcessReadView::Auto,
             cursor: None,
-            max_bytes: None,
+            max_bytes,
         };
-        let request_json = serde_json::to_value(request).unwrap();
-        assert_eq!(request_json["processId"], "process-1");
-        assert_eq!(request_json["maxBytes"], serde_json::Value::Null);
-        assert_eq!(ProcessOutputRequest::DEFAULT_MAX_BYTES, 8192);
-        assert_eq!(ProcessOutputRequest::MAX_MAX_BYTES, 32768);
-        assert_eq!(ProcessResultRequest::MAX_MAX_BYTES, 512 * 1024);
+        assert_eq!(
+            read(None).effective_max_bytes(8192).unwrap(),
+            DEFAULT_PROCESS_RESPONSE_BYTES
+        );
+        for bytes in [
+            MIN_PROCESS_RESPONSE_BYTES,
+            DEFAULT_PROCESS_RESPONSE_BYTES,
+            MAX_PROCESS_RESPONSE_BYTES,
+        ] {
+            assert_eq!(read(Some(bytes)).effective_max_bytes(1).unwrap(), bytes);
+        }
+        assert!(read(Some(MIN_PROCESS_RESPONSE_BYTES - 1))
+            .effective_max_bytes(DEFAULT_PROCESS_RESPONSE_BYTES)
+            .is_err());
+        assert!(read(Some(MAX_PROCESS_RESPONSE_BYTES + 1))
+            .effective_max_bytes(DEFAULT_PROCESS_RESPONSE_BYTES)
+            .is_err());
+    }
 
-        let result = ProcessResultResponse {
+    #[test]
+    fn unified_process_response_has_compact_identity_and_observation_fields() {
+        let response = ProcessResponse {
+            agent_id: "agent-1".to_string(),
             process_id: "process-1".to_string(),
-            status: ProcessResultStatus::Unavailable,
-            result_available: false,
-            result: None,
+            kind: ProcessKind::Command,
+            state: ProcessState::Completed,
+            capture_status: ProcessCaptureStatus::Complete,
+            group: None,
+            batch_id: None,
+            batch_index: None,
+            exit_code: Some(0),
+            wait_elapsed_ms: Some(5),
             error: None,
-            result_bytes: Some(600_000),
-            result_sha256: Some("sha256:abc".to_string()),
-            result_preview: Some("preview".to_string()),
+            cancel_outcome: None,
+            termination_evidence: None,
+            capture_error: None,
+            output: None,
+            mcp_result: None,
         };
-        let json = serde_json::to_value(result).unwrap();
+        let json = serde_json::to_value(response).unwrap();
+        assert_eq!(json["agentId"], "agent-1");
         assert_eq!(json["processId"], "process-1");
-        assert_eq!(json["status"], "unavailable");
-        assert_eq!(json["resultAvailable"], false);
-        assert!(json.get("result").is_none());
+        assert_eq!(json["kind"], "command");
+        assert_eq!(json["state"], "completed");
+        assert_eq!(json["captureStatus"], "complete");
+        assert_eq!(json["exitCode"], 0);
+        for removed in [
+            "status",
+            "completedInline",
+            "pollAfterMs",
+            "inlineOutput",
+            "outputPreview",
+            "resultAvailable",
+        ] {
+            assert!(json.get(removed).is_none());
+        }
     }
 }
