@@ -197,3 +197,14 @@
 - 新确定性双Agent真实dispatch回归先在旧单槽实现上exit101，实际捕获Null != file_revision_conflict；随后仅修改cfg(test)hook按路径保留注册项，原生产逻辑不动。
 - rustfmt两处受影响文件后cargo fmt --all -- --check通过；cargo test -p agentic-gpt --bin agentic-gpt file_edit_ -- --nocapture --test-threads=8实际8 passed；cargo clippy -p agentic-gpt --all-targets -- -D warnings通过且无warning。
 - 此为修复前/后定点证据，不是完整新验收轮；历史3/3及新增3/3保持。公共文档无需改动，原事件系统集成及全验收仍blocked。修复阶段提交仅包含本次hook/新回归的精确变更及planning证据，不夹带stdio tests已有未提交事件功能。
+
+## 再次授权完整验收进行中
+- 用户明确“授权完整验收”；本次只执行一次完整链，历史3/3及前次新增3/3保持。所有代码冻结，主线程执行fmt/check/strict Clippy/workspace tests/build/live parity。
+- Rust各阶段和Agent/Hub构建均通过；Agent unit suite563 passed/1 ignored、Hub132 passed、protocol21 passed，live parity仍运行中（bg_28）。此处不预报整链成功。
+- 原隔离TUI操作/保存/读回/同配置生产证据见本记录100–102，测试hook修复未修改配置或TUI实现。并已把findings中的单槽描述和“未实施修复”明确标为调查阶段历史状态，避免误述当前实现。
+
+## 再次授权的一次完整验收结果：失败
+- 完整命令链fmt --check、cargo check --workspace、cargo clippy --workspace --all-targets -- -D warnings、cargo test --workspace、Agent/Hub build均通过，无warning；workspace实际761 passed（13 suites）、1 ignored。
+- live parity exit1（artifact://291）：Hub inline process.exec event suppression预期current为low: 0 | medium: 0 | high: 0，实际low: 1 | medium: 1 | high: 0。输出不足以区分先前pending未清理或此次inline错误产事件，未展开调查/修复/重验。
+- 本轮实际通过Agent stdio/Unix/HTTP共享inbox/reopen、snapshot reload、内部off、Hub late/restart、primary/delta补漏、crash恢复、targetless不消费曝光以及HubMCP/HTTP list/get/mark。delta live partial-A admission竞态仍为[INFERENCE]，恢复checkpoint证据不改写为live竞态复现。
+- 本次单独授权验收失败，历史3/3与前次新增3/3保持；停止，不自动追加修复轮。仅提交planning授权/结果证据及历史表述修正，feature集成/文档完成提交继续暂缓，goal不complete。

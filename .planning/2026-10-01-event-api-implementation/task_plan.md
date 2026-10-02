@@ -28,7 +28,7 @@ Status: blocked
 
 ## 阶段四：文档与验收
 Status: blocked
-历史完整验收3/3失败已保留；追加授权的新增完整验收也已失败3/3，达到停止条件。真实隔离TUI及定点Agent/Hub证据保留，整体目标未完成；不再修复重验，源代码集成与文档完成提交暂缓。
+历史完整验收3/3及追加验收3/3失败均保留。测试注入修复后再次授权的一次完整验收也失败：Rust全部通过，live parity在Hub inline process.exec event suppression计数断言失败。记录并停止，不自动修复重试；整体未完成，源代码集成提交继续暂缓。
 
 ## 验收与停止
 - cargo fmt --all -- --check
@@ -90,3 +90,7 @@ Status: complete
 Status: complete
 用户要求“可以，尝试修一下”。仅修复cfg(test)外部改写注入的单槽覆盖；增加确定性双Agent路径隔离的真实dispatch回归，先观察修前失败、再运行修后相关定点回归。生产代码与原断言不变，不重启完整验收；历史3/3及新增3/3保留。此内部测试修复不改变公共文档合同。
 已取得新真实dispatch回归修前失败/修后通过证据，8项相关并行回归及fmt/strict Clippy通过；本次局部修复完成。没有重启全验收，原目标仍blocked。
+
+## 用户再次授权完整验收
+Status: blocked
+再次授权的一次完整验收已结束并失败；fmt/check/strict Clippy、workspace761 tests/1 ignored、Agent/Hub build通过，live parity在Hub inline process.exec event suppression期望全零而实际low1/medium1时exit1。历史3/3及前次新增3/3不重置。本次未修复/重试，保留真实TUI与本轮各定点通过证据；仍未标目标完成。

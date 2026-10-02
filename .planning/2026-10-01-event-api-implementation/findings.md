@@ -121,8 +121,8 @@
 - 最终第三轮strict Rust门禁无warning，但workspace test失败于file_edit_apply_patch_revalidates_external_change_before_commit（stdio_server_tests.rs:3418），error实际Null而非file_revision_conflict。此次未继续诊断或重跑，原因尚未确定。
 - 本轮build/live parity被&&阻断；整体仍未完成，历史3/3及新增3/3均保留。此前定点恢复证据不替代整链成功。
 
-## 用户授权的file.edit调查：初步证据
-- 测试hook为cfg(test)进程全局Mutex<Option<(PathBuf,Vec<u8>)>>；inject_external_change直接替换唯一槽位（file_ops.rs:64–78）。take_external_change_for只按当前patch路径匹配（:110–127），不防另一个测试覆盖尚未消费的注入。
+## 用户授权的file.edit调查：修复前初步证据
+- 修复前测试hook为cfg(test)进程全局Mutex<Option<(PathBuf,Vec<u8>)>>；inject_external_change直接替换唯一槽位（当时file_ops.rs:64–78）。take_external_change_for只按当前patch路径匹配（当时:110–127），不防另一个测试覆盖尚未消费的注入。
 - 原失败测试在stdio_server_tests.rs:3411注入race.txt后await dispatch；另一测试file_edit_add_creates_nested_parents_after_whole_patch_preflight在:3178也注入external/nested/target.txt。原始artifact://276显示后者通过、前者失败；日志未记录具体线程交错，尚不能声称捕获原失败调度。
 - 真实生产revalidation在file_ops.rs:1841–1846重新读取并比较revision；hook只在cfg(test)的:1833–1836写外部正文。调查将隔离执行实际hook代码，区分测试注入丢失与生产校验缺陷，不运行完整suite。
 
@@ -130,9 +130,14 @@
 - 已用源码原样的inject_external_change/take_external_change_for函数编译临时Rust probe（只提供它们读取的source/target/path输入字段），确定执行A注入→B注入→A消费→B消费。实际输出：单独A可消费；交错后A不可消费、B可消费、A再次消费仍为空，exit0。这是hook覆盖机制的可执行证明，不是原完整测试线程调度的重放，也不是生产revalidation的验证。
 - 另用现有已构建Agent在一次性HOME/config/workspace启动真实HTTP MCP，无注入地执行同一before→agent patch。实际响应{changed:1,changes:[{action:"updated",path:"race.txt"}],events:{current:"low: 0 | medium: 0 | high: 0",new:[]},status:"completed"}，文件agent换行，exit0。此处仅证明成功响应没有error；生产binary不含cfg(test)hook，不能用此smoke替代失败单测。
 - 因果解释：A注入被B覆盖→A未发生外部改写→A revision不变→正常commit→error.code缺失，被JSON索引读为Null。原日志同进程B通过/A失败与此吻合；原调度无记录，因此将其标作最有证据支持的原因，而非已捕获原交错。
-- 影响范围为cfg(test)共享单槽；两个调用者均受影响。未发现要求修改生产错误投影或事件面板的证据。推荐仅把测试注入状态按绝对路径隔离、消费匹配项，保留两个行为断言；不删除测试、不放宽assert、不以全套串行化隐藏问题。本次未实施修复。
+- 调查阶段确认影响范围为修复前cfg(test)共享单槽；两个调用者均受影响。未发现要求修改生产错误投影或事件面板的证据。当时建议仅按绝对路径隔离测试注入、消费匹配项，保留两个行为断言；调查阶段未实施修复，随后已按新授权实施，见下节。
 
 ## 测试注入修复与真实dispatch回归
 - 新增file_edit_external_changes_remain_isolated_by_path：两个独立AgentMcpServer workspace使用同名race.txt，先同时注册两个不同绝对路径，再逐个真实dispatch更新；每项必须返回file_revision_conflict且保留各自不同的external正文。修前该回归实际失败Null != file_revision_conflict；不是仅hook helper探针。
 - cfg(test)外部改写注入改为Mutex<Vec<(PathBuf,Vec<u8>)>>，按路径更新/新增待注入项，消费只移除当前patch匹配项；不再覆盖其他路径。同路径仍保留最后一次注册内容，原生产校验和两个旧回归断言不变。
 - 修后8项file_edit_回归以8线程运行全部通过，包括新确定性隔离回归和原失败/相邻add回归；fmt --check与Agent all-targets strict Clippy均exit0、无warning（artifact://284）。内部测试修复不改变用户文档/API合同；未执行全workspace/live完整验收，计数保持历史3/3及新增3/3。
+
+## 再次授权完整验收的未解决项
+- 修复测试注入后workspace实际761 passed/1 ignored，strict Clippy无warning；先前file.edit失败未在本轮出现。
+- 全live parity现到达Hub inline process.exec event suppression，current断言预期全零却实际low1/medium1（artifact://291）。这是inbox计数差异证据，单凭错误不能断言inline资格仲裁缺陷，亦不能直接认定fixture残留。
+- 此前真实Hub聚合/共享API、晚到结果/重启、delta检查点和crash恢复在同一完整运行中均已通过，但后续parity未完成。按本次一次验收授权记录失败并停止，原目标仍未完成。
