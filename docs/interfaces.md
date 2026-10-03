@@ -30,23 +30,22 @@ GPT Actions API 由 `openapi/hub.yaml` 描述，并受 Hub API key 保护。
 
 - `GET /v1/info`：安全的 Hub 运行时概要。
 - `GET /v1/agents`：启用的本地 Agent、其在线状态和安全配置概要。
-- `POST /v1/process/exec`：启动一个受管理的进程并短暂等待。请求必须提供 `agentId`、`program`、`args` 和 `needConfirm`；支持可选的 `workingDirectory`、`group`（1–32 个字符）和有界 `waitSeconds`。响应为扁平的 `ProcessResponse`。只有当序列化后的创建响应不超过 8 KiB 时才会内联完整输出/结果；超出部分的输出会用 stdout/stderr 共用的预览表示，预览上限为 2 KiB。
-- `POST /v1/process/batch`：原子准入一批受管理进程。请求必须提供 `agentId`、`elements` 和 `needConfirm`；支持批次级 `workingDirectory`、每个元素的覆盖项，以及由子进程继承的可选 `group`。响应为 `ProcessBatchResponse`，其中按序排列的子进程投影共用一个 8 KiB 的完整内联预算，输出预览也有界。
+- `POST /v1/process/exec`：启动一个受管理的进程并短暂等待。请求必须提供 `agentId`、`program`、`args` 和 `needConfirm`；支持可选的 `workingDirectory`、`group`（1–32 个字符）和有界 `waitSeconds`。响应为扁平的 `ProcessResponse`，统一受 `limits.processResponseBytes` 预算约束。
+- `POST /v1/process/batch`：原子准入一批受管理进程。请求必须提供 `agentId`、`elements` 和 `needConfirm`；支持批次级 `workingDirectory`、每个元素的覆盖项，以及由子进程继承的可选 `group`。响应为 `ProcessBatchResponse`，整个批次共用统一响应预算。
 - `GET /v1/process?agentId=...`：列出活动或近期保留的进程元数据，可选用 `group`、kind、state、limit 和 cursor 筛选。`limit` 默认值为 50，上限为 100。Agent 不可用时，Hub 可以为第一页返回缓存元数据，但不会从缓存继续使用 Agent 发出的 cursor。
-- `GET /v1/process/{processId}?agentId=...&waitSeconds=...`：仅查看进程状态元数据，或短暂等待；`waitSeconds` 默认值为 5，上限为 30。状态永不包含 stdout、stderr 或结果正文。
-- `GET /v1/process/{processId}/output?agentId=...&cursor=...&maxBytes=...`：读取非消费式 stdout/stderr 分页。cursor 绑定到进程，并推进两个流的原始字节偏移；`maxBytes` 默认值为 8 KiB，上限为 32 KiB。响应以 base64 保留无效 UTF-8，并明确报告保留区间缺口和 EOF。
-- `GET /v1/process/{processId}/result?agentId=...&maxBytes=...`：获取完整且保留的结构化结果，或如实返回 `complete`、`too_large` 或 `unavailable` 状态。`maxBytes` 默认值为 8 KiB，上限为 512 KiB；过大的结果绝不会以不完整 JSON 返回，Hub 元数据缓存也不会提供结果内容。
+- `GET /v1/process/{processId}/read?agentId=...&waitSeconds=...&view=auto|status&cursor=...&maxBytes=...`：统一读取进程状态和捕获输出。wait 默认 5 秒、最大 30 秒、0 表示立即返回；auto 有 backlog 时立即返回，否则有界等待输出、终态/采集结算或期限；status 只等待执行终态/期限，不因输出提前返回。`maxBytes` 省略时使用 `limits.processResponseBytes`，显式值范围为 4096..1048576。
+- read 响应报告 `captureStatus`，stdout/stderr 使用 `data`、`encoding`、偏移和 `gap` segment，并提供 `nextCursor`、`hasMore`、`eof`。`hasMore` 不要求读完整日志；cursor 只推进实际返回数据，不同读取者不共享消费。cursor 仅用于 command/skill 输出；MCP 下游 CallToolResult 不使用输出 cursor。
 - `POST /v1/process/{processId}/cancel?agentId=...`：请求按进程类型执行取消，并返回观察到的结果/终止证据；超时或缺少响应不能作为已取消的证据。
 - `POST /v1/mcp/servers`：列出一个本地 Agent 中配置的 MCP 服务器；省略 `agentId` 时，则汇总所有当前已连接 Agent 的 MCP 服务器。
 - `POST /v1/mcp/tools`：列出一个 MCP 服务器暴露的工具。
-- `POST /v1/mcp/callTool`：通过所选本地 Agent 启动一个受管理的下游 MCP 工具进程。HTTP 响应为扁平的 `ProcessResponse`；完整内联输出/结果遵循 8 KiB 创建响应预算，超出部分的输出受 2 KiB 共用预览限制。`waitSeconds` 默认值为 5，上限为 30；等待超时不会取消进程。`timeoutSeconds` 默认值为 300，上限为 900。
-- `POST /v1/mcp/batch`：原子准入 1–16 个按序排列的下游 MCP 子进程。响应为 `McpBatchToolResponse`，所有子进程共用 8 KiB 完整内联预算，并提供有界输出预览；该操作使用一次聚合确认，支持并行或顺序模式、可选的安全快速失败调度、共用的全局/每服务器并发限制，以及 2 MiB 聚合响应预算。
+- `POST /v1/mcp/callTool`：通过所选本地 Agent 启动一个受管理的下游 MCP 工具进程。HTTP 响应为扁平的 `ProcessResponse`；等待超时不会取消进程。`timeoutSeconds` 默认值为 300，上限为 900。
+- `POST /v1/mcp/batch`：原子准入 1–16 个按序排列的下游 MCP 子进程。响应为 `McpBatchToolResponse`，整个响应共用 `limits.processResponseBytes` 预算；该操作使用一次聚合确认，支持并行或顺序模式、可选的安全快速失败调度，以及共用的全局/每服务器并发限制。聚合参数上限为 2 MiB，不是对外响应预算。
 - `GET /v1/runs/{runId}`：查看一项 Hub 到 Agent 命令运行的已持久化状态和可选的迟到结果。
 - `POST /v1/room/skills/list`、`/read`、`/search`、`/active`、`/activate`、`/deactivate`：通过活动 Room Agent 发现 workspace Skills 并维护本地激活状态。这些端点不接收 `agentId`。
 - `POST /v1/room/skills/install`：异步安装一个 Skill，来源可以是公开 GitHub、HTTPS 文件条目或内联 UTF-8/base64 文件。网络操作开始前，响应会先返回 `installId`。
-- `POST /v1/room/skills/install/get`：通过有界长轮询查询安装状态。`waitSeconds` 默认值为 5，上限为 30；等待超时不会取消安装；终态响应将 `pollAfterMs` 设为 `0`。
+- `POST /v1/room/skills/install/get`：通过有界长轮询查询安装状态。`waitSeconds` 默认值为 5，上限为 30；等待超时不会取消安装。
 - `POST /v1/room/skills/install/cancel`：在原子提交之前请求幂等的协作式取消。
-- `POST /v1/room/skills/run`：运行活动 workspace Skill 在 `scripts/` 下的可执行脚本。`waitSeconds` 默认值为 5，上限为 30；等待超时不会取消执行。若可能则内联返回终态输出，否则使用响应中的实际 `agentId` 和 `processId` 调用 `process.status`、`process.output` 或 `process.cancel`；Skill 脚本不适用 `process.result`。此运行端点的输入不接收 `agentId`。
+- `POST /v1/room/skills/run`：运行活动 workspace Skill 在 `scripts/` 下的可执行脚本。`waitSeconds` 默认值为 5，上限为 30；等待超时不会取消执行。使用响应中的实际 `agentId` 和 `processId` 调用 `process.read` 或 `process.cancel`；此运行端点的输入不接收 `agentId`。
 - `POST /v1/room/bootstrap`：读取活动 Room Agent 的重复会话入口及确定性指南清单。无请求体，也不接收 `agentId`。
 - `POST /v1/room/bootstrap/read`：按 frontmatter 中的 `id` 读取一份有效引导指南。不接收 `agentId`。
 - `POST /v1/room/diary/active` 和 `POST /v1/room/diary/read`：通过捕获的活动 Room 租约读取当前或一个经过验证的 Diary 层。请求分别使用 `RoomDiaryActiveRequest` 或 `RoomDiaryReadRequest`；响应分别为 `RoomDiaryActiveResponse` 或 `RoomDiaryReadResponse`。
@@ -79,7 +78,7 @@ Hub 不持久保存上次取得的本地配置概要。本地确认提示可通�
 
 Agent 的受管理进程历史是执行侧权威来源。Hub 进程状态条目和 Hub 进程缓存是用于路由和观察的投影；它们不能证明本地进程仍在运行，也不能证明副作用已撤销。Hub 缓存最多保留 4,096 个进程，在 `observedAt` 之后 15 分钟过期，并在 60 秒后标记为 `stale`。每 15 秒运行一次清理，移除已过期条目；容量淘汰最早观察到的条目。淘汰活动投影不会影响 Agent 进程或权威的 Hub 运行回执。
 
-Hub HTTP `process.status`、`process.list` 以及对应的 Apps MCP 进程检查响应会暴露 `freshness` 和 `observedAt` 元数据。创建端点直接返回的实时进程封套可能省略这些投影字段；其中的 Agent 进程负载仍具权威性。`live` 表示响应来自 Agent，`cached` 表示 Hub 投影仍在新鲜度窗口内且可用，`stale` 表示投影已较旧，`unknown` 表示当前没有可用事实（包括重启协调之后）。这些字段描述响应投影，不是 Agent 进程状态字段。只有缓存的状态响应属于降级证据，不是新的等待结果；Hub 不会为 Agent 发出的 cursor 臆造续页。Hub 缓存仅包含状态元数据，不能提供输出或结果内容。
+Hub HTTP `process.read`、`process.list` 以及对应的 Apps MCP 进程检查响应会暴露 `freshness` 和 `observedAt` 元数据。创建端点直接返回的实时进程封套可能省略这些投影字段；其中的 Agent 进程负载仍具权威性。`live` 表示响应来自 Agent，`cached` 表示 Hub 投影仍在新鲜度窗口内且可用，`stale` 表示投影已较旧，`unknown` 表示当前没有可用事实（包括重启协调之后）。这些字段描述响应投影，不是 Agent 进程状态字段。只有缓存的状态响应属于降级证据，不是新的等待结果；Hub 不会为 Agent 发出的 cursor 臆造续页。Hub 缓存仅包含状态元数据，不能提供输出或结果内容。
 
 Hub 运行回执仍是已派发命令的持久控制面身份。运行保留窗口为 24 小时；窗口结束后，只压缩符合条件的已完成负载：`runId`、请求/Agent 身份、命令哈希、状态以及冲突/未知/墓碑证据仍会保留。重放和去重所需的身份/哈希证据仍受保护；未知和冲突记录不会压缩。因此 `AgentRun` 会分别报告 `resultRetained` 和 `resultOmitted`；负载被省略不能证明命令未运行。
 
@@ -132,7 +131,7 @@ Hub HTTP 路由使用现有 Hub API Bearer 认证及 Agent 启用状态授权：
 
 面板统计所有未过期 pending 事件（含本次未展示项）；`new` 最多五项，按 high、medium、low 排序，同级按较早创建时间排序。摘要最多 32 个 Unicode 字符（超长时 31 字符加 `…`）；等级、时间和 ID 不截断。low 首次曝光后隐藏，默认 TTL 为 24 小时且可配置；medium 曝光三次后隐藏且不自动过期；high 保持候选直到处理。等级表示通知优先级，不表示内部事件成功/失败或是否需要人工介入。handled/expired 历史保留七天后清理。新事件只在后续工具调用中以面板提醒；同一响应内，原有 Browser/file 内容块会保留，面板为紧凑文本且只展示/计次一次。事件详情正文读取本身不计入曝光，面板实际展示的候选仍按正常规则计次。面板位于原结果根级键 `events`，不另加结果封套或面板封套。
 
-没有主动推送。无单一 Agent 目标的 Hub 调用不附面板；Agent 离线、Hub 请求超时或 Hub 缓存回退也不附事件，不能伪报零值或旧快照；成功在线的 native cache-only Hub 工具可单独做一次 best-effort 面板查询。原始创建响应是否已包含终态结果由最终入口决定：包含终态即抑制对应异步事件，不包含则晚到的终态可产生事件；这一判定不依赖 `completedInline`、结果/输出截断或大小限制。创建去重、事件来源/origin 绑定及可靠的私有响应反馈用于防止重放改变资格；这些不是公开事件 API。模型不可写入内部来源/仲裁元数据，也没有客户端阅读 ACK 或模型主动推送。
+没有主动推送。无单一 Agent 目标的 Hub 调用不附面板；Agent 离线、Hub 请求超时或 Hub 缓存回退也不附事件，不能伪报零值或旧快照；成功在线的 native cache-only Hub 工具可单独做一次 best-effort 面板查询。原始创建响应是否已包含终态结果由最终入口决定；这一判定不依赖结果/输出截断或大小限制。创建去...
 
 无目标的 `mcp.listServers` 聚合发现会在 Agent 端抑制面板生成，因此不会消耗事件曝光次数；单目标发现仍按正常规则附带面板。
 
@@ -146,7 +145,7 @@ Agent 内部可靠传输命令清单新增 `event.list`、`event.get`、`event.m
 
 所有 `/mcp` `tools/call` 响应均使用 Hub 的 `AgenticResult` 封套，与 ChatGPT Apps/MCP 工具结果格式直接兼容。Hub 原生 JSON 以 `structuredContent` 和 JSON 文本 content block 暴露；顶层 `error` 会使 MCP 工具结果的 `isError=true`。
 
-`mcp.callTool` 不会在 Hub 顶层透传下游结果封套。当前实时 HTTP 端点返回扁平的 `ProcessResponse`；下游终态结果保留在 `result` 中，下游 `isError=true` 会使进程失败，同时保留该结果。序列化参数上限为 256 KiB。最多 512 KiB 的序列化结果会予以保留；更大的结果会省略，并以 `resultBytes`、`resultSha256` 和 UTF-8 安全的 `resultPreview` 替代。活动调用使用 `process.status`、`process.output`、`process.result` 和 `process.cancel` 跟进。
+`mcp.callTool` 不会在 Hub 顶层透传下游结果封套。实时 HTTP 端点返回扁平的 `ProcessResponse`；下游终态 CallToolResult 使用 `mcpResult`，状态为 `pending`、`included`、`deferred`、`unavailable` 或 `not_retained`。`included` 才包含完整对象；`deferred` 可通过 read 显式提高 `maxBytes` 重试，`not_retained` 不可恢复。最多 512 KiB 的序列化结果会予以保留。活动调用使用 `process.read` 和 `process.cancel` 跟进。
 Hub 没有原生 `file.read` 或 `file.edit` 工具。其通用异步 MCP 进程桥接不是类型化的图像内容接口；不要依赖它保留 `file.read` 图像 Content blocks。
 
 `mcp.batch` 返回扁平的 `McpBatchToolResponse`，其中 `results` 按顺序包含子进程投影。确认和启动任何子进程之前，会先完成验证与容量准入。并行模式使用共享调度器（全局最多 8 个、每个服务器最多 2 个）；顺序模式会等待每个子进程进入终态。`failFast=true` 时，只有尚未启动的子进程会标记为 `skipped`；已经启动的调用不会取消。单服务器批次可以获得临时服务器 allow 操作，多服务器确认则仍以整个批次为作用范围。每个子项都是普通的受管理进程，带有 `batchId`、可选 `batchCallId` 和 `batchIndex`，后续检查和取消使用相同的 `process.*` 生命周期接口。
@@ -256,7 +255,7 @@ title: 执行方式选择
 summary: 有意识地选择受管理进程或持久窗格。
 loadPolicy: startup
 priority: 90
-toolBindings: [process.exec, process.batch, process.status, process.cancel, tmux.exec]
+toolBindings: [process.exec, process.batch, process.read, process.cancel, tmux.exec]
 tags: [运维, 安全]
 ---
 参数以工具 schema 为准；工作流、确认和恢复说明见本指南。
@@ -321,7 +320,7 @@ WebSocket 与 HTTP/SSE 对请求/响应式 `HubCommand` 消息使用相同的可
 
 每个 SSE 连接都必须使用全新且非空的 `connectionId`；同一个当前 ID 不能标识第二条流。省略 `connectionId` 时，Hub 会生成新的 ID。显式传入空 ID 会返回 `400 invalid_connection_id`；重复使用当前 ID 会返回 `409 connection_id_in_use`。替换成功后会关闭旧流。这些 ID 在 agent-secret 身份验证之后用于标识连接代际，不是独立的对端身份验证机制。
 
-V1 中，`Hello`、`Heartbeat`、`HeartbeatAck`、确认消息和 `ProcessUpdate` 仍是尽力而为的生命周期消息。`process.exec`、`process.batch`、`process.status`、`process.list`、`process.output`、`process.result`、`process.cancel` 以及 `event.list`、`event.get`、`event.mark` 是可靠的请求/响应命令；私有 `event.settle` 用于响应事件仲裁反馈。`Hello.bootGeneration` 变更会使缓存中的活动进程变为 `unknown_after_restart`；终态进程仍予保留，且不会重放副作用。
+V1 中，`Hello`、`Heartbeat`、`HeartbeatAck`、确认消息和 `ProcessUpdate` 仍是尽力而为的生命周期消息。`process.exec`、`process.batch`、`process.read`、`process.list`、`process.cancel` 以及 `event.list`、`event.get`、`event.mark` 是可靠的请求/响应命令；私有 `event.settle` 用于响应事件仲裁反馈。`Hello.bootGeneration` 变更会使缓存中的活动进程变为 `unknown_after_restart`；终态进程仍予保留，且不会重放副作用。
 
 Agent 重启时，传输账本是命令/结果的持久权威来源：绑定所有者的已完成记录可以重新发送匹配结果；绑定所有者的已接受记录可以从已存储命令恢复；没有完成结果的 started/running 记录会变为 `unknown`，而不会重放副作用。claim 会被锁定并绑定到显式的 `agentId`；其他所有者不能接管该记录。旧的无所有者记录继续保持 `LegacyUnowned`：不会自动协调、执行，也不会用于披露结果。恢复操作须由运维人员检查保留的原始记录和更新的所有者绑定证据；绝不能为了让启动通过而删除去重证据。
 

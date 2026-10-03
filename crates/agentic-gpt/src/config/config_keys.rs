@@ -419,8 +419,8 @@ pub(crate) static CONFIG_KEYS: &[ConfigKeySpec] = &[
         Limits,
         NonNegativeInteger,
         false,
-        "Default serialized Process response budget shared by process.exec, process.batch, skills.run, mcp.callTool, and process.read. If process.read omits maxBytes, it uses this value; an explicit maxBytes overrides it for that read only. Configured range: 4096–1048576 bytes.",
-        "process.exec、process.batch、skills.run、mcp.callTool 和 process.read 共用的序列化 Process 响应默认预算。process.read 省略 maxBytes 时使用此值；显式 maxBytes 仅覆盖本次 read。配置范围：4096–1048576 字节。",
+        "Default serialized Process response budget shared by process.exec, process.batch, skills.run, mcp.callTool, mcp.batch, and process.read. If process.read omits maxBytes, it uses this value; an explicit maxBytes overrides it for that read only. Configured range: 4096–1048576 bytes.",
+        "process.exec、process.batch、skills.run、mcp.callTool、mcp.batch 和 process.read 共用的序列化 Process 响应默认预算。process.read 省略 maxBytes 时使用此值；显式 maxBytes 仅覆盖本次 read。配置范围：4096–1048576 字节。",
         "8192",
         set_process_response_bytes
     ),

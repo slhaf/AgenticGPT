@@ -3391,7 +3391,7 @@ fn optional_center_inspector_body(
                     "• freedesktop → ntfy",
                 ],
                 OptionalSection::Limits => &[
-                    "Control Process batch concurrency, total active process capacity, file-search context, and the shared default Process response budget for exec, batch, skills.run, mcp.callTool, and read.",
+                    "Control Process batch concurrency, total active process capacity, file-search context, and the shared default response budget for process.exec, process.batch, skills.run, mcp.callTool, mcp.batch, and process.read.",
                     "",
                     "Defaults:",
                     "• Process batch concurrency: 2",
@@ -3456,7 +3456,7 @@ fn optional_center_inspector_body(
                     "• freedesktop → ntfy",
                 ],
                 OptionalSection::Limits => &[
-                    "控制 Process 批处理并发、活动进程总容量、文件搜索上下文，以及 exec、batch、skills.run、mcp.callTool 和 read 共用的 Process 响应默认预算。",
+                    "控制 Process 批处理并发、活动进程总容量、文件搜索上下文，以及 process.exec、process.batch、skills.run、mcp.callTool、mcp.batch 和 process.read 共用的默认响应预算。",
                     "",
                     "默认值：",
                     "• Process 批处理并发：2",
@@ -3582,7 +3582,7 @@ fn optional_form_inspector_body(
                     "Default: 5; valid range: 0–100.",
                 ],
                 SetupField::ProcessResponseBytes => &[
-                    "Default serialized Process response budget shared by process.exec, process.batch, skills.run, mcp.callTool, and process.read.",
+                    "Default serialized Process response budget shared by process.exec, process.batch, skills.run, mcp.callTool, mcp.batch, and process.read.",
                     "process.read uses this value when maxBytes is omitted; an explicit maxBytes overrides it for that read only (4096–1048576 bytes).",
                     "Counts the UTF-8 JSON response, including metadata and encoded output; default: 8192 bytes. Does not limit retained process output.",
                 ],
@@ -3794,7 +3794,7 @@ fn optional_form_inspector_body(
                     "默认 5；有效范围 0–100。",
                 ],
                 SetupField::ProcessResponseBytes => &[
-                    "process.exec、process.batch、skills.run、mcp.callTool 和 process.read 共用的序列化 Process 响应默认预算。",
+                    "process.exec、process.batch、skills.run、mcp.callTool、mcp.batch 和 process.read 共用的序列化 Process 响应默认预算。",
                     "process.read 省略 maxBytes 时使用此值；显式 maxBytes 仅覆盖本次 read（4096–1048576 字节）。",
                     "按包含元数据和编码输出的 UTF-8 JSON 计量；默认 8192 字节，配置范围 4096–1048576；不限制输出保留量。",
                 ],

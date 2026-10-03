@@ -565,7 +565,6 @@ async fn managed_mcp_tool_error_and_large_result_are_truthful() {
         agentic_gpt_protocol::ProcessMcpResultStatus::Deferred
     );
     assert!(deferred_result.value.is_none());
-    assert!(deferred_result.preview.as_deref().unwrap().contains("xxx"));
     let deferred_read = crate::process::get_process_read(
         &state,
         agentic_gpt_protocol::ProcessReadRequest {
@@ -573,14 +572,22 @@ async fn managed_mcp_tool_error_and_large_result_are_truthful() {
             wait_seconds: Some(0),
             view: agentic_gpt_protocol::ProcessReadView::Auto,
             cursor: None,
-            max_bytes: None,
+            max_bytes: Some(agentic_gpt_protocol::MAX_PROCESS_RESPONSE_BYTES),
         },
     )
     .await
     .unwrap();
+    let recovered_result = deferred_read.response.mcp_result.as_ref().unwrap();
     assert_eq!(
-        deferred_read.response.mcp_result.as_ref().unwrap().status,
-        agentic_gpt_protocol::ProcessMcpResultStatus::Deferred
+        recovered_result.status,
+        agentic_gpt_protocol::ProcessMcpResultStatus::Included
+    );
+    assert_eq!(
+        recovered_result.value.as_ref().unwrap()["structuredContent"]["blob"]
+            .as_str()
+            .unwrap()
+            .len(),
+        240_000
     );
 
     let large = start_managed_call_with_factory(
@@ -605,7 +612,6 @@ async fn managed_mcp_tool_error_and_large_result_are_truthful() {
         .as_deref()
         .unwrap()
         .starts_with("sha256:"));
-    assert!(large_result.preview.as_deref().unwrap().contains("blob"));
     let unavailable = crate::process::get_process_read(
         &state,
         agentic_gpt_protocol::ProcessReadRequest {

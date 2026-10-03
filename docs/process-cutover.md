@@ -1,24 +1,43 @@
 # Process API 与存储切换说明
 
-这是一次破坏性的 `Job`→`Process` 彻底切换，不提供旧接口别名或兼容双轨。升级时应协调部署 Agent 与 Hub，并同步升级所有调用方（包括 TUI、HTTP/MCP 客户端和自动化）；旧客户端不能假定仍可使用 `Job` 接口面。
+本页区分本次统一 `process.read` 的接口切换与较早的 `Job`→`Process` 迁移。本次移除旧 Process 读取接口，不提供别名或兼容双轨，但继续使用既有 Process 历史存储，不新建、迁移或清空数据库。Agent、Hub 与调用方需要协调升级。
 
 ## API 迁移
 
+### 本次统一读取接口
+
 | 旧调用 | 新调用 |
 |---|---|
-| MCP `job.get` | `process.status`（仅元数据）；按需使用 `process.output` 和 `process.result` 获取输出与结果 |
+| MCP `process.status` | `process.read`，需要只读状态时指定 `view: "status"` |
+| MCP `process.output` | `process.read`，使用返回的 `output.nextCursor` 续页 |
+| MCP `process.result` | `process.read`，读取完整 `mcpResult.value` 或结果可用性状态 |
+| HTTP `GET /v1/process/{processId}` | `GET /v1/process/{processId}/read?view=status` |
+| HTTP `GET /v1/process/{processId}/output` | `GET /v1/process/{processId}/read`，按需携带 `cursor` |
+| HTTP `GET /v1/process/{processId}/result` | `GET /v1/process/{processId}/read` |
+
+### 从较早的 Job 客户端升级
+
+以下名称属于更早的接口代际，不是本次才移除的 Process 读取工具。
+
+| 旧调用 | 新调用 |
+|---|---|
+| MCP `job.get` | `process.read`（默认 auto；需要时用 `view: "status"`，输出使用非消费 cursor） |
 | MCP `job.list` / `job.cancel` | `process.list` / `process.cancel` |
-| Hub MCP `hub.job.get` / `hub.job.list` | `hub.process.status` / `hub.process.list` |
+| Hub MCP `hub.job.get` / `hub.job.list` | `hub.process.status` / `hub.process.list`（独立 cache-only 元数据投影；不可等待或获取正文） |
 | HTTP `GET /v1/jobs` | `GET /v1/process` |
-| HTTP `GET /v1/jobs/{jobId}` | `GET /v1/process/{processId}`（仅元数据），另用 `GET /v1/process/{processId}/output` 和 `/result` |
+| HTTP `GET /v1/jobs/{jobId}` | `GET /v1/process/{processId}/read`（统一状态/输出读取） |
 | HTTP `POST /v1/jobs/{jobId}/cancel` | `POST /v1/process/{processId}/cancel` |
 
-状态和列表响应只含元数据；不含输出或结果负载。通过输出端点获取输出（默认 8 KiB，最大 32 KiB 游标窗口）；单独获取已完成结果（最大 512 KiB）。报告的生命周期/新鲜度状态仅在其声明范围内具有权威性；状态不能证明外部副作用已回滚。Hub 状态/列表是投影，不是 Agent 执行权威。
+当前公开 Process 工具仅为 `process.exec`、`process.batch`、`process.read`、`process.list` 和 `process.cancel`；旧 `process.status`、`process.output`、`process.result` 工具及旧 HTTP 路径直接移除，不提供 wire/http 兼容别名。HTTP read 的 wait 默认 5 秒、最大 30 秒、0 立即；view 为 `auto` 或 `status`。响应包含 `captureStatus`，输出页包含 `gap`、`eof`、`hasMore`；hasMore 不要求读完整日志。cursor 仅 command/skill，非消费且不同读取者不共享。
+
+统一响应预算由 `limits.processResponseBytes` 控制，默认 8192 字节，范围 4096..1048576；read 可用 `maxBytes` 显式覆盖。预算是序列化响应 JSON（含转义/Base64），不含传输/event 封套；与 MCP 结果 512 KiB 保留上限分离，`mcp.batch` 整个聚合响应共用预算。MCP 完整 CallToolResult 状态为 `pending`、`included`、`deferred`、`unavailable` 或 `not_retained`；完整对象不切碎，`not_retained` 不可恢复。
 
 ## 数据与升级安全
 
-Agent 会将当前 Process 历史写入新的私有 `process.sqlite3`。它不会打开、迁移或删除旧 `jobs.sqlite3`；应保留该文件原样。旧数据库的现有记录会有意地无法通过新的 Process API 访问，也不会导入到新历史中。任何手动维护前都应备份两个文件；不要将旧数据库重命名为 `process.sqlite3`，也不要将其内容视为当前 Process 历史。
+本次统一读取沿用既有 `process.sqlite3`。Agent 的 `transport-runs.jsonl` 及 Hub 已持久化的旧读取请求保留原始命令、身份、哈希和已有结果，用于历史、去重及恢复边界；未完成的旧读取请求显式退休，不改写成新命令重新执行。
 
-将 Agent 与 Hub 一起升级，使新的 Process 标识、投影和路由保持一致。升级前先停止或清点正在执行的工作，并将每个客户端迁移至新名称；旧二进制/客户端与新 API 不支持混合版本兼容模式。回滚需要将旧版 Agent 和 Hub 与相匹配的客户端一起部署。旧版看不到写入 `process.sqlite3` 的 Process 历史/结果；应单独保留该文件，且不得假定回滚能重建已完成的外部效果或恢复新格式历史。只有在安全清点所有正在进行的操作后，才宜回滚。
+仅当从更早的 Job 版本升级时，才涉及 `jobs.sqlite3` 与 `process.sqlite3` 的历史边界：Process 运行时不会打开、迁移或删除旧 `jobs.sqlite3`，旧 Job 记录不导入 Process 历史。保留旧文件，维护前备份；不要重命名旧数据库来伪装成 Process 历史。
+
+升级前先停止或清点正在执行的工作，同步迁移 Agent、Hub 和客户端。旧二进制与新 API 不支持混合版本兼容模式；回滚同样需要匹配的 Agent、Hub 和客户端。不要假定回滚可以重建已完成的外部效果或恢复正在执行的工作。回滚至旧 Job 版本时，该版本无法看到 Process 历史，应另行保留 `process.sqlite3`。
 
 本说明描述切换契约；不表示托管发布、交叉构建或每项外部集成都已验证。

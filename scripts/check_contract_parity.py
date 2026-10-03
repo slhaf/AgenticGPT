@@ -294,6 +294,8 @@ def make_env(root: Path, extra: dict[str, str] | None = None) -> dict[str, str]:
     )
     if extra:
         env.update(extra)
+    env.pop("TMUX", None)
+    env["TMUX_TMPDIR"] = str(runtime_dir)
     return env
 
 
@@ -1551,6 +1553,8 @@ PROCESS_MARKERS = (
     "contract-parity-batch-two",
 )
 PROCESS_OVERFLOW_MARKER = "overflow-" + "x" * 20000
+PROCESS_BINARY_OUTPUT = b"\xff" * 7000
+PROCESS_BINARY_FORMAT = r"\377" * len(PROCESS_BINARY_OUTPUT)
 PROCESS_ESCAPE_OUTPUT = ('"\\\n\t' * 700)
 PROCESS_AUTO_MARKER = "contract-parity-auto-before-exit"
 PROCESS_AUTO_COMMAND = f"printf '%s' '{PROCESS_AUTO_MARKER}'; sleep 2"
@@ -1872,7 +1876,7 @@ def require_schema_contract(document: dict[str, Any], schemas: dict[str, Any]) -
     wait_schema = read_by_name.get("waitSeconds", {}).get("schema", {})
     if wait_schema.get("default") != 5 or wait_schema.get("minimum") != 0 or wait_schema.get("maximum") != 30:
         fail("schema/contract", "HTTP process.read waitSeconds is not default5/clamped0..30")
-    view_schema = read_by_name.get("view", {}).get("schema", {})
+    view_schema = resolve_local_ref(document, read_by_name.get("view", {}).get("schema", {}))
     if view_schema.get("default") != "auto" or view_schema.get("enum") != ["auto", "status"]:
         fail("schema/contract", "HTTP process.read view is not default auto with auto/status choices")
     if "cursor" not in read_by_name:
@@ -1885,33 +1889,42 @@ def require_schema_contract(document: dict[str, Any], schemas: dict[str, Any]) -
     ):
         fail("schema/contract", "HTTP process.read maxBytes must use configured defaults and enforce 4096..1048576")
     for name in (
-        "ProcessExecRequest", "ProcessBatchExecRequest", "ProcessResponse", "ProcessBatchResponse",
+        "ProcessExecRequest", "ProcessBatchExecRequest", "ProcessResponse", "ProcessReadResponse", "ProcessBatchResponse",
         "ProcessListResponse", "ProcessOutputSegment", "ProcessOutputPage", "ProcessMcpResult",
         "ProcessReadView", "ProcessCancelResponse", "ProcessUnavailableResponse",
     ):
         if not isinstance(schemas.get(name), dict):
             fail("schema/contract", f"OpenAPI process schema {name} is missing")
-    process_response = schemas["ProcessResponse"]
-    if not {"agentId", "processId", "kind", "state", "captureStatus"}.issubset(
-        set(process_response.get("required", []))
-    ):
-        fail("schema/contract", "ProcessResponse omits required process identity or state")
-    process_properties = process_response.get("properties", {})
-    if process_properties.get("output", {}).get("$ref") != "#/components/schemas/ProcessOutputPage":
-        fail("schema/contract", "ProcessResponse.output does not use ProcessOutputPage")
-    if process_properties.get("mcpResult", {}).get("$ref") != "#/components/schemas/ProcessMcpResult":
-        fail("schema/contract", "ProcessResponse.mcpResult does not use ProcessMcpResult")
-    retired_response_fields = {
-        "status", "completedInline", "pollAfterMs", "inlineOutput", "outputPreview", "resultAvailable",
+    process_example = {
+        "agentId": "schema-agent", "processId": "schema-process",
+        "kind": "command", "state": "completed", "captureStatus": "complete",
     }
-    if retired_response_fields.intersection(process_properties):
-        fail("schema/contract", "ProcessResponse retains retired duplicate fields")
-    if schemas["ProcessMcpResult"].get("properties", {}).get("status", {}).get("enum") != [
+    validate_instance(document, schemas, "ProcessResponse", process_example, "schema/contract")
+    for field in process_example:
+        incomplete = {key: value for key, value in process_example.items() if key != field}
+        assert_rejected(document, schemas, "ProcessResponse", incomplete, f"schema/contract required {field}")
+    retired_response_fields = {
+        "status": "completed", "completedInline": True, "pollAfterMs": 1000,
+        "inlineOutput": {
+            "stdout": {"data": "", "encoding": "utf8"},
+            "stderr": {"data": "", "encoding": "utf8"},
+        },
+        "outputPreview": {"stdout": "", "stderr": ""}, "resultAvailable": False,
+    }
+    for field, value in retired_response_fields.items():
+        assert_rejected(
+            document, schemas, "ProcessResponse", {**process_example, field: value},
+            f"schema/contract retired {field}",
+        )
+    mcp_status = resolve_local_ref(
+        document, schemas["ProcessMcpResult"].get("properties", {}).get("status", {})
+    )
+    if set(mcp_status.get("enum", [])) != {
         "pending", "included", "deferred", "unavailable", "not_retained",
-    ]:
+    }:
         fail("schema/contract", "ProcessMcpResult status choices changed")
     read_operation = paths["/v1/process/{processId}/read"]["get"]
-    for status, schema_name in ((200, "ProcessResponse"), (503, "ProcessUnavailableResponse")):
+    for status, schema_name in ((200, "ProcessReadResponse"), (503, "ProcessUnavailableResponse")):
         response = resolve_local_ref(document, read_operation.get("responses", {}).get(str(status)))
         response_schema = (
             response.get("content", {}).get("application/json", {}).get("schema")
@@ -2269,7 +2282,7 @@ def start_local_agent(binary: Path, root: Path, reports: list[str]) -> tuple[Man
         or local_exec.get("agentId") != "parity-local"
         or local_stdout.get("data") != PROCESS_MARKERS[0]
         or local_stdout.get("encoding") != "utf8"
-        or len(json.dumps(local_exec, separators=(",", ":")).encode()) > 8192
+        or process_response_size(local_exec) > 8192
     ):
         fail("Agent local process.exec", f"printf did not complete with full read response: {local_exec}")
     local_status = local_tool(
@@ -2294,9 +2307,8 @@ def start_local_agent(binary: Path, root: Path, reports: list[str]) -> tuple[Man
         local_read.get("processId") != local_process_id
         or local_page.get("stdout", {}).get("data") != PROCESS_MARKERS[0]
         or str(local_page.get("stdout", {}).get("startOffset")) != "0"
-        or local_page.get("eof") is not True
         or local_page.get("hasMore") is not False
-        or local_read.get("mcpResult", {}).get("status") != "unavailable"
+        or "mcpResult" in local_read
     ):
         fail("Agent local process.read auto view", f"unified read omitted retained output or result applicability: {local_read}")
     reports.append("PASS Agent local Unix MCP process.read status/auto views and command result applicability")
@@ -2314,8 +2326,8 @@ def start_local_agent(binary: Path, root: Path, reports: list[str]) -> tuple[Man
     if (
         overflow_response.get("state") != "completed"
         or overflow_process_id is None
-        or overflow_output.get("hasMore") is not True
-        or len(json.dumps(overflow_response, separators=(",", ":")).encode()) > 8192
+        or (overflow_response.get("captureStatus") == "complete" and overflow_output.get("hasMore") is not True)
+        or process_response_size(overflow_response) > 8192
     ):
         fail("Agent local process.exec overflow", f"creation response did not preserve identity and bounded read page: {overflow_response}")
     process_read_status = local_tool(
@@ -5362,6 +5374,11 @@ def decode_output_segment(segment: dict[str, Any], scenario: str) -> bytes:
     return decoded
 
 
+def process_response_size(value: dict[str, Any]) -> int:
+    body = {key: item for key, item in value.items() if key != "events"}
+    return len(json.dumps(body, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+
+
 def process_read_has_artifacts(response: dict[str, Any]) -> bool:
     return "output" in response or "mcpResult" in response
 
@@ -5409,7 +5426,7 @@ def hub_process_read(
         scenario,
     )
     if expected_status == 200:
-        validate_instance(document, schemas, "ProcessResponse", result, f"{scenario} response")
+        validate_instance(document, schemas, "ProcessReadResponse", result, f"{scenario} response")
     return response, result
 
 
@@ -5442,9 +5459,10 @@ def collect_http_process_stdout(
             schemas,
             scenario,
             cursor=cursor,
+            wait_seconds=1,
             max_bytes=first_max_bytes if index == 0 else continuation_max_bytes,
         )
-        if len(response.body) > response_budget:
+        if process_response_size(value) > response_budget:
             fail(scenario, f"serialized ProcessResponse exceeded its {response_budget}-byte budget")
         output = value.get("output")
         if not isinstance(output, dict):
@@ -5462,12 +5480,14 @@ def collect_http_process_stdout(
             fail(scenario, f"cursor page did not continue at the returned byte offset: {stdout}")
         collected.extend(decode_output_segment(stdout, scenario))
         pages.append(value)
-        if output.get("hasMore") is False:
-            if output.get("eof") is not True:
-                fail(scenario, f"output ended without EOF: {output}")
+        if output.get("eof") is True:
+            if output.get("hasMore") is not False:
+                fail(scenario, f"EOF still advertises unread retained output: {output}")
             break
-        if output.get("hasMore") is not True or not output.get("nextCursor"):
+        if not isinstance(output.get("hasMore"), bool) or not output.get("nextCursor"):
             fail(scenario, f"output continuation omitted its cursor: {output}")
+        if value.get("captureStatus") == "incomplete":
+            fail(scenario, f"fixture output capture failed before EOF: {value}")
         cursor = output["nextCursor"]
     else:
         fail(scenario, "output cursor did not reach EOF within the page bound")
@@ -5500,7 +5520,7 @@ def collect_mcp_process_stdout(
         arguments: dict[str, Any] = {
             "agentId": agent_id,
             "processId": process_id,
-            "waitSeconds": 0,
+            "waitSeconds": 1,
             "maxBytes": max_bytes,
         }
         if cursor is not None:
@@ -5525,10 +5545,7 @@ def collect_mcp_process_stdout(
             or value.get("state") != "completed"
         ):
             fail(page_scenario, f"cursor response lost process identity or terminal state: {value}")
-        serialized_size = len(
-            json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-        )
-        if serialized_size > max_bytes:
+        if process_response_size(value) > max_bytes:
             fail(page_scenario, f"serialized ProcessResponse exceeded its {max_bytes}-byte budget")
         output = value.get("output")
         if not isinstance(output, dict):
@@ -5544,15 +5561,19 @@ def collect_mcp_process_stdout(
             fail(page_scenario, f"MCP cursor page did not continue at the returned byte offset: {stdout}")
         collected.extend(decode_output_segment(stdout, page_scenario))
         pages.append(value)
-        if output.get("hasMore") is False:
-            if output.get("eof") is not True:
-                fail(page_scenario, f"output ended without EOF: {output}")
+        if output.get("eof") is True:
+            if output.get("hasMore") is not False:
+                fail(page_scenario, f"EOF still advertises unread retained output: {output}")
             break
-        if output.get("hasMore") is not True:
+        if not isinstance(output.get("hasMore"), bool):
             fail(page_scenario, f"output page has invalid continuation state: {output}")
+        if value.get("captureStatus") == "incomplete":
+            fail(page_scenario, f"fixture output capture failed before EOF: {value}")
         next_cursor = output.get("nextCursor")
-        if not isinstance(next_cursor, str) or not next_cursor or next_cursor in seen_cursors:
-            fail(page_scenario, f"output cursor is absent or repeated: {output}")
+        if not isinstance(next_cursor, str) or not next_cursor:
+            fail(page_scenario, f"output cursor is absent: {output}")
+        if output.get("hasMore") and next_cursor in seen_cursors:
+            fail(page_scenario, f"backlogged output cursor did not advance: {output}")
         seen_cursors.add(next_cursor)
         cursor = next_cursor
     else:
@@ -5659,7 +5680,7 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
             or http_output.get("stdout", {}).get("encoding") != "utf8"
         ):
             fail("Agent HTTP process.exec", f"printf did not complete with full process read response: {http_exec}")
-        if len(json.dumps(http_exec, separators=(",", ":")).encode()) > 8192:
+        if process_response_size(http_exec) > 8192:
             fail("Agent HTTP process.exec", f"creation response exceeded the configured process response budget: {http_exec}")
         run_http_internal_policy_off_gate(http_port, http_token, http_session, reports)
         reports.append("PASS Agent local/HTTP descriptor parity and HTTP process printf dispatch")
@@ -5789,7 +5810,7 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
             or full_exec.get("state") != "completed"
             or full_output.get("stdout", {}).get("data") != PROCESS_MARKERS[1]
             or full_output.get("stdout", {}).get("encoding") != "utf8"
-            or len(json.dumps(full_exec, separators=(",", ":")).encode()) > 4096
+            or process_response_size(full_exec) > 4096
         ):
             fail("Hub Full process.exec printf", f"process response omitted identity or bounded output: {full_exec}")
         inline_panel = assert_event_counts(
@@ -5856,8 +5877,7 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
             full_read.get("agentId") != normal_id
             or full_read.get("processId") != full_id
             or full_read.get("output", {}).get("stdout", {}).get("data") != PROCESS_MARKERS[1]
-            or full_read.get("output", {}).get("eof") is not True
-            or full_read.get("mcpResult", {}).get("status") != "unavailable"
+            or "mcpResult" in full_read
         ):
             fail("Hub Full process.read auto view", f"unified read omitted command output or MCP applicability: {full_read}")
         mcp_page_exec = json_result(
@@ -5996,7 +6016,7 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
             document,
             schemas,
             "Hub HTTP process.read base64 budget",
-            b"\xff" * 7000,
+            PROCESS_BINARY_OUTPUT,
             first_max_bytes=4096,
             continuation_max_bytes=4096,
         )
@@ -6140,20 +6160,22 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
             or tail_read.get("output", {}).get("stdout", {}).get("data") != PROCESS_TAIL_MARKER
         ):
             fail("Hub process.read captures tail after exit", f"post-exit output tail was not retained: {tail_read}")
-        time.sleep(0.2)
         tail_settled = json_result(
             mcp_call(
                 hub_port, hub_key, full_session, 78, "tools/call",
                 {
                     "name": "process.read",
-                    "arguments": {"agentId": normal_id, "processId": tail_id, "waitSeconds": 0},
+                    "arguments": {
+                        "agentId": normal_id, "processId": tail_id, "waitSeconds": 5,
+                        "cursor": tail_read["output"]["nextCursor"],
+                    },
                 },
                 "Hub process.read capture EOF after tail",
             ),
             "Hub process.read capture EOF after tail",
         )
         if (
-            tail_settled.get("output", {}).get("stdout", {}).get("data") != PROCESS_TAIL_MARKER
+            tail_settled.get("output", {}).get("stdout", {}).get("data") != ""
             or tail_settled.get("output", {}).get("eof") is not True
         ):
             fail("Hub process.read capture EOF after tail", f"tail capture did not settle after its writer exited: {tail_settled}")
@@ -6170,7 +6192,7 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
             "Hub Full policy denied process",
         )
         if (
-            denied.get("status") != "rejected"
+            denied.get("state") != "rejected"
             or not denied.get("processId")
             or denied.get("error", {}).get("code") != "policy_denied"
         ):
@@ -6251,7 +6273,7 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
             or completed.get("output", {}).get("stdout", {}).get("data") != PROCESS_MARKERS[2]
         ):
             fail("Hub HTTP completed printf", f"expected complete process observation: {completed}")
-        if len(json.dumps(completed, separators=(",", ":")).encode()) > 4096:
+        if process_response_size(completed) > 4096:
             fail("Hub HTTP completed printf", f"creation response exceeded the configured 4096-byte budget: {completed}")
         assert_event_counts(completed, (0, 0, 0), "Hub HTTP inline completion suppression")
         completed_events_response, completed_events = hub_event_http_call(
@@ -6342,7 +6364,7 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
             or batch_processes[1].get("output", {}).get("stdout", {}).get("data") != PROCESS_MARKERS[4]
         ):
             fail("Hub HTTP process.batch", f"ordered complete process observations were not returned: {batch_body}")
-        if len(json.dumps(batch_body, separators=(",", ":")).encode()) > 4096:
+        if process_response_size(batch_body) > 4096:
             fail("Hub HTTP process.batch", f"aggregate batch response exceeded the configured 4096-byte budget: {batch_body}")
 
         mcp_payload = {

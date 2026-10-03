@@ -50,3 +50,36 @@
 - 最新构建的Agent真实Unix MCP冒烟通过：tools/list恰为五个Process工具；printf首次completed并返回完整stdout/eof；sleep启动wait=0后read(view=status,wait=5)约1003ms返回completed且无output。临时HOME/XDG/config/TMUX隔离，进程与临时状态已清理。
 - 本轮日志：/tmp/agentic-process-validation-nu1jkxf0/{0..5}.log、parity.log、smoke-direct.log。
 - 尚未完成：上述测试与schema/fixture修复、完整Hub运行验证、真实config TUI编辑保存验证、用户文档/双语同步。Console未修改。达到5/5，不启动第6轮、不把目标标记完成。
+
+## 用户授权续做
+- 用户明确要求再开五轮。继续原完整目标，新增轮次0/5；初始git diff --stat无未提交变更。
+- 先按已记录失败定位，不重复运行失败检查作确认；并行切分Agent错误投影/测试、核心等待与预算边界、HTTP schema及parity fixture。父代理统一验证、真实TUI与阶段提交。
+- 真实config TUI已验证（当前已构建二进制，配置/TUI代码不在本轮修复范围）：独立tmux socket与临时HOME/XDG，Local→Limits字段显示8192；输入4095后屏幕拒绝为无效数字；改16384，Review及最终JSON显示正确，确认写入后config show重新加载为16384并生成1个备份。
+- 同一TUI保存配置保留预算，仅补入临时Agent身份/workspace与精确printf策略后启动真实Unix MCP：10000字节stdout首次完整返回，Process JSON主体10542字节（>8192且≤16384），hasMore=false，证明TUI保存值实际生效。Agent与私有tmux已停止，不涉及宿主配置。
+- Agent失败切片已交付：MCP deferred的preview可选，改以更大预算read证明完整结果可恢复；batch lifecycle fixture改为真实error对象；预检保留working_directory_not_found并验证未创建进程；确认拒绝保留deny及无准入；非法maxBytes按结构化工具错误验证。没有改生产错误投影、没有放宽策略。
+- Parity切片已交付：实际OpenAPI view用$ref引用且schema正确，修checker先resolve_local_ref再检查；补齐PROCESS_BINARY_FORMAT/OUTPUT与共享二进制期望；policy断言使用state；每个fixture环境清除TMUX并隔离TMUX_TMPDIR。静态解析通过，尚未运行续轮验收。
+- 文档切片完成：README双语、interfaces/tool-contract-matrix/standalone-runtime/operations/configuration双语/process-cutover，区分cache-only hub.process.status与迁移历史引用；统一mcp.batch聚合预算及hasMore语义。
+- 请求侧20ms轮询修复经咨询发现首版有try_lock退化、Notified借用/pin及exit通知遗漏；咨询agent只读，父代理落实修正：runtime/ring共用Notify，可靠await注册，创建future先于状态刷新，timeout按值pin；普通退出、失败、取消、MCP接入失败均在状态所有者广播，不在finalize中自唤醒。批次join_all每子项共享绝对deadline，避免反复重建整组waiter及输出快照。
+- MCP batch请求等待亦复用同deadline通知等待，仅最终读取完整detail，移除每20ms复制MCP正文；既有owner监控/取消协调周期不变，不宣称全仓无周期任务。
+- 补充/增强4项回归：旧Starting快照不延迟、终态早于继承管道EOF、首子项完成后的batch唤醒、锁争用后的多读者广播。保留cursor/预算回归。线上Tokio文档访问失败，按Cargo.lock对应本机Tokio1.52.3源码确认notify_waiters从Notified创建起保证唤醒。
+
+## 续轮1（累计第6轮，in_progress）
+- 所有写入worker已停止；开始格式化、fmt/check/严格Clippy、完整workspace测试（--no-fail-fast收集所有目标）及Agent/Hub构建；随后执行隔离live parity。新增五轮计数1/5。
+- 续轮1：fmt/check/严格Clippy通过；workspace测试未结束，执行器3600秒超时，构建未执行。中断后发现唯一残留Agent测试进程并已终止。不能把未返回的测试计作通过。
+- 根因定位新增争用回归：手动poll后读者在Tokio FIFO mutex队列中保留位置，测试先单独await生产者、未同时推进读者，造成测试自身死锁。修为timeout包裹join!(completion, auto_read, status_read)，同时驱动真实owner与消费者；不修改生产语义。
+- 文档复核补齐skills.run预算入口、McpBatchToolResponse类型；区分2MiB聚合参数限制与返回预算，并明确本次沿用既有process.sqlite3而非重复声称新建数据库。
+
+## 续轮2（累计第7轮，in_progress）
+- 新增五轮计数2/5。验证日志直接落盘，单命令600秒上限；超时清理本轮独立进程组，避免中断遗留测试。
+- 续轮2：fmt/check/Clippy/build通过；Agent 575 passed/4 failed/1 ignored，Hub136、protocol22、config CLI23及Unix/HTTP/supervisor集成全部通过。新增争用/旧快照/batch后续子项唤醒回归通过。
+- 四失败修复：worker追加了MCP恢复读取但遗漏删除两条可选preview文案断言，现已删除，保留deferred恢复与not_retained语义；输出末chunk可先于EOF，stdio分页改为到真实EOF并有界等待；晚EOF测试分别验证尾输出与随后EOF；批次先验证启动响应预算，再用已结算的真实快照验证多项转义JSON预算/进度，不假设退出即输出全到齐。
+- 本轮parity卡在ProcessResponse allOf组合的checker错误假设。改为以实际JSON Schema验证必填/退休字段，而非要求扁平required/ref布局；MCP状态解析$ref，HTTP包含事件的响应按ProcessReadResponse校验。运行时OpenAPI保持不变。
+
+## 续轮3（累计第8轮，in_progress）
+- 新增五轮计数3/5。执行完整Rust与live parity；只读审查并行检查剩余live fixture的执行终态/EOF混淆，不修改正在验证的源文件。
+- 续轮3：Rust仅剩1项测试失败，其余Agent578/Hub136/protocol22及全部集成目标通过，fmt/check/Clippy/build通过。MCP恢复fixture的完整CallToolResult包含content与structuredContent，300000字节不足；按公开上限领取完整保留值，保留Included及内容断言。
+- Parity进入真实Agent运行后发现command读取被错误要求返回不适用mcpResult。只读review另外确认collector把hasMore=false当EOF、预算把独立events算入。父代理统一修复：按kind检查字段、沿cursor有界读到真实EOF（不要求普通调用者读完）、仅计算Process主体UTF-8 JSON、尾输出和EOF分别观察；不改公开schema/运行时掩盖失败。
+- 实现/文档/回归阶段已落地，提交该阶段后继续完整验收，不将验收状态标为通过。
+
+## 续轮4（累计第9轮，in_progress）
+- 新增五轮计数4/5，执行完整Rust及隔离live parity。

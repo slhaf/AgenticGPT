@@ -1437,8 +1437,11 @@ async fn process_tools_reject_legacy_identity_and_confirmation_fields() {
             ])),
         )
         .await
-        .expect_err("process.read maxBytes below the protocol range must be rejected");
-    assert_eq!(too_small.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        .expect("process.read range failures are returned as structured tool errors");
+    assert_eq!(
+        too_small["error"]["code"],
+        "process_read_max_bytes_out_of_range"
+    );
 
     for removed_name in [
         "process.status",
@@ -1558,6 +1561,13 @@ async fn process_creation_read_cancel_and_batch_use_process_api() -> anyhow::Res
     assert_eq!(batch["processes"][1]["state"], "failed");
     assert!(batch.get("jobs").is_none());
 
+    let process_ids_before_rejection = server.dispatch("process.list", json!({})).await?
+        ["processes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|process| process["processId"].as_str().unwrap().to_string())
+        .collect::<BTreeSet<_>>();
     let rejected = server
         .dispatch(
             "process.batch",
@@ -1570,8 +1580,22 @@ async fn process_creation_read_cancel_and_batch_use_process_api() -> anyhow::Res
             }),
         )
         .await?;
-    assert_eq!(rejected["error"]["code"], "process_batch_rejected");
+    assert_eq!(
+        rejected["error"]["code"], "working_directory_not_found",
+        "preserve the batch preflight failure cause"
+    );
     assert!(rejected.get("processes").is_none());
+    let process_ids_after_rejection = server.dispatch("process.list", json!({})).await?
+        ["processes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|process| process["processId"].as_str().unwrap().to_string())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        process_ids_after_rejection, process_ids_before_rejection,
+        "a rejected batch must not start any of its elements"
+    );
     Ok(())
 }
 
@@ -1750,7 +1774,7 @@ async fn process_read_preserves_raw_byte_offsets_and_utf8_output() -> anyhow::Re
 
     let mut expected_offset = 0_u64;
     let mut collected = Vec::new();
-    loop {
+    for _ in 0..16 {
         let output = &response["output"];
         let stdout = &output["stdout"];
         let start = stdout["startOffset"].as_str().unwrap().parse::<u64>()?;
@@ -1766,8 +1790,8 @@ async fn process_read_preserves_raw_byte_offsets_and_utf8_output() -> anyhow::Re
         collected.extend_from_slice(&bytes);
         expected_offset = end;
 
-        if output["hasMore"] == false {
-            assert_eq!(output["eof"], true);
+        if output["eof"] == true {
+            assert_eq!(output["hasMore"], false);
             break;
         }
         let cursor = output["nextCursor"].as_str().unwrap().to_string();
@@ -1775,7 +1799,7 @@ async fn process_read_preserves_raw_byte_offsets_and_utf8_output() -> anyhow::Re
             .call(
                 CallToolRequestParams::new("process.read").with_arguments(Map::from_iter([
                     ("processId".to_string(), json!(process_id)),
-                    ("waitSeconds".to_string(), json!(0)),
+                    ("waitSeconds".to_string(), json!(1)),
                     ("cursor".to_string(), json!(cursor)),
                     (
                         "maxBytes".to_string(),
@@ -1785,6 +1809,7 @@ async fn process_read_preserves_raw_byte_offsets_and_utf8_output() -> anyhow::Re
             )
             .await?;
     }
+    assert_eq!(response["output"]["eof"], true);
     assert_eq!(expected_offset, expected.len() as u64);
     assert_eq!(collected, expected.as_bytes());
     Ok(())
@@ -2252,7 +2277,10 @@ async fn denied_process_batch_creates_no_processes() -> anyhow::Result<()> {
             }),
         )
         .await?;
-    assert_eq!(batch["error"]["code"], "process_batch_rejected");
+    assert_eq!(
+        batch["error"]["code"], "deny",
+        "retain the explicit confirmation refusal reason"
+    );
     let processes = server.dispatch("process.list", json!({})).await?;
     assert_eq!(processes["processes"], json!([]));
     responder.abort();
@@ -2417,13 +2445,17 @@ fn batch_lifecycle_detection_reads_process_envelopes() {
         "processes": [{
             "processId": "process_b",
             "state": "failed",
-            "rejectReason": "spawn_failed"
+            "error": {
+                "code": "spawn_failed",
+                "message": "spawn failed"
+            }
         }]
     });
     assert!(!value_has_active_process(&failed));
+    assert!(value_has_terminal_failure(&failed));
     assert_eq!(
         human_failure_reason(&failed).as_deref(),
-        Some("spawn_failed")
+        Some("spawn failed")
     );
 }
 

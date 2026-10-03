@@ -11,6 +11,7 @@ use agentic_gpt_protocol::{
     McpBatchStatus, McpCallToolRequest, ProcessError, ProcessState,
 };
 use anyhow::{anyhow, Result};
+use futures_util::future::try_join_all;
 use rmcp::model::JsonObject;
 use sha2::{Digest, Sha256};
 use tokio::{
@@ -588,26 +589,27 @@ async fn build_mcp_batch_response(
     forced_status: Option<McpBatchStatus>,
 ) -> Result<McpBatchResponse> {
     let deadline = Instant::now() + Duration::from_secs(wait_seconds.min(30));
-    let mut details = Vec::new();
-    loop {
-        details.clear();
-        let mut all_terminal = true;
-        for (index, id, process_id) in child_refs {
-            let detail = process::get_process_detail(state, process_id, 0)
+    if wait_seconds != 0 {
+        try_join_all(child_refs.iter().map(|(_, _, process_id)| async move {
+            let info = process::get_process(state, process_id, 0)
                 .await
                 .map_err(|reason| anyhow!(reason))?;
-            all_terminal &= detail.process.state.is_terminal();
-            details.push(McpBatchChildResponse {
-                index: *index,
-                id: id.clone(),
-                result_omitted: false,
-                process: detail,
-            });
-        }
-        if all_terminal || wait_seconds == 0 || Instant::now() >= deadline {
-            break;
-        }
-        sleep(Duration::from_millis(20)).await;
+            process::wait_for_process_until(state, info, deadline).await;
+            Ok::<(), anyhow::Error>(())
+        }))
+        .await?;
+    }
+    let mut details = Vec::with_capacity(child_refs.len());
+    for (index, id, process_id) in child_refs {
+        let detail = process::get_process_detail(state, process_id, 0)
+            .await
+            .map_err(|reason| anyhow!(reason))?;
+        details.push(McpBatchChildResponse {
+            index: *index,
+            id: id.clone(),
+            result_omitted: false,
+            process: detail,
+        });
     }
     let all_terminal = details
         .iter()

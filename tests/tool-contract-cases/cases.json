@@ -228,7 +228,10 @@
     "tool": "process.read",
     "kind": "descriptor",
     "arguments": {
-      "processId": "contract-process"
+      "processId": "contract-process",
+      "view": "auto",
+      "cursor": "opaque-cursor",
+      "maxBytes": 4096
     },
     "expect": {
       "required": ["processId"]

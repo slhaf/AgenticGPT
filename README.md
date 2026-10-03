@@ -51,7 +51,7 @@ Choose Hub mode when you need one public entry point for multiple Agents, Custom
 ## Capabilities
 
 - `process.exec`, `process.batch`, `skills.run`, `mcp.callTool`, and `mcp.batch` can create managed processes.
-- Use `process.status`, `process.list`, `process.output`, `process.result`, and `process.cancel` to inspect or control a process by `processId`.
+- Use `process.read`, `process.list`, and `process.cancel` to inspect or control a process by `processId`. `process.read` combines auto output/status views; its default wait is 5 seconds (maximum 30, or 0 for immediate observation).
 - Batch admission is atomic, with bounded confirmation boundaries.
 - Configurable allow / confirm / deny command policy.
 - Writable, read-only, and denied path roots.
@@ -260,16 +260,15 @@ For an existing v0.9 configuration or external JSON, use the explicit migration 
 
 - Custom GPT Actions: import [`openapi/hub.yaml`](openapi/hub.yaml) and authenticate with `AGENTIC_GPT_API_KEY` as a Bearer token.
 - ChatGPT Apps MCP: connect to `https://<your-hub-domain>/mcp`.
-
-Hub-native tools and forwarded execution use the same process-lifecycle projection. Use `process.status` or `process.list` to inspect work, `process.output` and `process.result` to retrieve output/results, and `process.cancel` to cancel, passing the returned `processId`.
+Hub-native tools and forwarded execution use the same process-lifecycle projection. Use `process.read` or `process.list` to inspect work, `process.read` to retrieve bounded output or status, and `process.cancel` to cancel, passing the returned `processId`.
 
 ## Managed processes and safety boundaries
 
-- Every managed process has a `processId` and a status reflecting its actual lifecycle. `process.status` returns metadata only; use `process.output` for bounded output and `process.result` for retained results.
-- The Worker HTTP API exposes `GET /v1/process` (list), `GET /v1/process/{processId}` (status), `GET /v1/process/{processId}/output`, `GET /v1/process/{processId}/result`, and `POST /v1/process/{processId}/cancel`. Hub MCP exposes `hub.process.status` and `hub.process.list`.
+- Every managed process has a `processId` and a status reflecting its actual lifecycle. `process.read` defaults to an auto view: it returns available output without requiring the full log, or waits up to 5 seconds (maximum 30, or 0 for immediate observation); use `view: "status"` when only terminal status is needed.
+- The Worker HTTP API exposes `GET /v1/process` (list), `GET /v1/process/{processId}/read` (read), and `POST /v1/process/{processId}/cancel` (cancel). The read response reports `captureStatus`, output `gap`/`eof`, and a continuation cursor; `hasMore` does not require reading the complete log. Cursors are non-consuming and independent between readers, and apply to command/skill output, not MCP CallToolResult.
 - `process.exec`, `skills.run`, and `mcp.callTool` start managed processes. `process.batch` and `mcp.batch` return ordered child-process projections. `mcp.batch` accepts 1–16 calls with one aggregate confirmation and global/per-server concurrency limits.
-- Creation responses inline at most 8 KiB of output; larger initial output uses a shared preview capped at 2 KiB. The default `process.output` cursor window is 8 KiB; the maximum is 32 KiB.
-- MCP call arguments must be JSON objects and are limited to 256 KiB; retained process results are limited to 512 KiB; aggregate batch arguments and results are each limited to 2 MiB.
+- The configured `limits.processResponseBytes` budget defaults to 8192 bytes and is valid from 4096 through 1048576; `process.read` may explicitly override it within that range. The TUI uses the same configured default. The budget covers serialized response JSON (including escaping and Base64), not transport or event envelopes, and is separate from the 512 KiB retained MCP-result limit.
+- MCP CallToolResult is returned as a complete object only when included within budget; its status is `pending`, `included`, `deferred`, `unavailable`, or `not_retained`. `deferred` can be retried with a larger read budget; `not_retained` is not recoverable.
 - Worker process state is stored in `process.sqlite3`. Initializing the process store does not migrate or modify old `jobs.sqlite3` data.
 - Audit records contain bounded metadata, hashes, status, and termination evidence, not raw MCP arguments/results.
 - Check `agent.info` for the current profile, path policy, capacity, confirmation, MCP configuration summary, and connection status before execution.

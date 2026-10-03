@@ -22,11 +22,12 @@ use base64::{
     Engine as _,
 };
 use chrono::{Duration as ChronoDuration, Utc};
+use futures_util::future::join_all;
 use rmcp::{model::RequestId, service::Peer, RoleClient};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Child;
-use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{Mutex, Notify, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, Instant};
 
@@ -202,9 +203,11 @@ pub(crate) enum ProcessRuntime {
 pub(crate) struct ManagedMcpRuntime {
     peer: Option<Peer<RoleClient>>,
     request_id: Option<RequestId>,
+    changed: Arc<Notify>,
 }
 
 pub(crate) struct ManagedProcessRuntime {
+    changed: Arc<Notify>,
     child: Option<Child>,
     stdout: Arc<Mutex<OutputRing>>,
     stderr: Arc<Mutex<OutputRing>>,
@@ -311,12 +314,13 @@ enum ReaderOutcome {
     Failed(String),
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct OutputRing {
     data: std::collections::VecDeque<u8>,
     start_offset: u64,
     end_offset: u64,
     capture: RingCapture,
+    changed: Arc<Notify>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -329,22 +333,25 @@ enum RingCapture {
 }
 
 impl OutputRing {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(changed: Arc<Notify>) -> Self {
         Self {
             data: std::collections::VecDeque::with_capacity(PROCESS_OUTPUT_RING_CAPACITY),
             start_offset: 0,
             end_offset: 0,
             capture: RingCapture::NotStarted,
+            changed,
         }
     }
 
     fn mark_started(&mut self) {
         self.capture = RingCapture::Capturing;
+        self.changed.notify_waiters();
     }
 
     fn push(&mut self, bytes: &[u8]) -> bool {
         let Some(end_offset) = self.end_offset.checked_add(bytes.len() as u64) else {
             self.capture = RingCapture::Failed("output_offset_overflow".to_string());
+            self.changed.notify_waiters();
             return false;
         };
         self.end_offset = end_offset;
@@ -353,6 +360,7 @@ impl OutputRing {
             self.data.pop_front();
         }
         self.start_offset = self.end_offset - self.data.len() as u64;
+        self.changed.notify_waiters();
         true
     }
 
@@ -364,10 +372,12 @@ impl OutputRing {
             ReaderOutcome::Eof => RingCapture::Eof,
             ReaderOutcome::Failed(error) => RingCapture::Failed(error),
         };
+        self.changed.notify_waiters();
     }
 
     fn abort(&mut self, reason: &str) {
         self.capture = RingCapture::Failed(reason.to_string());
+        self.changed.notify_waiters();
     }
     fn is_eof(&self) -> bool {
         matches!(self.capture, RingCapture::Eof)
@@ -532,6 +542,7 @@ pub(crate) async fn register_mcp_process(
             runtime: ProcessRuntime::Mcp(ManagedMcpRuntime {
                 peer: None,
                 request_id: None,
+                changed: Arc::new(Notify::new()),
             }),
             cancel_requested: cancel_requested.clone(),
             audit: Some(ManagedAuditContext {
@@ -669,6 +680,7 @@ pub(crate) async fn register_mcp_batch(
                 runtime: ProcessRuntime::Mcp(ManagedMcpRuntime {
                     peer: None,
                     request_id: None,
+                    changed: Arc::new(Notify::new()),
                 }),
                 cancel_requested: cancel_requested.clone(),
                 audit: Some(ManagedAuditContext {
@@ -756,6 +768,9 @@ pub(crate) async fn set_mcp_process_state(
     if process.info.state.is_active() {
         process.info.state = state_name;
         process.info.updated_at = Utc::now();
+        if let ProcessRuntime::Mcp(runtime) = &process.runtime {
+            runtime.changed.notify_waiters();
+        }
     }
     Ok(())
 }
@@ -795,8 +810,12 @@ pub(crate) async fn attach_mcp_request(
         process.info.finished_at = Some(process.info.updated_at);
         process.info.reject_reason = Some(reason.clone());
         process.info.termination_evidence = Some("history_start_failed".to_string());
+        process_change_notifier(process).notify_waiters();
         finalize_process(state, process).await;
         return Err(reason);
+    }
+    if let ProcessRuntime::Mcp(runtime) = &process.runtime {
+        runtime.changed.notify_waiters();
     }
     Ok(())
 }
@@ -854,6 +873,9 @@ pub(crate) async fn complete_mcp_result(
     process.info.capture_status = ProcessCaptureStatus::NotApplicable;
     process.info.capture_error = None;
     finalize_process(state, process).await;
+    if let ProcessRuntime::Mcp(runtime) = &process.runtime {
+        runtime.changed.notify_waiters();
+    }
     let detail = process_detail(process);
     prune_terminal_processes(state, &mut processes);
     Ok(detail)
@@ -893,6 +915,9 @@ pub(crate) async fn finish_mcp_error(
         process.info.termination_evidence = Some(evidence.to_string());
     }
     finalize_process(state, process).await;
+    if let ProcessRuntime::Mcp(runtime) = &process.runtime {
+        runtime.changed.notify_waiters();
+    }
     let detail = process_detail(process);
     prune_terminal_processes(state, &mut processes);
     Ok(detail)
@@ -1624,22 +1649,15 @@ pub(crate) async fn start_process_batch(
             event_origin: event_origin.clone(),
         })
         .collect::<Vec<_>>();
-    let mut processes = start_prepared_managed_batch(state.clone(), config, specs).await?;
+    let processes = start_prepared_managed_batch(state.clone(), config, specs).await?;
     let started = Instant::now();
     let deadline = started + std::time::Duration::from_secs(wait_seconds);
-    loop {
-        let mut all_terminal = true;
-        for process in &mut processes {
-            if let Ok(latest) = get_process(&state, &process.process_id, 0).await {
-                *process = latest;
-            }
-            all_terminal &= process.state.is_terminal();
-        }
-        if all_terminal || Instant::now() >= deadline {
-            break;
-        }
-        sleep(std::time::Duration::from_millis(20)).await;
-    }
+    let processes = join_all(
+        processes
+            .into_iter()
+            .map(|process| wait_for_process_until(&state, process, deadline)),
+    )
+    .await;
     let mut response_processes = Vec::with_capacity(processes.len());
     let mut snapshots = Vec::with_capacity(processes.len());
     let mut outputs = Vec::with_capacity(processes.len());
@@ -1966,6 +1984,7 @@ pub(crate) async fn start_prepared_managed_batch(
         }
         for (spec, info, stdout, stderr, cancel_requested) in &registered {
             let runtime = ManagedProcessRuntime {
+                changed: stdout.lock().await.changed.clone(),
                 child: None,
                 stdout: stdout.clone(),
                 stderr: stderr.clone(),
@@ -2244,13 +2263,15 @@ fn process_info(
 }
 
 fn process_runtime(skill_lease: Option<SkillLease>) -> ManagedProcessRuntime {
+    let changed = Arc::new(Notify::new());
     ManagedProcessRuntime {
         child: None,
-        stdout: Arc::new(Mutex::new(OutputRing::new())),
-        stderr: Arc::new(Mutex::new(OutputRing::new())),
+        stdout: Arc::new(Mutex::new(OutputRing::new(changed.clone()))),
+        stderr: Arc::new(Mutex::new(OutputRing::new(changed.clone()))),
         stdout_reader: None,
         stderr_reader: None,
         skill_lease,
+        changed,
     }
 }
 
@@ -2355,6 +2376,7 @@ async fn run_async_process(
         finish_process(&state, &process_id, ProcessState::Failed, &reason).await;
         return;
     }
+    process_change_notifier(process).notify_waiters();
     drop(processes);
 
     let spawned = spawn_process_with_readers(
@@ -2406,6 +2428,7 @@ async fn run_async_process(
         runtime.stdout_reader = spawned.stdout_reader;
         runtime.stderr_reader = spawned.stderr_reader;
         process.info.capture_status = ProcessCaptureStatus::Capturing;
+        runtime.changed.notify_waiters();
         cancel_requested.load(std::sync::atomic::Ordering::Acquire)
             || !process.info.state.is_active()
     };
@@ -2569,6 +2592,7 @@ async fn set_process_state(state: &AppState, process_id: &str, state_name: Proce
         if process.info.state.is_active() {
             process.info.state = state_name;
             process.info.updated_at = Utc::now();
+            process_change_notifier(process).notify_waiters();
         }
     }
 }
@@ -2613,6 +2637,7 @@ async fn finish_process(state: &AppState, process_id: &str, terminal: ProcessSta
                     }
                 }
             }
+            process_change_notifier(process).notify_waiters();
         }
         refresh_capture_status(process).await;
         finalize_process(state, process).await;
@@ -2793,19 +2818,42 @@ async fn finalize_process(state: &AppState, process: &mut ManagedProcess) {
 
 pub(crate) async fn wait_for_process(
     state: &AppState,
-    mut info: ProcessInfo,
+    info: ProcessInfo,
     wait_seconds: u64,
 ) -> ProcessInfo {
     if wait_seconds == 0 {
         return info;
     }
     let deadline = Instant::now() + std::time::Duration::from_secs(wait_seconds.min(30));
-    while info.state.is_active() && Instant::now() < deadline {
-        sleep(std::time::Duration::from_millis(20)).await;
-        if let Some(latest) = get_process_now(state, &info.process_id).await {
-            info = latest;
-        } else {
+    wait_for_process_until(state, info, deadline).await
+}
+
+pub(crate) async fn wait_for_process_until(
+    state: &AppState,
+    mut info: ProcessInfo,
+    deadline: Instant,
+) -> ProcessInfo {
+    let change_notify = process_change_notify(state, &info.process_id).await;
+    loop {
+        // Subscribe before refreshing: an exit between the refresh and await must wake us.
+        let changed = change_notify.as_ref().map(|notify| notify.notified());
+        let Some(latest) = get_process_now(state, &info.process_id).await else {
+            if let Ok(Some(record)) = state.process_history.get(&info.process_id) {
+                if record.info.state.is_terminal() {
+                    info = record.info;
+                }
+            }
             break;
+        };
+        info = latest;
+        if !info.state.is_active() || Instant::now() >= deadline {
+            break;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if let Some(changed) = changed {
+            let _ = tokio::time::timeout(remaining, changed).await;
+        } else {
+            sleep(remaining).await;
         }
     }
     info
@@ -3060,9 +3108,11 @@ async fn get_process_read_with_budget(
         .transpose()?;
     let started = Instant::now();
     let deadline = started + std::time::Duration::from_secs(request.effective_wait_seconds());
-    let mut summary = get_process_read_summary(state, &request.process_id).await?;
-    validate_read_cursor_summary(&summary, cursor.as_ref())?;
+    let change_notify = process_change_notify(state, &request.process_id).await;
     loop {
+        let changed = change_notify.as_ref().map(|notify| notify.notified());
+        let summary = get_process_read_summary(state, &request.process_id).await?;
+        validate_read_cursor_summary(&summary, cursor.as_ref())?;
         let ready = match request.view {
             ProcessReadView::Status => summary.state.is_terminal(),
             ProcessReadView::Auto => process_read_auto_ready(&summary, cursor.as_ref()),
@@ -3071,9 +3121,11 @@ async fn get_process_read_with_budget(
             break;
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
-        sleep(remaining.min(std::time::Duration::from_millis(20))).await;
-        summary = get_process_read_summary(state, &request.process_id).await?;
-        validate_read_cursor_summary(&summary, cursor.as_ref())?;
+        if let Some(changed) = changed {
+            let _ = tokio::time::timeout(remaining, changed).await;
+        } else {
+            sleep(remaining).await;
+        }
     }
     let observation = get_process_observation(
         state,
@@ -3127,6 +3179,20 @@ fn validate_read_cursor_summary(
         return Err("process_output_cursor_ahead_of_output".to_string());
     }
     Ok(())
+}
+
+fn process_change_notifier(process: &ManagedProcess) -> &Arc<Notify> {
+    match &process.runtime {
+        ProcessRuntime::Process(runtime) => &runtime.changed,
+        ProcessRuntime::Mcp(runtime) => &runtime.changed,
+    }
+}
+
+async fn process_change_notify(state: &AppState, process_id: &str) -> Option<Arc<Notify>> {
+    let processes = state.processes.lock().await;
+    processes
+        .get(process_id)
+        .map(|process| process_change_notifier(process).clone())
 }
 
 fn process_read_auto_ready(
@@ -3372,6 +3438,7 @@ async fn cancel_command_process(
         let ProcessRuntime::Process(runtime) = &mut process.runtime else {
             return Err("process_kind_mismatch".to_string());
         };
+        runtime.changed.notify_waiters();
         match runtime.child.take() {
             Some(child) => Some(child),
             None => {
@@ -3430,6 +3497,7 @@ async fn cancel_command_process(
             }
         },
     }
+    runtime.changed.notify_waiters();
     if process.info.state.is_terminal() {
         finalize_process(state, process).await;
     }
@@ -3471,6 +3539,7 @@ async fn cancel_mcp_process(state: &AppState, process_id: &str) -> Result<Proces
                 message: "MCP Process was cancelled before the downstream request started"
                     .to_string(),
             });
+            process_change_notifier(process).notify_waiters();
             finalize_process(state, process).await;
             let detail = process_detail(process);
             prune_terminal_processes(state, &mut processes);
@@ -3478,6 +3547,7 @@ async fn cancel_mcp_process(state: &AppState, process_id: &str) -> Result<Proces
         }
         process.info.state = ProcessState::CancelRequested;
         process.info.updated_at = Utc::now();
+        process_change_notifier(process).notify_waiters();
         request
     };
     let Some((peer, request_id)) = request else {
@@ -3535,6 +3605,7 @@ async fn cancel_mcp_process(state: &AppState, process_id: &str) -> Result<Proces
             finalize_process(state, process).await;
         }
     }
+    process_change_notifier(process).notify_waiters();
     let detail = process_detail(process);
     prune_terminal_processes(state, &mut processes);
     Ok(detail)
@@ -3605,6 +3676,7 @@ async fn refresh_process(state: &AppState, process: &mut ManagedProcess) {
                 process.info.updated_at = now;
                 process.info.finished_at = Some(now);
                 runtime.skill_lease = None;
+                runtime.changed.notify_waiters();
             }
         }
         if let (Ok(stdout), Ok(stderr)) = (runtime.stdout.try_lock(), runtime.stderr.try_lock()) {
@@ -4083,10 +4155,18 @@ mod tests {
     async fn completed_processes_release_capacity_and_keep_output() {
         let (state, workspace) = test_state(1).await;
         let first = start_process_for_test(state.clone(), exec_request("true", &workspace)).await;
+        let first_starting = first.clone();
         assert!(first.process_id.starts_with("process_testboot0001_"));
         assert_eq!(first.kind, ProcessKind::Command);
         let first = wait_terminal(&state, first).await;
         assert_eq!(first.state, ProcessState::Completed);
+        let stale_wait = tokio::time::timeout(
+            Duration::from_millis(500),
+            wait_for_process(&state, first_starting, 30),
+        )
+        .await
+        .expect("a stale starting snapshot must refresh before waiting");
+        assert_eq!(stale_wait.state, ProcessState::Completed);
 
         let mut second_request = exec_request("printf", &workspace);
         second_request.args = vec!["done".to_string()];
@@ -4165,7 +4245,7 @@ mod tests {
         let mut request = exec_request("sh", &workspace);
         request.args = vec![
             "-c".to_string(),
-            "printf before; (sleep 0.6; printf after) &".to_string(),
+            "printf before; (sleep 2; printf after) & sleep 0.15".to_string(),
         ];
         state
             .config
@@ -4178,7 +4258,9 @@ mod tests {
                 args_prefix: Vec::new(),
             });
         let started = start_managed_process(state.clone(), request, options).await;
-        let terminal = wait_terminal(&state, started).await;
+        let terminal = tokio::time::timeout(Duration::from_secs(1), wait_terminal(&state, started))
+            .await
+            .expect("terminal notification must arrive before inherited pipe EOF");
         assert_eq!(terminal.state, ProcessState::Completed);
         assert_eq!(hook_count.load(Ordering::Acquire), 1);
 
@@ -4218,10 +4300,43 @@ mod tests {
         assert_eq!(persisted_event.source, source);
         assert!(persisted_event.message.contains("completed"));
 
-        let output = wait_output_capture(&state, &terminal.process_id).await;
+        let output = tokio::time::timeout(
+            Duration::from_secs(4),
+            read_process(
+                &state,
+                &terminal.process_id,
+                30,
+                ProcessReadView::Auto,
+                before_eof
+                    .response
+                    .output
+                    .as_ref()
+                    .map(|page| page.next_cursor.clone()),
+                None,
+            ),
+        )
+        .await
+        .expect("auto read should wake for inherited output and EOF")
+        .unwrap();
         let output_page = output.response.output.as_ref().unwrap();
-        assert!(output_page.eof);
-        assert_eq!(decode_segment(&output_page.stdout), b"beforeafter");
+        assert_eq!(decode_segment(&output_page.stdout), b"after");
+        let settled = tokio::time::timeout(
+            Duration::from_secs(2),
+            read_process(
+                &state,
+                &terminal.process_id,
+                30,
+                ProcessReadView::Auto,
+                Some(output_page.next_cursor.clone()),
+                None,
+            ),
+        )
+        .await
+        .expect("capture EOF should settle after the final inherited output")
+        .unwrap();
+        let settled_page = settled.response.output.unwrap();
+        assert!(settled_page.eof);
+        assert!(decode_segment(&settled_page.stdout).is_empty());
         assert_eq!(
             get_process(&state, &terminal.process_id, 0)
                 .await
@@ -4411,7 +4526,7 @@ mod tests {
 
     #[tokio::test]
     async fn output_overflow_reports_exact_retained_gap() {
-        let mut ring = OutputRing::new();
+        let mut ring = OutputRing::new(Arc::new(Notify::new()));
         ring.mark_started();
         ring.push(&vec![b'x'; PROCESS_OUTPUT_RING_CAPACITY + 5]);
         ring.finish(ReaderOutcome::Eof);
@@ -4507,6 +4622,24 @@ mod tests {
         let result = complete.response.mcp_result.unwrap();
         assert_eq!(result.status, ProcessMcpResultStatus::Included);
         assert_eq!(result.value, Some(value));
+        let cursor = encode_output_cursor(ProcessCursor {
+            version: 1,
+            process_id: process_id.clone(),
+            stdout_offset: 0,
+            stderr_offset: 0,
+        })
+        .unwrap();
+        let cursor_error = read_process(
+            &state,
+            &process_id,
+            0,
+            ProcessReadView::Auto,
+            Some(cursor),
+            Some(MAX_PROCESS_RESPONSE_BYTES),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(cursor_error, "process_read_cursor_not_supported_for_mcp");
 
         let registration = register_mcp_process(&state, mcp_spec("oversized-result"))
             .await
@@ -4538,7 +4671,7 @@ mod tests {
     async fn process_batch_response_obeys_whole_body_budget_and_keeps_identities() {
         let (state, workspace) = test_state(4).await;
         let budget = state.config.read().await.limits.process_response_bytes;
-        let payload = "b".repeat(5 * 1024);
+        let payload = "\\\"quoted\\n".repeat(700);
         let request = ProcessBatchExecRequest {
             agent_id: "test-agent".to_string(),
             group: None,
@@ -4560,7 +4693,7 @@ mod tests {
             wait_seconds: Some(2),
         };
         let response = start_process_batch(
-            state,
+            state.clone(),
             request,
             "test:process.batch".to_string(),
             None,
@@ -4583,6 +4716,37 @@ mod tests {
                     && process.batch_index == Some(index)
             }));
         assert_eq!(response.processes.len(), 2);
+        // Execution can finish before readers settle. Fit populated snapshots to
+        // exercise escaped JSON budgeting without assuming exit implies capture EOF.
+        let mut response = response.response;
+        let mut outputs = Vec::new();
+        for child in &mut response.processes {
+            let captured = wait_output_capture(&state, &child.process_id).await;
+            assert_eq!(
+                captured.response.capture_status,
+                ProcessCaptureStatus::Complete
+            );
+            let observation = get_process_observation(&state, &child.process_id, true)
+                .await
+                .unwrap();
+            let (base, _, output, _) = process_response_base(observation, ProcessReadView::Auto, 0);
+            *child = base;
+            outputs.push(output);
+        }
+        let fitted = fit_process_batch_response(response, &outputs, budget).unwrap();
+        assert!(serialized_size(&fitted) <= budget);
+        let pages = fitted
+            .processes
+            .iter()
+            .map(|process| process.output.as_ref().expect("batch output page"))
+            .collect::<Vec<_>>();
+        assert!(pages.iter().all(|page| {
+            page.stdout
+                .end_offset
+                .parse::<u64>()
+                .expect("numeric output offset")
+                > page.stdout.start_offset.parse::<u64>().unwrap()
+        }));
     }
 
     #[tokio::test]
@@ -4850,6 +5014,99 @@ mod tests {
         for process in &batch.processes {
             let _ = cancel_process(&state, &process.process_id).await;
         }
+    }
+
+    #[tokio::test]
+    async fn process_batch_wait_wakes_for_later_child() {
+        let (state, workspace) = test_state(4).await;
+        state.config.write().await.limits.max_concurrent_tasks = 1;
+        let request = ProcessBatchExecRequest {
+            agent_id: "test-agent".to_string(),
+            group: None,
+            elements: vec![
+                agentic_gpt_protocol::ProcessExecElement {
+                    program: "true".to_string(),
+                    args: Vec::new(),
+                    working_directory: None,
+                },
+                agentic_gpt_protocol::ProcessExecElement {
+                    program: "sleep".to_string(),
+                    args: vec!["0.15".to_string()],
+                    working_directory: None,
+                },
+            ],
+            need_confirm: false,
+            confirm_method: None,
+            working_directory: Some(workspace.to_string_lossy().to_string()),
+            wait_seconds: Some(30),
+        };
+
+        let batch = tokio::time::timeout(
+            Duration::from_secs(3),
+            start_process_batch(
+                state,
+                request,
+                "test:process.batch".to_string(),
+                None,
+                None,
+                DEFAULT_PROCESS_RESPONSE_BYTES,
+            ),
+        )
+        .await
+        .expect("batch wait should return when the queued child finishes")
+        .unwrap();
+        assert_eq!(batch.response.status, "completed");
+        assert_eq!(batch.processes.len(), 2);
+        assert!(batch
+            .processes
+            .iter()
+            .all(|process| process.state == ProcessState::Completed));
+    }
+
+    #[tokio::test]
+    async fn process_read_wait_survives_process_lock_contention() {
+        let (state, _workspace) = test_state(2).await;
+        let registration = register_mcp_process(&state, mcp_spec("read-lock-contention"))
+            .await
+            .unwrap();
+        let process_id = registration.info.process_id;
+        let auto_read = read_process(&state, &process_id, 30, ProcessReadView::Auto, None, None);
+        let status_read =
+            read_process(&state, &process_id, 30, ProcessReadView::Status, None, None);
+        tokio::pin!(auto_read);
+        tokio::pin!(status_read);
+
+        let processes = state.processes.lock().await;
+        assert!(futures_util::poll!(auto_read.as_mut()).is_pending());
+        assert!(futures_util::poll!(status_read.as_mut()).is_pending());
+        drop(processes);
+        assert!(futures_util::poll!(auto_read.as_mut()).is_pending());
+        assert!(futures_util::poll!(status_read.as_mut()).is_pending());
+
+        let completion = complete_mcp_result(
+            &state,
+            &process_id,
+            serde_json::json!({"ok": true, "value": "complete"}),
+            false,
+            None,
+        );
+        // Readers may hold queued FIFO mutex reservations after manual polling.
+        // Drive them alongside the producer rather than awaiting the producer alone.
+        let (completion, auto, status) = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::join!(completion, auto_read, status_read)
+        })
+        .await
+        .expect("both waiting readers should wake after MCP completion");
+        completion.unwrap();
+        let auto = auto.unwrap();
+        let status = status.unwrap();
+        assert_eq!(auto.response.state, ProcessState::Completed);
+        assert_eq!(
+            auto.response.mcp_result.unwrap().status,
+            ProcessMcpResultStatus::Included
+        );
+        assert_eq!(status.response.state, ProcessState::Completed);
+        assert!(status.response.output.is_none());
     }
 
     #[tokio::test]

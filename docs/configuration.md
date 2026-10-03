@@ -484,10 +484,13 @@ agentic-gpt config path deny add ~/.secrets
   "limits": {
     "maxConcurrentTasks": 2,
     "maxActiveProcesses": "auto",
-    "maxFileSearchContextLines": 5
+    "maxFileSearchContextLines": 5,
+    "processResponseBytes": 8192
   }
 }
 ```
+
+`processResponseBytes` 是 `process.exec`、`process.batch`、`skills.run`、`mcp.callTool`、`mcp.batch` 以及 `process.read` 默认使用的序列化 UTF-8 JSON 响应预算。默认 8192 字节，范围为 4096..1048576；`process.read` 可在此范围内用 `maxBytes` 显式覆盖。`mcp.batch` 的整个 `McpBatchToolResponse` 共用一份预算，不按子项重复分配。预算包括响应 JSON 转义和 Base64，但不包括传输与 event 封套，并与 512 KiB 的 MCP 结果保留上限分离。TUI 使用相同的默认预算。
 
 `maxConcurrentTasks` 限制单次 `process.batch` 中同时实际运行的子 Process Job 数量。所有子 Job 仍会整批 admission；超过并发槽的子 Job 保持 `queued`，因此该限制不会阻止 batch 在有界 `waitSeconds` 后返回。配置小于 1 时，有效下限为 1。
 

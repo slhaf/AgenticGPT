@@ -51,7 +51,7 @@ agentic-gpt local call agent.info --arguments '{}'
 
 - `agent.info.connections.localMcp.status` 为 `ready`。
 - 运行时目录权限为 `0700`、套接字权限为 `0600`，且只接受相同 UID。
-- 存在 `event.list`、`event.get`、`event.mark`，以及 `process.exec`、`process.batch`、`process.status`、`process.list`、`process.output`、`process.result`、`process.cancel`、`mcp.callTool` 和 `mcp.batch`。
+- 存在 `event.list`、`event.get`、`event.mark`，以及 `process.exec`、`process.batch`、`process.read`、`process.list`、`process.cancel`、`mcp.callTool` 和 `mcp.batch`。
 - 事件收件箱工具独立于工具集开关；隐藏事件不因此视为已处理。它们管理收件箱状态，不是进程控制接口。
 - Process 历史使用 `process.sqlite3`；事件历史使用独立的 `events.sqlite3`。现有 `jobs.sqlite3` 会有意保持原样且不可访问，不迁移或备份 Job 历史。
 - [持久事件收件箱](interfaces.md#持久事件收件箱)说明同一 Agent 的共享收件箱和提醒范围。
@@ -88,8 +88,7 @@ curl -fsS -H 'Authorization: Bearer test-key' http://127.0.0.1:18787/v1/info
 1. 确认 `agentic-gpt --version` 是预期版本。
 2. 确认 tunnel secret 使用受保护的 `file:` 或 `env:` 引用。
 3. 确认 `agentic-gpt run` 以 `mode=standalone` 启动后达到就绪状态，并在重启预算重置间隔之后仍保持稳定。
-4. 分别通过 ChatGPT tunnel 和 Local Unix MCP 调用 `agent.info`。
-5. 启动一个无害进程，并使用 `process.status`、`process.output` 和 `process.result` 检查；只有明确要求取消时才调用 `process.cancel`。
+5. 启动一个无害进程，并使用 `process.read`（auto/status）检查输出和状态；只有明确要求取消时才调用 `process.cancel`。
 6. 重启一个 Agent，并确认其他机器的 connector 仍可用。
 7. 确认审计 JSONL 位于 `workspaceRoot` 下，且不含原始 tunnel/MCP secret。
 
@@ -133,14 +132,8 @@ Standalone supervisor 还会发出 `restart_required`；Hub 模式没有 supervi
 2. 确认 `/v1/info` 可通过公共 HTTPS 响应。
 3. 确认 `/v1/agents` 显示预期的、具备命令能力且在线的 Agent。
 4. 通过 `/v1/process/exec` 运行一条无害命令。
-5. 通过 `GET /v1/process` 和 `GET /v1/process/{processId}` 检查进程元数据；从
-   `GET /v1/process/{processId}/output` 获取输出，从
-   `GET /v1/process/{processId}/result` 获取结果，并通过
-   `POST /v1/process/{processId}/cancel` 请求取消。
-   状态端点仅返回元数据。Standalone `process.status` 等待默认 5 秒、上限为 30 秒；
-   HTTP 的 `waitSeconds` 默认 5 秒、上限为 30 秒。未提供 `cursor` 时，输出从字节 0 开始；
-   `maxBytes` 默认 8 KiB、上限为 32 KiB。MCP 结果 `maxBytes` 默认 8 KiB、上限
-   为 512 KiB；HTTP 结果读取使用相同范围。
+5. 通过 `GET /v1/process` 检查进程元数据；从 `GET /v1/process/{processId}/read` 读取输出或状态，并通过 `POST /v1/process/{processId}/cancel` 请求取消。
+   read 的 `waitSeconds` 默认 5 秒、上限 30 秒、0 表示立即；`maxBytes` 省略时使用 `limits.processResponseBytes`（默认 8192 字节），显式范围为 4096..1048576。cursor 非消费且不共享，仅用于 command/skill；`captureStatus`、`gap`、`eof` 和 `hasMore` 由读取响应报告。MCP CallToolResult 使用 `pending`/`included`/`deferred`/`unavailable`/`not_retained`，完整对象不切碎。
 6. 验证 `/mcp`；契约发生变化时刷新 GPT Actions schema。
 7. 如果启用了 Standalone 上报，确认仅上报的连接会拒绝 Hub 执行请求。
 

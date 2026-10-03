@@ -51,7 +51,7 @@ ChatGPT Actions 或 Apps MCP
 ## 主要能力
 
 - `process.exec`、`process.batch`、`skills.run`、`mcp.callTool` 与 `mcp.batch` 可创建受管进程。
-- 使用 `process.status`、`process.list`、`process.output`、`process.result` 和 `process.cancel`，通过 `processId` 查询或控制进程。
+- 使用 `process.read`、`process.list` 和 `process.cancel`，通过 `processId` 查询或控制进程。`process.read` 合并自动输出/状态视图；默认等待 5 秒（最多 30 秒，显式为 0 时立即观察）。
 - 批量接纳具有原子性，确认边界有界。
 - 可配置 allow / confirm / deny 命令策略，以及可写、只读和拒绝访问的路径根目录。
 - 支持本地桌面确认，以及可选的 Hub 中继 ntfy 确认。
@@ -259,15 +259,17 @@ agentic-gpt run
 
 - Custom GPT Actions：导入 [`openapi/hub.yaml`](openapi/hub.yaml)，并使用 `AGENTIC_GPT_API_KEY` 进行 Bearer 认证。
 - ChatGPT Apps MCP：连接 `https://<your-hub-domain>/mcp`。
-
-Hub 原生工具与转发执行使用相同的进程生命周期投影。使用 `process.status` 或 `process.list` 查询运行状态，使用 `process.output` 和 `process.result` 获取输出/结果，使用 `process.cancel` 取消，并传入返回的 `processId`。
+Hub 原生工具与转发执行使用相同的进程生命周期投影。使用 `process.read` 或 `process.list` 查询运行状态，使用 `process.read` 获取有界输出或状态，使用 `process.cancel` 取消，并传入返回的 `processId`。
 
 ## 受管进程与安全边界
 
-- 每个受管进程都有一个 `processId` 和如实反映其生命周期的状态。`process.status` 只返回状态元数据；使用 `process.output` 获取有界输出，使用 `process.result` 获取保留的最终结果。
-- Worker HTTP API 提供 `GET /v1/process`（列表）、`GET /v1/process/{processId}`（状态）、`GET /v1/process/{processId}/output`、`GET /v1/process/{processId}/result` 和 `POST /v1/process/{processId}/cancel`。Hub MCP 提供 `hub.process.status` 与 `hub.process.list`。
+- 每个受管进程都有一个 `processId` 和如实反映其生命周期的状态。`process.read` 默认使用 auto 视图：有可用输出时直接返回，不要求读取完整日志；否则最多等待 5 秒（最多 30 秒，显式为 0 时立即观察）。仅需要终态状态时使用 `view: "status"`。
+- Worker HTTP API 提供 `GET /v1/process`（列表）、`GET /v1/process/{processId}/read`（读取）和 `POST /v1/process/{processId}/cancel`（取消）。读取响应报告 `captureStatus`、输出 `gap`/`eof` 与续读 cursor；`hasMore` 不要求读取完整日志。cursor 不消费数据，各读取者彼此独立；它适用于 command/skill 输出，不适用于 MCP CallToolResult。
 - `process.exec`、`skills.run` 和 `mcp.callTool` 会启动受管进程；`process.batch` 与 `mcp.batch` 返回有序的子进程投影。`mcp.batch` 接受 1–16 个调用，只进行一次聚合确认，并执行全局/单 server 并发限制。
-- 创建响应最多内联包含 8 KiB 输出；更多初始输出使用共享预览，最多 2 KiB。`process.output` 默认 cursor 窗口为 8 KiB，最大为 32 KiB。
+- 配置项 `limits.processResponseBytes` 是统一响应预算，默认 8192 字节，范围为 4096–1048576；`process.read` 可在此范围内显式覆盖。TUI 使用相同的配置默认值。预算计算序列化响应 JSON（包括转义和 Base64），不包括传输或 event 封套，并与 512 KiB 的 MCP 结果保留上限分离。
+- MCP CallToolResult 只有在预算允许时才以完整对象返回；状态为 `pending`、`included`、`deferred`、`unavailable` 或 `not_retained`。`deferred` 可通过提高读取预算重试，`not_retained` 不可恢复。
+- Worker 进程状态存储于 `process.sqlite3`。首次初始化进程存储不会迁移或修改旧的 `jobs.sqlite3` 数据。
+- 审计记录包含有界元数据、哈希、状态与终止证据，不记录原始 MCP 参数/结果。
 - 每次 MCP 调用的参数上限为 256 KiB；保留的进程结果上限为 512 KiB；批次聚合参数与结果各上限为 2 MiB。
 - Worker 进程状态存储于 `process.sqlite3`。首次初始化进程存储不会迁移或修改旧的 `jobs.sqlite3` 数据。
 - 审计记录包含有界元数据、哈希、状态与终止证据，不记录原始 MCP 参数/结果。
@@ -321,7 +323,7 @@ git push origin "v${rust_version}"
 - Tunnel 密钥优先使用 `file:` 或受保护的 `env:` 引用，不要将其以明文写入配置。
 - 凭据、浏览器、云平台和 SSH 目录应放在 denied roots 中。
 - 对 shell、网络工具和陌生 MCP server 优先要求确认。
-- 使用有界的 `process.output`/`process.result` 获取结果，避免 HTTP/MCP 请求无限期阻塞。
+- 使用有界的 `process.read` 获取输出或状态，避免 HTTP/MCP 请求无限期阻塞。
 - Hub 公开部署时必须使用 HTTPS。
 
 ## 许可证

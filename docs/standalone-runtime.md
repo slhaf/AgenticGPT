@@ -128,9 +128,7 @@ Normal 与 Room profile 选择 namespace 预设，而不是固定最终运行时
 
 先调用 `agent.info`，检查当前 profile、已启用的 namespace、受限的路径策略、容量、确认功能是否可用以及 reporting 状态：
 ```text
-mcp.list, mcp.callTool, mcp.batch
-process.exec, process.batch, process.status, process.list,
-process.output, process.result, process.cancel
+process.exec, process.batch, process.read, process.list, process.cancel
 skills.list, skills.read, skills.setActive, skills.install,
 skills.install.get, skills.install.cancel, skills.run
 tmux.sessions, tmux.panes, tmux.exec, tmux.pasteText
@@ -200,17 +198,10 @@ Standalone worker 不接受 Tunnel 命令封套中的 `agentId` 或 `confirmMeth
 
 事件收件箱持久历史保存在独立的 `events.sqlite3` store 中，不与 `process.sqlite3` 进程历史混用；`event.list`、`event.get` 和
 `event.mark` 只管理事件收件箱，不控制或取消进程。
-Process 历史保存在每个 Agent 的私有 `process.sqlite3` store 中，保留 30 天并受逻辑软上限约束。`process.status` 可按 `processId`
-回退到保留的 metadata；其 `waitSeconds` 未提供时默认值为 5，最大为 30。显式传入 `waitSeconds: 0` 时只查询当前状态，不等待状态变化。
-Status 和 list 只返回 metadata，不返回 stdout、stderr 或结果正文。`process.list` 的默认 limit 为 50，上限为 100，支持精确的
-`group`/kind/state 过滤，以及按 `createdAt DESC, processId DESC` 排序的稳定不透明 cursor 分页。Agent 可用时，Hub Full 和 HTTP 转发会保留
-这些字段。Agent 不可用时，Hub 可以按 group/kind/state 过滤缓存的第一页，但不会为 Agent 签发的 cursor 虚构后续页；缓存 status 明确属于降级
-证据，不是刚完成等待后的结果。
-
-`process.output` 以非消耗方式分页读取 stdout 和 stderr。默认页预算为 8 KiB，上限为 32 KiB。cursor 与特定 process 绑定，并携带两个 stream
-的原始字节偏移量；返回片段会通过 base64 编码保留无效 UTF-8 字节。响应会明确报告保留缺口和 EOF；仅当采集实际到达输出末尾时，EOF 才为 true。
-使用 `process.result` 获取完整且仍被保留的结构化结果。其状态区分 `complete`、`too_large` 和 `unavailable`；过大或未保留的结果不会作为部分
-JSON 返回，Hub metadata cache 也永远不会提供结果内容。若 preflight、策略、确认或容量检查失败，batch 准入仍会在启动任何子项之前拒绝整个 batch。
+Process 历史保存在每个 Agent 的私有 `process.sqlite3` store 中，保留 30 天并受逻辑软上限约束。`process.read` 的 wait 默认值为 5，最大为 30；显式传入 0 时立即观察。默认 `view` 为 `auto`：有 backlog 时立即返回，否则有界等待；`view: "status"` 只等待执行终态/期限。
+`process.read` 返回紧凑状态与捕获输出：报告 `captureStatus`，stdout/stderr 带偏移、`gap`、`eof` 和 `hasMore`；hasMore 不要求读完整日志。cursor 非消费且不共享，只适用于 command/skill 输出；MCP CallToolResult 使用独立 `mcpResult` 状态。
+读取预算由 `limits.processResponseBytes` 控制，默认 8192 字节，范围 4096..1048576；read 可显式覆盖。预算针对序列化响应 JSON，不含传输/event 封套，并与 MCP 结果 512 KiB 保留上限分离。MCP 结果状态为 `pending`、`included`、`deferred`、`unavailable`、`not_retained`；完整 CallToolResult 不切碎，`not_retained` 不可恢复。
+若 preflight、策略、确认或容量检查失败，batch 准入仍会在启动任何子项之前拒绝整个 batch。
 
 ### 存储权威与恢复边界
 
@@ -350,10 +341,8 @@ Full profile 保留现有 Hub 执行表面，增加与 transport 无关的 `boot
 `clamp(ceil(availableParallelism * 1.5), 6, 24)`。现有数值保持显式设置，不会迁移。容量拒绝时返回
 `max_active_processes_reached`，并附带有界的 `active`、`requested` 和 `limit` 详情；batch 准入仍为原子操作，要么全部接受，要么全部拒绝。
 
-有破坏性的 v0.9 迁移指南属于历史记录，不是当前执行接口。当前生命周期工具表面为 `process.exec`、`process.batch`、
-`process.status`、`process.list`、`process.output`、`process.result` 和 `process.cancel`，HTTP 路由为 `/v1/process`。旧版
-`job.*` 工具名称和 `/v1/jobs/*` 路由不是当前 API。此前的 `process.batchExec`、`process.get`、`process.kill`、托管
-`session.*`、`/v1/exec`、`/v1/batchExec` 和 `/v1/sessions/*` 别名仍已移除。tmux session 名称与 tmux session API 未改变。
+有破坏性的 v0.9 迁移指南属于历史记录，不是当前执行接口。当前生命周期工具表面为 `process.exec`、`process.batch`、`process.read`、`process.list` 和 `process.cancel`，HTTP 路由为 `/v1/process`、`/v1/process/{processId}/read` 与 `/cancel`。旧版
+`job.*` 工具名称和 `/v1/jobs/*` 路由不是当前 API。此前的 `process.status`、`process.output`、`process.result` 及其旧 HTTP 路径已移除；旧 wire/http 工具不执行。存储中的旧 receipt 证据仍保留，用于历史/去重边界，但不会退休后重新执行。
 
 当前的多文件变更边界见 file 合同矩阵：一份完整的 apply-patch 请求会先暂存和验证，然后才进行可选确认及提交。
 
