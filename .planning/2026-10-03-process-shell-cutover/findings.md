@@ -1,0 +1,5 @@
+# 发现
+初始工作树干净。LSP未配置，采用CodeGraph定位与引用。三名只读scout定位核心所有者/所有入口/配置消费者。
+CodeGraph当前exec::preflight仍程序名+参数路径检查，cwd canonicalize writeRoots；build_command统一bwrap或direct。managed::cancel_command_process仍child.kill、local_process_kill_completed，组修复需同owner完成。
+现有Skill使用ProcessExecRequest，DTO改动必须拆开内部argv执行，不能将Skill转换Shell。
+Context7本轮两次fetch failed；后续parser源码/API使用官方可读GitHub文档，不能假称Context7成功。

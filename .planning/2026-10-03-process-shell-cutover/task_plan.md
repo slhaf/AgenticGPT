@@ -1,0 +1,18 @@
+# Process Shell 切换
+
+## 目标
+完整执行已设置goal与用户全部澄清；普通系统Bash，command/cwd，可信initFile（默认~/.agentic_gpt/.bashrc、null禁用、显式缺失报错、默认open ENOENT跳过含悬空symlink），白名单只分析提交command，不追踪init环境；进程组取消。无patched Shell/agentsh/新沙箱/PTY/cgroup。所有相关消费者一次迁移。详尽需求存contract.md。
+
+## 阶段
+1. 所有者与调用方定位、固定接口及共享契约（in_progress）；阶段提交。
+2. 实现执行/解析/配置/生命周期，迁移所有入口与消费者（pending）；阶段提交。
+3. 真实入口验收、文档同步与完整验证（pending）；阶段提交。
+
+## 验证
+最多20轮完整验收；fmt/check/strict clippy/workspace test/build Agent+Hub/live parity均退出0；额外隔离真实入口覆盖shell/init/白名单/取消边界。并行实现子代理不得中途运行build/tests/formatter，由父代理收敛后统一运行。记录每轮结果。
+
+## 边界与停止
+保留无关改动；只改必要实现/配置/契约/消费者/测试/文档。按阶段提交、不push/release/tag，不碰真实HOME/配置/数据；未约定公共行为/权限变化或需真实数据等操作暂停确认，普通失败继续修复，达到20轮报告停止。
+
+## 记录
+初始git status干净；有.codegraph，代码探索先CodeGraph。LSP status：未配置语言服务器，采用CodeGraph/文本工具。规划脚本位于~/.agents/skills而非~/.omp/agent/skills，后者glob未命中。
