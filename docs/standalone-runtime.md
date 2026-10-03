@@ -193,8 +193,16 @@ Agentic 会报告 `detached` 并附带有界的终止证据，而不会声称已
 arguments 或原始结果。
 
 Standalone worker 不接受 Tunnel 命令封套中的 `agentId` 或 `confirmMethod` 字段，意外的旧版字段仍会被拒绝；事件工具另有明确的可选 `agentId` 输入，且只接受匹配当前 worker 身份的值，不会据此选择其他 Agent。worker 使用已配置的本地 Agent 身份处理调用。`bootstrap` 仅限 Room。托管 process 准入工具（`process.exec`、`process.batch`、`skills.run`、`mcp.callTool` 和
-`mcp.batch`）接受可选且经过校验的可读 `group`；batch 子项继承父项的 group。响应保持精简，并将 `processId` 作为后续查询状态、输出、
+`mcp.batch`）接受可选且经过校验的可读 `group`；batch 子项继承父项的 group。`process.exec` 使用必填原始 Bash 脚本 `command` 和可选 `cwd`；`process.batch` 每个元素使用 `command`，可在批次级提供 `cwd` 并由元素覆盖。旧 `program`/`args`/`workingDirectory` 不是可接受的执行输入。响应保持精简，并将 `processId` 作为后续查询状态、输出、
 结果或取消的稳定句柄。丰富但有界的 provenance 保留在内部/持久记录中，不会在每个响应里重复。
+
+Shell 启动配置 `shell.initFile` 的配置方式和 `Default`/`Disabled`/显式路径语义见[配置说明](configuration.md)。未设置时使用 `~/.agentic_gpt/.bashrc`；`null` 禁用 init，字符串指定文件路径（相对路径以请求的 `cwd` 或默认工作目录为基准，不从 `PATH` 查找）。默认文件不存在（包括 dangling symlink）时跳过；显式路径不存在或任一文件打开、读取、source 错误会以 `shell_init_file_failed` 阻止命令。除这一默认文件外，不自动读取用户 `~/.bashrc`，也不隐式加载 `BASH_ENV`/`ENV`。init 在与命令相同的 sandbox 可见性和挂载中执行，init 后会重置工作目录；不创建文件或回滚 init 已产生的效果。模型调用不能设置 `initFile`。
+
+init 文件是本地可信配置，不经命令白名单审计，也不绑定之后实际执行的可执行对象。它可修改 PATH、定义函数/别名或设置 exports/变量声明，改变后续命令解析/执行；非交互 Bash 默认不展开别名，若 init 需要别名展开，须自行启用 `expand_aliases`。相对路径若置于模型可选择或可写的位置，尤其需要审慎信任。优先使用用户所有、受保护的绝对路径；这是一项运维建议，不是额外运行时强制策略。已准入进程冻结配置快照，但不冻结 init 文件内容或可执行文件身份。
+
+普通命令以非登录、非交互 Bash（`--noprofile --norc`）执行原始脚本；初始化后启用 `pipefail` 并执行 `set +e`，不会自动启用 `set -e`。策略仅分析用户提交的脚本，不分析 init 文件或 init 改写后的执行对象。退出码 0 为 `completed`，非零为 `failed` 并保留实际 `exitCode`，不会因非零状态合成 init 错误。`waitSeconds` 只限制本次响应等待，不会取消进程；执行终态与 stdout/stderr 捕获 EOF 独立，读取仍受原有游标、UTF-8/Base64、gap、hasMore/eof 和响应预算约束。
+
+`process.cancel` 请求管理整个普通进程组：向仍存活的组发送 TERM，等待后必要时 KILL；已退出的组长不会让仍存活的组成员丢失取消/容量跟踪。只在观察到停止信号时报告正面证据 `process_group_sigterm_observed` 或 `process_group_sigkill_observed`；未验证/脱离或无响应不等于停止。范围包括普通同组管道/后台子进程，不保证 `setsid` 等方式脱离进程组的后代，也不提供 cgroup 级保证。仍有存活组成员的任务继续占用执行容量。
 
 事件收件箱持久历史保存在独立的 `events.sqlite3` store 中，不与 `process.sqlite3` 进程历史混用；`event.list`、`event.get` 和
 `event.mark` 只管理事件收件箱，不控制或取消进程。

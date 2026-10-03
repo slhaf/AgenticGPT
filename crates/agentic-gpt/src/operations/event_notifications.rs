@@ -182,6 +182,26 @@ pub(crate) fn initial_response_dispositions(
     Ok(dispositions)
 }
 
+pub(crate) fn registered_response_dispositions(
+    event_store: &crate::event_store::EventStore,
+    operation: &str,
+    value: &Value,
+) -> Result<Vec<EventResponseDisposition>> {
+    let dispositions = initial_response_dispositions(operation, value)?;
+    if dispositions.is_empty() {
+        return Ok(dispositions);
+    }
+    let registration = event_store
+        .contains_internal_sources(dispositions.iter().map(|disposition| &disposition.source))?;
+    let mut registered = Vec::with_capacity(dispositions.len());
+    for (disposition, is_registered) in dispositions.into_iter().zip(registration) {
+        if is_registered {
+            registered.push(disposition);
+        }
+    }
+    Ok(registered)
+}
+
 fn append_batch_dispositions(
     value: &Value,
     key: &str,
@@ -423,6 +443,119 @@ mod tests {
         .unwrap();
 
         assert!(dispositions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn response_feedback_requires_registered_sources_and_keeps_off_policy_quiet() {
+        let (state, root) = test_state();
+        let capacity_rejection = json!({
+            "processId": "process-capacity-rejected",
+            "state": "rejected",
+            "terminationEvidence": "not_started"
+        });
+        assert!(registered_response_dispositions(
+            &state.event_store,
+            "process.exec",
+            &capacity_rejection,
+        )
+        .unwrap()
+        .is_empty());
+
+        let off_policy = crate::event_store::InternalEventPolicy {
+            low_ttl_seconds: 24 * 60 * 60,
+            overrides: std::collections::BTreeMap::from([("process.completed".to_string(), None)]),
+        };
+        let terminal_source = process_source("process-completed-leader");
+        let terminal_origin = agentic_gpt_protocol::EventOrigin {
+            run_id: "run-completed-leader".to_string(),
+            request_id: "request-completed-leader".to_string(),
+            command_hash: "hash-completed-leader".to_string(),
+        };
+        register_internal_source(
+            &state,
+            &terminal_source,
+            &off_policy,
+            Some(&terminal_origin),
+        )
+        .unwrap();
+        state
+            .event_store
+            .record_internal_completion(
+                &terminal_source,
+                "process.completed",
+                "completed leader with live descendant",
+                Utc::now(),
+            )
+            .unwrap();
+        let terminal_response = json!({
+            "processId": "process-completed-leader",
+            "state": "completed",
+            "captureStatus": "incomplete",
+            "output": {"hasMore": true}
+        });
+        let terminal_dispositions = registered_response_dispositions(
+            &state.event_store,
+            "process.exec",
+            &terminal_response,
+        )
+        .unwrap();
+        assert_eq!(
+            terminal_dispositions,
+            vec![EventResponseDisposition {
+                source: terminal_source.clone(),
+                includes_terminal: true,
+            }]
+        );
+        state
+            .event_store
+            .settle_remote_response(
+                &terminal_source,
+                &terminal_origin,
+                terminal_dispositions[0].includes_terminal,
+            )
+            .unwrap();
+
+        let active_source = process_source("process-off-policy-async");
+        let active_origin = agentic_gpt_protocol::EventOrigin {
+            run_id: "run-off-policy-async".to_string(),
+            request_id: "request-off-policy-async".to_string(),
+            command_hash: "hash-off-policy-async".to_string(),
+        };
+        register_internal_source(&state, &active_source, &off_policy, Some(&active_origin))
+            .unwrap();
+        let active_response = json!({
+            "processId": "process-off-policy-async",
+            "state": "running"
+        });
+        let active_dispositions =
+            registered_response_dispositions(&state.event_store, "process.exec", &active_response)
+                .unwrap();
+        assert_eq!(
+            active_dispositions,
+            vec![EventResponseDisposition {
+                source: active_source.clone(),
+                includes_terminal: false,
+            }]
+        );
+        state
+            .event_store
+            .record_internal_completion(
+                &active_source,
+                "process.completed",
+                "completion suppressed by off policy",
+                Utc::now(),
+            )
+            .unwrap();
+        state
+            .event_store
+            .settle_remote_response(
+                &active_source,
+                &active_origin,
+                active_dispositions[0].includes_terminal,
+            )
+            .unwrap();
+        assert!(state.event_store.panel().unwrap().new.is_empty());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     fn test_state() -> (AppState, PathBuf) {

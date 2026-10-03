@@ -12,6 +12,59 @@ pub(crate) enum ExecutionSpec {
     Shell { command: String },
     Argv { program: String, args: Vec<String> },
 }
+/// Reject a single argument that the Linux kernel cannot pass to `execve`.
+///
+/// For shell execution, count the exact `bash -c` bootstrap using the same
+/// emitter as command construction, without allocating the argument string.
+pub(crate) fn kernel_argument_limit_error(
+    config: &Config,
+    working_directory: Option<&Path>,
+    execution: &ExecutionSpec,
+) -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        let page_size = usize::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) }).ok()?;
+        let limit = page_size.checked_mul(32)?;
+        let oversized_argument = |argument: &str| {
+            let bytes = argument.len().saturating_add(1);
+            (bytes > limit).then_some(bytes)
+        };
+        match execution {
+            ExecutionSpec::Shell { command } => {
+                let working_directory = working_directory?;
+                let bytes = shell_bootstrap_argument_len(config, working_directory, command)
+                    .ok()?
+                    .saturating_add(1);
+                (bytes > limit).then(|| {
+                    format!(
+                        "process_kernel_argument_too_large: argument=bash_-c; bytes={bytes}; max={limit}"
+                    )
+                })
+            }
+            ExecutionSpec::Argv { program, args } => {
+                if let Some(bytes) = oversized_argument(program) {
+                    return Some(format!(
+                        "process_kernel_argument_too_large: argument=program; bytes={bytes}; max={limit}"
+                    ));
+                }
+                args.iter()
+                    .enumerate()
+                    .find_map(|(index, argument)| {
+                        oversized_argument(argument).map(|bytes| {
+                            format!(
+                                "process_kernel_argument_too_large: argument=argv[{index}]; bytes={bytes}; max={limit}"
+                            )
+                        })
+                    })
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (config, working_directory, execution);
+        None
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct ExecutionRequest {
@@ -455,6 +508,39 @@ fn sanitize_shell_environment(command: &mut Command) {
 }
 
 fn shell_bootstrap(config: &Config, working_directory: &Path, script: &str) -> Result<String> {
+    let mut bootstrap = String::new();
+    append_shell_bootstrap(&mut bootstrap, config, working_directory, script)?;
+    Ok(bootstrap)
+}
+
+#[cfg(target_os = "linux")]
+fn shell_bootstrap_argument_len(
+    config: &Config,
+    working_directory: &Path,
+    script: &str,
+) -> Result<usize> {
+    let mut length = BootstrapLength(0);
+    append_shell_bootstrap(&mut length, config, working_directory, script)?;
+    Ok(length.0)
+}
+
+#[cfg(target_os = "linux")]
+struct BootstrapLength(usize);
+
+#[cfg(target_os = "linux")]
+impl std::fmt::Write for BootstrapLength {
+    fn write_str(&mut self, text: &str) -> std::fmt::Result {
+        self.0 = self.0.saturating_add(text.len());
+        Ok(())
+    }
+}
+
+fn append_shell_bootstrap(
+    output: &mut impl std::fmt::Write,
+    config: &Config,
+    working_directory: &Path,
+    script: &str,
+) -> Result<()> {
     let init_file = match &config.shell.init_file {
         crate::config::ShellInitFile::Default => Some((
             dirs::home_dir()
@@ -464,34 +550,131 @@ fn shell_bootstrap(config: &Config, working_directory: &Path, script: &str) -> R
             true,
         )),
         crate::config::ShellInitFile::Disabled => None,
-        crate::config::ShellInitFile::Path(path) => Some((expand_path(path)?, false)),
-    };
-    let mut bootstrap = String::from("set +e\nset -o pipefail\nbuiltin printf 'B\\n' >&3\n");
-    if let Some((path, is_default)) = init_file {
-        let path = shell_quote(&path.to_string_lossy());
-        if is_default {
-            bootstrap.push_str(&format!(
-                "__agentic_load_init() {{\n  local __agentic_diag __agentic_open_status __agentic_probe_fd __agentic_init_status\n  __agentic_diag=$(export LC_ALL=C; exec 2>&1 {{__agentic_probe_fd}}< {path})\n  __agentic_open_status=$?\n  if (( __agentic_open_status != 0 )); then\n    if [[ $__agentic_diag == *': No such file or directory' ]]; then return 0; fi\n    builtin printf '%s\\n' \"$__agentic_diag\" >&2\n    return 1\n  fi\n  if builtin source {path}; then return 0; else __agentic_init_status=$?; fi\n  return \"$__agentic_init_status\"\n}}\n"
-            ));
-        } else {
-            bootstrap.push_str(&format!(
-                "__agentic_load_init() {{\n  local __agentic_init_status\n  if builtin source {path}; then return 0; else __agentic_init_status=$?; fi\n  return \"$__agentic_init_status\"\n}}\n"
-            ));
+        crate::config::ShellInitFile::Path(path) => {
+            let path = expand_path(path)?;
+            let path = if path.is_absolute() {
+                path
+            } else {
+                working_directory.join(path)
+            };
+            Some((path, false))
         }
-        bootstrap.push_str(
-            "__agentic_load_init\n__agentic_init_status=$?\nbuiltin unset -f __agentic_load_init\nbuiltin unset BASH_ENV ENV POSIXLY_CORRECT\nset +e\nset -o pipefail\nif (( __agentic_init_status != 0 )); then builtin printf 'I:%s\\n' \"$__agentic_init_status\" >&3; exec 3>&-; exit \"$__agentic_init_status\"; fi\n",
+    };
+    write_bootstrap_text(
+        output,
+        "set +e\nset -o pipefail\nif ! exec {__agentic_shell_control_fd}>&3; then exit 1; fi\nexec 3>&-\nif ! builtin printf 'B\\n' >&\"$__agentic_shell_control_fd\"; then exit 1; fi\n",
+    );
+    if let Some((path, is_default)) = init_file {
+        if is_default {
+            write_bootstrap_text(
+                output,
+                "__agentic_diag=$(export LC_ALL=C; exec 2>&1 {__agentic_probe_fd}< ",
+            );
+            write_shell_quote_path(output, &path);
+            write_bootstrap_text(
+                output,
+                ")\n__agentic_open_status=$?\nif (( __agentic_open_status == 0 )); then\n  if builtin source ",
+            );
+            write_shell_quote_path(output, &path);
+            write_bootstrap_text(
+                output,
+                "; then __agentic_init_status=0; else __agentic_init_status=$?; fi\nelif [[ $__agentic_diag == *': No such file or directory' ]]; then\n  __agentic_init_status=0\nelse\n  builtin printf '%s\\n' \"$__agentic_diag\" >&2\n  __agentic_init_status=1\nfi\nbuiltin unset __agentic_diag __agentic_open_status\n",
+            );
+        } else {
+            write_bootstrap_text(output, "if builtin source ");
+            write_shell_quote_path(output, &path);
+            write_bootstrap_text(
+                output,
+                "; then __agentic_init_status=0; else __agentic_init_status=$?; fi\n",
+            );
+        }
+        write_bootstrap_text(
+            output,
+            "builtin unset BASH_ENV ENV POSIXLY_CORRECT\nset +e\nset -o pipefail\n",
         );
+        write_bootstrap_text(
+            output,
+            "if (( __agentic_init_status != 0 )); then builtin printf 'I:%s\\n' \"$__agentic_init_status\" >&\"$__agentic_shell_control_fd\"; exec {__agentic_shell_control_fd}>&-; exit \"$__agentic_init_status\"; fi\n",
+        );
+        write_bootstrap_text(output, "builtin unset __agentic_init_status\n");
     }
-    bootstrap.push_str(&format!(
-        "builtin cd -- {} || {{ builtin printf 'C:1\\n' >&3; exec 3>&-; exit 1; }}\nbuiltin printf 'R\\n' >&3\nexec 3>&-\nbuiltin eval {}\n",
-        shell_quote(&working_directory.to_string_lossy()),
-        shell_quote(script),
-    ));
-    Ok(bootstrap)
+    write_bootstrap_text(output, "builtin cd -- ");
+    write_shell_quote_path(output, working_directory);
+    write_bootstrap_text(
+        output,
+        " || { builtin printf 'C:1\\n' >&\"$__agentic_shell_control_fd\"; exec {__agentic_shell_control_fd}>&-; exit 1; }\n",
+    );
+    write_bootstrap_text(
+        output,
+        "if ! builtin printf 'R\\n' >&\"$__agentic_shell_control_fd\"; then exit 1; fi\n",
+    );
+    write_bootstrap_text(
+        output,
+        "exec {__agentic_shell_control_fd}>&-\nbuiltin unset __agentic_shell_control_fd\nbuiltin eval -- ",
+    );
+    write_shell_quote(output, script);
+    output
+        .write_char('\n')
+        .expect("bootstrap writer is infallible");
+    Ok(())
 }
 
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
+fn write_shell_quote_path(output: &mut impl std::fmt::Write, path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+
+        let mut bytes = path.as_os_str().as_bytes();
+        write_bootstrap_text(output, "'");
+        while !bytes.is_empty() {
+            match std::str::from_utf8(bytes) {
+                Ok(text) => {
+                    write_shell_quote_contents(output, text);
+                    break;
+                }
+                Err(error) => {
+                    let valid_up_to = error.valid_up_to();
+                    let valid = std::str::from_utf8(&bytes[..valid_up_to])
+                        .expect("UTF-8 error prefix is valid");
+                    write_shell_quote_contents(output, valid);
+                    output
+                        .write_char('\u{FFFD}')
+                        .expect("bootstrap writer is infallible");
+                    let invalid_len = error
+                        .error_len()
+                        .unwrap_or_else(|| bytes.len() - valid_up_to);
+                    bytes = &bytes[valid_up_to + invalid_len..];
+                }
+            }
+        }
+        write_bootstrap_text(output, "'");
+    }
+    #[cfg(not(unix))]
+    {
+        write_shell_quote(output, &path.to_string_lossy());
+    }
+}
+
+fn write_shell_quote(output: &mut impl std::fmt::Write, value: &str) {
+    write_bootstrap_text(output, "'");
+    write_shell_quote_contents(output, value);
+    write_bootstrap_text(output, "'");
+}
+
+fn write_shell_quote_contents(output: &mut impl std::fmt::Write, value: &str) {
+    let mut pieces = value.split('\'').peekable();
+    while let Some(piece) = pieces.next() {
+        write_bootstrap_text(output, piece);
+        if pieces.peek().is_some() {
+            write_bootstrap_text(output, "'\\''");
+        }
+    }
+}
+
+fn write_bootstrap_text(output: &mut impl std::fmt::Write, text: &str) {
+    output
+        .write_str(text)
+        .expect("bootstrap writer is infallible");
 }
 
 fn add_bwrap_bind(
@@ -515,5 +698,236 @@ fn add_bwrap_parent_dirs(command: &mut Command, created_dirs: &mut HashSet<PathB
         if created_dirs.insert(parent.clone()) {
             command.arg("--dir").arg(parent);
         }
+    }
+}
+#[cfg(all(test, unix))]
+mod tests {
+    use std::{
+        fs,
+        io::Read,
+        os::unix::{io::AsRawFd, process::CommandExt},
+        process::Stdio,
+        time::Duration,
+    };
+
+    use super::{build_command, ExecutionSpec, SHELL_STARTUP_FD};
+    #[cfg(target_os = "linux")]
+    use super::{kernel_argument_limit_error, shell_bootstrap, shell_bootstrap_argument_len};
+    use crate::config::{Config, ShellInitFile};
+    use uuid::Uuid;
+
+    #[tokio::test]
+    async fn relative_shell_init_file_is_not_resolved_through_path() {
+        let root = std::env::temp_dir().join(format!("shell-init-path-{}", Uuid::new_v4()));
+        let home = root.join("home");
+        let tmp = root.join("tmp");
+        let working_directory = root.join("cwd");
+        let path_directory = root.join("path");
+        for directory in [&home, &tmp, &working_directory, &path_directory] {
+            fs::create_dir_all(directory).unwrap();
+        }
+        let init_name = format!("init-{}.bash", Uuid::new_v4());
+        fs::write(
+            working_directory.join(&init_name),
+            "CUTOVER_INIT_SOURCE=from_working_directory\n",
+        )
+        .unwrap();
+        fs::write(
+            path_directory.join(&init_name),
+            "CUTOVER_INIT_SOURCE=from_PATH\n",
+        )
+        .unwrap();
+
+        let mut config = Config::default_config().unwrap();
+        config.sandbox.enabled = false;
+        config.shell.init_file = ShellInitFile::Path(init_name);
+        let mut command = build_command(
+            &config,
+            &working_directory,
+            &ExecutionSpec::Shell {
+                command: "printf '%s' \"$CUTOVER_INIT_SOURCE\"".to_string(),
+            },
+        )
+        .unwrap();
+        command
+            .env("HOME", &home)
+            .env("TMPDIR", &tmp)
+            .env("XDG_CONFIG_HOME", home.join(".config"))
+            .env("XDG_DATA_HOME", home.join(".local/share"))
+            .env("XDG_CACHE_HOME", home.join(".cache"))
+            .env("PATH", &path_directory)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let (startup_reader, startup_writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let startup_fd = startup_writer.as_raw_fd();
+        unsafe {
+            command.as_std_mut().pre_exec(move || {
+                if startup_fd != SHELL_STARTUP_FD {
+                    if libc::dup2(startup_fd, SHELL_STARTUP_FD) == -1 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                } else {
+                    let flags = libc::fcntl(startup_fd, libc::F_GETFD);
+                    if flags == -1
+                        || libc::fcntl(startup_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) == -1
+                    {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                }
+                Ok(())
+            });
+        }
+
+        let child = command.spawn().unwrap();
+        drop(startup_writer);
+        let output = child.wait_with_output().await.unwrap();
+        let mut startup_markers = Vec::new();
+        startup_reader
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut startup_reader = startup_reader;
+        startup_reader.read_to_end(&mut startup_markers).unwrap();
+
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout.as_slice(), b"from_working_directory");
+        assert_eq!(startup_markers.as_slice(), b"B\nR\n");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn losing_startup_channel_before_ready_prevents_command_execution() {
+        let root = std::env::temp_dir().join(format!("shell-startup-channel-{}", Uuid::new_v4()));
+        let working_directory = root.join("cwd");
+        fs::create_dir_all(&working_directory).unwrap();
+        let release_init = root.join("release-init");
+        let init_file = root.join("init.bash");
+        let marker = root.join("must-not-run");
+        fs::write(
+            &init_file,
+            format!(
+                "while [[ ! -e '{}' ]]; do :; done\n",
+                release_init.display()
+            ),
+        )
+        .unwrap();
+
+        let mut config = Config::default_config().unwrap();
+        config.sandbox.enabled = false;
+        config.shell.init_file = ShellInitFile::Path(init_file.to_string_lossy().to_string());
+        let mut command = build_command(
+            &config,
+            &working_directory,
+            &ExecutionSpec::Shell {
+                command: format!("printf ran > '{}'", marker.display()),
+            },
+        )
+        .unwrap();
+        command
+            .kill_on_drop(true)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+
+        let (startup_reader, startup_writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let startup_fd = startup_writer.as_raw_fd();
+        unsafe {
+            command.as_std_mut().pre_exec(move || {
+                if startup_fd != SHELL_STARTUP_FD {
+                    if libc::dup2(startup_fd, SHELL_STARTUP_FD) == -1 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                } else {
+                    let flags = libc::fcntl(startup_fd, libc::F_GETFD);
+                    if flags == -1
+                        || libc::fcntl(startup_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) == -1
+                    {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                }
+                Ok(())
+            });
+        }
+
+        let child = command.spawn().unwrap();
+        drop(startup_writer);
+        let mut startup_reader = startup_reader;
+        startup_reader
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut boot_marker = [0; 2];
+        startup_reader.read_exact(&mut boot_marker).unwrap();
+        assert_eq!(boot_marker, *b"B\n");
+        startup_reader.shutdown(std::net::Shutdown::Both).unwrap();
+        drop(startup_reader);
+        fs::write(&release_init, "").unwrap();
+
+        let output = tokio::time::timeout(Duration::from_secs(3), child.wait_with_output())
+            .await
+            .expect("shell should stop after startup control delivery fails")
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(!marker.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn shell_argument_limit_counts_exact_bootstrap_and_keeps_boundary() {
+        let root = std::env::temp_dir().join(format!("shell-argument-limit-{}", Uuid::new_v4()));
+        let working_directory = root.join("cwd");
+        fs::create_dir_all(&working_directory).unwrap();
+        let mut config = Config::default_config().unwrap();
+        config.sandbox.enabled = false;
+        config.shell.init_file = ShellInitFile::Disabled;
+
+        let max_argument_bytes =
+            usize::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) }).unwrap() * 32;
+        let quote_dense_command = format!("true; #{}", "'".repeat(max_argument_bytes / 4 + 1));
+        assert!(quote_dense_command.len() + 1 < max_argument_bytes);
+        let quote_dense_bootstrap_len =
+            shell_bootstrap_argument_len(&config, &working_directory, &quote_dense_command)
+                .unwrap();
+        assert_eq!(
+            quote_dense_bootstrap_len,
+            shell_bootstrap(&config, &working_directory, &quote_dense_command)
+                .unwrap()
+                .len()
+        );
+        let error = kernel_argument_limit_error(
+            &config,
+            Some(&working_directory),
+            &ExecutionSpec::Shell {
+                command: quote_dense_command,
+            },
+        )
+        .unwrap();
+        assert!(error.contains(&format!("bytes={}", quote_dense_bootstrap_len + 1)));
+        assert!(quote_dense_bootstrap_len + 1 > max_argument_bytes);
+
+        let boundary_prefix = "true; #";
+        let prefix_len =
+            shell_bootstrap_argument_len(&config, &working_directory, boundary_prefix).unwrap();
+        let boundary_command = format!(
+            "{boundary_prefix}{}",
+            "x".repeat(max_argument_bytes - 1 - prefix_len)
+        );
+        let boundary_bootstrap_len =
+            shell_bootstrap_argument_len(&config, &working_directory, &boundary_command).unwrap();
+        assert_eq!(boundary_bootstrap_len + 1, max_argument_bytes);
+        assert!(kernel_argument_limit_error(
+            &config,
+            Some(&working_directory),
+            &ExecutionSpec::Shell {
+                command: boundary_command,
+            },
+        )
+        .is_none());
+        fs::remove_dir_all(root).unwrap();
     }
 }

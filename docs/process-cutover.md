@@ -1,6 +1,6 @@
 # Process API 与存储切换说明
 
-本页区分本次统一 `process.read` 的接口切换与较早的 `Job`→`Process` 迁移。本次移除旧 Process 读取接口，不提供别名或兼容双轨，但继续使用既有 Process 历史存储，不新建、迁移或清空数据库。Agent、Hub 与调用方需要协调升级。
+本页记录当前 `process.exec`/`process.batch` 的 Bash 输入切换、统一 `process.read` 接口切换与较早的 `Job`→`Process` 历史迁移。各次切换都不提供已移除输入或读取接口的别名；进程历史继续使用既有存储，不新建、迁移或清空数据库。当前部署须协调更新 Agent、Hub 与调用方。
 
 ## API 迁移
 
@@ -27,6 +27,18 @@
 | HTTP `GET /v1/jobs` | `GET /v1/process` |
 | HTTP `GET /v1/jobs/{jobId}` | `GET /v1/process/{processId}/read`（统一状态/输出读取） |
 | HTTP `POST /v1/jobs/{jobId}/cancel` | `POST /v1/process/{processId}/cancel` |
+
+### 当前 Bash 命令输入切换
+
+当前 `process.exec` 必须提供原始 shell 脚本 `command`，可选工作目录字段为 `cwd`；`process.batch` 的每个元素也必须提供 `command`，并可使用批次级 `cwd`，由元素覆盖。旧 `program`、`args`、`workingDirectory` 字段不是当前输入，也没有兼容别名。若客户端原先传入可执行文件和参数数组，必须自行按 shell 规则显式引用/转义每个参数，再构造 `command`；不得把数组直接拼接成脚本。保留在非输入 `ProcessInfo` 历史元数据中的旧字段，不代表这些字段仍可作为执行请求输入。
+
+Shell 策略现在针对提交的整个脚本做静态预检，而不是为每个 `program`/`args` 调用组装单独命令：任一可判定的拒绝会在执行脚本前拒绝整个请求；无法匹配、语法不完整或不支持的结构要求对整段脚本确认。缺少确认通道时 fail closed。不要据此扩大默认 Bash 白名单。普通字面量 `printf` 可用于无副作用的冒烟检查；需要通用 shell 结构的脚本可能要求显式确认。
+
+历史持久化记录不会改写成新格式或重新执行：旧输入的原始命令、哈希、身份和已有结果保持不变；旧的未完成记录退休为 `UnknownAfterRestart`，绝不重放；已完成记录仍可重放其保存结果。此次切换不做数据库 rewrite/migration，也不改变 Process 历史数据库。
+
+升级前应停止或盘点正在运行的旧调用，同步部署配对的 Agent/Hub，并迁移所有客户端；旧输入将被拒绝，不支持新旧输入混用或回退式兼容。已完成结果可按历史保留规则读取；未完成旧调用不会由新版本续跑。
+
+`process.cancel` 对受管理进程组发 TERM，等待后再发 KILL；如组成员仍存活，保留进程组并继续占用执行容量。`process_group_sigterm_observed` 与 `process_group_sigkill_observed` 是观察到相应停止信号的正面语义证据，必须与未验证/脱离等结果区分。取消覆盖普通同组管道及后台后代，不保证脱离该进程组的后代停止。执行终态与 stdout/stderr 捕获 EOF 分开报告；捕获尚未 EOF 不会让已经结束的执行仍被称为运行中。
 
 当前公开 Process 工具仅为 `process.exec`、`process.batch`、`process.read`、`process.list` 和 `process.cancel`；旧 `process.status`、`process.output`、`process.result` 工具及旧 HTTP 路径直接移除，不提供 wire/http 兼容别名。HTTP read 的 wait 默认 5 秒、最大 30 秒、0 立即；view 为 `auto` 或 `status`。响应包含 `captureStatus`，输出页包含 `gap`、`eof`、`hasMore`；hasMore 不要求读完整日志。cursor 仅 command/skill，非消费且不同读取者不共享。
 

@@ -5,8 +5,8 @@
 
 ## 阶段
 1. 所有者与调用方定位、固定接口及共享契约（complete）；已提交e399179。
-2. 实现执行/解析/配置/生命周期，迁移所有入口与消费者（in_progress）；各owner已交付，等待parser词法审查修正收敛后阶段提交。
-3. 真实入口验收、文档同步与完整验证（pending）；阶段提交。
+2. 实现执行/解析/配置/生命周期，迁移所有入口与消费者（complete）；已提交0fdf5da。
+3. 真实入口验收、文档同步与完整验证（complete）；第13轮完整六项验收均exit0，额外真实Shell/TUI及恢复checkpoint场景通过，阶段修复/文档/证据完成并由最终本地聚焦提交收束。
 
 ## 验证
 最多20轮完整验收；fmt/check/strict clippy/workspace test/build Agent+Hub/live parity均退出0；额外隔离真实入口覆盖shell/init/白名单/取消边界。并行实现子代理不得中途运行build/tests/formatter，由父代理收敛后统一运行。记录每轮结果。

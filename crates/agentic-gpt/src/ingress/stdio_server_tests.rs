@@ -1561,10 +1561,10 @@ async fn process_creation_read_cancel_and_batch_use_process_api() -> anyhow::Res
     assert_eq!(cancelled["processId"], long_id);
     assert_eq!(cancelled["state"], "cancelled");
     assert_eq!(cancelled["cancelOutcome"], "cancelled");
-    assert_eq!(
-        cancelled["terminationEvidence"],
-        "local_process_kill_completed"
-    );
+    assert!(matches!(
+        cancelled["terminationEvidence"].as_str(),
+        Some("process_group_sigterm_observed" | "process_group_sigkill_observed")
+    ));
 
     let batch = server
         .dispatch(
@@ -3691,6 +3691,17 @@ fn test_state(profile: CapabilityProfile) -> AppState {
     let workspace_root = root.join("workspace");
     let mut config = Config::default_config().expect("default config");
     config.shell.init_file = ShellInitFile::Disabled;
+    config
+        .policy
+        .allow
+        .extend(
+            ["true", "false", "sleep"]
+                .into_iter()
+                .map(|program| crate::config::Rule {
+                    program: program.to_string(),
+                    args_prefix: Vec::new(),
+                }),
+        );
     config.agent_id = "stdio-test-agent".to_string();
     config.toolsets = if profile == CapabilityProfile::Room {
         ToolsetConfig::room()

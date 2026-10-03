@@ -872,7 +872,7 @@ async fn handle_reliable_envelope(
         }
         transport_ledger::AcceptOutcome::Completed(result) => {
             let event_sources =
-                match event_response_sources(hub_command_name(&envelope.command), &result) {
+                match event_response_sources(state, hub_command_name(&envelope.command), &result) {
                     Ok(sources) => sources,
                     Err(error) => {
                         log_warn(format!("transport replay event metadata failed: {error}"));
@@ -933,7 +933,7 @@ async fn handle_reliable_envelope(
         }
         transport_ledger::ClaimOutcome::Completed(result) => {
             let event_sources =
-                match event_response_sources(hub_command_name(&envelope.command), &result) {
+                match event_response_sources(state, hub_command_name(&envelope.command), &result) {
                     Ok(sources) => sources,
                     Err(error) => {
                         log_warn(format!("transport replay event metadata failed: {error}"));
@@ -1007,15 +1007,17 @@ async fn reconcile_transport_runs(state: &AppState, tx: &mpsc::UnboundedSender<A
             continue;
         }
         match record.status.as_str() {
-            "completed" => match transport_ledger::completed_response(&record) {
-                Ok(Some(message)) => {
-                    let _ = tx.send(message);
+            "completed" => {
+                match transport_ledger::completed_response(&record, &state.event_store) {
+                    Ok(Some(message)) => {
+                        let _ = tx.send(message);
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        log_warn(format!("transport replay event metadata failed: {error}"));
+                    }
                 }
-                Ok(None) => {}
-                Err(error) => {
-                    log_warn(format!("transport replay event metadata failed: {error}"));
-                }
-            },
+            }
             "accepted" => {
                 let command = match record.command.clone() {
                     Some(StoredCommand::Current(command)) => command,
@@ -1210,10 +1212,15 @@ pub(crate) struct RunIdentity {
 }
 
 fn event_response_sources(
+    state: &AppState,
     operation: &str,
     data: &serde_json::Value,
 ) -> Result<Vec<EventResponseDisposition>> {
-    crate::event_notifications::initial_response_dispositions(operation, data)
+    crate::event_notifications::registered_response_dispositions(
+        &state.event_store,
+        operation,
+        data,
+    )
 }
 
 async fn report_unreturned_event_sources(
@@ -1289,7 +1296,7 @@ pub(crate) async fn handle_hub_command(
                 })
             }
         };
-    let event_sources = event_response_sources(operation, &data)?;
+    let event_sources = event_response_sources(&state, operation, &data)?;
     if !suppress_event_panel && !matches!(operation, "event.panel" | "event.settle") {
         let panel_result = state
             .event_store

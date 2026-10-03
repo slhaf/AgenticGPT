@@ -562,6 +562,16 @@ async fn hub_panel_failure_emits_live_event_source_without_terminal_response() {
     let workspace = unique_temp_dir("hub-panel-failure").join("workspace");
     fs::create_dir_all(&workspace).unwrap();
     let (state, mut rx) = command_test_state(CapabilityProfile::Normal, workspace);
+    state
+        .config
+        .write()
+        .await
+        .policy
+        .allow
+        .push(crate::config::Rule {
+            program: "true".to_string(),
+            args_prefix: Vec::new(),
+        });
     let agent_id = state.config.read().await.agent_id.clone();
     let request_id = "req-panel-failure".to_string();
     let identity = hub::RunIdentity {

@@ -370,6 +370,7 @@ class WebSocketRelay:
         self.source_report_seen = threading.Event()
         self.fail_next_settle_response = False
         self.settle_failure_seen = threading.Event()
+        self._failed_settle_response_baseline: int | None = None
         self._settle_response_ids: set[tuple[str, str]] = set()
         self._expected_response: tuple[str, str] | None = None
         self._expected_receipt: tuple[str, str, str, str] | None = None
@@ -491,11 +492,14 @@ class WebSocketRelay:
 
     def arm_receipt_hold(self) -> None:
         with self._condition:
-            self.receipt_hold_armed = True
-            self.receipt_release.clear()
-            self.receipt_seen.clear()
-            self.settle_reply_hold_armed = True
-            self.settle_reply_seen.clear()
+            self._arm_receipt_hold_locked()
+
+    def _arm_receipt_hold_locked(self) -> None:
+        self.receipt_hold_armed = True
+        self.receipt_release.clear()
+        self.receipt_seen.clear()
+        self.settle_reply_hold_armed = True
+        self.settle_reply_seen.clear()
 
     def disarm_receipt_hold(self) -> None:
         with self._condition:
@@ -575,11 +579,17 @@ class WebSocketRelay:
     def arm_settle_response_failure(self) -> None:
         with self._condition:
             self.fail_next_settle_response = True
+            self._failed_settle_response_baseline = None
             self.settle_failure_seen.clear()
 
-    def wait_settle_failure(self, timeout: float, scenario: str) -> None:
+    def wait_settle_failure(self, timeout: float, scenario: str) -> int:
         if not self.settle_failure_seen.wait(timeout):
             fail(scenario, "relay did not drop an actual successful EventSettle response")
+        with self._condition:
+            baseline = self._failed_settle_response_baseline
+        if baseline is None:
+            fail(scenario, "relay dropped the EventSettle response without capturing its replay boundary")
+        return baseline
 
     def command_types(self) -> list[str]:
         with self._condition:
@@ -721,6 +731,8 @@ class WebSocketRelay:
                     if self.fail_next_settle_response:
                         self.fail_next_settle_response = False
                         self._failed_settle_connection_id = connection_id
+                        self._failed_settle_response_baseline = len(self.settle_response_messages)
+                        self._arm_receipt_hold_locked()
                         self.settle_failure_seen.set()
                         self._condition.notify_all()
                         return True
@@ -4351,6 +4363,17 @@ def run_hub_agent_crash_recovery_gate(
             "Hub crash-recovery bound EventSources",
             f"Agent did not recover the exact durably bound process source: {report}",
         )
+
+    def recovered_sources_persisted() -> bool:
+        row = read_hub_feedback_row(hub_db_path, str(run_id))
+        return row is not None and isinstance(row.get("sources"), str)
+
+    wait_until(
+        recovered_sources_persisted,
+        "Hub crash-recovery source persistence",
+        "the Hub to persist Agent-reported source identities",
+        process=agent,
+    )
     feedback_with_sources = read_hub_feedback_row(hub_db_path, str(run_id))
     if feedback_with_sources is None or not isinstance(feedback_with_sources.get("sources"), str):
         fail(
@@ -4368,9 +4391,9 @@ def run_hub_agent_crash_recovery_gate(
         )
 
     relay.wait_for_settle(1, 15, "Hub crash-recovery initial EventSettle")
-    relay.wait_settle_failure(15, "Hub crash-recovery transient EventSettle response failure")
-    settle_response_baseline = relay.settle_response_count()
-    relay.arm_receipt_hold()
+    settle_response_baseline = relay.wait_settle_failure(
+        15, "Hub crash-recovery transient EventSettle response failure"
+    )
     relay.wait_failed_settle_disconnected(5, "Hub crash-recovery transient disconnect")
     wait_for_agent(hub_port, hub_key, agent_id, "Hub crash-recovery Agent after transient failure", agent)
 
@@ -4514,10 +4537,12 @@ def run_hub_agent_crash_recovery_gate(
         )
     time.sleep(0.1)
     command_types = relay.command_types()
-    if not list_thread.is_alive() or "event.list" in command_types:
+    list_thread_alive = list_thread.is_alive()
+    if not list_thread_alive or "event.list" in command_types:
         fail(
             "Hub crash-recovery EventSettle barrier",
-            f"public event.list crossed the held completed-settle replay response: {command_types}",
+            f"public event.list did not remain blocked behind the held completed-settle response: "
+            f"commands={command_types}, list_thread_alive={list_thread_alive}, list_outcome={list_outcome}",
         )
     relay.disarm_receipt_hold()
 
@@ -6370,14 +6395,50 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
             document, schemas, "ProcessExecRequest", legacy_exec,
             "Hub HTTP process.exec rejects old program/args input",
         )
-        legacy_http_response, legacy_http_body = hub_json(
-            hub_port, hub_key, "POST", "/v1/process/exec", legacy_exec,
+        legacy_http_response = http_request(
+            hub_port,
+            "POST",
+            "/v1/process/exec",
+            legacy_exec,
+            {"Authorization": f"Bearer {hub_key}"},
             "Hub HTTP rejects old process.exec input",
         )
-        if legacy_http_response.status not in {400, 422}:
+        legacy_http_error = legacy_http_response.body.decode("utf-8", errors="replace")
+        if (
+            legacy_http_response.status != 422
+            or "unknown field" not in legacy_http_error
+            or "program" not in legacy_http_error
+        ):
             fail(
                 "Hub HTTP rejects old process.exec input",
-                f"legacy program/args request was not rejected: {legacy_http_response.status}, {legacy_http_body}",
+                f"expected HTTP 422 for the unknown legacy program field: "
+                f"{legacy_http_response.status}, {legacy_http_error!r}",
+            )
+        legacy_exec_list_response, legacy_exec_list = hub_json(
+            hub_port,
+            hub_key,
+            "GET",
+            "/v1/process?" + urlencode({"agentId": normal_id, "group": "parity-legacy-exec"}),
+            None,
+            "Hub HTTP legacy process.exec has no startup result",
+        )
+        if legacy_exec_list_response.status != 200:
+            fail(
+                "Hub HTTP legacy process.exec has no startup result",
+                f"HTTP {legacy_exec_list_response.status}: {legacy_exec_list}",
+            )
+        validate_operation_response(
+            document,
+            "/v1/process",
+            "get",
+            200,
+            legacy_exec_list,
+            "Hub HTTP legacy process.exec has no startup result",
+        )
+        if legacy_exec_list.get("processes") != []:
+            fail(
+                "Hub HTTP legacy process.exec has no startup result",
+                f"rejected legacy request started a process: {legacy_exec_list}",
             )
         legacy_mcp = mcp_call(
             hub_port, hub_key, full_session, 11, "tools/call",
@@ -6496,12 +6557,13 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
         assert_rejected(document, schemas, "ProcessBatchExecRequest", invalid_batch, "Hub HTTP process.batch negative request")
         legacy_batch = {
             "agentId": normal_id,
-            "workingDirectory": str(normal_workspace),
+            "group": "parity-legacy-batch",
+            "cwd": str(normal_workspace),
             "elements": [
                 {
                     "program": "/usr/bin/pwd",
                     "args": [],
-                    "workingDirectory": str(batch_subdir),
+                    "cwd": str(batch_subdir),
                 },
                 {"program": "/usr/bin/pwd", "args": []},
             ],
@@ -6512,14 +6574,50 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
             document, schemas, "ProcessBatchExecRequest", legacy_batch,
             "Hub HTTP process.batch rejects old program/args input",
         )
-        legacy_batch_response, legacy_batch_body = hub_json(
-            hub_port, hub_key, "POST", "/v1/process/batch", legacy_batch,
+        legacy_batch_response = http_request(
+            hub_port,
+            "POST",
+            "/v1/process/batch",
+            legacy_batch,
+            {"Authorization": f"Bearer {hub_key}"},
             "Hub HTTP rejects old process.batch input",
         )
-        if legacy_batch_response.status not in {400, 422}:
+        legacy_batch_error = legacy_batch_response.body.decode("utf-8", errors="replace")
+        if (
+            legacy_batch_response.status != 422
+            or "unknown field" not in legacy_batch_error
+            or "program" not in legacy_batch_error
+        ):
             fail(
                 "Hub HTTP rejects old process.batch input",
-                f"legacy element argv request was not rejected: {legacy_batch_response.status}, {legacy_batch_body}",
+                f"expected HTTP 422 for the unknown legacy element program field: "
+                f"{legacy_batch_response.status}, {legacy_batch_error!r}",
+            )
+        legacy_batch_list_response, legacy_batch_list = hub_json(
+            hub_port,
+            hub_key,
+            "GET",
+            "/v1/process?" + urlencode({"agentId": normal_id, "group": "parity-legacy-batch"}),
+            None,
+            "Hub HTTP legacy process.batch has no startup result",
+        )
+        if legacy_batch_list_response.status != 200:
+            fail(
+                "Hub HTTP legacy process.batch has no startup result",
+                f"HTTP {legacy_batch_list_response.status}: {legacy_batch_list}",
+            )
+        validate_operation_response(
+            document,
+            "/v1/process",
+            "get",
+            200,
+            legacy_batch_list,
+            "Hub HTTP legacy process.batch has no startup result",
+        )
+        if legacy_batch_list.get("processes") != []:
+            fail(
+                "Hub HTTP legacy process.batch has no startup result",
+                f"rejected legacy request started processes: {legacy_batch_list}",
             )
         batch_response, batch_body = hub_json(
             hub_port, hub_key, "POST", "/v1/process/batch", batch_payload, "Hub HTTP process.batch"

@@ -42,6 +42,7 @@ fn run_local_e2e(root: &Path) -> Result<(), String> {
     config["profile"] = json!("normal");
     config["displayName"] = json!("Local E2E");
     config["workspaceRoot"] = json!(workspace);
+    config["shell"]["initFile"] = Value::Null;
     config["tunnel"] = Value::Null;
     config["policy"]["deny"] = json!([{
         "program": "/usr/bin/printf",
@@ -307,7 +308,7 @@ fn run_local_e2e(root: &Path) -> Result<(), String> {
             "call",
             "process.exec",
             "--arguments",
-            r#"{"program":"/usr/bin/printf","args":["guarded"],"waitSeconds":1}"#,
+            r#"{"command":"/usr/bin/printf 'guarded'","waitSeconds":1}"#,
         ],
     )?;
     let guarded: Value =

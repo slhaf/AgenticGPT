@@ -180,15 +180,13 @@ fn run_env_scenario(root: &Path) -> Result<(), String> {
         3,
         "process.exec",
         json!({
-            "program": "/usr/bin/printf",
-            "args": ["stdio-http-parity"],
+            "command": "/usr/bin/printf 'stdio-http-parity'",
             "waitSeconds": 2
         }),
     )?;
-    require(
-        stdio_call["result"]["structuredContent"]["state"] == "completed",
-        "stdio process.exec did not complete",
-    )?;
+    if stdio_call["result"]["structuredContent"]["state"] != "completed" {
+        return Err(format!("stdio process.exec did not complete: {stdio_call}"));
+    }
     let (_, http_result) = http_call(
         &endpoint,
         initial_token,
@@ -196,15 +194,13 @@ fn run_env_scenario(root: &Path) -> Result<(), String> {
         12,
         "process.exec",
         json!({
-            "program": "/usr/bin/printf",
-            "args": ["stdio-http-parity"],
+            "command": "/usr/bin/printf 'stdio-http-parity'",
             "waitSeconds": 2
         }),
     )?;
-    require(
-        http_result["result"]["structuredContent"]["state"] == "completed",
-        "HTTP process.exec did not complete",
-    )?;
+    if http_result["result"]["structuredContent"]["state"] != "completed" {
+        return Err(format!("HTTP process.exec did not complete: {http_result}"));
+    }
     let audit = fs::read_to_string(root.join("workspace/.agentic-gpt-audit.jsonl"))
         .map_err(|error| error.to_string())?;
     require(
@@ -225,8 +221,7 @@ fn run_env_scenario(root: &Path) -> Result<(), String> {
         13,
         "process.exec",
         json!({
-            "program": "/usr/bin/printf",
-            "args": ["policy-must-deny"],
+            "command": "/usr/bin/printf 'policy-must-deny'",
             "waitSeconds": 2
         }),
     )?;
@@ -308,8 +303,7 @@ fn run_env_scenario(root: &Path) -> Result<(), String> {
         31,
         "process.exec",
         json!({
-            "program": "/usr/bin/printf",
-            "args": ["must-not-run"],
+            "command": "/usr/bin/printf 'must-not-run'",
             "waitSeconds": 2
         }),
     )?;
@@ -1474,7 +1468,10 @@ fn spawn_worker_with_public_url(
     config["profile"] = json!("normal");
     config["agentId"] = json!(agent_id.clone());
     config["workspaceRoot"] = json!(workspace.to_string_lossy().into_owned());
-    config["pathPolicy"]["writeRoots"] = json!([workspace.to_string_lossy()]);
+    config["shell"]["initFile"] = Value::Null;
+    config["policy"]["allow"] = json!([
+        { "program": "/usr/bin/printf", "argsPrefix": [] }
+    ]);
     config["toolsets"]["enabled"] = json!(["agent", "file", "mcp", "process", "skills", "tmux"]);
     config["tunnel"] = json!({
         "tunnelId": "tunnel_http_mcp_integration",

@@ -26,7 +26,7 @@ use futures_util::future::join_all;
 use rmcp::{model::RequestId, service::Peer, RoleClient};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt};
-use tokio::process::{Child, Command};
+use tokio::process::Child;
 use tokio::sync::{Mutex, Notify, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, Instant};
@@ -62,6 +62,15 @@ pub(crate) fn capacity_rejection(active: usize, requested: usize, limit: usize) 
 
 fn resolved_process_limit(config: &Config) -> usize {
     config.limits.max_active_processes.resolve().resolved
+}
+fn process_uses_capacity(process: &mut ManagedProcess) -> bool {
+    if process.info.state.is_active() {
+        return true;
+    }
+    match &mut process.runtime {
+        ProcessRuntime::Process(runtime) => observe_managed_process_group(runtime),
+        ProcessRuntime::Mcp(_) => false,
+    }
 }
 
 fn validated_group(group: Option<&str>) -> std::result::Result<Option<String>, String> {
@@ -211,13 +220,43 @@ pub(crate) struct ManagedProcessRuntime {
     child: Option<Child>,
     process_group_id: Option<i32>,
     exit_status: Option<ProcessExitStatus>,
-    cancel_evidence: Option<String>,
+    cancel_evidence: Option<&'static str>,
     startup_reader: Option<JoinHandle<ShellStartupStatus>>,
     stdout: Arc<Mutex<OutputRing>>,
     stderr: Arc<Mutex<OutputRing>>,
     stdout_reader: Option<JoinHandle<ReaderOutcome>>,
     stderr_reader: Option<JoinHandle<ReaderOutcome>>,
+    terminal_capture_waiters: Option<Arc<AtomicUsize>>,
     skill_lease: Option<SkillLease>,
+}
+
+fn observe_managed_process_group(runtime: &mut ManagedProcessRuntime) -> bool {
+    observe_process_group_id_with(&mut runtime.process_group_id, process_group_exists)
+}
+
+struct TerminalCapturePin {
+    waiters: Option<Arc<AtomicUsize>>,
+}
+
+impl TerminalCapturePin {
+    fn new(waiters: Arc<AtomicUsize>) -> Self {
+        Self {
+            waiters: Some(waiters),
+        }
+    }
+
+    fn release(&mut self) {
+        if let Some(waiters) = self.waiters.take() {
+            let previous = waiters.fetch_sub(1, Ordering::AcqRel);
+            debug_assert!(previous > 0, "capture waiter pin must be balanced");
+        }
+    }
+}
+
+impl Drop for TerminalCapturePin {
+    fn drop(&mut self) {
+        self.release();
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -530,8 +569,9 @@ pub(crate) async fn register_mcp_process(
     let mut processes = state.processes.lock().await;
     refresh_processes(state, &mut processes).await;
     let active = processes
-        .values()
-        .filter(|process| process.info.state.is_active())
+        .values_mut()
+        .map(process_uses_capacity)
+        .filter(|uses_capacity| *uses_capacity)
         .count();
     let limit = resolved_process_limit(&config);
     if active >= limit {
@@ -619,8 +659,9 @@ pub(crate) async fn register_mcp_batch(
     let mut processes = state.processes.lock().await;
     refresh_processes(state, &mut processes).await;
     let active = processes
-        .values()
-        .filter(|process| process.info.state.is_active())
+        .values_mut()
+        .map(process_uses_capacity)
+        .filter(|uses_capacity| *uses_capacity)
         .count();
     if active.saturating_add(requested) > limit {
         return Err(capacity_rejection(active, requested, limit));
@@ -1938,8 +1979,19 @@ pub(crate) async fn start_prepared_managed_batch(
     if specs.is_empty() {
         return Ok(Vec::new());
     }
-    for spec in &specs {
+    for (index, spec) in specs.iter().enumerate() {
         validated_group(spec.request.group.as_deref())?;
+        if spec.decision != PolicyDecision::Deny {
+            if let Some(reason) = exec::kernel_argument_limit_error(
+                &config,
+                Some(&spec.working_directory),
+                &spec.request.execution,
+            ) {
+                return Err(format!(
+                    "process_batch_element_rejected; index={index}; reason={reason}"
+                ));
+            }
+        }
     }
     let requested = specs.len();
     let limit = resolved_process_limit(&config);
@@ -1950,8 +2002,9 @@ pub(crate) async fn start_prepared_managed_batch(
         let mut processes = state.processes.lock().await;
         refresh_processes(&state, &mut processes).await;
         let active = processes
-            .values()
-            .filter(|process| process.info.state.is_active())
+            .values_mut()
+            .map(process_uses_capacity)
+            .filter(|uses_capacity| *uses_capacity)
             .count();
         if active.saturating_add(requested) > limit {
             return Err(capacity_rejection(active, requested, limit));
@@ -2018,6 +2071,7 @@ pub(crate) async fn start_prepared_managed_batch(
                 child: None,
                 process_group_id: None,
                 exit_status: None,
+                terminal_capture_waiters: None,
                 cancel_evidence: None,
                 startup_reader: None,
                 stdout: stdout.clone(),
@@ -2083,6 +2137,7 @@ pub(crate) async fn start_prepared_managed_batch(
                 stderr,
                 cancel_requested,
                 Some((spec.working_directory, spec.decision)),
+                None,
                 spec.confirmation_result,
             )
             .await;
@@ -2123,6 +2178,38 @@ async fn start_managed_process_inner(
         now,
         Some(&options),
     );
+    let resolved_shell_working_directory = if group_error.is_none()
+        && initial_terminal.is_none()
+        && matches!(&request.execution, exec::ExecutionSpec::Shell { .. })
+        && prepared.is_none()
+    {
+        exec::resolve_working_directory(&config, request.cwd.as_deref()).ok()
+    } else {
+        None
+    };
+    let kernel_working_directory = prepared
+        .as_ref()
+        .map(|(working_directory, _)| working_directory.as_path())
+        .or(resolved_shell_working_directory.as_deref());
+    let kernel_argument_error = if group_error.is_none() && initial_terminal.is_none() {
+        exec::kernel_argument_limit_error(&config, kernel_working_directory, &request.execution)
+            .filter(|_| {
+                let denied = prepared
+                    .as_ref()
+                    .map(|(_, decision)| decision == &PolicyDecision::Deny)
+                    .unwrap_or_else(|| {
+                        execution_policy_decision(
+                            &config,
+                            state.runtime.profile,
+                            &request.execution,
+                            request.need_confirm,
+                        ) == PolicyDecision::Deny
+                    });
+                !denied
+            })
+    } else {
+        None
+    };
     let runtime = process_runtime(skill_lease);
     let stdout = runtime.stdout.clone();
     let stderr = runtime.stderr.clone();
@@ -2153,17 +2240,20 @@ async fn start_managed_process_inner(
         config_revision: None,
         terminal_event_hook: options.terminal_event_hook,
     };
-    let (capacity_error, history_error) = {
+    let (capacity_error, admission_error) = {
         let mut processes = state.processes.lock().await;
         refresh_processes(&state, &mut processes).await;
         let active = processes
-            .values()
-            .filter(|process| process.info.state.is_active())
+            .values_mut()
+            .map(process_uses_capacity)
+            .filter(|uses_capacity| *uses_capacity)
             .count();
         let limit = resolved_process_limit(&config);
         let capacity_error = (active >= limit).then(|| capacity_rejection(active, 1, limit));
         if capacity_error.is_some() {
             (capacity_error, None)
+        } else if let Some(reason) = kernel_argument_error {
+            (None, Some(reason))
         } else {
             let source = crate::event_notifications::process_source(&process_id);
             let registration = crate::event_notifications::register_internal_source(
@@ -2212,7 +2302,7 @@ async fn start_managed_process_inner(
     if let Some(reason) = capacity_error {
         return terminal_without_admission(info, ProcessState::Rejected, reason);
     }
-    if let Some(reason) = history_error {
+    if let Some(reason) = admission_error {
         return terminal_without_admission(info, ProcessState::Failed, reason);
     }
     if let Some(reason) = group_error {
@@ -2232,6 +2322,7 @@ async fn start_managed_process_inner(
         stderr,
         cancel_requested,
         prepared,
+        resolved_shell_working_directory,
         None,
     ));
     tokio::spawn(monitor_process(state, process_id, None));
@@ -2314,6 +2405,7 @@ fn process_runtime(skill_lease: Option<SkillLease>) -> ManagedProcessRuntime {
         child: None,
         process_group_id: None,
         exit_status: None,
+        terminal_capture_waiters: None,
         cancel_evidence: None,
         startup_reader: None,
         stdout: Arc::new(Mutex::new(OutputRing::new(changed.clone()))),
@@ -2386,6 +2478,7 @@ async fn run_async_process(
     stderr: Arc<Mutex<OutputRing>>,
     cancel_requested: Arc<std::sync::atomic::AtomicBool>,
     prepared: Option<(PathBuf, PolicyDecision)>,
+    resolved_working_directory: Option<PathBuf>,
     prepared_confirmation_result: Option<String>,
 ) {
     let (working_directory, decision) = if let Some(prepared) = prepared {
@@ -2398,14 +2491,16 @@ async fn run_async_process(
             request.need_confirm,
         );
         set_policy_decision(&state, &process_id, format!("{decision:?}")).await;
-        let working_directory =
-            match exec::resolve_working_directory(&config, request.cwd.as_deref()) {
+        let working_directory = match resolved_working_directory {
+            Some(directory) => directory,
+            None => match exec::resolve_working_directory(&config, request.cwd.as_deref()) {
                 Ok(directory) => directory,
                 Err(reason) => {
                     finish_process(&state, &process_id, ProcessState::Rejected, &reason).await;
                     return;
                 }
-            };
+            },
+        };
         if let Err(reason) = preflight_execution(&config, &working_directory, &request.execution) {
             finish_process(&state, &process_id, ProcessState::Rejected, &reason).await;
             return;
@@ -2519,7 +2614,14 @@ async fn run_async_process(
         let Some(process) = processes.get_mut(&process_id) else {
             drop(processes);
             if let Some(mut spawned) = spawned.take() {
-                terminate_process_group(&mut spawned.child, spawned.process_group_id).await;
+                terminate_process_group(
+                    Some(&mut spawned.child),
+                    spawned
+                        .process_group_id
+                        .map(|id| ProcessGroupOwner::Detached(Some(id))),
+                    None,
+                )
+                .await;
                 settle_reader(spawned.stdout_reader, spawned.stdout).await;
                 settle_reader(spawned.stderr_reader, spawned.stderr).await;
             }
@@ -2528,7 +2630,14 @@ async fn run_async_process(
         let ProcessRuntime::Process(runtime) = &mut process.runtime else {
             drop(processes);
             if let Some(mut spawned) = spawned.take() {
-                terminate_process_group(&mut spawned.child, spawned.process_group_id).await;
+                terminate_process_group(
+                    Some(&mut spawned.child),
+                    spawned
+                        .process_group_id
+                        .map(|id| ProcessGroupOwner::Detached(Some(id))),
+                    None,
+                )
+                .await;
                 settle_reader(spawned.stdout_reader, spawned.stdout).await;
                 settle_reader(spawned.stderr_reader, spawned.stderr).await;
             }
@@ -2573,10 +2682,11 @@ async fn spawn_process_with_readers(
             use std::os::unix::io::AsRawFd;
             let (reader, writer) = std::os::unix::net::UnixStream::pair()?;
             reader.set_nonblocking(true)?;
+            let writer_fd = writer.as_raw_fd();
             (
                 Some(tokio::net::UnixStream::from_std(reader)?),
                 Some(writer),
-                Some(writer.as_raw_fd()),
+                Some(writer_fd),
             )
         } else {
             (None, None, None)
@@ -2663,18 +2773,16 @@ async fn read_shell_startup(mut reader: tokio::net::UnixStream) -> ShellStartupS
     let mut byte = [0_u8; 1];
     loop {
         match reader.read(&mut byte).await {
-            Ok(0) => {
-                return if booted {
-                    ShellStartupStatus::InitFailed(None)
-                } else {
-                    ShellStartupStatus::StartupFailed
-                };
-            }
+            Ok(0) => return ShellStartupStatus::StartupFailed,
             Ok(_) if byte[0] == b'\n' => {
                 if line == b"B" {
                     booted = true;
                 } else if line == b"R" {
-                    return ShellStartupStatus::Ready;
+                    return if booted {
+                        ShellStartupStatus::Ready
+                    } else {
+                        ShellStartupStatus::StartupFailed
+                    };
                 } else if let Some(status) = line.strip_prefix(b"I:") {
                     return ShellStartupStatus::InitFailed(
                         std::str::from_utf8(status)
@@ -2735,6 +2843,57 @@ async fn settle_reader(reader: Option<JoinHandle<ReaderOutcome>>, ring: Arc<Mute
     };
     ring.lock().await.finish(outcome);
 }
+async fn managed_process_group_is_live(state: &AppState, process_id: &str) -> bool {
+    let mut processes = state.processes.lock().await;
+    let Some(process) = processes.get_mut(process_id) else {
+        return false;
+    };
+    let ProcessRuntime::Process(runtime) = &mut process.runtime else {
+        return false;
+    };
+    observe_managed_process_group(runtime)
+}
+
+async fn settle_reader_while_process_group_lives(
+    reader: Option<JoinHandle<ReaderOutcome>>,
+    ring: Arc<Mutex<OutputRing>>,
+    state: &AppState,
+    process_id: &str,
+    cancel_requested: Arc<std::sync::atomic::AtomicBool>,
+) {
+    let Some(mut reader) = reader else {
+        settle_reader(None, ring).await;
+        return;
+    };
+    if managed_process_group_is_live(state, process_id).await
+        && !cancel_requested.load(std::sync::atomic::Ordering::Acquire)
+    {
+        tokio::select! {
+            outcome = &mut reader => {
+                let outcome = match outcome {
+                    Ok(outcome) => outcome,
+                    Err(error) => ReaderOutcome::Failed(format!("reader_task_failed: {error}")),
+                };
+                ring.lock().await.finish(outcome);
+                return;
+            }
+            _ = wait_for_group_capture_or_cancel(state, process_id, &cancel_requested) => {}
+        }
+    }
+    settle_reader(Some(reader), ring).await;
+}
+
+async fn wait_for_group_capture_or_cancel(
+    state: &AppState,
+    process_id: &str,
+    cancel_requested: &std::sync::atomic::AtomicBool,
+) {
+    while !cancel_requested.load(std::sync::atomic::Ordering::Acquire)
+        && managed_process_group_is_live(state, process_id).await
+    {
+        sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
 
 struct GroupTermination {
     group_stopped: bool,
@@ -2742,25 +2901,59 @@ struct GroupTermination {
     exit_status: Option<ProcessExitStatus>,
 }
 
+enum ProcessGroupOwner<'a> {
+    Managed {
+        state: &'a AppState,
+        process_id: &'a str,
+    },
+    Detached(Option<i32>),
+}
+
+impl ProcessGroupOwner<'_> {
+    async fn is_live(&mut self) -> bool {
+        match self {
+            Self::Managed { state, process_id } => {
+                managed_process_group_is_live(state, process_id).await
+            }
+            Self::Detached(process_group_id) => observe_process_group_id(process_group_id),
+        }
+    }
+
+    #[cfg(unix)]
+    async fn send_signal(&mut self, signal: i32) -> std::io::Result<bool> {
+        match self {
+            Self::Managed { state, process_id } => {
+                send_managed_process_group_signal(state, process_id, signal).await
+            }
+            Self::Detached(process_group_id) => {
+                send_detached_process_group_signal(process_group_id, signal)
+            }
+        }
+    }
+}
+
 async fn terminate_process_group(
     mut child: Option<&mut Child>,
-    process_group_id: Option<i32>,
+    mut process_group: Option<ProcessGroupOwner<'_>>,
     known_exit_status: Option<ProcessExitStatus>,
 ) -> GroupTermination {
     #[cfg(unix)]
-    if let Some(process_group_id) = process_group_id {
-        if process_group_id > 0 && !process_group_exists(process_group_id) {
+    if let Some(process_group) = process_group.as_mut() {
+        let term_sent = process_group
+            .send_signal(libc::SIGTERM)
+            .await
+            .unwrap_or(false);
+        if !term_sent && !process_group.is_live().await {
             return GroupTermination {
                 group_stopped: true,
                 evidence: "process_group_already_gone",
                 exit_status: known_exit_status,
             };
         }
-        let term_sent = send_process_group_signal(process_group_id, libc::SIGTERM).is_ok();
         let mut exit_status = known_exit_status;
         if wait_for_process_group_exit(
             &mut child,
-            process_group_id,
+            process_group,
             std::time::Duration::from_millis(500),
             &mut exit_status,
         )
@@ -2776,10 +2969,10 @@ async fn terminate_process_group(
                 exit_status,
             };
         }
-        let _ = send_process_group_signal(process_group_id, libc::SIGKILL);
+        let kill_sent = matches!(process_group.send_signal(libc::SIGKILL).await, Ok(true));
         if wait_for_process_group_exit(
             &mut child,
-            process_group_id,
+            process_group,
             std::time::Duration::from_secs(2),
             &mut exit_status,
         )
@@ -2787,7 +2980,11 @@ async fn terminate_process_group(
         {
             return GroupTermination {
                 group_stopped: true,
-                evidence: "process_group_sigkill_observed",
+                evidence: if kill_sent {
+                    "process_group_sigkill_observed"
+                } else {
+                    "process_group_already_gone"
+                },
                 exit_status,
             };
         }
@@ -2798,12 +2995,14 @@ async fn terminate_process_group(
         };
     }
 
+    #[cfg(not(unix))]
+    let _ = process_group;
     #[cfg(unix)]
     let evidence = "process_group_termination_unverified";
     #[cfg(not(unix))]
     let evidence = "local_child_termination_only";
     let mut exit_status = known_exit_status;
-    if let Some(child) = child.as_deref_mut() {
+    if let Some(child) = child {
         if child.kill().await.is_ok() {
             if let Ok(Some(status)) = child.try_wait() {
                 exit_status = Some(status.into());
@@ -2833,7 +3032,7 @@ async fn terminate_process_group(
 #[cfg(unix)]
 async fn wait_for_process_group_exit(
     child: &mut Option<&mut Child>,
-    process_group_id: i32,
+    process_group: &mut ProcessGroupOwner<'_>,
     timeout: std::time::Duration,
     exit_status: &mut Option<ProcessExitStatus>,
 ) -> bool {
@@ -2846,7 +3045,7 @@ async fn wait_for_process_group_exit(
                 }
             }
         }
-        if !process_group_exists(process_group_id) {
+        if !process_group.is_live().await {
             return true;
         }
         if Instant::now() >= deadline {
@@ -2884,6 +3083,75 @@ fn process_group_exists(_process_group_id: i32) -> bool {
     false
 }
 
+fn observe_process_group_id(process_group_id: &mut Option<i32>) -> bool {
+    observe_process_group_id_with(process_group_id, process_group_exists)
+}
+
+fn observe_process_group_id_with(
+    process_group_id: &mut Option<i32>,
+    exists: impl FnOnce(i32) -> bool,
+) -> bool {
+    let Some(id) = *process_group_id else {
+        return false;
+    };
+    if exists(id) {
+        true
+    } else {
+        *process_group_id = None;
+        false
+    }
+}
+
+#[cfg(unix)]
+async fn send_managed_process_group_signal(
+    state: &AppState,
+    process_id: &str,
+    signal: i32,
+) -> std::io::Result<bool> {
+    let mut processes = state.processes.lock().await;
+    let Some(process) = processes.get_mut(process_id) else {
+        return Ok(false);
+    };
+    let ProcessRuntime::Process(runtime) = &mut process.runtime else {
+        return Ok(false);
+    };
+    if !observe_managed_process_group(runtime) {
+        return Ok(false);
+    }
+    let Some(group_id) = runtime.process_group_id else {
+        return Ok(false);
+    };
+    match send_process_group_signal(group_id, signal) {
+        Ok(()) => Ok(true),
+        Err(error) if error.raw_os_error() == Some(libc::ESRCH) => {
+            runtime.process_group_id = None;
+            Ok(false)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(unix)]
+fn send_detached_process_group_signal(
+    process_group_id: &mut Option<i32>,
+    signal: i32,
+) -> std::io::Result<bool> {
+    if !observe_process_group_id(process_group_id) {
+        return Ok(false);
+    }
+    let Some(id) = *process_group_id else {
+        return Ok(false);
+    };
+    match send_process_group_signal(id, signal) {
+        Ok(()) => Ok(true),
+        Err(error) if error.raw_os_error() == Some(libc::ESRCH) => {
+            *process_group_id = None;
+            Ok(false)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 async fn monitor_process(
     state: AppState,
     process_id: String,
@@ -2915,10 +3183,22 @@ async fn monitor_process(
             runtime.stderr.clone(),
             runtime.stdout_reader.take(),
             runtime.stderr_reader.take(),
+            process.cancel_requested.clone(),
         )
     };
-    settle_reader(readers.2, readers.0).await;
-    settle_reader(readers.3, readers.1).await;
+    settle_reader_while_process_group_lives(
+        readers.2,
+        readers.0,
+        &state,
+        &process_id,
+        readers.4.clone(),
+    )
+    .await;
+    settle_reader_while_process_group_lives(readers.3, readers.1, &state, &process_id, readers.4)
+        .await;
+    while managed_process_group_is_live(&state, &process_id).await {
+        sleep(std::time::Duration::from_millis(50)).await;
+    }
 
     let mut processes = state.processes.lock().await;
     if let Some(process) = processes.get_mut(&process_id) {
@@ -3778,7 +4058,7 @@ async fn cancel_command_process(
     state: &AppState,
     process_id: &str,
 ) -> Result<ProcessDetail, String> {
-    let (mut child, process_group_id, exit_status) = {
+    let (mut child, group_owned, exit_status, mut capture_pin) = {
         let mut processes = state.processes.lock().await;
         let Some(process) = processes.get_mut(process_id) else {
             return Err(missing_process_reason(state, process_id));
@@ -3787,7 +4067,7 @@ async fn cancel_command_process(
         let ProcessRuntime::Process(runtime) = &mut process.runtime else {
             return Err("process_kind_mismatch".to_string());
         };
-        let group_alive = runtime.process_group_id.is_some_and(process_group_exists);
+        let group_alive = observe_managed_process_group(runtime);
         if process.info.state.is_terminal() && !group_alive {
             let detail = process_detail(process);
             prune_terminal_processes(state, &mut processes);
@@ -3803,6 +4083,7 @@ async fn cancel_command_process(
         }
         runtime.changed.notify_waiters();
         let child = runtime.child.take();
+        let group_owned = runtime.process_group_id.is_some();
         if child.is_none() && runtime.process_group_id.is_none() {
             process.info.cancel_outcome = Some("cancel_requested".to_string());
             process.info.termination_evidence =
@@ -3812,10 +4093,17 @@ async fn cancel_command_process(
             prune_terminal_processes(state, &mut processes);
             return Ok(detail);
         }
-        (child, runtime.process_group_id, runtime.exit_status)
+        let waiters = runtime
+            .terminal_capture_waiters
+            .get_or_insert_with(|| Arc::new(AtomicUsize::new(0)))
+            .clone();
+        waiters.fetch_add(1, Ordering::AcqRel);
+        let capture_pin = TerminalCapturePin::new(waiters);
+        (child, group_owned, runtime.exit_status, capture_pin)
     };
 
-    let termination = terminate_process_group(child.as_mut(), process_group_id, exit_status).await;
+    let process_group = group_owned.then_some(ProcessGroupOwner::Managed { state, process_id });
+    let termination = terminate_process_group(child.as_mut(), process_group, exit_status).await;
     let group_stopped = termination.group_stopped;
     let mut processes = state.processes.lock().await;
     let Some(process) = processes.get_mut(process_id) else {
@@ -3828,7 +4116,7 @@ async fn cancel_command_process(
     if group_stopped {
         runtime.child = None;
         runtime.process_group_id = None;
-        runtime.cancel_evidence = Some(termination.evidence.to_string());
+        runtime.cancel_evidence = Some(termination.evidence);
         process.info.exit_code = runtime.exit_status.and_then(|status| status.code);
         if process.info.state.is_terminal() {
             process.info.cancel_requested = true;
@@ -3842,6 +4130,7 @@ async fn cancel_command_process(
         runtime.changed.notify_waiters();
         finalize_process(state, process).await;
     } else {
+        capture_pin.release();
         runtime.child = child;
         if !process.info.state.is_terminal() {
             process.info.state = ProcessState::CancelRequested;
@@ -3863,7 +4152,7 @@ async fn cancel_command_process(
     prune_terminal_processes(state, &mut processes);
     drop(processes);
     if group_stopped {
-        return wait_for_process_capture(state, process_id).await;
+        return wait_for_process_capture(state, process_id, &mut capture_pin).await;
     }
     Ok(detail)
 }
@@ -3871,21 +4160,26 @@ async fn cancel_command_process(
 async fn wait_for_process_capture(
     state: &AppState,
     process_id: &str,
+    capture_pin: &mut TerminalCapturePin,
 ) -> Result<ProcessDetail, String> {
     let deadline = Instant::now() + std::time::Duration::from_secs(5);
     loop {
-        let (detail, settled) = {
+        let (detail, finished) = {
             let mut processes = state.processes.lock().await;
             let Some(process) = processes.get_mut(process_id) else {
                 return Err(missing_process_reason(state, process_id));
             };
             refresh_process(state, process).await;
-            (
-                process_detail(process),
-                process.info.capture_status != ProcessCaptureStatus::Capturing,
-            )
+            let finished = process.info.capture_status != ProcessCaptureStatus::Capturing
+                || Instant::now() >= deadline;
+            let detail = process_detail(process);
+            if finished {
+                capture_pin.release();
+                prune_terminal_processes(state, &mut processes);
+            }
+            (detail, finished)
         };
-        if settled || Instant::now() >= deadline {
+        if finished {
             return Ok(detail);
         }
         sleep(std::time::Duration::from_millis(10)).await;
@@ -4037,12 +4331,7 @@ async fn refresh_process(state: &AppState, process: &mut ManagedProcess) {
             }
         }
         if let Some(exit_status) = runtime.exit_status {
-            let group_stopped = runtime
-                .process_group_id
-                .is_none_or(|process_group_id| !process_group_exists(process_group_id));
-            if group_stopped {
-                runtime.process_group_id = None;
-            }
+            let group_stopped = !observe_managed_process_group(runtime);
             if !process.info.state.is_terminal() {
                 let now = Utc::now();
                 process.info.exit_code = exit_status.code;
@@ -4110,7 +4399,11 @@ async fn refresh_process(state: &AppState, process: &mut ManagedProcess) {
                                 });
                             }
                             Some(ShellStartupStatus::Ready) => {
-                                process.info.state = ProcessState::Completed;
+                                process.info.state = if exit_status.success {
+                                    ProcessState::Completed
+                                } else {
+                                    ProcessState::Failed
+                                };
                             }
                             None if process.info.kind == ProcessKind::Command => {
                                 process.info.state = ProcessState::Completed;
@@ -4148,6 +4441,11 @@ fn prune_terminal_processes(
 ) {
     let _ = state.process_history.retry_pending();
     for process in processes.values_mut() {
+        if process.info.state.is_terminal() {
+            if let ProcessRuntime::Process(runtime) = &mut process.runtime {
+                observe_managed_process_group(runtime);
+            }
+        }
         if process.info.state.is_terminal()
             && process.history_terminal_snapshot_at.is_none()
             && !state
@@ -4171,9 +4469,13 @@ fn prune_terminal_processes(
                 && !matches!(
                     &process.runtime,
                     ProcessRuntime::Process(runtime)
-                        if runtime
-                            .process_group_id
-                            .is_some_and(process_group_exists)
+                        if runtime.terminal_capture_waiters.as_ref().is_some_and(|waiters| {
+                            waiters.load(Ordering::Acquire) > 0
+                        })
+                )
+                && !matches!(
+                    &process.runtime,
+                    ProcessRuntime::Process(runtime) if runtime.process_group_id.is_some()
                 )
                 && !state
                     .process_history
@@ -4661,21 +4963,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shell_init_runs_before_working_directory_is_restored() {
+    async fn shell_init_runs_at_top_level_before_working_directory_is_restored() {
         let (state, workspace) = test_state(1).await;
         let marker = workspace.join("shell-init-ran");
         let init_file = workspace.join("init.bash");
-        fs::write(&init_file, format!(": > '{}'\ncd /\n", marker.display())).unwrap();
+        fs::write(
+            &init_file,
+            format!(
+                "declare -x CUTOVER_INIT_VALUE=loaded\n: > '{}'\ncd /\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
         state.config.write().await.shell.init_file =
-            crate::config::ShellInitFile::Path(init_file.to_string_lossy().to_string());
+            crate::config::ShellInitFile::Path("init.bash".to_string());
 
-        let process = start_process_for_test(state.clone(), exec_request("pwd", &workspace)).await;
+        let command = "printf '%s\\n' \"${CUTOVER_INIT_VALUE-unset}\"; pwd";
+        let process = start_shell_process_for_test_with_decision(
+            state.clone(),
+            exec_request(command, &workspace),
+            ProcessOptions::for_source("test"),
+        )
+        .await;
         let process = wait_terminal(&state, process).await;
         assert_eq!(process.state, ProcessState::Completed);
         let output = wait_output_capture(&state, &process.process_id).await;
         assert_eq!(
             output.response.output.as_ref().unwrap().stdout.data,
-            format!("{}\n", workspace.display())
+            format!("loaded\n{}\n", workspace.display())
         );
         assert!(marker.exists());
     }
@@ -4708,7 +5023,67 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pipefail_nonzero_exit_completes_with_shell_status() {
+    async fn shell_init_fd3_changes_preserve_startup_channel() {
+        let (state, workspace) = test_state(1).await;
+        let rebind_log = workspace.join("init-fd3.log");
+        let cases = [
+            ("closed", "exec 3>&-\n".to_string(), false),
+            (
+                "rebound",
+                format!(
+                    "exec 3> '{}'\nprintf 'init-fd3\\n' >&3\n",
+                    rebind_log.display()
+                ),
+                true,
+            ),
+        ];
+
+        for (name, init_source, raw_command_uses_fd3) in cases {
+            let marker = workspace.join(format!("must-run-after-init-{name}"));
+            let init_file = workspace.join(format!("init-{name}.bash"));
+            fs::write(&init_file, init_source).unwrap();
+            state.config.write().await.shell.init_file =
+                crate::config::ShellInitFile::Path(init_file.to_string_lossy().to_string());
+
+            let raw_command = if raw_command_uses_fd3 {
+                format!("printf DATA >&3; printf 'ran' > '{}'", marker.display())
+            } else {
+                format!("printf 'ran' > '{}'", marker.display())
+            };
+            let process = start_shell_process_for_test_with_decision(
+                state.clone(),
+                exec_request(&raw_command, &workspace),
+                ProcessOptions::for_source("test"),
+            )
+            .await;
+            let process = wait_terminal(&state, process).await;
+            assert_eq!(process.state, ProcessState::Completed);
+            assert_eq!(process.exit_code, Some(0));
+            assert!(marker.exists());
+            let detail = get_process_detail(&state, &process.process_id, 0)
+                .await
+                .unwrap();
+            assert!(detail.error.is_none());
+        }
+        assert_eq!(fs::read_to_string(rebind_log).unwrap(), "init-fd3\nDATA");
+    }
+
+    #[tokio::test]
+    async fn shell_eval_preserves_dash_leading_command_text() {
+        let (state, workspace) = test_state(1).await;
+        let process = start_shell_process_for_test_with_decision(
+            state.clone(),
+            exec_request("--", &workspace),
+            ProcessOptions::for_source("test"),
+        )
+        .await;
+        let process = wait_terminal(&state, process).await;
+        assert_eq!(process.state, ProcessState::Failed);
+        assert_eq!(process.exit_code, Some(127));
+    }
+
+    #[tokio::test]
+    async fn pipefail_nonzero_exit_fails_with_shell_status() {
         let (state, workspace) = test_state(1).await;
         let process = start_process_for_test(
             state.clone(),
@@ -4716,7 +5091,7 @@ mod tests {
         )
         .await;
         let process = wait_terminal(&state, process).await;
-        assert_eq!(process.state, ProcessState::Completed);
+        assert_eq!(process.state, ProcessState::Failed);
         assert_eq!(process.exit_code, Some(1));
         assert!(process.reject_reason.is_none());
         let detail = get_process_detail(&state, &process.process_id, 0)
@@ -4779,7 +5154,7 @@ mod tests {
             hook_count_for_event.fetch_add(1, Ordering::AcqRel);
         }));
         let request = exec_request(
-            "printf before; (sleep 2; printf after) & sleep 0.15",
+            "printf before; (sleep 3; printf after) & sleep 0.15",
             &workspace,
         );
         let started =
@@ -4827,7 +5202,7 @@ mod tests {
         assert!(persisted_event.message.contains("completed"));
 
         let output = tokio::time::timeout(
-            Duration::from_secs(4),
+            Duration::from_secs(5),
             read_process(
                 &state,
                 &terminal.process_id,
@@ -5273,26 +5648,54 @@ mod tests {
         }));
     }
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn oversized_process_admission_fails_before_command_effect() {
         let (state, workspace) = test_state(1).await;
         let marker = workspace.join("oversized-admission-must-not-run");
-        let oversized_args = (0..70)
-            .map(|_| "x".repeat(4 * 1024))
-            .collect::<Vec<_>>()
-            .join(" ");
-        let request = exec_request(
-            &format!("touch {} {oversized_args}", marker.display()),
-            &workspace,
-        );
+        let max_argument_bytes =
+            usize::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) }).unwrap() * 32;
 
-        let rejected = start_process_for_test(state.clone(), request).await;
+        let oversized_command = format!(
+            "touch {} {}",
+            marker.display(),
+            "x".repeat(max_argument_bytes)
+        );
+        let rejected =
+            start_process_for_test(state.clone(), exec_request(&oversized_command, &workspace))
+                .await;
         assert_eq!(rejected.state, ProcessState::Failed);
         assert!(rejected
             .reject_reason
             .as_deref()
             .unwrap()
-            .contains("process_history_admission_metadata_too_large"));
+            .starts_with("process_kernel_argument_too_large"));
+
+        let quote_dense_command = format!(
+            "touch {} ; #{}",
+            marker.display(),
+            "'".repeat(max_argument_bytes / 4 + 1)
+        );
+        assert!(quote_dense_command.len() + 1 < max_argument_bytes);
+        let rejected = start_process_for_test(
+            state.clone(),
+            exec_request(&quote_dense_command, &workspace),
+        )
+        .await;
+        assert_eq!(rejected.state, ProcessState::Failed);
+        let reason = rejected.reject_reason.as_deref().unwrap();
+        assert!(reason.starts_with("process_kernel_argument_too_large"));
+        let actual_argument_bytes = reason
+            .split("bytes=")
+            .nth(1)
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .parse::<usize>()
+            .unwrap();
+        assert!(actual_argument_bytes > max_argument_bytes);
+        assert!(reason.contains(&format!("max={max_argument_bytes}")));
         assert!(!marker.exists());
         assert!(state.processes.lock().await.is_empty());
         assert!(history_rows_after_reopen(&state).is_empty());
@@ -5699,6 +6102,361 @@ mod tests {
         assert!(!process_group_exists(process_group_id));
         let settled = get_process(&state, &completed.process_id, 0).await.unwrap();
         assert_ne!(settled.capture_status, ProcessCaptureStatus::Capturing);
+    }
+    #[tokio::test]
+    async fn terminal_leader_keeps_capacity_after_eof_until_group_retirement() {
+        let (state, workspace) = test_state(1).await;
+        let started = start_shell_process_for_test_with_decision(
+            state.clone(),
+            exec_request("exec >/dev/null 2>&1; /usr/bin/sleep 100 &", &workspace),
+            ProcessOptions::for_source("test"),
+        )
+        .await;
+        let completed = wait_terminal(&state, started).await;
+        assert_eq!(completed.state, ProcessState::Completed);
+        let output = wait_output_capture(&state, &completed.process_id).await;
+        assert!(output.response.output.as_ref().unwrap().eof);
+        let process_group_id = {
+            let processes = state.processes.lock().await;
+            let process = processes.get(&completed.process_id).unwrap();
+            match &process.runtime {
+                ProcessRuntime::Process(runtime) => runtime.process_group_id.unwrap(),
+                ProcessRuntime::Mcp(_) => unreachable!(),
+            }
+        };
+        assert!(process_group_exists(process_group_id));
+
+        let rejected =
+            start_process_for_test(state.clone(), exec_request("true", &workspace)).await;
+        let rejected = wait_terminal(&state, rejected).await;
+        assert_eq!(rejected.state, ProcessState::Rejected);
+        assert!(rejected
+            .reject_reason
+            .unwrap()
+            .starts_with("max_active_processes_reached"));
+
+        assert!(process_group_exists(process_group_id));
+        assert_eq!(
+            unsafe { libc::kill(-process_group_id, libc::SIGKILL) },
+            0,
+            "kill only the test-owned background process group"
+        );
+        let group_gone = tokio::time::timeout(Duration::from_secs(5), async {
+            while process_group_exists(process_group_id) {
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(group_gone.is_ok(), "test-owned process group should stop");
+
+        let group_retired = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let still_owned = {
+                    let processes = state.processes.lock().await;
+                    processes.get(&completed.process_id).is_some_and(|process| {
+                        matches!(
+                            &process.runtime,
+                            ProcessRuntime::Process(runtime)
+                                if runtime.process_group_id.is_some()
+                        )
+                    })
+                };
+                if !still_owned {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(
+            group_retired.is_ok(),
+            "the background group watcher must retire ownership after EOF"
+        );
+
+        let accepted =
+            start_process_for_test(state.clone(), exec_request("true", &workspace)).await;
+        let accepted = wait_terminal(&state, accepted).await;
+        assert_eq!(accepted.state, ProcessState::Completed);
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn revoked_group_is_not_reused_by_capacity_reader_or_cancellation() {
+        use std::os::unix::process::CommandExt;
+
+        let (state, _workspace) = test_state(1).await;
+        let process_id = "revoked-group-reuse".to_string();
+        let info = synthetic_process(
+            &process_id,
+            None,
+            ProcessKind::Command,
+            ProcessState::Completed,
+            Utc::now(),
+        );
+        let _ = state.process_history.insert_admissions([&info]);
+        let _ = state.process_history.upsert_terminal(
+            &synthetic_detail(info.clone()),
+            &crate::process_history::ProcessOutputSnapshot::default(),
+        );
+        let cancel_requested = Arc::new(AtomicBool::new(false));
+        let runtime = process_runtime(None);
+        for ring in [&runtime.stdout, &runtime.stderr] {
+            let mut ring = ring.lock().await;
+            ring.mark_started();
+            ring.finish(ReaderOutcome::Eof);
+        }
+        state.processes.lock().await.insert(
+            process_id.clone(),
+            ManagedProcess {
+                info,
+                detail: ManagedProcessDetail::default(),
+                runtime: ProcessRuntime::Process(runtime),
+                cancel_requested: cancel_requested.clone(),
+                audit: None,
+                history_terminal_snapshot_at: None,
+                event_completion_recorded: false,
+            },
+        );
+        let mut group_command = tokio::process::Command::new("/usr/bin/sleep");
+        group_command.arg("10");
+        group_command.as_std_mut().process_group(0);
+        let mut group_child = group_command.spawn().unwrap();
+        let process_group_id = i32::try_from(group_child.id().unwrap()).unwrap();
+        assert!(process_group_exists(process_group_id));
+        {
+            let mut processes = state.processes.lock().await;
+            let process = processes.get_mut(&process_id).unwrap();
+            let ProcessRuntime::Process(runtime) = &mut process.runtime else {
+                unreachable!();
+            };
+            runtime.process_group_id = Some(process_group_id);
+            assert!(observe_managed_process_group(runtime));
+        }
+        group_child.start_kill().unwrap();
+        group_child.wait().await.unwrap();
+
+        let group_gone = tokio::time::timeout(Duration::from_secs(5), async {
+            while process_group_exists(process_group_id) {
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(group_gone.is_ok(), "the test-owned group should exit");
+
+        {
+            let mut processes = state.processes.lock().await;
+            let process = processes.get_mut(&process_id).unwrap();
+            let ProcessRuntime::Process(runtime) = &mut process.runtime else {
+                unreachable!();
+            };
+            assert!(!observe_managed_process_group(runtime));
+            assert!(runtime.process_group_id.is_none());
+        }
+
+        // A reused numeric PGID must not trigger another probe after revocation.
+        let mut simulated_group_id = Some(process_group_id);
+        assert!(!observe_process_group_id_with(
+            &mut simulated_group_id,
+            |_| false
+        ));
+        let mut reuse_probe_calls = 0;
+        assert!(!observe_process_group_id_with(
+            &mut simulated_group_id,
+            |_| {
+                reuse_probe_calls += 1;
+                true
+            }
+        ));
+        assert_eq!(reuse_probe_calls, 0);
+
+        let ring = Arc::new(Mutex::new(OutputRing::new(Arc::new(Notify::new()))));
+        ring.lock().await.mark_started();
+        let (reader, writer) = tokio::io::duplex(8);
+        drop(writer);
+        let reader = tokio::spawn(read_output(reader, ring.clone()));
+        settle_reader_while_process_group_lives(
+            Some(reader),
+            ring.clone(),
+            &state,
+            &process_id,
+            cancel_requested.clone(),
+        )
+        .await;
+        assert!(ring.lock().await.is_eof());
+
+        let child = tokio::process::Command::new("/usr/bin/sleep")
+            .arg("10")
+            .spawn()
+            .unwrap();
+        {
+            let mut processes = state.processes.lock().await;
+            let process = processes.get_mut(&process_id).unwrap();
+            process.info.state = ProcessState::Running;
+            process.info.updated_at = Utc::now();
+            process.info.finished_at = None;
+            process.info.cancel_requested = false;
+            process.info.cancel_outcome = None;
+            process.info.termination_evidence = None;
+            process.history_terminal_snapshot_at = None;
+            process.cancel_requested.store(false, Ordering::Release);
+            let ProcessRuntime::Process(runtime) = &mut process.runtime else {
+                unreachable!();
+            };
+            runtime.child = Some(child);
+            runtime.exit_status = None;
+            runtime.process_group_id = None;
+        }
+        let cancelled = cancel_command_process(&state, &process_id).await.unwrap();
+        assert_eq!(cancelled.process.state, ProcessState::Cancelled);
+
+        let mut processes = state.processes.lock().await;
+        let process = processes.get_mut(&process_id).unwrap();
+        assert!(matches!(
+            &process.runtime,
+            ProcessRuntime::Process(runtime) if runtime.process_group_id.is_none()
+        ));
+        process.info.finished_at = Some(Utc::now() - ChronoDuration::minutes(6));
+        process.history_terminal_snapshot_at = Some(Utc::now());
+        prune_terminal_processes(&state, &mut processes);
+        assert!(!processes.contains_key(&process_id));
+    }
+
+    #[tokio::test]
+    async fn cancelling_aged_terminal_process_returns_detail_after_cache_pruning() {
+        let (state, workspace) = test_state(1).await;
+        let started = start_shell_process_for_test_with_decision(
+            state.clone(),
+            exec_request("exec >/dev/null 2>&1; /usr/bin/sleep 100 &", &workspace),
+            ProcessOptions::for_source("test"),
+        )
+        .await;
+        let completed = wait_terminal(&state, started).await;
+        assert_eq!(completed.state, ProcessState::Completed);
+        let output = wait_output_capture(&state, &completed.process_id).await;
+        assert!(output.response.output.as_ref().unwrap().eof);
+
+        let mut terminal_snapshot_durable = false;
+        for _ in 0..100 {
+            terminal_snapshot_durable = {
+                let processes = state.processes.lock().await;
+                processes
+                    .get(&completed.process_id)
+                    .is_some_and(|process| process.history_terminal_snapshot_at.is_some())
+            };
+            if terminal_snapshot_durable {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+        assert!(terminal_snapshot_durable);
+
+        let process_group_id = {
+            let mut processes = state.processes.lock().await;
+            let process = processes.get_mut(&completed.process_id).unwrap();
+            process.info.finished_at = Some(Utc::now() - ChronoDuration::minutes(6));
+            match &process.runtime {
+                ProcessRuntime::Process(runtime) => runtime.process_group_id.unwrap(),
+                ProcessRuntime::Mcp(_) => unreachable!(),
+            }
+        };
+        assert!(process_group_exists(process_group_id));
+
+        let cancelled = cancel_process(&state, &completed.process_id).await.unwrap();
+        assert_eq!(cancelled.state, ProcessState::Completed);
+        assert_eq!(cancelled.cancel_outcome, "cancelled");
+        assert!(!process_group_exists(process_group_id));
+    }
+
+    #[tokio::test]
+    async fn aborting_cancellation_releases_stale_terminal_process_pin() {
+        let (state, workspace) = test_state(1).await;
+        let started = start_shell_process_for_test_with_decision(
+            state.clone(),
+            exec_request(
+                "exec >/dev/null 2>&1; (trap '' TERM; while :; do /usr/bin/sleep 1; done) &",
+                &workspace,
+            ),
+            ProcessOptions::for_source("test"),
+        )
+        .await;
+        let completed = wait_terminal(&state, started).await;
+        assert_eq!(completed.state, ProcessState::Completed);
+        let output = wait_output_capture(&state, &completed.process_id).await;
+        assert!(output.response.output.as_ref().unwrap().eof);
+
+        let mut terminal_snapshot_durable = false;
+        for _ in 0..100 {
+            terminal_snapshot_durable = {
+                let processes = state.processes.lock().await;
+                processes
+                    .get(&completed.process_id)
+                    .is_some_and(|process| process.history_terminal_snapshot_at.is_some())
+            };
+            if terminal_snapshot_durable {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+        assert!(terminal_snapshot_durable);
+
+        let process_group_id = {
+            let mut processes = state.processes.lock().await;
+            let process = processes.get_mut(&completed.process_id).unwrap();
+            process.info.finished_at = Some(Utc::now() - ChronoDuration::minutes(6));
+            match &process.runtime {
+                ProcessRuntime::Process(runtime) => runtime.process_group_id.unwrap(),
+                ProcessRuntime::Mcp(_) => unreachable!(),
+            }
+        };
+        assert!(process_group_exists(process_group_id));
+
+        let cancellation_state = state.clone();
+        let cancellation_process_id = completed.process_id.clone();
+        let cancellation = tokio::spawn(async move {
+            cancel_command_process(&cancellation_state, &cancellation_process_id).await
+        });
+        let mut pin_acquired = false;
+        for _ in 0..100 {
+            pin_acquired = {
+                let processes = state.processes.lock().await;
+                processes
+                    .get(&completed.process_id)
+                    .and_then(|process| match &process.runtime {
+                        ProcessRuntime::Process(runtime) => runtime
+                            .terminal_capture_waiters
+                            .as_ref()
+                            .map(|waiters| waiters.load(Ordering::Acquire) > 0),
+                        ProcessRuntime::Mcp(_) => None,
+                    })
+                    .unwrap_or(false)
+            };
+            if pin_acquired {
+                break;
+            }
+            sleep(Duration::from_millis(5)).await;
+        }
+        assert!(pin_acquired);
+        cancellation.abort();
+        let abort_error = cancellation
+            .await
+            .expect_err("cancellation task should be aborted");
+        assert!(abort_error.is_cancelled());
+
+        unsafe {
+            assert_eq!(libc::kill(-process_group_id, libc::SIGKILL), 0);
+        }
+        let group_gone = tokio::time::timeout(Duration::from_secs(5), async {
+            while process_group_exists(process_group_id) {
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(
+            group_gone.is_ok(),
+            "process group should stop after SIGKILL"
+        );
+        let mut processes = state.processes.lock().await;
+        prune_terminal_processes(&state, &mut processes);
+        assert!(!processes.contains_key(&completed.process_id));
     }
 
     #[tokio::test]

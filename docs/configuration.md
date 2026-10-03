@@ -107,8 +107,9 @@ Review 会隐藏密钥，可跳回 Basic、Connection 或可选 section 编辑�
 优先于环境变量。这个界面选择与持久化的 `confirmationLanguage` 不同；后者控制 runtime
 发出的确认提示语言，可在可选配置 section 或通过 `config set` 设置。
 
-全屏初始化的 Optional settings 包含下游 MCP server 集合编辑器；但 `config init --non-interactive`
-没有用于填写 `mcpServers` 集合的 CLI flags。自动化初始化后可使用 `config mcp` 配置 server；
+全屏初始化的 Optional settings 包含下游 MCP server 集合编辑器；`Shell` section 可选择 Shell
+初始化文件为 Default、Disabled 或 Path，并仅在 Path 时编辑路径；三种选择都会写入并可在 Review
+复核。`config init --non-interactive` 没有用于填写 `mcpServers` 集合的 CLI flags。自动化初始化后可使用 `config mcp` 配置 server；
 命令策略集合仍使用 `config allow`、`config confirm`、`config deny`，路径根使用 `config path`。
 
 ## 各 runtime 必需项
@@ -162,6 +163,7 @@ agentic-gpt run
 | `confirmationProvider` | 有序的本地/远程确认通道。 |
 | `confirmationLanguage` | `en` 或 `zh-CN`。 |
 | `sandbox` | 可选 bubblewrap 配置。 |
+| `shell` | Bash 命令执行的 Shell 初始化文件设置。 |
 | `mcpServers` | `mcp.*` 转发的下游 MCP server。 |
 | `pathPolicy` | 可写、只读、拒绝路径根。 |
 | `policy` | 显式 allow / confirm / deny 命令规则。 |
@@ -463,7 +465,7 @@ CLI 仍接受 `freedesktop-then-ntfy` 等 legacy label；Agentic 管理写入会
 ## 命令与路径策略
 
 ```bash
-agentic-gpt config allow add bash
+agentic-gpt config allow add printf
 agentic-gpt config confirm add python -c
 agentic-gpt config deny add ssh
 
@@ -476,6 +478,33 @@ agentic-gpt config path deny add ~/.secrets
 配置的 allow 规则可以显式覆盖 builtin confirm/deny。多个配置规则匹配时，除非存在按运行时策略生效的更明确 allow override，否则 deny 优先。
 
 `workspaceRoot` 始终视为可写。Denied roots 覆盖 writable/read-only roots。Symlink 会解析，最终目标必须留在有效策略边界内。
+
+### Bash 命令与 Shell 初始化文件
+
+Process 命令由普通 Bash 以 `--noprofile --norc` 非登录、非交互方式执行原始脚本；启用 `pipefail`，
+初始化完成后重置该选项，并保持 `set +e`，不会自动启用 `set -e`。每次调用相互独立，不提供 PTY、
+stdin 或持久 Shell session。命令策略只分析提交的脚本，不分析初始化文件：只识别 tree-sitter-bash
+可解析的字面量命令调用及 `&&`、`||`、`;`、`|` 组合。命中 deny 会在执行任何脚本前拒绝整段命令；
+不完整、无法识别或不支持的语法需要对整段脚本确认，缺少可用确认通道时 fail closed。不要把
+`bash -c` 加入广泛 allow：这会显式授权任意 shell 代码，不能作为默认放宽策略。
+
+`shell.initFile` 有三种配置状态：
+
+- 省略或执行 `agentic-gpt config unset shell.initFile`：Default，source `~/.agentic_gpt/.bashrc`。
+- `null`：Disabled，不加载初始化文件。
+- 字符串路径：显式 Path；相对路径以请求 cwd（未提供时为默认 cwd）解析，不按 `PATH` 查找。
+
+Default 文件在 sandbox 可见 namespace 中打开；仅当打开失败为 `ENOENT`（包括 dangling symlink）时跳过。
+显式路径的 `ENOENT` 会失败；两种模式的其他打开、读取或 source 错误均以 `shell_init_file_failed`
+阻断命令。不会自动创建文件、加载用户 `~/.bashrc`，也不会隐式加载 `BASH_ENV`/`ENV`。允许 symlink；
+不做专门的 lstat/readlink 验证。Source 使用现有 sandbox 可见性与挂载，不会扩大 namespace。
+Source 后工作目录恢复为请求 cwd；初始化脚本对 PATH、函数、alias
+（正常 Bash 中 alias 扩展需显式启用）与导出变量的修改按普通 Bash 规则生效。
+
+初始化文件是本地可信代码，不受命令白名单审计；其 PATH、函数、alias、hook 等影响，以及后续进程
+或逃离同一进程组的子进程不由命令策略绑定到原始字面量检查对象。相对路径若由模型选择的 cwd
+或模型可写位置解析，存在信任风险；建议使用由用户拥有且受保护的绝对路径。准入时冻结的是配置
+设置，不是文件字节或可执行文件身份；运行中配置热加载不会更改已准入 Process 的设置快照。
 
 ## 资源限制
 
@@ -558,7 +587,7 @@ replica。旧 JSONL append/update/remove 与 passage/date-selection 调用不会
 agentic-gpt config keys [--section <SECTION>] [--json]
 ```
 
-文本形式按 `runtime`、`identity`、`hub`、`confirmation`、`sandbox`、`limits`、`skills`、`room`、
+文本形式按 `runtime`、`identity`、`hub`、`confirmation`、`sandbox`、`shell`、`limits`、`skills`、`room`、
 `tunnel`、`http-mcp` 和 `events` 分组；`--section` 只显示其中一个分组。`--json` 返回机器可读的类型、
 是否可为 null、示例、双语说明和别名元数据。`config set` 只接受 registry 中的键；结构化
 policy 与 MCP 集合应使用专用命令。
@@ -566,7 +595,13 @@ policy 与 MCP 集合应使用专用命令。
 注册键后的值是一个 shell 参数。因此 JSON 列表必须加引号。`room.repositoryRoot` 可为 null，
 使用字面量 JSON 值 `null` 可以清除它并恢复 workspace 默认目录。
 
+只有新键 `shell.initFile` 支持 `config unset`；unset 恢复省略状态（Default），不同于 `config set shell.initFile null`
+所设置的 Disabled。该键可用 `config set shell.initFile null` 或设置字符串路径；其他 registry 键不支持 unset。
+
 ```bash
+agentic-gpt config set shell.initFile null
+agentic-gpt config set shell.initFile /path/to/protected/bashrc
+agentic-gpt config unset shell.initFile
 agentic-gpt config set sandbox.requiredRuntimePaths '["/usr","/opt/runtime"]'
 agentic-gpt config set skills.allowedHosts '["skills.example.com"]'
 agentic-gpt config set room.repositoryRoot null
@@ -581,6 +616,7 @@ registry 包含以下常用 scalar：
 - `tunnel.tunnelId`、`tunnel.apiKey`
 - 全部 `tunnel.client.*` 与 `tunnel.hubReporting.*`
 - `room.repositoryRoot`、`room.timezone`、`room.diaryDayBoundaryHour`
+- `shell.initFile`
 - `room.maintenance.mode`、`room.maintenance.autoPush`
 - 文档列出的 `skills.*` scalar/list 字段
 - `httpMcp.enabled`、`httpMcp.host`、`httpMcp.port`、`httpMcp.publicUrl`、`httpMcp.bearerToken`、`httpMcp.allowHosts`
@@ -618,6 +654,7 @@ live subset。无效候选会保留上一份有效状态；候选修改需要重
 | 配置 | 行为 |
 | --- | --- |
 | `policy`、`limits`、`mcpServers`、`toolsets.enabled` | 所有 Agent worker 共享热加载，对新 admission/call 与工具发现生效 |
+| `shell.initFile` | 热加载；之后接纳的 Process 使用新设置，已接纳 Process 保留准入时的配置快照 |
 | `pathPolicy`（`workspaceRoot` 未改变时） | 所有 Agent worker 共享热加载，对后续路径检查生效 |
 | `httpMcp.enabled`、`host`、`port`、`publicUrl`、`allowHosts` | Standalone HTTP watcher 协调启用状态与 endpoint identity；identity 变化会关闭有状态 session 并丢弃 listener-local OAuth state，客户端必须重新 initialize |
 | `httpMcp.bearerToken` 引用或其解析内容 | Standalone HTTP watcher 原地更新认证而不重新绑定；解析凭据可用时保留已有 session |

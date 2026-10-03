@@ -687,6 +687,31 @@ impl EventStore {
         self.settle_response_inner(source, Some(origin), includes_terminal)
     }
 
+    pub(crate) fn contains_internal_sources<'a>(
+        &self,
+        sources: impl Iterator<Item = &'a EventSource>,
+    ) -> Result<Vec<bool>> {
+        let connection = self
+            .connection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut statement = connection
+            .prepare("SELECT 1 FROM internal_sources WHERE source_kind=?1 AND source_ref=?2")
+            .context("event_store_internal_source_lookup_prepare_failed")?;
+        let mut found = Vec::new();
+        for source in sources {
+            validate_internal_source(source)?;
+            let exists: Option<i64> = statement
+                .query_row(params![source.kind.as_str(), source.reference], |row| {
+                    row.get(0)
+                })
+                .optional()
+                .context("event_store_internal_source_lookup_failed")?;
+            found.push(exists.is_some());
+        }
+        Ok(found)
+    }
+
     fn settle_response_inner(
         &self,
         source: &EventSource,

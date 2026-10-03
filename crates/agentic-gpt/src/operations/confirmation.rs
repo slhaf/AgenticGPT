@@ -236,24 +236,6 @@ async fn request_hub_batch_confirmation(
     };
     request_hub_confirmation_payload(state, payload).await
 }
-pub(crate) async fn request_shell_confirmation(
-    state: &AppState,
-    config: &Config,
-    confirm_method: Option<&str>,
-    command: &str,
-    cwd: Option<&str>,
-) -> String {
-    request_shell_confirmation_cancellable(
-        state,
-        config,
-        confirm_method,
-        command,
-        cwd,
-        Arc::new(AtomicBool::new(false)),
-    )
-    .await
-}
-
 pub(crate) async fn request_shell_confirmation_cancellable(
     state: &AppState,
     config: &Config,

@@ -2,7 +2,7 @@ use serde_json::{json, Value};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::{ffi::OsStrExt, fs::PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{
@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 #[test]
 fn hidden_worker_recovers_stale_tunnel_session_before_first_call() {
-    let root = std::env::temp_dir().join(format!("agentic-stdio-resume-e2e-{}", Uuid::new_v4()));
+    let root = std::env::temp_dir().join(format!("ag-{}", Uuid::new_v4().simple()));
     fs::create_dir_all(&root).unwrap();
     let result = run_stdio_resume(&root);
     let _ = fs::remove_dir_all(&root);
@@ -24,7 +24,7 @@ fn hidden_worker_recovers_stale_tunnel_session_before_first_call() {
 
 #[test]
 fn hidden_worker_reloads_policy_path_limit_and_mcp_without_restart() {
-    let root = std::env::temp_dir().join(format!("agentic-live-reload-e2e-{}", Uuid::new_v4()));
+    let root = std::env::temp_dir().join(format!("ag-{}", Uuid::new_v4().simple()));
     fs::create_dir_all(&root).unwrap();
     let result = run_live_reload(&root);
     let _ = fs::remove_dir_all(&root);
@@ -33,7 +33,7 @@ fn hidden_worker_reloads_policy_path_limit_and_mcp_without_restart() {
 
 #[test]
 fn supervisor_launches_real_worker_and_completes_local_mcp_call() {
-    let root = std::env::temp_dir().join(format!("agentic-standalone-e2e-{}", Uuid::new_v4()));
+    let root = std::env::temp_dir().join(format!("ag-{}", Uuid::new_v4().simple()));
     fs::create_dir_all(&root).unwrap();
     let result = run_smoke(&root, "normal", false, false);
     let _ = fs::remove_dir_all(&root);
@@ -42,7 +42,7 @@ fn supervisor_launches_real_worker_and_completes_local_mcp_call() {
 
 #[test]
 fn supervisor_launches_real_room_worker_and_advertises_room_surface() {
-    let root = std::env::temp_dir().join(format!("agentic-standalone-room-e2e-{}", Uuid::new_v4()));
+    let root = std::env::temp_dir().join(format!("ag-{}", Uuid::new_v4().simple()));
     fs::create_dir_all(&root).unwrap();
     let result = run_smoke(&root, "room", true, false);
     let _ = fs::remove_dir_all(&root);
@@ -51,7 +51,7 @@ fn supervisor_launches_real_room_worker_and_advertises_room_surface() {
 
 #[test]
 fn supervised_journal_mode_omits_agentic_inner_timestamp() {
-    let root = std::env::temp_dir().join(format!("agentic-journal-e2e-{}", Uuid::new_v4()));
+    let root = std::env::temp_dir().join(format!("ag-{}", Uuid::new_v4().simple()));
     fs::create_dir_all(&root).unwrap();
     let result = run_smoke(&root, "normal", true, false);
     let _ = fs::remove_dir_all(&root);
@@ -60,7 +60,7 @@ fn supervised_journal_mode_omits_agentic_inner_timestamp() {
 
 #[test]
 fn supervised_invalid_config_warning_is_supervisor_owned() {
-    let root = std::env::temp_dir().join(format!("agentic-invalid-reload-e2e-{}", Uuid::new_v4()));
+    let root = std::env::temp_dir().join(format!("ag-{}", Uuid::new_v4().simple()));
     fs::create_dir_all(&root).unwrap();
     let result = run_smoke(&root, "normal", true, true);
     let _ = fs::remove_dir_all(&root);
@@ -90,7 +90,7 @@ fn run_smoke(
     let response_path = root.join("worker-response.jsonl");
     let worker_stderr_path = root.join("worker.stderr");
     let marker_path = root.join("tool-complete");
-    let agent_id = format!("standalone-e2e-{}", Uuid::new_v4().simple());
+    let agent_id = short_agent_id();
 
     let init = Command::new(&binary)
         .args([
@@ -123,6 +123,10 @@ fn run_smoke(
     };
     config["agentId"] = Value::String(agent_id.clone());
     config["workspaceRoot"] = Value::String(workspace.to_string_lossy().into_owned());
+    config["shell"]["initFile"] = Value::Null;
+    config["policy"]["allow"] = json!([
+        { "program": "/usr/bin/printf", "argsPrefix": [] }
+    ]);
     config["pathPolicy"]["writeRoots"] = json!([workspace.to_string_lossy()]);
     config["tunnel"] = json!({
         "tunnelId": "tunnel_local_integration",
@@ -288,7 +292,7 @@ fn run_stdio_resume(root: &Path) -> Result<(), String> {
     let mut config: Value =
         serde_json::from_str(&fs::read_to_string(&config_path).map_err(|error| error.to_string())?)
             .map_err(|error| error.to_string())?;
-    config["agentId"] = Value::String(format!("stdio-resume-e2e-{}", Uuid::new_v4().simple()));
+    config["agentId"] = Value::String(short_agent_id());
     config["workspaceRoot"] = Value::String(workspace.to_string_lossy().into_owned());
     config["pathPolicy"]["writeRoots"] = json!([workspace.to_string_lossy()]);
     config["tunnel"] = json!({
@@ -425,9 +429,10 @@ fn run_live_reload(root: &Path) -> Result<(), String> {
     let mut config: Value =
         serde_json::from_str(&fs::read_to_string(&config_path).map_err(|error| error.to_string())?)
             .map_err(|error| error.to_string())?;
-    let agent_id = format!("live-reload-e2e-{}", Uuid::new_v4().simple());
+    let agent_id = short_agent_id();
     config["agentId"] = Value::String(agent_id.clone());
     config["workspaceRoot"] = Value::String(workspace.to_string_lossy().into_owned());
+    config["shell"]["initFile"] = Value::Null;
     config["pathPolicy"]["writeRoots"] =
         json!([workspace.to_string_lossy(), path_root.to_string_lossy()]);
     config["tunnel"] = json!({
@@ -587,7 +592,7 @@ fn run_live_reload(root: &Path) -> Result<(), String> {
         &mut stdout,
         2,
         "process.exec",
-        json!({ "program": "/usr/bin/printf", "args": ["denied"], "waitSeconds": 2 }),
+        json!({ "command": "/usr/bin/printf 'denied'", "waitSeconds": 2 }),
     )?;
     assert_eq!(
         denied["result"]["structuredContent"]["error"]["code"],
@@ -608,7 +613,7 @@ fn run_live_reload(root: &Path) -> Result<(), String> {
         &mut stdout,
         3,
         "process.exec",
-        json!({ "program": "/usr/bin/printf", "args": ["reloaded"], "waitSeconds": 2 }),
+        json!({ "command": "/usr/bin/printf 'reloaded'", "waitSeconds": 2 }),
     )?;
     assert_eq!(
         allowed["result"]["structuredContent"]["state"],
@@ -638,8 +643,7 @@ fn run_live_reload(root: &Path) -> Result<(), String> {
         31,
         "process.exec",
         json!({
-            "program": "/usr/bin/touch",
-            "args": [path_target.to_string_lossy()],
+            "command": format!("/usr/bin/touch {}", sh_quote(&path_target.to_string_lossy())),
             "waitSeconds": 2
         }),
     )?;
@@ -656,8 +660,7 @@ fn run_live_reload(root: &Path) -> Result<(), String> {
         32,
         "process.exec",
         json!({
-            "program": "/usr/bin/touch",
-            "args": [path_target.to_string_lossy()],
+            "command": format!("/usr/bin/touch {}", sh_quote(&path_target.to_string_lossy())),
             "waitSeconds": 2
         }),
     )?;
@@ -678,7 +681,7 @@ fn run_live_reload(root: &Path) -> Result<(), String> {
         &mut stdout,
         33,
         "process.exec",
-        json!({ "program": "/usr/bin/printf", "args": ["last-good"], "waitSeconds": 2 }),
+        json!({ "command": "/usr/bin/printf 'last-good'", "waitSeconds": 2 }),
     )?;
     assert_eq!(
         retained["result"]["structuredContent"]["state"],
@@ -719,7 +722,7 @@ fn run_live_reload(root: &Path) -> Result<(), String> {
         &mut stdout,
         4,
         "process.exec",
-        json!({ "program": "/bin/sleep", "args": ["5"], "waitSeconds": 0 }),
+        json!({ "command": "/bin/sleep 5", "waitSeconds": 0 }),
     )?;
     let active_process_id = active["result"]["structuredContent"]["processId"]
         .as_str()
@@ -738,7 +741,7 @@ fn run_live_reload(root: &Path) -> Result<(), String> {
         &mut stdout,
         5,
         "process.exec",
-        json!({ "program": "/usr/bin/printf", "args": ["blocked"], "waitSeconds": 2 }),
+        json!({ "command": "/usr/bin/printf 'blocked'", "waitSeconds": 2 }),
     )?;
     let reason = rejected["result"]["structuredContent"]["error"]["message"]
         .as_str()
@@ -754,7 +757,7 @@ fn run_live_reload(root: &Path) -> Result<(), String> {
         &mut stdout,
         6,
         "process.exec",
-        json!({ "program": "/usr/bin/printf", "args": ["limit-reloaded"], "waitSeconds": 2 }),
+        json!({ "command": "/usr/bin/printf 'limit-reloaded'", "waitSeconds": 2 }),
     )?;
     assert_eq!(
         admitted["result"]["structuredContent"]["state"],
@@ -884,8 +887,7 @@ fn fake_tunnel_script(
         "params": {
             "name": "process.exec",
             "arguments": {
-                "program": "/usr/bin/printf",
-                "args": ["standalone-e2e-ok"]
+                "command": "/usr/bin/printf 'standalone-e2e-ok'"
             }
         }
     });
@@ -948,6 +950,23 @@ fn respond_health(stream: &mut TcpStream) {
     let _ = stream.read(&mut request);
     let response = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
     let _ = stream.write_all(response);
+}
+
+fn short_agent_id() -> String {
+    let fixed_path_bytes = local_socket_path("x")
+        .expect("HOME is required")
+        .as_os_str()
+        .as_bytes()
+        .len()
+        - 1;
+    let available_id_bytes = 100usize.saturating_sub(fixed_path_bytes);
+    assert!(
+        available_id_bytes > 0,
+        "HOME leaves no room for a local socket agent ID"
+    );
+    let mut agent_id = Uuid::new_v4().simple().to_string();
+    agent_id.truncate(available_id_bytes.min(16));
+    agent_id
 }
 
 fn local_socket_path(agent_id: &str) -> Result<PathBuf, String> {

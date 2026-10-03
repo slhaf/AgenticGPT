@@ -30,12 +30,12 @@ GPT Actions API 由 `openapi/hub.yaml` 描述，并受 Hub API key 保护。
 
 - `GET /v1/info`：安全的 Hub 运行时概要。
 - `GET /v1/agents`：启用的本地 Agent、其在线状态和安全配置概要。
-- `POST /v1/process/exec`：启动一个受管理的进程并短暂等待。请求必须提供 `agentId`、`program`、`args` 和 `needConfirm`；支持可选的 `workingDirectory`、`group`（1–32 个字符）和有界 `waitSeconds`。响应为扁平的 `ProcessResponse`，统一受 `limits.processResponseBytes` 预算约束。
-- `POST /v1/process/batch`：原子准入一批受管理进程。请求必须提供 `agentId`、`elements` 和 `needConfirm`；支持批次级 `workingDirectory`、每个元素的覆盖项，以及由子进程继承的可选 `group`。响应为 `ProcessBatchResponse`，整个批次共用统一响应预算。
+- `POST /v1/process/exec`：启动一个受策略控制的 Bash 命令并短暂等待。请求必须提供 `agentId`、原始 shell 脚本 `command` 和 `needConfirm`；可选 `cwd`（工作目录）、`group`（1–32 个字符）和 `waitSeconds`（默认 5 秒，最多 30 秒）。策略针对完整提交脚本预检：任一命令被拒绝就拒绝整段脚本；无法静态判定的脚本需要整段确认。响应为扁平的 `ProcessResponse`，统一受 `limits.processResponseBytes` 预算约束。
+- `POST /v1/process/batch`：原子准入一批受管理 Bash 命令。请求必须提供 `agentId`、`elements`（每项含 `command`）和 `needConfirm`；可选批次级 `cwd`，元素可覆盖工作目录，以及由子进程继承的可选 `group` 和 `waitSeconds`（默认 5 秒，最多 30 秒）。全部元素先完成预检，再通过一次聚合确认；准入后不回滚已启动命令。响应为 `ProcessBatchResponse`，整个批次共用统一响应预算。
 - `GET /v1/process?agentId=...`：列出活动或近期保留的进程元数据，可选用 `group`、kind、state、limit 和 cursor 筛选。`limit` 默认值为 50，上限为 100。Agent 不可用时，Hub 可以为第一页返回缓存元数据，但不会从缓存继续使用 Agent 发出的 cursor。
 - `GET /v1/process/{processId}/read?agentId=...&waitSeconds=...&view=auto|status&cursor=...&maxBytes=...`：统一读取进程状态和捕获输出。wait 默认 5 秒、最大 30 秒、0 表示立即返回；auto 有 backlog 时立即返回，否则有界等待输出、终态/采集结算或期限；status 只等待执行终态/期限，不因输出提前返回。`maxBytes` 省略时使用 `limits.processResponseBytes`，显式值范围为 4096..1048576。
 - read 响应报告 `captureStatus`，stdout/stderr 使用 `data`、`encoding`、偏移和 `gap` segment，并提供 `nextCursor`、`hasMore`、`eof`。`hasMore` 不要求读完整日志；cursor 只推进实际返回数据，不同读取者不共享消费。cursor 仅用于 command/skill 输出；MCP 下游 CallToolResult 不使用输出 cursor。
-- `POST /v1/process/{processId}/cancel?agentId=...`：请求按进程类型执行取消，并返回观察到的结果/终止证据；超时或缺少响应不能作为已取消的证据。
+- `POST /v1/process/{processId}/cancel?agentId=...`：请求取消受管理进程组并返回观察到的结果/终止证据。`process_group_sigterm_observed` 和 `process_group_sigkill_observed` 是观察到相应停止信号的正面语义证据；未验证或缺少响应不等于已停止。普通同组管道/后台子进程在取消范围内；脱离进程组的后代不作保证。
 - `POST /v1/mcp/servers`：列出一个本地 Agent 中配置的 MCP 服务器；省略 `agentId` 时，则汇总所有当前已连接 Agent 的 MCP 服务器。
 - `POST /v1/mcp/tools`：列出一个 MCP 服务器暴露的工具。
 - `POST /v1/mcp/callTool`：通过所选本地 Agent 启动一个受管理的下游 MCP 工具进程。HTTP 响应为扁平的 `ProcessResponse`；等待超时不会取消进程。`timeoutSeconds` 默认值为 300，上限为 900。

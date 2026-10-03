@@ -6,6 +6,7 @@ mod tests {
     use crate::config::{
         RoomMaintenanceMode, ShellInitFile, ToolNamespace, ToolsetConfig, DEFAULT_SHELL_INIT_FILE,
     };
+    use crate::config_templates::{build_config, OptionalSection, RuntimeMode, SecretValue};
     use crate::tui::forms::OrderedMultiSelectState;
     use crate::WorkerProfile;
 

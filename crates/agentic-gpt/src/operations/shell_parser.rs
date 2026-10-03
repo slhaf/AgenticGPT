@@ -106,7 +106,7 @@ fn bash_crlf_analysis_view(script: &str, offsets: &[usize]) -> Option<String> {
     let mut bytes = script.as_bytes().to_vec();
     for offset in offsets {
         let sequence = bytes.get_mut(*offset..offset.saturating_add(3))?;
-        sequence.copy_from_slice(&[b' ', b'\n', b' ']);
+        sequence.copy_from_slice(b" \n ");
     }
     String::from_utf8(bytes).ok()
 }
@@ -220,7 +220,7 @@ fn extract_command(node: Node<'_>, source: &str) -> (Option<LiteralCommand>, boo
             complete = false;
             continue;
         };
-        let field = node.field_name_for_child(index);
+        let field = node.field_name_for_child(index as u32);
         let gap = source
             .get(previous_end..child.start_byte())
             .unwrap_or_default();

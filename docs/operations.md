@@ -79,6 +79,14 @@ curl -fsS -H 'Authorization: Bearer test-key' http://127.0.0.1:18787/v1/info
 
 预期 JSON 包含 `service`、`version`、`remoteConfirmation`、`agents`、`counts` 和 `generatedAt`。
 
+### Process Bash 输入切换检查
+
+部署采用新 Process 输入契约的配对 Agent/Hub 工件时，应先更新所有调用方：`process.exec` 使用原始 `command` 脚本与可选 `cwd`；`process.batch` 的每项使用 `command`，批次级 `cwd` 可被元素覆盖。`program`、`args`、`workingDirectory` 不再是执行输入，客户端若需表达 argv，必须自行按 shell 规则显式引用参数并构造脚本。保留在历史 `ProcessInfo` 中的旧元数据不构成输入兼容性。此次切换不改写数据库；旧未完成记录不会重放，已完成记录保留其历史结果。不要把此部署说明解释为发布或推送已发生。
+
+对已授权的本地实例，可用只含字面量 `printf` 的无副作用脚本做定向冒烟，例如 `process.exec` 的 `command` 为 `printf '%s\n' 'process smoke'`。确认进程退出码为 0 时状态为 `completed`，再通过 `process.read` 检查捕获输出；非零退出码应为 `failed` 并保留实际退出码。读取时分别观察执行终态与 `captureStatus`/EOF；`waitSeconds` 只结束本次等待，不取消执行。需验证取消时另启动获准的长时无害任务并显式调用 `process.cancel`：只有 `process_group_sigterm_observed` 或 `process_group_sigkill_observed` 表示观察到对应停止信号；unknown、detached 或缺少证据不能作为停止证明。普通同组管道和后台子进程属于目标范围；不要将该检查外推到脱离进程组的后代。
+
+Shell `initFile` 是本地可信配置，不由模型输入控制；部署前按[配置说明](configuration.md)核对 Default/Disabled/显式路径以及文件所有权和可写性。策略预检针对提交脚本，不审计 init 文件，且配置快照不冻结文件内容或可执行身份。相对 init 路径若随模型可选 cwd 或可写位置变化，属于信任风险；优先使用用户所有、受保护的绝对路径。此为运维建议，不是新增执行限制。
+
 ### WP1 收尾证据边界
 
 当前 WP1 收尾证据范围有限：最终清理阶段通过了 `cargo fmt --all -- --check`、集成的 `cargo test -p agentic-gpt-hub` 套件，以及无警告的 `cargo build -p agentic-gpt-hub`。一次隔离的 Hub HTTP/SSE 冒烟检查使用模拟 Agent 对等端，覆盖了六种确认、替换、回调、超时和迟到回执场景。此后，针对同一临时 SQLite 数据库执行的真实 Hub 重启保留了两条状态为 `completed` 的 `/v1/runs` 记录和 `sessions[]`；`/v1/info` 则报告 `pendingRequestCount`、`pendingConfirmationCount` 和 `cachedJobCount` 均为零。这只证明 Hub 侧的回执/会话清理和保留行为；没有执行真实 Agent 或传输账本重启，也不能证明历史路线图中的所有场景都完成了端到端验证。外部 ntfy 提供方行为仍未验证；本地/mock 回调路径不能作为等价证据。

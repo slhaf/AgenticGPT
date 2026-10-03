@@ -496,24 +496,29 @@ pub(crate) fn ack_message(envelope: &HubCommandEnvelope) -> AgentMessage {
     }
 }
 
-pub(crate) fn completed_response(record: &LedgerRecord) -> Result<Option<AgentMessage>> {
+pub(crate) fn completed_response(
+    record: &LedgerRecord,
+    event_store: &crate::event_store::EventStore,
+) -> Result<Option<AgentMessage>> {
     let Some(data) = record.result.clone() else {
         return Ok(None);
     };
-    let event_sources = record
-        .command
-        .as_ref()
-        .map(|command| {
+    let event_sources = match record.command.as_ref() {
+        Some(command) => {
             let operation = match command {
                 StoredCommand::Current(command) => crate::operation::hub_command_name(command),
                 StoredCommand::RetiredProcessCommand { operation, .. } => {
                     operation.operation_name()
                 }
             };
-            crate::event_notifications::initial_response_dispositions(operation, &data)
-        })
-        .transpose()?
-        .unwrap_or_default();
+            crate::event_notifications::registered_response_dispositions(
+                event_store,
+                operation,
+                &data,
+            )?
+        }
+        None => Vec::new(),
+    };
     Ok(Some(AgentMessage::Response {
         run_id: Some(record.run_id.clone()),
         request_id: record.request_id.clone(),
@@ -871,6 +876,11 @@ mod tests {
         fs::create_dir_all(&ledger_dir).unwrap();
         set_test_ledger_path(Some(ledger_dir.join("transport-runs.jsonl")));
         TestHome { root }
+    }
+
+    fn test_event_store(root: &std::path::Path) -> Arc<crate::event_store::EventStore> {
+        let paths = crate::private_state::PrivateStatePaths::for_test(root.join("event-state"));
+        crate::event_store::EventStore::open(&paths).unwrap()
     }
 
     fn envelope(
@@ -1271,6 +1281,7 @@ mod tests {
     fn retired_process_commands_survive_mixed_ledger_recovery_and_compaction() {
         let _home_lock = TEST_HOME_LOCK.lock();
         let _home = test_home();
+        let event_store = test_event_store(&_home.root);
         let ledger = ledger_path().unwrap();
         let retired_completed_command = serde_json::json!({
             "type": "process.output",
@@ -1404,9 +1415,12 @@ mod tests {
                 if request_id == "request-current-incomplete"
         ));
 
-        let response = completed_response(recovered.get("run-retired-completed").unwrap())
-            .unwrap()
-            .unwrap();
+        let response = completed_response(
+            recovered.get("run-retired-completed").unwrap(),
+            &event_store,
+        )
+        .unwrap()
+        .unwrap();
         assert!(matches!(
             response,
             AgentMessage::Response {
@@ -1478,6 +1492,7 @@ mod tests {
     fn stored_legacy_argv_commands_keep_identity_results_and_current_recovery() {
         let _home_lock = TEST_HOME_LOCK.lock();
         let _home = test_home();
+        let event_store = test_event_store(&_home.root);
         let ledger = ledger_path().unwrap();
         let legacy_exec = |request_id: &str| {
             serde_json::json!({
@@ -1611,7 +1626,9 @@ mod tests {
                 value,
             }) if value == &completed_command
         ));
-        let response = completed_response(completed).unwrap().unwrap();
+        let response = completed_response(completed, &event_store)
+            .unwrap()
+            .unwrap();
         assert!(matches!(
             response,
             AgentMessage::Response {

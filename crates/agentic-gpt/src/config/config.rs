@@ -475,8 +475,9 @@ impl Default for ShellConfig {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) enum ShellInitFile {
+    #[default]
     Default,
     Disabled,
     Path(String),
@@ -485,12 +486,6 @@ pub(crate) enum ShellInitFile {
 impl ShellInitFile {
     fn is_default(&self) -> bool {
         matches!(self, Self::Default)
-    }
-}
-
-impl Default for ShellInitFile {
-    fn default() -> Self {
-        Self::Default
     }
 }
 
