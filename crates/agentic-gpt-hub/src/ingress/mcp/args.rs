@@ -253,6 +253,10 @@ pub(super) enum ProcessReadViewArgs {
     Status,
 }
 
+fn default_process_read_view() -> ProcessReadViewArgs {
+    ProcessReadViewArgs::Auto
+}
+
 impl From<ProcessReadViewArgs> for agentic_gpt_protocol::ProcessReadView {
     fn from(value: ProcessReadViewArgs) -> Self {
         match value {
@@ -282,6 +286,7 @@ pub(super) struct ProcessReadArgs {
     pub(super) wait_seconds: Option<u64>,
     #[serde(default)]
     #[schemars(
+        default = "default_process_read_view",
         description = "观察视图：auto（默认）读取有界输出或 kind=mcp 结果并可等待；status 仅返回状态元数据，不含输出或结构化结果。"
     )]
     pub(super) view: Option<ProcessReadViewArgs>,

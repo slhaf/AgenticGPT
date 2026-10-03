@@ -373,7 +373,9 @@ class WebSocketRelay:
         self._expected_response: tuple[str, str] | None = None
         self._expected_receipt: tuple[str, str, str, str] | None = None
         self._condition = threading.Condition()
-        self._active_connections = 0
+        self._next_connection_id = 0
+        self._active_connections: set[int] = set()
+        self._failed_settle_connection_id: int | None = None
         self.server = self._make_server()
         self.port = self.server.server_address[1]
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
@@ -384,6 +386,7 @@ class WebSocketRelay:
 
         class Handler(socketserver.BaseRequestHandler):
             def handle(self) -> None:
+                connection_id: int | None = None
                 client = self.request
                 upstream: socket.socket | None = None
                 try:
@@ -398,7 +401,8 @@ class WebSocketRelay:
                         return
                     client.settimeout(None)
                     upstream.settimeout(None)
-                    relay._proxy(client, upstream)
+                    connection_id = relay._connection_started()
+                    relay._proxy(client, upstream, connection_id)
                 except (OSError, ValueError, GateError):
                     pass
                 finally:
@@ -407,7 +411,8 @@ class WebSocketRelay:
                     if upstream is not None:
                         with contextlib.suppress(OSError):
                             upstream.close()
-                    relay._connection_stopped()
+                    if connection_id is not None:
+                        relay._connection_stopped(connection_id)
 
         server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
         server.daemon_threads = True
@@ -498,14 +503,17 @@ class WebSocketRelay:
             self.settle_reply_hold_armed = False
             self._condition.notify_all()
 
-    def _connection_started(self) -> None:
+    def _connection_started(self) -> int:
         with self._condition:
-            self._active_connections += 1
+            self._next_connection_id += 1
+            connection_id = self._next_connection_id
+            self._active_connections.add(connection_id)
             self._condition.notify_all()
+            return connection_id
 
-    def _connection_stopped(self) -> None:
+    def _connection_stopped(self, connection_id: int) -> None:
         with self._condition:
-            self._active_connections = max(0, self._active_connections - 1)
+            self._active_connections.discard(connection_id)
             self._condition.notify_all()
 
     def wait_disconnected(self, timeout: float, scenario: str) -> None:
@@ -515,6 +523,21 @@ class WebSocketRelay:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     fail(scenario, "Agent WebSocket relay connection did not close")
+                self._condition.wait(remaining)
+
+    def wait_failed_settle_disconnected(self, timeout: float, scenario: str) -> None:
+        deadline = time.monotonic() + timeout
+        with self._condition:
+            while True:
+                connection_id = self._failed_settle_connection_id
+                if connection_id is not None and connection_id not in self._active_connections:
+                    return
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    fail(
+                        scenario,
+                        "Agent WebSocket relay connection carrying failed EventSettle response did not close",
+                    )
                 self._condition.wait(remaining)
 
     def wait_for_settle(self, count: int, timeout: float, scenario: str) -> None:
@@ -679,7 +702,7 @@ class WebSocketRelay:
                 )
             self._condition.notify_all()
 
-    def _observe_agent_message(self, message: dict[str, Any]) -> bool:
+    def _observe_agent_message(self, message: dict[str, Any], connection_id: int) -> bool:
         with self._condition:
             if message.get("type") == "event.sources":
                 self.source_reports.append(message)
@@ -696,6 +719,7 @@ class WebSocketRelay:
                     self.settle_response_messages.append(message)
                     if self.fail_next_settle_response:
                         self.fail_next_settle_response = False
+                        self._failed_settle_connection_id = connection_id
                         self.settle_failure_seen.set()
                         self._condition.notify_all()
                         return True
@@ -747,7 +771,9 @@ class WebSocketRelay:
             return True
 
 
-    def _forward(self, source: socket.socket, target: socket.socket, agent_to_hub: bool) -> None:
+    def _forward(
+        self, source: socket.socket, target: socket.socket, agent_to_hub: bool, connection_id: int
+    ) -> None:
         blocked: list[bytes] | None = None
         release: threading.Event | None = None
         while True:
@@ -772,7 +798,7 @@ class WebSocketRelay:
                 else:
                     target.sendall(raw)
                 continue
-            if self._observe_agent_message(message):
+            if self._observe_agent_message(message, connection_id):
                 return
             if blocked is not None:
                 if self._should_hold_settle_reply(message) or self._should_hold_receipt(message):
@@ -802,12 +828,10 @@ class WebSocketRelay:
                     self._condition.notify_all()
             target.sendall(raw)
 
-    def _proxy(self, client: socket.socket, upstream: socket.socket) -> None:
-        self._connection_started()
-
+    def _proxy(self, client: socket.socket, upstream: socket.socket, connection_id: int) -> None:
         def forward(source: socket.socket, target: socket.socket, agent_to_hub: bool) -> None:
             try:
-                self._forward(source, target, agent_to_hub)
+                self._forward(source, target, agent_to_hub, connection_id)
             except (OSError, ValueError, GateError):
                 pass
             finally:
@@ -1469,20 +1493,36 @@ def assert_tool_semantics(
     ):
         fail(label, "process.read waitSeconds is not default5/clamped0..30")
     view = read_props.get("view", {})
-    if "process.read" in descriptors and (
-        view.get("default") != "auto" or view.get("enum") != ["auto", "status"]
-    ):
-        fail(label, "process.read view is not default auto with auto/status choices")
+    if "process.read" in descriptors:
+        if view.get("default") != "auto":
+            fail(label, "process.read view does not advertise default auto")
+        read_validator = Draft202012Validator(read_schema)
+        read_base = {"processId": "schema-process"}
+        if hub:
+            read_base["agentId"] = "schema-agent"
+        if not read_validator.is_valid(read_base):
+            fail(label, "process.read rejects omission of optional read controls")
+        for field, accepted, rejected in (
+            ("view", ("auto", "status"), ("output", "AUTO", 1, {})),
+            ("cursor", ("opaque-cursor",), (1, {}, [])),
+            ("maxBytes", (4096, 8192, 1048576), (4095, 1048577, 4096.5, True)),
+            ("waitSeconds", (0, 5, 30), (-1, 31, 0.5, True)),
+        ):
+            for value in accepted:
+                if not read_validator.is_valid({**read_base, field: value}):
+                    fail(label, f"process.read schema rejects valid {field}={value!r}")
+            for value in rejected:
+                if read_validator.is_valid({**read_base, field: value}):
+                    fail(label, f"process.read schema accepts invalid {field}={value!r}")
     response_bytes = read_props.get("maxBytes", {})
     if "process.read" in descriptors and (
-        "default" in response_bytes
+        response_bytes.get("default") is not None
         or response_bytes.get("minimum") != 4096
         or response_bytes.get("maximum") != 1048576
     ):
         fail(label, "process.read maxBytes must use configured defaults and enforce 4096..1048576")
-    cursor = read_props.get("cursor", {})
     if "process.read" in descriptors and (
-        cursor.get("type") != "string" or "cursor" in read_schema.get("required", [])
+        "cursor" not in read_props or "cursor" in read_schema.get("required", [])
     ):
         fail(label, "process.read cursor must be optional string for output pagination")
     if hub and "process.read" in descriptors:
@@ -1614,9 +1654,11 @@ def configure_process_fixture(
     except (OSError, TypeError, json.JSONDecodeError) as error:
         fail("process fixture", f"could not configure private process fixture: {error}")
 
-def write_large_mcp_result_fixture(workspace: Path) -> None:
-    """Create an incompressible, valid image whose MCP content exceeds retention."""
-    width = height = 512
+def write_large_mcp_result_fixture(
+    workspace: Path, *, size: int = 512, filename: str = "large-mcp-result.png"
+) -> None:
+    """Create a valid incompressible image for MCP retention boundary fixtures."""
+    width = height = size
     row_bytes = width * 4
     pixels = random.Random(0).randbytes(row_bytes * height)
     scanlines = b"".join(
@@ -1639,7 +1681,7 @@ def write_large_mcp_result_fixture(workspace: Path) -> None:
         + chunk(b"IEND", b"")
     )
     try:
-        (workspace / "large-mcp-result.png").write_bytes(image)
+        (workspace / filename).write_bytes(image)
     except OSError as error:
         fail("MCP retention fixture", f"could not create the large image fixture: {error}")
 
@@ -2398,6 +2440,10 @@ def start_http_agent(binary: Path, root: Path, reports: list[str]) -> tuple[Mana
     config, _, env = init_agent(binary, root, "standalone", "normal", "parity-http")
     prepare_skill_fixture(config)
     write_large_mcp_result_fixture(Path(json.loads(config.read_text())["workspaceRoot"]))
+    write_large_mcp_result_fixture(
+        Path(json.loads(config.read_text())["workspaceRoot"]),
+        size=288, filename="retained-mcp-result.png",
+    )
     token = "contract-parity-http-token"
     data = json.loads(config.read_text())
     data["httpMcp"] = {
@@ -2850,7 +2896,7 @@ def run_hub_event_gate(
              "needConfirm": False, "waitSeconds": 0},
             f"Hub real {name} event producer",
         )
-        if response.status != 200 or started.get("status") not in ("starting", "running"):
+        if response.status != 200 or started.get("state") not in ("starting", "running"):
             fail("Hub event producer admission", f"expected an actual nonterminal initial response: {started}")
         return started["processId"]
 
@@ -4312,7 +4358,7 @@ def run_hub_agent_crash_recovery_gate(
     relay.wait_settle_failure(15, "Hub crash-recovery transient EventSettle response failure")
     settle_response_baseline = relay.settle_response_count()
     relay.arm_receipt_hold()
-    relay.wait_disconnected(5, "Hub crash-recovery transient disconnect")
+    relay.wait_failed_settle_disconnected(5, "Hub crash-recovery transient disconnect")
     wait_for_agent(hub_port, hub_key, agent_id, "Hub crash-recovery Agent after transient failure", agent)
 
     session_path = "/v1/events?" + urlencode({"agentId": agent_id, "status": "pending"})
@@ -6181,6 +6227,41 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
         ):
             fail("Hub process.read capture EOF after tail", f"tail capture did not settle after its writer exited: {tail_settled}")
 
+        # These waitSeconds=0 fixtures deliberately publish completion events.
+        # Settle only their exact sources before testing inline suppression.
+        wait_fixture_events: dict[str, str] = {}
+
+        def find_wait_fixture_events() -> bool:
+            pending = hub_event_mcp_call(
+                hub_port, hub_key, full_session, 79, "event.list",
+                {"agentId": normal_id, "status": "pending"},
+                "Hub read wait fixture completion events",
+            )
+            for process_id in (auto_id, tail_id):
+                record = event_record_for_source(
+                    event_items(pending, "Hub read wait fixture completion events"),
+                    "process", process_id,
+                    lambda event_id: hub_event_mcp_call(
+                        hub_port, hub_key, full_session, 80, "event.get",
+                        {"agentId": normal_id, "eventId": event_id},
+                        "Hub read wait fixture event provenance",
+                    ),
+                    "Hub read wait fixture event provenance",
+                )
+                if record is not None:
+                    wait_fixture_events[process_id] = record["eventId"]
+            return set(wait_fixture_events) == {auto_id, tail_id}
+
+        wait_until(find_wait_fixture_events, "Hub read wait fixtures", "both completion events")
+        marked_wait_events = hub_event_mcp_call(
+            hub_port, hub_key, full_session, 81, "event.mark",
+            {"agentId": normal_id, "eventIds": list(wait_fixture_events.values())},
+            "Hub read wait fixture event cleanup",
+        )
+        if set(marked_wait_events.get("handledIds", [])) != set(wait_fixture_events.values()):
+            fail("Hub read wait fixture event cleanup", f"fixture events were not handled: {marked_wait_events}")
+        reports.append("PASS Hub read auto/status waits and post-exit capture; exact fixture completion events settled")
+
         denied = json_result(
             mcp_call(
                 hub_port, hub_key, full_session, 6, "tools/call",
@@ -6587,6 +6668,58 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
         ):
             fail("Hub HTTP mcp.batch", f"distinct downstream info/skills results were not in request order: {mcp_batch_body}")
         reports.append("PASS Hub HTTP process.batch and real downstream mcp.callTool/mcp.batch with distinct ordered results")
+
+        retained_batch_response, retained_batch = confirmed_hub_json(
+            hub_port, hub_key, "POST", "/v1/mcp/batch",
+            {
+                "agentId": normal_id,
+                "calls": [
+                    {
+                        "id": f"image-{index}", "serverId": "standalone-http",
+                        "toolName": "file.read",
+                        "arguments": {"path": "retained-mcp-result.png"},
+                    }
+                    for index in range(6)
+                ],
+                "waitSeconds": 5,
+            },
+            confirmation, "Hub MCP batch aggregate retention boundary",
+        )
+        if retained_batch_response.status != 200:
+            fail("Hub MCP batch aggregate retention boundary", f"HTTP {retained_batch_response.status}: {retained_batch}")
+        validate_operation_response(
+            document, "/v1/mcp/batch", "post", 200, retained_batch,
+            "Hub MCP batch aggregate retention boundary",
+        )
+        retained_children = retained_batch.get("results", [])
+        if (
+            retained_batch.get("status") != "completed"
+            or len(retained_children) != 6
+            or any(child.get("mcpResult", {}).get("status") != "deferred" for child in retained_children)
+            or sum(child.get("mcpResult", {}).get("bytes", 0) for child in retained_children) <= 2 * 1024 * 1024
+            or process_response_size(retained_batch) > 4096
+        ):
+            fail("Hub MCP batch aggregate retention boundary", f"retained aggregate overflow was not deferred within budget: {retained_batch}")
+        expected_image = (
+            Path(json.loads(http_config.read_text())["workspaceRoot"]) / "retained-mcp-result.png"
+        ).read_bytes()
+        for child in retained_children:
+            _, restored = hub_process_read(
+                hub_port, hub_key, normal_id, child["processId"], document, schemas,
+                "Hub MCP aggregate-omitted result recovery", max_bytes=1048576,
+            )
+            result = restored.get("mcpResult", {})
+            images = [
+                block for block in result.get("value", {}).get("content", [])
+                if block.get("type") == "image"
+            ]
+            if (
+                result.get("status") != "included" or len(images) != 1
+                or base64.b64decode(images[0].get("data", ""), validate=True) != expected_image
+                or process_response_size(restored) > 1048576
+            ):
+                fail("Hub MCP aggregate-omitted result recovery", f"retained image was not recovered intact for {child['processId']}")
+        reports.append("PASS Hub MCP batch exceeding internal 2 MiB aggregate reports deferred and recovers all six retained images intact")
 
         room_install_payload = inline_skill_install_request()
         validate_instance(document, schemas, "SkillInstallRequest", room_install_payload, "Hub Room skills.install request")

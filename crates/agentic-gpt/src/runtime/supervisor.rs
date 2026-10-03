@@ -532,7 +532,7 @@ fn spawn_tunnel(invocation: &Invocation) -> Result<RunningProcess> {
     configure_process_group(&mut command);
     let mut child = command
         .spawn()
-        .map_err(|_| anyhow!("tunnel_client_spawn_failed"))?;
+        .map_err(|error| spawn_error("tunnel_client_spawn_failed", error))?;
     let mut log_tasks = Vec::new();
     if let Some(stdout) = child.stdout.take() {
         log_tasks.push(tokio::spawn(forward_log(
@@ -564,7 +564,7 @@ async fn run_doctor(invocation: &Invocation) -> Result<()> {
     let output = command
         .output()
         .await
-        .map_err(|_| anyhow!("tunnel_doctor_spawn_failed"))?;
+        .map_err(|error| spawn_error("tunnel_doctor_spawn_failed", error))?;
     if !output.status.success() {
         let exit_code = output
             .status
@@ -579,6 +579,14 @@ async fn run_doctor(invocation: &Invocation) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+fn spawn_error(operation: &str, error: io::Error) -> anyhow::Error {
+    anyhow!(
+        "{operation}: kind={:?}, raw_os_error={:?}: {error}",
+        error.kind(),
+        error.raw_os_error()
+    )
 }
 
 fn bounded_redacted_output(output: &[u8], secrets: &[&str]) -> String {
@@ -1235,6 +1243,29 @@ mod tests {
         assert!(error.contains("public stderr [REDACTED] token=[REDACTED]"));
         assert!(!error.contains("runtime-secret"));
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn doctor_spawn_failure_preserves_os_error_kind() {
+        let root =
+            std::env::temp_dir().join(format!("agentic-doctor-spawn-test-{}", Uuid::new_v4()));
+        let invocation = Invocation {
+            tunnel_id: "tunnel_test".to_owned(),
+            secret: "runtime-secret".to_owned(),
+            executable: root.join("fake-tunnel.sh"),
+            worker_command: "agentic-gpt stdio-worker --config config.json".to_owned(),
+            worker_token: "worker-token".to_owned(),
+            paths: RuntimePaths {
+                health_url: root.join("health.url"),
+                log: root.join("tunnel.log"),
+                pid: root.join("tunnel.pid"),
+            },
+        };
+
+        let error = run_doctor(&invocation).await.unwrap_err().to_string();
+        assert!(error.starts_with("tunnel_doctor_spawn_failed:"));
+        assert!(error.contains("kind=NotFound"));
+        assert!(error.contains("raw_os_error="));
     }
 
     #[tokio::test]

@@ -32,6 +32,8 @@
 
 统一响应预算由 `limits.processResponseBytes` 控制，默认 8192 字节，范围 4096..1048576；read 可用 `maxBytes` 显式覆盖。预算是序列化响应 JSON（含转义/Base64），不含传输/event 封套；与 MCP 结果 512 KiB 保留上限分离，`mcp.batch` 整个聚合响应共用预算。MCP 完整 CallToolResult 状态为 `pending`、`included`、`deferred`、`unavailable` 或 `not_retained`；完整对象不切碎，`not_retained` 不可恢复。
 
+`mcp.batch` 因聚合预算省略某个子项的正文时，只要该进程仍保留完整结果，子项就返回 `mcpResult.status: "deferred"`，不是 `unavailable`。需要该结果时，使用子项的 `agentId`、`processId` 调用 `process.read` 并按需提高 `maxBytes`；批次响应未包含正文不代表结果已丢失。
+
 ## 数据与升级安全
 
 本次统一读取沿用既有 `process.sqlite3`。Agent 的 `transport-runs.jsonl` 及 Hub 已持久化的旧读取请求保留原始命令、身份、哈希和已有结果，用于历史、去重及恢复边界；未完成的旧读取请求显式退休，不改写成新命令重新执行。

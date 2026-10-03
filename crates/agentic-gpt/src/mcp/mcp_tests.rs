@@ -1243,6 +1243,54 @@ async fn mcp_batch_clips_late_results_to_the_aggregate_budget() {
         .as_deref()
         .unwrap()
         .starts_with("sha256:"));
+
+    let omitted = response
+        .results
+        .iter()
+        .find(|child| child.result_omitted)
+        .expect("aggregate cap omits at least one retained child result");
+    assert!(omitted.process.detail_available);
+    assert!(omitted.process.result_available);
+    let process_id = omitted.process.process.process_id.clone();
+    let projected = crate::operation_result::slim_mcp_batch_response(
+        batch::ManagedMcpBatchResponse {
+            response,
+            response_budget: agentic_gpt_protocol::MAX_PROCESS_RESPONSE_BYTES,
+        },
+        None,
+    )
+    .unwrap();
+    let omitted_projection = projected["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|child| child["processId"].as_str() == Some(process_id.as_str()))
+        .unwrap();
+    assert_eq!(omitted_projection["mcpResult"]["status"], "deferred");
+
+    let read = crate::process::get_process_read(
+        &state,
+        agentic_gpt_protocol::ProcessReadRequest {
+            process_id,
+            wait_seconds: Some(0),
+            view: agentic_gpt_protocol::ProcessReadView::Auto,
+            cursor: None,
+            max_bytes: Some(agentic_gpt_protocol::MAX_PROCESS_RESPONSE_BYTES),
+        },
+    )
+    .await
+    .unwrap();
+    let recovered = read.response.mcp_result.as_ref().unwrap();
+    assert_eq!(
+        recovered.status,
+        agentic_gpt_protocol::ProcessMcpResultStatus::Included
+    );
+    assert_eq!(
+        recovered.value.as_ref().unwrap()["structuredContent"]["blob"]
+            .as_str()
+            .unwrap(),
+        "x".repeat(240_000)
+    );
     let _ = std::fs::remove_dir_all(root);
 }
 

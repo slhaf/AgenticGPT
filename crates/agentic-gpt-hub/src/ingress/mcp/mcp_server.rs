@@ -2702,6 +2702,25 @@ mod tests {
         assert!(schema_text.contains("limits.processResponseBytes"));
         assert!(schema_text.contains(&DEFAULT_PROCESS_RESPONSE_BYTES.to_string()));
         assert!(schema["properties"].get("cursor").is_some());
+        let server = AgenticMcpServer::new(test_state());
+        let descriptor = transport::app_tool_descriptors(&server)
+            .into_iter()
+            .find(|tool| tool["name"] == "process.read")
+            .expect("process.read descriptor missing");
+        let descriptor_schema = &descriptor["inputSchema"];
+        let descriptor_view = &descriptor_schema["properties"]["view"];
+        assert_eq!(descriptor_view["default"], "auto");
+        assert!(!descriptor_schema["required"]
+            .as_array()
+            .is_some_and(|required| required.contains(&json!("view"))));
+
+        for args in [
+            json!({"agentId": "agent", "processId": "process"}),
+            json!({"agentId": "agent", "processId": "process", "view": null}),
+        ] {
+            let params: ProcessReadArgs = serde_json::from_value(args).unwrap();
+            assert_eq!(process_read_payload(&params).view, ProcessReadView::Auto);
+        }
 
         for (wait_seconds, expected) in [(None, 5), (Some(0), 0), (Some(31), 30)] {
             let params = ProcessReadArgs {

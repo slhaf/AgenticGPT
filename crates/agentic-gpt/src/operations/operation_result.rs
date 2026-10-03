@@ -107,7 +107,10 @@ fn mcp_batch_process_response(
         .is_some_and(|bytes| bytes > crate::process::MAX_MCP_RESULT_BYTES)
     {
         ProcessMcpResultStatus::NotRetained
-    } else if !detail.detail_available || !detail.result_available || detail.result.is_none() {
+    } else if !detail.detail_available
+        || !detail.result_available
+        || (detail.result.is_none() && !result_omitted)
+    {
         ProcessMcpResultStatus::Unavailable
     } else if result_omitted || !include_result {
         ProcessMcpResultStatus::Deferred

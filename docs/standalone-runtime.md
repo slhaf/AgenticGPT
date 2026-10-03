@@ -459,6 +459,8 @@ supervisor 会在启动第一个子进程前运行 `doctor --json`，等待 loop
 转发内容会带组件前缀并脱敏 secret；已知的 INFO/WARN/ERROR 级别会保留。未知级别的子进程 stdout 按信息级别处理，stderr 按警告级别处理。
 在 journald 下，Agentic 会省略自身内部时间戳；前台日志则保留一个完整时间戳。正常或失败清理都会删除 health URL 和 PID 标记，但保留结构化日志。
 
+`tunnel_doctor_spawn_failed` 或 `tunnel_client_spawn_failed` 表示无法启动子进程；错误附带 OS 错误种类、原始错误码和错误消息。排查时保留这些细节，以区分文件不存在、权限或其他启动错误，不应仅凭错误前缀判断原因。
+
 子进程意外退出或就绪失败时，最多重试 5 次，间隔依次为 1/2/4/8/16 秒。连续就绪 60 秒会重置失败计数。配置/reference 错误、不支持的平台、
 缺少本地 executable、checksum 失败，以及 tunnel authentication/authorization 失败，都会作为永久启动失败处理。收到 SIGINT/SIGTERM 时会停止
 tunnel 进程组和 worker，随后使用有界的 kill fallback。

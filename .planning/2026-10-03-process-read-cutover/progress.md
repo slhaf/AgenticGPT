@@ -93,3 +93,28 @@
 - 本轮真实运行已通过：Agent Unix/HTTP/stdio工具与统一读取、Skill运行与安装、事件收件箱/异步完成/持久恢复、配置live reload；Hub连接normal/Room Agent、延迟终态与ledger replay、batch补充事件、Agent崩溃后的事件恢复。后续Hub process分页/预算等场景未走完，不声明全部契约通过。batch补充恢复有临时DB checkpoint注入，真实partial-A/reconnect/source-B交错未复现。
 - 完整日志：/tmp/pr-final-q9ds_nyn/{0,1,2,3,4}.log与parity.log；上一轮全绿Rust证据为/tmp/pr-verify-5e8yqp3y/round4-*.log。TUI实际编辑/校验/保存/生效证据见本文件57–58行；Console无受影响调用，不改不运行。
 - 已到用户授权追加五轮上限，验收阶段blocked；不宣称完成，不扩大范围修改supervisor，不重跑碰运气。实现阶段提交68ad518；验收检查点另行提交。
+
+## 再续验收（累计11–15轮，已运行2/5）
+- 用户再次授权五轮，并明确可继续排查执行的问题不应当作目标失败/技术阻塞。恢复任务：定点定位与修复不计完整轮次，完整验证链单独记账；成功标准和范围不变。
+- 并行处理Hub工具schema默认值与supervisor fixture启动失败，父代理维护parity及整体验收。
+- checker改用完整JSON Schema验证view/cursor/等待/预算输入边界，支持合法$ref和nullable布局；仍要求广告默认auto，拒绝错误类型与越界输入，不把生产schema改成checker偏好的布局。
+- Hub根因已确认：ProcessReadArgs.view缺schemars default；补Auto默认但保留Option及null运行语义。现有回归检查真实app descriptor与参数解析；子代理提前运行定点测试1 passed，父代理仍执行完整验证。
+- supervisor历史底层io::Error被丢弃，不能反推errno。fixture路径UUID隔离、fs::write已完成后chmod，无需另建fake二进制；机器有/bin/sh、/usr/bin/sleep且/tmp无noexec。仅保留spawn的kind/errno/message并增加缺失可执行文件回归，不加猜测性重试。历史根因仍未知。
+- 再续第1轮（累计11）已启动：日志/tmp/pr-resume-wz90dcl8/r11-*.log，fmt/check/Clippy已通过；workspace tests、build和live parity继续。只读最终契约审查并行进行。
+- 再续第1轮结果：Rust全部通过（Agent580/Hub136/protocol22，Agent另1 ignored），build通过；Hub实际tools/list schema检查已通过。live parity继续暴露事件producer fixture沿用旧status字段，实际响应state=starting合法；已改为state，并检查脚本其他status引用均属于event/ledger/install/batch等仍有效的契约。
+- 正在定点重跑live parity验证脚本修复，不重复构建未变化的Rust，不增加完整验收轮次。supervisor本轮通过仅证明当前可运行，不代表已找回历史丢失的OS错误。
+- parity定点修复1失败是场景串扰：新增auto/tail waitSeconds=0进程各产生一个正常low完成事件，后续inline suppression仍假定空inbox。按两条精确process source通过event.list/get定位并event.mark领取；不清除其他来源，不削弱后续空inbox断言。
+- parity定点修复2完整通过（exit0），日志/tmp/pr-resume-wz90dcl8/parity-fix2.log。覆盖全部Agent/Hub/Room/Coordinator、HTTP/MCP分页与预算、auto/status等待、退出后尾输出EOF、MCP deferred/included/not_retained、取消与离线cache边界。
+- 仍明确现有验证边界：batch补充恢复包含私有临时DB checkpoint注入，不声称真实partial-A/reconnect/source-B交错已重现；没有运行生产tunnel外部部署。
+- 补充独立真实Agent游标重放/双读者/64KiB窗口丢失gap冒烟，以及最后只读契约审查；不以主gate已绿替代未覆盖目标。
+- 独立真实Unix MCP游标冒烟通过，原始响应证据/tmp/process_cursor_gap_smoke_evidence.json；父代理重读并断言：两读者相同cursor得到完全相同output与nextCursor，stdout偏移578..1156；100000字节输出的旧cursor明确gap=0..34464，25页连续覆盖34464..100000（65536字节），最终eof=true/captureStatus=complete。私有Agent及脚本/状态已由执行者清理。
+- 最终只读审查发现真实P2：mcp.batch内部2MiB聚合快照take()省略正文后result_omitted=true，但owner仍完整保留；operation_result.rs先因快照result=None误报unavailable。修复改为仅非result_omitted的无值情况判unavailable，保持pending/not_retained/真实unavailable优先级；扩展现有6子项aggregate-cap回归。
+- 用旧二进制真实启动Hub+上游Agent+下游HTTP Agent，6次file.read读取288px随机PNG：状态为4个deferred+2个unavailable，但6个process.read均能逐字节恢复完整PNG。已重现错误，日志/tmp/pr-resume-wz90dcl8/aggregate-before.log；同一throwaway冒烟待新二进制验证。
+- 在新增聚合场景的全gate运行中另观察旧relay fixture等待断连超时（batch-before.log）。[INFERENCE] 候选竞争是active连接数在开始等待前已因重连恢复非零；委托核对并修复精确连接生命周期观测，不改生产重连策略、不扩大超时。主parity新增6图聚合恢复边界检查。
+- relay修复仅追踪成功升级连接的递增ID；记录被注入settle失败的连接，等待该ID退出活动集合，不再要求所有连接同时为零。其他全局关闭等待保持原语义。
+- 再续第2轮（累计12）执行中：fmt/check/严格Clippy/workspace tests/build全通过；新增真实aggregate恢复冒烟和包含该场景的完整live parity继续。日志/tmp/pr-resume-wz90dcl8/r12-*.log及aggregate-after.log。
+- 再续第2轮（累计12）最终全部通过：fmt/check/严格Clippy/workspace tests/build、独立aggregate冒烟、完整live parity均exit0。Agent580 passed/1 ignored、Hub136、protocol22、config CLI23，其余集成目标均通过。无需消耗剩余三轮。
+- aggregate修复后同一真实冒烟六项全部deferred，所有process.read均逐字节恢复443387字节的CallToolResult内PNG；总保留结果2660322字节，超过2MiB，公开batch仍在4096字节内。已保留永久Rust aggregate-cap恢复回归及真实Hub/下游Agent的6图边界gate。完整证据aggregate-before.log/aggregate-after.log及r12-parity.log。
+- 本次supervisor连续两轮完整测试均通过；历史spawn失败的errno已无法从旧日志恢复，不声称已证明历史根因。现在保留OS错误细节供再次发生时定位，无猜测性重试。
+- 最终验收覆盖：五个Process工具及旧路径移除由实际descriptor/HTTP gate验证；状态/输出/MCP观察、等待、预算、取消和cache边界由Rust回归与实际Agent/Hub gate验证；cursor重放/缺口由独立真实Unix MCP验证；config TUI实际校验/编辑/保存/生效证据仍有效；Console无迁移调用，未改未跑。文档、工具schema与调用方已同步；最终审查唯一P2已有失败前/修复后证据。
+- 清理本轮throwaway脚本和生成的Python bytecode，保留/tmp下验证日志；提交本次修复与验收记录后交付。
