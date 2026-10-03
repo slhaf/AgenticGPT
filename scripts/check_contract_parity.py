@@ -4868,6 +4868,7 @@ def run_agent_event_gate(binary: Path, root: Path, reports: list[str]) -> Manage
         {"program": "/usr/bin/sleep", "args": ["1"], "waitSeconds": 0},
         "Agent stdio asynchronous process.exec",
     )
+    async_id = asynchronous.get("processId")
     if not async_id or asynchronous.get("state") in {"completed", "failed", "cancelled"}:
         fail("Agent stdio asynchronous process.exec", f"creation response was not asynchronous: {asynchronous}")
     assert_event_counts(asynchronous, (0, 1, 1), "Agent asynchronous creation response")

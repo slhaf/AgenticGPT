@@ -83,3 +83,13 @@
 
 ## 续轮4（累计第9轮，in_progress）
 - 新增五轮计数4/5，执行完整Rust及隔离live parity。
+- 续轮4：fmt/check/严格Clippy/workspace test/build全部通过；Agent579 passed/1 ignored，Hub136，protocol22，config CLI23，其他集成全部通过。live parity在Agent事件场景因脚本漏取async_id而NameError，尚未完成Hub验收。
+- 修复：从asynchronous响应读取processId；此前symtable分析仅发现这一真实未定义全局（另一个为Python合成的__conditional_annotations__）。
+
+## 续轮5（累计第10轮，in_progress）
+- 执行获准的最后一轮完整验收；若仍失败则按用户约定停止，不追加第六轮。
+- 续轮5结束（5/5，累计10/10）：fmt/check/严格Clippy/build通过。workspace test失败1项：supervisor::tests::fake_tunnel_verifies_args_environment_health_and_shutdown，runtime/supervisor.rs:1283，tunnel_doctor_spawn_failed；本轮Agent578 passed/1 failed/1 ignored，Hub136、protocol22、config CLI23及其余集成通过。上一轮同一全套测试通过，不能据此忽略本轮失败；根因未确定。
+- live parity失败于scripts/check_contract_parity.py:1475，Hub Full descriptor的process.read view默认值/auto-status选择检查。未继续修改或开启第六轮，尚不能判断是描述符还是checker问题。
+- 本轮真实运行已通过：Agent Unix/HTTP/stdio工具与统一读取、Skill运行与安装、事件收件箱/异步完成/持久恢复、配置live reload；Hub连接normal/Room Agent、延迟终态与ledger replay、batch补充事件、Agent崩溃后的事件恢复。后续Hub process分页/预算等场景未走完，不声明全部契约通过。batch补充恢复有临时DB checkpoint注入，真实partial-A/reconnect/source-B交错未复现。
+- 完整日志：/tmp/pr-final-q9ds_nyn/{0,1,2,3,4}.log与parity.log；上一轮全绿Rust证据为/tmp/pr-verify-5e8yqp3y/round4-*.log。TUI实际编辑/校验/保存/生效证据见本文件57–58行；Console无受影响调用，不改不运行。
+- 已到用户授权追加五轮上限，验收阶段blocked；不宣称完成，不扩大范围修改supervisor，不重跑碰运气。实现阶段提交68ad518；验收检查点另行提交。
