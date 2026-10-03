@@ -64,7 +64,7 @@ fn tool_input_schema(name: &str) -> Map<String, Value> {
 
 fn tool_schema(name: &str) -> (Map<String, Value>, &'static [&'static str]) {
     let required: &'static [&'static str] = match name {
-        "process.exec" => &["program"],
+        "process.exec" => &["command"],
         "browser.manual" => &["action"],
         "browser.acquire" => &["name", "idleTimeoutSeconds"],
         "browser.repl" => &["name", "code"],
@@ -390,8 +390,7 @@ pub(super) fn properties_for(name: &str) -> Map<String, Value> {
             string("可选 server ID；省略列服务器，提供时列工具。"),
         ),
         "process.exec" => {
-            add("program", string("可执行文件名/路径。"));
-            add("args", strings("传给 program 的参数数组。"));
+            add("command", string("普通非登录/非交互 Bash 原样执行；pipefail 生效，不设 set -e。cwd 在初始化后应用。策略只分析提交内容；不检查可信初始化文件中的 PATH/函数，非运行时安全边界。"));
             add(
                 "group",
                 json!({
@@ -405,10 +404,10 @@ pub(super) fn properties_for(name: &str) -> Map<String, Value> {
                 "needConfirm",
                 json!({"type":"boolean","default":false,"description":"请求执行前确认。"}),
             );
-            add("workingDirectory", string("可选目录；省略用配置默认值。"));
+            add("cwd", string("可选工作目录；省略用配置默认值。"));
             add(
                 "waitSeconds",
-                json!({"type":"integer","minimum":0,"maximum":30,"default":5,"description":"终态等待。"}),
+                json!({"type":"integer","minimum":0,"maximum":30,"default":5,"description":"只等待终态，不会取消进程。"}),
             );
         }
         "process.batch" => {
@@ -416,12 +415,11 @@ pub(super) fn properties_for(name: &str) -> Map<String, Value> {
                 "elements",
                 json!({
                     "type": "array",
-                    "description": "有序列表；workingDirectory 可覆盖批次值。",
+                    "description": "有序 Bash 命令列表；元素 cwd 可覆盖批次 cwd。",
                     "items": {"type": "object", "properties": {
-                        "program": string("可执行文件名/路径。"),
-                        "args": strings("program 参数；省略为空数组。"),
-                        "workingDirectory": string("单项工作目录；覆盖批次值。")
-                    }, "required": ["program"], "additionalProperties": false}
+                        "command": string("普通 Bash 原样执行，不改写；策略只分析提交内容。"),
+                        "cwd": string("单项工作目录；覆盖批次 cwd。")
+                    }, "required": ["command"], "additionalProperties": false}
                 }),
             );
             add("needConfirm", boolean("批次前确认；缺省 false。"));
@@ -434,10 +432,10 @@ pub(super) fn properties_for(name: &str) -> Map<String, Value> {
                     "description": "可选分组键；子进程继承。",
                 }),
             );
-            add("workingDirectory", string("批次默认工作目录；单项可覆盖。"));
+            add("cwd", string("批次默认工作目录；单项可覆盖。"));
             add(
                 "waitSeconds",
-                json!({"type":"integer","minimum":0,"maximum":30,"default":5,"description":"终态等待。"}),
+                json!({"type":"integer","minimum":0,"maximum":30,"default":5,"description":"只等待终态，不会取消进程。"}),
             );
         }
         "process.read" => {
@@ -921,8 +919,8 @@ fn tool_description(name: &str) -> String {
         "file.read" => "按文件路径策略读取 UTF-8 文件或目录元数据；单次 path 与 requests 批次二选一。文本返回 content/可选 metadata/nextStartLine；PNG/JPEG/WebP 及 GIF 以 image content blocks 返回，GIF 为采样 PNG 帧并带帧元数据。批次按序逐项给状态/错误，单项失败不阻断其他项；目录须请求 metadata，图片不支持行范围。只读。".to_string(),
         "file.search" => "在允许的工作区路径搜索文本，支持字面/正则、glob 和有序批次；返回匹配位置/上下文及跳过、裁剪状态，批次逐项标明结果或错误。空查询、无效正则/glob 或路径会失败；上下文可能按配置裁剪。只读。".to_string(),
         "file.edit" => "用 Codex apply_patch 更新、新增、删除或移动工作区文件；成功返回 status/changed/changes（path/action/可选 destination），部分失败保留已完成项和错误，不公开 diff/revision。无效补丁、路径策略、确认拒绝或并发冲突会报错；有效操作会写盘，needConfirm 可请求一次确认。".to_string(),
-        "process.exec" => "用 program 与参数数组启动本地受管理进程；不是拼接 shell 命令。返回紧凑观察，包含 agentId、processId、kind、state、captureStatus 及预算内可选产物；后续用 process.read 查看或 process.cancel 请求取消。执行受策略/确认控制并可产生真实副作用；waitSeconds 只等响应，不取消进程。".to_string(),
-        "process.batch" => "在同一准入边界下启动一组有序子进程；返回批次状态和各子进程紧凑观察。失败时已启动的子进程及副作用不回滚；按子 processId 用 process.read 查看或 process.cancel 请求取消。waitSeconds 只控制本次等待，不取消任务。".to_string(),
+        "process.exec" => "在指定 Agent 上以普通非登录/非交互 Bash 原样执行 command（pipefail 生效、不设 set -e）；cwd 在可信初始化后生效。策略只分析提交的 command，不检查可信初始化中的 PATH/函数；不是运行时安全边界。返回紧凑进程状态；waitSeconds 只等待、不取消，可用 process.read/cancel 跟进。".to_string(),
+        "process.batch" => "在一次准入边界内按序执行原文 Bash 命令；元素 cwd 覆盖批次 cwd。返回批次及逐项进程状态；waitSeconds 只等待不取消，已启动副作用不会回滚。".to_string(),
         "process.read" => "按 processId 读取状态与一页产物，不启动或取消工作。返回 agentId/processId/kind/state/captureStatus，及预算内的 output 或完整下游 mcpResult。view=auto 在有未读输出时立即返回，否则有界等待；view=status 只等执行终态或期限，不返回正文。command/skill 用 cursor 续读；kind=mcp 和 status view 不接受日志 cursor。hasMore 只表示可续读，不要求读完日志；gap 表示已丢失字节，captureStatus=incomplete 时不要无限等待 EOF。MCP 结果状态 pending/deferred 不代表失败；deferred 可提高 maxBytes 领取，not_retained 不可恢复。waitSeconds 默认5、最大30、0立即，超时不取消；maxBytes 省略用 limits.processResponseBytes（出厂8192），显式范围4096..=1048576。预算计 Process JSON 主体，不含传输封套和独立事件面板。未知ID或非法参数返回结构化错误。".to_string(),
         "process.list" => "按 group、kind、state 分页发现进程；返回进程 ID、类型、状态、时间、捕获状态及 nextCursor。游标错误会失败；只读，不读取输出正文。".to_string(),
         "process.cancel" => "向进程所有者请求取消；返回当前 state、cancelOutcome、terminationEvidence 和可选 error。MCP 通过下游取消通知，返回请求/通知不证明远端副作用已停止。".to_string(),

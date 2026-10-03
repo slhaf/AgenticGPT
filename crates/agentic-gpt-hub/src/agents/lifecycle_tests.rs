@@ -307,11 +307,10 @@ async fn room_lease_invalidated_during_feedback_flush_returns_conflict_without_r
         payload: ProcessExecRequest {
             agent_id: "agent".to_string(),
             group: None,
-            program: "printf".to_string(),
-            args: vec!["done".to_string()],
+            command: "printf 'done'".to_string(),
             need_confirm: false,
             confirm_method: None,
-            working_directory: None,
+            cwd: None,
             wait_seconds: None,
         },
     };

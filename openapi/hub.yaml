@@ -3792,8 +3792,7 @@ components:
       type: object
       required:
         - agentId
-        - program
-        - args
+        - command
         - needConfirm
       additionalProperties: false
       properties:
@@ -3804,12 +3803,9 @@ components:
           minLength: 1
           maxLength: 32
           description: Optional human-readable workstream key inherited by this managed process.
-        program:
+        command:
           type: string
-        args:
-          type: array
-          items:
-            type: string
+          description: Bash command executed verbatim without rewriting.
         needConfirm:
           type: boolean
         confirmMethod:
@@ -3821,15 +3817,15 @@ components:
             - freedesktop-then-hub
             - freedesktopThenHub
           description: Optional per-request confirmation provider override. Omit or use default to follow the local agent configuration.
-        workingDirectory:
+        cwd:
           type: string
-          description: Optional command working directory. Relative values are resolved from the agent workspace root. The resolved directory must exist and be inside writable roots, not denied roots.
+          description: Optional command working directory; applied after Bash initialization. Relative values are resolved from the agent workspace root and must satisfy local path policy.
         waitSeconds:
           type: integer
           minimum: 0
           maximum: 30
           default: 5
-          description: Bounded inline wait. The process remains inspectable when still active after this interval.
+          description: Bounded inline wait only; does not cancel the process.
     ProcessBatchExecRequest:
       type: object
       required:
@@ -3851,19 +3847,15 @@ components:
           items:
             type: object
             required:
-              - program
-              - args
+              - command
             additionalProperties: false
             properties:
-              program:
+              command:
                 type: string
-              args:
-                type: array
-                items:
-                  type: string
-              workingDirectory:
+                description: Bash command executed verbatim without rewriting.
+              cwd:
                 type: string
-                description: Optional per-element working directory. Overrides the batch workingDirectory for this element.
+                description: Optional per-element working directory. Overrides the batch cwd for this element.
         needConfirm:
           type: boolean
         confirmMethod:
@@ -3874,16 +3866,16 @@ components:
             - hub
             - freedesktop-then-hub
             - freedesktopThenHub
-          description: Optional per-request confirmation provider override for all batch elements. Omit or use default to follow the local agent configuration.
-        workingDirectory:
+          description: Optional per-request confirmation provider override for all batch elements.
+        cwd:
           type: string
-          description: Optional default working directory for all batch elements. Relative values are resolved from the agent workspace root. Per-element workingDirectory values override this.
+          description: Optional default working directory for all batch elements. Relative values are resolved from the agent workspace root. Per-element cwd values override this.
         waitSeconds:
           type: integer
           minimum: 0
           maximum: 30
           default: 5
-          description: Bounded inline wait for all admitted child processes.
+          description: Bounded inline wait for all admitted child processes; does not cancel them.
     ProcessKind:
       type: string
       enum: [command, skill, mcp]

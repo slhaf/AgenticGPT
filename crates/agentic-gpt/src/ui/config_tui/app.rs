@@ -2633,6 +2633,9 @@ fn optional_section_for_field(field: SetupField) -> crate::config_templates::Opt
         SetupField::SandboxEnabled
         | SetupField::BubblewrapPath
         | SetupField::RequiredRuntimePaths => crate::config_templates::OptionalSection::Sandbox,
+        SetupField::ShellInitFileMode | SetupField::ShellInitFilePath => {
+            crate::config_templates::OptionalSection::Shell
+        }
         SetupField::RoomTimezone
         | SetupField::DiaryBoundaryHour
         | SetupField::RepositoryRoot

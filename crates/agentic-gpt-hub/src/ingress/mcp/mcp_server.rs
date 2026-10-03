@@ -570,7 +570,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "process.exec",
-        description = "在指定 Agent 上启动一个受管理命令进程；program 与 args 是直接可执行文件和参数数组，不自动拆分 shell 字符串，shell 语法须显式调用 bash/sh。首响为紧凑 ProcessResponse，含 agentId、processId、kind、state、captureStatus 及预算内的可选 output；waitSeconds 默认 5、上限 30、0 不等待。执行会产生实际副作用并受 Agent 本地策略/确认约束；process_exec_timeout 是结果内 JSON 错误，超时不表示未启动或已取消，可用首响中的相同 agentId/processId 调 process.read/cancel 跟进，Hub 派发回执用 hub.run.get 查询。"
+        description = "以普通非登录/非交互 Bash 在 Agent 上原样执行 command（pipefail 生效，不启用 set -e）。cwd 在可信初始化后生效；策略只分析 command，不检查初始化中的 PATH/函数，故不是运行时安全边界。waitSeconds 只等待、不取消；超时可用 process.read/cancel 跟进。"
     )]
     async fn exec(&self, params: Parameters<ProcessExecArgs>) -> Result<CallToolResult, ErrorData> {
         let params = params.0;
@@ -578,11 +578,10 @@ impl AgenticMcpServer {
         let payload = ProcessExecRequest {
             agent_id: params.agent_id.clone(),
             group: params.group,
-            program: params.program,
-            args: params.args.unwrap_or_default(),
+            command: params.command,
             need_confirm: params.need_confirm.unwrap_or(false),
             confirm_method: params.confirm_method,
-            working_directory: params.working_directory,
+            cwd: params.cwd,
             wait_seconds: params.wait_seconds,
         };
         let command = HubCommand::Exec {
@@ -604,7 +603,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "process.batch",
-        description = "在同一批次准入边界内启动多个 Agent 受管理命令进程；每项可用 workingDirectory 覆盖批次默认目录。返回 batchId、批次 status 和逐项紧凑 ProcessResponse；整个 ProcessBatchResponse 共用一个响应预算，waitSeconds 默认 5、上限 30、0 不等待。已启动项的副作用不会回滚；process_batch_timeout 不会取消子进程。后续对每项使用其 agentId/processId 调 process.read/cancel。"
+        description = "批次准入后按序启动原文 Bash 命令；元素 cwd 覆盖批次 cwd。Bash 行为与 process.exec 相同；waitSeconds 只等待不取消，已启动副作用不会回滚。"
     )]
     async fn batch_exec(
         &self,
@@ -619,14 +618,13 @@ impl AgenticMcpServer {
                 .elements
                 .into_iter()
                 .map(|element| ProcessExecElement {
-                    program: element.program,
-                    args: element.args.unwrap_or_default(),
-                    working_directory: element.working_directory,
+                    command: element.command,
+                    cwd: element.cwd,
                 })
                 .collect(),
             need_confirm: params.need_confirm.unwrap_or(false),
             confirm_method: params.confirm_method,
-            working_directory: params.working_directory,
+            cwd: params.cwd,
             wait_seconds: params.wait_seconds,
         };
         let command = HubCommand::ProcessBatch {

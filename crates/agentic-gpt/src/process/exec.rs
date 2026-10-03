@@ -8,11 +8,64 @@ use tokio::process::Command;
 use crate::{config::Config, policy::PolicyDecision};
 
 #[derive(Clone)]
+pub(crate) enum ExecutionSpec {
+    Shell { command: String },
+    Argv { program: String, args: Vec<String> },
+}
+
+#[derive(Clone)]
+pub(crate) struct ExecutionRequest {
+    pub(crate) agent_id: String,
+    pub(crate) group: Option<String>,
+    pub(crate) execution: ExecutionSpec,
+    pub(crate) need_confirm: bool,
+    pub(crate) confirm_method: Option<String>,
+    pub(crate) cwd: Option<String>,
+    pub(crate) wait_seconds: Option<u64>,
+}
+
+impl From<agentic_gpt_protocol::ProcessExecRequest> for ExecutionRequest {
+    fn from(request: agentic_gpt_protocol::ProcessExecRequest) -> Self {
+        Self {
+            agent_id: request.agent_id,
+            group: request.group,
+            execution: ExecutionSpec::Shell {
+                command: request.command,
+            },
+            need_confirm: request.need_confirm,
+            confirm_method: request.confirm_method,
+            cwd: request.cwd,
+            wait_seconds: request.wait_seconds,
+        }
+    }
+}
+
+impl ExecutionRequest {
+    pub(crate) fn argv(
+        agent_id: String,
+        group: Option<String>,
+        program: String,
+        args: Vec<String>,
+        cwd: Option<String>,
+        wait_seconds: Option<u64>,
+    ) -> Self {
+        Self {
+            agent_id,
+            group,
+            execution: ExecutionSpec::Argv { program, args },
+            need_confirm: false,
+            confirm_method: None,
+            cwd,
+            wait_seconds,
+        }
+    }
+}
+
+#[derive(Clone)]
 pub(crate) struct PreparedBatchElement {
     pub(crate) index: usize,
-    pub(crate) program: String,
-    pub(crate) args: Vec<String>,
-    pub(crate) working_directory: Option<String>,
+    pub(crate) command: String,
+    pub(crate) cwd: Option<String>,
     pub(crate) resolved_working_directory: PathBuf,
     pub(crate) decision: PolicyDecision,
 }
@@ -326,11 +379,27 @@ pub(crate) fn resolve_working_directory(
     Ok(directory)
 }
 
+pub(crate) const SHELL_STARTUP_FD: i32 = 3;
+
 pub(crate) fn build_command(
     config: &Config,
     working_directory: &Path,
-    program: &str,
+    execution: &ExecutionSpec,
 ) -> Result<Command> {
+    let (program, args) = match execution {
+        ExecutionSpec::Shell { command } => (
+            "/usr/bin/bash",
+            vec![
+                "--noprofile".to_string(),
+                "--norc".to_string(),
+                "-o".to_string(),
+                "pipefail".to_string(),
+                "-c".to_string(),
+                shell_bootstrap(config, working_directory, command)?,
+            ],
+        ),
+        ExecutionSpec::Argv { program, args } => (program.as_str(), args.clone()),
+    };
     if config.sandbox.enabled {
         let policy = expanded_path_policy(config)?;
         let mut command = Command::new(&config.sandbox.bubblewrap_path);
@@ -357,13 +426,72 @@ pub(crate) fn build_command(
                 add_bwrap_bind(&mut command, &mut created_dirs, "--ro-bind", path);
             }
         }
-        command.arg("--").arg(program);
+        command.arg("--").arg(program).args(args);
+        if matches!(execution, ExecutionSpec::Shell { .. }) {
+            sanitize_shell_environment(&mut command);
+        }
         Ok(command)
     } else {
         let mut command = Command::new(program);
-        command.current_dir(working_directory);
+        command.current_dir(working_directory).args(args);
+        if matches!(execution, ExecutionSpec::Shell { .. }) {
+            sanitize_shell_environment(&mut command);
+        }
         Ok(command)
     }
+}
+
+fn sanitize_shell_environment(command: &mut Command) {
+    let environment = std::env::vars_os()
+        .filter(|(key, _)| {
+            let key = key.to_string_lossy();
+            !matches!(
+                key.as_ref(),
+                "BASH_ENV" | "ENV" | "SHELLOPTS" | "BASHOPTS" | "BASH_XTRACEFD" | "POSIXLY_CORRECT"
+            ) && !key.starts_with("BASH_FUNC_")
+        })
+        .collect::<Vec<_>>();
+    command.env_clear().envs(environment);
+}
+
+fn shell_bootstrap(config: &Config, working_directory: &Path, script: &str) -> Result<String> {
+    let init_file = match &config.shell.init_file {
+        crate::config::ShellInitFile::Default => Some((
+            dirs::home_dir()
+                .context("home directory not found")?
+                .join(".agentic_gpt")
+                .join(".bashrc"),
+            true,
+        )),
+        crate::config::ShellInitFile::Disabled => None,
+        crate::config::ShellInitFile::Path(path) => Some((expand_path(path)?, false)),
+    };
+    let mut bootstrap = String::from("set +e\nset -o pipefail\nbuiltin printf 'B\\n' >&3\n");
+    if let Some((path, is_default)) = init_file {
+        let path = shell_quote(&path.to_string_lossy());
+        if is_default {
+            bootstrap.push_str(&format!(
+                "__agentic_load_init() {{\n  local __agentic_diag __agentic_open_status __agentic_probe_fd __agentic_init_status\n  __agentic_diag=$(export LC_ALL=C; exec 2>&1 {{__agentic_probe_fd}}< {path})\n  __agentic_open_status=$?\n  if (( __agentic_open_status != 0 )); then\n    if [[ $__agentic_diag == *': No such file or directory' ]]; then return 0; fi\n    builtin printf '%s\\n' \"$__agentic_diag\" >&2\n    return 1\n  fi\n  if builtin source {path}; then return 0; else __agentic_init_status=$?; fi\n  return \"$__agentic_init_status\"\n}}\n"
+            ));
+        } else {
+            bootstrap.push_str(&format!(
+                "__agentic_load_init() {{\n  local __agentic_init_status\n  if builtin source {path}; then return 0; else __agentic_init_status=$?; fi\n  return \"$__agentic_init_status\"\n}}\n"
+            ));
+        }
+        bootstrap.push_str(
+            "__agentic_load_init\n__agentic_init_status=$?\nbuiltin unset -f __agentic_load_init\nbuiltin unset BASH_ENV ENV POSIXLY_CORRECT\nset +e\nset -o pipefail\nif (( __agentic_init_status != 0 )); then builtin printf 'I:%s\\n' \"$__agentic_init_status\" >&3; exec 3>&-; exit \"$__agentic_init_status\"; fi\n",
+        );
+    }
+    bootstrap.push_str(&format!(
+        "builtin cd -- {} || {{ builtin printf 'C:1\\n' >&3; exec 3>&-; exit 1; }}\nbuiltin printf 'R\\n' >&3\nexec 3>&-\nbuiltin eval {}\n",
+        shell_quote(&working_directory.to_string_lossy()),
+        shell_quote(script),
+    ));
+    Ok(bootstrap)
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn add_bwrap_bind(

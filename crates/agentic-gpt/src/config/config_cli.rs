@@ -236,6 +236,9 @@ pub(crate) enum ConfigCommand {
         key: String,
         value: String,
     },
+    Unset {
+        key: String,
+    },
     Allow {
         #[command(subcommand)]
         command: RuleCommand,
@@ -336,6 +339,12 @@ pub(crate) async fn handle_config(
             let _lock = acquire_config_mutation_lock(&config_path)?;
             let mut config = Config::load_or_default_locked(&config_path)?;
             config_keys::apply_config_key(&mut config, &key, &value)?;
+            write_config_with_backup(&config_path, &config)?;
+        }
+        ConfigCommand::Unset { key } => {
+            let _lock = acquire_config_mutation_lock(&config_path)?;
+            let mut config = Config::load_or_default_locked(&config_path)?;
+            config_keys::unset_config_key(&mut config, &key)?;
             write_config_with_backup(&config_path, &config)?;
         }
         ConfigCommand::Allow { command } => {

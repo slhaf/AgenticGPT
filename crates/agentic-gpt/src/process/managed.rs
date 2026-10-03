@@ -1,5 +1,5 @@
-use std::path::Path;
-use std::process::Stdio;
+use std::path::{Path, PathBuf};
+use std::process::{ExitStatus, Stdio};
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc, Weak,
@@ -26,7 +26,7 @@ use futures_util::future::join_all;
 use rmcp::{model::RequestId, service::Peer, RoleClient};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt};
-use tokio::process::Child;
+use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, Notify, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, Instant};
@@ -209,11 +209,36 @@ pub(crate) struct ManagedMcpRuntime {
 pub(crate) struct ManagedProcessRuntime {
     changed: Arc<Notify>,
     child: Option<Child>,
+    process_group_id: Option<i32>,
+    exit_status: Option<ProcessExitStatus>,
+    cancel_evidence: Option<String>,
+    startup_reader: Option<JoinHandle<ShellStartupStatus>>,
     stdout: Arc<Mutex<OutputRing>>,
     stderr: Arc<Mutex<OutputRing>>,
     stdout_reader: Option<JoinHandle<ReaderOutcome>>,
     stderr_reader: Option<JoinHandle<ReaderOutcome>>,
     skill_lease: Option<SkillLease>,
+}
+
+#[derive(Clone, Copy)]
+struct ProcessExitStatus {
+    code: Option<i32>,
+    success: bool,
+}
+
+impl From<ExitStatus> for ProcessExitStatus {
+    fn from(status: ExitStatus) -> Self {
+        Self {
+            code: status.code(),
+            success: status.success(),
+        }
+    }
+}
+
+enum ShellStartupStatus {
+    Ready,
+    InitFailed(Option<i32>),
+    StartupFailed,
 }
 
 pub(crate) struct ProcessOptions {
@@ -251,8 +276,8 @@ pub(crate) struct ManagedProcessBatchResponse {
 }
 
 pub(crate) struct ManagedProcessSpec {
-    pub(crate) request: ProcessExecRequest,
-    pub(crate) working_directory: std::path::PathBuf,
+    pub(crate) request: exec::ExecutionRequest,
+    pub(crate) working_directory: PathBuf,
     pub(crate) batch_id: Option<String>,
     pub(crate) batch_index: Option<usize>,
     pub(crate) decision: PolicyDecision,
@@ -416,7 +441,7 @@ pub(crate) async fn start_managed_process(
     options: ProcessOptions,
 ) -> ProcessInfo {
     let config = Arc::new(state.config.read().await.clone());
-    start_managed_process_inner(state, request, config, None, options, None, None).await
+    start_managed_process_inner(state, request.into(), config, None, options, None, None).await
 }
 
 #[cfg(test)]
@@ -434,7 +459,7 @@ pub(crate) async fn start_process_for_test(
 
 pub(crate) async fn start_skill_process_with_hook_and_source(
     state: AppState,
-    request: ProcessExecRequest,
+    request: exec::ExecutionRequest,
     skill_id: &str,
     skill_path: &str,
     request_source: &str,
@@ -1505,7 +1530,7 @@ pub(crate) async fn start_and_wait_process(
 
 pub(crate) async fn start_and_wait_skill_process(
     state: AppState,
-    request: ProcessExecRequest,
+    request: exec::ExecutionRequest,
     (skill_id, skill_path): (&str, &str),
     request_source: &str,
     terminal_event_hook: Option<TerminalEventHook>,
@@ -1520,7 +1545,10 @@ pub(crate) async fn start_and_wait_skill_process(
         &state.boot_generation,
         response_budget,
     )?;
-    let wait_seconds = request.effective_wait_seconds();
+    let wait_seconds = request
+        .wait_seconds
+        .unwrap_or(ProcessExecRequest::DEFAULT_WAIT_SECONDS)
+        .min(ProcessExecRequest::MAX_WAIT_SECONDS);
     let started = Instant::now();
     let process = start_skill_process_with_hook_and_source(
         state.clone(),
@@ -1572,43 +1600,44 @@ pub(crate) async fn start_process_batch(
     let config = Arc::new(state.config.read().await.clone());
     let mut prepared = Vec::with_capacity(request.elements.len());
     for (index, element) in request.elements.into_iter().enumerate() {
-        let working_directory = element
-            .working_directory
-            .clone()
-            .or_else(|| request.working_directory.clone());
-        let decision = policy_decision_for_profile(
+        let cwd = element.cwd.clone().or_else(|| request.cwd.clone());
+        let decision = crate::policy::shell_policy_decision_for_profile(
             &config,
             state.runtime.profile,
-            &element.program,
-            &element.args,
+            &element.command,
             request.need_confirm,
         );
-        let resolved_working_directory =
-            exec::resolve_working_directory(&config, working_directory.as_deref())?;
-        exec::preflight(
-            &config,
-            &resolved_working_directory,
-            &element.program,
-            &element.args,
-        )?;
+        let resolved_working_directory = exec::resolve_working_directory(&config, cwd.as_deref())?;
         if decision == PolicyDecision::Deny {
             return Err(format!(
                 "batch_element_rejected; index={index}; reason=policy_denied"
             ));
         }
+        preflight_shell_paths(&config, &resolved_working_directory, &element.command)?;
         prepared.push(exec::PreparedBatchElement {
             index,
-            program: element.program,
-            args: element.args,
-            working_directory,
+            command: element.command,
+            cwd,
             resolved_working_directory,
             decision,
         });
     }
+    let all_confirmation_elements = prepared
+        .iter()
+        .map(|element| confirmation::BatchConfirmationElement {
+            index: element.index,
+            command: element.command.clone(),
+            cwd: element.cwd.clone(),
+        })
+        .collect::<Vec<_>>();
     let needs_confirmation = prepared
         .iter()
         .filter(|element| element.decision == PolicyDecision::Confirm)
-        .cloned()
+        .map(|element| confirmation::BatchConfirmationElement {
+            index: element.index,
+            command: element.command.clone(),
+            cwd: element.cwd.clone(),
+        })
         .collect::<Vec<_>>();
     let confirmation_result = if needs_confirmation.is_empty() {
         None
@@ -1618,7 +1647,7 @@ pub(crate) async fn start_process_batch(
             &config,
             request.confirm_method.as_deref(),
             &needs_confirmation,
-            &prepared,
+            &all_confirmation_elements,
         )
         .await;
         if result != "allow_once" {
@@ -1629,14 +1658,15 @@ pub(crate) async fn start_process_batch(
     let specs = prepared
         .into_iter()
         .map(|element| ManagedProcessSpec {
-            request: ProcessExecRequest {
+            request: exec::ExecutionRequest {
                 agent_id: request.agent_id.clone(),
                 group: group.clone(),
-                program: element.program,
-                args: element.args,
+                execution: exec::ExecutionSpec::Shell {
+                    command: element.command,
+                },
                 need_confirm: request.need_confirm,
                 confirm_method: request.confirm_method.clone(),
-                working_directory: element.working_directory,
+                cwd: element.cwd,
                 wait_seconds: request.wait_seconds,
             },
             working_directory: element.resolved_working_directory,
@@ -1986,6 +2016,10 @@ pub(crate) async fn start_prepared_managed_batch(
             let runtime = ManagedProcessRuntime {
                 changed: stdout.lock().await.changed.clone(),
                 child: None,
+                process_group_id: None,
+                exit_status: None,
+                cancel_evidence: None,
+                startup_reader: None,
                 stdout: stdout.clone(),
                 stderr: stderr.clone(),
                 stdout_reader: None,
@@ -2061,7 +2095,7 @@ pub(crate) async fn start_prepared_managed_batch(
 
 async fn start_managed_process_inner(
     state: AppState,
-    request: ProcessExecRequest,
+    request: exec::ExecutionRequest,
     config: Arc<Config>,
     skill_lease: Option<SkillLease>,
     options: ProcessOptions,
@@ -2219,13 +2253,25 @@ fn terminal_without_admission(
 }
 
 fn process_info(
-    request: &ProcessExecRequest,
+    request: &exec::ExecutionRequest,
     process_id: String,
     kind: ProcessKind,
     state: ProcessState,
     now: chrono::DateTime<Utc>,
     options: Option<&ProcessOptions>,
 ) -> ProcessInfo {
+    let (program, args, command_preview) = match &request.execution {
+        exec::ExecutionSpec::Shell { command } => (
+            Some("/usr/bin/bash".to_string()),
+            vec!["-c".to_string(), command.clone()],
+            command.clone(),
+        ),
+        exec::ExecutionSpec::Argv { program, args } => (
+            Some(program.clone()),
+            args.clone(),
+            command_preview(program, args),
+        ),
+    };
     ProcessInfo {
         agent_id: request.agent_id.clone(),
         process_id,
@@ -2239,10 +2285,10 @@ fn process_info(
         started_at: None,
         updated_at: now,
         finished_at: None,
-        program: Some(request.program.clone()),
-        args: request.args.clone(),
-        working_directory: request.working_directory.clone(),
-        command_preview: Some(command_preview(&request.program, &request.args)),
+        program,
+        args,
+        working_directory: request.cwd.clone(),
+        command_preview: Some(command_preview),
         exit_code: None,
         reject_reason: None,
         skill_id: options.and_then(|options| options.skill_id.clone()),
@@ -2266,6 +2312,10 @@ fn process_runtime(skill_lease: Option<SkillLease>) -> ManagedProcessRuntime {
     let changed = Arc::new(Notify::new());
     ManagedProcessRuntime {
         child: None,
+        process_group_id: None,
+        exit_status: None,
+        cancel_evidence: None,
+        startup_reader: None,
         stdout: Arc::new(Mutex::new(OutputRing::new(changed.clone()))),
         stderr: Arc::new(Mutex::new(OutputRing::new(changed.clone()))),
         stdout_reader: None,
@@ -2275,41 +2325,88 @@ fn process_runtime(skill_lease: Option<SkillLease>) -> ManagedProcessRuntime {
     }
 }
 
+fn execution_policy_decision(
+    config: &Config,
+    profile: crate::state::CapabilityProfile,
+    execution: &exec::ExecutionSpec,
+    need_confirm: bool,
+) -> PolicyDecision {
+    match execution {
+        exec::ExecutionSpec::Shell { command } => {
+            crate::policy::shell_policy_decision_for_profile(config, profile, command, need_confirm)
+        }
+        exec::ExecutionSpec::Argv { program, args } => {
+            policy_decision_for_profile(config, profile, program, args, need_confirm)
+        }
+    }
+}
+
+fn preflight_execution(
+    config: &Config,
+    working_directory: &Path,
+    execution: &exec::ExecutionSpec,
+) -> std::result::Result<(), String> {
+    match execution {
+        exec::ExecutionSpec::Shell { command } => {
+            preflight_shell_paths(config, working_directory, command)
+        }
+        exec::ExecutionSpec::Argv { program, args } => {
+            exec::preflight(config, working_directory, program, args)
+        }
+    }
+}
+
+fn preflight_shell_paths(
+    config: &Config,
+    working_directory: &Path,
+    command: &str,
+) -> std::result::Result<(), String> {
+    let extraction = crate::policy::shell_parser::extract_literal_commands(command);
+    for invocation in extraction.commands {
+        if invocation.complete {
+            exec::preflight(
+                config,
+                working_directory,
+                &invocation.program,
+                &invocation.args,
+            )?;
+        }
+    }
+    Ok(())
+}
+
 /// `config` is the admission snapshot; workers must not reload live state here.
 #[allow(clippy::too_many_arguments)]
 async fn run_async_process(
     state: AppState,
     process_id: String,
     config: Arc<Config>,
-    request: ProcessExecRequest,
+    request: exec::ExecutionRequest,
     stdout: Arc<Mutex<OutputRing>>,
     stderr: Arc<Mutex<OutputRing>>,
     cancel_requested: Arc<std::sync::atomic::AtomicBool>,
-    prepared: Option<(std::path::PathBuf, PolicyDecision)>,
+    prepared: Option<(PathBuf, PolicyDecision)>,
     prepared_confirmation_result: Option<String>,
 ) {
     let (working_directory, decision) = if let Some(prepared) = prepared {
         prepared
     } else {
-        let decision = policy_decision_for_profile(
+        let decision = execution_policy_decision(
             &config,
             state.runtime.profile,
-            &request.program,
-            &request.args,
+            &request.execution,
             request.need_confirm,
         );
         set_policy_decision(&state, &process_id, format!("{decision:?}")).await;
         let working_directory =
-            match exec::resolve_working_directory(&config, request.working_directory.as_deref()) {
+            match exec::resolve_working_directory(&config, request.cwd.as_deref()) {
                 Ok(directory) => directory,
                 Err(reason) => {
                     finish_process(&state, &process_id, ProcessState::Rejected, &reason).await;
                     return;
                 }
             };
-        if let Err(reason) =
-            exec::preflight(&config, &working_directory, &request.program, &request.args)
-        {
+        if let Err(reason) = preflight_execution(&config, &working_directory, &request.execution) {
             finish_process(&state, &process_id, ProcessState::Rejected, &reason).await;
             return;
         }
@@ -2324,15 +2421,30 @@ async fn run_async_process(
         let confirmation = if let Some(confirmation) = prepared_confirmation_result {
             confirmation
         } else {
-            confirmation::request_confirmation_cancellable(
-                &state,
-                &config,
-                request.confirm_method.as_deref(),
-                &request.program,
-                &request.args,
-                cancel_requested.clone(),
-            )
-            .await
+            match &request.execution {
+                exec::ExecutionSpec::Shell { command } => {
+                    confirmation::request_shell_confirmation_cancellable(
+                        &state,
+                        &config,
+                        request.confirm_method.as_deref(),
+                        command,
+                        request.cwd.as_deref(),
+                        cancel_requested.clone(),
+                    )
+                    .await
+                }
+                exec::ExecutionSpec::Argv { program, args } => {
+                    confirmation::request_confirmation_cancellable(
+                        &state,
+                        &config,
+                        request.confirm_method.as_deref(),
+                        program,
+                        args,
+                        cancel_requested.clone(),
+                    )
+                    .await
+                }
+            }
         };
         set_confirmation_result(&state, &process_id, confirmation.clone()).await;
         if confirmation != "allow_once" {
@@ -2382,8 +2494,7 @@ async fn run_async_process(
     let spawned = spawn_process_with_readers(
         &config,
         &working_directory,
-        &request.program,
-        &request.args,
+        &request.execution,
         stdout,
         stderr,
     )
@@ -2408,7 +2519,7 @@ async fn run_async_process(
         let Some(process) = processes.get_mut(&process_id) else {
             drop(processes);
             if let Some(mut spawned) = spawned.take() {
-                let _ = spawned.child.kill().await;
+                terminate_process_group(&mut spawned.child, spawned.process_group_id).await;
                 settle_reader(spawned.stdout_reader, spawned.stdout).await;
                 settle_reader(spawned.stderr_reader, spawned.stderr).await;
             }
@@ -2417,7 +2528,7 @@ async fn run_async_process(
         let ProcessRuntime::Process(runtime) = &mut process.runtime else {
             drop(processes);
             if let Some(mut spawned) = spawned.take() {
-                let _ = spawned.child.kill().await;
+                terminate_process_group(&mut spawned.child, spawned.process_group_id).await;
                 settle_reader(spawned.stdout_reader, spawned.stdout).await;
                 settle_reader(spawned.stderr_reader, spawned.stderr).await;
             }
@@ -2425,6 +2536,8 @@ async fn run_async_process(
         };
         let spawned = spawned.take().expect("spawn result is present");
         runtime.child = Some(spawned.child);
+        runtime.process_group_id = spawned.process_group_id;
+        runtime.startup_reader = spawned.startup_reader;
         runtime.stdout_reader = spawned.stdout_reader;
         runtime.stderr_reader = spawned.stderr_reader;
         process.info.capture_status = ProcessCaptureStatus::Capturing;
@@ -2439,6 +2552,8 @@ async fn run_async_process(
 
 struct SpawnedProcess {
     child: Child,
+    process_group_id: Option<i32>,
+    startup_reader: Option<JoinHandle<ShellStartupStatus>>,
     stdout: Arc<Mutex<OutputRing>>,
     stderr: Arc<Mutex<OutputRing>>,
     stdout_reader: Option<JoinHandle<ReaderOutcome>>,
@@ -2448,18 +2563,68 @@ struct SpawnedProcess {
 async fn spawn_process_with_readers(
     config: &Config,
     working_directory: &Path,
-    program: &str,
-    args: &[String],
+    execution: &exec::ExecutionSpec,
     stdout: Arc<Mutex<OutputRing>>,
     stderr: Arc<Mutex<OutputRing>>,
 ) -> Result<SpawnedProcess> {
-    let mut command = exec::build_command(config, working_directory, program)?;
+    #[cfg(unix)]
+    let (startup_stream, startup_writer, startup_fd) =
+        if matches!(execution, exec::ExecutionSpec::Shell { .. }) {
+            use std::os::unix::io::AsRawFd;
+            let (reader, writer) = std::os::unix::net::UnixStream::pair()?;
+            reader.set_nonblocking(true)?;
+            (
+                Some(tokio::net::UnixStream::from_std(reader)?),
+                Some(writer),
+                Some(writer.as_raw_fd()),
+            )
+        } else {
+            (None, None, None)
+        };
+
+    #[cfg(not(unix))]
+    let startup_writer: Option<()> = None;
+    let mut command = exec::build_command(config, working_directory, execution)?;
     command
-        .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.as_std_mut().process_group(0);
+        if let Some(startup_fd) = startup_fd {
+            unsafe {
+                command.as_std_mut().pre_exec(move || {
+                    if startup_fd != exec::SHELL_STARTUP_FD {
+                        if libc::dup2(startup_fd, exec::SHELL_STARTUP_FD) == -1 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                    } else {
+                        let flags = libc::fcntl(startup_fd, libc::F_GETFD);
+                        if flags == -1
+                            || libc::fcntl(startup_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC)
+                                == -1
+                        {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                    }
+                    Ok(())
+                });
+            }
+        }
+    }
+
     let mut child = command.spawn()?;
+    drop(startup_writer);
+    let process_group_id = child
+        .id()
+        .and_then(|process_id| i32::try_from(process_id).ok());
+    #[cfg(unix)]
+    let startup_reader = startup_stream.map(|stream| tokio::spawn(read_shell_startup(stream)));
+    #[cfg(not(unix))]
+    let startup_reader: Option<JoinHandle<ShellStartupStatus>> = None;
     let stdout_reader = if let Some(reader) = child.stdout.take() {
         stdout.lock().await.mark_started();
         Some(tokio::spawn(read_output(reader, stdout.clone())))
@@ -2482,11 +2647,53 @@ async fn spawn_process_with_readers(
     };
     Ok(SpawnedProcess {
         child,
+        process_group_id,
+        startup_reader,
         stdout,
         stderr,
         stdout_reader,
         stderr_reader,
     })
+}
+
+#[cfg(unix)]
+async fn read_shell_startup(mut reader: tokio::net::UnixStream) -> ShellStartupStatus {
+    let mut line = Vec::with_capacity(16);
+    let mut booted = false;
+    let mut byte = [0_u8; 1];
+    loop {
+        match reader.read(&mut byte).await {
+            Ok(0) => {
+                return if booted {
+                    ShellStartupStatus::InitFailed(None)
+                } else {
+                    ShellStartupStatus::StartupFailed
+                };
+            }
+            Ok(_) if byte[0] == b'\n' => {
+                if line == b"B" {
+                    booted = true;
+                } else if line == b"R" {
+                    return ShellStartupStatus::Ready;
+                } else if let Some(status) = line.strip_prefix(b"I:") {
+                    return ShellStartupStatus::InitFailed(
+                        std::str::from_utf8(status)
+                            .ok()
+                            .and_then(|status| status.parse().ok())
+                            .filter(|status| *status > 0)
+                            .or(Some(1)),
+                    );
+                } else if line.starts_with(b"C:") {
+                    return ShellStartupStatus::StartupFailed;
+                }
+                line.clear();
+            }
+            Ok(_) if line.len() < 64 => line.push(byte[0]),
+            Ok(_) => return ShellStartupStatus::StartupFailed,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return ShellStartupStatus::StartupFailed,
+        }
+    }
 }
 
 async fn read_output<R: AsyncRead + Unpin>(
@@ -2510,18 +2717,171 @@ async fn read_output<R: AsyncRead + Unpin>(
 }
 
 async fn settle_reader(reader: Option<JoinHandle<ReaderOutcome>>, ring: Arc<Mutex<OutputRing>>) {
-    let Some(reader) = reader else {
+    let Some(mut reader) = reader else {
         let mut ring = ring.lock().await;
         if matches!(ring.capture, RingCapture::Capturing) {
             ring.abort("reader_handle_missing");
         }
         return;
     };
-    let outcome = match reader.await {
-        Ok(outcome) => outcome,
-        Err(error) => ReaderOutcome::Failed(format!("reader_task_failed: {error}")),
+    let outcome = match tokio::time::timeout(std::time::Duration::from_secs(2), &mut reader).await {
+        Ok(Ok(outcome)) => outcome,
+        Ok(Err(error)) => ReaderOutcome::Failed(format!("reader_task_failed: {error}")),
+        Err(_) => {
+            reader.abort();
+            let _ = reader.await;
+            ReaderOutcome::Failed("output_reader_did_not_converge".to_string())
+        }
     };
     ring.lock().await.finish(outcome);
+}
+
+struct GroupTermination {
+    group_stopped: bool,
+    evidence: &'static str,
+    exit_status: Option<ProcessExitStatus>,
+}
+
+async fn terminate_process_group(
+    mut child: Option<&mut Child>,
+    process_group_id: Option<i32>,
+    known_exit_status: Option<ProcessExitStatus>,
+) -> GroupTermination {
+    #[cfg(unix)]
+    if let Some(process_group_id) = process_group_id {
+        if process_group_id > 0 && !process_group_exists(process_group_id) {
+            return GroupTermination {
+                group_stopped: true,
+                evidence: "process_group_already_gone",
+                exit_status: known_exit_status,
+            };
+        }
+        let term_sent = send_process_group_signal(process_group_id, libc::SIGTERM).is_ok();
+        let mut exit_status = known_exit_status;
+        if wait_for_process_group_exit(
+            &mut child,
+            process_group_id,
+            std::time::Duration::from_millis(500),
+            &mut exit_status,
+        )
+        .await
+        {
+            return GroupTermination {
+                group_stopped: true,
+                evidence: if term_sent {
+                    "process_group_sigterm_observed"
+                } else {
+                    "process_group_already_gone"
+                },
+                exit_status,
+            };
+        }
+        let _ = send_process_group_signal(process_group_id, libc::SIGKILL);
+        if wait_for_process_group_exit(
+            &mut child,
+            process_group_id,
+            std::time::Duration::from_secs(2),
+            &mut exit_status,
+        )
+        .await
+        {
+            return GroupTermination {
+                group_stopped: true,
+                evidence: "process_group_sigkill_observed",
+                exit_status,
+            };
+        }
+        return GroupTermination {
+            group_stopped: false,
+            evidence: "process_group_termination_unverified",
+            exit_status,
+        };
+    }
+
+    #[cfg(unix)]
+    let evidence = "process_group_termination_unverified";
+    #[cfg(not(unix))]
+    let evidence = "local_child_termination_only";
+    let mut exit_status = known_exit_status;
+    if let Some(child) = child.as_deref_mut() {
+        if child.kill().await.is_ok() {
+            if let Ok(Some(status)) = child.try_wait() {
+                exit_status = Some(status.into());
+            }
+            return GroupTermination {
+                group_stopped: true,
+                evidence,
+                exit_status,
+            };
+        }
+        if let Ok(Some(status)) = child.try_wait() {
+            exit_status = Some(status.into());
+            return GroupTermination {
+                group_stopped: true,
+                evidence,
+                exit_status,
+            };
+        }
+    }
+    GroupTermination {
+        group_stopped: false,
+        evidence,
+        exit_status,
+    }
+}
+
+#[cfg(unix)]
+async fn wait_for_process_group_exit(
+    child: &mut Option<&mut Child>,
+    process_group_id: i32,
+    timeout: std::time::Duration,
+    exit_status: &mut Option<ProcessExitStatus>,
+) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if exit_status.is_none() {
+            if let Some(child) = child.as_deref_mut() {
+                if let Ok(Some(status)) = child.try_wait() {
+                    *exit_status = Some(status.into());
+                }
+            }
+        }
+        if !process_group_exists(process_group_id) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+#[cfg(unix)]
+fn process_group_exists(process_group_id: i32) -> bool {
+    if process_group_id <= 0 {
+        return false;
+    }
+    if unsafe { libc::kill(-process_group_id, 0) } == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+}
+
+#[cfg(unix)]
+fn send_process_group_signal(process_group_id: i32, signal: i32) -> std::io::Result<()> {
+    if process_group_id <= 0 {
+        return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
+    }
+    if unsafe { libc::kill(-process_group_id, signal) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(unix))]
+fn process_group_exists(_process_group_id: i32) -> bool {
+    false
 }
 
 async fn monitor_process(
@@ -3418,13 +3778,17 @@ async fn cancel_command_process(
     state: &AppState,
     process_id: &str,
 ) -> Result<ProcessDetail, String> {
-    let child = {
+    let (mut child, process_group_id, exit_status) = {
         let mut processes = state.processes.lock().await;
         let Some(process) = processes.get_mut(process_id) else {
             return Err(missing_process_reason(state, process_id));
         };
         refresh_process(state, process).await;
-        if process.info.state.is_terminal() {
+        let ProcessRuntime::Process(runtime) = &mut process.runtime else {
+            return Err("process_kind_mismatch".to_string());
+        };
+        let group_alive = runtime.process_group_id.is_some_and(process_group_exists);
+        if process.info.state.is_terminal() && !group_alive {
             let detail = process_detail(process);
             prune_terminal_processes(state, &mut processes);
             return Ok(detail);
@@ -3433,30 +3797,26 @@ async fn cancel_command_process(
             .cancel_requested
             .store(true, std::sync::atomic::Ordering::Release);
         process.info.cancel_requested = true;
-        process.info.state = ProcessState::CancelRequested;
-        process.info.updated_at = Utc::now();
-        let ProcessRuntime::Process(runtime) = &mut process.runtime else {
-            return Err("process_kind_mismatch".to_string());
-        };
-        runtime.changed.notify_waiters();
-        match runtime.child.take() {
-            Some(child) => Some(child),
-            None => {
-                process.info.cancel_outcome = Some("cancel_requested".to_string());
-                process.info.termination_evidence =
-                    Some("cancel_flag_before_process_start".to_string());
-                runtime.skill_lease = None;
-                let detail = process_detail(process);
-                prune_terminal_processes(state, &mut processes);
-                return Ok(detail);
-            }
+        if !process.info.state.is_terminal() {
+            process.info.state = ProcessState::CancelRequested;
+            process.info.updated_at = Utc::now();
         }
+        runtime.changed.notify_waiters();
+        let child = runtime.child.take();
+        if child.is_none() && runtime.process_group_id.is_none() {
+            process.info.cancel_outcome = Some("cancel_requested".to_string());
+            process.info.termination_evidence =
+                Some("cancel_flag_before_process_start".to_string());
+            runtime.skill_lease = None;
+            let detail = process_detail(process);
+            prune_terminal_processes(state, &mut processes);
+            return Ok(detail);
+        }
+        (child, runtime.process_group_id, runtime.exit_status)
     };
 
-    let Some(mut child) = child else {
-        return Err("process_cancel_internal".to_string());
-    };
-    let kill_result = child.kill().await;
+    let termination = terminate_process_group(child.as_mut(), process_group_id, exit_status).await;
+    let group_stopped = termination.group_stopped;
     let mut processes = state.processes.lock().await;
     let Some(process) = processes.get_mut(process_id) else {
         return Err("process_not_found".to_string());
@@ -3464,46 +3824,72 @@ async fn cancel_command_process(
     let ProcessRuntime::Process(runtime) = &mut process.runtime else {
         return Err("process_kind_changed".to_string());
     };
-    match kill_result {
-        Ok(()) => {
-            mark_cancelled(
-                &mut process.info,
-                "cancelled",
-                "local_process_kill_completed",
-            );
-            runtime.skill_lease = None;
+    runtime.exit_status = termination.exit_status.or(runtime.exit_status);
+    if group_stopped {
+        runtime.child = None;
+        runtime.process_group_id = None;
+        runtime.cancel_evidence = Some(termination.evidence.to_string());
+        process.info.exit_code = runtime.exit_status.and_then(|status| status.code);
+        if process.info.state.is_terminal() {
+            process.info.cancel_requested = true;
+            process.info.cancel_outcome = Some("cancelled".to_string());
+            process.info.termination_evidence = Some(termination.evidence.to_string());
+            process.info.updated_at = Utc::now();
+        } else {
+            mark_cancelled(&mut process.info, "cancelled", termination.evidence);
         }
-        Err(_) => match child.try_wait() {
-            Ok(Some(status)) => {
-                let now = Utc::now();
-                process.info.exit_code = status.code();
-                process.info.state = if status.success() {
-                    ProcessState::Completed
-                } else {
-                    ProcessState::Failed
-                };
-                process.info.updated_at = now;
-                process.info.finished_at = Some(now);
-                process.info.cancel_outcome = Some("already_terminal".to_string());
-                process.info.termination_evidence = Some("process_exit_status".to_string());
-                runtime.skill_lease = None;
-            }
-            _ => {
-                process.info.state = ProcessState::CancelRequested;
-                process.info.updated_at = Utc::now();
-                process.info.cancel_outcome = Some("cancel_failed".to_string());
-                process.info.termination_evidence = Some("process_kill_error".to_string());
-                runtime.child = Some(child);
-            }
-        },
-    }
-    runtime.changed.notify_waiters();
-    if process.info.state.is_terminal() {
+        runtime.skill_lease = None;
+        runtime.changed.notify_waiters();
         finalize_process(state, process).await;
+    } else {
+        runtime.child = child;
+        if !process.info.state.is_terminal() {
+            process.info.state = ProcessState::CancelRequested;
+        }
+        process.info.updated_at = Utc::now();
+        process.info.cancel_outcome = Some("cancel_failed".to_string());
+        process.info.termination_evidence = Some(termination.evidence.to_string());
+        process.detail.error = Some(ProcessError {
+            code: "process_group_termination_unverified".to_string(),
+            message: "Process-group termination could not be verified after SIGTERM and SIGKILL"
+                .to_string(),
+        });
+        runtime.changed.notify_waiters();
+        if process.info.state.is_terminal() {
+            finalize_process(state, process).await;
+        }
     }
     let detail = process_detail(process);
     prune_terminal_processes(state, &mut processes);
+    drop(processes);
+    if group_stopped {
+        return wait_for_process_capture(state, process_id).await;
+    }
     Ok(detail)
+}
+
+async fn wait_for_process_capture(
+    state: &AppState,
+    process_id: &str,
+) -> Result<ProcessDetail, String> {
+    let deadline = Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let (detail, settled) = {
+            let mut processes = state.processes.lock().await;
+            let Some(process) = processes.get_mut(process_id) else {
+                return Err(missing_process_reason(state, process_id));
+            };
+            refresh_process(state, process).await;
+            (
+                process_detail(process),
+                process.info.capture_status != ProcessCaptureStatus::Capturing,
+            )
+        };
+        if settled || Instant::now() >= deadline {
+            return Ok(detail);
+        }
+        sleep(std::time::Duration::from_millis(10)).await;
+    }
 }
 
 async fn cancel_mcp_process(state: &AppState, process_id: &str) -> Result<ProcessDetail, String> {
@@ -3642,41 +4028,107 @@ async fn refresh_processes(
 
 async fn refresh_process(state: &AppState, process: &mut ManagedProcess) {
     if let ProcessRuntime::Process(runtime) = &mut process.runtime {
-        let child_status = runtime
-            .child
-            .as_mut()
-            .and_then(|child| child.try_wait().ok().flatten());
-        if let Some(status) = child_status {
-            runtime.child = None;
+        if runtime.exit_status.is_none() {
+            if let Some(child) = runtime.child.as_mut() {
+                if let Ok(Some(status)) = child.try_wait() {
+                    runtime.exit_status = Some(status.into());
+                    runtime.child = None;
+                }
+            }
+        }
+        if let Some(exit_status) = runtime.exit_status {
+            let group_stopped = runtime
+                .process_group_id
+                .is_none_or(|process_group_id| !process_group_exists(process_group_id));
+            if group_stopped {
+                runtime.process_group_id = None;
+            }
             if !process.info.state.is_terminal() {
                 let now = Utc::now();
-                process.info.exit_code = status.code();
-                if process
+                process.info.exit_code = exit_status.code;
+                let cancel_requested = process
                     .cancel_requested
-                    .load(std::sync::atomic::Ordering::Acquire)
-                {
-                    process.info.state = ProcessState::Cancelled;
-                    process.info.reject_reason = Some("cancelled".to_string());
-                    process.info.cancel_requested = true;
-                    process
-                        .info
-                        .cancel_outcome
-                        .get_or_insert_with(|| "cancelled".to_string());
-                    process
-                        .info
-                        .termination_evidence
-                        .get_or_insert_with(|| "process_exit_after_cancel".to_string());
+                    .load(std::sync::atomic::Ordering::Acquire);
+                if cancel_requested && !group_stopped {
+                    process.info.state = ProcessState::CancelRequested;
+                    process.info.updated_at = now;
                 } else {
-                    process.info.state = if status.success() {
-                        ProcessState::Completed
+                    let startup_status = if let Some(mut reader) = runtime.startup_reader.take() {
+                        match tokio::time::timeout(
+                            std::time::Duration::from_millis(200),
+                            &mut reader,
+                        )
+                        .await
+                        {
+                            Ok(Ok(status)) => Some(status),
+                            Ok(Err(_)) | Err(_) => {
+                                reader.abort();
+                                let _ = reader.await;
+                                Some(ShellStartupStatus::StartupFailed)
+                            }
+                        }
                     } else {
-                        ProcessState::Failed
+                        None
                     };
+                    if cancel_requested {
+                        process.info.state = ProcessState::Cancelled;
+                        process.info.reject_reason = Some("cancelled".to_string());
+                        process.info.cancel_requested = true;
+                        process
+                            .info
+                            .cancel_outcome
+                            .get_or_insert_with(|| "cancelled".to_string());
+                        process.info.termination_evidence = Some(
+                            runtime
+                                .cancel_evidence
+                                .unwrap_or("process_group_exit_after_cancel")
+                                .to_string(),
+                        );
+                    } else {
+                        match startup_status {
+                            Some(ShellStartupStatus::InitFailed(status)) => {
+                                let status = status.or(exit_status.code).unwrap_or(1);
+                                process.info.state = ProcessState::Failed;
+                                let message =
+                                    format!("Shell init file failed with exit status {status}");
+                                process.info.reject_reason =
+                                    Some(format!("shell_init_file_failed: {message}"));
+                                process.detail.error = Some(ProcessError {
+                                    code: "shell_init_file_failed".to_string(),
+                                    message,
+                                });
+                            }
+                            Some(ShellStartupStatus::StartupFailed) => {
+                                process.info.state = ProcessState::Failed;
+                                let message =
+                                    "Shell failed before the requested command started".to_string();
+                                process.info.reject_reason =
+                                    Some(format!("shell_startup_failed: {message}"));
+                                process.detail.error = Some(ProcessError {
+                                    code: "shell_startup_failed".to_string(),
+                                    message,
+                                });
+                            }
+                            Some(ShellStartupStatus::Ready) => {
+                                process.info.state = ProcessState::Completed;
+                            }
+                            None if process.info.kind == ProcessKind::Command => {
+                                process.info.state = ProcessState::Completed;
+                            }
+                            None => {
+                                process.info.state = if exit_status.success {
+                                    ProcessState::Completed
+                                } else {
+                                    ProcessState::Failed
+                                };
+                            }
+                        }
+                    }
+                    process.info.updated_at = now;
+                    process.info.finished_at = Some(now);
+                    runtime.skill_lease = None;
+                    runtime.changed.notify_waiters();
                 }
-                process.info.updated_at = now;
-                process.info.finished_at = Some(now);
-                runtime.skill_lease = None;
-                runtime.changed.notify_waiters();
             }
         }
         if let (Ok(stdout), Ok(stderr)) = (runtime.stdout.try_lock(), runtime.stderr.try_lock()) {
@@ -3715,6 +4167,14 @@ fn prune_terminal_processes(
             process.info.state.is_terminal()
                 && process.info.state != ProcessState::UnknownAfterRestart
                 && process.history_terminal_snapshot_at.is_some()
+                && process.info.capture_status != ProcessCaptureStatus::Capturing
+                && !matches!(
+                    &process.runtime,
+                    ProcessRuntime::Process(runtime)
+                        if runtime
+                            .process_group_id
+                            .is_some_and(process_group_exists)
+                )
                 && !state
                     .process_history
                     .terminal_pending(&process.info.process_id)
@@ -3749,17 +4209,35 @@ mod tests {
         dir
     }
 
-    fn exec_request(program: &str, working_directory: &Path) -> ProcessExecRequest {
+    fn exec_request(command: &str, working_directory: &Path) -> ProcessExecRequest {
         ProcessExecRequest {
             agent_id: "test-agent".to_string(),
             group: None,
-            program: program.to_string(),
-            args: Vec::new(),
+            command: command.to_string(),
             need_confirm: false,
             confirm_method: None,
-            working_directory: Some(working_directory.to_string_lossy().to_string()),
+            cwd: Some(working_directory.to_string_lossy().to_string()),
             wait_seconds: Some(2),
         }
+    }
+
+    async fn start_shell_process_for_test_with_decision(
+        state: AppState,
+        request: ProcessExecRequest,
+        options: ProcessOptions,
+    ) -> ProcessInfo {
+        let config = Arc::new(state.config.read().await.clone());
+        let working_directory = PathBuf::from(request.cwd.as_deref().unwrap());
+        start_managed_process_inner(
+            state,
+            request.into(),
+            config,
+            None,
+            options,
+            Some((working_directory, PolicyDecision::Allow)),
+            None,
+        )
+        .await
     }
 
     async fn test_state(max_active_processes: usize) -> (AppState, PathBuf) {
@@ -3768,10 +4246,26 @@ mod tests {
         fs::create_dir_all(&workspace).unwrap();
         let mut config = Config::default_config().unwrap();
         config.workspace_root = workspace.clone();
+        config.shell.init_file = crate::config::ShellInitFile::Disabled;
         config.limits.max_active_processes =
             crate::config::MaxActiveProcesses::Explicit(max_active_processes);
         config.confirmation_provider =
             crate::config::ConfirmationProviderConfig::from_legacy("none").unwrap();
+        config.policy.allow = [
+            "false",
+            "pwd",
+            "printf",
+            "sleep",
+            "true",
+            "touch",
+            "__history_trigger_failure__",
+        ]
+        .into_iter()
+        .map(|program| crate::config::Rule {
+            program: program.to_string(),
+            args_prefix: Vec::new(),
+        })
+        .collect();
         let private_state =
             crate::private_state::PrivateStatePaths::for_test(root.join("private-state"));
         let state = AppState {
@@ -3810,7 +4304,7 @@ mod tests {
                 "DROP TRIGGER IF EXISTS test_process_batch_admission_failure;
                  CREATE TRIGGER test_process_batch_admission_failure
                  BEFORE INSERT ON processes
-                 WHEN json_extract(NEW.info_json, '$.program') = '__history_trigger_failure__'
+                 WHEN json_extract(NEW.info_json, '$.commandPreview') = '__history_trigger_failure__'
                  BEGIN
                      SELECT RAISE(ABORT, 'test process batch admission failure');
                  END;",
@@ -4094,18 +4588,7 @@ mod tests {
     #[tokio::test]
     async fn exec_waits_for_terminal_state_after_early_output() {
         let (state, workspace) = test_state(1).await;
-        state
-            .config
-            .write()
-            .await
-            .policy
-            .allow
-            .push(crate::config::Rule {
-                program: "sh".to_string(),
-                args_prefix: Vec::new(),
-            });
-        let mut request = exec_request("sh", &workspace);
-        request.args = vec!["-c".to_string(), "printf progress; sleep 0.15".to_string()];
+        let mut request = exec_request("printf progress; sleep 0.15", &workspace);
         request.wait_seconds = Some(5);
         let budget = state.config.read().await.limits.process_response_bytes;
         let response =
@@ -4119,8 +4602,7 @@ mod tests {
     #[tokio::test]
     async fn exec_preserves_rejection_when_process_was_not_admitted() {
         let (state, workspace) = test_state(1).await;
-        let mut long_running = exec_request("sleep", &workspace);
-        long_running.args = vec!["2".to_string()];
+        let long_running = exec_request("sleep 2", &workspace);
         let running = start_process_for_test(state.clone(), long_running).await;
 
         let mut rejected_request = exec_request("true", &workspace);
@@ -4168,8 +4650,7 @@ mod tests {
         .expect("a stale starting snapshot must refresh before waiting");
         assert_eq!(stale_wait.state, ProcessState::Completed);
 
-        let mut second_request = exec_request("printf", &workspace);
-        second_request.args = vec!["done".to_string()];
+        let second_request = exec_request("printf done", &workspace);
         let second = start_process_for_test(state.clone(), second_request).await;
         let second = wait_terminal(&state, second).await;
         assert_eq!(second.state, ProcessState::Completed);
@@ -4180,24 +4661,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn shell_init_runs_before_working_directory_is_restored() {
+        let (state, workspace) = test_state(1).await;
+        let marker = workspace.join("shell-init-ran");
+        let init_file = workspace.join("init.bash");
+        fs::write(&init_file, format!(": > '{}'\ncd /\n", marker.display())).unwrap();
+        state.config.write().await.shell.init_file =
+            crate::config::ShellInitFile::Path(init_file.to_string_lossy().to_string());
+
+        let process = start_process_for_test(state.clone(), exec_request("pwd", &workspace)).await;
+        let process = wait_terminal(&state, process).await;
+        assert_eq!(process.state, ProcessState::Completed);
+        let output = wait_output_capture(&state, &process.process_id).await;
+        assert_eq!(
+            output.response.output.as_ref().unwrap().stdout.data,
+            format!("{}\n", workspace.display())
+        );
+        assert!(marker.exists());
+    }
+
+    #[tokio::test]
+    async fn shell_init_failure_blocks_command_and_reports_init_error() {
+        let (state, workspace) = test_state(1).await;
+        let marker = workspace.join("must-not-run");
+        let init_file = workspace.join("init.bash");
+        fs::write(&init_file, "return 23\n").unwrap();
+        state.config.write().await.shell.init_file =
+            crate::config::ShellInitFile::Path(init_file.to_string_lossy().to_string());
+
+        let process = start_process_for_test(
+            state.clone(),
+            exec_request(&format!("touch {}", marker.display()), &workspace),
+        )
+        .await;
+        let process = wait_terminal(&state, process).await;
+        assert_eq!(process.state, ProcessState::Failed);
+        assert_eq!(process.exit_code, Some(23));
+        assert!(!marker.exists());
+        let detail = get_process_detail(&state, &process.process_id, 0)
+            .await
+            .unwrap();
+        assert_eq!(
+            detail.error.as_ref().unwrap().code,
+            "shell_init_file_failed"
+        );
+    }
+
+    #[tokio::test]
+    async fn pipefail_nonzero_exit_completes_with_shell_status() {
+        let (state, workspace) = test_state(1).await;
+        let process = start_process_for_test(
+            state.clone(),
+            exec_request("printf before | false", &workspace),
+        )
+        .await;
+        let process = wait_terminal(&state, process).await;
+        assert_eq!(process.state, ProcessState::Completed);
+        assert_eq!(process.exit_code, Some(1));
+        assert!(process.reject_reason.is_none());
+        let detail = get_process_detail(&state, &process.process_id, 0)
+            .await
+            .unwrap();
+        assert!(detail.error.is_none());
+    }
+    #[tokio::test]
     async fn reader_eof_is_visible_while_the_child_keeps_running() {
         let (state, workspace) = test_state(1).await;
-        let mut request = exec_request("sh", &workspace);
-        request.args = vec![
-            "-c".to_string(),
-            "exec >/dev/null 2>&1; sleep 0.8".to_string(),
-        ];
-        state
-            .config
-            .write()
-            .await
-            .policy
-            .allow
-            .push(crate::config::Rule {
-                program: "sh".to_string(),
-                args_prefix: Vec::new(),
-            });
-        let process = start_process_for_test(state.clone(), request).await;
+        let request = exec_request("exec >/dev/null 2>&1; sleep 0.8", &workspace);
+        let process = start_shell_process_for_test_with_decision(
+            state.clone(),
+            request,
+            ProcessOptions::for_source("test"),
+        )
+        .await;
         let mut eof_while_running = None;
         for _ in 0..100 {
             let info = get_process(&state, &process.process_id, 0).await.unwrap();
@@ -4242,22 +4778,12 @@ mod tests {
         options.terminal_event_hook = Some(Arc::new(move |_| {
             hook_count_for_event.fetch_add(1, Ordering::AcqRel);
         }));
-        let mut request = exec_request("sh", &workspace);
-        request.args = vec![
-            "-c".to_string(),
-            "printf before; (sleep 2; printf after) & sleep 0.15".to_string(),
-        ];
-        state
-            .config
-            .write()
-            .await
-            .policy
-            .allow
-            .push(crate::config::Rule {
-                program: "sh".to_string(),
-                args_prefix: Vec::new(),
-            });
-        let started = start_managed_process(state.clone(), request, options).await;
+        let request = exec_request(
+            "printf before; (sleep 2; printf after) & sleep 0.15",
+            &workspace,
+        );
+        let started =
+            start_shell_process_for_test_with_decision(state.clone(), request, options).await;
         let terminal = tokio::time::timeout(Duration::from_secs(1), wait_terminal(&state, started))
             .await
             .expect("terminal notification must arrive before inherited pipe EOF");
@@ -4358,8 +4884,7 @@ mod tests {
     async fn process_read_cursors_are_replayable_and_page_raw_offsets() {
         let (state, workspace) = test_state(2).await;
         let payload = "x".repeat(12 * 1024);
-        let mut request = exec_request("printf", &workspace);
-        request.args = vec!["%s".to_string(), payload.clone()];
+        let request = exec_request(&format!("printf '%s' '{payload}'"), &workspace);
         let process = start_process_for_test(state.clone(), request).await;
         let process = wait_terminal(&state, process).await;
         let _ = wait_output_capture(&state, &process.process_id).await;
@@ -4487,8 +5012,7 @@ mod tests {
     #[tokio::test]
     async fn output_pages_base64_invalid_utf8_without_loss() {
         let (state, workspace) = test_state(1).await;
-        let mut request = exec_request("printf", &workspace);
-        request.args = vec!["\\377\\000\\200".to_string()];
+        let request = exec_request(r"printf '\377\000\200'", &workspace);
         let process = start_process_for_test(state.clone(), request).await;
         let process = wait_terminal(&state, process).await;
         let output = wait_output_capture(&state, &process.process_id).await;
@@ -4570,8 +5094,10 @@ mod tests {
     async fn process_read_compacts_output_to_configured_response_budget() {
         let (state, workspace) = test_state(2).await;
         let budget = state.config.read().await.limits.process_response_bytes;
-        let mut request = exec_request("printf", &workspace);
-        request.args = vec!["%s".to_string(), "x".repeat(12 * 1024)];
+        let request = exec_request(
+            &format!("printf '%s' '{}'", "x".repeat(12 * 1024)),
+            &workspace,
+        );
         let response =
             start_and_wait_process(state, request, ProcessOptions::for_source("test"), budget)
                 .await
@@ -4677,19 +5203,17 @@ mod tests {
             group: None,
             elements: vec![
                 agentic_gpt_protocol::ProcessExecElement {
-                    program: "printf".to_string(),
-                    args: vec!["%s".to_string(), payload.clone()],
-                    working_directory: None,
+                    command: format!("printf '%s' '{payload}'"),
+                    cwd: None,
                 },
                 agentic_gpt_protocol::ProcessExecElement {
-                    program: "printf".to_string(),
-                    args: vec!["%s".to_string(), payload],
-                    working_directory: None,
+                    command: format!("printf '%s' '{payload}'"),
+                    cwd: None,
                 },
             ],
             need_confirm: false,
             confirm_method: None,
-            working_directory: Some(workspace.to_string_lossy().to_string()),
+            cwd: Some(workspace.to_string_lossy().to_string()),
             wait_seconds: Some(2),
         };
         let response = start_process_batch(
@@ -4753,9 +5277,14 @@ mod tests {
     async fn oversized_process_admission_fails_before_command_effect() {
         let (state, workspace) = test_state(1).await;
         let marker = workspace.join("oversized-admission-must-not-run");
-        let mut request = exec_request("touch", &workspace);
-        request.args = vec![marker.to_string_lossy().to_string()];
-        request.args.extend((0..70).map(|_| "x".repeat(4 * 1024)));
+        let oversized_args = (0..70)
+            .map(|_| "x".repeat(4 * 1024))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let request = exec_request(
+            &format!("touch {} {oversized_args}", marker.display()),
+            &workspace,
+        );
 
         let rejected = start_process_for_test(state.clone(), request).await;
         assert_eq!(rejected.state, ProcessState::Failed);
@@ -4781,14 +5310,13 @@ mod tests {
             elements: markers
                 .iter()
                 .map(|marker| agentic_gpt_protocol::ProcessExecElement {
-                    program: "touch".to_string(),
-                    args: vec![marker.to_string_lossy().to_string()],
-                    working_directory: None,
+                    command: format!("touch {}", marker.display()),
+                    cwd: None,
                 })
                 .collect(),
             need_confirm: false,
             confirm_method: None,
-            working_directory: Some(workspace.to_string_lossy().to_string()),
+            cwd: Some(workspace.to_string_lossy().to_string()),
             wait_seconds: Some(0),
         };
 
@@ -4811,8 +5339,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn admitted_process_keeps_policy_snapshot_across_reload() {
         let (state, workspace) = test_state(1).await;
-        let mut request = exec_request("printf", &workspace);
-        request.args = vec!["admitted".to_string()];
+        let request = exec_request("printf admitted", &workspace);
         let admitted = start_process_for_test(state.clone(), request).await;
         assert!(admitted.started_at.is_none());
 
@@ -4839,9 +5366,10 @@ mod tests {
     async fn process_batch_admission_failure_is_atomic_before_spawn() {
         let (state, workspace) = test_state(2).await;
         let marker = workspace.join("process-batch-must-not-run");
-        let mut first_request = exec_request("touch", &workspace);
-        first_request.args = vec![marker.to_string_lossy().to_string()];
-        let second_request = exec_request("__history_trigger_failure__", &workspace);
+        let first_request: exec::ExecutionRequest =
+            exec_request(&format!("touch {}", marker.display()), &workspace).into();
+        let second_request: exec::ExecutionRequest =
+            exec_request("__history_trigger_failure__", &workspace).into();
         let specs = vec![
             ManagedProcessSpec {
                 request: first_request,
@@ -4883,7 +5411,7 @@ mod tests {
             config,
             vec![
                 ManagedProcessSpec {
-                    request: exec_request("true", &workspace),
+                    request: exec_request("true", &workspace).into(),
                     working_directory: workspace.clone(),
                     decision: PolicyDecision::Allow,
                     confirmation_result: None,
@@ -4894,7 +5422,7 @@ mod tests {
                     event_origin: None,
                 },
                 ManagedProcessSpec {
-                    request: exec_request("true", &workspace),
+                    request: exec_request("true", &workspace).into(),
                     working_directory: workspace.clone(),
                     decision: PolicyDecision::Allow,
                     confirmation_result: None,
@@ -4951,19 +5479,17 @@ mod tests {
             group: None,
             elements: vec![
                 agentic_gpt_protocol::ProcessExecElement {
-                    program: "sleep".to_string(),
-                    args: vec!["2".to_string()],
-                    working_directory: None,
+                    command: "sleep 2".to_string(),
+                    cwd: None,
                 },
                 agentic_gpt_protocol::ProcessExecElement {
-                    program: "sleep".to_string(),
-                    args: vec!["2".to_string()],
-                    working_directory: None,
+                    command: "sleep 2".to_string(),
+                    cwd: None,
                 },
             ],
             need_confirm: false,
             confirm_method: None,
-            working_directory: Some(workspace.to_string_lossy().to_string()),
+            cwd: Some(workspace.to_string_lossy().to_string()),
             wait_seconds: Some(0),
         };
 
@@ -5025,19 +5551,17 @@ mod tests {
             group: None,
             elements: vec![
                 agentic_gpt_protocol::ProcessExecElement {
-                    program: "true".to_string(),
-                    args: Vec::new(),
-                    working_directory: None,
+                    command: "true".to_string(),
+                    cwd: None,
                 },
                 agentic_gpt_protocol::ProcessExecElement {
-                    program: "sleep".to_string(),
-                    args: vec!["0.15".to_string()],
-                    working_directory: None,
+                    command: "sleep 0.15".to_string(),
+                    cwd: None,
                 },
             ],
             need_confirm: false,
             confirm_method: None,
-            working_directory: Some(workspace.to_string_lossy().to_string()),
+            cwd: Some(workspace.to_string_lossy().to_string()),
             wait_seconds: Some(30),
         };
 
@@ -5112,8 +5636,7 @@ mod tests {
     #[tokio::test]
     async fn active_process_capacity_and_cancel_are_truthful() {
         let (state, workspace) = test_state(1).await;
-        let mut request = exec_request("sleep", &workspace);
-        request.args = vec!["2".to_string()];
+        let request = exec_request("sleep 2", &workspace);
         let running = start_process_for_test(state.clone(), request).await;
         let mut running_state = running.clone();
         for _ in 0..100 {
@@ -5136,10 +5659,46 @@ mod tests {
         let cancelled = cancel_process(&state, &running.process_id).await.unwrap();
         assert_eq!(cancelled.state, ProcessState::Cancelled);
         assert_eq!(cancelled.cancel_outcome, "cancelled");
-        assert_eq!(
-            cancelled.termination_evidence,
-            "local_process_kill_completed"
-        );
+        assert!(matches!(
+            cancelled.termination_evidence.as_str(),
+            "process_group_sigterm_observed" | "process_group_sigkill_observed"
+        ));
+    }
+
+    #[tokio::test]
+    async fn cancellation_reaches_background_descendant_after_leader_exit() {
+        let (state, workspace) = test_state(1).await;
+        let request = exec_request("/usr/bin/sleep 100 &", &workspace);
+        let started = start_shell_process_for_test_with_decision(
+            state.clone(),
+            request,
+            ProcessOptions::for_source("test"),
+        )
+        .await;
+        let completed = wait_terminal(&state, started).await;
+        assert_eq!(completed.state, ProcessState::Completed);
+        assert_eq!(completed.exit_code, Some(0));
+        assert_ne!(completed.capture_status, ProcessCaptureStatus::Complete);
+        let process_group_id = {
+            let processes = state.processes.lock().await;
+            let process = processes.get(&completed.process_id).unwrap();
+            match &process.runtime {
+                ProcessRuntime::Process(runtime) => runtime.process_group_id.unwrap(),
+                ProcessRuntime::Mcp(_) => unreachable!(),
+            }
+        };
+        assert!(process_group_exists(process_group_id));
+
+        let cancelled = cancel_process(&state, &completed.process_id).await.unwrap();
+        assert_eq!(cancelled.state, ProcessState::Completed);
+        assert_eq!(cancelled.cancel_outcome, "cancelled");
+        assert!(matches!(
+            cancelled.termination_evidence.as_str(),
+            "process_group_sigterm_observed" | "process_group_sigkill_observed"
+        ));
+        assert!(!process_group_exists(process_group_id));
+        let settled = get_process(&state, &completed.process_id, 0).await.unwrap();
+        assert_ne!(settled.capture_status, ProcessCaptureStatus::Capturing);
     }
 
     #[tokio::test]
@@ -5234,9 +5793,8 @@ mod tests {
     #[tokio::test]
     async fn runtime_history_tracks_group_timestamps_and_hot_cache_fallback() {
         let (state, workspace) = test_state_with_history(2).await;
-        let mut request = exec_request("printf", &workspace);
+        let mut request = exec_request("printf history-output", &workspace);
         request.group = Some("  runtime-group  ".to_string());
-        request.args = vec!["history-output".to_string()];
         let admitted = start_process_for_test(state.clone(), request).await;
         assert_eq!(admitted.group.as_deref(), Some("runtime-group"));
         assert!(admitted.started_at.is_none());
@@ -5420,8 +5978,7 @@ mod tests {
                 .join("missing-history-parent")
                 .join("process.sqlite3"),
         );
-        let mut request = exec_request("printf", &workspace);
-        request.args = vec!["must-not-run".to_string()];
+        let request = exec_request("printf must-not-run", &workspace);
         let terminal = start_process_for_test(state.clone(), request).await;
         assert_eq!(terminal.state, ProcessState::Failed);
         assert!(terminal

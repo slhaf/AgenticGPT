@@ -179,6 +179,11 @@ const COMMAND_CATALOG: &[CatalogEntry] = &[
     CatalogEntry::new("config.keys", "List configuration keys", "列出配置键"),
     CatalogEntry::new("config.set", "Set a configuration value", "设置配置值"),
     CatalogEntry::new(
+        "config.unset",
+        "Restore an unsettable key to its default",
+        "将支持 unset 的配置键恢复为默认值",
+    ),
+    CatalogEntry::new(
         "config.toolset",
         "Manage namespace-level optional toolsets",
         "管理命名空间级可选工具集",
@@ -426,6 +431,7 @@ const ARG_CATALOG: &[CatalogEntry] = &[
     CatalogEntry::new("config.keys.section", "Filter keys by section", "按部分筛选配置键"),
     CatalogEntry::new("config.keys.json", "Print machine-readable JSON", "输出机器可读的 JSON"),
     CatalogEntry::new("config.set.key", "Registered configuration key", "已注册的配置键"),
+    CatalogEntry::new("config.unset.key", "Registered configuration key", "已注册的配置键"),
     CatalogEntry::new("config.set.value", "Value to assign", "要设置的值"),
     CatalogEntry::new("config.allow.add.program", "Program name", "程序名称"),
     CatalogEntry::new("config.allow.add.args_prefix", "Optional argument prefix", "可选参数前缀"),

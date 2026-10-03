@@ -34,7 +34,7 @@ fn config_help_is_fully_localized_without_changing_tokens() {
     assert!(en.contains("Commands:"));
     assert!(en.contains("Initialize configuration"));
     for token in [
-        "init", "import", "show", "set", "keys", "allow", "confirm", "deny", "path", "mcp",
+        "init", "import", "show", "set", "unset", "keys", "allow", "confirm", "deny", "path", "mcp",
     ] {
         assert!(zh.contains(token), "Chinese help omitted token {token}");
         assert!(en.contains(token), "English help omitted token {token}");
@@ -53,6 +53,7 @@ fn every_visible_command_has_help() {
         &["config", "import", "--help"],
         &["config", "show", "--help"],
         &["config", "set", "--help"],
+        &["config", "unset", "--help"],
         &["config", "keys", "--help"],
         &["config", "allow", "--help"],
         &["config", "allow", "add", "--help"],
@@ -305,6 +306,64 @@ fn config_init_set_and_show_round_trip() {
     assert_eq!(value["limits"]["maxConcurrentTasks"], 2);
     assert_eq!(value["limits"]["processResponseBytes"], 16384);
     assert_eq!(value["room"]["timezone"], "Asia/Tokyo");
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn config_shell_init_file_keeps_default_disabled_and_explicit_path_distinct() {
+    let root = temp_root("shell-init-file");
+    fs::create_dir_all(&root).unwrap();
+    let config = root.join("config.json");
+    let binary = binary_path();
+    let invoke = |args: &[&str]| {
+        Command::new(&binary)
+            .args(["--language", "en", "config", "--config"])
+            .arg(&config)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+
+    let unset = invoke(&["unset", "shell.initFile"]);
+    assert!(unset.status.success(), "initial shell unset failed");
+    let default: Value = serde_json::from_slice(&invoke(&["show"]).stdout).unwrap();
+    assert!(default.get("shell").is_none());
+
+    let explicit = invoke(&["set", "shell.initFile", "~/.agentic_gpt/.bashrc"]);
+    assert!(explicit.status.success(), "explicit shell path set failed");
+    let explicit: Value = serde_json::from_slice(&invoke(&["show"]).stdout).unwrap();
+    assert_eq!(
+        explicit["shell"]["initFile"], "~/.agentic_gpt/.bashrc",
+        "an explicit path equal to the default must remain explicit"
+    );
+
+    let disabled = invoke(&["set", "shell.initFile", "null"]);
+    assert!(disabled.status.success(), "shell init disable failed");
+    let disabled: Value = serde_json::from_slice(&invoke(&["show"]).stdout).unwrap();
+    assert!(disabled["shell"]["initFile"].is_null());
+
+    let restored = invoke(&["unset", "shell.initFile"]);
+    assert!(
+        restored.status.success(),
+        "shell init default restoration failed"
+    );
+    let restored: Value = serde_json::from_slice(&invoke(&["show"]).stdout).unwrap();
+    assert!(restored.get("shell").is_none());
+    let before = fs::read(&config).unwrap();
+    let unsupported = invoke(&["unset", "mode"]);
+    assert!(!unsupported.status.success());
+    assert_eq!(fs::read(&config).unwrap(), before);
+
+    let keys: Value = serde_json::from_slice(&invoke(&["keys", "--json"]).stdout).unwrap();
+    let entry = keys["keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["key"] == "shell.initFile")
+        .unwrap();
+    assert_eq!(entry["type"], "nullable-path");
+    assert_eq!(entry["nullable"], true);
 
     let _ = fs::remove_dir_all(root);
 }

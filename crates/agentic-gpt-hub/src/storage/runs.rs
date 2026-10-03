@@ -168,6 +168,152 @@ pub(crate) fn prepare_run_in_transaction(
     })
 }
 
+// Match only historical persisted DTOs; this is not a compatibility input path.
+fn is_legacy_argv_process_command(command_type: &str, command: &Value) -> bool {
+    let Some(envelope) = command.as_object() else {
+        return false;
+    };
+    if envelope.get("type").and_then(Value::as_str) != Some(command_type)
+        || !has_only_fields(envelope, &["type", "requestId", "payload"])
+        || !envelope.get("requestId").is_some_and(Value::is_string)
+    {
+        return false;
+    }
+    let Some(payload) = envelope.get("payload").and_then(Value::as_object) else {
+        return false;
+    };
+    match command_type {
+        "process.exec" => {
+            has_only_fields(
+                payload,
+                &[
+                    "agentId",
+                    "group",
+                    "program",
+                    "args",
+                    "needConfirm",
+                    "confirmMethod",
+                    "workingDirectory",
+                    "waitSeconds",
+                ],
+            ) && payload.get("agentId").is_some_and(Value::is_string)
+                && payload.get("program").is_some_and(Value::is_string)
+                && payload
+                    .get("args")
+                    .and_then(Value::as_array)
+                    .is_some_and(|args| args.iter().all(Value::is_string))
+                && payload.get("needConfirm").is_some_and(Value::is_boolean)
+                && optional_string_field(payload, "group")
+                && optional_string_field(payload, "confirmMethod")
+                && optional_string_field(payload, "workingDirectory")
+                && optional_u64_field(payload, "waitSeconds")
+        }
+        "process.batch" => {
+            let Some(elements) = payload.get("elements").and_then(Value::as_array) else {
+                return false;
+            };
+            // Old empty batches are identifiable by their serialized top-level workingDirectory.
+            (!elements.is_empty() || payload.contains_key("workingDirectory"))
+                && has_only_fields(
+                    payload,
+                    &[
+                        "agentId",
+                        "group",
+                        "elements",
+                        "needConfirm",
+                        "confirmMethod",
+                        "workingDirectory",
+                        "waitSeconds",
+                    ],
+                )
+                && payload.get("agentId").is_some_and(Value::is_string)
+                && payload.get("needConfirm").is_some_and(Value::is_boolean)
+                && optional_string_field(payload, "group")
+                && optional_string_field(payload, "confirmMethod")
+                && optional_string_field(payload, "workingDirectory")
+                && optional_u64_field(payload, "waitSeconds")
+                && elements.iter().all(is_legacy_argv_element)
+        }
+        _ => false,
+    }
+}
+
+fn is_legacy_argv_element(element: &Value) -> bool {
+    let Some(element) = element.as_object() else {
+        return false;
+    };
+    has_only_fields(element, &["program", "args", "workingDirectory"])
+        && element.get("program").is_some_and(Value::is_string)
+        && element
+            .get("args")
+            .and_then(Value::as_array)
+            .is_some_and(|args| args.iter().all(Value::is_string))
+        && optional_string_field(element, "workingDirectory")
+}
+
+fn has_only_fields(object: &serde_json::Map<String, Value>, allowed: &[&str]) -> bool {
+    object.keys().all(|field| allowed.contains(&field.as_str()))
+}
+
+fn optional_string_field(object: &serde_json::Map<String, Value>, field: &str) -> bool {
+    object
+        .get(field)
+        .is_none_or(|value| value.is_null() || value.is_string())
+}
+
+fn optional_u64_field(object: &serde_json::Map<String, Value>, field: &str) -> bool {
+    object
+        .get(field)
+        .is_none_or(|value| value.is_null() || value.as_u64().is_some())
+}
+
+// Preserve the historical JSON and hash while making old argv requests non-replayable.
+fn retire_pending_legacy_argv_commands(conn: &rusqlite::Connection, agent_id: &str) -> Result<()> {
+    let rows = {
+        let mut stmt = conn.prepare(
+            "select run_id, command_type, command_json
+             from agent_runs
+             where agent_id = ?1
+               and acked_at is null
+               and result_json is null
+               and status in ('created', 'dispatched', 'timeout_waiting_result')
+               and command_type in ('process.exec', 'process.batch')
+             order by created_at asc",
+        )?;
+        let rows = stmt.query_map(params![agent_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()?
+    };
+    let now = Utc::now();
+    for (run_id, command_type, command_json) in rows {
+        let command = serde_json::from_str::<Value>(&command_json)?;
+        if !is_legacy_argv_process_command(&command_type, &command) {
+            continue;
+        }
+        conn.execute(
+            "update agent_runs
+             set status = 'unknown',
+                 reason = case
+                     when reason is null or reason = '' then 'retired_process_command'
+                     else reason || ';retired_process_command'
+                 end,
+                 updated_at = ?1
+             where run_id = ?2
+               and agent_id = ?3
+               and acked_at is null
+               and result_json is null
+               and status in ('created', 'dispatched', 'timeout_waiting_result')",
+            params![now, run_id, agent_id],
+        )?;
+    }
+    Ok(())
+}
+
 pub(crate) fn pending_unacked(state: &HubState, agent_id: &str) -> Result<Vec<PendingReplay>> {
     let conn = state.db.lock().unwrap();
     // Retired read variants must not be deserialized or replayed after the wire cutover.
@@ -186,6 +332,7 @@ pub(crate) fn pending_unacked(state: &HubState, agent_id: &str) -> Result<Vec<Pe
            and status in ('created', 'dispatched', 'timeout_waiting_result')",
         params![Utc::now(), agent_id],
     )?;
+    retire_pending_legacy_argv_commands(&conn, agent_id)?;
     let mut stmt = conn.prepare(
         "select run_id, request_id, command_hash, command_json
          from agent_runs
@@ -889,11 +1036,10 @@ mod tests {
             payload: agentic_gpt_protocol::ProcessExecRequest {
                 agent_id: "agent".to_string(),
                 group: None,
-                program: "echo".to_string(),
-                args: vec!["ok".to_string()],
+                command: "echo ok".to_string(),
                 need_confirm: false,
                 confirm_method: None,
-                working_directory: None,
+                cwd: None,
                 wait_seconds: Some(0),
             },
         };
@@ -964,6 +1110,316 @@ mod tests {
         assert_eq!(completed_after.reason, completed_before.reason);
         assert_eq!(completed_after.updated_at, completed_before.updated_at);
         assert_eq!(completed_after.result, Some(retained_result));
+    }
+
+    #[test]
+    fn pending_unacked_retires_legacy_argv_and_preserves_current_and_completed_runs() {
+        let state = test_state();
+        let legacy_command = |command_type: &str, request_id: &str| match command_type {
+            "process.exec" => serde_json::json!({
+                "type": command_type,
+                "requestId": request_id,
+                "payload": {
+                    "agentId": "agent",
+                    "program": "echo",
+                    "args": ["legacy"],
+                    "needConfirm": false,
+                    "workingDirectory": "/legacy/work"
+                }
+            }),
+            "process.batch" if request_id == "req_legacy_empty_batch" => serde_json::json!({
+                "type": command_type,
+                "requestId": request_id,
+                "payload": {
+                    "agentId": "agent",
+                    "elements": [],
+                    "needConfirm": false,
+                    "workingDirectory": "/legacy/work"
+                }
+            }),
+            "process.batch" => serde_json::json!({
+                "type": command_type,
+                "requestId": request_id,
+                "payload": {
+                    "agentId": "agent",
+                    "elements": [{
+                        "program": "echo",
+                        "args": ["legacy batch"],
+                        "workingDirectory": "/legacy/work"
+                    }],
+                    "needConfirm": false
+                }
+            }),
+            _ => unreachable!(),
+        };
+        let prepare_legacy = |request_id: &str, command_type: &str| {
+            let placeholder = HubCommand::SkillsList {
+                request_id: request_id.to_string(),
+            };
+            let receipt = prepare_run(&state, "agent", request_id, &placeholder).unwrap();
+            let command_json = legacy_command(command_type, request_id).to_string();
+            let command_hash = crate::utils::sha256_hex(&command_json);
+            state
+                .db
+                .lock()
+                .unwrap()
+                .execute(
+                    "update agent_runs
+                     set command_type = ?1, command_json = ?2, command_hash = ?3
+                     where run_id = ?4",
+                    params![command_type, command_json, command_hash, receipt.run_id],
+                )
+                .unwrap();
+            (receipt, command_json, command_hash)
+        };
+
+        let mut retired = Vec::new();
+        for (request_id, command_type) in [
+            ("req_legacy_process.exec", "process.exec"),
+            ("req_legacy_process.batch", "process.batch"),
+            ("req_legacy_empty_batch", "process.batch"),
+        ] {
+            retired.push((
+                prepare_legacy(request_id, command_type),
+                request_id.to_string(),
+                command_type,
+            ));
+        }
+
+        let completed_request_id = "req_completed_legacy_exec";
+        let completed_placeholder = HubCommand::SkillsList {
+            request_id: completed_request_id.to_string(),
+        };
+        let completed_receipt = prepare_run(
+            &state,
+            "agent",
+            completed_request_id,
+            &completed_placeholder,
+        )
+        .unwrap();
+        let completed_result = serde_json::json!({"completed": "retained"});
+        assert!(mark_acked(
+            &state,
+            "agent",
+            &completed_receipt.run_id,
+            completed_request_id,
+            &completed_receipt.command_hash,
+        )
+        .unwrap());
+        assert!(matches!(
+            store_result(
+                &state,
+                "agent",
+                &completed_receipt.run_id,
+                completed_request_id,
+                &completed_result,
+            )
+            .unwrap(),
+            StoreResultOutcome::Stored { .. }
+        ));
+        let completed_command_json =
+            legacy_command("process.exec", completed_request_id).to_string();
+        let completed_command_hash = crate::utils::sha256_hex(&completed_command_json);
+        state
+            .db
+            .lock()
+            .unwrap()
+            .execute(
+                "update agent_runs
+                 set command_type = 'process.exec', command_json = ?1, command_hash = ?2
+                 where run_id = ?3",
+                params![
+                    completed_command_json,
+                    completed_command_hash,
+                    completed_receipt.run_id
+                ],
+            )
+            .unwrap();
+
+        let exec_request_id = "req_current_exec";
+        let exec = HubCommand::Exec {
+            request_id: exec_request_id.to_string(),
+            payload: agentic_gpt_protocol::ProcessExecRequest {
+                agent_id: "agent".to_string(),
+                group: None,
+                command: "echo current".to_string(),
+                need_confirm: false,
+                confirm_method: None,
+                cwd: None,
+                wait_seconds: Some(0),
+            },
+        };
+        let exec_receipt = prepare_run(&state, "agent", exec_request_id, &exec).unwrap();
+        let batch_request_id = "req_current_batch";
+        let batch = HubCommand::ProcessBatch {
+            request_id: batch_request_id.to_string(),
+            payload: agentic_gpt_protocol::ProcessBatchExecRequest {
+                agent_id: "agent".to_string(),
+                group: None,
+                elements: vec![agentic_gpt_protocol::ProcessExecElement {
+                    command: "echo current batch".to_string(),
+                    cwd: None,
+                }],
+                need_confirm: false,
+                confirm_method: None,
+                cwd: None,
+                wait_seconds: Some(0),
+            },
+        };
+        let batch_receipt = prepare_run(&state, "agent", batch_request_id, &batch).unwrap();
+        let empty_batch_request_id = "req_current_empty_batch";
+        let empty_batch = HubCommand::ProcessBatch {
+            request_id: empty_batch_request_id.to_string(),
+            payload: agentic_gpt_protocol::ProcessBatchExecRequest {
+                agent_id: "agent".to_string(),
+                group: None,
+                elements: vec![],
+                need_confirm: false,
+                confirm_method: None,
+                cwd: None,
+                wait_seconds: Some(0),
+            },
+        };
+        let empty_batch_receipt =
+            prepare_run(&state, "agent", empty_batch_request_id, &empty_batch).unwrap();
+        let legacy_empty_batch = legacy_command("process.batch", "req_legacy_empty_batch");
+        assert!(is_legacy_argv_process_command(
+            "process.batch",
+            &legacy_empty_batch
+        ));
+        let current_empty_batch_value = serde_json::to_value(&empty_batch).unwrap();
+        assert!(!is_legacy_argv_process_command(
+            "process.batch",
+            &current_empty_batch_value
+        ));
+        let legacy_exec_missing_args = serde_json::json!({
+            "type": "process.exec",
+            "requestId": "req_legacy_missing_args",
+            "payload": {
+                "agentId": "agent",
+                "program": "echo",
+                "needConfirm": false
+            }
+        });
+        assert!(!is_legacy_argv_process_command(
+            "process.exec",
+            &legacy_exec_missing_args
+        ));
+        let legacy_batch_missing_element_args = serde_json::json!({
+            "type": "process.batch",
+            "requestId": "req_legacy_missing_element_args",
+            "payload": {
+                "agentId": "agent",
+                "elements": [{"program": "echo"}],
+                "needConfirm": false,
+                "workingDirectory": "/legacy/work"
+            }
+        });
+        assert!(!is_legacy_argv_process_command(
+            "process.batch",
+            &legacy_batch_missing_element_args
+        ));
+
+        let pending = pending_unacked(&state, "agent").unwrap();
+        assert_eq!(pending.len(), 3);
+        assert!(pending.iter().any(|replay| {
+            replay.run_id == exec_receipt.run_id
+                && replay.request_id == exec_request_id
+                && replay.command_hash == exec_receipt.command_hash
+                && matches!(
+                    &replay.command,
+                    HubCommand::Exec { request_id, .. } if request_id == exec_request_id
+                )
+        }));
+        assert!(pending.iter().any(|replay| {
+            replay.run_id == batch_receipt.run_id
+                && replay.request_id == batch_request_id
+                && replay.command_hash == batch_receipt.command_hash
+                && matches!(
+                    &replay.command,
+                    HubCommand::ProcessBatch { request_id, .. } if request_id == batch_request_id
+                )
+        }));
+        assert!(pending.iter().any(|replay| {
+            replay.run_id == empty_batch_receipt.run_id
+                && replay.request_id == empty_batch_request_id
+                && replay.command_hash == empty_batch_receipt.command_hash
+                && matches!(
+                    &replay.command,
+                    HubCommand::ProcessBatch { request_id, .. }
+                        if request_id == empty_batch_request_id
+                )
+        }));
+
+        for ((receipt, command_json, command_hash), request_id, command_type) in retired {
+            let stored: (
+                String,
+                String,
+                String,
+                String,
+                Option<String>,
+                Option<String>,
+            ) = state
+                .db
+                .lock()
+                .unwrap()
+                .query_row(
+                    "select command_type, command_json, command_hash, status, reason, result_json
+                     from agent_runs where run_id = ?1",
+                    params![receipt.run_id],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                        ))
+                    },
+                )
+                .unwrap();
+            assert_eq!(stored.0, command_type);
+            assert_eq!(stored.1, command_json);
+            assert_eq!(stored.2, command_hash);
+            assert_eq!(stored.3, "unknown");
+            assert_eq!(stored.4.as_deref(), Some("retired_process_command"));
+            assert_eq!(stored.5, None);
+            assert_eq!(
+                serde_json::from_str::<Value>(&stored.1).unwrap(),
+                legacy_command(command_type, &request_id)
+            );
+        }
+
+        let completed: (String, String, String, String) = state
+            .db
+            .lock()
+            .unwrap()
+            .query_row(
+                "select command_type, command_json, command_hash, result_json
+                 from agent_runs where run_id = ?1",
+                params![completed_receipt.run_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(completed.0, "process.exec");
+        assert_eq!(completed.1, completed_command_json);
+        assert_eq!(completed.2, completed_command_hash);
+        assert_eq!(
+            completed.3,
+            serde_json::to_string(&completed_result).unwrap()
+        );
+
+        let current_exec_value = serde_json::to_value(&exec).unwrap();
+        assert!(!is_legacy_argv_process_command(
+            "process.exec",
+            &current_exec_value
+        ));
+        let current_batch_value = serde_json::to_value(&batch).unwrap();
+        assert!(!is_legacy_argv_process_command(
+            "process.batch",
+            &current_batch_value
+        ));
     }
 
     #[test]

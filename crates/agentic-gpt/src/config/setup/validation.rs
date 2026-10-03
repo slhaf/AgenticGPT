@@ -3,14 +3,15 @@ mod tests {
     use std::path::PathBuf;
 
     use crate::cli_i18n::UiLanguage;
-    use crate::config::{RoomMaintenanceMode, ToolNamespace, ToolsetConfig};
-    use crate::config_templates::{build_config, OptionalSection, RuntimeMode, SecretValue};
+    use crate::config::{
+        RoomMaintenanceMode, ShellInitFile, ToolNamespace, ToolsetConfig, DEFAULT_SHELL_INIT_FILE,
+    };
     use crate::tui::forms::OrderedMultiSelectState;
     use crate::WorkerProfile;
 
     use super::super::model::{
         HubReportingDraft, LimitsDraft, OptionalSectionDraft, RoomDraft, SandboxDraft, SetupField,
-        SetupSeed, SetupSession, ToolsetsDraft, WorkspaceDraft,
+        SetupSeed, SetupSession, ShellDraft, ToolsetsDraft, WorkspaceDraft,
     };
 
     fn session(mode: RuntimeMode, profile: WorkerProfile) -> SetupSession {
@@ -137,6 +138,30 @@ mod tests {
             session.section_status(OptionalSection::Room),
             super::super::model::SectionStatus::NotApplicable
         );
+    }
+
+    #[test]
+    fn shell_init_file_modes_preserve_default_disabled_and_explicit_path() {
+        let cases = [
+            ("default", ShellInitFile::Default),
+            ("disabled", ShellInitFile::Disabled),
+            (
+                "path",
+                ShellInitFile::Path(DEFAULT_SHELL_INIT_FILE.to_string()),
+            ),
+        ];
+
+        for (mode, expected) in cases {
+            let mut session = session(RuntimeMode::Local, WorkerProfile::Normal);
+            session
+                .save_optional_section(OptionalSectionDraft::Shell(ShellDraft {
+                    init_file_mode: mode.to_string(),
+                    init_file_path: DEFAULT_SHELL_INIT_FILE.to_string(),
+                }))
+                .unwrap();
+            let built = build_config(session.build_active_input().unwrap()).unwrap();
+            assert_eq!(built.config.shell.init_file, expected);
+        }
     }
 
     #[test]
@@ -326,7 +351,7 @@ use crate::config::{
     self, default_room_config, ConfirmationProviderConfig, EventNotificationLevel, EventsConfig,
     HttpMcpConfig, HubReportingConfig, LimitsConfig, MaxActiveProcesses, PathPolicyConfig,
     ReportingDetail, RoomConfig, RoomMaintenanceConfig, RoomMaintenanceMode, SandboxConfig,
-    ToolNamespace, ToolsetConfig, TunnelClientConfig,
+    ShellConfig, ShellInitFile, ToolNamespace, ToolsetConfig, TunnelClientConfig,
 };
 use crate::config_templates::{
     self, build_config, InitInput, OptionalSection, RuntimeMode, SecretValue, TunnelSecretSource,
@@ -366,6 +391,7 @@ pub(super) fn available_optional_sections(
         OptionalSection::Confirmation,
         OptionalSection::Limits,
         OptionalSection::Sandbox,
+        OptionalSection::Shell,
         OptionalSection::Toolsets,
         OptionalSection::McpServers,
         OptionalSection::Room,
@@ -630,6 +656,10 @@ pub(super) fn validate_field(
             OptionalSection::Sandbox,
             &session.optional_draft(OptionalSection::Sandbox),
         ),
+        SetupField::ShellInitFileMode | SetupField::ShellInitFilePath => validate_optional(
+            OptionalSection::Shell,
+            &session.optional_draft(OptionalSection::Shell),
+        ),
         SetupField::Toolsets => validate_optional(
             OptionalSection::Toolsets,
             &session.optional_draft(OptionalSection::Toolsets),
@@ -802,6 +832,17 @@ fn validate_optional(section: OptionalSection, draft: &OptionalSectionDraft) -> 
                 errors.push(error(
                     SetupField::RequiredRuntimePaths,
                     "config_init_runtime_paths_invalid",
+                ));
+            }
+        }
+        (OptionalSection::Shell, OptionalSectionDraft::Shell(value)) => {
+            if !matches!(
+                value.init_file_mode.as_str(),
+                "default" | "disabled" | "path"
+            ) {
+                errors.push(error(
+                    SetupField::ShellInitFileMode,
+                    "config_init_shell_init_file_mode_invalid",
                 ));
             }
         }
@@ -1117,6 +1158,7 @@ fn configured_draft(
             .map(OptionalSectionDraft::Confirmation),
         OptionalSection::Limits => drafts.limits.clone().map(OptionalSectionDraft::Limits),
         OptionalSection::Sandbox => drafts.sandbox.clone().map(OptionalSectionDraft::Sandbox),
+        OptionalSection::Shell => drafts.shell.clone().map(OptionalSectionDraft::Shell),
         OptionalSection::Toolsets => drafts.toolsets.clone().map(OptionalSectionDraft::Toolsets),
         OptionalSection::McpServers => drafts
             .mcp_servers
@@ -1381,6 +1423,20 @@ fn apply_optional_draft(
                 detail,
             });
         }
+        (OptionalSection::Shell, OptionalSectionDraft::Shell(value)) => {
+            let init_file = match value.init_file_mode.as_str() {
+                "default" => ShellInitFile::Default,
+                "disabled" => ShellInitFile::Disabled,
+                "path" => ShellInitFile::Path(value.init_file_path.clone()),
+                _ => {
+                    return Err(vec![error(
+                        SetupField::ShellInitFileMode,
+                        "config_init_shell_init_file_mode_invalid",
+                    )])
+                }
+            };
+            input.shell = Some(ShellConfig { init_file });
+        }
         (OptionalSection::Events, OptionalSectionDraft::Events(value)) => {
             input.events = Some(events_config_from_draft(value)?);
         }
@@ -1468,6 +1524,7 @@ fn first_field(section: OptionalSection) -> SetupField {
         OptionalSection::Confirmation => SetupField::ConfirmationChannels,
         OptionalSection::Limits => SetupField::MaxConcurrentTasks,
         OptionalSection::Sandbox => SetupField::SandboxEnabled,
+        OptionalSection::Shell => SetupField::ShellInitFileMode,
         OptionalSection::Toolsets => SetupField::Toolsets,
         OptionalSection::McpServers => SetupField::McpServerId,
         OptionalSection::Room => SetupField::RoomTimezone,

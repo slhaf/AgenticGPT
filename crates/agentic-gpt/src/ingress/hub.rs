@@ -1019,7 +1019,7 @@ async fn reconcile_transport_runs(state: &AppState, tx: &mpsc::UnboundedSender<A
             "accepted" => {
                 let command = match record.command.clone() {
                     Some(StoredCommand::Current(command)) => command,
-                    Some(StoredCommand::RetiredProcessRead { .. }) => {
+                    Some(StoredCommand::RetiredProcessCommand { .. }) => {
                         let _ = tx.send(AgentMessage::TransportRunStatus {
                             run_id: record.run_id.clone(),
                             request_id: record.request_id.clone(),
@@ -1071,7 +1071,7 @@ async fn reconcile_transport_runs(state: &AppState, tx: &mpsc::UnboundedSender<A
             "started" | "running" => {
                 let reason = if matches!(
                     record.command.as_ref(),
-                    Some(StoredCommand::RetiredProcessRead { .. })
+                    Some(StoredCommand::RetiredProcessCommand { .. })
                 ) {
                     "transport_command_retired"
                 } else {
@@ -1357,6 +1357,216 @@ pub(crate) async fn send_agent_message(state: &AppState, message: AgentMessage) 
 mod reporting_tests {
     use super::*;
 
+    use std::fmt::Write;
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+
+    struct RecoveryTestHome {
+        root: PathBuf,
+        ledger: PathBuf,
+    }
+
+    impl Drop for RecoveryTestHome {
+        fn drop(&mut self) {
+            transport_ledger::set_test_ledger_path(None);
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn recovery_test_home() -> RecoveryTestHome {
+        let root = std::env::temp_dir().join(format!("agentic-hub-recovery-{}", Uuid::new_v4()));
+        let ledger_dir = root.join(".agentic_gpt");
+        std::fs::create_dir_all(&ledger_dir).unwrap();
+        let ledger = ledger_dir.join("transport-runs.jsonl");
+        transport_ledger::set_test_ledger_path(Some(ledger.clone()));
+        RecoveryTestHome { root, ledger }
+    }
+
+    fn recovery_test_state(root: &Path) -> AppState {
+        let mut config = Config::default_config().expect("test config");
+        config.agent_id = "recovery-agent".to_string();
+        config.workspace_root = root.join("workspace");
+        config.ensure_workspace().expect("test workspace");
+        let private_state = crate::private_state::PrivateStatePaths::for_test_agent(
+            root.join("private-state"),
+            config.agent_id.clone(),
+        );
+        let process_history = crate::process_history::ProcessHistoryStore::open(&private_state);
+        let event_store =
+            crate::event_store::EventStore::open(&private_state).expect("event store");
+        AppState {
+            config_path: root.join("agent.json"),
+            config: Arc::new(tokio::sync::RwLock::new(config)),
+            private_state,
+            event_store,
+            process_history,
+            browser_runtime: None,
+            runtime: crate::state::RuntimeModel::hub(crate::state::CapabilityProfile::Normal),
+            started_at: Utc::now(),
+            boot_generation: "recovery-test".to_string(),
+            supervised: true,
+            file_locks: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            processes: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            hub_sender: Arc::new(tokio::sync::Mutex::new(None)),
+            reporting_sender: Arc::new(tokio::sync::Mutex::new(None)),
+            pending_confirmations: Arc::new(tokio::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            temporary_mcp_allows: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            mcp_concurrency: Arc::new(crate::process::McpConcurrency::new()),
+            room_repository_writes: Arc::new(tokio::sync::Mutex::new(())),
+            skills_writes: Arc::new(tokio::sync::Mutex::new(())),
+            skill_leases: Arc::new(crate::skills::SkillLeaseManager::new()),
+            skill_installs: Arc::new(crate::skill_installs::InstallManager::new()),
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_replays_completed_results_but_never_executes_retired_argv_commands() {
+        let home = recovery_test_home();
+        let state = recovery_test_state(&home.root);
+        let marker = home.root.join("retired-command-ran");
+        let old_exec = serde_json::json!({
+            "type": "process.exec",
+            "requestId": "request-old-exec",
+            "payload": {
+                "agentId": "recovery-agent",
+                "program": "touch",
+                "args": [marker.to_string_lossy()],
+                "needConfirm": false
+            }
+        });
+        let old_batch = serde_json::json!({
+            "type": "process.batch",
+            "requestId": "request-old-batch",
+            "payload": {
+                "agentId": "recovery-agent",
+                "elements": [{
+                    "program": "touch",
+                    "args": [marker.to_string_lossy()]
+                }],
+                "needConfirm": false
+            }
+        });
+        let old_completed = serde_json::json!({
+            "type": "process.exec",
+            "requestId": "request-old-completed",
+            "payload": {
+                "agentId": "recovery-agent",
+                "program": "touch",
+                "args": [marker.to_string_lossy()],
+                "needConfirm": false
+            }
+        });
+        let old_result = serde_json::json!({"historical": "already completed"});
+        let current = serde_json::to_value(HubCommand::EventPanel {
+            request_id: "request-current".to_string(),
+        })
+        .unwrap();
+        let records = [
+            serde_json::json!({
+                "runId": "run-old-exec",
+                "requestId": "request-old-exec",
+                "commandHash": "hash-old-exec",
+                "status": "accepted",
+                "agentId": "recovery-agent",
+                "command": old_exec,
+            }),
+            serde_json::json!({
+                "runId": "run-old-batch",
+                "requestId": "request-old-batch",
+                "commandHash": "hash-old-batch",
+                "status": "started",
+                "agentId": "recovery-agent",
+                "command": old_batch,
+            }),
+            serde_json::json!({
+                "runId": "run-old-completed",
+                "requestId": "request-old-completed",
+                "commandHash": "hash-old-completed",
+                "status": "completed",
+                "agentId": "recovery-agent",
+                "command": old_completed,
+                "result": old_result,
+            }),
+            serde_json::json!({
+                "runId": "run-current",
+                "requestId": "request-current",
+                "commandHash": "hash-current",
+                "status": "accepted",
+                "agentId": "recovery-agent",
+                "command": current,
+            }),
+        ];
+        let mut ledger = String::new();
+        for record in &records {
+            writeln!(&mut ledger, "{record}").unwrap();
+        }
+        std::fs::write(&home.ledger, ledger).unwrap();
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut state = state;
+        state.hub_sender = Arc::new(tokio::sync::Mutex::new(Some(tx.clone())));
+        reconcile_transport_runs(&state, &tx).await;
+
+        let mut saw_completed = false;
+        let mut saw_accepted_retired = false;
+        let mut saw_started_retired = false;
+        let mut saw_current = false;
+        for _ in 0..4 {
+            match timeout(Duration::from_secs(5), rx.recv())
+                .await
+                .expect("recovery response timed out")
+                .expect("recovery channel closed")
+            {
+                AgentMessage::TransportRunStatus {
+                    run_id,
+                    request_id,
+                    status,
+                    reason,
+                } => {
+                    assert_eq!(status, "unknown");
+                    assert_eq!(reason.as_deref(), Some("transport_command_retired"));
+                    if run_id == "run-old-exec" && request_id == "request-old-exec" {
+                        saw_accepted_retired = true;
+                    } else {
+                        assert_eq!(run_id, "run-old-batch");
+                        assert_eq!(request_id, "request-old-batch");
+                        saw_started_retired = true;
+                    }
+                }
+                AgentMessage::Response {
+                    run_id,
+                    request_id,
+                    data,
+                    ..
+                } if request_id == "request-old-completed" => {
+                    assert_eq!(run_id.as_deref(), Some("run-old-completed"));
+                    assert_eq!(data, old_result);
+                    saw_completed = true;
+                }
+                AgentMessage::Response { request_id, .. } => {
+                    assert_eq!(request_id, "request-current");
+                    saw_current = true;
+                }
+                message => panic!("unexpected recovery message: {message:?}"),
+            }
+        }
+        assert!(saw_completed);
+        assert!(saw_accepted_retired);
+        assert!(saw_started_retired);
+        assert!(saw_current);
+        assert!(!marker.exists());
+
+        let recovered = transport_ledger::latest_records().unwrap();
+        assert_eq!(recovered["run-old-exec"].status, "accepted");
+        assert_eq!(recovered["run-old-exec"].command_hash, "hash-old-exec");
+        assert_eq!(recovered["run-old-batch"].status, "started");
+        assert_eq!(recovered["run-old-batch"].command_hash, "hash-old-batch");
+        assert_eq!(recovered["run-old-completed"].result, Some(old_result));
+        assert_eq!(recovered["run-current"].status, "completed");
+        assert_eq!(recovered["run-current"].command_hash, "hash-current");
+    }
     #[test]
     fn oversized_report_json_becomes_a_hash_record() {
         let bounded = bounded_json_value(serde_json::json!({

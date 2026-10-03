@@ -1077,11 +1077,10 @@ impl AgentMcpServer {
                     request: ProcessExecRequest {
                         agent_id: config.agent_id.clone(),
                         group: args.group,
-                        program: args.program,
-                        args: args.args,
+                        command: args.command,
                         need_confirm: args.need_confirm,
                         confirm_method: None,
-                        working_directory: args.working_directory,
+                        cwd: args.cwd,
                         wait_seconds: args.wait_seconds,
                     },
                     terminal_event_hook: Some(managed_terminal_event_hook(
@@ -1096,7 +1095,6 @@ impl AgentMcpServer {
         report_process_snapshots(&self.state, snapshots);
         Ok(response)
     }
-
     async fn dispatch_process_read(&self, arguments: Value) -> Result<Value> {
         let request: ProcessReadRequest = from_value(arguments)?;
         let mut snapshots = Vec::new();
@@ -1133,14 +1131,13 @@ impl AgentMcpServer {
                         .elements
                         .into_iter()
                         .map(|element| ProcessExecElement {
-                            program: element.program,
-                            args: element.args,
-                            working_directory: element.working_directory,
+                            command: element.command,
+                            cwd: element.cwd,
                         })
                         .collect(),
                     need_confirm: args.need_confirm,
                     confirm_method: None,
-                    working_directory: args.working_directory,
+                    cwd: args.cwd,
                     wait_seconds: args.wait_seconds,
                 };
                 Ok(local_service::ProcessCall::Batch {
@@ -1871,13 +1868,11 @@ fn build_ordered_batch_image_result(
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ProcessExecArgs {
-    program: String,
-    #[serde(default)]
-    args: Vec<String>,
+    command: String,
     #[serde(default)]
     group: Option<String>,
     #[serde(default)]
-    working_directory: Option<String>,
+    cwd: Option<String>,
     #[serde(default)]
     need_confirm: bool,
     #[serde(default)]
@@ -1887,11 +1882,9 @@ struct ProcessExecArgs {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct BatchElementArgs {
-    program: String,
+    command: String,
     #[serde(default)]
-    args: Vec<String>,
-    #[serde(default)]
-    working_directory: Option<String>,
+    cwd: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1901,7 +1894,7 @@ struct ProcessBatchArgs {
     #[serde(default)]
     group: Option<String>,
     #[serde(default)]
-    working_directory: Option<String>,
+    cwd: Option<String>,
     #[serde(default)]
     need_confirm: bool,
     #[serde(default)]

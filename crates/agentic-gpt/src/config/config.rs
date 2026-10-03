@@ -458,6 +458,70 @@ where
     Ok(overrides)
 }
 
+pub(crate) const DEFAULT_SHELL_INIT_FILE: &str = "~/.agentic_gpt/.bashrc";
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ShellConfig {
+    #[serde(default, skip_serializing_if = "ShellInitFile::is_default")]
+    pub(crate) init_file: ShellInitFile,
+}
+
+impl Default for ShellConfig {
+    fn default() -> Self {
+        Self {
+            init_file: ShellInitFile::Default,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ShellInitFile {
+    Default,
+    Disabled,
+    Path(String),
+}
+
+impl ShellInitFile {
+    fn is_default(&self) -> bool {
+        matches!(self, Self::Default)
+    }
+}
+
+impl Default for ShellInitFile {
+    fn default() -> Self {
+        Self::Default
+    }
+}
+
+impl Serialize for ShellInitFile {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::Default | Self::Disabled => serializer.serialize_none(),
+            Self::Path(path) => serializer.serialize_str(path),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ShellInitFile {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Option::<String>::deserialize(deserializer)
+            .map(|path| path.map_or(Self::Disabled, Self::Path))
+    }
+}
+
+impl ShellConfig {
+    fn is_default(&self) -> bool {
+        self.init_file.is_default()
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Config {
@@ -473,6 +537,8 @@ pub(crate) struct Config {
     #[serde(default = "default_confirmation_language")]
     pub(crate) confirmation_language: String,
     pub(crate) sandbox: SandboxConfig,
+    #[serde(default, skip_serializing_if = "ShellConfig::is_default")]
+    pub(crate) shell: ShellConfig,
     #[serde(default, skip_serializing_if = "BrowserConfig::is_empty")]
     pub(crate) browser: BrowserConfig,
     #[serde(default)]
@@ -1035,6 +1101,7 @@ impl Config {
                     PathBuf::from("/etc/ssl"),
                 ],
             },
+            shell: ShellConfig::default(),
             path_policy: default_path_policy(&base.join("workspace")),
             policy: PolicyConfig::default(),
             limits: LimitsConfig {
@@ -1343,6 +1410,7 @@ impl Config {
             "confirmationProvider",
             "confirmationLanguage",
             "sandbox",
+            "shell",
             "mcpServers",
             "events",
             "browser",
@@ -2788,6 +2856,46 @@ mod tests {
     }
 
     #[test]
+    fn shell_init_file_serde_preserves_default_disabled_and_explicit_paths() {
+        let mut config = Config::default_config().unwrap();
+        let default_value = serde_json::to_value(&config).unwrap();
+        assert!(default_value.get("shell").is_none());
+        let loaded: Config = serde_json::from_value(default_value).unwrap();
+        assert_eq!(loaded.shell.init_file, ShellInitFile::Default);
+
+        let explicit_default_path = DEFAULT_SHELL_INIT_FILE.to_string();
+        config.shell.init_file = ShellInitFile::Path(explicit_default_path.clone());
+        let explicit_default = serde_json::to_value(&config).unwrap();
+        assert_eq!(
+            explicit_default["shell"]["initFile"],
+            json!(DEFAULT_SHELL_INIT_FILE)
+        );
+        let loaded: Config = serde_json::from_value(explicit_default).unwrap();
+        assert_eq!(
+            loaded.shell.init_file,
+            ShellInitFile::Path(explicit_default_path.clone())
+        );
+        assert!(serde_json::to_string(&config.safe_summary())
+            .unwrap()
+            .find(&explicit_default_path)
+            .is_none());
+
+        config.shell.init_file = ShellInitFile::Disabled;
+        let disabled = serde_json::to_value(&config).unwrap();
+        assert_eq!(disabled["shell"]["initFile"], Value::Null);
+        let loaded: Config = serde_json::from_value(disabled).unwrap();
+        assert_eq!(loaded.shell.init_file, ShellInitFile::Disabled);
+
+        config.shell.init_file = ShellInitFile::Path("/tmp/trusted-init.sh".to_string());
+        let custom_path = serde_json::to_value(&config).unwrap();
+        let loaded: Config = serde_json::from_value(custom_path).unwrap();
+        assert_eq!(
+            loaded.shell.init_file,
+            ShellInitFile::Path("/tmp/trusted-init.sh".to_string())
+        );
+    }
+
+    #[test]
     fn http_bearer_file_references_require_absolute_paths_without_tightening_tunnel_refs() {
         assert!(validate_http_mcp_bearer_token("file:/run/secrets/http").is_ok());
         assert!(validate_http_mcp_bearer_token("file:relative-token").is_err());
@@ -3092,6 +3200,46 @@ mod tests {
     }
 
     #[test]
+    fn explicit_import_preserves_shell_init_file_tristate() {
+        let root = temp_config_path();
+        let cases = [
+            (
+                json!({"mode": "local", "profile": "normal"}),
+                ShellInitFile::Default,
+            ),
+            (
+                json!({
+                    "mode": "local",
+                    "profile": "normal",
+                    "shell": {"initFile": null}
+                }),
+                ShellInitFile::Disabled,
+            ),
+            (
+                json!({
+                    "mode": "local",
+                    "profile": "normal",
+                    "shell": {"initFile": DEFAULT_SHELL_INIT_FILE}
+                }),
+                ShellInitFile::Path(DEFAULT_SHELL_INIT_FILE.to_string()),
+            ),
+        ];
+
+        for (value, expected) in cases {
+            fs::write(&root, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+            let imported = Config::import(&root).unwrap();
+            assert!(
+                imported.warnings.is_empty(),
+                "unexpected import warnings: {:?}",
+                imported.warnings
+            );
+            assert_eq!(imported.config.shell.init_file, expected);
+        }
+
+        let _ = fs::remove_file(root);
+    }
+
+    #[test]
     fn explicit_import_uses_room_toolset_preset_when_toolsets_are_omitted() {
         let root = temp_config_path();
         let value = json!({
@@ -3155,6 +3303,7 @@ mod tests {
         let value = json!({
             "displayName": "still-imported",
             "limits": {"maxActiveSessions": 4},
+            "shell": {"initFile": false},
             "futureField": "preserve-me"
         });
         fs::write(&root, serde_json::to_string_pretty(&value).unwrap()).unwrap();
@@ -3164,7 +3313,12 @@ mod tests {
             .warnings
             .iter()
             .any(|warning| warning.starts_with("limits ")));
+        assert!(imported
+            .warnings
+            .iter()
+            .any(|warning| warning.starts_with("shell ")));
         assert_eq!(imported.config.display_name, "still-imported");
+        assert_eq!(imported.config.shell.init_file, ShellInitFile::Default);
         assert_eq!(imported.config.extra["futureField"], json!("preserve-me"));
         assert_eq!(imported.config.limits.max_concurrent_tasks, 2);
         let _ = fs::remove_file(root);

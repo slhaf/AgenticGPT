@@ -8,7 +8,7 @@ mod tests {
 
     use super::super::model::{
         EventsDraft, IdentityDraft, McpServerDraft, McpServersDraft, OptionalSectionDraft,
-        SetupField, SetupSeed, SetupSession,
+        SetupField, SetupSeed, SetupSession, ShellDraft,
     };
     use super::{optional_items, ReviewEditorKind, ReviewItemTarget};
 
@@ -165,6 +165,25 @@ mod tests {
             mcp_items[0].target,
             ReviewItemTarget::McpServer { index: 0 }
         );
+    }
+
+    #[test]
+    fn shell_review_shows_path_only_for_explicit_path_mode() {
+        let default = optional_items(OptionalSectionDraft::Shell(ShellDraft {
+            init_file_mode: "default".into(),
+            init_file_path: "~/.agentic_gpt/.bashrc".into(),
+        }));
+        assert_eq!(default.len(), 1);
+        assert_eq!(default[0].label_key, "shell_init_file_mode");
+        assert_eq!(default[0].choice_values(), &["default", "disabled", "path"]);
+
+        let explicit = optional_items(OptionalSectionDraft::Shell(ShellDraft {
+            init_file_mode: "path".into(),
+            init_file_path: "/tmp/trusted-init.sh".into(),
+        }));
+        assert_eq!(explicit.len(), 2);
+        assert_eq!(explicit[1].label_key, "shell_init_file_path");
+        assert_eq!(explicit[1].value, "/tmp/trusted-init.sh");
     }
     #[test]
     fn event_review_preserves_values_and_offers_every_override_choice() {
@@ -363,6 +382,7 @@ impl ReviewItem {
             Some(SetupField::Profile) => &["normal", "room"],
             Some(SetupField::TunnelSecretSource) => &["file", "env"],
             Some(SetupField::HubTransport) => &["websocket", "sse"],
+            Some(SetupField::ShellInitFileMode) => &["default", "disabled", "path"],
             Some(SetupField::ConfirmationLanguage) => &["zh-CN", "en"],
             Some(SetupField::RoomMaintenanceMode) => &["local", "workflow"],
             Some(
@@ -483,6 +503,7 @@ pub(super) fn build_review_model(session: &SetupSession) -> Result<ReviewModel, 
         OptionalSection::Confirmation,
         OptionalSection::Limits,
         OptionalSection::Sandbox,
+        OptionalSection::Shell,
         OptionalSection::Toolsets,
         OptionalSection::McpServers,
         OptionalSection::Room,
@@ -851,6 +872,24 @@ fn optional_items(draft: OptionalSectionDraft) -> Vec<ReviewItem> {
                 ReviewEditorKind::List,
             ),
         ],
+        OptionalSectionDraft::Shell(value) => {
+            let mode = value.init_file_mode;
+            let mut items = vec![ReviewItem::field(
+                SetupField::ShellInitFileMode,
+                "shell_init_file_mode",
+                mode.clone(),
+                ReviewEditorKind::Choice,
+            )];
+            if mode == "path" {
+                items.push(ReviewItem::field(
+                    SetupField::ShellInitFilePath,
+                    "shell_init_file_path",
+                    value.init_file_path,
+                    ReviewEditorKind::Text,
+                ));
+            }
+            items
+        }
         OptionalSectionDraft::Toolsets(ToolsetsDraft { selection }) => vec![ReviewItem::field(
             SetupField::Toolsets,
             "toolsets",

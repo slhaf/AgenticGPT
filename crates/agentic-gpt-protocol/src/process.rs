@@ -6,23 +6,45 @@ pub const MIN_PROCESS_RESPONSE_BYTES: usize = 4 * 1024;
 pub const MAX_PROCESS_RESPONSE_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProcessExecRequest {
     pub agent_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
-    pub program: String,
-    pub args: Vec<String>,
+    pub command: String,
     pub need_confirm: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confirm_method: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub working_directory: Option<String>,
+    pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_seconds: Option<u64>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProcessExecElement {
+    pub command: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProcessBatchExecRequest {
+    pub agent_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    pub elements: Vec<ProcessExecElement>,
+    pub need_confirm: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirm_method: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wait_seconds: Option<u64>,
 }
 
-impl ProcessExecRequest {
+impl ProcessBatchExecRequest {
     pub const DEFAULT_WAIT_SECONDS: u64 = 5;
     pub const MAX_WAIT_SECONDS: u64 = 30;
 
@@ -33,32 +55,7 @@ impl ProcessExecRequest {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProcessExecElement {
-    pub program: String,
-    pub args: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub working_directory: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProcessBatchExecRequest {
-    pub agent_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub group: Option<String>,
-    pub elements: Vec<ProcessExecElement>,
-    pub need_confirm: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub confirm_method: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub working_directory: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub wait_seconds: Option<u64>,
-}
-
-impl ProcessBatchExecRequest {
+impl ProcessExecRequest {
     pub const DEFAULT_WAIT_SECONDS: u64 = 5;
     pub const MAX_WAIT_SECONDS: u64 = 30;
 
@@ -593,5 +590,55 @@ mod tests {
         ] {
             assert!(json.get(removed).is_none());
         }
+    }
+
+    #[test]
+    fn process_exec_wire_uses_command_and_cwd_and_rejects_legacy_argv_fields() {
+        let request: ProcessExecRequest = serde_json::from_value(serde_json::json!({
+            "agentId": "agent",
+            "command": "printf '%s' hi",
+            "needConfirm": false,
+            "cwd": "/workspace",
+            "waitSeconds": 0
+        }))
+        .unwrap();
+        assert_eq!(request.command, "printf '%s' hi");
+        assert_eq!(request.cwd.as_deref(), Some("/workspace"));
+        let encoded = serde_json::to_value(&request).unwrap();
+        assert_eq!(encoded["command"], "printf '%s' hi");
+        assert_eq!(encoded["cwd"], "/workspace");
+        for legacy in [
+            serde_json::json!({
+                "agentId": "agent",
+                "program": "printf",
+                "args": ["hi"],
+                "needConfirm": false
+            }),
+            serde_json::json!({
+                "agentId": "agent",
+                "command": "true",
+                "needConfirm": false,
+                "workingDirectory": "/workspace"
+            }),
+        ] {
+            assert!(serde_json::from_value::<ProcessExecRequest>(legacy).is_err());
+        }
+        assert!(
+            serde_json::from_value::<ProcessExecElement>(serde_json::json!({
+                "program": "true",
+                "args": [],
+                "workingDirectory": "/workspace"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ProcessBatchExecRequest>(serde_json::json!({
+                "agentId": "agent",
+                "elements": [{"command": "true"}],
+                "needConfirm": false,
+                "workingDirectory": "/workspace"
+            }))
+            .is_err()
+        );
     }
 }

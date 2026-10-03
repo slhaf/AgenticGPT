@@ -371,6 +371,7 @@ pub(crate) fn apply_live_config_subset(
         live.path_policy = candidate.path_policy;
     }
     live.limits = candidate.limits;
+    live.shell = candidate.shell;
     live.mcp_servers = candidate.mcp_servers;
     live.toolsets = candidate.toolsets;
     live.events = candidate.events;

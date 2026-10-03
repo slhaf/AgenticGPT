@@ -12,14 +12,21 @@ use crate::{
     config::{
         confirmation_language_is_zh, Config, ConfirmationChannel, ConfirmationProviderConfig,
     },
-    exec::PreparedBatchElement,
     hub,
+    policy::shell_script_risk_level,
     state::AppState,
     utils::{
         command_preview, log_info, log_warn, mcp_tool_command_preview, risk_level,
         risky_file_mutation, truncate_chars, CONFIRM_TIMEOUT_SECS,
     },
 };
+
+#[derive(Clone, Debug)]
+pub(crate) struct BatchConfirmationElement {
+    pub(crate) index: usize,
+    pub(crate) command: String,
+    pub(crate) cwd: Option<String>,
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct TemporaryMcpAllow {
@@ -30,8 +37,8 @@ pub(crate) struct TemporaryMcpAllow {
 
 pub(crate) fn batch_confirmation_preview(
     config: &Config,
-    needs_confirmation: &[PreparedBatchElement],
-    all_elements: &[PreparedBatchElement],
+    needs_confirmation: &[BatchConfirmationElement],
+    all_elements: &[BatchConfirmationElement],
 ) -> String {
     let zh = confirmation_language_is_zh(config);
     let mut lines = vec![if zh {
@@ -49,7 +56,7 @@ pub(crate) fn batch_confirmation_preview(
     }];
     for element in needs_confirmation.iter().take(8) {
         let cwd = element
-            .working_directory
+            .cwd
             .as_ref()
             .map(|directory| {
                 if zh {
@@ -59,12 +66,7 @@ pub(crate) fn batch_confirmation_preview(
                 }
             })
             .unwrap_or_default();
-        lines.push(format!(
-            "[{}] {}{}",
-            element.index,
-            command_preview(&element.program, &element.args),
-            cwd
-        ));
+        lines.push(format!("[{}] {}{}", element.index, element.command, cwd));
     }
     if needs_confirmation.len() > 8 {
         lines.push(if zh {
@@ -99,8 +101,8 @@ pub(crate) async fn request_batch_confirmation(
     state: &AppState,
     config: &Config,
     confirm_method: Option<&str>,
-    needs_confirmation: &[PreparedBatchElement],
-    all_elements: &[PreparedBatchElement],
+    needs_confirmation: &[BatchConfirmationElement],
+    all_elements: &[BatchConfirmationElement],
 ) -> String {
     let channels = confirmation_channels(config, confirm_method);
     let preview = batch_confirmation_preview(config, needs_confirmation, all_elements);
@@ -137,7 +139,7 @@ fn confirmation_channels(
 async fn request_freedesktop_batch_confirmation(
     config: &Config,
     preview: &str,
-    needs_confirmation: &[PreparedBatchElement],
+    needs_confirmation: &[BatchConfirmationElement],
 ) -> String {
     let supports_actions = tokio::task::spawn_blocking(|| {
         notify_rust::get_capabilities()
@@ -155,7 +157,7 @@ async fn request_freedesktop_batch_confirmation(
     }
     let has_risky_file_mutation = needs_confirmation
         .iter()
-        .any(|element| risky_file_mutation(&element.program));
+        .any(|element| shell_script_risk_level(&element.command) == "HIGH");
     let zh = confirmation_language_is_zh(config);
     let warning = if !config.sandbox.enabled && has_risky_file_mutation {
         if zh {
@@ -208,11 +210,11 @@ async fn request_hub_batch_confirmation(
     state: &AppState,
     config: &Config,
     preview: &str,
-    needs_confirmation: &[PreparedBatchElement],
+    needs_confirmation: &[BatchConfirmationElement],
 ) -> String {
     let risk = if needs_confirmation
         .iter()
-        .any(|element| risk_level(&element.program) == "HIGH")
+        .any(|element| shell_script_risk_level(&element.command) == "HIGH")
     {
         "HIGH"
     } else {
@@ -233,6 +235,146 @@ async fn request_hub_batch_confirmation(
         tool_name: None,
     };
     request_hub_confirmation_payload(state, payload).await
+}
+pub(crate) async fn request_shell_confirmation(
+    state: &AppState,
+    config: &Config,
+    confirm_method: Option<&str>,
+    command: &str,
+    cwd: Option<&str>,
+) -> String {
+    request_shell_confirmation_cancellable(
+        state,
+        config,
+        confirm_method,
+        command,
+        cwd,
+        Arc::new(AtomicBool::new(false)),
+    )
+    .await
+}
+
+pub(crate) async fn request_shell_confirmation_cancellable(
+    state: &AppState,
+    config: &Config,
+    confirm_method: Option<&str>,
+    command: &str,
+    cwd: Option<&str>,
+    cancel_requested: Arc<AtomicBool>,
+) -> String {
+    if cancel_requested.load(Ordering::Acquire) {
+        return "cancelled".to_string();
+    }
+    let preview = shell_command_preview(command, cwd);
+    let risk = shell_script_risk_level(command);
+    for channel in confirmation_channels(config, confirm_method) {
+        let result = match channel {
+            ConfirmationChannel::Freedesktop => tokio::select! {
+                result = request_freedesktop_shell_confirmation(config, &preview, risk) => result,
+                _ = wait_for_cancellation(cancel_requested.clone()) => "cancelled".to_string(),
+            },
+            ConfirmationChannel::Ntfy => {
+                let payload = ConfirmationPayload {
+                    program: "bash".to_string(),
+                    args: vec!["-c".to_string(), command.to_string()],
+                    command_preview: truncate_chars(&preview, 1000),
+                    risk_level: risk.to_string(),
+                    reason: if confirmation_language_is_zh(config) {
+                        "Shell 脚本需要确认".to_string()
+                    } else {
+                        "Shell script requires confirmation".to_string()
+                    },
+                    kind: Some("process.shell".to_string()),
+                    server_id: None,
+                    tool_name: None,
+                };
+                request_hub_confirmation_payload_cancellable(
+                    state,
+                    payload,
+                    Some(cancel_requested.clone()),
+                )
+                .await
+            }
+        };
+        if result != "provider_unavailable" {
+            return result;
+        }
+    }
+    "provider_unavailable".to_string()
+}
+
+fn shell_command_preview(command: &str, cwd: Option<&str>) -> String {
+    match cwd {
+        Some(cwd) => format!("{command}\n(cwd: {cwd})"),
+        None => command.to_string(),
+    }
+}
+
+async fn request_freedesktop_shell_confirmation(
+    config: &Config,
+    preview: &str,
+    risk: &str,
+) -> String {
+    let supports_actions = tokio::task::spawn_blocking(|| {
+        notify_rust::get_capabilities()
+            .map(|capabilities| {
+                capabilities
+                    .iter()
+                    .any(|capability| capability == "actions")
+            })
+            .unwrap_or(false)
+    })
+    .await
+    .unwrap_or(false);
+    if !supports_actions {
+        return "provider_unavailable".to_string();
+    }
+    let zh = confirmation_language_is_zh(config);
+    let warning = if !config.sandbox.enabled && risk == "HIGH" {
+        if zh {
+            "\n警告：bubblewrap 未启用；该脚本可能包含文件变更，对宿主机的可见范围更大。"
+        } else {
+            "\nWARNING: bubblewrap is disabled; this script may include file mutations with broader host visibility."
+        }
+    } else {
+        ""
+    };
+    let body = format!(
+        "{preview}{warning}{}",
+        if zh {
+            "\n是否允许本次执行？"
+        } else {
+            "\nAllow once?"
+        }
+    );
+    let provider = notify_rust::Notification::new()
+        .summary(if zh {
+            "Agentic GPT 确认"
+        } else {
+            "Agentic GPT confirmation"
+        })
+        .body(&body)
+        .action("allow_once", if zh { "允许本次" } else { "Allow once" })
+        .action("deny", if zh { "拒绝" } else { "Deny" })
+        .timeout((CONFIRM_TIMEOUT_SECS * 1000) as i32)
+        .show();
+    match provider {
+        Ok(handle) => {
+            let action = tokio::task::spawn_blocking(move || {
+                let mut selected = "timeout".to_string();
+                handle.wait_for_action(|action| selected = action.to_string());
+                selected
+            })
+            .await
+            .unwrap_or_else(|_| "timeout".to_string());
+            if action == "allow_once" {
+                action
+            } else {
+                "deny".to_string()
+            }
+        }
+        Err(_) => "provider_unavailable".to_string(),
+    }
 }
 
 pub(crate) async fn request_confirmation(
@@ -872,4 +1014,29 @@ pub(crate) fn confirmation_decision_value(decision: ConfirmationDecision) -> Str
         ConfirmationDecision::Expired => "expired",
     }
     .to_string()
+}
+
+#[cfg(test)]
+mod shell_confirmation_tests {
+    use super::{batch_confirmation_preview, BatchConfirmationElement};
+    use crate::config::Config;
+
+    #[test]
+    fn batch_confirmation_shows_the_original_script_and_working_directory() {
+        let config = Config::default_config().unwrap();
+        let command = "printf 'first' && printf \"second value\"";
+        let element = BatchConfirmationElement {
+            index: 2,
+            command: command.to_string(),
+            cwd: Some("/tmp/work".to_string()),
+        };
+        let preview = batch_confirmation_preview(
+            &config,
+            std::slice::from_ref(&element),
+            std::slice::from_ref(&element),
+        );
+
+        assert!(preview.contains(command));
+        assert!(preview.contains("/tmp/work"));
+    }
 }

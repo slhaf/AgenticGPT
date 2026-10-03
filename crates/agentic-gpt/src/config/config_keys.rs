@@ -7,7 +7,7 @@ use crate::{
     cli_i18n::{self, UiLanguage},
     config::{
         self, normalize_confirmation_language, Config, EventNotificationLevel, ReportingDetail,
-        RoomMaintenanceMode, RuntimeMode, INTERNAL_EVENT_TYPES,
+        RoomMaintenanceMode, RuntimeMode, ShellInitFile, INTERNAL_EVENT_TYPES,
     },
     policy, WorkerProfile,
 };
@@ -82,6 +82,7 @@ pub(crate) enum ConfigSection {
     HttpMcp,
     Confirmation,
     Sandbox,
+    Shell,
     Limits,
     Skills,
     Room,
@@ -98,6 +99,7 @@ impl ConfigSection {
             Self::Hub => "hub",
             Self::Confirmation => "confirmation",
             Self::Sandbox => "sandbox",
+            Self::Shell => "shell",
             Self::Limits => "limits",
             Self::Skills => "skills",
             Self::Room => "room",
@@ -113,13 +115,15 @@ impl ConfigSection {
             (Self::Identity, UiLanguage::En) => "Identity",
             (Self::Identity, UiLanguage::ZhCn) => "身份",
             (Self::Hub, UiLanguage::En) => "Hub",
+            (Self::Hub, UiLanguage::ZhCn) => "Hub",
             (Self::HttpMcp, UiLanguage::En) => "HTTP MCP",
             (Self::HttpMcp, UiLanguage::ZhCn) => "HTTP MCP",
-            (Self::Hub, UiLanguage::ZhCn) => "Hub",
             (Self::Confirmation, UiLanguage::En) => "Confirmation",
             (Self::Confirmation, UiLanguage::ZhCn) => "确认",
             (Self::Sandbox, UiLanguage::En) => "Sandbox",
             (Self::Sandbox, UiLanguage::ZhCn) => "沙箱",
+            (Self::Shell, UiLanguage::En) => "Shell",
+            (Self::Shell, UiLanguage::ZhCn) => "Shell",
             (Self::Limits, UiLanguage::En) => "Limits",
             (Self::Limits, UiLanguage::ZhCn) => "限制",
             (Self::Skills, UiLanguage::En) => "Skills",
@@ -148,6 +152,7 @@ pub(crate) struct ConfigKeySpec {
     pub(crate) example: &'static str,
     pub(crate) alias_of: Option<&'static str>,
     apply: fn(&mut Config, &str) -> Result<()>,
+    reset: Option<fn(&mut Config)>,
 }
 
 macro_rules! config_key {
@@ -164,6 +169,23 @@ macro_rules! config_key {
             example: $example,
             alias_of: None,
             apply: $apply,
+            reset: None,
+        }
+    };
+    ($key:literal, $section:ident, $kind:ident, $nullable:expr, $en:expr, $zh_cn:expr, $example:expr, $apply:ident, $reset:ident) => {
+        ConfigKeySpec {
+            key: $key,
+            section: ConfigSection::$section,
+            kind: ConfigValueKind::$kind,
+            nullable: $nullable,
+            description: LocalizedText {
+                en: $en,
+                zh_cn: $zh_cn,
+            },
+            example: $example,
+            alias_of: None,
+            apply: $apply,
+            reset: Some($reset),
         }
     };
     ($key:literal, $section:ident, $kind:ident, $nullable:expr, $en:expr, $zh_cn:expr, $example:expr, $apply:ident, $alias_of:literal) => {
@@ -179,6 +201,7 @@ macro_rules! config_key {
             example: $example,
             alias_of: Some($alias_of),
             apply: $apply,
+            reset: None,
         }
     };
 }
@@ -373,6 +396,17 @@ pub(crate) static CONFIG_KEYS: &[ConfigKeySpec] = &[
         "以 JSON 数组表示的沙箱运行时路径。",
         r#"["/usr","/opt/runtime"]"#,
         set_required_runtime_paths
+    ),
+    config_key!(
+        "shell.initFile",
+        Shell,
+        NullablePath,
+        true,
+        "Trusted shell initialization file; null disables it. Omit or unset to use the default.",
+        "受信任的 shell 初始化文件；null 表示禁用。省略或 unset 使用默认值。",
+        "~/.agentic_gpt/.bashrc",
+        set_shell_init_file,
+        unset_shell_init_file
     ),
     config_key!(
         "backupLimit",
@@ -848,6 +882,18 @@ pub(crate) fn apply_config_key(config: &mut Config, key: &str, value: &str) -> R
     Ok(())
 }
 
+pub(crate) fn unset_config_key(config: &mut Config, key: &str) -> Result<()> {
+    let spec = CONFIG_KEYS
+        .iter()
+        .find(|spec| spec.key == key)
+        .ok_or_else(|| anyhow!("unsupported config key: {key}"))?;
+    let reset = spec
+        .reset
+        .ok_or_else(|| anyhow!("config key cannot be unset: {key}"))?;
+    reset(config);
+    Ok(())
+}
+
 #[derive(Serialize)]
 struct ConfigKeysOutput {
     keys: Vec<ConfigKeyOutput>,
@@ -875,13 +921,14 @@ struct ConfigDescriptionOutput {
     zh_cn: &'static str,
 }
 
-const CONFIG_SECTION_ORDER: [ConfigSection; 11] = [
+const CONFIG_SECTION_ORDER: [ConfigSection; 12] = [
     ConfigSection::Runtime,
     ConfigSection::Identity,
     ConfigSection::Hub,
     ConfigSection::HttpMcp,
     ConfigSection::Confirmation,
     ConfigSection::Sandbox,
+    ConfigSection::Shell,
     ConfigSection::Limits,
     ConfigSection::Skills,
     ConfigSection::Room,
@@ -1083,6 +1130,18 @@ fn set_confirmation_language(config: &mut Config, value: &str) -> Result<()> {
     Ok(())
 }
 
+fn set_shell_init_file(config: &mut Config, value: &str) -> Result<()> {
+    config.shell.init_file = if value == "null" {
+        ShellInitFile::Disabled
+    } else {
+        ShellInitFile::Path(value.to_string())
+    };
+    Ok(())
+}
+
+fn unset_shell_init_file(config: &mut Config) {
+    config.shell.init_file = ShellInitFile::Default;
+}
 fn set_sandbox_enabled(config: &mut Config, value: &str) -> Result<()> {
     config.sandbox.enabled = value.parse::<bool>()?;
     Ok(())

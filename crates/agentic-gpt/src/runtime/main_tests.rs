@@ -8,7 +8,6 @@ use crate::config::mcp_servers::McpServerConfig;
 use crate::config::{Config, RuntimeMode};
 use crate::config::{PathPolicyConfig, Rule, TunnelConfig};
 use crate::config_cli::{PathRootCommand, PathRootKind};
-use crate::exec::PreparedBatchElement;
 use crate::policy::PolicyDecision;
 use crate::startup::{apply_live_config_subset, build_app_state, reload_live_config_once};
 use crate::state::{AppState, BrowserRuntimeContext, CapabilityProfile, RuntimeModel};
@@ -433,6 +432,7 @@ fn command_test_state(
     workspace_root: PathBuf,
 ) -> (AppState, mpsc::UnboundedReceiver<AgentMessage>) {
     let mut config = Config::default_config().unwrap();
+    config.shell.init_file = config::ShellInitFile::Disabled;
     config.toolsets = if profile == CapabilityProfile::Room {
         config::ToolsetConfig::room()
     } else {
@@ -602,11 +602,10 @@ async fn hub_panel_failure_emits_live_event_source_without_terminal_response() {
             payload: agentic_gpt_protocol::ProcessExecRequest {
                 agent_id,
                 group: None,
-                program: "true".to_string(),
-                args: Vec::new(),
+                command: "true".to_string(),
                 need_confirm: false,
                 confirm_method: None,
-                working_directory: None,
+                cwd: None,
                 wait_seconds: Some(5),
             },
         },
@@ -1098,13 +1097,10 @@ fn unknown_program_defaults_to_write_access() {
 fn batch_confirmation_preview_supports_chinese() {
     let mut config = Config::default_config().unwrap();
     config.confirmation_language = "zh-CN".to_string();
-    let element = PreparedBatchElement {
+    let element = confirmation::BatchConfirmationElement {
         index: 1,
-        program: "python".to_string(),
-        args: vec!["-c".to_string(), "print(1)".to_string()],
-        working_directory: Some("/tmp".to_string()),
-        resolved_working_directory: PathBuf::from("/tmp"),
-        decision: PolicyDecision::Confirm,
+        command: "python -c 'print(1)'".to_string(),
+        cwd: Some("/tmp".to_string()),
     };
     let preview = confirmation::batch_confirmation_preview(
         &config,
@@ -1559,6 +1555,7 @@ async fn standalone_live_reload_applies_valid_mcp_map_and_rejects_invalid_candid
     let (mut state, _rx) = command_test_state(CapabilityProfile::Normal, workspace.clone());
     state.config_path = config_path.clone();
     state.runtime = RuntimeModel::tunnel(CapabilityProfile::Normal, false);
+    state.config.write().await.shell.init_file = config::ShellInitFile::Default;
 
     let mut initial = state.config.read().await.clone();
     initial.workspace_root = workspace;
@@ -1609,8 +1606,47 @@ async fn standalone_live_reload_applies_valid_mcp_map_and_rejects_invalid_candid
         agentic_gpt_protocol::MAX_PROCESS_RESPONSE_BYTES
     );
     assert_eq!(live_after_valid.toolsets, valid.toolsets);
+    assert_eq!(
+        live_after_valid.shell.init_file,
+        config::ShellInitFile::Default
+    );
+    let mut disabled = valid.clone();
+    disabled.shell.init_file = config::ShellInitFile::Disabled;
+    assert!(
+        !config::restart_required_fields(&live_after_valid, &disabled)
+            .iter()
+            .any(|field| field == "shell")
+    );
+    fs::write(&config_path, serde_json::to_vec_pretty(&disabled).unwrap()).unwrap();
+    reload_live_config_once(&state).await.unwrap();
+    let live_after_disabled = state.config.read().await.clone();
+    assert_eq!(
+        live_after_disabled.shell.init_file,
+        config::ShellInitFile::Disabled
+    );
 
-    let mut invalid = valid;
+    let mut explicit_default = disabled;
+    explicit_default.shell.init_file =
+        config::ShellInitFile::Path("~/.agentic_gpt/.bashrc".to_string());
+    assert!(
+        !config::restart_required_fields(&live_after_disabled, &explicit_default)
+            .iter()
+            .any(|field| field == "shell")
+    );
+    fs::write(
+        &config_path,
+        serde_json::to_vec_pretty(&explicit_default).unwrap(),
+    )
+    .unwrap();
+    reload_live_config_once(&state).await.unwrap();
+    let live_after_explicit = state.config.read().await.clone();
+    assert_eq!(
+        live_after_explicit.shell.init_file,
+        explicit_default.shell.init_file
+    );
+
+    let mut invalid = explicit_default;
+
     invalid.mcp_servers.get_mut("primary").unwrap().transport = "sse".to_string();
     fs::write(&config_path, serde_json::to_vec_pretty(&invalid).unwrap()).unwrap();
     let error = reload_live_config_once(&state)
@@ -1626,6 +1662,11 @@ async fn standalone_live_reload_applies_valid_mcp_map_and_rejects_invalid_candid
     assert_eq!(
         state.config.read().await.limits.process_response_bytes,
         agentic_gpt_protocol::MAX_PROCESS_RESPONSE_BYTES
+    );
+    assert_eq!(
+        state.config.read().await.shell.init_file,
+        live_after_explicit.shell.init_file,
+        "an invalid candidate must not partially reload shell initialization",
     );
     let _ = fs::remove_dir_all(root);
 }

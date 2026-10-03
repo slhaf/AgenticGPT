@@ -10,7 +10,7 @@ use crate::config::{
     default_path_policy, normalize_http_mcp_public_url, parse_http_mcp_allow_hosts,
     validate_hub_transport, validate_hub_url_shape, Config, ConfirmationProviderConfig,
     EventsConfig, HubReportingConfig, LimitsConfig, PathPolicyConfig, RoomConfig, SandboxConfig,
-    ToolNamespace, ToolsetConfig, TunnelClientConfig, TunnelConfig, WorkerProfile,
+    ShellConfig, ToolNamespace, ToolsetConfig, TunnelClientConfig, TunnelConfig, WorkerProfile,
 };
 use crate::utils::agentic_home;
 
@@ -27,6 +27,7 @@ pub(crate) enum OptionalSection {
     Confirmation,
     Limits,
     Sandbox,
+    Shell,
     McpServers,
     Toolsets,
     Room,
@@ -92,6 +93,7 @@ pub(crate) struct InitInput {
     pub(crate) confirmation_language: Option<String>,
     pub(crate) limits: Option<LimitsConfig>,
     pub(crate) sandbox: Option<SandboxConfig>,
+    pub(crate) shell: Option<ShellConfig>,
     pub(crate) room: Option<RoomConfig>,
     pub(crate) tunnel_client: Option<TunnelClientConfig>,
     pub(crate) hub_reporting: Option<HubReportingConfig>,
@@ -108,17 +110,17 @@ impl InitInput {
             imported_base: None,
             ui_language: language,
             tunnel_id: None,
-            http_mcp_enabled: None,
-            http_mcp_host: None,
-            http_mcp_port: None,
-            http_mcp_public_url: None,
-            http_mcp_bearer_token: None,
-            http_mcp_allow_hosts: None,
             tunnel_api_key: None,
             hub_url: None,
             hub_transport: None,
             agent_id: None,
             agent_secret: None,
+            http_mcp_enabled: None,
+            http_mcp_host: None,
+            http_mcp_port: None,
+            http_mcp_bearer_token: None,
+            http_mcp_public_url: None,
+            http_mcp_allow_hosts: None,
             display_name: None,
             workspace_root: None,
             path_policy: None,
@@ -126,12 +128,13 @@ impl InitInput {
             confirmation_language: None,
             limits: None,
             sandbox: None,
+            shell: None,
             room: None,
             tunnel_client: None,
             hub_reporting: None,
-            events: None,
             mcp_servers: None,
             toolsets: None,
+            events: None,
         }
     }
 }
@@ -190,6 +193,7 @@ pub(crate) fn build_config(input: InitInput) -> Result<InitBuild> {
         confirmation_language,
         limits,
         sandbox,
+        shell,
         room,
         tunnel_client,
         hub_reporting,
@@ -268,6 +272,9 @@ pub(crate) fn build_config(input: InitInput) -> Result<InitBuild> {
     }
     if let Some(sandbox) = sandbox {
         config.sandbox = sandbox;
+    }
+    if let Some(shell) = shell {
+        config.shell = shell;
     }
     if let Some(room) = room {
         let imported_skills = config.skills.clone();
@@ -359,6 +366,7 @@ pub(crate) fn optional_section_is_legal(
         | OptionalSection::Confirmation
         | OptionalSection::Limits
         | OptionalSection::Sandbox
+        | OptionalSection::Shell
         | OptionalSection::McpServers
         | OptionalSection::Toolsets
         | OptionalSection::Events => true,

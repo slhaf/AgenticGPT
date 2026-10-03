@@ -1367,6 +1367,40 @@ fn render_optional_form(
                 left.width,
             );
         }
+        OptionalSection::Shell => {
+            push_choice_group(
+                &mut lines,
+                &mut focused_line,
+                section,
+                draft,
+                state,
+                SetupField::ShellInitFileMode,
+                t(language, "Init file mode", "初始化文件模式"),
+                &[
+                    ("default", t(language, "Default", "默认")),
+                    ("disabled", t(language, "Disabled", "禁用")),
+                    ("path", t(language, "Path", "路径")),
+                ],
+                theme,
+                errors,
+                language,
+            );
+            if optional_field_value(draft, SetupField::ShellInitFileMode) == "path" {
+                push_long_form_field(
+                    &mut lines,
+                    &mut focused_line,
+                    session,
+                    section,
+                    draft,
+                    state,
+                    SetupField::ShellInitFilePath,
+                    language,
+                    theme,
+                    errors,
+                    left.width,
+                );
+            }
+        }
         OptionalSection::McpServers => push_mcp_servers_form(
             &mut lines,
             &mut focused_line,
@@ -2708,6 +2742,19 @@ pub(super) fn optional_focus_items(
             items.extend(list_focus_items(SetupField::RequiredRuntimePaths, draft));
             items
         }
+        OptionalSection::Shell => {
+            let mut items = ["default", "disabled", "path"]
+                .into_iter()
+                .map(|value| OptionalFocusItem::Choice {
+                    field: SetupField::ShellInitFileMode,
+                    value,
+                })
+                .collect::<Vec<_>>();
+            if optional_field_value(draft, SetupField::ShellInitFileMode) == "path" {
+                items.push(OptionalFocusItem::Field(SetupField::ShellInitFilePath));
+            }
+            items
+        }
         OptionalSection::Toolsets => multi_select_options(SetupField::Toolsets)
             .into_iter()
             .map(|value| OptionalFocusItem::MultiSelect {
@@ -3405,6 +3452,12 @@ fn optional_center_inspector_body(
                     "",
                     "Default: off",
                 ],
+                OptionalSection::Shell => &[
+                    "Configure the init file sourced for managed shell invocations.",
+                    "Default: ~/.agentic_gpt/.bashrc; Disabled sources no file.",
+                    "An explicit path is trusted code and can run with the process's execution privileges.",
+                    "It runs inside the configured sandbox, then the requested command's working directory is restored.",
+                ],
                 OptionalSection::Toolsets => &[
                     "Choose which built-in tool namespaces are available at runtime.",
                     "The selection applies to every tool with the corresponding namespace prefix.",
@@ -3476,6 +3529,12 @@ fn optional_center_inspector_body(
                     "支持的传输：",
                     "• streamable-http",
                     "• stdio",
+                ],
+                OptionalSection::Shell => &[
+                    "配置托管 shell 调用时要 source 的初始化文件。",
+                    "默认值：~/.agentic_gpt/.bashrc；Disabled 表示不 source 文件。",
+                    "显式路径代表受信任代码，可使用进程的执行权限运行命令。",
+                    "它会在当前配置的沙箱内运行，随后恢复请求指定的工作目录。",
                 ],
                 OptionalSection::Toolsets => &[
                     "选择运行时可用的内置工具命名空间。",
@@ -3593,6 +3652,16 @@ fn optional_form_inspector_body(
                 SetupField::BubblewrapPath => &[
                     "Command or path used to launch bubblewrap.",
                     "Default: bwrap. This wizard checks only that the value is non-empty.",
+                ],
+                SetupField::ShellInitFileMode => &[
+                    "Choose which init file is sourced before the command.",
+                    "Default uses ~/.agentic_gpt/.bashrc; Disabled sources none.",
+                    "Path runs a trusted file with the process's execution privileges.",
+                ],
+                SetupField::ShellInitFilePath => &[
+                    "Path to a trusted shell init file; shown only when mode is Path.",
+                    "Its contents are executed before the requested command, inside the configured sandbox.",
+                    "The requested command's working directory is restored afterward.",
                 ],
                 SetupField::RequiredRuntimePaths => &[
                     "Host paths mounted read-only into the sandbox so programs can run.",
@@ -3806,6 +3875,16 @@ fn optional_form_inspector_body(
                     "启动 bubblewrap 使用的命令名或路径。",
                     "默认 bwrap；此向导只检查它是否非空，不检查可执行文件是否存在。",
                 ],
+                SetupField::ShellInitFileMode => &[
+                    "选择命令执行前要 source 的初始化文件。",
+                    "Default 使用 ~/.agentic_gpt/.bashrc；Disabled 不 source 文件。",
+                    "Path 会以进程的执行权限运行受信任文件。",
+                ],
+                SetupField::ShellInitFilePath => &[
+                    "受信任 shell 初始化文件的路径；仅在模式为 Path 时显示。",
+                    "文件内容会在请求的命令前、当前配置的沙箱内执行。",
+                    "执行后会恢复请求指定的工作目录。",
+                ],
                 SetupField::RequiredRuntimePaths => &[
                     "以只读方式挂载进沙箱、供程序运行所需的宿主机路径。",
                     "默认 /usr、/bin、/lib、/lib64、/etc/ssl。",
@@ -3951,13 +4030,14 @@ fn editing_cursor(state: &TuiState, field: SetupField) -> Option<usize> {
         .map(|editing| editing.cursor)
 }
 
-fn all_optional_sections() -> [OptionalSection; 11] {
+fn all_optional_sections() -> [OptionalSection; 12] {
     [
         OptionalSection::Identity,
         OptionalSection::Workspace,
         OptionalSection::Confirmation,
         OptionalSection::Limits,
         OptionalSection::Sandbox,
+        OptionalSection::Shell,
         OptionalSection::Toolsets,
         OptionalSection::McpServers,
         OptionalSection::Room,
@@ -3974,6 +4054,7 @@ fn section_label(section: OptionalSection, language: UiLanguage) -> &'static str
         OptionalSection::Confirmation => t(language, "Confirmation", "确认"),
         OptionalSection::Limits => t(language, "Limits", "限制"),
         OptionalSection::Sandbox => t(language, "Sandbox", "沙箱"),
+        OptionalSection::Shell => t(language, "Shell", "Shell"),
         OptionalSection::Toolsets => t(language, "Toolsets", "工具集"),
         OptionalSection::McpServers => t(language, "MCP servers", "MCP 服务"),
         OptionalSection::Room => t(language, "Room", "Room"),
@@ -4003,6 +4084,8 @@ fn optional_field_label(field: SetupField, language: UiLanguage) -> &'static str
             "默认进程响应字节预算",
         ),
         SetupField::SandboxEnabled => t(language, "Sandbox enabled", "启用沙箱"),
+        SetupField::ShellInitFileMode => t(language, "Init file mode", "初始化文件模式"),
+        SetupField::ShellInitFilePath => t(language, "Init file path", "初始化文件路径"),
         SetupField::BubblewrapPath => t(language, "Bubblewrap path", "Bubblewrap 路径"),
         SetupField::RequiredRuntimePaths => t(language, "Required runtime paths", "必需运行时路径"),
         SetupField::RepositoryRoot => t(language, "Repository root", "仓库根目录"),
@@ -4097,6 +4180,11 @@ pub(super) fn optional_field_value(draft: &OptionalSectionDraft, field: SetupFie
             SetupField::RequiredRuntimePaths => value.required_runtime_paths.clone(),
             _ => String::new(),
         },
+        OptionalSectionDraft::Shell(value) => match field {
+            SetupField::ShellInitFileMode => value.init_file_mode.clone(),
+            SetupField::ShellInitFilePath => value.init_file_path.clone(),
+            _ => String::new(),
+        },
         OptionalSectionDraft::Toolsets(value) => match field {
             SetupField::Toolsets => value.selection.selected().join(" → "),
             _ => String::new(),
@@ -4169,6 +4257,11 @@ pub(super) fn set_optional_field(
             SetupField::BubblewrapPath => draft.bubblewrap_path = value,
             SetupField::RequiredRuntimePaths => draft.required_runtime_paths = value,
             SetupField::SandboxEnabled => draft.enabled = value == "true",
+            _ => {}
+        },
+        OptionalSectionDraft::Shell(draft) => match field {
+            SetupField::ShellInitFileMode => draft.init_file_mode = value,
+            SetupField::ShellInitFilePath => draft.init_file_path = value,
             _ => {}
         },
         OptionalSectionDraft::Room(draft) => match field {
@@ -5035,6 +5128,8 @@ fn review_item_label(label_key: &str, language: UiLanguage) -> &'static str {
             "默认进程响应字节预算",
         ),
         "sandbox_enabled" => t(language, "Sandbox enabled", "启用沙箱"),
+        "shell_init_file_mode" => t(language, "Init file mode", "初始化文件模式"),
+        "shell_init_file_path" => t(language, "Init file path", "初始化文件路径"),
         "bubblewrap_path" => t(language, "Bubblewrap path", "Bubblewrap 路径"),
         "required_runtime_paths" => t(language, "Required runtime paths", "必需运行时路径"),
         "mcp_server" => t(language, "MCP server", "MCP 服务"),
@@ -5164,4 +5259,31 @@ fn render_placeholder(
         theme,
     );
     let _ = state;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shell_path_field_is_focusable_only_for_explicit_path_mode() {
+        let mut draft = default_optional_draft(UiLanguage::En, OptionalSection::Shell);
+        let default_focus = optional_focus_items(OptionalSection::Shell, &draft);
+        assert_eq!(default_focus.len(), 3);
+        assert!(default_focus
+            .iter()
+            .all(|item| item.field() == SetupField::ShellInitFileMode));
+
+        set_optional_field(
+            &mut draft,
+            SetupField::ShellInitFileMode,
+            "path".to_string(),
+        );
+        let path_focus = optional_focus_items(OptionalSection::Shell, &draft);
+        assert_eq!(path_focus.len(), 4);
+        assert!(matches!(
+            path_focus.last(),
+            Some(OptionalFocusItem::Field(SetupField::ShellInitFilePath))
+        ));
+    }
 }

@@ -1,8 +1,7 @@
 use agentic_gpt_protocol::{
-    ActiveSkill, ProcessExecRequest, SkillActivationRequest, SkillActivationResponse, SkillDetail,
-    SkillOrigin, SkillPackageSummary, SkillReadRequest, SkillReadResponse, SkillRunRequest,
-    SkillSearchRequest, SkillSummary, SkillsActiveResponse, SkillsListResponse,
-    SkillsSearchResponse,
+    ActiveSkill, SkillActivationRequest, SkillActivationResponse, SkillDetail, SkillOrigin,
+    SkillPackageSummary, SkillReadRequest, SkillReadResponse, SkillRunRequest, SkillSearchRequest,
+    SkillSummary, SkillsActiveResponse, SkillsListResponse, SkillsSearchResponse,
 };
 use anyhow::{anyhow, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
@@ -199,16 +198,14 @@ pub(crate) async fn run(
     }
     process::start_and_wait_skill_process(
         state,
-        ProcessExecRequest {
-            agent_id: config.agent_id,
-            group: request.group,
-            program: program.to_string_lossy().to_string(),
-            args: request.args.unwrap_or_default(),
-            need_confirm: false,
-            confirm_method: None,
-            working_directory: request.working_directory,
-            wait_seconds: request.wait_seconds,
-        },
+        exec::ExecutionRequest::argv(
+            config.agent_id,
+            request.group,
+            program.to_string_lossy().to_string(),
+            request.args.unwrap_or_default(),
+            request.working_directory,
+            request.wait_seconds,
+        ),
         (&request.id, &request.path),
         request_source,
         terminal_event_hook,

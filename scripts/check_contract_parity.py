@@ -21,6 +21,7 @@ import fcntl
 import sqlite3
 import os
 from pathlib import Path
+import shlex
 import queue
 import select
 import signal
@@ -1631,6 +1632,9 @@ def configure_process_fixture(
                 {"program": "/usr/bin/true", "argsPrefix": []},
                 {"program": "/usr/bin/sleep", "argsPrefix": ["30"]},
                 {"program": "/usr/bin/sleep", "argsPrefix": ["1"]},
+                {"program": "/usr/bin/printf", "argsPrefix": ["feedback-child-A"]},
+                {"program": "/usr/bin/printf", "argsPrefix": ["feedback-child-B"]},
+                {"program": "/usr/bin/pwd", "argsPrefix": []},
             ],
             "confirm": [],
             "deny": [{"program": "/usr/bin/echo", "argsPrefix": []}],
@@ -2310,7 +2314,7 @@ def start_local_agent(binary: Path, root: Path, reports: list[str]) -> tuple[Man
         binary,
         config,
         "process.exec",
-        {"program": "/usr/bin/printf", "args": [PROCESS_MARKERS[0]], "waitSeconds": 5},
+        {"command": shlex.join(["/usr/bin/printf", PROCESS_MARKERS[0]]), "waitSeconds": 5},
         env,
         "Agent local process.exec",
     )
@@ -2358,7 +2362,7 @@ def start_local_agent(binary: Path, root: Path, reports: list[str]) -> tuple[Man
         binary,
         config,
         "process.exec",
-        {"program": "/usr/bin/printf", "args": [PROCESS_OVERFLOW_MARKER], "waitSeconds": 5},
+        {"command": shlex.join(["/usr/bin/printf", PROCESS_OVERFLOW_MARKER]), "waitSeconds": 5},
         env,
         "Agent local process.exec overflow",
     )
@@ -2892,7 +2896,7 @@ def run_hub_event_gate(
     def start_event_process(name: str) -> str:
         response, started = hub_json(
             hub_port, hub_key, "POST", "/v1/process/exec",
-            {"agentId": normal_id, "program": str(programs[name]), "args": [],
+            {"agentId": normal_id, "command": shlex.join([str(programs[name])]),
              "needConfirm": False, "waitSeconds": 0},
             f"Hub real {name} event producer",
         )
@@ -3486,6 +3490,7 @@ def run_hub_late_response_gate(
         reports,
     )
     configure_process_fixture(config)
+    agent_workspace = Path(json.loads(config.read_text())["workspaceRoot"])
     wait_for_agent(hub_port, hub_key, agent_id, "Hub delayed-response Agent connection", agent)
     relay.arm_late_response("parity-late-event")
     relay.arm_receipt_hold()
@@ -3496,8 +3501,8 @@ def run_hub_late_response_gate(
         "/v1/process/exec",
         {
             "agentId": agent_id,
-            "program": "/usr/bin/sleep",
-            "args": ["1"],
+            "command": shlex.join(["/usr/bin/sleep", "1"]),
+            "cwd": str(agent_workspace),
             "group": "parity-late-event",
             "needConfirm": False,
             "waitSeconds": 30,
@@ -3516,6 +3521,16 @@ def run_hub_late_response_gate(
     process_envelope = relay.wait_for_process_command(
         "parity-late-event", 5, "Hub delayed-response process.exec envelope"
     )
+    wire_command = process_envelope.get("command", {})
+    wire_payload = wire_command.get("payload", {}) if isinstance(wire_command, dict) else {}
+    expected_command = shlex.join(["/usr/bin/sleep", "1"])
+    if (
+        wire_payload.get("command") != expected_command
+        or wire_payload.get("cwd") != str(agent_workspace)
+        or "program" in wire_payload
+        or "args" in wire_payload
+    ):
+        fail("Hub HTTP-to-wire process contract", f"Agent wire request did not preserve command/cwd: {wire_payload}")
     process_origin = {
         "runId": process_envelope.get("runId"),
         "requestId": process_envelope.get("requestId"),
@@ -3811,7 +3826,6 @@ def run_hub_late_response_gate(
         hub_key,
         agent_id,
         "/usr/bin/true",
-        [],
         "parity-terminal-inline",
         5,
         "Hub normal terminal response suppression",
@@ -3897,8 +3911,8 @@ def run_hub_feedback_delta_recovery_gate(
                     "agentId": agent_id,
                     "group": group,
                     "elements": [
-                        {"program": "/usr/bin/printf", "args": ["feedback-child-A"]},
-                        {"program": "/usr/bin/printf", "args": ["feedback-child-B"]},
+                        {"command": shlex.join(["/usr/bin/printf", "feedback-child-A"])},
+                        {"command": shlex.join(["/usr/bin/printf", "feedback-child-B"])},
                     ],
                     "needConfirm": False,
                     "waitSeconds": 30,
@@ -4163,8 +4177,7 @@ def run_hub_agent_crash_recovery_gate(
                 "/v1/process/exec",
                 {
                     "agentId": agent_id,
-                    "program": "/usr/bin/sleep",
-                    "args": ["1"],
+                    "command": shlex.join(["/usr/bin/sleep", "1"]),
                     "group": group,
                     "needConfirm": False,
                     "waitSeconds": 30,
@@ -4881,7 +4894,7 @@ def run_agent_event_gate(binary: Path, root: Path, reports: list[str]) -> Manage
         config,
         env,
         "process.exec",
-        {"program": "/usr/bin/printf", "args": [PROCESS_MARKERS[0]], "waitSeconds": 5},
+        {"command": shlex.join(["/usr/bin/printf", PROCESS_MARKERS[0]]), "waitSeconds": 5},
         "Agent Unix inline process.exec",
     )
     inline_id = inline.get("processId")
@@ -4911,7 +4924,7 @@ def run_agent_event_gate(binary: Path, root: Path, reports: list[str]) -> Manage
         process,
         5,
         "process.exec",
-        {"program": "/usr/bin/sleep", "args": ["1"], "waitSeconds": 0},
+        {"command": shlex.join(["/usr/bin/sleep", "1"]), "waitSeconds": 0},
         "Agent stdio asynchronous process.exec",
     )
     async_id = asynchronous.get("processId")
@@ -5037,8 +5050,7 @@ def run_http_internal_policy_off_gate(
         13,
         "process.exec",
         {
-            "program": "/usr/bin/sleep",
-            "args": ["1"],
+            "command": shlex.join(["/usr/bin/sleep", "1"]),
             "waitSeconds": 0,
         },
         "Agent HTTP internal-off async process.exec",
@@ -5098,7 +5110,7 @@ def run_live_event_policy_reload_gate(
             session,
             3,
             "process.exec",
-            {"program": "/usr/bin/sleep", "args": ["30"], "waitSeconds": 0},
+            {"command": shlex.join(["/usr/bin/sleep", "30"]), "waitSeconds": 0},
             "Agent pre-reload async process.exec",
         )
         old_id = old_start.get("processId")
@@ -5147,7 +5159,7 @@ def run_live_event_policy_reload_gate(
             session,
             5,
             "process.exec",
-            {"program": "/usr/bin/sleep", "args": ["1"], "waitSeconds": 0},
+            {"command": shlex.join(["/usr/bin/sleep", "1"]), "waitSeconds": 0},
             "Agent post-reload async process.exec",
         )
         new_id = new_start.get("processId")
@@ -5379,15 +5391,17 @@ def wait_for_agent(port: int, api_key: str, agent_id: str, scenario: str,
     wait_until(online, scenario, f"connected Agent {agent_id}", process=process)
 
 
-def process_request(port: int, api_key: str, agent_id: str, program: str, args: list[str], group: str,
-                    wait_seconds: int | None = 0, scenario: str = "Hub process.exec") -> dict[str, Any]:
+def process_request(port: int, api_key: str, agent_id: str, command: str, group: str,
+                    wait_seconds: int | None = 0, scenario: str = "Hub process.exec",
+                    cwd: str | None = None) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "agentId": agent_id,
-        "program": program,
-        "args": args,
+        "command": command,
         "group": group,
         "needConfirm": False,
     }
+    if cwd is not None:
+        payload["cwd"] = cwd
     if wait_seconds is not None:
         payload["waitSeconds"] = wait_seconds
     response, value = hub_json(port, api_key, "POST", "/v1/process/exec", payload, scenario)
@@ -5708,8 +5722,7 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
                 {
                     "name": "process.exec",
                     "arguments": {
-                        "program": "/usr/bin/printf",
-                        "args": [PROCESS_MARKERS[0]],
+                        "command": shlex.join(["/usr/bin/printf", PROCESS_MARKERS[0]]),
                         "waitSeconds": 5,
                     },
                 },
@@ -5828,6 +5841,7 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
         )
 
 
+        normal_workspace = Path(json.loads(normal_config.read_text())["workspaceRoot"])
         full_exec = json_result(
             mcp_call(
                 hub_port,
@@ -5839,8 +5853,8 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
                     "name": "process.exec",
                     "arguments": {
                         "agentId": normal_id,
-                        "program": "/usr/bin/printf",
-                        "args": [PROCESS_MARKERS[1]],
+                        "command": f"/usr/bin/pwd; {shlex.join(['/usr/bin/printf', PROCESS_MARKERS[1]])}",
+                        "cwd": str(normal_workspace),
                         "needConfirm": False,
                         "waitSeconds": 5,
                     },
@@ -5855,7 +5869,7 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
             not full_id
             or full_exec.get("agentId") != normal_id
             or full_exec.get("state") != "completed"
-            or full_output.get("stdout", {}).get("data") != PROCESS_MARKERS[1]
+            or full_output.get("stdout", {}).get("data") != f"{normal_workspace.resolve()}\n{PROCESS_MARKERS[1]}"
             or full_output.get("stdout", {}).get("encoding") != "utf8"
             or process_response_size(full_exec) > 4096
         ):
@@ -5923,7 +5937,7 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
         if (
             full_read.get("agentId") != normal_id
             or full_read.get("processId") != full_id
-            or full_read.get("output", {}).get("stdout", {}).get("data") != PROCESS_MARKERS[1]
+            or full_read.get("output", {}).get("stdout", {}).get("data") != f"{normal_workspace.resolve()}\n{PROCESS_MARKERS[1]}"
             or "mcpResult" in full_read
         ):
             fail("Hub Full process.read auto view", f"unified read omitted command output or MCP applicability: {full_read}")
@@ -5938,8 +5952,10 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
                     "name": "process.exec",
                     "arguments": {
                         "agentId": normal_id,
-                        "program": "/bin/sh",
-                        "args": ["-c", PROCESS_MCP_PAGINATION_COMMAND, "sh", PROCESS_OVERFLOW_MARKER],
+                        "command": shlex.join([
+                            "/bin/sh", "-c", PROCESS_MCP_PAGINATION_COMMAND,
+                            "sh", PROCESS_OVERFLOW_MARKER,
+                        ]),
                         "needConfirm": False,
                         "waitSeconds": 5,
                     },
@@ -5993,7 +6009,8 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
                 )
 
         page_exec = process_request(
-            hub_port, hub_key, normal_id, "/usr/bin/printf", [PROCESS_OVERFLOW_MARKER],
+            hub_port, hub_key, normal_id,
+            shlex.join(["/usr/bin/printf", PROCESS_OVERFLOW_MARKER]),
             "parity-read-pages", 5, "Hub HTTP process.read page fixture",
         )
         validate_operation_response(
@@ -6022,8 +6039,9 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
             fail("Hub HTTP process.read configured-default pagination", "the configured 4096-byte response cap did not paginate real output")
 
         escaped_exec = process_request(
-            hub_port, hub_key, normal_id, "/usr/bin/printf",
-            ["%s", PROCESS_ESCAPE_OUTPUT], "parity-read-json-escape", 5,
+            hub_port, hub_key, normal_id,
+            shlex.join(["/usr/bin/printf", "%s", PROCESS_ESCAPE_OUTPUT]),
+            "parity-read-json-escape", 5,
             "Hub HTTP process.read JSON escaping fixture",
         )
         escaped_id = escaped_exec.get("processId")
@@ -6048,9 +6066,9 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
             fail("Hub HTTP process.read JSON escaping budget", "JSON-escaped output did not honor the response budget")
 
         binary_exec = process_request(
-            hub_port, hub_key, normal_id, "/usr/bin/printf",
-            [PROCESS_BINARY_FORMAT], "parity-read-base64", 5,
-            "Hub HTTP process.read binary fixture",
+            hub_port, hub_key, normal_id,
+            shlex.join(["/usr/bin/printf", PROCESS_BINARY_FORMAT]),
+            "parity-read-base64", 5, "Hub HTTP process.read binary fixture",
         )
         binary_id = binary_exec.get("processId")
         if not binary_id:
@@ -6119,7 +6137,8 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
                 )
 
         auto_start = process_request(
-            hub_port, hub_key, normal_id, "/bin/sh", ["-c", PROCESS_AUTO_COMMAND],
+            hub_port, hub_key, normal_id,
+            shlex.join(["/bin/sh", "-c", PROCESS_AUTO_COMMAND]),
             "parity-read-auto-wait", 0, "Hub process.read auto wait fixture",
         )
         auto_id = auto_start.get("processId")
@@ -6165,7 +6184,8 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
             fail("Hub process.read status waits for exit", f"status returned on output rather than process exit: {auto_status}")
 
         tail_start = process_request(
-            hub_port, hub_key, normal_id, "/bin/sh", ["-c", PROCESS_TAIL_COMMAND],
+            hub_port, hub_key, normal_id,
+            shlex.join(["/bin/sh", "-c", PROCESS_TAIL_COMMAND]),
             "parity-read-tail-after-exit", 0, "Hub process.read tail fixture",
         )
         tail_id = tail_start.get("processId")
@@ -6266,8 +6286,9 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
             mcp_call(
                 hub_port, hub_key, full_session, 6, "tools/call",
                 {"name": "process.exec", "arguments": {
-                    "agentId": normal_id, "program": "/usr/bin/echo",
-                    "args": ["must-be-denied"], "needConfirm": False, "waitSeconds": 5,
+                    "agentId": normal_id,
+                    "command": shlex.join(["/usr/bin/echo", "must-be-denied"]),
+                    "needConfirm": False, "waitSeconds": 5,
                 }},
                 "Hub Full policy denied process",
             ),
@@ -6305,7 +6326,7 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
             coordinator_session,
             3,
             "tools/call",
-            {"name": "process.exec", "arguments": {"agentId": normal_id, "program": "/usr/bin/true"}},
+            {"name": "process.exec", "arguments": {"agentId": normal_id, "command": "/usr/bin/true"}},
             "Hub Coordinator hidden call",
         )
         hidden_error = hidden.get("error", {}).get("message", "") if isinstance(hidden.get("error"), dict) else ""
@@ -6327,8 +6348,8 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
 
         completed_request = {
             "agentId": normal_id,
-            "program": "/usr/bin/printf",
-            "args": [PROCESS_MARKERS[2]],
+            "command": f"/usr/bin/pwd; {shlex.join(['/usr/bin/printf', PROCESS_MARKERS[2]])}",
+            "cwd": str(normal_workspace),
             "group": "parity-completed",
             "needConfirm": False,
             "waitSeconds": 5,
@@ -6337,22 +6358,59 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
         invalid_exec = dict(completed_request)
         invalid_exec.pop("needConfirm")
         assert_rejected(document, schemas, "ProcessExecRequest", invalid_exec, "Hub HTTP process.exec negative request")
+        legacy_exec = {
+            "agentId": normal_id,
+            "program": "/usr/bin/printf",
+            "args": [PROCESS_MARKERS[2]],
+            "group": "parity-legacy-exec",
+            "needConfirm": False,
+            "waitSeconds": 5,
+        }
+        assert_rejected(
+            document, schemas, "ProcessExecRequest", legacy_exec,
+            "Hub HTTP process.exec rejects old program/args input",
+        )
+        legacy_http_response, legacy_http_body = hub_json(
+            hub_port, hub_key, "POST", "/v1/process/exec", legacy_exec,
+            "Hub HTTP rejects old process.exec input",
+        )
+        if legacy_http_response.status not in {400, 422}:
+            fail(
+                "Hub HTTP rejects old process.exec input",
+                f"legacy program/args request was not rejected: {legacy_http_response.status}, {legacy_http_body}",
+            )
+        legacy_mcp = mcp_call(
+            hub_port, hub_key, full_session, 11, "tools/call",
+            {
+                "name": "process.exec",
+                "arguments": {
+                    "agentId": normal_id,
+                    "program": "/usr/bin/true",
+                    "args": [],
+                    "needConfirm": False,
+                    "waitSeconds": 5,
+                },
+            },
+            "Hub MCP rejects old process.exec input",
+        )
+        if "error" not in legacy_mcp and legacy_mcp.get("result", {}).get("isError") is not True:
+            fail("Hub MCP rejects old process.exec input", f"legacy program/args call was not rejected: {legacy_mcp}")
         completed = process_request(
             hub_port,
             hub_key,
             normal_id,
-            "/usr/bin/printf",
-            [PROCESS_MARKERS[2]],
+            completed_request["command"],
             "parity-completed",
             5,
-            "Hub HTTP completed printf",
+            "Hub HTTP completed pwd/printf chain",
+            cwd=completed_request["cwd"],
         )
         validate_operation_response(document, "/v1/process/exec", "post", 200, completed, "Hub HTTP completed printf")
         completed_id = completed.get("processId")
         if (
             not completed_id
             or completed.get("state") != "completed"
-            or completed.get("output", {}).get("stdout", {}).get("data") != PROCESS_MARKERS[2]
+            or completed.get("output", {}).get("stdout", {}).get("data") != f"{normal_workspace.resolve()}\n{PROCESS_MARKERS[2]}"
         ):
             fail("Hub HTTP completed printf", f"expected complete process observation: {completed}")
         if process_response_size(completed) > 4096:
@@ -6373,8 +6431,8 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
             fail("Hub HTTP inline completion suppression", f"terminal response created a completion event: {completed_events}")
 
         active = process_request(
-            hub_port, hub_key, normal_id, "/usr/bin/sleep", ["30"], "parity-active", 0,
-            "Hub HTTP active process",
+            hub_port, hub_key, normal_id,
+            shlex.join(["/usr/bin/sleep", "30"]), "parity-active", 0,
         )
         validate_operation_response(document, "/v1/process/exec", "post", 200, active, "Hub HTTP active process")
         active_id = active.get("processId")
@@ -6415,11 +6473,19 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
         ):
             fail("Hub HTTP process.cancel", f"missing observed cancellation evidence: {cancel_body}")
 
+        batch_subdir = normal_workspace / "batch-element"
+        batch_subdir.mkdir(exist_ok=True)
         batch_payload = {
             "agentId": normal_id,
+            "cwd": str(normal_workspace),
             "elements": [
-                {"program": "/usr/bin/printf", "args": [PROCESS_MARKERS[3]]},
-                {"program": "/usr/bin/printf", "args": [PROCESS_MARKERS[4]]},
+                {
+                    "command": f"/usr/bin/pwd; {shlex.join(['/usr/bin/printf', PROCESS_MARKERS[3]])}",
+                    "cwd": str(batch_subdir),
+                },
+                {
+                    "command": f"/usr/bin/pwd; {shlex.join(['/usr/bin/printf', PROCESS_MARKERS[4]])}",
+                },
             ],
             "needConfirm": False,
             "waitSeconds": 5,
@@ -6428,6 +6494,33 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
         invalid_batch = dict(batch_payload)
         invalid_batch.pop("needConfirm")
         assert_rejected(document, schemas, "ProcessBatchExecRequest", invalid_batch, "Hub HTTP process.batch negative request")
+        legacy_batch = {
+            "agentId": normal_id,
+            "workingDirectory": str(normal_workspace),
+            "elements": [
+                {
+                    "program": "/usr/bin/pwd",
+                    "args": [],
+                    "workingDirectory": str(batch_subdir),
+                },
+                {"program": "/usr/bin/pwd", "args": []},
+            ],
+            "needConfirm": False,
+            "waitSeconds": 5,
+        }
+        assert_rejected(
+            document, schemas, "ProcessBatchExecRequest", legacy_batch,
+            "Hub HTTP process.batch rejects old program/args input",
+        )
+        legacy_batch_response, legacy_batch_body = hub_json(
+            hub_port, hub_key, "POST", "/v1/process/batch", legacy_batch,
+            "Hub HTTP rejects old process.batch input",
+        )
+        if legacy_batch_response.status not in {400, 422}:
+            fail(
+                "Hub HTTP rejects old process.batch input",
+                f"legacy element argv request was not rejected: {legacy_batch_response.status}, {legacy_batch_body}",
+            )
         batch_response, batch_body = hub_json(
             hub_port, hub_key, "POST", "/v1/process/batch", batch_payload, "Hub HTTP process.batch"
         )
@@ -6442,8 +6535,8 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
             or len(batch_processes) != 2
             or [process.get("state") for process in batch_processes] != ["completed", "completed"]
             or not all(process.get("processId") and process.get("agentId") == normal_id for process in batch_processes)
-            or batch_processes[0].get("output", {}).get("stdout", {}).get("data") != PROCESS_MARKERS[3]
-            or batch_processes[1].get("output", {}).get("stdout", {}).get("data") != PROCESS_MARKERS[4]
+            or batch_processes[0].get("output", {}).get("stdout", {}).get("data") != f"{batch_subdir.resolve()}\n{PROCESS_MARKERS[3]}"
+            or batch_processes[1].get("output", {}).get("stdout", {}).get("data") != f"{normal_workspace.resolve()}\n{PROCESS_MARKERS[4]}"
         ):
             fail("Hub HTTP process.batch", f"ordered complete process observations were not returned: {batch_body}")
         if process_response_size(batch_body) > 4096:
@@ -6781,8 +6874,7 @@ def run_runtime_gate(root: Path, agent_binary: Path, hub_binary: Path,
         pagination_ids: list[str] = []
         for _ in range(101):
             value = process_request(
-                hub_port, hub_key, normal_id, "/usr/bin/true", [], "parity-page", 0,
-                "Hub process.list pagination setup",
+                hub_port, hub_key, normal_id, "/usr/bin/true", "parity-page", 0,
             )
             validate_operation_response(document, "/v1/process/exec", "post", 200, value, "Hub process.list pagination setup")
             pagination_id = value.get("processId")

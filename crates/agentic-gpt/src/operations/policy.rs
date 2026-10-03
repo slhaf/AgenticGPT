@@ -11,7 +11,10 @@ use crate::config::{
 use crate::config_cli::{PathCommand, PathRootCommand, PathRootKind, RuleCommand};
 use crate::exec;
 use crate::state::CapabilityProfile;
-use crate::utils::command_preview;
+use crate::utils::{command_preview, risk_level, risky_file_mutation};
+
+#[path = "shell_parser.rs"]
+pub(crate) mod shell_parser;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize, ValueEnum)]
 #[serde(rename_all = "lowercase")]
@@ -61,6 +64,72 @@ pub(crate) fn policy_decision_for_profile(
     }
 
     configured_decision.unwrap_or(decision)
+}
+
+pub(crate) fn shell_policy_decision_for_profile(
+    config: &Config,
+    profile: CapabilityProfile,
+    command: &str,
+    need_confirm: bool,
+) -> PolicyDecision {
+    let extraction = shell_parser::extract_literal_commands(command);
+    let mut decision = PolicyDecision::Allow;
+    let mut complete = extraction.complete;
+
+    for invocation in &extraction.commands {
+        let invocation_decision = policy_decision_for_profile(
+            config,
+            profile,
+            &invocation.program,
+            &invocation.args,
+            false,
+        );
+        if invocation_decision == PolicyDecision::Deny {
+            return PolicyDecision::Deny;
+        }
+        if !invocation.complete {
+            complete = false;
+            continue;
+        }
+        let invocation_decision = if invocation_decision == PolicyDecision::Allow
+            && !config
+                .policy
+                .allow
+                .iter()
+                .any(|rule| rule.matches(&invocation.program, &invocation.args))
+        {
+            PolicyDecision::Confirm
+        } else {
+            invocation_decision
+        };
+        decision = decision.max(invocation_decision);
+    }
+
+    if need_confirm || !complete || extraction.commands.is_empty() {
+        decision.max(PolicyDecision::Confirm)
+    } else {
+        decision
+    }
+}
+
+pub(crate) fn shell_script_risk_level(command: &str) -> &'static str {
+    let extraction = shell_parser::extract_literal_commands(command);
+    if !extraction.complete
+        || extraction
+            .commands
+            .iter()
+            .any(|invocation| risky_file_mutation(&invocation.program))
+    {
+        "HIGH"
+    } else if extraction
+        .commands
+        .iter()
+        .any(|invocation| risk_level(&invocation.program) != "LOW")
+    {
+        "MEDIUM"
+    } else {
+        "LOW"
+    }
 }
 
 impl Rule {
@@ -285,5 +354,177 @@ pub(crate) fn paths_match(left: &Path, right: &Path) -> bool {
     match exec::normalize_roots([left, right].into_iter()) {
         Ok(normalized) => normalized.len() == 1,
         Err(_) => false,
+    }
+}
+
+#[cfg(test)]
+mod shell_policy_tests {
+    use super::{shell_policy_decision_for_profile, PolicyDecision};
+    use crate::{
+        config::{Config, Rule},
+        state::CapabilityProfile,
+    };
+
+    fn config() -> Config {
+        Config::default_config().unwrap()
+    }
+
+    fn rule(program: &str, args_prefix: &[&str]) -> Rule {
+        Rule {
+            program: program.to_string(),
+            args_prefix: args_prefix.iter().map(|arg| (*arg).to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn shell_requires_allow_for_every_literal_command() {
+        let mut config = config();
+        config.policy.allow.push(rule("printf", &[]));
+        assert_eq!(
+            shell_policy_decision_for_profile(
+                &config,
+                CapabilityProfile::Normal,
+                "printf ok && printf 'two words'",
+                false,
+            ),
+            PolicyDecision::Allow
+        );
+        assert_eq!(
+            shell_policy_decision_for_profile(
+                &config,
+                CapabilityProfile::Normal,
+                "printf ok && git status",
+                false,
+            ),
+            PolicyDecision::Confirm
+        );
+    }
+
+    #[test]
+    fn shell_supports_literal_quotes_concatenation_and_supported_operators() {
+        let mut config = config();
+        config
+            .policy
+            .allow
+            .extend([rule("printf", &[]), rule("cat", &[])]);
+        let script = r#"printf 'two words' && printf "escaped \"quote" || cat 'pre'fix | printf end; printf final"#;
+        assert_eq!(
+            shell_policy_decision_for_profile(&config, CapabilityProfile::Normal, script, false,),
+            PolicyDecision::Allow
+        );
+
+        config.policy.confirm.push(rule("cat", &["prefix"]));
+        assert_eq!(
+            shell_policy_decision_for_profile(&config, CapabilityProfile::Normal, script, false,),
+            PolicyDecision::Confirm
+        );
+    }
+
+    #[test]
+    fn shell_confirmation_cannot_be_removed_by_an_allow_rule() {
+        let mut config = config();
+        config.policy.allow.push(rule("printf", &[]));
+        assert_eq!(
+            shell_policy_decision_for_profile(
+                &config,
+                CapabilityProfile::Normal,
+                "printf ok",
+                true,
+            ),
+            PolicyDecision::Confirm
+        );
+    }
+
+    #[test]
+    fn dynamic_words_redirects_and_complex_scripts_never_use_partial_allows() {
+        let mut config = config();
+        config
+            .policy
+            .allow
+            .extend([rule("printf", &[]), rule("true", &[])]);
+        for script in [
+            "",
+            r#"printf "$HOME""#,
+            "printf ok > output.txt",
+            "if true; then printf safe; fi",
+        ] {
+            assert_eq!(
+                shell_policy_decision_for_profile(
+                    &config,
+                    CapabilityProfile::Normal,
+                    script,
+                    false,
+                ),
+                PolicyDecision::Confirm,
+                "{script}"
+            );
+        }
+    }
+
+    #[test]
+    fn known_deny_wins_inside_unsupported_or_incomplete_scripts() {
+        let mut config = config();
+        config.policy.allow.push(rule("printf", &[]));
+        config.policy.deny.push(rule("touch", &["blocked"]));
+        for script in [
+            "printf ok; if true; then ssh host; fi",
+            r#"touch blocked "$EXTRA"; printf ok"#,
+        ] {
+            assert_eq!(
+                shell_policy_decision_for_profile(
+                    &config,
+                    CapabilityProfile::Normal,
+                    script,
+                    false,
+                ),
+                PolicyDecision::Deny,
+                "{script}"
+            );
+        }
+    }
+    #[test]
+    fn terminal_dollar_in_a_quoted_argument_is_not_truncated() {
+        let mut config = config();
+        config.policy.allow.push(rule("touch", &["blocked"]));
+        config.policy.deny.push(rule("touch", &["blocked$"]));
+
+        assert_eq!(
+            shell_policy_decision_for_profile(
+                &config,
+                CapabilityProfile::Normal,
+                r#"touch "blocked$""#,
+                false,
+            ),
+            PolicyDecision::Deny
+        );
+    }
+
+    #[test]
+    fn escaped_crlf_cannot_hide_a_default_denied_command() {
+        let mut config = config();
+        config.policy.allow.push(rule("printf", &[]));
+        let script = concat!("printf safe \\", "\r\nssh host");
+
+        assert_eq!(
+            shell_policy_decision_for_profile(&config, CapabilityProfile::Normal, script, false,),
+            PolicyDecision::Deny
+        );
+    }
+
+    #[test]
+    fn escaped_word_separator_requires_confirmation_instead_of_partial_matching() {
+        let mut config = config();
+        config.policy.allow.push(rule("touch", &["blocked"]));
+        config.policy.deny.push(rule("touch", &[" blocked"]));
+
+        assert_eq!(
+            shell_policy_decision_for_profile(
+                &config,
+                CapabilityProfile::Normal,
+                r"touch \ blocked",
+                false,
+            ),
+            PolicyDecision::Confirm
+        );
     }
 }

@@ -26,21 +26,25 @@ thread_local! {
 }
 
 #[cfg(test)]
-fn set_test_ledger_path(path: Option<PathBuf>) {
+pub(crate) fn set_test_ledger_path(path: Option<PathBuf>) {
     TEST_LEDGER_PATH.with(|current| *current.borrow_mut() = path);
 }
 static TEMP_COUNTER: LazyLock<Mutex<u64>> = LazyLock::new(|| Mutex::new(0));
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum RetiredProcessCommand {
+pub(crate) enum RetiredProcessOperation {
+    Exec,
+    Batch,
     Status,
     Output,
     Result,
 }
 
-impl RetiredProcessCommand {
+impl RetiredProcessOperation {
     fn operation_name(self) -> &'static str {
         match self {
+            Self::Exec => "process.exec",
+            Self::Batch => "process.batch",
             Self::Status => "process.status",
             Self::Output => "process.output",
             Self::Result => "process.result",
@@ -51,8 +55,8 @@ impl RetiredProcessCommand {
 #[derive(Clone, Debug)]
 pub(crate) enum StoredCommand {
     Current(HubCommand),
-    RetiredProcessRead {
-        command_type: RetiredProcessCommand,
+    RetiredProcessCommand {
+        operation: RetiredProcessOperation,
         value: Value,
     },
 }
@@ -64,7 +68,7 @@ impl Serialize for StoredCommand {
     {
         match self {
             Self::Current(command) => command.serialize(serializer),
-            Self::RetiredProcessRead { value, .. } => value.serialize(serializer),
+            Self::RetiredProcessCommand { value, .. } => value.serialize(serializer),
         }
     }
 }
@@ -75,11 +79,8 @@ impl<'de> Deserialize<'de> for StoredCommand {
         D: serde::Deserializer<'de>,
     {
         let value = Value::deserialize(deserializer)?;
-        if let Some(command_type) = retired_process_command(&value) {
-            return Ok(Self::RetiredProcessRead {
-                command_type,
-                value,
-            });
+        if let Some(operation) = retired_process_operation(&value) {
+            return Ok(Self::RetiredProcessCommand { operation, value });
         }
         serde_json::from_value(value)
             .map(Self::Current)
@@ -87,13 +88,122 @@ impl<'de> Deserialize<'de> for StoredCommand {
     }
 }
 
-fn retired_process_command(value: &Value) -> Option<RetiredProcessCommand> {
+// Retire only serialized legacy DTO shapes; live HubCommand deserialization stays strict.
+fn retired_process_operation(value: &Value) -> Option<RetiredProcessOperation> {
     match value.get("type").and_then(Value::as_str)? {
-        "process.status" => Some(RetiredProcessCommand::Status),
-        "process.output" => Some(RetiredProcessCommand::Output),
-        "process.result" => Some(RetiredProcessCommand::Result),
+        "process.status" => Some(RetiredProcessOperation::Status),
+        "process.output" => Some(RetiredProcessOperation::Output),
+        "process.result" => Some(RetiredProcessOperation::Result),
+        "process.exec"
+            if stored_process_payload(value).is_some_and(is_legacy_process_exec_payload) =>
+        {
+            Some(RetiredProcessOperation::Exec)
+        }
+        "process.batch"
+            if stored_process_payload(value).is_some_and(is_legacy_process_batch_payload) =>
+        {
+            Some(RetiredProcessOperation::Batch)
+        }
         _ => None,
     }
+}
+
+fn stored_process_payload(value: &Value) -> Option<&Value> {
+    let command = value.as_object()?;
+    if !has_only_fields(command, &["type", "requestId", "payload"])
+        || !command.get("requestId").is_some_and(Value::is_string)
+    {
+        return None;
+    }
+    command.get("payload")
+}
+
+fn is_legacy_process_exec_payload(payload: &Value) -> bool {
+    let Some(payload) = payload.as_object() else {
+        return false;
+    };
+    has_only_fields(
+        payload,
+        &[
+            "agentId",
+            "group",
+            "program",
+            "args",
+            "needConfirm",
+            "confirmMethod",
+            "workingDirectory",
+            "waitSeconds",
+        ],
+    ) && payload.get("agentId").is_some_and(Value::is_string)
+        && payload.get("program").is_some_and(Value::is_string)
+        && payload
+            .get("args")
+            .and_then(Value::as_array)
+            .is_some_and(|args| args.iter().all(Value::is_string))
+        && payload.get("needConfirm").is_some_and(Value::is_boolean)
+        && optional_string_field(payload, "group")
+        && optional_string_field(payload, "confirmMethod")
+        && optional_string_field(payload, "workingDirectory")
+        && optional_u64_field(payload, "waitSeconds")
+}
+
+fn is_legacy_process_batch_payload(payload: &Value) -> bool {
+    let Some(payload) = payload.as_object() else {
+        return false;
+    };
+    let Some(elements) = payload.get("elements").and_then(Value::as_array) else {
+        return false;
+    };
+    // A legacy empty batch is identifiable by its serialized top-level workingDirectory.
+    (!elements.is_empty() || payload.contains_key("workingDirectory"))
+        && has_only_fields(
+            payload,
+            &[
+                "agentId",
+                "group",
+                "elements",
+                "needConfirm",
+                "confirmMethod",
+                "workingDirectory",
+                "waitSeconds",
+            ],
+        )
+        && payload.get("agentId").is_some_and(Value::is_string)
+        && payload.get("needConfirm").is_some_and(Value::is_boolean)
+        && optional_string_field(payload, "group")
+        && optional_string_field(payload, "confirmMethod")
+        && optional_string_field(payload, "workingDirectory")
+        && optional_u64_field(payload, "waitSeconds")
+        && elements.iter().all(is_legacy_process_exec_element)
+}
+
+fn is_legacy_process_exec_element(element: &Value) -> bool {
+    let Some(element) = element.as_object() else {
+        return false;
+    };
+    has_only_fields(element, &["program", "args", "workingDirectory"])
+        && element.get("program").is_some_and(Value::is_string)
+        && element
+            .get("args")
+            .and_then(Value::as_array)
+            .is_some_and(|args| args.iter().all(Value::is_string))
+        && optional_string_field(element, "workingDirectory")
+}
+
+fn has_only_fields(object: &serde_json::Map<String, Value>, allowed: &[&str]) -> bool {
+    object.keys().all(|field| allowed.contains(&field.as_str()))
+}
+
+fn optional_string_field(object: &serde_json::Map<String, Value>, field: &str) -> bool {
+    object
+        .get(field)
+        .is_none_or(|value| value.is_null() || value.is_string())
+}
+
+fn optional_u64_field(object: &serde_json::Map<String, Value>, field: &str) -> bool {
+    object
+        .get(field)
+        .is_none_or(|value| value.is_null() || value.as_u64().is_some())
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -396,8 +506,8 @@ pub(crate) fn completed_response(record: &LedgerRecord) -> Result<Option<AgentMe
         .map(|command| {
             let operation = match command {
                 StoredCommand::Current(command) => crate::operation::hub_command_name(command),
-                StoredCommand::RetiredProcessRead { command_type, .. } => {
-                    command_type.operation_name()
+                StoredCommand::RetiredProcessCommand { operation, .. } => {
+                    operation.operation_name()
                 }
             };
             crate::event_notifications::initial_response_dispositions(operation, &data)
@@ -790,11 +900,10 @@ mod tests {
             payload: ProcessExecRequest {
                 agent_id: agent_id.to_string(),
                 group: None,
-                program: "true".to_string(),
-                args: Vec::new(),
+                command: "true".to_string(),
                 need_confirm: false,
                 confirm_method: None,
-                working_directory: None,
+                cwd: None,
                 wait_seconds: None,
             },
         }
@@ -1264,8 +1373,8 @@ mod tests {
             recovered
                 .get("run-retired-completed")
                 .and_then(|record| record.command.as_ref()),
-            Some(StoredCommand::RetiredProcessRead {
-                command_type: RetiredProcessCommand::Output,
+            Some(StoredCommand::RetiredProcessCommand {
+                operation: RetiredProcessOperation::Output,
                 value,
             }) if value["type"] == retired_command_type
         ));
@@ -1273,8 +1382,8 @@ mod tests {
             recovered
                 .get("run-retired-incomplete")
                 .and_then(|record| record.command.as_ref()),
-            Some(StoredCommand::RetiredProcessRead {
-                command_type: RetiredProcessCommand::Status,
+            Some(StoredCommand::RetiredProcessCommand {
+                operation: RetiredProcessOperation::Status,
                 ..
             })
         ));
@@ -1282,8 +1391,8 @@ mod tests {
             recovered
                 .get("run-retired-result")
                 .and_then(|record| record.command.as_ref()),
-            Some(StoredCommand::RetiredProcessRead {
-                command_type: RetiredProcessCommand::Result,
+            Some(StoredCommand::RetiredProcessCommand {
+                operation: RetiredProcessOperation::Result,
                 ..
             })
         ));
@@ -1323,8 +1432,8 @@ mod tests {
             compacted
                 .get("run-retired-completed")
                 .and_then(|record| record.command.as_ref()),
-            Some(StoredCommand::RetiredProcessRead {
-                command_type: RetiredProcessCommand::Output,
+            Some(StoredCommand::RetiredProcessCommand {
+                operation: RetiredProcessOperation::Output,
                 value,
             }) if value == &serde_json::json!({
                 "type": "process.output",
@@ -1342,8 +1451,8 @@ mod tests {
             compacted
                 .get("run-retired-incomplete")
                 .and_then(|record| record.command.as_ref()),
-            Some(StoredCommand::RetiredProcessRead {
-                command_type: RetiredProcessCommand::Status,
+            Some(StoredCommand::RetiredProcessCommand {
+                operation: RetiredProcessOperation::Status,
                 ..
             })
         ));
@@ -1351,8 +1460,8 @@ mod tests {
             compacted
                 .get("run-retired-result")
                 .and_then(|record| record.command.as_ref()),
-            Some(StoredCommand::RetiredProcessRead {
-                command_type: RetiredProcessCommand::Result,
+            Some(StoredCommand::RetiredProcessCommand {
+                operation: RetiredProcessOperation::Result,
                 ..
             })
         ));
@@ -1363,6 +1472,335 @@ mod tests {
             Some(StoredCommand::Current(HubCommand::SkillsList { request_id }))
                 if request_id == "request-current-incomplete"
         ));
+    }
+
+    #[test]
+    fn stored_legacy_argv_commands_keep_identity_results_and_current_recovery() {
+        let _home_lock = TEST_HOME_LOCK.lock();
+        let _home = test_home();
+        let ledger = ledger_path().unwrap();
+        let legacy_exec = |request_id: &str| {
+            serde_json::json!({
+                "type": "process.exec",
+                "requestId": request_id,
+                "payload": {
+                    "agentId": "agent-a",
+                    "program": "echo",
+                    "args": ["legacy"],
+                    "needConfirm": false,
+                    "workingDirectory": "/legacy/work"
+                }
+            })
+        };
+        let legacy_batch = serde_json::json!({
+            "type": "process.batch",
+            "requestId": "request-old-batch",
+            "payload": {
+                "agentId": "agent-a",
+                "elements": [{
+                    "program": "echo",
+                    "args": ["legacy batch"],
+                    "workingDirectory": "/legacy/work"
+                }],
+                "needConfirm": false
+            }
+        });
+        let completed_command = legacy_exec("request-old-completed");
+        let accepted_command = serde_json::json!({
+            "type": "process.exec",
+            "requestId": "request-old-accepted",
+            "payload": {
+                "agentId": "agent-a",
+                "program": "echo",
+                "args": [],
+                "needConfirm": false
+            }
+        });
+        let unowned_command = legacy_exec("request-old-unowned");
+        let current_command =
+            serde_json::to_value(exec_command("request-current", "agent-a")).unwrap();
+        let current_batch = serde_json::to_value(HubCommand::ProcessBatch {
+            request_id: "request-current-batch".to_string(),
+            payload: agentic_gpt_protocol::ProcessBatchExecRequest {
+                agent_id: "agent-a".to_string(),
+                group: None,
+                elements: vec![agentic_gpt_protocol::ProcessExecElement {
+                    command: "echo current".to_string(),
+                    cwd: None,
+                }],
+                need_confirm: false,
+                confirm_method: None,
+                cwd: None,
+                wait_seconds: Some(0),
+            },
+        })
+        .unwrap();
+        let completed_result = serde_json::json!({"legacyResult": "retained"});
+        let records = [
+            serde_json::json!({
+                "runId": "run-old-completed",
+                "requestId": "request-old-completed",
+                "commandHash": "hash-old-completed",
+                "status": "accepted",
+                "agentId": "agent-a",
+                "command": completed_command,
+            }),
+            serde_json::json!({
+                "runId": "run-old-completed",
+                "requestId": "request-old-completed",
+                "commandHash": "hash-old-completed",
+                "status": "completed",
+                "agentId": "agent-a",
+                "command": completed_command,
+                "result": completed_result,
+            }),
+            serde_json::json!({
+                "runId": "run-old-accepted",
+                "requestId": "request-old-accepted",
+                "commandHash": "hash-old-accepted",
+                "status": "accepted",
+                "agentId": "agent-a",
+                "command": accepted_command,
+            }),
+            serde_json::json!({
+                "runId": "run-old-batch",
+                "requestId": "request-old-batch",
+                "commandHash": "hash-old-batch",
+                "status": "started",
+                "agentId": "agent-a",
+                "command": legacy_batch,
+            }),
+            serde_json::json!({
+                "runId": "run-current",
+                "requestId": "request-current",
+                "commandHash": "hash-current",
+                "status": "accepted",
+                "agentId": "agent-a",
+                "command": current_command,
+            }),
+            serde_json::json!({
+                "runId": "run-current-batch",
+                "requestId": "request-current-batch",
+                "commandHash": "hash-current-batch",
+                "status": "accepted",
+                "agentId": "agent-a",
+                "command": current_batch,
+            }),
+            serde_json::json!({
+                "runId": "run-old-unowned",
+                "requestId": "request-old-unowned",
+                "commandHash": "hash-old-unowned",
+                "status": "accepted",
+                "command": unowned_command,
+            }),
+        ];
+        for record in &records {
+            append_raw_record(&ledger, record);
+        }
+        let before = fs::read(&ledger).unwrap();
+
+        let recovered = latest_records().unwrap();
+        assert_eq!(recovered.len(), records.len() - 1);
+        let completed = recovered.get("run-old-completed").unwrap();
+        assert_eq!(completed.command_hash, "hash-old-completed");
+        assert_eq!(completed.result, Some(completed_result.clone()));
+        assert!(matches!(
+            completed.command.as_ref(),
+            Some(StoredCommand::RetiredProcessCommand {
+                operation: RetiredProcessOperation::Exec,
+                value,
+            }) if value == &completed_command
+        ));
+        let response = completed_response(completed).unwrap().unwrap();
+        assert!(matches!(
+            response,
+            AgentMessage::Response {
+                run_id: Some(run_id),
+                request_id,
+                data,
+                ..
+            } if run_id == "run-old-completed"
+                && request_id == "request-old-completed"
+                && data == completed_result
+        ));
+
+        let accepted = recovered.get("run-old-accepted").unwrap();
+        assert_eq!(accepted.command_hash, "hash-old-accepted");
+        assert_eq!(accepted.status, "accepted");
+        assert!(matches!(
+            accepted.command.as_ref(),
+            Some(StoredCommand::RetiredProcessCommand {
+                operation: RetiredProcessOperation::Exec,
+                value,
+            }) if value == &accepted_command
+        ));
+        let started = recovered.get("run-old-batch").unwrap();
+        assert_eq!(started.command_hash, "hash-old-batch");
+        assert_eq!(started.status, "started");
+        assert!(matches!(
+            started.command.as_ref(),
+            Some(StoredCommand::RetiredProcessCommand {
+                operation: RetiredProcessOperation::Batch,
+                value,
+            }) if value == &legacy_batch
+        ));
+        assert!(matches!(
+            recovered
+                .get("run-current")
+                .and_then(|record| record.command.as_ref()),
+            Some(StoredCommand::Current(HubCommand::Exec { request_id, .. }))
+                if request_id == "request-current"
+        ));
+        assert!(matches!(
+            recovered
+                .get("run-current-batch")
+                .and_then(|record| record.command.as_ref()),
+            Some(StoredCommand::Current(HubCommand::ProcessBatch { request_id, .. }))
+                if request_id == "request-current-batch"
+        ));
+        let unowned = recovered.get("run-old-unowned").unwrap();
+        assert_eq!(unowned.agent_id, None);
+        assert!(matches!(
+            unowned.command.as_ref(),
+            Some(StoredCommand::RetiredProcessCommand {
+                operation: RetiredProcessOperation::Exec,
+                ..
+            })
+        ));
+        assert!(matches!(
+            accept(
+                &envelope(
+                    "run-old-unowned",
+                    "request-old-unowned",
+                    "hash-old-unowned",
+                    skills_command("request-old-unowned"),
+                ),
+                "agent-a",
+            )
+            .unwrap(),
+            AcceptOutcome::LegacyUnowned
+        ));
+
+        let invalid_new_exec_with_legacy_fields = serde_json::json!({
+            "type": "process.exec",
+            "requestId": "request-invalid-new",
+            "payload": {
+                "agentId": "agent-a",
+                "command": "echo current",
+                "program": "echo",
+                "args": [],
+                "needConfirm": false
+            }
+        });
+        assert!(
+            serde_json::from_value::<StoredCommand>(invalid_new_exec_with_legacy_fields).is_err()
+        );
+        let empty_legacy_batch = serde_json::json!({
+            "type": "process.batch",
+            "requestId": "request-old-empty-batch",
+            "payload": {
+                "agentId": "agent-a",
+                "elements": [],
+                "needConfirm": false,
+                "workingDirectory": "/legacy/work"
+            }
+        });
+        assert!(matches!(
+            serde_json::from_value::<StoredCommand>(empty_legacy_batch.clone()).unwrap(),
+            StoredCommand::RetiredProcessCommand {
+                operation: RetiredProcessOperation::Batch,
+                value,
+            } if value == empty_legacy_batch
+        ));
+        let empty_current_batch = serde_json::to_value(HubCommand::ProcessBatch {
+            request_id: "request-current-empty-batch".to_string(),
+            payload: agentic_gpt_protocol::ProcessBatchExecRequest {
+                agent_id: "agent-a".to_string(),
+                group: None,
+                elements: vec![],
+                need_confirm: false,
+                confirm_method: None,
+                cwd: None,
+                wait_seconds: Some(0),
+            },
+        })
+        .unwrap();
+        assert!(matches!(
+            serde_json::from_value::<StoredCommand>(empty_current_batch).unwrap(),
+            StoredCommand::Current(HubCommand::ProcessBatch { request_id, .. })
+                if request_id == "request-current-empty-batch"
+        ));
+        let legacy_exec_missing_args = serde_json::json!({
+            "type": "process.exec",
+            "requestId": "request-old-missing-args",
+            "payload": {
+                "agentId": "agent-a",
+                "program": "echo",
+                "needConfirm": false
+            }
+        });
+        assert!(serde_json::from_value::<StoredCommand>(legacy_exec_missing_args).is_err());
+        let legacy_batch_missing_element_args = serde_json::json!({
+            "type": "process.batch",
+            "requestId": "request-old-missing-element-args",
+            "payload": {
+                "agentId": "agent-a",
+                "elements": [{"program": "echo"}],
+                "needConfirm": false,
+                "workingDirectory": "/legacy/work"
+            }
+        });
+        assert!(
+            serde_json::from_value::<StoredCommand>(legacy_batch_missing_element_args).is_err()
+        );
+
+        with_ledger_lock(compact_locked).unwrap();
+        let after = fs::read(&ledger).unwrap();
+        assert!(after.len() < before.len());
+        assert_eq!(fs::read(recovery_backup_path(&ledger)).unwrap(), before);
+        let compacted = latest_records().unwrap();
+        assert_eq!(compacted.len(), records.len() - 1);
+        for (run_id, command_hash, result) in [
+            (
+                "run-old-completed",
+                "hash-old-completed",
+                Some(&completed_result),
+            ),
+            ("run-old-accepted", "hash-old-accepted", None),
+            ("run-old-batch", "hash-old-batch", None),
+            ("run-current", "hash-current", None),
+            ("run-current-batch", "hash-current-batch", None),
+            ("run-old-unowned", "hash-old-unowned", None),
+        ] {
+            let record = compacted.get(run_id).unwrap();
+            assert_eq!(record.command_hash, command_hash);
+            assert_eq!(record.result.as_ref(), result);
+        }
+        assert_eq!(
+            serde_json::to_value(
+                compacted
+                    .get("run-old-completed")
+                    .unwrap()
+                    .command
+                    .as_ref()
+                    .unwrap()
+            )
+            .unwrap(),
+            completed_command
+        );
+        assert_eq!(
+            serde_json::to_value(
+                compacted
+                    .get("run-old-batch")
+                    .unwrap()
+                    .command
+                    .as_ref()
+                    .unwrap()
+            )
+            .unwrap(),
+            legacy_batch
+        );
+        assert_eq!(compacted.get("run-old-unowned").unwrap().agent_id, None);
     }
 
     #[test]

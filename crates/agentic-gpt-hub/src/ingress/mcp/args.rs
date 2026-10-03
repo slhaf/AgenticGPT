@@ -136,7 +136,7 @@ pub(super) struct HubRunListArgs {
 }
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct ProcessExecArgs {
     #[schemars(description = "目标本地 Agent ID；必须是 Hub 中已启用的 Agent。")]
     pub(super) agent_id: String,
@@ -145,15 +145,8 @@ pub(super) struct ProcessExecArgs {
         description = "可选工作流分组名，会随托管进程记录；首尾空白会去除，去除后不能为空、最多 32 个 Unicode 字符且不能含控制字符。"
     )]
     pub(super) group: Option<String>,
-    #[schemars(
-        description = "要直接启动的可执行文件名或路径，不会自动经 shell 拆分；需要 shell 语法时用 bash 或 sh，并将脚本放在 args（例如 ['-lc', '...']）。"
-    )]
-    pub(super) program: String,
-    #[serde(default)]
-    #[schemars(
-        description = "可选的 argv 字符串数组；每项作为独立参数直接传给程序，不按 shell 字符串拆分。省略或传 null 等同空数组。"
-    )]
-    pub(super) args: Option<Vec<String>>,
+    #[schemars(description = "要执行的 Bash 命令原文；Agent 按原文执行，不按 argv 拆分或改写。")]
+    pub(super) command: String,
     #[serde(default)]
     #[schemars(
         description = "是否在请求中要求确认；省略或传 null 时为 false。最终 Allow、Confirm 或 Deny 仍由 Agent 本地策略决定，true 不能覆盖策略拒绝，false 也不能绕过策略确认。"
@@ -166,9 +159,9 @@ pub(super) struct ProcessExecArgs {
     pub(super) confirm_method: Option<String>,
     #[serde(default)]
     #[schemars(
-        description = "可选工作目录；省略或传 null 时使用 Agent 工作区根目录，相对路径从工作区根目录解析，绝对路径也必须通过本地允许/拒绝路径策略并指向现存目录。"
+        description = "可选当前工作目录；省略或 null 使用 Agent 工作区根目录。Bash 初始化完成后会切换至此目录。"
     )]
-    pub(super) working_directory: Option<String>,
+    pub(super) cwd: Option<String>,
     #[serde(default)]
     #[schemars(
         range(min = 0, max = 30),
@@ -179,7 +172,7 @@ pub(super) struct ProcessExecArgs {
 }
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct ProcessBatchArgs {
     #[schemars(description = "目标本地 Agent ID；必须是 Hub 中已启用的 Agent。")]
     pub(super) agent_id: String,
@@ -189,7 +182,7 @@ pub(super) struct ProcessBatchArgs {
     )]
     pub(super) group: Option<String>,
     #[schemars(
-        description = "按输入顺序排列的子命令；空数组是无操作并返回空的已完成批次。所有子命令先做路径、执行策略和预检，再开始启动；元素级 workingDirectory（非 null 时）覆盖此处的默认目录。"
+        description = "按输入顺序排列的 Bash 命令；整个批次先准入、后启动。元素 cwd（非 null）覆盖批次 cwd；空数组不启动进程。"
     )]
     pub(super) elements: Vec<ProcessBatchElementArgs>,
     #[serde(default)]
@@ -204,9 +197,9 @@ pub(super) struct ProcessBatchArgs {
     pub(super) confirm_method: Option<String>,
     #[serde(default)]
     #[schemars(
-        description = "所有元素的默认工作目录；省略或传 null 时使用 Agent 工作区根目录，相对路径从该根目录解析且目录必须通过本地路径策略。元素级非 null 的 workingDirectory 优先覆盖此值。"
+        description = "所有元素的默认工作目录；省略或 null 使用 Agent 工作区根目录。元素 cwd（非 null）覆盖此值。"
     )]
-    pub(super) working_directory: Option<String>,
+    pub(super) cwd: Option<String>,
     #[serde(default)]
     #[schemars(
         range(min = 0, max = 30),
@@ -218,20 +211,15 @@ pub(super) struct ProcessBatchArgs {
 
 /// 批次中的单条命令；可单独指定工作目录覆盖批次默认目录。
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct ProcessBatchElementArgs {
-    #[schemars(
-        description = "本批次元素要直接启动的可执行文件名或路径；不会按 shell 字符串拆分。"
-    )]
-    pub(super) program: String,
-    #[serde(default)]
-    #[schemars(description = "可选的 argv 字符串数组；每项是独立参数。省略或传 null 等同空数组。")]
-    pub(super) args: Option<Vec<String>>,
+    #[schemars(description = "要执行的 Bash 命令原文；不按 argv 拆分或改写。")]
+    pub(super) command: String,
     #[serde(default)]
     #[schemars(
-        description = "可选的元素级工作目录；非 null 时覆盖批次 workingDirectory，省略或传 null 时继承批次目录；相对路径从 Agent 工作区根目录解析并受本地路径策略约束。"
+        description = "可选的元素级工作目录；非 null 时覆盖批次 cwd，省略或 null 时继承批次目录。"
     )]
-    pub(super) working_directory: Option<String>,
+    pub(super) cwd: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, rmcp::schemars::JsonSchema)]
@@ -1043,4 +1031,45 @@ pub(super) struct SkillRunArgs {
         description = "启动技能脚本后等待完成的内联等待秒数；省略或传 null 时为 5，范围 0–30，超过 30 时运行时按 30 处理；0 表示不等待完成。"
     )]
     pub(super) wait_seconds: Option<u64>,
+}
+
+#[cfg(test)]
+mod process_exec_args_tests {
+    use super::{ProcessBatchArgs, ProcessExecArgs};
+
+    #[test]
+    fn process_exec_arguments_accept_command_cwd_and_reject_legacy_fields() {
+        let exec: ProcessExecArgs = serde_json::from_value(serde_json::json!({
+            "agentId": "agent",
+            "command": "printf hi",
+            "cwd": "/workspace"
+        }))
+        .unwrap();
+        assert_eq!(exec.command, "printf hi");
+        assert_eq!(exec.cwd.as_deref(), Some("/workspace"));
+        assert!(
+            serde_json::from_value::<ProcessExecArgs>(serde_json::json!({
+                "agentId": "agent",
+                "program": "printf",
+                "args": ["hi"]
+            }))
+            .is_err()
+        );
+
+        let batch: ProcessBatchArgs = serde_json::from_value(serde_json::json!({
+            "agentId": "agent",
+            "elements": [{"command": "true", "cwd": "/tmp"}],
+            "cwd": "/workspace"
+        }))
+        .unwrap();
+        assert_eq!(batch.elements[0].command, "true");
+        assert_eq!(batch.cwd.as_deref(), Some("/workspace"));
+        assert!(
+            serde_json::from_value::<ProcessBatchArgs>(serde_json::json!({
+                "agentId": "agent",
+                "elements": [{"program": "true", "args": []}]
+            }))
+            .is_err()
+        );
+    }
 }

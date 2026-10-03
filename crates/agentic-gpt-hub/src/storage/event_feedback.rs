@@ -2473,11 +2473,10 @@ mod tests {
                     payload: ProcessExecRequest {
                         agent_id: "agent".to_string(),
                         group: None,
-                        program: "true".to_string(),
-                        args: Vec::new(),
+                        command: "true".to_string(),
                         need_confirm: false,
                         confirm_method: None,
-                        working_directory: None,
+                        cwd: None,
                         wait_seconds: None,
                     },
                 },

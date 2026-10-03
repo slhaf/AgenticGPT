@@ -24,7 +24,7 @@ use tokio::sync::{mpsc, Mutex, RwLock};
 use super::stdio_transport::ResumableStdioTransport;
 use super::*;
 use crate::{
-    config::{Config, ToolsetConfig},
+    config::{Config, ShellInitFile, ToolsetConfig},
     skill_installs::InstallManager,
     skills::SkillLeaseManager,
     state::RuntimeModel,
@@ -237,6 +237,18 @@ async fn normal_and_room_tool_sets_follow_fixed_surface_contract() {
     assert!(process_exec_schema["inputSchema"]["properties"]
         .get("agentId")
         .is_none());
+    assert!(process_exec_schema["inputSchema"]["required"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|field| field == "command"));
+    let process_properties = process_exec_schema["inputSchema"]["properties"]
+        .as_object()
+        .unwrap();
+    assert!(process_properties.contains_key("command"));
+    assert!(process_properties.contains_key("cwd"));
+    assert!(!process_properties.contains_key("program"));
+    assert!(!process_properties.contains_key("args"));
     assert!(serialized.contains("event.list"));
     assert!(!serialized.contains("confirmMethod"));
     assert!(serialized.contains("mcp.list"));
@@ -436,7 +448,7 @@ async fn terminal_result_is_not_suppressed_when_panel_preparation_fails() -> any
     let failed_handoff = server
         .call(
             CallToolRequestParams::new("process.exec").with_arguments(Map::from_iter([
-                ("program".to_string(), json!("true")),
+                ("command".to_string(), json!("true")),
                 ("waitSeconds".to_string(), json!(5)),
             ])),
         )
@@ -1404,7 +1416,7 @@ async fn process_tools_reject_legacy_identity_and_confirmation_fields() {
     let identity = server
         .call(
             CallToolRequestParams::new("process.exec").with_arguments(Map::from_iter([
-                ("program".to_string(), Value::String("true".to_string())),
+                ("command".to_string(), Value::String("true".to_string())),
                 (
                     "agentId".to_string(),
                     Value::String("stdio-test-agent".to_string()),
@@ -1418,7 +1430,7 @@ async fn process_tools_reject_legacy_identity_and_confirmation_fields() {
     let confirmation = server
         .call(
             CallToolRequestParams::new("process.exec").with_arguments(Map::from_iter([
-                ("program".to_string(), Value::String("true".to_string())),
+                ("command".to_string(), Value::String("true".to_string())),
                 (
                     "confirmMethod".to_string(),
                     Value::String("hub".to_string()),
@@ -1428,6 +1440,17 @@ async fn process_tools_reject_legacy_identity_and_confirmation_fields() {
         .await
         .expect_err("Tunnel process schemas must reject confirmMethod");
     assert_eq!(confirmation.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+
+    let old_exec_shape = server
+        .call(
+            CallToolRequestParams::new("process.exec").with_arguments(Map::from_iter([
+                ("program".to_string(), json!("true")),
+                ("args".to_string(), json!([])),
+            ])),
+        )
+        .await
+        .expect_err("process.exec must reject the retired program/args shape");
+    assert_eq!(old_exec_shape.code, rmcp::model::ErrorCode::INVALID_PARAMS);
 
     let too_small = server
         .call(
@@ -1468,7 +1491,7 @@ async fn process_tools_reject_legacy_identity_and_confirmation_fields() {
 async fn process_creation_read_cancel_and_batch_use_process_api() -> anyhow::Result<()> {
     let server = AgentMcpServer::new(test_state(CapabilityProfile::Normal));
     let quick = server
-        .dispatch("process.exec", json!({"program": "true", "waitSeconds": 5}))
+        .dispatch("process.exec", json!({"command": "true", "waitSeconds": 5}))
         .await?;
     assert_eq!(quick["state"], "completed");
     assert_eq!(quick["kind"], "command");
@@ -1507,7 +1530,7 @@ async fn process_creation_read_cancel_and_batch_use_process_api() -> anyhow::Res
     let long = server
         .dispatch(
             "process.exec",
-            json!({"program": "sleep", "args": ["2"], "waitSeconds": 0}),
+            json!({"command": "sleep 2", "waitSeconds": 0}),
         )
         .await?;
     let long_id = long["processId"].as_str().unwrap().to_string();
@@ -1548,8 +1571,8 @@ async fn process_creation_read_cancel_and_batch_use_process_api() -> anyhow::Res
             "process.batch",
             json!({
                 "elements": [
-                    {"program": "true"},
-                    {"program": "false"}
+                    {"command": "true"},
+                    {"command": "false"}
                 ],
                 "waitSeconds": 5
             }),
@@ -1573,8 +1596,8 @@ async fn process_creation_read_cancel_and_batch_use_process_api() -> anyhow::Res
             "process.batch",
             json!({
                 "elements": [
-                    {"program": "true"},
-                    {"program": "true", "workingDirectory": "/missing"}
+                    {"command": "true"},
+                    {"command": "true", "cwd": "/missing"}
                 ],
                 "waitSeconds": 0
             }),
@@ -1605,7 +1628,7 @@ async fn process_read_omitted_waits_but_zero_is_nonblocking() -> anyhow::Result<
     let started = server
         .dispatch(
             "process.exec",
-            json!({"program": "sleep", "args": ["2"], "waitSeconds": 0}),
+            json!({"command": "sleep 2", "waitSeconds": 0}),
         )
         .await?;
     let process_id = started["processId"].as_str().unwrap().to_string();
@@ -1651,7 +1674,7 @@ async fn process_shapes_are_compact_and_keep_group_filters() -> anyhow::Result<(
         .dispatch(
             "process.exec",
             json!({
-                "program": "true",
+                "command": "true",
                 "group": "  workstream  ",
                 "waitSeconds": 5
             }),
@@ -1696,7 +1719,7 @@ async fn process_shapes_are_compact_and_keep_group_filters() -> anyhow::Result<(
     let running = server
         .dispatch(
             "process.exec",
-            json!({"program": "sleep", "args": ["2"], "waitSeconds": 0}),
+            json!({"command": "sleep 2", "waitSeconds": 0}),
         )
         .await?;
     let running_id = running["processId"].as_str().unwrap().to_string();
@@ -1725,7 +1748,7 @@ async fn process_shapes_are_compact_and_keep_group_filters() -> anyhow::Result<(
         .await?;
 
     let rejected = server
-        .dispatch("process.exec", json!({"program": "vim", "waitSeconds": 5}))
+        .dispatch("process.exec", json!({"command": "vim", "waitSeconds": 5}))
         .await?;
     assert_eq!(rejected["state"], "rejected");
     assert_eq!(rejected["error"]["code"], "requires_tty_not_supported");
@@ -1733,7 +1756,7 @@ async fn process_shapes_are_compact_and_keep_group_filters() -> anyhow::Result<(
     let failed = server
         .dispatch(
             "process.exec",
-            json!({"program": "false", "waitSeconds": 5}),
+            json!({"command": "false", "waitSeconds": 5}),
         )
         .await?;
     assert_eq!(failed["state"], "failed");
@@ -1751,8 +1774,7 @@ async fn process_read_preserves_raw_byte_offsets_and_utf8_output() -> anyhow::Re
         .dispatch(
             "process.exec",
             json!({
-                "program": "printf",
-                "args": ["%s", expected],
+                "command": format!("printf '%s' '{}'", expected),
                 "waitSeconds": 5
             }),
         )
@@ -1824,8 +1846,7 @@ async fn process_creation_and_batch_responses_obey_response_budget() -> anyhow::
         .dispatch(
             "process.exec",
             json!({
-                "program": "printf",
-                "args": ["%12000s", ""],
+                "command": "printf '%12000s' ''",
                 "waitSeconds": 5
             }),
         )
@@ -1851,8 +1872,8 @@ async fn process_creation_and_batch_responses_obey_response_budget() -> anyhow::
             "process.batch",
             json!({
                 "elements": [
-                    {"program": "printf", "args": ["%5000s", ""]},
-                    {"program": "printf", "args": ["%5000s", ""]}
+                    {"command": "printf '%5000s' ''"},
+                    {"command": "printf '%5000s' ''"}
                 ],
                 "waitSeconds": 5
             }),
@@ -2218,7 +2239,7 @@ async fn managed_batch_uses_one_confirmation_for_all_elements() -> anyhow::Resul
         .dispatch(
             "process.batch",
             json!({
-                "elements": [{"program": "true"}, {"program": "true"}],
+                "elements": [{"command": "true"}, {"command": "true"}],
                 "needConfirm": true,
                 "waitSeconds": 5
             }),
@@ -2271,7 +2292,7 @@ async fn denied_process_batch_creates_no_processes() -> anyhow::Result<()> {
         .dispatch(
             "process.batch",
             json!({
-                "elements": [{"program": "true"}, {"program": "true"}],
+                "elements": [{"command": "true"}, {"command": "true"}],
                 "needConfirm": true,
                 "waitSeconds": 5
             }),
@@ -3669,6 +3690,7 @@ fn test_state(profile: CapabilityProfile) -> AppState {
     let root = std::env::temp_dir().join(format!("agentic-stdio-{}", Uuid::new_v4()));
     let workspace_root = root.join("workspace");
     let mut config = Config::default_config().expect("default config");
+    config.shell.init_file = ShellInitFile::Disabled;
     config.agent_id = "stdio-test-agent".to_string();
     config.toolsets = if profile == CapabilityProfile::Room {
         ToolsetConfig::room()

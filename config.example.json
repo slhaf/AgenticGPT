@@ -59,6 +59,9 @@
     "maxActiveProcesses": "auto",
     "processResponseBytes": 8192
   },
+  "shell": {
+    "initFile": "/home/your-user/.agentic_gpt/.bashrc"
+  },
   "mcpServers": {
     "example-http": {
       "enabled": false,

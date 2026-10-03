@@ -47,11 +47,10 @@ async fn start_response_owner_request_with_timeout(
         payload: ProcessExecRequest {
             agent_id: "agent".to_string(),
             group: None,
-            program: "printf".to_string(),
-            args: vec!["ok".to_string()],
+            command: "printf 'ok'".to_string(),
             need_confirm: false,
             confirm_method: None,
-            working_directory: None,
+            cwd: None,
             wait_seconds: None,
         },
     };
@@ -114,11 +113,10 @@ async fn pending_replay_sends_reliable_envelope() {
         payload: ProcessExecRequest {
             agent_id: "agent".to_string(),
             group: None,
-            program: "printf".to_string(),
-            args: vec!["ok".to_string()],
+            command: "printf 'ok'".to_string(),
             need_confirm: false,
             confirm_method: None,
-            working_directory: None,
+            cwd: None,
             wait_seconds: None,
         },
     };
@@ -148,11 +146,10 @@ async fn stale_response_with_matching_run_is_accepted() {
         payload: ProcessExecRequest {
             agent_id: "agent".to_string(),
             group: None,
-            program: "printf".to_string(),
-            args: vec!["ok".to_string()],
+            command: "printf 'ok'".to_string(),
             need_confirm: false,
             confirm_method: None,
-            working_directory: None,
+            cwd: None,
             wait_seconds: None,
         },
     };
@@ -254,11 +251,10 @@ async fn response_owner_isolates_runs_sharing_request_id() {
         payload: ProcessExecRequest {
             agent_id: "agent".to_string(),
             group: None,
-            program: "printf".to_string(),
-            args: vec!["ok".to_string()],
+            command: "printf 'ok'".to_string(),
             need_confirm: false,
             confirm_method: None,
-            working_directory: None,
+            cwd: None,
             wait_seconds: None,
         },
     };
@@ -343,11 +339,10 @@ async fn response_owner_timeout_preserves_other_run_and_accepts_late_result() {
         payload: ProcessExecRequest {
             agent_id: "agent".to_string(),
             group: None,
-            program: "printf".to_string(),
-            args: vec!["ok".to_string()],
+            command: "printf 'ok'".to_string(),
             need_confirm: false,
             confirm_method: None,
-            working_directory: None,
+            cwd: None,
             wait_seconds: None,
         },
     };
@@ -595,11 +590,10 @@ async fn failed_request_send_removes_current_connection() {
         payload: ProcessExecRequest {
             agent_id: "agent".to_string(),
             group: None,
-            program: "printf".to_string(),
-            args: vec!["ok".to_string()],
+            command: "printf 'ok'".to_string(),
             need_confirm: false,
             confirm_method: None,
-            working_directory: None,
+            cwd: None,
             wait_seconds: None,
         },
     };
@@ -637,11 +631,10 @@ async fn reporting_only_connection_is_not_a_command_target() {
         payload: ProcessExecRequest {
             agent_id: "agent".to_string(),
             group: None,
-            program: "printf".to_string(),
-            args: vec!["blocked".to_string()],
+            command: "printf 'blocked'".to_string(),
             need_confirm: false,
             confirm_method: None,
-            working_directory: None,
+            cwd: None,
             wait_seconds: None,
         },
     };
@@ -667,11 +660,10 @@ async fn wp1_send_failure_marks_not_sent_and_excludes_replay() {
         payload: ProcessExecRequest {
             agent_id: "agent".to_string(),
             group: None,
-            program: "printf".to_string(),
-            args: vec!["offline".to_string()],
+            command: "printf 'offline'".to_string(),
             need_confirm: false,
             confirm_method: None,
-            working_directory: None,
+            cwd: None,
             wait_seconds: None,
         },
     };
@@ -1031,11 +1023,10 @@ async fn feedback_intent_insert_failure_rolls_back_creation_run_before_send() {
         payload: ProcessExecRequest {
             agent_id: "agent".to_string(),
             group: None,
-            program: "printf".to_string(),
-            args: vec!["must-not-run".to_string()],
+            command: "printf 'must-not-run'".to_string(),
             need_confirm: false,
             confirm_method: None,
-            working_directory: None,
+            cwd: None,
             wait_seconds: None,
         },
     };
@@ -1074,19 +1065,17 @@ async fn event_sources_validation_conflict_is_http_409_for_unknown_source() {
             group: None,
             elements: vec![
                 ProcessExecElement {
-                    program: "printf".to_string(),
-                    args: vec!["one".to_string()],
-                    working_directory: None,
+                    command: "printf 'one'".to_string(),
+                    cwd: None,
                 },
                 ProcessExecElement {
-                    program: "printf".to_string(),
-                    args: vec!["two".to_string()],
-                    working_directory: None,
+                    command: "printf 'two'".to_string(),
+                    cwd: None,
                 },
             ],
             need_confirm: false,
             confirm_method: None,
-            working_directory: None,
+            cwd: None,
             wait_seconds: None,
         },
     };
@@ -1155,11 +1144,10 @@ async fn event_sources_validation_conflict_is_http_409_for_unknown_source() {
         payload: ProcessExecRequest {
             agent_id: "agent".to_string(),
             group: None,
-            program: "printf".to_string(),
-            args: vec!["recovery".to_string()],
+            command: "printf 'recovery'".to_string(),
             need_confirm: false,
             confirm_method: None,
-            working_directory: None,
+            cwd: None,
             wait_seconds: None,
         },
     };

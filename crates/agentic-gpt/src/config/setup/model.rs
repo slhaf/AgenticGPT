@@ -4,9 +4,9 @@ use std::path::PathBuf;
 
 use crate::cli_i18n::UiLanguage;
 use crate::config::{
-    default_path_policy, sparse_config_json, Config, EventsConfig, HttpMcpConfig, ToolNamespace,
-    ToolsetConfig, DEFAULT_HTTP_MCP_ALLOW_HOSTS, DEFAULT_HTTP_MCP_HOST, DEFAULT_HTTP_MCP_PORT,
-    INTERNAL_EVENT_TYPES,
+    default_path_policy, sparse_config_json, Config, EventsConfig, HttpMcpConfig, ShellInitFile,
+    ToolNamespace, ToolsetConfig, DEFAULT_HTTP_MCP_ALLOW_HOSTS, DEFAULT_HTTP_MCP_HOST,
+    DEFAULT_HTTP_MCP_PORT, DEFAULT_SHELL_INIT_FILE, INTERNAL_EVENT_TYPES,
 };
 use crate::config_templates::{
     build_config, InitInput, OptionalSection, RuntimeMode, SecretValue, TunnelSecretSource,
@@ -57,6 +57,8 @@ pub(crate) enum SetupField {
     MaxFileSearchContextLines,
     ProcessResponseBytes,
     SandboxEnabled,
+    ShellInitFileMode,
+    ShellInitFilePath,
     BubblewrapPath,
     RequiredRuntimePaths,
     McpServerId,
@@ -242,6 +244,11 @@ pub(crate) struct SandboxDraft {
     pub(crate) bubblewrap_path: String,
     pub(crate) required_runtime_paths: String,
 }
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ShellDraft {
+    pub(crate) init_file_mode: String,
+    pub(crate) init_file_path: String,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct McpServerDraft {
@@ -359,6 +366,7 @@ pub(crate) struct OptionalDrafts {
     pub(crate) limits: Option<LimitsDraft>,
     pub(crate) sandbox: Option<SandboxDraft>,
     pub(crate) toolsets: Option<ToolsetsDraft>,
+    pub(crate) shell: Option<ShellDraft>,
     pub(crate) mcp_servers: Option<McpServersDraft>,
     pub(crate) room: Option<RoomDraft>,
     pub(crate) tunnel_client: Option<TunnelClientDraft>,
@@ -378,6 +386,7 @@ pub(crate) enum OptionalSectionDraft {
     Room(RoomDraft),
     TunnelClient(TunnelClientDraft),
     HubReporting(HubReportingDraft),
+    Shell(ShellDraft),
     Events(EventsDraft),
 }
 
@@ -407,6 +416,7 @@ impl OptionalSectionDraft {
             Self::TunnelClient(_) => OptionalSection::TunnelClient,
             Self::HubReporting(_) => OptionalSection::HubReporting,
             Self::Events(_) => OptionalSection::Events,
+            Self::Shell(_) => OptionalSection::Shell,
         }
     }
 }
@@ -755,6 +765,7 @@ impl OptionalDrafts {
             OptionalSection::Confirmation => self.confirmation.is_some(),
             OptionalSection::Limits => self.limits.is_some(),
             OptionalSection::Sandbox => self.sandbox.is_some(),
+            OptionalSection::Shell => self.shell.is_some(),
             OptionalSection::Toolsets => self.toolsets.is_some(),
             OptionalSection::McpServers => self.mcp_servers.is_some(),
             OptionalSection::Room => self.room.is_some(),
@@ -776,6 +787,7 @@ impl OptionalDrafts {
                 .map(OptionalSectionDraft::Confirmation),
             OptionalSection::Limits => self.limits.clone().map(OptionalSectionDraft::Limits),
             OptionalSection::Sandbox => self.sandbox.clone().map(OptionalSectionDraft::Sandbox),
+            OptionalSection::Shell => self.shell.clone().map(OptionalSectionDraft::Shell),
             OptionalSection::Toolsets => self.toolsets.clone().map(OptionalSectionDraft::Toolsets),
             OptionalSection::McpServers => self
                 .mcp_servers
@@ -801,6 +813,7 @@ impl OptionalDrafts {
             OptionalSectionDraft::Confirmation(value) => self.confirmation = Some(value),
             OptionalSectionDraft::Limits(value) => self.limits = Some(value),
             OptionalSectionDraft::Sandbox(value) => self.sandbox = Some(value),
+            OptionalSectionDraft::Shell(value) => self.shell = Some(value),
             OptionalSectionDraft::Toolsets(value) => self.toolsets = Some(value),
             OptionalSectionDraft::McpServers(value) => self.mcp_servers = Some(value),
             OptionalSectionDraft::Room(value) => self.room = Some(value),
@@ -854,6 +867,10 @@ pub(crate) fn default_optional_draft_for_profile(
             enabled: false,
             bubblewrap_path: DEFAULT_BUBBLEWRAP_PATH.to_string(),
             required_runtime_paths: DEFAULT_RUNTIME_PATHS.to_string(),
+        }),
+        OptionalSection::Shell => OptionalSectionDraft::Shell(ShellDraft {
+            init_file_mode: "default".to_string(),
+            init_file_path: DEFAULT_SHELL_INIT_FILE.to_string(),
         }),
         OptionalSection::Toolsets => OptionalSectionDraft::Toolsets(ToolsetsDraft::from_config(
             &ToolsetConfig::for_profile(profile),
@@ -914,6 +931,20 @@ fn optional_drafts_from_config(config: &Config) -> OptionalDrafts {
             enabled: config.sandbox.enabled,
             bubblewrap_path: config.sandbox.bubblewrap_path.clone(),
             required_runtime_paths: serialize_paths(&config.sandbox.required_runtime_paths),
+        }),
+        shell: Some(match &config.shell.init_file {
+            ShellInitFile::Default => ShellDraft {
+                init_file_mode: "default".to_string(),
+                init_file_path: DEFAULT_SHELL_INIT_FILE.to_string(),
+            },
+            ShellInitFile::Disabled => ShellDraft {
+                init_file_mode: "disabled".to_string(),
+                init_file_path: DEFAULT_SHELL_INIT_FILE.to_string(),
+            },
+            ShellInitFile::Path(path) => ShellDraft {
+                init_file_mode: "path".to_string(),
+                init_file_path: path.clone(),
+            },
         }),
         toolsets: Some(ToolsetsDraft::from_config(&config.toolsets)),
         mcp_servers: Some(McpServersDraft {
