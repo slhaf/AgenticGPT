@@ -23,3 +23,12 @@ Reviewer 已撤回 zombie-only 成功证据 finding：当前代码保守报告 t
 - Live parity恢复夹具需区分relay观测、Hub持久化与parent线程时序。失败response同一lock内记录稳定boundary并arm双holds；EventSources另等待现有Hub DB sources持久化后保持精确identity比较。真实隔离after场景故意delay parent4s，replay已在parent醒前发生（count1→2），全部原barrier/结果/outbox/去重断言仍通过；未改生产恢复行为或增加超时上限。
 - 阶段4只修agent.info::live_subset：新增整个config.shell投影，外层ShellConfig序列化保留Default省略与Disabled null、Path字符串（含显式默认路径文本）的差别。apply_live_config_subset已经copy shell，无需改热加载。用户明确不用永久回归测试，父统一构建后通过真实local MCP临时smoke验收。
 - 阶段4真实smoke已exit0：七次Default/Disabled/Path A/Path B/显式默认路径文本转换均先false并含config_live_subset_not_applied，真实watcher加载后true且该issue消失；MCP连接关闭，临时Agent PID136521正常exit0已wait，临时root不存在。该验证只证明配置值的观测，不检查init文件内容或更改执行语义。
+
+## 阶段5：工具描述审查（源码与实际MCP证据）
+- 实际MCP名称为process.exec/batch/read/list/cancel，两侧一致；Hub Rust handler batch_exec不是公开工具名。
+- Agent-local stdio_schema.rs的batch顶层required遗漏elements，而stdio_server.rs::ProcessBatchArgs.elements无serde default。实际工具表required=[]，省略elements的真实调用exit1、MCP -32602 missing field `elements`；Hub Full表required=["agentId","elements"]。描述“按序执行”会误导为串行，亲读managed.rs的maxConcurrentTasks semaphore/tokio::spawn：并发任务，结果按输入顺序。
+- read建议突出执行state与captureStatus/output.eof独立；managed.rs EOF计算不依据state，现有reader_eof_is_visible_while_the_child_keeps_running回归也体现此边界（本轮只读、未运行该测试）。cancel应保持请求不等于停止、按terminationEvidence解释结果；现有wait不cancel、init信任边界、无rollback与annotations方向正确。
+- 实际工具表读取复用parity的init_agent/local_surface与start_hub/open_mcp_session/mcp_call；使用python -B且私有HOME/XDG，避免重复生成脚本缓存。未改工具定义或API。
+- 用户要求主代理亲读OpenAI原文：已读取项目链接https://developers.openai.com/plugins/plan/tools。关键是用户目标/选择时机、相似工具区分、输入schema、结果与副作用，不是向description穷举全部字段/枚举/错误码。此建议是厂商产品设计参考，不新增MCP协议要求。Context7已resolve并查官方Apps SDK examples，返回片段相关性弱，结论依据直接取得的指定原文。
+- 建议五工具开头分别说明启动一段命令/脚本、提交多项独立命令、已有ID时观察状态/产物、不知道ID时发现任务、请求取消。保留字段schema中的default/range；正文保留改变调用决策或风险判断的条件（状态与EOF、cursor互斥、预算deferred、取消证据、Hub缓存）。
+- 首次临时capture漏导入subprocess，取得Agent表后失败，finally已停止Agent并删除私有root；修正临时脚本后capture exit0，读取真实Agent-local及Hub Full两侧五工具并验证缺elements错误。不执行用户命令，不改工具定义/schema/API或永久测试。Agent PID282147 exit0，Hub PID282277由SIGTERM停止(-15)，均已wait；/tmp/td-25y0lfo_不存在，scripts/__pycache__不存在。没有创建仓库内临时driver。

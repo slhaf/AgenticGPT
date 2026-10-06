@@ -8,6 +8,7 @@
 2. 实现执行/解析/配置/生命周期，迁移所有入口与消费者（complete）；已提交0fdf5da。
 3. 真实入口验收、文档同步与完整验证（complete）；第13轮完整六项验收均exit0，额外真实Shell/TUI及恢复checkpoint场景通过，阶段修复/文档/证据完成并由最终本地聚焦提交收束。
 4. 补齐agent.info的shell配置漂移观测（complete）；live_subset加入完整ShellConfig，无新增永久回归测试。格式检查、新Agent构建及临时HOME真实local MCP smoke均通过，七次三态/路径漂移逐次false→reload后true，临时Agent/连接/目录/driver均清理，修复/双语文档/证据由本地单阶段提交收束。
+5. 对照项目指南审查Process工具描述（complete）；主代理亲读项目引用的OpenAI原文，核对Agent与Hub MCP描述/schema/annotations及真实工具表面。确认batch串行暗示与local必填elements遗漏，建议描述先说明目标与选择时机、再说明关键状态/风险。未改工具或API；仅清理单个pyc并完成隔离真实MCP审查，证据与建议按阶段记录和提交。
 
 ## 验证
 最多20轮完整验收；fmt/check/strict clippy/workspace test/build Agent+Hub/live parity均退出0；额外隔离真实入口覆盖shell/init/白名单/取消边界。并行实现子代理不得中途运行build/tests/formatter，由父代理收敛后统一运行。记录每轮结果。

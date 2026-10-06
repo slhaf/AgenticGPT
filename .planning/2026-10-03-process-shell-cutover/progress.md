@@ -78,3 +78,10 @@ ShellConfiguration已交付三态serde/CLI/TUI/live reload/import；`config unse
 - 修正后的现场smoke exit0、14.27s：真实新Agent `sh8b23edca`（PID136521）使用`/tmp/sh-ww253k1z`私有HOME/XDG/runtime/workspace及local Unix MCP持久连接。初始Default matchesDisk=true；随后Disabled→Path A→Path B→Default→显式默认路径文本→Disabled→Default七次变更，每次均观察到false与config_live_subset_not_applied，再经真实watcher观察true且issue消失。未mock比较函数、未暂停watcher、未新增永久测试。
 - 清理实际证据：Agent returncode=0已wait、MCP连接关闭=true、tempRootExists=false。临时driver已删除；现场输出保留artifact://483。只运行格式检查、新Agent构建与此真实smoke，未重跑旧执行场景或回归套件。
 - 本阶段源码只新增shell比较投影，配置双语文档同步对应观测边界；规划/证据与修复在单独本地阶段提交收束，不push/release/tag。
+
+## 阶段5：Process工具描述审查
+- 用户报告git status仅残留scripts/__pycache__；不重跑status确认。目录实际只有check_contract_parity.cpython-314.pyc。[INFERENCE] 文件名、时间与上一阶段driver的parity导入方式符合临时smoke残留，但未单独证明首次创建时间。已仅删除该文件并以非递归rmdir清空目录，命令exit0；未改gitignore或其他文件。
+- 本轮只读审查Process tools描述，依据documentation-standard.md42-50核对用途、输入/default/约束、输出/状态/错误及副作用/信任边界，兼顾Agent-local与Hub MCP。不改描述/schema/API/测试；实际读取工具表面时使用python -B避免再次产生缓存。
+- 主代理亲自读取项目指定OpenAI Define tools原文，亲读Agent/Hub描述、local required分支、batch DTO和并发worker、read EOF计算；子代理只作定位。明确区分必须纠正的batch串行暗示/schema必填遗漏，与面向选择的正文重排建议，不要求所有枚举和错误码进入描述。
+- 隔离真实MCP审查完成：两侧均exec/batch/read/list/cancel；local batch required=[]而缺elements调用exit1/-32602，Hub Full required包含agentId/elements。临时driver首次缺subprocess import失败且已清理，修正后exit0；最终Agent/Hub均停止wait，私有root及pycache不存在。仅记录审查与建议，未修改工具/API/测试；公开文档无需改变，因本轮没有实施契约或描述变更。
+- 阶段5完成；按项目阶段提交规则，仅提交三份已有规划记录。
