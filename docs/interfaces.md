@@ -99,13 +99,17 @@ Hub 运行回执仍是已派发命令的持久控制面身份。运行保留窗�
 
 每个 Agent 有独立、持久的事件收件箱；同一 Agent 的客户端共享事件和展示计数。事件 API 与 Process/Skill Install 的生命周期操作彼此独立。Standalone 的三个公开 MCP 工具 `event.list`、`event.get`、`event.mark` 不依赖 Process/Skills 工具集开关，也不新增可配置 namespace。Standalone 请求省略 `agentId` 时使用当前 Agent；若提供，则必须与当前 Agent 匹配，不作为跨 Agent 选择器。Hub Full 的三个工具要求显式 `agentId`；Coordinator 的八项工具保持不变，且不公开事件工具。
 
-`EventSource.kind` 是创建时固定的事件来源类型，与入口/传输（如 Unix、stdio、HTTP、Hub）以及 Hub `RunReport` 相互独立：内部事件由服务端绑定 `process` 或 `skill_install` 和对应实体 ID；外部注入固定为 `external`，调用方只提供 `ref`。读取、筛选、标记或传输事件都不能改写来源。事件记录使用 camelCase 字段 `eventId`、`message`、`severity`（`low|medium|high`）、`createdAt`、`status`（`pending|handled|expired`）、`source: { kind, ref }`、`shownCount` 与可空 `expiresAt`。列表项以 `summary` 代替完整正文。
+`EventSource.kind` 是创建时固定的事件来源类型，与入口/传输（如 Unix、stdio、HTTP、Hub）以及 Hub `RunReport` 相互独立：内部事件由服务端绑定 `process` 或 `skill_install` 和对应实体 ID；外部注入的来源种类固定为 `external`，来源引用由调用方通过 `ref` 提供。读取、筛选、标记或传输事件都不能改写来源。事件记录使用 camelCase 字段 `eventId`、`message`、`severity`（`low|medium|high`）、`createdAt`、`status`（`pending|handled|expired`）、`source: { kind, ref }`、`shownCount` 与可空 `expiresAt`。列表项以 `summary` 代替完整正文。
 
 | 操作 | 请求与结果 |
 |---|---|
-| `event.list` | 可选 `agentId`（Standalone 省略时为当前 Agent；若提供须匹配当前 Agent）、`status`（缺省 `pending`）、`severity`、`limit`（缺省 20，范围 1–100）和不透明 `cursor`；返回 `{ items, nextCursor? }`，每项为 `eventId/summary/severity/createdAt/status`。隐藏的 pending 事件仍可列出；有后续页时返回 `nextCursor`。 |
-| `event.get` | 必填 `eventId`，可选 `agentId`；返回完整事件记录（含 `message`），读取不会标记为已处理。 |
-| `event.mark` | 必填 `eventIds`（最多 512 项），可选 `agentId`；幂等地标记为 handled，只改变收件箱处理状态，返回 `{ handledIds, notFoundIds }`。不管理进程或安装。 |
+| `event.list` | 发现事件摘要。可选 `agentId`（Standalone 仅访问当前 Agent，可省略）、`status`（缺省 `pending`）、`severity`、`limit`（缺省 20，范围 1–100）和不透明 `cursor`；返回 `{ items, nextCursor? }`，每项为 `eventId/summary/severity/createdAt/status`。隐藏的 pending 事件仍可列出。 |
+| `event.get` | 查看完整正文或来源。必填 `eventId`（可来自列表或事件面板），可选 `agentId`；返回完整记录（含 `message`、`source`），读取不标记 handled。 |
+| `event.mark` | 事件已处理或明确决定忽略后，按必填 `eventIds`（最多 512 项）标记为 handled；可选 `agentId`，返回 `{ handledIds, notFoundIds }`。不执行或取消来源进程/安装。 |
+
+Standalone 的三个工具不会转发到其他 Agent；提供不匹配的 `agentId` 会返回 `event_agent_mismatch`。Hub 三个工具必须显式提供目标 `agentId`。续页时原样传回 `nextCursor`，保持同一 Agent、`status`、`severity`；改变这些筛选会返回 `event_cursor_scope_mismatch`，`limit` 可以调整。省略 `status` 表示仅列 pending，不是所有状态。
+
+`event.mark` 仅将选中的 pending 事件改为 handled；重复 ID 去重，已经 handled 的 ID 仍进入 `handledIds`。过期或不存在的 ID 都进入 `notFoundIds`，不能据此断言记录不存在。空数组不标记任何事件，不表示确认全部。该操作不主动删除记录，但访问收件箱时仍会执行过期与历史保留清理。其 MCP 注解为 `readOnlyHint=false`、`destructiveHint=true`；注解只是行为提示，不替代运行时授权。
 
 Hub HTTP 路由使用现有 Hub API Bearer 认证及 Agent 启用状态授权：`GET /v1/events?agentId=...`（另支持 `status`、`severity`、`limit`、`cursor`）、`GET /v1/events/{eventId}?agentId=...`、`POST /v1/events/mark`（JSON `{ "agentId": "...", "eventIds": ["..."] }`）。Hub 工具、OpenAPI 与请求体都按目标 Agent 隔离，不跨 Agent 查找或合并。
 
@@ -130,6 +134,8 @@ Hub HTTP 路由使用现有 Hub API Bearer 认证及 Agent 启用状态授权：
 ```
 
 面板统计所有未过期 pending 事件（含本次未展示项）；`new` 最多五项，按 high、medium、low 排序，同级按较早创建时间排序。摘要最多 32 个 Unicode 字符（超长时 31 字符加 `…`）；等级、时间和 ID 不截断。low 首次曝光后隐藏，默认 TTL 为 24 小时且可配置；medium 曝光三次后隐藏且不自动过期；high 保持候选直到处理。等级表示通知优先级，不表示内部事件成功/失败或是否需要人工介入。handled/expired 历史保留七天后清理。新事件只在后续工具调用中以面板提醒；同一响应内，原有 Browser/file 内容块会保留，面板为紧凑文本且只展示/计次一次。事件详情正文读取本身不计入曝光，面板实际展示的候选仍按正常规则计次。面板位于原结果根级键 `events`，不另加结果封套或面板封套。
+
+`events.new` 不是完整待处理列表；事件因展示次数限制而隐藏，不代表已 handled，需要完整待处理摘要时使用 `event.list`。列表/详情读取不标记 handled，但响应面板中实际展示的候选会增加 `shownCount`，收件箱访问也可能执行过期和保留期清理；不要将“不标记 handled”理解为数据库完全没有状态维护。已经了解并处理事件时可直接 `event.mark`，不要求每次都先 `event.get`。
 
 没有主动推送。无单一 Agent 目标的 Hub 调用不附面板；Agent 离线、Hub 请求超时或 Hub 缓存回退也不附事件，不能伪报零值或旧快照；成功在线的 native cache-only Hub 工具可单独做一次 best-effort 面板查询。原始创建响应是否已包含终态结果由最终入口决定；这一判定不依赖结果/输出截断或大小限制。创建去...
 

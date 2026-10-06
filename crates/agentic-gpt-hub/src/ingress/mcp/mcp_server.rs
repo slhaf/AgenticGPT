@@ -489,7 +489,7 @@ impl AgenticMcpServer {
     }
     #[tool(
         name = "event.list",
-        description = "列出指定 Agent 的持久事件 inbox，可按状态/等级筛选并分页；仅读取事件，不操作进程。必须显式指定 agentId，不会选择或合并其他 Agent。"
+        description = "发现指定 Agent 的待处理事件或按状态/等级筛选历史时使用。返回 items（eventId/summary/severity/createdAt/status）与可选 nextCursor；完整正文和来源用 event.get 查看。events.new 是有展示限制的提醒面板，不是完整 pending 列表；隐藏不等于 handled，仍可通过列表查询。读取不标记 handled，不读取进程状态；成功响应附目标 Agent 的 events 面板并记录实际曝光，历史仍按过期/保留策略维护。必须指定 agentId，不跨 Agent 查找或合并；非法游标或请求失败返回错误，不等于空列表。"
     )]
     async fn event_list(
         &self,
@@ -518,7 +518,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "event.get",
-        description = "读取指定 Agent inbox 中一个事件的完整记录和 message；仅读取事件，不操作进程。必须显式指定 agentId，不会跨 Agent 查找。"
+        description = "已知 eventId 且需要完整正文或来源时使用；ID 可来自 event.list 或事件面板。返回完整记录（message、severity/status、source.kind/ref、shownCount、expiresAt）；成功响应附目标 Agent 的 events 面板。读取不标记 handled，不操作进程或安装；详情正文读取不额外计曝光，附带面板实际展示项仍计次。历史仍按过期/保留策略维护；必须指定 agentId，不跨 Agent 查找，未知 ID 或请求失败返回错误。"
     )]
     async fn event_get(
         &self,
@@ -544,7 +544,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "event.mark",
-        description = "将指定 Agent inbox 中的事件标记为已处理；重复和未知 ID 的结果由 Agent 明确返回。该操作仅改变事件处理状态，不操作进程；必须显式指定 agentId。"
+        description = "事件已处理或明确决定忽略后，在指定 Agent 上将选中的 pending 事件标记为 handled，停止后续提醒；不执行或取消来源进程/安装。返回 handledIds/notFoundIds；成功响应附目标 Agent 的 events 面板。重复 ID 去重，已 handled 的 ID 幂等；过期或不存在的 ID 进入 notFoundIds，空数组不标记任何事件。不会主动删除事件记录，历史仍按过期/保留策略维护；必须指定 agentId，不跨 Agent 操作，请求失败返回错误。"
     )]
     async fn event_mark(
         &self,

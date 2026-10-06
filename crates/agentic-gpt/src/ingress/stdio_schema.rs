@@ -317,7 +317,10 @@ pub(super) fn properties_for(name: &str) -> Map<String, Value> {
             );
         }
         "event.list" => {
-            add("agentId", string("目标 Agent ID；省略时使用当前 Agent。"));
+            add(
+                "agentId",
+                string("当前 Agent ID；可省略。提供其他 Agent ID 会返回 event_agent_mismatch，不跨 Agent 路由。"),
+            );
             add(
                 "status",
                 json!({
@@ -332,7 +335,7 @@ pub(super) fn properties_for(name: &str) -> Map<String, Value> {
                 json!({
                     "type":"string",
                     "enum":["low","medium","high"],
-                    "description":"可选等级筛选。"
+                    "description":"可选通知优先级筛选；等级不表示来源任务成功或失败。"
                 }),
             );
             add(
@@ -345,21 +348,30 @@ pub(super) fn properties_for(name: &str) -> Map<String, Value> {
                     "description":"页大小；省略时为20，范围1–100。"
                 }),
             );
-            add("cursor", string("由上一页返回的不透明 nextCursor。"));
+            add(
+                "cursor",
+                string("上一页 event.list 返回的 nextCursor；原样续页并保持同一 Agent、status、severity，limit 可调整。非法或筛选不匹配的游标会报错。"),
+            );
         }
         "event.get" => {
-            add("agentId", string("目标 Agent ID；省略时使用当前 Agent。"));
-            add("eventId", string("event.list 返回的事件 ID。"));
+            add(
+                "agentId",
+                string("当前 Agent ID；可省略。提供其他 Agent ID 会返回 event_agent_mismatch，不跨 Agent 路由。"),
+            );
+            add("eventId", string("event.list 或事件面板中的事件 ID；不是进程或安装 ID。"));
         }
         "event.mark" => {
-            add("agentId", string("目标 Agent ID；省略时使用当前 Agent。"));
+            add(
+                "agentId",
+                string("当前 Agent ID；可省略。提供其他 Agent ID 会返回 event_agent_mismatch，不跨 Agent 路由。"),
+            );
             add(
                 "eventIds",
                 json!({
                     "type":"array",
                     "maxItems":512,
                     "items":{"type":"string"},
-                    "description":"要标记为 handled 的事件 ID；重复 ID 幂等，未知 ID 返回 notFoundIds。"
+                    "description":"已处理或决定忽略的事件 ID，最多512项。重复/已 handled 的 ID 幂等；过期或未知 ID 返回 notFoundIds。空数组不标记任何事件，不表示确认全部。"
                 }),
             );
         }
@@ -967,10 +979,10 @@ fn tool_description(name: &str) -> String {
         "room.notebook.read" => "读取 Notebook/ 下精确的 .md 相对路径；返回 path/content。未知或超大文档返回错误；只读，不是任意仓库文件读取器。".to_string(),
         "room.state.list" => "列出 State/entities/ 下的 Markdown 实体；返回按路径排序的 entities（entity/path），跳过 symlink 和非 Markdown 文件。只读。".to_string(),
         "room.state.read" => "按实体文件名 stem 读取 State/entities/{entity}.md；返回 path/content。缺失或超大文档报错；不接受路径输入，只读。".to_string(),
-        "event.list" => "按状态、等级和不透明游标分页查看当前 Agent 的事件；默认列 pending、每页20条，隐藏事件仍包含在列表/计数中。返回 items/nextCursor 与本次紧凑 events 面板；非法游标或目标 Agent 不匹配时返回错误。只读，不读取进程状态。".to_string(),
-        "event.get" => "按 eventId 读取完整事件记录和当前 Agent 的紧凑 events 面板；读取不标记 handled，也不操作进程或安装。未知 ID 或目标 Agent 不匹配时返回错误。".to_string(),
-        "event.mark" => "将 eventIds 对应事件幂等标记为 handled，并返回 handledIds/notFoundIds 与紧凑 events 面板；不清理历史、不操作进程或安装。".to_string(),
-        "privateevent.inject" => "本地集成专用事件注入；仅 LocalUnix ingress 可直接调用，不在 tools/list 中公开。来源固定为 external，调用方只提供 ref；此注入确认不消费事件面板曝光。".to_string(),
+        "event.list" => "发现当前 Agent 的待处理事件或按状态/等级筛选历史时使用。返回 items（eventId/summary/severity/createdAt/status）与可选 nextCursor；完整正文和来源用 event.get 查看。events.new 是有展示限制的提醒面板，不是完整 pending 列表；隐藏不等于 handled，仍可通过列表查询。读取不标记 handled，不读取进程状态；附带面板记录实际曝光，历史仍按过期/保留策略维护。非法游标或目标 Agent 不匹配返回错误。".to_string(),
+        "event.get" => "已知 eventId 且需要完整正文或来源时使用；ID 可来自 event.list 或事件面板。返回完整记录（message、severity/status、source.kind/ref、shownCount、expiresAt）及当前 Agent 的 events 面板。读取不标记 handled，不操作进程或安装；详情正文读取不额外计曝光，附带面板实际展示项仍计次。历史仍按过期/保留策略维护；未知 ID 或目标 Agent 不匹配返回错误。".to_string(),
+        "event.mark" => "事件已处理或明确决定忽略后，按 eventIds 将选中的 pending 事件标记为 handled，停止后续提醒；不执行或取消来源进程/安装。返回 handledIds/notFoundIds 与当前 Agent 的 events 面板。重复 ID 去重，已 handled 的 ID 幂等；过期或不存在的 ID 进入 notFoundIds，空数组不标记任何事件。不会主动删除事件记录，历史仍按过期/保留策略维护；目标 Agent 不匹配返回错误。".to_string(),
+        "privateevent.inject" => "本地集成专用事件注入；仅 LocalUnix ingress 可直接调用，不在 tools/list 中公开。来源种类固定为 external，来源引用由调用方通过 ref 提供；此注入响应不附事件面板，也不计面板曝光。".to_string(),
 
         _ => "未知本地工具；请使用已列出的工具名，输入和结果由对应工具合同定义。".to_string(),
     }

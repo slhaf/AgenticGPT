@@ -98,3 +98,10 @@ ShellConfiguration已交付三态serde/CLI/TUI/live reload/import；`config unse
 - 主代理亲读local三描述/schema、Hub三描述/args、共享EventRecord/ListItem/MarkResponse、event_store list/get/mark/panel/cursor/retention及local_service scope/result映射。已确认默认pending/20页/1..100，列表为summary、get完整message/source，mark≤512且expired与未知同属notFoundIds、空列表无批量确认；续页绑定归一化agentId/status/severity，隐藏未改变pending状态。
 - 发现local mark“不清理历史”过强（访问先自动过期/清理），Hub缺输出/默认/限制，local agentId字段未明确只能当前Agent；event.mark destructiveHint本地false、Hubtrue，建议保守统一。仅给出描述/字段/注解调整建议，保留三个公开名称和privateevent.inject隐藏LocalUnix边界，不修改Event源码或API。
 - 阶段7审查完成，未调用子代理、未新增/修改测试、未运行测试或真实smoke；审查结论仅提交三份规划记录。阶段6修改已提交55d19c2。
+
+## 阶段8：直接实施Event工具说明
+- 用户授权同样修改Event工具说明；沿用阶段7亲自核对的源码证据，主代理直接实现，不调用子代理。只修改描述/字段说明与local mark的destructiveHint，不新增schema校验或改DTO/运行语义，保持三个公开名称及privateevent.inject隐藏LocalUnix边界。
+- 按用户要求不新增或运行测试、不做真实smoke或build；静态核对已有实现与受影响消费者，同步既有文档，按阶段本地提交。
+- 两侧三公开Event工具已改为按用户目标选择，返回字段与关键错误/状态明确；local agentId三处明确只接受当前Agent，Hub保持显式目标。字段仅说明真实pending/20/1–100/512与cursor绑定，不增加schema结构属性。private注入仅澄清source.ref由调用方提供，仍隐藏且仅LocalUnix。
+- local event.mark destructiveHint对齐Hub为true；readOnly/openWorld不变。保留mark处理通知而不操作来源任务、重复/已有handled幂等、expired或未知notFoundIds、空数组无批量确认、自动过期/保留清理等边界。list/get不标记handled，附带面板真实曝光照常计次。
+- 同步docs/interfaces.md和docs/tool-contract-matrix.md，无新增文档或双语对应页。已有Event合同测试与metadata断言静态核对无须更新；测试文件未改，不新增/运行测试、不build或smoke/formatter，不调用子代理。阶段8完成并由聚焦本地阶段提交收束，不push/release/tag。

@@ -226,6 +226,7 @@ pub(crate) fn tool_is_destructive(name: &str) -> bool {
             | "room.maintenance.submit"
             | "skills.setActive"
             | "skills.run"
+            | "event.mark"
     )
 }
 

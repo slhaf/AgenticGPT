@@ -51,3 +51,11 @@ Reviewer 已撤回 zombie-only 成功证据 finding：当前代码保守报告 t
 - 亲读panel_at：high持续展示，medium shownCount<3、low shownCount<1，最多5项；达到展示次数后隐藏并不自动handled，pending计数/list仍保留。应解释“隐藏”不等于已处理，不把events.new当完整待处理列表。面板曝光更新shownCount；“不标记handled”比“读取绝不改变任何状态”准确。仅用现有源码核对，不执行Event工具。
 - 最后核对annotations发现两侧event.mark分类不同：local readOnly=false/destructive=false，Hub readOnly=false/destructive=true；mark更改既有pending状态而非纯追加，建议保守对齐Hub，但本轮仅报告，不改注解。两侧list/get均无显式业务handled写入；附带面板曝光会更新shownCount，存储访问仍可能过期/清理，不应承诺零数据库写入。
 - Event审查结论：保留三个公开名称及private注入边界，先补选择时机（发现摘要、查看正文/来源、明确处理后确认）。local mark去掉“不清理历史”的绝对保证，说明expired也进入notFoundIds、空数组不批量清空、重复/已有handled幂等；Hub补items/nextCursor、message/source及handledIds/notFoundIds，字段级补status=pending、limit默认20/1..100、mark≤512。续页保持agentId/status/severity，模型不要把events.new当完整待处理列表，隐藏不等于handled。未修改Event源码/schema/API/测试，也未运行Event工具、测试或smoke。
+
+## 阶段8：修改契约
+- 复用阶段7已核实的选择/返回/状态语义。Hub的默认值、clamp范围和512个ID限制仅写入现有字段说明，不增加schemars range/length/default等schema形状或校验；local也仅澄清现有属性说明。
+- local event.mark注解改为destructive=true，以反映既有状态替换、与Hub一致；readOnly/openWorld保持原值。不把list/get的曝光计数与自动清理扩大成一般业务写操作，不改执行器或数据库；描述使用“不标记handled”及保留策略边界。
+- 现有Event用户说明位于docs/interfaces.md:98–140和tool-contract-matrix.md:42–44,83；matrix也有“不清理历史”的旧绝对措辞，需同步。现有Event测试仅断言pending/20默认、无minItems/最大512；受影响注解测试未固定event.mark=false，也无Event描述字面断言，不需要改测试。
+- 字段说明将明确本地agentId只能当前Agent、cursor保持同一Agent/status/severity、Hub状态默认pending/limit默认20并clamp1–100、已handled和重复ID幂等/expired或未知notFoundIds/空数组不批量确认。只维护既有说明，不增加required/default/range/length等结构性schema属性。private注入描述仅消除“只提供ref”的歧义，不改变入口/可见性。
+- 阶段8已实施：stdio_schema.rs改三公开描述、现有字段说明和private注入来源说明；Hub args.rs仅改描述属性，mcp_server.rs改三描述；operation.rs仅补event.mark破坏性提示。现有枚举/required/default/min/max/DTO、handler、存储、授权和可见性保持不变。
+- 既有interfaces.md及tool-contract-matrix.md同步工具选择、local/Hub scope、cursor绑定、mark过期/空数组/幂等、曝光/保留规则与注解；对应文件glob仅有这两页，无双语对应页需维护。只依据阶段7/本阶段静态源码核对与编辑结果，不声称编译/运行验证；未新增或修改测试，未运行测试/build/smoke/formatter，未调用子代理。

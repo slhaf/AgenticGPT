@@ -11,6 +11,7 @@
 5. 对照项目指南审查Process工具描述（complete）；主代理亲读项目引用的OpenAI原文，核对Agent与Hub MCP描述/schema/annotations及真实工具表面。确认batch串行暗示与local必填elements遗漏，建议描述先说明目标与选择时机、再说明关键状态/风险。未改工具或API；仅清理单个pyc并完成隔离真实MCP审查，证据与建议按阶段记录和提交。
 6. 实施Process工具定义调整（complete）；主代理直接完成、不调用子代理。两侧五个描述改为目标/选择时机优先，保留必要状态/风险；local batch elements必填标记与既有DTO对齐，执行行为/API名称不变。批次顺序只承诺逐项进程信息按输入顺序。字段约束与既有用户文档同步。用户补充要求描述改动不测试、不加测试、无API结构变化不smoke；新增corpus条目已原样撤回，不再运行测试或smoke。提前发出的验证链在中止请求前已完成，事实单独记录；本阶段单独提交。
 7. 审查Event工具描述（complete）；主代理亲读local/Hub描述、schema、annotations及存储/分发行为。确认摘要/详情/处理选择流程、Hub默认/输出/上限缺失、cursor筛选绑定、expired的notFoundIds、不清理历史的过强说法及mark破坏性注解两侧不一致；仅报告建议，未改Event源码/API，不调用子代理、不新增或运行测试/真实smoke，审查记录单独提交。
+8. 实施Event工具定义调整（complete）；主代理直接完成两侧三公开描述、字段说明及private来源措辞，local mark破坏性提示对齐Hub。明确local scope、选择/输出、cursor绑定、expired/空数组/幂等、面板曝光/历史保留；同步interfaces与tool-contract-matrix。只改说明与行为注解，未改DTO、字段结构/约束、执行/授权或private可见性；静态核对现有消费者，无新增/修改测试或运行测试/build/smoke/formatter，不调用子代理，单阶段本地提交。
 
 ## 验证
 最多20轮完整验收；fmt/check/strict clippy/workspace test/build Agent+Hub/live parity均退出0；额外隔离真实入口覆盖shell/init/白名单/取消边界。并行实现子代理不得中途运行build/tests/formatter，由父代理收敛后统一运行。记录每轮结果。

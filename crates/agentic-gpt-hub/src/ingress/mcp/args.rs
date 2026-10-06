@@ -63,16 +63,24 @@ pub(super) struct EventListArgs {
     )]
     pub(super) agent_id: String,
     #[serde(default)]
-    #[schemars(description = "可选事件状态筛选：pending、handled 或 expired。")]
+    #[schemars(
+        description = "可选事件状态筛选：pending、handled 或 expired；省略或 null 时为 pending，不表示列出所有状态。"
+    )]
     pub(super) status: Option<EventStatusArgs>,
     #[serde(default)]
-    #[schemars(description = "可选事件等级筛选：low、medium 或 high。")]
+    #[schemars(
+        description = "可选通知优先级筛选：low、medium 或 high；省略或 null 时不筛选，等级不表示来源任务成功或失败。"
+    )]
     pub(super) severity: Option<EventSeverityArgs>,
     #[serde(default)]
-    #[schemars(description = "可选结果数限制。")]
+    #[schemars(
+        description = "每页结果数；省略或 null 时为20，Agent 将显式值限制到1–100。"
+    )]
     pub(super) limit: Option<usize>,
     #[serde(default)]
-    #[schemars(description = "此前 event.list 返回的不透明分页游标。")]
+    #[schemars(
+        description = "上一页 event.list 返回的 nextCursor；原样续页并保持同一 agentId、status、severity，limit 可调整。非法或筛选不匹配的游标会报错。"
+    )]
     pub(super) cursor: Option<String>,
 }
 
@@ -83,7 +91,7 @@ pub(super) struct EventGetArgs {
         description = "目标本地 Agent ID；必须指定 Hub 中已启用的 Agent，不会自动选择其他 Agent。"
     )]
     pub(super) agent_id: String,
-    #[schemars(description = "event.list 返回的事件 ID。")]
+    #[schemars(description = "event.list 或事件面板中的事件 ID；不是进程或安装 ID。")]
     pub(super) event_id: String,
 }
 
@@ -95,7 +103,7 @@ pub(super) struct EventMarkArgs {
     )]
     pub(super) agent_id: String,
     #[schemars(
-        description = "要标记为已处理的事件 ID；重复或未知 ID 按 Agent 返回的结果说明处理。"
+        description = "已处理或决定忽略的事件 ID，最多512项；重复/已 handled 的 ID 幂等，过期或未知 ID 进入 notFoundIds。空数组不标记任何事件，不表示确认全部。"
     )]
     pub(super) event_ids: Vec<String>,
 }
