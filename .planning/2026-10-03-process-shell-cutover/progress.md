@@ -85,3 +85,13 @@ ShellConfiguration已交付三态serde/CLI/TUI/live reload/import；`config unse
 - 主代理亲自读取项目指定OpenAI Define tools原文，亲读Agent/Hub描述、local required分支、batch DTO和并发worker、read EOF计算；子代理只作定位。明确区分必须纠正的batch串行暗示/schema必填遗漏，与面向选择的正文重排建议，不要求所有枚举和错误码进入描述。
 - 隔离真实MCP审查完成：两侧均exec/batch/read/list/cancel；local batch required=[]而缺elements调用exit1/-32602，Hub Full required包含agentId/elements。临时driver首次缺subprocess import失败且已清理，修正后exit0；最终Agent/Hub均停止wait，私有root及pycache不存在。仅记录审查与建议，未修改工具/API/测试；公开文档无需改变，因本轮没有实施契约或描述变更。
 - 阶段5完成；按项目阶段提交规则，仅提交三份已有规划记录。
+
+## 阶段6：直接实施工具定义调整
+- 用户授权修改，主代理直接实现，不调用子代理。范围为Agent-local与Hub Full五个Process描述、local batch elements必填、受影响文档/契约验证；不改变执行器、API名称、确认/权限、缓存或取消行为。
+- 前一轮真实Agent缺elements错误与local required=[]已复现；无需再跑错误确认。本阶段使用现有共享tool-contract corpus补必填schema回归，不固定描述字面措辞。batch顺序仅描述逐项进程信息按输入顺序，不暗示完成结果排序或串行依赖。
+- Process定义已修改：两侧五工具先讲目标/选择条件；batch明确配置并发与逐项进程信息顺序，read区分state/EOF与预算/cursor，cancel强调证据/进程组/MCP边界，list区分发现与读取及Hub缓存。local schema增加既有DTO硬要求的elements必填；cwd/default/预算说明放到字段级。未改变DTO、执行器、确认/权限或工具名称。
+- 用户中途补充：此类描述无需测试、不新增测试，无API结构变化无需真实smoke。新增process_batch_descriptor条目已完整撤回，cases.json恢复原hash3996；不改任何既有测试。请求取消bg_1时工具报告链已完成，非成功中止：此前fmt check及Agent stdio_server过滤测试64 passed、Hub mcp过滤测试23 passed、Agent/Hub build完成；之后不再补跑验证，不执行本轮真实smoke。
+- docs/process-cutover.md同步elements必填、工具选择、batch进程信息顺序及状态/EOF独立；不新增文档，历史迁移事实保留。本阶段提交仅三份Rust工具定义、现有Process文档与三份规划文件。
+
+## 阶段7：Event工具描述审查
+- 用户仅要求审查，暂不擅自修改Event描述或API；主代理自己读现有定义/schema/DTO与存储/分发实现，按同一指南给出必要调整。遵守不新增测试、不运行测试或真实smoke，不调用子代理。

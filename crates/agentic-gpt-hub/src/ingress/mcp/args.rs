@@ -182,7 +182,7 @@ pub(super) struct ProcessBatchArgs {
     )]
     pub(super) group: Option<String>,
     #[schemars(
-        description = "按输入顺序排列的 Bash 命令；整个批次先准入、后启动。元素 cwd（非 null）覆盖批次 cwd；空数组不启动进程。"
+        description = "必填的独立 Bash 命令列表；整个批次先准入、后按配置并发启动。按输入顺序返回逐项进程信息，不保证执行/完成顺序。元素 cwd（非 null）覆盖批次 cwd；空数组不启动进程。"
     )]
     pub(super) elements: Vec<ProcessBatchElementArgs>,
     #[serde(default)]
@@ -286,7 +286,7 @@ pub(super) struct ProcessReadArgs {
     #[serde(default)]
     #[schemars(
         range(min = 4096, max = 1048576),
-        description = "整个紧凑 ProcessResponse 的 JSON UTF-8 字节预算；省略时不在 Hub 覆盖 Agent 当前 limits.processResponseBytes（出厂默认 8192）；显式值范围 4096–1048576。"
+        description = "整个紧凑 ProcessResponse 的 JSON UTF-8 字节预算，不含传输封套和独立 events 面板，不切分 MCP 结果；省略时不在 Hub 覆盖 Agent 当前 limits.processResponseBytes（出厂默认 8192）；显式值范围 4096–1048576。"
     )]
     pub(super) max_bytes: Option<usize>,
 }

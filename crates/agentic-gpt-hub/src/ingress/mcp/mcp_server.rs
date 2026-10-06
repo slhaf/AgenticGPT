@@ -570,7 +570,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "process.exec",
-        description = "以普通非登录/非交互 Bash 在 Agent 上原样执行 command（pipefail 生效，不启用 set -e）。cwd 在可信初始化后生效；策略只分析 command，不检查初始化中的 PATH/函数，故不是运行时安全边界。waitSeconds 只等待、不取消；超时可用 process.read/cancel 跟进。"
+        description = "在指定 Agent 上执行一段 Bash 命令或脚本，适用于启动单项工作；多项独立工作可用 process.batch。返回 agentId/processId/state 及预算内可用输出，后续用返回的 agentId/processId 调用 process.read 或 process.cancel。普通非登录/非交互 Bash 原样执行 command（pipefail 生效，不设 set -e）；cwd 在可信初始化后生效。命令可产生文件或外部副作用；策略只分析提交的 command，不检查可信初始化中的 PATH/函数，不是运行时安全边界。waitSeconds 只等待、不取消。"
     )]
     async fn exec(&self, params: Parameters<ProcessExecArgs>) -> Result<CallToolResult, ErrorData> {
         let params = params.0;
@@ -603,7 +603,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "process.batch",
-        description = "批次准入后按序启动原文 Bash 命令；元素 cwd 覆盖批次 cwd。Bash 行为与 process.exec 相同；waitSeconds 只等待不取消，已启动副作用不会回滚。"
+        description = "在指定 Agent 上一次提交多条独立 Bash 命令，适用于无需先后依赖的批量工作。整批准入后按 Agent limits.maxConcurrentTasks 控制并发，不保证执行/完成顺序；有依赖关系时用 process.exec 和显式 shell 控制流。Bash 行为与 process.exec 相同；元素 cwd 覆盖批次 cwd。返回 batchId/status 与按输入顺序排列的逐项进程信息（含 agentId/processId），用 process.read 或 process.cancel 跟进单项。waitSeconds 只等待不取消，已启动副作用不会回滚。"
     )]
     async fn batch_exec(
         &self,
@@ -646,7 +646,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "process.list",
-        description = "列出指定 Agent 的活动或保留进程，可按 group/kind/state 过滤并以 cursor 续页；优先用于在线实时发现。返回 processes、nextCursor，以及 freshness/observedAt；Agent 请求失败时 Hub 可能回退缓存快照，需据 freshness 判断。离线时不能续用 Agent 签发的 cursor，会返回 status=unavailable 和 process_list_cursor_unavailable；该错误不等于空列表。"
+        description = "不知道 processId、重新发现已有任务或筛选指定 Agent 进程时使用；已知 ID 要读状态/输出时用 process.read。按 group/kind/state 分页列出活动或保留进程，不读取输出正文。返回 processes/nextCursor 及 freshness/observedAt；Agent 请求失败时可能回退 Hub 缓存，不能当作实时状态。离线时不能续用 Agent 签发的 cursor，会返回 status=unavailable 和 process_list_cursor_unavailable，不等于空列表。"
     )]
     async fn process_list(
         &self,
@@ -679,7 +679,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "process.read",
-        description = "统一读取指定 Agent 的受管理进程状态与可用产物，适合跟进 process.exec、process.batch、skills.run 或 mcp.callTool 的 processId。必填 agentId/processId；waitSeconds 省略时为 5、范围 0–30（超过按 30，0 立即），view 为 auto（默认）或 status；status 仅等待执行终态/期限且不返回产物，auto 有 backlog 时先返回输出/结果，否则可有界等待输出、终态/采集结算或期限。auto 可用 cursor 续读 command/skill 输出，status 与 cursor 不可组合；kind=mcp 的下游结果不支持输出 cursor。maxBytes 是整个紧凑 ProcessResponse 的 UTF-8 JSON 预算，省略时保持未指定并由 Agent 使用 limits.processResponseBytes（出厂默认 8192），显式范围 4096–1048576。返回 agentId、processId、kind、state、captureStatus 与可选 output/mcpResult；完整下游 CallToolResult 只会以 included 状态整体保留，deferred 可提高预算，pending 不是失败。等待超时不取消进程；Agent 不可达时返回 process_read_unavailable 及明确标记的 Hub 缓存元数据（若有），缓存不含产物且不是实时结果。"
+        description = "已有 agentId/processId 时读取执行状态、增量输出或下游 MCP 结果，适合跟进 process.exec、process.batch、skills.run 或 mcp.callTool；不知道进程 ID 时先用 process.list。不启动或取消工作。view=status 只返回元数据并等待执行终态/期限；auto 优先返回未读产物，否则有界等待。返回 agentId/processId/kind/state/captureStatus 及可用 output/mcpResult。执行终态与 output.eof 不能互相推断；hasMore 仅表示当前有未读输出，gap 表示已丢失字节，captureStatus=incomplete 时不要无限等 EOF。command/skill 可用 cursor 续读；status 或 kind=mcp 不接受输出 cursor。mcpResult.value 为完整 CallToolResult；pending 不是失败，deferred 可提高 maxBytes 领取，not_retained 不可恢复。waitSeconds 到期不取消；Agent 不可达时返回 process_read_unavailable 及可能的 Hub 缓存元数据，缓存不含产物且不是实时结果。"
     )]
     async fn process_read(
         &self,
@@ -712,7 +712,7 @@ impl AgenticMcpServer {
 
     #[tool(
         name = "process.cancel",
-        description = "请求 Agent 取消指定进程并核验实际终止证据；成功时返回 ProcessCancelResponse（processId、state、cancelOutcome、terminationEvidence，可选 error），并可能附独立 events 面板。请求取消不保证远端已停止；Agent 不可达时返回 process_cancel_unavailable，并可能附 Hub 缓存元数据，不能把缓存当停止证据。"
+        description = "需要停止排队中或已启动的工作时，向指定 Agent 请求取消 processId；返回 state/cancelOutcome/terminationEvidence 和可选 error，可附独立 events 面板。依据 Agent 返回的证据判断是否已观察到停止，不把请求已接收当作副作用已停止。本地命令/skill 取消针对受管理进程组，不保证脱组后代停止；MCP 向下游请求取消，不保证远端副作用停止。Agent 不可达时返回 process_cancel_unavailable 及可能的 Hub 缓存元数据，缓存不是停止证据。"
     )]
     async fn process_cancel(
         &self,

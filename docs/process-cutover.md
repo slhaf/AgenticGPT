@@ -30,7 +30,7 @@
 
 ### 当前 Bash 命令输入切换
 
-当前 `process.exec` 必须提供原始 shell 脚本 `command`，可选工作目录字段为 `cwd`；`process.batch` 的每个元素也必须提供 `command`，并可使用批次级 `cwd`，由元素覆盖。旧 `program`、`args`、`workingDirectory` 字段不是当前输入，也没有兼容别名。若客户端原先传入可执行文件和参数数组，必须自行按 shell 规则显式引用/转义每个参数，再构造 `command`；不得把数组直接拼接成脚本。保留在非输入 `ProcessInfo` 历史元数据中的旧字段，不代表这些字段仍可作为执行请求输入。
+当前 `process.exec` 必须提供原始 shell 脚本 `command`，可选工作目录字段为 `cwd`；`process.batch` 必须提供 `elements` 数组，每个元素必须提供 `command`，可使用批次级 `cwd`，由元素覆盖。空数组不启动进程。旧 `program`、`args`、`workingDirectory` 字段不是当前输入，也没有兼容别名。若客户端原先传入可执行文件和参数数组，必须自行按 shell 规则显式引用/转义每个参数，再构造 `command`；不得把数组直接拼接成脚本。保留在非输入 `ProcessInfo` 历史元数据中的旧字段，不代表这些字段仍可作为执行请求输入。
 
 Shell 策略现在针对提交的整个脚本做静态预检，而不是为每个 `program`/`args` 调用组装单独命令：任一可判定的拒绝会在执行脚本前拒绝整个请求；无法匹配、语法不完整或不支持的结构要求对整段脚本确认。缺少确认通道时 fail closed。不要据此扩大默认 Bash 白名单。普通字面量 `printf` 可用于无副作用的冒烟检查；需要通用 shell 结构的脚本可能要求显式确认。
 
@@ -41,6 +41,16 @@ Shell 策略现在针对提交的整个脚本做静态预检，而不是为每�
 `process.cancel` 对受管理进程组发 TERM，等待后再发 KILL；如组成员仍存活，保留进程组并继续占用执行容量。`process_group_sigterm_observed` 与 `process_group_sigkill_observed` 是观察到相应停止信号的正面语义证据，必须与未验证/脱离等结果区分。取消覆盖普通同组管道及后台后代，不保证脱离该进程组的后代停止。执行终态与 stdout/stderr 捕获 EOF 分开报告；捕获尚未 EOF 不会让已经结束的执行仍被称为运行中。
 
 当前公开 Process 工具仅为 `process.exec`、`process.batch`、`process.read`、`process.list` 和 `process.cancel`；旧 `process.status`、`process.output`、`process.result` 工具及旧 HTTP 路径直接移除，不提供 wire/http 兼容别名。HTTP read 的 wait 默认 5 秒、最大 30 秒、0 立即；view 为 `auto` 或 `status`。响应包含 `captureStatus`，输出页包含 `gap`、`eof`、`hasMore`；hasMore 不要求读完整日志。cursor 仅 command/skill，非消费且不同读取者不共享。
+
+### 工具选择与批次顺序
+
+- `process.exec`：启动一段命令或脚本。需要先后依赖时，在同一 `command` 中用 `&&` 或显式 shell 控制流表达。
+- `process.batch`：一次提交多条独立命令。整批准入后按 Agent 的 `limits.maxConcurrentTasks` 控制并发，不保证执行或完成先后；响应中的逐项进程信息按输入顺序排列，不是串行执行保证。使用各项的 `processId` 分别读取或请求取消；已启动的副作用不回滚。
+- `process.read`：已有 `processId` 时观察执行状态、读取增量输出或下游 MCP 结果。只看状态使用 `view: "status"`；领取产物使用默认 `auto`。执行终态与 `output.eof` 不能互相推断：终态后仍可能有未读或尚未捕获的输出，输出管道关闭也不证明执行结束。
+- `process.list`：不知道 `processId`、重新发现已有任务或按 `group`、`kind`、`state` 筛选时使用；不返回输出正文。Hub 回退缓存时检查 `freshness`、`observedAt`，不要将缓存当作实时状态。
+- `process.cancel`：请求停止排队中或已启动的工作，依据 `cancelOutcome`、`terminationEvidence` 判断取消结果；请求已接收不等于副作用已停止，缓存也不是停止证据。
+
+通过 Hub 调用时，后续调用必须复用返回的 `agentId`、`processId`；Agent-local 工具由当前 Agent 执行，不接收目标 `agentId`。`waitSeconds` 到期只结束本次等待，不取消工作。
 
 统一响应预算由 `limits.processResponseBytes` 控制，默认 8192 字节，范围 4096..1048576；read 可用 `maxBytes` 显式覆盖。预算是序列化响应 JSON（含转义/Base64），不含传输/event 封套；与 MCP 结果 512 KiB 保留上限分离，`mcp.batch` 整个聚合响应共用预算。MCP 完整 CallToolResult 状态为 `pending`、`included`、`deferred`、`unavailable` 或 `not_retained`；完整对象不切碎，`not_retained` 不可恢复。
 

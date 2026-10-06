@@ -32,3 +32,12 @@ Reviewer 已撤回 zombie-only 成功证据 finding：当前代码保守报告 t
 - 用户要求主代理亲读OpenAI原文：已读取项目链接https://developers.openai.com/plugins/plan/tools。关键是用户目标/选择时机、相似工具区分、输入schema、结果与副作用，不是向description穷举全部字段/枚举/错误码。此建议是厂商产品设计参考，不新增MCP协议要求。Context7已resolve并查官方Apps SDK examples，返回片段相关性弱，结论依据直接取得的指定原文。
 - 建议五工具开头分别说明启动一段命令/脚本、提交多项独立命令、已有ID时观察状态/产物、不知道ID时发现任务、请求取消。保留字段schema中的default/range；正文保留改变调用决策或风险判断的条件（状态与EOF、cursor互斥、预算deferred、取消证据、Hub缓存）。
 - 首次临时capture漏导入subprocess，取得Agent表后失败，finally已停止Agent并删除私有root；修正临时脚本后capture exit0，读取真实Agent-local及Hub Full两侧五工具并验证缺elements错误。不执行用户命令，不改工具定义/schema/API或永久测试。Agent PID282147 exit0，Hub PID282277由SIGTERM停止(-15)，均已wait；/tmp/td-25y0lfo_不存在，scripts/__pycache__不存在。没有创建仓库内临时driver。
+
+## 阶段6：实施边界与验证选择
+- 已亲读开发指南与文档标准，恢复同一计划。CodeGraph确认deterministic_tool_contract_corpus_exercises_public_dispatch从tests/tool-contract-cases/cases.json读取descriptor required期待并验证公开schema，现有模式适合捕获模型被错误告知elements可选的回归；不为描述措辞新增测试。
+- 设计维持现有私有schema/工具宏，不引入共享字符串抽象，不改导出符号或执行/响应DTO。字段的默认值/范围优先留在schema；正文保留状态/EOF、cursor、deferred、wait不取消、init信任、无rollback、取消证据与Hub缓存边界。
+- 已核对字段schema：Hub read已说明wait/view/cursor/range/default，local仍缺status与cursor互斥的字段提示；将预算UTF-8 JSON、不含传输/独立events、不切MCP结果的说明放到maxBytes字段。local cwd省略实际为workspaceRoot，修正文案而不改行为。现有corpus只有process_read_descriptor，新增batch descriptor必填elements用例即可捕获本次schema遗漏，不增加重复缺参/措辞测试。
+- 既有docs/process-cutover.md记录五工具、预算/EOF/取消边界，但未说明batch不是串行依赖；在真实MCP smoke通过后补工具选择、elements必填与逐项进程信息顺序说明，无对应英文版需要同步。
+- 用户新要求覆盖本阶段原验证安排：不为描述改动新增/运行测试，不改变API结构时不跑真实smoke。新增corpus用例已经撤回；仅local schema required补齐既有DTO必填，不改变执行入参形状或运行语义。提前启动的链已完成，终止请求无法撤销此前执行；之后不继续测试/smoke。
+- Process实际提交范围为stdio_schema.rs、Hub mcp_server.rs/args.rs、docs/process-cutover.md及三份规划记录。字段默认/range继续存在；未引入辅助抽象或修改行为注解。无对应英文Process文档或OpenAPI/DTO变更。
+- Event初步定位：Hub只暴露event.list/get/mark三工具且必须agentId；privateevent.inject为Agent-local入口。共享DTO list返回items/nextCursor，item仅summary而非完整message；get返回EventRecord；mark返回handledIds/notFoundIds。将亲读local描述与存储选择/mark/注入规则后给出完整审查结论。
