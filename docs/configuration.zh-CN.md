@@ -682,6 +682,7 @@ HTTP MCP 凭据无法解析时会 fail closed：endpoint 停止接受请求并�
 共享 watcher 在需要重启的字段变化时记录 `config changes require restart; fields=...`，其中包括
 `browser`。诊断只列出发生变化的字段名，不会输出 secret 值。Standalone supervisor 另外输出
 `restart_required`；Hub 没有 supervisor 事件。不要把“文件已修改”误认为现有子进程树已经切换。
+`agent.info` 的 `config.liveSubsetMatchesDisk` 比较运行时 live subset 与有效磁盘配置投影；该比较包含完整的 `shell` 配置，Default、Disabled 与显式 init 文件路径三态按配置序列化表示区分。改变 Shell 初始化文件配置后，在 worker 热加载应用前该值预期为 `false`，应用后为 `true`。这只是配置快照诊断：不检查 init 文件内容，也不表示运行中进程已切换配置或提供强一致生效屏障。
 
 ## 验证与检查
 

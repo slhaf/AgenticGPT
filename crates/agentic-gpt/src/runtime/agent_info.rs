@@ -376,6 +376,7 @@ fn live_subset(config: &Config) -> Value {
         "mcpServers": config.mcp_servers,
         "toolsets": config.toolsets,
         "httpMcp": config.http_mcp,
+        "shell": config.shell,
     })
 }
 

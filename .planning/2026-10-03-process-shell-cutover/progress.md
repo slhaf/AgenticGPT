@@ -67,3 +67,14 @@ ShellConfiguration已交付三态serde/CLI/TUI/live reload/import；`config unse
 - command/cwd clean cutover、内部Skill argv分离、普通Bash/pipefail/no-set-e、init三态与typed失败、字面策略/集中确认、独立组取消/准确evidence、旧持久请求退休、统一读取/预算/游标等均已实现；所有受影响入口、消费者与文档已迁移。
 - 额外真实Agent/Hub Shell场景全pass，真实PTY配置三态surface/save全pass；有实际host PID消失、late输出cursor→EOF、容量/retention与迟到确认零执行证据。修正后的真实恢复夹具额外delay4s仍全pass。
 - 无push/release/tag；未修改真实用户配置/数据或系统Shell。自建临时driver已删除，私有根/进程已清理，保留实际验收日志。本阶段修复、文档与证据由最终本地聚焦提交一次收束。
+
+## 阶段4：Shell配置观测补漏
+- 用户真实临时Agent smoke已确认执行、init三态、policy/reload/read通过；报告liveSubsetMatchesDisk漏shell。只读核对根因在agent_info.rs::live_subset字段投影，reload已复制candidate.shell。本次只修比较投影，不改watcher/执行器/轮询/输入契约。
+- 用户指定不新增永久回归测试；使用临时HOME/XDG真实Agent及local MCP验证Default、Disabled、Path（含显式默认路径文本）差异，磁盘改动未加载时false、加载后true；清理自建进程/目录/driver，按仓库规则单阶段提交。
+- 源码已单行补入`"shell": config.shell`；`cargo fmt --all -- --check && cargo build -p agentic-gpt`成功，实际新Agent构建20.71s。未新增永久测试，未运行回归套件。
+- 配置中英文对应页已补充同一观测边界：完整shell三态纳入liveSubsetMatchesDisk，reload前后false→true，只比较配置快照，不检查init文件内容、不证明旧进程切换或强一致生效屏障。
+- 临时driver `/tmp/shell_health_smoke.py` 已交付并正在父级执行；真实local Unix MCP持久连接、短私有HOME/XDG/runtime/workspace/配置，按原子写盘逐项改变shell，必须见漂移issue后消失。等待实际exit/断言，不以driver交付当作通过。
+- 第一次临时driver实际exit1（0.28s），尚未启动Agent：init_agent生成sparse配置省略sandbox，driver错误要求sandbox object。只修driver用setdefault显式enabled=false；finally覆盖此失败路径并清理私有root，不是生产实现故障。
+- 修正后的现场smoke exit0、14.27s：真实新Agent `sh8b23edca`（PID136521）使用`/tmp/sh-ww253k1z`私有HOME/XDG/runtime/workspace及local Unix MCP持久连接。初始Default matchesDisk=true；随后Disabled→Path A→Path B→Default→显式默认路径文本→Disabled→Default七次变更，每次均观察到false与config_live_subset_not_applied，再经真实watcher观察true且issue消失。未mock比较函数、未暂停watcher、未新增永久测试。
+- 清理实际证据：Agent returncode=0已wait、MCP连接关闭=true、tempRootExists=false。临时driver已删除；现场输出保留artifact://483。只运行格式检查、新Agent构建与此真实smoke，未重跑旧执行场景或回归套件。
+- 本阶段源码只新增shell比较投影，配置双语文档同步对应观测边界；规划/证据与修复在单独本地阶段提交收束，不push/release/tag。

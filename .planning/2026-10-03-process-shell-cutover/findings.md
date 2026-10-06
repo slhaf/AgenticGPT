@@ -21,3 +21,5 @@ Reviewer 已撤回 zombie-only 成功证据 finding：当前代码保守报告 t
 - Supervisor socket由HOME而非config root决定：`$HOME/.agentic_gpt/runtime/agent/<agent_id>/mcp.sock`。fixture只缩短唯一agent ID至精确100byte路径预算内；生产上限/路径保持不变。四个supervised smoke共享配置原无allow，须显式授权fixture自己的`/usr/bin/printf`，不扩大生产默认权限。
 - 第12轮workspace tests全部通过：Agent615（1 ignored）、Hub138、Protocol23、配置CLI24、Unix control1、HTTP MCP4、Supervisor6、apply-patch2、browser-host10。最终完整验收结果见progress.md；既有ignored项未冒充执行成功。
 - Live parity恢复夹具需区分relay观测、Hub持久化与parent线程时序。失败response同一lock内记录稳定boundary并arm双holds；EventSources另等待现有Hub DB sources持久化后保持精确identity比较。真实隔离after场景故意delay parent4s，replay已在parent醒前发生（count1→2），全部原barrier/结果/outbox/去重断言仍通过；未改生产恢复行为或增加超时上限。
+- 阶段4只修agent.info::live_subset：新增整个config.shell投影，外层ShellConfig序列化保留Default省略与Disabled null、Path字符串（含显式默认路径文本）的差别。apply_live_config_subset已经copy shell，无需改热加载。用户明确不用永久回归测试，父统一构建后通过真实local MCP临时smoke验收。
+- 阶段4真实smoke已exit0：七次Default/Disabled/Path A/Path B/显式默认路径文本转换均先false并含config_live_subset_not_applied，真实watcher加载后true且该issue消失；MCP连接关闭，临时Agent PID136521正常exit0已wait，临时root不存在。该验证只证明配置值的观测，不检查init文件内容或更改执行语义。
