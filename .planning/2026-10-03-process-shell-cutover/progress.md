@@ -95,3 +95,6 @@ ShellConfiguration已交付三态serde/CLI/TUI/live reload/import；`config unse
 
 ## 阶段7：Event工具描述审查
 - 用户仅要求审查，暂不擅自修改Event描述或API；主代理自己读现有定义/schema/DTO与存储/分发实现，按同一指南给出必要调整。遵守不新增测试、不运行测试或真实smoke，不调用子代理。
+- 主代理亲读local三描述/schema、Hub三描述/args、共享EventRecord/ListItem/MarkResponse、event_store list/get/mark/panel/cursor/retention及local_service scope/result映射。已确认默认pending/20页/1..100，列表为summary、get完整message/source，mark≤512且expired与未知同属notFoundIds、空列表无批量确认；续页绑定归一化agentId/status/severity，隐藏未改变pending状态。
+- 发现local mark“不清理历史”过强（访问先自动过期/清理），Hub缺输出/默认/限制，local agentId字段未明确只能当前Agent；event.mark destructiveHint本地false、Hubtrue，建议保守统一。仅给出描述/字段/注解调整建议，保留三个公开名称和privateevent.inject隐藏LocalUnix边界，不修改Event源码或API。
+- 阶段7审查完成，未调用子代理、未新增/修改测试、未运行测试或真实smoke；审查结论仅提交三份规划记录。阶段6修改已提交55d19c2。

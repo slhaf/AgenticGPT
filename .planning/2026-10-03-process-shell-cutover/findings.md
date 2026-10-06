@@ -41,3 +41,13 @@ Reviewer 已撤回 zombie-only 成功证据 finding：当前代码保守报告 t
 - 用户新要求覆盖本阶段原验证安排：不为描述改动新增/运行测试，不改变API结构时不跑真实smoke。新增corpus用例已经撤回；仅local schema required补齐既有DTO必填，不改变执行入参形状或运行语义。提前启动的链已完成，终止请求无法撤销此前执行；之后不继续测试/smoke。
 - Process实际提交范围为stdio_schema.rs、Hub mcp_server.rs/args.rs、docs/process-cutover.md及三份规划记录。字段默认/range继续存在；未引入辅助抽象或修改行为注解。无对应英文Process文档或OpenAPI/DTO变更。
 - Event初步定位：Hub只暴露event.list/get/mark三工具且必须agentId；privateevent.inject为Agent-local入口。共享DTO list返回items/nextCursor，item仅summary而非完整message；get返回EventRecord；mark返回handledIds/notFoundIds。将亲读local描述与存储选择/mark/注入规则后给出完整审查结论。
+
+## 阶段7：Event初步源码结论
+- 公开工具只有event.list/get/mark；privateevent.inject只允许LocalUnix且不在tools/list公开，不建议改公开边界。local list/get/mark已有一部分输出、错误和“不操作进程”说明；Hub三描述缺输出字段和主要默认/限制，重排应以发现摘要→查看详情→确认处理为选择流程。
+- 亲读event_store.rs::list_at/get_at/mark_at：list默认pending，页大小默认20并clamp至1..100，仅summary不含完整message；get保留完整记录。mark仅将pending变handled，已有handled也列handledIds，重复ID去重；expired或不存在都列notFoundIds，最大512。
+- local mark“不清理历史”是过强表述：mark_at先执行expire_and_cleanup_at，自动过期和retention删除仍可能发生。应区分“不主动删除事件”与后台/按访问清理；不将自然语言只读说明理解成数据库绝不维护状态。
+- Hub EventListArgs.status和limit未写真实默认，limit无范围说明；EventMarkArgs.eventIds未写512上限/expired结果。cursor的筛选绑定、自动面板曝光与目标scope还需核对后定稿。仅审查，不修改Event源码或测试，不运行。
+- 补充亲读decode_cursor：游标绑定归一化后的agentId、status（默认pending）和severity，续页改变筛选会event_cursor_scope_mismatch；limit可改变，不应描述成所有字段都不可改变。local_service将省略/空Agent ID绑定当前Agent，其他目标拒绝；get直接序列化完整EventRecord，不另包event字段。
+- 亲读panel_at：high持续展示，medium shownCount<3、low shownCount<1，最多5项；达到展示次数后隐藏并不自动handled，pending计数/list仍保留。应解释“隐藏”不等于已处理，不把events.new当完整待处理列表。面板曝光更新shownCount；“不标记handled”比“读取绝不改变任何状态”准确。仅用现有源码核对，不执行Event工具。
+- 最后核对annotations发现两侧event.mark分类不同：local readOnly=false/destructive=false，Hub readOnly=false/destructive=true；mark更改既有pending状态而非纯追加，建议保守对齐Hub，但本轮仅报告，不改注解。两侧list/get均无显式业务handled写入；附带面板曝光会更新shownCount，存储访问仍可能过期/清理，不应承诺零数据库写入。
+- Event审查结论：保留三个公开名称及private注入边界，先补选择时机（发现摘要、查看正文/来源、明确处理后确认）。local mark去掉“不清理历史”的绝对保证，说明expired也进入notFoundIds、空数组不批量清空、重复/已有handled幂等；Hub补items/nextCursor、message/source及handledIds/notFoundIds，字段级补status=pending、limit默认20/1..100、mark≤512。续页保持agentId/status/severity，模型不要把events.new当完整待处理列表，隐藏不等于handled。未修改Event源码/schema/API/测试，也未运行Event工具、测试或smoke。
