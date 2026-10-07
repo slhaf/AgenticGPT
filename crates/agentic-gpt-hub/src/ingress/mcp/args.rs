@@ -73,9 +73,7 @@ pub(super) struct EventListArgs {
     )]
     pub(super) severity: Option<EventSeverityArgs>,
     #[serde(default)]
-    #[schemars(
-        description = "每页结果数；省略或 null 时为20，Agent 将显式值限制到1–100。"
-    )]
+    #[schemars(description = "每页结果数；省略或 null 时为20，Agent 将显式值限制到1–100。")]
     pub(super) limit: Option<usize>,
     #[serde(default)]
     #[schemars(

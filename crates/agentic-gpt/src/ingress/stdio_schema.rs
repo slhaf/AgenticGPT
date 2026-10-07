@@ -358,7 +358,10 @@ pub(super) fn properties_for(name: &str) -> Map<String, Value> {
                 "agentId",
                 string("当前 Agent ID；可省略。提供其他 Agent ID 会返回 event_agent_mismatch，不跨 Agent 路由。"),
             );
-            add("eventId", string("event.list 或事件面板中的事件 ID；不是进程或安装 ID。"));
+            add(
+                "eventId",
+                string("event.list 或事件面板中的事件 ID；不是进程或安装 ID。"),
+            );
         }
         "event.mark" => {
             add(
