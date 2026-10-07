@@ -141,17 +141,7 @@ async fn request_freedesktop_batch_confirmation(
     preview: &str,
     needs_confirmation: &[BatchConfirmationElement],
 ) -> String {
-    let supports_actions = tokio::task::spawn_blocking(|| {
-        notify_rust::get_capabilities()
-            .map(|capabilities| {
-                capabilities
-                    .iter()
-                    .any(|capability| capability == "actions")
-            })
-            .unwrap_or(false)
-    })
-    .await
-    .unwrap_or(false);
+    let supports_actions = crate::notify::freedesktop_supports_actions().await;
     if !supports_actions {
         return "provider_unavailable".to_string();
     }
@@ -297,17 +287,7 @@ async fn request_freedesktop_shell_confirmation(
     preview: &str,
     risk: &str,
 ) -> String {
-    let supports_actions = tokio::task::spawn_blocking(|| {
-        notify_rust::get_capabilities()
-            .map(|capabilities| {
-                capabilities
-                    .iter()
-                    .any(|capability| capability == "actions")
-            })
-            .unwrap_or(false)
-    })
-    .await
-    .unwrap_or(false);
+    let supports_actions = crate::notify::freedesktop_supports_actions().await;
     if !supports_actions {
         return "provider_unavailable".to_string();
     }
@@ -422,17 +402,7 @@ async fn request_freedesktop_confirmation(
     program: &str,
     args: &[String],
 ) -> String {
-    let supports_actions = tokio::task::spawn_blocking(|| {
-        notify_rust::get_capabilities()
-            .map(|capabilities| {
-                capabilities
-                    .iter()
-                    .any(|capability| capability == "actions")
-            })
-            .unwrap_or(false)
-    })
-    .await
-    .unwrap_or(false);
+    let supports_actions = crate::notify::freedesktop_supports_actions().await;
     if !supports_actions {
         return "provider_unavailable".to_string();
     }
@@ -745,17 +715,7 @@ async fn request_freedesktop_mcp_batch_confirmation(
     preview: &str,
     allow_temporary_server: bool,
 ) -> String {
-    let supports_actions = tokio::task::spawn_blocking(|| {
-        notify_rust::get_capabilities()
-            .map(|capabilities| {
-                capabilities
-                    .iter()
-                    .any(|capability| capability == "actions")
-            })
-            .unwrap_or(false)
-    })
-    .await
-    .unwrap_or(false);
+    let supports_actions = crate::notify::freedesktop_supports_actions().await;
     if !supports_actions {
         return "provider_unavailable".to_string();
     }
@@ -884,17 +844,7 @@ async fn request_freedesktop_mcp_confirmation(
     tool_name: &str,
     arguments: &serde_json::Value,
 ) -> String {
-    let supports_actions = tokio::task::spawn_blocking(|| {
-        notify_rust::get_capabilities()
-            .map(|capabilities| {
-                capabilities
-                    .iter()
-                    .any(|capability| capability == "actions")
-            })
-            .unwrap_or(false)
-    })
-    .await
-    .unwrap_or(false);
+    let supports_actions = crate::notify::freedesktop_supports_actions().await;
     if !supports_actions {
         return "provider_unavailable".to_string();
     }

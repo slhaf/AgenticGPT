@@ -458,6 +458,8 @@ Hub credential 与 Standalone tunnel API key 是两套独立凭据，不要复�
 - `freedesktop`：本地桌面通知按钮。
 - `ntfy`：Hub-backed 远程 relay。
 
+`freedesktop` 能力检测先向 session D-Bus 查询当前通知服务的 owner，不自动启动桌面通知服务；有 owner 时才向该连接查询 `GetCapabilities`。每次 D-Bus 方法调用最多等待 2 秒。服务缺失或能力查询失败时，该通道视为不可用，可继续尝试后续配置通道；此检测超时与等待用户点击确认的超时不同。
+
 Standalone 未配置 Hub reporting 时，建议只使用 `freedesktop`。所有配置通道均不可用时，需要确认的操作会 fail closed。本地拒绝或超时不会继续回退到其他通道。
 
 CLI 仍接受 `freedesktop-then-ntfy` 等 legacy label；Agentic 管理写入会序列化为规范有序数组。
