@@ -3,7 +3,7 @@
 ## Session: 2026-10-08
 
 ### Current Status
-- **Phase:** 5 - Exhaustive Case Index
+- **Phase:** 6 - Lower-Tier Mixed-Case Review (complete; awaiting user review)
 - **Started:** 2026-10-08
 
 ### Actions Taken
@@ -23,7 +23,7 @@
 - Reviewed the ignored real-package Rust test: it materializes a verified official browser `.deb` into a cache and checks expected artifacts; potential tier-5 value is recorded for human review.
 - Intermediate hub subset count was corrected after reviewing six `notify.rs` cases (not seven); final full-crate count is 138 within the 173-case non-`agentic-gpt` total above.
 - The four non-`agentic-gpt` Rust crates reconcile to Cargo's 173 cases: T1/T2/T3/T4/T5/MIXED = 1/42/36/35/49/10. The Hub split was recomputed from the exhaustive case inventory; earlier aggregate classifications were superseded where individual SQL/resource assertions required T5.
-- The other-crate case inventory records all 10 MIXED cases, lower-tier behaviors worth retaining, and selected low-value candidates with concrete reasons.
+- The other-crate technical classification contains 10 MIXED cases; the six cases containing T4/T5 remain in the mixed review catalog, while four Protocol T2+T3 cases are routed to `review-candidates.md`.
 - Exhaustive other-crate case review produced 163 single-tier rows plus 10 mixed rows; the four crate counts reconcile to Hub 138, Protocol 23, Apply-patch 2, Browser-host 10.
 - Independent reviewer agreed with `hub_info_reports_safe_runtime_summary` as MIXED (T4+T5), because the asserted count depends on its actual in-memory SQLite registry read.
 - Hub storage case inventory: `runs.rs` has 11 T5 and one MIXED; `event_feedback.rs` has 21 single-tier T5, two single-tier T3, and three MIXED cases. This replaces earlier partial event-feedback counts.
@@ -32,9 +32,11 @@
 - Main Rust audit initially classified `denied_process_batch_creates_no_processes` as T4-only. Source review found `process.list` queries `ProcessHistoryStore` and the test asserts no persisted rows after denial; final tier is MIXED T4+T5. `event_api_business_errors_keep_their_code_and_include_the_panel`, `in_process_stdio_initialize_list_and_call`, and `in_process_room_stdio_initialize_list_and_call` are T4: the first two check empty-store/error or response behavior, while Room only asserts success and the constructed `daily` object shape (even with no Room files). `browser_repl_event_decoration_preserves_inner_result_channels` remains MIXED T2+T4, without T5.
 - Protocol case-label recount resolved the discrepancy: detailed labels total T2 14 / T3 5 / MIXED 4 in its 23 cases; the earlier 13/6 aggregate was stale and is excluded from workspace totals.
 - Final `agentic-gpt` slice counts: browser/config 202 (3/28/50/24/3/94), ingress/operations 105 (7/10/34/8/3/43), MCP/room 68 (0/3/5/12/12/36), storage/skills 69 (0/2/7/0/2/58), UI/support/tmux/integration 62 (1/14/8/4/24/11), runtime/files/process 148 (0/16/30/11/10/81); in T1/T2/T3/T4/T5/MIXED order. Total: 654 (11/73/134/59/54/323).
-- Final reconciled totals: Rust 827 (T1/T2/T3/T4/T5/MIXED = 12/115/170/94/103/333); Kotlin 7 (3/0/4/0/0/0); combined 834. Mixed indexes contain 323 `agentic-gpt` and 10 other Rust cases.
-- Review candidates are recorded in `findings.md` and `review-candidates.md`. Only discovery commands were run; no Rust or Kotlin test suite was executed.
-- Exhaustive case-index follow-up complete: the four Rust index files contain 827 case entries; a multiset comparison against `cargo test --workspace -- --list` found no missing or extra test names. The two repeated Rust function names match declarations in separate crate source paths. The Kotlin index lists seven declarations across common/JVM/androidHost source sets; common cases are counted once. No Rust or Kotlin test suite was executed.
+- Final technical totals remain Rust 827 (T1/T2/T3/T4/T5/MIXED = 12/115/170/94/103/333); Kotlin 7 (3/0/4/0/0/0); combined 834. Review routing does not alter technical tier totals.
+- The mixed-review catalogs now contain 303 cases with T4/T5: 297 `agentic-gpt` and 6 other Rust. The 30 lower-only mixed cases are individually recorded in `review-candidates.md`: 17 retention, 6 cleanup, 7 user-judgment candidates.
+- 在低档清理审查范围内（304 个纯 T1–T3 加 30 个只含 T1–T3 的 MIXED），当前是 31 个保留候选、296 个清理候选、7 个待用户判断。另有 T4/T5 低价值候选单独列出，不计入此清理数量；以上均未删除测试。
+- ID-by-ID static check passed: all 30 lower-only mixed case names appear exactly once in the correct disposition section (17 retain, 6 cleanup, 7 user judgment), none remain in either mixed catalog, and the catalogs contain 297+6=303 T4/T5 mixed cases.
+- No engineering-consultant consultation was used for this phase; the seven uncertain value judgments are documented for the user. No Rust or Kotlin tests were run, and no source/test files were modified.
 ### Errors
 | Error | Resolution |
 |-------|------------|

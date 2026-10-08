@@ -1,6 +1,6 @@
 # 其他四个 Rust crate 的混合档用例
 
-本文件列出四个已审查 Rust crate 中全部 10 个混合档用例。每个用例只计入 `MIXED` 一次，并注明实际断言涉及的档位。最终数量：Hub 5、Protocol 4、Apply-patch 1、Browser-host 0。
+本文件列出跨越 T4/T5 的 6 个混合档审查用例。其他 Rust crate 的技术分类仍有 10 个 MIXED：Hub 5、Protocol 4、Apply-patch 1、Browser-host 0；其中 Protocol 的 4 个 T2+T3 用例已按新规则移至 `review-candidates.md`，其余 6 个保留在本文件待审。
 
 | Crate | 源文件 / 测试函数 | 档位组成 | 实际验证内容 | 证据行 |
 |---|---|---|---|---|
@@ -9,10 +9,6 @@
 | `agentic-gpt-hub` | `crates/agentic-gpt-hub/src/storage/event_feedback.rs` — `public_preflight_requires_idle_barrier_and_drained_queued_repairs` | T3 public preflight／barrier 与 owner-drop 队列逻辑 + T5 SQLite pending-feedback 状态 | 断言一个 public preflight 能取得 idle barrier，而并发 preflight 会被拒绝。响应 owner 被丢弃并排入修复后，preflight 仍不可用，持久化 pending disposition 为 no-terminal（`includes_terminal = false`）。 | `2515–2539` |
 | `agentic-gpt-hub` | `crates/agentic-gpt-hub/src/storage/event_feedback.rs` — `delta_arriving_during_ack_is_settled_before_public_request_dispatch` | T4 feedback／ack／dispatch 行为链 + T5 SQLite outbox 副作用 | 启动 flush 并观察主 `EventSettle`；settlement 未完成时，断言不会发送 public `Exec`。主 ack 期间加入第二个 source，随后断言其 false-terminal delta 在 `Exec` dispatch 前也完成结算。两个 settlement 和模拟命令响应被确认后，flush 与请求成功，pending outbox 为空。 | `2415–2513` |
 | `agentic-gpt-hub` | `crates/agentic-gpt-hub/src/runtime/main_tests.rs` — `hub_info_reports_safe_runtime_summary` | T4 runtime 投影／序列化／脱敏链 + T5 断言依赖 SQLite 查询得到的 registry 计数 | 构建并序列化 hub-info，检查服务／配置字段、注册与在线 agent 数为零、pending 请求数，并确认 topic／callback／API-key 字符串不会泄漏。断言的 `registeredCount` 来自对测试 registry 表执行的真实 SQLite 查询。 | `53–73` |
-| `agentic-gpt-protocol` | `crates/agentic-gpt-protocol/src/lib.rs` — `maintenance_v2_shapes_close_slots_bound_wait_and_separate_sync` | T2 协议枚举／wire 映射 + T3 请求校验与等待时长边界逻辑 | 断言五个 maintenance slot 的精确 wire 名称并拒绝未知 slot；校验 item 数量并将 wait `31` 限制为 `30`；验证序列化请求、local-applied/state/sync 响应字段及往返转换；同时检查嵌套 status 字段和往返转换。 | `153–261` |
-| `agentic-gpt-protocol` | `crates/agentic-gpt-protocol/src/lib.rs` — `install_and_run_protocol_defaults_and_command_names_are_stable` | T3 有效等待时长／默认值逻辑 + T2 public command 序列化 | 反序列化 install-get 和 skill-run 请求，断言有效 wait 默认值均为 `5` 且 run args 缺省；再序列化 `SkillsRun` 和 `SkillsInstall`，检查 command 名、request ID 和 `waitSeconds: null`。 | `365–403` |
-| `agentic-gpt-protocol` | `crates/agentic-gpt-protocol/src/lib.rs` — `managed_mcp_batch_defaults_bounds_and_wire_type_are_frozen` | T3 batch 默认值／边界／钳制逻辑 + T2 command wire 映射 | 检查默认并行模式、`fail_fast = false`、wait `5`、timeout `300` 及 call/byte 限制；检查 sequential/fail-fast 输入会将 wait 钳制到 `30`、timeout 钳制到 `900`；序列化 `McpBatch` 并断言类型、request ID 和嵌套 call ID。 | `728–774` |
-| `agentic-gpt-protocol` | `crates/agentic-gpt-protocol/src/process.rs` — `process_read_defaults_view_and_bounds_wait` | T2 请求反序列化／默认值映射 + T3 有效等待时长边界逻辑 | 反序列化最小请求并检查 process ID、自动 view、wait `5` 以及 cursor/budget 缺省；有效 wait `0`、`5`、`30`、`31`、`u64::MAX` 分别为 `0`、`5`、`30`、`30`、`30`。 | `505–526` |
 | `agentic-apply-patch` | `crates/agentic-apply-patch/src/lib.rs` — `applies_update` | T2 patch 解析／chunk 映射 + T4 parser→updater 跨组件更新链 | 从固定 patch 解析出 `UpdateFile` chunks，将 parser 产出的 chunks 传给 `apply_update`，再以 `PreserveLineEndings` 模式断言内存文本 `alpha\n` 变为 `beta\n`；核心断言覆盖解析／映射与跨组件应用的端到端结果。 | `36–55` |
 
 `crates/agentic-browser-host` 已审查的 10 个用例中没有混合档用例。

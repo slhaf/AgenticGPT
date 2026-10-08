@@ -3,12 +3,10 @@
 ## Goal
 Count every Rust and Kotlin test case by the repository's five-tier testing standard; persist a complete case/name/behavior inventory, final counts, and review candidates in planning records only.
 
-## Next Step
-
-No remaining actions; the exhaustive case index is reconciled.
+Await the user’s review of the retention, cleanup, and uncertain-value candidates; no test or implementation edits are in scope.
 
 ## Current Phase
-Phase 5
+Phase 6
 
 ## Phases
 
@@ -37,12 +35,21 @@ Phase 5
 - **Status:** complete
 
 ### Phase 5: Exhaustive Case Index
-- [x] Record all 333 mixed Rust declarations with tier components and asserted behaviors
+- [x] Record the technical classification of all 333 Rust MIXED cases across the mixed catalogs and lower-only routing candidates
 - [x] Record all seven Kotlin declarations with tier and behavior
 - [x] Persist every Rust single-tier declaration with path, function, tier, and behavior
 - [x] Reconcile all 834 named cases once against Rust and Kotlin discovery totals
 - [x] Commit the exhaustive case-index follow-up
 - **Status:** complete
+
+### Phase 6: Lower-Tier Mixed-Case Review
+- [x] Identify every MIXED case containing only T1–T3 components
+- [x] Move cases worth retaining into `review-candidates.md`; remove all lower-only cases from mixed-review catalogs
+- [x] Keep MIXED cases containing T4 or T5 and preserve their asserted-behavior descriptions
+- [x] Reconcile candidate and mixed counts; record unclear value judgments for the user
+- [x] Commit planning-only changes; do not alter test or implementation files
+- **Status:** complete
+
 
 ## Decisions Made
 | Decision | Rationale |

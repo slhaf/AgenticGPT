@@ -1,6 +1,6 @@
 # Agentic GPT 混合层级测试用例
 
-**最终 MIXED 声明数：323。** 所有唯一测试声明均按 repository-relative 源文件分组，且各列一次。Tier 组件指出测试分别断言的行为；MIXED 是单独分类，不会额外计入任何单一 tier。若分片报告提供了源代码行范围，则在条目中保留为证据。`#[ignore]` 和平台条件门控的声明仍按声明各计一次。
+**技术分类 MIXED 声明数：323；本文件当前列出含 T4/T5 的 297 个审查用例。** 所有唯一测试声明均按 repository-relative 源文件分组，且各列一次。Tier 组件指出测试分别断言的行为；MIXED 是单独分类，不会额外计入任何单一 tier。若分片报告提供了源代码行范围，则在条目中保留为证据。`#[ignore]` 和平台条件门控的声明仍按声明各计一次。仅含 T1–T3 的 26 个 MIXED 用例已移至 `review-candidates.md`，依用户规则分别列为保留、清理或待判断。
 
 ## Tier 判定边界与数量核对
 
@@ -8,17 +8,17 @@
 
 以下涉及空存储的最终分类已修正：`event_api_business_errors_keep_their_code_and_include_the_panel` = T4；`browser_repl_event_decoration_preserves_inner_result_channels` = MIXED(T2+T4)，不含 T5；`in_process_stdio_initialize_list_and_call` = T4；`denied_process_batch_creates_no_processes` = MIXED(T4+T5)，因为拒绝后的 SQLite 列表断言了进程未持久化的不变量；`in_process_room_stdio_initialize_list_and_call` = T4，因为只断言错误标记和构造出的 daily 对象形状，而空/缺失 root 仍会返回该对象。
 
-| 范围 | 声明数 | T1 | T2 | T3 | T4 | T5 | MIXED |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| Browser/config | 202 | 3 | 28 | 50 | 24 | 3 | 94 |
-| Ingress/operations | 105 | 7 | 10 | 34 | 8 | 3 | 43 |
-| MCP/room | 68 | 0 | 3 | 5 | 12 | 12 | 36 |
-| Storage/skills | 69 | 0 | 2 | 7 | 0 | 2 | 58 |
-| UI/support/tmux/integration | 62 | 1 | 14 | 8 | 4 | 24 | 11 |
-| Runtime/files/process | 148 | 0 | 16 | 30 | 11 | 10 | 81 |
-| **合计** | **654** | **11** | **73** | **134** | **59** | **54** | **323** |
+| 范围 | 声明数 | T1 | T2 | T3 | T4 | T5 | MIXED 技术分类 | 含 T4/T5 待审 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Browser/config | 202 | 3 | 28 | 50 | 24 | 3 | 94 | 73 |
+| Ingress/operations | 105 | 7 | 10 | 34 | 8 | 3 | 43 | 42 |
+| MCP/room | 68 | 0 | 3 | 5 | 12 | 12 | 36 | 36 |
+| Storage/skills | 69 | 0 | 2 | 7 | 0 | 2 | 58 | 58 |
+| UI/support/tmux/integration | 62 | 1 | 14 | 8 | 4 | 24 | 11 | 11 |
+| Runtime/files/process | 148 | 0 | 16 | 30 | 11 | 10 | 81 | 77 |
+| **合计** | **654** | **11** | **73** | **134** | **59** | **54** | **323** | **297** |
 
-六个分片合计 654 个声明；单一层级分类共 331 个，另有 323 个 MIXED，合计 654。下列 MIXED 清单共有 94 + 43 + 36 + 58 + 11 + 81 = 323 项。
+六个分片合计 654 个声明；单一层级分类共 331 个，技术 MIXED 分类 323 个，合计 654。按本轮路由，26 个只含 T1–T3 的混合用例移入 `review-candidates.md`，本文件现列 73 + 42 + 36 + 58 + 11 + 77 = 297 个含 T4/T5 的 MIXED 用例。
 
 ## MIXED 用例清单
 
@@ -36,10 +36,8 @@
 - `streamed_package_checks_size_hash_and_temp_cleanup` — MIXED (T3+T5); 将回环 HTTP 响应体流式写入临时文件；检查字节、哈希/大小失败及清理；T3:大小/哈希规则；T5:套接字及生产文件写入 [证据 L339]
 - `symlinked_critical_parent_in_cached_artifact_fails_closed` — MIXED (T4+T5); 将关键缓存目录替换为符号链接，并检查生产发现逻辑在失败时采取拒绝策略。`#[cfg(unix)]` 位于 L1150；T4:制品/发现调用链；T5:符号链接/文件系统影响 [证据 L1152]
 - `synthetic_deb_materializes_only_selected_resources` — MIXED (T4+T5); 物化合成归档，检查选中文件/权限/路径，并重新发现缓存运行时；T4:归档到运行时/发现调用链；T5:生产包/缓存文件系统 [证据 L813]
-- `target_names_are_frozen` — MIXED (T1+T3); 固定受支持的目标名称字面量，并检查组件/哈希校验；T1:固定名称；T3:校验 [证据 L801]
 
 ### `crates/agentic-gpt/src/browser/browser_kernel.rs`
-- `bootstrap_sends_escaped_path_and_frozen_browser_setup_code` — MIXED (T1+T2); 检查转义后的路径、超时、固定的设置代码/顺序，以及作为 JS 发送的 browser-ID 输出；T1:固定内容；T2:转义/请求转发 [证据 L702]
 - `sequential_calls_reuse_initialized_service_and_metadata` — MIXED (T2+T4); 发送两次 JS 调用；检查仅一次 initialize、协议及元数据一致性；T2:元数据转发；T4:内核/客户端/服务复用 [证据 L602]
 
 ### `crates/agentic-gpt/src/browser/browser_manager.rs`
@@ -59,7 +57,6 @@
 - `derives_docs_root_from_browser_client_path` — MIXED (T2+T5); 生产代码读取注册表，将客户端路径映射到 docs 根目录；T2:路径映射；T5:注册表文件读取 [证据 L693]
 - `derives_ordered_deduplicated_trusted_code_paths` — MIXED (T3+T5); 生产代码读取注册表测试样本，推导出顺序稳定且去重的可信路径；T3:去重/排序逻辑；T5:注册表文件读取 [证据 L673]
 - `empty_entries_are_rejected` — MIXED (T3+T5); 生产代码读取注册表测试样本并拒绝空条目；T3:空注册表规则；T5:注册表文件读取 [证据 L733]
-- `explicit_descriptor_allows_missing_codex_cli_path` — MIXED (T2+T3); 接受 CLI 路径缺失，并省略对应启动变量；T2:可选映射；T3:缺失分支 [证据 L828]
 - `malformed_json_is_rejected_with_browser_runtime_context` — MIXED (T3+T5); 生产代码打开格式错误的临时注册表，返回带上下文的 JSON 错误；T3:解析/错误规则；T5:注册表读取 [证据 L775]
 - `malformed_latest_entry_does_not_fall_back_to_older_valid_entry` — MIXED (T3+T5); 读取注册表测试样本，拒绝格式错误的最新条目，而非回退；T3:选择/错误规则；T5:注册表文件读取 [证据 L759]
 - `missing_or_empty_required_fields_are_rejected` — MIXED (T3+T5); 生产代码读取注册表测试样本，拒绝缺失应用版本/空 Node 路径，并返回字段错误；T3:必填字段规则；T5:注册表文件读取 [证据 L739]
@@ -82,30 +79,18 @@
 - `explicit_import_uses_room_toolset_preset_when_toolsets_are_omitted` — MIXED (T2+T5); 生产代码导入时读取 Room profile 配置并选择所有 toolset；T2:预设映射；T5:文件读取 [证据 L3238]
 - `explicit_limit_stays_numeric_after_config_load_and_write` — MIXED (T2+T5); 生产代码加载临时配置，序列化数值限制，并保留未来字段；T2:数值/额外字段映射；T5:生产代码读取配置文件 [证据 L2737]
 - `loading_a_legacy_file_without_selectors_returns_migration_error` — MIXED (T3+T5); 生产代码读取缺少 mode/profile 的配置并返回迁移指导；T3:迁移规则；T5:文件读取 [证据 L3097]
-- `managed_browser_policy_defaults_are_enabled_without_auto_provisioning` — MIXED (T1+T2+T3); 检查固定默认值、空值序列化/解析及稀疏省略；T1:固定默认值；T2:serde 映射；T3:稀疏/默认规则 [证据 L3437]
 - `managed_browser_policy_round_trips_non_default_values` — MIXED (T2+T4+T5); 生产代码通过写入器/加载/导入往返处理非默认浏览器策略；T2:serde 映射；T4:写入器/加载/导入链；T5:文件操作 [证据 L3452]
-- `max_active_processes_supports_auto_and_explicit_round_trips` — MIXED (T2+T3); 将 `auto`/数值 JSON 与变体双向映射；拒绝负数/大写形式；T2:serde 映射；T3:无效输入规则 [证据 L2530]
-- `new_default_config_serializes_auto_limit` — MIXED (T1+T2); 检查固定的默认 JSON 进程限制、搜索上下文及确认通道；T1:固定默认值；T2:序列化 [证据 L2637]
 - `old_config_without_process_response_bytes_uses_default` — MIXED (T2+T5); 生产代码加载缺少字段的临时文件并检查默认值；T2:默认值映射；T5:配置文件读取 [证据 L2512]
-- `room_repository_and_maintenance_use_the_v2_json_shape` — MIXED (T2+T3); 检查 v2 room JSON 并拒绝旧版 `notebookRoot`；T2:JSON 映射；T3:拒绝旧版 [证据 L2756]
 - `sparse_load_preserves_inactive_mode_and_profile_sections` — MIXED (T2+T5); 生产代码加载稀疏文件并保留未激活的 tunnel 和 Room 值；T2:字段映射；T5:配置文件读取 [证据 L3018]
 - `sparse_load_reconstructs_workspace_dependent_path_policy_and_unknown_fields` — MIXED (T2+T4+T5); 生产代码加载临时稀疏 JSON，推导路径策略，并保留未知字段；T2:字段/额外字段映射；T4:加载/默认策略链；T5:文件读取 [证据 L2995]
-- `sparse_projection_always_keeps_selectors_and_omits_reconstructable_defaults` — MIXED (T2+T3); 保留 mode/profile/toolsets，并省略可重建的默认字段；T2:投影；T3:省略规则 [证据 L2902]
-- `sparse_projection_keeps_inactive_sections_and_redacts_config_secrets` — MIXED (T2+T3); 保留未激活的 tunnel/ref，并对 Hub/MCP 机密信息进行脱敏；T2:投影；T3:机密信息/未激活数据规则 [证据 L2956]
 - `sparse_projection_preserves_custom_workspace_root_but_reconstructs_its_path_defaults` — MIXED (T2+T4+T5); 投影自定义工作区根目录，省略默认路径策略，并由生产代码加载时重建该策略；T2:投影；T4:投影/加载重建；T5:配置文件读取 [证据 L2934]
 - `sparse_projection_preserves_explicit_inactive_hub_tunnel_and_room_data` — MIXED (T2+T4+T5); 投影未激活的数据，然后由生产代码加载文件并检查保留的 Hub/tunnel/Room/未来字段；T2:投影；T4:投影/加载链；T5:文件读取 [证据 L3043]
 - `strict_load_rejects_legacy_confirmation_provider_shape` — MIXED (T3+T5); 生产代码读取临时文件，拒绝旧版 provider 结构并提供导入指导；T3:迁移规则；T5:文件读取 [证据 L3080]
 - `strict_load_rejects_legacy_room_skills` — MIXED (T3+T5); 生产代码读取临时配置，并在出现旧版 room skills 时拒绝缺少顶层 skills 的配置；T3:严格迁移规则；T5:文件读取 [证据 L2780]
 - `strict_load_rejects_legacy_top_level_hub_fields_even_with_selectors` — MIXED (T3+T5); 生产代码读取临时文件并拒绝旧版顶层 Hub 字段；T3:严格 schema 规则；T5:文件读取 [证据 L3112]
-- `toolset_profiles_are_closed_and_deterministic` — MIXED (T1+T3); 检查固定的 namespace/profile 列表及启用/禁用/解析器行为；T1:冻结的 namespace/顺序；T3:profile/变更规则 [证据 L2651]
-- `tunnel_secret_references_are_strict_and_safe_summary_is_redacted` — MIXED (T3+T2); 检查 env/file ref 策略及摘要脱敏；T3:引用策略；T2:摘要投影 [证据 L2832]
 
 ### `crates/agentic-gpt/src/config/config_cli.rs`
-- `registry_applies_new_scalar_and_list_keys` — MIXED (T2+T3); 将 registry 字符串映射到 display、backup、path-list 和 limit 字段；T2:映射；T3:类型化解析 [证据 L596]
-- `registry_updates_room_repository_and_maintenance_settings` — MIXED (T2+T3); 映射 Room 设置，清除可选路径，并拒绝无效 mode/已废弃的键；T2:映射；T3:验证 [证据 L618]
-- `toolset_commands_dispatch_and_reject_unknown_namespaces` — MIXED (T2+T3); 将 list/enable/disable 解析为变体，并拒绝未知 namespace；T2:参数映射；T3:拒绝 [证据 L459]
 - `toolset_enable_and_disable_persist_across_config_loads` — MIXED (T4+T5); 调用处理器及生产代码的写入器/加载器，检查持久化的 toolset 状态；T4:处理器/写入/加载链；T5:配置文件操作 [证据 L506]
-- `toolset_listing_describes_all_namespaces_and_feedback_is_localized` — MIXED (T1+T2); 检查固定的英文/中文列表、状态、行及消息；T1:固定文本；T2:渲染/本地化 [证据 L547]
 
 ### `crates/agentic-gpt/src/config/config_templates.rs`
 - `default_template_is_standalone_normal_with_safe_placeholders` — MIXED (T1+T3+T4); 检查默认值/占位符/待执行操作及 Standalone 验证；T1:固定占位符；T3:模板规则；T4:构建器/验证器 [证据 L425]
@@ -115,9 +100,7 @@
 
 ### `crates/agentic-gpt/src/config/setup/model.rs`
 - `imported_base_seeds_reviewable_fields_without_requiring_an_editor_for_every_field` — MIXED (T2+T4); 初始化 identity/limits/MCP 草稿，并在预览中包含未知字段；T2:草稿映射；T4:导入配置/会话/预览链 [证据 L1118]
-- `mcp_server_draft_defaults_empty_and_saves_as_configured` — MIXED (T2+T3); 检查空默认值、保存/状态转换、token 往返处理及 debug 脱敏；T2:字段映射；T3:会话/状态/脱敏 [证据 L1183]
 - `preview_is_the_redacted_sparse_projection_without_transaction_secret_material` — MIXED (T2+T4); 比较预览与构建的稀疏配置，保留 ref，并排除事务机密信息；T2:投影/脱敏；T4:活动输入/构建/预览链 [证据 L1086]
-- `tunnel_secret_reference_seeds_are_parsed_without_exposing_secret_text` — MIXED (T2+T3); 将 file/env ref 映射到草稿字段，并检查 Hub 机密信息的 debug 脱敏；T2:引用映射；T3:机密信息处理 [证据 L1038]
 
 ### `crates/agentic-gpt/src/config/setup/outcome.rs`
 - `aliased_config_and_secret_paths_are_rejected_before_secret_write` — MIXED (T3+T5); 拒绝 config/secret 路径别名，并检查现有配置未更改/备份中无标记；T3:别名验证；T5:文件系统路径/效果断言 [证据 L905]
@@ -131,13 +114,7 @@
 - `recovery_restores_crash_state_and_retains_conflicting_evidence` — MIXED (T4+T5); 恢复操作还原旧 secret/模式并移除日志/备份；冲突时保留 secret/证据；T4:恢复链路；T5:实际文件操作 [证据 L681]
 - `symlink_parent_alias_to_nonexistent_target_is_rejected_before_secret_write` — MIXED (T3+T5); 拒绝父目录为 symlink 的别名路径，并检查未写入目标或含 secret 的备份；T3:规范路径验证；T5:文件系统操作 [证据 L938]
 
-### `crates/agentic-gpt/src/config/setup/review.rs`
-- `event_review_preserves_values_and_offers_every_override_choice` — MIXED (T1+T2); 投影事件值并检查固定选项；T1:固定选项；T2:草稿/审查映射 [证据 L189]
-- `review_is_redacted_active_mode_only_and_reports_secret_write_intent` — MIXED (T2+T3); 检查活动模式投影、非活动 Hub 排除、写入意图/脱敏、Room 适用性；T2:投影；T3:模式/状态/脱敏 [证据 L16]
-- `review_preserves_pending_actions_and_redacted_standalone_reference` — MIXED (T2+T3); 检查延迟/即时写入意图、待处理操作及引用；T2:投影；T3:操作规则 [证据 L224]
-
 ### `crates/agentic-gpt/src/config/setup/validation.rs`
-- `active_input_ignores_inactive_connection_secrets_and_restores_staged_drafts` — MIXED (T2+T3); 过滤非活动凭据，并在模式切换时恢复；T2:活动输入投影；T3:状态行为 [证据 L219]
 - `shell_init_file_modes_preserve_default_disabled_and_explicit_path` — MIXED (T2+T4); 通过 config 构建将 shell 草稿模式映射为 enum 值；T2:映射；T4:保存/构建链路 [证据 L145]
 
 ### `crates/agentic-gpt/src/files/file_ops.rs`
@@ -193,7 +170,6 @@
 - `room_profile_dispatches_room_memory_tools` — MIXED (T4+T5); T4 分发 bootstrap/skills/notebook/diary/state 适配器；T5 的 bootstrap 读取预置的临时工作区文件 [证据 L2619–L2633]
 - `targetless_hub_listing_keeps_events_for_targeted_calls` — MIXED (T4+T5); T4 驱动先被抑制、后定向的 Hub 响应；T5 断言持久化 EventStore 中的事件记录及显示计数 [证据 L350–L428]
 - `terminal_result_is_not_suppressed_when_panel_preparation_fails` — MIXED (T4+T5); T4 测试装饰失败后的进程结果/事件面板恢复；T5 执行 `true`，并触发/检查实际 SQLite 触发器故障及保留的事件 [证据 L430–L479]
-- `tunnel_local_and_http_ingress_advertise_identical_surface` — MIXED (T1+T2); T1 检查公布的工具描述符完全一致；T2 检查入口标签/来源字符串映射 [证据 L2483–L2502]
 - `tunnel_skill_audit_uses_tunnel_request_source` — MIXED (T4+T5); T4 检查技能完成及隧道来源审计映射；T5 创建/执行临时 shell 脚本并读取审计输出 [证据 L2568–L2600]
 
 ### `crates/agentic-gpt/src/mcp/mcp_tests.rs`
@@ -290,8 +266,6 @@
 - `info_reports_toolset_live_subset_difference_without_restart_requirement` — MIXED (T3+T5); 比较生效配置和磁盘配置中的工具集，再检查应用后的 live-subset 匹配情况；T3: live-subset/重启分类；T5: 实际配置文件读取。证据 L663–L692 [证据 L663–L692]
 
 ### `crates/agentic-gpt/src/runtime/main_tests.rs`
-- `batch_confirmation_preview_supports_chinese` — MIXED (T1+T2); 渲染中文预览并检查本地化措辞/cwd/转义；T1: 固定的本地化字符串；T2: 将批处理元素渲染为预览。证据 L1107–L1124 [证据 L1107–L1124]
-- `cli_version_uses_crate_version` — MIXED (T1+T2); 解析 `--version` 并检查 display-version 类型及渲染的 crate 版本；T1: 固定版本文本；T2: CLI 版本渲染/转发。证据 L309–L318 [证据 L309–L318]
 - `deny_roots_override_read_and_write` — MIXED (T3+T5); 检查在实际禁止访问的根目录下，读写命令均被拒绝；T3: 拒绝规则优先；T5: 真实文件系统路径解析。证据 L1040–L1075 [证据 L1040–L1075]
 - `hub_panel_failure_emits_live_event_source_without_terminal_response` — MIXED (T4+T5); 在 hub `true` 命令后强制 SQLite 面板更新失败，并检查事件源交接/无响应；T4: hub/事件时序；T5: 子进程执行及 SQLite 触发器/存储操作。证据 L561–L652 [证据 L561–L652]
 - `load_old_config_without_path_policy_adds_defaults` — MIXED (T2+T5); 写入不含 `pathPolicy` 的旧版配置，重新加载并检查默认值；T2: 旧版字段到默认值的映射；T5: 生产代码中的配置文件读取。证据 L1239–L1250 [证据 L1239–L1250]
@@ -306,7 +280,6 @@
 - `relative_path_arguments_are_resolved_from_working_directory` — MIXED (T3+T5); 检查真实的相对目标从工作区根目录访问时失败，从包含该目标的 cwd 访问时成功；T3: 相对于 cwd 的参数解析；T5: 生产代码中的路径查找。证据 L1178–L1203 [证据 L1178–L1203]
 - `room_mode_dispatches_bootstrap_manifest_and_read` — MIXED (T4+T5); 分派 manifest/read 命令并检查解析后的数据及精确的指南内容；T4: hub 命令/响应链；T5: 生产代码中的测试夹具文件读取。证据 L655–L702 [证据 L655–L702]
 - `room_mode_dispatches_current_diary_command` — MIXED (T4+T5); 分派 active-diary 请求并检查日记缺失结果；T4: hub 命令/响应行为；T5: 查找真实环境中不存在的仓库资源。证据 L726–L744 [证据 L726–L744]
-- `room_timezone_defaults_and_can_be_overridden` — MIXED (T1+T2); 检查固定默认值及保留的自定义时区/日期边界值；T1: 默认值；T2: 配置字段更新/回读。证据 L420–L427 [证据 L420–L427]
 - `standalone_live_reload_applies_valid_mcp_map_and_rejects_invalid_candidate` — MIXED (T4+T5); 检查有效的 MCP/limits/shell 更新，再检查对无效 transport 的原子性拒绝；T4: 验证及运行中状态更新链；T5: 实际候选配置文件读取。证据 L1559–L1682 [证据 L1559–L1682]
 - `standalone_live_reload_bootstraps_room_repository_before_maintenance_submit` — MIXED (T4+T5); 重新加载 Room 设置，检查运行中根目录的脚手架，提交维护任务并读取创建的笔记本；T4: 重新加载/仓库维护链；T5: 真实仓库/文件系统影响。证据 L1685–L1756 [证据 L1685–L1756]
 - `symlink_to_denied_path_is_rejected` — MIXED (T3+T5); 在 Unix 上创建指向禁止访问目标的符号链接，并检查预检拒绝；T3: 拒绝策略；T5: 符号链接/规范路径查找。证据 L1207–L1235；保留 **REVIEW**：在非 Unix 平台上，该断言被编译排除 [证据 L1207–L1235]
@@ -327,7 +300,6 @@
 - `bounded_local_download_handles_redirect_and_size_limit` — MIXED (T3+T5); 检查本地重定向下载、大小上限及响应体过短时失败；T3:重定向/大小/长度处理；T5:本地 HTTP 交互及目标文件写入。证据 L934–L959 [证据 L934–L959]
 - `cache_revalidates_archive_and_repairs_binary` — MIXED (T3+T5); 安装制品后将其损坏，检查修复状态，再重新安装并读取替换文件；T3:缓存有效性/修复决策；T5:实际缓存文件操作。证据 L830–L859 [证据 L830–L859]
 - `executable_override_checks_permissions_and_optional_hash` — MIXED (T3+T5); 检查文件模式/哈希，并拒绝不匹配/符号链接；T3:可执行性/哈希策略；T5:真实文件元数据/哈希/符号链接。证据 L770–L791；保留 **REVIEW**：使用 Unix 符号链接 API，但未设置 Unix 条件限制 [证据 L770–L791]
-- `manifest_and_platforms_are_pinned` — MIXED (T1+T2); 检查平台映射、清单数量、固定的 URL/版本及摘要；T1:固定清单内容；T2:平台映射。证据 L711–L729 [证据 L711–L729]
 - `offline_cache_and_auto_download_false_are_deterministic` — MIXED (T3+T5); 离线解析预填充的缓存，并在禁用下载时检查缓存缺失的结果；T3:缓存/下载策略；T5:实际缓存查找。证据 L864–L899 [证据 L864–L899]
 
 ### `crates/agentic-gpt/src/skills/skill_installs.rs`
@@ -417,14 +389,6 @@
 ### `crates/agentic-gpt/tests/standalone_supervisor.rs`
 - `supervised_journal_mode_omits_agentic_inner_timestamp` — MIXED (T2+T5); T2:验证转发的子进程日志中的时间戳移除和日志行渲染；T5:使用临时配置/文件、模拟隧道和本地健康检查 socket 运行真实的 supervisor/worker，然后检查 worker 输出和转发的 stderr。 [证据 L53–58; helper L161–246]
 
-## 值得保留的低层级用例
-
-- `crates/agentic-gpt/src/browser/browser_distribution_tests.rs` — `pinned_repository_key_has_exact_fingerprint` (T1)：固定安全信任根指纹；`authenticated_inrelease_metadata_selects_exact_target` (T2)：将经过认证的元数据映射到精确目标；`cleartext_signature_verifies_and_tampering_fails` (T3)：覆盖签名验证和篡改拒绝。
-- `crates/agentic-gpt/src/ingress/stdio_server_tests.rs` — `normal_and_room_tool_sets_follow_fixed_surface_contract` (MIXED T1+T4)：保护精确 API surface/schema；`process_read_preserves_raw_byte_offsets_and_utf8_output` (MIXED T2+T4+T5)：保护 byte-offset 和 UTF-8/base64 投影行为。
-- `crates/agentic-gpt/src/mcp/mcp_tests.rs::server_config_validation_is_complete_and_typed` (T3)：直接验证有效和无效的 typed MCP config 变体。
-- `crates/agentic-gpt/src/storage/event_store.rs::list_summaries_count_unicode_scalars_and_preserve_full_message_on_get` (MIXED T3+T5)：检查 Unicode scalar 摘要逻辑，以及从 SQLite 完整取回 message。
-- `crates/agentic-gpt/src/files/file_ops.rs::search_rejects_invalid_patterns_and_enforces_bounds` (T3)：覆盖独立 pattern/bounds 逻辑。
-- `crates/agentic-gpt/src/runtime/main_tests.rs::cli_version_uses_crate_version` (T1+T2)：保护固定版本文本和 CLI 渲染行为。
 
 ## 明确低价值的 T4/T5 用例
 

@@ -1,6 +1,6 @@
 # 建议保留或清理的测试用例
 
-仅作盘点，供用户后续决定；本清单不表示要修改或删除任何测试或实现。档位依据实际断言的行为；混合档用例只计入单独的 MIXED 档清单一次。
+仅作盘点，供用户后续决定；本清单不表示要修改或删除任何测试或实现。档位依据实际断言的行为。技术分类中的 MIXED 总数不变；仅含 T1–T3 的混合用例按用户规则并入本清单，含 T4/T5 的混合用例仍列在专门的混合档清单中。
 
 ## 低档但值得保留的行为
 
@@ -25,6 +25,49 @@
 | `console/shared/src/commonTest/kotlin/work/slhaf/agentic/console/AttentionTransitionPolicyTest.kt::future_restore_schedules_until_snoozed_due_boundary` | T3 | 保护到期前 Schedule、到期边界 Trigger 的规则。 |
 | `console/shared/src/commonTest/kotlin/work/slhaf/agentic/console/AttentionTransitionPolicyTest.kt::degraded_item_stays_pending_until_due_and_can_be_terminal` | T3 | 保护 Degraded／Pending 与终态之间的行为。 |
 | `console/shared/src/commonTest/kotlin/work/slhaf/agentic/console/AttentionTransitionPolicyTest.kt::terminal_transition_clears_actions_and_rejects_duplicate_transition` | T3 | 保护进入终态时清空 actions，以及拒绝重复终态转换。 |
+| `crates/agentic-gpt/src/browser/browser_distribution_tests.rs::target_names_are_frozen` | T1+T3 | 固定浏览器目标名，并拒绝路径穿越、错误空白和无效 hash；保护制品名称与校验边界。 |
+| `crates/agentic-gpt/src/browser/browser_kernel.rs::bootstrap_sends_escaped_path_and_frozen_browser_setup_code` | T1+T2 | 检查注入到 bootstrap 脚本的路径经过转义，并锁定浏览器初始化代码，防止路径内容改变脚本语义。 |
+| `crates/agentic-gpt/src/browser/browser_runtime.rs::managed_browser_policy_defaults_are_enabled_without_auto_provisioning` | T1+T2+T3 | 保护托管浏览器默认启用、但默认不自动安装的配置策略。 |
+| `crates/agentic-gpt/src/config/config.rs::room_repository_and_maintenance_use_the_v2_json_shape` | T2+T3 | 保护 Room/maintenance v2 配置形状，并拒绝旧 `notebookRoot` 字段。 |
+| `crates/agentic-gpt/src/config/config.rs::sparse_projection_always_keeps_selectors_and_omits_reconstructable_defaults` | T2+T3 | 保护稀疏配置投影必须保留选择器、可重建默认值可省略的规则。 |
+| `crates/agentic-gpt/src/config/config.rs::sparse_projection_keeps_inactive_sections_and_redacts_config_secrets` | T2+T3 | 保护未激活配置段保留和 secret 脱敏，避免稀疏投影丢失用户数据或泄漏凭据。 |
+| `crates/agentic-gpt/src/config/config.rs::tunnel_secret_references_are_strict_and_safe_summary_is_redacted` | T2+T3 | 保护 tunnel secret 引用的严格格式规则及安全摘要脱敏。 |
+| `crates/agentic-gpt/src/config/setup/model.rs::mcp_server_draft_defaults_empty_and_saves_as_configured` | T2+T3 | 保护 MCP 草稿默认值与保存结果，并覆盖 token 往返和 Debug 脱敏。 |
+| `crates/agentic-gpt/src/config/setup/review.rs::review_is_redacted_active_mode_only_and_reports_secret_write_intent` | T2+T3 | 保护仅展示活动模式、secret 脱敏及 secret 写入意图提示。 |
+| `crates/agentic-gpt/src/config/setup/review.rs::review_preserves_pending_actions_and_redacted_standalone_reference` | T2+T3 | 保护 review 中待执行动作、独立 secret 引用和脱敏信息的保留。 |
+| `crates/agentic-gpt/src/config/setup/validation.rs::active_input_ignores_inactive_connection_secrets_and_restores_staged_drafts` | T2+T3 | 保护活动配置输入忽略非活动连接 secret，并恢复暂存草稿的行为。 |
+| `crates/agentic-gpt/src/ingress/stdio_server_tests.rs::tunnel_local_and_http_ingress_advertise_identical_surface` | T1+T2 | 保护 local 与 HTTP ingress 公布相同工具描述和来源标识，防止入口契约分叉。 |
+| `crates/agentic-gpt/src/runtime/tunnel_distribution.rs::manifest_and_platforms_are_pinned` | T1+T2 | 固定支持平台、运行时下载 URL、版本和 SHA-256，避免分发清单意外漂移。 |
+| `crates/agentic-gpt-protocol/src/lib.rs::maintenance_v2_shapes_close_slots_bound_wait_and_separate_sync` | T2+T3 | 保护 maintenance v2 wire 名称、未知 slot 拒绝、数量/等待边界及同步状态语义。 |
+| `crates/agentic-gpt-protocol/src/lib.rs::install_and_run_protocol_defaults_and_command_names_are_stable` | T2+T3 | 保护 `skills.install` / `skills.run` public command 名称、request 字段及等待默认值。 |
+| `crates/agentic-gpt-protocol/src/process.rs::process_read_defaults_view_and_bounds_wait` | T2+T3 | 保护 process-read 的默认 view/wait、可选字段缺省，以及最大等待上限。 |
+
+## 低档混合：建议清理（6）
+
+以下用例只覆盖 T1–T3；不保留在混合档审查目录。建议清理，不代表已删除测试。
+
+| 用例 | 档位 | 判断理由 |
+|---|---|---|
+| `crates/agentic-gpt/src/config/config.rs::max_active_processes_supports_auto_and_explicit_round_trips` | T2+T3 | 主要是 `auto`/数字配置的序列化往返和输入格式检查；核心自动限额公式由独立行为测试覆盖。 |
+| `crates/agentic-gpt/src/config/config_cli.rs::registry_applies_new_scalar_and_list_keys` | T2+T3 | 主要验证 registry key 到配置字段的映射与类型解析，属机械配置搬运。 |
+| `crates/agentic-gpt/src/config/config_cli.rs::toolset_listing_describes_all_namespaces_and_feedback_is_localized` | T1+T2 | 主要锁定静态双语列表和提示文案。 |
+| `crates/agentic-gpt/src/config/setup/model.rs::tunnel_secret_reference_seeds_are_parsed_without_exposing_secret_text` | T2+T3 | 主要检查引用到草稿字段的映射与 Debug 脱敏；更严格的引用格式和摘要脱敏已由 `tunnel_secret_references_are_strict_and_safe_summary_is_redacted` 覆盖。 |
+| `crates/agentic-gpt/src/runtime/main_tests.rs::batch_confirmation_preview_supports_chinese` | T1+T2 | 主要检查固定中文提示、cwd 和转义拼装。 |
+| `crates/agentic-gpt/src/runtime/main_tests.rs::cli_version_uses_crate_version` | T1+T2 | 只保护版本号从 crate 元数据到 CLI 输出的机械转发。 |
+
+## 低档混合：需用户判断（7）
+
+以下用例只覆盖 T1–T3，但是否值得留下取决于对配置契约、命令边界或界面语义的维护价值；不确定性已记录，不升级为顾问咨询。
+
+| 用例 | 档位 | 实际验证内容与待判断点 |
+|---|---|---|
+| `crates/agentic-gpt/src/browser/browser_runtime.rs::explicit_descriptor_allows_missing_codex_cli_path` | T2+T3 | 允许 descriptor 缺少可选 Codex CLI path，并省略启动变量；需判断与 `absent_codex_cli_path_is_supported` 的覆盖是否重复。 |
+| `crates/agentic-gpt/src/config/config.rs::new_default_config_serializes_auto_limit` | T1+T2 | 固定新配置中的自动进程限制、搜索和确认通道默认值；需判断公开默认契约是否值得独立锁定，且与自动限制公式测试有部分重叠。 |
+| `crates/agentic-gpt/src/config/config.rs::toolset_profiles_are_closed_and_deterministic` | T1+T3 | 固定工具集 profile/namespace 集合并测试启停、解析规则；需判断这属于值得保护的安全能力边界，还是静态枚举/独立规则测试。 |
+| `crates/agentic-gpt/src/config/config_cli.rs::registry_updates_room_repository_and_maintenance_settings` | T2+T3 | 验证 Room 配置 key 更新、可选路径清空，以及非法模式/弃用 key 拒绝；需判断配置 CLI 契约是否需要单独保留。 |
+| `crates/agentic-gpt/src/config/config_cli.rs::toolset_commands_dispatch_and_reject_unknown_namespaces` | T2+T3 | 验证 toolset list/enable/disable 命令解析及未知 namespace 拒绝；需判断命令输入边界的价值。 |
+| `crates/agentic-gpt/src/config/setup/review.rs::event_review_preserves_values_and_offers_every_override_choice` | T1+T2 | 保留事件配置值并提供全部 override 选项；需判断 UI 选项完整性是否值得作为独立保护点。 |
+| `crates/agentic-gpt/src/runtime/main_tests.rs::room_timezone_defaults_and_can_be_overridden` | T1+T2 | 固定默认时区及覆盖后的日期往返；测试没有覆盖时区跨日边界，需判断该默认/覆盖契约是否仍值得保留。 |
 
 ## 低价值或建议清理／补强的候选
 
