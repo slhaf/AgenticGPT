@@ -1,14 +1,14 @@
 # Task Plan: Rust and Kotlin Test Inventory
 
 ## Goal
-Count every Rust and Kotlin test case by the repository's five-tier testing standard; document counts, review candidates, and ambiguous cases in the selected planning record only.
+Count every Rust and Kotlin test case by the repository's five-tier testing standard; persist a complete case/name/behavior inventory, final counts, and review candidates in planning records only.
 
 ## Next Step
 
-Planning records are complete; commit this phase.
+No remaining actions; the exhaustive case index is reconciled.
 
 ## Current Phase
-Phase 4
+Phase 5
 
 ## Phases
 
@@ -34,6 +34,14 @@ Phase 4
 ### Phase 4: Delivery
 - [x] Record final counts and review lists in planning files
 - [x] Commit planning records for this phase
+- **Status:** complete
+
+### Phase 5: Exhaustive Case Index
+- [x] Record all 333 mixed Rust declarations with tier components and asserted behaviors
+- [x] Record all seven Kotlin declarations with tier and behavior
+- [x] Persist every Rust single-tier declaration with path, function, tier, and behavior
+- [x] Reconcile all 834 named cases once against Rust and Kotlin discovery totals
+- [x] Commit the exhaustive case-index follow-up
 - **Status:** complete
 
 ## Decisions Made

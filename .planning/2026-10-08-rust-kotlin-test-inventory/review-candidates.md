@@ -1,45 +1,44 @@
-# Test Cases for Retention or Cleanup Review
+# 建议保留或清理的测试用例
 
-Inventory only. These are candidates for the user's later decision; no test or implementation edits are proposed here. Tier labels describe asserted behavior, and MIXED cases count once in the separate mixed-case index.
+仅作盘点，供用户后续决定；本清单不表示要修改或删除任何测试或实现。档位依据实际断言的行为；混合档用例只计入单独的 MIXED 档清单一次。
 
-## Lower-tier behavior worth retaining
+## 低档但值得保留的行为
 
-| Case | Tier(s) | Behavior worth protecting |
+| 用例 | 档位 | 值得保护的行为 |
 |---|---|---|
-| `crates/agentic-gpt/src/browser/browser_distribution_tests.rs::pinned_repository_key_has_exact_fingerprint` | T1 | Freezes the trusted repository key fingerprint. |
-| `crates/agentic-gpt/src/browser/browser_distribution_tests.rs::authenticated_inrelease_metadata_selects_exact_target` | T2 | Maps authenticated platform metadata to the exact package target. |
-| `crates/agentic-gpt/src/browser/browser_distribution_tests.rs::cleartext_signature_verifies_and_tampering_fails` | T3 | Accepts valid signed metadata and rejects tampering. |
-| `crates/agentic-gpt/src/browser/browser_distribution_tests.rs::fixed_repository_url_rejects_untrusted_path_forms` | T3 | Rejects traversal, foreign host, query, and fragment URL forms. |
-| `crates/agentic-gpt/src/config/config.rs::process_response_bytes_defaults_validates_bounds_and_rejects_invalid_values` | T3 | Locks default, allowed bounds, and invalid value rejection for an agent-facing output budget. |
-| `crates/agentic-gpt/src/config/config.rs::explicit_import_clears_plaintext_tunnel_secret_and_reports_it` | MIXED (T2+T3+T5) | Checks secret-clearing policy, warning, redaction, and actual import behavior. |
-| `crates/agentic-gpt/src/ingress/stdio_server_tests.rs::process_read_preserves_raw_byte_offsets_and_utf8_output` | MIXED (T2+T4+T5) | Protects byte cursor/offset and UTF-8/base64 projection through a real command-output path. |
-| `crates/agentic-gpt/src/mcp/mcp_tests.rs::server_config_validation_is_complete_and_typed` | T3 | Covers typed MCP configuration validation branches and stable errors. |
-| `crates/agentic-gpt/src/storage/event_store.rs::list_summaries_count_unicode_scalars_and_preserve_full_message_on_get` | MIXED (T3+T5) | Protects Unicode summary truncation and full-message retrieval from persisted events. |
-| `crates/agentic-gpt/src/storage/process_history.rs::oversized_admission_metadata_rejects_the_entire_batch` | MIXED (T3+T5) | Verifies size rejection is atomic and no partial SQLite batch rows are stored. |
-| `crates/agentic-gpt/src/files/file_ops.rs::search_rejects_invalid_patterns_and_enforces_bounds` | T3 | Exercises malformed-pattern and result/context bound errors. |
-| `crates/agentic-gpt-hub/src/ingress/mcp/mcp_server.rs::mcp_batch_descriptor_freezes_bounds_and_side_effect_annotations` | T2 | Protects public schema bounds and side-effect metadata. |
-| `crates/agentic-gpt-hub/src/ingress/mcp/mcp_server.rs::coordinator_rejects_hidden_execution_tools_before_dispatch` | T3 | Verifies profile gating and that hidden tools do not dispatch. |
-| `crates/agentic-gpt-protocol/src/lib.rs::managed_mcp_batch_defaults_and_bounds_are_frozen` | MIXED (T2+T3) | Protects public batch wire fields plus defaults, clamping, and bounds. |
-| `crates/agentic-gpt-protocol/src/process.rs::process_read_rejects_explicit_budgets_outside_shared_limits` | T3 | Keeps process-read budget validation aligned with shared limits. |
-| `crates/agentic-browser-host/src/lib.rs::zero_malformed_and_non_utf8_payloads_are_errors` | T2 | Covers invalid framed payload decoding at the wire boundary. |
-| `console/shared/src/commonTest/kotlin/work/slhaf/agentic/console/AttentionTransitionPolicyTest.kt::overdue_restore_claim_is_trigger_once_at_due_boundary` | T3 | Protects due-time triggering and one-shot claim behavior. |
-| `console/shared/src/commonTest/kotlin/work/slhaf/agentic/console/AttentionTransitionPolicyTest.kt::future_restore_schedules_until_snoozed_due_boundary` | T3 | Protects Schedule-before-due and Trigger-at-due boundaries. |
-| `console/shared/src/commonTest/kotlin/work/slhaf/agentic/console/AttentionTransitionPolicyTest.kt::degraded_item_stays_pending_until_due_and_can_be_terminal` | T3 | Protects degraded/pending versus terminal-state behavior. |
-| `console/shared/src/commonTest/kotlin/work/slhaf/agentic/console/AttentionTransitionPolicyTest.kt::terminal_transition_clears_actions_and_rejects_duplicate_transition` | T3 | Protects terminal action clearing and duplicate-transition rejection. |
+| `crates/agentic-gpt/src/browser/browser_distribution_tests.rs::pinned_repository_key_has_exact_fingerprint` | T1 | 固定受信任仓库公钥指纹。 |
+| `crates/agentic-gpt/src/browser/browser_distribution_tests.rs::authenticated_inrelease_metadata_selects_exact_target` | T2 | 将已认证的平台 metadata 映射到精确的软件包目标。 |
+| `crates/agentic-gpt/src/browser/browser_distribution_tests.rs::cleartext_signature_verifies_and_tampering_fails` | T3 | 验证合法签名 metadata，并拒绝遭篡改的内容。 |
+| `crates/agentic-gpt/src/browser/browser_distribution_tests.rs::fixed_repository_url_rejects_untrusted_path_forms` | T3 | 拒绝路径穿越、外部主机、query 和 fragment URL。 |
+| `crates/agentic-gpt/src/config/config.rs::process_response_bytes_defaults_validates_bounds_and_rejects_invalid_values` | T3 | 锁定面向 agent 的输出预算默认值、合法边界和非法值拒绝规则。 |
+| `crates/agentic-gpt/src/config/config.rs::explicit_import_clears_plaintext_tunnel_secret_and_reports_it` | MIXED (T2+T3+T5) | 检查明文 secret 清除策略、告警、脱敏和真实导入行为。 |
+| `crates/agentic-gpt/src/ingress/stdio_server_tests.rs::process_read_preserves_raw_byte_offsets_and_utf8_output` | MIXED (T2+T4+T5) | 保护字节游标／偏移和 UTF-8／base64 投影，并贯穿真实命令输出路径。 |
+| `crates/agentic-gpt/src/mcp/mcp_tests.rs::server_config_validation_is_complete_and_typed` | T3 | 覆盖 MCP 配置的类型化校验分支及稳定错误。 |
+| `crates/agentic-gpt/src/storage/event_store.rs::list_summaries_count_unicode_scalars_and_preserve_full_message_on_get` | MIXED (T3+T5) | 保护 Unicode 摘要截断规则，以及从持久化事件中读取完整消息。 |
+| `crates/agentic-gpt/src/storage/process_history.rs::oversized_admission_metadata_rejects_the_entire_batch` | MIXED (T3+T5) | 验证超限拒绝具有原子性，SQLite 中不会留下部分 batch 行。 |
+| `crates/agentic-gpt/src/files/file_ops.rs::search_rejects_invalid_patterns_and_enforces_bounds` | T3 | 覆盖无效 pattern 及结果数／上下文边界错误。 |
+| `crates/agentic-gpt-hub/src/ingress/mcp/mcp_server.rs::mcp_batch_descriptor_freezes_bounds_and_side_effect_annotations` | T2 | 保护 public schema 的边界和副作用 metadata。 |
+| `crates/agentic-gpt-protocol/src/lib.rs::managed_mcp_batch_defaults_bounds_and_wire_type_are_frozen` | MIXED (T2+T3) | 保护 public batch wire 字段、默认值、钳制和边界行为。 |
+| `crates/agentic-gpt-protocol/src/process.rs::process_read_rejects_explicit_budgets_outside_shared_limits` | T3 | 确保 process-read 预算校验与共享限制一致。 |
+| `crates/agentic-browser-host/src/lib.rs::zero_malformed_and_non_utf8_payloads_are_errors` | T2 | 覆盖 wire 边界对无效 framed payload 的解码处理。 |
+| `console/shared/src/commonTest/kotlin/work/slhaf/agentic/console/AttentionTransitionPolicyTest.kt::overdue_restore_claim_is_trigger_once_at_due_boundary` | T3 | 保护到期触发和单次 claim 行为。 |
+| `console/shared/src/commonTest/kotlin/work/slhaf/agentic/console/AttentionTransitionPolicyTest.kt::future_restore_schedules_until_snoozed_due_boundary` | T3 | 保护到期前 Schedule、到期边界 Trigger 的规则。 |
+| `console/shared/src/commonTest/kotlin/work/slhaf/agentic/console/AttentionTransitionPolicyTest.kt::degraded_item_stays_pending_until_due_and_can_be_terminal` | T3 | 保护 Degraded／Pending 与终态之间的行为。 |
+| `console/shared/src/commonTest/kotlin/work/slhaf/agentic/console/AttentionTransitionPolicyTest.kt::terminal_transition_clears_actions_and_rejects_duplicate_transition` | T3 | 保护进入终态时清空 actions，以及拒绝重复终态转换。 |
 
-## Low-value or cleanup/strengthening candidates
+## 低价值或建议清理／补强的候选
 
-| Case | Tier(s) | Concern |
+| 用例 | 档位 | 具体问题 |
 |---|---|---|
-| `crates/agentic-gpt/src/ingress/stdio_server_tests.rs::room_profile_dispatches_room_memory_tools` | MIXED (T4+T5) | Checks JSON field presence/types but not returned Room data or operation semantics. |
-| `crates/agentic-gpt/src/ingress/stdio_server_tests.rs::compact_mcp_skills_and_tmux_adapters_preserve_result_envelopes` | MIXED (T4+T5) | Accepts either result or error for both tmux calls, so both adapters may fail and pass. |
-| `crates/agentic-gpt/src/runtime/tunnel_distribution.rs::artifact_lock_serializes_concurrent_installers` | T5 | Sleeps, releases the first lock, then checks eventual acquisition; never asserts the waiter was blocked. |
-| `crates/agentic-gpt/src/files/file_ops.rs::absent_commit_uses_no_replace_and_overwrite_preserves_permissions` | T5 | Calls `fs::hard_link`/`fs::rename` directly instead of exercising the production commit path. |
-| `crates/agentic-gpt/src/process/managed.rs::shell_eval_preserves_dash_leading_command_text` | T5 | Checks only exit 127/Failed and no captured command/output proving the leading text was preserved. |
-| `crates/agentic-gpt/tests/config_cli.rs::config_import_compatible_round_trip_preserves_http_mcp_fields` | T5 | Import is expected to fail without a TTY; subsequent `show` observes the source generated by `init`, not an imported config. |
-| `crates/agentic-gpt-hub/src/ingress/mcp/mcp_server.rs::every_advertised_tool_is_accepted_by_apps_dispatcher` | T4 | Only checks “not unknown tool”; arbitrary argument/runtime failures are accepted. |
-| `crates/agentic-browser-host/src/lib.rs::identifier_free_notifications_forward_and_broadcast` | T4 | Tests pure forwarding/broadcast through in-memory buffers. |
-| `crates/agentic-apply-patch/src/lib.rs::parses_patch` | T2 | Parses add/delete/update forms but asserts only three hunks, not their individual content/type. |
-| Kotlin `SharedCommonTest.example`, `SharedLogicDesktopTest.example`, `SharedLogicAndroidHostTest.example` | T1 | Each asserts only the fixed arithmetic expression `1 + 2 == 3`. |
+| `crates/agentic-gpt/src/ingress/stdio_server_tests.rs::room_profile_dispatches_room_memory_tools` | MIXED (T4+T5) | 只检查 JSON 字段存在和类型，没有验证返回的 Room 数据或操作语义。 |
+| `crates/agentic-gpt/src/ingress/stdio_server_tests.rs::compact_mcp_skills_and_tmux_adapters_preserve_result_envelopes` | MIXED (T4+T5) | 两次 tmux 调用都允许返回错误仍通过，适配器即使全部失败也可能通过。 |
+| `crates/agentic-gpt/src/runtime/tunnel_distribution.rs::artifact_lock_serializes_concurrent_installers` | T5 | sleep 并释放第一把锁后只检查第二方最终能获取；没有断言持锁期间 waiter 确实被阻塞。 |
+| `crates/agentic-gpt/src/files/file_ops.rs::absent_commit_uses_no_replace_and_overwrite_preserves_permissions` | T5 | 直接调用 `fs::hard_link`／`fs::rename`，没有经过名称所暗示的生产 commit 路径。 |
+| `crates/agentic-gpt/src/process/managed.rs::shell_eval_preserves_dash_leading_command_text` | T5 | 只检查 exit 127／Failed，没有检查捕获的命令或输出来证明前导文本被保留。 |
+| `crates/agentic-gpt/tests/config_cli.rs::config_import_compatible_round_trip_preserves_http_mcp_fields` | T5 | 非 TTY 下 import 预期失败；后续 `show` 读到的是 `init` 创建的源文件，而非成功导入后的配置。 |
+| `crates/agentic-gpt-hub/src/ingress/mcp/mcp_server.rs::every_advertised_tool_is_accepted_by_apps_dispatcher` | T4 | 只排除 “unknown tool”；任意参数／运行时失败都可通过。 |
+| `crates/agentic-browser-host/src/lib.rs::identifier_free_notifications_forward_and_broadcast` | T4 | 只验证经内存 buffer 转发／广播通知。 |
+| `crates/agentic-apply-patch/src/lib.rs::parses_patch` | T2 | 解析 add/delete/update 形式，但只断言有三个 hunks，没有验证各 hunk 的内容或类型。 |
+| Kotlin `SharedCommonTest.example`、`SharedLogicDesktopTest.example`、`SharedLogicAndroidHostTest.example` | T1 | 三个用例都只断言固定算式 `1 + 2 == 3`。 |
 
-The single ignored browser package materialization case (`crates/agentic-gpt/src/browser/browser_distribution_tests.rs::real_package_materializes_from_explicit_fixture_path`) is not marked low-value: it requires verified release-package inputs and checks real package materialization and runtime layout. Three platform-sensitive Rust declarations require portability review; see `findings.md`.
+唯一的 ignored 浏览器软件包物化用例 `crates/agentic-gpt/src/browser/browser_distribution_tests.rs::real_package_materializes_from_explicit_fixture_path` 未列为低价值：它需要经过校验的 release package 输入，并检查真实软件包物化及 runtime 布局。另有 3 个 Rust 用例需要人工检查跨平台适用性；见 `findings.md`。
