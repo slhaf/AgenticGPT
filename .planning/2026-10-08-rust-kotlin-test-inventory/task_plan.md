@@ -1,13 +1,14 @@
-# Task Plan: [Brief Description]
+# Task Plan: Rust and Kotlin Test Inventory
 
 ## Goal
 Count every Rust and Kotlin test case by the repository's five-tier testing standard; document counts, review candidates, and ambiguous cases in the selected planning record only.
 
 ## Next Step
-Map all Rust/Kotlin test source sets, then enumerate each declared test case and log findings incrementally.
+
+Planning records are complete; commit this phase.
 
 ## Current Phase
-Phase 1
+Phase 4
 
 ## Phases
 
@@ -19,27 +20,21 @@ Phase 1
 - **Status:** complete
 
 ### Phase 2: Inventory & Classification
-- [ ] Enumerate each test case and classify by tested behavior
-- [ ] Record review candidates and mixed-tier coverage
-- [ ] Record discoveries in findings.md throughout
-- **Status:** in_progress
-
-### Phase 2: Inventory & Classification
-- [ ] Enumerate each test case and classify by tested behavior
-- [ ] Record review candidates and mixed-tier coverage
-- [ ] Record discoveries in findings.md throughout
-- **Status:** pending
+- [x] Enumerate each test case and classify by tested behavior
+- [x] Record review candidates and mixed-tier coverage
+- [x] Record discoveries in findings.md throughout
+- **Status:** complete
 
 ### Phase 3: Completeness Verification
-- [ ] Cross-check Rust with `cargo test --workspace -- --list`
-- [ ] Cross-check each enabled Kotlin source set with Gradle discovery
-- [ ] Reconcile unique case counts and any gaps
-- **Status:** pending
+- [x] Cross-check Rust declarations with `cargo test --workspace -- --list`
+- [x] Cross-check enabled Kotlin test source sets with Gradle task discovery
+- [x] Reconcile case-level mixed inventories against final per-crate totals (323 `agentic-gpt` + 10 other Rust; 333 Rust mixed total)
+- **Status:** complete
 
 ### Phase 4: Delivery
-- [ ] Record final counts and review lists in planning files
-- [ ] Report verified coverage and any unresolved gaps
-- **Status:** pending
+- [x] Record final counts and review lists in planning files
+- [x] Commit planning records for this phase
+- **Status:** complete
 
 ## Decisions Made
 | Decision | Rationale |
