@@ -53,6 +53,8 @@ GPT Actions API 由 `openapi/hub.yaml` 描述，并受 Hub API key 保护。
 - `POST /v1/room/state/list` 和 `POST /v1/room/state/read`：列出或读取有界的 `State/entities` Markdown 文档，分别使用 `RoomStateListResponse` 或 `RoomStateReadResponse`。
 - `POST /v1/room/maintenance/status` 和 `POST /v1/room/maintenance/submit`：检查由仓库所有者负责的就绪状态，或提交明确的语义维护请求。响应分别为 `RoomMaintenanceStatusResponse` 和 `RoomMaintenanceSubmitResponse`；submit 使用现有 local/workflow 模式及有界等待契约。
 
+确认通道不可用时，受管理进程的 exec/read 响应通过 `error.code = process_confirmation_unavailable` 明确说明无法取得确认、操作未执行。进程元数据的拒绝原因以及确认协议/审计值仍为 `provider_unavailable`。调用方应检查 `agent.info` 的确认通道状态，并在通道恢复后按原有策略重试。文件修改对应返回 `file_confirmation_unavailable`，不会应用文件变更；确认拒绝仍使用 `file_confirmation_denied`。
+
 这九个 Room 端点在 JSON 请求体中使用当前的 camelCase Agent 请求/响应 DTO。
 空请求 DTO 仍须传入 `{}`；没有端点接受 `agentId` 选择器。它们解析并捕获活动
 Room 租约：Room 不存在时返回 `room_not_active`（404），租约不一致/已替换时返回

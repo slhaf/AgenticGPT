@@ -1073,9 +1073,17 @@ fn process_recorded_failure_error(process: &ProcessInfo) -> Option<ProcessError>
         .chars()
         .take(MAX_PROCESS_ERROR_CODE_BYTES)
         .collect();
+    let (code, message) = if reason == "provider_unavailable" {
+        (
+            "process_confirmation_unavailable".to_string(),
+            "The configured confirmation channel/provider was unavailable, so approval could not be obtained. The operation was not executed.".to_string(),
+        )
+    } else {
+        (code, reason.to_string())
+    };
     Some(ProcessError {
         code,
-        message: bounded_response_text(reason),
+        message: bounded_response_text(&message),
     })
 }
 

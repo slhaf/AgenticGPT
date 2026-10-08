@@ -47,7 +47,7 @@ use crate::{
 };
 use stdio_schema::{properties_for, tool_descriptor, tool_descriptors};
 
-const INSTRUCTIONS: &str = "先用 agent.info 查看当前 profile、工作区、路径策略、容量、连接与确认通道；仅调用当前 tools/list 暴露的工具，按各工具的 schema 和说明构造参数。file.read/search 用于有界读取与搜索，file.edit 接受 Codex apply_patch。process.exec/batch 和 skills.run 启动受管理命令/脚本，用 process.read 统一读取状态与可用输出/结果，使用 process.cancel 请求取消。mcp.list 发现服务器/工具，mcp.callTool/batch 调用下游并登记 Process；等待到期不等于取消，已发生的外部副作用不回滚。tmux 用于持久终端；skills 包含 workspace 技能及只读、不可运行的内置 skill-installer，激活不执行代码或授予权限；bootstrap 与 room 工具用于 Room 引导和语义文档。Browser 先读 browser.manual，acquire 后以同名 repl 执行官方 SDK JavaScript；list 查租约，reset 仅恢复，release 最终清理。工具注解只是提示，不是授权；各操作受其实际策略、确认及资源限制控制，不构成对下游 MCP、tmux 或 Browser JavaScript 的通用沙箱。";
+const INSTRUCTIONS: &str = "先用 agent.info 查看当前 profile、工作区、路径策略、容量、连接与确认通道；仅调用当前 tools/list 暴露的工具，按各工具的 schema 和说明构造参数。file.read/search 用于有界读取与搜索，file.edit 接受 Codex apply_patch。process.exec/batch 和 skills.run 启动受管理命令/脚本，用 process.read 统一读取状态与可用输出/结果，使用 process.cancel 请求取消。process.exec/read 若返回 process_confirmation_unavailable，表示确认通知通道/提供方不可用、操作未执行。mcp.list 发现服务器/工具，mcp.callTool/batch 调用下游并登记 Process；等待到期不等于取消，已发生的外部副作用不回滚。tmux 用于持久终端；skills 包含 workspace 技能及只读、不可运行的内置 skill-installer，激活不执行代码或授予权限；bootstrap 与 room 工具用于 Room 引导和语义文档。Browser 先读 browser.manual，acquire 后以同名 repl 执行官方 SDK JavaScript；list 查租约，reset 仅恢复，release 最终清理。工具注解只是提示，不是授权；各操作受其实际策略、确认及资源限制控制，不构成对下游 MCP、tmux 或 Browser JavaScript 的通用沙箱。";
 const BROWSER_REPL_RESULT_MARKER: &str = "__agentic_browser_repl_result";
 
 pub(crate) async fn serve_stdio(state: AppState) -> Result<()> {

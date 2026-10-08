@@ -1821,12 +1821,18 @@ async fn apply_patch_inner(
         if confirmation != "allow_once" {
             cleanup_temps(&mut changes);
             cleanup_owned_parent_directories(&mut owned_parent_dirs);
-            let code = if confirmation == "provider_unavailable" {
-                "file_confirmation_unavailable"
+            let (code, message) = if confirmation == "provider_unavailable" {
+                (
+                    "file_confirmation_unavailable",
+                    "The configured confirmation channel/provider was unavailable, so approval could not be obtained; file changes were not applied.",
+                )
             } else {
-                "file_confirmation_denied"
+                (
+                    "file_confirmation_denied",
+                    "File mutation was not confirmed; file changes were not applied.",
+                )
             };
-            return Err(FileError::new(code, "file mutation was not confirmed"));
+            return Err(FileError::new(code, message));
         }
     }
     // Revalidate again after staging and immediately before the first commit.
