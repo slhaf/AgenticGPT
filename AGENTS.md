@@ -36,13 +36,27 @@ Use `rustfmt` defaults and idiomatic Rust naming: `snake_case` functions/modules
 
 用户可见功能、CLI／配置默认值、API／MCP 契约或工具描述、安全／确认／策略、界面流程、发布／迁移或文档示例变化时，检查并按需更新受影响的文档。若行为和已有文档契约均未变化，无须为内部实现改动强行修改文档。历史记录应标明适用版本；文档约定变化时同步修改本标准。
 
-## Testing Guidelines
+## 测试指南
 
-Place Rust unit tests beside implementation code in `#[cfg(test)]` modules; use `#[tokio::test]` for async behavior. Kotlin tests belong in the matching source set, such as `commonTest` or `jvmTest`, and test classes should end in `Test`. Add regression tests for bug fixes. No numeric coverage threshold is configured; prioritize policy, protocol, persistence, and transport edge cases.
+Rust 单元测试应与实现代码放在一起，位于 `#[cfg(test)]` 模块中；异步行为使用 `#[tokio::test]`。Kotlin 测试应放在对应的源集（如 `commonTest` 或 `jvmTest`）中，测试类名应以 `Test` 结尾。修复缺陷时应验证相关回归；需要新增测试时，遵循下方分级规则。目前未设定数字化的覆盖率门槛；应优先测试策略、协议、持久化和传输方面的边界情况。
 
-New tests must demonstrate a distinct, consumer-observable behavior, boundary, error, state transition, protocol contract, or meaningful side effect that existing tests do not already establish. Assert outcomes rather than implementation call order, field forwarding, incidental/unpromised wording, or source layout; preserve exact wording assertions when the wording itself is an external contract. Keep higher-level tests when they prove integration or contract behavior that lower-level tests cannot. Do not use line coverage or similar inputs alone to judge test value.
+### 测试分级
 
-Before deleting a test, identify its assertions and the failure it could catch. Record why that failure is already detected by named retained tests, or why the test only detects an implementation change without a behavior change. Similar inputs or overlapping coverage alone do not prove redundancy. Preserve tests for distinct boundaries, errors, side effects, and cross-surface contracts; if distinct failure detection cannot be ruled out, retain the test. These rules apply to all future test additions and deletions, not only refactoring.
+本项目中，按照测试覆盖范围，将其划分为五档：
+
+| 档位 | 实际验证的内容 | 典型例子 |
+| --- | --- | --- |
+| **① 固定内容** | 写死的文本、常量、声明 | 提示文字、默认值、字段清单 |
+| **② 机械处理** | 直接映射、搬运、拼装 | 枚举转错误码、字段转发、格式转换 |
+| **③ 独立逻辑** | 一个组件内的规则和运算 | 策略判断、算法、状态机、调度规则 |
+| **④ 内部链路** | 多个组件接起来后的行为 | 请求进入后经过解析、策略、确认，得到结果 |
+| **⑤ 实际执行** | 链路与真实运行资源发生交互 | 真正启动进程、写入数据库、发送通知，以及检查实际副作用 |
+
+在编写、审查测试时，按照上述规则区分，其中：
+
+- 第 1、2、3 档默认不主动编写
+- 第 4、5 档允许 Agent 主动编写
+- 前 1、2、3 档如果 Agent 认为有编写价值，需要主动与用户商讨并获取许可
 
 ## Commit & Pull Request Guidelines
 
