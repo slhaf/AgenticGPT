@@ -3,7 +3,7 @@
 ## Session: 2026-10-08
 
 ### Current Status
-- **Phase:** 6 - Lower-Tier Mixed-Case Review (complete; awaiting user review)
+- **Phase:** 8 - Verification & Delivery (complete; cleanup commit `519fda3`, planning closeout commit pending)
 - **Started:** 2026-10-08
 
 ### Actions Taken
@@ -44,6 +44,29 @@
 - Recounted the manifest: exactly 306 deletion rows and 8 merge/simplify rows. This supersedes the stale 299 deletion count in the inventory handoff.
 - CodeGraph exploration returned partial symbols (80 across five files); exact per-file target matching remains required before each edit.
 - Planning now tracks Phase 7 cleanup and Phase 8 verification/delivery. No source edits or test runs yet.
+- Began Phase 7 using five disjoint file-ownership batches: Hub; supporting Rust crates plus Kotlin; Agent browser; Agent config/files; remaining Agent modules. Each worker is restricted to exact manifest entries and source-only edits; they do not run tests.
+- Supporting Rust/Kotlin batch returned: 26 listed declarations removed, plus `process_read_defaults_view_and_bounds_wait` merged into `process_read_rejects_explicit_budgets_outside_shared_limits` with default-view, wait-boundary, no-cursor, and max-bytes boundary assertions retained. No target mismatch; this batch ran no checks.
+- Batch results reconcile exactly to 306 listed deletions: Hub 53, supporting Rust/Kotlin 26, Agent browser 43, Agent config/files 49, remaining Agent 135. All reports had zero mismatches or skips.
+- Eight special targets: five merged, two simplified in place, one retained unchanged because the independent pinned-key fingerprint assertion is not exercised by available trusted-repository signature fixtures. Unique behavior assertions were reported preserved; source review and verification remain.
+- First `cargo fmt --all -- --check` exposed one missing closing brace at the end of the Protocol `tmux_tests` module after removing its final test, plus excess blank lines left by declaration deletions. Restored the module delimiter; format cleanup is next.
+- CI `cargo check --workspace` passed. Strict Clippy identified test-only imports/helpers and an empty `#[cfg(test)]` module made unused by the manifest deletions in Protocol; removed only those now-dead test scaffolds. Re-run formatting and Clippy before continuing.
+- After dead Protocol scaffolding removal, strict Clippy reached all crates and reported remaining unused imports/test helpers caused by removed declarations (including Hub and Agent test modules), plus two private production helpers with no remaining callers (`room/bootstrap.rs::build_resource`, `runtime/supervisor.rs::backoff_delay`). Do not remove these production helpers without confirming they are not required by production behavior; inspect references before deciding.
+- Review of two Clippy-flagged helpers confirmed both have `#[cfg(test)]`; `build_resource` and `backoff_delay` are test-only and now have no callers after the declared case deletions. The configured LSP reference tool was unavailable, so exact-symbol source search was used.
+- Lint-only cleanup is delegated in three disjoint slices (Hub; Agent browser/config; remaining Agent); workers may remove only imports and dead `#[cfg(test)]` support code, without running verification commands.
+- Hub Clippy cleanup completed: removed only now-empty test modules, unused test imports, and test-only helpers in nine assigned Hub files. No tests/build/fmt/lint run during this batch.
+- Agent remaining-module Clippy cleanup completed: removed unused test imports and three unreferenced test-only helpers (`build_resource`, `backoff_delay`, `mark_zip_entry_as_unix_symlink`); preserved production helpers. No tests/build/fmt/lint run during this batch.
+- Agent browser/config Clippy cleanup completed: removed unused test imports, three unused `Behavior` variants/match arms, and the unreferenced `explicit_config` helper. No tests/build/fmt/lint run during this batch.
+- Strict Clippy after the first lint cleanup exposed accidentally removed imports still used by retained tests (Hub `Capabilities`/room protocol types and the browser pinned-key `KeyDetails` trait), plus other unused imports not yet handled. Sent exact compiler diagnostics to the three file owners for narrow import corrections; no test run yet.
+- Corrected the retained-test import regressions from the second Clippy run (including `build_app_state`/`reload_live_config_once`, required setup imports, and Hub/browser types); retained the bootstrap success match arm and removed only variants no longer constructed. `cargo fmt --all -- --check` passed after these corrections.
+- Full workspace test run initially failed only `bootstrap_escapes_import_path_and_initializes_browser_in_order`: the simplified test's fake `Behavior::Success` had been routed through `expected_result()` with `is_error = true`. Restored the original success response (`CallToolResult::default()`), kept `Preserve` on `expected_result()`, and the targeted test passed (1 passed, 423 filtered across 5 suites).
+- The first full workspace run then reached the Hub batch test and found its optional integer schema expected as a scalar; actual schema is `["integer", "null"]`. Updated the public-schema assertion and the focused Hub test passed (1 passed, 84 filtered).
+- Final pinned-toolchain Rust CI checks passed: `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test --workspace` (519 passed, 1 ignored). The full test run includes 13 test suites.
+- The separate latest-stable Clippy workflow passed: `cargo +stable clippy --workspace --all-targets -- -D warnings`. CI binary build passed for Agent and Hub.
+- Live contract parity passed, including OpenAPI/schema validation and real Agent/Hub interactions; one supplemental recovery interleaving remains explicitly an inference.
+- Android host Gradle task remains unverified: with `ANDROID_HOME` set, the SDK requires acceptance of Build-Tools 36 and Android 36 licenses. No license acceptance was performed.
+- Combined JVM/JS/Wasm Gradle invocation compiled JS and Wasm test sources, and `:shared:jvmTest` completed, but failed at `:kotlinStoreYarnLock` because `console/build/js/yarn.lock` was missing during concurrent Yarn setup. The user directed not to run every Kotlin target. An isolated `:shared:jvmTest` then passed in 2 seconds; JS/Wasm test runners were not completed. Remaining Kotlin changes were visually reviewed, not represented as executed tests.
+- Removed the generated untracked `console/kotlin-js-store/` artifact after Gradle finished. Current manifest records 306 exact deletions and all 8 B outcomes; no mismatch or skip.
+- Final Rust recheck passed: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test --workspace -- --list` (520 listed cases).
 ### Errors
 | Error | Resolution |
 |-------|------------|

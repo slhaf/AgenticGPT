@@ -6,7 +6,8 @@ Count every Rust and Kotlin test case by the repository's five-tier testing stan
 The inventory has been converted into an execution request: process only the exact targets in `cleanup-manifest.md` (306 test removals and 8 merge/simplify targets). Do not modify production behavior or tests outside that manifest. Verify affected Rust/Kotlin crates and report any skipped or blocked items.
 
 ## Current Phase
-Phase 6
+
+Phase 8
 
 ## Phases
 
@@ -50,23 +51,28 @@ Phase 6
 - [x] Commit planning-only changes; do not alter test or implementation files
 - **Status:** complete
 
+### 历史复审交接（背景记录，不构成当前执行范围）
+- 2026-10-08 用户确认 `cleanup-review.md` 的 31 项处理方向：保留 20、合并/精简 8、清理 3；另确认原先 296 个低档清理候选无需二次价值审查。
+- 当时记录的 299 个删除目标是旧版执行提案；后续用户更新的 [`cleanup-manifest.md`](cleanup-manifest.md) 明确为当前唯一执行依据，并列出 306 个删除目标及 8 个合并/精简目标。
+- 7 个待判断用例与含 T4/T5 的 303 个 MIXED 用例不属于本次清理清单。
+
 ### Phase 7: Test Cleanup
-- [ ] Remove the 306 exact test declarations in `cleanup-manifest.md`; skip and record any source/name mismatch.
-- [ ] Process the 8 merge/simplify targets, preserving unique long-term regression assertions; unchanged targets require a reason.
-- [ ] Update manifest checkboxes and record per-batch removals, merges, simplifications, retained, and skipped items.
-- **Status:** in_progress
+- [x] Remove the 306 exact test declarations in `cleanup-manifest.md`; skip and record any source/name mismatch.
+- [x] Process the 8 merge/simplify targets, preserving unique long-term regression assertions; unchanged targets require a reason.
+- [x] Update manifest checkboxes and record per-batch removals, merges, simplifications, retained, and skipped items.
+- **Status:** complete
 
 ### Phase 8: Verification & Delivery
-- [ ] Verify affected Rust crates and Kotlin shared test tasks; reconcile test-discovery changes against actual edits.
-- [ ] Commit the cleanup implementation and record command results and any blockers.
-- **Status:** pending
+- [x] Verify Rust cleanup and reconcile test discovery against actual edits; record Kotlin verification limits per user's instruction not to run all targets.
+- [x] Commit the cleanup implementation and record final commit identifiers: `519fda3` (`test: clean up reviewed low-tier cases`).
+- **Status:** complete
 
 
 ## Decisions Made
 | Decision | Rationale |
 |----------|-----------|
 | Count test cases, not files | User explicitly selected per-case counting |
-| Keep the audit read-only except planning records | User needs an inventory to decide later cleanup |
+| Inventory-only read-only boundary | Applied to the original inventory phases; the user has separately authorized cleanup strictly within `cleanup-manifest.md` |
 | Handle mixed coverage separately; unclear cases go to review | User specified this ambiguity policy |
 | Attempt cap: 5 rounds | User explicitly set the cap |
 
